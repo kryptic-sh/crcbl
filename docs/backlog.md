@@ -1291,14 +1291,22 @@ Sample and browser follow-up:
   operations, not supported pool behavior. This establishes the recovery test
   design, not a production test or an optimized implementation. Port it into the
   private production tests and repeat against retained dirty-run storage before
-  shipping; actual renderer failure recovery remains unverified. The same
-  external source copy also exercised repeated writes to a handle, removal and
-  same-index reuse before rotation, stale set/remove rejection, continued motion
-  across rotations and stopping. It checked unique enrollment despite repeated
-  writes and reuse, unchanged revisions for stale operations, no premature
-  settling during continued motion, a single settling write after stopping,
-  complete current/previous record bytes and destination bytes through the frame
-  ring, dead-slot preservation, idempotent flush and teardown. A deliberately
+  shipping; actual renderer failure recovery remains unverified. Follow-up read
+  `ForwardRenderer::begin_frame` and `begin_skinned_frame`: both rotate the
+  instance ring and call `InstancePool::flush` before shared `begin_frame_body`;
+  the skinned path also updates palettes and instance bases before that flush.
+  The shadow-uniform refusal fixture therefore does not cover instance-upload
+  failure. Add an integrated fixture that observes refusal before shared
+  preparation, preserves the committed prefix and dirty suffix, and verifies
+  recovery across the ring without claiming rollback of rotation or skinning
+  work. No public fault injector is required by this finding. The same external
+  source copy also exercised repeated writes to a handle, removal and same-index
+  reuse before rotation, stale set/remove rejection, continued motion across
+  rotations and stopping. It checked unique enrollment despite repeated writes
+  and reuse, unchanged revisions for stale operations, no premature settling
+  during continued motion, a single settling write after stopping, complete
+  current/previous record bytes and destination bytes through the frame ring,
+  dead-slot preservation, idempotent flush and teardown. A deliberately
   corrupted settling transform failed the full-byte comparison; normal lifecycle
   and retry fixtures passed again. These strengthen the production test design;
   changed storage and actual renderer removal/reuse remain required coverage.
