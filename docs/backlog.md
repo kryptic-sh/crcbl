@@ -655,13 +655,23 @@ Networking preparation follow-up:
   native worker with an explicit stack-size request; the altered outer XOR
   failed on that worker and the restored fixed provider passed. This is the
   standard-library worker harness on the observed native host, not a changed
-  engine spawner or a measured stack high-water bound. These checks cover
-  isolated helper execution, not shared-memory engine workers, full network call
-  chains, exact stack high-water bounds or production authentication
-  integration. Native and browser engine-worker stacks, actual packet mix,
-  changed production callers and full shipping gates remain required before
-  keeping it. Keep this separate from wider inner-input streaming design and
-  behind the current hash shipping gates.
+  engine spawner or a measured stack high-water bound. These earlier checks
+  cover isolated helper execution. An additional external threaded fixture now
+  uses the actual `crcbl_jobs::default_spawner` and repository
+  `WorkerHost`/worker bring-up scripts with shared WASM memory, independent
+  worker stack and TLS initialization. Fresh Python HMAC answers revalidated the
+  helper fixtures. Real Chromium passed unchanged and fixed helpers through that
+  engine worker ABI, trapped on altered outer XOR while running the work, and
+  passed the restored fixed helper. The harness requires the queued HMAC
+  request, worker-up message, worker frame observation and atomic completion;
+  the helper also rejects the caller's frame address. This closes the
+  isolated-helper-only browser execution gap, but still uses helper source
+  copies with the actual production SHA source. It does not establish full
+  packet authentication call chains, exact stack high-water bounds or changed
+  production authentication integration. Actual packet mix, changed production
+  callers, full network worker fixtures and shipping gates remain required
+  before keeping it. Keep this separate from wider inner-input streaming design
+  and behind the current hash shipping gates.
 
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
