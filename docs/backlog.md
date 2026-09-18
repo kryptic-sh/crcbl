@@ -46,11 +46,14 @@ Next performance trials:
 The sample input-queue production trial merged fast-forward into `main` at
 `f4dce5e3823d64eff05511d2c5bd6f687907203a` after its full branch gates.
 Exact-head main CI
-[35372105178](https://github.com/kryptic-sh/crcbl/actions/runs/35372105178) and
-Pages
-[35372105001](https://github.com/kryptic-sh/crcbl/actions/runs/35372105001) are
-pending; audit their complete jobs and steps, deployment receipt and live URLs
-before closing this trial or starting another production change. Horde's
+[35372105178](https://github.com/kryptic-sh/crcbl/actions/runs/35372105178)
+completed successfully. Its terminal audit accepted all 27 required jobs and
+complete step inventories; failed job/step, missing job/step, unexpectedly
+skipped required step and wrong-commit controls each failed before normal
+restoration passed. Pages
+[35372105001](https://github.com/kryptic-sh/crcbl/actions/runs/35372105001) is
+still running. Audit its complete jobs and steps, deployment receipt and live
+URLs before closing this trial or starting another production change. Horde's
 existing game tests moved into a separate module without production changes;
 workspace formatting, default Clippy and regular workspace tests passed on both
 the extraction and changed queue replay. Ordered draining now retains event
@@ -134,15 +137,15 @@ passed at `fbef915413570b5750706651946c3b441a189726`. The terminal audit
 accepted the complete inventory of 27 required jobs and their steps. Failed job,
 failed step, missing job, missing step, unexpectedly skipped required step and
 wrong-head controls each failed before normal restoration passed. The workflow
-definition matches the previously audited main baseline. Main CI and publication
-gates remain required before keeping this slice.
+definition matches the previously audited main baseline. Publication gates
+remain required before keeping this slice.
 
-- Close the merged sample input-queue trial after exact-head main CI and Pages
-  verification. Changed gameplay, context transitions, held inputs and full
-  local native/browser gates passed; paired Horde tick prices were mixed.
-  Retained native type storage was measured on synthetic bursts; actual browser
-  layout, full-process lifetime memory and real burst frequency remain gaps.
-  Backend command-pool reuse, wider graph caching and math changes need stronger
+- Close the merged sample input-queue trial after exact-head Pages verification.
+  Changed gameplay, context transitions, held inputs and full local
+  native/browser gates passed; paired Horde tick prices were mixed. Retained
+  native type storage was measured on synthetic bursts; actual browser layout,
+  full-process lifetime memory and real burst frequency remain gaps. Backend
+  command-pool reuse, wider graph caching and math changes need stronger
   workload evidence or carry more lifecycle risk.
 
 Browser queued-key regression coverage remains external: the held-key
