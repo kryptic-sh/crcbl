@@ -4100,6 +4100,31 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   graph draw parity, actual renderer/device uploads and real workload memory
   remain open before retaining production output.
 
+  A constrained-raster-budget external trial compared retained conversion with
+  production through cold misses, deferred frames and eventual cached
+  completion. Complete geometry field bits, indices, overlay cuts, atlas
+  statistics, page pixels and dirty/taken-dirty rectangles matched. Actual
+  rasterization, deferral and eventual settled cache were required, not inferred
+  from empty output. Missing atlas frame advancement, corrupt stats, corrupt
+  page pixels and a missing workload observation each failed before the separate
+  deferral-only normal fixture restored successfully. No timing was measured.
+
+  The separate eviction-pressure trial FAILED full geometry parity between
+  independent atlas instances. An unchanged draw-list source-copy control also
+  failed against production under the same pressure, so this cannot be assigned
+  to retained-vector conversion. Fresh source inspection of
+  `GlyphAtlas::evict_for` in `crates/crcbl-ui/src/font/atlas.rs` found victim
+  collection from `HashMap` entries and sorting only by `last_used`, with no
+  glyph-key tie break. Equal-age victims can therefore produce different
+  placements/UVs in independent atlases. Keep the failed eviction trial open;
+  the successful deferral-only fixture does not establish eviction parity. No
+  existing regression assertion or production source changed. Before keeping
+  output reuse, compare eviction under a shared reproducible atlas state or
+  verify equivalent rendered sampling against each atlas's complete page data,
+  preserving eviction/refusal behavior. Decide separately whether deterministic
+  victim tie breaks are needed; current evidence establishes a byte-comparison
+  limitation, not a visual regression or a measured performance problem.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
