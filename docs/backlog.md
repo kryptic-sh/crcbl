@@ -4125,6 +4125,19 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   victim tie breaks are needed; current evidence establishes a byte-comparison
   limitation, not a visual regression or a measured performance problem.
 
+  A separate shared-atlas trial now drives actual production eviction and
+  rasterization, then compares retained conversion against the produced frame
+  using that same atlas. Complete vertex field bits, indices and overlay cuts
+  match; full page pixels and dirty rectangles remain unchanged by the second
+  conversion. Eviction, rasterization and partial placement refusal were
+  observed. Corrupt geometry, corrupt page pixels and a missing eviction
+  observation each failed before normal restoration passed. This proves retained
+  conversion handles the resulting shared atlas state; production fills the
+  atlas first in every frame, so it does not establish equivalent independent
+  cold eviction, matching statistics for repeated refused glyph attempts,
+  performance or actual renderer image parity. Keep those gaps and the original
+  failed independent-atlas trial explicit.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
