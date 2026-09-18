@@ -1581,49 +1581,59 @@ Sample and browser follow-up:
   both. This compares the isolated replay stage, not changed production samples,
   authenticated loopback outputs, focus-loss shell delivery or browser behavior.
   Actual mixed-input queue element storage and sample timing remain unmeasured.
-  A preserved release-library Horde baseline now exercises the actual
-  authenticated loopback game with deferred start input, held diagonal movement,
-  catch-up ticks, releases, repeated press/release bursts, restart and retained
-  stick levels. Repeated seeded runs compare complete logical render snapshots,
-  rather than counts alone; corrupting the last snapshot health fails before
-  restoration passes. The capture checks action resolution and the existing
-  simulation order explicitly: physics runs before the game module, so newly
-  resolved movement affects position on the following tick. This is an
-  unchanged-production baseline, not a retained-queue implementation or timing
-  result. Compare the changed game with this preserved capture before keeping a
-  queue change. An extended preserved native baseline also checks a context
-  pushed before queued replay, held-key suppression after popping it,
-  release/repress routing, and keyboard/touch/pointer attribution through queued
-  keys and stick input. Complete seeded snapshots matched; the corruption
-  control failed before restoration passed. A DHAT run of the actual unchanged
-  release-library contextual baseline additionally observed 400 bytes in 28
-  input-queue growth blocks rooted in `Game::key_event`; the guarded selector
-  requires the exact production frame and exercised allocation sites. A
-  missing-frame control failed before restoration passed. Whole-fixture totals
-  were 3,283,640 bytes in 2,655 blocks, with peak live memory of 766,940 bytes
-  in 95 blocks; these include seeded game setup, both runs, snapshots and
-  output. The narrow queue total excludes the separately observed
-  `ActionMap::key_event` held-key allocation. This confirms production queue
-  churn in the selected script without establishing a large tick cost or FPS
-  benefit. A preserved post-HMAC production release binary and complete
-  contextual capture now provide the next queue trial's baseline, avoiding an
-  authentication change in the comparison. Both preserved files match the
-  changed HMAC fixture byte for byte. Reanalysis of that fixture's existing DHAT
-  profile still reports 400 bytes in 28 queue-growth blocks rooted in
-  `Game::key_event`, excluding `ActionMap::key_event`; an impossible selector
-  failed before the normal nonempty-site observer passed. This is allocation
-  evidence from the saved profile, not a fresh timing run or a retained-queue
-  result. An external tick-price fixture now links the current production Horde
-  release library and validates the complete preserved contextual capture before
-  measuring repeated seeded scripts. Each measured batch times only complete
-  `Game::tick` calls; setup, event pumps, snapshot captures and reference
-  comparisons are outside those timers. The snapshot scaffolding still affects
-  the workload and caches. With the process pinned to the same allowed CPU, the
-  first run reported 500 timed batches of 24 ticks and p50/p95 batch price
-  normalized per tick of 6057.2/6840.0 ns; the repeat reported 6044.3/6784.1 ns.
-  These are batch-average prices rather than individual tick tail percentiles.
-  Both altered full-capture and empty-timing-collection controls failed before
-  normal execution passed. Preserve this executable for paired changed-caller
+  An additional unchanged production Flappy release-library fixture now captures
+  its authenticated game loop. Deferred mixed key/button events, catch-up ticks,
+  a button keeping the flap held after a key release, later button release,
+  repeated mixed press/release bursts and restart replay all passed explicit
+  action/state checks. Repeated runs matched complete render-state values and
+  tick counts; the fixture reported 17 snapshots. Altering the final bird
+  position failed the full-capture observer before restoration passed. Preserve
+  this executable and complete capture for comparison with the changed queue.
+  This is the original mixed caller baseline, not changed-queue equivalence,
+  Breakout loopback coverage, sample timing or browser behavior. A preserved
+  release-library Horde baseline now exercises the actual authenticated loopback
+  game with deferred start input, held diagonal movement, catch-up ticks,
+  releases, repeated press/release bursts, restart and retained stick levels.
+  Repeated seeded runs compare complete logical render snapshots, rather than
+  counts alone; corrupting the last snapshot health fails before restoration
+  passes. The capture checks action resolution and the existing simulation order
+  explicitly: physics runs before the game module, so newly resolved movement
+  affects position on the following tick. This is an unchanged-production
+  baseline, not a retained-queue implementation or timing result. Compare the
+  changed game with this preserved capture before keeping a queue change. An
+  extended preserved native baseline also checks a context pushed before queued
+  replay, held-key suppression after popping it, release/repress routing, and
+  keyboard/touch/pointer attribution through queued keys and stick input.
+  Complete seeded snapshots matched; the corruption control failed before
+  restoration passed. A DHAT run of the actual unchanged release-library
+  contextual baseline additionally observed 400 bytes in 28 input-queue growth
+  blocks rooted in `Game::key_event`; the guarded selector requires the exact
+  production frame and exercised allocation sites. A missing-frame control
+  failed before restoration passed. Whole-fixture totals were 3,283,640 bytes in
+  2,655 blocks, with peak live memory of 766,940 bytes in 95 blocks; these
+  include seeded game setup, both runs, snapshots and output. The narrow queue
+  total excludes the separately observed `ActionMap::key_event` held-key
+  allocation. This confirms production queue churn in the selected script
+  without establishing a large tick cost or FPS benefit. A preserved post-HMAC
+  production release binary and complete contextual capture now provide the next
+  queue trial's baseline, avoiding an authentication change in the comparison.
+  Both preserved files match the changed HMAC fixture byte for byte. Reanalysis
+  of that fixture's existing DHAT profile still reports 400 bytes in 28
+  queue-growth blocks rooted in `Game::key_event`, excluding
+  `ActionMap::key_event`; an impossible selector failed before the normal
+  nonempty-site observer passed. This is allocation evidence from the saved
+  profile, not a fresh timing run or a retained-queue result. An external
+  tick-price fixture now links the current production Horde release library and
+  validates the complete preserved contextual capture before measuring repeated
+  seeded scripts. Each measured batch times only complete `Game::tick` calls;
+  setup, event pumps, snapshot captures and reference comparisons are outside
+  those timers. The snapshot scaffolding still affects the workload and caches.
+  With the process pinned to the same allowed CPU, the first run reported 500
+  timed batches of 24 ticks and p50/p95 batch price normalized per tick of
+  6057.2/6840.0 ns; the repeat reported 6044.3/6784.1 ns. These are
+  batch-average prices rather than individual tick tail percentiles. Both
+  altered full-capture and empty-timing-collection controls failed before normal
+  execution passed. Preserve this executable for paired changed-caller
   measurement with the same script and current authentication. It uses
   synchronous native workers and excludes GPU rendering, hardware audio and
   browser scheduling; large enemy-count workloads remain unpriced. Native Horde
