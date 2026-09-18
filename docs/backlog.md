@@ -610,6 +610,17 @@ Networking preparation follow-up:
   into steering jobs merely to exercise it. Actual tick packet mix and
   authentication cost remain unmeasured.
 
+  The preserved actual Horde context-fixture DHAT profile also exercises this
+  allocation on the sample tick path. Release disassembly identifies the
+  fixed-size outer allocation after the inner hash; the guarded matching DHAT
+  sites report 27,840 bytes in 290 blocks across the fixture, including 27,456
+  bytes in 286 tick-path blocks. Sealing and opening both contribute; setup key
+  derivation is separate. A missing-site selector failed before the actual
+  selector passed. This is a reanalysis of the preserved original production
+  sample profile, not a new runtime measurement, changed-production comparison,
+  packet-size distribution or authentication CPU profile. It establishes sample
+  allocation reach without establishing a tick-time bottleneck.
+
   A fixed-outer-input HMAC follow-up prototype is now priced against an
   unchanged source-copy control, both using the actual changed release hash
   export. The copied credential fixture matches the repository credential
