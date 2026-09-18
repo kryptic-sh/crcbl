@@ -826,7 +826,21 @@ Simulation and loading follow-up:
   without building temporary vectors; no low-effort allocation fix was found in
   those functions. Gust arithmetic still runs with zero amplitude, but an
   early-out needs dense-consumer measurements and identical calm-field results
-  before it is worth a change.
+  before it is worth a change. Follow-up read `WindField::gust_factor`,
+  `sample`, `direction_at`, `gpu_params`, `smooth_triangle`, layer sampling,
+  `Weather::new`/`set_gust` and the scroll path. An external release fixture of
+  the actual unchanged production crate confirmed exact unity for an ordinary
+  zero-amplitude sample, but NaN for finite diagonal-coordinate overflow,
+  infinite coordinates and direct public mutation of `gust_wavelength` to zero.
+  The validated gust setter refused zero wavelength; public field mutation
+  bypasses that setter. An unconditional unity-return control failed these
+  boundary observations before the restored fixture passed. Declined treating an
+  unconditional zero-amplitude shortcut as behavior-preserving. A guarded
+  shortcut after a finite gust-coordinate check remains a candidate to price;
+  preserve current exceptional-input behavior and the CPU/GPU field agreement.
+  Tightening public weather/position validation is a separate contract decision,
+  not part of an allocation optimization. No wind sampling latency, dense
+  physics/grass/hair workload or GPU shortcut was measured or changed here.
 - `crcbl_render::cluster_pool::ClusterPool::new` clones each incoming
   `PooledMesh::clusters` into a temporary geometry collection before
   `concatenate` reads it. A borrowed input walk could avoid that intermediate
