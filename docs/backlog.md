@@ -3950,6 +3950,34 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   editor/debug/console workloads before fixing a retention budget or claiming an
   application gain.
 
+  Actual Horde lists now pass a matched unchanged/retained/retained/unchanged
+  renderer source-copy caller trial on the same pinned CPU. A copied draw-list
+  adapter uses installed production command/vertex/clip types, clones complete
+  commands and per-command clips, and preserves the public base-command cut;
+  adaptation and complete reference conversion are outside caller timers. Every
+  actual title, gameplay, pause and resumed frame restores the original list
+  before the next sample frame. Both paths match independent complete vertex
+  field and index uploads, required writes and HUD/overlay indexed graph ranges;
+  graph execution and clean recorder validation are outside timers. Missing
+  start input, corrupt uploaded reference bytes, missing writes/draw receipts,
+  empty phase collection and omitted renderer teardown each failed before normal
+  restoration. Both renderer pools and device resources return to their tracked
+  baseline. This covers actual bitmap sample lists; no glyph runs appeared.
+
+  Final restored gameplay p50/p95 caller prices were 2.184/2.394 microseconds
+  unchanged versus 1.362/1.403 retained with debug hidden, and 10.731/11.091
+  versus 7.554/7.675 with debug shown. Each reported 100 timed frames for each
+  path/phase. The changed caller retained 104448 bytes of CPU geometry capacity
+  for the hidden-debug run and 208896 for the shown-debug run. Caller timers
+  include conversion, staging checks, ring rotation and null host writes; actual
+  sample frame generation, adaptation, references, graph recording, observers,
+  setup and teardown are excluded and still influence caches. This supports a
+  small real-list caller gain, not sample frame latency/FPS, GPU execution or
+  browser performance. Unlimited outlier retention, actual refusal/retry, larger
+  editor/console UI, allocation profiles and real-backend image parity remain
+  open before keeping the change. The fixture and adapter are external;
+  production source and existing regressions remain unchanged.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
