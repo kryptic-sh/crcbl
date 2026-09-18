@@ -668,10 +668,25 @@ Networking preparation follow-up:
   isolated-helper-only browser execution gap, but still uses helper source
   copies with the actual production SHA source. It does not establish full
   packet authentication call chains, exact stack high-water bounds or changed
-  production authentication integration. Actual packet mix, changed production
-  callers, full network worker fixtures and shipping gates remain required
-  before keeping it. Keep this separate from wider inner-input streaming design
-  and behind the current hash shipping gates.
+  production authentication integration. A follow-up external worker fixture now
+  links the actual `crcbl_net` and `crcbl_shaders` crates alongside
+  unchanged/fixed authentication source copies and the existing credential
+  fixture. On the same shared-memory engine worker ABI, complete independently
+  generated envelopes match both providers across boundary and large payloads.
+  Cross-provider opens, forged MAC refusal, fresh packet acceptance, replay
+  refusal, outbound counters and malformed-envelope refusal passed. The altered
+  outer XOR trapped while running the worker's packet checks, and the restored
+  provider passed. An initial harness compile failed because
+  `SessionCrypto::open` returns payload alone; after reading that installed
+  implementation, the fixture checks its complete payload and separately
+  observes counters through low-level `open` and sealed bytes. No repository API
+  or assertion was changed. This adds full envelope/authentication calls on an
+  engine worker, including actual current production exports, but not
+  client/server update scheduling, changed production temporary storage, exact
+  stack high-water use or actual packet mix. Those remaining measurements and
+  full shipping gates are still required before keeping the production change.
+  Keep this separate from wider inner-input streaming design and behind the
+  current hash shipping gates.
 
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
