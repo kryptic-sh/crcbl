@@ -578,6 +578,44 @@ Networking preparation follow-up:
   derivation, replay rejection and existing wire bytes if changing temporary
   storage.
 
+  A fixed-outer-input HMAC follow-up prototype is now priced against an
+  unchanged source-copy control, both using the actual changed release hash
+  export. The copied credential fixture matches the repository credential
+  representation; the private byte accessor is not exposed through the public
+  engine API. Complete envelopes and cross-provider opens match the actual
+  release authentication implementation on boundary and large inputs, while
+  forged MACs and replayed packets are rejected. Copied authentication tests,
+  including RFC vectors, oversized keys and counter exhaustion, passed. An
+  altered outer XOR source failed the RFC tests; corrupted complete-envelope
+  observation failed before normal restoration passed. No production HMAC
+  storage or public interface changed.
+
+  Matched source-copy seal/open/replay prices include envelope destruction and
+  exclude key setup, wire observations, validation and result assertions. Each
+  run reported 500 timed batches of 20 calls. Paired p50/p95 prices in
+  nanoseconds, with the fixed copy repeated before the original repeat, were:
+
+  | Payload bytes | Original          | Fixed outer       | Original repeat   | Fixed repeat      |
+  | ------------- | ----------------- | ----------------- | ----------------- | ----------------- |
+  | 64            | 1587.0/1651.7     | 1521.3/1535.4     | 1595.0/1661.7     | 1518.8/1536.9     |
+  | 1200          | 6620.0/6768.8     | 6417.6/6507.8     | 6485.8/6582.4     | 6399.1/6498.2     |
+  | 65536         | 281590.6/283388.5 | 281879.7/287096.5 | 281386.8/283456.7 | 281736.3/284245.1 |
+
+  Small and packet-sized inputs improved slightly in this controlled stage;
+  large-input timings were slightly worse. Do not claim an application or frame
+  bottleneck from these results. DHAT matched-copy whole-fixture totals were
+  7,541,148 bytes in 61,740 blocks originally versus 5,268,444 bytes in 38,066
+  blocks fixed. Peak live memory remained 328,472 bytes in 8 blocks. Guarded
+  copied-HMAC outer-size sites reported 2,272,704 bytes in 23,674 blocks
+  originally and none after fixed outer storage, while inner allocation sites
+  remained. Setup, preflight, observers and warmup are included; actual
+  authentication exports used by the observers still allocate their original
+  outer buffers. Instrumented timing is excluded. This is a source-copy
+  allocation prototype, not a changed-production caller profile. Native and
+  browser worker stacks, actual packet mix, changed production callers and full
+  shipping gates remain required before keeping it. Keep this separate from
+  wider inner-input streaming design and behind the current hash shipping gates.
+
 - SHA-256 padding is being implemented in the current trial above.
   `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
   changing `compress`, digest bytes or the public hash API. Both MAC hashing and
