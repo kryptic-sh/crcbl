@@ -1216,15 +1216,20 @@ Sample and browser follow-up:
   implemented. The unchanged-pool actual renderer lifecycle fixture now
   exercises removal, generation-changed slot reuse and stale set/remove attempts
   under dense and sparse updates across `IndirectCount`, `IndirectPerBatch` and
-  `MeshShader`, with point and spot shadows enabled. Complete logical records,
-  actual shadow/cache observations, validation and zero-live-object teardown
-  passed. Altered reused previous transforms and accidental fresh-handle
-  set/remove operations independently failed; restored runs passed. Complete
-  pre-lifecycle recording matched the preserved current-renderer capture, and an
-  altered indirect offset was rejected. This is baseline preparation for the
+  `MeshShader`, with point and spot shadows enabled. Complete logical records
+  and whole current-slot instance upload bytes, including unused zero-filled
+  storage, passed alongside actual shadow/cache observations, validation and
+  zero-live-object teardown. Constructor creation/write pairs identified the
+  real instance buffers; each observed instance write named only the
+  independently expected current ring slot. Altered reused previous transforms,
+  accidental fresh-handle set/remove operations and an altered expected upload
+  byte independently failed; restored runs passed. Complete pre-lifecycle
+  recording matched the preserved current-renderer capture, and an altered
+  indirect offset was rejected. This is baseline preparation for the
   retained-pool comparison, not changed-renderer evidence or a timed performance
-  claim. Integrated failed upload retry and complete post-lifecycle upload-byte
-  comparisons remain required.
+  claim. Integrated failed upload retry remains required. Repeat these complete
+  lifecycle and upload-byte comparisons on the changed production pool before
+  keeping storage reuse.
 
   An external source-copy prototype now retains carry vectors by clearing the
   consumed list and swapping it with the current list, and retains dirty-run
