@@ -69,15 +69,49 @@ MAC rejection passed. An altered outer-XOR source copy trapped in that worker;
 the restored fixture passed. This covers the changed authentication exports, not
 client/server update scheduling or browser storage. The canonical threaded jobs
 build and browser jobs gate passed, including its deliberate failure controls
-and non-isolated fallback checks. It reused the existing plain jobs artifact;
-the plain site rebuild remains pending. With the expanded fixture linking
-changed production authentication, browser stack sentinel write residue was 1520
-bytes in each original/fixed/fixed/original run. The constant-zero residue
-observer failed its calibration and the restored observer passed. This is
-written residue, not an exact stack high-water or worst-case bound, and does not
-justify reducing worker stack storage. Broader workspace checks, representative
-sample allocation/timing comparison and shipping gates remain pending; earlier
-prototype results below do not establish production performance.
+and non-isolated fallback checks. The plain jobs artifact and complete plain web
+site have also been rebuilt. Browser jobs verification of the rebuilt plain
+artifact passed its positive, deliberate-failure and non-isolated checks. With
+the expanded fixture linking changed production authentication, browser stack
+sentinel write residue was 1520 bytes in each original/fixed/fixed/original run.
+The constant-zero residue observer failed its calibration and the restored
+observer passed. This is written residue, not an exact stack high-water or
+worst-case bound, and does not justify reducing worker stack storage. The
+complete all-features workspace build, Clippy, nextest, regular tests,
+public/private documentation, dependency audit, advisory checks and release
+build passed. Production `SessionCrypto` prices now compare the preserved
+original binary and changed release library with complete wire, counter, payload
+and replay checks outside the timed batches. An altered wire capture failed;
+normal captures passed. The first unpinned comparison was noisy. After warming
+both binaries and pinning them to the same allowed CPU, the samples below show a
+small short-packet improvement and little large-packet difference. Each cell
+reports p50/p95 batch price per seal and open pair in nanoseconds; key setup,
+compatibility observers and warmup are excluded, while envelope destruction is
+included. These are authentication operation prices, not game tick or FPS
+measurements.
+
+| Payload bytes | Original p50/p95  | Fixed p50/p95     | Fixed repeat p50/p95 | Original repeat p50/p95 |
+| ------------- | ----------------- | ----------------- | -------------------- | ----------------------- |
+| 64            | 1526.3/1531.4     | 1470.3/1476.2     | 1484.8/1489.3        | 1529.9/1538.4           |
+| 1200          | 6542.4/6651.6     | 6506.3/6604.4     | 6496.8/6599.0        | 6548.9/6653.6           |
+| 65536         | 287735.8/291275.5 | 286358.2/286852.1 | 286305.1/286713.8    | 286426.3/286894.7       |
+
+The rebuilt Horde authenticated loopback fixture matches the preserved original
+complete contextual render capture. Altering its last snapshot failed; the
+restored capture and instrumented capture matched. The original HMAC outer
+allocation sites account for 27,840 bytes in 290 blocks and are absent in the
+changed DHAT profile. Inner sites remained 33,692 bytes in 290 blocks. The
+changed whole fixture reported 3,255,795 bytes in 2,365 blocks, with peak live
+memory unchanged at 766,940 bytes in 95 blocks. Whole-fixture totals include
+setup, snapshots and output scaffolding; the allocation-site evidence
+establishes the mechanism, not a measured game tick speedup. A missing HMAC-site
+observer failed for each profile before the normal observer passed. Changed
+release disassembly separately places the retained inner allocation before its
+hash and uses local outer storage between the hash calls. Breakout and Shard
+hardware Vulkan goldens, the hardware Vulkan backend suite, and
+hardware/lavapipe render suites passed with synchronization validation and fatal
+validation errors enabled. Branch/main CI and deployment gates remain pending.
+Earlier source-copy prototype prices below are separate evidence.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
