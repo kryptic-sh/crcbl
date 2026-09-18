@@ -154,8 +154,17 @@ still pending. Once it terminates, rerun the failed job with unchanged source
 and settings and inspect the complete render summary; investigate repeated
 failures rather than extending deadlines, weakening assertions or reducing
 concurrency to obtain a green gate. Keep the original failure visible even if
-the rerun passes. This adds a WARP observation to the separate readback gap; it
-does not justify new work on the owner-deferred D3D12 backend.
+the rerun passes. Source review follows `grass::frame_of` to
+`OffscreenSetup::draw_and_readback`: its `READBACK_DEADLINE` starts after
+`begin_readback`, and pending polls yield. `PendingReadback::poll` delegates to
+the backend; D3D12 `request_readback` with no explicit timeline records the
+submission fence target, and `poll_readback` samples completion and returns
+`Pending` before mapping or retirement when the fence has not reached it.
+Measure the requested/completed fence values, pending-poll cost and driver/host
+execution phases on a matched workload before assigning a cause. No host poll
+cost or WARP fence-progress profile was collected here. This adds a WARP
+observation to the separate readback gap; it does not justify new work on the
+owner-deferred D3D12 backend.
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
