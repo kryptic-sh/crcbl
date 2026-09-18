@@ -52,6 +52,18 @@ Next performance trials:
   candidate to price. Backend command-pool reuse, wider graph caching and math
   changes need stronger workload evidence or carry more lifecycle risk.
 
+The fixed-padding SHA-256 trial is in progress on `perf/fixed-hash-padding`.
+Production padding now uses fixed local storage without changing compression or
+public APIs. Repository uniform and patterned boundary tests compare complete
+raw and hex digests against independently generated Python `hashlib` answers.
+The original implementation and fixed-padding implementation passed the focused
+hash suite; corrupted digest and wrong encoded-length source controls failed.
+Workspace formatting, default clippy and regular workspace tests passed.
+Production caller checks, allocation profiles, native/browser worker
+integration, branch CI, main CI and browser deployment remain open. Keep this
+slice pending until all required gates close; isolated prototype results above
+do not prove production integration.
+
 Cold-cache native readback investigation remains open:
 
 The first optimized lavapipe render run, with Mesa shader caching disabled and

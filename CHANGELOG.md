@@ -2077,6 +2077,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- `crcbl_shaders::sha256` uses fixed local padding storage, removing its
+  temporary tail allocation for shader, asset, persistence and authentication
+  digests while preserving digest bytes and the public hash API.
+
 - **Instance-pool frame preparation retains motion and dirty-run scratch**:
   `InstancePool::carry_forward` reuses its carry vectors, and `flush` retains
   run capacity after successful or refused uploads. A refused write keeps the
