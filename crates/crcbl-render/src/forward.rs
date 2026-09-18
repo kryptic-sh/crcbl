@@ -1989,6 +1989,10 @@ pub struct ForwardRenderer {
     /// view's matrix, so the depth-only pipeline runs the unmodified vertex and
     /// mesh stages rather than a second transform path.
     shadow_uniforms: Vec<Vec<BufferHandle>>,
+    /// Empty between frame preparations, with capacity retained for assembly.
+    shadow_prepare_views: Vec<(usize, usize, mesh::FrameUniforms)>,
+    /// Empty between frame preparations, with capacity retained for frusta.
+    shadow_prepare_culls: Vec<(usize, Frustum)>,
     /// `[frame][view]`: the mesh layout again, reading that view's uniforms and
     /// the survivors of the cull its slot owns.
     shadow_groups: Vec<Vec<BindGroupHandle>>,
@@ -5471,6 +5475,8 @@ impl ForwardRenderer {
             sun_color: Vec3::ZERO,
             shadow_draws: std::mem::take(&mut rollback.shadow_draws),
             shadow_uniforms,
+            shadow_prepare_views: Vec::new(),
+            shadow_prepare_culls: Vec::new(),
             shadow_groups,
             shadow_selection,
             shadow_lights: shadow::Selection::default(),
@@ -15972,6 +15978,119 @@ mod tests {
             if opened { "opened" } else { "opened no" }
         );
         opened
+    }
+
+    #[test]
+    fn shadow_preparation_retains_empty_scratch_after_redraw_and_cached_frames() {
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let (mut renderer, _) = shadow_cache_scene(device, queue);
+        let camera = Camera::default();
+        let sun = DirectionalLight::default();
+        let mut seen = 0;
+        assert!(drew_the_atlas(
+            &recorder,
+            &mut seen,
+            device,
+            &mut renderer,
+            queue,
+            &camera,
+            &sun
+        ));
+        let capacity = (
+            renderer.shadow_prepare_views.capacity(),
+            renderer.shadow_prepare_culls.capacity(),
+        );
+        assert!(capacity.0 >= SHADOW_VIEWS && capacity.1 >= SHADOW_CULLS);
+        assert!(renderer.shadow_prepare_views.is_empty());
+        assert!(renderer.shadow_prepare_culls.is_empty());
+        for _ in 0..FRAMES_IN_FLIGHT {
+            assert!(!drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ));
+            assert!(renderer.shadow_prepare_views.is_empty());
+            assert!(renderer.shadow_prepare_culls.is_empty());
+            assert_eq!(
+                (
+                    renderer.shadow_prepare_views.capacity(),
+                    renderer.shadow_prepare_culls.capacity()
+                ),
+                capacity
+            );
+        }
+        for (step, view) in [0, 1, shadow_view(0, 0)].into_iter().enumerate() {
+            renderer.set_lights(&[shadowable_spot(-2.0 - step as f32)]);
+            let slot = (renderer.frame + 1) % FRAMES_IN_FLIGHT;
+            let short = device
+                .create_buffer(&BufferDesc {
+                    label: Some("refused shadow scratch test upload"),
+                    size: std::mem::size_of::<f32>() as u64,
+                    usage: BufferUsage::UNIFORM,
+                    memory: MemoryLocation::HostUpload,
+                })
+                .unwrap();
+            let original = std::mem::replace(&mut renderer.shadow_uniforms[slot][view], short);
+            let before = recorder.buffer_bytes(short).unwrap();
+            let result = renderer.begin_frame(device, &camera, &sun, TEST_EXTENT);
+            renderer.shadow_uniforms[slot][view] = original;
+            assert!(
+                matches!(result, Err(HalError::InvalidDescriptor(ref cause)) if cause.contains("exceeds")),
+                "observe a refused shadow uniform: {result:?}"
+            );
+            assert_eq!(recorder.buffer_bytes(short).unwrap(), before);
+            assert!(!recorder.events().iter().any(
+                |event| matches!(event, Event::BufferWritten { buffer, .. } if *buffer == short)
+            ));
+            assert!(renderer.shadow_prepare_views.is_empty());
+            assert!(renderer.shadow_prepare_culls.is_empty());
+            assert_eq!(
+                (
+                    renderer.shadow_prepare_views.capacity(),
+                    renderer.shadow_prepare_culls.capacity()
+                ),
+                capacity
+            );
+            let refused_inputs = renderer.shadow_group_inputs.clone();
+            device.destroy_buffer(short);
+            recorder.assert_valid();
+            assert!(drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ));
+            assert_eq!(renderer.shadow_group_inputs, refused_inputs);
+            assert!(renderer.shadow_prepare_views.is_empty());
+            assert!(renderer.shadow_prepare_culls.is_empty());
+            assert_eq!(
+                (
+                    renderer.shadow_prepare_views.capacity(),
+                    renderer.shadow_prepare_culls.capacity()
+                ),
+                capacity
+            );
+            assert!(!drew_the_atlas(
+                &recorder,
+                &mut seen,
+                device,
+                &mut renderer,
+                queue,
+                &camera,
+                &sun
+            ));
+        }
+        renderer.destroy(device);
+        recorder.assert_valid();
+        assert_eq!(recorder.total_live_objects(), 0);
     }
 
     /// **A frame over a scene nothing moved in does not draw the shadow atlas

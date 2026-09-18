@@ -2077,6 +2077,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Forward shadow preparation retains view and frustum scratch capacity**:
+  frame preparation clears and reuses private vectors across redraws, cached
+  atlas returns and refused uploads. Complete cache records, view/cull order and
+  pending shadow commit behavior remain unchanged. Storage stays owned by the
+  renderer between frames.
+
 - **Shadow-atlas group records reserve their complete encoded size**: selected
   uniform blocks, view and cull IDs, frustum planes and record headers determine
   capacity. Cascade and spot records avoid the point-cube reservation, and full
