@@ -2151,13 +2151,21 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   complete corner capture and empty timer collection independently failed before
   normal restoration passed. This small source-copy timing difference does not
   establish meaningful sample-load savings or justify moving it ahead of frame
-  work. Allocation sites, peak builder memory, refusal/nonfinite inputs,
-  complete DAG cooking, browser behavior and changed production callers remain
-  unverified. `Pending::new` also creates traversal scratch separately per
-  connected component; reuse is unpriced. Preserve component labels/counts,
-  lowest pending seed, cluster closure rules and deterministic frontier
-  ordering; replacing the ordered frontier with a hash set is not supported by
-  this trial.
+  work. Fresh DHAT runs of the full original and changed source copies matched
+  current production vertex runs, corners and cluster records on both meshes.
+  Guarded `OpenCluster::new` vertex/corner capacity sites reported 46472 bytes
+  in 148 blocks originally versus 1256 bytes in four blocks with reuse. Each
+  constructor site had to appear; impossible source-site selectors failed before
+  normal restoration passed. These exclude adjacency, ordered-frontier nodes,
+  returned geometry, capture clones and the separately invoked production
+  reference. Whole-process profiles include that reference and observer storage,
+  so they do not isolate builder peak live memory. Actual sample-load allocation
+  sites, isolated peak builder memory, refusal/nonfinite inputs, complete DAG
+  cooking, browser behavior and changed production callers remain unverified.
+  `Pending::new` also creates traversal scratch separately per connected
+  component; reuse is unpriced. Preserve component labels/counts, lowest pending
+  seed, cluster closure rules and deterministic frontier ordering; replacing the
+  ordered frontier with a hash set is not supported by this trial.
 
 - Texture/loading follow-up inspected `texture::upload_texture_layers`,
   `upload_texture_mip_layers`, their shared `upload`, `upload_cleared_texture`,
