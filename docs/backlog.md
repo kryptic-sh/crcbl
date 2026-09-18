@@ -107,11 +107,20 @@ setup, snapshots and output scaffolding; the allocation-site evidence
 establishes the mechanism, not a measured game tick speedup. A missing HMAC-site
 observer failed for each profile before the normal observer passed. Changed
 release disassembly separately places the retained inner allocation before its
-hash and uses local outer storage between the hash calls. Breakout and Shard
-hardware Vulkan goldens, the hardware Vulkan backend suite, and
-hardware/lavapipe render suites passed with synchronization validation and fatal
-validation errors enabled. Branch/main CI and deployment gates remain pending.
-Earlier source-copy prototype prices below are separate evidence.
+hash and uses local outer storage between the hash calls. A separate Callgrind
+comparison disables collection at process start and toggles it only around
+`<crcbl_horde::game::Game>::tick`. The preserved original collected 7,455,227
+instructions and the changed binary collected 7,242,522; both profiled captures
+match the complete preserved contextual render capture. A missing-function
+selector collected zero instructions and failed the nonempty-collection guard
+before the normal selectors passed. Setup, render-state capture and output are
+outside this collection scope. These instruction counts cover this scripted tick
+workload; they are not elapsed tick latency, tail latency or FPS measurements.
+
+Breakout and Shard hardware Vulkan goldens, the hardware Vulkan backend suite,
+and hardware/lavapipe render suites passed with synchronization validation and
+fatal validation errors enabled. Branch/main CI and deployment gates remain
+pending. Earlier source-copy prototype prices below are separate evidence.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
