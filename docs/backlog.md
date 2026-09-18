@@ -67,10 +67,17 @@ through the actual engine shared-memory worker host. Complete independently
 expected packets, fresh opens, replay rejection, malformed packets and forged
 MAC rejection passed. An altered outer-XOR source copy trapped in that worker;
 the restored fixture passed. This covers the changed authentication exports, not
-client/server update scheduling or browser storage. Broader workspace checks,
-representative sample allocation/timing comparison and shipping gates remain
-pending; earlier prototype results below do not establish production
-performance.
+client/server update scheduling or browser storage. The canonical threaded jobs
+build and browser jobs gate passed, including its deliberate failure controls
+and non-isolated fallback checks. It reused the existing plain jobs artifact;
+the plain site rebuild remains pending. With the expanded fixture linking
+changed production authentication, browser stack sentinel write residue was 1520
+bytes in each original/fixed/fixed/original run. The constant-zero residue
+observer failed its calibration and the restored observer passed. This is
+written residue, not an exact stack high-water or worst-case bound, and does not
+justify reducing worker stack storage. Broader workspace checks, representative
+sample allocation/timing comparison and shipping gates remain pending; earlier
+prototype results below do not establish production performance.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
