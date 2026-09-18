@@ -4053,6 +4053,32 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   these measurements do not establish a CPU speedup, empty graph draw behavior,
   hardware residency or browser lifetime cost.
 
+  An external complete draw-list source-copy trial now returns tessellation into
+  caller-owned retained vectors. The unchanged copy matched current production
+  output; every timed original/changed frame matched complete vertex field bits,
+  index values and overlay cut. Imports point to installed engine types; both
+  copies omit the unused POD trait implementations, and the observer encodes
+  logical fields without unsafe byte access. On the same pinned CPU,
+  original/changed/changed/original conversion p50/p95 prices were
+  15.569/16.872, 7.093/7.134, 7.093/7.143 and 15.560/15.990 microseconds for 32
+  bitmap labels; 203.806/278.647, 59.793/62.097, 59.974/61.947 and
+  199.858/273.287 for 256; and 736.974/868.182, 246.256/248.961, 247.317/249.873
+  and 738.226/867.601 for 1024. Each reported 250 timed frames after warmup.
+  Timers include conversion and its allocations; reference building, logical
+  encoding/comparisons and output destruction are excluded. Do not compare these
+  absolute figures with the differently compiled actual renderer baseline or
+  infer FPS savings. Corrupt complete output and empty timing controls failed
+  before normal restoration passed. A retained caller also matched production
+  through large, small, empty, medium and empty lists; empty output reset both
+  geometry lengths and the overlay cut while retaining 13369344 bytes of CPU
+  vector payload. Retention is now observed in the changed source-copy
+  conversion, not only proposed clearing. Sans glyph/cache-budget behavior,
+  non-text primitives, device-write refusals, actual renderer upload prices,
+  allocation sites, real UI workload burst sizes, native/browser lifetime memory
+  and graph draw parity remain unverified. This supports the next bitmap and
+  sans actual-caller trial after the current publication gates close; keep the
+  burst-memory policy explicit rather than claiming cost-free reuse.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
