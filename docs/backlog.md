@@ -158,12 +158,13 @@ The runner reported 33/98 tests run, 31 passed and 2 failed; its fail-fast
 policy left the remaining tests unrun. The earlier deliberate D3D12 dirty-report
 panic is a passing negative-control test, not this job's failure. The render
 source and workflow files are unchanged from the verified main baseline, but
-that alone does not establish timeout causality. Other jobs in this run are
-still pending. Once it terminates, rerun the failed job with unchanged source
-and settings and inspect the complete render summary; investigate repeated
-failures rather than extending deadlines, weakening assertions or reducing
-concurrency to obtain a green gate. Keep the original failure visible even if
-the rerun passes. Source review follows `grass::frame_of` to
+that alone does not establish timeout causality. The first attempt finished with
+every other job successful. Its complete job and step results were preserved and
+audited. The failed job is now rerunning at the same source commit and with
+unchanged workflow settings. Inspect the complete render summary and investigate
+repeated failures rather than extending deadlines, weakening assertions or
+reducing concurrency to obtain a green gate. Keep the original failure visible
+even if the rerun passes. Source review follows `grass::frame_of` to
 `OffscreenSetup::draw_and_readback`: its `READBACK_DEADLINE` starts after
 `begin_readback`, and pending polls yield. `PendingReadback::poll` delegates to
 the backend; D3D12 `request_readback` with no explicit timeline records the
