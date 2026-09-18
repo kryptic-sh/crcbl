@@ -48,9 +48,11 @@ Next performance trials:
   shader/persistence fixtures are recorded below. Strengthen the repository's
   padding-boundary assertions, verify changed production callers, native and
   browser worker stacks, and complete workspace and browser shipping gates
-  before keeping the change. Input queue capacity remains an input-burst
-  candidate to price. Backend command-pool reuse, wider graph caching and math
-  changes need stronger workload evidence or carry more lifecycle risk.
+  before keeping the change. Input queue capacity has isolated staging prices
+  and an actual Horde baseline below; the next event-burst trial must still
+  verify changed sample behavior and full native/browser gates. Backend
+  command-pool reuse, wider graph caching and math changes need stronger
+  workload evidence or carry more lifecycle risk.
 
 The fixed-padding SHA-256 trial is in progress on `perf/fixed-hash-padding`.
 Production padding now uses fixed local storage without changing compression or
@@ -1512,8 +1514,13 @@ Sample and browser follow-up:
   the game module, so newly resolved movement affects position on the following
   tick. This is an unchanged-production baseline, not a retained-queue
   implementation or timing result. Compare the changed game with this preserved
-  capture before keeping a queue change. Browser/focus-loss, queued context
-  changes, device attribution and other samples remain unverified.
+  capture before keeping a queue change. An extended preserved native baseline
+  also checks a context pushed before queued replay, held-key suppression after
+  popping it, release/repress routing, and keyboard/touch/pointer attribution
+  through queued keys and stick input. Complete seeded snapshots matched; the
+  corruption control failed before restoration passed. Native Horde baseline
+  context and attribution observations are now covered, but changed-caller
+  comparison, browser/focus-loss behavior and other samples remain unverified.
 
 - Considered and declined: removing browser command-field copies without a
   lifetime redesign. `gpu-stream.js::StreamReader::readField` produces owned
