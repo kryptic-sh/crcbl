@@ -716,6 +716,25 @@ Simulation and loading follow-up:
   cases and refusal recovery must also guard a proposed change. No copy-removal
   prototype, startup speedup or memory improvement has been verified. This
   candidate follows the ranked frame-allocation work.
+- Reviewed `crcbl_render::mesh_pool::MeshPool::upload`, `record_upload`,
+  `write_and_submit`, `flush`, table construction/writes/snapshots and
+  `local_bounds`, plus `FreeList::alloc`, `free` and free-space readers.
+  Deinterleaving builds pre-sized position/attribute vectors and one staging
+  buffer per upload; price large asset loads or an adopted streaming workload
+  before introducing retained upload scratch. Successful retirement drains the
+  existing in-flight vector after completion; no fresh retirement-vector
+  candidate was established. `FreeList::free` already uses ordered insertion and
+  neighbour coalescing, so a whole-list sorting rewrite is declined.
+  `table_entries` constructs an owned full-table snapshot, reached through
+  `ForwardRenderer::cull_records`. Repository callers are culling-oracle GPU
+  tests and editor instance tests; the editor module is actually gated by
+  `cfg(test)`, and inspected GPU consumers compare readback routes/counts with
+  host records. This is diagnostic work rather than an established normal
+  sample-frame allocation priority. Preserve zeroed empty/freed table entries,
+  handle generations, completion-gated residency, copy ordering, barriers and
+  refusal cleanup. Constructor/error-path coverage, upload CPU/peak-memory
+  pricing and future streaming costs remain incomplete in this follow-up; no
+  mesh-upload speedup was measured.
 - `crcbl_scene::scn::Scene::load` reads and parses scene and system files at
   load time. Its formatting and owned data are not evidence of a per-frame
   bottleneck; cooking, importer and large-scene load costs still need review
