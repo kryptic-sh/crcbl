@@ -4182,6 +4182,20 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   trial rather than proving a reuse speedup: copied renderer behavior still
   needs comparison through sans glyphs, graph draws, refusals and real backends.
 
+  The unchanged external renderer control also passes cached sans glyphs with
+  the installed normal page and raster-budget settings. Every timed frame
+  requires no new rasterization and complete production-reference vertex fields
+  and index uploads. A real render graph records each frame outside the caller
+  timer, preventing skipped glyph-copy retries from contaminating the cached
+  fixture; its HUD and overlay indexed draw ranges are checked completely, and
+  recorder validation remains clean. Corrupt upload contents, missing geometry
+  writes, empty timers, omitted teardown, actual cold-cache recreation and
+  removed draw receipts each failed before normal restoration passed. The
+  fixture destroys both renderer resources and the transient pool. This closes
+  the cached-sans caller-control preparation only; changed retained output,
+  graph execution performance, actual GPU sampling and browser behavior remain
+  unverified by it.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
