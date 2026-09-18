@@ -115,10 +115,14 @@ harness backend/adapter invocation settings. The local validation-layer
 cross-submission coverage limitation remains recorded separately below; passing
 images do not close it. The actual changed release library additionally matched
 every committed shader source and artifact digest in the manifest; an altered
-expected digest failed and restoration passed. Branch CI is running against the
-production change. Main CI and browser deployment remain open. Keep this slice
-pending until all required gates close; isolated prototype results above do not
-prove production integration.
+expected digest failed and restoration passed. Full branch CI passed against the
+production change. The final audit matched the required job set from the
+unchanged CI workflow and verified every job succeeded with no failed or
+cancelled steps; an altered-job control failed before restoration passed. Local
+commits added after the tested branch revision contain backlog verification
+notes only. Main CI and browser deployment remain open. Keep this slice pending
+until all required gates close; isolated prototype results above do not prove
+production integration.
 
 Cold-cache native readback investigation remains open:
 
