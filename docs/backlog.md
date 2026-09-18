@@ -135,9 +135,12 @@ skipped. Its full log records successful platform, boot, simulation, render and
 focus checks through explicit resume, with no emitted browser assertion failure
 and no final gate verdict. The workflow's job budget was not exhausted in the
 recorded interval; why the runner shut down remains unproven. This interruption
-does not establish a code regression or a passing Tide gate. The unchanged
-failed job still needs retry after the active Pages run reaches a terminal
-state; keep the original log and verify the full retry verdict before deployment
+does not establish a code regression or a passing Tide gate. The first attempt
+is now terminal: Tide was the sole failed job, the remaining required checks
+passed, and deployment was skipped. The complete exact-head job and step audit
+and original interruption log are preserved. GitHub accepted the unchanged
+failed-job retry as attempt 2 on the same main commit. The retry and deployment
+gates remain pending; verify the full Tide verdict and actual deployment before
 closure. Earlier source-copy prototype prices below are separate evidence.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
@@ -1548,6 +1551,22 @@ Sample and browser follow-up:
   implementation, elapsed tick comparison, browser delivery check or FPS
   improvement. Retained lifetime memory and changed-production native/browser
   gates remain required.
+
+  A matched elapsed-tick trial uses these same game-source copies and the
+  complete preserved gameplay capture. After warming both binaries and pinning
+  them to the same allowed CPU, take/drain/drain/take p50/p95 normalized prices
+  were 6036.8/6900.5, 6077.2/6830.5, 6119.9/6984.2 and 6066.6/6821.0 nanoseconds
+  per tick. Each run reported 500 timed batches with 24 ticks per batch. The
+  percentiles describe total batch price divided by tick count, rather than
+  individual tick tails. Complete `Game::tick` physics, intent, authentication,
+  loopback and simulation are timed; game setup, event pumps, render-state
+  snapshots and full-value comparisons are outside the timers, though that
+  scaffolding still affects caches and the workload. The full preserved capture
+  and nonempty collection observers independently failed deliberate controls,
+  then normal restoration passed. This small synchronous worker-free script
+  shows no elapsed tick improvement from queue draining; reduced allocation
+  churn does not establish a latency or FPS benefit. It does not cover large
+  enemy counts, GPU work, hardware audio or browser delivery.
 
   A separate release staging probe linked the current production `ActionMap` and
   replayed growing bursts followed by quiet ticks. Complete logical action
