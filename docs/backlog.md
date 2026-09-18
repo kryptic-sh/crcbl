@@ -742,6 +742,11 @@ Simulation and loading follow-up:
   identity contract failed on the over-limit table, and the restored
   reproduction passed. Reject excess item entries at the parser conversion
   boundary while preserving valid order and duplicate-name first-match behavior.
+  An actual resolved-library release fixture also passed duplicate names with
+  different definitions: every file-order ID retained its fields, name and
+  save-key lookup selected the first entry, and complete catalogue round trips
+  matched. A wrong expected first identity failed before the restored check
+  passed. Preserve this valid behavior when rejecting excessive item tables.
   Item entry limits and distinct-tag vocabulary limits are separate checks.
   Production rejection and repository fixtures remain unfinished. Keep these
   correctness findings separate from the measured frame-preparation priority.
