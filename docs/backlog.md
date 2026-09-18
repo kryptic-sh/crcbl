@@ -67,12 +67,12 @@ whole-fixture totals fell from 1,283,708 bytes in 10,011 blocks to 3,708 bytes
 in 11 blocks. Peak live memory was unchanged at 1,736 bytes in 3 blocks. This
 fixture includes setup and output, not authentication, persistence or frame
 rendering; it confirms heap churn reduction without claiming throughput or FPS
-benefit. Production release-library caller profiling and browser worker stacks
-remain open. An isolated WASM executable compiled the actual production hash
-source with a constrained linker stack and checked complete raw and hex digests
-against fresh Python `hashlib` answers for patterned boundary and large inputs.
-Local Chromium ran it inside a real Web Worker: the normal build passed, a
-corrupted-digest source control trapped, and the restored build passed. The
+benefit. Release-library caller results and remaining browser worker stack gaps
+are recorded below. An isolated WASM executable compiled the actual production
+hash source with a constrained linker stack and checked complete raw and hex
+digests against fresh Python `hashlib` answers for patterned boundary and large
+inputs. Local Chromium ran it inside a real Web Worker: the normal build passed,
+a corrupted-digest source control trapped, and the restored build passed. The
 harness checked the worker's result message and required the negative result to
 be a WASM trap. This verifies isolated production-source worker execution, not
 shared-memory engine worker stack high-water use, full subsystem call chains or
@@ -94,12 +94,13 @@ bytes in 28 blocks. This workload includes caller and worker authentication,
 save serialization, capture buffers and runtime setup; it establishes allocation
 churn reduction without a throughput or FPS claim. All-feature workspace build,
 clippy, nextest, regular tests, public/private rustdoc, dependency audits and
-release build passed. The canonical real-browser jobs gate is running.
-Shared-memory engine worker stack high-water use and full hashing subsystem call
-chains in browser workers remain coverage gaps; the jobs gate does not hash.
-Browser integration, branch CI, main CI and browser deployment remain open. Keep
-this slice pending until all required gates close; isolated prototype results
-above do not prove production integration.
+release build passed. The canonical real-browser jobs gate passed its normal
+worker execution, deliberate refusal controls and non-isolated-origin fallback
+checks. Shared-memory engine worker stack high-water use and full hashing
+subsystem call chains in browser workers remain coverage gaps; the jobs gate
+does not hash. Browser integration, branch CI, main CI and browser deployment
+remain open. Keep this slice pending until all required gates close; isolated
+prototype results above do not prove production integration.
 
 Cold-cache native readback investigation remains open:
 
