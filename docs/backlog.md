@@ -43,6 +43,29 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
+The fixed outer-input HMAC production trial is in progress. Existing
+`auth::tests` bodies moved unchanged into a separate module. Workspace
+formatting, default Clippy and regular workspace tests passed on both the
+extraction and changed production storage. An external fixture compiled the
+actual production authentication module with the extracted tests and existing
+credential fixture; its suite passed, an altered outer XOR copy failed the RFC
+vector, and normal source passed again. A preserved pre-change release binary
+and changed release library now match complete independent Python
+digest/envelope/save captures through public engine exports, on the caller and
+through native `jobs::Threads::spawn`. An altered worker capture failed;
+restoration passed. DHAT whole-fixture totals were 2,305,665 bytes in 693 blocks
+originally versus 2,296,251 bytes in 595 blocks changed. Peak live memory
+remained 688,918 bytes in 28 blocks. The original release HMAC outer site
+reported 9,408 bytes in 98 blocks; it is absent after the change, while the
+inner site remained 413,820 bytes in 98 blocks. Original release disassembly
+separately identifies the outer allocation after the inner hash. These fixture
+totals include setup, outputs, persistence and worker scaffolding, and do not
+establish authentication latency or FPS benefit. Complete instrumented captures
+also matched independent expected bytes. Broader workspace checks, changed
+browser production integration, representative sample allocation/timing
+comparison and shipping gates remain pending; earlier prototype results below do
+not establish production performance.
+
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
   allocation sites and slightly improve small-packet prices, while large-input

@@ -2077,6 +2077,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Authentication now keeps `crcbl_net::auth`'s fixed outer HMAC input in local
+  storage, removing its temporary heap allocation for key derivation, packet
+  sealing and verification while preserving packet bytes and replay behavior.
+
 - `crcbl_shaders::sha256` uses fixed local padding storage, removing its
   temporary tail allocation for shader, asset, persistence and authentication
   digests while preserving digest bytes and the public hash API.

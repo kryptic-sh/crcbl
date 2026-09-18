@@ -253,11 +253,11 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     inner.extend_from_slice(data);
     let inner_digest = sha256(&inner);
 
-    let mut outer = Vec::with_capacity(HMAC_BLOCK_BYTES + 32);
-    for byte in block {
-        outer.push(byte ^ 0x5c);
+    let mut outer = [0u8; HMAC_BLOCK_BYTES + 32];
+    for (out, byte) in outer[..HMAC_BLOCK_BYTES].iter_mut().zip(block) {
+        *out = byte ^ 0x5c;
     }
-    outer.extend_from_slice(&inner_digest);
+    outer[HMAC_BLOCK_BYTES..].copy_from_slice(&inner_digest);
     sha256(&outer)
 }
 
