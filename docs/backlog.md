@@ -1565,7 +1565,15 @@ Sample and browser follow-up:
   output. The narrow queue total excludes the separately observed
   `ActionMap::key_event` held-key allocation. This confirms production queue
   churn in the selected script without establishing a large tick cost or FPS
-  benefit. Native Horde baseline context and attribution observations are now
+  benefit. A preserved post-HMAC production release binary and complete
+  contextual capture now provide the next queue trial's baseline, avoiding an
+  authentication change in the comparison. Both preserved files match the
+  changed HMAC fixture byte for byte. Reanalysis of that fixture's existing DHAT
+  profile still reports 400 bytes in 28 queue-growth blocks rooted in
+  `Game::key_event`, excluding `ActionMap::key_event`; an impossible selector
+  failed before the normal nonempty-site observer passed. This is allocation
+  evidence from the saved profile, not a fresh timing run or a retained-queue
+  result. Native Horde baseline context and attribution observations are
   covered, but changed-caller comparison, browser/focus-loss behavior and other
   samples remain unverified. The next retained-queue trial should also run the
   existing shell-driven Horde regressions in `apps/horde/src/app.rs`:
