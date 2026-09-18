@@ -4072,12 +4072,33 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   through large, small, empty, medium and empty lists; empty output reset both
   geometry lengths and the overlay cut while retaining 13369344 bytes of CPU
   vector payload. Retention is now observed in the changed source-copy
-  conversion, not only proposed clearing. Sans glyph/cache-budget behavior,
-  non-text primitives, device-write refusals, actual renderer upload prices,
-  allocation sites, real UI workload burst sizes, native/browser lifetime memory
-  and graph draw parity remain unverified. This supports the next bitmap and
-  sans actual-caller trial after the current publication gates close; keep the
-  burst-memory policy explicit rather than claiming cost-free reuse.
+  conversion, not only proposed clearing. Cold sans glyphs, cache-budget
+  deferral behavior, non-text primitives, device-write refusals, actual renderer
+  upload prices, allocation sites, real UI workload burst sizes, native/browser
+  lifetime memory and graph draw parity remain unverified. This supports the
+  next bitmap and sans actual-caller trial after the current publication gates
+  close; keep the burst-memory policy explicit rather than claiming cost-free
+  reuse.
+
+  The matching cached-sans source-copy trial now checks complete production
+  vertex field bits, indices and overlay cuts and zero rasterization on every
+  timed frame. Original/changed/changed/original p50/p95 conversion prices were
+  28.304/28.674, 18.866/18.976, 18.706/18.916 and 19.467/19.658 microseconds for
+  32 labels; 325.926/333.741, 159.742/162.127, 159.893/162.187 and
+  301.079/465.541 for 256; and 1346.135/1351.815, 660.940/666.350,
+  658.124/662.242 and 1365.702/1402.522 for 1024. Each reported 250 timed frames
+  after warmup on the same pinned CPU. The small original fixture varies between
+  the forward and reversed run; do not claim a fixed gain across label sizes.
+  Layout, initial glyph rasterization, atlas frame reset, output destruction and
+  full-value observers are outside timers. Both paths use the same installed
+  glyph atlas with sufficient capacity and raster budget for the synthetic
+  fixture; this does not test the normal renderer's budget pressure or eviction.
+  Recreating the cache on timed frames, corrupting complete output and emptying
+  the timer collection each failed their exact observer before normal
+  restoration passed. Cached-sans conversion parity is established for this
+  fixture; cold/deferred/evicted glyphs, image and other primitives, complete
+  graph draw parity, actual renderer/device uploads and real workload memory
+  remain open before retaining production output.
 
 ### Checked and fine
 
