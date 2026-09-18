@@ -698,6 +698,24 @@ Simulation and loading follow-up:
   those functions. Gust arithmetic still runs with zero amplitude, but an
   early-out needs dense-consumer measurements and identical calm-field results
   before it is worth a change.
+- `crcbl_render::cluster_pool::ClusterPool::new` clones each incoming
+  `PooledMesh::clusters` into a temporary geometry collection before
+  `concatenate` reads it. A borrowed input walk could avoid that intermediate
+  copy. Reviewed concatenation, upload serialization, selection-length refusal,
+  partial-buffer rollback, accessors and teardown, plus the actual
+  `ForwardRenderer` construction call: `emit.is_mesh()` gates this path, and the
+  scene's flat meshes or DAG levels are already cloned into cooked entries
+  there. This is startup/scene-construction work, not an established per-frame
+  bottleneck. Price large cooked pools and actual renderer startup, recording
+  allocation-site and peak-memory changes before selecting the inner copy or a
+  broader ownership change. Keep the public owned input API compatible and
+  preserve mesh/level order, shifted vertex/corner offsets, bounds, packed
+  corner tails, complete selection records, mode-bucket ranges and
+  partial-upload cleanup. Existing inspected null tests observe shifted offsets,
+  bounds and uploaded lengths; complete uploaded-byte comparisons, DAG/mode
+  cases and refusal recovery must also guard a proposed change. No copy-removal
+  prototype, startup speedup or memory improvement has been verified. This
+  candidate follows the ranked frame-allocation work.
 - `crcbl_scene::scn::Scene::load` reads and parses scene and system files at
   load time. Its formatting and owned data are not evidence of a per-frame
   bottleneck; cooking, importer and large-scene load costs still need review
