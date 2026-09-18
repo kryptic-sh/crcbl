@@ -2077,6 +2077,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Sample input queues in Horde, Asteroids, Breakout, Flappy, Shard, Puppet,
+  Orbit, Towers and Breach retain their event storage after fixed-tick replay,
+  avoiding repeated queue growth for later input bursts while preserving ordered
+  key, button and pointer events. Storage retains the largest burst capacity.
+
 - Authentication now keeps `crcbl_net::auth`'s fixed outer HMAC input in local
   storage, removing its temporary heap allocation for key derivation, packet
   sealing and verification while preserving packet bytes and replay behavior.

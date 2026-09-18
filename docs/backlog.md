@@ -43,6 +43,42 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
+The sample input-queue production trial is in progress on
+`perf/sample-input-queues`. Horde's existing game tests moved into a separate
+module without production changes; workspace formatting, default Clippy and
+regular workspace tests passed on both the extraction and changed queue replay.
+Ordered draining now retains event storage in the inspected sample game and app
+loops. Rebuilt Horde and Flappy release libraries and Breakout's current
+production-source fixture matched their complete preserved gameplay captures.
+Corrupting each changed capture failed its full-value observer; restoration
+passed. Changed DHAT captures also matched their preserved originals. Guarded
+actual queue-growth sites reported 400 bytes in 28 blocks originally versus 240
+bytes in 8 blocks for Horde, and 576 bytes in 20 blocks versus 496 bytes in 10
+blocks for Flappy. Horde's original figure is a reanalysis of the preserved
+post-HMAC production profile; Flappy's preserved original executable and both
+changed executables were profiled freshly. Breakout's current source fixture
+reported 4032 queue bytes in 12 blocks; its source-copy baseline below is
+separate. Missing actual queue-site selectors failed before normal selectors
+passed. These queue sites exclude action-map, setup and capture allocations. The
+changed Horde native focus suite passed its held-key release, paused focus
+return and start-screen cases.
+
+A matched actual Horde tick trial warms the preserved post-HMAC original and
+changed release binaries, pins both to the same allowed CPU, and checks complete
+contextual captures outside the timers. Original/changed/changed/original
+p50/p95 normalized prices were 9969.2/11810.2, 9633.3/11083.1, 9988.5/11402.7
+and 9802.2/10871.8 nanoseconds per tick. Each run reported 500 timed batches
+with 24 ticks per batch. These are total batch prices divided by tick count, not
+individual tick tails. Complete physics, intent, authentication, loopback and
+simulation are timed; setup, event pumps, snapshots and comparisons are
+excluded, though the scaffold affects caches and the workload. Full preserved
+capture and nonempty collection controls independently failed, then normal
+restoration passed. Prices are mixed and do not establish a latency or FPS gain.
+Source-copy storage evidence below remains separate from actual production
+lifetime-memory, browser layout and real burst-frequency measurements. Broader
+workspace, browser held-key focus delivery and canonical shipping gates remain
+required before keeping the change.
+
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
   Verify changed sample behavior, retained lifetime memory, context transitions,

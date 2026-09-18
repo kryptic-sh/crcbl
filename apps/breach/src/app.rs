@@ -606,7 +606,7 @@ impl HostedGame for Breach {
         // input edge is worth.
         #[allow(clippy::cast_possible_truncation)]
         self.actions.begin_tick(tick_dt as f32);
-        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
+        for (key, pressed) in self.pending_keys.drain(..) {
             self.actions.key_event(key, pressed);
         }
         // The angles go with the buttons: what the player asked for is

@@ -1306,7 +1306,7 @@ impl<T: Transport> Game<T> {
     pub fn tick(&mut self) {
         let dt = self.tick_period.as_secs_f64();
         self.action_map.begin_tick(dt as f32);
-        for queued in std::mem::take(&mut self.pending_input) {
+        for queued in self.pending_input.drain(..) {
             match queued {
                 Queued::Key(key, pressed) => self.action_map.key_event(key, pressed),
                 Queued::Button(pressed) => {

@@ -312,7 +312,7 @@ impl HostedGame for Orbit {
 
     fn tick(&mut self, _gpu: &mut Gpu, tick_dt: f64) {
         self.actions.begin_tick(tick_dt as f32);
-        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
+        for (key, pressed) in self.pending_keys.drain(..) {
             self.actions.key_event(key, pressed);
         }
         self.game.set_controls(controls(&self.actions));

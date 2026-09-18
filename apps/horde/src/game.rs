@@ -3578,7 +3578,7 @@ impl Game {
     pub fn tick(&mut self) {
         let dt = self.tick_period.as_secs_f64();
         self.action_map.begin_tick(dt as f32);
-        for (key, pressed) in std::mem::take(&mut self.pending_keys) {
+        for (key, pressed) in self.pending_keys.drain(..) {
             self.action_map.key_event(key, pressed);
         }
         // Only when the widget reported one. A finger resting on the stick
