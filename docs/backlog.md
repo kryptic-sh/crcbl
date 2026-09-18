@@ -44,21 +44,25 @@ Next performance trials:
 The retained shadow-scratch trial is implemented and pushed at `9253b7d`.
 Exact-commit [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020)
 and [Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) are
-still running; enumerate every job and check the deployed live site before
-removing this trial. Shared `begin_frame_body` preparation has been moved
-unchanged into private `forward::frame_prepare`, following the existing
-private-module convention. Complete moved code and documentation matched after
-visibility/whitespace normalization, and an altered cadence increment was
-rejected. Workspace formatting, default clippy and default workspace tests
-passed. Retained view/cull vectors are now implemented around the fallible
-preparation body and cleared on both successful and failed returns. The actual
-null graph fixture rejected the eager implementation, then passed redraw/cached
-capacity observations and first/middle/last uniform-refusal recovery, including
-complete cache-record equality, refused-buffer bytes/events, validation and
-teardown. Dropping capacity only on errors and omitting either scratch clear
-were separately rejected; restored tests passed. Default workspace clippy and
-default workspace tests passed for the reuse change, followed by the release
-build. Actual renderer command captures matched across cascade, point, spot and
+still running. The Windows Vulkan job failed its readback deadlines with LATE
+verdicts; it is not a passing gate. The job rerun request was rejected while the
+overall run remained active. Wait for the same run to finish, retry the failed
+Windows job on the same commit and inspect its complete result. Enumerate every
+job and check the deployed live site before removing this trial. Shared
+`begin_frame_body` preparation has been moved unchanged into private
+`forward::frame_prepare`, following the existing private-module convention.
+Complete moved code and documentation matched after visibility/whitespace
+normalization, and an altered cadence increment was rejected. Workspace
+formatting, default clippy and default workspace tests passed. Retained
+view/cull vectors are now implemented around the fallible preparation body and
+cleared on both successful and failed returns. The actual null graph fixture
+rejected the eager implementation, then passed redraw/cached capacity
+observations and first/middle/last uniform-refusal recovery, including complete
+cache-record equality, refused-buffer bytes/events, validation and teardown.
+Dropping capacity only on errors and omitting either scratch clear were
+separately rejected; restored tests passed. Default workspace clippy and default
+workspace tests passed for the reuse change, followed by the release build.
+Actual renderer command captures matched across cascade, point, spot and
 combined lighting with paired reversed repeats. Complete uploaded shadow uniform
 bytes and observer commands matched separately; altered indirect offsets were
 detected. Preparation observations remain small and mixed, establishing no
@@ -20761,9 +20765,19 @@ and a timed `wait_idle` — then panics with a LATE, STUCK or LOST verdict.
 **Next:** read the first-frame wait in the next Windows run, green or red. LATE
 on the runner confirms the cause and puts a longer deadline for that leg, or a
 smaller mesh test group running at once, back on the table; LOST or STUCK
-reopens the driver question. Not verified: the Windows runner itself, and
-whether the harness's busy poll matters there (on Linux, sleeping instead made
-no material difference).
+reopens the driver question. The Windows runner is now observed on `9253b7d` in
+[job 105494004842](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105494004842):
+`draw_gen::every_geometry_path_draws_the_same_frame`,
+`mesh::a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths`,
+`mesh::the_mesh_dispatch_extent_is_the_culled_instance_count` and
+`mesh::the_mesh_shader_path_matches_the_indirect_path_s_golden` failed their
+readback deadlines. Every failed readback became Ready during diagnostic polling
+with changed destination bytes and matching submitted/retired timeline values,
+yielding LATE rather than STUCK or LOST verdicts. The suite remains failed;
+rerun it on the exact commit before closing the scratch shipping gate. Whether
+busy polling materially affects Windows remains unverified. Deadline changes and
+automatic test retries have not been adopted; reducing concurrent cold mesh work
+remains an option requiring a priced test-group change.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
