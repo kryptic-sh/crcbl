@@ -221,6 +221,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `PhysicsWorld::cast_ray_excluding` and its shared `OverlapQueries` form omit a
+  live collider before selecting the closest exact ray hit. Character support
+  and traversal probes can skip their own capsule while retaining geometry
+  behind it, without mutating trigger state. Stale collider IDs do not exclude
+  recycled slots.
+
 - `CharacterController::set_self_collider` changes or clears a collision binding
   while preserving the current position, ground contact, and movement
   configuration. Games can retire movement-only proxies without rebuilding the

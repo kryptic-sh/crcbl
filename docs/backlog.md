@@ -21499,3 +21499,15 @@ draws, and expansion would have meant a width in world or screen units, a
 miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
+
+## Windows lavapipe readback deadline failure
+
+CI run `35400375474` at `9a9a694b` failed in the Windows Vulkan e2e job
+`105778661364`. In `draw_gen::every_geometry_path_draws_the_same_frame`,
+`Headless::readback` in `crates/crcbl-vk/tests/vk_e2e/harness.rs` reported a
+pending submission at its deadline; the diagnostic subsequently observed it
+retire and deliver the image. Other mesh-path tests also reached the deadline.
+Investigate Windows lavapipe submission scheduling and runner contention before
+changing the deadline. This is a failed backend check, not evidence of lost
+readback data or a verified driver defect. Local workspace tests pass; this
+Windows failure remains unresolved.

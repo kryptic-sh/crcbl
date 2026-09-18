@@ -314,7 +314,30 @@ impl OverlapQueries<'_> {
         ray: &Ray,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
-        cast_ray_core(self.bvh, self.colliders, self.generations, ray, scratch)
+        self.cast_ray_excluding(ray, None, scratch)
+    }
+
+    /// [`PhysicsWorld::cast_ray_excluding`] under a shared borrow, working in
+    /// `scratch` instead of the world's own buffers.
+    ///
+    /// This leaves one live collider out of the narrow phase while preserving
+    /// the closest hit behind it. The shared and `&mut self` forms call the
+    /// same implementation.
+    #[must_use]
+    pub fn cast_ray_excluding(
+        &self,
+        ray: &Ray,
+        exclude: Option<ColliderId>,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        cast_ray_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            ray,
+            exclude,
+            scratch,
+        )
     }
 
     /// [`PhysicsWorld::sweep_sphere`] under a shared borrow, working in
@@ -485,20 +508,24 @@ fn overlap_aabb_core(
 
 /// The one implementation of "what does this ray hit first".
 ///
-/// Both [`PhysicsWorld::cast_ray`] and [`OverlapQueries::cast_ray`] come
-/// through here. Triggers are non-solid and are skipped by `closest_hit_core`.
+/// Both [`PhysicsWorld::cast_ray_excluding`] and
+/// [`OverlapQueries::cast_ray_excluding`] come through here — and so do the
+/// two `cast_ray` forms, which are this with no exclusion. Triggers are
+/// non-solid and are skipped by `closest_hit_core`.
 fn cast_ray_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     ray: &Ray,
+    exclude: Option<ColliderId>,
     scratch: &mut QueryScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
     // Out of the scratch and back into it, because the descent borrows the
     // stack at the same time and the two are fields of one struct.
     let mut hits = core::mem::take(&mut scratch.ray_hits);
     bvh.traverse_ray_into(ray, &mut scratch.stack, &mut hits);
-    let best = closest_hit_core(colliders, generations, ray, &hits);
+    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let best = closest_hit_core(colliders, generations, ray, &hits, skip);
     scratch.ray_hits = hits;
     best
 }
@@ -643,16 +670,21 @@ fn swept_bounds(segment: &Segment, half_extents: DVec3) -> Aabb {
 }
 
 /// Given BVH hits (AABB-level), find the closest exact hit using shape-level
-/// intersection. Triggers are non-solid and are skipped.
+/// intersection. Triggers are non-solid and are skipped, as is `skip` — the
+/// storage slot of the collider the caller excluded, if any.
 fn closest_hit_core(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     ray: &Ray,
     bvh_hits: &[BvhHit],
+    skip: Option<usize>,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for bvh_hit in bvh_hits {
         let idx = bvh_hit.element_id as usize;
+        if Some(idx) == skip {
+            continue;
+        }
         let Some(Some(slot)) = colliders.get(idx) else {
             continue;
         };
@@ -957,8 +989,27 @@ impl PhysicsWorld {
     /// [`PhysicsWorld::overlap_sphere`] to detect them.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(ColliderId, ShapeHit)> {
+        self.cast_ray_excluding(ray, None)
+    }
+
+    /// [`cast_ray`](Self::cast_ray) with one collider left out of the answer.
+    ///
+    /// A character whose collision capsule is registered in the world can
+    /// cast from inside itself. Excluding that capsule in the narrow phase
+    /// keeps the wall behind it, which discarding a self-hit afterwards loses.
+    ///
+    /// A stale or invalid `exclude` excludes nothing, which is the same answer
+    /// as `None`. Triggers remain non-solid and are skipped.
+    #[must_use]
+    pub fn cast_ray_excluding(
+        &mut self,
+        ray: &Ray,
+        exclude: Option<ColliderId>,
+    ) -> Option<(ColliderId, ShapeHit)> {
         let mut scratch = core::mem::take(&mut self.scratch);
-        let hit = self.overlap_queries().cast_ray(ray, &mut scratch);
+        let hit = self
+            .overlap_queries()
+            .cast_ray_excluding(ray, exclude, &mut scratch);
         self.scratch = scratch;
         hit
     }
@@ -2673,3 +2724,7 @@ mod tests {
         assert!((hit.t - 0.51).abs() < 1e-12, "t = {}", hit.t);
     }
 }
+
+#[cfg(test)]
+#[path = "world/ray_exclusion_tests.rs"]
+mod ray_exclusion_tests;
