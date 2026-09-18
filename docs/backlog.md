@@ -4258,6 +4258,28 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   and the cost of regrowth before keeping a production memory policy. The
   original unlimited-retention fixture remains separate and unchanged.
 
+  A matched repeated-transition caller trial now prices unlimited retention
+  against unconditional empty-frame release on the same pinned CPU, in
+  retain/release/release/retain order. The workload repeats large, small, quiet,
+  regrown-large and quiet-again bitmap phases through every actual ring slot.
+  Complete production-reference uploads, lengths, overlay cuts, policy-specific
+  CPU capacity, ring descriptors and teardown pass outside the caller timers.
+  Empty timing-phase collection fails for both policies before restoration. Each
+  phase reports 160 timed frames. The large-phase p50/p95 prices were
+  368.267/371.593, 475.399/801.575, 620.283/733.707 and 369.508/373.096
+  microseconds; quiet-phase prices were 0.050/0.061, 106.431/205.208,
+  153.490/163.088 and 0.050/0.061 microseconds. These phase distributions mix
+  the first frame that releases or regrows storage with another frame using the
+  same phase; they are not isolated release/regrowth operation tails. Reference
+  construction, full-value observers and setup are outside timers but affect
+  caches and allocator behavior. Timers include vector release or regrowth,
+  conversion, staging checks, ring rotation and null host writes. Immediate
+  release costs substantial work in this synthetic alternating-burst workload
+  and is not justified as a universal lean policy by its capacity reduction.
+  Prefer pricing actual burst frequency and a less aggressive bound or delayed
+  shrink policy; real UI lifetime memory, backend/GPU costs and browser
+  performance remain open. No production code changed.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
