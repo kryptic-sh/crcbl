@@ -1530,6 +1530,25 @@ Sample and browser follow-up:
   memory trade-off warrants a bound. No additional wrapper is needed for this
   loop.
 
+  An external Horde game-source trial now compares a verbatim copy of the
+  current production `game.rs` with a copy changing only its queued-key replay
+  to `drain(..)`. Both use the unchanged production audio and best-record
+  modules and the same current release engine library, including fixed outer
+  HMAC storage. Both complete contextual gameplay captures matched the preserved
+  authenticated original capture, with 26 snapshots covering deferred events,
+  catch-up ticks, held movement, bursts, restart, context suppression and device
+  transitions. Corrupting the draining capture failed the full-value observer;
+  normal restoration passed. Symbolized release DHAT profiles also matched the
+  complete preserved capture. Guarded allocation sites at the actual
+  `pending_keys.push` source expression reported 400 bytes in 28 blocks for the
+  take copy versus 240 bytes in 8 blocks for the draining copy. Their stacks
+  identify growth of the key-event vector; action-map and capture allocations
+  are separate. A missing queue-site selector failed before the normal selector
+  passed for each profile. These are source-copy trial results, not a production
+  implementation, elapsed tick comparison, browser delivery check or FPS
+  improvement. Retained lifetime memory and changed-production native/browser
+  gates remain required.
+
   A separate release staging probe linked the current production `ActionMap` and
   replayed growing bursts followed by quiet ticks. Complete logical action
   values matched the take-and-replay reference throughout. Clearing retained
