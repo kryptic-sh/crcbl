@@ -1575,6 +1575,22 @@ Sample and browser follow-up:
   gameplay comparisons, not changed-production, full packaged shell, browser
   delivery, elapsed tick or retained-lifetime memory verification.
 
+  Native sample-source storage probes now append the same read-only private
+  queue observer to each take/drain copy, retaining the unchanged companion
+  modules and release engine library. Growing synthetic bursts followed by quiet
+  ticks produced matching complete gameplay captures: each sample reported 1028
+  snapshots in each mode. After a 4096-event burst and 256 quiet ticks, draining
+  retained 8192 payload bytes in Horde and Flappy and 32768 in Breakout, while
+  take retained none. Their actual event elements measured 2 bytes for Horde and
+  Flappy and 8 for Breakout. Every quiet tick observed an empty queue with
+  unchanged capacity; payload figures exclude allocator overhead and the rest of
+  the game. Constant-zero capacity observers failed independently for each
+  sample, then normal restoration passed; corrupting a complete quiet-gameplay
+  capture also failed before the normal full comparison passed. These copies
+  establish the native type and quiet-period retention trade-off for synthetic
+  bursts. They do not measure production burst frequency, full process memory,
+  browser event layouts, packaged delivery or acceptable retention budgets.
+
   A matched elapsed-tick trial uses these same game-source copies and the
   complete preserved gameplay capture. After warming both binaries and pinning
   them to the same allowed CPU, take/drain/drain/take p50/p95 normalized prices
@@ -1606,9 +1622,10 @@ Sample and browser follow-up:
 
   Payload bytes are vector capacity multiplied by the actual key-event element
   size, excluding allocator overhead, maps and reference scaffolding. These are
-  isolated queue lifetime observations, not actual sample retained-memory
-  profiles or timing results. Mixed-input element storage and production event
-  burst frequency remain unverified; this does not establish a queue limit.
+  isolated queue lifetime observations, not actual production retained-memory
+  profiles or timing results. Browser element storage and production event burst
+  frequency remain unverified; native sample-source observations below do not
+  establish a queue limit.
 
   A release staging probe used the actual `ActionMap` with Horde's move, restart
   and choice declarations, comparing the existing take-and-replay loop with a
