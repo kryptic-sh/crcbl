@@ -41,75 +41,17 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-The shadow-group record capacity trial is underway on
-`perf/shadow-record-capacity`. The existing serialization and its contract have
-been moved to the private `forward::shadow_inputs` module with the algorithm
-unchanged. The moved block matched after visibility, link-path and whitespace
-normalization; a deliberately altered instance-count encoding failed that
-comparison. Workspace formatting, default clippy and default tests passed, then
-the unchanged move was committed. The production byte test passed on the
-original implementation and independently failed altered revision, count,
-selected views, view id, uniform bytes, cull planes and order before restoration
-passed. Its exact-capacity observation rejected the original hint. Reservation
-now includes headers and all selected view/cull payloads; the production byte
-and capacity test, workspace clippy and default workspace tests passed. The
-locked all-features workspace build, formatting check and all-features clippy
-also passed. Nextest reported 7,200 passed and 507 skipped; the regular
-all-features workspace test run passed separately. Explicit doctests, public and
-private Rustdoc with warnings denied, dependency checks and the release build
-passed. Actual renderer command captures matched for cascade, point, spot and
-combined lighting across paired repeats, and separately for each geometry tail.
-Complete uploaded shadow uniform bytes matched; a deliberately changed indirect
-offset was detected by the capture comparison. The null fixture checks instance
-mirrors, cached/redrawn shadow claims, warmed bind-group reuse, requested
-effects, validation and teardown outside its timer. Paired original and exact
-reservation preparation p50/p95 observations were:
-
-| Lighting       | Original (ms) | Exact (ms)  | Original repeat | Exact repeat |
-| -------------- | ------------- | ----------- | --------------- | ------------ |
-| Cascade        | 0.061/0.065   | 0.059/0.062 | 0.060/0.063     | 0.059/0.062  |
-| Point          | 0.089/0.093   | 0.090/0.093 | 0.089/0.094     | 0.088/0.093  |
-| Spot           | 0.066/0.070   | 0.066/0.071 | 0.066/0.069     | 0.066/0.071  |
-| Point and spot | 0.097/0.101   | 0.095/0.100 | 0.096/0.102     | 0.096/0.100  |
-
-The workload and timer include the existing actual-renderer fixture described
-below; GPU execution, native/browser frame timing and FPS are not measured.
-These small differences do not establish a general CPU gain. Whole-fixture DHAT
-reported 763,931,430 bytes in 1,478,001 blocks originally and 736,900,027 bytes
-in 1,477,451 blocks with exact reservation. The guarded record allocation return
-site, confirmed against the disassembled reservation, reported 36,432,000 bytes
-in 2,750 blocks versus 9,400,600 bytes in 2,200 blocks. A wrong site selector
-failed before the restored selector passed. Setup, warmup and observers are
-included; instrumented timings are excluded from release prices. Instrumented
-complete command captures matched their release counterparts. Whole-fixture peak
-bytes were 18,251,294 and 18,251,291, so this does not establish a material
-peak-memory improvement. Radeon/RADV passed its render suite with 98 tests and
-no skips, opening the requested discrete adapter with Vulkan validation. Every
-lavapipe engine suite passed without skips on the requested CPU adapter. The
-full Vulkan suite passed with 63 tests; a separate direct positive run passed
-with 60 tests and the deliberate violations excluded. The filtered shell harness
-refused its missing reach marker as described below; it was not counted as a
-passing gate. Vulkan validation was loaded and clean on positive paths. The
-local full harness reported record-time and single-submission reach, with
-cross-submission reach absent. Exact-commit CI completed successfully for
-`144d4543fc6dd52c841398457ce36c88e0885f54`; every enumerated job succeeded,
-including Metal, Direct3D, Vulkan, native windowing and threaded wasm.
-Exact-commit browser/deployment verification remains required before retaining
-this change.
-
-- Finish exact shadow-group record capacity verification, then price retained
-  shadow-preparation views/culls: actual caller profiles below show repeated
-  allocation before cached-atlas reuse. The original group records reserve for a
-  point cube even for a cascade, while a full cube outgrows that hint. Compare
-  complete bytes and recording, allocation churn, CPU cost and host memory
-  before keeping either change. Retained instance carry/dirty-run storage
-  follows as a small candidate; price moving/dense workloads. Fixed SHA-256
-  padding follows renderer/instance preparation: its isolated digest and
-  authentication prices, allocation profiles, complete wire compatibility and
-  shader/persistence fixtures are recorded below. Verify the changed production
-  callers, workspace and browser gates before keeping it. Input queue capacity
-  remains an input-burst candidate to price. Backend command-pool reuse, wider
-  graph caching and math changes need stronger workload evidence or carry more
+- Price retained shadow-preparation views/culls next: actual caller profiles
+  below show repeated allocation before cached-atlas reuse. Compare complete
+  bytes and recording, allocation churn, CPU cost and host memory before keeping
+  the change. Retained instance carry/dirty-run storage follows as a small
+  candidate; price moving/dense workloads. Fixed SHA-256 padding follows
+  renderer/instance preparation: its isolated digest and authentication prices,
+  allocation profiles, complete wire compatibility and shader/persistence
+  fixtures are recorded below. Verify the changed production callers, workspace
+  and browser gates before keeping it. Input queue capacity remains an
+  input-burst candidate to price. Backend command-pool reuse, wider graph
+  caching and math changes need stronger workload evidence or carry more
   lifecycle risk.
 
 Editor image coverage gap:
@@ -1078,14 +1020,18 @@ Sample and browser follow-up:
   dependencies included ambient, previous-view, vertex-pool and view-projection
   fields; the depth-only vertex path read the view projection, and the inspected
   masked/reflective fragment paths read no frame fields. These artifact audits
-  do not execute shaders or establish image parity. Masked/reflective SPIR-V,
-  DXIL/MSL dependencies, native images and actual GPU cost remain unverified.
-  Confirm the relevant paths before unused fields can be canonicalized. Do not
-  weaken cache records by ignoring GPU inputs. Preserve cadence, layout, skinned
-  previous/current data, reflective and probe producers, failure recovery and
-  native image parity. Price native redraw cost before ranking this ahead of
-  measured scratch allocation; no changed-caller optimization or GPU saving has
-  been verified.
+  do not execute shaders or establish image parity. A call-path audit of
+  committed `mesh.spv` separately resolved reachable SPIR-V function calls and
+  frame-member accesses from shared vertex, depth-only, masked-depth and
+  reflective entry points. Its observed members matched the WGSL audit. The
+  actual color fragment's punctual-matrix access was rejected by the same audit,
+  as was an injected vertex access; restoration passed. DXIL/MSL dependencies,
+  native images and actual GPU cost remain unverified. Confirm the relevant
+  paths before unused fields can be canonicalized. Do not weaken cache records
+  by ignoring GPU inputs. Preserve cadence, layout, skinned previous/current
+  data, reflective and probe producers, failure recovery and native image
+  parity. Price native redraw cost before ranking this ahead of measured scratch
+  allocation; no changed-caller optimization or GPU saving has been verified.
 
   A smaller related candidate is the local `slot_matrices` closure in
   `ForwardRenderer::begin_frame_body`: it collects owned `Mat4` runs from the
@@ -1098,127 +1044,6 @@ Sample and browser follow-up:
   result. Price it after the larger scratch trial; compare complete matrices,
   frusta, face planes, view order and shadow-off reflective producers before
   keeping it. Platform stack use and CPU benefit remain unverified.
-
-  The original `shadow_group_record` capacity hint reserves for
-  `shadow::POINT_FACES` uniform blocks, even for a cascade with one view, and
-  omits record headers, view IDs and cull plane bytes. A source-format capacity
-  probe using the resolved uniform size reported an initial capacity of 11,040
-  bytes. Its cascade record encoded 1,968 bytes and retained that capacity; its
-  full point cube encoded 11,188 bytes and grew capacity to 22,080. An
-  exact-size destination reported capacities of 1,968 and 11,188, respectively.
-  The arithmetic assertion rejected a deliberately wrong expected length before
-  the normal probe passed. This is a copied metadata-format probe, not a
-  production change or a serialization latency comparison. The actual renderer
-  profiles reported the corresponding maximum-size record allocation footprint
-  at 12,144,000 bytes in 1,100 blocks; those fixtures contain cascades, rather
-  than exercising a point cube. Price exact capacity based on actual group
-  views/culls before retained scratch: it can reduce overreservation and
-  point-record regrowth without another cache or lifetime storage. Preserve
-  every encoded byte, group/view/cull order, revision IDs, changed-input
-  detection and cadence behavior. Move the existing group-record serialization
-  and its contract along its private seam before changing capacity. Production
-  complete-byte tests, changed-caller profiles, point/spot/cascade images and
-  CPU/native/browser performance still require verification. A follow-up actual
-  renderer fixture added non-fill point and spot lights through `set_lights`.
-  Cold-frame assertions observed their occupied shadow slots, and recorded
-  redraws versus cached-atlas claims remained independently checked. Full
-  instance mirrors, warmed bind-group reuse, requested effect labels, null
-  validation, teardown and complete command captures passed across repeats. At
-  256 mixed-mode cubes, 960x720, 550 frames and 500 timed, with the same
-  moving/stopped cadence and timer exclusions as below:
-
-  | Extra lights   | Preparation p50/p95 (ms) | Repeat (ms) | Cold shadow faces | Cached/redrawn commands |
-  | -------------- | ------------------------ | ----------- | ----------------- | ----------------------- |
-  | Point          | 0.089/0.094              | 0.090/0.094 | 8                 | 495/1366                |
-  | Spot           | 0.066/0.070              | 0.066/0.069 | 3                 | 495/886                 |
-  | Point and spot | 0.097/0.101              | 0.097/0.121 | 9                 | 495/1492                |
-
-  Each reported 213 cached-shadow and 287 redraw frames among timed frames.
-  Whole-fixture DHAT reported 747,491,409 bytes in 1,399,796 blocks for the
-  point-light case and 763,931,427 bytes in 1,478,001 blocks for point plus
-  spot. A guarded query at the record allocation return site, confirmed against
-  its disassembled allocation size, reported 30,360,000 bytes/2,200 blocks and
-  36,432,000 bytes/2,750 blocks, respectively. These original site totals
-  include point-record regrowth; the changed-production profile is recorded
-  above. Profiled complete command captures matched the uninstrumented runs.
-  This establishes the allocation candidate in actual point/spot preparation,
-  while native images and private record-byte checks remain required for the
-  changed implementation.
-
-  A reservation prototype then reused actual uploaded shadow uniform payloads
-  captured from that point/spot fixture; its complete command capture matched
-  the original fixture after adding the observer. Captured payload lengths were
-  checked against the cold shadow-face count. The prototype copied the record
-  format with an explicit synthetic revision/count header, reconstructing frusta
-  from captured matrices and the point light. Original and exact reservations
-  produced identical complete records for cascade, point, spot and empty-group
-  inputs. Wrong expected capacity and a changed final cull byte independently
-  failed their checks before the normal probe passed. The timer includes
-  capacity calculation, key allocation, metadata serialization, payload copying
-  and destruction. Uniform-block encoding, capture, startup, assertions and
-  renderer/GPU work are excluded. Each release run reported 1,000 timed batches
-  of 1,000 calls after warmup. Percentiles report batch cost divided by calls
-  per batch:
-
-  | Group   | Original p50/p95 (ns/call) | Exact p50/p95 (ns/call) | Original repeat | Exact repeat |
-  | ------- | -------------------------- | ----------------------- | --------------- | ------------ |
-  | Cascade | 37.0/39.3                  | 33.3/41.2               | 29.4/29.7       | 33.2/33.9    |
-  | Point   | 86.5/88.7                  | 79.2/81.1               | 85.9/88.5       | 79.4/81.7    |
-  | Spot    | 34.5/35.0                  | 36.2/37.7               | 33.3/33.7       | 35.8/36.9    |
-
-  Point construction improved in both pairs, while single-view construction
-  showed no consistent benefit. A shorter whole-fixture point DHAT comparison
-  reported 994,779,365 bytes in 60,104 blocks for the original hint and
-  336,139,470 bytes in 30,073 blocks for exact reservation. A guarded query of
-  the repeated construction-loop allocation site, including warmup, reported
-  993,600,000 bytes/60,000 blocks versus 335,640,000 bytes/30,000 blocks. Setup
-  and validation sites are separate from that query; the totals are not
-  allocations per engine frame. Instrumented timings are not used as release
-  prices. This supports a narrower allocation trial, without establishing
-  private production-record tests or any whole-renderer, native or browser
-  improvement. Keep the actual renderer comparisons and image gates required
-  before retaining it.
-
-  A further release prototype includes the actual `FrameUniforms::to_bytes` call
-  for every selected view. Inputs use the captured view matrices with explicitly
-  synthetic remaining uniform fields and revision/count headers; these are not
-  the complete original uploaded payloads. Before timing, records built from the
-  typed blocks matched a separate path appending their saved encoded payloads.
-  Changing a typed uniform after saving those payloads made that comparison
-  fail. Changed final cull bytes and wrong expected capacity also failed
-  independently; restored runs passed for cascade, point, spot and empty groups.
-  The timer includes capacity calculation, allocation, metadata serialization,
-  uniform encoding, copying and destruction, while setup, assertions and
-  renderer/GPU work are excluded. Each checked run reported 1,000 timed batches
-  of 1,000 calls after warmup; the percentiles are batch cost divided by calls
-  per batch:
-
-  | Group   | Original p50/p95 (ns/call) | Exact p50/p95 (ns/call) | Original repeat | Exact repeat |
-  | ------- | -------------------------- | ----------------------- | --------------- | ------------ |
-  | Cascade | 84.0/86.9                  | 81.9/102.4              | 80.5/82.8       | 87.2/93.3    |
-  | Point   | 427.7/430.5                | 428.2/437.8             | 410.4/413.9     | 397.7/401.0  |
-  | Spot    | 83.0/85.8                  | 87.0/89.3               | 80.1/82.3       | 83.0/85.0    |
-
-  Including uniform encoding does not establish a consistent CPU improvement for
-  the point case either. Exact reservation still reported final capacities of
-  1,968 bytes for single-view groups and 11,188 for the point group, versus
-  11,040 and 22,080 for the original hint. Keep this as an allocation trial; the
-  narrower pre-encoded timing above cannot establish a full serialization gain.
-  An additional external release fixture extracted the current
-  `shadow_group_record` method unchanged into a private wrapper borrowing the
-  real `InstancePool`, then changed only reservation in its candidate method. A
-  separate reference encoder matched complete records with interleaved group
-  owners, multiple matching culls, unsorted selected view ids and empty
-  selections. Exact capacity matched the complete encoded length. Changed eye,
-  instance count, selected view id, uniform contents, cull-plane signed zero or
-  selected order changed the bytes; changes to unselected uniforms and planes
-  did not. An actual pool write changed only the revision header. Deliberately
-  incorrect capacity and inverted group filters each failed before the normal
-  fixture passed again. Typed uniforms and culls are fixture data; this does not
-  exercise the private production method on an actual `ForwardRenderer`. Port
-  these observations into that method's private tests. Production byte tests,
-  changed-renderer recording/profiles, native images and complete-frame/browser
-  prices remain required or unmeasured.
 
 - `crcbl_render::instance_pool::InstancePool::carry_forward` consumes and drops
   `written_last_frame` through `mem::take`, then takes `written_this_frame`,
