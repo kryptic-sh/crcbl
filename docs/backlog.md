@@ -68,7 +68,15 @@ in 11 blocks. Peak live memory was unchanged at 1,736 bytes in 3 blocks. This
 fixture includes setup and output, not authentication, persistence or frame
 rendering; it confirms heap churn reduction without claiming throughput or FPS
 benefit. Production release-library caller profiling and browser worker stacks
-remain open. The all-feature workspace gates are running. Production
+remain open. An isolated WASM executable compiled the actual production hash
+source with a constrained linker stack and checked complete raw and hex digests
+against fresh Python `hashlib` answers for patterned boundary and large inputs.
+Local Chromium ran it inside a real Web Worker: the normal build passed, a
+corrupted-digest source control trapped, and the restored build passed. The
+harness checked the worker's result message and required the negative result to
+be a WASM trap. This verifies isolated production-source worker execution, not
+shared-memory engine worker stack high-water use, full subsystem call chains or
+browser storage. The all-feature workspace gates are running. Production
 release-library caller compatibility and allocation profiles, native/browser
 worker integration, branch CI, main CI and browser deployment remain open. Keep
 this slice pending until all required gates close; isolated prototype results
