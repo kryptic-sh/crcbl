@@ -41,6 +41,14 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
+The retained shadow-scratch trial is underway on `perf/retained-shadow-scratch`.
+Shared `begin_frame_body` preparation has been moved unchanged into private
+`forward::frame_prepare`, following the existing private-module convention.
+Complete moved code and documentation matched after visibility/whitespace
+normalization, and an altered cadence increment was rejected. Workspace
+formatting, default clippy and default workspace tests passed. Retained storage
+and its recovery/byte/recording tests are not implemented yet.
+
 - Price retained shadow-preparation views/culls next: actual caller profiles
   below show repeated allocation before cached-atlas reuse. Compare complete
   bytes and recording, allocation churn, CPU cost and host memory before keeping
@@ -895,16 +903,16 @@ Sample and browser follow-up:
   invalidation.
 
 - Shadow preparation follow-up inspected `ForwardRenderer::begin_frame_body` and
-  the cached-atlas early return in `crates/crcbl-render/src/forward.rs`, plus
-  `shadow_group_record` in the private
-  `crates/crcbl-render/src/forward/shadow_inputs.rs` module. Frame preparation
-  reserves fresh `views` and `culls` vectors using `SHADOW_VIEWS` and
-  `SHADOW_CULLS` before deciding the atlas can be reused. Both remain required
-  inputs to complete cache-key construction and conditional uniform/cull
-  uploads; skipping their construction merely because the previous atlas was
-  cached would miss current changes. A release helper using the actual tuple
-  types and public shadow constants reported capacity footprints of 44,720 and
-  672 bytes. Disassembly showed those allocation sizes at the corresponding
+  the cached-atlas early return, now in
+  `crates/crcbl-render/src/forward/frame_prepare.rs`, plus `shadow_group_record`
+  in the private `crates/crcbl-render/src/forward/shadow_inputs.rs` module.
+  Frame preparation reserves fresh `views` and `culls` vectors using
+  `SHADOW_VIEWS` and `SHADOW_CULLS` before deciding the atlas can be reused.
+  Both remain required inputs to complete cache-key construction and conditional
+  uniform/cull uploads; skipping their construction merely because the previous
+  atlas was cached would miss current changes. A release helper using the actual
+  tuple types and public shadow constants reported capacity footprints of 44,720
+  and 672 bytes. Disassembly showed those allocation sizes at the corresponding
   adjacent allocation return sites in `begin_frame_body`. Guarded DHAT queries
   of both actual renderer fixtures below found matching direct method sites:
   24,596,000 bytes in 550 blocks and 369,600 bytes in 550 blocks, respectively.
