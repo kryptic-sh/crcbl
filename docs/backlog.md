@@ -61,10 +61,16 @@ inner site remained 413,820 bytes in 98 blocks. Original release disassembly
 separately identifies the outer allocation after the inner hash. These fixture
 totals include setup, outputs, persistence and worker scaffolding, and do not
 establish authentication latency or FPS benefit. Complete instrumented captures
-also matched independent expected bytes. Broader workspace checks, changed
-browser production integration, representative sample allocation/timing
-comparison and shipping gates remain pending; earlier prototype results below do
-not establish production performance.
+also matched independent expected bytes. The browser packet fixture now links
+the changed production networking crate and exercises its public `SessionCrypto`
+through the actual engine shared-memory worker host. Complete independently
+expected packets, fresh opens, replay rejection, malformed packets and forged
+MAC rejection passed. An altered outer-XOR source copy trapped in that worker;
+the restored fixture passed. This covers the changed authentication exports, not
+client/server update scheduling or browser storage. Broader workspace checks,
+representative sample allocation/timing comparison and shipping gates remain
+pending; earlier prototype results below do not establish production
+performance.
 
 - Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
   sample input-queue changes. Matched source-copy measurements remove outer
