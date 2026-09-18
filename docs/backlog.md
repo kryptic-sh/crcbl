@@ -41,89 +41,22 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-The retained shadow-scratch trial is implemented and pushed at `9253b7d`.
-Exact-commit [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020)
-failed. Exact-commit
-[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) completed
-successfully: browser and golden jobs and deployment passed; the owner-deferred
-macOS seam job was skipped. The deployed site at `https://crcbl.kryptic.sh/`
-returned HTTP 200. The initial Windows Vulkan job failed readback deadlines with
-LATE verdicts. Its same-commit rerun passed the complete backend suite, but
-[job 105501333899](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105501333899)
-then failed in the forward suite:
-`antialiasing::each_persisted_video_effect_switch_reaches_the_frame` hit the
-nextest hard timeout. The runner reported 28/38 tests run, 27 passed and one
-timed out; ten tests were not run because the suite stopped on failure. Real
-Win32 presentation was skipped. The timeout log shows repeated device creation
-and progress through the effect comparisons, but does not establish the exact
-stage at termination or its cause. Every other CI job succeeded. Investigate
-this failure without weakening deadlines, assertions or coverage before closing
-this gate. Enumerate every job and check the deployed live site before removing
-this trial. Shared `begin_frame_body` preparation has been moved unchanged into
-private `forward::frame_prepare`, following the existing private-module
-convention. Complete moved code and documentation matched after
-visibility/whitespace normalization, and an altered cadence increment was
-rejected. Workspace formatting, default clippy and default workspace tests
-passed. Retained view/cull vectors are now implemented around the fallible
-preparation body and cleared on both successful and failed returns. The actual
-null graph fixture rejected the eager implementation, then passed redraw/cached
-capacity observations and first/middle/last uniform-refusal recovery, including
-complete cache-record equality, refused-buffer bytes/events, validation and
-teardown. Dropping capacity only on errors and omitting either scratch clear
-were separately rejected; restored tests passed. Default workspace clippy and
-default workspace tests passed for the reuse change, followed by the release
-build. Actual renderer command captures matched across cascade, point, spot and
-combined lighting with paired reversed repeats. Complete uploaded shadow uniform
-bytes and observer commands matched separately; altered indirect offsets were
-detected. Preparation observations remain small and mixed, establishing no
-general CPU improvement. Complete geometry-tail commands also matched separately
-for `IndirectCount`, `IndirectPerBatch` and `MeshShader`. Whole-fixture DHAT
-reported 736,900,031 bytes in 1,477,451 blocks for the preserved exact-record
-baseline and 711,979,825 bytes in 1,476,353 blocks with retained scratch.
-Disassembly-confirmed unique allocation sites reported views at 24,596,000 bytes
-in 550 blocks versus 44,720 bytes in one block, and culls at 369,600 bytes in
-550 blocks versus 672 bytes in one block. Missing-site selectors failed before
-restored selectors uniquely matched. Every selected site had no bytes left at
-process end. Instrumented complete commands matched each other and the release
-capture. Whole-fixture peak memory was unchanged at 18,251,295 bytes; no peak
-improvement is established. The retained scratch allocation footprint is 45,392
-bytes, kept between preparations until renderer teardown. Setup, warmup and
-observers are included in DHAT totals; instrumented timings are excluded from
-release prices. The locked all-feature workspace build, formatting check,
-all-feature clippy, CI-profile nextest, regular all-feature workspace tests and
-explicit doctests passed. Public and private documentation passed with warnings
-denied, along with cargo-machete, cargo-deny, documentation citations,
-wrapped-string checks and diff whitespace checks. Native RADV rendering and
-lavapipe render, mesh, sprite, draw-generation, tiling, forward, HAL seam, glTF
-and complete Vulkan suites passed with their adapter and validation guards. The
-Vulkan suite reports record-time and one-submission synchronization coverage,
-but no cross-submission coverage on this machine. CI verification remains open
-before keeping the change. Exact-commit browser and deployment gates passed;
-those correctness gates do not establish browser performance.
+- Price retained instance carry/dirty-run storage next, including moving/dense
+  workloads, complete instance-buffer bytes and failed-upload recovery across
+  the frame ring. Fixed SHA-256 padding follows renderer/instance preparation:
+  its isolated digest and authentication prices, allocation profiles, complete
+  wire compatibility and shader/persistence fixtures are recorded below. Verify
+  changed production callers, workspace and browser gates before keeping each
+  change. Input queue capacity remains an input-burst candidate to price.
+  Backend command-pool reuse, wider graph caching and math changes need stronger
+  workload evidence or carry more lifecycle risk.
 
-| Lighting | Baseline p50/p95 (ms) | Retained    | Baseline repeat | Retained repeat |
-| -------- | --------------------- | ----------- | --------------- | --------------- |
-| cascade  | 0.059/0.064           | 0.059/0.064 | 0.060/0.064     | 0.059/0.063     |
-| point    | 0.089/0.097           | 0.089/0.094 | 0.090/0.094     | 0.091/0.095     |
-| spot     | 0.066/0.069           | 0.066/0.071 | 0.067/0.100     | 0.067/0.095     |
-| both     | 0.096/0.102           | 0.096/0.101 | 0.097/0.101     | 0.097/0.106     |
-
-These prices use the existing actual null renderer moving/stopped fixture and
-its timer exclusions. They do not measure GPU execution, presentation, native or
-browser frame timing, or FPS.
-
-- Price retained shadow-preparation views/culls next: actual caller profiles
-  below show repeated allocation before cached-atlas reuse. Compare complete
-  bytes and recording, allocation churn, CPU cost and host memory before keeping
-  the change. Retained instance carry/dirty-run storage follows as a small
-  candidate; price moving/dense workloads. Fixed SHA-256 padding follows
-  renderer/instance preparation: its isolated digest and authentication prices,
-  allocation profiles, complete wire compatibility and shader/persistence
-  fixtures are recorded below. Verify the changed production callers, workspace
-  and browser gates before keeping it. Input queue capacity remains an
-  input-burst candidate to price. Backend command-pool reuse, wider graph
-  caching and math changes need stronger workload evidence or carry more
-  lifecycle risk.
+Retained shadow-preparation scratch has shipped. Actual browser performance,
+native presentation timing and GPU execution benefit remain unmeasured. Null
+recording and allocation observations do not establish FPS improvements. Local
+Vulkan validation covers record-time and one-submission synchronization;
+cross-submission coverage remains unverified on this machine. Keep the remaining
+preparation-refusal coverage below separate from the shipped scratch reuse.
 
 Editor image coverage gap:
 `app::instances::tests::filtered_editor_images_match_eager_writes_through_history`
@@ -20891,11 +20824,11 @@ with changed destination bytes and matching submitted/retired timeline values,
 yielding LATE rather than STUCK or LOST verdicts. The same-commit rerun passed
 the complete backend suite, but its forward suite subsequently timed out in
 `antialiasing::each_persisted_video_effect_switch_reaches_the_frame`; real Win32
-presentation was skipped. The scratch shipping gate remains open as recorded
-above. Whether busy polling materially affects Windows remains unverified.
-Deadline changes and automatic test retries have not been adopted; reducing
-concurrent cold mesh work remains an option requiring a priced test-group
-change.
+presentation was skipped. Subsequent diagnostic CI and deployment passed, but
+the earlier timeout cause remains unknown. Whether busy polling materially
+affects Windows remains unverified. Deadline changes and automatic test retries
+have not been adopted; reducing concurrent cold mesh work remains an option
+requiring a priced test-group change.
 
 Linux cold-compilation forward-suite follow-up: both complete runs used the
 pinned llvmpipe adapter, validation and `MESA_SHADER_CACHE_DISABLE=true`,
@@ -20932,43 +20865,22 @@ rendering or waiting. Every settings label had every expected stage; removing
 one stage made the observation guard fail before restoration. These runs did not
 reproduce the Windows timeout or concurrent Windows load.
 
-`forward_e2e::antialiasing::frame_passes` now emits settings-label and
-elapsed-stage diagnostics, covering device opening, renderer creation,
-preparation, recording, submission, presentation, idle and teardown. Fresh
-fixture construction, rendering and all assertions remain unchanged. Workspace
-formatting, default clippy and default workspace tests passed, followed by the
-locked all-feature build, formatting check and all-feature clippy. The complete
-cold-compilation lavapipe forward suite passed with the diagnostics. Every
-expected settings label emitted every phase in order; removing an actual
-submission diagnostic made the observation guard fail before restoration.
-CI-profile nextest, regular all-feature workspace tests, explicit doctests,
-public and private documentation with warnings denied, cargo-machete and
-cargo-deny passed. Documentation citations, wrapped strings and whitespace
-checks passed. The diagnostics were pushed on
-`fix/windows-forward-timeout-diagnostics` at `04a48cb`. Its exact-commit
-[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329) was accepted
-and its Windows Vulkan
-[job 105508739038](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
-completed successfully: its backend runner reported 63 passed with no skips, its
-forward runner reported 38 passed with no skips, and real Win32 presentation
-reported four passed with no skips. The previously timed-out persisted-effects
-test passed in 224.069 s. Its stage trace shows the all-effects frame submitted
-after 4.0118612 s and idle after 30.9632841 s; the auto-exposure-disabled frame
-submitted after 4.9701897 s and idle after 42.7704545 s. The successful run
-therefore locates substantial elapsed time between submission and idle, but does
-not identify the earlier timeout's cause or isolate driver compilation, software
-rendering and waiting. Diagnostics do not fix that variability. The exact-commit
-diagnostic branch CI completed successfully; every job was enumerated and
-passed, including Linux Vulkan and macOS Metal. Main was fast-forwarded and
-pushed at `143684a`. Its exact-commit
-[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35318805086) completed
-successfully; every job was enumerated and passed.
-[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35318805062) remains
-live with no reported failure at the latest observation. Enumerate every
-terminal job and verify the newly deployed live site before the next engine
-slice. The diagnostic branch used a separate CI concurrency group; the earlier
-`9253b7d` Pages run completed successfully without cancellation. Preserve fresh
-fixtures, effect assertions and deadlines while investigating any recurrence.
+`forward_e2e::antialiasing::frame_passes` emits settings-label and elapsed-stage
+observations without changing fresh fixture construction, assertions or existing
+deadlines. The diagnostic branch and main exact-commit
+[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35318805086) passed every
+job. Main exact-commit
+[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35318805062) passed its
+browser, golden, Windows seam and deployment jobs; the owner-deferred macOS seam
+job was skipped. Every terminal job was enumerated and the deployed live site
+returned HTTP 200. Shipping gates are closed; the earlier Windows timeout's
+cause remains unresolved. The successful Windows
+[job](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
+stage trace locates substantial elapsed time between submission and idle,
+without isolating driver compilation, software rendering or waiting. Read these
+stage observations on any recurrence before choosing fixture changes. Preserve
+fresh fixtures, every settings arm and control, effect assertions and deadlines;
+diagnostics do not fix variability.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
