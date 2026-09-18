@@ -599,6 +599,17 @@ Networking preparation follow-up:
   derivation, replay rejection and existing wire bytes if changing temporary
   storage.
 
+  Caller review revalidated Horde’s `Game::tick` in `apps/horde/src/game.rs`: it
+  sets encoded intent and calls client/server updates synchronously on the tick
+  caller. The client seals outbound input and opens snapshots; the server opens
+  input and seals snapshots through their session crypto. The inspected steering
+  `Pool::par_for` closure computes velocities and does not authenticate packets.
+  Thus threaded Horde steering coverage does not establish worker-side
+  authentication coverage. Retain a separate explicit authentication worker
+  fixture when evaluating temporary stack storage; do not move packet processing
+  into steering jobs merely to exercise it. Actual tick packet mix and
+  authentication cost remain unmeasured.
+
   A fixed-outer-input HMAC follow-up prototype is now priced against an
   unchanged source-copy control, both using the actual changed release hash
   export. The copied credential fixture matches the repository credential
