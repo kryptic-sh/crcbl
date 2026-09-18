@@ -1613,10 +1613,24 @@ Sample and browser follow-up:
   `Game::key_event`, excluding `ActionMap::key_event`; an impossible selector
   failed before the normal nonempty-site observer passed. This is allocation
   evidence from the saved profile, not a fresh timing run or a retained-queue
-  result. Native Horde baseline context and attribution observations are
-  covered, but changed-caller comparison, browser/focus-loss behavior and other
-  samples remain unverified. The next retained-queue trial should also run the
-  existing shell-driven Horde regressions in `apps/horde/src/app.rs`:
+  result. An external tick-price fixture now links the current production Horde
+  release library and validates the complete preserved contextual capture before
+  measuring repeated seeded scripts. Each measured batch times only complete
+  `Game::tick` calls; setup, event pumps, snapshot captures and reference
+  comparisons are outside those timers. The snapshot scaffolding still affects
+  the workload and caches. With the process pinned to the same allowed CPU, the
+  first run reported 500 timed batches of 24 ticks and p50/p95 batch price
+  normalized per tick of 6057.2/6840.0 ns; the repeat reported 6044.3/6784.1 ns.
+  These are batch-average prices rather than individual tick tail percentiles.
+  Both altered full-capture and empty-timing-collection controls failed before
+  normal execution passed. Preserve this executable for paired changed-caller
+  measurement with the same script and current authentication. It uses
+  synchronous native workers and excludes GPU rendering, hardware audio and
+  browser scheduling; large enemy-count workloads remain unpriced. Native Horde
+  baseline context and attribution observations are covered, but changed-caller
+  comparison, browser/focus-loss behavior and other samples remain unverified.
+  The next retained-queue trial should also run the existing shell-driven Horde
+  regressions in `apps/horde/src/app.rs`:
   `losing_focus_releases_the_keys_the_game_still_thinks_are_down` and
   `a_focus_loss_event_releases_the_held_keys_and_pauses`. The current unchanged
   production baseline passed `cargo test -p horde --lib focus --locked`,
