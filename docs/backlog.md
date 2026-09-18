@@ -540,77 +540,48 @@ Networking preparation follow-up:
   derivation, replay rejection and existing wire bytes if changing temporary
   storage.
 
-- SHA-256 padding follow-up read `crcbl_shaders::sha256::sha256`, `compress`,
-  its tests and `crcbl_net::auth::hmac_sha256`. The hash allocates a
-  fixed-capacity tail vector for every digest, then processes whole input blocks
-  and padded tail blocks. This is reached by both inner and outer MAC hashing on
-  packet sealing and verification; asset identity and persistence checksums also
-  call the same hash. Fixed local padding storage could remove this digest
-  allocation without changing the compression algorithm, hash API, full-message
-  buffering or authentication ownership. Price actual small and large packet
-  authentication, allocation churn and stack use before ranking it above the
-  measured renderer candidates. Wider streaming hashing remains a separate
-  design; no production hash change or caller speedup is established. Coverage
-  gap: `every_padding_boundary_is_exercised` asserts fixed digest/hex lengths
-  and unequal digests for differently sized inputs, but has no expected digest
-  for each boundary. Its comment mentions a streaming comparison that the test
-  does not perform. An external copy of the current source passed that exact
-  test even after flipping the first byte of every computed digest. The
-  published-vector test rejected that mutation, and the original source passed
-  both exact tests. This demonstrates a gap in the boundary-specific check,
-  rather than a defect in the current hash or an absence of published-vector
-  coverage. Before changing padding, add independently generated complete
-  expected digests around each padding/block boundary, check original and new
-  implementations against them, and show a padding or digest mutation fails.
-  External preflight fixtures now compare complete raw and hex digests from the
-  current production source and the existing safe prototype against newly
-  generated Python `hashlib` answers for 13 uniform and 28 patterned payloads
-  around padding/block boundaries and further whole blocks. Both fixtures
-  passed; flipping a digest byte or changing the encoded bit length made both
-  fail, and restored fixtures passed again. Payload patterning exercises more
-  than identical repeated blocks. This prepares the required boundary assertions
-  but does not close the repository test gap: the production boundary test still
-  checks lengths and must gain expected values when the slice starts. No
-  production hashing or caller implementation changed in this preflight. The
-  complete external preflight runner also passed all 8 tests, including the
-  existing published NIST vectors and formatting checks from both hash
-  implementations, with no ignored or filtered tests. This remains external
-  prototype evidence rather than a production-change verification gate. Preserve
-  existing NIST and HMAC vectors, shader-source manifests, saves, authenticated
-  wire bytes and browser builds. No repository tests were changed or weakened
-  during this source-review probe. A separate safe prototype replaced only the
-  tail vector with fixed local padding storage, preserving the existing
-  compression implementation. Its complete digests and the current release
-  library's digests matched independently generated Python `hashlib` answers for
-  15 inputs around padding/block boundaries and at larger sizes. An
-  intentionally wrong bit-length field made that comparison fail before restored
-  runs passed. Paired digest-only release timings included padding and
-  compression, with 500 timed batches of 20 calls after warmup; percentiles
-  report batch cost divided by calls. Input creation, expected-answer checks,
-  session authentication and engine/network work were excluded: Compiler-frame
-  follow-up compiled the current hash source and unchanged fixed padding
-  prototype as isolated optimized libraries with the repository's pinned
-  compiler on `x86_64-unknown-linux-gnu`. Compression was inlined in both.
-  Complete hash-function assembly reported maximum canonical-frame-address
-  offsets of 432 bytes for the current vector implementation and 528 bytes for
-  the fixed-padding prototype, including saved registers and the return address.
-  The fixed hash body called only `memcpy`; the original body also called the
-  allocator, deallocator and allocation-growth/error paths. An absent-symbol
-  selector was rejected before trusting the frame extraction. This prices the
-  compiled function frame under these isolated flags, not native worker peak
-  stack, production caller inlining, WASM stack budgets or CPU/FPS benefit. Keep
-  the worker/browser stack verification gap open when implementing the padding
-  change. An optimized external native-thread preflight subsequently ran the
-  current source and fixed-padding prototype on `std::thread::Builder` threads
-  using default stacks and a requested 32,768-byte stack. Each worker checked
-  complete digests against freshly generated Python `hashlib` answers for 12
-  patterned payloads, repeated 16 times, including padding boundaries and large
-  inputs. Both stack configurations passed; deliberately corrupting the
-  candidate hex result failed inside the worker and propagated through `join`;
-  restored runs passed. Input buffers were heap-owned. This checks isolated hash
-  execution on the local native runtime, not actual stack high-water use,
-  platform thread minimums, engine worker call chains, recursive nesting or WASM
-  worker budgets.
+- SHA-256 padding is being implemented in the current trial above.
+  `crcbl_shaders::sha256::sha256` now uses fixed local padding storage without
+  changing `compress`, digest bytes or the public hash API. Both MAC hashing and
+  asset/persistence identities use this shared function. Repository boundary
+  fixtures now compare complete raw and hex digests with independent answers;
+  digest and encoded-length mutation controls fail. The old length-only test and
+  its inaccurate streaming-comparison comment have been replaced. Remaining
+  production caller, allocation, native/browser worker-stack and shipping gates
+  belong to the current trial; prototype prices below do not close them. Wider
+  streaming hashing is separate because it changes buffering and ownership. A
+  separate safe prototype replaced only the tail vector with fixed local padding
+  storage, preserving the existing compression implementation. Its complete
+  digests and the current release library's digests matched independently
+  generated Python `hashlib` answers for 15 inputs around padding/block
+  boundaries and at larger sizes. An intentionally wrong bit-length field made
+  that comparison fail before restored runs passed. Paired digest-only release
+  timings included padding and compression, with 500 timed batches of 20 calls
+  after warmup; percentiles report batch cost divided by calls. Input creation,
+  expected-answer checks, session authentication and engine/network work were
+  excluded: Compiler-frame follow-up compiled the current hash source and
+  unchanged fixed padding prototype as isolated optimized libraries with the
+  repository's pinned compiler on `x86_64-unknown-linux-gnu`. Compression was
+  inlined in both. Complete hash-function assembly reported maximum
+  canonical-frame-address offsets of 432 bytes for the current vector
+  implementation and 528 bytes for the fixed-padding prototype, including saved
+  registers and the return address. The fixed hash body called only `memcpy`;
+  the original body also called the allocator, deallocator and
+  allocation-growth/error paths. An absent-symbol selector was rejected before
+  trusting the frame extraction. This prices the compiled function frame under
+  these isolated flags, not native worker peak stack, production caller
+  inlining, WASM stack budgets or CPU/FPS benefit. Keep the worker/browser stack
+  verification gap open when implementing the padding change. An optimized
+  external native-thread preflight subsequently ran the current source and
+  fixed-padding prototype on `std::thread::Builder` threads using default stacks
+  and a requested 32,768-byte stack. Each worker checked complete digests
+  against freshly generated Python `hashlib` answers for 12 patterned payloads,
+  repeated 16 times, including padding boundaries and large inputs. Both stack
+  configurations passed; deliberately corrupting the candidate hex result failed
+  inside the worker and propagated through `join`; restored runs passed. Input
+  buffers were heap-owned. This checks isolated hash execution on the local
+  native runtime, not actual stack high-water use, platform thread minimums,
+  engine worker call chains, recursive nesting or WASM worker budgets.
 
   | Input bytes | Original p50/p95 (ns/call) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
   | ----------- | -------------------------- | --------------------- | ----------------- | ----------------- |
