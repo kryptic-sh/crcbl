@@ -43,121 +43,12 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-The fixed outer-input HMAC production trial is in progress. Existing
-`auth::tests` bodies moved unchanged into a separate module. Workspace
-formatting, default Clippy and regular workspace tests passed on both the
-extraction and changed production storage. An external fixture compiled the
-actual production authentication module with the extracted tests and existing
-credential fixture; its suite passed, an altered outer XOR copy failed the RFC
-vector, and normal source passed again. A preserved pre-change release binary
-and changed release library now match complete independent Python
-digest/envelope/save captures through public engine exports, on the caller and
-through native `jobs::Threads::spawn`. An altered worker capture failed;
-restoration passed. DHAT whole-fixture totals were 2,305,665 bytes in 693 blocks
-originally versus 2,296,251 bytes in 595 blocks changed. Peak live memory
-remained 688,918 bytes in 28 blocks. The original release HMAC outer site
-reported 9,408 bytes in 98 blocks; it is absent after the change, while the
-inner site remained 413,820 bytes in 98 blocks. Original release disassembly
-separately identifies the outer allocation after the inner hash. These fixture
-totals include setup, outputs, persistence and worker scaffolding, and do not
-establish authentication latency or FPS benefit. Complete instrumented captures
-also matched independent expected bytes. The browser packet fixture now links
-the changed production networking crate and exercises its public `SessionCrypto`
-through the actual engine shared-memory worker host. Complete independently
-expected packets, fresh opens, replay rejection, malformed packets and forged
-MAC rejection passed. An altered outer-XOR source copy trapped in that worker;
-the restored fixture passed. This covers the changed authentication exports, not
-client/server update scheduling or browser storage. The canonical threaded jobs
-build and browser jobs gate passed, including its deliberate failure controls
-and non-isolated fallback checks. The plain jobs artifact and complete plain web
-site have also been rebuilt. Browser jobs verification of the rebuilt plain
-artifact passed its positive, deliberate-failure and non-isolated checks. With
-the expanded fixture linking changed production authentication, browser stack
-sentinel write residue was 1520 bytes in each original/fixed/fixed/original run.
-The constant-zero residue observer failed its calibration and the restored
-observer passed. This is written residue, not an exact stack high-water or
-worst-case bound, and does not justify reducing worker stack storage. The
-complete all-features workspace build, Clippy, nextest, regular tests,
-public/private documentation, dependency audit, advisory checks and release
-build passed. Production `SessionCrypto` prices now compare the preserved
-original binary and changed release library with complete wire, counter, payload
-and replay checks outside the timed batches. An altered wire capture failed;
-normal captures passed. The first unpinned comparison was noisy. After warming
-both binaries and pinning them to the same allowed CPU, the samples below show a
-small short-packet improvement and little large-packet difference. Each cell
-reports p50/p95 batch price per seal and open pair in nanoseconds; key setup,
-compatibility observers and warmup are excluded, while envelope destruction is
-included. These are authentication operation prices, not game tick or FPS
-measurements.
-
-| Payload bytes | Original p50/p95  | Fixed p50/p95     | Fixed repeat p50/p95 | Original repeat p50/p95 |
-| ------------- | ----------------- | ----------------- | -------------------- | ----------------------- |
-| 64            | 1526.3/1531.4     | 1470.3/1476.2     | 1484.8/1489.3        | 1529.9/1538.4           |
-| 1200          | 6542.4/6651.6     | 6506.3/6604.4     | 6496.8/6599.0        | 6548.9/6653.6           |
-| 65536         | 287735.8/291275.5 | 286358.2/286852.1 | 286305.1/286713.8    | 286426.3/286894.7       |
-
-The rebuilt Horde authenticated loopback fixture matches the preserved original
-complete contextual render capture. Altering its last snapshot failed; the
-restored capture and instrumented capture matched. The original HMAC outer
-allocation sites account for 27,840 bytes in 290 blocks and are absent in the
-changed DHAT profile. Inner sites remained 33,692 bytes in 290 blocks. The
-changed whole fixture reported 3,255,795 bytes in 2,365 blocks, with peak live
-memory unchanged at 766,940 bytes in 95 blocks. Whole-fixture totals include
-setup, snapshots and output scaffolding; the allocation-site evidence
-establishes the mechanism, not a measured game tick speedup. A missing HMAC-site
-observer failed for each profile before the normal observer passed. Changed
-release disassembly separately places the retained inner allocation before its
-hash and uses local outer storage between the hash calls. A separate Callgrind
-comparison disables collection at process start and toggles it only around
-`<crcbl_horde::game::Game>::tick`. The preserved original collected 7,455,227
-instructions and the changed binary collected 7,242,522; both profiled captures
-match the complete preserved contextual render capture. A missing-function
-selector collected zero instructions and failed the nonempty-collection guard
-before the normal selectors passed. Setup, render-state capture and output are
-outside this collection scope. These instruction counts cover this scripted tick
-workload; they are not elapsed tick latency, tail latency or FPS measurements.
-
-Breakout and Shard hardware Vulkan goldens, the hardware Vulkan backend suite,
-and hardware/lavapipe render suites passed with synchronization validation and
-fatal validation errors enabled. Full branch CI at
-`4055c703ea6072fddd77b27cf7da9269a5d49221` passed after the unchanged WARP
-retry. Every required job and its steps passed the terminal audit; deliberately
-failed job and step controls were rejected before restoration passed. Changes
-after that tested source commit affect this backlog alone. Main CI run
-`35357584635` at `c1b031e7ee0ffdf61fc5920c2e08c76c5d643acf` passed its terminal
-audit: all expected jobs and their steps succeeded or took their permitted
-conditional skips. Deliberately failed job and step controls were rejected
-before the normal audit passed. Pages and deployment gates remain pending. Pages
-run `35357584616` at main `c1b031e7ee0ffdf61fc5920c2e08c76c5d643acf` reported
-its Tide browser job `105641587733` failed after the runner received a shutdown
-signal. Job metadata marks the browser render step cancelled and evidence upload
-skipped. Its full log records successful platform, boot, simulation, render and
-focus checks through explicit resume, with no emitted browser assertion failure
-and no final gate verdict. The workflow's job budget was not exhausted in the
-recorded interval; why the runner shut down remains unproven. This interruption
-does not establish a code regression or a passing Tide gate. The first attempt
-is now terminal: Tide was the sole failed job, the remaining required checks
-passed, and deployment was skipped. The complete exact-head job and step audit
-and original interruption log are preserved. GitHub accepted the unchanged
-failed-job retry as attempt 2 on the same main commit. The retry and deployment
-gates remain pending; verify the full Tide verdict and actual deployment before
-closure. Earlier source-copy prototype prices below are separate evidence.
-
-- Trial fixed outer-input storage in `crcbl_net::auth::hmac_sha256` before the
-  sample input-queue changes. Matched source-copy measurements remove outer
-  allocation sites and slightly improve small-packet prices, while large-input
-  prices are slightly worse. The change is confined to private temporary storage
-  and retains the existing hash API; this makes it a narrower next trial, not an
-  established application bottleneck. Verify actual changed authentication
-  exports, complete packet bytes, replay and malformed-input rejection,
-  engine-worker execution and required native/browser shipping gates. Keep wider
-  inner-input streaming design separate.
-- Input queue capacity has isolated staging prices and an actual Horde baseline
-  below. Trial it next if the HMAC production measurements support keeping that
-  change, or if they reject it. The event-burst trial must verify changed sample
-  behavior, context transitions, held inputs and full native/browser gates.
-  Backend command-pool reuse, wider graph caching and math changes need stronger
-  workload evidence or carry more lifecycle risk.
+- Trial sample input queue capacity next. Source-copy gameplay and allocation
+  comparisons support the mechanism; matched Horde tick prices did not improve.
+  Verify changed sample behavior, retained lifetime memory, context transitions,
+  held inputs and full native/browser gates before keeping the production
+  change. Backend command-pool reuse, wider graph caching and math changes need
+  stronger workload evidence or carry more lifecycle risk.
 
 Hash and authentication worker coverage gaps remain separate from shipped
 padding storage: native sampled aggregate stack and browser sentinel residue
@@ -637,133 +528,23 @@ Networking preparation follow-up:
   Delayed-burst cost, queue growth and memory were not measured; decline a
   send-interface redesign or prioritizing this ahead of P14 without such
   evidence.
-- `crcbl_net::auth::hmac_sha256` allocates inner and outer concatenation buffers
-  for each MAC. The fixed-size outer hash input could use local array storage; a
-  reusable/streaming inner input requires a wider hashing design and must not
-  weaken authentication. A standalone release probe measured `seal` plus `open`
-  with MAC verification included: p50/p95 0.002/0.002 ms for a 64-byte payload,
-  0.007/0.007 ms for 1200 bytes, and 0.298/0.301 ms for 65536 bytes. Counter and
-  complete payload checks and envelope destruction were outside the timer; a
-  deliberately wrong counter expectation failed before restoration and repeat.
-  This is a combined authentication baseline, not the allocation cost or an
-  observed engine-network bottleneck. Actual packet rates and sizes, hashing
-  versus copying and authenticated replay-window integration remain unpriced.
-  This small-packet baseline does not establish an application bottleneck;
-  retain the RFC vectors, malformed-input rejection, counter coverage, key
-  derivation, replay rejection and existing wire bytes if changing temporary
-  storage.
+- `crcbl_net::auth::hmac_sha256` retains an owned inner concatenation buffer. A
+  reusable or streaming inner input requires a wider hashing design; measure
+  actual packet rates, sizes and hashing versus copying before proposing it.
+  Preserve complete packet bytes, RFC vectors, oversized-key derivation,
+  malformed-input rejection, counter exhaustion and authenticated replay
+  behavior. Controlled operation prices and scripted Horde instruction counts do
+  not establish a representative game latency or FPS bottleneck.
 
-  Caller review revalidated Horde’s `Game::tick` in `apps/horde/src/game.rs`: it
-  sets encoded intent and calls client/server updates synchronously on the tick
-  caller. The client seals outbound input and opens snapshots; the server opens
-  input and seals snapshots through their session crypto. The inspected steering
-  `Pool::par_for` closure computes velocities and does not authenticate packets.
-  Thus threaded Horde steering coverage does not establish worker-side
-  authentication coverage. Retain a separate explicit authentication worker
-  fixture when evaluating temporary stack storage; do not move packet processing
-  into steering jobs merely to exercise it. Actual tick packet mix and
-  authentication cost remain unmeasured.
-
-  The preserved actual Horde context-fixture DHAT profile also exercises this
-  allocation on the sample tick path. Release disassembly identifies the
-  fixed-size outer allocation after the inner hash; the guarded matching DHAT
-  sites report 27,840 bytes in 290 blocks across the fixture, including 27,456
-  bytes in 286 tick-path blocks. Sealing and opening both contribute; setup key
-  derivation is separate. A missing-site selector failed before the actual
-  selector passed. This is a reanalysis of the preserved original production
-  sample profile, not a new runtime measurement, changed-production comparison,
-  packet-size distribution or authentication CPU profile. It establishes sample
-  allocation reach without establishing a tick-time bottleneck.
-
-  A fixed-outer-input HMAC follow-up prototype is now priced against an
-  unchanged source-copy control, both using the actual changed release hash
-  export. The copied credential fixture matches the repository credential
-  representation; the private byte accessor is not exposed through the public
-  engine API. Complete envelopes and cross-provider opens match the actual
-  release authentication implementation on boundary and large inputs, while
-  forged MACs and replayed packets are rejected. Copied authentication tests,
-  including RFC vectors, oversized keys and counter exhaustion, passed. An
-  altered outer XOR source failed the RFC tests; corrupted complete-envelope
-  observation failed before normal restoration passed. No production HMAC
-  storage or public interface changed.
-
-  Matched source-copy seal/open/replay prices include envelope destruction and
-  exclude key setup, wire observations, validation and result assertions. Each
-  run reported 500 timed batches of 20 calls. Paired p50/p95 prices in
-  nanoseconds, with the fixed copy repeated before the original repeat, were:
-
-  | Payload bytes | Original          | Fixed outer       | Original repeat   | Fixed repeat      |
-  | ------------- | ----------------- | ----------------- | ----------------- | ----------------- |
-  | 64            | 1587.0/1651.7     | 1521.3/1535.4     | 1595.0/1661.7     | 1518.8/1536.9     |
-  | 1200          | 6620.0/6768.8     | 6417.6/6507.8     | 6485.8/6582.4     | 6399.1/6498.2     |
-  | 65536         | 281590.6/283388.5 | 281879.7/287096.5 | 281386.8/283456.7 | 281736.3/284245.1 |
-
-  Small and packet-sized inputs improved slightly in this controlled stage;
-  large-input timings were slightly worse. Do not claim an application or frame
-  bottleneck from these results. DHAT matched-copy whole-fixture totals were
-  7,541,148 bytes in 61,740 blocks originally versus 5,268,444 bytes in 38,066
-  blocks fixed. Peak live memory remained 328,472 bytes in 8 blocks. Guarded
-  copied-HMAC outer-size sites reported 2,272,704 bytes in 23,674 blocks
-  originally and none after fixed outer storage, while inner allocation sites
-  remained. Setup, preflight, observers and warmup are included; actual
-  authentication exports used by the observers still allocate their original
-  outer buffers. Instrumented timing is excluded. This is a source-copy
-  allocation prototype, not a changed-production caller profile. An isolated
-  constrained-stack WASM helper now checks complete MAC bytes against freshly
-  generated independent Python HMAC answers across patterned message and key
-  boundaries, including oversized keys and session-key derivation. It uses the
-  actual production SHA source with extracted unchanged/fixed outer-input HMAC
-  helper copies. Real Chromium Web Workers passed both providers, trapped on an
-  altered outer XOR source, and passed the restored fixed provider; the harness
-  required the worker result message and required the negative result to be a
-  WASM trap. The same independently checked helper cases also passed on a local
-  native worker with an explicit stack-size request; the altered outer XOR
-  failed on that worker and the restored fixed provider passed. This is the
-  standard-library worker harness on the observed native host, not a changed
-  engine spawner or a measured stack high-water bound. These earlier checks
-  cover isolated helper execution. An additional external threaded fixture now
-  uses the actual `crcbl_jobs::default_spawner` and repository
-  `WorkerHost`/worker bring-up scripts with shared WASM memory, independent
-  worker stack and TLS initialization. Fresh Python HMAC answers revalidated the
-  helper fixtures. Real Chromium passed unchanged and fixed helpers through that
-  engine worker ABI, trapped on altered outer XOR while running the work, and
-  passed the restored fixed helper. The harness requires the queued HMAC
-  request, worker-up message, worker frame observation and atomic completion;
-  the helper also rejects the caller's frame address. This closes the
-  isolated-helper-only browser execution gap, but still uses helper source
-  copies with the actual production SHA source. It does not establish full
-  packet authentication call chains, exact stack high-water bounds or changed
-  production authentication integration. A follow-up external worker fixture now
-  links the actual `crcbl_net` and `crcbl_shaders` crates alongside
-  unchanged/fixed authentication source copies and the existing credential
-  fixture. On the same shared-memory engine worker ABI, complete independently
-  generated envelopes match both providers across boundary and large payloads.
-  Cross-provider opens, forged MAC refusal, fresh packet acceptance, replay
-  refusal, outbound counters and malformed-envelope refusal passed. The altered
-  outer XOR trapped while running the worker's packet checks, and the restored
-  provider passed. An initial harness compile failed because
-  `SessionCrypto::open` returns payload alone; after reading that installed
-  implementation, the fixture checks its complete payload and separately
-  observes counters through low-level `open` and sealed bytes. No repository API
-  or assertion was changed. This adds full envelope/authentication calls on an
-  engine worker, including actual current production exports, but not
-  client/server update scheduling, changed production temporary storage, exact
-  stack high-water use or actual packet mix. Those remaining measurements and
-  full shipping gates are still required before keeping the production change.
-  Keep this separate from wider inner-input streaming design.
-
-  The shared-memory packet fixture additionally seeded the exact worker stack
-  allocation before bring-up and scanned write residue after completion.
-  Original/fixed/fixed/original runs reported deepest changed sentinel offsets
-  of 1280/1392/1392/1280 bytes below stack top, with complete packet checks
-  passing. The stack region size was read from the production allocator rather
-  than inferred from a frame pointer. Deliberately replacing the scanner with a
-  constant-zero result failed its changed-byte control; restoration passed. This
-  observes residue on this optimized browser fixture only: matching sentinel
-  bytes, unwritten reserved stack frames and unexercised call chains prevent
-  treating it as an exact high-water or worst-case bound. Do not shrink engine
-  worker stacks from these results. Production integration, representative
-  packet workloads and broader stack coverage remain open.
+  Horde's `Game::tick` in `apps/horde/src/game.rs` performs client/server
+  authentication synchronously on the tick caller. Its steering `Pool::par_for`
+  closure does not authenticate packets, so steering tests cannot establish
+  worker-side authentication coverage. Explicit shared-memory packet fixtures
+  exercise actual authentication exports through the engine worker host, but
+  client/server update scheduling, worker persistence, representative packet
+  mixes and exact native/browser stack high-water bounds remain unverified. Keep
+  those gaps separate from completed outer-input storage and do not shrink
+  worker stacks from isolated execution or sentinel write residue.
 
 - Persistence digest-input preparation remains a separate allocation candidate.
   OPFS framing and validation concatenate header and payload into an owned
