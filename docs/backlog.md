@@ -4138,6 +4138,22 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   performance or actual renderer image parity. Keep those gaps and the original
   failed independent-atlas trial explicit.
 
+  An external retained-conversion primitive fixture matched complete production
+  vertex field bits, indices and overlay cuts through images, nine-slices,
+  rectangles, outlines, lines, open/closed polylines, rounded borders, nested
+  clipping, scale changes and repeated empty transitions. Invalid nine-slice
+  scale and a nonfinite line are included; index ranges and actual nonempty,
+  empty and split-overlay phases are required. Corrupt clip lanes, changed
+  indices, wrong overlay cuts and missing workload observations each failed
+  before normal restoration passed. The initial fixture attempted to pop a clip
+  after `begin_overlay` and failed with `ClipUnderflow`; fresh source inspection
+  confirmed that overlay intentionally clears the clip stack. The corrected
+  external fixture explicitly asserts that refusal rather than treating it as a
+  renderer failure. No production source or existing regression changed. These
+  are conversion-only fixtures: arbitrary primitive/nonfinite inputs,
+  device-write refusal paths, actual draw/pass images and browser/native upload
+  parity remain open.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
