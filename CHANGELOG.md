@@ -221,6 +221,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `CharacterController::set_self_collider` changes or clears a collision binding
+  while preserving the current position, ground contact, and movement
+  configuration. Games can retire movement-only proxies without rebuilding the
+  controller.
+
 - **Two-phase GPU occlusion culling, small-feature culling and per-face
   point-light shadow culls.** `ForwardRenderer::set_occlusion_culling` and the
   `r_occlusion_cull` console switch (off by default) test frustum survivors

@@ -352,8 +352,13 @@ impl CharacterController {
     /// A character nothing else collides with does not need it.
     #[must_use]
     pub fn with_self_collider(mut self, collider: ColliderId) -> Self {
-        self.self_collider = Some(collider);
+        self.set_self_collider(Some(collider));
         self
+    }
+
+    /// Change the world-collider binding without changing movement or ground state.
+    pub fn set_self_collider(&mut self, collider: Option<ColliderId>) {
+        self.self_collider = collider;
     }
 
     /// The centre of the capsule.
@@ -1360,10 +1365,31 @@ mod tests {
 
     // ── The character's own collider ───────────────────────────────────
 
-    /// A character registered in the world would otherwise find itself at
-    /// `t = 0` on every sweep and never move at all; naming its own collider
-    /// is what keeps it out of its own answers, and each move writes the new
-    /// position back so the world's copy is never a tick behind.
+    #[test]
+    fn clearing_self_collider_preserves_ground_and_movement_state() {
+        let config = CharacterConfig::default();
+        let mut world = flat_world();
+        let mut character =
+            CharacterController::new(config, DVec3::new(0.0, centre_for_feet(&config, 0.0), 0.0));
+        character.move_and_slide(&mut world, DVec3::ZERO);
+        assert!(character.is_grounded());
+        let position = character.position();
+        let ground = character.ground().cloned();
+        let body = world.add_capsule(character.capsule());
+        character.set_self_collider(Some(body));
+        assert_eq!(character.self_collider, Some(body));
+        assert_eq!(character.position(), position);
+        assert_eq!(character.ground(), ground.as_ref());
+        character.set_self_collider(None);
+        assert_eq!(character.self_collider, None);
+        assert_eq!(character.position(), position);
+        assert_eq!(character.ground(), ground.as_ref());
+        assert!(world.remove(body));
+        let moved = character.move_and_slide(&mut world, DVec3::new(0.2, 0.0, 0.0));
+        assert!((moved.motion.x - 0.2).abs() < 1e-12);
+        assert!(moved.grounded);
+    }
+
     #[test]
     fn a_character_registered_in_the_world_is_left_out_of_its_own_sweeps() {
         let config = CharacterConfig::default();
