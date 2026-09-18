@@ -136,10 +136,13 @@ branch CI passed against the production change. The final audit matched the
 required job set from the unchanged CI workflow and verified every job succeeded
 with no failed or cancelled steps; an altered-job control failed before
 restoration passed. Local commits added after the tested branch revision contain
-backlog verification notes only. Main CI and Pages are running for the exact
-merged production revision. Their final job/step audits and deployed-site
-verification remain open. Keep this slice pending until all required gates
-close; isolated prototype results above do not prove production integration.
+backlog verification notes only. Main CI completed successfully for the exact
+merged production revision. Its required job set and every job/step result
+passed the final audit; altering a job to failure made that audit reject it.
+Pages remains active for the same revision. Its final job/step audit and
+deployed-site verification remain open. Keep this slice pending until all
+required gates close; isolated prototype results above do not prove production
+integration.
 
 Cold-cache native readback investigation remains open:
 
