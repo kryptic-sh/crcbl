@@ -645,14 +645,18 @@ Networking preparation follow-up:
   than identical repeated blocks. This prepares the required boundary assertions
   but does not close the repository test gap: the production boundary test still
   checks lengths and must gain expected values when the slice starts. No
-  production hashing or caller implementation changed in this preflight.
-  Preserve existing NIST and HMAC vectors, shader-source manifests, saves,
-  authenticated wire bytes and browser builds. No repository tests were changed
-  or weakened during this source-review probe. A separate safe prototype
-  replaced only the tail vector with fixed local padding storage, preserving the
-  existing compression implementation. Its complete digests and the current
-  release library's digests matched independently generated Python `hashlib`
-  answers for 15 inputs around padding/block boundaries and at larger sizes. An
+  production hashing or caller implementation changed in this preflight. The
+  complete external preflight runner also passed all 8 tests, including the
+  existing published NIST vectors and formatting checks from both hash
+  implementations, with no ignored or filtered tests. This remains external
+  prototype evidence rather than a production-change verification gate. Preserve
+  existing NIST and HMAC vectors, shader-source manifests, saves, authenticated
+  wire bytes and browser builds. No repository tests were changed or weakened
+  during this source-review probe. A separate safe prototype replaced only the
+  tail vector with fixed local padding storage, preserving the existing
+  compression implementation. Its complete digests and the current release
+  library's digests matched independently generated Python `hashlib` answers for
+  15 inputs around padding/block boundaries and at larger sizes. An
   intentionally wrong bit-length field made that comparison fail before restored
   runs passed. Paired digest-only release timings included padding and
   compression, with 500 timed batches of 20 calls after warmup; percentiles
