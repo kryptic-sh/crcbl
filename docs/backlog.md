@@ -6,15 +6,17 @@ did not, and why. Delete an entry when it ships — `git log` is the history.
 Current goal: complete the full codebase performance review, record actionable
 findings and verification gaps in this backlog, and implement supported
 low-hanging performance improvements before feature expansion to keep the engine
-lean. Preserve and report the culling experiments testing richer geometry and
-algorithm optimization. After the performance improvements, continue
-implementing features and backlog items in the plans' priority order until the
-remaining planned work is complete. Keep the plans, backlog and changelog
-current as work ships, removing completed backlog entries. Profile relevant
-workloads, preserve correctness, measure each optimization, and complete the
-required verification and shipping gates before starting the next production
-change. Authored interior and browser culling measurements, CPU draw-recording
-cost, and overlapping grass workloads remain open below.
+lean. Test whether richer geometry makes culling worthwhile and whether
+algorithm optimization improves its cost, then report the results before
+continuing the implementation plan. Record all review findings, deferred work,
+declined ideas and verification gaps in this backlog. After the performance
+improvements, continue implementing features and backlog items in the plans'
+priority order until the remaining planned work is complete. Keep the plans,
+backlog and changelog current as work ships, removing completed backlog entries.
+Profile relevant workloads, preserve correctness, measure each optimization, and
+complete the required verification and shipping gates before starting the next
+production change. Authored interior and browser culling measurements, CPU
+draw-recording cost, and overlapping grass workloads remain open below.
 
 ## Performance review and execution priority (2026-09-17)
 
@@ -54,6 +56,57 @@ regression.
 Next performance trials: measure streaming bitmap glyph positions and actual
 sans-panel layout before selecting the next UI change. Keep startup-only and
 unexercised candidates behind measured frame-path work.
+
+The bitmap streaming production trial is applied to `FontAtlas` and bitmap
+triangle expansion. It shares a crate-local `FontAtlas::glyph_positions`
+iterator with the existing owned `layout_line` API, retaining the owned API's
+capacity policy and fresh triangle storage. The preceding exact-main CI and
+Pages gates passed and publication was verified before applying this trial.
+Workspace formatting, default clippy, regular tests, release compilation, locked
+workspace build, all-feature clippy, no-GPU nextest, workspace doctests, rustdoc
+with denied warnings, dependency-use and dependency-policy checks passed. Native
+Radeon golden checks passed: 98 tests passed with none skipped. X11 contention
+tests passed, but the Radeon-pinned sandbox could not present to Xvfb; no
+present-capable queue family was available. That terminal harness failure is
+preserved. Both X11 contention gates passed with the installed lavapipe driver:
+each reports 45 tests passed with none skipped, and sandbox presentation,
+fullscreen and F11 behavior completed both without a window manager and with
+Openbox. Owned contention workers remained active through the gates and were
+reaped afterward. Branch CI/browser and exact-main publication remain pending.
+The disabled macOS seam probe remains a coverage gap; Windows Vulkan's passing
+successor run does not resolve the intermittent readback investigation.
+
+The rebuilt production DHAT profile observes actual conversion allocation stacks
+and no intermediate owned bitmap layout allocation trace. The preserved original
+profile reports 10000 such allocations totaling 400000 bytes for the same
+conversion workload, excluding independent fresh vertex/index storage. Feeding
+that original profile to the elimination observer produces the intended failure.
+The rebuilt owned API matches the original production source's complete glyph
+positions and capacity across 60 edge cases. Complete frozen Horde vertices,
+indices, overlay cuts and uploaded fields match the preserved original fixtures;
+both geometry writes and cleanup remain observed. Independent upload,
+write-count, timer, cleanup and edge-geometry corruption controls fail as
+intended.
+
+Paired recording-null renderer runs used the preserved original executable and
+the rebuilt production path, with CPU affinity and reversed run order. Each
+debug panel workload's median and tail improved across those runs, while smaller
+workloads were mixed and run-to-run drift was visible. This is a bounded CPU
+recording observation, not GPU execution, browser performance or an FPS claim.
+Keep this trial pending until full branch CI/browser gates and exact-main
+publication complete; do not start the next production change.
+
+The external iterator edge-case screen matches the current production owned
+layout for empty and whitespace-only strings, consecutive and trailing blank
+lines, Unicode fallback and tab glyphs, nonzero anchors, and negative, zero and
+positive finite scales. It also observes the original owned layout retaining
+byte-length capacity; corrupting a positioned-glyph reference produces the
+intended parity failure. `FontAtlas::layout_line` and bitmap `DrawList::text` do
+not reject negative scales or sizes, so streaming must preserve their existing
+behavior rather than introduce a new validation policy. This is an external
+prototype screen, not verification of the production patch or its allocation
+mechanism. The rebuilt production observations above supersede this prototype
+screen; final native and shipping gates remain pending.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -429,6 +482,55 @@ open):
   the run. Validation, result destruction, tree traversal, wrapping, alignment,
   glyph-run copying and triangle expansion were excluded. This is an isolated
   baseline, not an editor-frame measurement or demonstrated cache speedup.
+- `tree::layout::MeasureCache::text` keys bitmap measurements by width even
+  though its bitmap branch never wraps. `MeasureCache::retain` removes entries
+  only when their content hash disappears from `Ui::live_text`, so previously
+  visited width buckets remain for unchanged live labels. A matched external
+  source-copy screen requested 512 distinct definite widths for one unchanged
+  label, calling the existing retention rule after each request: bitmap and sans
+  each retained 512 entries with 512 misses and no hits. Every result matched an
+  independently constructed font measurement; dropping the live content removed
+  all entries, and corrupting the expected retained-entry count failed the named
+  check. This establishes direct-cache behavior, not actual `Ui` resize
+  frequency, heap bytes or frame latency. The actual editor `Panels::frame`
+  receives the current window extent, builds docked panels and calls
+  `Ui::layout` with definite available space; `Ui::dock_node` also applies
+  changed divider positions to its layout. These are relevant callers, but their
+  actual measurement-cache growth has not been observed. Measure dock splitting,
+  viewport resizing and long-lived panels before prioritizing width-bucket
+  normalization for bitmap text or a bounded sans measurement cache. Preserve
+  font/size/line-height identity, parsed-font wrapping, min/max-content
+  semantics, measurement correctness and dead-content pruning. This memory
+  candidate stays behind the supported bitmap frame-path trial; no production
+  change is applied.
+- `tree::widgets::outliner::Ui::outliner_row` creates a temporary declaration
+  `Vec` for each built row, copying the fixed array from `list::row_inline` and
+  appending its indentation before borrowing the slice into `Ui::open_block`.
+  The actual editor `Panels::frame` builds this outliner every frame; row
+  virtualization already limits the work to its window and kept focus row. Trial
+  a stack array for this fixed declaration shape, preserving field order, row
+  placement, finite-indent fallback, depth padding, focus, selection and
+  disabled behavior. This removes a specific temporary collection; it does not
+  imply that resolving styles or building a whole row becomes allocation-free.
+  Source and actual caller reviewed; rebuilt candidate compilation and
+  allocation observations, complete emitted geometry and real-panel timings
+  remain open. An actual production outliner build/layout baseline now drives
+  unchanged labels through a fixed viewport and observes its real virtualized
+  row callbacks. Valgrind DHAT attributed 7000 declaration-vector capacity
+  allocations and 1008000 total allocated bytes to `outliner_row`, matching 7000
+  observed row callbacks. The observer requires a nonempty profile and the
+  declaration-capacity and row-builder stack frames; a corrupted expected count
+  failed its named check. These are original-path total allocations in a
+  synthetic builder workload, not a stack-array implementation, heap-peak
+  reduction, emitted geometry check or editor-frame timing gain. An external
+  source-copy declaration screen also compares the proposed stack-array shape
+  with the exact existing declaration producer across 448 cases, including row
+  positions/heights, depth extremes, negative indentation and non-finite indent
+  fallback. Every ordered declaration matched; replacing the absolute-position
+  declaration made the parity observer fail. This does not exercise a rebuilt
+  production outliner, interaction, emitted geometry, allocation removal or
+  timing. Rank this small frame-path trial ahead of unpriced startup-only work,
+  after the current bitmap streaming trial and shipping gate.
 - Bitmap expansion in `draw_list::expand` calls `FontAtlas::layout_line`, which
   allocates and fills a temporary glyph-position vector for every label before
   emitting triangles. The inspected layout loop advances a cursor and handles
@@ -458,8 +560,68 @@ open):
   excludes construction, output destruction, comparisons, uploads and GPU
   execution. No production change or end-to-end speedup is established. Next:
   confirm through actual renderer and frozen Horde consumers, preserve the owned
-  layout API, then run complete final gates.
+  layout API, then run complete final gates. Matched external renderer probes
+  now also pass complete preserved static bitmap uploads and frozen actual Horde
+  title, playing, paused and resumed lists with debug hidden and shown. Both use
+  identical former renderer source, differing only in owned versus streamed
+  glyph positions; vertex/index storage remains fresh. The streamed lane's
+  corrupted upload, missing writes, empty timer and omitted teardown each failed
+  its intended observer. Correcting the probe labels distinguishes these source
+  copies from production APIs. Initial timing diagnostics ran alongside rustdoc.
+  A subsequent pinned-CPU repeat with compiler processes absent preserved those
+  full-output observers. Medium static bitmap renderer p50/p95 microseconds,
+  owned/streamed/streamed/owned, were 112.562/115.739; 84.590/87.476;
+  85.512/87.967; 93.126/95.730. Frozen Horde gameplay with debug shown was
+  8.186/8.356; 6.963/7.153; 6.973/7.164; 8.276/8.526. Each reported lane used
+  500 timed frames. These remain matched source-copy screens; no actual
+  production optimization is established. A statically linked actual production
+  fresh-output baseline now preserves all frozen Horde phases and full uploads
+  for comparison after implementation. Compare rebuilt actual production before
+  keeping a change. Browser measurements and GPU speedups remain unverified.
 
+  A sealed actual production bitmap allocation baseline now profiles
+  `DrawList::to_triangles_split` on the original fresh-output release artifact,
+  verified against the frozen baseline's recorded artifact hash. Valgrind DHAT
+  attributes 10000 blocks and 400000 total allocated bytes directly to
+  `FontAtlas::layout_line` within the production conversion loop; independent
+  fresh vertex/index allocation traces remain. The workload observes glyph
+  vertex/index counts, the base-only overlay cut and every intended conversion;
+  complete geometry/upload parity remains covered by the separate preserved
+  reference fixtures. Its observer requires the actual production layout and
+  conversion stack frames; corrupting the expected allocation count failed the
+  named check. The rebuilt streaming path must remove that temporary trace while
+  preserving the owned layout API, fresh triangle outputs and full reference
+  geometry. This is a former-path allocation baseline, not optimized production
+  evidence, heap-peak reduction or a timing/GPU/browser gain.
+
+- UI clipping follow-up inspected `tree::emit::Ui::{emit, emit_node}`,
+  `DrawList::{clip, push_clip}` and `ClipRect::intersect`. Emission skips
+  `Display::None`, but otherwise visits descendants and builds sans layouts or
+  owned bitmap strings even when the inherited draw-list clip has no area. The
+  inspected `ui.slang` fragment test rejects the clip's upper edge, and
+  intersection clamps disjoint clips to zero extent. Price a scrolled, heavily
+  clipped editor panel before adding an emission guard. Use the effective
+  draw-list clip; a parent's own rectangle outside the viewport does not justify
+  skipping descendants with visible overflow. Preserve caller clip balance,
+  navigation outlines, hit/focus state, glyph-budget behavior and rendered
+  images. Command-list changes and backend image parity remain unverified; no
+  clipping optimization or latency benefit has been implemented. A pinned-CPU
+  actual production `Ui::emit` baseline now uses unchanged bitmap and sans trees
+  with a deliberately empty caller clip. It still emitted every label command:
+  empty-clip bitmap p50/p95 microseconds were 3.657/3.757 for 256 labels and
+  14.087/14.417 for 1024; sans was 83.468/85.381 and 354.250/364.108,
+  respectively, with 250 timed calls per workload. Complete bitmap strings or
+  nonempty sans glyph runs, command counts, effective clip lanes and caller clip
+  balance were observed outside the timer. An intentionally incorrect command
+  count failed its named assertion. An independent known-zero clip setup guard
+  also failed when the requested clip was deliberately omitted; the guarded
+  restored run supplies the figures above. This prices existing synthetic
+  emission, excluding tree build/layout, command clearing/destruction,
+  comparisons, tessellation, glyph rasterization, uploads, GPU and browser
+  behavior. It does not establish a speedup or the frequency of empty inherited
+  clips in actual editor scrolling. Keep this after the better-supported bitmap
+  streaming trial until real-panel frequency and image/glyph-budget parity are
+  established.
 - `crcbl_client::Client::send_input` clones `pending_input` into an owned
   protocol message before the codec copies it into a payload. A borrowed input
   encoder could remove that intermediate copy while retaining input for later
@@ -516,6 +678,41 @@ open):
   the deviation heartbeat that detects actual motion. No loaded Viewer
   animation, deviation or complete frame latency was measured; this does not
   rank ahead of the P14 or skinning preparation trials.
+- Puppet `anim::Animator::advance` calls `probes(&self.palette)`, whose helper
+  collects transformed global-matrix probe positions into a fresh `Vec`, then
+  immediately consumes that vector into the maximum-deviation fold. The actual
+  `app::Puppet::draw` caller advances the animator on the render clock and hands
+  its palette to the GPU. Rest probes are already collected once in
+  `Animator::new`; the Viewer rest-transform candidate above should not be
+  applied blindly to Puppet. Trial streaming current probe positions into the
+  existing fold, retaining owned rest storage and the exact joint-major probe
+  order, transformed values, maximum deviation, idle/paused behavior, blending
+  and browser motion heartbeat. The `Animator` comment claiming that a frame
+  allocates nothing is inconsistent with this collected temporary; correct it
+  when the mechanism is changed or verified. Source and actual render caller
+  reviewed, but production allocation counts, rebuilt animator output parity and
+  real frame cost are unmeasured. Rank this narrowly scoped frame-path candidate
+  with the fixed outliner declaration trial, ahead of unpriced startup-only work
+  and after the current bitmap streaming shipping slice. Matched external
+  complete-Animator source copies now compare the former collected probes with a
+  streaming iterator, collecting owned rest probes only during construction. The
+  screen passed 1080 advances with complete palette-bit parity and exact
+  deviation, blend and partial-transition counters across idle, partial/full
+  walking, pause, clamped speeds and nonfinite input behavior. Palette-bit and
+  deviation corruption separately triggered their intended failures. Both copies
+  use the actual rig source and unchanged engine animation types; this remains
+  an external source-copy screen. Valgrind DHAT then profiled separate owned and
+  streaming complete-Animator source-copy runs without the output-comparison
+  allocations. The repeated advance trace attributed 10000 blocks and 4320000
+  total allocated bytes to the owned probe collection, versus no
+  repeated-advance allocation trace in the streamed lane; owned rest-probe
+  construction remains. Both lanes reported the same nonzero workload checksum.
+  The observer requires an actual owned advance trace and nonempty profiles;
+  feeding the owned trace to its streaming lane failed the named mechanism
+  check. These are total allocations in the external workload, not heap-peak
+  reduction, production allocation counts or frame-rate improvement. Production
+  compilation, rebuilt allocation observations and frame/browser performance
+  remain open, and no production code is changed.
 - `crcbl::engine::GpuContext::retire_to` waits on the submission timeline on
   capable devices. Its `wait_idle` arm is the documented fallback for devices
   without a timeline, not an unconditional hardware frame stall.
@@ -599,7 +796,15 @@ Networking preparation follow-up:
   `Server::emit_snapshot` moves the already-decoded current baseline into it
   only after a successful send. Do not prioritize a baseline clone or linear
   lookup removal that these paths no longer perform. Channel internals,
-  contention and simulator scheduling remain unpriced.
+  contention and simulator scheduling remain unpriced. Transport follow-up read
+  `InMemoryTransport::{pair, send_reliable, send_unreliable, recv_reliable, recv}`:
+  sends move the owned payload into bounded channels after size checks, and
+  receives return that message without an explicit payload clone or a temporary
+  receive-buffer vector. Declined adding transport-local buffer scratch to
+  remove a copy these methods do not perform. Preserve reliability-channel
+  labels, control-first receive ordering, backpressure, payload limits and
+  queued-message draining on peer disconnect. This source review does not price
+  standard-channel internals or prove allocation-free end-to-end delivery.
 - Revalidated `ConditionSimulator::drain_pending`: it removes due messages
   individually from a retained pending vector, builds an unreliable-position
   vector when reordering is enabled, and clones each forwarded payload. The
@@ -1463,7 +1668,18 @@ Console and diagnostics follow-up:
   UTF-8 truncation and reentrant `Display` behavior: ring and capture currently
   render before taking their storage borrows. This is a source-review candidate
   with no caller latency or allocation measurement, below the measured
-  frame-preparation work; hidden-panel snapshots are already incremental.
+  frame-preparation work; hidden-panel snapshots are already incremental. A
+  rebuilt actual production native probe confirmed per-target rejected macros
+  leave arguments unevaluated and add no ring record; accepted macros evaluate
+  the argument and retain their message, and direct console answers survive an
+  off filter. Expecting the rejected macro in the ring failed the intended
+  assertion. This contradicts the broad rejected-record retention described by
+  `core::log::console` module docs and needs a contract decision: preserve the
+  fast macro gate and narrow the docs, or deliberately retain per-target
+  rejected macro records and price the extra argument evaluation, formatting,
+  locking and storage. Do not route all rejected calls to the sink as an
+  unpriced performance change. Browser behavior was source-reviewed here, not
+  runtime-verified.
 - Read typed `crcbl_console::ConVar` getters: they read atomic cells directly,
   and enum values return a static string. They do not allocate a dynamic value
   on these paths. Do not add blanket setting caches without caller measurements
@@ -1727,7 +1943,18 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   accepted changes. Do not treat an empty edit vector as a heap allocation or
   remove owned inverse values. Selected inspector latency and editing behaviour
   need paired verification before keeping these smaller candidates. Other
-  application inspector call sites remain a review gap.
+  application inspector call sites remain a review gap. A standalone owned-text
+  inspector baseline linked the sealed original production release artifact and
+  observed idle build/layout over 1000 frames with unchanged reflected text and
+  no reported edits. DHAT recorded separate inspector-row string-clone traces,
+  each with 1000 blocks and 26000 allocated bytes; text-input ownership has its
+  own separate trace. A deliberately incorrect clone count was rejected by the
+  observer. This establishes repeated allocation in the text-property workload,
+  not a measured saving or actual editor frame-time cost. The release artifact
+  predates the newer physics commits; source comparison shows the inspected UI
+  implementation unchanged. Moving the owned `Value::Text` payload into the
+  input remains a candidate, requiring compiled production parity, accepted and
+  refused edits, undo values and a rebuilt allocation profile before adoption.
 - Browser `shell.js::syncCursor` decodes the requested CSS string before
   checking whether it matches `appliedCursor`. The Rust cursor exports publish
   stable static strings; checking pointer and length before decoding could avoid
@@ -2531,12 +2758,12 @@ and its rungs W2–W6 are separate slices rather than gaps.
   a drop target resolved from the pointer against last frame's pane rectangles
   into a `DockSide` (the five-zone hit test), and a preview drawn over the pane
   the drop would take.
-- **Decision owed: multi-selection needs modifiers nothing supplies.**
-  `SelectMode::Toggle` and `Range` are applied by `Ui::outliner`, but neither
-  `NavInput` nor `PointerInput` carries a modifier, so no engine caller can
-  produce anything but `Replace`. Where control and shift enter — a `NavInput`
-  field or a `PointerInput` one — is the call; there is likewise no keyboard
-  range select.
+- **Keyboard range selection needs a defined gesture.** The row builder applies
+  `OutlinerOptions::select` when a row activates; extending selection while
+  stepping focus with shift and an arrow still needs its own routing and
+  behavior verification. Modifier-click selection is already supplied by the
+  editor's `app::select_mode` through `PanelInput::select`, so changing
+  `NavInput` or `PointerInput` merely to supply those clicks is unnecessary.
 - **`OutlinerState::select` with `Range` walks the model** to find the anchor,
   so a range click costs the model's length; `Replace` and `Toggle` are
   constant.
@@ -2544,9 +2771,12 @@ and its rungs W2–W6 are separate slices rather than gaps.
   `OutlinerId` for every item ever expanded or selected, including ones the tree
   no longer holds. A `retain` against the last flatten would need the flatten to
   report what it saw.
-- **No scroll-to-index or reveal on the outliner**: the only way to bring a row
-  into view is to focus it, and nothing scrolls it with a wheel — `PointerInput`
-  still has no wheel, as rung 7b left it.
+- **Reusable outliner row reveal is absent.** The editor already routes wheel
+  scrolling with `panel::scroll` and reveals a selected scene entity with
+  `Panels::reveal_row`, using the tree's scroll-offset API. A shared widget
+  helper should wait for another actual caller, preserving the editor's
+  least-movement behavior and row margin; no generic wheel-input redesign is
+  required for the existing editor path.
 - **A tab strip neither wraps nor scrolls**, so tabs past the pane's width are
   clipped; arrows move between tabs only because spatial navigation finds them,
   and activation is manual (focus, then accept). **A tab's pane is dropped when
@@ -2557,8 +2787,9 @@ and its rungs W2–W6 are separate slices rather than gaps.
   pixels rather than a fraction (inherited from rung 7b), so a layout restored
   at a different window size keeps the pixel split. A per-pane minimum would
   have to live in `DockLayout`. `Ui::dock` also clones each pane's name every
-  frame to satisfy the borrow checker — immaterial at editor pane counts, but it
-  is an allocation per pane per frame.
+  frame, creating a temporary owned string before borrowing the name into the
+  pane builder. Recheck whether a shared string borrow suffices; actual editor
+  allocation and frame cost are unpriced, so no material gain is established.
 - **Cost**: the outliner is 87.9 µs a frame at 10 001 rows and 86.8 µs at 201
   (release, median of 41, 1920×1080, 70 rows in view), against 37.8 µs for a
   `Ui::list` of the same length — four nodes a row against two. The flatten,
@@ -3604,6 +3835,19 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   implementation. This remains behind the measured HMAC/input trials and the
   existing capped-cue construction-order candidate; no production audio behavior
   changed in this review.
+
+- Audio synthesis follow-up read
+  `crcbl_audio::synth::{sine, looped_sine, noise_burst}` and the complete
+  bank-building sections of `apps/horde/src/audio.rs::Audio::new`,
+  `apps/flappy/src/audio.rs::Audio::new` and
+  `apps/breakout/src/audio.rs::Audio::new`. Those callers generate and bank
+  sample buffers during construction; `SoundBank::create_voice` subsequently
+  shares the stored sample allocation. Decline waveform scratch retention or
+  replacing transcendental functions as an ordinary frame/callback optimization
+  for these callers. Such changes would address startup work and need measured
+  constructor cost plus waveform and fade parity before reconsideration. This is
+  source-verified caller classification, not synthesis timing, complete
+  workspace caller coverage or native/browser callback allocation evidence.
 
 - **P37 — price audio contention and retirement before redesigning commands.**
   Callback follow-up read `Mixer::fill`, `route_gain`, the bus accessors and
@@ -21367,6 +21611,45 @@ affects Windows remains unverified. Deadline changes and automatic test retries
 have not been adopted; reducing concurrent cold mesh work remains an option
 requiring a priced test-group change.
 
+Successor run `35400375474`, Windows Vulkan job `105778661364`, reproduced LATE
+readbacks on `9a9a694b9323973e026471845488f9ee30536856`. The runner reported 63
+tests run: 59 passed, 4 failed, 0 skipped. Failures were
+`draw_gen::every_geometry_path_draws_the_same_frame`,
+`mesh::a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths`,
+`mesh::the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and
+`mesh::the_gpu_descends_a_scaled_instance_at_the_size_it_draws`. Every failed
+request and deadline snapshot showed submitted timeline 35 and retired timeline
+34; diagnostic polling subsequently completed with changed staging bytes and
+retired timeline 35. This establishes late execution rather than a permanently
+lost completion for these requests. The pre-suite sample reported 3.8% processor
+time and 13.1 GiB free of 15.99 GiB on 4 logical processors, which does not
+measure contention during cold compilation. The forward-pass and Win32
+presentation steps were skipped after the suite failed. Keep their coverage
+open; do not claim a complete Windows Vulkan pass. Price reduced concurrency for
+cold mesh tests against the complete suite, preserving deadlines, image
+assertions and validation controls, before choosing a harness change. This
+recurrence alone does not establish that busy polling or compilation is the
+cause, and no automatic retry has been added.
+
+Cold backend-suite scheduling screen on the current successor source used Linux
+llvmpipe, sync validation, disabled Mesa shader caching, four-CPU affinity and
+four global test slots. The default run reported 63 tests run: 63 passed, 0
+skipped in 20.093 s, with maximum logged readback 3.102314801 s. An external
+nextest configuration limited only `vk_e2e` mesh and draw-generation tests to
+two concurrent slots; the complete suite again reported 63 tests run: 63 passed,
+0 skipped in 25.738 s, with maximum logged readback 2.536692321 s. An invalid
+named-group control was rejected by nextest, confirming the external
+configuration is read. Reverse-order runs again reported 63 tests run: 63
+passed, 0 skipped in both configurations: the two-slot mesh group took 25.149 s
+with maximum logged readback 2.588259423 s; default concurrency took 20.424 s
+with maximum logged readback 3.223727493 s. Nextest's group report confirms the
+mesh and draw-generation tests belong to the two-slot group, including every
+failed successor test. Both pairs show lower worst observed readback wait at a
+higher suite cost. They do not resolve the Windows deadline failures or
+establish an engine performance improvement. No repository configuration was
+changed. Actual Windows scheduling evidence remains required before adopting the
+limit.
+
 Linux cold-compilation forward-suite follow-up: both complete runs used the
 pinned llvmpipe adapter, validation and `MESA_SHADER_CACHE_DISABLE=true`,
 without filtering the suite or changing deadlines. The runner reported 38 passed
@@ -21499,15 +21782,3 @@ draws, and expansion would have meant a width in world or screen units, a
 miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
-
-## Windows lavapipe readback deadline failure
-
-CI run `35400375474` at `9a9a694b` failed in the Windows Vulkan e2e job
-`105778661364`. In `draw_gen::every_geometry_path_draws_the_same_frame`,
-`Headless::readback` in `crates/crcbl-vk/tests/vk_e2e/harness.rs` reported a
-pending submission at its deadline; the diagnostic subsequently observed it
-retire and deliver the image. Other mesh-path tests also reached the deadline.
-Investigate Windows lavapipe submission scheduling and runner contention before
-changing the deadline. This is a failed backend check, not evidence of lost
-readback data or a verified driver defect. Local workspace tests pass; this
-Windows failure remains unresolved.

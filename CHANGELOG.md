@@ -2088,6 +2088,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Bitmap UI draw conversion streams glyph positions directly into triangle
+  storage instead of allocating an intermediate layout vector. The owned
+  `FontAtlas::layout_line` API retains its behavior.
+
 - Sample input queues in Horde, Asteroids, Breakout, Flappy, Shard, Puppet,
   Orbit, Towers and Breach retain their event storage after fixed-tick replay,
   avoiding repeated queue growth for later input bursts while preserving ordered

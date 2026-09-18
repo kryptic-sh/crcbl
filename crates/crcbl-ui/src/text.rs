@@ -229,22 +229,35 @@ impl FontAtlas {
     /// [`DrawCommand::Text::pos`]: crate::draw_list::DrawCommand::Text
     pub fn layout_line(&self, text: &str, pos: Vec2, scale: f32) -> Vec<(char, Vec2, Vec2)> {
         let mut out = Vec::with_capacity(text.len());
+        out.extend(self.glyph_positions(text, pos, scale));
+        out
+    }
+
+    /// Positions bitmap glyphs without building an intermediate layout vector.
+    pub(crate) fn glyph_positions<'a>(
+        &'a self,
+        text: &'a str,
+        pos: Vec2,
+        scale: f32,
+    ) -> impl Iterator<Item = (char, Vec2, Vec2)> + 'a {
         // `cursor` is a baseline position; `pos` is the top of the em box.
         let mut cursor = Vec2::new(pos.x, pos.y + ASCENDER as f32 * scale);
-        for c in text.chars() {
+        text.chars().filter_map(move |c| {
             if c == '\n' {
                 cursor.x = pos.x;
                 cursor.y += LINE_HEIGHT * scale;
-                continue;
+                return None;
             }
             let g = self.glyph(c);
-            if g.width > 0 {
+            let quad = if g.width > 0 {
                 let (min, max) = g.rect_scaled(cursor, scale);
-                out.push((c, min, max));
-            }
+                Some((c, min, max))
+            } else {
+                None
+            };
             cursor.x += g.advance * scale;
-        }
-        out
+            quad
+        })
     }
 
     /// Number of glyphs in the atlas.

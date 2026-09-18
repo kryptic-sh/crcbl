@@ -978,7 +978,7 @@ fn expand(
         } => {
             if let Some(atlas) = atlas {
                 let layout_scale = (*size / GLYPH_HEIGHT as f32) * scale;
-                let glyphs = atlas.layout_line(text, *pos, layout_scale);
+                let glyphs = atlas.glyph_positions(text, *pos, layout_scale);
                 for (c, min, max) in glyphs {
                     // v = 0 is the atlas's top row, and `min.y` is the
                     // quad's top edge in the Y-down screen convention.
