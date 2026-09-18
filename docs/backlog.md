@@ -705,8 +705,19 @@ Simulation and loading follow-up:
   refusal without mutation. Full-occupancy `erase` and slot-table scans need
   larger-container workload evidence before redesign. Shard render/stat readers
   also walk `Grid::len` and `weight_g`; their caller costs remain unpriced.
-  Catalogue parsing/serialization, save validation and Breach caller pricing
-  were not completed in this follow-up.
+  Further source review read catalogue RON entry points,
+  `CatalogFile`/`ItemFile`, conversions, `key`, `by_key` and FNV hashing. Tag
+  interning scans the retained tag table for each incoming tag; serialization
+  builds owned item/tag output. `key` hashes the selected item name and `by_key`
+  scans name hashes. The inspected Shard save encoder and decoder reach these
+  helpers for persisted placements, not continuous inventory placement. Large
+  tag-heavy catalogue load and save/load pricing remain open; no general frame
+  bottleneck is established. Source inspection also found that tag-index
+  conversion saturates at `u16::MAX`, so excessive distinct tags could alias
+  instead of being refused. An over-limit runtime fixture and a catalogue-limit
+  decision are still required; this was not reproduced or changed. Full save
+  validation, compiled-code inspection and Breach caller pricing were not
+  completed in this follow-up.
 
 - `crcbl_render::sprite_pass::SpriteRenderer::begin_frame` builds fresh
   instance, batch and padded constant-byte vectors; assigning
