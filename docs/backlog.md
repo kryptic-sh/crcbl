@@ -41,21 +41,24 @@ coverage gaps separate from the completed entry-allocation implementation.
 
 Next performance trials:
 
-The retained shadow-scratch trial is underway on `perf/retained-shadow-scratch`.
-Shared `begin_frame_body` preparation has been moved unchanged into private
-`forward::frame_prepare`, following the existing private-module convention.
-Complete moved code and documentation matched after visibility/whitespace
-normalization, and an altered cadence increment was rejected. Workspace
-formatting, default clippy and default workspace tests passed. Retained
-view/cull vectors are now implemented around the fallible preparation body and
-cleared on both successful and failed returns. The actual null graph fixture
-rejected the eager implementation, then passed redraw/cached capacity
-observations and first/middle/last uniform-refusal recovery, including complete
-cache-record equality, refused-buffer bytes/events, validation and teardown.
-Dropping capacity only on errors and omitting either scratch clear were
-separately rejected; restored tests passed. Default workspace clippy and default
-workspace tests passed for the reuse change, followed by the release build.
-Actual renderer command captures matched across cascade, point, spot and
+The retained shadow-scratch trial is implemented and pushed at `9253b7d`.
+Exact-commit [CI](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020)
+and [Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35311394992) are
+still running; enumerate every job and check the deployed live site before
+removing this trial. Shared `begin_frame_body` preparation has been moved
+unchanged into private `forward::frame_prepare`, following the existing
+private-module convention. Complete moved code and documentation matched after
+visibility/whitespace normalization, and an altered cadence increment was
+rejected. Workspace formatting, default clippy and default workspace tests
+passed. Retained view/cull vectors are now implemented around the fallible
+preparation body and cleared on both successful and failed returns. The actual
+null graph fixture rejected the eager implementation, then passed redraw/cached
+capacity observations and first/middle/last uniform-refusal recovery, including
+complete cache-record equality, refused-buffer bytes/events, validation and
+teardown. Dropping capacity only on errors and omitting either scratch clear
+were separately rejected; restored tests passed. Default workspace clippy and
+default workspace tests passed for the reuse change, followed by the release
+build. Actual renderer command captures matched across cascade, point, spot and
 combined lighting with paired reversed repeats. Complete uploaded shadow uniform
 bytes and observer commands matched separately; altered indirect offsets were
 detected. Preparation observations remain small and mixed, establishing no
