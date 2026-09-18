@@ -674,7 +674,17 @@ Networking preparation follow-up:
   compiled function frame under these isolated flags, not native worker peak
   stack, production caller inlining, WASM stack budgets or CPU/FPS benefit. Keep
   the worker/browser stack verification gap open when implementing the padding
-  change.
+  change. An optimized external native-thread preflight subsequently ran the
+  current source and fixed-padding prototype on `std::thread::Builder` threads
+  using default stacks and a requested 32,768-byte stack. Each worker checked
+  complete digests against freshly generated Python `hashlib` answers for 12
+  patterned payloads, repeated 16 times, including padding boundaries and large
+  inputs. Both stack configurations passed; deliberately corrupting the
+  candidate hex result failed inside the worker and propagated through `join`;
+  restored runs passed. Input buffers were heap-owned. This checks isolated hash
+  execution on the local native runtime, not actual stack high-water use,
+  platform thread minimums, engine worker call chains, recursive nesting or WASM
+  worker budgets.
 
   | Input bytes | Original p50/p95 (ns/call) | Fixed padding p50/p95 | Original repeat   | Fixed repeat      |
   | ----------- | -------------------------- | --------------------- | ----------------- | ----------------- |
