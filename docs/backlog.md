@@ -75,9 +75,36 @@ excluded, though the scaffold affects caches and the workload. Full preserved
 capture and nonempty collection controls independently failed, then normal
 restoration passed. Prices are mixed and do not establish a latency or FPS gain.
 Source-copy storage evidence below remains separate from actual production
-lifetime-memory, browser layout and real burst-frequency measurements. Broader
-workspace, browser held-key focus delivery and canonical shipping gates remain
-required before keeping the change.
+lifetime-memory, browser layout and real burst-frequency measurements.
+
+The broader native production gates passed: workspace formatting, all-feature
+build and Clippy, nextest's reported 7206 tests, regular all-feature workspace
+tests, public and private rustdoc, dependency audits and the root release build.
+The plain site build emitted its complete artifact listing after export and Node
+smoke checks; the threaded jobs build passed. The actual browser jobs gate
+passed its reported 29 isolated checks, four deliberate failure checks and 13
+checks without isolation. Vulkan's suite reported 63 tests passed, exercised
+both sandbox backends and verified refusal of an unavailable fatal validation
+gate. Its validation reach was record-time and within one submission, not
+cross-submission. The discrete AMD hardware renderer reported 98 tests passed
+and matched its checked-in goldens.
+
+An external copy of the canonical Horde browser driver adds a held-key focus
+observer against the rebuilt production artifact. It requires a fresh run,
+actual keyboard movement before blur, paused focus return, explicit resume,
+advancing resumed simulation time with unchanged player position, and renewed
+movement on a fresh key. The normal full browser run reported 64/64 checks
+passed. Injecting movement after resume failed only the held-release check;
+explicit resume and fresh movement still passed. Guard controls for a missing
+failure and missing resume independently went red. The restored normal full
+browser run also reported 64/64 checks passed. The probe initially assumed
+restart began play immediately; it correctly failed because Horde restarts at
+the title screen. The corrected probe requires that transition and a separate
+start edge. Its initial result parser also matched summary repetitions; it now
+reads only assertion rows. Neither correction changes production code or weakens
+gameplay assertions. Actual hidden-tab delivery, the remaining changed samples'
+canonical browser gates and canonical branch/main CI and publication gates
+remain required.
 
 - Trial sample input queue capacity next. Source-copy gameplay and allocation
   comparisons support the mechanism; matched Horde tick prices did not improve.
