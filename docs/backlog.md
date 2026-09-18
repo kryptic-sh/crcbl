@@ -4009,6 +4009,35 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   native/browser images before keeping the bounded production candidate. Larger
   editor UI, glyph pressure and backend runtime/memory remain separate gaps.
 
+  The bounded external caller also passes matched oversized bitmap and
+  cached-sans fallback captures in original/budget/budget/original order. For
+  1024 bitmap labels, p50/p95 prices were 384.407/387.783, 373.957/377.172,
+  374.728/378.295 and 386.421/389.496 microseconds. Cached-sans prices were
+  765.227/769.995, 770.807/775.025, 770.546/774.644 and 762.522/766.579
+  microseconds. Each reported 500 timed frames. Complete independent production
+  uploads pass, and sans retains its no-rasterization and full graph-range
+  checks. The oversized sans fallback is slightly slower in this paired run;
+  bounding memory deliberately forgoes reuse, and these differently compiled
+  source-copy prices do not establish a production regression or FPS gain. Keep
+  this trade-off visible in the production comparison.
+
+  A separate external write-refusal fixture substitutes a genuinely destroyed
+  buffer handle into the next warmed geometry ring slot, receives the actual
+  null device's matching `InvalidHandle`, then restores the original live
+  handle. Both vertex and index writes are exercised with ordinary and oversized
+  geometry. Every failed write preserves prior committed draw counts; ordinary
+  scratch retains its measured capacity while oversized scratch is released.
+  Successful retries match complete independently encoded production-reference
+  vertex/index uploads and committed lengths/overlay cuts. Missing refusal,
+  incorrect reported prior counts and corrupt retry-reference contents each
+  failed before restoration. The complete burst/ring/graph and teardown fixture
+  still passes. This observes real device write rejection through an external
+  temporary-handle seam, not source-level early-return injection, and does not
+  change production code or existing assertions. Image/glyph staging failures,
+  geometry allocation refusal and bind-group creation refusal remain unverified;
+  full rollback of the frame is not promised. Allocation profiles and required
+  workspace/native/browser gates remain required for the production candidate.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
