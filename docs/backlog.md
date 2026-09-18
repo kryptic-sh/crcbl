@@ -3782,6 +3782,24 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   samples and malformed-file refusal. Decoder allocation profiles, loaded assets
   and complete asset-to-playback latency remain unmeasured.
 
+- **Audio delay-line storage — price fixed capacity before changing voices.**
+  Revalidated private `mixer::DelayLine::{new, push_and_read}` and
+  `Voice::{from_shared, mix_block}` in `crates/crcbl-audio/src/mixer.rs`.
+  `Voice::from_shared` is the inspected delay-line constructor caller and passes
+  `DELAY_CAPACITY` for each channel. Construction allocates delay buffers even
+  with zero ITD; mixing advances them in the sample loop and indexes with modulo
+  their runtime vector length. Fixed array storage could remove construction
+  allocations and make the modulo divisor constant, but that compiler effect has
+  not been verified in release assembly. It would enlarge inline `Voice` storage
+  and increase bytes moved when active/releasing voice vectors grow or compact.
+  Do not treat this as allocation on every callback or assume a net gain. Price
+  accepted cue bursts, voice-list memory/moves and callback mixing separately
+  with unchanged and varied fractional ITD, looping, pitch, stop ramps and
+  complete stereo output equality. Compare release code and native and browser
+  workloads before implementation. This remains behind the measured HMAC/input
+  trials and the existing capped-cue construction-order candidate; no production
+  audio behavior changed in this review.
+
 - **P37 — price audio contention and retirement before redesigning commands.**
   Callback follow-up read `Mixer::fill`, `route_gain`, the bus accessors and
   `WebAudioOutput::configure`/`render`. Gains are read before the voice loops
