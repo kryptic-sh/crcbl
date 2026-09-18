@@ -49,49 +49,52 @@ verdicts; it is not a passing gate. The initial job rerun request was rejected
 while the overall run remained active. Once the run became terminal, GitHub
 accepted the same-commit Windows Vulkan rerun;
 [job 105501333899](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105501333899)
-is now running. Every other CI job is successful in the complete enumeration.
-Inspect the rerun's complete result before closing this gate. Enumerate every
-job and check the deployed live site before removing this trial. Shared
-`begin_frame_body` preparation has been moved unchanged into private
-`forward::frame_prepare`, following the existing private-module convention.
-Complete moved code and documentation matched after visibility/whitespace
-normalization, and an altered cadence increment was rejected. Workspace
-formatting, default clippy and default workspace tests passed. Retained
-view/cull vectors are now implemented around the fallible preparation body and
-cleared on both successful and failed returns. The actual null graph fixture
-rejected the eager implementation, then passed redraw/cached capacity
-observations and first/middle/last uniform-refusal recovery, including complete
-cache-record equality, refused-buffer bytes/events, validation and teardown.
-Dropping capacity only on errors and omitting either scratch clear were
-separately rejected; restored tests passed. Default workspace clippy and default
-workspace tests passed for the reuse change, followed by the release build.
-Actual renderer command captures matched across cascade, point, spot and
-combined lighting with paired reversed repeats. Complete uploaded shadow uniform
-bytes and observer commands matched separately; altered indirect offsets were
-detected. Preparation observations remain small and mixed, establishing no
-general CPU improvement. Complete geometry-tail commands also matched separately
-for `IndirectCount`, `IndirectPerBatch` and `MeshShader`. Whole-fixture DHAT
-reported 736,900,031 bytes in 1,477,451 blocks for the preserved exact-record
-baseline and 711,979,825 bytes in 1,476,353 blocks with retained scratch.
-Disassembly-confirmed unique allocation sites reported views at 24,596,000 bytes
-in 550 blocks versus 44,720 bytes in one block, and culls at 369,600 bytes in
-550 blocks versus 672 bytes in one block. Missing-site selectors failed before
-restored selectors uniquely matched. Every selected site had no bytes left at
-process end. Instrumented complete commands matched each other and the release
-capture. Whole-fixture peak memory was unchanged at 18,251,295 bytes; no peak
-improvement is established. The retained scratch allocation footprint is 45,392
-bytes, kept between preparations until renderer teardown. Setup, warmup and
-observers are included in DHAT totals; instrumented timings are excluded from
-release prices. The locked all-feature workspace build, formatting check,
-all-feature clippy, CI-profile nextest, regular all-feature workspace tests and
-explicit doctests passed. Public and private documentation passed with warnings
-denied, along with cargo-machete, cargo-deny, documentation citations,
-wrapped-string checks and diff whitespace checks. Native RADV rendering and
-lavapipe render, mesh, sprite, draw-generation, tiling, forward, HAL seam, glTF
-and complete Vulkan suites passed with their adapter and validation guards. The
-Vulkan suite reports record-time and one-submission synchronization coverage,
-but no cross-submission coverage on this machine. CI, browser and deployment
-verification remain open before keeping the change.
+is now running. Its previously failed “Run the suite against lavapipe” step has
+passed on the same-commit rerun. The forward-pass step is running, and real
+Win32 presentation remains pending; the overall job is not yet a passing gate.
+Every other CI job is successful in the complete enumeration. Inspect the
+rerun's complete result before closing this gate. Enumerate every job and check
+the deployed live site before removing this trial. Shared `begin_frame_body`
+preparation has been moved unchanged into private `forward::frame_prepare`,
+following the existing private-module convention. Complete moved code and
+documentation matched after visibility/whitespace normalization, and an altered
+cadence increment was rejected. Workspace formatting, default clippy and default
+workspace tests passed. Retained view/cull vectors are now implemented around
+the fallible preparation body and cleared on both successful and failed returns.
+The actual null graph fixture rejected the eager implementation, then passed
+redraw/cached capacity observations and first/middle/last uniform-refusal
+recovery, including complete cache-record equality, refused-buffer bytes/events,
+validation and teardown. Dropping capacity only on errors and omitting either
+scratch clear were separately rejected; restored tests passed. Default workspace
+clippy and default workspace tests passed for the reuse change, followed by the
+release build. Actual renderer command captures matched across cascade, point,
+spot and combined lighting with paired reversed repeats. Complete uploaded
+shadow uniform bytes and observer commands matched separately; altered indirect
+offsets were detected. Preparation observations remain small and mixed,
+establishing no general CPU improvement. Complete geometry-tail commands also
+matched separately for `IndirectCount`, `IndirectPerBatch` and `MeshShader`.
+Whole-fixture DHAT reported 736,900,031 bytes in 1,477,451 blocks for the
+preserved exact-record baseline and 711,979,825 bytes in 1,476,353 blocks with
+retained scratch. Disassembly-confirmed unique allocation sites reported views
+at 24,596,000 bytes in 550 blocks versus 44,720 bytes in one block, and culls at
+369,600 bytes in 550 blocks versus 672 bytes in one block. Missing-site
+selectors failed before restored selectors uniquely matched. Every selected site
+had no bytes left at process end. Instrumented complete commands matched each
+other and the release capture. Whole-fixture peak memory was unchanged at
+18,251,295 bytes; no peak improvement is established. The retained scratch
+allocation footprint is 45,392 bytes, kept between preparations until renderer
+teardown. Setup, warmup and observers are included in DHAT totals; instrumented
+timings are excluded from release prices. The locked all-feature workspace
+build, formatting check, all-feature clippy, CI-profile nextest, regular
+all-feature workspace tests and explicit doctests passed. Public and private
+documentation passed with warnings denied, along with cargo-machete, cargo-deny,
+documentation citations, wrapped-string checks and diff whitespace checks.
+Native RADV rendering and lavapipe render, mesh, sprite, draw-generation,
+tiling, forward, HAL seam, glTF and complete Vulkan suites passed with their
+adapter and validation guards. The Vulkan suite reports record-time and
+one-submission synchronization coverage, but no cross-submission coverage on
+this machine. CI, browser and deployment verification remain open before keeping
+the change.
 
 | Lighting | Baseline p50/p95 (ms) | Retained    | Baseline repeat | Retained repeat |
 | -------- | --------------------- | ----------- | --------------- | --------------- |
