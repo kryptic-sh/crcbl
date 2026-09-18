@@ -1570,24 +1570,35 @@ Sample and browser follow-up:
   native/browser behavior. Device attribution and context changes during queued
   replay are not covered by this probe. Breakout's pointer/button staging and
   Flappy's mixed input still require their own evidence; key-only results do not
-  cover those queues. A preserved release-library Horde baseline now exercises
-  the actual authenticated loopback game with deferred start input, held
-  diagonal movement, catch-up ticks, releases, repeated press/release bursts,
-  restart and retained stick levels. Repeated seeded runs compare complete
-  logical render snapshots, rather than counts alone; corrupting the last
-  snapshot health fails before restoration passes. The capture checks action
-  resolution and the existing simulation order explicitly: physics runs before
-  the game module, so newly resolved movement affects position on the following
-  tick. This is an unchanged-production baseline, not a retained-queue
-  implementation or timing result. Compare the changed game with this preserved
-  capture before keeping a queue change. An extended preserved native baseline
-  also checks a context pushed before queued replay, held-key suppression after
-  popping it, release/repress routing, and keyboard/touch/pointer attribution
-  through queued keys and stick input. Complete seeded snapshots matched; the
-  corruption control failed before restoration passed. A DHAT run of the actual
-  unchanged release-library contextual baseline additionally observed 400 bytes
-  in 28 input-queue growth blocks rooted in `Game::key_event`; the guarded
-  selector requires the exact production frame and exercised allocation sites. A
+  cover those queues. A separate mixed-input release staging probe now extracts
+  Breakout and Flappy's current action declarations and links the production
+  action map. Ordered draining replay matches complete logical action values and
+  device attribution across deferred events, catch-up ticks, held input and
+  release through mixed key/button bindings. Breakout also verifies ordered
+  pointer positions, unchanged-position suppression and nonfinite-position
+  rejection. Reversing the queued sequence failed Breakout's full action-value
+  observer and Flappy's device-attribution observer; restored replay passed for
+  both. This compares the isolated replay stage, not changed production samples,
+  authenticated loopback outputs, focus-loss shell delivery or browser behavior.
+  Actual mixed-input queue element storage and sample timing remain unmeasured.
+  A preserved release-library Horde baseline now exercises the actual
+  authenticated loopback game with deferred start input, held diagonal movement,
+  catch-up ticks, releases, repeated press/release bursts, restart and retained
+  stick levels. Repeated seeded runs compare complete logical render snapshots,
+  rather than counts alone; corrupting the last snapshot health fails before
+  restoration passes. The capture checks action resolution and the existing
+  simulation order explicitly: physics runs before the game module, so newly
+  resolved movement affects position on the following tick. This is an
+  unchanged-production baseline, not a retained-queue implementation or timing
+  result. Compare the changed game with this preserved capture before keeping a
+  queue change. An extended preserved native baseline also checks a context
+  pushed before queued replay, held-key suppression after popping it,
+  release/repress routing, and keyboard/touch/pointer attribution through queued
+  keys and stick input. Complete seeded snapshots matched; the corruption
+  control failed before restoration passed. A DHAT run of the actual unchanged
+  release-library contextual baseline additionally observed 400 bytes in 28
+  input-queue growth blocks rooted in `Game::key_event`; the guarded selector
+  requires the exact production frame and exercised allocation sites. A
   missing-frame control failed before restoration passed. Whole-fixture totals
   were 3,283,640 bytes in 2,655 blocks, with peak live memory of 766,940 bytes
   in 95 blocks; these include seeded game setup, both runs, snapshots and
