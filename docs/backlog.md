@@ -139,6 +139,24 @@ not shrink worker stacks from isolated execution or write-residue results.
 
 Cold-cache native readback investigation remains open:
 
+The HMAC production branch's initial full CI run
+[35351870875](https://github.com/kryptic-sh/crcbl/actions/runs/35351870875) at
+`4055c703ea6072fddd77b27cf7da9269a5d49221` failed the WARP render step.
+`grass_shells::fins_fill_the_far_hillside_and_stand_nowhere_else` and
+`grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open`
+reported `ReadbackTimeout` through `grass::frame_of` before image assertions.
+The runner reported 33/98 tests run, 31 passed and 2 failed; its fail-fast
+policy left the remaining tests unrun. The earlier deliberate D3D12 dirty-report
+panic is a passing negative-control test, not this job's failure. The render
+source and workflow files are unchanged from the verified main baseline, but
+that alone does not establish timeout causality. Other jobs in this run are
+still pending. Once it terminates, rerun the failed job with unchanged source
+and settings and inspect the complete render summary; investigate repeated
+failures rather than extending deadlines, weakening assertions or reducing
+concurrency to obtain a green gate. Keep the original failure visible even if
+the rerun passes. This adds a WARP observation to the separate readback gap; it
+does not justify new work on the owner-deferred D3D12 backend.
+
 The first optimized lavapipe render run, with Mesa shader caching disabled and
 normal nextest concurrency, stopped on a readback timeout before the calm-shell
 pixel assertion. A complete pre-optimization-pool comparison under the same
