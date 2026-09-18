@@ -781,7 +781,33 @@ Simulation and loading follow-up:
   base-size/spin ranges each step; lifetime is already stored separately. Price
   large live effects before caching base size and spin, since caching increases
   particle storage. Preserve seeded results, pool compaction, lifetime
-  retirement and curve evaluation.
+  retirement and curve evaluation. Follow-up re-read `ParticleSystem::step`,
+  `update`, `emit`, `shade`, `particle::life`, the hash/range helpers and
+  `ParticlePool` storage/getters/compaction. Arrays retain storage; cloning a
+  slice `Range` does not copy particle data. The effect owns its validated
+  descriptor and exposes no mutable descriptor accessor. A release probe of the
+  actual unchanged production crate timed only `ParticleSystem::step` for a
+  seeded point burst with zero speed, no gravity/drag, constant curves and a
+  lifetime that avoided retirement. Spawn/setup and full seeded attribute/age
+  observations were outside the timer. Omitting a real step made its age
+  observer fail before normal/reversed runs passed:
+
+  | Live particles | Current step p50/p95 (ms) | Reverse repeat p50/p95 (ms) |
+  | -------------- | ------------------------- | --------------------------- |
+  | 1024           | 0.004759/0.004829         | 0.004589/0.009248           |
+  | 8192           | 0.038282/0.040447         | 0.038633/0.075172           |
+  | 65536          | 0.314284/0.321548         | 0.311199/0.314876           |
+
+  Each run reported 500 timed steps. This is a steady-state baseline, not the
+  isolated hash cost or a measured cache improvement. It excludes birth/retire
+  churn, moving/gravity/drag workloads, mesh instance publication, rendering,
+  allocation profiles and GPU execution. Cached base-size/spin would add
+  particle storage and compaction obligations; price that tradeoff on actual
+  Sparks workloads before ranking it ahead of the measured renderer/hash
+  candidates. Seeded size/spin were checked through the existing hash provider;
+  this is not an independent PCG known-answer validation or complete byte-parity
+  comparison of a changed implementation.
+
 - Reviewed `crcbl_rand::Rng` construction, scalar draws and slice filling,
   `entropy`, the WASM `fill_from`/`seed_into` bridge and its input exports, plus
   the entropy error type. The resolved ChaCha and block-generator source retains
