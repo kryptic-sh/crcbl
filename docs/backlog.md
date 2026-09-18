@@ -87,7 +87,9 @@ checks without isolation. Vulkan's suite reported 63 tests passed, exercised
 both sandbox backends and verified refusal of an unavailable fatal validation
 gate. Its validation reach was record-time and within one submission, not
 cross-submission. The discrete AMD hardware renderer reported 98 tests passed
-and matched its checked-in goldens.
+and matched its checked-in goldens. X11 gates passed both bare Xvfb and Openbox
+configurations; the nested Wayland gate also passed, including the sandbox
+validation refusal controls.
 
 An external copy of the canonical Horde browser driver adds a held-key focus
 observer against the rebuilt production artifact. It requires a fresh run,
@@ -3828,8 +3830,20 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   frame measurement; the differing repeats also caution against treating the
   isolated prototype's timings as a real caller speedup. Accepted-request
   latency, actual game drop frequency, hardware callback contention and the
-  modified caller remain unmeasured. Price those before keeping the production
-  change; this event-driven candidate follows the frame-wide P14 trial.
+  modified production caller remain unmeasured. A fresh source-copy follow-up
+  used the current complete Horde audio module, changed only borrowed-data
+  prechecking and delayed construction, and preserved the headless null stream,
+  counters and cap lock. Both binaries were warmed and pinned to the same
+  allowed CPU. Original/prechecked/prechecked/original p50/p95 prices were
+  41.9/42.6, 15.7/16.3, 15.7/16.3 and 43.2/47.6 nanoseconds per refused request.
+  Each run reported 17600 refused requests, 17616 valid cues and 1000 timed
+  batches; a full cap was verified after every batch. Each incorrect drop-count
+  control failed, then normal restoration passed. Setup, assertions and accepted
+  requests remain outside the timers. This supports the saturated source-copy
+  mechanism with concurrent null mixing, not actual production behavior,
+  accepted-request latency, hardware callback contention, game drop frequency or
+  a frame-rate gain. Price those before keeping the production change; this
+  event-driven candidate follows the frame-wide P14 trial.
 - **P38 — price retained UI triangle output and text storage.** Revalidated
   `DrawList::clear` and `Ui::begin_frame_with`: command and tree collections
   retain capacity. `DrawCommand::Text` still owns label strings, and
