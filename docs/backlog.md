@@ -3927,6 +3927,29 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   shrink policy; real UI lifetime memory, backend/GPU costs and browser
   performance remain open. No production code changed.
 
+  A freshly rebuilt production Horde library now supplies actual headless
+  sample-loop draw lists across title, gameplay, pause and resumed phases, with
+  the debug overlay both hidden and shown. The public polled boot drives the
+  existing sample; its public draw-list swap temporarily captures and restores
+  each actual list without production changes. Every phase reported 20 observed
+  frames. Gameplay state and tick advancement, paused tick stasis, nonempty
+  geometry, index bounds and overlay bounds pass. Missing actual start input,
+  hidden geometry and missing phase collection each failed before restoration.
+  Independently converted fresh vector-capacity payloads were 52224 bytes for
+  gameplay/resumption and 104448 for title/pause with debug hidden, and 208896
+  for every sampled phase with debug shown. No glyph runs were emitted by these
+  sampled lists. These actual sample workloads are smaller than the large-label
+  stress fixture; they do not establish a general editor/UI memory ceiling.
+  Conversion is outside the sample's renderer and untimed, so this is workload
+  sizing rather than changed-renderer latency, retained memory, full
+  upload/image parity or complete-process/GPU/browser measurement. Initial probe
+  compilation found the read-only draw-list getter is test-gated; the corrected
+  external probe uses the existing public reversible swap and restores it before
+  each next frame. No source visibility or existing assertion changed. Price
+  these real lists through the changed caller and include larger
+  editor/debug/console workloads before fixing a retention budget or claiming an
+  application gain.
+
 ### Checked and fine
 
 Log macros test the level before formatting; disabled tracing is one atomic
