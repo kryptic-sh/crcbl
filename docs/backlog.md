@@ -20819,11 +20819,36 @@ reopens the driver question. The Windows runner is now observed on `9253b7d` in
 `mesh::the_mesh_shader_path_matches_the_indirect_path_s_golden` failed their
 readback deadlines. Every failed readback became Ready during diagnostic polling
 with changed destination bytes and matching submitted/retired timeline values,
-yielding LATE rather than STUCK or LOST verdicts. The suite remains failed;
-rerun it on the exact commit before closing the scratch shipping gate. Whether
-busy polling materially affects Windows remains unverified. Deadline changes and
-automatic test retries have not been adopted; reducing concurrent cold mesh work
-remains an option requiring a priced test-group change.
+yielding LATE rather than STUCK or LOST verdicts. The same-commit rerun passed
+the complete backend suite, but its forward suite subsequently timed out in
+`antialiasing::each_persisted_video_effect_switch_reaches_the_frame`; real Win32
+presentation was skipped. The scratch shipping gate remains open as recorded
+above. Whether busy polling materially affects Windows remains unverified.
+Deadline changes and automatic test retries have not been adopted; reducing
+concurrent cold mesh work remains an option requiring a priced test-group
+change.
+
+Linux cold-compilation forward-suite follow-up: both complete runs used the
+pinned llvmpipe adapter, validation and `MESA_SHADER_CACHE_DISABLE=true`,
+without filtering the suite or changing deadlines. The runner reported 38 passed
+and zero skipped in each run. Default concurrency took 23.807 s; one test at a
+time took 163.230 s. The persisted-effects test took 23.806 s and 19.819 s
+respectively. Declined blanket serialization from this evidence; Windows
+contention and per-case stage timing remain unverified.
+
+An external release prototype reused only the device while retaining a fresh
+`ForwardRenderer` and `TransientPool` for every persisted-settings comparison.
+All existing control witnesses, pass-family comparisons, submit/present/idle and
+per-renderer teardown remained. Reversed paired runs reported original test
+19.62/19.55 s and device reuse 18.75/18.58 s on Linux cold compilation.
+Bypassing the persisted clamp failed the shadow-cull comparison; the restored
+prototype passed. This small difference does not establish a fix for the Windows
+hard timeout, so device reuse has not been implemented. Reusing the renderer
+itself would change the fresh-startup contract and has not been adopted. Next
+inspect individual setup/execution stages on the constrained workload before
+choosing fixture changes or independent per-switch cases; preserve every
+`VIDEO_KEYS` arm, its all-on control, fresh-renderer startup checks and existing
+deadlines.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
