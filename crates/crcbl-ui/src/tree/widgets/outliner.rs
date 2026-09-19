@@ -501,12 +501,15 @@ impl Ui {
         } else {
             0.0
         };
-        let mut inline = Vec::with_capacity(row_inline(0, 1.0).len() + 1);
-        inline.extend_from_slice(&row_inline(index, height));
-        inline.push(Declaration::Padding(
-            Sides::Left,
-            Length::Px(f32::from(item.depth) * step),
-        ));
+        let [position, top, left, right, height] = row_inline(index, height);
+        let inline = [
+            position,
+            top,
+            left,
+            right,
+            height,
+            Declaration::Padding(Sides::Left, Length::Px(f32::from(item.depth) * step)),
+        ];
 
         let open = if item.open {
             PseudoClasses::OPEN
