@@ -117,16 +117,17 @@ impl Line {
 
 /// Positions `word` from `line`'s pen, writing each glyph's x beside it, and
 /// returns its right edge.
-fn place_word(font: &Font, scale: f32, word: &mut [(GlyphId, f32)], line: &Line) -> f32 {
+fn place_word(font: &Font, scale: f32, word: &mut [PositionedGlyph], line: &Line) -> f32 {
     let mut pen = line.pen;
     let mut previous = line.previous;
-    for (glyph, x) in word.iter_mut() {
+    for positioned in word {
+        let glyph = positioned.glyph;
         if let Some(previous) = previous {
-            pen += font.kerning(previous, *glyph) * scale;
+            pen += font.kerning(previous, glyph) * scale;
         }
-        *x = pen;
-        pen += font.advance(*glyph) * scale;
-        previous = Some(*glyph);
+        positioned.offset.x = pen;
+        pen += font.advance(glyph) * scale;
+        previous = Some(glyph);
     }
     pen
 }
@@ -145,7 +146,6 @@ impl TextLayout {
             lines: Vec::new(),
             line_height,
         };
-        let mut word: Vec<(GlyphId, f32)> = Vec::new();
         for paragraph in text.split('\n') {
             let mut line = Line::new(layout.glyphs.len());
             let mut chars = paragraph.chars().peekable();
@@ -160,32 +160,30 @@ impl TextLayout {
                     line.previous = Some(glyph);
                     continue;
                 }
-                word.clear();
+                let word_start = layout.glyphs.len();
                 while let Some(&c) = chars.peek() {
                     if c == ' ' {
                         break;
                     }
                     chars.next();
-                    word.push((font.glyph_id(c), 0.0));
-                }
-                let mut right = place_word(font, scale, &mut word, &line);
-                if line.has_word && wrap.is_some_and(|wrap| right > wrap) {
-                    layout.finish_line(&line);
-                    line = Line::new(layout.glyphs.len());
-                    right = place_word(font, scale, &mut word, &line);
-                }
-                for &(glyph, x) in &word {
                     layout.glyphs.push(PositionedGlyph {
-                        glyph,
-                        offset: Vec2::new(x, 0.0),
+                        glyph: font.glyph_id(c),
+                        offset: Vec2::ZERO,
                     });
                 }
-                line.previous = word.last().map(|&(glyph, _)| glyph);
+                let mut right = place_word(font, scale, &mut layout.glyphs[word_start..], &line);
+                if line.has_word && wrap.is_some_and(|wrap| right > wrap) {
+                    layout.finish_line(&line, word_start);
+                    line = Line::new(word_start);
+                    right = place_word(font, scale, &mut layout.glyphs[word_start..], &line);
+                }
+                line.previous = layout.glyphs.last().map(|glyph| glyph.glyph);
                 line.pen = right;
                 line.width = right;
                 line.has_word = true;
             }
-            layout.finish_line(&line);
+            let end = layout.glyphs.len();
+            layout.finish_line(&line, end);
         }
 
         let ascent = metrics.ascent * scale;
@@ -200,9 +198,9 @@ impl TextLayout {
         layout
     }
 
-    fn finish_line(&mut self, line: &Line) {
+    fn finish_line(&mut self, line: &Line, end: usize) {
         self.lines.push(TextLine {
-            glyphs: line.first..self.glyphs.len(),
+            glyphs: line.first..end,
             width: line.width,
             baseline: 0.0,
             offset: 0.0,

@@ -54,9 +54,10 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial: finish the outliner row declaration stack-array gate,
-then measure actual sans-panel layout before selecting the following UI change.
-Keep startup-only and unexercised candidates behind measured frame-path work.
+Next performance trial: finish the sans-layout word-scratch production gate,
+then evaluate retained layout storage only if the remaining measured emission
+cost justifies persistent state. Keep startup-only and unexercised candidates
+behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -416,22 +417,52 @@ open):
   are examples and tests. This is latent work until an actual loading path
   adopts the registry, rather than a current sample-frame priority.
 - `crcbl_ui::tree::emit::Ui::emit_node` constructs a fresh `TextLayout` for sans
-  text on every emission, including unchanged labels. `TextLayout::new` owns
-  glyph, line and word vectors. Measurement in `tree::layout` already caches
-  sizes by content and width; `GlyphAtlas::glyph` returns cached glyphs before
-  rasterization, so neither is evidence for rerasterizing every label. Price
-  emission separately on a large unchanged sans panel. Consider retained layout
-  storage or a layout cache only if it removes measured cost; preserve unrounded
-  wrap widths, rounded-box alignment, font metrics, text changes and clipping.
-  Bitmap labels take a different path and need separate measurements. A
-  standalone release construction-only probe reused outer result storage and
-  constructed the same unwrapped sans label at each iteration. p50/p95 was
-  0.016/0.016 ms for 32 labels, 0.100/0.112 ms for 256, and 0.407/0.432 ms
-  for 1024. Every layout matched the complete reference outside the timer;
-  changing the reference text made the check fail before restoring and repeating
-  the run. Validation, result destruction, tree traversal, wrapping, alignment,
-  glyph-run copying and triangle expansion were excluded. This is an isolated
-  baseline, not an editor-frame measurement or demonstrated cache speedup.
+  text on every emission, including unchanged labels. The original
+  `TextLayout::new` path owned separate glyph, line and word vectors.
+  Measurement in `tree::layout` already caches sizes by content and width;
+  `GlyphAtlas::glyph` returns cached glyphs before rasterization, so neither is
+  evidence for rerasterizing every label. Price emission separately on a large
+  unchanged sans panel. Consider retained layout storage or a layout cache only
+  if it removes measured cost; preserve unrounded wrap widths, rounded-box
+  alignment, font metrics, text changes and clipping. Bitmap labels take a
+  different path and need separate measurements. A standalone release
+  construction-only probe reused outer result storage and constructed the same
+  unwrapped sans label at each iteration. p50/p95 was 0.016/0.016 ms for 32
+  labels, 0.100/0.112 ms for 256, and 0.407/0.432 ms for 1024. Every layout
+  matched the complete reference outside the timer; changing the reference text
+  made the check fail before restoring and repeating the run. Validation, result
+  destruction, tree traversal, wrapping, alignment, glyph-run copying and
+  triangle expansion were excluded. This is an isolated baseline, not an
+  editor-frame measurement or demonstrated cache speedup. An actual production
+  unchanged sans panel now separates build, cached layout and emission while
+  checking complete triangles on every frame and requiring zero warmed glyph
+  rasterization. At 32, 256 and 1024 rows, the original emission p50/p95
+  microseconds were 21.030/21.310, 163.579/166.404 and 638.376/641.232 in the
+  forward run, then 20.569/20.750, 166.815/169.621 and 654.738/658.364 in
+  reverse. Build and cached-layout prices were recorded separately and were much
+  smaller for this unchanged fixture. Triangle expansion, comparison and GPU
+  work stayed outside the timers.
+
+  The production candidate writes each word directly into the final glyph vector
+  and repositions that range only when it wraps, removing the temporary word
+  vector without retaining layout state. Its two middle runs reported emission
+  p50/p95 microseconds of 17.944/18.115 and 18.125/18.305 at 32 rows,
+  142.319/145.164 and 141.567/144.152 at 256, and 570.829/574.426 and
+  584.314/587.010 at 1024. Build and cached-layout results were mixed, so the
+  supported claim is the repeated emission path. DHAT on the same production
+  path at 32 rows observed the original word scratch in 115200 blocks and
+  8601600 allocated bytes and no matching candidate trace; feeding the original
+  profile to the elimination observer failed. The source-copy screen matched
+  complete glyphs, line ranges, widths, baselines and left/center/right
+  alignment across empty text, spaces, newlines, Unicode, long words, sizes and
+  wrap widths; a changed glyph position failed before restoration. Targeted
+  layout tests and the rebuilt release workspace pass. The locked all-feature
+  build, Clippy, nextest, doctests, rustdoc and dependency audits pass. Hardware
+  Vulkan matched all render goldens, and both X11 window-manager configurations
+  passed under owned CPU contention. Browser and shipping gates remain open;
+  retain this entry until publication. A retained layout cache remains a
+  separate, higher-state candidate after this bounded change.
+
 - `tree::layout::MeasureCache::text` keys bitmap measurements by width even
   though its bitmap branch never wraps. `MeasureCache::retain` removes entries
   only when their content hash disappears from `Ui::live_text`, so previously
@@ -451,33 +482,8 @@ open):
   normalization for bitmap text or a bounded sans measurement cache. Preserve
   font/size/line-height identity, parsed-font wrapping, min/max-content
   semantics, measurement correctness and dead-content pruning. This memory
-  candidate stays behind the fixed outliner and actual sans-panel trials; no
+  candidate stays behind the measured sans-layout production trial; no
   production change is applied.
-- `tree::widgets::outliner::Ui::outliner_row` created a temporary declaration
-  `Vec` for each built row, copying the fixed array from `list::row_inline` and
-  appending its indentation before borrowing the slice into `Ui::open_block`.
-  The actual editor `Panels::frame` builds this outliner every frame; row
-  virtualization already limits the work to its window and kept focus row. The
-  production candidate now destructures `row_inline` and builds the same ordered
-  declarations in a stack array. The rebuilt release workspace passed. A sealed
-  emitted-geometry comparison matches complete triangles for expanded and
-  selected rows under ordinary, negative and non-finite indentation. Its changed
-  vertex control was already rejected. Under the same fixed-viewport workload,
-  Valgrind DHAT no longer finds the declaration-capacity and `outliner_row`
-  stack that the original attributed to 7000 allocations and 1008000 allocated
-  bytes; every run observed 7000 actual row callbacks. The observer also rejects
-  the original profile, so absence is tied to the intended allocation site.
-
-  Reversed-order pinned-CPU old/new timing runs each observed 5000 frames and
-  35000 callbacks. Original p50/p95 nanoseconds were 12263/12444, 10129/10289,
-  10179/10330 and 10179/10340; the candidate reported 9989/12183, 9928/10079,
-  9969/10169 and 10009/10169. The first ordered pair was colder; the warmed
-  comparisons show a small consistent improvement, not an editor FPS or GPU
-  claim. Emission, triangle expansion and GPU work were excluded. Preserve field
-  order, placement, finite-indent fallback, depth padding, focus, selection and
-  disabled behavior. Full workspace, native and shipping gates remain open; keep
-  this entry until the production change publishes.
-
 - UI clipping follow-up inspected `tree::emit::Ui::{emit, emit_node}`,
   `DrawList::{clip, push_clip}` and `ClipRect::intersect`. Emission skips
   `Display::None`, but otherwise visits descendants and builds sans layouts or
@@ -503,9 +509,9 @@ open):
   emission, excluding tree build/layout, command clearing/destruction,
   comparisons, tessellation, glyph rasterization, uploads, GPU and browser
   behavior. It does not establish a speedup or the frequency of empty inherited
-  clips in actual editor scrolling. Keep this after the fixed outliner and
-  actual sans-panel trials until real-panel frequency and image/glyph-budget
-  parity are established.
+  clips in actual editor scrolling. Keep this after the measured sans-layout
+  production trial until real-panel frequency and image/glyph-budget parity are
+  established.
 - `crcbl_client::Client::send_input` clones `pending_input` into an owned
   protocol message before the codec copies it into a payload. A borrowed input
   encoder could remove that intermediate copy while retaining input for later
@@ -576,26 +582,27 @@ open):
   when the mechanism is changed or verified. Source and actual render caller
   reviewed, but production allocation counts, rebuilt animator output parity and
   real frame cost are unmeasured. Rank this narrowly scoped frame-path candidate
-  behind the fixed outliner declaration trial and ahead of unpriced startup-only
-  work. Matched external complete-Animator source copies now compare the former
-  collected probes with a streaming iterator, collecting owned rest probes only
-  during construction. The screen passed 1080 advances with complete palette-bit
-  parity and exact deviation, blend and partial-transition counters across idle,
-  partial/full walking, pause, clamped speeds and nonfinite input behavior.
-  Palette-bit and deviation corruption separately triggered their intended
-  failures. Both copies use the actual rig source and unchanged engine animation
-  types; this remains an external source-copy screen. Valgrind DHAT then
-  profiled separate owned and streaming complete-Animator source-copy runs
-  without the output-comparison allocations. The repeated advance trace
-  attributed 10000 blocks and 4320000 total allocated bytes to the owned probe
-  collection, versus no repeated-advance allocation trace in the streamed lane;
-  owned rest-probe construction remains. Both lanes reported the same nonzero
-  workload checksum. The observer requires an actual owned advance trace and
-  nonempty profiles; feeding the owned trace to its streaming lane failed the
-  named mechanism check. These are total allocations in the external workload,
-  not heap-peak reduction, production allocation counts or frame-rate
-  improvement. Production compilation, rebuilt allocation observations and
-  frame/browser performance remain open, and no production code is changed.
+  behind the measured sans-layout production trial and ahead of unpriced
+  startup-only work. Matched external complete-Animator source copies now
+  compare the former collected probes with a streaming iterator, collecting
+  owned rest probes only during construction. The screen passed 1080 advances
+  with complete palette-bit parity and exact deviation, blend and
+  partial-transition counters across idle, partial/full walking, pause, clamped
+  speeds and nonfinite input behavior. Palette-bit and deviation corruption
+  separately triggered their intended failures. Both copies use the actual rig
+  source and unchanged engine animation types; this remains an external
+  source-copy screen. Valgrind DHAT then profiled separate owned and streaming
+  complete-Animator source-copy runs without the output-comparison allocations.
+  The repeated advance trace attributed 10000 blocks and 4320000 total allocated
+  bytes to the owned probe collection, versus no repeated-advance allocation
+  trace in the streamed lane; owned rest-probe construction remains. Both lanes
+  reported the same nonzero workload checksum. The observer requires an actual
+  owned advance trace and nonempty profiles; feeding the owned trace to its
+  streaming lane failed the named mechanism check. These are total allocations
+  in the external workload, not heap-peak reduction, production allocation
+  counts or frame-rate improvement. Production compilation, rebuilt allocation
+  observations and frame/browser performance remain open, and no production code
+  is changed.
 - `crcbl::engine::GpuContext::retire_to` waits on the submission timeline on
   capable devices. Its `wait_idle` arm is the documented fallback for devices
   without a timeline, not an unconditional hardware frame stall.

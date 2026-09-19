@@ -2095,6 +2095,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - UI outliner rows build their fixed inline declarations in stack storage,
   removing a temporary allocation for each visible row.
 
+- Parsed-font text layout writes each word directly into final glyph storage,
+  removing its temporary word allocation while preserving wrapping and
+  alignment.
+
 - Sample input queues in Horde, Asteroids, Breakout, Flappy, Shard, Puppet,
   Orbit, Towers and Breach retain their event storage after fixed-tick replay,
   avoiding repeated queue growth for later input bursts while preserving ordered
