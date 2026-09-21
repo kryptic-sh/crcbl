@@ -93,7 +93,7 @@ use std::path::PathBuf;
 use crate::AspectRatio;
 
 use super::events::{RawEvent, enqueue};
-use super::ffi::Handle;
+use super::ffi::{Handle, Rect};
 use super::geometry::{Frame, Track};
 
 // The procedure itself is the only part of this module that calls into the
@@ -103,9 +103,7 @@ use super::geometry::{Frame, Track};
 #[cfg(target_os = "windows")]
 use super::dnd;
 #[cfg(target_os = "windows")]
-use super::ffi::{
-    self, CreateStructW, Lparam, Lresult, MinMaxInfo, Point, Rect, Wparam, msg, value,
-};
+use super::ffi::{self, CreateStructW, Lparam, Lresult, MinMaxInfo, Point, Wparam, msg, value};
 #[cfg(target_os = "windows")]
 use super::geometry;
 #[cfg(target_os = "windows")]
@@ -178,6 +176,22 @@ pub(super) struct FileDrop {
     pub y: i32,
 }
 
+/// The composition string one `WM_IME_COMPOSITION` carried.
+///
+/// Beside the queue rather than in it for the reason [`FileDrop`] is: a
+/// [`RawEvent`] is `Copy` and a string is not, and the string belongs to the
+/// input context *now* — by the time the pump runs, the next keystroke may have
+/// changed it. [`RawEvent::Preedit`] is the marker that claims it.
+#[derive(Clone, Debug)]
+pub(super) struct Preedit {
+    /// Which window, so a marker claims its own payload.
+    pub hwnd: isize,
+    /// The composition, as UTF-16 code units; empty when it ended.
+    pub units: Vec<u16>,
+    /// The input method's cursor, as a code unit index, if it said.
+    pub cursor: Option<usize>,
+}
+
 /// What the shell and its window procedure share.
 ///
 /// Owned by the shell as an `Rc`, and reached by the procedure as a raw pointer
@@ -199,6 +213,14 @@ pub(super) struct Shared {
     /// Drop payloads, oldest first, each claimed by the
     /// [`FilesDropped`](RawEvent::FilesDropped) marker that was pushed with it.
     drops: RefCell<VecDeque<FileDrop>>,
+    /// Composition payloads, oldest first, each claimed by the
+    /// [`Preedit`](RawEvent::Preedit) marker that was pushed with it.
+    preedits: RefCell<VecDeque<Preedit>>,
+    /// Each window's text input area, in client pixels, as
+    /// [`set_text_input_area`](crate::Shell::set_text_input_area) last said.
+    /// Re-applied when a composition starts, because an input method is free
+    /// to forget a placement between compositions.
+    input_areas: RefCell<Vec<(isize, Rect)>>,
     /// The window `TrackMouseEvent` is currently armed for, or zero.
     ///
     /// Also the answer to "is the pointer inside?", which is the only way to
@@ -269,6 +291,12 @@ impl Shared {
         self.limits.borrow_mut().retain(|known| known.hwnd != hwnd);
         self.shapes.borrow_mut().retain(|known| known.hwnd != hwnd);
         self.drops.borrow_mut().retain(|drop| drop.hwnd != hwnd);
+        self.preedits
+            .borrow_mut()
+            .retain(|preedit| preedit.hwnd != hwnd);
+        self.input_areas
+            .borrow_mut()
+            .retain(|&(known, _)| known != hwnd);
         if self.tracked.get() == hwnd {
             self.tracked.set(0);
         }
@@ -296,6 +324,37 @@ impl Shared {
             Some(known) => *known = shape,
             None => table.push(shape),
         }
+    }
+
+    /// Records a composition string, for the marker pushed with it to claim.
+    fn push_preedit(&self, preedit: Preedit) {
+        self.preedits.borrow_mut().push_back(preedit);
+    }
+
+    /// Takes the oldest composition recorded for `hwnd`, matched by window for
+    /// the reason [`take_drop`](Self::take_drop) is.
+    pub(super) fn take_preedit(&self, hwnd: isize) -> Option<Preedit> {
+        let mut preedits = self.preedits.borrow_mut();
+        let index = preedits.iter().position(|preedit| preedit.hwnd == hwnd)?;
+        preedits.remove(index)
+    }
+
+    /// Publishes a window's text input area, or clears it with `None`.
+    pub(super) fn set_input_area(&self, hwnd: isize, area: Option<Rect>) {
+        let mut table = self.input_areas.borrow_mut();
+        table.retain(|&(known, _)| known != hwnd);
+        if let Some(area) = area {
+            table.push((hwnd, area));
+        }
+    }
+
+    /// A window's text input area, by value.
+    fn input_area_for(&self, hwnd: isize) -> Option<Rect> {
+        self.input_areas
+            .borrow()
+            .iter()
+            .find(|&&(known, _)| known == hwnd)
+            .map(|&(_, area)| area)
     }
 
     /// A window's cursor, or `None` to leave the class cursor alone.
@@ -571,6 +630,50 @@ pub(super) unsafe extern "system" fn window_proc(
                 millis,
             });
             0
+        }
+
+        // The input method's half of text. Every one of these still reaches
+        // the default handler: it draws the input method's own composition
+        // window, and it turns a committed result into the `WM_IME_CHAR` and
+        // then `WM_CHAR` that the arm above records as the commit. What is
+        // taken here is the composition in progress, which nothing else reports.
+        msg::IME_START_COMPOSITION => {
+            // An input method is free to forget a placement between
+            // compositions, so the caret area is restated at every start.
+            if let Some(area) = shared.input_area_for(window) {
+                input::place_ime(hwnd, Some(area));
+            }
+            default()
+        }
+        msg::IME_COMPOSITION => {
+            // `lParam` names what changed; only a changed composition string
+            // is a pre-edit. A result alone is the commit, which arrives as
+            // `WM_CHAR`.
+            if (l_param as u32) & value::GCS_COMP_STR != 0 {
+                let (units, cursor) = input::composition(hwnd);
+                shared.push_preedit(Preedit {
+                    hwnd: window,
+                    units,
+                    cursor,
+                });
+                shared.push(RawEvent::Preedit {
+                    hwnd: window,
+                    millis,
+                });
+            }
+            default()
+        }
+        msg::IME_END_COMPOSITION => {
+            shared.push_preedit(Preedit {
+                hwnd: window,
+                units: Vec::new(),
+                cursor: None,
+            });
+            shared.push(RawEvent::Preedit {
+                hwnd: window,
+                millis,
+            });
+            default()
         }
 
         msg::MOUSE_MOVE => {
@@ -1205,6 +1308,52 @@ mod tests {
             shared.take_drop(2).expect("still there").paths,
             [PathBuf::from("survivor")]
         );
+    }
+
+    #[test]
+    fn a_composition_is_claimed_by_its_own_window_and_dies_with_it() {
+        // Same shape as the drop queue: matched by window, oldest first, and
+        // gone with a window that was destroyed before the pump reached it.
+        let shared = Shared::default();
+        let preedit = |hwnd, text: &str| Preedit {
+            hwnd,
+            units: text.encode_utf16().collect(),
+            cursor: Some(1),
+        };
+        shared.push_preedit(preedit(1, "か"));
+        shared.push_preedit(preedit(2, "な"));
+        shared.push_preedit(preedit(1, "かな"));
+        let first = shared.take_preedit(1).expect("queued");
+        assert_eq!(String::from_utf16_lossy(&first.units), "か");
+        assert_eq!(first.cursor, Some(1));
+        shared.forget(1);
+        assert!(shared.take_preedit(1).is_none(), "went with its window");
+        assert_eq!(
+            String::from_utf16_lossy(&shared.take_preedit(2).expect("untouched").units),
+            "な"
+        );
+    }
+
+    #[test]
+    fn a_text_input_area_is_replaced_cleared_and_forgotten_per_window() {
+        let shared = Shared::default();
+        let area = |left| Rect {
+            left,
+            top: 10,
+            right: left + 5,
+            bottom: 30,
+        };
+        shared.set_input_area(1, Some(area(0)));
+        shared.set_input_area(2, Some(area(100)));
+        shared.set_input_area(1, Some(area(50)));
+        assert_eq!(shared.input_area_for(1).map(|area| area.left), Some(50));
+        shared.set_input_area(1, None);
+        assert!(
+            shared.input_area_for(1).is_none(),
+            "None hands placement back"
+        );
+        shared.forget(2);
+        assert!(shared.input_area_for(2).is_none(), "went with its window");
     }
 
     #[test]

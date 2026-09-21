@@ -2936,9 +2936,12 @@ the gaps below.
   a combining accent is two stops, and so is an emoji with a modifier. Nothing
   in `Cargo.lock` segments by UAX #29; the options are adding a segmentation
   crate such as `unicode-segmentation` (a new dependency) or keeping `char`.
-- **Pre-edit is not drawn**: the shell has no pre-edit event (`appkit/view.rs`
-  records the marked text's length and nothing reads it), so composition text
-  cannot be underlined at the caret until `15-windowing.md` adds one.
+- **Pre-edit is not drawn**: the seam now carries `ShellEvent::TextPreedit` and
+  `Shell::set_text_input_area` (2026-09-21), and the Win32 backend sends and
+  honours them. `crcbl::text_input` does neither yet: drawing the pre-edit
+  underlined at the caret, and telling the shell the caret's rectangle, are the
+  field's half. AppKit still records only the marked text's length
+  (`appkit/view.rs`), and Wayland's `text-input-v3` pre-edit is unbound.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.

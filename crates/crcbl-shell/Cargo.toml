@@ -122,5 +122,14 @@ x11-e2e = []
 # desktop, so the runner here is nextest plus the count check and nothing else.
 win32-e2e = []
 
+# The Win32 input-method test, which needs the Microsoft Japanese IME installed
+# (`ja-JP` in the user's language list). A separate feature because no CI
+# runner has it: `run-win32-e2e.ps1` does not enable this, so the test is not
+# compiled into the suite that must pass there. Run it by hand where the IME
+# is installed:
+#   cargo nextest run -p crcbl-shell --features win32-e2e,win32-ime-e2e \
+#     --test win32_e2e --run-ignored all -E 'test(/input_method/)'
+win32-ime-e2e = ["win32-e2e"]
+
 [lints]
 workspace = true

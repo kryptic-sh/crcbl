@@ -45,9 +45,10 @@
 //! `SurfaceTarget` is deliberately exhaustive so a new platform breaks every
 //! HAL backend loudly. `ShellEvent` is the opposite: a consumer that ignores an
 //! event it has never heard of degrades gracefully (touch input does nothing,
-//! rather than doing something wrong), and gamepad hotplug and IME pre-edit are
-//! both scheduled to land later. Breaking every `match` in the engine for each
-//! is not a useful forcing function, it is churn.
+//! rather than doing something wrong), and gamepad hotplug is scheduled to land
+//! later; [`TextPreedit`](ShellEvent::TextPreedit) arrived the same way.
+//! Breaking every `match` in the engine for each is not a useful forcing
+//! function, it is churn.
 //!
 //! [`Touch`](ShellEvent::Touch) is what that promise looked like when it was
 //! collected: it landed without touching a single `match` outside the shell,
@@ -334,6 +335,38 @@ pub enum ShellEvent {
         text: String,
     },
 
+    /// An input method's composition in progress: the pre-edit a text field
+    /// draws at its caret, underlined, until it is committed or abandoned.
+    ///
+    /// **Each one replaces the last**, and an empty `text` means there is no
+    /// pre-edit any more: the composition was committed, cancelled, or deleted
+    /// back to nothing. The committed text itself arrives separately, as
+    /// [`TextCommit`](ShellEvent::TextCommit), and a consumer must not
+    /// synthesize it from the last pre-edit: an input method commits the
+    /// conversion the user chose, which is usually not the reading they typed.
+    /// The two streams are independent — a field inserts each commit at its
+    /// caret and draws the latest pre-edit after it — so their relative order
+    /// within one pump carries no meaning.
+    ///
+    /// A backend with no input-method integration never sends this, and
+    /// composed text still arrives as commits where
+    /// [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set; the platform's
+    /// own composition window shows the pre-edit instead.
+    /// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area) is how a
+    /// field tells the input method where to put that window and its
+    /// candidate list.
+    TextPreedit {
+        /// Which window.
+        window: WindowId,
+        /// When it happened.
+        time: EventTime,
+        /// The composition so far. Empty when the pre-edit ended.
+        text: String,
+        /// Where the input method's cursor sits in `text`, as a byte offset on
+        /// a `char` boundary, if it said. `None` for an empty `text`.
+        cursor: Option<usize>,
+    },
+
     /// The set of monitors changed — hotplug, resolution change, or a layout
     /// rearrangement.
     ///
@@ -416,6 +449,7 @@ impl ShellEvent {
             | Self::Wheel { window, .. }
             | Self::Touch { window, .. }
             | Self::TextCommit { window, .. }
+            | Self::TextPreedit { window, .. }
             | Self::DroppedFile { window, .. }
             | Self::ClipboardData { window, .. } => Some(*window),
             Self::MonitorsChanged => None,
@@ -436,6 +470,7 @@ impl ShellEvent {
             | Self::Wheel { time, .. }
             | Self::Touch { time, .. }
             | Self::TextCommit { time, .. }
+            | Self::TextPreedit { time, .. }
             | Self::DroppedFile { time, .. } => Some(*time),
             Self::Resized { .. }
             | Self::ScaleFactorChanged { .. }
@@ -478,6 +513,7 @@ impl ShellEvent {
             Self::Wheel { .. } => "Wheel",
             Self::Touch { .. } => "Touch",
             Self::TextCommit { .. } => "TextCommit",
+            Self::TextPreedit { .. } => "TextPreedit",
             Self::MonitorsChanged => "MonitorsChanged",
             Self::DroppedFile { .. } => "DroppedFile",
             Self::ClipboardData { .. } => "ClipboardData",

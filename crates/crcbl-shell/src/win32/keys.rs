@@ -1,5 +1,5 @@
-//! Win32 keyboard numbering → engine vocabulary, and the two things `WM_CHAR`
-//! needs done to it.
+//! Win32 keyboard numbering → engine vocabulary, the two things `WM_CHAR` needs
+//! done to it, and an input method's composition string.
 //!
 //! Everything here is a pure function over integers, for the reason
 //! [`geometry`](super::geometry) gives at length: it is the part of the backend
@@ -368,9 +368,68 @@ pub fn is_text(character: char) -> bool {
     !character.is_control()
 }
 
+/// An input method's composition string as UTF-8, with its cursor.
+///
+/// `ImmGetCompositionStringW` answers in UTF-16 code units, and its
+/// `GCS_CURSORPOS` is a **code unit** index; the seam's
+/// [`TextPreedit::cursor`](crate::ShellEvent::TextPreedit) is a byte offset
+/// into the UTF-8 text. The two disagree on everything outside ASCII — every
+/// kana is one unit and three bytes — so the index is walked across rather than
+/// copied. A cursor past the end, or inside a surrogate pair, lands on the
+/// nearest `char` boundary at or before it. An unpaired surrogate becomes
+/// U+FFFD, as it would anywhere else a Windows string reaches UTF-8.
+#[must_use]
+pub fn preedit(units: &[u16], cursor: Option<usize>) -> (String, Option<usize>) {
+    let mut text = String::with_capacity(units.len());
+    let mut at = None;
+    let mut consumed = 0;
+    for character in char::decode_utf16(units.iter().copied()) {
+        if cursor.is_some_and(|cursor| consumed >= cursor) && at.is_none() {
+            at = Some(text.len());
+        }
+        let character = character.unwrap_or(char::REPLACEMENT_CHARACTER);
+        consumed += character.len_utf16();
+        text.push(character);
+    }
+    if cursor.is_some() && at.is_none() {
+        at = Some(text.len());
+    }
+    if text.is_empty() {
+        return (text, None);
+    }
+    (text, at)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_composition_cursor_is_counted_in_code_units_and_reported_in_bytes() {
+        // か (U+304B) is one code unit and three bytes.
+        let ka: Vec<u16> = "かな".encode_utf16().collect();
+        assert_eq!(preedit(&ka, Some(0)), ("かな".to_owned(), Some(0)));
+        assert_eq!(preedit(&ka, Some(1)), ("かな".to_owned(), Some(3)));
+        assert_eq!(preedit(&ka, Some(2)), ("かな".to_owned(), Some(6)));
+        // Past the end clamps to the end rather than inventing an offset.
+        assert_eq!(preedit(&ka, Some(9)), ("かな".to_owned(), Some(6)));
+        assert_eq!(preedit(&ka, None), ("かな".to_owned(), None));
+
+        // An astral character is two code units; a cursor between them lands
+        // before it, never inside it.
+        let astral: Vec<u16> = "a𠀋b".encode_utf16().collect();
+        assert_eq!(preedit(&astral, Some(3)), ("a𠀋b".to_owned(), Some(5)));
+        assert_eq!(preedit(&astral, Some(2)), ("a𠀋b".to_owned(), Some(5)));
+        assert_eq!(preedit(&astral, Some(1)), ("a𠀋b".to_owned(), Some(1)));
+
+        // Nothing composed is no pre-edit, and has no cursor.
+        assert_eq!(preedit(&[], Some(0)), (String::new(), None));
+        // A lone surrogate does not abort the string.
+        assert_eq!(
+            preedit(&[0xD800, 0x61], None),
+            ("\u{FFFD}a".to_owned(), None)
+        );
+    }
 
     /// A key message's `lParam` for a scan code, with the flags spelled out.
     const fn l_param(code: isize, extended: bool, previous: bool) -> isize {

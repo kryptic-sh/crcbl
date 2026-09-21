@@ -97,6 +97,12 @@ mod scancode {
     /// The key right of `;` on a US keyboard: `'`, and on US-International the
     /// dead acute accent.
     pub const QUOTE: u32 = 0x28;
+    /// `K`.
+    #[cfg(feature = "win32-ime-e2e")]
+    pub const K: u32 = 0x25;
+    /// `Enter`.
+    #[cfg(feature = "win32-ime-e2e")]
+    pub const ENTER: u32 = 0x1C;
     /// `ArrowUp`, which is `E0`-prefixed — the identity, not a flag beside it.
     pub const ARROW_UP: u32 = 0xE048;
 }
@@ -356,6 +362,147 @@ mod desktop {
         let written = unsafe { GetKeyboardLayoutList(count, list.as_mut_ptr()) };
         list.truncate(usize::try_from(written).unwrap_or(0));
         list
+    }
+
+    /// `COMPOSITIONFORM`, read back to check where the input method was told
+    /// to put its window.
+    #[cfg(feature = "win32-ime-e2e")]
+    #[repr(C)]
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct CompositionForm {
+        /// `CFS_*`.
+        pub style: u32,
+        /// The window's top-left, in client coordinates.
+        pub position: Point,
+        /// The area, in client coordinates.
+        pub area: Rect,
+    }
+
+    /// `IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE` — hiragana, the mode in which
+    /// typing `k` `a` composes `か`.
+    #[cfg(feature = "win32-ime-e2e")]
+    const IME_HIRAGANA: u32 = 0x0001 | 0x0008;
+
+    #[cfg(feature = "win32-ime-e2e")]
+    #[link(name = "imm32")]
+    unsafe extern "system" {
+        fn ImmGetContext(hwnd: Handle) -> *mut c_void;
+        fn ImmReleaseContext(hwnd: Handle, context: *mut c_void) -> i32;
+        fn ImmSetOpenStatus(context: *mut c_void, open: i32) -> i32;
+        fn ImmSetConversionStatus(context: *mut c_void, conversion: u32, sentence: u32) -> i32;
+        fn ImmGetConversionStatus(
+            context: *mut c_void,
+            conversion: *mut u32,
+            sentence: *mut u32,
+        ) -> i32;
+        fn ImmGetCompositionWindow(context: *mut c_void, form: *mut CompositionForm) -> i32;
+    }
+
+    /// `SPI_GETTHREADLOCALINPUTSETTINGS`.
+    #[cfg(feature = "win32-ime-e2e")]
+    const SPI_GET_THREAD_LOCAL_INPUT_SETTINGS: u32 = 0x104E;
+    /// `SPI_SETTHREADLOCALINPUTSETTINGS`.
+    #[cfg(feature = "win32-ime-e2e")]
+    const SPI_SET_THREAD_LOCAL_INPUT_SETTINGS: u32 = 0x104F;
+
+    /// Per-thread input languages, switched on for the guard's lifetime and put
+    /// back on drop.
+    ///
+    /// Since Windows 8 the input method is per user unless "use a different
+    /// input method for each app window" is on, and a Text Services Framework
+    /// input method such as the Japanese IME is only activated for a thread
+    /// that switches language while that setting is on — a plain layout (the
+    /// dead-key test's US-International) switches either way. `fWinIni` is zero,
+    /// so the change is for this session only and is never written to the
+    /// user's profile, the same terms as [`unlock_foreground`].
+    #[cfg(feature = "win32-ime-e2e")]
+    pub struct ThreadLocalInput {
+        previous: i32,
+    }
+
+    #[cfg(feature = "win32-ime-e2e")]
+    impl ThreadLocalInput {
+        /// Turns per-thread input languages on.
+        #[must_use]
+        pub fn enable() -> Self {
+            let mut previous: i32 = 0;
+            // SAFETY: `previous` is a live `BOOL` this action writes into.
+            unsafe {
+                SystemParametersInfoW(
+                    SPI_GET_THREAD_LOCAL_INPUT_SETTINGS,
+                    0,
+                    (&raw mut previous).cast::<c_void>(),
+                    0,
+                );
+            }
+            Self::set(true);
+            Self { previous }
+        }
+
+        fn set(on: bool) {
+            // SAFETY: the set action takes the value **in** `pvParam`, as a
+            // provenance-free integer, and reads no memory of ours.
+            unsafe {
+                SystemParametersInfoW(
+                    SPI_SET_THREAD_LOCAL_INPUT_SETTINGS,
+                    0,
+                    core::ptr::without_provenance_mut(usize::from(on)),
+                    0,
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "win32-ime-e2e")]
+    impl Drop for ThreadLocalInput {
+        fn drop(&mut self) {
+            Self::set(self.previous != 0);
+        }
+    }
+
+    /// Opens the window's input method in hiragana mode, answering whether it
+    /// took: an input context exists, it opened, and the conversion mode
+    /// reads back as asked.
+    #[cfg(feature = "win32-ime-e2e")]
+    #[must_use]
+    pub fn open_hiragana(hwnd: Handle) -> bool {
+        // SAFETY: `hwnd` is a window this process created, on its own thread.
+        let context = unsafe { ImmGetContext(hwnd) };
+        if context.is_null() {
+            return false;
+        }
+        let mut conversion = 0;
+        let mut sentence = 0;
+        // SAFETY: the context taken above; the two out-pointers are live
+        // `DWORD`s. The sentence mode is read and written back unchanged.
+        let took = unsafe {
+            ImmGetConversionStatus(context, &raw mut conversion, &raw mut sentence);
+            ImmSetOpenStatus(context, 1) != 0
+                && ImmSetConversionStatus(context, IME_HIRAGANA, sentence) != 0
+                && ImmGetConversionStatus(context, &raw mut conversion, &raw mut sentence) != 0
+        };
+        // SAFETY: releasing the context taken above, once.
+        unsafe { ImmReleaseContext(hwnd, context) };
+        took && conversion & IME_HIRAGANA == IME_HIRAGANA
+    }
+
+    /// Where the window's input method was last told to put its composition
+    /// window, or `None` without an input context.
+    #[cfg(feature = "win32-ime-e2e")]
+    #[must_use]
+    pub fn composition_window(hwnd: Handle) -> Option<CompositionForm> {
+        // SAFETY: as in `open_hiragana`.
+        let context = unsafe { ImmGetContext(hwnd) };
+        if context.is_null() {
+            return None;
+        }
+        let mut form = CompositionForm::default();
+        // SAFETY: `form` is a live, initialised `COMPOSITIONFORM` the call
+        // writes into.
+        let read = unsafe { ImmGetCompositionWindow(context, &raw mut form) } != 0;
+        // SAFETY: releasing the context taken above, once.
+        unsafe { ImmReleaseContext(hwnd, context) };
+        read.then_some(form)
     }
 
     /// Whether the user has reversed the mouse wheel in Settings.
@@ -1794,6 +1941,133 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
          were {:?} and the sender said {:?}",
         session.names(),
         sender.lines()
+    );
+}
+
+/// A real input method's composition arrives as a pre-edit, its commit as
+/// text, and the end of the composition as an empty pre-edit.
+///
+/// Needs the Microsoft Japanese IME (`ja-JP` in the language list), which is why
+/// it is behind `win32-ime-e2e` and not in the suite CI runs; see `Cargo.toml`.
+/// It fails, rather than skipping, where the IME is missing: a test that passes
+/// on a machine that could not have run it is the trap this suite exists to
+/// avoid.
+///
+/// Typing `k` `a` in hiragana composes `か`. That is the pre-edit, with the
+/// input method's cursor after it (byte 3, since `か` is three bytes). Enter
+/// commits it: a `TextCommit` of `か` through `WM_CHAR`, and an empty pre-edit
+/// when the composition ends.
+#[cfg(feature = "win32-ime-e2e")]
+#[test]
+#[ignore = "needs the Japanese IME; see the win32-ime-e2e feature"]
+fn an_input_method_composition_is_a_pre_edit_and_its_result_a_commit() {
+    let mut session = Session::open();
+    let window = session.window("input method");
+    // Before any language switch: without it the Japanese IME is not activated
+    // for this thread at all. See `desktop::ThreadLocalInput`.
+    let _thread_local = desktop::ThreadLocalInput::enable();
+    session.foreground(window);
+    // After the foreground, for the reason the dead-key test gives.
+    let _layout = desktop::ThreadLayout::activate("00000411")
+        .expect("the Japanese layout loads where the Japanese IME is installed");
+    let hwnd = session.hwnd(window);
+    assert!(
+        desktop::open_hiragana(hwnd),
+        "the Japanese IME opened in hiragana mode on this window's input context"
+    );
+
+    // The caret area, which the backend hands the input method; read back
+    // through the input context, since nothing reports where the IME drew.
+    let area = PhysicalRect::new(40, 60, 8, 20);
+    session
+        .shell
+        .set_text_input_area(window, Some(area))
+        .expect("a live window takes a text input area");
+    let placed = desktop::composition_window(hwnd).expect("an input context");
+    assert_eq!(
+        (placed.position.x, placed.position.y),
+        (40, 60),
+        "the composition window was told to start at the caret area's corner: {placed:?}"
+    );
+    // Switching the thread to another input language can move the foreground
+    // while the system shows its language indicator, and taking it back
+    // re-syncs the thread to the user's own language. So: back to the
+    // foreground, then Japanese and the open IME once more, on top.
+    session.foreground(window);
+    let _again =
+        desktop::ThreadLayout::activate("00000411").expect("the Japanese layout is still loaded");
+    assert!(
+        desktop::open_hiragana(hwnd),
+        "the Japanese IME reopened in hiragana mode after the foreground was retaken"
+    );
+    session.settle();
+    session.take_names();
+
+    let mut sender = Sender::start();
+    sender.send(&format!("key {:#x}", scancode::K));
+    sender.send(&format!("key {:#x}", scancode::A));
+    sender.wait_for(&format!("sent \"key {:#x}\"", scancode::A));
+    session.pump_until("the composition", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::TextPreedit { text, .. } if text == "か"))
+    });
+    let preedit = session.events.iter().rev().find_map(|event| match event {
+        ShellEvent::TextPreedit { text, cursor, .. } if !text.is_empty() => {
+            Some((text.clone(), *cursor))
+        }
+        _ => None,
+    });
+    assert_eq!(
+        preedit,
+        Some(("か".to_owned(), Some("か".len()))),
+        "the composition and the cursor after it; the events were {:?}, the sender said {:?}",
+        session.names(),
+        sender.lines()
+    );
+    assert!(
+        !session.names().contains(&"TextCommit"),
+        "nothing is committed while composing: {:?}",
+        session.names()
+    );
+
+    session.events.clear();
+    sender.send(&format!("key {:#x}", scancode::ENTER));
+    session.pump_until("the commit and the end of the composition", |session| {
+        let committed = session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::TextCommit { .. }));
+        let ended = session.events.iter().any(
+            |event| matches!(event, ShellEvent::TextPreedit { text, cursor: None, .. } if text.is_empty()),
+        );
+        committed && ended
+    });
+    let committed: String = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::TextCommit { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        committed,
+        "か",
+        "Enter commits the composition as text: {:?}",
+        session.names()
+    );
+    let ends = session
+        .events
+        .iter()
+        .filter(|event| matches!(event, ShellEvent::TextPreedit { text, .. } if text.is_empty()))
+        .count();
+    assert_eq!(
+        ends,
+        1,
+        "one end, however many ways the IME says it: {:?}",
+        session.names()
     );
 }
 

@@ -97,7 +97,8 @@ pub(super) struct Shared {
     keying: Cell<f64>,
     /// How many UTF-16 units of pre-edit text the input method is holding.
     ///
-    /// Not surfaced — the seam has no pre-edit event — but `hasMarkedText` and
+    /// Not surfaced — this backend does not send
+    /// [`TextPreedit`](crate::ShellEvent::TextPreedit) yet — but `hasMarkedText` and
     /// `markedRange` are required reading for an input method to compose at all,
     /// and both are answers about this number.
     marked: Cell<usize>,

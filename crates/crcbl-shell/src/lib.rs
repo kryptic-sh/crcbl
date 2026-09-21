@@ -753,4 +753,35 @@ pub trait Shell: core::fmt::Debug {
     fn clipboard_readable(&self, window: WindowId) -> bool {
         self.caps().contains(ShellCaps::CLIPBOARD) && self.window_state(window).is_ok()
     }
+
+    /// Tells the input method where text is being entered, so it can put its
+    /// composition window and candidate list there instead of at a corner of the
+    /// screen.
+    ///
+    /// `area` is the text field's caret, or the line it sits on, in the
+    /// window's **client** device pixels; the candidate list opens beside it
+    /// without covering it. `None` hands placement back to the input method's
+    /// default. Call it when a field gains focus and whenever its caret moves.
+    /// A hint: the input method may place its windows elsewhere, and nothing
+    /// reports where they went.
+    ///
+    /// # A provided method, and a no-op where there is nothing to place
+    ///
+    /// Only a backend with an input method that draws its own windows has
+    /// anything to do here — Win32's IMM and TSF, a Wayland compositor's
+    /// `text-input-v3` cursor rectangle, AppKit's `firstRectForCharacterRange:`.
+    /// The default validates the handle and does nothing else, which is exactly
+    /// right for the rest.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] if the handle is stale.
+    fn set_text_input_area(
+        &mut self,
+        window: WindowId,
+        area: Option<PhysicalRect>,
+    ) -> Result<(), ShellError> {
+        let _ = area;
+        self.window_state(window).map(|_| ())
+    }
 }

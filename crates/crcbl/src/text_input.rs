@@ -42,10 +42,11 @@
 //! # IME
 //!
 //! A [`ShellEvent::TextCommit`] is an [`Edit::Insert`], so an input method's
-//! committed text lands like typing. **Pre-edit is not drawn**: the shell's
-//! seam has no pre-edit event — the AppKit backend records how much marked
-//! text an input method holds and surfaces none of it — so there is nothing
-//! to underline at the caret until that event exists.
+//! committed text lands like typing. **Pre-edit is not drawn**: the shell reports
+//! a composition in progress as [`ShellEvent::TextPreedit`] (the Win32 backend
+//! does; the AppKit backend records how much marked text an input method holds
+//! and surfaces none of it), and this field does not yet underline it at the
+//! caret or call `Shell::set_text_input_area`.
 
 use std::time::Duration;
 

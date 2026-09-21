@@ -209,11 +209,13 @@ impl LogicalPoint {
     }
 }
 
-/// An axis-aligned rectangle in the desktop's device-pixel coordinate space.
+/// An axis-aligned rectangle in device pixels.
 ///
-/// Used for monitor geometry, where the origin is the desktop origin rather
-/// than a window corner and coordinates can be negative (a monitor placed left
-/// of the primary one).
+/// Each use names its space. Monitor geometry is in the desktop's, where the
+/// origin is the desktop origin rather than a window corner and coordinates can
+/// be negative (a monitor placed left of the primary one);
+/// [`Shell::set_text_input_area`](crate::Shell::set_text_input_area) is in a
+/// window's client area.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct PhysicalRect {
     /// Left edge, in desktop device pixels.

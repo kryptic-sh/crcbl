@@ -244,6 +244,106 @@ pub(super) unsafe fn read_raw(l_param: Lparam) -> Option<RawReport> {
     }
 }
 
+/// The window's input context for the length of `use_it`, released after.
+///
+/// `None` when the thread has none, which is what a window without an input
+/// method looks like.
+fn with_input_context<T>(hwnd: Handle, use_it: impl FnOnce(Handle) -> T) -> Option<T> {
+    // SAFETY: `hwnd` is a live window of this shell, on its own thread.
+    let context = unsafe { ffi::ImmGetContext(hwnd) };
+    if context.is_null() {
+        return None;
+    }
+    let answer = use_it(context);
+    // SAFETY: the context this function took for this window, released once.
+    unsafe { ffi::ImmReleaseContext(hwnd, context) };
+    Some(answer)
+}
+
+/// The composition string in progress, as UTF-16 code units, and the input
+/// method's cursor within it as a code unit index.
+///
+/// Empty when there is no input context or nothing composed. Called from the
+/// window procedure, because the string belongs to the input context as it is
+/// during this message; see [`Preedit`](super::proc::Preedit).
+pub(super) fn composition(hwnd: Handle) -> (Vec<u16>, Option<usize>) {
+    with_input_context(hwnd, |context| {
+        // SAFETY: a null buffer with a zero size asks only for the size in
+        // bytes; a negative answer is an `IMM_ERROR_*`.
+        let bytes = unsafe {
+            ffi::ImmGetCompositionStringW(context, value::GCS_COMP_STR, ptr::null_mut(), 0)
+        };
+        let Ok(bytes) = usize::try_from(bytes) else {
+            return (Vec::new(), None);
+        };
+        let mut units = vec![0u16; bytes / size_of::<u16>()];
+        // SAFETY: `units` holds exactly `bytes` bytes, which is the size the
+        // call is told it may write.
+        let copied = unsafe {
+            ffi::ImmGetCompositionStringW(
+                context,
+                value::GCS_COMP_STR,
+                units.as_mut_ptr().cast(),
+                bytes as u32,
+            )
+        };
+        units.truncate(usize::try_from(copied).unwrap_or(0) / size_of::<u16>());
+        // SAFETY: `GCS_CURSORPOS` answers in the return value and writes
+        // nothing, so a null buffer is what it takes.
+        let cursor = unsafe {
+            ffi::ImmGetCompositionStringW(context, value::GCS_CURSOR_POS, ptr::null_mut(), 0)
+        };
+        (units, usize::try_from(cursor).ok())
+    })
+    .unwrap_or_default()
+}
+
+/// Puts the input method's composition window at `area`'s top-left and opens
+/// its candidate list beside `area` without covering it, or hands placement
+/// back to the input method with `None`.
+///
+/// Both forms are in client coordinates. The candidate list has no documented
+/// "default" style to return to, so `None` resets the composition window only;
+/// the next composition's candidate list opens where the input method chooses
+/// once no area is restated at its start.
+pub(super) fn place_ime(hwnd: Handle, area: Option<Rect>) {
+    with_input_context(hwnd, |context| {
+        let Some(area) = area else {
+            let form = ffi::CompositionForm {
+                dw_style: value::CFS_DEFAULT,
+                ..ffi::CompositionForm::default()
+            };
+            // SAFETY: a live, initialised form the call reads and does not
+            // retain, on this window's own context.
+            unsafe { ffi::ImmSetCompositionWindow(context, &raw const form) };
+            return;
+        };
+        let composition = ffi::CompositionForm {
+            dw_style: value::CFS_POINT,
+            pt_current_pos: Point {
+                x: area.left,
+                y: area.top,
+            },
+            rc_area: area,
+        };
+        let candidates = ffi::CandidateForm {
+            dw_index: 0,
+            dw_style: value::CFS_EXCLUDE,
+            pt_current_pos: Point {
+                x: area.left,
+                y: area.bottom,
+            },
+            rc_area: area,
+        };
+        // SAFETY: two live, initialised forms the calls read and do not
+        // retain, on this window's own context.
+        unsafe {
+            ffi::ImmSetCompositionWindow(context, &raw const composition);
+            ffi::ImmSetCandidateWindow(context, &raw const candidates);
+        }
+    });
+}
+
 /// A raw input device's interface path, which [`devices::DeviceTable`] keys
 /// ids by. `None` if the system will not say.
 fn device_name(device: Handle) -> Option<String> {
@@ -633,6 +733,7 @@ impl Win32Shell {
             | RawEvent::Destroyed { .. }
             | RawEvent::FilesDropped { .. }
             | RawEvent::MonitorsChanged
+            | RawEvent::Preedit { .. }
             | RawEvent::DeviceRemoved { .. } => {}
         }
     }
@@ -702,10 +803,12 @@ impl Win32Shell {
         self.queue_event(touch(phase, position));
     }
 
-    /// Drops every contact on `window`, which is being destroyed: its fingers
-    /// can send nothing more, and a later window must not inherit them.
-    pub(super) fn forget_contacts(&mut self, window: WindowId) {
+    /// Drops the input state kept for `window`, which is being destroyed: its
+    /// fingers and its composition can send nothing more, and a later window
+    /// must not inherit them.
+    pub(super) fn forget_input(&mut self, window: WindowId) {
         self.contacts.retain(|contact| contact.window != window);
+        self.preediting.retain(|&known| known != window);
     }
 
     /// A click's position, suppressed while the pointer is locked.

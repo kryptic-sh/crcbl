@@ -11,9 +11,9 @@ use crcbl_core::{EventTime, Pool, SurfaceTarget};
 
 use crate::{
     ClipboardContent, ClipboardOffer, ClipboardRequestId, CloseReply, CursorIcon, DisplayMode,
-    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalSize, PointerMode,
-    ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SizeConstraints,
-    WindowConfiguration, WindowDesc, WindowId, WindowState,
+    LogicalSize, MimeType, MonitorId, MonitorInfo, PhysicalPoint, PhysicalRect, PhysicalSize,
+    PointerMode, ReceivedMime, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SizeConstraints, WindowConfiguration, WindowDesc, WindowId, WindowState,
 };
 
 use super::TimeBase;
@@ -24,7 +24,7 @@ use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
 use super::input;
 use super::input::Contact;
-use super::keys::Utf16;
+use super::keys::{self, Utf16};
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
 use super::window;
@@ -182,6 +182,9 @@ pub struct Win32Shell {
     pub(super) devices: DeviceTable,
     /// Raw reports waiting for the key and button messages they produced.
     pub(super) attribution: Attribution,
+    /// The windows showing a pre-edit, so an input method that ends a
+    /// composition twice over reports it once.
+    pub(super) preediting: Vec<WindowId>,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
     /// The next [`ClipboardRequestId`], which is unique for the session.
@@ -287,6 +290,7 @@ impl Win32Shell {
             contacts: Vec::new(),
             devices: DeviceTable::default(),
             attribution: Attribution::default(),
+            preediting: Vec::new(),
             visibility: Visibility::default(),
             next_request: 1,
             caps: Self::latch_caps(raw_motion),
@@ -497,7 +501,7 @@ impl Win32Shell {
     /// dead keys, AltGr and an input method's commit all arrive. This loop did
     /// not call it, so `WM_CHAR` was never generated for a real keystroke: the
     /// `Char` branch of the window procedure, the surrogate reassembly in
-    /// [`keys`](super::keys) and every
+    /// [`keys`] and every
     /// [`TextCommit`](ShellEvent::TextCommit) were unreachable from a keyboard,
     /// and typing into a Crucible window on Windows produced no text at all.
     ///
@@ -790,7 +794,7 @@ impl Win32Shell {
                     if let Some(removed) = self.windows.remove(window.cast()) {
                         self.shared.forget(removed.key);
                         self.drop_clipboard_answers(window);
-                        self.forget_contacts(window);
+                        self.forget_input(window);
                         self.queue.push_back(ShellEvent::WindowDestroyed { window });
                     }
                 }
@@ -832,6 +836,34 @@ impl Win32Shell {
                             position,
                         });
                     }
+                }
+                RawEvent::Preedit { hwnd, millis } => {
+                    // Taken before anything can `continue`, for the reason the
+                    // drop payload is.
+                    let Some(preedit) = self.shared.take_preedit(hwnd) else {
+                        continue;
+                    };
+                    let Some(window) = window else { continue };
+                    let (text, cursor) = keys::preedit(&preedit.units, preedit.cursor);
+                    let showing = self.preediting.contains(&window);
+                    if text.is_empty() {
+                        // An input method ends a composition more than one way
+                        // at once — the string deleted to nothing, then the end
+                        // message — and one "no pre-edit" is the whole answer.
+                        if !showing {
+                            continue;
+                        }
+                        self.preediting.retain(|&known| known != window);
+                    } else if !showing {
+                        self.preediting.push(window);
+                    }
+                    let time = self.event_time(millis);
+                    self.queue.push_back(ShellEvent::TextPreedit {
+                        window,
+                        time,
+                        text,
+                        cursor,
+                    });
                 }
                 RawEvent::MonitorsChanged => {
                     self.monitors = self.enumerate_monitors();
@@ -959,9 +991,10 @@ impl Shell for Win32Shell {
     ///   which delivers an IME's committed string as `WM_CHAR` too. Both arrive
     ///   as [`TextCommit`](ShellEvent::TextCommit), surrogate pairs joined.
     ///   `win32_e2e`'s dead-key test proves the composition on a real desktop.
-    ///   What is **not** here, as on every backend, is a pre-edit: no
-    ///   composition string reaches the seam and the candidate window is not
-    ///   placed at the caret.
+    ///   The composition in progress is read from `WM_IME_COMPOSITION` and
+    ///   reported as [`TextPreedit`](ShellEvent::TextPreedit), and
+    ///   [`set_text_input_area`](Shell::set_text_input_area) places the input
+    ///   method's composition window and candidate list at the caret.
     /// * [`TOUCH`](ShellCaps::TOUCH) — `WM_POINTERDOWN`/`UPDATE`/`UP` for
     ///   `PT_TOUCH` pointers, with a capture change or a cancelled release as
     ///   [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled). The primary
@@ -1089,7 +1122,7 @@ impl Shell for Win32Shell {
             .ok_or_else(|| ShellError::invalid_window(window))?;
         self.shared.forget(removed.key);
         self.drop_clipboard_answers(window);
-        self.forget_contacts(window);
+        self.forget_input(window);
         // The pool entry is gone **before** the system call, deliberately:
         // `DestroyWindow` dispatches `WM_DESTROY` into the window procedure
         // synchronously, and the `RawEvent::Destroyed` that produces must not
@@ -1631,6 +1664,34 @@ impl Shell for Win32Shell {
             content,
         });
         Ok(request)
+    }
+
+    /// Places the input method's composition window at `area` and its
+    /// candidate list beside it, now and at the start of every composition.
+    ///
+    /// Restated at `WM_IME_STARTCOMPOSITION` from the recorded area because an
+    /// input method may reset a placement between compositions.
+    ///
+    /// # Errors
+    ///
+    /// [`ShellError::InvalidWindow`] for a stale handle.
+    fn set_text_input_area(
+        &mut self,
+        window: WindowId,
+        area: Option<PhysicalRect>,
+    ) -> Result<(), ShellError> {
+        let state = self.window(window)?;
+        let hwnd = state.raw();
+        let key = state.key;
+        let area = area.map(|area| ffi::Rect {
+            left: area.x,
+            top: area.y,
+            right: area.x.saturating_add_unsigned(area.width),
+            bottom: area.y.saturating_add_unsigned(area.height),
+        });
+        self.shared.set_input_area(key, area);
+        input::place_ime(hwnd, area);
+        Ok(())
     }
 }
 
