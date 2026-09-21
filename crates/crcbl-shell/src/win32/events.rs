@@ -513,6 +513,30 @@ mod tests {
                 unit: 0xDFAE,
                 millis: 1_600,
             },
+            // A tap that lands and lifts inside one pump: keeping only the
+            // latest state per contact would report a finger that was never
+            // down.
+            RawEvent::Touch {
+                hwnd: A,
+                pointer_id: 5,
+                phase: TouchPhase::Began,
+                position: Some((20, 30)),
+                millis: 1_700,
+            },
+            RawEvent::Touch {
+                hwnd: A,
+                pointer_id: 5,
+                phase: TouchPhase::Moved,
+                position: Some((21, 30)),
+                millis: 1_708,
+            },
+            RawEvent::Touch {
+                hwnd: A,
+                pointer_id: 5,
+                phase: TouchPhase::Ended,
+                position: Some((21, 30)),
+                millis: 1_716,
+            },
         ];
         for sample in samples {
             enqueue(&mut queue, sample);
