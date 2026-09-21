@@ -16238,52 +16238,6 @@ taken:
 - **Accept it** and treat "trigger it deliberately after anything lands near it"
   as the rule, which is what the file says today and what did not happen twice.
 
-## The private-item doc gate only ever runs on Linux
-
-`ci.yml`'s `rustdoc` job is `runs-on: ubuntu-latest`, so
-`cargo doc --document-private-items` compiles the Linux `cfg` and nothing else.
-`crcbl-shell`'s Win32 and AppKit halves are therefore uncovered by it, and they
-have rot the Linux run cannot see. Measured 2026-08-22 with the same flags plus
-`--target`, on the two targets that are installed here:
-
-- `x86_64-pc-windows-msvc`: 46 errors — 23 unresolved links and 23 redundant
-  explicit link targets.
-- `aarch64-apple-darwin`: 82 errors — 48 unresolved links, 26 redundant explicit
-  link targets, and 8 cases of public documentation linking a private item.
-
-Pre-existing rather than introduced: the Linux half was cleaned on 2026-08-22
-and these two were never in scope. **Both targets are installed locally, so this
-is fixable without a CI round trip** — the same reason the cross-target clippy
-checks exist.
-
-Two things make this bigger than the count suggests. The
-`redundant explicit link target` rows are a _consequence_ of fixing the others —
-Linux hit exactly one of those once a link resolved in its own scope — so the
-real total moves as work proceeds. And a doc gate added per target is a third
-and fourth rustdoc invocation in a job that already runs four; whether that
-belongs in the `rustdoc` job or alongside the cross-target clippy steps is a
-placement question nobody has answered.
-
-**The rest of the workspace was then measured too**, and the answer is clean in
-the only sense that matters here. Running the same flags over
-`--workspace --exclude crcbl-shell --exclude crcbl-webgpu`:
-`x86_64-pc-windows-msvc` reports 21 errors and **every one is in `crcbl-dx12`**;
-`aarch64-apple-darwin` reports 14 and **every one is in `crcbl-mtl`**. No other
-crate with platform-gated code has any.
-
-Both are lower bounds rather than totals — a failing `cargo doc` stops
-scheduling further units, so a crate after the first failure is never reached —
-but the attribution holds: the rot outside `crcbl-shell` is confined to the two
-**deferred** backends.
-
-**So it is deliberately not being fixed.** Cleaning docs on `crcbl-mtl` and
-`crcbl-dx12` is not a feature and would not break the deferral, but it buys
-nothing while nobody is reading or extending those crates, and the standing
-priority is gap-closing work on Vulkan and WebGPU. What it does decide is the
-shape of the gate: a **workspace-wide** cross-target doc job cannot go green
-until those two are cleaned, whereas a `-p crcbl-shell --target …` pair can.
-That is the cheap version and the one to add if this is picked up.
-
 ## What the scaffold's gate does not cover
 
 `crcbl new`'s template now hosts `crcbl::engine::Loop`, and the scaffold e2e
@@ -16586,32 +16540,15 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   the two obvious fixes are both wrong: coalescing loses the per-event timing
   `docs/plan/19-input.md`'s pattern evaluator is a function of, and dropping
   needs a "we are inside a modal loop" flag nobody else would consume.
-- **Refresh rate is a whole hertz, so 59.94 Hz reports as 60.**
-  `EnumDisplaySettingsW`'s `DEVMODEW::dmDisplayFrequency` is an integer, and
-  `MonitorInfo::refresh_millihertz` exists precisely because that rounding
-  matters to frame pacing. The exact figure is in `QueryDisplayConfig`'s
-  `DISPLAYCONFIG_RATIONAL` — worth closing now that frame pacing is real.
-  **Closed 2026-08-07**: `win32::monitors` now reads the exact rate from
-  `QueryDisplayConfig` (path walk → `DisplayConfigGetDeviceInfo` source name →
-  the target mode's `vSyncFreq`, `vSyncFreqDivider` applied), falling back to
-  the integer path when the walk cannot answer. The first CI run on
-  `windows-latest` caught the virtual-display case: the runner's desktop reports
-  a placeholder rational (1 mHz), which the exact path now refuses
-  (`MIN_PLAUSIBLE_REFRESH_MHZ`, so the seam's documented "0 = cannot determine"
-  is what such a display reports); the e2e's refresh band permits that zero.
-  **Observed on a physical display, 2026-09-21:** a windowed `sandbox` run on
-  the RX 7900 XTX desktop logged
-  `win32: exact refresh for \\.\DISPLAY1: 180000 mHz`, so the exact path ran,
-  and it agrees with the 180 Hz `Win32_VideoController` reports for that
-  2560x1440 display. **The fractional case, observed the same day:** with the
-  display switched temporarily to its 1920x1080 "59 Hz" mode (a non-persisted
-  `ChangeDisplaySettingsExW`, restored afterwards), the same run logged
-  `59940 mHz`, which is 60000/1001 Hz truncated to whole millihertz, while
-  `Win32_VideoController` and the integer `DEVMODEW` path say 59. So the exact
-  path carries a fractional rate through intact. No automated test covers it:
-  asserting it needs a mode switch on a physical display, which CI's virtual
-  display cannot do and a developer's desktop should not have done to it
-  unasked. The info line remains the only record of which path a machine took.
+- **No automated test covers the exact refresh rate on a physical display.**
+  `win32::monitors` reads it from `QueryDisplayConfig`, and on 2026-09-21 a
+  windowed `sandbox` run logged `180000 mHz` at 180 Hz and `59940 mHz` in a
+  temporarily switched 1920x1080 "59 Hz" mode, where the integer `DEVMODEW` path
+  says 59. Asserting it needs a mode switch on a physical display, which CI's
+  virtual display cannot do (it reports a placeholder 1 mHz that
+  `MIN_PLAUSIBLE_REFRESH_MHZ` refuses) and a developer's desktop should not have
+  done to it unasked. The `win32: exact refresh for …` info line is the only
+  record of which path a machine took.
 - **A window frozen during a user drag-resize is accepted, not fixed.** Windows
   runs its own modal loop between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, so
   no frame renders until the mouse is released. The usual fix — `SetTimer` plus
@@ -17872,14 +17809,17 @@ arithmetic (host-testable, and its tests run on any `cargo test`);
   side effect a HAL backend arguably should not have; nothing above the seam
   asked for it and nothing can turn it off.
 
-- **No `crcbl-shell` window has ever been handed to this backend.** The registry
-  half of this bullet closed — `crcbl`'s `backend` module opens
+- **No CI run hands a `crcbl-shell` window to this backend.** The registry half
+  of this bullet closed — `crcbl`'s `backend` module opens
   `crcbl_dx12::Dx12Instance` under `GpuBackend::Dx12`, registered and never
   automatic — and `SurfaceTarget::Offscreen` is built (a ring of plain
   `ID3D12Resource` textures, `SwapchainEntry::raw` `None`), which is what lets
   the WARP render step draw at all. What is still true is that every D3D12 run
   in CI is offscreen: nothing drives a real win32 window through it, so the
-  win32 shell e2e is not an end-to-end D3D12 path.
+  win32 shell e2e is not an end-to-end D3D12 path. By hand it has run: on
+  2026-09-15 every sample in `tools/run-samples-windowed.sh`'s table ran
+  windowed on `--backend dx12` on an RX 9060 XT desktop (see "What the Win32
+  backend has and has not been run against").
 
 ## Raised 2026-08-09 and not finished
 
@@ -17903,9 +17843,13 @@ docs/notes/simulation.md under its own heading.
   equivalent. Survivable because untrusted modules run server-side on native; a
   browser-hosted single-player game with mods has no containment. See
   `16-wasm-modules.md`.
-- **DXIL is validated by nothing.** `spirv-val` runs on the SPIR-V, the WGSL has
-  `crates/crcbl-shaders/tests/wgsl_validation.rs`, and the macOS leg compiles
-  every committed MSL artifact with `xcrun metal`; the DXIL alone is unchecked.
+- **DXIL gets structural validation and nothing more.** `spirv-val` runs on the
+  SPIR-V, the WGSL has `crates/crcbl-shaders/tests/wgsl_validation.rs`, the
+  macOS leg compiles every committed MSL artifact with `xcrun metal`, and
+  `tools/compile-shaders.sh`'s `require_signed_dxil` refuses any container
+  `libdxil` did not sign, which it signs only after its validator passes. What
+  no gate checks is the DXIL's meaning against the other targets'; see "The
+  differential render gate does not reach D3D12" below.
 - **L0's static trimesh/heightfield colliders do not exist.** `05-physics.md`
   puts them in L0 (MVP); the ROADMAP marks "P3 L0" done against a narrower list.
   towers demands them, and so does the character controller, which can only walk
@@ -17919,12 +17863,13 @@ docs/notes/simulation.md under its own heading.
   both synthesise deterministically from fixed seeds.
 - **Audio's transcendentals are unconstructed.** See "Audio's transcendentals
   and deny".
-- **`DeviceId` is per-kind on three backends of four** — Win32, X11 and AppKit —
-  which blocks the local-multiplayer device assignment `19-input.md` says is
-  supported "from day one". Wayland allocates one id per `wl_seat`
-  (`crates/crcbl-shell/src/wayland/mod.rs`), so a distinguishability test would
-  pass vacuously on three and have something to say on one; no such test exists
-  and nothing brings up a second seat.
+- **`DeviceId` is per-kind on two backends of four** — X11 and AppKit — which
+  blocks the local-multiplayer device assignment `19-input.md` says is supported
+  "from day one". Wayland allocates one id per `wl_seat`
+  (`crates/crcbl-shell/src/wayland/mod.rs`) and Win32 one per physical device
+  (`win32::devices`, since 2026-09-21), so a distinguishability test would pass
+  vacuously on two. No such test exists: nothing brings up a second seat, and no
+  desk here has two keyboards or mice.
 - **`21-jobs.md`'s threaded-wasm finding is reproducible again** since
   `rust-src` was installed on `nightly-2026-07-02` (2026-08-22). Re-verified by
   running finding 1's build; the P5B entry above carries the command, its
