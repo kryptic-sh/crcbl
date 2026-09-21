@@ -740,8 +740,9 @@ pub struct RawInputHeader {
     pub dw_type: u32,
     /// Size of the whole `RAWINPUT` this heads.
     pub dw_size: u32,
-    /// The device that produced it. Not used here; see
-    /// [`input`](super::input) on why device ids are constants.
+    /// The device that produced it, or null for injected input. What a
+    /// [`DeviceId`](crcbl_core::input::DeviceId) is resolved from; see
+    /// [`devices`](super::devices).
     pub h_device: Handle,
     /// The `wParam` of the `WM_INPUT` that carried it.
     pub w_param: Wparam,
@@ -770,8 +771,11 @@ pub struct RawMouse {
     pub us_flags: u16,
     /// The union's alignment padding.
     pub padding: u16,
-    /// Button transitions. Not read: the button *messages* carry position and
-    /// ordering, and raw button edges would double every click.
+    /// `usButtonFlags` in the low half — the `RI_MOUSE_*` edges this report
+    /// carries — and `usButtonData`, the wheel delta, in the high half. Not
+    /// turned into events: the button *messages* carry position and ordering,
+    /// and raw edges would double every click. Read only to say which device a
+    /// button message came from.
     pub ul_buttons: u32,
     /// Raw button state, likewise unread.
     pub ul_raw_buttons: u32,
@@ -784,20 +788,62 @@ pub struct RawMouse {
     pub ul_extra_information: u32,
 }
 
-/// `RAWINPUT`, narrowed to its mouse arm.
-///
-/// The real structure's tail is a union of `RAWMOUSE`, `RAWKEYBOARD` and
-/// `RAWHID`, and `RAWMOUSE` is the largest of the two fixed-size arms — this
-/// backend registers only the mouse usage, so nothing else can arrive. The
-/// [`header`](Self::header)'s `dwType` is checked before the mouse arm is read,
-/// which is what makes narrowing it sound rather than hopeful.
+/// `RAWKEYBOARD`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+pub struct RawKeyboard {
+    /// The set 1 scan code, without its prefix — see
+    /// [`flags`](Self::flags).
+    pub make_code: u16,
+    /// `RI_KEY_BREAK` for a release, `RI_KEY_E0`/`RI_KEY_E1` for a prefix.
+    pub flags: u16,
+    /// Reserved.
+    pub reserved: u16,
+    /// The virtual key. Not read: the key *message* is what names the symbol.
+    pub v_key: u16,
+    /// The legacy message this report corresponds to.
+    pub message: u32,
+    /// Driver-supplied extra information.
+    pub extra_information: u32,
+}
+
+/// The tail of `RAWINPUT`, narrowed to the two arms this backend registers.
+///
+/// `RAWHID` is the third arm and variable-length; no HID usage other than the
+/// generic mouse and keyboard is registered, so it cannot arrive.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub union RawInputData {
+    /// Valid when the header's `dwType` is `RIM_TYPEMOUSE`.
+    pub mouse: RawMouse,
+    /// Valid when the header's `dwType` is `RIM_TYPEKEYBOARD`.
+    pub keyboard: RawKeyboard,
+}
+
+/// `RAWINPUT`.
+///
+/// The [`header`](Self::header)'s `dwType` is checked before either arm of
+/// [`data`](Self::data) is read, which is what makes the union sound rather than
+/// hopeful. [`Default`] initializes the larger arm, so every byte of the smaller
+/// one is initialized too.
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct RawInput {
     /// Type, size and source device.
     pub header: RawInputHeader,
-    /// Valid only when `header.dw_type` is `RIM_TYPE_MOUSE`.
-    pub mouse: RawMouse,
+    /// The report, as the header's type says.
+    pub data: RawInputData,
+}
+
+impl Default for RawInput {
+    fn default() -> Self {
+        Self {
+            header: RawInputHeader::default(),
+            data: RawInputData {
+                mouse: RawMouse::default(),
+            },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -870,6 +916,9 @@ pub mod msg {
     pub const NC_CREATE: u32 = 0x0081;
     /// `WM_NCDESTROY`.
     pub const NC_DESTROY: u32 = 0x0082;
+    /// `WM_INPUT_DEVICE_CHANGE` — a raw input device arrived or left. `lParam`
+    /// is its handle, `wParam` says which.
+    pub const INPUT_DEVICE_CHANGE: u32 = 0x00FE;
     /// `WM_INPUT` — a raw input report.
     pub const INPUT: u32 = 0x00FF;
     /// `WM_KEYDOWN`.
@@ -1171,11 +1220,44 @@ pub mod value {
     pub const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
     /// `HID_USAGE_GENERIC_MOUSE`.
     pub const HID_USAGE_GENERIC_MOUSE: u16 = 0x02;
+    /// `HID_USAGE_GENERIC_KEYBOARD`.
+    pub const HID_USAGE_GENERIC_KEYBOARD: u16 = 0x06;
+    /// `RIDEV_DEVNOTIFY` — deliver `WM_INPUT_DEVICE_CHANGE` when a device of
+    /// this usage arrives or leaves.
+    pub const RIDEV_DEV_NOTIFY: u32 = 0x0000_2000;
     /// `RID_INPUT` — ask `GetRawInputData` for the report rather than its
     /// header.
     pub const RID_INPUT: u32 = 0x1000_0003;
+    /// `RIDI_DEVICENAME` — ask `GetRawInputDeviceInfoW` for the device's
+    /// interface path, which outlives the handle across a replug.
+    pub const RIDI_DEVICE_NAME: u32 = 0x2000_0007;
     /// `RIM_TYPEMOUSE`.
     pub const RIM_TYPE_MOUSE: u32 = 0;
+    /// `RIM_TYPEKEYBOARD`.
+    pub const RIM_TYPE_KEYBOARD: u32 = 1;
+    /// `RI_KEY_BREAK` — the report is a release.
+    pub const RI_KEY_BREAK: u16 = 0x0001;
+    /// `RI_KEY_E0` — the scan code carries the `E0` prefix.
+    pub const RI_KEY_E0: u16 = 0x0002;
+    /// `RI_KEY_E1` — the scan code carries the `E1` prefix (Pause alone).
+    pub const RI_KEY_E1: u16 = 0x0004;
+    /// `RI_MOUSE_LEFT_BUTTON_DOWN`; each button's up edge is the next bit.
+    pub const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+    /// `RI_MOUSE_RIGHT_BUTTON_DOWN`.
+    pub const RI_MOUSE_RIGHT_BUTTON_DOWN: u16 = 0x0004;
+    /// `RI_MOUSE_MIDDLE_BUTTON_DOWN`.
+    pub const RI_MOUSE_MIDDLE_BUTTON_DOWN: u16 = 0x0010;
+    /// `RI_MOUSE_BUTTON_4_DOWN` — `XBUTTON1`, "back".
+    pub const RI_MOUSE_BUTTON_4_DOWN: u16 = 0x0040;
+    /// `RI_MOUSE_BUTTON_5_DOWN` — `XBUTTON2`, "forward".
+    pub const RI_MOUSE_BUTTON_5_DOWN: u16 = 0x0100;
+    /// `RI_MOUSE_WHEEL`.
+    pub const RI_MOUSE_WHEEL: u16 = 0x0400;
+    /// `RI_MOUSE_HWHEEL`.
+    pub const RI_MOUSE_H_WHEEL: u16 = 0x0800;
+    /// `GIDC_REMOVAL` — the `wParam` of a `WM_INPUT_DEVICE_CHANGE` for a device
+    /// that left.
+    pub const GIDC_REMOVAL: usize = 2;
     /// `MOUSE_MOVE_ABSOLUTE` — the report carries a *position*, not a delta.
     ///
     /// Set by a remote-desktop session, a tablet and some virtual machines. A
@@ -1445,6 +1527,14 @@ unsafe extern "system" {
         size: *mut u32,
         header_size: u32,
     ) -> u32;
+    // With `RIDI_DEVICENAME`, `size` is in **characters**, not bytes, and a
+    // null `data` asks for the length the name needs.
+    pub fn GetRawInputDeviceInfoW(
+        device: Handle,
+        command: u32,
+        data: *mut c_void,
+        size: *mut u32,
+    ) -> u32;
     pub fn GetSystemMetrics(index: i32) -> i32;
     // The clipboard. `OpenClipboard` **fails while another process has it
     // open**, which is routine rather than exceptional, so every one of these
@@ -1642,8 +1732,11 @@ mod tests {
         assert_eq!(core::mem::offset_of!(RawMouse, l_last_x), 12);
         assert_eq!(core::mem::offset_of!(RawMouse, l_last_y), 16);
         assert_eq!(size_of::<RawInputHeader>(), 24);
+        assert_eq!(size_of::<RawKeyboard>(), 16);
+        assert_eq!(core::mem::offset_of!(RawKeyboard, message), 8);
+        assert!(size_of::<RawKeyboard>() <= size_of::<RawMouse>());
         assert_eq!(size_of::<RawInput>(), 48);
-        assert_eq!(core::mem::offset_of!(RawInput, mouse), 24);
+        assert_eq!(core::mem::offset_of!(RawInput, data), 24);
 
         // The one a *test* writes rather than reads. A wrong length here puts
         // the file list where `DragQueryFileW` does not look, and the drop test

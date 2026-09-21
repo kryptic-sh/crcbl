@@ -78,30 +78,27 @@ use crate::{
     CursorIcon, PhysicalPoint, PhysicalSize, PointerMode, ShellError, ShellEvent, WindowId,
 };
 
+use super::devices::{self, POINTER_DEVICE, TOUCH_DEVICE};
 use super::events::RawEvent;
 use super::ffi::{
-    self, Handle, Lparam, Point, RawInput, RawInputDevice, RawMouse, Rect, TrackMouse, value,
+    self, Handle, Lparam, Point, RawInput, RawInputDevice, RawKeyboard, RawMouse, Rect, TrackMouse,
+    value,
 };
 use super::keys;
 use super::pointer::{self, RawMotion, Show};
 use super::proc::{Shape, Shared};
 use super::shell::Win32Shell;
 
-/// Which keyboard and pointer an event came from.
-///
-/// Constants rather than a table, and the same admission the X11 backend makes:
-/// [`DeviceId`] exists so the P2 action layer can
-/// tell two mice apart, and on this backend it cannot yet. Raw input *does*
-/// carry a per-device `hDevice`, which is more than core X11 offers — turning it
-/// into a stable [`DeviceId`] needs a handle table
-/// and a hotplug story (`WM_INPUT_DEVICE_CHANGE`), and that is a slice of its
-/// own. `docs/backlog.md` carries it.
-pub(super) const KEYBOARD_DEVICE: DeviceId = DeviceId(1);
-/// See [`KEYBOARD_DEVICE`].
-pub(super) const POINTER_DEVICE: DeviceId = DeviceId(2);
-/// See [`KEYBOARD_DEVICE`]. Every touchscreen shares it; the contact id is what
-/// tells fingers apart.
-pub(super) const TOUCH_DEVICE: DeviceId = DeviceId(3);
+/// One raw input report, as far as this backend reads it.
+pub(super) enum RawReport {
+    /// A mouse report, and the device that sent it.
+    Mouse { device: Handle, mouse: RawMouse },
+    /// A keyboard report, and the device that sent it.
+    Keyboard {
+        device: Handle,
+        keyboard: RawKeyboard,
+    },
+}
 
 /// A touch contact that is down, and where it was last seen.
 ///
@@ -109,7 +106,7 @@ pub(super) const TOUCH_DEVICE: DeviceId = DeviceId(3);
 /// reported where the finger was, and so a contact this shell never saw land —
 /// one that began before the window existed — never reaches the consumer as a
 /// `Moved` or an `Ended` with no `Began`, which
-/// [`TouchPhase::Began`](crcbl_core::input::TouchPhase::Began) promises cannot
+/// [`TouchPhase::Began`] promises cannot
 /// happen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Contact {
@@ -147,56 +144,75 @@ fn unshifted(character: char) -> char {
     }
 }
 
-/// Registers the mouse for raw input, once per process.
+/// Registers one generic-desktop usage for raw input, answering whether the
+/// system accepted it.
 ///
-/// Returns whether the registration succeeded, which is what
+/// No `RIDEV_INPUTSINK`: reports should stop when another application has the
+/// keyboard, which is what a null target gives. No `RIDEV_NOLEGACY` either: the
+/// legacy messages stay the source of every key and button event, and the raw
+/// report only says which device sent it — see [`devices`].
+/// `RIDEV_DEVNOTIFY` asks for `WM_INPUT_DEVICE_CHANGE`, which is how a removed
+/// device's handle is forgotten before Windows reuses it.
+fn register(usage: u16, what: &str) -> bool {
+    let device = RawInputDevice {
+        us_usage_page: value::HID_USAGE_PAGE_GENERIC,
+        us_usage: usage,
+        dw_flags: value::RIDEV_DEV_NOTIFY,
+        hwnd_target: ptr::null_mut(),
+    };
+    // SAFETY: `device` is a fully initialised `RAWINPUTDEVICE` that outlives the
+    // call — the system copies the registration — and the size argument is the
+    // array element's own size, which the call validates.
+    let ok = unsafe {
+        ffi::RegisterRawInputDevices(&raw const device, 1, size_of::<RawInputDevice>() as u32)
+    };
+    if ok == 0 {
+        // SAFETY: reads this thread's last error code, set by the call above.
+        let error = unsafe { ffi::GetLastError() };
+        crcbl_core::log::warn!(
+            "RegisterRawInputDevices for the {what} failed with Win32 error {error}"
+        );
+        return false;
+    }
+    crcbl_core::log::debug!("raw {what} input is registered for this process");
+    true
+}
+
+/// Registers the mouse and the keyboard for raw input, once per process.
+///
+/// Returns whether the **mouse** registration succeeded, which is what
 /// [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION) is latched from:
-/// a shell that could not register it must not claim to deliver it.
+/// a shell that could not register it must not claim to deliver it. The
+/// keyboard registration only names devices, so a refusal costs keys their
+/// device and nothing else: they fall back to
+/// [`KEYBOARD_DEVICE`](devices::KEYBOARD_DEVICE).
 pub(super) fn register_raw_input() -> bool {
     *RAW_INPUT.get_or_init(|| {
-        let device = RawInputDevice {
-            us_usage_page: value::HID_USAGE_PAGE_GENERIC,
-            us_usage: value::HID_USAGE_GENERIC_MOUSE,
-            // No `RIDEV_INPUTSINK`: reports should stop when another
-            // application has the keyboard, which is what a null target gives.
-            dw_flags: 0,
-            hwnd_target: ptr::null_mut(),
-        };
-        // SAFETY: `device` is a fully initialised `RAWINPUTDEVICE` that outlives
-        // the call — the system copies the registration — and the size argument
-        // is the array element's own size, which the call validates.
-        let ok = unsafe {
-            ffi::RegisterRawInputDevices(&raw const device, 1, size_of::<RawInputDevice>() as u32)
-        };
-        if ok == 0 {
-            // SAFETY: reads this thread's last error code, set by the call
-            // above.
-            let error = unsafe { ffi::GetLastError() };
+        let mouse = register(value::HID_USAGE_GENERIC_MOUSE, "mouse");
+        if !mouse {
             crcbl_core::log::warn!(
-                "RegisterRawInputDevices for the mouse failed with Win32 error {error}; \
-                 relative pointer motion will not be reported and RAW_POINTER_MOTION is clear"
+                "relative pointer motion will not be reported and RAW_POINTER_MOTION is clear"
             );
-            return false;
         }
-        crcbl_core::log::debug!("raw mouse input is registered for this process");
-        true
+        register(value::HID_USAGE_GENERIC_KEYBOARD, "keyboard");
+        mouse
     })
 }
 
-/// The `RAWMOUSE` a `WM_INPUT` carried, if it carried one.
+/// The report a `WM_INPUT` carried, if it is a mouse or keyboard one.
 ///
 /// # Safety
 ///
 /// `l_param` must be the `HRAWINPUT` of a `WM_INPUT` currently being processed,
 /// which is the only thing `GetRawInputData` accepts.
-pub(super) unsafe fn read_raw_mouse(l_param: Lparam) -> Option<RawMouse> {
+pub(super) unsafe fn read_raw(l_param: Lparam) -> Option<RawReport> {
     let mut report = RawInput::default();
     let mut size = size_of::<RawInput>() as u32;
     // SAFETY: the caller guarantees the handle; `report` is a live, initialised
     // buffer of exactly `size` bytes, and `header_size` is the header's own size
     // as the call requires. A report larger than our buffer — impossible for the
-    // mouse usage, which is the only one registered — returns `u32::MAX` rather
-    // than overrunning.
+    // mouse and keyboard usages, the only ones registered — returns `u32::MAX`
+    // rather than overrunning.
     let written = unsafe {
         ffi::GetRawInputData(
             l_param as Handle,
@@ -209,12 +225,59 @@ pub(super) unsafe fn read_raw_mouse(l_param: Lparam) -> Option<RawMouse> {
     if written == u32::MAX || written == 0 {
         return None;
     }
-    // Checked rather than assumed: only the mouse usage is registered, but the
-    // mouse arm of the union is not what a keyboard report would have put there.
-    if report.header.dw_type != value::RIM_TYPE_MOUSE {
+    let device = report.header.h_device;
+    // The header's type decides which arm the system wrote, and both arms are
+    // plain integers that `RawInput::default` initialised in full, so reading
+    // the one the type names is sound.
+    match report.header.dw_type {
+        value::RIM_TYPE_MOUSE => Some(RawReport::Mouse {
+            device,
+            // SAFETY: the header says the mouse arm was written.
+            mouse: unsafe { report.data.mouse },
+        }),
+        value::RIM_TYPE_KEYBOARD => Some(RawReport::Keyboard {
+            device,
+            // SAFETY: the header says the keyboard arm was written.
+            keyboard: unsafe { report.data.keyboard },
+        }),
+        _ => None,
+    }
+}
+
+/// A raw input device's interface path, which [`devices::DeviceTable`] keys
+/// ids by. `None` if the system will not say.
+fn device_name(device: Handle) -> Option<String> {
+    let mut length = 0u32;
+    // SAFETY: a null buffer with a zero length asks only for the length the
+    // name needs, in characters, which the call writes to `length`.
+    unsafe {
+        ffi::GetRawInputDeviceInfoW(
+            device,
+            value::RIDI_DEVICE_NAME,
+            ptr::null_mut(),
+            &raw mut length,
+        )
+    };
+    if length == 0 {
         return None;
     }
-    Some(report.mouse)
+    let mut name = vec![0u16; length as usize];
+    // SAFETY: `name` holds exactly `length` characters, which is what `length`
+    // tells the call it may write.
+    let written = unsafe {
+        ffi::GetRawInputDeviceInfoW(
+            device,
+            value::RIDI_DEVICE_NAME,
+            name.as_mut_ptr().cast(),
+            &raw mut length,
+        )
+    };
+    if written == u32::MAX || written == 0 {
+        return None;
+    }
+    name.truncate(written as usize);
+    let name = String::from_utf16_lossy(&name);
+    Some(name.trim_end_matches('\0').to_owned())
 }
 
 /// Asks for one `WM_MOUSELEAVE` for this window.
@@ -395,9 +458,10 @@ impl Win32Shell {
             } => {
                 let time = self.event_time(millis);
                 let key_code = keys::key_code(scancode);
+                let device = self.attribution.key(scancode, state, millis);
                 self.queue_event(ShellEvent::Key {
                     window,
-                    device: KEYBOARD_DEVICE,
+                    device,
                     time,
                     scancode: Scancode(scancode),
                     key_code,
@@ -438,7 +502,7 @@ impl Win32Shell {
                 }
                 self.queue_event(ShellEvent::PointerMotion {
                     window,
-                    device: POINTER_DEVICE,
+                    device: self.attribution.pointer(),
                     time,
                     abs: Some(PhysicalPoint::new(f64::from(x), f64::from(y))),
                     // `WM_MOUSEMOVE` is accelerated and clipped, so it is never
@@ -457,7 +521,7 @@ impl Win32Shell {
                 let time = self.event_time(millis);
                 self.queue_event(ShellEvent::PointerFocus {
                     window,
-                    device: POINTER_DEVICE,
+                    device: self.attribution.pointer(),
                     time,
                     entered,
                     position: entered.then(|| PhysicalPoint::new(f64::from(x), f64::from(y))),
@@ -473,9 +537,10 @@ impl Win32Shell {
                 ..
             } => {
                 let time = self.event_time(millis);
+                let device = self.attribution.button(button, state, millis);
                 self.queue_event(ShellEvent::Button {
                     window,
-                    device: POINTER_DEVICE,
+                    device,
                     time,
                     button,
                     state,
@@ -493,9 +558,10 @@ impl Win32Shell {
                 ..
             } => {
                 let time = self.event_time(millis);
+                let device = self.attribution.wheel(horizontal, millis);
                 self.queue_event(ShellEvent::Wheel {
                     window,
-                    device: POINTER_DEVICE,
+                    device,
                     time,
                     delta: pointer::wheel(horizontal, ticks),
                     position: self.position_or_none(window, x, y),
@@ -511,14 +577,34 @@ impl Win32Shell {
                 ..
             } => self.translate_touch(window, pointer_id, phase, position, millis),
 
-            RawEvent::RawMotion {
+            RawEvent::RawKey {
+                device,
+                make_code,
                 flags,
+                millis,
+                ..
+            } => {
+                let device = self.device_id(device);
+                if let Some(scancode) = devices::raw_scancode(make_code, flags) {
+                    let pressed = flags & value::RI_KEY_BREAK == 0;
+                    self.attribution.raw_key(scancode, pressed, device, millis);
+                }
+            }
+
+            RawEvent::RawMotion {
+                device,
+                flags,
+                buttons,
                 x,
                 y,
                 millis,
                 ..
             } => {
                 let time = self.event_time(millis);
+                // Recorded before anything can return: a report with button
+                // edges and no motion still names the device of those clicks.
+                let device = self.device_id(device);
+                self.attribution.raw_mouse(buttons, device, millis);
                 let screen = absolute_screen(flags);
                 let Some(delta) = self.raw_motion.delta(flags, x, y, screen) else {
                     return;
@@ -526,7 +612,8 @@ impl Win32Shell {
                 let locked = self.pointer_mode_of(window) == PointerMode::Locked;
                 self.queue_event(ShellEvent::PointerMotion {
                     window,
-                    device: POINTER_DEVICE,
+                    // The report's own device, exactly: no matching involved.
+                    device: device.unwrap_or(POINTER_DEVICE),
                     time,
                     abs: if locked {
                         None
@@ -545,8 +632,16 @@ impl Win32Shell {
             | RawEvent::CloseRequested { .. }
             | RawEvent::Destroyed { .. }
             | RawEvent::FilesDropped { .. }
-            | RawEvent::MonitorsChanged => {}
+            | RawEvent::MonitorsChanged
+            | RawEvent::DeviceRemoved { .. } => {}
         }
+    }
+
+    /// The id of the device behind a raw report's `hDevice`, or `None` for
+    /// injected input.
+    fn device_id(&mut self, handle: isize) -> Option<DeviceId> {
+        self.devices
+            .resolve(handle, || device_name(handle as Handle))
     }
 
     /// One touch message as a [`ShellEvent::Touch`], keeping [`Contact`]s in

@@ -109,7 +109,7 @@ use super::ffi::{
 #[cfg(target_os = "windows")]
 use super::geometry;
 #[cfg(target_os = "windows")]
-use super::input;
+use super::input::{self, RawReport};
 #[cfg(target_os = "windows")]
 use super::{keys, pointer};
 #[cfg(target_os = "windows")]
@@ -755,17 +755,39 @@ pub(super) unsafe extern "system" fn window_proc(
             // SAFETY: for `WM_INPUT` the system documents `l_param` as an
             // `HRAWINPUT` handle valid for the duration of this message, which
             // is exactly what `GetRawInputData` takes.
-            if let Some(mouse) = unsafe { input::read_raw_mouse(l_param) } {
-                shared.push(RawEvent::RawMotion {
+            match unsafe { input::read_raw(l_param) } {
+                Some(RawReport::Mouse { device, mouse }) => shared.push(RawEvent::RawMotion {
                     hwnd: window,
+                    device: device as isize,
                     flags: mouse.us_flags,
+                    // The low half of the button word is `usButtonFlags`.
+                    buttons: low_word(mouse.ul_buttons as usize) as u16,
                     x: mouse.l_last_x,
                     y: mouse.l_last_y,
                     millis,
-                });
+                }),
+                Some(RawReport::Keyboard { device, keyboard }) => {
+                    shared.push(RawEvent::RawKey {
+                        hwnd: window,
+                        device: device as isize,
+                        make_code: keyboard.make_code,
+                        flags: keyboard.flags,
+                        millis,
+                    });
+                }
+                None => {}
             }
             // `WM_INPUT` must reach the default handler even when it was read:
             // that is what releases the report's buffer.
+            default()
+        }
+
+        // Only the removal matters: an arriving device is named by its first
+        // report. Forwarded because the default handler owns the rest.
+        msg::INPUT_DEVICE_CHANGE => {
+            if w_param == value::GIDC_REMOVAL {
+                shared.push(RawEvent::DeviceRemoved { device: l_param });
+            }
             default()
         }
 

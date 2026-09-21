@@ -16439,13 +16439,14 @@ After both fixes: **48 of 48** under the harness (16 e2e plus the 32 in-crate
 `win32::shell::tests`, the three pointer-clip tests included), and the ordinary
 sweep's **279 of 279**.
 
-**One unexplained failure, not reproduced:**
-`a_second_injected_press_of_a_held_key_produces_no_second_event` failed once in
-the first full run and passed on each of its three reruns alone, and in two
-later full runs. The sender's log showed `down 30`, `down 30`, `up 30` all sent
-with the foreground on the test window, so this is not the focus flake. Not
-diagnosed; if it recurs, capture the actual event list the assertion compared,
-which its message does not print.
+**One failure, since explained:** the held-key test (then
+`a_second_injected_press_of_a_held_key_produces_no_second_event`) failed once in
+the first full run. The per-device id work later showed that Windows reports a
+second injected down of a held key as an auto-repeat whenever a raw keyboard
+registration is active, and drops it otherwise (ten of ten each way). The likely
+cause of that one run is another program on the desktop registering raw keyboard
+input; not verified. The test now accepts either system answer and is renamed
+`a_second_injected_press_of_a_held_key_is_never_a_fresh_press`.
 
 Still true after this run: the input was all injected, since nothing typed on a
 real keyboard is part of any test, and the IME and real drag cases above are
@@ -16481,8 +16482,8 @@ absolute raw device, and another process contending for the clipboard.
 `win32_e2e` injects contacts with `InitializeTouchInjection`/`InjectTouchInput`
 from the sender process. The machine it passed on has **no touchscreen**
 (`SM_DIGITIZER` and `SM_MAXIMUMTOUCHES` both 0), so injection needs no
-digitizer. Whether CI's `windows-latest` image allows it is answered by the
-first `win32 e2e (real desktop)` run that includes these tests.
+digitizer. CI's `windows-latest` image allows it too: `win32 e2e (real desktop)`
+passed with both touch tests on `fb4266c0` (run 35596202377).
 
 - **A pinch is promoted to a synthesized Ctrl key, so secondary contacts are
   kept from `DefWindowProc`.** With every pointer message passed to the default
@@ -16551,11 +16552,15 @@ first `win32 e2e (real desktop)` run that includes these tests.
   run here, because no East Asian IME was installed. Still owed: a pre-edit
   event on the seam (no backend has one), and placing the candidate window at
   the caret (`ImmSetCompositionWindow`).
-- **`DeviceId` names a device kind, not a device.** Windows is better placed to
-  fix this than X11 is — `RAWINPUTHEADER::hDevice` identifies the physical
-  device on every `WM_INPUT` — but turning a handle into a stable `DeviceId`
-  needs a handle table and a hotplug story, and raw input would have to become
-  the source of button and wheel events too rather than only of motion.
+- **Per-device ids: what is not verified.** `win32::devices` attributes each
+  key, button and wheel message to the raw report that produced it, and keys ids
+  by interface path. Unit tests cover the matching and the table; the hands-on
+  check covers one real keyboard against one real mouse. Not verified: **two
+  devices of the same kind** (no desk here has two mice or keyboards), the
+  `WM_INPUT_DEVICE_CHANGE` removal path and a replug keeping its id, and how a
+  keyboard's own mouse collection (the MonsGeek exposes one) is reported. Touch
+  keeps its constant (`devices::TOUCH_DEVICE`): `WM_POINTER*` does not name the
+  digitizer, and `GetPointerInfo`'s `sourceDevice` could be the way to fix that.
 - **A modal drag-resize accumulates raw motion.** `WM_INPUT` keeps arriving
   while Windows runs its own message loop, so a three-second edge drag delivers
   a few thousand `PointerMotion` events in one `pump`. Bounded, not a leak, and

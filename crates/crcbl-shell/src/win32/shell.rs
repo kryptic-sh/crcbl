@@ -18,6 +18,7 @@ use crate::{
 
 use super::TimeBase;
 use super::clipboard::{self, Clipboard, Opened};
+use super::devices::{Attribution, DeviceTable};
 use super::events::RawEvent;
 use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
@@ -176,6 +177,11 @@ pub struct Win32Shell {
     pub(super) raw_motion: RawMotion,
     /// Every touch contact currently down, with where it was last seen.
     pub(super) contacts: Vec<Contact>,
+    /// Raw input handles and the stable [`DeviceId`](crcbl_core::input::DeviceId)s
+    /// behind them.
+    pub(super) devices: DeviceTable,
+    /// Raw reports waiting for the key and button messages they produced.
+    pub(super) attribution: Attribution,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
     /// The next [`ClipboardRequestId`], which is unique for the session.
@@ -279,6 +285,8 @@ impl Win32Shell {
             text: Utf16::default(),
             raw_motion: RawMotion::default(),
             contacts: Vec::new(),
+            devices: DeviceTable::default(),
+            attribution: Attribution::default(),
             visibility: Visibility::default(),
             next_request: 1,
             caps: Self::latch_caps(raw_motion),
@@ -829,6 +837,7 @@ impl Win32Shell {
                     self.monitors = self.enumerate_monitors();
                     self.queue.push_back(ShellEvent::MonitorsChanged);
                 }
+                RawEvent::DeviceRemoved { device } => self.devices.remove(device),
 
                 // The input half, which needs the layout, the modifier snapshot
                 // and this shell's own surrogate and raw-motion state — see
@@ -840,7 +849,8 @@ impl Win32Shell {
                 | RawEvent::Button { .. }
                 | RawEvent::Wheel { .. }
                 | RawEvent::Touch { .. }
-                | RawEvent::RawMotion { .. }) => self.translate_input(input_event, window),
+                | RawEvent::RawMotion { .. }
+                | RawEvent::RawKey { .. }) => self.translate_input(input_event, window),
             }
         }
     }

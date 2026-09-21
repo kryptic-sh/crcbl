@@ -10,7 +10,8 @@
 //! from another process, a hand-built `DROPFILES`, `InjectTouchInput`. This
 //! program covers what injection cannot reach: a real keyboard's `lParam`, the
 //! driver's typematic repeat, a physical wheel detent, raw motion from a real
-//! mouse, and a drag the shell itself starts from Explorer.
+//! mouse, and a drag the shell itself starts from Explorer, and whether a real
+//! keyboard and mouse each get a device id of their own.
 //!
 //! # The instructions are in the window's title bar
 //!
@@ -46,8 +47,8 @@ mod windows {
     use std::time::{Duration, Instant};
 
     use crcbl_shell::{
-        ButtonState, KeyCode, Keysym, LogicalSize, PointerButton, ScrollDelta, Shell, ShellBackend,
-        ShellEvent, WindowDesc, WindowId,
+        ButtonState, DeviceId, KeyCode, Keysym, LogicalSize, PointerButton, ScrollDelta, Shell,
+        ShellBackend, ShellEvent, WindowDesc, WindowId,
     };
 
     /// How long a step waits for the person before it is reported as timed out.
@@ -59,6 +60,13 @@ mod windows {
     const KEY_J: u32 = 0x24;
     const ARROW_UP: u32 = 0xE048;
     const CONTROL_RIGHT: u32 = 0xE01D;
+
+    /// The ids the backend gives an event whose raw report was never matched —
+    /// keyboard, pointer, touch — restated from `win32::devices`, which is
+    /// crate-private. A real device is never given one of these.
+    const FALLBACK_DEVICES: [DeviceId; 3] = [DeviceId(1), DeviceId(2), DeviceId(3)];
+    /// How many raw motion samples the device step waits for before judging.
+    const MIN_RAW_SAMPLES: usize = 10;
 
     /// The fewest driver repeats a two-second hold must produce. Windows'
     /// slowest setting is a one-second delay and about 2.5 repeats a second.
@@ -243,7 +251,7 @@ mod windows {
             events: Vec::new(),
         };
 
-        let total = 13;
+        let total = 14;
         let mut results: Vec<(&str, Verdict)> = Vec::new();
 
         // Focus first: a process started from a terminal is not granted the
@@ -442,6 +450,62 @@ mod windows {
             },
         );
         results.push(("file drag from Explorer", drop));
+
+        let devices = desk.step(
+            14,
+            total,
+            "Press the A key, move the mouse around, then left-click",
+            |events| {
+                let key = events.iter().find_map(|event| match event {
+                    ShellEvent::Key { device, .. } => Some(*device),
+                    _ => None,
+                })?;
+                let click = events.iter().find_map(|event| match event {
+                    ShellEvent::Button {
+                        device,
+                        state: ButtonState::Released,
+                        ..
+                    } => Some(*device),
+                    _ => None,
+                })?;
+                let raw: Vec<DeviceId> = events
+                    .iter()
+                    .filter_map(|event| match event {
+                        ShellEvent::PointerMotion {
+                            device,
+                            raw_delta: Some(_),
+                            ..
+                        } => Some(*device),
+                        _ => None,
+                    })
+                    .collect();
+                // Judged only once there is motion to compare the click against, or
+                // the agreement check below would pass over an empty list.
+                if raw.len() < MIN_RAW_SAMPLES {
+                    return None;
+                }
+                Some(if FALLBACK_DEVICES.contains(&key) || FALLBACK_DEVICES.contains(&click) {
+                    Verdict::Fail(format!(
+                        "key {key:?} or click {click:?} carries a per-kind fallback {FALLBACK_DEVICES:?}, \
+                         so its raw report was never matched"
+                    ))
+                } else if key == click {
+                    Verdict::Fail(format!(
+                        "the keyboard and the mouse share {key:?}"
+                    ))
+                } else if raw.iter().any(|&device| device != click) {
+                    Verdict::Fail(format!(
+                        "the click is {click:?} but raw motion named {raw:?}"
+                    ))
+                } else {
+                    Verdict::Pass(format!(
+                        "keyboard {key:?}, mouse {click:?} (clicks and {} raw samples agree)",
+                        raw.len()
+                    ))
+                })
+            },
+        );
+        results.push(("per-device ids", devices));
 
         println!("\ncrcbl real input check:");
         let mut failed = false;

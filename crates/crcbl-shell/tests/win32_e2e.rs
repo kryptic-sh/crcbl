@@ -81,10 +81,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crcbl_shell::{
-    ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DisplayMode, KeyCode,
-    Keysym, LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton, PointerMode,
-    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, TouchPhase,
-    WindowDesc, WindowId,
+    ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DeviceId, DisplayMode,
+    KeyCode, Keysym, LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton,
+    PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
+    SurfaceTarget, TouchPhase, WindowDesc, WindowId,
 };
 
 /// PS/2 set 1 scan codes, spelled as the sender takes them and as
@@ -1763,6 +1763,21 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
     assert_eq!(keys[1].3, ButtonState::Released);
     assert!(!keys[1].4);
 
+    // `SendInput`'s raw reports carry a null `hDevice`, so an injected key is
+    // attributed to the keyboard fallback and never to a real device's id.
+    let devices: Vec<DeviceId> = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::Key { device, .. } => Some(*device),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        devices.iter().all(|&device| device == DeviceId(1)),
+        "injected keys carry the keyboard fallback: {devices:?}"
+    );
+
     // The half that only a queued message can produce.
     let committed: String = session
         .events
@@ -1830,33 +1845,36 @@ fn a_dead_key_typed_by_another_process_composes_with_the_next_key() {
     );
 }
 
-/// A second injected press of a key that is already down produces **no second
-/// event**, and the release still arrives.
+/// A second injected press of a key that is already down is **never a fresh
+/// press**, and the release that follows is never a repeat.
 ///
-/// # This test asserted the opposite, and the backend was right
+/// # Windows answers this sequence two ways, and which one depends on raw input
 ///
-/// It was written as "press, repeat, release" on the reasoning that bit 30 of
-/// the `lParam` — the previous-key-state bit — would be set by the system on the
-/// second `WM_KEYDOWN` because the system knows the key is down. The first CI
-/// run against a real desktop reported two `down` commands sent and one
-/// `Pressed` delivered, and that is correct: **`SendInput` describes a state
-/// transition, not a keystroke.** The input system tracks which keys are down,
-/// a second down for a key already down is not a transition, and no second
-/// `WM_KEYDOWN` is generated at all.
+/// Two `down`s and an `up`, with no release between the downs. The first CI run
+/// reported one `Pressed` for the two downs: the second, for a key already down,
+/// produced no `WM_KEYDOWN` at all. That is what happens while **no** raw
+/// keyboard registration is active. Once one is, and this backend registers the
+/// keyboard to name the device behind each key (see `win32::devices`), Windows
+/// reports the second down as a `WM_KEYDOWN` with the previous-state bit set:
+/// an auto-repeat, which is how a real keyboard's held key arrives. Measured on
+/// a desktop on 2026-09-21: ten of ten runs dropped the second down with the
+/// keyboard registration switched off, and ten of ten reported it as a repeat
+/// with it on. One run earlier that day repeated with nothing of ours
+/// registered; another program on that desktop registering raw keyboard input
+/// is the likely cause, not verified.
 ///
-/// Genuine auto-repeat comes from the keyboard driver's typematic timer holding
-/// a *physically* depressed key, which no amount of `SendInput` reproduces — so
-/// this suite cannot reach the repeat bit, and `docs/backlog.md` carries that as
-/// a real gap rather than a solved problem. What it *can* reach is the
-/// coalescing above, which is worth pinning precisely because it surprised us.
+/// So the test asserts what holds either way and is the backend's to get
+/// right: exactly one press that is not a repeat, at most one more press and
+/// that one marked as a repeat, and a release that is not a repeat. A backend
+/// that decoded the second down as a fresh press, or read the previous-state
+/// bit on a release (where it is always set), fails.
 ///
-/// The decoding of the repeat bit is covered where it can be: the in-crate suite
-/// in `src/win32/shell.rs` builds the `lParam` itself and delivers it with
-/// `SendMessageW`, so it exercises `keys::` on a message with bit 30 set without
-/// needing the system to have set it.
+/// Genuine typematic timing comes from a physically held key, which no amount
+/// of `SendInput` reproduces; `tests/bin/hands_on_win32.rs` covers it with a
+/// person at the keyboard.
 #[test]
 #[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
-fn a_second_injected_press_of_a_held_key_produces_no_second_event() {
+fn a_second_injected_press_of_a_held_key_is_never_a_fresh_press() {
     let mut session = Session::open();
     let window = session.window("held");
     session.foreground(window);
@@ -1878,14 +1896,20 @@ fn a_second_injected_press_of_a_held_key_produces_no_second_event() {
         .iter()
         .map(|(_, _, _, state, repeat)| (*state, *repeat))
         .collect();
-    assert_eq!(
-        states,
-        vec![
-            (ButtonState::Pressed, false),
-            (ButtonState::Released, false),
-        ],
-        "two injected downs are one transition, so one press — and the release is never a \
-         repeat however long the key was held; the sender said {:?}",
+    let dropped = [
+        (ButtonState::Pressed, false),
+        (ButtonState::Released, false),
+    ];
+    let repeated = [
+        (ButtonState::Pressed, false),
+        (ButtonState::Pressed, true),
+        (ButtonState::Released, false),
+    ];
+    assert!(
+        states == dropped || states == repeated,
+        "one fresh press, the second down either dropped or reported as a repeat, and a \
+         release that is never a repeat however long the key was held: {states:?}; the \
+         sender said {:?}",
         sender.lines()
     );
 }

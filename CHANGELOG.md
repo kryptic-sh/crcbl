@@ -2088,6 +2088,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- The Win32 shell now gives each physical keyboard and mouse its own `DeviceId`
+  on key, button, wheel and pointer events, instead of one constant per kind.
+  Ids are keyed by the device's interface path, so a replugged device keeps its
+  id and no id is ever handed to another device. Injected input, and any message
+  whose raw report cannot be matched, keeps the old per-kind ids. The keyboard
+  is now registered for raw input alongside the mouse; with that registration
+  active, Windows reports a second synthetic press of a held key as an
+  auto-repeat instead of dropping it.
+
 - The Win32 shell now reports `ShellCaps::TOUCH` and delivers
   `ShellEvent::Touch` from `WM_POINTER*` messages, one contact per finger. The
   first finger still arrives as the mouse as before, so games bound only to the

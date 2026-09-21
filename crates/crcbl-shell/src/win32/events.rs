@@ -239,14 +239,40 @@ pub enum RawEvent {
         /// `HWND` as an integer — raw input follows the keyboard focus, so this
         /// is whichever of our windows had it.
         hwnd: isize,
+        /// `RAWINPUTHEADER::hDevice` as an integer, zero for injected input.
+        device: isize,
         /// `RAWMOUSE::usFlags`.
         flags: u16,
+        /// `RAWMOUSE::usButtonFlags`: the button and wheel edges this report
+        /// carries, which say what device the matching messages came from.
+        buttons: u16,
         /// `RAWMOUSE::lLastX`.
         x: i32,
         /// `RAWMOUSE::lLastY`.
         y: i32,
         /// `GetMessageTime` milliseconds.
         millis: u32,
+    },
+    /// `WM_INPUT` carrying a `RAWKEYBOARD` report. Produces no event of its
+    /// own; it names the device of the key message that follows it. See
+    /// [`devices`](super::devices).
+    RawKey {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// `RAWINPUTHEADER::hDevice` as an integer, zero for injected input.
+        device: isize,
+        /// `RAWKEYBOARD::MakeCode`.
+        make_code: u16,
+        /// `RAWKEYBOARD::Flags`.
+        flags: u16,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
+    /// `WM_INPUT_DEVICE_CHANGE` for a device that left. Its handle may be given
+    /// to the next device that arrives, so the shell forgets it.
+    DeviceRemoved {
+        /// The raw input device handle as an integer.
+        device: isize,
     },
     /// `WM_DROPFILES` — files were dropped on the window.
     ///
@@ -288,8 +314,9 @@ impl RawEvent {
             | Self::Wheel { hwnd, .. }
             | Self::Touch { hwnd, .. }
             | Self::RawMotion { hwnd, .. }
+            | Self::RawKey { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
-            Self::MonitorsChanged => None,
+            Self::MonitorsChanged | Self::DeviceRemoved { .. } => None,
         }
     }
 }
@@ -411,6 +438,10 @@ mod tests {
             },
             RawEvent::Minimized { hwnd: A },
             RawEvent::Destroyed { hwnd: A },
+            // A device that leaves twice in one pump — unplugged, then its
+            // reappearance unplugged again — is two handles to forget.
+            RawEvent::DeviceRemoved { device: 0x100 },
+            RawEvent::DeviceRemoved { device: 0x200 },
         ];
         for event in events {
             enqueue(&mut queue, event);
@@ -491,14 +522,18 @@ mod tests {
             },
             RawEvent::RawMotion {
                 hwnd: A,
+                device: 0,
                 flags: 0,
+                buttons: 0,
                 x: 3,
                 y: -2,
                 millis: 1_501,
             },
             RawEvent::RawMotion {
                 hwnd: A,
+                device: 0,
                 flags: 0,
+                buttons: 0,
                 x: 4,
                 y: -1,
                 millis: 1_502,
@@ -512,6 +547,22 @@ mod tests {
                 hwnd: A,
                 unit: 0xDFAE,
                 millis: 1_600,
+            },
+            // Two raw keyboard reports for one key, from two devices: each names
+            // the device of its own key message, so neither may be dropped.
+            RawEvent::RawKey {
+                hwnd: A,
+                device: 0x100,
+                make_code: 0x1E,
+                flags: 0,
+                millis: 1_650,
+            },
+            RawEvent::RawKey {
+                hwnd: A,
+                device: 0x200,
+                make_code: 0x1E,
+                flags: 0,
+                millis: 1_651,
             },
             // A tap that lands and lifts inside one pump: keeping only the
             // latest state per contact would report a finger that was never
@@ -651,7 +702,9 @@ mod tests {
         assert_eq!(
             RawEvent::RawMotion {
                 hwnd: B,
+                device: 0,
                 flags: 0,
+                buttons: 0,
                 x: 1,
                 y: 1,
                 millis: 0

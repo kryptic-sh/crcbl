@@ -209,6 +209,7 @@
 //! documentation gives.
 
 pub mod clipboard;
+pub mod devices;
 pub mod dnd;
 pub mod events;
 pub mod geometry;
