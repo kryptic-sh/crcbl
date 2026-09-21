@@ -91,6 +91,11 @@ use crcbl_shell::{
 mod scancode {
     /// `A`.
     pub const A: u32 = 0x1E;
+    /// `E`.
+    pub const E: u32 = 0x12;
+    /// The key right of `;` on a US keyboard: `'`, and on US-International the
+    /// dead acute accent.
+    pub const QUOTE: u32 = 0x28;
     /// `ArrowUp`, which is `E0`-prefixed — the identity, not a flag beside it.
     pub const ARROW_UP: u32 = 0xE048;
 }
@@ -276,6 +281,79 @@ mod desktop {
             data: *mut c_void,
             size: *mut u32,
         ) -> i32;
+    }
+
+    /// `HKL`.
+    pub type Layout = *mut c_void;
+
+    /// `KLF_NOTELLSHELL` — load the layout without announcing it to the shell's
+    /// language bar.
+    const KLF_NO_TELL_SHELL: u32 = 0x0000_0080;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn LoadKeyboardLayoutW(id: *const u16, flags: u32) -> Layout;
+        fn ActivateKeyboardLayout(layout: Layout, flags: u32) -> Layout;
+        fn UnloadKeyboardLayout(layout: Layout) -> i32;
+        fn GetKeyboardLayoutList(capacity: i32, list: *mut Layout) -> i32;
+    }
+
+    /// A keyboard layout made active on **this thread** for the guard's
+    /// lifetime, and put back on drop.
+    ///
+    /// Per-thread on purpose (`ActivateKeyboardLayout` without
+    /// `KLF_SETFORPROCESS`): only the thread pumping the test window translates
+    /// keys through it, so the developer's own typing elsewhere is untouched.
+    /// The layout is unloaded again only if it was not already in the user's
+    /// list, so running the suite never removes a layout somebody chose.
+    pub struct ThreadLayout {
+        previous: Layout,
+        loaded: Option<Layout>,
+    }
+
+    impl ThreadLayout {
+        /// Activates the layout named by `id`, a KLID such as `"00020409"`, or
+        /// `None` if the system does not have it.
+        #[must_use]
+        pub fn activate(id: &str) -> Option<Self> {
+            let before = layouts();
+            let wide: Vec<u16> = id.encode_utf16().chain([0]).collect();
+            // SAFETY: `wide` is a live NUL-terminated UTF-16 KLID; the call
+            // reads it and returns a handle or null.
+            let layout = unsafe { LoadKeyboardLayoutW(wide.as_ptr(), KLF_NO_TELL_SHELL) };
+            if layout.is_null() {
+                return None;
+            }
+            // SAFETY: a layout handle the call above returned, activated for the
+            // calling thread only.
+            let previous = unsafe { ActivateKeyboardLayout(layout, 0) };
+            let loaded = (!before.contains(&layout)).then_some(layout);
+            Some(Self { previous, loaded })
+        }
+    }
+
+    impl Drop for ThreadLayout {
+        fn drop(&mut self) {
+            // SAFETY: the handle `ActivateKeyboardLayout` reported as active
+            // before, which is still loaded because nothing here unloaded it.
+            unsafe { ActivateKeyboardLayout(self.previous, 0) };
+            if let Some(layout) = self.loaded {
+                // SAFETY: a layout this guard loaded and that is no longer
+                // active on this thread.
+                unsafe { UnloadKeyboardLayout(layout) };
+            }
+        }
+    }
+
+    /// Every layout currently loaded for this session.
+    fn layouts() -> Vec<Layout> {
+        // SAFETY: a zero capacity with a null list asks only for the count.
+        let count = unsafe { GetKeyboardLayoutList(0, core::ptr::null_mut()) };
+        let mut list = vec![core::ptr::null_mut(); usize::try_from(count).unwrap_or(0)];
+        // SAFETY: `list` holds exactly `count` writable handles.
+        let written = unsafe { GetKeyboardLayoutList(count, list.as_mut_ptr()) };
+        list.truncate(usize::try_from(written).unwrap_or(0));
+        list
     }
 
     /// Whether the user has reversed the mouse wheel in Settings.
@@ -1100,6 +1178,8 @@ fn the_backend_is_reachable_by_name_and_is_win32_shaped() {
         ShellCaps::POINTER_WARP,
         ShellCaps::CLIPBOARD,
         ShellCaps::DRAG_DROP,
+        // Composed commits, which the dead-key test below proves.
+        ShellCaps::TEXT_IME,
     ] {
         assert!(caps.contains(present), "{present:?} is implemented");
     }
@@ -1109,7 +1189,7 @@ fn the_backend_is_reachable_by_name_and_is_win32_shaped() {
     );
     assert!(caps.has_mouselook(), "both halves, which is the point");
 
-    for absent in [ShellCaps::TEXT_IME, ShellCaps::HW_UPSCALE] {
+    for absent in [ShellCaps::HW_UPSCALE, ShellCaps::TOUCH] {
         assert!(!caps.contains(absent), "{absent:?} is not implemented");
     }
 
@@ -1679,6 +1759,54 @@ fn a_key_typed_by_another_process_carries_its_position_its_symbol_and_its_text()
         "a",
         "a printable key commits text, which needs TranslateMessage in the pump; the events \
          were {:?} and the sender said {:?}",
+        session.names(),
+        sender.lines()
+    );
+}
+
+/// A dead key composes with the next key into one committed character.
+///
+/// This is what [`ShellCaps::TEXT_IME`] claims on every backend that sets it:
+/// composed text reaches the engine through the platform's input method, not
+/// that a pre-edit exists. On US-International `'` is a dead acute accent, so
+/// `'` then `e` must commit exactly `é` — never the bare accent, never `'e`. The
+/// system does the composing (`TranslateMessage` posts `WM_DEADCHAR` and then a
+/// `WM_CHAR` carrying the result); what this proves is that the backend lets it,
+/// which calling `ToUnicode` on the way through would not, because that
+/// consumes the pending accent.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_dead_key_typed_by_another_process_composes_with_the_next_key() {
+    let mut session = Session::open();
+    let window = session.window("dead key");
+    session.foreground(window);
+    // After the foreground, not before: with Windows' default of one input
+    // method for every app, taking the foreground re-syncs this thread's layout
+    // to the user's, which would undo an earlier activation.
+    let _layout = desktop::ThreadLayout::activate("00020409")
+        .expect("US-International ships with every Windows install");
+    session.take_names();
+
+    let mut sender = Sender::start();
+    sender.send(&format!("key {:#x}", scancode::QUOTE));
+    sender.send(&format!("key {:#x}", scancode::E));
+    session.pump_until("both keystrokes and their releases", |session| {
+        session.keys().len() >= 4
+    });
+
+    let committed: String = session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::TextCommit { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        committed,
+        "é",
+        "the dead accent composes with the vowel into one character; the events were {:?} and \
+         the sender said {:?}",
         session.names(),
         sender.lines()
     );

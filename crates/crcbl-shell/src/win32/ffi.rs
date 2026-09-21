@@ -48,7 +48,7 @@
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
 //! | `EnumDisplayDevicesW` | a monitor's marketing name | it usually answers "Generic PnP Monitor", which is worse than the device name for telling two displays apart |
-//! | `ImmGetContext` and the `WM_IME_*` family | a real input method | W2 leaves [`TEXT_IME`](crate::ShellCaps::TEXT_IME) clear rather than claiming what `WM_CHAR` alone earns; see [`Win32Shell::caps`](super::Win32Shell) |
+//! | `ImmGetContext` and the `WM_IME_*` family | a pre-edit string and a caret-placed candidate window | the seam has no pre-edit event on any backend; committed IME text already arrives as `WM_CHAR` through `DefWindowProc`, which is what [`TEXT_IME`](crate::ShellCaps::TEXT_IME) claims. See [`Win32Shell::caps`](super::Win32Shell) |
 //! | `ToUnicode` | the character a key produces | it **consumes** dead-key state, so calling it would eat the accent `WM_CHAR` was about to deliver. [`MapVirtualKeyW`] with `MAPVK_VK_TO_CHAR` answers the same question without side effects |
 //! | `GetAsyncKeyState` | modifier state | it reads the hardware *now*, not at the message's time. [`GetKeyboardState`] is the snapshot that belongs to the message being processed |
 //! | `RegisterDragDrop` and `IDropTarget` | drag *feedback* — a drop cursor, hover highlighting, non-file formats | it is COM: `OleInitialize`, a hand-written vtable, `IUnknown` reference counting and an apartment this crate does not own. `WM_DROPFILES` delivers the file paths the seam asks for; see `win32::dnd` for the whole comparison |

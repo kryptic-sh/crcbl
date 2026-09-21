@@ -303,7 +303,8 @@ impl Win32Shell {
             .union(ShellCaps::POINTER_CONFINE)
             .union(ShellCaps::POINTER_WARP)
             .union(ShellCaps::CLIPBOARD)
-            .union(ShellCaps::DRAG_DROP);
+            .union(ShellCaps::DRAG_DROP)
+            .union(ShellCaps::TEXT_IME);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -933,24 +934,17 @@ impl Shell for Win32Shell {
     ///   feedback while a drag is in the air, because that is `IDropTarget` and
     ///   `IDropTarget` is COM. [`dnd`](super::dnd) gives the argument, and it is
     ///   a gap in *feedback* rather than in the capability the seam names.
-    ///
-    /// # `TEXT_IME` is clear, and that is a decision rather than a gap
-    ///
-    /// `WM_CHAR` is handled, so typing produces
-    /// [`TextCommit`](ShellEvent::TextCommit) — surrogate pairs included, which
-    /// is what makes an astral codepoint arrive whole. **That is not what this
-    /// bit claims.** [`TEXT_IME`](ShellCaps::TEXT_IME) says the commit path is
-    /// wired to a real input method, and nothing in this backend touches the
-    /// `WM_IME_*` family: there is no composition string, no candidate-window
-    /// placement, and no way for the seam to tell a pre-edit from a commit.
-    ///
-    /// Leaving `DefWindowProc` to run the default IME does deliver a committed
-    /// Japanese string as `WM_CHAR`, and it would be easy to read that as the
-    /// capability being met. It is not the standard the other backends are held
-    /// to — Wayland latches this bit on having *bound* `text-input-v3` — and
-    /// this backend has never been run on Windows, so setting it would be an
-    /// unverified claim about a code path nobody has watched. A capability that
-    /// overstates itself is worse than one that is missing.
+    /// * [`TEXT_IME`](ShellCaps::TEXT_IME) — the bit claims only that composed
+    ///   text reaches the engine through the platform's input method, which is
+    ///   the bar X11 and Wayland set it on. Here the system composes:
+    ///   `TranslateMessage` turns a dead key and the next key into one
+    ///   `WM_CHAR`, and the `WM_IME_*` family falls through to `DefWindowProc`,
+    ///   which delivers an IME's committed string as `WM_CHAR` too. Both arrive
+    ///   as [`TextCommit`](ShellEvent::TextCommit), surrogate pairs joined.
+    ///   `win32_e2e`'s dead-key test proves the composition on a real desktop.
+    ///   What is **not** here, as on every backend, is a pre-edit: no
+    ///   composition string reaches the seam and the candidate window is not
+    ///   placed at the caret.
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -2222,6 +2216,7 @@ mod tests {
             ShellCaps::POINTER_WARP,
             ShellCaps::CLIPBOARD,
             ShellCaps::DRAG_DROP,
+            ShellCaps::TEXT_IME,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
         }
@@ -2233,11 +2228,10 @@ mod tests {
         );
         assert!(caps.has_mouselook(), "both halves, which is the point");
 
-        // Clear, and each for a stated reason: `TEXT_IME` is not earned by
-        // `WM_CHAR` alone, and `HW_UPSCALE` is not something a plain `HWND` can
-        // do. A capability that overstates itself is worse than one that is
-        // missing.
-        for absent in [ShellCaps::TEXT_IME, ShellCaps::HW_UPSCALE] {
+        // Clear, each for a stated reason: `HW_UPSCALE` is not something a
+        // plain `HWND` can do, and `TOUCH` has no `WM_POINTER` path yet. A
+        // capability that overstates itself is worse than one that is missing.
+        for absent in [ShellCaps::HW_UPSCALE, ShellCaps::TOUCH] {
             assert!(!caps.contains(absent), "{absent:?} is not implemented");
         }
         assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");

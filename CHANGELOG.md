@@ -2088,6 +2088,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- The Win32 shell now reports `ShellCaps::TEXT_IME`: dead keys and input-method
+  commits already arrived as `ShellEvent::TextCommit`, and a real-desktop test
+  now proves the composition, so a consumer branching on the bit gets the same
+  answer as on X11 and Wayland. There is still no pre-edit event.
+
 - Bitmap UI draw conversion streams glyph positions directly into triangle
   storage instead of allocating an intermediate layout vector. The owned
   `FontAtlas::layout_line` API retains its behavior.

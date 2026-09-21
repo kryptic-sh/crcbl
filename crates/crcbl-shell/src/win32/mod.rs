@@ -33,7 +33,7 @@
 //! | Message pump, and a blocking [`wait_events`](crate::Shell::wait_events) | complete |
 //! | [`SurfaceTarget::Win32`](crcbl_core::SurfaceTarget::Win32) for the HAL | complete |
 //! | Keyboard: scan codes, [`KeyCode`](crcbl_core::KeyCode), keysyms, modifiers, auto-repeat | complete — [`keys`] |
-//! | Text: `WM_CHAR` with surrogate pairs, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete, but **not** [`TEXT_IME`](crate::ShellCaps::TEXT_IME) — see [`caps`](Win32Shell::caps) |
+//! | Text: `WM_CHAR` with surrogate pairs, dead keys and IME commits, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete — [`TEXT_IME`](crate::ShellCaps::TEXT_IME); no pre-edit, see [`caps`](Win32Shell::caps) |
 //! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`mod@pointer`] |
 //! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
 //! | [`PointerMode`](crate::PointerMode) confine and lock, and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE), [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
@@ -44,8 +44,8 @@
 //!
 //! Two things input needs that no other area of this backend does are worth
 //! finding here rather than in a call stack. [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME)
-//! is deliberately **clear** although typing works — [`caps`](Win32Shell::caps)
-//! gives the argument. And a [`DeviceId`](crcbl_core::input::DeviceId) is a
+//! is set for composed commits and there is no pre-edit —
+//! [`caps`](Win32Shell::caps) gives the argument. And a [`DeviceId`](crcbl_core::input::DeviceId) is a
 //! constant per device *kind* rather than per device, exactly as on X11; raw
 //! input carries a per-device handle that a later slice can turn into a real id.
 //!

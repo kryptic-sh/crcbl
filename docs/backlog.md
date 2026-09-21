@@ -16444,13 +16444,15 @@ are unchanged.
   infers. Wiring it means a third system library (`shell32` is already linked
   for the drop calls) and a decision about _where_ a process-wide property is
   set when a host application embedded the engine.
-- **`ShellCaps::TEXT_IME` is clear although typing works.** `WM_CHAR` is
-  handled, including surrogate pairs, and the default IME does deliver a
-  committed CJK string through it — but nothing touches the `WM_IME_*` family,
-  the seam cannot tell a pre-edit from a commit, and there is no way to place
-  the candidate window at the caret. Matching Wayland's standard means handling
-  the `WM_IME_*` family and giving the seam a pre-edit event, which is its own
-  slice. The argument is written out in `Win32Shell::caps`.
+- **No IME pre-edit, and a CJK commit has not been watched.**
+  `ShellCaps::TEXT_IME` is set since 2026-09-21, on the bar X11 and Wayland use:
+  composed text reaches the engine. `win32_e2e`'s
+  `a_dead_key_typed_by_another_process_composes_with_the_next_key` proves the
+  dead-key half on a real desktop. The IME half rests on `DefWindowProc` turning
+  `WM_IME_CHAR` into `WM_CHAR`, which is documented behaviour but has not been
+  run here, because no East Asian IME was installed. Still owed: a pre-edit
+  event on the seam (no backend has one), and placing the candidate window at
+  the caret (`ImmSetCompositionWindow`).
 - **`DeviceId` names a device kind, not a device.** Windows is better placed to
   fix this than X11 is — `RAWINPUTHEADER::hDevice` identifies the physical
   device on every `WM_INPUT` — but turning a handle into a stable `DeviceId`
