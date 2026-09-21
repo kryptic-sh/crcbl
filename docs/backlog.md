@@ -16577,10 +16577,15 @@ first `win32 e2e (real desktop)` run that includes these tests.
   the RX 7900 XTX desktop logged
   `win32: exact refresh for \\.\DISPLAY1: 180000 mHz`, so the exact path ran,
   and it agrees with the 180 Hz `Win32_VideoController` reports for that
-  2560x1440 display. Still unobserved: a fractional rate such as 59.94 Hz, which
-  is the case the exact path exists for; a whole-number display cannot tell a
-  correct rational from a rounded one. The info line remains the only record of
-  which path a machine took.
+  2560x1440 display. **The fractional case, observed the same day:** with the
+  display switched temporarily to its 1920x1080 "59 Hz" mode (a non-persisted
+  `ChangeDisplaySettingsExW`, restored afterwards), the same run logged
+  `59940 mHz`, which is 60000/1001 Hz truncated to whole millihertz, while
+  `Win32_VideoController` and the integer `DEVMODEW` path say 59. So the exact
+  path carries a fractional rate through intact. No automated test covers it:
+  asserting it needs a mode switch on a physical display, which CI's virtual
+  display cannot do and a developer's desktop should not have done to it
+  unasked. The info line remains the only record of which path a machine took.
 - **A window frozen during a user drag-resize is accepted, not fixed.** Windows
   runs its own modal loop between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, so
   no frame renders until the mouse is released. The usual fix — `SetTimer` plus
