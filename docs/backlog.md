@@ -4411,6 +4411,67 @@ validation fatal: `run-draw-gen-e2e.sh`, `run-forward-e2e.sh`,
   performance section's "After P1"), and an in-engine breakdown still needs the
   memory accounting in "Measurement first".
 
+## The engine owns scaling on every platform: a full upscale pass (2026-09-21)
+
+**Decided by the user, 2026-09-21:** scaling from the internal render resolution
+to the output is the engine's job, done in the engine's own pass on every
+platform and backend, so its filter, quality and cost are under our control. The
+OS/compositor path (`ShellCaps::HW_UPSCALE`: Wayland's `wp_viewporter`, a
+CSS-sized canvas, DXGI's `DXGI_SCALING_STRETCH` / `SetSourceSize`) is **not** a
+rendering path to build towards. That path still costs GPU time whenever the
+compositor composites (it is only free on direct-scanout planes), it uses a
+fixed bilinear-class filter, and on Win32 it would exist for dx12 only, since
+Vulkan cannot ask for it.
+
+**What exists today** (read, not re-run): `crcbl_render::upscale` with
+`shaders/upscale.slang`, a 16-tap Catmull-Rom spatial filter targeting spirv,
+wgsl, msl and dxil. It runs as the last 3D pass, after tonemap and FXAA, with
+the UI composited afterwards at native resolution. `render_scale` goes from
+`[engine.video]` through `crcbl::settings` and `GpuContext::render_scale` to
+`ForwardRenderer::set_render_scale`, clamped to `MIN_RENDER_SCALE..=1.0`, and
+`apps/options` has a slider for it. It is checked by
+`mesh_e2e::render_scale::a_scaled_frame_is_the_same_picture_resampled_by_as_much_as_the_scale_says`.
+No crate outside `crcbl-shell` reads `HW_UPSCALE`, so the engine already always
+does its own pass; this entry is about making that pass complete.
+
+**What "proper" still needs:**
+
+1. **A selectable filter**, as a video setting: nearest/integer for pixel art,
+   bilinear, Catmull-Rom (today's), and an edge-adaptive filter with contrast-
+   adaptive sharpening in the FSR 1 (EASU + RCAS) class. FSR 1 is MIT-licensed;
+   a transcription must be tested against the reference implementation's output,
+   not against itself.
+2. **Sharpening as its own knob**, usable at full scale too. Today the only
+   sharpness is what Catmull-Rom's negative lobes give.
+3. **Dynamic resolution**: drive `render_scale` from measured GPU frame time
+   towards a target. It needs pass timestamps on every backend, and the
+   2026-09-15 D3D12 hardware run found the timestamp pair not advancing (the
+   "D3D12 on hardware" entry), so that is a prerequisite on dx12.
+4. **Temporal upscaling**, its own rung under `docs/plan/43-render-standards.md`
+   §7/§9: jitter, a motion-vector target, history, and disocclusion rejection.
+   The per-instance half of motion vectors now exists
+   (`GpuInstance::previous_transform`, since `1d6d604`). `upscale.slang`'s
+   header still says `GpuInstance` carries no previous transform, which is
+   stale; fix it when this work starts.
+5. **Optionally, scale above 1.0** (supersampling down to the output), which the
+   clamp forbids today.
+
+**The portability rule:** each filter is one Slang source carrying the
+`crcbl-targets: spirv, wgsl, msl, dxil` header and runs through the render
+graph. No backend-specific path and no per-platform fallback. Prefer a
+fullscreen fragment pass, as today; use a compute variant only if every target,
+including WebGPU, can run it. A vendor SDK (DLSS, XeSS) could at most be an
+optional extra behind a capability, never the only path, since each covers a
+subset of platforms and backends. **Verification** has to cover every backend:
+pixel tests on vk (radv/lavapipe) and a row in CI's Metal, dx12 (WARP) and
+browser cross-backend gates for each new filter. Which of those gates run
+`mesh_e2e::render_scale` today was not checked.
+
+**Open decision:** what happens to `ShellCaps::HW_UPSCALE` itself. Either keep
+it as a documented fact that nothing branches on, or remove it from the seam,
+which is a breaking change to `crcbl-shell` that every backend's caps and tests
+would follow.
+
 ## A debug `crcbl screenshot` overflows the main stack on Windows (2026-09-21)
 
 On a Windows 11 desktop with an AMD Radeon RX 7900 XTX, the debug
