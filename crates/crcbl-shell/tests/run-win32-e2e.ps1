@@ -65,11 +65,15 @@ try {
         # below is what keeps "no failures" from meaning "nothing ran", and the
         # partial-run check beside it is what keeps a cut-short run from
         # reading as a whole one.
+        # The filter takes the in-crate `win32::shell::tests` as well as the
+        # e2e binary: the pointer-clip tests there are `#[ignore]`d out of the
+        # ordinary sweep on the grounds that this script runs them, and a
+        # `--test win32_e2e` selection left them running nowhere at all.
         cargo nextest run `
             --locked `
             --package crcbl-shell `
             --features win32-e2e `
-            --test win32_e2e `
+            -E 'binary(win32_e2e) | test(/^win32::shell::tests::/)' `
             --run-ignored all `
             --test-threads 1 `
             --no-fail-fast `

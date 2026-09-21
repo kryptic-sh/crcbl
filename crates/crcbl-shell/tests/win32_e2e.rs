@@ -257,6 +257,61 @@ mod desktop {
         fn GetCurrentProcessId() -> u32;
     }
 
+    /// `HKEY_CURRENT_USER`: a predefined key, `(HKEY)(ULONG_PTR)(LONG)0x80000001`,
+    /// so the 32-bit value is sign-extended into the pointer.
+    const HKEY_CURRENT_USER: isize = 0x8000_0001_u32 as i32 as isize;
+    /// `RRF_RT_REG_DWORD` — refuse the read unless the value is a `REG_DWORD`.
+    const RRF_RT_REG_DWORD: u32 = 0x0000_0010;
+    /// `ERROR_SUCCESS`.
+    const ERROR_SUCCESS: i32 = 0;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn RegGetValueW(
+            key: *mut c_void,
+            sub_key: *const u16,
+            value: *const u16,
+            flags: u32,
+            kind: *mut u32,
+            data: *mut c_void,
+            size: *mut u32,
+        ) -> i32;
+    }
+
+    /// Whether the user has reversed the mouse wheel in Settings.
+    ///
+    /// Windows 11's "Scroll direction" setting stores
+    /// `ReverseMouseWheelDirection` under `HKCU\Control Panel\Mouse`, and the
+    /// system applies it **before** a wheel message reaches any window, injected
+    /// input included: a `SendInput` notch away from the user arrives as a
+    /// negative `WM_MOUSEWHEEL`. A backend that passes the sign through is
+    /// honouring the user's choice, so the expectation has to follow the setting
+    /// rather than assume its default. Absent on a stock install, and so on CI's
+    /// runner, which reads as not reversed.
+    #[must_use]
+    pub fn wheel_reversed() -> bool {
+        let sub_key: Vec<u16> = "Control Panel\\Mouse\0".encode_utf16().collect();
+        let value: Vec<u16> = "ReverseMouseWheelDirection\0".encode_utf16().collect();
+        let mut data: u32 = 0;
+        let mut size = u32::try_from(size_of::<u32>()).expect("a DWORD's size fits a DWORD");
+        // SAFETY: both names are live, NUL-terminated UTF-16 buffers;
+        // `RRF_RT_REG_DWORD` makes the call refuse any value that is not exactly
+        // a `DWORD`, so it writes at most the four bytes `size` announces into
+        // `data`, and a null type pointer is documented as "do not report it".
+        let status = unsafe {
+            RegGetValueW(
+                core::ptr::without_provenance_mut(HKEY_CURRENT_USER as usize),
+                sub_key.as_ptr(),
+                value.as_ptr(),
+                RRF_RT_REG_DWORD,
+                core::ptr::null_mut(),
+                (&raw mut data).cast::<c_void>(),
+                &raw mut size,
+            )
+        };
+        status == ERROR_SUCCESS && data != 0
+    }
+
     /// Takes the foreground the way a test harness has to, and answers whether
     /// this window now has it.
     ///
@@ -1824,11 +1879,17 @@ fn a_pointer_driven_by_another_process_moves_clicks_and_scrolls() {
             _ => None,
         })
         .collect();
+    // The sender's notch is away from the user; the user's scroll-direction
+    // setting decides which way it reaches every window, this one included.
+    let reversed = desktop::wheel_reversed();
+    let away = if reversed { -1.0 } else { 1.0 };
     assert_eq!(
         wheels,
-        vec![ScrollDelta::Lines { x: 0.0, y: 1.0 }],
-        "one notch is one line, and WHEEL_DELTA is not one: {:?}",
-        session.names()
+        vec![ScrollDelta::Lines { x: 0.0, y: away }],
+        "one notch is one line, and WHEEL_DELTA is not one (wheel reversed in Settings: \
+         {reversed}): {:?}, sender said {:?}",
+        session.names(),
+        sender.lines()
     );
     assert!(
         !session

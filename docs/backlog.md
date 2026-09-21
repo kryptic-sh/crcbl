@@ -4411,6 +4411,26 @@ validation fatal: `run-draw-gen-e2e.sh`, `run-forward-e2e.sh`,
   performance section's "After P1"), and an in-engine breakdown still needs the
   memory accounting in "Measurement first".
 
+## A debug `crcbl screenshot` overflows the main stack on Windows (2026-09-21)
+
+On a Windows 11 desktop with an AMD Radeon RX 7900 XTX, the debug
+`crcbl screenshot --size 32x24 -o shot.png --json` opens the vk device and its
+offscreen ring, then dies with `thread 'main' has overflowed its stack` (exit
+127, nothing on stdout). The release build of the same command succeeds and
+writes the PNG. That makes `crcbl-cli`'s
+`screenshot_json_carries_the_path_and_the_dimensions` fail on every run here: it
+reads zero lines of stdout where it asserts one.
+
+**Why nothing else saw it:** Windows gives the main thread 1 MiB of stack where
+Linux gives 8 MiB, and CI's Windows runner has no GPU, so there the command
+takes the "no adapter" branch and never reaches the frame. Not yet known: which
+frame is large (an unoptimised build keeps big locals such as fixed arrays or
+descriptor structs on the stack), and whether every debug windowed or headless
+app on Windows (the sandbox, the samples) overflows the same way. Next step: run
+it under a debugger or read the overflowing frame, then either box the large
+value or run the frame on a thread with an explicit stack size. Raising the
+linker's stack reserve would hide the problem rather than fix it.
+
 ## D3D12 on hardware: what structured storage views made visible (2026-09-15)
 
 Until storage buffers became structured views, no shader on a D3D12 **hardware**
@@ -16355,6 +16375,42 @@ under the same heading, and it binds any Windows test written from now on.
   `dirs::config_dir` does not read on Windows. Porting it is the job; the
   autoexec half needs a different way to point `NativeStorage` at a scratch
   directory.
+
+### The shell suites on a real desktop (2026-09-21)
+
+`run-win32-e2e.ps1` and the ordinary `crcbl-shell` sweep were run by hand on a
+Windows 11 (build 26200) desktop with an AMD Radeon RX 7900 XTX (driver
+32.0.21036.18). The first run turned up two real findings, both about the suite
+rather than the backend:
+
+- **The wheel test assumed the default scroll direction.** This desktop has
+  Settings' "Scroll direction" reversed (`ReverseMouseWheelDirection = 1` under
+  `HKCU\Control Panel\Mouse`), and Windows applies that before any window sees
+  the message, `SendInput` included, so an injected notch away from the user
+  arrived as `Lines { y: -1.0 }`. The backend was right to pass the sign
+  through; the test now reads the setting (`desktop::wheel_reversed`). CI's
+  runner has no such value, so its expectation is unchanged. It failed 4 of 4
+  runs before the fix.
+- **Three `#[ignore]`d pointer-clip tests had been running nowhere.** Their
+  ignore reason and docs/notes/ci.md both said the harness runs them, but its
+  `--test win32_e2e` selection left out the library binary they live in. The
+  harness now selects `binary(win32_e2e) | test(/^win32::shell::tests::/)`.
+
+After both fixes: **48 of 48** under the harness (16 e2e plus the 32 in-crate
+`win32::shell::tests`, the three pointer-clip tests included), and the ordinary
+sweep's **279 of 279**.
+
+**One unexplained failure, not reproduced:**
+`a_second_injected_press_of_a_held_key_produces_no_second_event` failed once in
+the first full run and passed on each of its three reruns alone, and in two
+later full runs. The sender's log showed `down 30`, `down 30`, `up 30` all sent
+with the foreground on the test window, so this is not the focus flake. Not
+diagnosed; if it recurs, capture the actual event list the assertion compared,
+which its message does not print.
+
+Still true after this run: the input was all injected, since nothing typed on a
+real keyboard is part of any test, and the IME, touch and real drag cases above
+are unchanged.
 
 ### Owed on the Win32 backend
 
