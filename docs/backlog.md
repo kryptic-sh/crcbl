@@ -16552,6 +16552,30 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   run here, because no East Asian IME was installed. Still owed: a pre-edit
   event on the seam (no backend has one), and placing the candidate window at
   the caret (`ImmSetCompositionWindow`).
+
+  **DEFERRED 2026-09-21, with the work parked on branch
+  `wip/win32-ime-preedit`** (commit `009c93bc`, pushed). It adds
+  `ShellEvent::TextPreedit` and a provided `Shell::set_text_input_area` to the
+  seam, and the Win32 half: `WM_IME_COMPOSITION` read into a pre-edit,
+  `WM_IME_ENDCOMPOSITION` as an empty one, and `ImmSetCompositionWindow` /
+  `ImmSetCandidateWindow` at the caret area. Verified there: clippy and the
+  private-items rustdoc on Windows, Linux and macOS targets, and unit tests for
+  the UTF-16 cursor conversion (`keys::preedit`) and the payload queues. **Not
+  verified:** the real-IME e2e test
+  (`an_input_method_composition_is_a_pre_edit_and_its_result_a_commit`, behind
+  the branch's `win32-ime-e2e` feature) never passed. On the RX 7900 XTX desktop
+  the Microsoft Japanese IME reported itself open in hiragana through
+  `ImmGetConversionStatus`, yet typed plain `k` `a`. ja-JP's `BasicTyping`
+  feature was stuck downloading throughout (`Get-InstalledLanguage` showed
+  `LanguageFeatures: None`), which is the likely cause. The branch's
+  `desktop::ThreadLocalInput` guard, which enables
+  `SPI_SETTHREADLOCALINPUTSETTINGS` so a per-thread language switch activates a
+  TSF input method, did not change the result either, but it was only tried
+  without the feature installed. To resume: on a machine where typing Japanese
+  in Notepad works, run the branch's test (the command is in its `Cargo.toml`
+  under `win32-ime-e2e`), drop the guard if the test passes without it, then
+  rebase onto `main`.
+
 - **Per-device ids: what is not verified.** `win32::devices` attributes each
   key, button and wheel message to the raw report that produced it, and keys ids
   by interface path. Unit tests cover the matching and the table; the hands-on

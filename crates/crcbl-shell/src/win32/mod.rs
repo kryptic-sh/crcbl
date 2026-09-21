@@ -44,11 +44,12 @@
 //! | Drag *feedback* — a drop cursor, hover highlighting, non-file formats | **not implemented**: it is `IDropTarget`, which is COM. [`dnd`] gives the argument |
 //!
 //! Two things input needs that no other area of this backend does are worth
-//! finding here rather than in a call stack. [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME)
-//! is set for composed commits and there is no pre-edit —
-//! [`caps`](Win32Shell::caps) gives the argument. And a [`DeviceId`](crcbl_core::input::DeviceId) is a
-//! constant per device *kind* rather than per device, exactly as on X11; raw
-//! input carries a per-device handle that a later slice can turn into a real id.
+//! finding here rather than in a call stack.
+//! [`ShellCaps::TEXT_IME`](crate::ShellCaps::TEXT_IME) is set for composed
+//! commits and there is no pre-edit — [`caps`](Win32Shell::caps) gives the
+//! argument. And a [`DeviceId`](crcbl_core::input::DeviceId) names the physical
+//! keyboard or mouse, taken from the raw report behind each message — see
+//! [`devices`].
 //!
 //! # What Win32 does that neither Linux backend nor `HeadlessShell` models
 //!
