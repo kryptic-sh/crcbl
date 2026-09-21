@@ -1,0 +1,26 @@
+# Every Windows binary reserves an 8 MiB main-thread stack, the size Linux
+# gives the main thread by default; Windows' own default is 1 MiB.
+#
+# The first compute pipeline a vk device creates can run deep inside the GPU
+# driver, which the engine does not control: on an AMD Radeon RX 7900 XTX,
+# `vkCreateComputePipelines` recurses through the driver's settings
+# deserialiser. Unoptimised Rust frames spend more of the stack before that
+# call, so a debug `crcbl screenshot` overflowed the 1 MiB default (exit 127)
+# while the release build passed; the same debug binary with a 2 MiB reserve or
+# more succeeded. Matching Linux keeps a driver's stack appetite from being a
+# Windows-only failure.
+#
+# This reserve covers the main thread only. Spawned threads take their size
+# from `std::thread::Builder::stack_size` or `RUST_MIN_STACK`.
+#
+# Cargo ignores `target.*.rustflags` whenever a `RUSTFLAGS` (or
+# `CARGO_ENCODED_RUSTFLAGS`) environment variable is set, so a caller that sets
+# one must add the matching link arg below itself.
+
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "link-arg=/STACK:8388608"]
+
+# Covers both `*-windows-gnu` and `*-windows-gnullvm`, whose `target_env` is
+# `gnu`.
+[target.'cfg(all(windows, target_env = "gnu"))']
+rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]

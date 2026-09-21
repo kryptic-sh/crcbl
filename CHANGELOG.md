@@ -1843,6 +1843,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A debug `crcbl screenshot` no longer overflows the main stack on Windows.**
+  On an AMD Radeon RX 7900 XTX the driver recurses deeply inside the first
+  `vkCreateComputePipelines`, and unoptimised frames had already spent most of
+  Windows' 1 MiB default, so the command died with exit 127 and nothing on
+  stdout. A new `.cargo/config.toml` links every Windows binary with the 8 MiB
+  main-thread stack Linux gives by default, for the MSVC and GNU targets alike.
+  It does not apply when `RUSTFLAGS` is set, which makes Cargo skip config
+  rustflags.
+
 - **`crcbl_water::surface_mesh` tiles its grid without cracks.** A cell's far
   edge was its near edge plus the spacing, which rounds to a different `f32`
   than the next cell's near edge in about a third of columns, leaving one-step

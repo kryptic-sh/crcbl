@@ -4472,25 +4472,20 @@ it as a documented fact that nothing branches on, or remove it from the seam,
 which is a breaking change to `crcbl-shell` that every backend's caps and tests
 would follow.
 
-## A debug `crcbl screenshot` overflows the main stack on Windows (2026-09-21)
+## CI's Windows jobs do not get the 8 MiB main stack (2026-09-22)
 
-On a Windows 11 desktop with an AMD Radeon RX 7900 XTX, the debug
-`crcbl screenshot --size 32x24 -o shot.png --json` opens the vk device and its
-offscreen ring, then dies with `thread 'main' has overflowed its stack` (exit
-127, nothing on stdout). The release build of the same command succeeds and
-writes the PNG. That makes `crcbl-cli`'s
-`screenshot_json_carries_the_path_and_the_dimensions` fail on every run here: it
-reads zero lines of stdout where it asserts one.
-
-**Why nothing else saw it:** Windows gives the main thread 1 MiB of stack where
-Linux gives 8 MiB, and CI's Windows runner has no GPU, so there the command
-takes the "no adapter" branch and never reaches the frame. Not yet known: which
-frame is large (an unoptimised build keeps big locals such as fixed arrays or
-descriptor structs on the stack), and whether every debug windowed or headless
-app on Windows (the sandbox, the samples) overflows the same way. Next step: run
-it under a debugger or read the overflowing frame, then either box the large
-value or run the frame on a thread with an explicit stack size. Raising the
-linker's stack reserve would hide the problem rather than fix it.
+`.cargo/config.toml` links Windows binaries with an 8 MiB main-thread stack (the
+fix for a debug `crcbl screenshot` overflowing inside the AMD driver's first
+`vkCreateComputePipelines`). `.github/workflows/ci.yml` sets
+`RUSTFLAGS: '-D warnings'` for the whole workflow, and Cargo ignores
+`target.*.rustflags` whenever `RUSTFLAGS` is set, so every CI job still links
+with the platform default. Harmless today: the Windows runner has no GPU, and
+WARP and lavapipe have not been seen to recurse like the AMD driver. If a job on
+real Windows hardware is ever added, or a software driver starts overflowing,
+give that job `-C link-arg=/STACK:8388608` in its own `RUSTFLAGS`. A global edit
+would also reach the Linux and macOS linkers, which reject that flag. Considered
+and declined for now: moving `-D warnings` out of `RUSTFLAGS` workflow-wide,
+which is a larger CI change than a harmless gap warrants.
 
 ## D3D12 on hardware: what structured storage views made visible (2026-09-15)
 
