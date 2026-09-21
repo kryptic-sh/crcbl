@@ -30,7 +30,8 @@
 //! "one `scale_factor` concept over … per-monitor-v2 (Windows)", and the three
 //! APIs that make per-monitor DPI work — `SetProcessDpiAwarenessContext`,
 //! `GetDpiForWindow` and `AdjustWindowRectExForDpi` — all arrive in 1607.
-//! Everything else this module declares is Windows XP-era.
+//! `GetPointerType` and the `WM_POINTER*` messages are Windows 8, below the
+//! floor; everything else this module declares is Windows XP-era.
 //!
 //! One wrinkle is worth stating rather than discovering: the *awareness context
 //! value* [`DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`](value::DPI_PER_MONITOR_AWARE_V2)
@@ -903,6 +904,17 @@ pub mod msg {
     pub const X_BUTTON_UP: u32 = 0x020C;
     /// `WM_MOUSEHWHEEL` — the tilt wheel.
     pub const MOUSE_H_WHEEL: u32 = 0x020E;
+    /// `WM_POINTERUPDATE` — a pointer moved or changed state. `wParam`'s low
+    /// word is the pointer id and its high word the `POINTER_MESSAGE_FLAG_*`
+    /// bits; `lParam` is the position in **screen** coordinates.
+    pub const POINTER_UPDATE: u32 = 0x0245;
+    /// `WM_POINTERDOWN` — a pointer made contact.
+    pub const POINTER_DOWN: u32 = 0x0246;
+    /// `WM_POINTERUP` — a pointer broke contact.
+    pub const POINTER_UP: u32 = 0x0247;
+    /// `WM_POINTERCAPTURECHANGED` — the window lost the pointer's capture, so
+    /// the rest of its gesture will not arrive here.
+    pub const POINTER_CAPTURE_CHANGED: u32 = 0x024C;
     /// `WM_SIZING`.
     pub const SIZING: u32 = 0x0214;
     /// `WM_CAPTURECHANGED` — somebody else took the mouse capture, so ours is
@@ -1140,6 +1152,20 @@ pub mod value {
     /// it converts to `f32` losslessly — a widening cast on the divisor is the
     /// kind of thing that goes unnoticed until a lint changes.
     pub const WHEEL_DELTA: i16 = 120;
+
+    /// `PT_TOUCH` — the `POINTER_INPUT_TYPE` `GetPointerType` answers for a
+    /// finger. Pen, touchpad and mouse pointers have their own values and are
+    /// left to the legacy mouse messages `DefWindowProc` synthesizes from them.
+    pub const PT_TOUCH: u32 = 2;
+    /// `POINTER_MESSAGE_FLAG_INCONTACT`, in the high word of a pointer
+    /// message's `wParam`.
+    pub const POINTER_MESSAGE_FLAG_IN_CONTACT: u32 = 0x0004;
+    /// `POINTER_MESSAGE_FLAG_PRIMARY` — the first contact of the interaction,
+    /// the only one the system turns into mouse messages.
+    pub const POINTER_MESSAGE_FLAG_PRIMARY: u32 = 0x2000;
+    /// `POINTER_MESSAGE_FLAG_CANCELED` — the system took the gesture away, so
+    /// this `WM_POINTERUP` is not a completed touch.
+    pub const POINTER_MESSAGE_FLAG_CANCELED: u32 = 0x8000;
 
     /// `HID_USAGE_PAGE_GENERIC`.
     pub const HID_USAGE_PAGE_GENERIC: u16 = 0x01;
@@ -1398,6 +1424,10 @@ unsafe extern "system" {
     pub fn SetForegroundWindow(hwnd: Handle) -> Bool32;
     pub fn ClientToScreen(hwnd: Handle, point: *mut Point) -> Bool32;
     pub fn ScreenToClient(hwnd: Handle, point: *mut Point) -> Bool32;
+    // Which kind of device a `WM_POINTER*` message's pointer id belongs to.
+    // Answers only while that pointer is live, which is why it is asked inside
+    // the window procedure rather than at translation time.
+    pub fn GetPointerType(pointer_id: u32, kind: *mut u32) -> Bool32;
     pub fn SetCursorPos(x: i32, y: i32) -> Bool32;
     pub fn GetCursorPos(point: *mut Point) -> Bool32;
     pub fn SetCursor(cursor: Handle) -> Handle;

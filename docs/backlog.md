@@ -16470,8 +16470,43 @@ diagnosed; if it recurs, capture the actual event list the assertion compared,
 which its message does not print.
 
 Still true after this run: the input was all injected, since nothing typed on a
-real keyboard is part of any test, and the IME, touch and real drag cases above
-are unchanged.
+real keyboard is part of any test, and the IME and real drag cases above are
+unchanged.
+
+### Touch on Win32: what was measured and what was not (2026-09-21)
+
+`ShellCaps::TOUCH` is set, from `WM_POINTER*` messages for `PT_TOUCH` pointers.
+`win32_e2e` injects contacts with `InitializeTouchInjection`/`InjectTouchInput`
+from the sender process. The machine it passed on has **no touchscreen**
+(`SM_DIGITIZER` and `SM_MAXIMUMTOUCHES` both 0), so injection needs no
+digitizer. Whether CI's `windows-latest` image allows it is answered by the
+first `win32 e2e (real desktop)` run that includes these tests.
+
+- **A pinch is promoted to a synthesized Ctrl key, so secondary contacts are
+  kept from `DefWindowProc`.** With every pointer message passed to the default
+  handler, two fingers moving apart delivered `ControlLeft` pressed and released
+  (a key nobody pressed) and no click for the first finger: Windows' legacy
+  promotion turns a pinch into the Ctrl+wheel that means "zoom". The backend now
+  answers non-primary touch messages itself (see `POINTER_MESSAGE_FLAG_PRIMARY`
+  in `win32::proc`). The two-finger test failed with the Ctrl events before that
+  and passes after.
+- **Not measured:** a real finger, so real digitizer timing, palm rejection, and
+  whether a real edge swipe arrives as the `Cancelled` this maps it to (a
+  cancelled `WM_POINTERUP` or a `WM_POINTERCAPTURECHANGED`). Press-and-hold,
+  which Windows promotes to a right click for the primary contact, is left to
+  `DefWindowProc` and untested. `DeviceId` for touch is a constant
+  (`input::TOUCH_DEVICE`), like the keyboard and pointer ones.
+- **Flakes seen in the same session, not reproduced:** one full harness run in
+  seven failed `a_pointer_driven_by_another_process_moves_clicks_and_scrolls`
+  (its message was not captured), and one ordinary sweep in seven failed
+  `the_pointer_enters_moves_clicks_scrolls_and_leaves` ("WM_MOUSEMOVE is not raw
+  motion") and `wait_events_genuinely_blocks`. Twelve targeted reruns of the
+  touch tests followed by the pointer test passed, as did every later run. The
+  user confirmed they were using the machine during some of these runs, and real
+  mouse input on the same desktop explains all three, so they are not counted as
+  defects. If one recurs on CI, where nobody is at the desk, suspect leftover
+  state from injected touch first. The same applies to the held-key failure
+  recorded in the entry above.
 
 ### Owed on the Win32 backend
 
@@ -16538,10 +16573,14 @@ are unchanged.
   a placeholder rational (1 mHz), which the exact path now refuses
   (`MIN_PLAUSIBLE_REFRESH_MHZ`, so the seam's documented "0 = cannot determine"
   is what such a display reports); the e2e's refresh band permits that zero.
-  What is still unobserved: the exact rate of a _physical_ display — the
-  `win32: exact refresh for …` info line is the only record of which path a
-  machine took, since a broken walk silently falls back and every test stays
-  green.
+  **Observed on a physical display, 2026-09-21:** a windowed `sandbox` run on
+  the RX 7900 XTX desktop logged
+  `win32: exact refresh for \\.\DISPLAY1: 180000 mHz`, so the exact path ran,
+  and it agrees with the 180 Hz `Win32_VideoController` reports for that
+  2560x1440 display. Still unobserved: a fractional rate such as 59.94 Hz, which
+  is the case the exact path exists for; a whole-number display cannot tell a
+  correct rational from a rounded one. The info line remains the only record of
+  which path a machine took.
 - **A window frozen during a user drag-resize is accepted, not fixed.** Windows
   runs its own modal loop between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`, so
   no frame renders until the mouse is released. The usual fix — `SetTimer` plus

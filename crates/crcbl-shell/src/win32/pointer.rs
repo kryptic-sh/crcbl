@@ -1,5 +1,6 @@
-//! The mouse, arithmetically: button messages, wheel detents, raw reports and
-//! the two pieces of cursor bookkeeping that are counters rather than calls.
+//! The mouse, arithmetically: button messages, wheel detents, raw reports, touch
+//! pointer messages and the two pieces of cursor bookkeeping that are counters
+//! rather than calls.
 //!
 //! Pure, and for the reason [`geometry`](super::geometry) states — every
 //! function here is checked by `cargo test -p crcbl-shell` on the machine this
@@ -29,7 +30,7 @@
 //! `Pixels`: the device is reporting detents, and the lines-to-pixels factor is
 //! a policy decision `crcbl_core::input` puts above this crate.
 
-use crcbl_core::input::{ButtonState, PointerButton, ScrollDelta};
+use crcbl_core::input::{ButtonState, PointerButton, ScrollDelta, TouchPhase};
 
 use crate::CursorIcon;
 
@@ -92,6 +93,50 @@ pub const fn button(message: u32, w_param: usize) -> Option<(PointerButton, Butt
         },
     };
     Some((button, state))
+}
+
+/// The touch phase a `WM_POINTER*` message reports, and the pointer id it is
+/// about.
+///
+/// `None` for a message this is not one of, and for a `WM_POINTERUPDATE` that
+/// is not in contact — a digitizer that senses a hovering finger reports one,
+/// and the seam's [`Touch`](crate::ShellEvent::Touch) has no hover: a contact
+/// exists from the moment it lands.
+///
+/// # A cancelled release is not a release
+///
+/// `WM_POINTERUP` with `POINTER_MESSAGE_FLAG_CANCELED` is the system taking the
+/// gesture away — palm rejection, an edge swipe — and
+/// [`TouchPhase::Cancelled`] documents why a consumer must not treat it as
+/// [`Ended`](TouchPhase::Ended). A `WM_POINTERCAPTURECHANGED` is the same thing
+/// said differently: the rest of the gesture is going elsewhere.
+///
+/// The flags are the **high** word of `wParam` and the id the low word, as
+/// `GET_POINTERID_WPARAM` and `IS_POINTER_CANCELED_WPARAM` read them.
+#[must_use]
+pub const fn touch(message: u32, w_param: usize) -> Option<(u32, TouchPhase)> {
+    let pointer_id = (w_param & 0xFFFF) as u32;
+    let flags = ((w_param >> 16) & 0xFFFF) as u32;
+    let phase = match message {
+        msg::POINTER_DOWN => TouchPhase::Began,
+        msg::POINTER_UPDATE if flags & value::POINTER_MESSAGE_FLAG_IN_CONTACT != 0 => {
+            TouchPhase::Moved
+        }
+        msg::POINTER_UP if flags & value::POINTER_MESSAGE_FLAG_CANCELED != 0 => {
+            TouchPhase::Cancelled
+        }
+        msg::POINTER_UP => TouchPhase::Ended,
+        msg::POINTER_CAPTURE_CHANGED => TouchPhase::Cancelled,
+        _ => return None,
+    };
+    Some((pointer_id, phase))
+}
+
+/// Whether a pointer message is about the primary contact — the first finger of
+/// an interaction, and the one the system turns into mouse messages.
+#[must_use]
+pub const fn is_primary(w_param: usize) -> bool {
+    ((w_param >> 16) as u32) & value::POINTER_MESSAGE_FLAG_PRIMARY != 0
 }
 
 /// Which bit of the held-button mask a button owns.
@@ -407,6 +452,45 @@ mod tests {
         unique.dedup();
         assert_eq!(unique.len(), bits.len(), "{bits:?}");
         assert_eq!(bits.iter().fold(0, |all, bit| all | bit).count_ones(), 5);
+    }
+
+    #[test]
+    fn a_pointer_message_names_its_contact_and_a_cancelled_release_is_not_an_end() {
+        const IN_CONTACT: usize = (value::POINTER_MESSAGE_FLAG_IN_CONTACT as usize) << 16;
+        const CANCELED: usize = (value::POINTER_MESSAGE_FLAG_CANCELED as usize) << 16;
+        // The id is the low word, whatever the flags in the high word say.
+        assert_eq!(
+            touch(msg::POINTER_DOWN, 7 | IN_CONTACT),
+            Some((7, TouchPhase::Began))
+        );
+        assert_eq!(
+            touch(msg::POINTER_UPDATE, 7 | IN_CONTACT),
+            Some((7, TouchPhase::Moved))
+        );
+        assert_eq!(touch(msg::POINTER_UP, 7), Some((7, TouchPhase::Ended)));
+        // Palm rejection or an edge swipe: the gesture is over but was not
+        // completed, so a tap must not fire.
+        assert_eq!(
+            touch(msg::POINTER_UP, 7 | CANCELED),
+            Some((7, TouchPhase::Cancelled))
+        );
+        assert_eq!(
+            touch(msg::POINTER_CAPTURE_CHANGED, 7),
+            Some((7, TouchPhase::Cancelled))
+        );
+        // A hovering finger is not a contact yet.
+        assert_eq!(touch(msg::POINTER_UPDATE, 7), None);
+        assert_eq!(touch(msg::MOUSE_MOVE, 7 | IN_CONTACT), None);
+    }
+
+    #[test]
+    fn primary_is_read_from_the_flag_word_not_the_id() {
+        const PRIMARY: usize = (value::POINTER_MESSAGE_FLAG_PRIMARY as usize) << 16;
+        assert!(is_primary(3 | PRIMARY));
+        assert!(!is_primary(3));
+        // An id whose low word happens to share the flag's bit is still not
+        // primary: the flags live in the high word.
+        assert!(!is_primary(value::POINTER_MESSAGE_FLAG_PRIMARY as usize));
     }
 
     #[test]

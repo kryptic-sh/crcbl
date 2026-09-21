@@ -193,14 +193,14 @@ bitflags::bitflags! {
         /// with a contact id and a phase, so more than one can be tracked at a
         /// time.
         ///
-        /// **Clear on every desktop backend here**, and that is a statement
-        /// about the backends rather than about the platforms: a Windows laptop
-        /// and a Linux tablet both have touchscreens, and X11 (XInput2
-        /// `XI_TouchBegin`), Wayland (`wl_touch`), Win32 (`WM_POINTERDOWN`) and
-        /// AppKit (`NSTouch`) all have a way to deliver them. None of those
-        /// paths is written, so none of those backends sets this bit and a game
-        /// on them sees no contacts at all — an input that is *absent*, which is
-        /// a different thing from one that silently fails.
+        /// **Win32 is the one desktop backend that sets it** (`WM_POINTER*`),
+        /// beside the browser. Clear on the others, and that is a statement
+        /// about the backends rather than about the platforms: a Linux tablet
+        /// has a touchscreen, and X11 (XInput2 `XI_TouchBegin`), Wayland
+        /// (`wl_touch`) and AppKit (`NSTouch`) all have a way to deliver one.
+        /// None of those paths is written, so a game on them sees no contacts
+        /// at all — an input that is *absent*, which is a different thing from
+        /// one that silently fails.
         ///
         /// A backend that does set it owes the emulated pointer stream for the
         /// primary contact as well; [`ShellEvent::Touch`](crate::ShellEvent::Touch)

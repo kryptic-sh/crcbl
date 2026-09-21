@@ -36,6 +36,7 @@
 //! | Text: `WM_CHAR` with surrogate pairs, dead keys and IME commits, as [`TextCommit`](crate::ShellEvent::TextCommit) | complete — [`TEXT_IME`](crate::ShellCaps::TEXT_IME); no pre-edit, see [`caps`](Win32Shell::caps) |
 //! | Pointer: motion, five buttons, enter/leave, capture, both wheel axes | complete — [`mod@pointer`] |
 //! | Raw relative motion, absolute devices included | complete — [`RAW_POINTER_MOTION`](crate::ShellCaps::RAW_POINTER_MOTION), latched on the registration |
+//! | Touch: `WM_POINTER*` contacts, with the primary one also a mouse | complete — [`TOUCH`](crate::ShellCaps::TOUCH); secondary contacts are kept from `DefWindowProc`'s gesture promotion, see [`caps`](Win32Shell::caps) |
 //! | [`PointerMode`](crate::PointerMode) confine and lock, and [`warp_pointer`](crate::Shell::warp_pointer) | complete — [`POINTER_CONFINE`](crate::ShellCaps::POINTER_CONFINE), [`POINTER_LOCK`](crate::ShellCaps::POINTER_LOCK), [`POINTER_WARP`](crate::ShellCaps::POINTER_WARP) |
 //! | Cursor shapes and hiding | complete — stock `IDC_*` cursors through `WM_SETCURSOR`, hiding through a balanced `ShowCursor` |
 //! | Clipboard, both directions: `CF_UNICODETEXT` plus a registered format per mime | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`clipboard`] |

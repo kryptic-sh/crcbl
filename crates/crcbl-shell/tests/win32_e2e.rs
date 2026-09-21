@@ -81,9 +81,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crcbl_shell::{
-    ButtonState, ClipboardContent, ClipboardOffer, CursorIcon, DisplayMode, KeyCode, Keysym,
-    LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton, PointerMode, ScrollDelta,
-    Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, WindowDesc, WindowId,
+    ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DisplayMode, KeyCode,
+    Keysym, LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton, PointerMode,
+    ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent, SurfaceTarget, TouchPhase,
+    WindowDesc, WindowId,
 };
 
 /// PS/2 set 1 scan codes, spelled as the sender takes them and as
@@ -253,6 +254,7 @@ mod desktop {
         fn BringWindowToTop(hwnd: Handle) -> i32;
         fn SetFocus(hwnd: Handle) -> Handle;
         fn GetClassNameW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
+        fn ClientToScreen(hwnd: Handle, point: *mut Point) -> i32;
         fn GetWindowTextW(hwnd: Handle, buffer: *mut u16, capacity: i32) -> i32;
     }
 
@@ -659,6 +661,17 @@ mod desktop {
         // SAFETY: reading the calling thread's own queue state. The call takes
         // no pointers and has no failure mode.
         unsafe { GetQueueStatus(QS_ALL_INPUT) }
+    }
+
+    /// A client-area point of `hwnd` in desktop coordinates, which is what a
+    /// touch injected from another process is addressed by.
+    #[must_use]
+    pub fn client_to_screen(hwnd: Handle, x: i32, y: i32) -> Point {
+        let mut point = Point { x, y };
+        // SAFETY: `point` is a live, initialised `POINT` converted in place, and
+        // `hwnd` is a window this process created and has not destroyed.
+        unsafe { ClientToScreen(hwnd, &raw mut point) };
+        point
     }
 
     /// Where the cursor is, in desktop coordinates.
@@ -1189,9 +1202,14 @@ fn the_backend_is_reachable_by_name_and_is_win32_shaped() {
     );
     assert!(caps.has_mouselook(), "both halves, which is the point");
 
-    for absent in [ShellCaps::HW_UPSCALE, ShellCaps::TOUCH] {
-        assert!(!caps.contains(absent), "{absent:?} is not implemented");
-    }
+    assert!(
+        caps.contains(ShellCaps::TOUCH),
+        "WM_POINTER touch, which the finger tests below prove"
+    );
+    assert!(
+        !caps.contains(ShellCaps::HW_UPSCALE),
+        "a plain HWND presents at its own size"
+    );
 
     // Latched, as implementor obligation 3 requires — across a mode change,
     // which is the one thing on this platform that could plausibly move one.
@@ -2035,6 +2053,223 @@ fn a_pointer_driven_by_another_process_moves_clicks_and_scrolls() {
         .shell
         .set_cursor(window, Some(CursorIcon::Crosshair))
         .expect("shape");
+}
+
+/// Every touch event delivered so far, flattened for assertion.
+fn touches(session: &Session) -> Vec<(ContactId, TouchPhase, PhysicalPoint)> {
+    session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::Touch {
+                contact,
+                phase,
+                position,
+                ..
+            } => Some((*contact, *phase, *position)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every button edge delivered so far, with where it was.
+fn buttons(session: &Session) -> Vec<(PointerButton, ButtonState, Option<PhysicalPoint>)> {
+    session
+        .events
+        .iter()
+        .filter_map(|event| match event {
+            ShellEvent::Button {
+                button,
+                state,
+                position,
+                ..
+            } => Some((*button, *state, *position)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Sends a `touch` command aimed at a client point of `window`.
+fn touch_at(session: &Session, sender: &mut Sender, verb: &str, window: WindowId, x: i32, y: i32) {
+    let at = desktop::client_to_screen(session.hwnd(window), x, y);
+    sender.send(&format!("touch {verb} {} {}", at.x, at.y));
+}
+
+/// One finger, injected from another process, is one contact from landing to
+/// lifting, and it also drives the pointer.
+///
+/// # What this settles
+///
+/// `InjectTouchInput` needs no touchscreen, which is what makes this runnable
+/// on a desktop nobody can touch. The backlog could not say whether the CI
+/// runner allows it; a pass on a machine with no digitizer is the answer for
+/// the API, and `win32-e2e` running this is the answer for the runner.
+///
+/// # The emulated pointer is Windows', not this backend's
+///
+/// [`ShellEvent::Touch`] obliges a backend that reports touch to also report the
+/// primary contact as pointer motion and buttons. This backend does not write
+/// that emulation: it passes every `WM_POINTER*` on to `DefWindowProc`, which
+/// synthesizes the legacy mouse messages the ordinary arms already record. The
+/// button assertions are what prove the pass-through happened.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_finger_touched_by_another_process_is_one_contact_and_drives_the_pointer() {
+    let mut session = Session::open();
+    let window = session.window("touch");
+    session.foreground(window);
+    session.settle();
+    session.events.clear();
+
+    let mut sender = Sender::start();
+    touch_at(&session, &mut sender, "down 0", window, 100, 80);
+    touch_at(&session, &mut sender, "move 0", window, 140, 110);
+    sender.send("touch up 0");
+    session.pump_until("the finger to lift", |session| {
+        touches(session)
+            .iter()
+            .any(|&(_, phase, _)| phase.ends_contact())
+    });
+    // The emulated release can trail the contact's own end by a message or two.
+    session.settle();
+
+    let contacts = touches(&session);
+    let (first, _, landed) = *contacts.first().expect("just waited for it");
+    let (_, last_phase, lifted) = *contacts.last().expect("just waited for it");
+    assert!(
+        contacts.iter().all(|&(contact, _, _)| contact == first),
+        "one finger is one contact: {contacts:?}"
+    );
+    assert_eq!(contacts[0].1, TouchPhase::Began, "{contacts:?}");
+    assert_eq!(last_phase, TouchPhase::Ended, "{contacts:?}");
+    assert!(
+        contacts[1..contacts.len() - 1]
+            .iter()
+            .all(|&(_, phase, _)| phase == TouchPhase::Moved),
+        "only moves between landing and lifting: {contacts:?}"
+    );
+    assert_eq!(
+        landed,
+        PhysicalPoint::new(100.0, 80.0),
+        "the finger landed on the client pixel it was aimed at, so the screen-to-client \
+         conversion ran: {contacts:?}; the sender said {:?}",
+        sender.lines()
+    );
+    assert_eq!(lifted, PhysicalPoint::new(140.0, 110.0), "{contacts:?}");
+
+    let left: Vec<_> = buttons(&session)
+        .into_iter()
+        .filter(|&(button, _, _)| button == PointerButton::Left)
+        .map(|(_, state, _)| state)
+        .collect();
+    assert_eq!(
+        left,
+        vec![ButtonState::Pressed, ButtonState::Released],
+        "the primary contact is also a left click, which DefWindowProc synthesizes only if the \
+         pointer messages reach it; the events were {:?}",
+        session.names()
+    );
+}
+
+/// A second finger down at the same time is its own contact, and moves no
+/// pointer.
+///
+/// The seam's reason for [`ShellEvent::Touch`] existing at all: a game reading
+/// two thumbs needs two identities, and a second finger reported through the
+/// pointer would be the first one teleporting.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_second_finger_is_its_own_contact_and_moves_no_pointer() {
+    let mut session = Session::open();
+    let window = session.window("two fingers");
+    session.foreground(window);
+    session.settle();
+    session.events.clear();
+
+    let mut sender = Sender::start();
+    touch_at(&session, &mut sender, "down 0", window, 60, 60);
+    touch_at(&session, &mut sender, "down 1", window, 300, 200);
+    touch_at(&session, &mut sender, "move 1", window, 320, 220);
+    sender.send("touch up 1");
+    sender.send("touch up 0");
+    session.pump_until("both fingers to lift", |session| {
+        touches(session)
+            .iter()
+            .filter(|&&(_, phase, _)| phase.ends_contact())
+            .count()
+            >= 2
+    });
+    session.settle();
+
+    let contacts = touches(&session);
+    let first = contacts[0].0;
+    let second = contacts
+        .iter()
+        .map(|&(contact, _, _)| contact)
+        .find(|&contact| contact != first)
+        .unwrap_or_else(|| panic!("two fingers are two contacts: {contacts:?}"));
+    let of = |wanted: ContactId| -> Vec<(TouchPhase, PhysicalPoint)> {
+        contacts
+            .iter()
+            .filter(|&&(contact, _, _)| contact == wanted)
+            .map(|&(_, phase, position)| (phase, position))
+            .collect()
+    };
+    let first_path = of(first);
+    let second_path = of(second);
+    assert_eq!(
+        first_path.first().map(|&(phase, _)| phase),
+        Some(TouchPhase::Began)
+    );
+    assert_eq!(
+        first_path.last().map(|&(phase, _)| phase),
+        Some(TouchPhase::Ended)
+    );
+    // Repeated in every frame while the other finger moves, and never moved.
+    assert!(
+        first_path
+            .iter()
+            .all(|&(_, position)| position == PhysicalPoint::new(60.0, 60.0)),
+        "the finger that held still stayed where it landed: {first_path:?}"
+    );
+    assert_eq!(
+        second_path.first(),
+        Some(&(TouchPhase::Began, PhysicalPoint::new(300.0, 200.0)))
+    );
+    assert_eq!(
+        second_path.last(),
+        Some(&(TouchPhase::Ended, PhysicalPoint::new(320.0, 220.0))),
+        "{second_path:?}"
+    );
+
+    // Given the second finger, `DefWindowProc` read the pair as a pinch and
+    // synthesized a Ctrl press and release: a key nobody pressed, on whatever
+    // the game bound to Ctrl. The backend keeps secondary contacts away from it.
+    let keys = session.keys();
+    assert!(
+        keys.is_empty(),
+        "two fingers type nothing; the keys delivered were {keys:?}"
+    );
+
+    // Only the primary contact is emulated: one click, where the first finger
+    // was, and nothing anywhere near the second one.
+    let clicks = buttons(&session);
+    assert_eq!(
+        clicks
+            .iter()
+            .map(|&(button, state, _)| (button, state))
+            .collect::<Vec<_>>(),
+        vec![
+            (PointerButton::Left, ButtonState::Pressed),
+            (PointerButton::Left, ButtonState::Released),
+        ],
+        "only the first finger is a mouse: {clicks:?}; the events were {:#?}",
+        session
+            .events
+            .iter()
+            .filter(|event| !matches!(event, ShellEvent::Touch { .. }))
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Injected motion arrives as **raw**, unaccelerated relative motion — the thing

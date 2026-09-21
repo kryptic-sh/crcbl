@@ -695,6 +695,62 @@ pub(super) unsafe extern "system" fn window_proc(
             0
         }
 
+        msg::POINTER_DOWN
+        | msg::POINTER_UPDATE
+        | msg::POINTER_UP
+        | msg::POINTER_CAPTURE_CHANGED => {
+            // The default handler is what turns the primary contact into the
+            // mouse messages every pointer binding reads, which
+            // `ShellEvent::Touch` makes an obligation on a backend that reports
+            // touch — so everything but a secondary finger goes to it, recorded
+            // or not.
+            let Some((pointer_id, phase)) = pointer::touch(message, w_param) else {
+                return default();
+            };
+            let position = if message == msg::POINTER_CAPTURE_CHANGED {
+                // Carries no position, and the pointer's kind may no longer be
+                // answerable. Recorded for any pointer: the shell keeps only the
+                // ids it is tracking as contacts.
+                None
+            } else {
+                let mut kind = 0;
+                // SAFETY: `pointer_id` is the id this message is about, live for
+                // the duration of the message, and `kind` is a live `u32` the
+                // call writes into.
+                let known = unsafe { ffi::GetPointerType(pointer_id, &raw mut kind) } != 0;
+                if !known || kind != value::PT_TOUCH {
+                    return default();
+                }
+                // Screen coordinates, as on the wheel pair.
+                let (x, y) = pointer::point(l_param);
+                let mut position = Point { x, y };
+                // SAFETY: `position` is a live, initialised `POINT` converted in
+                // place, and `hwnd` is a live window of this shell.
+                unsafe { ffi::ScreenToClient(hwnd, &raw mut position) };
+                Some((position.x, position.y))
+            };
+            shared.push(RawEvent::Touch {
+                hwnd: window,
+                pointer_id,
+                phase,
+                position,
+                millis,
+            });
+            if position.is_some() && !pointer::is_primary(w_param) {
+                // **A secondary finger is handled here and never reaches the
+                // default handler.** Given two fingers, `DefWindowProc`'s legacy
+                // promotion recognizes a pinch and synthesizes a Ctrl press for
+                // the Ctrl+wheel that means "zoom" to an old application — a key
+                // nobody pressed, arriving on whatever the game bound to Ctrl —
+                // and withholds the first finger's click. The seam says a
+                // secondary contact has no pointer events at all; answering it
+                // here is how that stays true. Measured, not assumed: see
+                // `win32_e2e`'s two-finger test.
+                return 0;
+            }
+            default()
+        }
+
         msg::INPUT => {
             // SAFETY: for `WM_INPUT` the system documents `l_param` as an
             // `HRAWINPUT` handle valid for the duration of this message, which

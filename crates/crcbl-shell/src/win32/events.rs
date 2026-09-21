@@ -62,7 +62,7 @@
 //! belongs to a *later* message — the whole point of a timestamp is that it is
 //! not the moment the queue was drained.
 
-use crcbl_core::input::{ButtonState, PointerButton};
+use crcbl_core::input::{ButtonState, PointerButton, TouchPhase};
 
 use crate::PhysicalSize;
 
@@ -206,6 +206,30 @@ pub enum RawEvent {
         /// `GetMessageTime` milliseconds.
         millis: u32,
     },
+    /// A `WM_POINTER*` message for a **touch** contact, or a
+    /// `WM_POINTERCAPTURECHANGED` for any pointer.
+    ///
+    /// Recorded only for touch: pen, touchpad and mouse pointers are left to
+    /// the legacy mouse messages `DefWindowProc` synthesizes from them, which
+    /// the arms above already record. A capture change is recorded whatever the
+    /// pointer's kind, because by then the kind may no longer be answerable;
+    /// the shell drops it unless the id is a contact it is tracking.
+    Touch {
+        /// `HWND` as an integer.
+        hwnd: isize,
+        /// The system's pointer id — distinct for contacts down at the same
+        /// time, reused afterwards, which is exactly
+        /// [`ContactId`](crcbl_core::input::ContactId)'s promise.
+        pointer_id: u32,
+        /// What the contact did.
+        phase: TouchPhase,
+        /// Client position, converted from the screen coordinates the pointer
+        /// messages carry. `None` for a capture change, which carries no
+        /// position; the shell reports the contact's last one.
+        position: Option<(i32, i32)>,
+        /// `GetMessageTime` milliseconds.
+        millis: u32,
+    },
     /// `WM_INPUT` carrying a `RAWMOUSE` report.
     ///
     /// The coordinates are a delta **or** a position depending on `flags`; see
@@ -262,6 +286,7 @@ impl RawEvent {
             | Self::PointerFocus { hwnd, .. }
             | Self::Button { hwnd, .. }
             | Self::Wheel { hwnd, .. }
+            | Self::Touch { hwnd, .. }
             | Self::RawMotion { hwnd, .. }
             | Self::FilesDropped { hwnd, .. } => Some(hwnd),
             Self::MonitorsChanged => None,

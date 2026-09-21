@@ -72,7 +72,7 @@ use core::ptr;
 use std::sync::OnceLock;
 
 use crcbl_core::KeyCode;
-use crcbl_core::input::{DeviceId, Keysym, Modifiers, Scancode};
+use crcbl_core::input::{ContactId, DeviceId, Keysym, Modifiers, Scancode, TouchPhase};
 
 use crate::{
     CursorIcon, PhysicalPoint, PhysicalSize, PointerMode, ShellError, ShellEvent, WindowId,
@@ -99,6 +99,24 @@ use super::shell::Win32Shell;
 pub(super) const KEYBOARD_DEVICE: DeviceId = DeviceId(1);
 /// See [`KEYBOARD_DEVICE`].
 pub(super) const POINTER_DEVICE: DeviceId = DeviceId(2);
+/// See [`KEYBOARD_DEVICE`]. Every touchscreen shares it; the contact id is what
+/// tells fingers apart.
+pub(super) const TOUCH_DEVICE: DeviceId = DeviceId(3);
+
+/// A touch contact that is down, and where it was last seen.
+///
+/// Tracked so a `WM_POINTERCAPTURECHANGED`, which carries no position, can be
+/// reported where the finger was, and so a contact this shell never saw land —
+/// one that began before the window existed — never reaches the consumer as a
+/// `Moved` or an `Ended` with no `Began`, which
+/// [`TouchPhase::Began`](crcbl_core::input::TouchPhase::Began) promises cannot
+/// happen.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Contact {
+    window: WindowId,
+    pointer_id: u32,
+    position: PhysicalPoint,
+}
 
 /// How far from the centre a locked pointer may drift before it is warped back.
 ///
@@ -485,6 +503,14 @@ impl Win32Shell {
                 });
             }
 
+            RawEvent::Touch {
+                pointer_id,
+                phase,
+                position,
+                millis,
+                ..
+            } => self.translate_touch(window, pointer_id, phase, position, millis),
+
             RawEvent::RawMotion {
                 flags,
                 x,
@@ -521,6 +547,70 @@ impl Win32Shell {
             | RawEvent::FilesDropped { .. }
             | RawEvent::MonitorsChanged => {}
         }
+    }
+
+    /// One touch message as a [`ShellEvent::Touch`], keeping [`Contact`]s in
+    /// step.
+    ///
+    /// A contact is reported from its `Began` to its `Ended` or `Cancelled` and
+    /// at no other time. A second `Began` for an id still down means its end was
+    /// lost — the window was not told, or the message went to a capture this
+    /// window did not hold — so the stale contact is cancelled first rather than
+    /// being handed to the consumer as a finger that landed twice.
+    fn translate_touch(
+        &mut self,
+        window: WindowId,
+        pointer_id: u32,
+        phase: TouchPhase,
+        position: Option<(i32, i32)>,
+        millis: u32,
+    ) {
+        let time = self.event_time(millis);
+        let tracked = self
+            .contacts
+            .iter()
+            .position(|contact| contact.window == window && contact.pointer_id == pointer_id);
+        let position = match (position, tracked) {
+            (Some((x, y)), _) => PhysicalPoint::new(f64::from(x), f64::from(y)),
+            (None, Some(index)) => self.contacts[index].position,
+            // A capture change for a pointer that is not a contact here: a
+            // mouse, or a finger that landed somewhere else.
+            (None, None) => return,
+        };
+        let touch = |phase, position| ShellEvent::Touch {
+            window,
+            device: TOUCH_DEVICE,
+            time,
+            contact: ContactId(pointer_id),
+            phase,
+            position,
+        };
+        match (phase, tracked) {
+            (TouchPhase::Began, Some(index)) => {
+                let stale = self.contacts[index].position;
+                self.queue_event(touch(TouchPhase::Cancelled, stale));
+                self.contacts[index].position = position;
+            }
+            (TouchPhase::Began, None) => self.contacts.push(Contact {
+                window,
+                pointer_id,
+                position,
+            }),
+            // Never seen landing, so there is nothing for the consumer to
+            // continue or end.
+            (_, None) => return,
+            (TouchPhase::Moved, Some(index)) => self.contacts[index].position = position,
+            (TouchPhase::Ended | TouchPhase::Cancelled, Some(index)) => {
+                self.contacts.swap_remove(index);
+            }
+        }
+        self.queue_event(touch(phase, position));
+    }
+
+    /// Drops every contact on `window`, which is being destroyed: its fingers
+    /// can send nothing more, and a later window must not inherit them.
+    pub(super) fn forget_contacts(&mut self, window: WindowId) {
+        self.contacts.retain(|contact| contact.window != window);
     }
 
     /// A click's position, suppressed while the pointer is locked.

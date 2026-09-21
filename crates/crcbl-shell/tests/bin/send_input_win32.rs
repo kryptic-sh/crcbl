@@ -47,7 +47,23 @@
 //! move <dx> <dy>          relative pointer motion, in mickeys
 //! click <left|right|middle>
 //! wheel <notches>         positive scrolls away from the user
+//! touch down <id> <x> <y> a finger lands at a screen pixel
+//! touch move <id> <x> <y> a finger that is down moves there
+//! touch up <id>           a finger lifts where it last was
 //! ```
+//!
+//! # Touch needs no touchscreen, and needs every finger in every frame
+//!
+//! `InjectTouchInput` synthesizes contacts for a machine with no digitizer at
+//! all, which is what lets this suite reach `WM_POINTER*` on a desktop nobody
+//! can touch. Two rules shape the `touch` commands. The call describes a
+//! **frame** holding every contact that is down, not a change to one of them,
+//! so this program remembers each finger's position and repeats the others
+//! beside the one a command moves. And its coordinates are **physical** screen
+//! pixels, so the process makes itself per-monitor DPI aware before the first
+//! one; a DPI-unaware sender would have its points scaled by the system on any
+//! desktop not at 100%. The `<id>` is this program's name for a finger; the
+//! backend sees the system's own pointer ids, which are different numbers.
 //!
 //! Every line is acknowledged on stdout, and the acknowledgement carries the
 //! foreground window handle **at the moment of the send**. That is the single
@@ -202,8 +218,130 @@ mod win32 {
     /// therefore how one is spelled on this program's stdin.
     pub const EXTENDED_PREFIX: u32 = 0xE000;
 
+    /// `POINT`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct Point {
+        /// Horizontal coordinate.
+        pub x: i32,
+        /// Vertical coordinate.
+        pub y: i32,
+    }
+
+    /// `RECT`.
+    #[repr(C)]
+    #[derive(Clone, Copy, Default)]
+    pub struct Rect {
+        /// Left edge.
+        pub left: i32,
+        /// Top edge.
+        pub top: i32,
+        /// One past the right edge.
+        pub right: i32,
+        /// One past the bottom edge.
+        pub bottom: i32,
+    }
+
+    /// `POINTER_INFO`, the part of a contact every pointer type shares.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct PointerInfo {
+        /// `PT_TOUCH` for everything this program injects.
+        pub pointer_type: u32,
+        /// This program's name for the finger.
+        pub pointer_id: u32,
+        /// Filled in by the system.
+        pub frame_id: u32,
+        /// `POINTER_FLAG_*`: what this contact is doing in this frame.
+        pub pointer_flags: u32,
+        /// Filled in by the system.
+        pub source_device: *mut c_void,
+        /// Zero: the system hit-tests the point, as it would a real finger.
+        pub hwnd_target: Handle,
+        /// Where, in physical screen pixels.
+        pub pixel_location: Point,
+        /// Filled in by the system.
+        pub himetric_location: Point,
+        /// Filled in by the system.
+        pub pixel_location_raw: Point,
+        /// Filled in by the system.
+        pub himetric_location_raw: Point,
+        /// Zero means "stamp it with the system's own time".
+        pub time: u32,
+        /// Unused when injecting.
+        pub history_count: u32,
+        /// Unused when injecting.
+        pub input_data: i32,
+        /// Unused when injecting.
+        pub key_states: u32,
+        /// Zero means "stamp it with the system's own counter".
+        pub performance_count: u64,
+        /// Unused when injecting.
+        pub button_change_type: u32,
+    }
+
+    /// `POINTER_TOUCH_INFO`.
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    pub struct PointerTouchInfo {
+        /// The shared part.
+        pub pointer_info: PointerInfo,
+        /// `TOUCH_FLAG_NONE`.
+        pub touch_flags: u32,
+        /// Which of the optional fields below are meaningful: none of them.
+        pub touch_mask: u32,
+        /// Unused without `TOUCH_MASK_CONTACTAREA`.
+        pub contact: Rect,
+        /// Unused without `TOUCH_MASK_CONTACTAREA`.
+        pub contact_raw: Rect,
+        /// Unused without `TOUCH_MASK_ORIENTATION`.
+        pub orientation: u32,
+        /// Unused without `TOUCH_MASK_PRESSURE`.
+        pub pressure: u32,
+    }
+
+    // `InjectTouchInput` takes no size, so a wrong layout is not refused; it is
+    // read as garbage. These are the SDK's sizes on 64-bit Windows.
+    #[cfg(target_pointer_width = "64")]
+    const _: () = {
+        assert!(
+            size_of::<PointerInfo>() == 96,
+            "POINTER_INFO on 64-bit Windows"
+        );
+        assert!(
+            size_of::<PointerTouchInfo>() == 144,
+            "POINTER_TOUCH_INFO on 64-bit Windows"
+        );
+    };
+
+    /// `PT_TOUCH`.
+    pub const PT_TOUCH: u32 = 2;
+    /// `TOUCH_FEEDBACK_NONE` — no ripple drawn on the desktop under the point.
+    pub const TOUCH_FEEDBACK_NONE: u32 = 0x3;
+    /// How many fingers `InitializeTouchInjection` is told to expect.
+    pub const MAX_CONTACTS: u32 = 10;
+    /// `POINTER_FLAG_INRANGE`.
+    pub const POINTER_FLAG_IN_RANGE: u32 = 0x0000_0002;
+    /// `POINTER_FLAG_INCONTACT`.
+    pub const POINTER_FLAG_IN_CONTACT: u32 = 0x0000_0004;
+    /// `POINTER_FLAG_DOWN`.
+    pub const POINTER_FLAG_DOWN: u32 = 0x0001_0000;
+    /// `POINTER_FLAG_UPDATE`.
+    pub const POINTER_FLAG_UPDATE: u32 = 0x0002_0000;
+    /// `POINTER_FLAG_UP`.
+    pub const POINTER_FLAG_UP: u32 = 0x0004_0000;
+    /// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`.
+    pub const DPI_PER_MONITOR_AWARE_V2: isize = -4;
+
     #[link(name = "user32")]
     unsafe extern "system" {
+        /// Readies the calling process to inject up to `max_count` contacts.
+        pub fn InitializeTouchInjection(max_count: u32, feedback: u32) -> i32;
+        /// Injects one frame: every contact that is down, each saying what it
+        /// is doing.
+        pub fn InjectTouchInput(count: u32, contacts: *const PointerTouchInfo) -> i32;
+        /// Makes screen coordinates physical pixels for this process.
+        pub fn SetProcessDpiAwarenessContext(context: isize) -> i32;
         /// Injects events into the session's input stream.
         ///
         /// Returns how many were inserted, which is less than asked for when the
@@ -226,6 +364,7 @@ mod win32 {
 fn main() -> ExitCode {
     say(&format!("ready fg={}", foreground()));
 
+    let mut fingers = Fingers::default();
     for line in std::io::stdin().lock().lines() {
         let line = match line {
             Ok(line) => line,
@@ -238,7 +377,7 @@ fn main() -> ExitCode {
         if command.is_empty() {
             continue;
         }
-        match run(command) {
+        match run(command, &mut fingers) {
             Ok(()) => say(&format!("sent {command:?} fg={}", foreground())),
             Err(problem) => {
                 eprintln!("crcbl-e2e-win32-input: {command:?}: {problem}");
@@ -251,7 +390,7 @@ fn main() -> ExitCode {
 
 /// Runs one command line, or says what was wrong with it.
 #[cfg(target_os = "windows")]
-fn run(command: &str) -> Result<(), String> {
+fn run(command: &str, fingers: &mut Fingers) -> Result<(), String> {
     let mut words = command.split_whitespace();
     let verb = words.next().unwrap_or_default();
     match verb {
@@ -286,10 +425,164 @@ fn run(command: &str) -> Result<(), String> {
             // is what makes a scroll towards the user expressible at all.
             mouse(win32::MOUSEEVENTF_WHEEL, delta as u32, 0, 0)
         }
+        "touch" => {
+            let action = words.next();
+            let id = u32::try_from(number(words.next(), "finger id")?)
+                .map_err(|_| "a finger id is not negative")?;
+            match action {
+                Some("down") => {
+                    let at = point(&mut words)?;
+                    fingers.down(id, at)
+                }
+                Some("move") => {
+                    let at = point(&mut words)?;
+                    fingers.moved(id, at)
+                }
+                Some("up") => fingers.up(id),
+                other => Err(format!("{other:?} is not down, move or up")),
+            }
+        }
         other => Err(format!(
-            "{other:?} is not one of key, down, up, move, click, wheel"
+            "{other:?} is not one of key, down, up, move, click, wheel, touch"
         )),
     }
+}
+
+/// Two numbers, `x` then `y`.
+#[cfg(target_os = "windows")]
+fn point<'a>(words: &mut impl Iterator<Item = &'a str>) -> Result<win32::Point, String> {
+    let x = number(words.next(), "x")?;
+    let y = number(words.next(), "y")?;
+    Ok(win32::Point { x, y })
+}
+
+/// Every finger this program has put down and not yet lifted.
+#[cfg(target_os = "windows")]
+#[derive(Default)]
+struct Fingers {
+    /// Whether `InitializeTouchInjection` has run in this process.
+    ready: bool,
+    /// Each finger that is down, by this program's id, and where it is.
+    down: Vec<(u32, win32::Point)>,
+}
+
+#[cfg(target_os = "windows")]
+impl Fingers {
+    /// A finger lands.
+    fn down(&mut self, id: u32, at: win32::Point) -> Result<(), String> {
+        if self.down.iter().any(|&(finger, _)| finger == id) {
+            return Err(format!("finger {id} is already down"));
+        }
+        let flags = win32::POINTER_FLAG_DOWN
+            | win32::POINTER_FLAG_IN_RANGE
+            | win32::POINTER_FLAG_IN_CONTACT;
+        self.inject(id, at, flags)?;
+        self.down.push((id, at));
+        Ok(())
+    }
+
+    /// A finger that is down moves.
+    fn moved(&mut self, id: u32, at: win32::Point) -> Result<(), String> {
+        let index = self.index(id)?;
+        let flags = win32::POINTER_FLAG_UPDATE
+            | win32::POINTER_FLAG_IN_RANGE
+            | win32::POINTER_FLAG_IN_CONTACT;
+        self.inject(id, at, flags)?;
+        self.down[index].1 = at;
+        Ok(())
+    }
+
+    /// A finger lifts, where it last was.
+    fn up(&mut self, id: u32) -> Result<(), String> {
+        let index = self.index(id)?;
+        let at = self.down[index].1;
+        self.inject(id, at, win32::POINTER_FLAG_UP)?;
+        self.down.remove(index);
+        Ok(())
+    }
+
+    fn index(&self, id: u32) -> Result<usize, String> {
+        self.down
+            .iter()
+            .position(|&(finger, _)| finger == id)
+            .ok_or_else(|| format!("finger {id} is not down"))
+    }
+
+    /// Injects one frame: `id` doing what `flags` say at `at`, and every other
+    /// finger that is down holding still where it is.
+    fn inject(&mut self, id: u32, at: win32::Point, flags: u32) -> Result<(), String> {
+        if !self.ready {
+            // SAFETY: a constant awareness context by value. A refusal leaves
+            // the process DPI-unaware, which only matters on a scaled desktop
+            // and is then visible as touches landing in the wrong place.
+            unsafe { win32::SetProcessDpiAwarenessContext(win32::DPI_PER_MONITOR_AWARE_V2) };
+            // SAFETY: two integers by value.
+            if unsafe {
+                win32::InitializeTouchInjection(win32::MAX_CONTACTS, win32::TOUCH_FEEDBACK_NONE)
+            } == 0
+            {
+                return Err(last_error("InitializeTouchInjection"));
+            }
+            self.ready = true;
+        }
+        let holding = win32::POINTER_FLAG_UPDATE
+            | win32::POINTER_FLAG_IN_RANGE
+            | win32::POINTER_FLAG_IN_CONTACT;
+        let frame: Vec<win32::PointerTouchInfo> = self
+            .down
+            .iter()
+            .filter(|&&(finger, _)| finger != id)
+            .map(|&(finger, still)| contact(finger, still, holding))
+            .chain([contact(id, at, flags)])
+            .collect();
+        let count = u32::try_from(frame.len()).expect("at most MAX_CONTACTS fingers");
+        // SAFETY: `frame` is `count` live, fully initialised
+        // `POINTER_TOUCH_INFO`s, read and never retained.
+        if unsafe { win32::InjectTouchInput(count, frame.as_ptr()) } == 0 {
+            return Err(last_error("InjectTouchInput"));
+        }
+        Ok(())
+    }
+}
+
+/// One finger's entry in a frame.
+#[cfg(target_os = "windows")]
+fn contact(id: u32, at: win32::Point, flags: u32) -> win32::PointerTouchInfo {
+    win32::PointerTouchInfo {
+        pointer_info: win32::PointerInfo {
+            pointer_type: win32::PT_TOUCH,
+            pointer_id: id,
+            frame_id: 0,
+            pointer_flags: flags,
+            source_device: core::ptr::null_mut(),
+            hwnd_target: core::ptr::null_mut(),
+            pixel_location: at,
+            himetric_location: win32::Point::default(),
+            pixel_location_raw: win32::Point::default(),
+            himetric_location_raw: win32::Point::default(),
+            time: 0,
+            history_count: 0,
+            input_data: 0,
+            key_states: 0,
+            performance_count: 0,
+            button_change_type: 0,
+        },
+        touch_flags: 0,
+        touch_mask: 0,
+        contact: win32::Rect::default(),
+        contact_raw: win32::Rect::default(),
+        orientation: 0,
+        pressure: 0,
+    }
+}
+
+/// `what` failed, and the calling thread's last error says why.
+#[cfg(target_os = "windows")]
+fn last_error(what: &str) -> String {
+    // SAFETY: reading the calling thread's last error immediately after the
+    // call that set it.
+    let error = unsafe { win32::GetLastError() };
+    format!("{what} failed with Win32 error {error}")
 }
 
 /// A PS/2 set 1 scan code, extended codes included.

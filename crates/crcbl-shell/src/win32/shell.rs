@@ -22,6 +22,7 @@ use super::events::RawEvent;
 use super::ffi::{self, Handle, Msg, WindowPlacement, value};
 use super::geometry;
 use super::input;
+use super::input::Contact;
 use super::keys::Utf16;
 use super::pointer::{RawMotion, Visibility};
 use super::proc::{self, Shared};
@@ -173,6 +174,8 @@ pub struct Win32Shell {
     pub(super) text: Utf16,
     /// The previous absolute raw sample, for a device that reports positions.
     pub(super) raw_motion: RawMotion,
+    /// Every touch contact currently down, with where it was last seen.
+    pub(super) contacts: Vec<Contact>,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
     /// The next [`ClipboardRequestId`], which is unique for the session.
@@ -275,6 +278,7 @@ impl Win32Shell {
             time: TimeBase::at(ffi::tick_nanos()),
             text: Utf16::default(),
             raw_motion: RawMotion::default(),
+            contacts: Vec::new(),
             visibility: Visibility::default(),
             next_request: 1,
             caps: Self::latch_caps(raw_motion),
@@ -304,7 +308,8 @@ impl Win32Shell {
             .union(ShellCaps::POINTER_WARP)
             .union(ShellCaps::CLIPBOARD)
             .union(ShellCaps::DRAG_DROP)
-            .union(ShellCaps::TEXT_IME);
+            .union(ShellCaps::TEXT_IME)
+            .union(ShellCaps::TOUCH);
         if raw_motion {
             caps.union(ShellCaps::RAW_POINTER_MOTION)
         } else {
@@ -777,6 +782,7 @@ impl Win32Shell {
                     if let Some(removed) = self.windows.remove(window.cast()) {
                         self.shared.forget(removed.key);
                         self.drop_clipboard_answers(window);
+                        self.forget_contacts(window);
                         self.queue.push_back(ShellEvent::WindowDestroyed { window });
                     }
                 }
@@ -833,6 +839,7 @@ impl Win32Shell {
                 | RawEvent::PointerFocus { .. }
                 | RawEvent::Button { .. }
                 | RawEvent::Wheel { .. }
+                | RawEvent::Touch { .. }
                 | RawEvent::RawMotion { .. }) => self.translate_input(input_event, window),
             }
         }
@@ -945,6 +952,15 @@ impl Shell for Win32Shell {
     ///   What is **not** here, as on every backend, is a pre-edit: no
     ///   composition string reaches the seam and the candidate window is not
     ///   placed at the caret.
+    /// * [`TOUCH`](ShellCaps::TOUCH) — `WM_POINTERDOWN`/`UPDATE`/`UP` for
+    ///   `PT_TOUCH` pointers, with a capture change or a cancelled release as
+    ///   [`Cancelled`](crcbl_core::input::TouchPhase::Cancelled). The primary
+    ///   contact reaches `DefWindowProc`, which synthesizes the mouse messages
+    ///   the seam obliges a touch backend to deliver; a secondary one does not,
+    ///   because given two fingers the default handler turns a pinch into a
+    ///   synthesized Ctrl press. A constant, like the rest: a touchscreen
+    ///   plugged in mid-session delivers pointer messages to a window that
+    ///   never asked for them, so there is nothing to latch on.
     ///
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE) is clear for a reason rather than
     /// for want of work — a plain `HWND` presents at its own size, and the
@@ -1063,6 +1079,7 @@ impl Shell for Win32Shell {
             .ok_or_else(|| ShellError::invalid_window(window))?;
         self.shared.forget(removed.key);
         self.drop_clipboard_answers(window);
+        self.forget_contacts(window);
         // The pool entry is gone **before** the system call, deliberately:
         // `DestroyWindow` dispatches `WM_DESTROY` into the window procedure
         // synchronously, and the `RawEvent::Destroyed` that produces must not
@@ -2217,6 +2234,7 @@ mod tests {
             ShellCaps::CLIPBOARD,
             ShellCaps::DRAG_DROP,
             ShellCaps::TEXT_IME,
+            ShellCaps::TOUCH,
         ] {
             assert!(caps.contains(present), "{present:?} is implemented");
         }
@@ -2228,12 +2246,9 @@ mod tests {
         );
         assert!(caps.has_mouselook(), "both halves, which is the point");
 
-        // Clear, each for a stated reason: `HW_UPSCALE` is not something a
-        // plain `HWND` can do, and `TOUCH` has no `WM_POINTER` path yet. A
-        // capability that overstates itself is worse than one that is missing.
-        for absent in [ShellCaps::HW_UPSCALE, ShellCaps::TOUCH] {
-            assert!(!caps.contains(absent), "{absent:?} is not implemented");
-        }
+        // Clear, for a stated reason: a plain `HWND` presents at its own size.
+        // A capability that overstates itself is worse than one that is missing.
+        assert!(!caps.contains(ShellCaps::HW_UPSCALE));
         assert_eq!(caps, shell.caps(), "latched for the shell's lifetime");
 
         // And the methods agree with the bits, which is what makes them

@@ -2088,6 +2088,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- The Win32 shell now reports `ShellCaps::TOUCH` and delivers
+  `ShellEvent::Touch` from `WM_POINTER*` messages, one contact per finger. The
+  first finger still arrives as the mouse as before, so games bound only to the
+  pointer keep working. Secondary fingers are kept from Windows' gesture
+  promotion, which otherwise turns a two-finger pinch into a synthesized Ctrl
+  press.
+
 - The Win32 shell now reports `ShellCaps::TEXT_IME`: dead keys and input-method
   commits already arrived as `ShellEvent::TextCommit`, and a real-desktop test
   now proves the composition, so a consumer branching on the bit gets the same

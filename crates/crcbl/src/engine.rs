@@ -3151,8 +3151,8 @@ pub struct Pending {
     /// Positions are framebuffer pixels, like [`pointer`](Self::pointer). The
     /// game is handed them normalised — see [`TouchUpdate`].
     ///
-    /// Empty on every backend but the web one today: contacts arrive only where
-    /// [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH) is set.
+    /// Empty on every backend but the web and Win32 ones today: contacts arrive
+    /// only where [`ShellCaps::TOUCH`](crcbl_shell::ShellCaps::TOUCH) is set.
     pub touches: Vec<TouchContact>,
     /// Every **non-primary** pointer button edge this batch carried, in the
     /// order the shell reported them, `true` for a press.
