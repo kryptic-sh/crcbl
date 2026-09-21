@@ -4487,46 +4487,54 @@ would also reach the Linux and macOS linkers, which reject that flag. Considered
 and declined for now: moving `-D warnings` out of `RUSTFLAGS` workflow-wide,
 which is a larger CI change than a harmless gap warrants.
 
-## D3D12 on hardware: what structured storage views made visible (2026-09-15)
+## D3D12 on hardware: fixed on an RX 7900 XTX, and what is left (2026-09-22)
 
-Until storage buffers became structured views, no shader on a D3D12 **hardware**
-device could read one — every element aliased the first — so nothing in
-`crates/crcbl/tests` had ever drawn a real picture there, and WARP, CI's only
-D3D12 device, never showed the difference. With that fixed, the GPU suites were
-run on an AMD RX 9060 XT (driver 32.0.31041.1004) with `CRCBL_GPU=dx12` and the
-debug layer on, and against WARP the same way (`CRCBL_ADAPTER=cpu`, as CI sets
-it). **WARP: 639 of 639 pass. Hardware: 596 passed and 43 failed**; six of those
-were `draw_gen_e2e`'s cull tests declaring a wrong stride, which the new check
-refused and which pass on hardware since the fix, leaving **37** that WARP
-passes and hardware does not — findings rather than regressions. Grouped by what
-they report, none diagnosed yet:
+The 2026-09-15 run on an RX 9060 XT found 37 tests that WARP passed and hardware
+failed. On 2026-09-22 the same suites (`render_e2e`, `hal_seam_e2e`,
+`draw_gen_e2e`, `forward_e2e`, `sprite_e2e`, `mesh_e2e`, `tiling_e2e`, each
+behind its feature, `CRCBL_GPU=dx12`, `CRCBL_DX12_VALIDATION=0` because no debug
+layer is installed) ran on an RX 7900 XTX (driver 32.0.21036.18): **144 passed,
+158 failed**, while WARP passed 302 of 302. Two backend defects explained all of
+it, and after fixing them hardware and WARP both pass 302 of 302:
 
-- **The timestamp pair does not move.** `hal_seam_e2e`'s
-  `every_declared_capability_behaves_the_way_it_was_declared` reads the same
-  tick for the opening and closing write of a pass that cleared 4 MiB. WARP
-  advances. Suspect the query heap's resolve or the queue the writes land on.
-- **A dynamic-offset bind removes the device.**
-  `a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them` fails at
-  `ID3D12GraphicsCommandList::Close` with `DXGI_ERROR_DEVICE_REMOVED`, zero
-  debug-layer errors. Root descriptors are the path it exercises.
-- **The froxel volume integrates nothing.** Every `mesh_e2e` `hdr::` froxel test
-  and `froxels::the_froxel_column_is_the_scan_of_the_slabs_the_medium_scatters`
-  read zero scattering where the closed form is non-zero.
-- **Exposure reduces to a slightly different number.** `mesh_e2e` `exposure::`
-  (four tests): 1.4012964 on the GPU against the host's 1.4051892 from the same
-  bins — small, systematic, possibly the histogram's atomic increments.
-- **Frames differ between geometry paths, and from goldens.** Every `render_e2e`
-  `*_draws_the_same_frame_on_every_geometry_path` (IndirectCount against
-  IndirectPerBatch on this device), five goldens across `render_e2e` and
-  `mesh_e2e`, `cmaa2::` determinism and edge-band checks, both `shadow_cache::`
-  equivalences and two `forward_e2e` `shadow::` atlas views. The goldens were
-  blessed on lavapipe, so some of these may be tolerance rather than defect; the
-  cross-path and determinism ones cannot be.
+- **No UAV barrier between dependent storage passes.** The seam's `ShaderWrite`
+  and `ShaderReadWrite` both map to `UNORDERED_ACCESS`, so `plan_barriers`
+  dropped the barrier between two passes writing one storage resource as an
+  equal-state transition. WARP runs dispatches one after another; a real GPU
+  overlaps them, and `draw_gen`'s starts pass read the counts before the bin
+  pass had finished writing them (every start read `runs_at`). Now a `UAV`
+  barrier is recorded (`Transitions::push_uav`). This was 157 of the 158.
+- **A root argument set before any root signature.** `bind_group` before a
+  pipeline set root arguments against no root signature; WARP recorded it, and
+  AMD's driver failed the list at `Close` with `DXGI_ERROR_DEVICE_REMOVED`.
+  `bind_group` now sets the layout's root signature when no pipeline is bound.
 
-**What would close it:** each group is its own slice, run on a hardware D3D12
-device, since CI has none — `docs/notes/ci.md` records that `windows-latest` has
-no GPU. Until then `dx12 e2e (software adapter)` stays the only D3D12 gate, and
-it is blind to all of the above.
+Measurement is also a correction to the 9060 XT account: the timestamp,
+dynamic-offset, froxel, exposure and cross-path groups it listed all pass on the
+7900 XTX now, and were most likely the same missing barrier.
+
+**Still open, none of it verified either way:**
+
+- `push_constants` with no pipeline bound sets root constants the way
+  `bind_group` did, so it probably has the same fault. No test binds push
+  constants before a pipeline.
+- `plan_barriers` still drops a copy-destination to copy-destination barrier
+  without recording anything, so two copies writing one buffer are unordered.
+  Nothing has failed from it.
+- Whether binding a pipeline after a group keeps the arguments that group set.
+  The pipeline's root signature comes from the same layout, and
+  `a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them` passes,
+  but no test covers bind-group-then-pipeline-then-draw directly.
+- `crcbl-dx12`'s own device tests (`--run-ignored only`, pin unset so the
+  discrete GPU is used) fail three on hardware and four on WARP, and did before
+  these fixes: the two debug-layer self-tests (no layer installed here),
+  `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` (the mesh pipeline
+  declares a 20-byte stride at set 0 binding 12 where the shader's SRV register
+  9 holds 4-byte elements), and, on WARP only,
+  `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` (see the
+  mesh-shading `DEFERRED` entry).
+- No CI job runs D3D12 on hardware (`windows-latest` has no GPU), so these
+  results live only in this entry.
 
 ## Posed bounds for deforming geometry
 

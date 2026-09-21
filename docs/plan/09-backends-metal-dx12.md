@@ -1,5 +1,13 @@
 # Stage 9 — Metal + DX12 Backends
 
+> **D3D12 resumed for defects, 2026-09-22.** The owner's goal of fixing every
+> Windows item in `docs/backlog.md` lifts the hold below for `crcbl-dx12` on a
+> Windows desktop with a real GPU (an RX 7900 XTX): its first fixes were a
+> missing UAV barrier between dependent storage passes and a root argument set
+> before any root signature, both invisible on WARP. The capability-row
+> bookkeeping still lists the backend as deferred until its rows are closed.
+> Metal stays deferred.
+>
 > **DEFERRED, 2026-08-21.** Work on both backends is stopped for now by the
 > owner's decision. Neither crate is deleted and neither CI job is removed —
 > `dx12 e2e (software adapter)` and `mtl e2e (macos-latest)` keep running and

@@ -751,6 +751,9 @@ pub(crate) struct BoundGroup {
     /// Every resource the group's descriptors point into, so the encoder can
     /// hold a reference for the length of the submission.
     pub(crate) retained: Vec<ID3D12Resource>,
+    /// The pipeline layout's root signature, which every parameter index above
+    /// is an index into — set by the encoder when no pipeline has set one.
+    pub(crate) root_signature: ID3D12RootSignature,
 }
 
 /// One root descriptor a bind sets: which parameter, which call, which address.
@@ -1218,6 +1221,7 @@ impl DeviceInner {
                 .map(|(root, block)| (root, state.visible.gpu_samplers(block))),
             roots,
             retained: record.retained.clone(),
+            root_signature: layout.raw.clone(),
         })
     }
 

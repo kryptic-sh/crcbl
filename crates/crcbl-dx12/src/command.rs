@@ -105,9 +105,10 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, D3D12_RESOURCE_BARRIER_FLAG_NONE,
     D3D12_RESOURCE_BARRIER_TYPE_TRANSITION, D3D12_RESOURCE_BARRIER_TYPE_UAV,
     D3D12_RESOURCE_STATE_RENDER_TARGET, D3D12_RESOURCE_STATE_RESOLVE_DEST,
-    D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER,
-    D3D12_RESOURCE_UAV_BARRIER, D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV,
-    D3D12_SUBRESOURCE_FOOTPRINT, D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
+    D3D12_RESOURCE_STATE_RESOLVE_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+    D3D12_RESOURCE_STATES, D3D12_RESOURCE_TRANSITION_BARRIER, D3D12_RESOURCE_UAV_BARRIER,
+    D3D12_ROOT_PARAMETER_TYPE_CBV, D3D12_ROOT_PARAMETER_TYPE_SRV, D3D12_SUBRESOURCE_FOOTPRINT,
+    D3D12_TEXTURE_COPY_LOCATION, D3D12_TEXTURE_COPY_LOCATION_0,
     D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
     D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
     ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList,
@@ -137,10 +138,10 @@ use crate::{query, resolve};
 /// enforces — including on the path where a later barrier fails to resolve and
 /// the batch is abandoned half-built.
 ///
-/// Only `TRANSITION` barriers live here, which is what lets `Drop` name one
-/// union member without knowing anything else. The global barrier
-/// [`Barriers::global`] asks for is a `UAV` barrier with a null resource, built
-/// inline where there is no reference to release.
+/// `TRANSITION` barriers and per-resource `UAV` barriers live here, and `Drop`
+/// reads each entry's `Type` to name the union member holding its reference.
+/// The global barrier [`Barriers::global`] asks for is a `UAV` barrier with a
+/// null resource, built inline where there is no reference to release.
 struct Transitions(Vec<D3D12_RESOURCE_BARRIER>);
 
 impl Transitions {
@@ -172,6 +173,31 @@ impl Transitions {
         });
     }
 
+    /// Adds one `UAV` barrier on `resource`, taking a reference to it for the
+    /// call: every unordered access to it recorded before the barrier finishes
+    /// before any recorded after it starts.
+    ///
+    /// **This is the barrier a storage-to-storage transition needs, and a
+    /// `TRANSITION` cannot be it.** The seam's `ShaderWrite` and
+    /// `ShaderReadWrite` are both `UNORDERED_ACCESS`, so a graph's barrier
+    /// between two passes writing one storage resource collapses to a
+    /// transition whose two states are equal — which the debug layer rejects
+    /// and which orders nothing. D3D12 does not order unordered accesses
+    /// across dispatches or draws on its own: WARP runs them one after another
+    /// and hides the gap, while a hardware queue overlaps them and the second
+    /// pass reads what the first has not finished writing.
+    fn push_uav(&mut self, resource: &ID3D12Resource) {
+        self.0.push(D3D12_RESOURCE_BARRIER {
+            Type: D3D12_RESOURCE_BARRIER_TYPE_UAV,
+            Flags: D3D12_RESOURCE_BARRIER_FLAG_NONE,
+            Anonymous: D3D12_RESOURCE_BARRIER_0 {
+                UAV: ManuallyDrop::new(D3D12_RESOURCE_UAV_BARRIER {
+                    pResource: ManuallyDrop::new(Some(resource.clone())),
+                }),
+            },
+        });
+    }
+
     fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
@@ -184,10 +210,20 @@ impl Transitions {
 impl Drop for Transitions {
     fn drop(&mut self) {
         for barrier in &mut self.0 {
-            // SAFETY: `push` above is the only constructor and always writes the
-            // `Transition` member, so that is the live one for every entry here.
-            // Reading the union field is the whole of what needs the block; the
-            // deref through `ManuallyDrop` below is ordinary safe code.
+            if barrier.Type == D3D12_RESOURCE_BARRIER_TYPE_UAV {
+                // SAFETY: `push_uav` is the only constructor of a `UAV` entry
+                // and always writes the `UAV` member, so that is the live one.
+                let uav = unsafe { &mut barrier.Anonymous.UAV };
+                // SAFETY: `pResource` holds the reference `push_uav` cloned, and
+                // this is its matching release. The entry is not read again.
+                unsafe { ManuallyDrop::drop(&mut uav.pResource) };
+                continue;
+            }
+            // SAFETY: `push` above is the only constructor of every other entry
+            // and always writes the `Transition` member, so that is the live
+            // one here. Reading the union field is the whole of what needs the
+            // block; the deref through `ManuallyDrop` below is ordinary safe
+            // code.
             let transition = unsafe { &mut barrier.Anonymous.Transition };
             // SAFETY: `pResource` is the `ManuallyDrop<Option<ID3D12Resource>>`
             // holding the reference `push` cloned, and this is its matching
@@ -636,8 +672,9 @@ impl Dx12CommandEncoder {
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is a live command list in the recording state, and the
         // slice is a live, fully initialised barrier array borrowed for the
-        // duration of the call. Every entry is a `TRANSITION` naming a resource
-        // `Transitions::push` holds a reference to until after this returns.
+        // duration of the call. Every entry is a `TRANSITION` or a `UAV` barrier
+        // naming a resource `Transitions` holds a reference to until after this
+        // returns.
         unsafe { list.ResourceBarrier(transitions.as_slice()) };
     }
 
@@ -665,6 +702,11 @@ impl Dx12CommandEncoder {
             let before = conv::resource_state(barrier.from);
             let after = conv::resource_state(barrier.to);
             if before == after {
+                // Both storage states: a hazard with no state change, which is
+                // what a `UAV` barrier is for — see `Transitions::push_uav`.
+                if before == D3D12_RESOURCE_STATE_UNORDERED_ACCESS {
+                    transitions.push_uav(&buffer.raw);
+                }
                 continue;
             }
             transitions.push(
@@ -685,8 +727,13 @@ impl Dx12CommandEncoder {
             // A transition whose two states are the same D3D12 state is not a
             // no-op to the debug layer, it is an error — so the seam pairs that
             // collapse (`Undefined` to `Present`, both `COMMON`) are dropped
-            // rather than recorded.
+            // rather than recorded — except the two storage states, whose
+            // hazard a `UAV` barrier orders (see `Transitions::push_uav`). It
+            // names the whole resource, so the barrier's range cannot narrow it.
             if before == after {
+                if before == D3D12_RESOURCE_STATE_UNORDERED_ACCESS {
+                    transitions.push_uav(&image.raw);
+                }
                 continue;
             }
             for subresource in image.subresources(barrier.range) {
@@ -2112,6 +2159,15 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// `SetComputeRootDescriptorTable` and its graphics twin — a `DIRECT`
     /// command list has both, and the wrong one leaves the dispatch reading the
     /// last draw's arguments.
+    ///
+    /// **A bind with no pipeline at its bind point sets the layout's root
+    /// signature first.** A root argument is an index into the command list's
+    /// current root signature, and before any is set there is nothing for it to
+    /// index — WARP records the call anyway, while AMD's driver fails the whole
+    /// list at `Close` with `DXGI_ERROR_DEVICE_REMOVED`. The seam permits a
+    /// bind before a pipeline, as Vulkan does, so the backend supplies the
+    /// signature the layout names. With a pipeline bound its signature is left
+    /// alone: replacing it would reset the arguments bound before this one.
     fn bind_group(
         &mut self,
         index: u32,
@@ -2136,7 +2192,23 @@ impl CommandEncoder for Dx12CommandEncoder {
             self.retain(resource);
         }
         let compute = self.in_compute_pass;
+        let unset = if compute {
+            self.compute.is_none()
+        } else {
+            self.pipeline.is_none()
+        };
         let Some(list) = self.list() else { return };
+        if unset {
+            // SAFETY: `list` is live and recording, and the signature is one this
+            // device created, held by `bound` for the duration of the call.
+            unsafe {
+                if compute {
+                    list.SetComputeRootSignature(&bound.root_signature);
+                } else {
+                    list.SetGraphicsRootSignature(&bound.root_signature);
+                }
+            }
+        }
         // SAFETY: `list` is live and recording. `bound.heaps` is a live slice of
         // shader-visible heaps this device owns, borrowed for the call and
         // containing no null entry — `VisibleHeaps::bound` drops a heap that was
