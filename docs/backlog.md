@@ -16365,16 +16365,6 @@ under the same heading, and it binds any Windows test written from now on.
   to `u16` leaves every assertion green). `DEVMODEW` is the one with two unions
   in it and the one to re-read if a refresh rate ever looks implausible;
   `RAWMOUSE` if a raw delta does.
-- **No input has ever been delivered by a real device.** Injection is not
-  hardware: nothing has confirmed that a real keyboard's `lParam` carries what
-  `keys::scancode` expects, or that `GetMessageTime` answers for the message
-  being dispatched. Note the limitation belongs to the **in-crate** tests, which
-  drive the window procedure with `SendMessageW` — the real procedure against
-  the real cached state, but not the real message stream. The e2e suite does
-  better: it injects with `SendInput` from a second process
-  (`tests/bin/send_input_win32.rs`), so its messages are posted, queued,
-  translated and dispatched. That is what found `TranslateMessage` missing from
-  the pump.
 - **`WM_INPUT`'s absolute path is untested; its relative path is not.** W4's
   `injected_motion_arrives_as_raw_relative_motion_for_mouselook` waits for a
   `raw_delta`, which only `input::read_raw_mouse` and the `RIM_TYPE_MOUSE` check
@@ -16398,18 +16388,6 @@ under the same heading, and it binds any Windows test written from now on.
   (`cursor_display_count` reads it by moving it and putting it back). That test
   is the only thing standing between this backend and an invisible cursor for
   the rest of a session, so it is the one to keep rather than relax.
-- **Auto-repeat is not the driver's.** Windows typematic comes from the
-  keyboard, and an injected key does not repeat; the repeat test sends two
-  presses and reads bit 30, which the _system_ sets — the same bit a real hold
-  sets, so the claim is sound; what is untested is the driver's timing.
-- **No file has ever been dragged onto a window.** The drop test builds a
-  `DROPFILES` block by hand — this project's idea of what the shell sends, not
-  the shell's, and a real drag needs a source application's mouse. If shell32
-  rejects the block it reads exactly like a backend bug: `ffi::DropFiles`'s size
-  assertion is the first thing to re-check, and `f_wide` the second.
-  `DragAcceptFiles` and the `WS_EX_ACCEPTFILES` round trip are asserted through
-  the style word; a _real_ drag being offered is a decision the shell makes in
-  another process.
 - **No other process has ever contended for the clipboard**, so `Opened::After`
   and `Opened::Refused` have never been produced and the retry loop itself is
   unexercised; only the budget arithmetic is covered, on Linux. The clipboard
@@ -16472,6 +16450,30 @@ which its message does not print.
 Still true after this run: the input was all injected, since nothing typed on a
 real keyboard is part of any test, and the IME and real drag cases above are
 unchanged.
+
+### Real keyboard, mouse and drag, by hand (2026-09-21)
+
+`tests/bin/hands_on_win32.rs` (`crcbl-e2e-win32-hands-on`, `win32-e2e` feature)
+prompts a person through each step in its window's title bar and checks what the
+shell reports. It is never run by CI. Run once by the user on the RX 7900 XTX
+desktop, with a MonsGeek keyboard and a VID 3710 mouse, it passed all 13 steps:
+
+- Real scancodes arrive as `keys::scancode` expects, the extended ones included:
+  `A` is `0x1E`, `ArrowUp` `0xE048`, right Ctrl `0xE01D`. So do the key code,
+  the keysym, and the `TextCommit` that `TranslateMessage` builds.
+- The driver's typematic repeat: a two-second hold of `J` gave 60 repeats, the
+  first 500 ms after the press and then every 31 ms (the median). That is
+  Windows' default repeat delay and rate, measured from the events' own
+  `GetMessageTime` stamps, so the timestamps do belong to the message being
+  dispatched.
+- Left, right, middle and Back buttons press and release at client coordinates,
+  and one wheel notch away from the user reads `Lines { y: -1 }` under that
+  desktop's reversed scroll setting.
+- Raw relative motion from a real mouse, and a real drag of a file from Explorer
+  (`DroppedFile` with an existing path and a client position).
+
+Still not covered by it: the Forward button (the prompt asks only for Back), an
+absolute raw device, and another process contending for the clipboard.
 
 ### Touch on Win32: what was measured and what was not (2026-09-21)
 
