@@ -3993,7 +3993,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   MX550 `draw-args` distributions before and after; retain the lookup only if
   the pass improves repeatably. Preserve material-mode and LOD routing, empty
   buckets and `NO_BUCKET`, and make those cases observable in a GPU readback
-  test before replacing the search.
+  test before replacing the search. The fixture rendered cleanly through the
+  MX550 Vulkan validation path. Two 900-frame 1920×1080 runs measured the three
+  aggregated `draw-args` passes at 0.373/0.374 ms p50 against complete p50 pass
+  sums of 8.545/8.562 ms, so routing is material and stable enough to trial.
+  They also exposed `draw-starts` at 0.525/0.527 ms: its single-invocation
+  prefix scan is now the larger draw-generation cost on this workload and should
+  be priced separately after the routing lookup.
 - **P21 — one bind and one indirect call per bucket per pass per view.**
   `BucketDraws::record` issues a call for every bucket, empty or not, in the
   prepass, the forward pass and every shadow view — about ten thousand calls a

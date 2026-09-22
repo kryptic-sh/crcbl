@@ -4,16 +4,19 @@
 //! or light count changes between runs is two workloads sharing a label, so the
 //! command line selects a shape and this module owns every parameter behind it.
 
+use std::borrow::Cow;
+
 use crcbl::math::{Mat4, Quat, Vec3};
 use crcbl::render::{
     ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight, RectLight,
-    scene::{DEMO_CUBE, DEMO_UNTINTED},
+    scene::{self, DEMO_CUBE, DEMO_UNTINTED, SceneDesc},
 };
 use crcbl::shaders::light::CLUSTER_LIGHT_CAPACITY;
 
 const INSTANCE_COLUMNS: usize = 100;
 const INSTANCE_ROWS: usize = 100;
 pub const INSTANCE_COUNT: usize = INSTANCE_COLUMNS * INSTANCE_ROWS;
+const ROUTING_BUCKET_COUNT: usize = 938;
 const LIGHT_COLUMNS: usize = 16;
 const LIGHT_ROWS: usize = 16;
 pub const LIGHT_COUNT: usize = LIGHT_COLUMNS * LIGHT_ROWS;
@@ -31,6 +34,8 @@ pub enum Scene {
     Cube,
     /// A screen-filling grid of static instances, with one animated cell.
     Instances,
+    /// The instance grid distributed over a large fixed resident-mesh table.
+    Buckets,
     /// The instance grid with every transform rewritten each frame.
     Moving,
     /// The instance grid with the froxel budget filled but not exceeded.
@@ -55,6 +60,7 @@ impl Scene {
         match name {
             "cube" => Some(Self::Cube),
             "instances" => Some(Self::Instances),
+            "buckets" => Some(Self::Buckets),
             "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
             "specular-lights-fit" => Some(Self::SpecularLightsFit),
@@ -72,6 +78,7 @@ impl Scene {
         match self {
             Self::Cube => "cube",
             Self::Instances => "instances",
+            Self::Buckets => "buckets",
             Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
             Self::SpecularLightsFit => "specular-lights-fit",
@@ -88,6 +95,7 @@ impl Scene {
         match self {
             Self::Cube => 1,
             Self::Instances
+            | Self::Buckets
             | Self::Moving
             | Self::LightsFit
             | Self::SpecularLightsFit
@@ -102,7 +110,7 @@ impl Scene {
     #[must_use]
     pub const fn light_count(self) -> usize {
         match self {
-            Self::Cube | Self::Instances | Self::Moving => 0,
+            Self::Cube | Self::Instances | Self::Buckets | Self::Moving => 0,
             Self::LightsFit
             | Self::SpecularLightsFit
             | Self::AreaLightsFit
@@ -117,6 +125,27 @@ impl Scene {
     pub const fn simulates(self) -> bool {
         matches!(self, Self::Combined)
     }
+}
+
+/// The resident data for the selected fixture.
+#[must_use]
+pub fn description(which: Scene) -> SceneDesc<'static> {
+    let mut description = scene::demo();
+    if which != Scene::Buckets {
+        return description;
+    }
+
+    let cube = description.meshes[DEMO_CUBE].clone();
+    description.meshes = (0..ROUTING_BUCKET_COUNT)
+        .map(|index| {
+            let mut mesh = cube.clone();
+            mesh.label = Cow::Owned(format!("routing cube {index}"));
+            mesh
+        })
+        .collect();
+    description.capacities.instances = u32::try_from(INSTANCE_COUNT)
+        .unwrap_or_else(|_| unreachable!("the fixed instance grid fits a u32"));
+    description
 }
 
 /// Populates `renderer` and returns the instances the fixture may animate.
@@ -156,6 +185,7 @@ fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
     let transform = match scene {
         Scene::Cube => ForwardRenderer::spin(seconds),
         Scene::Instances
+        | Scene::Buckets
         | Scene::Moving
         | Scene::LightsFit
         | Scene::SpecularLightsFit
@@ -167,7 +197,11 @@ fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
         }
     };
     InstanceDesc {
-        mesh: DEMO_CUBE,
+        mesh: if scene == Scene::Buckets {
+            index % ROUTING_BUCKET_COUNT
+        } else {
+            DEMO_CUBE
+        },
         material: DEMO_UNTINTED,
         transform,
     }
@@ -261,6 +295,7 @@ mod tests {
         for scene in [
             Scene::Cube,
             Scene::Instances,
+            Scene::Buckets,
             Scene::Moving,
             Scene::LightsFit,
             Scene::SpecularLightsFit,
@@ -273,6 +308,7 @@ mod tests {
             assert!(scene.instance_count() > 0);
         }
         assert_eq!(Scene::Instances.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::Buckets.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::SpecularLightsFit.instance_count(), INSTANCE_COUNT);
@@ -309,6 +345,14 @@ mod tests {
         assert_eq!(Scene::Moving.light_count(), 0);
         assert!(Scene::Combined.simulates());
         assert!(!Scene::Lights.simulates());
+    }
+
+    #[test]
+    fn the_bucket_fixture_matches_the_many_bucket_workload() {
+        let scene = description(Scene::Buckets);
+        assert_eq!(scene.meshes.len(), ROUTING_BUCKET_COUNT);
+        assert_eq!(scene.capacities.instances as usize, INSTANCE_COUNT);
+        assert_eq!(scene.materials, crcbl::render::scene::demo().materials);
     }
 
     #[test]

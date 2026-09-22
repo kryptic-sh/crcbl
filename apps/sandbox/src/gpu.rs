@@ -218,7 +218,9 @@ impl Gpu {
     ) -> Result<Self, GpuError> {
         // Milestones 3–5. Built after the swapchain because the tonemap
         // pipeline has to name the colour format the pass will render to.
-        let mut renderer = ForwardRenderer::new(ctx.device(), ctx.queue(), ctx.format())?;
+        let description = stress::description(scene);
+        let mut renderer =
+            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &description)?;
         // The player's `[engine.video]` clamp, which the context read while it
         // opened. Only that layer: the camera layer belongs to a view and this
         // sample draws one, and nothing here overrides an effect from code. It

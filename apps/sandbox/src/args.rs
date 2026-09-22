@@ -32,7 +32,7 @@ OPTIONS:
         --camera <MODE>   `perspective` or `ortho`. Default: perspective.
                           The 2D story is a projection-matrix swap and nothing
                           else, which is what this flag exists to demonstrate.
-        --scene <NAME>    Fixed scene: `cube`, `instances`, `moving`,
+        --scene <NAME>    Fixed scene: `cube`, `instances`, `buckets`, `moving`,
                           `lights-fit`, `specular-lights-fit`, `area-lights-fit`,
                           `area-fill-lights-fit`, `lights` or `combined`.
                           Default: cube. The stress scenes keep their load live
@@ -150,7 +150,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     Some(scene) => options.scene = scene,
                     None => {
                         return Invocation::BadUsage(format!(
-                            "unknown --scene `{name}`; try `cube`, `instances`, `moving`, \
+                            "unknown --scene `{name}`; try `cube`, `instances`, `buckets`, `moving`, \
                              `lights-fit`, `specular-lights-fit`, `area-lights-fit`, \
                              `area-fill-lights-fit`, `lights` or `combined`"
                         ));
@@ -234,6 +234,7 @@ mod tests {
     #[test]
     fn every_fixed_stress_scene_is_reachable_and_unknown_names_are_refused() {
         assert_eq!(options(&["--scene", "instances"]).scene, Scene::Instances);
+        assert_eq!(options(&["--scene", "buckets"]).scene, Scene::Buckets);
         assert_eq!(options(&["--scene", "moving"]).scene, Scene::Moving);
         assert_eq!(options(&["--scene", "lights-fit"]).scene, Scene::LightsFit);
         assert_eq!(
