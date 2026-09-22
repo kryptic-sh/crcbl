@@ -3727,7 +3727,7 @@ run to completion at a 363 MiB peak where they aborted before, and that is with
 One item at a time: an implementation agent takes an item with the verification
 below, the change is reviewed and the whole verification re-run by hand, then
 committed on its own and pushed to `main`, and its bullet is deleted here. The
-remaining order, by expected win against risk: P3, P20, P2 (log the real stride
+remaining order, by expected win against risk: P20, P2 (log the real stride
 first — it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the
 rest top to bottom. The verification every item gets:
 
@@ -3861,14 +3861,19 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   count and index by the local group; `ClusterDrawConstants::group_stride` and
   `mesh_cluster.slang` change together. Log the stride for a real scene first —
   an all-flat scene has a stride of one and this is moot there.
-- **P3 — GPU-only buffers are rings for no stated reason.** `runs`, `args`,
-  `counts` and `cull stats` in `DrawGen`, the light grid's froxel grid, the
-  cluster-selection rings (`View::cluster_selection`, and `shadow selection`
-  over `SHADOW_VIEWS`) are written and read by shaders inside one frame, unlike
-  host-written rings. **Fix:** one buffer each, imported per frame in
-  `ShaderReadWrite` as `group_state` already is; keep rings for host-written
-  data. Check the `cull_stats` copy stays inside its producing frame, and leave
-  the volumetric rings until they are shown not to be history.
+- **P3 — sharing GPU frame buffers was considered and declined.** `runs`,
+  `args`, `counts` and `visible_count` in `DrawGen` remain live after their
+  shader writes: later passes consume the indirect data and the statistics copy
+  completes asynchronously. The light grid, cluster selection, shadow selection
+  and prepass statistics document the same previous-submission hazard.
+  `GpuContext::submit_and_present` allows submissions to overlap and retires
+  only after the configured frames-in-flight depth; a later frame does not wait
+  for the previous frame before recording or submitting. Collapsing these rings
+  would therefore race storage still in use, or require a cross-frame wait that
+  serializes rendering. `group_state` is intentionally different: it is retained
+  history with explicit cross-frame read/write state. Keep the rings unless a
+  future design changes frame scheduling and measures a worthwhile memory
+  benefit against lost overlap.
 - **P4 — every light-slot generator is built whether or not a light is
   shadowed.** Four `DrawGen`s in `build` ("the unused ones cost memory"). Cheap
   once P2–P3 land; otherwise build a slot when a shadowed light first needs it,
