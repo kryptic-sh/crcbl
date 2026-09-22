@@ -325,6 +325,14 @@ Initial measurements and harness findings:
   cache's branch or live matrix costs more than the repeated frame calculation
   saves. Keep rebuilding `ltc_shading_frame` inside the rectangle arm on this
   adapter.
+- The retained point-light controls all set `PointLight::fill`, so they skip the
+  ordinary punctual GGX lobe and cannot price or guard that path. Add a matched
+  within-budget point-light scene that changes only the fill flag, prove the
+  fixture's equality observer fails before the variant exists, and use
+  alternating 1920x1080 runs against `lights-fit` to isolate the specular cost.
+  Keep the scene only if it provides a stable differential without changing
+  froxel occupancy; defer shader changes until that measurement identifies a
+  bounded target.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
