@@ -21992,10 +21992,12 @@ there: 17, 8 and 10 call sites). The rest:
   `probe_ground(world, skin_width * ACTION_SUPPORT_PROBE_SKINS)`, keeping its
   airborne check. EW's foot probes (`probe_foot_contacts`) are vertical rays, a
   different query that `PhysicsWorld::cast_ray_excluding` already serves, so no
-  controller API was added for them. Unverified possible EW bug: they call
-  `world.cast_ray`, which does not skip the character's own collider, and a ray
-  starting inside a shape reports its far wall, so a foot origin inside the
-  player's capsule could hit the capsule's underside and lose the contact.
+  controller API was added for them. They call `world.cast_ray`, which does not
+  skip the character's own collider; EW checked on 2026-09-23 that no character
+  capsule is resident when they run (`begin_character_collision` /
+  `end_character_collision` scope each capsule to its movement step), so this is
+  safe until EW keeps capsules across the tick, at which point the rays need
+  `cast_ray_excluding`.
 - **P2, new: register a GPU-rendered image as a sprite sheet, plus an icon
   cache.** `SpriteRenderer` takes CPU pixels only, so EW rasterises item icons
   on the CPU. Overlaps `crcbl icon bake` above, which is the offline half; this
