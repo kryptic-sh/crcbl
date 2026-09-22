@@ -273,6 +273,8 @@ pub struct Summary {
     pub effects: RenderEffects,
     /// The fixed workload every completed frame presented.
     pub scene: Scene,
+    /// Complete simulation-tick percentiles for a scene that has simulation.
+    pub simulation: Option<crate::stress::SimulationTimings>,
 }
 
 /// Anything that can stop the sandbox before it starts.
@@ -340,6 +342,7 @@ impl Sandbox {
         wait_unpresented: bool,
         effects: RenderEffects,
         scene: Scene,
+        measure_simulation: bool,
     ) -> Self {
         Self {
             pacing,
@@ -351,7 +354,7 @@ impl Sandbox {
             unpresented: None,
             effects,
             scene,
-            simulation: crate::stress::Simulation::for_scene(scene),
+            simulation: crate::stress::Simulation::for_scene(scene, measure_simulation),
         }
     }
 }
@@ -464,6 +467,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             options.wait_unpresented,
             effects,
             options.scene,
+            options.real_clock(),
         ),
         LoopConfig {
             tick_hz: options.tick_hz,
@@ -605,6 +609,7 @@ impl HostedGame for Sandbox {
             run,
             effects: self.effects,
             scene: self.scene,
+            simulation: self.simulation.as_ref().and_then(|sim| sim.timings()),
         }
     }
 

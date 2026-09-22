@@ -56,6 +56,14 @@ fn main() -> ExitCode {
                     summary.effects.row(),
                     summary.run.exit,
                 );
+                if let Some(timings) = summary.simulation {
+                    println!(
+                        "sandbox simulation (p50 / p95 over the last {} ticks): {:.3} / {:.3} ms",
+                        timings.samples,
+                        std::time::Duration::from_nanos(timings.p50_ns).as_secs_f64() * 1_000.0,
+                        std::time::Duration::from_nanos(timings.p95_ns).as_secs_f64() * 1_000.0,
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err(error) => {

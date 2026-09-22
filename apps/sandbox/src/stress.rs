@@ -21,7 +21,7 @@ const WITHIN_BUDGET_LIGHT_COUNT: usize = CLUSTER_LIGHT_CAPACITY as usize - 1;
 
 mod simulation;
 
-pub use simulation::Simulation;
+pub use simulation::{Simulation, SimulationTimings};
 
 /// The fixed scene the sandbox presents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

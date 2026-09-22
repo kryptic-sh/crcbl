@@ -1,5 +1,8 @@
 //! Dense deterministic broadphase work for the combined stress scene.
 
+use std::time::Instant;
+
+use crcbl::core::stats::Window;
 use crcbl::math::DVec3;
 use crcbl::phys::{ColliderId, PhysicsWorld, QueryScratch, Sphere};
 
@@ -10,6 +13,18 @@ const EXTENT: f64 = 48.0;
 const BODY_RADIUS: f64 = 0.2;
 const QUERY_RADIUS: f64 = 1.0;
 const SPEED: f64 = 1.5;
+const TIMING_SAMPLES: usize = 120;
+
+/// Recent complete simulation-tick latency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SimulationTimings {
+    /// Samples currently in the rolling window.
+    pub samples: usize,
+    /// Nearest-rank median, in nanoseconds.
+    pub p50_ns: u64,
+    /// Nearest-rank p95, in nanoseconds.
+    pub p95_ns: u64,
+}
 
 /// The deterministic simulation half of [`Scene::Combined`].
 #[derive(Debug)]
@@ -21,17 +36,20 @@ pub struct Simulation {
     scratch: QueryScratch,
     out: Vec<ColliderId>,
     last_results: usize,
+    timings: Option<Window<TIMING_SAMPLES>>,
 }
 
 impl Simulation {
     /// Build the fixed dense crowd, or no simulation for a render-only scene.
     #[must_use]
-    pub fn for_scene(scene: Scene) -> Option<Self> {
-        scene.simulates().then(|| Self::with_count(BODY_COUNT))
+    pub fn for_scene(scene: Scene, measure: bool) -> Option<Self> {
+        scene
+            .simulates()
+            .then(|| Self::with_count(BODY_COUNT, measure))
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn with_count(count: usize) -> Self {
+    fn with_count(count: usize, measure: bool) -> Self {
         assert!(count > 0, "a stress crowd must contain a body");
         let columns = (count as f64).sqrt().ceil() as usize;
         let mut world = PhysicsWorld::new();
@@ -59,11 +77,13 @@ impl Simulation {
             scratch: QueryScratch::new(),
             out: Vec::new(),
             last_results: 0,
+            timings: measure.then(Window::new),
         }
     }
 
     /// Move, refit and query the whole crowd once.
     pub fn step(&mut self, dt: f64) {
+        let started = self.timings.as_ref().map(|_| Instant::now());
         let boundary = EXTENT * 0.5;
         for ((position, velocity), &id) in self
             .positions
@@ -94,6 +114,23 @@ impl Simulation {
             results = results.saturating_add(self.out.len());
         }
         self.last_results = std::hint::black_box(results);
+        if let (Some(started), Some(timings)) = (started, self.timings.as_mut()) {
+            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+            timings.record(nanos);
+        }
+    }
+
+    /// Percentiles over the most recent complete ticks, once the sample count
+    /// is large enough that p95 is not merely the maximum under another name.
+    #[must_use]
+    pub fn timings(&self) -> Option<SimulationTimings> {
+        let timings = self.timings.as_ref()?;
+        let (p50_ns, p95_ns) = timings.percentiles()?;
+        Some(SimulationTimings {
+            samples: timings.len(),
+            p50_ns,
+            p95_ns,
+        })
     }
 }
 
@@ -103,7 +140,7 @@ mod tests {
 
     #[test]
     fn the_combined_fixture_moves_refits_and_queries_every_body() {
-        let mut simulation = Simulation::with_count(64);
+        let mut simulation = Simulation::with_count(64, false);
         let before = simulation.positions.clone();
 
         simulation.step(1.0 / 60.0);
@@ -118,5 +155,18 @@ mod tests {
             simulation.last_results >= simulation.ids.len(),
             "every sphere query must at least find its own body",
         );
+        assert_eq!(simulation.timings(), None, "timing is disabled");
+    }
+
+    #[test]
+    fn timings_cover_complete_simulation_ticks() {
+        let mut simulation = Simulation::with_count(64, true);
+        for _ in 0..crcbl::core::stats::MIN_PERCENTILE_SAMPLES {
+            simulation.step(1.0 / 60.0);
+        }
+        let timings = simulation.timings().expect("enough ticks for a p95");
+        assert_eq!(timings.samples, crcbl::core::stats::MIN_PERCENTILE_SAMPLES);
+        assert!(timings.p50_ns > 0);
+        assert!(timings.p95_ns >= timings.p50_ns);
     }
 }
