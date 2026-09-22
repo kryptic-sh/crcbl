@@ -1171,9 +1171,16 @@ pub mod value {
     pub const QS_ALL_EVENTS: u32 = 0x04BF;
     /// `INFINITE`.
     pub const INFINITE: u32 = 0xFFFF_FFFF;
-    /// `WAIT_OBJECT_0` — with a handle count of zero this means one thing only:
-    /// a message is available.
+    /// `WAIT_OBJECT_0` — the first handle was signalled, or, with a handle
+    /// count of zero, a message is available. With `n` handles a message is
+    /// `WAIT_OBJECT_0 + n`.
     pub const WAIT_OBJECT_0: u32 = 0;
+    /// `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION` — a timer that fires to the
+    /// hundred-nanosecond due time rather than on the next system clock tick.
+    /// Windows 10 1803 and later; refused as an invalid parameter before that.
+    pub const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x0000_0002;
+    /// `TIMER_MODIFY_STATE | SYNCHRONIZE` — enough to set a timer and wait on it.
+    pub const TIMER_SET_AND_WAIT: u32 = 0x0000_0002 | 0x0010_0000;
     /// `WAIT_TIMEOUT` — the wait slept for its whole timeout, which is the
     /// outcome [`ShellCaps::EVENT_WAIT`](crate::ShellCaps::EVENT_WAIT) claims is
     /// reachable.
@@ -1651,6 +1658,24 @@ unsafe extern "system" {
     // on. See `TimeBase` for why that makes Win32's timestamp rebasing the
     // easiest of the native backends' and still not free.
     pub fn GetTickCount64() -> u64;
+    // The high-resolution timer `wait_events` sleeps on, so a short timeout is
+    // not rounded up to the next clock tick. `due` is in 100 ns units and
+    // negative for "relative to now".
+    pub fn CreateWaitableTimerExW(
+        attributes: *const c_void,
+        name: *const u16,
+        flags: u32,
+        access: u32,
+    ) -> Handle;
+    pub fn SetWaitableTimer(
+        timer: Handle,
+        due: *const i64,
+        period: i32,
+        completion: *const c_void,
+        argument: *const c_void,
+        resume: Bool32,
+    ) -> Bool32;
+    pub fn CloseHandle(handle: Handle) -> Bool32;
 }
 
 // ---------------------------------------------------------------------------

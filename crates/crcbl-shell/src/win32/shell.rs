@@ -182,6 +182,10 @@ pub struct Win32Shell {
     pub(super) devices: DeviceTable,
     /// Raw reports waiting for the key and button messages they produced.
     pub(super) attribution: Attribution,
+    /// The high-resolution waitable timer a timed [`wait`](Self::wait) sleeps
+    /// on, or `None` where the system refused one (before Windows 10 1803), in
+    /// which case the wait falls back to its own millisecond timeout.
+    wait_timer: Option<NonNull<c_void>>,
     /// `ShowCursor`'s reference count, kept balanced.
     pub(super) visibility: Visibility,
     /// The next [`ClipboardRequestId`], which is unique for the session.
@@ -287,6 +291,17 @@ impl Win32Shell {
             contacts: Vec::new(),
             devices: DeviceTable::default(),
             attribution: Attribution::default(),
+            // SAFETY: null attributes and a null name ask for an unnamed timer
+            // with default security; the flags and access mask are constants
+            // the call documents. A null return is a refusal, kept as `None`.
+            wait_timer: NonNull::new(unsafe {
+                ffi::CreateWaitableTimerExW(
+                    ptr::null(),
+                    ptr::null(),
+                    value::CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                    value::TIMER_SET_AND_WAIT,
+                )
+            }),
             visibility: Visibility::default(),
             next_request: 1,
             caps: Self::latch_caps(raw_motion),
@@ -609,27 +624,72 @@ impl Win32Shell {
         // records here is delivered by the next `pump`, exactly as if the
         // messages had been drained there.
         self.drain_messages();
-        let milliseconds = timeout.map_or(value::INFINITE, |timeout| {
+        // **A timed wait sleeps on the high-resolution timer, not on its own
+        // timeout.** `MsgWaitForMultipleObjectsEx`'s millisecond timeout expires
+        // on the system clock tick, 15.6 ms by default, and nothing in this
+        // process raises the resolution — so a 4 ms wait slept a whole tick
+        // whenever no message arrived, capping a windowed game near 64 frames a
+        // second (found by EW: 15.6 ms a frame windowed, 2.2 ms offscreen). The
+        // timer is armed to the timeout in 100 ns units and waited on with no
+        // timeout of its own; a zero timeout, or a system that refused the
+        // timer, keeps the plain millisecond wait.
+        let armed = match (timeout, self.wait_timer) {
+            (Some(timeout), Some(timer)) if !timeout.is_zero() => {
+                // Negative is relative. Saturating at `i64::MIN` is a wait of
+                // some 29 000 years, which is "forever" for any caller.
+                let due =
+                    i64::try_from(timeout.as_nanos() / 100).map_or(i64::MIN, |ticks| -ticks.max(1));
+                // SAFETY: `timer` is the live handle `open` created; `due` is a
+                // live `i64` the call reads; no completion routine.
+                let set = unsafe {
+                    ffi::SetWaitableTimer(
+                        timer.as_ptr(),
+                        &raw const due,
+                        0,
+                        ptr::null(),
+                        ptr::null(),
+                        0,
+                    )
+                };
+                (set != 0).then_some(timer.as_ptr())
+            }
+            _ => None,
+        };
+        let milliseconds = match (armed, timeout) {
+            (Some(_), _) | (None, None) => value::INFINITE,
             // `INFINITE` is `u32::MAX`, so a timeout that saturates to it would
             // silently become "forever" — 49 days of sleep is close enough to
             // the caller's intent, but never waking is not.
-            u32::try_from(timeout.as_millis())
+            (None, Some(timeout)) => u32::try_from(timeout.as_millis())
                 .unwrap_or(value::INFINITE - 1)
-                .min(value::INFINITE - 1)
-        });
-        // SAFETY: a count of zero makes the handle array unused, so a null
-        // pointer is correct for it; zero flags is the documented "wait for a
-        // new message", which is what the drain above makes correct.
+                .min(value::INFINITE - 1),
+        };
+        let handles = armed.map_or(0, |_| 1);
+        let handle_array = armed.as_ref().map_or(ptr::null(), core::ptr::from_ref);
+        // SAFETY: `handle_array` is null with a count of zero, or points at the
+        // one live timer handle with a count of one, for the length of the
+        // call. Zero flags is the documented "wait for a new message", which is
+        // what the drain above makes correct.
         //
         // `QS_ALLEVENTS`, not `QS_ALLINPUT`: the difference is `QS_SENDMESSAGE`,
         // which `PeekMessageW` can neither return nor clear, so waiting on it is
         // waiting on a bit that is already set. See the doc comment.
         let outcome = unsafe {
-            ffi::MsgWaitForMultipleObjectsEx(0, ptr::null(), milliseconds, value::QS_ALL_EVENTS, 0)
+            ffi::MsgWaitForMultipleObjectsEx(
+                handles,
+                handle_array,
+                milliseconds,
+                value::QS_ALL_EVENTS,
+                0,
+            )
         };
+        // With the timer armed, `WAIT_OBJECT_0` is the timer firing and
+        // `WAIT_OBJECT_0 + 1` a message; without it, `WAIT_OBJECT_0` is the
+        // message.
         match outcome {
             value::WAIT_TIMEOUT => Wake::TimedOut,
-            value::WAIT_OBJECT_0 => Wake::Message,
+            value::WAIT_OBJECT_0 if armed.is_some() => Wake::TimedOut,
+            message if message == value::WAIT_OBJECT_0 + handles => Wake::Message,
             // SAFETY: reading the calling thread's last error, immediately
             // after the call that set it.
             value::WAIT_FAILED => Wake::Failed {
@@ -1681,6 +1741,12 @@ impl Drop for Win32Shell {
             // SAFETY: destroying this shell's own windows from the thread that
             // created them — a `Shell` is not `Send`, so this is that thread.
             unsafe { ffi::DestroyWindow(hwnd) };
+        }
+        if let Some(timer) = self.wait_timer.take() {
+            // SAFETY: the timer handle `open` created, closed once; no wait on
+            // it can be in progress, because only `wait` waits on it and
+            // `drop` has the shell exclusively.
+            unsafe { ffi::CloseHandle(timer.as_ptr()) };
         }
     }
 }
@@ -3477,6 +3543,46 @@ mod tests {
         shell.destroy_window(first).expect("destroy");
         assert!(shell.window_state(second).is_ok());
         assert!(shell.window_state(first).is_err());
+    }
+
+    #[test]
+    fn a_short_timed_wait_is_not_rounded_up_to_the_clock_tick() {
+        // The frame loop's windowed idle is a few milliseconds; the default
+        // system clock tick is 15.6 ms. A wait that ends on the tick instead of
+        // its timeout capped a windowed game near 64 frames a second, which is
+        // what the high-resolution timer in `wait` is for.
+        //
+        // No window: a thread with none gets no desktop traffic, so the waits
+        // end by their timeout and the median below is a measurement of the
+        // timer rather than of the desktop's mood. Only timed-out waits count.
+        const TIMEOUT: Duration = Duration::from_millis(4);
+        /// Well under the default tick and well over a timer that works, so a
+        /// busy machine does not fail it and a tick-bound wait always does.
+        const CEILING: Duration = Duration::from_millis(10);
+        const ATTEMPTS: usize = 40;
+        /// Timed-out waits needed before the median means anything.
+        const SAMPLES: usize = 10;
+
+        let mut shell = shell();
+        let mut slept: Vec<Duration> = (0..ATTEMPTS)
+            .filter_map(|_| {
+                let start = std::time::Instant::now();
+                (shell.wait(Some(TIMEOUT)) == Wake::TimedOut).then(|| start.elapsed())
+            })
+            .collect();
+        assert!(
+            slept.len() >= SAMPLES,
+            "only {} of {ATTEMPTS} waits timed out on a thread with no window, too few to measure",
+            slept.len()
+        );
+        slept.sort_unstable();
+        let median = slept[slept.len() / 2];
+        assert!(
+            median < CEILING,
+            "a {TIMEOUT:?} wait slept a median of {median:?} over {} timed-out waits; a wait \
+             rounded to the system clock tick sleeps about 15.6 ms",
+            slept.len()
+        );
     }
 
     #[test]

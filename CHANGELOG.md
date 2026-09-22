@@ -1843,9 +1843,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Windowed games on Win32 are no longer capped near 64 frames a second.**
+  `wait_events` with a short timeout slept on `MsgWaitForMultipleObjectsEx`'s
+  millisecond timeout, which expires on the 15.6 ms system clock tick, so the
+  frame loop's few-millisecond windowed idle cost a whole tick. It now sleeps on
+  a high-resolution waitable timer (Windows 10 1803 and later) armed to the
+  timeout. Reported by EW: 15.6 ms a frame windowed against 2.2 ms offscreen.
+
 - **The shared `--help` blocks indent their first flag.** `COMMON_OPTIONS_HELP`,
   `SCREENSHOT_HELP`, `FORCED_PATH_HELP` and `COMMON_TAIL_HELP` were written as
-  `"` plus a newline, which also strips the next line's indent, so each block's
+  `"\` plus a newline, which also strips the next line's indent, so each block's
   first flag printed at column 0 in every consumer's `--help` while the rest sat
   four spaces in. Reported by EW.
 
