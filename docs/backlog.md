@@ -303,14 +303,21 @@ Initial measurements and harness findings:
   observer; its short timing window is not evidence for this optimization. Keep
   the original unconditional five-slot normalization on this adapter.
 - `area-lights-fit` currently measures diffuse and fitted-specular polygon
-  integration together, so its 8.849–8.985 ms `forward` range cannot identify
-  which integral dominates. Add a matched `area-fill-lights-fit` sandbox scene
-  that changes only each rectangle's fill flag, retaining the same positions,
-  extents, radiance, radius and within-budget froxel occupancy. Verify those
-  scene properties directly, then alternate point-fill, area-fill and ordinary
-  area runs on the pinned MX550. Use the area-fill delta to price diffuse LTC
-  integration and the ordinary-area delta to price the fitted specular half
-  before choosing another algorithmic shader trial.
+  integration together, so its original range could not identify which integral
+  dominates. The matched `area-fill-lights-fit` sandbox scene changes only each
+  rectangle's fill flag, retaining the same positions, extents, radiance, radius
+  and within-budget froxel occupancy; its observer failed before the variant
+  existed and now compares every rectangle field directly. Across two
+  alternating 900-frame 1920x1080 sets on the pinned MX550, point-fill `forward`
+  measured 3.505–3.569 ms, area-fill measured 6.446–6.513 ms, and ordinary area
+  measured 8.827–8.889 ms. Diffuse LTC integration therefore adds a repeatable
+  2.941–2.944 ms and fitted specular adds 2.376–2.381 ms. Diffuse accounts for
+  55.3% of the area-specific delta in both pairs and specular for 44.7%; neither
+  half alone is the bottleneck. The next common calculation to price is
+  `ltc_shading_frame`, which depends only on the fragment normal and eye vector
+  but is rebuilt inside every rectangle iteration. Trial a first-use cache that
+  keeps point-only fragments free of the calculation, and require all three
+  fixed scenes plus native area images before retaining it.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.

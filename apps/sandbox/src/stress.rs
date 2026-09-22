@@ -37,6 +37,8 @@ pub enum Scene {
     LightsFit,
     /// The instance grid with the froxel budget filled by rectangular lights.
     AreaLightsFit,
+    /// The rectangular-light grid with specular disabled by the fill flag.
+    AreaFillLightsFit,
     /// The instance grid under an overlapping field of local lights.
     Lights,
     /// The instance and within-budget light grid while dense broadphase bodies
@@ -54,6 +56,7 @@ impl Scene {
             "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
             "area-lights-fit" => Some(Self::AreaLightsFit),
+            "area-fill-lights-fit" => Some(Self::AreaFillLightsFit),
             "lights" => Some(Self::Lights),
             "combined" => Some(Self::Combined),
             _ => None,
@@ -69,6 +72,7 @@ impl Scene {
             Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
             Self::AreaLightsFit => "area-lights-fit",
+            Self::AreaFillLightsFit => "area-fill-lights-fit",
             Self::Lights => "lights",
             Self::Combined => "combined",
         }
@@ -83,6 +87,7 @@ impl Scene {
             | Self::Moving
             | Self::LightsFit
             | Self::AreaLightsFit
+            | Self::AreaFillLightsFit
             | Self::Lights
             | Self::Combined => INSTANCE_COUNT,
         }
@@ -93,7 +98,9 @@ impl Scene {
     pub const fn light_count(self) -> usize {
         match self {
             Self::Cube | Self::Instances | Self::Moving => 0,
-            Self::LightsFit | Self::AreaLightsFit | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
+            Self::LightsFit | Self::AreaLightsFit | Self::AreaFillLightsFit | Self::Combined => {
+                WITHIN_BUDGET_LIGHT_COUNT
+            }
             Self::Lights => LIGHT_COUNT,
         }
     }
@@ -145,6 +152,7 @@ fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
         | Scene::Moving
         | Scene::LightsFit
         | Scene::AreaLightsFit
+        | Scene::AreaFillLightsFit
         | Scene::Lights
         | Scene::Combined => {
             grid_transform(index) * Mat4::from_quat(Quat::from_rotation_y(seconds * 0.9))
@@ -177,8 +185,9 @@ fn lights(scene: Scene) -> Vec<Light> {
         return Vec::new();
     }
 
-    if scene == Scene::AreaLightsFit {
-        (0..count).map(area_light).collect()
+    if matches!(scene, Scene::AreaLightsFit | Scene::AreaFillLightsFit) {
+        let fill = scene == Scene::AreaFillLightsFit;
+        (0..count).map(|index| area_light(index, fill)).collect()
     } else {
         (0..count).map(point_light).collect()
     }
@@ -193,7 +202,7 @@ fn point_light(index: usize) -> Light {
     })
 }
 
-fn area_light(index: usize) -> Light {
+fn area_light(index: usize, fill: bool) -> Light {
     Light::Rect(RectLight {
         position: light_position(index),
         radius: 4.0,
@@ -202,7 +211,7 @@ fn area_light(index: usize) -> Light {
         tangent: Vec3::X,
         half_width: 0.08,
         half_height: 0.04,
-        fill: false,
+        fill,
     })
 }
 
@@ -242,6 +251,7 @@ mod tests {
             Scene::Moving,
             Scene::LightsFit,
             Scene::AreaLightsFit,
+            Scene::AreaFillLightsFit,
             Scene::Lights,
             Scene::Combined,
         ] {
@@ -252,6 +262,7 @@ mod tests {
         assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::AreaLightsFit.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::AreaFillLightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Combined.instance_count(), INSTANCE_COUNT);
         assert_eq!(
@@ -264,6 +275,11 @@ mod tests {
             Scene::AreaLightsFit.light_count(),
             Scene::LightsFit.light_count(),
             "both within-budget controls must fill the same froxel prefix",
+        );
+        assert_eq!(
+            Scene::AreaFillLightsFit.light_count(),
+            Scene::AreaLightsFit.light_count(),
+            "the two area-light controls must fill the same froxel prefix",
         );
         assert_eq!(
             Scene::Combined.light_count(),
@@ -364,9 +380,14 @@ mod tests {
     fn the_light_fixture_builds_the_count_the_scene_reports() {
         let within_budget = lights(Scene::LightsFit);
         let area_lights = lights(Scene::AreaLightsFit);
+        let area_fill_lights = lights(Scene::AreaFillLightsFit);
         let local_lights = lights(Scene::Lights);
         assert_eq!(within_budget.len(), Scene::LightsFit.light_count());
         assert_eq!(area_lights.len(), Scene::AreaLightsFit.light_count());
+        assert_eq!(
+            area_fill_lights.len(),
+            Scene::AreaFillLightsFit.light_count()
+        );
         assert_eq!(local_lights.len(), Scene::Lights.light_count());
         assert_eq!(
             within_budget,
@@ -383,6 +404,19 @@ mod tests {
                 .iter()
                 .all(|light| matches!(light, Light::Rect(rect) if !rect.fill))
         );
+        for (ordinary, fill) in area_lights.iter().zip(&area_fill_lights) {
+            let (Light::Rect(ordinary), Light::Rect(fill)) = (ordinary, fill) else {
+                panic!("both area controls must contain only rectangles");
+            };
+            assert!(fill.fill, "the matched control must skip specular");
+            assert_eq!(
+                ordinary,
+                &RectLight {
+                    fill: false,
+                    ..*fill
+                }
+            );
+        }
         assert!(lights(Scene::Cube).is_empty());
     }
 }

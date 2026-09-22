@@ -33,7 +33,8 @@ OPTIONS:
                           The 2D story is a projection-matrix swap and nothing
                           else, which is what this flag exists to demonstrate.
         --scene <NAME>    Fixed scene: `cube`, `instances`, `moving`,
-                          `lights-fit`, `area-lights-fit`, `lights` or `combined`.
+                          `lights-fit`, `area-lights-fit`,
+                          `area-fill-lights-fit`, `lights` or `combined`.
                           Default: cube. The stress scenes keep their load live
                           for the complete run so tail timings are comparable.
         --frames <N>      Stop after N presented frames.
@@ -150,7 +151,8 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     None => {
                         return Invocation::BadUsage(format!(
                             "unknown --scene `{name}`; try `cube`, `instances`, `moving`, \
-                             `lights-fit`, `area-lights-fit`, `lights` or `combined`"
+                             `lights-fit`, `area-lights-fit`, `area-fill-lights-fit`, `lights` \
+                             or `combined`"
                         ));
                     }
                 },
@@ -237,6 +239,10 @@ mod tests {
         assert_eq!(
             options(&["--scene", "area-lights-fit"]).scene,
             Scene::AreaLightsFit
+        );
+        assert_eq!(
+            options(&["--scene", "area-fill-lights-fit"]).scene,
+            Scene::AreaFillLightsFit
         );
         assert_eq!(options(&["--scene", "lights"]).scene, Scene::Lights);
         assert_eq!(options(&["--scene", "combined"]).scene, Scene::Combined);
