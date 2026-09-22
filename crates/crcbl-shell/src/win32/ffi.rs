@@ -188,10 +188,10 @@ pub struct Point {
 
 /// `MSG`.
 ///
-/// `l_private` is present in current SDK headers and absent in older ones; the
-/// struct is 48 bytes either way because of tail padding, so declaring it is
-/// free and reading a message into a buffer the system considers larger than
-/// ours is the failure that is not free.
+/// `l_private` is declared by `winuser.h` only under `_MAC`; on x64 it sits in
+/// what is otherwise the structure's tail padding, so the struct is 48 bytes
+/// either way. Declaring it is free, and reading a message into a buffer the
+/// system considers larger than ours is the failure that is not free.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Msg {
@@ -365,7 +365,7 @@ impl Default for MonitorInfoExW {
 /// The two unions in the real structure are replaced by byte-equivalent arrays,
 /// because this backend reads exactly one field out of it —
 /// [`dm_display_frequency`](Self::dm_display_frequency) — and a union whose
-/// display arm we never touch is layout, not meaning. The size assertion in
+/// display arm we never touch is layout, not meaning. The layout assertion in
 /// this module's tests is what makes that safe: get the padding wrong and every
 /// field after the mistake is read from the wrong offset, which produces a
 /// plausible number rather than a crash.
@@ -698,10 +698,15 @@ pub struct TrackMouse {
 /// file onto a window, so the only way to exercise `WM_DROPFILES` at all is to
 /// build the block the shell would have handed over and send the message.
 ///
-/// The size assertion in this module's tests is what makes that synthesis
+/// The layout assertion in this module's tests is what makes that synthesis
 /// trustworthy: a header of the wrong length puts the file list at an offset
 /// `DragQueryFileW` does not look at, and the test would then report zero files
 /// and read as a backend bug.
+///
+/// `shlobj_core.h` declares it under `pshpack1.h`, so the C structure is
+/// byte-aligned; this one is 4-aligned with the same size and offsets. That is
+/// only safe in the direction it is used — a test writing a block for shell32
+/// to read — and would not be for reading a `DROPFILES` out of shell memory.
 #[cfg(test)]
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -757,12 +762,12 @@ pub struct RawInputHeader {
 /// same two bytes — and it is here so a reader diffing this against `winuser.h`
 /// can see that the gap was noticed rather than missed.
 ///
-/// What the layout assertion in this module's tests actually catches is a field
-/// that is **absent or the wrong width**, which moves every offset after it.
-/// That is the real hazard: reading [`l_last_x`](Self::l_last_x) from offset 8
-/// instead of 12 gives half a button mask as a mouse delta, and a plausible
-/// number rather than a crash. Same shape as [`DevModeW`]'s, checked the same
-/// way.
+/// The layout assertion in this module's tests checks every field's offset and
+/// width, so a field that is absent, the wrong width or swapped with its
+/// neighbour all fail it. That is the real hazard: reading
+/// [`l_last_x`](Self::l_last_x) from offset 8 instead of 12 gives half a button
+/// mask as a mouse delta, and a plausible number rather than a crash. Same
+/// shape as [`DevModeW`]'s, checked the same way.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RawMouse {
@@ -1673,7 +1678,52 @@ pub fn tick_nanos() -> u64 {
 mod tests {
     use super::*;
 
-    /// The layouts, checked against the sizes `windows.h` produces on x64.
+    /// The width of the field `select` picks out, read from its type alone —
+    /// the function is never called.
+    fn field_size<T, F>(_select: fn(&T) -> &F) -> usize {
+        size_of::<F>()
+    }
+
+    /// Asserts a structure's size and every field's offset and width, one
+    /// `field: offset, width;` row per field.
+    ///
+    /// The destructuring pattern names every row's field and has no `..`, so a
+    /// field added to the declaration without a row here fails to compile
+    /// rather than going unchecked.
+    macro_rules! assert_layout {
+        ($ty:ident, $size:literal, { $($field:ident: $offset:literal, $width:literal;)+ }) => {{
+            let _every_field_has_a_row: fn($ty) = |value| {
+                let $ty { $($field: _),+ } = value;
+            };
+            assert_eq!(size_of::<$ty>(), $size, concat!("size of ", stringify!($ty)));
+            $(
+                assert_eq!(
+                    core::mem::offset_of!($ty, $field),
+                    $offset,
+                    concat!("offset of ", stringify!($ty), "::", stringify!($field))
+                );
+                assert_eq!(
+                    field_size(|value: &$ty| &value.$field),
+                    $width,
+                    concat!("width of ", stringify!($ty), "::", stringify!($field))
+                );
+            )+
+        }};
+    }
+
+    /// The layouts, field by field, against what `windows.h` produces on x64.
+    ///
+    /// Every number is the SDK's own `sizeof`/`offsetof` for the matching
+    /// field, printed by a C program built with MSVC 19.44 (`_MSC_FULL_VER`
+    /// 194435229) against Windows SDK 10.0.26100.0 for x64. They are the x64
+    /// Windows ABI, fixed by it rather than by anything in this crate. Where
+    /// the Rust declaration flattens a C union into one field, the row is the
+    /// union's extent; where it names bytes C leaves anonymous, the row is
+    /// that gap.
+    ///
+    /// Checking every field's offset, not only the size, is what catches two
+    /// same-width fields declared in the wrong order: the size is unchanged,
+    /// and each would read the other's value.
     ///
     /// These run on the host as well as on Windows, because every field is a
     /// fixed-width type or a pointer and 64-bit Linux lays them out
@@ -1683,67 +1733,245 @@ mod tests {
     /// have caught any better.
     #[test]
     fn the_structures_match_the_c_layout() {
-        assert_eq!(size_of::<Rect>(), 16);
-        assert_eq!(size_of::<Point>(), 8);
-        assert_eq!(size_of::<Msg>(), 48);
-        assert_eq!(size_of::<WndClassExW>(), 80);
-        assert_eq!(size_of::<CreateStructW>(), 80);
-        assert_eq!(size_of::<MinMaxInfo>(), 40);
-        assert_eq!(size_of::<WindowPlacement>(), 44);
-        assert_eq!(size_of::<MonitorInfoExW>(), 104);
+        assert_layout!(Rect, 16, {
+            left: 0, 4;
+            top: 4, 4;
+            right: 8, 4;
+            bottom: 12, 4;
+        });
+        assert_layout!(Point, 8, {
+            x: 0, 4;
+            y: 4, 4;
+        });
+        assert_layout!(Msg, 48, {
+            hwnd: 0, 8;
+            message: 8, 4;
+            w_param: 16, 8;
+            l_param: 24, 8;
+            time: 32, 4;
+            pt: 36, 8;
+            // C's tail padding; see the type docs.
+            l_private: 44, 4;
+        });
+        assert_layout!(WndClassExW, 80, {
+            cb_size: 0, 4;
+            style: 4, 4;
+            lpfn_wnd_proc: 8, 8;
+            cb_cls_extra: 16, 4;
+            cb_wnd_extra: 20, 4;
+            h_instance: 24, 8;
+            h_icon: 32, 8;
+            h_cursor: 40, 8;
+            hbr_background: 48, 8;
+            lpsz_menu_name: 56, 8;
+            lpsz_class_name: 64, 8;
+            h_icon_sm: 72, 8;
+        });
+        assert_layout!(CreateStructW, 80, {
+            lp_create_params: 0, 8;
+            h_instance: 8, 8;
+            h_menu: 16, 8;
+            hwnd_parent: 24, 8;
+            cy: 32, 4;
+            cx: 36, 4;
+            y: 40, 4;
+            x: 44, 4;
+            style: 48, 4;
+            lpsz_name: 56, 8;
+            lpsz_class: 64, 8;
+            dw_ex_style: 72, 4;
+        });
+        assert_layout!(MinMaxInfo, 40, {
+            pt_reserved: 0, 8;
+            pt_max_size: 8, 8;
+            pt_max_position: 16, 8;
+            pt_min_track_size: 24, 8;
+            pt_max_track_size: 32, 8;
+        });
+        assert_layout!(WindowPlacement, 44, {
+            length: 0, 4;
+            flags: 4, 4;
+            show_cmd: 8, 4;
+            pt_min_position: 12, 8;
+            pt_max_position: 20, 8;
+            rc_normal_position: 28, 16;
+        });
+        assert_layout!(MonitorInfoExW, 104, {
+            cb_size: 0, 4;
+            rc_monitor: 4, 16;
+            rc_work: 20, 16;
+            dw_flags: 36, 4;
+            sz_device: 40, 64;
+        });
         // The one with two unions in it, and the one whose fields are read
         // past the padding.
-        assert_eq!(size_of::<DevModeW>(), 220);
-        assert_eq!(core::mem::offset_of!(DevModeW, dm_display_frequency), 184);
-        assert_eq!(core::mem::offset_of!(MonitorInfoExW, sz_device), 40);
+        assert_layout!(DevModeW, 220, {
+            dm_device_name: 0, 64;
+            dm_spec_version: 64, 2;
+            dm_driver_version: 66, 2;
+            dm_size: 68, 2;
+            dm_driver_extra: 70, 2;
+            dm_fields: 72, 4;
+            // The printer/display union, `dmOrientation` to `dmPrintQuality`
+            // or `dmPosition` to `dmDisplayFixedOutput`.
+            dm_union_position: 76, 16;
+            dm_color: 92, 2;
+            dm_duplex: 94, 2;
+            dm_y_resolution: 96, 2;
+            dm_tt_option: 98, 2;
+            dm_collate: 100, 2;
+            dm_form_name: 102, 64;
+            dm_log_pixels: 166, 2;
+            dm_bits_per_pel: 168, 4;
+            dm_pels_width: 172, 4;
+            dm_pels_height: 176, 4;
+            // `dmDisplayFlags` / `dmNup`.
+            dm_display_flags: 180, 4;
+            dm_display_frequency: 184, 4;
+            dm_icm_method: 188, 4;
+            dm_icm_intent: 192, 4;
+            dm_media_type: 196, 4;
+            dm_dither_type: 200, 4;
+            dm_reserved1: 204, 4;
+            dm_reserved2: 208, 4;
+            dm_panning_width: 212, 4;
+            dm_panning_height: 216, 4;
+        });
 
         // The `QueryDisplayConfig` structures, read for the exact refresh
         // rate. A wrong one reads a plausible wrong rate: an offset mistake in
         // `DisplayConfigVideoSignalInfo` would report 59.94 Hz as something
         // only a CRT ran at, and the whole point of asking `QueryDisplayConfig`
         // is that `EnumDisplaySettingsW` already rounds.
-        assert_eq!(size_of::<DisplayConfigRational>(), 8);
-        assert_eq!(size_of::<DisplayConfigPathSourceInfo>(), 20);
-        assert_eq!(size_of::<DisplayConfigPathTargetInfo>(), 48);
-        assert_eq!(size_of::<DisplayConfigPathInfo>(), 72);
-        assert_eq!(size_of::<DisplayConfigVideoSignalInfo>(), 48);
-        assert_eq!(size_of::<DisplayConfigTargetMode>(), 48);
-        assert_eq!(size_of::<DisplayConfigModeInfo>(), 64);
-        assert_eq!(size_of::<DisplayConfigDeviceInfoHeader>(), 20);
-        assert_eq!(size_of::<DisplayConfigSourceDeviceName>(), 84);
-        assert_eq!(size_of::<Luid>(), 8);
-        assert_eq!(
-            core::mem::offset_of!(DisplayConfigPathTargetInfo, refresh_rate),
-            28
-        );
-        assert_eq!(
-            core::mem::offset_of!(DisplayConfigVideoSignalInfo, v_sync_freq),
-            16
-        );
+        assert_layout!(Luid, 8, {
+            low_part: 0, 4;
+            high_part: 4, 4;
+        });
+        assert_layout!(DisplayConfig2dRegion, 8, {
+            cx: 0, 4;
+            cy: 4, 4;
+        });
+        assert_layout!(DisplayConfigRational, 8, {
+            numerator: 0, 4;
+            denominator: 4, 4;
+        });
+        assert_layout!(DisplayConfigVideoSignalInfo, 48, {
+            pixel_rate: 0, 8;
+            h_sync_freq: 8, 8;
+            v_sync_freq: 16, 8;
+            active_size: 24, 8;
+            total_size: 32, 8;
+            // `AdditionalSignalInfo` / `videoStandard`.
+            additional_signal_info: 40, 4;
+            scan_line_ordering: 44, 4;
+        });
+        assert_layout!(DisplayConfigTargetMode, 48, {
+            target_video_signal_info: 0, 48;
+        });
+        assert_layout!(DisplayConfigModeInfo, 64, {
+            info_type: 0, 4;
+            id: 4, 4;
+            adapter_id: 8, 8;
+            // The union's `targetMode`, its largest arm: `sourceMode` and
+            // `desktopImageInfo` are smaller and start at the same offset.
+            target_mode: 16, 48;
+        });
+        assert_layout!(DisplayConfigPathSourceInfo, 20, {
+            adapter_id: 0, 8;
+            id: 8, 4;
+            mode_info_idx: 12, 4;
+            status_flags: 16, 4;
+        });
+        assert_layout!(DisplayConfigPathTargetInfo, 48, {
+            adapter_id: 0, 8;
+            id: 8, 4;
+            mode_info_idx: 12, 4;
+            output_technology: 16, 4;
+            rotation: 20, 4;
+            scaling: 24, 4;
+            refresh_rate: 28, 8;
+            scan_line_ordering: 36, 4;
+            target_available: 40, 4;
+            status_flags: 44, 4;
+        });
+        assert_layout!(DisplayConfigPathInfo, 72, {
+            source_info: 0, 20;
+            target_info: 20, 48;
+            flags: 68, 4;
+        });
+        assert_layout!(DisplayConfigDeviceInfoHeader, 20, {
+            kind: 0, 4;
+            size: 4, 4;
+            adapter_id: 8, 8;
+            id: 16, 4;
+        });
+        assert_layout!(DisplayConfigSourceDeviceName, 84, {
+            header: 0, 20;
+            view_gdi_device_name: 20, 64;
+        });
 
         // The input structures. `RAWMOUSE` is the one that matters: its
         // `usFlags` is followed by two bytes of union alignment, and reading
         // `lLastX` from offset 6 instead of 12 would produce a delta made of
         // half a button mask — a plausible number, never a crash.
-        assert_eq!(size_of::<TrackMouse>(), 24);
-        assert_eq!(size_of::<RawInputDevice>(), 16);
-        assert_eq!(size_of::<RawMouse>(), 24);
-        assert_eq!(core::mem::offset_of!(RawMouse, ul_buttons), 4);
-        assert_eq!(core::mem::offset_of!(RawMouse, l_last_x), 12);
-        assert_eq!(core::mem::offset_of!(RawMouse, l_last_y), 16);
-        assert_eq!(size_of::<RawInputHeader>(), 24);
-        assert_eq!(size_of::<RawKeyboard>(), 16);
-        assert_eq!(core::mem::offset_of!(RawKeyboard, message), 8);
+        assert_layout!(TrackMouse, 24, {
+            cb_size: 0, 4;
+            dw_flags: 4, 4;
+            hwnd_track: 8, 8;
+            dw_hover_time: 16, 4;
+        });
+        assert_layout!(RawInputDevice, 16, {
+            us_usage_page: 0, 2;
+            us_usage: 2, 2;
+            dw_flags: 4, 4;
+            hwnd_target: 8, 8;
+        });
+        assert_layout!(RawInputHeader, 24, {
+            dw_type: 0, 4;
+            dw_size: 4, 4;
+            h_device: 8, 8;
+            w_param: 16, 8;
+        });
+        assert_layout!(RawMouse, 24, {
+            us_flags: 0, 2;
+            // The gap before the union, which C leaves unnamed.
+            padding: 2, 2;
+            // `ulButtons` / `usButtonFlags` + `usButtonData`.
+            ul_buttons: 4, 4;
+            ul_raw_buttons: 8, 4;
+            l_last_x: 12, 4;
+            l_last_y: 16, 4;
+            ul_extra_information: 20, 4;
+        });
+        assert_layout!(RawKeyboard, 16, {
+            make_code: 0, 2;
+            flags: 2, 2;
+            reserved: 4, 2;
+            v_key: 6, 2;
+            message: 8, 4;
+            extra_information: 12, 4;
+        });
+        assert_layout!(RawInput, 48, {
+            header: 0, 24;
+            data: 24, 24;
+        });
+        // The union has no row table, since a union pattern names one field;
+        // each arm's width is its own structure's, asserted above. `RAWHID`,
+        // the arm left out, is smaller than both.
+        assert_eq!(size_of::<RawInputData>(), 24);
+        assert_eq!(core::mem::offset_of!(RawInput, data.mouse), 24);
+        assert_eq!(core::mem::offset_of!(RawInput, data.keyboard), 24);
         assert!(size_of::<RawKeyboard>() <= size_of::<RawMouse>());
-        assert_eq!(size_of::<RawInput>(), 48);
-        assert_eq!(core::mem::offset_of!(RawInput, data), 24);
 
         // The one a *test* writes rather than reads. A wrong length here puts
         // the file list where `DragQueryFileW` does not look, and the drop test
         // would then report zero files as though the backend had lost them.
-        assert_eq!(size_of::<DropFiles>(), 20);
-        assert_eq!(core::mem::offset_of!(DropFiles, pt), 4);
-        assert_eq!(core::mem::offset_of!(DropFiles, f_wide), 16);
+        assert_layout!(DropFiles, 20, {
+            p_files: 0, 4;
+            pt: 4, 8;
+            f_nc: 12, 4;
+            f_wide: 16, 4;
+        });
     }
 
     #[test]

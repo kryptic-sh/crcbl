@@ -16319,13 +16319,20 @@ under the same heading, and it binds any Windows test written from now on.
 
 ### Unverified, in the order it would hurt
 
-- **Structure layouts in `win32/ffi.rs` are asserted by size and offset, which
-  catches a missing or wrong-width field but not a reordering of two same-width
-  fields** — and a field whose width shrinks into its own trailing padding moves
-  no offset and is not caught either (narrowing `DropFiles::p_files` from `u32`
-  to `u16` leaves every assertion green). `DEVMODEW` is the one with two unions
-  in it and the one to re-read if a refresh rate ever looks implausible;
-  `RAWMOUSE` if a raw delta does.
+- **The hand-declared Win32 structure layouts are checked for width, not type.**
+  `crates/crcbl-shell/src/win32/ffi.rs`'s `the_structures_match_the_c_layout`
+  (and the const blocks in `crates/crcbl-shell/tests/bin/send_input_win32.rs`
+  and `crates/crcbl-shell/tests/win32_e2e.rs`'s `desktop`) assert every field's
+  offset and width against numbers printed by a C probe built against the SDK,
+  so a missing, reordered or narrowed field fails. Still not caught: a field of
+  the right width and the wrong **signedness** (`u32` where the SDK has `LONG`
+  would turn a negative raw delta into a huge one), and the individual arms of a
+  C union the Rust side flattens into one field (`DevModeW::dm_union_position`,
+  `dm_display_flags`) — only the union's extent is checked. The numbers are x64
+  only, and pasted rather than generated: the C probe is not in the tree, so a
+  new structure needs one written again (print `sizeof` and every field's
+  `offsetof`/`sizeof` from `windows.h`, build with `cl` for x64). No Windows
+  target other than x64 is built by CI.
 - **`WM_INPUT`'s absolute path is untested; its relative path is not.** W4's
   `injected_motion_arrives_as_raw_relative_motion_for_mouselook` waits for a
   `raw_delta`, which only `input::read_raw_mouse` and the `RIM_TYPE_MOUSE` check

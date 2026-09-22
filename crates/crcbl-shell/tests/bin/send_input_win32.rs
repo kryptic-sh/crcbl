@@ -164,11 +164,45 @@ mod win32 {
         pub body: InputBody,
     }
 
+    /// The width of the field `select` picks out, read from its type alone —
+    /// the function is never called.
+    #[cfg(target_pointer_width = "64")]
+    const fn field_size<T, F>(_select: fn(&T) -> &F) -> usize {
+        size_of::<F>()
+    }
+
+    /// Asserts every field's offset and width, one `field: offset, width;` row
+    /// per field. The destructuring pattern has no `..`, so a field declared
+    /// without a row fails to compile rather than going unchecked.
+    #[cfg(target_pointer_width = "64")]
+    macro_rules! assert_fields {
+        ($ty:ident { $($field:ident: $offset:literal, $width:literal;)+ }) => {
+            let _every_field_has_a_row: fn($ty) = |value| {
+                let $ty { $($field: _),+ } = value;
+            };
+            $(
+                assert!(
+                    core::mem::offset_of!($ty, $field) == $offset,
+                    concat!("offset of ", stringify!($ty), "::", stringify!($field))
+                );
+                assert!(
+                    field_size(|value: &$ty| &value.$field) == $width,
+                    concat!("width of ", stringify!($ty), "::", stringify!($field))
+                );
+            )+
+        };
+    }
+
     // The layout `SendInput` validates by size, checked at compile time on the
     // 64-bit Windows targets this engine claims. A `cbSize` that disagrees with
     // the system's is the classic way for this call to fail with
     // `ERROR_INVALID_PARAMETER` and no other symptom, and passing
     // `size_of::<Input>()` is only correct if the structure is right.
+    //
+    // Every offset and width here and in the pointer structures below is the
+    // SDK's own `offsetof`/`sizeof`, printed by a C program built with MSVC
+    // 19.44 against Windows SDK 10.0.26100.0 for x64: the x64 Windows ABI,
+    // fixed by it rather than by this file.
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
@@ -181,6 +215,27 @@ mod win32 {
         );
         assert!(size_of::<Input>() == 40, "INPUT on 64-bit Windows");
         assert!(align_of::<Input>() == 8, "ULONG_PTR alignment");
+        assert_fields!(MouseInput {
+            dx: 0, 4;
+            dy: 4, 4;
+            mouse_data: 8, 4;
+            flags: 12, 4;
+            time: 16, 4;
+            extra_info: 24, 8;
+        });
+        assert_fields!(KeybdInput {
+            vk: 0, 2;
+            scan: 2, 2;
+            flags: 4, 4;
+            time: 8, 4;
+            extra_info: 16, 8;
+        });
+        assert_fields!(Input {
+            kind: 0, 4;
+            body: 8, 32;
+        });
+        assert!(core::mem::offset_of!(Input, body.mouse) == 8);
+        assert!(core::mem::offset_of!(Input, body.keyboard) == 8);
     };
 
     /// `INPUT_MOUSE`.
@@ -301,7 +356,8 @@ mod win32 {
     }
 
     // `InjectTouchInput` takes no size, so a wrong layout is not refused; it is
-    // read as garbage. These are the SDK's sizes on 64-bit Windows.
+    // read as garbage. These are the SDK's layouts on 64-bit Windows, from the
+    // same C program as `INPUT`'s above.
     #[cfg(target_pointer_width = "64")]
     const _: () = {
         assert!(
@@ -312,6 +368,45 @@ mod win32 {
             size_of::<PointerTouchInfo>() == 144,
             "POINTER_TOUCH_INFO on 64-bit Windows"
         );
+        assert!(size_of::<Point>() == 8, "POINT");
+        assert!(size_of::<Rect>() == 16, "RECT");
+        assert_fields!(Point {
+            x: 0, 4;
+            y: 4, 4;
+        });
+        assert_fields!(Rect {
+            left: 0, 4;
+            top: 4, 4;
+            right: 8, 4;
+            bottom: 12, 4;
+        });
+        assert_fields!(PointerInfo {
+            pointer_type: 0, 4;
+            pointer_id: 4, 4;
+            frame_id: 8, 4;
+            pointer_flags: 12, 4;
+            source_device: 16, 8;
+            hwnd_target: 24, 8;
+            pixel_location: 32, 8;
+            himetric_location: 40, 8;
+            pixel_location_raw: 48, 8;
+            himetric_location_raw: 56, 8;
+            time: 64, 4;
+            history_count: 68, 4;
+            input_data: 72, 4;
+            key_states: 76, 4;
+            performance_count: 80, 8;
+            button_change_type: 88, 4;
+        });
+        assert_fields!(PointerTouchInfo {
+            pointer_info: 0, 96;
+            touch_flags: 96, 4;
+            touch_mask: 100, 4;
+            contact: 104, 16;
+            contact_raw: 120, 16;
+            orientation: 136, 4;
+            pressure: 140, 4;
+        });
     };
 
     /// `PT_TOUCH`.

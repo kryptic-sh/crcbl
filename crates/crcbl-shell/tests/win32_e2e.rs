@@ -201,6 +201,34 @@ mod desktop {
         pub y: i32,
     }
 
+    // Both as the SDK lays them out on x64 — the Windows ABI, and the numbers
+    // `win32::ffi`'s layout test carries for its own copies. The closures name
+    // every field with no `..` and return them as `i32`s, which pins each
+    // field's width and fails to compile if a field is added.
+    const _: () = {
+        let _: fn(Rect) -> [i32; 4] = |rect| {
+            let Rect {
+                left,
+                top,
+                right,
+                bottom,
+            } = rect;
+            [left, top, right, bottom]
+        };
+        let _: fn(Point) -> [i32; 2] = |point| {
+            let Point { x, y } = point;
+            [x, y]
+        };
+        assert!(size_of::<Rect>() == 16, "RECT");
+        assert!(core::mem::offset_of!(Rect, left) == 0);
+        assert!(core::mem::offset_of!(Rect, top) == 4);
+        assert!(core::mem::offset_of!(Rect, right) == 8);
+        assert!(core::mem::offset_of!(Rect, bottom) == 12);
+        assert!(size_of::<Point>() == 8, "POINT");
+        assert!(core::mem::offset_of!(Point, x) == 0);
+        assert!(core::mem::offset_of!(Point, y) == 4);
+    };
+
     /// `SM_XVIRTUALSCREEN`.
     const SM_X_VIRTUAL_SCREEN: i32 = 76;
     /// `SM_YVIRTUALSCREEN`.
