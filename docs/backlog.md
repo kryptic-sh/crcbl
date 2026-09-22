@@ -119,16 +119,12 @@ Initial measurements and harness findings:
   frame. At 1920x1080 the grid has 12,240 froxels, so this is about 108 dropped
   assignments per froxel in addition to each retained prefix. The scene is a
   useful deterministic overflow and capped-fragment-loop stressor, but it does
-  not measure shading all 256 lights. Add a separate within-budget light scene
-  before changing cluster capacity or policy; the current cluster pass is only
-  about 0.19 ms and does not justify that production trade-off.
-- The first workspace test run observed
-  `forward::tests::the_atlas_viewer_replaces_the_display_passes_and_the_count_follows`
-  report 52 draws where it expected 53. The exact test passed twice in isolation
-  and the complete workspace passed on an immediate rerun, with no renderer
-  source changed by this work. Treat this as possible shared-state or
-  order-dependent test interference and investigate if it recurs; the cause is
-  not established by the passing reruns.
+  not measure shading all 256 lights. The `lights-fit` control now supplies the
+  exact retained prefix without overflow. In alternating runs its `forward` p50
+  was 3.428–3.467 ms versus 3.449 ms for `lights`, while `light-cluster` was
+  0.054 ms versus 0.201 ms. The overflow scan therefore costs about 0.147 ms,
+  but does not change fragment work and is not the next dominant target; do not
+  change cluster capacity or policy on this evidence.
 
 ## Performance review and execution priority (2026-09-17)
 

@@ -9,6 +9,7 @@ use crcbl::render::{
     ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight,
     scene::{DEMO_CUBE, DEMO_UNTINTED},
 };
+use crcbl::shaders::light::CLUSTER_LIGHT_CAPACITY;
 
 const INSTANCE_COLUMNS: usize = 100;
 const INSTANCE_ROWS: usize = 100;
@@ -16,6 +17,7 @@ pub const INSTANCE_COUNT: usize = INSTANCE_COLUMNS * INSTANCE_ROWS;
 const LIGHT_COLUMNS: usize = 16;
 const LIGHT_ROWS: usize = 16;
 pub const LIGHT_COUNT: usize = LIGHT_COLUMNS * LIGHT_ROWS;
+const WITHIN_BUDGET_LIGHT_COUNT: usize = CLUSTER_LIGHT_CAPACITY as usize - 1;
 
 /// The fixed scene the sandbox presents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -25,6 +27,8 @@ pub enum Scene {
     Cube,
     /// A screen-filling grid of static instances, with one animated cell.
     Instances,
+    /// The instance grid with the froxel budget filled but not exceeded.
+    LightsFit,
     /// The instance grid under an overlapping field of local lights.
     Lights,
 }
@@ -36,6 +40,7 @@ impl Scene {
         match name {
             "cube" => Some(Self::Cube),
             "instances" => Some(Self::Instances),
+            "lights-fit" => Some(Self::LightsFit),
             "lights" => Some(Self::Lights),
             _ => None,
         }
@@ -47,6 +52,7 @@ impl Scene {
         match self {
             Self::Cube => "cube",
             Self::Instances => "instances",
+            Self::LightsFit => "lights-fit",
             Self::Lights => "lights",
         }
     }
@@ -56,7 +62,7 @@ impl Scene {
     pub const fn instance_count(self) -> usize {
         match self {
             Self::Cube => 1,
-            Self::Instances | Self::Lights => INSTANCE_COUNT,
+            Self::Instances | Self::LightsFit | Self::Lights => INSTANCE_COUNT,
         }
     }
 
@@ -65,6 +71,7 @@ impl Scene {
     pub const fn light_count(self) -> usize {
         match self {
             Self::Cube | Self::Instances => 0,
+            Self::LightsFit => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
     }
@@ -96,7 +103,7 @@ pub fn animated(scene: Scene, seconds: f32) -> InstanceDesc {
 fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
     let transform = match scene {
         Scene::Cube => ForwardRenderer::spin(seconds),
-        Scene::Instances | Scene::Lights => {
+        Scene::Instances | Scene::LightsFit | Scene::Lights => {
             grid_transform(index) * Mat4::from_quat(Quat::from_rotation_y(seconds * 0.9))
         }
     };
@@ -150,12 +157,23 @@ mod tests {
 
     #[test]
     fn every_scene_name_round_trips_and_names_a_fixed_load() {
-        for scene in [Scene::Cube, Scene::Instances, Scene::Lights] {
+        for scene in [
+            Scene::Cube,
+            Scene::Instances,
+            Scene::LightsFit,
+            Scene::Lights,
+        ] {
             assert_eq!(Scene::from_name(scene.name()), Some(scene));
             assert!(scene.instance_count() > 0);
         }
         assert_eq!(Scene::Instances.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
+        assert_eq!(
+            Scene::LightsFit.light_count() + 1,
+            usize::try_from(CLUSTER_LIGHT_CAPACITY).expect("the light budget fits usize"),
+            "the local rows and the sun fill one froxel without overflowing it",
+        );
         assert_eq!(Scene::Lights.light_count(), LIGHT_COUNT);
         assert_eq!(Scene::Instances.light_count(), 0);
     }
@@ -176,8 +194,15 @@ mod tests {
 
     #[test]
     fn the_light_fixture_builds_the_count_the_scene_reports() {
+        let within_budget = lights(Scene::LightsFit);
         let local_lights = lights(Scene::Lights);
+        assert_eq!(within_budget.len(), Scene::LightsFit.light_count());
         assert_eq!(local_lights.len(), Scene::Lights.light_count());
+        assert_eq!(
+            within_budget,
+            local_lights[..within_budget.len()],
+            "the budget control must shade the same prefix as the overflow scene",
+        );
         assert!(
             local_lights
                 .iter()
