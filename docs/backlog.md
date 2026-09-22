@@ -348,6 +348,15 @@ Initial measurements and harness findings:
   more than sharing it saves on this adapter. The shader, observer and generated
   artifacts were removed; keep the term inside `ggx_lobe` unless a conditional
   reuse shape can avoid per-light branching and extra live state.
+- The all-effects `specular-lights-fit` result still bundles punctual shadow-map
+  sampling with GGX. Price the existing shadow quality ladder before changing
+  that path: run alternating matched fill/specular pairs with isolated `pcss`
+  and `box` settings, then compare each pair against the no-shadow GGX
+  differential above. Punctual `pcss` and `disc` deliberately share the rotated
+  disc filter, while `box` takes the hardware-PCF grid; the paired scene delta
+  cancels the sun's filter change and leaves the incremental point-light cost.
+  Treat this as attribution, not permission to lower the shipped quality tier;
+  any default change needs image-quality evidence and a user decision.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
