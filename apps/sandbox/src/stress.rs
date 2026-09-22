@@ -35,6 +35,8 @@ pub enum Scene {
     Moving,
     /// The instance grid with the froxel budget filled but not exceeded.
     LightsFit,
+    /// The point-light grid with ordinary specular shading enabled.
+    SpecularLightsFit,
     /// The instance grid with the froxel budget filled by rectangular lights.
     AreaLightsFit,
     /// The rectangular-light grid with specular disabled by the fill flag.
@@ -55,6 +57,7 @@ impl Scene {
             "instances" => Some(Self::Instances),
             "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
+            "specular-lights-fit" => Some(Self::SpecularLightsFit),
             "area-lights-fit" => Some(Self::AreaLightsFit),
             "area-fill-lights-fit" => Some(Self::AreaFillLightsFit),
             "lights" => Some(Self::Lights),
@@ -71,6 +74,7 @@ impl Scene {
             Self::Instances => "instances",
             Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
+            Self::SpecularLightsFit => "specular-lights-fit",
             Self::AreaLightsFit => "area-lights-fit",
             Self::AreaFillLightsFit => "area-fill-lights-fit",
             Self::Lights => "lights",
@@ -86,6 +90,7 @@ impl Scene {
             Self::Instances
             | Self::Moving
             | Self::LightsFit
+            | Self::SpecularLightsFit
             | Self::AreaLightsFit
             | Self::AreaFillLightsFit
             | Self::Lights
@@ -98,9 +103,11 @@ impl Scene {
     pub const fn light_count(self) -> usize {
         match self {
             Self::Cube | Self::Instances | Self::Moving => 0,
-            Self::LightsFit | Self::AreaLightsFit | Self::AreaFillLightsFit | Self::Combined => {
-                WITHIN_BUDGET_LIGHT_COUNT
-            }
+            Self::LightsFit
+            | Self::SpecularLightsFit
+            | Self::AreaLightsFit
+            | Self::AreaFillLightsFit
+            | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
     }
@@ -151,6 +158,7 @@ fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
         Scene::Instances
         | Scene::Moving
         | Scene::LightsFit
+        | Scene::SpecularLightsFit
         | Scene::AreaLightsFit
         | Scene::AreaFillLightsFit
         | Scene::Lights
@@ -189,16 +197,17 @@ fn lights(scene: Scene) -> Vec<Light> {
         let fill = scene == Scene::AreaFillLightsFit;
         (0..count).map(|index| area_light(index, fill)).collect()
     } else {
-        (0..count).map(point_light).collect()
+        let fill = scene != Scene::SpecularLightsFit;
+        (0..count).map(|index| point_light(index, fill)).collect()
     }
 }
 
-fn point_light(index: usize) -> Light {
+fn point_light(index: usize, fill: bool) -> Light {
     Light::Point(PointLight {
         position: light_position(index),
         radius: 4.0,
         color: Vec3::splat(0.004),
-        fill: true,
+        fill,
     })
 }
 
@@ -245,11 +254,16 @@ mod tests {
             Scene::from_name("combined").is_some(),
             "the combined simulation and renderer workload must be selectable",
         );
+        assert!(
+            Scene::from_name("specular-lights-fit").is_some(),
+            "the ordinary point-light workload must be selectable",
+        );
         for scene in [
             Scene::Cube,
             Scene::Instances,
             Scene::Moving,
             Scene::LightsFit,
+            Scene::SpecularLightsFit,
             Scene::AreaLightsFit,
             Scene::AreaFillLightsFit,
             Scene::Lights,
@@ -261,6 +275,7 @@ mod tests {
         assert_eq!(Scene::Instances.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::SpecularLightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::AreaLightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::AreaFillLightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
@@ -271,6 +286,11 @@ mod tests {
             "the local rows and the sun fill one froxel without overflowing it",
         );
         assert_eq!(Scene::Lights.light_count(), LIGHT_COUNT);
+        assert_eq!(
+            Scene::SpecularLightsFit.light_count(),
+            Scene::LightsFit.light_count(),
+            "both point-light controls must fill the same froxel prefix",
+        );
         assert_eq!(
             Scene::AreaLightsFit.light_count(),
             Scene::LightsFit.light_count(),
@@ -379,10 +399,15 @@ mod tests {
     #[test]
     fn the_light_fixture_builds_the_count_the_scene_reports() {
         let within_budget = lights(Scene::LightsFit);
+        let specular_lights = lights(Scene::SpecularLightsFit);
         let area_lights = lights(Scene::AreaLightsFit);
         let area_fill_lights = lights(Scene::AreaFillLightsFit);
         let local_lights = lights(Scene::Lights);
         assert_eq!(within_budget.len(), Scene::LightsFit.light_count());
+        assert_eq!(
+            specular_lights.len(),
+            Scene::SpecularLightsFit.light_count()
+        );
         assert_eq!(area_lights.len(), Scene::AreaLightsFit.light_count());
         assert_eq!(
             area_fill_lights.len(),
@@ -394,6 +419,19 @@ mod tests {
             local_lights[..within_budget.len()],
             "the budget control must shade the same prefix as the overflow scene",
         );
+        for (fill, ordinary) in within_budget.iter().zip(&specular_lights) {
+            let (Light::Point(fill), Light::Point(ordinary)) = (fill, ordinary) else {
+                panic!("both point controls must contain only point lights");
+            };
+            assert!(!ordinary.fill, "the matched control must shade specular");
+            assert_eq!(
+                ordinary,
+                &PointLight {
+                    fill: false,
+                    ..*fill
+                }
+            );
+        }
         assert!(
             local_lights
                 .iter()

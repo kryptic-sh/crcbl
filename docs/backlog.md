@@ -325,14 +325,26 @@ Initial measurements and harness findings:
   cache's branch or live matrix costs more than the repeated frame calculation
   saves. Keep rebuilding `ltc_shading_frame` inside the rectangle arm on this
   adapter.
-- The retained point-light controls all set `PointLight::fill`, so they skip the
-  ordinary punctual GGX lobe and cannot price or guard that path. Add a matched
-  within-budget point-light scene that changes only the fill flag, prove the
-  fixture's equality observer fails before the variant exists, and use
-  alternating 1920x1080 runs against `lights-fit` to isolate the specular cost.
-  Keep the scene only if it provides a stable differential without changing
-  froxel occupancy; defer shader changes until that measurement identifies a
-  bounded target.
+- The retained point-light controls all set `PointLight::fill`, so they skipped
+  the ordinary punctual GGX lobe. The matched `specular-lights-fit` scene keeps
+  every point-light field and the within-budget froxel occupancy identical while
+  clearing only `fill`; its selection observer failed before the variant existed
+  and its fixture observer compares every light directly. That flag also means
+  "may cast a shadow", so an ordinary all-effects run is a useful production
+  stress case but not a pure GGX control: it selected two point-shadow groups,
+  raised the cull/draw group count from three to five, and measured 5.525–5.577
+  ms `forward` versus 3.531–3.611 ms for `lights-fit`. With shadows disabled for
+  both scenes through an isolated `[engine.video]` settings layer, alternating
+  900-frame 1920x1080 runs kept `light-cluster` at 0.055 ms and measured
+  3.770–3.793 ms `forward` for specular versus 2.961–3.054 ms for fill. The
+  punctual GGX path therefore adds 0.739–0.809 ms, or 24.2–27.3%, and the
+  complete pass-sum delta was nearly identical at 0.729–0.806 ms. The bounded
+  next trial is to compute `ggx_lobe`'s view-side Smith square root once per
+  fragment: it depends only on `alpha2` and `n_dot_v`, but the function
+  currently repeats it inside every ordinary punctual-light iteration. Require
+  unchanged native point-light images and alternating shadow-disabled timings
+  before retaining the hoist; a compiler that already performs it will make the
+  trial neutral rather than justify more shader state.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
