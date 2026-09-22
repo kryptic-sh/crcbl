@@ -233,6 +233,28 @@ pub struct GroundContact {
     pub collider: ColliderId,
 }
 
+/// What a downward capsule probe found: the surface, how far below the capsule
+/// it is, and whether the character could stand on it.
+///
+/// Returned by [`CharacterController::probe_ground`] and
+/// [`CharacterController::probe_ground_at`]. The same probe is what ends every
+/// [`CharacterController::move_and_slide`], which keeps only a walkable
+/// result, as its [`GroundContact`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GroundProbe {
+    /// The surface hit, in the form [`CharacterController::ground`] reports it.
+    pub contact: GroundContact,
+    /// How far the capsule travelled straight down before touching it. A
+    /// character settled by a move sits one
+    /// [`skin_width`](CharacterConfig::skin_width) above its ground, so this
+    /// reads that gap for a settled character; zero means it is already
+    /// touching or overlapping.
+    pub distance: f64,
+    /// Whether the surface passes [`CharacterController::is_walkable`] under
+    /// this controller's slope limit.
+    pub walkable: bool,
+}
+
 /// What one [`CharacterController::move_and_slide`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MoveOutcome {
@@ -401,6 +423,57 @@ impl CharacterController {
     #[must_use]
     pub fn is_grounded(&self) -> bool {
         self.ground.is_some()
+    }
+
+    /// Ask the world, now, what is under the capsule where it stands.
+    ///
+    /// [`probe_ground_at`](Self::probe_ground_at) at the current
+    /// [`position`](Self::position); see there.
+    #[must_use]
+    pub fn probe_ground(&self, world: &mut PhysicsWorld, distance: f64) -> Option<GroundProbe> {
+        self.probe_ground_at(world, self.position, distance)
+    }
+
+    /// Ask the world, now, what is under this controller's capsule if it were
+    /// centred at `position`, looking at most `distance` straight down.
+    ///
+    /// Nothing moves and nothing is recorded: the controller keeps its
+    /// position and its [`ground`](Self::ground), and the world is only read.
+    /// The sweep is the one [`move_and_slide`](Self::move_and_slide) ends
+    /// with — the same capsule, the same [self collider](Self::with_self_collider)
+    /// left out of it, the same [`is_walkable`](Self::is_walkable) verdict —
+    /// but it reports a surface too steep to stand on as well, with
+    /// [`GroundProbe::walkable`] false, where a move treats that as no ground.
+    ///
+    /// **This is not [`ground`](Self::ground).** That is what the last move
+    /// found and keeps saying so until the next one, however the world changed
+    /// in between: remove the floor and `ground()` still names it. This sweeps
+    /// the world as it is at the call, which is what an action that must start
+    /// from real support — a revive, a vault, a mantle — should ask.
+    ///
+    /// `distance` is how far below the capsule to look. A move leaves a
+    /// grounded character one [`skin_width`](CharacterConfig::skin_width)
+    /// above its floor, so a probe for "standing on something" needs more than
+    /// that; twice the skin width is the slack the move's own probe carries.
+    /// The capsule's shape is this controller's [`config`](Self::config), so a
+    /// caller that swaps configurations for a crouch probes the crouched shape.
+    ///
+    /// # Panics
+    ///
+    /// If `distance` is negative or not finite. A negative distance would
+    /// sweep upward and answer a different question.
+    #[must_use]
+    pub fn probe_ground_at(
+        &self,
+        world: &mut PhysicsWorld,
+        position: DVec3,
+        distance: f64,
+    ) -> Option<GroundProbe> {
+        assert!(
+            distance.is_finite() && distance >= 0.0,
+            "a ground probe looks a finite, non-negative distance down, not {distance}",
+        );
+        self.probe_below(world, position, distance)
     }
 
     /// Whether a surface with this normal is ground the character can stand on.
@@ -684,11 +757,10 @@ impl CharacterController {
         };
         let probe = snap + self.config.skin_width * GROUND_PROBE_SKINS;
 
-        let Some((collider, hit)) = self.sweep(world, self.position, self.position - UP * probe)
-        else {
+        let Some(found) = self.probe_below(world, self.position, probe) else {
             return;
         };
-        if !self.is_walkable(hit.normal) {
+        if !found.walkable {
             return;
         }
         // Signed, and so it corrects in both directions: a capsule that ended
@@ -699,13 +771,33 @@ impl CharacterController {
         // same correction. The lift is capped at the gap it is restoring;
         // anything deeper than that is a penetration, and the next move's
         // depenetration is what owns it.
-        let fall = (hit.t * probe - self.config.skin_width).clamp(-self.config.skin_width, probe);
+        let fall = (found.distance - self.config.skin_width).clamp(-self.config.skin_width, probe);
         self.position -= UP * fall;
-        self.ground = Some(GroundContact {
-            normal: hit.normal,
-            point: hit.point,
-            collider,
-        });
+        self.ground = Some(found.contact);
+    }
+
+    /// Sweep the capsule straight down `distance` from `from`, and describe
+    /// the first surface it touches.
+    ///
+    /// The one ground probe: [`settle_on_ground`](Self::settle_on_ground) and
+    /// the public [`probe_ground_at`](Self::probe_ground_at) both ask it, so
+    /// the two cannot disagree about what counts as ground.
+    fn probe_below(
+        &self,
+        world: &mut PhysicsWorld,
+        from: DVec3,
+        distance: f64,
+    ) -> Option<GroundProbe> {
+        let (collider, hit) = self.sweep(world, from, from - UP * distance)?;
+        Some(GroundProbe {
+            contact: GroundContact {
+                normal: hit.normal,
+                point: hit.point,
+                collider,
+            },
+            distance: hit.t * distance,
+            walkable: self.is_walkable(hit.normal),
+        })
     }
 
     // ── Sweeping ───────────────────────────────────────────────────────
@@ -1418,5 +1510,194 @@ mod tests {
             aabb.centre(),
             character.position(),
         );
+    }
+
+    // ── The public ground probe ────────────────────────────────────────
+
+    /// The probe length a caller asks "is it standing on something" with: the
+    /// move's own slack.
+    fn standing_probe(config: &CharacterConfig) -> f64 {
+        config.skin_width * GROUND_PROBE_SKINS
+    }
+
+    #[test]
+    fn a_probe_under_a_settled_character_finds_its_floor_a_skin_width_down() {
+        let config = CharacterConfig::default();
+        let mut world = PhysicsWorld::new();
+        let floor = world.add_box(BoxCollider::new(
+            DVec3::new(0.0, -1.0, 0.0),
+            DVec3::new(50.0, 1.0, 50.0),
+        ));
+        let character = standing(&mut world, config);
+
+        let found = character
+            .probe_ground(&mut world, standing_probe(&config))
+            .expect("a settled character is standing on its floor");
+
+        assert_eq!(found.contact.collider, floor);
+        assert!(
+            (found.contact.normal - DVec3::Y).length() < 1e-12,
+            "the floor faces up, and the probe reported {:?}",
+            found.contact.normal,
+        );
+        assert!(
+            (found.distance - config.skin_width).abs() < 1e-9,
+            "a settled capsule floats one skin width ({}) up, and the probe \
+             measured {}",
+            config.skin_width,
+            found.distance,
+        );
+        assert!(found.walkable);
+        assert_eq!(
+            Some(&found.contact),
+            character.ground(),
+            "the move and the probe share one sweep, so they name the same contact",
+        );
+    }
+
+    #[test]
+    fn a_probe_from_above_its_distance_finds_nothing() {
+        let config = CharacterConfig::default();
+        let mut world = flat_world();
+        let height = 1.0;
+        let character = CharacterController::new(
+            config,
+            DVec3::new(0.0, centre_for_feet(&config, height), 0.0),
+        );
+
+        assert_eq!(
+            character.probe_ground(&mut world, standing_probe(&config)),
+            None,
+            "the floor is {height} m down and the probe looked {} m",
+            standing_probe(&config),
+        );
+        // And the miss is the distance, not a probe that cannot see the floor.
+        let far = character
+            .probe_ground(&mut world, height * 2.0)
+            .expect("a long enough probe reaches the floor");
+        assert!(
+            (far.distance - height).abs() < 1e-9,
+            "the floor is {height} m below the feet and the probe measured {}",
+            far.distance,
+        );
+    }
+
+    #[test]
+    fn a_probe_on_a_slope_past_the_limit_reads_as_not_walkable() {
+        let config = CharacterConfig::default();
+        let mut world = dome_world();
+        let at = |degrees: f64| on_dome(&config, degrees.to_radians()) + UP * config.skin_width;
+        let character = CharacterController::new(config, DVec3::ZERO);
+
+        let steep = character
+            .probe_ground_at(&mut world, at(60.0), standing_probe(&config))
+            .expect("the dome is a skin width under the capsule");
+        assert!(
+            !steep.walkable,
+            "60° is past the default 45° limit, and the probe called it walkable \
+             with normal {:?}",
+            steep.contact.normal,
+        );
+        assert!(steep.contact.normal.y < config.min_ground_normal_y);
+
+        let gentle = character
+            .probe_ground_at(&mut world, at(30.0), standing_probe(&config))
+            .expect("the dome is a skin width under the capsule");
+        assert!(gentle.walkable, "30° is inside the default limit");
+    }
+
+    #[test]
+    fn a_probe_leaves_the_controller_and_its_world_body_where_they_were() {
+        let config = CharacterConfig::default();
+        let mut world = flat_world();
+        let body = world.add_capsule(Capsule::new(
+            DVec3::new(0.0, centre_for_feet(&config, 0.0), 0.0),
+            config.radius,
+            config.half_height,
+        ));
+        let mut character =
+            CharacterController::new(config, DVec3::new(0.0, centre_for_feet(&config, 0.0), 0.0))
+                .with_self_collider(body);
+        character.move_and_slide(&mut world, DVec3::ZERO);
+        let position = character.position();
+        let ground = character.ground().copied();
+        let aabb = world.aabb_of(body);
+        assert!(ground.is_some(), "the fixture starts on the floor");
+
+        let here = character.probe_ground(&mut world, standing_probe(&config));
+        let aloft = character.probe_ground_at(
+            &mut world,
+            DVec3::new(3.0, centre_for_feet(&config, 2.0), 0.0),
+            standing_probe(&config),
+        );
+
+        assert_ne!(
+            here.map(|found| found.contact.collider),
+            Some(body),
+            "the probe found the character's own body",
+        );
+        assert!(here.is_some_and(|found| found.walkable));
+        assert_eq!(aloft, None);
+        assert_eq!(character.position(), position);
+        assert_eq!(character.ground().copied(), ground);
+        assert_eq!(world.aabb_of(body), aabb);
+    }
+
+    /// **`ground()` is the last move's answer; the probe is the world's
+    /// current one.** Ported from EW's
+    /// `support_refresh_rejects_removed_floor_without_advancing_stamina_clocks`:
+    /// take the floor away and the recorded ground still names it, while a
+    /// fresh probe finds nothing and moves nothing.
+    #[test]
+    fn a_probe_sees_a_removed_floor_that_ground_still_reports() {
+        let config = CharacterConfig::default();
+        let mut world = PhysicsWorld::new();
+        let floor = world.add_box(BoxCollider::new(
+            DVec3::new(0.0, -1.0, 0.0),
+            DVec3::new(50.0, 1.0, 50.0),
+        ));
+        let character = standing(&mut world, config);
+        assert!(
+            character
+                .probe_ground(&mut world, standing_probe(&config))
+                .is_some_and(|found| found.walkable)
+        );
+        let position = character.position();
+
+        assert!(world.remove(floor));
+
+        assert!(
+            character.is_grounded(),
+            "ground() is the last move's record"
+        );
+        assert_eq!(
+            character.probe_ground(&mut world, standing_probe(&config)),
+            None
+        );
+        assert_eq!(character.position(), position);
+    }
+
+    /// Ported from EW's `unsupported_spawn_cannot_begin_revival_even_with_valid_reach`:
+    /// a character placed 0.1 m over its floor has no support within the
+    /// move's slack.
+    #[test]
+    fn a_character_spawned_a_tenth_of_a_metre_up_has_no_support() {
+        let config = CharacterConfig::default();
+        let mut world = flat_world();
+        let character =
+            CharacterController::new(config, DVec3::new(0.0, centre_for_feet(&config, 0.1), 0.0));
+
+        assert_eq!(
+            character.probe_ground(&mut world, standing_probe(&config)),
+            None
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-negative distance")]
+    fn a_probe_refuses_a_negative_distance() {
+        let mut world = flat_world();
+        let character = standing(&mut world, CharacterConfig::default());
+        let _ = character.probe_ground(&mut world, -0.1);
     }
 }

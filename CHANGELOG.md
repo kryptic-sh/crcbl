@@ -229,6 +229,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A non-moving ground probe on `crcbl_phys::CharacterController`.**
+  `probe_ground(world, distance)` and
+  `probe_ground_at(world, position, distance)` sweep the controller's capsule
+  straight down and return a `GroundProbe` (`contact: GroundContact`, `distance`
+  travelled to it, and `walkable` under the slope limit), or `None` when nothing
+  is within `distance`. They move nothing and leave `ground()` alone, and they
+  answer for the world as it is now, where `ground()` is what the last
+  `move_and_slide` found: take the floor away and `ground()` still names it
+  while the probe finds nothing. The sweep is the one `move_and_slide` settles
+  with, so a gameplay check (a revive or a vault that needs real support) and
+  the controller agree on what counts as ground. A negative or non-finite
+  `distance` panics.
 - **A voice budget with priority and stealing on `crcbl_audio::mixer::Mixer`.**
   `Mixer::set_voice_budget(Some(n))` caps the voices sounding at once (`None`,
   the default, is unlimited, as before). A voice carries a priority

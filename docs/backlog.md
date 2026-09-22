@@ -21984,10 +21984,18 @@ there: 17, 8 and 10 call sites). The rest:
 - **P2, already carried here:** the `Mixer` voice budget with priority and
   stealing under one lock (EW caps at 32 in `ClientAudio::play`, like
   `apps/horde`), and the typed grid drag/drop hoist.
-- **P2, new: a public non-moving ground/support probe on
-  `CharacterController`.** The settle probe is private and `ground()` reflects
-  only the last move; EW's `PlayerController::supports_grounded_action` sweeps
-  its own capsule for revival admission.
+- **P2: the non-moving ground probe shipped; EW's migration and one suspected EW
+  bug remain.** `CharacterController::probe_ground` / `probe_ground_at` (a
+  `GroundProbe` of contact, distance and walkable) landed 2026-09-23 on the same
+  sweep the settle step uses. EW should replace the hand-built sweep in
+  `PlayerController::supports_grounded_action` with
+  `probe_ground(world, skin_width * ACTION_SUPPORT_PROBE_SKINS)`, keeping its
+  airborne check. EW's foot probes (`probe_foot_contacts`) are vertical rays, a
+  different query that `PhysicsWorld::cast_ray_excluding` already serves, so no
+  controller API was added for them. Unverified possible EW bug: they call
+  `world.cast_ray`, which does not skip the character's own collider, and a ray
+  starting inside a shape reports its far wall, so a foot origin inside the
+  player's capsule could hit the capsule's underside and lose the contact.
 - **P2, new: register a GPU-rendered image as a sprite sheet, plus an icon
   cache.** `SpriteRenderer` takes CPU pixels only, so EW rasterises item icons
   on the CPU. Overlaps `crcbl icon bake` above, which is the offline half; this
