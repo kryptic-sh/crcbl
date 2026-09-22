@@ -16,6 +16,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `BroadphaseStats::surface_area_cost` exposes spatial overlap in a refit-aged
+  BVH even when its depth remains balanced, and the fixed physics benchmark
+  reports it beside query timings.
 - `sandbox --scene instances|moving|lights-fit|lights` provides fixed sustained
   renderer-load scenes, including full-grid transform updates and within-budget
   and overflowing light grids. `--wall-clock` makes a headless run report real

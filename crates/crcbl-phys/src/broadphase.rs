@@ -675,6 +675,38 @@ impl Bvh {
         deepest
     }
 
+    /// Sum of the half-surface areas of every live internal node.
+    ///
+    /// A refit keeps every box tight around its children but does not move a
+    /// leaf back beside its new neighbours. The resulting overlap makes this
+    /// sum grow even while [`depth`](Self::depth) and the node count stay
+    /// unchanged, so this is the diagnostic that distinguishes a balanced but
+    /// spatially loose tree from a freshly partitioned one.
+    ///
+    /// Only nodes reachable from the root are counted. Removed nodes leave
+    /// recycled slots in `nodes`, and folding those stale boxes in would make
+    /// churn look like query work that traversal cannot reach.
+    ///
+    /// This walks the tree in `O(n)` and allocates a traversal stack. It is for
+    /// diagnostics and policy measurements, not for each query.
+    #[must_use]
+    pub fn surface_area_cost(&self) -> f64 {
+        if self.root == NIL {
+            return 0.0;
+        }
+        let mut cost = 0.0;
+        let mut stack = vec![self.root];
+        while let Some(index) = stack.pop() {
+            let node = self.nodes[index as usize];
+            if node.leaf_count == 0 {
+                cost += node.aabb.half_surface_area();
+                stack.push(node.child_right);
+                stack.push(node.child_left);
+            }
+        }
+        cost
+    }
+
     // ── Internal helpers ───────────────────────────────────────────────
 
     /// The leaf node owning `element_index`, or `None` if that index names no
@@ -928,6 +960,15 @@ mod tests {
         let hits = bvh.traverse_ray(&Ray::new(DVec3::ZERO, DVec3::X));
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].element_id, 0);
+    }
+
+    #[test]
+    fn surface_area_cost_sums_the_internal_boxes() {
+        let bvh = Bvh::build([
+            unit_box_at(DVec3::ZERO),
+            unit_box_at(DVec3::new(2.0, 0.0, 0.0)),
+        ]);
+        assert_eq!(bvh.surface_area_cost(), 7.0);
     }
 
     #[test]

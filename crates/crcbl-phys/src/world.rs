@@ -106,10 +106,12 @@ impl ColliderEntry {
 /// Two kinds of number, read two different ways.
 ///
 /// **The shape, as it is right now:** [`elements`](Self::elements),
-/// [`nodes`](Self::nodes) and [`depth`](Self::depth). These are what let a
+/// [`nodes`](Self::nodes), [`depth`](Self::depth) and
+/// [`surface_area_cost`](Self::surface_area_cost). These are what let a
 /// structural policy (a teleport rule, a rebuild cadence) be argued from
 /// measurement — depth is the query-cost bound, node count the footprint
-/// including recycled slots.
+/// including recycled slots, and surface-area cost exposes overlap inside a
+/// tree whose depth stayed balanced.
 ///
 /// **The totals, counting up from the moment the world was created and never
 /// reset:** [`refits`](Self::refits),
@@ -123,7 +125,7 @@ impl ColliderEntry {
 /// [`PhysicsWorld::broadphase_stats`] forces the lazy rebuild, so a reading
 /// taken while the tree is dirty reports a `rebuilds` that includes the one it
 /// just caused — which is the honest number, since that rebuild happened.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BroadphaseStats {
     /// Live colliders (leaves) in the tree.
     pub elements: usize,
@@ -131,6 +133,13 @@ pub struct BroadphaseStats {
     pub nodes: usize,
     /// Longest root-to-leaf path, counted in nodes ([`Bvh::depth`]'s units).
     pub depth: usize,
+    /// Sum of every live internal node's half-surface area.
+    ///
+    /// [`Bvh::surface_area_cost`] is the definition and the reason this catches
+    /// refit degradation that [`depth`](Self::depth) cannot. Compare readings
+    /// over the same collider set and world scale; the absolute value carries
+    /// units squared and is not a portable threshold by itself.
+    pub surface_area_cost: f64,
     /// Collider updates ([`PhysicsWorld::set_sphere`] and its siblings) that a
     /// built tree absorbed in place, refitting one root-to-leaf path.
     ///
@@ -1178,10 +1187,10 @@ impl PhysicsWorld {
     /// game can measure a policy against.
     ///
     /// **For diagnostics, not for the frame path.** It forces the lazy rebuild
-    /// if the tree is dirty, and `Bvh::depth` walks the whole tree — `O(n)` —
-    /// so this is what a teleport rule's cost/benefit is argued from, the way
-    /// `docs/backlog.md`'s "A consumer cannot see the cost it is being asked to
-    /// avoid" asked for, and nothing a hot loop should call.
+    /// if the tree is dirty, and the two shape diagnostics walk the whole tree
+    /// — `O(n)` — so this is what a teleport rule's cost/benefit is argued
+    /// from, the way `docs/backlog.md`'s "A consumer cannot see the cost it is
+    /// being asked to avoid" asked for, and nothing a hot loop should call.
     ///
     /// The forced rebuild is counted: call this on a dirty tree and the
     /// [`rebuilds`](BroadphaseStats::rebuilds) it returns includes that one.
@@ -1197,6 +1206,7 @@ impl PhysicsWorld {
             elements: bvh.len(),
             nodes: bvh.node_count(),
             depth: bvh.depth(),
+            surface_area_cost: bvh.surface_area_cost(),
             refits: self.counters.refits,
             updates_without_refit: self.counters.updates_without_refit,
             rebuilds: self.counters.rebuilds,
@@ -1333,6 +1343,7 @@ mod tests {
                 elements: 0,
                 nodes: 0,
                 depth: 0,
+                surface_area_cost: 0.0,
                 refits: 0,
                 updates_without_refit: 0,
                 rebuilds: 1,

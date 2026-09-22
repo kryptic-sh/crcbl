@@ -80,8 +80,16 @@ Initial measurements and harness findings:
   and 2.860/2.944 ms at tick 600; the ordinary aged figures were 3.089/3.152,
   3.576/3.633 and 4.281/4.380 ms. The build phase itself was about 1.95 ms. This
   supports a quality-triggered rebuild, but not a fixed cadence: sparse worlds
-  have too little ageing loss to repay the same rebuild. Add a cheap BVH quality
-  observable and price its maintenance before choosing a production policy.
+  have too little ageing loss to repay the same rebuild. The new internal-node
+  surface-area sum tracks the loss without relying on topology: in a repeated
+  20-sample release run, the dense tree's cost rose from 62,659.356 at tick 1 to
+  71,984.278, 83,781.335 and 99,581.497 at ticks 120, 300 and 600 while query
+  p50 rose from 2.718 ms to 3.101, 3.576 and 4.153 ms. The sparse cost rose only
+  from 490,934.116 to 531,047.696 by tick 600 while query p50 moved from 1.167
+  ms to 1.233 ms. This supports a cost ratio relative to the most recent build
+  as the trigger signal. Price periodic scans and the rebuild spike before
+  selecting and shipping a threshold; the diagnostic is currently `O(n)` and
+  deliberately stays out of the query path.
 - The first pinned NVIDIA Vulkan Horde run used release mode at 1920x1080,
   uncapped, one simulation tick per second, 2,400 frames and 10,000 prefilled
   enemies with the debug overlay enabled. The last 120 of 2,397 timestamped
