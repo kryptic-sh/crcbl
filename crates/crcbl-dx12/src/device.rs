@@ -748,8 +748,10 @@ pub(crate) struct BoundGroup {
     pub(crate) samplers: Option<(u32, D3D12_GPU_DESCRIPTOR_HANDLE)>,
     /// One root descriptor per dynamic binding, with its offset already applied.
     pub(crate) roots: Vec<BoundRoot>,
-    /// Every resource the group's descriptors point into, so the encoder can
-    /// hold a reference for the length of the submission.
+    /// The resources the group's descriptors point into that the encoder does
+    /// not already hold, so it can take a reference for the length of the
+    /// submission: the group's whole list past the `held` prefix
+    /// [`DeviceInner::bind_group`] was given.
     pub(crate) retained: Vec<ID3D12Resource>,
     /// The pipeline layout's root signature, which every parameter index above
     /// is an index into — set by the encoder when no pipeline has set one.
@@ -1147,12 +1149,20 @@ impl DeviceInner {
     /// that otherwise binds a table of the wrong length, which D3D12 reads as
     /// arithmetic and never reports — or when `dynamic_offsets` cannot be
     /// applied to the set's root descriptors. See [`crate::root::apply`].
+    ///
+    /// `held` is how many of the group's retained references the encoder took
+    /// on an earlier bind, and only the ones after them come back in
+    /// [`BoundGroup::retained`]. The group's list only grows (see
+    /// `BindGroupRecord::retained`), so that prefix is exactly what the encoder
+    /// holds, and a group bound over and over in one encoder costs one reference
+    /// per resource rather than one per resource per bind.
     pub(crate) fn bind_group(
         &self,
         index: u32,
         group: BindGroupHandle,
         dynamic_offsets: &[u32],
         layout: PipelineLayoutHandle,
+        held: usize,
     ) -> Result<BoundGroup, HalError> {
         let state = self.state();
         let layout = handle::lookup(
@@ -1220,7 +1230,7 @@ impl DeviceInner {
                 .zip(record.samplers)
                 .map(|(root, block)| (root, state.visible.gpu_samplers(block))),
             roots,
-            retained: record.retained.clone(),
+            retained: record.retained.get(held..).unwrap_or_default().to_vec(),
             root_signature: layout.raw.clone(),
         })
     }
@@ -9908,6 +9918,145 @@ pub(crate) mod tests {
         device.destroy_buffer(readback);
         device.destroy_image_view(view);
         device.destroy_image(target);
+    }
+
+    /// A group bound many times in one encoder hands over its references once,
+    /// and a later bind hands over only what an `update_bind_group` added.
+    ///
+    /// The first half is the cost: a frame that binds one group over and over
+    /// used to clone the group's whole reference list on every bind, and
+    /// the count the device hands the encoder is what would move if it did
+    /// again. The second half is the lifetime contract the saving must not
+    /// cost: a resource written into the group after its first bind is named
+    /// by the second, so the encoder has to hold it too — which it would not if
+    /// "already bound" meant "skip" rather than "skip what is already held".
+    /// Both buffers and the group are destroyed before the submission, so the
+    /// clean drain afterwards is the encoder's references at work.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_group_bound_repeatedly_is_retained_once_and_an_update_is_retained_too() {
+        const BINDS: usize = 8;
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let storage = |label| {
+            device
+                .create_buffer(&BufferDesc {
+                    label: Some(label),
+                    size: 256,
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::DeviceLocal,
+                })
+                .expect("a storage buffer")
+        };
+        let first = storage("crcbl-dx12 first bound buffer");
+        let second = storage("crcbl-dx12 buffer written by an update");
+        let raw = |buffer| device.inner.buffer(buffer).expect("a live buffer").raw;
+        let (first_raw, second_raw) = (raw(first), raw(second));
+
+        let set_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("crcbl-dx12 one storage buffer"),
+                entries: &[BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::COMPUTE,
+                    kind: BindingKind::StorageBuffer {
+                        read_only: true,
+                        dynamic: false,
+                        stride: 4,
+                    },
+                    count: 1,
+                    flags: BindingFlags::empty(),
+                }],
+            })
+            .expect("one read-only storage buffer");
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("crcbl-dx12 one storage buffer"),
+                bind_group_layouts: &[set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one descriptor table");
+        let entry = |buffer| BindGroupEntry {
+            binding: 0,
+            array_index: 0,
+            resource: BindingResource::whole_buffer(buffer),
+        };
+        let group = device
+            .create_bind_group(&BindGroupDesc {
+                label: Some("crcbl-dx12 rebound group"),
+                layout: set_layout,
+                entries: &[entry(first)],
+                variable_count: None,
+            })
+            .expect("a bind group over the first buffer");
+
+        let mut encoder = Dx12CommandEncoder::new(
+            Arc::clone(&device.inner),
+            &CommandEncoderDesc {
+                label: Some("crcbl-dx12 rebinding encoder"),
+                queue,
+            },
+        );
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: None,
+            timestamp_writes: None,
+        });
+        for _ in 0..BINDS {
+            encoder.bind_group(0, group, &[], pipeline_layout);
+        }
+        assert_eq!(
+            encoder.group_references(),
+            1,
+            "{BINDS} binds of a one-resource group took more than one reference"
+        );
+        assert!(encoder.holds(&first_raw), "the bound buffer is not held");
+
+        device
+            .update_bind_group(group, &[entry(second)])
+            .expect("the group's one binding rewritten");
+        for _ in 0..BINDS {
+            encoder.bind_group(0, group, &[], pipeline_layout);
+        }
+        assert_eq!(
+            encoder.group_references(),
+            2,
+            "a bind after the update must take the one reference it added, once"
+        );
+        assert!(
+            encoder.holds(&second_raw),
+            "the buffer the update wrote is named by the later binds and must be held"
+        );
+        assert!(
+            encoder.holds(&first_raw),
+            "the first buffer is still named by the earlier binds"
+        );
+        encoder.end_compute_pass();
+
+        device.destroy_bind_group(group);
+        device.destroy_buffer(first);
+        device.destroy_buffer(second);
+        drop((first_raw, second_raw));
+        let buffer = Box::new(encoder)
+            .finish()
+            .unwrap_or_else(|error| panic!("stage=finish: {error:?}"));
+        device
+            .submit(queue, &SubmitInfo::new(&[buffer]))
+            .unwrap_or_else(|error| panic!("stage=submit: {error:?}"));
+        device.destroy_command_buffer(buffer);
+        device
+            .wait_idle()
+            .unwrap_or_else(|error| panic!("stage=wait_idle: {error:?}"));
+        assert_eq!(
+            device.state().retire.pending(),
+            0,
+            "the retire queue held references past an idle device, so it leaks"
+        );
+
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(set_layout);
     }
 
     /// A destroyed command buffer stops resolving, so a second submission of it

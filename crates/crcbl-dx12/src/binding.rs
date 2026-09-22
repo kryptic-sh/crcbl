@@ -289,6 +289,11 @@ pub(crate) struct BindGroupRecord {
     /// these again at `bind_group` time, which covers the window between
     /// submission and completion; this covers the window between
     /// `destroy_buffer` and then.
+    ///
+    /// **Append-only for the record's life**: `update_bind_group` extends it and
+    /// nothing shortens it. An encoder leans on that — it remembers how long a
+    /// prefix of this list it already holds and is handed only the rest on a
+    /// later bind of the same group. See `DeviceInner::bind_group`.
     pub(crate) retained: Vec<ID3D12Resource>,
 }
 

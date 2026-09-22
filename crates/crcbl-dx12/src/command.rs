@@ -86,6 +86,7 @@
 
 use core::mem::ManuallyDrop;
 use core::ops::Range;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crcbl_hal::{
@@ -295,6 +296,23 @@ pub(crate) struct Dx12CommandEncoder {
     list: Option<ID3D12GraphicsCommandList>,
     /// Every resource a recorded command names. See the module docs.
     retained: Vec<ID3D12Resource>,
+    /// The interface address of every entry in [`retained`](Self::retained),
+    /// so [`retain`](Self::retain)'s duplicate check is one lookup rather than
+    /// a scan of the whole list. An address cannot be reused while it is here:
+    /// the reference beside it in `retained` keeps the object alive.
+    retained_addresses: HashSet<usize>,
+    /// For each bind group this encoder has bound, how many of the group's own
+    /// retained references it has already taken — a prefix of that list, which
+    /// only grows. [`bind_group`](CommandEncoder::bind_group) passes it to the
+    /// device, so a group bound again hands back only what an
+    /// `update_bind_group` added since rather than its whole list once per
+    /// bind.
+    bound_groups: HashMap<BindGroupHandle, usize>,
+    /// How many references [`DeviceInner::bind_group`] has handed this encoder
+    /// in total, for the test that pins a group bound repeatedly being retained
+    /// once.
+    #[cfg(test)]
+    group_references: usize,
     /// Every query heap a recorded command names, held for the same reason and
     /// separately because `ID3D12QueryHeap` is not an `ID3D12Resource`.
     query_heaps: Vec<ID3D12QueryHeap>,
@@ -400,6 +418,10 @@ impl Dx12CommandEncoder {
             allocator: None,
             list: None,
             retained: Vec::new(),
+            retained_addresses: HashSet::new(),
+            bound_groups: HashMap::new(),
+            #[cfg(test)]
+            group_references: 0,
             query_heaps: Vec::new(),
             failed: None,
             pipeline: None,
@@ -477,10 +499,24 @@ impl Dx12CommandEncoder {
     /// costs one reference rather than a hundred — and so the set parked at
     /// submission is the set of distinct resources.
     fn retain(&mut self, resource: &ID3D12Resource) {
-        let raw = resource.as_raw();
-        if !self.retained.iter().any(|held| held.as_raw() == raw) {
+        if self.retained_addresses.insert(resource.as_raw().addr()) {
             self.retained.push(resource.clone());
         }
+    }
+
+    /// How many references the device has handed this encoder from bind
+    /// groups, across every bind.
+    #[cfg(test)]
+    pub(crate) const fn group_references(&self) -> usize {
+        self.group_references
+    }
+
+    /// Whether this encoder holds a reference to `resource`.
+    #[cfg(test)]
+    pub(crate) fn holds(&self, resource: &ID3D12Resource) -> bool {
+        self.retained
+            .iter()
+            .any(|held| held.as_raw() == resource.as_raw())
     }
 
     /// Resolves a buffer and takes a reference to it, or records the failure.
@@ -2213,9 +2249,10 @@ impl CommandEncoder for Dx12CommandEncoder {
         if self.list().is_none() {
             return;
         }
+        let held = self.bound_groups.get(&group).copied().unwrap_or(0);
         let bound = match self
             .device
-            .bind_group(index, group, dynamic_offsets, layout)
+            .bind_group(index, group, dynamic_offsets, layout, held)
         {
             Ok(bound) => bound,
             Err(error) => {
@@ -2223,6 +2260,11 @@ impl CommandEncoder for Dx12CommandEncoder {
                 return;
             }
         };
+        self.bound_groups.insert(group, held + bound.retained.len());
+        #[cfg(test)]
+        {
+            self.group_references += bound.retained.len();
+        }
         for resource in &bound.retained {
             self.retain(resource);
         }

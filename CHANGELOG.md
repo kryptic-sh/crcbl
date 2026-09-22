@@ -1843,6 +1843,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **dx12: a bind group bound repeatedly in one encoder no longer re-retains its
+  resources on every bind.** Each `bind_group` cloned the group's whole list of
+  resource references (an `AddRef` now and a `Release` later per resource), and
+  the encoder then checked each one against everything it already held with a
+  linear scan — so a frame binding thousands of groups spent milliseconds on
+  refcounts and pointer compares. The encoder now remembers how much of each
+  group's reference list it holds and is handed only what an `update_bind_group`
+  added since, and its duplicate check is a hash-set lookup by interface
+  pointer. Every resource a recorded command names is still held until the
+  submission retires. Reported by EW.
+
 - **Windowed frames no longer idle 4 ms each while rendering.** `Loop::frame`
   handed `WINDOWED_IDLE` to `Shell::wait_events` before every windowed frame,
   and on Win32 and X11 only input ends that wait early, so a rendering game paid
