@@ -577,6 +577,9 @@ float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 
 
     float sum = 0.0;
     float found = 0.0;
+    // Slang's weaker `[unroll]` leaves this loop and its dynamic table access in
+    // SPIR-V. This fixed bound uses the forcing form so every offset is folded.
+    [ForceUnroll]
     for (uint index = 0u; index < SHADOW_SEARCH_TAPS; ++index)
     {
         float2 spoke = SHADOW_SEARCH_OFFSET[index];

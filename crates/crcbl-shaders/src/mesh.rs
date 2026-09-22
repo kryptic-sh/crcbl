@@ -6729,6 +6729,13 @@ mod tests {
             !search.contains("SHADOW_SEARCH_OFFSET[index] * SHADOW_SEARCH_TEXELS"),
             "the blocker loop still scales every constant search offset at runtime"
         );
+        assert!(
+            source.contains(
+                "[ForceUnroll]\n    for (uint index = 0u; index < SHADOW_SEARCH_TAPS; ++index)"
+            ),
+            "the fixed blocker loop no longer requires compile-time expansion, so generated \
+             shaders can restore dynamic offset lookup and loop control"
+        );
     }
 
     /// **The rotation table is the sixteen sixteenths of a turn, in order.**

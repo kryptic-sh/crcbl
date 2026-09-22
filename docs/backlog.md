@@ -4074,7 +4074,22 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   generic loops, separately from `[unroll]`. It only counts if the generated
   blocker loop and dynamic table subscript actually disappear; otherwise fall
   back to the explicit sequence rather than treating another annotation as the
-  optimization.
+  optimization. The forced form passed that gate: mesh SPIR-V contains explicit
+  depth fetches for every tap and no longer contains the sixteen-iteration loop
+  guard. Mesh SPIR-V grew from 210,736 to 229,284 bytes, grass from 263,456 to
+  319,892 and water from 150,712 to 169,244. Four mirrored 900-frame 1920×1080
+  MX550 pairs put `instances` forward at 1.599–1.648 ms before and 1.604–1.622
+  ms after; the four-run means fell from 1.6238 to 1.6135 ms, or 0.631%, while
+  individual pair changes ranged from a 0.313% regression to a 1.578% reduction.
+  `specular-lights-fit` forward measured 3.712–3.815 ms before and 3.725–3.773
+  ms after; its means fell from 3.7835 to 3.7570 ms, or 0.700%, with three of
+  four pairs improving. Two mirrored Tide courtyard pairs were flat within
+  0.196% in the first pair; the second reduced forward by 1.414%, water by
+  0.958% and the pass sum by 0.708%. Sandbox pass sums overlapped and establish
+  no whole-frame gain. Retain the generated-code improvement for its small
+  multi-scene forward reduction, but do not claim a general frame-time
+  improvement. The grass path has correctness coverage but no sustained timing
+  fixture; its larger code growth remains a performance verification gap.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the

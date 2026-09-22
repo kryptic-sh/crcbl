@@ -232,22 +232,22 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 2c03b67d84c27560c4c06b3944497a621285e19125e23d567f494c5b58232109
+source-sha256 = ce729b92f377810dededf88b810eb97395a156885bb59e75a463b04f10eb783e
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
-spirv-sha256 = 72d580548e0ec9366f41cb3b05eeb164a5509c0becd7d006391e2b9b283aaaf2
+spirv-sha256 = 49f0cffa855edf4a9b27478c2e2a2bf54f6cc3f6f40bd25d4feb1ded50c61236
 wgsl = wgsl/grass.wgsl
-wgsl-sha256 = bd3bca1359b832940216aa7e7c37a70fd25130e90becebc20235e61bef21c777
+wgsl-sha256 = f2cdbdeb1f0c89e2c1a6f465d6139d11faae0bb3b062d3c5976ca0e9ec852215
 msl = msl/grass.metal
-msl-sha256 = b81ae332e7537ad5011ca3da2059d47af487f4ec86e162850663585333582b85
+msl-sha256 = 65bc664fb15e43a7b1eefa556515578054f27a0a68ff008deb639ec03bdb59fa
 dxil = vertexMain:dxil/grass.vertex.dxil:6184f0d6ad37125570f1d54db49e49440f9cf2d6396e058b117675319bbb49a2
 dxil = bladeNearVertexMain:dxil/grass.blade_near_vertex.dxil:3db14da3faf25fb44d6db3cb52f148f3d2518e38198b485fe8bdd399b26fc85e
 dxil = bladeFarVertexMain:dxil/grass.blade_far_vertex.dxil:2d12f7137a1eb27c856ce85fff90247d20bc440422a582f84af1880f81f2d0a4
-dxil = bladeFragmentMain:dxil/grass.blade_fragment.dxil:be00da0672099ff66308a2579e16d038982beb1d1bc3efdf8a58a65969d1d980
-dxil = fragmentMain:dxil/grass.fragment.dxil:8581cd6c6c2cf2e4cb42fd5a3b7774e105935e6054552dd5814024d7342f74cb
+dxil = bladeFragmentMain:dxil/grass.blade_fragment.dxil:64b4ffbb6f5be3a7496d0c8bb52adcdf1076f402bd10fd132bfaec283a0261ea
+dxil = fragmentMain:dxil/grass.fragment.dxil:a16e580aa920d9c0b2359274b618839f749dcc0cefcb5e4ec9cbe58af975e0a9
 dxil = shellVertexMain:dxil/grass.shell_vertex.dxil:e77291ee1693d91e9b466cfb2065c8d688801d781fef7b8cb679e1992d058af6
 dxil = finVertexMain:dxil/grass.fin_vertex.dxil:0c02ced4d74c4c941ac7fa14d8e1ecc41d346037d0e34fbd20199769506b1776
-dxil = shellFragmentMain:dxil/grass.shell_fragment.dxil:d58353eb9bf9c4c6e7e95629e569eceb4b76f802f0b46add0a3512c95a868db5
+dxil = shellFragmentMain:dxil/grass.shell_fragment.dxil:c4c292a404a7843c6ff4e240225bed1541826dd24a02bac89c177d1adcf1cbfc
 entry-points = vertexMain:vertex, bladeNearVertexMain:vertex, bladeFarVertexMain:vertex, bladeFragmentMain:fragment, fragmentMain:fragment, shellVertexMain:vertex, finVertexMain:vertex, shellFragmentMain:fragment
 
 [grass_gen]
@@ -318,18 +318,18 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = c49555b4907ccf467445e64829f3a70ccb6c06d7d4bc9452acabcc839d2ed671
+source-sha256 = fae2067334c6fc644af151a269d77b9eecfa24548e3d1dd1fd60eb65c3fbe6fd
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 92503bea97350bb8302dfe03b4bfbe13e7054db576bcd870c500bf7a11603f89
+spirv-sha256 = beee12ca8ea217618f1a49e6eb7fdda566b9c717dcad893f7c00bef3d06d023b
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 0bcec7d82959276483166813986c868c31885a09a6464971cdf896b19d276eb4
+wgsl-sha256 = 06a95b7131a15ff5b021db375231ba3f05d1e192a6104f25602e82f4726cdd0b
 msl = msl/mesh.metal
-msl-sha256 = 74c2a96bb4d934e6d3f30a73f3d1aef1ea8b9a2282bcd4fba40e1c8fbb52c742
+msl-sha256 = a6bc06e3f081f638d6e036ac89158defa2e5c17842772e7d7a0dd1690c797861
 dxil = vertexMain:dxil/mesh.vertex.dxil:a2c3139f7204a68114a8108f577a16f9c128fc04a99279908554b948d942012c
 dxil = depthVertexMain:dxil/mesh.depth_vertex.dxil:8199398137a7816f3e780c34fc8bd2636724f819b0c237b647b85beb0dfe269d
 dxil = depthClearVertexMain:dxil/mesh.depth_clear_vertex.dxil:e2007f43be9438f2c6d5022cb8fb44f825ab39426569a45117fd8c1494ab53a4
-dxil = fragmentMain:dxil/mesh.fragment.dxil:628d55e8cf01b43c88caf795be5e6dc845006812623dc79fa892fedaf598ff6e
+dxil = fragmentMain:dxil/mesh.fragment.dxil:348c1120b8bdf4a0b4dff6dff470e0e09b8df84e1293b7b637fce00463d7618c
 dxil = depthMaskedFragmentMain:dxil/mesh.depth_masked_fragment.dxil:4ed35491857dbad4dbc865c3ea5e9ab0fb7f03f274460f34e7d445102ac96cbb
 dxil = rsmFragmentMain:dxil/mesh.rsm_fragment.dxil:b1ff3ab66ea9736bee01557f5488aa1a62b625f5f408d07efa6ea5ad16e4f299
 entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:vertex, fragmentMain:fragment, depthMaskedFragmentMain:fragment, rsmFragmentMain:fragment
@@ -653,16 +653,16 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [water]
 source = shaders/water.slang
-source-sha256 = 18ebd6d3a9f98c3fc4f0a958c20d0fd882f88632aa47f99e5401ca4bcf2cc11c
+source-sha256 = 1c8b82208b9598a8672354adcb990eba7f4c8386e5118a8eca31d0e1a0259196
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/water.spv
-spirv-sha256 = 75cd6cc8d2a3e291d608915f397833c49ac9c72bd42149020df6672a2b698eb6
+spirv-sha256 = 22259340f0040025a3b51b6c7424e63faa8022ef8a951aec9719ac66a1fdb645
 wgsl = wgsl/water.wgsl
-wgsl-sha256 = c3e89dc38f984a9c37f81f2c27a30866df0e553b262cba3a14a951a2d585dacc
+wgsl-sha256 = 47f62413544b2619fce7f96dc705a5af8d5995042132f39856a439525577675d
 msl = msl/water.metal
-msl-sha256 = f35ebf6ce34ecb9497cf43f563be939f97681de75c1119c7dd7bf9c3016cae7d
+msl-sha256 = f41f1fb286ef2e91c7e4fec0a5a90492a9ac5d990f8a238fe986748d834a78d4
 dxil = vertexMain:dxil/water.vertex.dxil:fcc3595354c1daea484660f341c78ebbcd178728e0cb5de48b85919e4c348f91
-dxil = fragmentMain:dxil/water.fragment.dxil:40f3c5883dd34bc03d3ba3aee3bd6fa1e3bfd587f77960d7b0a328c7662c2727
+dxil = fragmentMain:dxil/water.fragment.dxil:ace3e4debe86ee30e9521d448fc2edafb01111eed01c06ed14da46159d95a2cf
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [water_copy]

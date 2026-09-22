@@ -29,6 +29,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Fixed-size PCSS blocker searches now compile to constant tap sequences instead
+  of dynamic loops and offset-table lookups in mesh, grass and water shading.
 - PCSS blocker searches now read pre-scaled Vogel offsets instead of multiplying
   every search tap by the fixed reach in mesh, grass and water shading. The
   offsets remain bit-identical to the previous filter coordinates.
