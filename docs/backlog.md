@@ -348,15 +348,24 @@ Initial measurements and harness findings:
   more than sharing it saves on this adapter. The shader, observer and generated
   artifacts were removed; keep the term inside `ggx_lobe` unless a conditional
   reuse shape can avoid per-light branching and extra live state.
-- The all-effects `specular-lights-fit` result still bundles punctual shadow-map
-  sampling with GGX. Price the existing shadow quality ladder before changing
-  that path: run alternating matched fill/specular pairs with isolated `pcss`
-  and `box` settings, then compare each pair against the no-shadow GGX
-  differential above. Punctual `pcss` and `disc` deliberately share the rotated
-  disc filter, while `box` takes the hardware-PCF grid; the paired scene delta
-  cancels the sun's filter change and leaves the incremental point-light cost.
-  Treat this as attribution, not permission to lower the shipped quality tier;
-  any default change needs image-quality evidence and a user decision.
+- The all-effects `specular-lights-fit` result bundles punctual shadow-map
+  sampling with GGX. Alternating matched fill/specular pairs on the current
+  commit measured a 2.010–2.033 ms `forward` delta with isolated `pcss`,
+  0.697–0.723 ms with `box`, and 0.749–0.780 ms with shadows disabled. The
+  rotated-disc punctual filter therefore adds 1.253–1.261 ms over the no-shadow
+  GGX control; rendering the two point-shadow groups adds another 0.623–0.634 ms
+  in the shadow pass under either filter. Complete pass-sum deltas were
+  2.662–2.700 ms for `pcss` and 1.375–1.391 ms for `box`. Punctual `pcss` and
+  `disc` deliberately share the rotated disc while `box` takes the hardware-PCF
+  grid, so this is attribution rather than permission to lower the shipped
+  quality tier; a default change still needs image-quality evidence and a user
+  decision. A bounded same-quality trial exists in `tile_pcf`: its five-tap
+  unanimity probe decides whether the other taps are needed, but the mixed-edge
+  path currently samples all 32 positions again, including those five. Reuse the
+  probe results while adding the full filter in its original index order,
+  require unchanged native shadow images, and compare alternating PCSS
+  specular/fill timings. Reject it if lookup branches or live probe values erase
+  the saved texture comparisons or regress the fill control.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
