@@ -394,6 +394,9 @@ static const float DEPTH_FAR = 0.0;
 /// lets a sample's own tests say which of its materials this pass can see.
 static const float ROUGHNESS_CUTOFF = 0.5;
 
+/// The march runs once for each block on the full-resolution scene images.
+static const uint RESOLUTION_DIVISOR = 2u;
+
 /// The sharpness ramp at `roughness`: full strength at a mirror, nothing at
 /// [`ROUGHNESS_CUTOFF`], linear between.
 ///
@@ -550,6 +553,39 @@ float depth_at(int2 pixel, int2 extent)
 {
     int2 clamped = clamp(pixel, int2(0, 0), extent - int2(1, 1));
     return scene_depth.Load(int3(clamped, 0));
+}
+
+/// The nearest visible scene pixel in one march block.
+///
+/// Reversed-Z makes the largest stored depth the nearest surface. Choosing it
+/// keeps thin foreground geometry represented instead of letting the fixed
+/// sub-pixel phase miss it. Clamping covers the overhang on odd scene extents.
+int2 representative_pixel(int2 block, int2 extent)
+{
+    int2 first = block * int(RESOLUTION_DIVISOR);
+    int2 best = clamp(first, int2(0, 0), extent - int2(1, 1));
+    float best_depth = depth_at(best, extent);
+    int2 candidate = clamp(first + int2(1, 0), int2(0, 0), extent - int2(1, 1));
+    float candidate_depth = depth_at(candidate, extent);
+    if (candidate_depth > best_depth)
+    {
+        best = candidate;
+        best_depth = candidate_depth;
+    }
+    candidate = clamp(first + int2(0, 1), int2(0, 0), extent - int2(1, 1));
+    candidate_depth = depth_at(candidate, extent);
+    if (candidate_depth > best_depth)
+    {
+        best = candidate;
+        best_depth = candidate_depth;
+    }
+    candidate = clamp(first + int2(1, 1), int2(0, 0), extent - int2(1, 1));
+    candidate_depth = depth_at(candidate, extent);
+    if (candidate_depth > best_depth)
+    {
+        best = candidate;
+    }
+    return best;
 }
 
 /// The two rows of the inverse projection that `depth` alone reaches: the
@@ -1324,13 +1360,13 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     uint width;
     uint height;
-    // Read off the image rather than passed in the block: the pass renders at the
-    // depth buffer's own size by construction, and a second copy of that number
-    // in a uniform is a second thing that can be stale.
+    // Read the scene extent off the depth image rather than pass a second copy
+    // that can become stale. The colour target is the ceil-divided working size;
+    // `representative_pixel` maps this invocation back into these dimensions.
     scene_depth.GetDimensions(width, height);
     int2 extent = int2(int(width), int(height));
     float2 size = float2(float(width), float(height));
-    int2 pixel = int2(input.position.xy);
+    int2 pixel = representative_pixel(int2(input.position.xy), extent);
 
     // **What a pixel with no reflection writes**, and every pixel of the target
     // has to be written. The alpha is the ramp `ssr_blur.slang` weighs taps by,

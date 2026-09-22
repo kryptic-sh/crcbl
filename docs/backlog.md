@@ -4094,21 +4094,16 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
   atlas is held. `rsm-punctual` records with zero faces.
-- **P27 — SSR marches at full resolution** (96 steps). A 900-frame fixed-camera
-  Lantern baseline on the MX550 measured `ssr` at 1.871 ms p50 and `ssr-blur` at
-  0.271 ms at 1920×1080; at 3840×2160 they measured 7.857 ms and 1.057 ms. The
-  near-fourfold scaling makes the march a resolution-bound priority. Trial the
-  march at `ssao::half_extent`, keep the composite full-resolution, and
-  reconstruct from the half-resolution reflection with full-resolution depth and
-  reflectivity-aware weights. Odd extents and one-pixel axes need explicit
-  coverage, and the SSR goldens must remain within their existing image bounds;
-  reject the trial if reflection edges or thin geometry visibly lose coverage.
-  The earlier suggestion to move environment evaluation after the cheap exits
-  was incorrect: the roughness and ray-feasibility exits return the authored
-  probe/sky fallback, so evaluating those exits first would change the image.
-  Only the far-plane exit truly owes no environment, and it already precedes
-  that work. A later environment optimization must preserve every miss and
-  rough-surface fallback rather than treating those returns as zero.
+- **SSR half-resolution cross-backend performance coverage.** The retained
+  nearest-surface half-resolution march and full-resolution reconstruction were
+  timed only on the MX550 Vulkan path. A 900-frame fixed-camera Lantern run
+  reduced the `ssr` plus `ssr-blur` p50 from 2.142 to 0.885 ms at 1920×1080
+  (58.683%) and from 8.914 to 3.513 ms at 3840×2160 (60.590%); the complete pass
+  sum fell 9.889% and 14.167%. The generated SPIR-V, WGSL, MSL and DXIL compile,
+  but Metal, D3D12 and WebGPU runtime performance remains unmeasured. Do not
+  move environment evaluation ahead of the roughness or ray-feasibility exits:
+  those paths owe the pixel its authored probe/sky fallback. Only the far-plane
+  exit returns nothing, and it already precedes that work.
 - **P28 — light clustering redoes per-tile work per froxel, every frame.**
   Revalidated `light_cluster.slang::computeMain` and `slice_start`: corner
   unprojection and slice bounds precede the light loop, including when there are

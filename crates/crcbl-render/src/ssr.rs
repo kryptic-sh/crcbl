@@ -1,5 +1,6 @@
-//! `docs/plan/18-render-features.md`'s screen-space reflections: the two
-//! full-screen passes between the forward pass and the tonemap.
+//! `docs/plan/18-render-features.md`'s screen-space reflections: a
+//! half-resolution march and full-resolution composite between the forward pass
+//! and the tonemap.
 //!
 //! ```text
 //! forward ──▶ scene-color ─────┐                  ┌─────────────┐
@@ -13,12 +14,13 @@
 //! except through [`Ssr::add_passes`].
 //!
 //! **The blur is the composite, and the march is not.** `ssr.slang` writes the
-//! reflection by itself into an `Rgba16Float` transient; `ssr_blur.slang`
-//! filters that image and writes the sum of it and the scene colour into a
-//! second one, which [`ForwardRenderer::add_passes`] returns in place of the
-//! scene colour. Had the march composited there would be no way to filter the
-//! reflection without filtering the whole frame with it. Two passes, no blend
-//! state, and no image that is both read and written.
+//! reflection by itself into a half-resolution `Rgba16Float` transient;
+//! `ssr_blur.slang` reconstructs and filters that image at scene resolution and
+//! writes its sum with the scene colour into a second one, which
+//! [`ForwardRenderer::add_passes`] returns in place of the scene colour. Had the
+//! march composited there would be no way to filter the reflection without
+//! filtering the whole frame with it. Two passes, no blend state, and no image
+//! that is both read and written.
 //!
 //! That is also the off-switch: a frame that does not add these passes hands the
 //! scene colour on and is bit-identical, needing no placeholder because nothing
@@ -89,6 +91,15 @@ const SKY_VIEW_BINDING: u32 = PROBE_VISIBILITY_BINDING + 1;
 /// Vertices in the over-sized full-screen triangle `ssr.slang` and
 /// `ssr_blur.slang` generate from `SV_VertexID`. No geometry is bound anywhere.
 const FULLSCREEN_VERTICES: u32 = 3;
+
+/// The working extent of the reflection march.
+///
+/// Rounded up so odd and single-pixel scene axes remain covered. Both SSR
+/// shaders mirror the divisor through [`crcbl_shaders::ssr::RESOLUTION_DIVISOR`].
+pub(crate) fn half_extent(extent: (u32, u32)) -> (u32, u32) {
+    let divisor = ssr::RESOLUTION_DIVISOR;
+    (extent.0.div_ceil(divisor), extent.1.div_ceil(divisor))
+}
 
 /// The graph transients [`Ssr::add_passes`] reads and writes.
 ///
@@ -841,5 +852,17 @@ impl Ssr {
         }
         self.sky_prefilter.destroy(device);
         self.dfg.destroy(device);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::half_extent;
+
+    #[test]
+    fn the_march_extent_covers_even_odd_and_single_pixel_frames() {
+        assert_eq!(half_extent((1920, 1080)), (960, 540));
+        assert_eq!(half_extent((1921, 1081)), (961, 541));
+        assert_eq!(half_extent((1, 1)), (1, 1));
     }
 }

@@ -29,6 +29,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Screen-space reflections now march a nearest-surface half-resolution grid and
+  reconstruct it with full-resolution depth-aware filtering, substantially
+  reducing the resolution-bound reflection cost while retaining thin foreground
+  coverage.
 - Auto-exposure now merges each tile's luminance histogram in workgroup memory,
   substantially reducing frame-wide atomic contention without changing the
   metered pixel population.

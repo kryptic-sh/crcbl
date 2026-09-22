@@ -48,6 +48,10 @@ pub const PARAMS_SIZE: usize = 64 + 64 + 64 + crate::probe::PROBE_VOLUME_SIZE + 
 /// `docs/backlog.md` carries it as the slice that owns the decision.
 pub const ROUGHNESS_CUTOFF: f32 = 0.5;
 
+/// The divisor on each scene axis for the reflection march's working image,
+/// matching `RESOLUTION_DIVISOR` in both SSR shaders.
+pub const RESOLUTION_DIVISOR: u32 = 2;
+
 /// `UNTINTED` is the row an instance written by omission shades through, and it
 /// must skip the screen-space march exactly.
 ///
@@ -359,6 +363,20 @@ mod tests {
             !include_str!("../shaders/mesh.slang").contains("ROUGHNESS_CUTOFF"),
             "mesh.slang names ROUGHNESS_CUTOFF again; the ramp belongs to ssr.slang"
         );
+    }
+
+    #[test]
+    fn the_resolution_divisor_matches_both_ssr_stages() {
+        let declaration = format!("static const uint RESOLUTION_DIVISOR = {RESOLUTION_DIVISOR}u;");
+        for (name, source) in [
+            ("ssr.slang", include_str!("../shaders/ssr.slang")),
+            ("ssr_blur.slang", include_str!("../shaders/ssr_blur.slang")),
+        ] {
+            assert!(
+                source.contains(&declaration),
+                "{name} does not declare `{declaration}`"
+            );
+        }
     }
 
     /// The attachment's quantisation and its empty value are spelled the same in

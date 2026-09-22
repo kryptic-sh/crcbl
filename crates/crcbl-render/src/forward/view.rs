@@ -1875,16 +1875,16 @@ impl View {
         // TAA is the first pass that will, and until then `DebugView::Motion`
         // is what observes the subtraction.
         let motion = graph.create_image("motion", TransientImageDesc::motion(extent));
-        // The march's output and the blur's, and both are the scene target's
-        // description exactly. The blur writes the scene colour plus a term, so
-        // a narrower image there would tonemap a truncated frame; the march
-        // writes a reflection *out of* that same colour, so an eight-bit image
-        // here would clip the frame's bright end before the tonemap saw it.
-        // Three live requests for one description are three physical images —
-        // see `TransientPool::image`.
+        // The march's HDR output is half-resolution on each axis; its composite
+        // remains at the scene extent because it replaces the scene colour from
+        // this point onwards. Both retain the scene target's format so neither
+        // clips the above-display-range reflection before the tonemap sees it.
         let reflected = effects.contains(RenderEffects::REFLECTIONS).then(|| {
             (
-                graph.create_image("reflection", TransientImageDesc::scene_color(extent)),
+                graph.create_image(
+                    "reflection",
+                    TransientImageDesc::scene_color(crate::ssr::half_extent(extent)),
+                ),
                 graph.create_image("scene-reflected", TransientImageDesc::scene_color(extent)),
             )
         });

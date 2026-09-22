@@ -134,6 +134,9 @@ Texture2D<float4> reflection D3D12_REGISTER(t3, space0);
 /// `crcbl_shaders::ssao::DEPTH_FAR` is the Rust mirror of all three.
 static const float DEPTH_FAR = 0.0;
 
+/// The divisor used by `ssr.slang`'s working image.
+static const uint RESOLUTION_DIVISOR = 2u;
+
 /// The least thickness the march credits any surface with, as a share of the
 /// ray's own view depth — `ssr.slang`'s `THICKNESS_FLOOR`.
 ///
@@ -166,16 +169,15 @@ static const float DEPTH_TOLERANCE_THICKNESSES = 8.0;
 
 /// The kernel's reach either side of the centre pixel.
 ///
-/// `-1 ..= 2` on each axis, which is `ssao_blur.slang`'s window: sixteen taps
-/// with a centre pixel, since an even-sided box has none. That file's footprint
-/// argument is about `ssao.slang`'s rotation tile and does not transfer — what
-/// this one has is that a wider kernel drags a reflection further past the
-/// silhouette of the thing reflecting it, and the weights rather than the width
-/// are what this pass leans on.
+/// `-1 ..= 1` on each half-resolution axis. Those samples cover the full-size
+/// neighbourhood the former four-pixel kernel occupied without doubling its
+/// reach after the march moved to half resolution. A wider kernel drags a
+/// reflection further past the silhouette of the thing reflecting it, and the
+/// weights rather than the width are what this pass leans on.
 static const int KERNEL_FROM = -1;
 
 /// One past the far edge of the kernel — see [`KERNEL_FROM`].
-static const int KERNEL_TO = 3;
+static const int KERNEL_TO = 2;
 
 struct FullscreenOutput
 {
@@ -283,19 +285,24 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     uint width;
     uint height;
-    // Read off the image rather than passed in the block, on the march's terms:
-    // this pass renders at the depth buffer's own size by construction, and a
-    // second copy of that number in a uniform is a second thing that can be
-    // stale.
+    // Read the scene extent off the depth image rather than pass a second copy
+    // that can become stale. This composite renders at that full extent while
+    // the reflection image queried below is the march's smaller working grid.
     scene_depth.GetDimensions(width, height);
     int2 extent = int2(int(width), int(height));
     float2 size = float2(float(width), float(height));
     int2 pixel = int2(input.position.xy);
+    uint reflection_width;
+    uint reflection_height;
+    reflection.GetDimensions(reflection_width, reflection_height);
+    int2 reflection_extent = int2(int(reflection_width), int(reflection_height));
+    int2 reflection_pixel = clamp(
+        pixel / int(RESOLUTION_DIVISOR), int2(0, 0), reflection_extent - int2(1, 1));
 
     // The scene colour is passed through whatever happens below — this pass is
     // the composite, so every pixel of the target has to be written.
     float4 lit = scene_color.Load(int3(pixel, 0));
-    float4 centre = reflection.Load(int3(pixel, 0));
+    float4 centre = reflection.Load(int3(reflection_pixel, 0));
     float sharpness = centre.a;
     float centre_depth = depth_at(pixel, extent);
     // Nothing was drawn here. A rough surface has no screen-space ray, but its
@@ -323,7 +330,8 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
             // outside the image is zero on some targets and undefined on others,
             // and clamping repeats the edge pixel, which is the honest answer
             // for a filter that has run out of evidence.
-            int2 tap = clamp(pixel + int2(x, y), int2(0, 0), extent - int2(1, 1));
+            int2 tap = clamp(
+                reflection_pixel + int2(x, y), int2(0, 0), reflection_extent - int2(1, 1));
             float4 tapped = reflection.Load(int3(tap, 0));
             // **The centre tap's share is one by construction**, which is what
             // keeps the divisor off zero — rather than because the two ramps
@@ -333,8 +341,16 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
             float share = 1.0;
             if (x != 0 || y != 0)
             {
-                float depth = depth_at(tap, extent);
-                float away = abs(view_z(tap, depth, size) - centre_z);
+                // One depth from the centre of the represented block. Repeating
+                // the march's four-depth nearest-surface search for every tap
+                // would turn this full-resolution reconstruction into dozens of
+                // depth reads per pixel. The centre's own full-resolution depth
+                // remains the reference, so a different surface is still
+                // rejected by the same view-space tolerance.
+                int2 represented = min(
+                    tap * int(RESOLUTION_DIVISOR) + int2(1, 1), extent - int2(1, 1));
+                float depth = depth_at(represented, extent);
+                float away = abs(view_z(represented, depth, size) - centre_z);
                 // Over the centre's own ramp, so a tap on a surface the march
                 // had nothing to say about — a floor under a metal block, at
                 // exactly the same depth as its contact edge — weighs exactly
