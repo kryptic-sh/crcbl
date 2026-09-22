@@ -229,6 +229,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A GPU-rendered image can be drawn as a sprite, through an atlas.**
+  `SpriteRenderer::create_atlas(device, &AtlasDesc { label, cell, columns, rows, sample })`
+  creates a sheet of fixed-size cells, every texel transparent, with a one-texel
+  gutter round each cell. `allocate_slot(atlas)` hands out an `AtlasSlot` (its
+  `sheet()` and `uv()` are what a `Sprite` names), and
+  `add_slot_copies(&mut graph, &[SlotCopy { source, slot }])` adds a graph copy
+  pass writing a rendered image — a transient a render pass drew, or an import —
+  into the slot's cell. Call it before `add_pass` and this frame's sprites see
+  the new texels; `add_pass` now declares a read of every atlas it samples, so
+  the barrier back to `ShaderRead` is the graph's. `free_slot(slot)` destroys
+  nothing and is safe while frames that sampled the cell are in flight: a later
+  copy is queue-ordered after them. Every failure is a `SheetError` rather than
+  a panic: `AtlasFull` when every cell is in use, `StaleSlot` for a freed slot
+  (refused even after its cell is reused), `NotAnAtlas`, and `SourceMismatch`
+  for a source that is not exactly the cell's size in `ATLAS_FORMAT`
+  (`Rgba8UnormSrgb`) or is a transient without `TRANSFER_SRC`. The icon cache
+  and its eviction policy stay the game's.
 - **A typed grid drag-and-drop in `crcbl_ui::grid_drag`.** `CellGrid` places a
   grid of square cells on screen (`origin`, `cell`, `columns`, `rows`,
   `id_base`) and owns its hit test (`cell_at`, `cell_bounds`) and cell widget

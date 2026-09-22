@@ -3,6 +3,9 @@
 //! ```text
 //! SpriteRenderer ──register_sheet──▶ uploads a sheet, returns a SheetId
 //!      │
+//!      ├──create_atlas───▶ a sheet of cells a rendered image is copied into;
+//!      │                   see [`atlas`] for slots and when one may be freed
+//!      │
 //!      ├──begin_frame──▶ batches consecutive sprites sharing a sheet, uploads
 //!      │                 one instance per sprite and one constant block per
 //!      │                 batch
@@ -87,6 +90,10 @@ use glam::Mat4;
 use crate::counters::FrameCounters;
 use crate::graph::{ImageId, RenderGraph};
 use crate::texture::{UploadedTexture, upload_texture};
+
+pub mod atlas;
+
+pub use atlas::{ATLAS_FORMAT, AtlasDesc, AtlasSlot, SheetError, SlotCopy};
 
 // ---------------------------------------------------------------------------
 // The shader ABI
@@ -495,6 +502,10 @@ pub struct SpriteRenderer {
 
     /// Registered sheets, indexed by [`SheetId::index`].
     sheets: Vec<RegisteredSheet>,
+    /// The sheets that are atlases, with their cells — see [`atlas`]. Each
+    /// one's image is also in [`sheets`](Self::sheets), which is what
+    /// destroys it.
+    atlases: Vec<atlas::Atlas>,
     /// The queue every sheet upload is submitted to.
     ///
     /// Taken once at construction rather than per `register_sheet`, so two
@@ -757,6 +768,7 @@ impl SpriteRenderer {
             sheet_layout,
             sampler,
             sheets: Vec::new(),
+            atlases: Vec::new(),
             queue,
             frame_groups,
             instance_buffers,
@@ -863,8 +875,39 @@ impl SpriteRenderer {
             desc.height,
             desc.pixels,
         )?;
+        self.adopt(
+            device,
+            desc.label,
+            texture,
+            (desc.width, desc.height),
+            desc.sample,
+        )
+    }
+
+    /// Makes an already-created sheet image drawable: its bind group, its
+    /// instance lane, and the id that names it.
+    ///
+    /// The half [`register_sheet`](Self::register_sheet) and
+    /// [`create_atlas`](Self::create_atlas) share. It owns `texture` from the
+    /// moment it is called: on failure the image is destroyed here, and no id
+    /// is allocated.
+    fn adopt(
+        &mut self,
+        device: &dyn Device,
+        label: &str,
+        texture: UploadedTexture,
+        extent: (u32, u32),
+        sample: SampleMode,
+    ) -> Result<SheetId, HalError> {
+        // Before the group exists, so a refusal has only the image to give back.
+        let Ok(index) = u32::try_from(self.sheets.len()) else {
+            texture.destroy(device);
+            return Err(HalError::InvalidDescriptor(
+                "more than u32::MAX sprite sheets".to_string(),
+            ));
+        };
         let group = match device.create_bind_group(&BindGroupDesc {
-            label: Some(desc.label),
+            label: Some(label),
             layout: self.sheet_layout,
             entries: &[
                 BindGroupEntry {
@@ -888,15 +931,12 @@ impl SpriteRenderer {
             }
         };
 
-        let id = SheetId(u32::try_from(self.sheets.len()).map_err(|_| {
-            HalError::InvalidDescriptor("more than u32::MAX sprite sheets".to_string())
-        })?);
         self.sheets.push(RegisteredSheet {
             texture,
             group,
-            lane: sheet_lane(desc.width, desc.height, desc.sample),
+            lane: sheet_lane(extent.0, extent.1, sample),
         });
-        Ok(id)
+        Ok(SheetId(index))
     }
 
     /// [`register_sheet`](Self::register_sheet) for a decoded
@@ -1096,30 +1136,49 @@ impl SpriteRenderer {
         let frame_group = self.frame_groups[self.frame];
         let sheets = &self.sheets;
 
-        graph
-            .add_render_pass("sprites")
-            .color(target, LoadOp::Load, StoreOp::Store, Default::default())
-            .execute(move |ctx| {
-                let encoder = ctx.encoder();
-                encoder.bind_graphics_pipeline(pipeline);
-                for batch in batches {
-                    // The block `begin_frame` wrote for this batch, and the only
-                    // thing that tells the shader where the batch's instances
-                    // start.
-                    encoder.bind_group(
-                        FRAME_SET,
-                        frame_group,
-                        &[batch.constant_offset],
-                        pipeline_layout,
-                    );
-                    // Indexing is safe by construction: `begin_frame` refuses a
-                    // sprite naming an unregistered sheet, and sheets are never
-                    // removed.
-                    let group = sheets[batch.sheet.index() as usize].group;
-                    encoder.bind_group(SHEET_SET, group, &[], pipeline_layout);
-                    encoder.draw(0..QUAD_VERTICES, 0..batch.count());
-                }
-            });
+        // **Every atlas this frame samples is declared as a read**, so a copy
+        // [`add_slot_copies`](Self::add_slot_copies) added earlier in the graph
+        // is followed by the transfer-to-sampled barrier before any fragment
+        // reads the cell. Without a copy this frame the import is `ShaderRead`
+        // to `ShaderRead` and costs no barrier. An uploaded sheet is not in the
+        // graph at all: nothing but its upload ever writes it.
+        let atlases: Vec<ImageId> = self
+            .atlases
+            .iter()
+            .filter(|atlas| batches.iter().any(|batch| batch.sheet == atlas.sheet))
+            .map(|atlas| atlas.import(graph))
+            .collect();
+
+        let mut pass = graph.add_render_pass("sprites").color(
+            target,
+            LoadOp::Load,
+            StoreOp::Store,
+            Default::default(),
+        );
+        for atlas in atlases {
+            pass = pass.read_image(atlas);
+        }
+        pass.execute(move |ctx| {
+            let encoder = ctx.encoder();
+            encoder.bind_graphics_pipeline(pipeline);
+            for batch in batches {
+                // The block `begin_frame` wrote for this batch, and the only
+                // thing that tells the shader where the batch's instances
+                // start.
+                encoder.bind_group(
+                    FRAME_SET,
+                    frame_group,
+                    &[batch.constant_offset],
+                    pipeline_layout,
+                );
+                // Indexing is safe by construction: `begin_frame` refuses a
+                // sprite naming an unregistered sheet, and sheets are never
+                // removed.
+                let group = sheets[batch.sheet.index() as usize].group;
+                encoder.bind_group(SHEET_SET, group, &[], pipeline_layout);
+                encoder.draw(0..QUAD_VERTICES, 0..batch.count());
+            }
+        });
     }
 
     /// Destroys all GPU resources, including every registered sheet.
@@ -1380,7 +1439,7 @@ mod tests {
     const TARGET: Format = Format::Bgra8UnormSrgb;
     const EXTENT: (u32, u32) = (256, 192);
 
-    fn open(recorder: &Recorder) -> (Box<dyn Device>, QueueHandle) {
+    pub(super) fn open(recorder: &Recorder) -> (Box<dyn Device>, QueueHandle) {
         let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
         let adapter = instance.adapters().remove(0);
         let device = instance
@@ -1420,7 +1479,7 @@ mod tests {
 
     /// A stand-in for a swapchain image, imported exactly as an acquired frame
     /// would be.
-    fn target(device: &dyn Device) -> ImportedImage {
+    pub(super) fn target(device: &dyn Device) -> ImportedImage {
         let image = device
             .create_image(&ImageDesc {
                 label: Some("fake swapchain image"),

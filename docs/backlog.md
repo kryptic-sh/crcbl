@@ -21997,16 +21997,24 @@ there: 17, 8 and 10 call sites). The rest:
   `end_character_collision` scope each capsule to its movement step), so this is
   safe until EW keeps capsules across the tick, at which point the rays need
   `cast_ray_excluding`.
-- **P2, new: register a GPU-rendered image as a sprite sheet, plus an icon
-  cache.** `SpriteRenderer` takes CPU pixels only, so EW rasterises item icons
-  on the CPU. Overlaps `crcbl icon bake` above, which is the offline half; this
-  is the runtime half (a secondary view or offscreen target registered as a
-  sheet). Agreed with EW: the engine exposes only the runtime API and the game
-  keeps the cache (EW's is policy: `MAX_CACHED_ICONS`, keys that follow firearm
-  and ammunition state, invalidation on inspection results). The API must
-  document when a registered target may be released or overwritten while earlier
-  frames still sample it, and must fail boundedly, not abort, when the atlas or
-  target is full.
+- **P2, runtime half landed: GPU-rendered images as sprites, through an atlas.**
+  `SpriteRenderer::create_atlas` / `allocate_slot` / `add_slot_copies` /
+  `free_slot` (2026-09-23): a rendered image is copied into a fixed-size cell;
+  `free_slot` destroys nothing and is safe while frames that sampled the cell
+  are in flight (the refill is queue-ordered after them); a full atlas is
+  `SheetError::AtlasFull`, a freed slot `StaleSlot`. The icon cache stays EW's,
+  as agreed. Still open:
+  - EW has to port its icon renderer and draw the model into a cell-sized
+    transient with its own mesh pass; the engine has no secondary-view API.
+  - Only same-queue ordering is claimed; a copy on another queue would need a
+    semaphore nothing records.
+  - A `Sprite` carries UVs, not a slot, so drawing a freed slot's UVs is not
+    detected.
+  - Considered and declined: sampling the target directly, which ties its
+    lifetime to the frame ring.
+  - The in-flight e2e reads back correct pixels but cannot force the GPU race;
+    its guard is the recorder test showing a free destroys no image.
+  - Not run on Metal or WebGPU.
 - **P3: gamepad backends** (evdev first for the Steam Deck, then XInput and
   GameController) and a tap/double-tap/hold evaluator — both already in "Input:
   patterns, RON bindings, rebind persistence and every gamepad backend". EW has
