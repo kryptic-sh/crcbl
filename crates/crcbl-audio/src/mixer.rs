@@ -615,9 +615,20 @@ const UNLIMITED_VOICES: usize = usize::MAX;
 impl Mixer {
     /// Create an empty mixer, hearing from [`Listener::ORIGIN`], with no voice
     /// budget.
+    ///
+    /// # Every lock is taken once here, off the audio thread
+    ///
+    /// On the pthread platforms — macOS among them — `std::sync::Mutex`
+    /// allocates its platform mutex on the **first** `lock`, not in `new`.
+    /// [`AudioSource::fill`] takes the voice, release and bus-gain locks, and a
+    /// mixer whose bus gains were never set would otherwise make that first
+    /// allocation inside the first audio callback. Taking each lock once here
+    /// moves it to the thread that builds the mixer. The macOS CI run of
+    /// `tests/fill_allocation.rs` is what caught it; Linux and Windows locks
+    /// never allocate, so they could not.
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let mixer = Self {
             voices: Mutex::new(Vec::new()),
             releasing: Mutex::new(Vec::new()),
             listener: Mutex::new(Listener::ORIGIN),
@@ -627,7 +638,13 @@ impl Mixer {
             voice_budget: AtomicUsize::new(UNLIMITED_VOICES),
             refused: AtomicU64::new(0),
             stolen: AtomicU64::new(0),
-        }
+        };
+        drop(mixer.lock());
+        drop(mixer.lock_releasing());
+        drop(mixer.lock_bus_gains());
+        drop(mixer.lock_listener());
+        drop(mixer.lock_cue_grammar());
+        mixer
     }
 
     /// Cap how many voices may sound at once; `None` removes the cap.
