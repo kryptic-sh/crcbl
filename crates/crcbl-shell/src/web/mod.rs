@@ -1350,6 +1350,15 @@ impl Shell for WebShell {
         }
     }
 
+    /// Does nothing, because there is nothing a module can run from here.
+    ///
+    /// The browser queues DOM events into the bridge itself, from callbacks it
+    /// runs only between calls into the module, so a load that holds the main
+    /// thread holds every one of them and no call made during it can let one
+    /// through. The browser's answer to a long load is to return: split it
+    /// across frames, the way `crcbl::engine::PolledBoot` splits start-up.
+    fn keep_alive(&mut self) {}
+
     /// Returns immediately, always — a browser main thread cannot block, which
     /// is why [`ShellCaps::EVENT_WAIT`] is clear.
     fn wait_events(&mut self, _timeout: Option<Duration>) {}

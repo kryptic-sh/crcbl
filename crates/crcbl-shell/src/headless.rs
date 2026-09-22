@@ -1453,8 +1453,7 @@ impl Shell for HeadlessShell {
     }
 
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
-        self.deliver_due_configures();
-        self.resolve_reads();
+        self.keep_alive();
         // Drain by count rather than `while let`: a sink that injects further
         // events (a UI that opens a window on a click) must not be able to spin
         // this loop forever, and the events it queued belong to the next frame
@@ -1465,6 +1464,18 @@ impl Shell for HeadlessShell {
             };
             sink(event);
         }
+    }
+
+    /// Lets the configures and the held reads come due, and keeps what they
+    /// produce.
+    ///
+    /// **This counts as a pump** for both of this shell's pump-counted delays,
+    /// [`set_configure_delay`](Self::set_configure_delay) and
+    /// [`clipboard_deadline`](Self::clipboard_deadline): each counts the window
+    /// system's turns, and delivery is the only part of a turn this leaves out.
+    fn keep_alive(&mut self) {
+        self.deliver_due_configures();
+        self.resolve_reads();
     }
 
     /// Sleeps as far as a shell with no window system behind it can.
@@ -1736,6 +1747,38 @@ mod tests {
         assert_eq!(state.scale_factor(), Some(1.0));
         assert_eq!(state.effective_mode(), Some(DisplayMode::Windowed));
         assert!(state.mode_request_honoured());
+    }
+
+    /// A loader's `keep_alive` is a turn of the window system that keeps what
+    /// the turn produced: the configure comes due, and it and an event that was
+    /// already waiting are delivered by the next pump, in order, once each.
+    #[test]
+    fn keep_alive_takes_a_turn_and_keeps_everything_for_the_next_pump() {
+        let (mut shell, window) = shell_with_window();
+        shell.inject(ShellEvent::CloseRequested { window });
+
+        // The configure waits this many turns and comes due on the next one.
+        for _ in 0..=DEFAULT_CONFIGURE_DELAY {
+            shell.keep_alive();
+        }
+        assert!(
+            shell.window_state(window).expect("state").is_configured(),
+            "every turn the configure waits for was taken by keep_alive"
+        );
+
+        assert_eq!(
+            drain(&mut shell),
+            vec![
+                ShellEvent::CloseRequested { window },
+                ShellEvent::Resized {
+                    window,
+                    size: PhysicalSize::new(1280, 720),
+                    scale_factor: 1.0,
+                },
+            ],
+            "nothing keep_alive saw was delivered or dropped"
+        );
+        assert_eq!(drain(&mut shell), Vec::new(), "and each arrived once");
     }
 
     #[test]

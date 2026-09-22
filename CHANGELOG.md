@@ -221,6 +221,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- `Shell::keep_alive` lets the window system run without delivering anything: a
+  game loading assets on the loop thread before its first frame calls it a few
+  times a second, and Windows no longer ghosts the window as "Not Responding"
+  (nor does a Wayland compositor's ping go unanswered). What arrives meanwhile —
+  input, a resize, a close request — is kept for the first frame's pump rather
+  than dropped. Every backend's `pump` is now `keep_alive` plus delivery. It is
+  a required method, so a `Shell` implemented outside this workspace must add
+  it.
+
 - `PhysicsWorld::cast_ray_excluding` and its shared `OverlapQueries` form omit a
   live collider before selecting the closest exact ray hit. Character support
   and traversal probes can skip their own capsule while retaining geometry

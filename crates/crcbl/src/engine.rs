@@ -4721,6 +4721,16 @@ enum BootStage<G: PolledGpu> {
 /// The engine stops here rather than building the loop itself: assembling one is
 /// the game's, and a `Loop` type parameter would drag its `Options` and its
 /// error type in behind it for no gain.
+///
+/// # A long load before the first frame
+///
+/// Whatever a game loads between here and [`Loop::new`] runs on the thread
+/// that owns the window, with nothing pumping it, and a desktop that hears
+/// nothing from a window for a few seconds marks it hung — Windows ghosts it
+/// as "Not Responding". Such a load calls [`Shell::keep_alive`] on
+/// [`shell`](Self::shell) a few times a second. Nothing it sees is lost: input
+/// and a close request made during the load are kept for the first frame's
+/// pump.
 #[derive(Debug)]
 pub struct Booted<S: Shell + ?Sized, G> {
     /// The shell the window belongs to.

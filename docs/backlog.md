@@ -16528,16 +16528,42 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
 
 ### Owed on the Win32 backend
 
-- **A long load on the loop thread ghosts the window as "Not Responding".**
-  Reported by EW 2026-09-22: under CPU contention its asset load ran about 15 s
-  before the loop pumped messages, and Windows ghosts a window that has not
-  pumped for about 5 s (uncontended, EW's first frame comes at 1.9 s). The
-  engine needs either a way to keep pumping during a long load or a
-  load-on-worker pattern games can follow. Next Windows slice.
+- **A long load on the loop thread: what `Shell::keep_alive` leaves open.** EW
+  reported the ghosting on 2026-09-22 (a 15 s asset load under contention, no
+  pump). The seam now has `Shell::keep_alive`, which lets the window system run
+  and keeps every event for the next pump, and `Booted`'s docs tell a loader to
+  call it. `a_load_that_keeps_the_window_alive_is_never_hung_and_loses_nothing`
+  in `win32_e2e.rs` checks it with `IsHungAppWindow`: the same load without the
+  calls is judged hung, and with them it is not. Still open:
+  - **EW has to call it.** The fix is a seam, not a behaviour change, so the
+    report closes only when EW's loader takes the turns.
+  - **The engine's own start-up is not covered.** `wait_for_configure` pumps,
+    but a game's `Gpu::open` (device, swapchain, pipelines) gets the shell as
+    `&S` and cannot take a turn. Nobody has measured it past five seconds, even
+    under contention. If it is, that path needs `&mut S`, or a device open that
+    returns control between steps the way `PolledBoot` does.
+  - **A close request cannot stop the load.** `keep_alive` keeps the request for
+    the first frame, so the window stays open until the load finishes. A loader
+    that wants to abort has to pump and handle events itself. No helper offers
+    that yet.
+  - **No engine pattern for loading on a worker.** A game can already do it: put
+    the game in a loading state, spawn through `crcbl_jobs::Spawn`, and poll the
+    result from `HostedGame::tick`/`draw` while the loop presents a loading
+    frame. It is not written down as a sample. Declined for this slice:
+    `keep_alive` covers every native load, and one that needs the device the
+    loop owns cannot move to a worker at all.
+  - **Only the Win32 half is verified.** The Wayland, X11 and AppKit versions
+    are the steps each backend's `pump` already ran, split out. They were
+    checked with cross-target clippy only. The Wayland `pong` it relies on is in
+    `process_raw`. X11 advertises no `_NET_WM_PING`, so no window manager pings
+    it.
+  - `DisableProcessWindowsGhosting` would hide the symptom (the window stops
+    greying, but clicks still queue unanswered). Considered and declined as a
+    fix.
 - **Logs go to stderr only, so a `windows_subsystem = "windows"` build loses
   them.** Reported by EW 2026-09-22. `crcbl_core::log` writes to stderr and a
   GUI-subsystem exe has none. Wanted: an opt-in rotating log file under the
-  app's data directory. Queued after the load item.
+  app's data directory. Next Windows slice.
 - **An exe icon and version resource helper — declined for now.** EW asked
   whether the engine should provide one; embedding a `.res` needs either
   `rc.exe` from the Windows SDK at build time or a new build dependency

@@ -1311,9 +1311,7 @@ impl Shell for Win32Shell {
     /// fact, not a bug in this loop; the [module docs](super) state what it
     /// costs and why the alternative is a decision above this crate.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
-        self.drain_messages();
-        self.translate();
-        self.publish_configurations();
+        self.keep_alive();
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
         // next frame — which is what the message queue would have done anyway.
@@ -1323,6 +1321,17 @@ impl Shell for Win32Shell {
             };
             sink(event);
         }
+    }
+
+    /// Runs the message queue and keeps what it produced.
+    ///
+    /// The `PeekMessageW` inside [`drain_messages`](Self::drain_messages) is
+    /// what the system times: a thread that makes one at least every five
+    /// seconds is not hung, whatever it does in between.
+    fn keep_alive(&mut self) {
+        self.drain_messages();
+        self.translate();
+        self.publish_configurations();
     }
 
     /// Blocks until a message arrives or `timeout` elapses.
