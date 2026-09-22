@@ -205,7 +205,13 @@ Initial measurements and harness findings:
   and a non-CMAA control before retaining it. The 8×8 trial regressed edge p50
   to 0.639 ms, shape p50 to 0.923 ms and their three-pass sum to 2.046 ms. The
   one-dimensional 64-thread dispatch remains faster on this adapter, so do not
-  repeat that layout change without evidence from different hardware.
+  repeat that layout change without evidence from different hardware. Source
+  inspection after the decline found a different repeated division:
+  `cmaa2_shapes.slang::accumulate` recovers a source texel from a flat index for
+  every emitted share, although `blend_line` already walks that texel in two
+  dimensions. Trial passing the known coordinate into `accumulate`; this keeps
+  the dispatch layout and coverage arithmetic unchanged, and must preserve the
+  CMAA2 image goldens byte for byte before any timing result is considered.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
