@@ -936,6 +936,9 @@ pub mod msg {
     pub const SYS_KEY_DOWN: u32 = 0x0104;
     /// `WM_SYSKEYUP`.
     pub const SYS_KEY_UP: u32 = 0x0105;
+    /// `WM_SYSCOMMAND` — a window-menu command. `wParam`'s low four bits are
+    /// the system's own and are masked off before comparing with an `SC_*`.
+    pub const SYS_COMMAND: u32 = 0x0112;
     /// `WM_MOUSEMOVE`.
     pub const MOUSE_MOVE: u32 = 0x0200;
     /// `WM_LBUTTONDOWN`.
@@ -1189,6 +1192,13 @@ pub mod value {
 
     /// `TME_LEAVE`.
     pub const TME_LEAVE: u32 = 0x0000_0002;
+
+    /// `SC_KEYMENU` — the `WM_SYSCOMMAND` that opens the window menu from the
+    /// keyboard.
+    pub const SC_KEY_MENU: usize = 0xF100;
+    /// The bits of a `WM_SYSCOMMAND`'s `wParam` that name the command; the low
+    /// four are the system's own.
+    pub const SC_COMMAND_MASK: usize = 0xFFF0;
 
     /// `XBUTTON1` — the `wParam` high word of a `WM_XBUTTON*`, "back".
     pub const XBUTTON1: u32 = 0x0001;

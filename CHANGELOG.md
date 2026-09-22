@@ -1843,6 +1843,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Tapping Alt on its own no longer freezes the keyboard on Win32.** The
+  release of a bare Alt (or F10) reached `DefWindowProc`, which answered it with
+  `SC_KEYMENU` and entered the modal window-menu loop, so every key after it
+  went to the menu until Alt was tapped again. The backend now answers that one
+  `WM_SYSCOMMAND` itself; Alt+Space still opens the window menu and Alt+F4 still
+  asks to close.
+
 - **Files copied in Explorer paste as a `text/uri-list` on Win32, and
   `parse_uri_list` reads Windows paths.** `clipboard_request(MimeType::UriList)`
   answered `Empty` for Explorer's "copy", which publishes only `CF_HDROP`; it

@@ -561,6 +561,22 @@ pub(super) unsafe extern "system" fn window_proc(
             }
         }
 
+        // **A bare Alt or F10 must not open the window menu.** Forwarding the
+        // `WM_SYS*` keys above is what makes `DefWindowProc` answer the release
+        // of an Alt pressed on its own with `SC_KEYMENU` and an `lParam` of
+        // zero, and letting that through enters the system's modal menu loop:
+        // every key after it goes to the menu until Alt is tapped again, so a
+        // player who brushes Alt loses the keyboard. Only that one form is
+        // answered here — Alt+Space carries its character in `lParam` and still
+        // opens the menu, and Alt+F4 arrives as `SC_CLOSE` — which is what SDL
+        // and GLFW do for the same reason.
+        msg::SYS_COMMAND => {
+            if w_param & value::SC_COMMAND_MASK == value::SC_KEY_MENU && l_param == 0 {
+                return 0;
+            }
+            default()
+        }
+
         // Text, which is not the same thing as a keystroke — see
         // [`TextCommit`](crate::ShellEvent::TextCommit). `WM_SYSCHAR` is
         // deliberately absent: Alt+E is a menu accelerator, not the letter E.

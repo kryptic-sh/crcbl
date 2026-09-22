@@ -92,6 +92,8 @@ use crcbl_shell::{
 mod scancode {
     /// `A`.
     pub const A: u32 = 0x1E;
+    /// Left `Alt`.
+    pub const ALT: u32 = 0x38;
     /// `E`.
     pub const E: u32 = 0x12;
     /// The key right of `;` on a US keyboard: `'`, and on US-International the
@@ -2014,6 +2016,43 @@ fn a_second_injected_press_of_a_held_key_is_never_a_fresh_press() {
         "one fresh press, the second down either dropped or reported as a repeat, and a \
          release that is never a repeat however long the key was held: {states:?}; the \
          sender said {:?}",
+        sender.lines()
+    );
+}
+
+/// A bare Alt tap does not swallow the keys that follow it.
+///
+/// `DefWindowProc` answers the release of an Alt pressed on its own (or of F10)
+/// with `WM_SYSCOMMAND`/`SC_KEYMENU` and an `lParam` of zero, and handing that
+/// on enters the system's modal menu loop: every key after it is the menu's
+/// until Alt is tapped again. A game that binds Alt-chords, or that a player
+/// merely brushes Alt in, loses its keyboard. Found by EW, whose bindings
+/// include Alt+R, Alt+T and Alt-click.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_bare_alt_tap_leaves_the_keyboard_with_the_window() {
+    let mut session = Session::open();
+    let window = session.window("alt tap");
+    session.foreground(window);
+    session.take_names();
+
+    let mut sender = Sender::start();
+    sender.send(&format!("key {}", scancode::ALT));
+    sender.send(&format!("key {}", scancode::A));
+    session.pump_until("the key after the Alt tap", |session| {
+        session.keys().iter().any(|&(code, ..)| code == scancode::A)
+    });
+
+    let keys = session.keys();
+    let pressed: Vec<u32> = keys
+        .iter()
+        .filter(|key| key.3 == ButtonState::Pressed)
+        .map(|key| key.0)
+        .collect();
+    assert_eq!(
+        pressed,
+        vec![scancode::ALT, scancode::A],
+        "the Alt tap and the key after it both reach the window; the sender said {:?}",
         sender.lines()
     );
 }
