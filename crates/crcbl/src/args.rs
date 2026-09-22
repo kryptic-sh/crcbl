@@ -195,6 +195,10 @@ pub enum Invocation<T> {
 /// Runs the native front end every sample shares: logging init, the parsed
 /// [`Invocation`], the run, the summary line, and the exit code.
 ///
+/// `name` also names the log file a player can ask for with
+/// [`FILE_ENV_VAR`](crate::core::log::FILE_ENV_VAR) — see
+/// [`enable_log_file`](crate::store::enable_log_file).
+///
 /// The exit-code contract is the one each sample's docs state and `crcbl`
 /// itself uses: **0** ran, **1** it failed, **2** the arguments were wrong.
 /// `--help` prints the usage and runs cleanly; a bad invocation prints the
@@ -219,6 +223,13 @@ where
 {
     // `CRCBL_LOG=debug` turns on the per-event lines; the default is warnings.
     crate::core::log::init_logging();
+    // `CRCBL_LOG_FILE=1` copies the log to a rotated file in the platform's log
+    // directory, for a player filing a report from a build with no console.
+    // Right after the logger, so the file has the run from its first line; a
+    // failure is a warning and the run goes on.
+    if crate::core::log::file_requested() {
+        crate::store::enable_log_file(name);
+    }
     // `CRCBL_TRACE=1` turns the CPU spans on and with them the debug panel's
     // budget row. Beside the logger and after it, because turning the trace on
     // logs a line saying so and a line logged before the sink exists goes

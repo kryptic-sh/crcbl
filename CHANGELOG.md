@@ -229,6 +229,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An opt-in log file, for builds with no console.** A
+  `windows_subsystem = "windows"` exe has no stderr, so every log line was lost.
+  `crcbl_store::enable_log_file(app_name)`, called after `init_logging`, copies
+  every line stderr gets to `<app_name>.log` in the platform's log directory
+  (`NativeStorage::log_root`: `%LOCALAPPDATA%\<app>\logs` on Windows,
+  `$XDG_STATE_HOME/<app>/logs` on Linux, `~/Library/Logs/<app>` on macOS).
+  Earlier runs rotate to `<app>.1.log`… at start-up, keeping
+  `crcbl_core::log::LOG_FILES_KEPT`; a run stops writing at
+  `LOG_FILE_MAX_BYTES`. Each line is written through before the log call
+  returns, so a crash keeps its last lines. A failure to open the file is a
+  warning, never fatal. `crcbl_core::log::attach_file` takes an explicit
+  directory, and every `crcbl::args::run_front_end` sample opens the file when a
+  player sets `CRCBL_LOG_FILE=1` (`crcbl_core::log::file_requested`).
 - `Shell::keep_alive` lets the window system run without delivering anything: a
   game loading assets on the loop thread before its first frame calls it a few
   times a second, and Windows no longer ghosts the window as "Not Responding"

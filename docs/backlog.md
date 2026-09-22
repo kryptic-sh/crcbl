@@ -16581,10 +16581,29 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   - `DisableProcessWindowsGhosting` would hide the symptom (the window stops
     greying, but clicks still queue unanswered). Considered and declined as a
     fix.
-- **Logs go to stderr only, so a `windows_subsystem = "windows"` build loses
-  them.** Reported by EW 2026-09-22. `crcbl_core::log` writes to stderr and a
-  GUI-subsystem exe has none. Wanted: an opt-in rotating log file under the
-  app's data directory. Next Windows slice.
+- **The log file's loose ends** (`crcbl_store::enable_log_file`,
+  `crcbl_core::log::attach_file`). The file itself shipped; these did not:
+  - **A panic's message is not in the file.** The default panic hook prints to
+    stderr, which a GUI-subsystem exe does not have, so the file keeps every
+    line up to the panic but not the panic's own text and location. Fix: a panic
+    hook that logs at `error` and then chains to the previous hook, installed by
+    `attach_file`. Not done because replacing a process-wide hook is a decision
+    a game may already have made.
+  - **No `--log-file` flag, only `CRCBL_LOG_FILE=1`.** `run_front_end` receives
+    an already-parsed, game-generic `Invocation<O>`, so a `Common` flag would
+    need every sample to act on it or `run_front_end` to see `Common`. A game
+    with its own parser maps its own flag onto `enable_log_file` in one line.
+  - **The size cap stops the file rather than rotating it**, keeping the start
+    of the run and losing the end. Deliberate for now (see `log::file` docs); a
+    runaway run past `LOG_FILE_MAX_BYTES` loses its final lines.
+  - **The macOS arm of `NativeStorage::log_root` (`~/Library/Logs/<app>`) has
+    only been through cross-target clippy**, and the Linux arm only through
+    Linux clippy; the test `the_log_root_is_named_per_platform_and_not_created`
+    ran on Windows alone.
+  - A second instance of the same game rotates the first's open file to
+    `<app>.1.log`, where the first keeps writing (std opens files with
+    `FILE_SHARE_DELETE` on Windows, and Unix renames open files freely). Not a
+    bug, but the two runs' files are then misnamed.
 - **An exe icon and version resource helper — declined for now.** EW asked
   whether the engine should provide one; embedding a `.res` needs either
   `rc.exe` from the Windows SDK at build time or a new build dependency
