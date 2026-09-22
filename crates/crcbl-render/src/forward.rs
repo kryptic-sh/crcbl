@@ -12111,6 +12111,7 @@ mod tests {
     /// records.
     #[test]
     fn the_atlas_viewer_replaces_the_display_passes_and_the_count_follows() {
+        let _seam = ssao_split_switch();
         let (recorder, device, queue) = open();
         let mut renderer =
             ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb).expect("built");
