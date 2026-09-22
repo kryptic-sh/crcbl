@@ -1308,6 +1308,11 @@ pub mod value {
     /// agrees on.
     pub const CF_UNICODETEXT: u32 = 13;
 
+    /// `CF_HDROP` — a file list, the block behind an `HDROP`, which is what
+    /// Explorer's "copy" puts on the clipboard. Read with `DragQueryFileW`,
+    /// exactly as a `WM_DROPFILES` handle is.
+    pub const CF_HDROP: u32 = 15;
+
     /// `GMEM_MOVEABLE` — the allocation flag `SetClipboardData` requires.
     ///
     /// A clipboard payload is handed to the *system*, which may move or discard

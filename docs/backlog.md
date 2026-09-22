@@ -16499,16 +16499,31 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   own. Considered and declined for W3 (it buys feedback rather than drops, and
   `ShellEvent::DroppedFile` is what the seam actually names); owed before the
   editor's asset browser wants a drop target that looks like one (P12).
-- **`MimeType::UriList` is a registered format, not `CF_HDROP`.** A "copy file"
-  from Explorer puts `CF_HDROP` on the clipboard, and this backend does not read
-  it: a request for `text/uri-list` finds whatever was published under that
-  registered name and is otherwise `Empty`. Rendering `CF_HDROP` as a
-  `text/uri-list` blob means _encoding_ URIs, and the shared decoder
-  `clipboard::parse_uri_list` cannot round-trip a Windows path (`file:///C:/a`
-  decodes to `/C:/a`, which is not a file). Closing this means either a
-  Windows-aware `file:` encoder plus a matching decoder, or delivering
-  `CF_HDROP` as paths through a different route. Not attempted; named so the gap
-  is not rediscovered as a bug.
+- **A `text/uri-list` offer does not publish `CF_HDROP`.** Reading is done: a
+  `MimeType::UriList` request falls back to `CF_HDROP` (Explorer's "copy") when
+  no registered `text/uri-list` is on the clipboard, encoded by
+  `clipboard::windows_uri`. Writing is not: `clipboard_offer` still publishes
+  only the registered format, so Explorer cannot paste files the engine copied.
+  Closing it means building a `DROPFILES` block in `clipboard_offer` from
+  `parse_uri_list`'s paths (`ffi::DropFiles` is `cfg(test)` today and is
+  4-aligned where the SDK's is packed — safe for writing, which is this
+  direction), and an e2e peer `get` that reads `CF_HDROP` back with
+  `DragQueryFileW`. Explorer may also want `Preferred DropEffect`; not
+  investigated.
+- **The uri-list precedence has no end-to-end test.** When a registered
+  `text/uri-list` and `CF_HDROP` are both on the clipboard, the registered one
+  is answered (reasons in `win32::clipboard`'s module docs). `win32_e2e`'s
+  `files_another_process_copied_read_as_a_uri_list` checks each format alone,
+  because `crcbl-e2e-win32-clip` publishes one format per call; checking both
+  together needs a peer verb that publishes two.
+- **The POSIX and Windows `file:` decoders disagree about a raw `#` or `?`.**
+  `clipboard::windows_uri::file_uri_to_windows_path` ends the path there, as RFC
+  3986 section 3.3 says; `clipboard::file_uri_to_posix_path` keeps both as part
+  of the name, so `file:///tmp/a#b` is `/tmp/a#b` on Linux and macOS. Every real
+  encoder escapes both, so no real drop has been seen to differ; aligning the
+  POSIX side is a behaviour change for the other backends and was left out of
+  the Win32 slice. A `CF_HDROP` name that is not valid Unicode (an unpaired
+  surrogate) has no URI and is left out of the list, logged.
 - **A clipboard payload whose last bytes are NUL loses them.** Payloads are
   written NUL-terminated and read back with trailing NULs trimmed, which is what
   makes a `GlobalSize` larger than the request harmless — and what would

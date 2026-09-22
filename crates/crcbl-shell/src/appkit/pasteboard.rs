@@ -87,9 +87,12 @@
 //!
 //! [`FILE_URL`] per pasteboard item, which is what Finder and every modern
 //! application put on a drag. The value is a percent-encoded `file://` URI, so
-//! it goes through [`parse_uri_list`](crate::parse_uri_list) — the RFC 2483
-//! parser the Wayland, X11 and browser backends already share — rather than
-//! through a fourth copy of the same decoding.
+//! it goes through the POSIX `file:` decoder behind
+//! [`parse_uri_list`](crate::parse_uri_list) — the RFC 2483 parser the
+//! Wayland, X11 and browser backends already share — rather than through a
+//! fourth copy of the same decoding. The POSIX one by name, not
+//! `parse_uri_list` itself, which decodes Windows paths when the crate is built
+//! for Windows.
 //!
 //! Two older shapes are **not** read, and neither is a silent omission:
 //!
@@ -138,16 +141,17 @@ pub const fn pasteboard_type(mime: MimeType) -> &'static str {
 ///
 /// `None` for anything that is not a file on this machine — a `https://` drag
 /// from a browser, an `file://host/…` on another host — because
-/// [`parse_uri_list`](crate::parse_uri_list) refuses those, which is the whole
-/// reason this goes through it rather than stripping a prefix here. Percent
-/// decoding, the `localhost` authority and a name that is not valid UTF-8 are
-/// all its answers rather than a fourth copy of them.
+/// [`parse_uri_list`](crate::parse_uri_list)'s POSIX decoder refuses those,
+/// which is the whole reason this goes through it rather than stripping a
+/// prefix here. Percent decoding, the `localhost` authority and a name that is not
+/// valid UTF-8 are all its answers rather than a fourth copy of them.
 ///
 /// A `public.file-url` value is a single URI, so the first parsed path is the
 /// only one there can be.
 #[must_use]
 pub fn path_from_file_url(url: &str) -> Option<PathBuf> {
-    crate::parse_uri_list(url.as_bytes()).into_iter().next()
+    crate::clipboard::uri_list_lines(url.as_bytes())
+        .find_map(crate::clipboard::file_uri_to_posix_path)
 }
 
 #[cfg(target_os = "macos")]

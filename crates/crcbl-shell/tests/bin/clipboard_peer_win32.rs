@@ -4,11 +4,16 @@
 //! ```text
 //! crcbl-e2e-win32-clip get <format>
 //! crcbl-e2e-win32-clip put <format> <text…>
+//! crcbl-e2e-win32-clip put-files <path> [path…]
 //! crcbl-e2e-win32-clip hold <ms>
 //! ```
 //!
 //! `hold` keeps the clipboard open for that many milliseconds, which is how the
 //! suite makes another process contend for it.
+//!
+//! `put-files` publishes a `CF_HDROP` naming each path, one argument per path,
+//! which is what Explorer's "copy" leaves on the clipboard. The paths need not
+//! exist: a file list is names, and nothing on the reading side opens them.
 //!
 //! **Compiled only with the `win32-e2e` feature**, which nothing but
 //! `tests/run-win32-e2e.ps1` turns on.
@@ -46,7 +51,7 @@
 //! crcbl-e2e-win32-clip: size <bytes>     (get, when the format is present)
 //! crcbl-e2e-win32-clip: text <content>   (get, when the format is present)
 //! crcbl-e2e-win32-clip: absent           (get, when it is not)
-//! crcbl-e2e-win32-clip: put <bytes>      (put)
+//! crcbl-e2e-win32-clip: put <bytes>      (put, put-files)
 //! crcbl-e2e-win32-clip: holding <ms>     (hold, once the clipboard is open)
 //! crcbl-e2e-win32-clip: released         (hold, once it is closed again)
 //! ```
@@ -90,6 +95,8 @@ mod win32 {
 
     /// `CF_UNICODETEXT`.
     pub const CF_UNICODETEXT: u32 = 13;
+    /// `CF_HDROP` — a `DROPFILES` header followed by a file list.
+    pub const CF_HDROP: u32 = 15;
     /// `GMEM_MOVEABLE` — what a clipboard block has to be.
     pub const GMEM_MOVEABLE: u32 = 0x0002;
 
@@ -139,10 +146,21 @@ fn main() -> ExitCode {
     let (Some(verb), Some(format)) = (args.next(), args.next()) else {
         eprintln!(
             "crcbl-e2e-win32-clip: usage: crcbl-e2e-win32-clip <get|put> <format> [text…] | hold \
-             <ms>"
+             <ms> | put-files <path> [path…]"
         );
         return ExitCode::from(2);
     };
+    if verb == "put-files" {
+        // Every word is a path here, the first one included.
+        let paths: Vec<String> = core::iter::once(format).chain(args).collect();
+        return match publish("CF_HDROP", win32::CF_HDROP, &drop_files(&paths)) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(problem) => {
+                eprintln!("crcbl-e2e-win32-clip: {problem}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     if verb == "hold" {
         // The second word is a duration here, not a format.
         let outcome = format
@@ -256,7 +274,14 @@ fn get(name: &str, format: u32) -> Result<(), String> {
 /// the data outliving this process is the property the suite is checking.
 #[cfg(target_os = "windows")]
 fn put(name: &str, format: u32, text: &str) -> Result<(), String> {
-    let payload = encode(format, text);
+    publish(name, format, &encode(format, text))
+}
+
+/// Publishes `payload`, verbatim, as the only format on the clipboard.
+///
+/// As with [`put`], the block outlives this process on success.
+#[cfg(target_os = "windows")]
+fn publish(name: &str, format: u32, payload: &[u8]) -> Result<(), String> {
     // SAFETY: an allocation request by value. `GMEM_MOVEABLE` is what a
     // clipboard block has to be.
     let block = unsafe { win32::GlobalAlloc(win32::GMEM_MOVEABLE, payload.len()) };
@@ -350,6 +375,34 @@ fn encode(format: u32, text: &str) -> Vec<u8> {
         bytes.push(0);
         bytes
     }
+}
+
+/// The `CF_HDROP` block naming `paths`, as `shlobj_core.h` lays it out.
+///
+/// A `DROPFILES` header — `pFiles`, the list's offset from the start of the
+/// block; `pt`, a `POINT`; `fNC`; and `fWide` — is 20 bytes of 4-byte fields
+/// under `pshpack1.h`. It is followed by each path in UTF-16 with its NUL, and
+/// one more NUL that ends the list. `fWide` is `TRUE` because the list is wide.
+///
+/// Built as bytes rather than through a `#[repr(C)]` struct: the header is only
+/// ever written here, so spelling out its five fields is the whole of the
+/// layout, with nothing for a padding rule to disagree about.
+#[cfg(target_os = "windows")]
+fn drop_files(paths: &[String]) -> Vec<u8> {
+    const HEADER: u32 = 20;
+    let mut block = Vec::new();
+    for field in [HEADER, 0, 0, 0, 1] {
+        // pFiles, pt.x, pt.y, fNC, fWide.
+        block.extend_from_slice(&field.to_ne_bytes());
+    }
+    let list = paths
+        .iter()
+        .flat_map(|path| path.encode_utf16().chain(core::iter::once(0)))
+        .chain(core::iter::once(0));
+    for unit in list {
+        block.extend_from_slice(&unit.to_ne_bytes());
+    }
+    block
 }
 
 /// The reverse, stopping at the terminator and tolerating padding after it.

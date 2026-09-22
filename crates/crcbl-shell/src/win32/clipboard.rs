@@ -52,6 +52,30 @@
 //! [`MimeType::TextUtf8`] reaches Notepad. Offering both is the caller's job
 //! and the reader picks, which is what `docs/plan/15-windowing.md` specifies.
 //!
+//! # `text/uri-list` is also read from `CF_HDROP`
+//!
+//! A "copy" of files in Explorer publishes `CF_HDROP` — the same file-list
+//! block a drop hands over — and no `text/uri-list`. So a
+//! [`MimeType::UriList`] request that finds no registered format of that name
+//! reads `CF_HDROP` instead, through `DragQueryFileW` exactly as
+//! [`dnd`](super::dnd) reads a drop, and answers an RFC 2483 list: one
+//! `file:` URI per path, each line CRLF-terminated, encoded with
+//! `crate::clipboard::windows_uri` — the module
+//! [`parse_uri_list`](crate::parse_uri_list) decodes with on Windows, so the
+//! paths come back as they were.
+//!
+//! **The registered format wins when both are there.**
+//! Its bytes are exactly what a uri-list-aware publisher wrote, where the
+//! `CF_HDROP` rendering is a synthesis; it can carry what a file list cannot
+//! (a non-`file:` URI, a comment line); and it keeps every request that was
+//! answered before `CF_HDROP` was read answered byte for byte as it was.
+//! There is no staleness to weigh: every write starts with `EmptyClipboard`,
+//! so two formats on the clipboard at once were put there by one publisher.
+//!
+//! Publishing `CF_HDROP` from a `text/uri-list` offer is not done: an offer is
+//! still only the registered format, so Explorer cannot paste files this
+//! engine copied.
+//!
 //! # Decision: a payload is NUL-terminated and read back NUL-trimmed
 //!
 //! `GlobalSize` is documented to answer **at least** what was asked for: a block
@@ -118,7 +142,8 @@ pub enum Encoding {
 /// other mime — the engine's RON, `text/uri-list`, and anything an
 /// [`Other`](MimeType::Other) names — is registered under its own mime string,
 /// which is what a browser and every other application exchanging custom types
-/// on Windows already does.
+/// on Windows already does. A `text/uri-list` read that finds none falls back
+/// to `CF_HDROP`; see the [module docs](self).
 #[must_use]
 pub const fn encoding_for(mime: MimeType) -> Encoding {
     match mime {
@@ -422,6 +447,35 @@ mod system {
             // SAFETY: balancing the lock taken above, on the same handle.
             unsafe { ffi::GlobalUnlock(mem) };
             Some(bytes)
+        }
+
+        /// The files a `CF_HDROP` on the clipboard names, as a
+        /// `text/uri-list`, or `None` when the clipboard holds no `CF_HDROP`.
+        ///
+        /// See the [module docs](super) for when this is asked. A path that
+        /// has no URI — one that is not valid Unicode, or not absolute — is
+        /// left out and logged, rather than failing the whole list.
+        pub(in super::super) fn file_uri_list(&self) -> Option<Vec<u8>> {
+            // SAFETY: this thread has the clipboard open. The returned handle
+            // is owned by the clipboard and must not be freed or finished.
+            let hdrop = unsafe { ffi::GetClipboardData(value::CF_HDROP) };
+            if hdrop.is_null() {
+                return None;
+            }
+            // SAFETY: a `CF_HDROP` block is an `HDROP`, and it stays live while
+            // this guard holds the clipboard open, which it does for the whole
+            // call. `query_files` neither finishes nor frees it.
+            let paths = unsafe { super::super::dnd::query_files(hdrop) };
+            let names = paths.iter().filter_map(|path| {
+                let name = path.to_str();
+                if name.is_none() {
+                    crcbl_core::log::warn!(
+                        "{path:?} is not valid Unicode, so it has no text/uri-list entry"
+                    );
+                }
+                name
+            });
+            Some(crate::clipboard::windows_uri::uri_list_from_windows_paths(names).into_bytes())
         }
     }
 

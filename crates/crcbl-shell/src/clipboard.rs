@@ -83,9 +83,18 @@
 //! lines — is wrong in the same way on all three. So [`parse_uri_list`] lives
 //! next to the mime types rather than being written once per backend, which is
 //! how the second and third copies drift.
+//!
+//! Windows is the one place a URI's path is not the file's path: `file:///C:/a`
+//! names `C:\a`, and `file://server/share` a UNC share. That mapping, in both
+//! directions, is the `windows_uri` module — the Win32 backend encodes a
+//! `CF_HDROP` with it, and [`parse_uri_list`] decodes with it when built for
+//! Windows.
 
 use core::fmt;
 use std::path::PathBuf;
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) mod windows_uri;
 
 /// The format of a clipboard or drag-and-drop payload.
 ///
@@ -405,10 +414,11 @@ impl fmt::Display for ClipboardRequestId {
 ///   plausible-looking lie that only fails once something tries to open it.
 ///   They are skipped, so a drop of three URLs and one file produces one
 ///   [`DroppedFile`](crate::ShellEvent::DroppedFile).
-/// * **`file://` with a remote authority.** `file://host/path` names a file on
-///   *that* host. `file:///path` (empty authority) and `file://localhost/path`
-///   are this machine and are kept; anything else is not reachable through a
-///   `PathBuf`.
+/// * **`file://` with a remote authority, except on Windows.**
+///   `file://host/path` names a file on *that* host. `file:///path` (empty
+///   authority) and `file://localhost/path` are this machine and are kept;
+///   anything else is not reachable through a `PathBuf` — except on Windows,
+///   where it is the UNC path `\\host\path` and is kept as one.
 ///
 /// Percent-decoding happens **after** the scheme and authority are stripped, so
 /// a `%2F` inside a filename decodes to a `/` in the name rather than to a path
@@ -417,39 +427,75 @@ impl fmt::Display for ClipboardRequestId {
 ///
 /// Paths are bytes on Unix, so a name that is not valid UTF-8 survives intact.
 ///
+/// # On Windows
+///
+/// A URI's path is RFC 8089's Windows mapping rather than the path verbatim:
+/// `file:///C:/a%20b` is `C:\a b`, `file://server/share/x` is
+/// `\\server\share\x`, and a URI with no drive or share — `file:///tmp/x` — is
+/// skipped, because there is nothing to resolve it against. A name that
+/// decodes to `\` or `/` is skipped rather than turned into a separator. The
+/// same module encodes the Win32 backend's `CF_HDROP` answers, so what that
+/// backend hands out, this reads back.
+///
 /// ```
 /// use crcbl_shell::parse_uri_list;
 /// use std::path::PathBuf;
 ///
-/// let dropped = b"# comment\r\nfile:///tmp/my%20scene.ron\r\nhttps://example.com/x\r\n";
-/// assert_eq!(
-///     parse_uri_list(dropped),
-///     vec![PathBuf::from("/tmp/my scene.ron")],
-///     "the URL is not a path and the space is decoded",
-/// );
+/// if cfg!(target_os = "windows") {
+///     let dropped = b"# comment\r\nfile:///C:/my%20scene.ron\r\nhttps://example.com/x\r\n";
+///     assert_eq!(
+///         parse_uri_list(dropped),
+///         vec![PathBuf::from(r"C:\my scene.ron")],
+///         "the URL is not a path, the space is decoded and the drive is found",
+///     );
+/// } else {
+///     let dropped = b"# comment\r\nfile:///tmp/my%20scene.ron\r\nhttps://example.com/x\r\n";
+///     assert_eq!(
+///         parse_uri_list(dropped),
+///         vec![PathBuf::from("/tmp/my scene.ron")],
+///         "the URL is not a path and the space is decoded",
+///     );
+/// }
 /// ```
 #[must_use]
 pub fn parse_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    uri_list_lines(bytes).filter_map(file_uri_to_path).collect()
+}
+
+/// The URI lines of a `text/uri-list`, without comments, blanks or line ends.
+pub(crate) fn uri_list_lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
     // Split on LF and trim a trailing CR, rather than splitting on CRLF: the
     // format says CRLF, real senders send both, and a parser that insisted on
     // CRLF would silently return nothing for half of them.
-    for line in bytes.split(|byte| *byte == b'\n') {
-        let line = trim_ascii(line);
+    bytes
+        .split(|byte| *byte == b'\n')
+        .map(trim_ascii)
         // `#` is a comment *line*; a `#` inside a URI is a fragment and is not
         // this case.
-        if line.is_empty() || line[0] == b'#' {
-            continue;
-        }
-        if let Some(path) = file_uri_to_path(line) {
-            paths.push(path);
-        }
-    }
-    paths
+        .filter(|line| !line.is_empty() && line[0] != b'#')
 }
 
 /// One `file:` URI as a path, or `None` for anything that is not a local file.
+#[cfg(not(target_os = "windows"))]
 fn file_uri_to_path(uri: &[u8]) -> Option<PathBuf> {
+    file_uri_to_posix_path(uri)
+}
+
+/// As above, through RFC 8089's Windows mapping; see [`windows_uri`].
+#[cfg(target_os = "windows")]
+fn file_uri_to_path(uri: &[u8]) -> Option<PathBuf> {
+    windows_uri::file_uri_to_windows_path(uri).map(PathBuf::from)
+}
+
+/// One `file:` URI as a POSIX path, whatever the host, or `None` for anything
+/// that is not a local file.
+///
+/// [`parse_uri_list`]'s decoder everywhere but Windows, and what the AppKit
+/// backend reads a pasteboard file URL with — a macOS path is a POSIX path.
+/// Compiled into a Windows build only for tests, so that both of those keep
+/// being checked on every host.
+#[cfg(any(not(target_os = "windows"), test))]
+pub(crate) fn file_uri_to_posix_path(uri: &[u8]) -> Option<PathBuf> {
     const SCHEME: &[u8] = b"file:";
     let (prefix, rest) = uri.split_at_checked(SCHEME.len())?;
     if !prefix.eq_ignore_ascii_case(SCHEME) {
@@ -524,7 +570,7 @@ fn bytes_to_path(bytes: Vec<u8>) -> Option<PathBuf> {
 
 /// As above. Everywhere else a path is not a byte string, and `text/uri-list`
 /// is defined as UTF-8, so anything else is rejected rather than mangled.
-#[cfg(not(unix))]
+#[cfg(all(not(unix), any(not(target_os = "windows"), test)))]
 fn bytes_to_path(bytes: Vec<u8>) -> Option<PathBuf> {
     String::from_utf8(bytes).ok().map(PathBuf::from)
 }
@@ -620,6 +666,36 @@ mod tests {
         }
     }
 
+    /// [`parse_uri_list`] through the POSIX decoder whatever the host, so the
+    /// rules every Unix backend relies on are checked on Windows too, where
+    /// `parse_uri_list` itself decodes Windows paths instead.
+    fn posix_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
+        uri_list_lines(bytes)
+            .filter_map(file_uri_to_posix_path)
+            .collect()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn on_windows_a_uri_list_names_windows_paths() {
+        // The gap this closes: through the POSIX decoder `file:///C:/a` came
+        // back as `/C:/a`, which no Windows API opens.
+        assert_eq!(
+            parse_uri_list(
+                b"# a CF_HDROP, rendered\r\n\
+                  file:///C:/My%20Scene.ron\r\n\
+                  file://server/share/caf%C3%A9.png\r\n\
+                  file:///tmp/posix-only\r\n\
+                  https://example.com/x\r\n"
+            ),
+            vec![
+                PathBuf::from(r"C:\My Scene.ron"),
+                PathBuf::from(r"\\server\share\café.png"),
+            ],
+            "a POSIX path has no drive to resolve against and is skipped, like the URL"
+        );
+    }
+
     #[test]
     fn a_uri_list_is_crlf_separated_percent_encoded_and_may_carry_comments() {
         // What a file manager actually sends for a two-file drop, byte for
@@ -629,7 +705,7 @@ mod tests {
                         file:///home/dev/My%20Scene.ron\r\n\
                         file:///tmp/a%2Bb%2Fc.png\r\n";
         assert_eq!(
-            parse_uri_list(dropped),
+            posix_uri_list(dropped),
             vec![
                 PathBuf::from("/home/dev/My Scene.ron"),
                 // `%2F` is a slash *in the name*, decoded after the URI has
@@ -641,11 +717,11 @@ mod tests {
         // Bare LF, no trailing newline, and leading whitespace: senders do all
         // three, and insisting on the letter of the spec would return nothing.
         assert_eq!(
-            parse_uri_list(b"  file:///tmp/one\nfile:///tmp/two"),
+            posix_uri_list(b"  file:///tmp/one\nfile:///tmp/two"),
             vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")]
         );
-        assert!(parse_uri_list(b"").is_empty());
-        assert!(parse_uri_list(b"\r\n\r\n# only comments\r\n").is_empty());
+        assert!(posix_uri_list(b"").is_empty());
+        assert!(posix_uri_list(b"\r\n\r\n# only comments\r\n").is_empty());
     }
 
     #[test]
@@ -663,7 +739,7 @@ mod tests {
             b"not a uri at all",
         ] {
             assert!(
-                parse_uri_list(hostile).is_empty(),
+                posix_uri_list(hostile).is_empty(),
                 "{}",
                 String::from_utf8_lossy(hostile)
             );
@@ -672,7 +748,7 @@ mod tests {
         // An empty authority and an explicit `localhost` are both this machine,
         // and `file:/path` is RFC 8089's authority-less form.
         assert_eq!(
-            parse_uri_list(b"FILE:///tmp/x\nfile://localhost/tmp/y\nfile:/tmp/z"),
+            posix_uri_list(b"FILE:///tmp/x\nfile://localhost/tmp/y\nfile:/tmp/z"),
             vec![
                 PathBuf::from("/tmp/x"),
                 PathBuf::from("/tmp/y"),
@@ -681,18 +757,18 @@ mod tests {
             "the scheme is case-insensitive and the authority may be omitted"
         );
         assert_eq!(
-            parse_uri_list(b"file:///"),
+            posix_uri_list(b"file:///"),
             vec![PathBuf::from("/")],
             "the root directory is a real path, degenerate as a drop is"
         );
 
         // A stray `%` is a literal `%`, not a reason to lose the file.
         assert_eq!(
-            parse_uri_list(b"file:///tmp/100%%20done"),
+            posix_uri_list(b"file:///tmp/100%%20done"),
             vec![PathBuf::from("/tmp/100% done")]
         );
         assert_eq!(
-            parse_uri_list(b"file:///tmp/trailing%"),
+            posix_uri_list(b"file:///tmp/trailing%"),
             vec![PathBuf::from("/tmp/trailing%")]
         );
     }

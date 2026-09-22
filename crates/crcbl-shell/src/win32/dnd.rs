@@ -10,6 +10,11 @@
 //! object delivered as a window message. Putting them in one module would
 //! suggest a relationship that is not there.
 //!
+//! The one thing they do share is the *block*: `CF_HDROP` on the clipboard is
+//! the same file list an `HDROP` names, so [`clipboard`](super::clipboard)
+//! reads it through this module's `query_files` rather than a second copy of
+//! the `DragQueryFileW` loop.
+//!
 //! # Decision: `WM_DROPFILES`, not `IDropTarget`
 //!
 //! Windows has two drop APIs and the small one does the job the seam asks for.
@@ -104,7 +109,7 @@ fn decode(units: &[u16]) -> PathBuf {
 }
 
 #[cfg(target_os = "windows")]
-pub(super) use system::{accept_files, take_drop};
+pub(super) use system::{accept_files, query_files, take_drop};
 
 /// The half that calls `shell32`.
 #[cfg(target_os = "windows")]
@@ -136,6 +141,35 @@ mod system {
     /// `hdrop` must be the `wParam` of a `WM_DROPFILES` currently being
     /// processed. It is finished here and must not be used afterwards.
     pub(in super::super) unsafe fn take_drop(hdrop: Handle) -> (Vec<PathBuf>, Point) {
+        // SAFETY: the caller guarantees a live `HDROP`.
+        let paths = unsafe { query_files(hdrop) };
+
+        let mut point = Point::default();
+        // SAFETY: the caller guarantees the handle, and `point` is a live,
+        // initialised `POINT` the call writes into. A drop outside the client
+        // area answers `FALSE` and leaves the origin, which is the honest
+        // answer for a position nobody can use.
+        unsafe { ffi::DragQueryPoint(hdrop, &raw mut point) };
+
+        // SAFETY: the handle has been read and is released exactly once, here.
+        // Nothing above retained it.
+        unsafe { ffi::DragFinish(hdrop) };
+        (paths, point)
+    }
+
+    /// The paths an `HDROP` names, read with `DragQueryFileW` and **not**
+    /// released.
+    ///
+    /// Shared by a drop, which finishes the handle afterwards, and by a
+    /// `CF_HDROP` read off the clipboard, whose handle belongs to the clipboard
+    /// and must be neither finished nor freed.
+    ///
+    /// # Safety
+    ///
+    /// `hdrop` must be a live `HDROP` — a `WM_DROPFILES` `wParam` not yet
+    /// finished, or `GetClipboardData(CF_HDROP)` while the clipboard is open —
+    /// for the length of the call.
+    pub(in super::super) unsafe fn query_files(hdrop: Handle) -> Vec<PathBuf> {
         // SAFETY: the caller guarantees the handle. `DRAG_QUERY_COUNT` with a
         // null buffer asks for the file count and writes nothing.
         let count = unsafe { ffi::DragQueryFileW(hdrop, value::DRAG_QUERY_COUNT, ptr_null(), 0) };
@@ -161,18 +195,7 @@ mod system {
                 paths.push(path);
             }
         }
-
-        let mut point = Point::default();
-        // SAFETY: the caller guarantees the handle, and `point` is a live,
-        // initialised `POINT` the call writes into. A drop outside the client
-        // area answers `FALSE` and leaves the origin, which is the honest
-        // answer for a position nobody can use.
-        unsafe { ffi::DragQueryPoint(hdrop, &raw mut point) };
-
-        // SAFETY: the handle has been read and is released exactly once, here.
-        // Nothing above retained it.
-        unsafe { ffi::DragFinish(hdrop) };
-        (paths, point)
+        paths
     }
 
     /// A null `LPWSTR`, for the two `DragQueryFileW` queries that write nothing.

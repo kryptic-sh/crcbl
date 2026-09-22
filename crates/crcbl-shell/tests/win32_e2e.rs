@@ -75,6 +75,7 @@
 #![cfg(all(target_os = "windows", feature = "win32-e2e"))]
 
 use std::io::{BufRead, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -83,7 +84,7 @@ use crcbl_shell::{
     ButtonState, ClipboardContent, ClipboardOffer, ContactId, CursorIcon, DeviceId, DisplayMode,
     KeyCode, Keysym, LogicalSize, MimeType, PhysicalPoint, PhysicalRect, PointerButton,
     PointerMode, ScrollDelta, Shell, ShellBackend, ShellCaps, ShellError, ShellEvent,
-    SurfaceTarget, TouchPhase, WindowDesc, WindowId,
+    SurfaceTarget, TouchPhase, WindowDesc, WindowId, parse_uri_list,
 };
 
 /// PS/2 set 1 scan codes, spelled as the sender takes them and as
@@ -2734,6 +2735,61 @@ fn we_read_what_another_process_copied() {
         .expect("CLIPBOARD is claimed");
     let (_, content) = session.clipboard_answer(request);
     assert_eq!(content.text(), Some("(entity: 7)"));
+}
+
+/// Files another process copied, the way Explorer copies them, read as a
+/// `text/uri-list`.
+///
+/// Explorer's "copy" publishes `CF_HDROP` and no registered `text/uri-list`,
+/// so before this was read a paste of copied files answered `Empty`. The two
+/// names are the shapes a URI encoder gets wrong: a space, and a name outside
+/// ASCII with an astral character in it. What has to hold is that
+/// [`parse_uri_list`] — what a consumer calls — hands back the very paths the
+/// peer copied.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn files_another_process_copied_read_as_a_uri_list() {
+    const COPIED: [&str; 2] = [r"C:\crcbl e2e\My Scene.ron", r"C:\プロジェクト\café 🎮.png"];
+    let mut session = Session::open();
+    let window = session.window("paste files");
+
+    clip(&["put-files", COPIED[0], COPIED[1]]);
+    let request = session
+        .shell
+        .clipboard_request(window, MimeType::UriList)
+        .expect("CLIPBOARD is claimed");
+    let (mime, content) = session.clipboard_answer(request);
+    assert!(mime.matches(MimeType::UriList));
+    let list = content
+        .text()
+        .unwrap_or_else(|| panic!("a CF_HDROP answers a UTF-8 uri-list, not {content:?}"));
+    assert!(
+        list.starts_with("file:///C:/crcbl%20e2e/My%20Scene.ron\r\n"),
+        "RFC 2483 lines, CRLF-terminated, with the space escaped: {list:?}"
+    );
+    assert!(
+        list.is_ascii() && list.ends_with("\r\n") && list.lines().count() == COPIED.len(),
+        "one URI per file, the non-ASCII name percent-encoded: {list:?}"
+    );
+    assert_eq!(
+        parse_uri_list(list.as_bytes()),
+        COPIED.map(PathBuf::from),
+        "the URIs decode back to the paths that were copied"
+    );
+
+    // A registered `text/uri-list`, which is what a uri-list-aware
+    // application publishes, is still read byte for byte.
+    clip(&[
+        "put",
+        MimeType::UriList.as_str(),
+        "file:///C:/registered.ron",
+    ]);
+    let request = session
+        .shell
+        .clipboard_request(window, MimeType::UriList)
+        .expect("CLIPBOARD is claimed");
+    let (_, content) = session.clipboard_answer(request);
+    assert_eq!(content.text(), Some("file:///C:/registered.ron"));
 }
 
 /// An empty offer empties the clipboard for every process, not just for this

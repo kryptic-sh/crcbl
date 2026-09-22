@@ -1843,6 +1843,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Files copied in Explorer paste as a `text/uri-list` on Win32, and
+  `parse_uri_list` reads Windows paths.** `clipboard_request(MimeType::UriList)`
+  answered `Empty` for Explorer's "copy", which publishes only `CF_HDROP`; it
+  now renders that file list as CRLF-separated `file:` URIs (RFC 2483, encoded
+  per RFC 8089 and RFC 3986). A registered `text/uri-list` on the clipboard is
+  still read first, byte for byte. On Windows `parse_uri_list` now decodes
+  `file:///C:/a%20b` to `C:\a b` rather than `/C:/a b`, and
+  `file://server/share/x` to `\\server\share\x` rather than dropping it; a URI
+  with no drive or share, such as `file:///tmp/x`, is skipped. Other targets
+  decode exactly as before.
+
 - **Vulkan query results are right on AMD's Windows driver, and never stale.**
   `resolve_query_set` now makes its copy visible with an all-commands barrier,
   because driver 25.10.36 on an RX 7900 XTX ignored the specification's

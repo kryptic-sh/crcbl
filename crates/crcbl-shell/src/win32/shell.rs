@@ -438,6 +438,14 @@ impl Win32Shell {
             );
         }
         let Some(bytes) = board.get(format) else {
+            // A file list with no registered `text/uri-list` beside it is what
+            // Explorer's "copy" leaves, and it is answered as one. The
+            // registered format is asked first; see `clipboard`'s module docs.
+            if mime == MimeType::UriList
+                && let Some(list) = board.file_uri_list()
+            {
+                return ClipboardContent::Bytes(list);
+            }
             // `GetClipboardData` answering null is "no such format on the
             // clipboard", which is exactly `Empty`. A lock failure logs and
             // lands here too — rare enough that distinguishing it would mean
