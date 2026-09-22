@@ -29,6 +29,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Empty probe volumes now skip their eight-corner forward, water and reflection
+  gathers while preserving populated clipmaps and the sky fallback.
 - Mixed-edge PCSS filtering now reuses the shadow comparisons already made by
   its unanimity probe instead of sampling those disc positions twice, preserving
   the complete filter result while reducing shadow-filter work in mesh, grass,

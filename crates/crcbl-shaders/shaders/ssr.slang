@@ -1288,6 +1288,9 @@ float3 probe_level_environment(uint level, float3 world_position, float3 normal,
 /// direction is what the coefficients are evaluated in.
 float3 probe_environment(float3 world_position, float3 normal, float3 direction)
 {
+    if (camera.probe_counts.w == 0u)
+        return float3(0.0, 0.0, 0.0);
+
     float3 last = max(float3(camera.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
     uint levels = clamp(camera.probe_levels.x, 1u, PROBE_LEVELS);
     float reach = probe_level_reach(world_position,

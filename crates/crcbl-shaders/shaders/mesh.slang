@@ -512,8 +512,8 @@ struct FrameUniforms
     /// because the offsets are a contract between this file and
     /// `crcbl_shaders::mesh::FRAME_UNIFORMS_SIZE` and the two changed together.
     ///
-    /// All zero for a scene with no probes, and `probe_irradiance` then returns
-    /// exactly zero with no branch anywhere — see it.
+    /// All zero for a scene with no probes, and `probe_irradiance` uses `w` to
+    /// return exactly zero before gathering — see it.
     uint4 probe_counts;
     /// `x`: how many clipmap levels are live, never more than `PROBE_LEVELS`.
     /// `y`: how many rows one level holds, which is also where each next level's
@@ -574,8 +574,8 @@ struct FrameUniforms
     /// composite below is `lit * t + fog * (1 - t)` — which at `t == 1` returns
     /// `lit` bit for bit, where a `lerp` would return `lit + (fog - lit)` and
     /// lose the low bits of an HDR value far from the fog colour. So this is a
-    /// feature made of data with no branch selecting it, on the probe grid's
-    /// terms, and no golden blessed before it existed moves.
+    /// feature whose off value preserves the old frame exactly, on the probe
+    /// grid's terms, and no golden blessed before it existed moves.
     ///
     /// **Last in the block**, on `lod_params`' terms: no existing member's
     /// offset changes.
@@ -4693,16 +4693,17 @@ WeightedProbe probe_corner(uint level, uint3 cell, float3 origin, float3 spacing
 /// where the spherical harmonics are checked against the literature they come
 /// from.
 ///
-/// # A grid of nothing evaluates to zero, and there is no branch
+/// # A grid of nothing evaluates to zero
 ///
 /// A scene with no probes carries counts of zero and a reciprocal spacing of
 /// zero. Then `last` is zero on every axis, the grid coordinate is zero, both
 /// corners of every axis are probe 0, and that row is the zeroed one every table
 /// starts as — so every weighted coefficient is exactly zero, the divisor is
 /// positive, `0 / w` is zero, and `frame.ambient.rgb + 0.0` is
-/// `frame.ambient.rgb` **exactly**, on every target. That is what let the grid
-/// land with no golden re-blessed, and what lets the visibility test below join
-/// it on the same terms.
+/// `frame.ambient.rgb` **exactly**, on every target. `probe_irradiance` now
+/// returns that same zero before this gather when the host-authored total is
+/// zero; this description remains the arithmetic fallback that makes the
+/// shortcut equivalent.
 ///
 /// # Interpolated coefficients, not interpolated evaluations
 ///
@@ -4878,6 +4879,9 @@ float2 probe_level_of(float reach, uint levels)
 /// reason.
 float3 probe_irradiance(float3 world_position, float3 normal)
 {
+    if (frame.probe_counts.w == 0u)
+        return float3(0.0, 0.0, 0.0);
+
     float3 last = max(float3(frame.probe_counts.xyz) - 1.0, float3(0.0, 0.0, 0.0));
     uint levels = clamp(frame.probe_levels.x, 1u, PROBE_LEVELS);
     float reach = probe_level_reach(world_position,
@@ -5936,9 +5940,10 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     //
     // `docs/plan/18-render-features.md`'s irradiance grid, **added** to the flat
     // term rather than replacing it: the sum starts at the ambient and a grid of
-    // nothing contributes exactly zero, so the whole feature is data and there
-    // is no branch anywhere selecting it. An author who wants the probes to be
-    // the whole of the environment sets `DirectionalLight::ambient` to zero.
+    // nothing contributes exactly zero; `probe_irradiance` uses the volume's
+    // zero total to avoid gathering that zero. An author who wants the probes
+    // to be the whole of the environment sets `DirectionalLight::ambient` to
+    // zero.
     //
     // The gradient sky is a third term on those same terms — `docs/plan/43-render-standards.md`
     // §8. It is added and not chosen between, because a scene may have a sky

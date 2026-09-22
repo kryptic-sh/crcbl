@@ -380,6 +380,22 @@ Initial measurements and harness findings:
   for mesh; it was reverted before timing. Keep the smaller measured array form
   unless a compiler-level profile shows its indexing is a remaining cost. Metal
   and Direct3D image parity remain unverified on this Linux machine.
+- Empty probe volumes previously ran the full eight-corner weighted gather for
+  every forward fragment and SSR surface even though the zeroed placeholder
+  evaluates to zero. `ProbeVolume::to_bytes` writes the volume's total into
+  `probe_counts.w`, so the retained uniform early return uses an unambiguous
+  host-authored sentinel while populated clipmaps keep their original path. The
+  existing shared-function guard required water's copy to take the same early
+  return. On two 900-frame 1920×1080 Vulkan runs, `instances` forward fell from
+  2.607/2.632 ms to 1.665/1.679 ms p50, SSR fell from 0.986/0.995 ms to
+  0.413/0.416 ms, and the pass sum fell 16.3–16.6%. In `specular-lights-fit`,
+  forward fell from 5.257/5.239 ms to 3.842/3.869 ms, SSR fell from 0.975/0.979
+  ms to 0.420/0.429 ms, and the pass sum fell 13.3–15.0%. The structural
+  observer failed before the guards and passed after them. Every shader target
+  compiled; validated MX550 Vulkan runs passed the empty-volume sky fallback,
+  populated probe golden, still-pool water golden and Lantern's populated SSR
+  fallback comparison. Water's separate performance delta was not timed. Metal
+  and Direct3D image parity remain unverified on this Linux machine.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
@@ -3982,21 +3998,6 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   where DAG LOD reads it, quantised; per-group dirtiness from moved instances'
   bounds against each group's frustum; consider `r_shadow_cadence = 2` for tier
   one and up.
-- **P23 — probe gathers still run for an empty volume.** Revalidated
-  `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
-  corners even when `frame.probe_counts` describes the zeroed placeholder.
-  `probe_moments` queries dimensions and reads visibility moments per corner.
-  `ssr.slang` builds `probe_environment` before its sharpness early-out. Price a
-  uniform empty-volume branch before the gathers; `ProbeVolume::to_bytes` writes
-  `ProbeVolume::total()` to `probe_counts.w`, so zero is an unambiguous
-  host-authored sentinel and populated volumes keep the existing path. The
-  1920×1080 Vulkan baselines over the last 120 of 897 measured frames were
-  2.607/2.632 ms forward and 0.986/0.995 ms SSR in `instances`, and 5.257/5.239
-  ms forward and 0.975/0.979 ms SSR in `specular-lights-fit`. Compare paired
-  alternating runs after the branch and keep it only for a repeatable pass
-  reduction. Preserve exact zero irradiance, captured visibility, clipmap blends
-  and the sky fallback. Actual driver load counts have not been measured; shader
-  source is not a compiled-cost report.
 - **P24 — price PCSS blocker searches; fixed-radius probe reordering is not
   established as equivalent.** Revalidated `mesh.slang::cascade_visibility`: box
   and fixed-disc modes return before the blocker search; only the adaptive mode

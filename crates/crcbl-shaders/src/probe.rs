@@ -435,8 +435,8 @@ pub type ProbeSteps = [[i32; 3]; PROBE_LEVELS];
 ///
 /// [`Default`] is the **degenerate volume**: no probes on any axis, which
 /// resolves every fetch to row 0 and — with that row zeroed — adds exactly
-/// nothing. It is what a scene with no probes uploads, and there is no branch
-/// anywhere selecting it.
+/// nothing. It is what a scene with no probes uploads; fragment shaders use its
+/// zero total to skip the otherwise equivalent gather.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ProbeVolume {
     /// Where probe `(0, 0, 0)` of **level 0**, the finest, would be in world
@@ -2043,6 +2043,43 @@ mod tests {
             assert!(
                 source.contains(declaration),
                 "mesh.slang does not declare `{declaration}`"
+            );
+        }
+    }
+
+    /// An empty volume is the common no-probe frame, so it must leave before
+    /// each fragment path starts the eight-corner gather. The total in the
+    /// fourth count lane is host-authored by [`ProbeVolume::to_bytes`]; testing
+    /// the guard at the function boundary also prevents a later refactor from
+    /// moving expensive level selection back in front of it.
+    #[test]
+    fn empty_probe_volumes_leave_before_the_shader_gathers() {
+        for (name, source, signature, sentinel) in [
+            (
+                "mesh.slang",
+                include_str!("../shaders/mesh.slang"),
+                "float3 probe_irradiance(float3 world_position, float3 normal)",
+                "frame.probe_counts.w",
+            ),
+            (
+                "ssr.slang",
+                include_str!("../shaders/ssr.slang"),
+                "float3 probe_environment(float3 world_position, float3 normal, float3 direction)",
+                "camera.probe_counts.w",
+            ),
+            (
+                "water.slang",
+                include_str!("../shaders/water.slang"),
+                "float3 probe_environment(float3 world_position, float3 normal, float3 direction)",
+                "camera.probe_counts.w",
+            ),
+        ] {
+            let body = slang_body(name, source, signature);
+            let guard =
+                format!("{{\n    if ({sentinel} == 0u)\n        return float3(0.0, 0.0, 0.0);");
+            assert!(
+                body.starts_with(&guard),
+                "{name}'s `{signature}` does work before rejecting an empty probe volume"
             );
         }
     }
