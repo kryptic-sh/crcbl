@@ -4010,12 +4010,21 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   mathematical counterexample to treating fixed-radius unanimity as a
   certificate for the adaptive probe, not a GPU rendering or PCSS-depth test.
   Declined the previous unconditional suggestion to run that probe before the
-  search and return immediately: it can change wide-penumbra classification.
-  Profile default adaptive shadows, cascade fade bands, fully lit/shadowed
-  interiors and contact edges before proposing a conservative alternative.
-  Preserve filter modes, atlas clamping, bias, adaptive penumbra width and
-  cascade blending, then verify image differences and GPU timings. No equivalent
-  cheaper certificate or measured blocker-search saving has been established.
+  search and return immediately: it can change wide-penumbra classification. Two
+  alternating 900-frame 1920×1080 `instances` pairs on the MX550 measured
+  adaptive `pcss` at 1.651/1.690 ms `forward` and fixed `disc` at 1.342/1.354
+  ms. The adaptive blocker search and radius therefore cost 0.309/0.336 ms, or
+  23.0/24.8% over the fixed disc, while the complete pass-sum cost was
+  0.292/0.353 ms (4.0/4.8%). Shadow-map rendering itself stayed flat at
+  0.552/0.564 ms for `pcss` and 0.555/0.560 ms for `disc`, locating the cost in
+  forward filtering rather than atlas production. This is attribution, not
+  permission to replace the adaptive filter. First trial reusing
+  `cascade_visibility`'s already-fetched atlas rectangle and a single derived
+  texel step in both `sun_penumbra_texels` and the final `tile_pcf`; preserve
+  the exact taps, accumulation order, atlas clamping, bias, adaptive penumbra
+  width and cascade blending. Retain only with shadow golden and cascade-ladder
+  parity plus repeated GPU timing. Fully lit/shadowed interiors, contact edges
+  and Metal/Direct3D image parity remain unverified.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
