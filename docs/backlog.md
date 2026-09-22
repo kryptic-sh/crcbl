@@ -70,12 +70,18 @@ Initial measurements and harness findings:
   versus 0.239 ms p50 and 0.281 ms p95 with the default 11 workers. This does
   not establish the right worker or chunk count for an engine frame; sweep both
   on a representative scene before changing either default.
-- Release-mode `phys` with 2,000 bodies in a 48-unit extent reported query
-  latency of 0.787 ms p50 and 0.837 ms p95 after one movement tick. With 5,000
-  bodies aged through 600 refits in the same extent, the query phase reported
-  4.601 ms p50 and 4.963 ms p95 at 12.851 results per query. This prices a
-  potential CPU bottleneck but does not isolate density from the refit-only
-  tree's ageing; sweep those controls separately before changing the broadphase.
+- Release-mode `phys` now separates density from refit-only tree ageing. With
+  5,000 bodies in a 48-unit extent, query p50/p95 rose from 2.829/2.922 ms after
+  one movement tick to 4.281/4.380 ms after 600, while answers stayed close at
+  13.10 and 12.85 per query. In a 192-unit extent, the same age change moved
+  query p50/p95 only from 1.185/1.218 ms to 1.296/1.335 ms at 1.75–1.76 answers
+  per query. A diagnostic `PhysicsWorld::rebuild` after the final refit restored
+  dense query p50/p95 to 2.845/2.967 ms at tick 120, 2.771/2.931 ms at tick 300
+  and 2.860/2.944 ms at tick 600; the ordinary aged figures were 3.089/3.152,
+  3.576/3.633 and 4.281/4.380 ms. The build phase itself was about 1.95 ms. This
+  supports a quality-triggered rebuild, but not a fixed cadence: sparse worlds
+  have too little ageing loss to repay the same rebuild. Add a cheap BVH quality
+  observable and price its maintenance before choosing a production policy.
 - The first pinned NVIDIA Vulkan Horde run used release mode at 1920x1080,
   uncapped, one simulation tick per second, 2,400 frames and 10,000 prefilled
   enemies with the debug overlay enabled. The last 120 of 2,397 timestamped
@@ -17335,14 +17341,18 @@ it costs is **tree quality**, not answers.
   than fall through to the next one. `sweep_sphere_excluding` is the shape to
   copy.
 
-- **No benchmark, and no rebuild policy.** Churn cost was measured as tree
-  _depth_, not as time: the claim "insert/remove beats a rebuild" is an
-  algorithmic one (one root-to-leaf path against `O(n log n)`) and was not
-  timed. There is also no policy that ever rebuilds a churned tree — the AVL
-  bound is what makes one unnecessary, but a bulk build still produces a tighter
-  tree by surface area than incremental insertion does, and nobody has measured
-  the query-cost difference between the two. The horde sample (P8, 10k bodies)
-  is where that stops being academic.
+- **The benchmark demonstrates refit ageing, and there is still no automatic
+  rebuild policy.** Churn cost is still measured as tree _depth_, not as time:
+  the claim "insert/remove beats a rebuild" is an algorithmic one (one
+  root-to-leaf path against `O(n log n)`) and has not been timed. The fixed
+  `crcbl bench --scenario phys` sweep now shows that a dense refit-only tree can
+  add 1.420 ms of query p50 by tick 600 and that rebuilding restores the query
+  cost, while a sparse tree at the same age loses only 0.111 ms. A universal
+  cadence would therefore optimize the dense case by taxing the sparse one. What
+  is wanted is a cheap quality signal — for example a maintained internal
+  surface-area cost relative to the last build — with a rebuild triggered only
+  after its measured query savings repay its own cost. Measure the signal's
+  update overhead and false positives before putting it in `Bvh::update_aabb`.
 
 ## What `crcbl-phys` owes at scale, found by writing horde
 
