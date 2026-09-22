@@ -21929,14 +21929,20 @@ commit `eccc3f6`). Not started; recorded for triage. EW's own list also named
 the `Mixer` voice budget and the typed grid drag/drop hoist, which this backlog
 already carries.
 
-- **Compound ray and closest-point queries (`crcbl-phys`).** `crcbl-phys` has
-  only world-axis-aligned primitives, no compound shape, and no
-  closest-point-on-box (only `closest_on_segment`). EW's
-  `asset_placement::interaction_ray_hit` moves the ray into local space, runs
-  `ray_vs_aabb` per part and keeps the nearest; `corpse_interaction_contact`
-  clamps to each local box and rotates back. Proposed shape: a compound of local
-  boxes plus a pose, with ray and closest-point queries. EW keeps loot reach,
-  visibility and ranking on its side.
+- **Compound queries shipped; EW's migration and two findings remain.**
+  `crcbl_phys::AabbCompound` (`ray_cast`, `closest_point`, `closest_points`) and
+  `Aabb::closest_point` landed 2026-09-23. EW still has to replace
+  `asset_placement::interaction_ray_hit` and the clamp loop in
+  `game_corpse_interactions::corpse_interaction_contact`; corpse contact must
+  use `closest_points`, because EW filters parts by reach and visibility before
+  choosing. EW's `item_motion::valid_compound_bounds` duplicates
+  `AabbCompound::new`'s validation (plus refusing an empty set). Found while
+  porting, read from the code and not run, and left alone because each changes
+  behaviour: `query::ray_vs_aabb` with a zero direction from inside a box yields
+  a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on a `NaN`
+  box corner (`f64::clamp` asserts), which rebuilding it on
+  `Aabb::closest_point` would turn into "no overlap". Not done: compound sweeps
+  and compound-vs-shape overlap, which EW did not ask for.
 - **Two-bone IK and parent-space joint rotation (`crcbl-anim`).** Already listed
   as absent in the animation plan. EW's `character_ik.rs` (`solve_two_bone`,
   `rotate_joint` over `Skeleton`/`Pose`/`Palette`) has four callers: arm hand

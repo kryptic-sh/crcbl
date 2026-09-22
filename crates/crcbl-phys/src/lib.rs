@@ -46,6 +46,10 @@
 //! displacement and knows nothing about any camera, which is what lets one
 //! controller serve a first-person and a third-person game.
 //!
+//! [`AabbCompound`] is L0's query surface for a rigid body made of several
+//! boxes: a ray cast and a closest-point query against local-space parts at a
+//! [`Transform`], naming the part each answer came from.
+//!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
 //!
@@ -56,6 +60,7 @@ pub mod broadphase;
 pub mod character;
 pub mod collider;
 pub mod components;
+pub mod compound;
 pub mod contact;
 pub mod forces;
 pub mod frames;
@@ -73,6 +78,7 @@ pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use character::{CharacterConfig, CharacterController, GroundContact, MoveOutcome};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
+pub use compound::{AabbCompound, CompoundError, CompoundHit, CompoundPoint};
 pub use contact::{
     ContactBody, ContactCounters, ContactReport, ContactSettings, KineticContact, KineticSource,
     PlaneId, StageTimes,

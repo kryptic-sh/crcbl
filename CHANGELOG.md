@@ -229,6 +229,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Rigid compound queries: `crcbl_phys::AabbCompound`.** A body made of several
+  local-space boxes, queried at a `Transform`. `AabbCompound::new(&parts)`
+  refuses a part with a `NaN` or infinite corner or with `min` past `max`
+  (`CompoundError`, naming the part); an empty set is allowed and answers
+  `None`. `ray_cast(&pose, &ray)` returns the nearest `CompoundHit` — part index
+  plus a world-space `ShapeHit` (`t`, point, normal, `started_inside`) — through
+  the existing `ray_vs_aabb`, so a ray starting inside a part reports its exit
+  face. `closest_point(&pose, point)` returns the nearest `CompoundPoint` (part,
+  world point, distance; the query point itself at distance zero when inside),
+  and `closest_points` yields one per part for a caller that filters parts
+  before choosing. A non-finite pose, ray or point, or a rotation that is not
+  unit length, answers `None` rather than being read as a miss. The single-box
+  primitive underneath is new too: `Aabb::closest_point`, `None` for an empty or
+  `NaN` box.
+
 - **`ForwardRenderer::with_scene_serviced` keeps a window alive while a renderer
   builds.** It is `with_scene` with a `&mut dyn FnMut()` that is called between
   the build's steps, so a game building on its loop thread passes
