@@ -70,6 +70,18 @@
 // The full-screen triangle is `tonemap.slang`'s, for the reason that file
 // gives.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything this pass needs that is not in a texture.
 ///
 /// **`ssao.slang`'s block, member for member**, because the host binds one
@@ -98,7 +110,7 @@ struct SsaoParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsaoParams> camera;
+ConstantBuffer<SsaoParams> camera D3D12_REGISTER(b0, space0);
 
 /// The depth prepass's output, fetched by integer pixel and never filtered.
 ///
@@ -115,7 +127,7 @@ ConstantBuffer<SsaoParams> camera;
 /// no UV, no filtering and no texel-centre arithmetic for four rasterisers to
 /// disagree about.
 [[vk::binding(1, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t1, space0);
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`.
 ///

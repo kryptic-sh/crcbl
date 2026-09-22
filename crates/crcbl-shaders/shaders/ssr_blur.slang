@@ -53,6 +53,18 @@
 // than filtered. With a zero probe volume the centre value is zero and the scene
 // colour remains bit-identical.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything this pass needs that is not in a texture, and it is
 /// `ssr.slang`'s block — same members, same order, same buffer.
 ///
@@ -78,7 +90,7 @@ struct SsrParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsrParams> camera;
+ConstantBuffer<SsrParams> camera D3D12_REGISTER(b0, space0);
 
 /// The depth prepass's output — the same image the march read, bound here to
 /// weight the kernel rather than to walk it.
@@ -92,12 +104,12 @@ ConstantBuffer<SsrParams> camera;
 /// read is a `Load` at an integer pixel, so there is no UV, no filtering and no
 /// texel-centre arithmetic for four rasterisers to disagree about.
 [[vk::binding(1, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t1, space0);
 
 /// The `Rgba16Float` scene target the forward pass wrote, passed through with
 /// the filtered reflection added to it.
 [[vk::binding(2, 0)]]
-Texture2D<float4> scene_color;
+Texture2D<float4> scene_color D3D12_REGISTER(t2, space0);
 
 /// The march's output: `rgb` is the reflection at that pixel and `a` is the
 /// weight it was computed under.
@@ -108,7 +120,7 @@ Texture2D<float4> scene_color;
 /// whose ray found nothing, and an `a` of zero is a surface this pass has
 /// nothing to say about at all.
 [[vk::binding(3, 0)]]
-Texture2D<float4> reflection;
+Texture2D<float4> reflection D3D12_REGISTER(t3, space0);
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` and `ssr.slang` both declare under this name.

@@ -91,7 +91,12 @@ fn the_binding_constants_are_the_shaders_declaration_order() {
             "RWStructuredBuffer<GrassInstance> grassCells;",
         ),
     ] {
-        let spelled = format!("[[vk::binding({number}, 0)]]\n{name}");
+        // The declaration and then its D3D12 register, whose numbers are
+        // `crcbl_shaders`' `declaration_order` lint's to check.
+        let spelled = format!(
+            "[[vk::binding({number}, 0)]]\n{} D3D12_REGISTER(",
+            name.trim_end_matches(';')
+        );
         assert!(
             generation.contains(&spelled),
             "grass_gen.slang does not declare `{name}` at binding {number}"
@@ -137,7 +142,12 @@ fn the_binding_constants_are_the_shaders_declaration_order() {
         ),
         (binding::WIND_SAMPLER, "SamplerState windSampler;"),
     ] {
-        let spelled = format!("[[vk::binding({number}, 0)]]\n{name}");
+        // The declaration and then its D3D12 register, whose numbers are
+        // `crcbl_shaders`' `declaration_order` lint's to check.
+        let spelled = format!(
+            "[[vk::binding({number}, 0)]]\n{} D3D12_REGISTER(",
+            name.trim_end_matches(';')
+        );
         assert!(
             raster.contains(&spelled),
             "grass.slang does not declare `{name}` at binding {number}"

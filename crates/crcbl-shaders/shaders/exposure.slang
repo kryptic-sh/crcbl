@@ -48,6 +48,18 @@
 // few tenths of a second. `docs/plan/48-post-processing.md` carries that as the
 // next rung, and it is the one that needs a value to survive between frames.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// What `crcbl_shaders::exposure::ExposureParams` writes: the extent of the
 /// image being binned, and how far this frame's exposure is allowed to move.
 ///
@@ -68,7 +80,7 @@ struct ExposureParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<ExposureParams> params;
+ConstantBuffer<ExposureParams> params D3D12_REGISTER(b0, space0);
 
 /// The frame as the passes before this one left it: linear `Rgba16Float`, HDR,
 /// before the tonemap maps it into the swapchain.
@@ -77,7 +89,7 @@ ConstantBuffer<ExposureParams> params;
 /// histogram wants each texel exactly once, and a filtered tap would bin an
 /// average of four texels that is not any texel's value.
 [[vk::binding(1, 0)]]
-Texture2D<float4> scene;
+Texture2D<float4> scene D3D12_REGISTER(t1, space0);
 
 /// `[bin]`: how many texels of the frame landed in each bin, matching
 /// `crcbl_shaders::exposure::BIN_COUNT`.
@@ -86,7 +98,7 @@ Texture2D<float4> scene;
 /// `cull.slang`'s reason: WGSL has no such intrinsic and refuses the entry
 /// point, while the type lowers on all four targets.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<Atomic<uint> > histogram;
+RWStructuredBuffer<Atomic<uint> > histogram D3D12_REGISTER(u2, space0);
 
 /// `[0]`: the exposure `reduceMain` measured, and the value `tonemap.slang`
 /// applies on a frame whose block says auto-exposure is on.
@@ -96,7 +108,7 @@ RWStructuredBuffer<Atomic<uint> > histogram;
 /// tonemap that reads it, so the exposure a frame is drawn with is measured
 /// from that frame and never from the one before it.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<float> measured;
+RWStructuredBuffer<float> measured D3D12_REGISTER(u3, space0);
 
 /// `[0]`: what the frame before this one was exposed by, which is the same ring
 /// one slot back — `crcbl_render::exposure` binds it.
@@ -108,7 +120,7 @@ RWStructuredBuffer<float> measured;
 /// frame's adaptation start somewhere defined rather than from whatever the
 /// allocation came with.
 [[vk::binding(4, 0)]]
-StructuredBuffer<float> previous;
+StructuredBuffer<float> previous D3D12_REGISTER(t4, space0);
 
 /// Bins per octave, matching `crcbl_shaders::exposure::BINS_PER_OCTAVE`.
 static const uint BINS_PER_OCTAVE = 4;

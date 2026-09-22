@@ -88,6 +88,18 @@
 // together; two copies is already the bug, and three without a guard is a drift
 // with a schedule.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything this pass needs that is not in a texture.
 ///
 /// **Its own block rather than `ssao.slang`'s**, and the two would have been the
@@ -173,7 +185,7 @@ struct GpuProbe
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsrParams> camera;
+ConstantBuffer<SsrParams> camera D3D12_REGISTER(b0, space0);
 
 /// The depth prepass's output, fetched by integer pixel and never filtered.
 ///
@@ -188,7 +200,7 @@ ConstantBuffer<SsrParams> camera;
 /// occlusion pass, because what a tap fetches is a *colour* rather than a
 /// fraction that a blur will average.
 [[vk::binding(1, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t1, space0);
 
 /// The `Rgba16Float` scene target the forward pass wrote.
 ///
@@ -199,7 +211,7 @@ DepthTexture2D scene_depth;
 /// image, and it lowers to `texture_2d<f32>` against the seam's
 /// `SampleType::Float`.
 [[vk::binding(2, 0)]]
-Texture2D<float4> scene_color;
+Texture2D<float4> scene_color D3D12_REGISTER(t2, space0);
 
 /// The reflectivity attachment: `rgb` is the surface's `F0` and `a` is the
 /// lobe's roughness.
@@ -210,13 +222,13 @@ Texture2D<float4> scene_color;
 /// [`ROUGHNESS_CUTOFF`] — `GpuMaterial::UNTINTED` — reloads as the level above
 /// it and derives exactly zero.
 [[vk::binding(3, 0)]]
-Texture2D<float4> reflectivity;
+Texture2D<float4> reflectivity D3D12_REGISTER(t3, space0);
 
 /// The same read-only irradiance table the forward pass binds to `mesh.slang`.
 /// Appending it keeps Metal's declaration-order argument numbering aligned with
 /// the renderer layout.
 [[vk::binding(4, 0)]]
-StructuredBuffer<GpuProbe> probes;
+StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t4, space0);
 
 /// The Hi-Z pyramid `hiz.slang` builds, one binding per level.
 ///
@@ -235,19 +247,19 @@ StructuredBuffer<GpuProbe> probes;
 /// above it, and `SsrParams::hiz_levels` is what stops the march ever reading
 /// them — see `crcbl_render::hiz`.
 [[vk::binding(5, 0)]]
-DepthTexture2D hiz_1;
+DepthTexture2D hiz_1 D3D12_REGISTER(t5, space0);
 
 [[vk::binding(6, 0)]]
-DepthTexture2D hiz_2;
+DepthTexture2D hiz_2 D3D12_REGISTER(t6, space0);
 
 [[vk::binding(7, 0)]]
-DepthTexture2D hiz_3;
+DepthTexture2D hiz_3 D3D12_REGISTER(t7, space0);
 
 [[vk::binding(8, 0)]]
-DepthTexture2D hiz_4;
+DepthTexture2D hiz_4 D3D12_REGISTER(t8, space0);
 
 [[vk::binding(9, 0)]]
-DepthTexture2D hiz_5;
+DepthTexture2D hiz_5 D3D12_REGISTER(t9, space0);
 
 /// The gradient sky convolved against the lobe, `crcbl_shaders::sky_prefilter`'s
 /// table as an `Rgba8Unorm` image: `rg` is `W_far` and `ba` is `W_opposite`,
@@ -259,7 +271,7 @@ DepthTexture2D hiz_5;
 /// `specular_albedo_at` terms: a hardware filter is not blessable across four
 /// rasterisers, and the table is baked on texel centres.
 [[vk::binding(10, 0)]]
-Texture2D<float4> sky_prefilter;
+Texture2D<float4> sky_prefilter D3D12_REGISTER(t10, space0);
 
 /// The split-sum's other half, `crcbl_shaders::dfg`'s table as an `Rgba8Unorm`
 /// image: `rg` is `scale` and `ba` is `bias`, each a 16-bit fixed-point share
@@ -270,7 +282,7 @@ Texture2D<float4> sky_prefilter;
 /// integrate to over the environment it gathers, and Schlick along one
 /// direction is only that at a roughness of zero.
 [[vk::binding(11, 0)]]
-Texture2D<float4> dfg;
+Texture2D<float4> dfg D3D12_REGISTER(t11, space0);
 
 /// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**, the very
 /// image the forward pass binds to `mesh.slang`: one layer per row of
@@ -314,7 +326,7 @@ Texture2D<float4> dfg;
 /// stage's arguments by declaration order, so the two agree only while both
 /// ascend.
 [[vk::binding(12, 0)]]
-Texture2DArray<float4> probe_visibility;
+Texture2DArray<float4> probe_visibility D3D12_REGISTER(t12, space0);
 
 /// `crcbl_shaders::atmosphere::SkyView::rows` — this frame's marched sky, one
 /// `float4` per texel with the direction's `y` slow, and **the same buffer
@@ -342,7 +354,7 @@ Texture2DArray<float4> probe_visibility;
 /// ascend. `msl/ssr.metal` puts it at `buffer(2)`, the next free index of that
 /// table.
 [[vk::binding(13, 0)]]
-StructuredBuffer<float4> sky_view;
+StructuredBuffer<float4> sky_view D3D12_REGISTER(t13, space0);
 
 /// `crcbl_shaders::atmosphere::SKY_VIEW_WIDTH`, which is the azimuth away from
 /// the sun.

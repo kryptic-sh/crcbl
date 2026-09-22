@@ -14974,7 +14974,13 @@ mod tests {
                             .next()?
                             .parse::<u32>()
                             .ok()?;
-                        let name = lines[1].split_whitespace().last()?.trim_end_matches(';');
+                        // The name is the last word before the D3D12 register.
+                        let name = lines[1]
+                            .split(" D3D12_REGISTER(")
+                            .next()?
+                            .split_whitespace()
+                            .last()?
+                            .trim_end_matches(';');
                         Some((name, binding))
                     })
                     .collect();

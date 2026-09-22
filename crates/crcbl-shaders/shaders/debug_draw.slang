@@ -24,6 +24,18 @@
 // first sixteen bytes — exactly `glam::Mat4::to_cols_array`. No transpose on the
 // way in, and no `-matrix-layout-*` flag on the compile.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One endpoint of one segment.
 ///
 /// Two `float4`s rather than a packed `float3` pair, for `triangle.slang`'s
@@ -50,10 +62,10 @@ struct DebugConstants
 
 /// This frame's segments, two elements per line. Read-only storage buffer.
 [[vk::binding(0, 0)]]
-StructuredBuffer<DebugVertex> vertices;
+StructuredBuffer<DebugVertex> vertices D3D12_REGISTER(t0, space0);
 
 [[vk::binding(1, 0)]]
-ConstantBuffer<DebugConstants> constants;
+ConstantBuffer<DebugConstants> constants D3D12_REGISTER(b1, space0);
 
 struct DebugOutput
 {

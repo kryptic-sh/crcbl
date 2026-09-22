@@ -47,27 +47,27 @@ struct KernelContext_0
 };
 
 
-#line 76 "shaders/debug_draw.slang"
+#line 88 "shaders/debug_draw.slang"
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_1 [[position]], DebugVertex_natural_0 device* vertices_1 [[buffer(0)]], DebugConstants_natural_0 constant* constants_1 [[buffer(1)]])
 {
 
-#line 76
+#line 88
     thread KernelContext_0 kernelContext_0;
 
-#line 76
+#line 88
     (&kernelContext_0)->vertices_0 = vertices_1;
 
-#line 76
+#line 88
     (&kernelContext_0)->constants_0 = constants_1;
 
-#line 76
+#line 88
     pixelOutput_0 _S2 = { _S1.color_0 };
 
     return _S2;
 }
 
 
-#line 78
+#line 90
 struct vertexMain_Result_0
 {
     float4 position_2 [[position]];
@@ -75,7 +75,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 58
+#line 70
 struct DebugOutput_0
 {
     float4 position_3;
@@ -83,36 +83,36 @@ struct DebugOutput_0
 };
 
 
-#line 70
+#line 82
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], DebugVertex_natural_0 device* vertices_2 [[buffer(0)]], DebugConstants_natural_0 constant* constants_2 [[buffer(1)]])
 {
 
-#line 70
+#line 82
     thread KernelContext_0 kernelContext_1;
 
-#line 70
+#line 82
     (&kernelContext_1)->vertices_0 = vertices_2;
 
-#line 70
+#line 82
     (&kernelContext_1)->constants_0 = constants_2;
 
-#line 67
+#line 79
     DebugVertex_natural_0 vertex_0 = vertices_2[index_0];
 
     thread DebugOutput_0 output_1;
     (&output_1)->position_3 = (((float4((float4(vertex_0.position_0) ).xyz, 1.0f)) * (matrix<float,int(4),int(4)> (constants_2->view_proj_0.data_0[int(0)][int(0)], constants_2->view_proj_0.data_0[int(1)][int(0)], constants_2->view_proj_0.data_0[int(2)][int(0)], constants_2->view_proj_0.data_0[int(3)][int(0)], constants_2->view_proj_0.data_0[int(0)][int(1)], constants_2->view_proj_0.data_0[int(1)][int(1)], constants_2->view_proj_0.data_0[int(2)][int(1)], constants_2->view_proj_0.data_0[int(3)][int(1)], constants_2->view_proj_0.data_0[int(0)][int(2)], constants_2->view_proj_0.data_0[int(1)][int(2)], constants_2->view_proj_0.data_0[int(2)][int(2)], constants_2->view_proj_0.data_0[int(3)][int(2)], constants_2->view_proj_0.data_0[int(0)][int(3)], constants_2->view_proj_0.data_0[int(1)][int(3)], constants_2->view_proj_0.data_0[int(2)][int(3)], constants_2->view_proj_0.data_0[int(3)][int(3)]))));
     (&output_1)->color_3 = float4(vertex_0.color_1) ;
 
-#line 71
+#line 83
     thread vertexMain_Result_0 _S3;
 
-#line 71
+#line 83
     (&_S3)->position_2 = output_1.position_3;
 
-#line 71
+#line 83
     (&_S3)->color_2 = output_1.color_3;
 
-#line 71
+#line 83
     return _S3;
 }
 

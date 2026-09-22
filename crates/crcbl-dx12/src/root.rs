@@ -12,7 +12,7 @@
 //!
 //! # A dynamic offset is a root descriptor, and that is D3D12's own answer
 //!
-//! [`BindingKind::UniformBuffer`](crcbl_hal::BindingKind::UniformBuffer)'s
+//! [`BindingKind::UniformBuffer`]'s
 //! `dynamic` and its storage-buffer twin ask for an offset applied at
 //! [`bind_group`](crcbl_hal::CommandEncoder::bind_group) time. A descriptor
 //! table has none to apply — the table is addressed by a GPU descriptor handle
@@ -65,15 +65,14 @@
 //! [`Limits::max_push_constant_size`], and the *combination* is what [`place`]
 //! answers.
 //!
-//! **The register is taken after every binding's**, and that is a fact about the
-//! committed artifacts rather than a choice here. HLSL has no push constants:
-//! Slang emits the block as an ordinary `cbuffer` and `dxc` numbers it in the
-//! `b` file with the rest, in declaration order — and `crcbl-shaders`'
-//! `declaration_order` lint requires every source to declare its push constant
-//! **last**, behind every numbered binding. So the block's register is the next
-//! free `b` once a pipeline layout's sets have taken theirs, which for
-//! `push_constant_probe.slang` — whose one binding is a UAV — is `b0`, the
-//! register that artifact was measured at.
+//! **The block is `b0` in a space of its own**, [`PUSH_CONSTANT_SPACE`]. HLSL
+//! has no push constants: Slang emits the block as an ordinary `cbuffer`, so it
+//! needs a register like any other, and every `b` register of a set's space may
+//! already belong to that set's binding of the same number — see
+//! [`assign_registers`]. A space no set can reach keeps the block off all of
+//! them, and `crcbl-shaders` annotates each source's block with the same
+//! register, which `crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE` names and this
+//! module's tests hold equal to the constant here.
 //!
 //! # The block starts at word zero, whatever the range's offset is
 //!
@@ -100,10 +99,11 @@
 //! cannot drift.
 
 use crcbl_hal::{
-    BackendKind, DeviceCaps, Features, HalError, Limits, PushConstantRange, ShaderStages,
+    BackendKind, BindingKind, DeviceCaps, Features, HalError, Limits, PushConstantRange,
+    ShaderStages,
 };
 
-use crate::dxil::{RegisterClass, Registers};
+use crate::dxil::RegisterClass;
 
 /// DWORDs a D3D12 root signature may cost.
 ///
@@ -111,6 +111,17 @@ use crate::dxil::{RegisterClass, Registers};
 /// module compiles off Windows. `crate::pipeline` asserts the two are equal in
 /// the build that has both.
 pub(crate) const MAX_ROOT_COST: u32 = 64;
+
+/// The register space a push-constant block is declared in.
+///
+/// Above every set index a layout can reach: [`space_of`] refuses a set at or
+/// past it, so the block's `b0` here is never a set's register. Its twin is
+/// `crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`, the space every source's block
+/// is annotated with.
+pub(crate) const PUSH_CONSTANT_SPACE: u32 = 64;
+
+/// The register a push-constant block takes in [`PUSH_CONSTANT_SPACE`].
+const PUSH_CONSTANT_REGISTER: u32 = 0;
 
 /// DWORDs one descriptor table costs: a descriptor handle is an offset into the
 /// bound heap.
@@ -141,11 +152,37 @@ pub(crate) const MAX_PUSH_CONSTANT_BYTES: u32 = MAX_ROOT_COST * 4;
 /// and D3D12's word counts convertible.
 const BYTES_PER_WORD: u32 = 4;
 
+/// Which HLSL register file a binding of `kind` is declared in.
+///
+/// The one place this is decided: `crate::conv`'s descriptor-range type is
+/// read off it, and so is every register this module assigns.
+pub(crate) const fn class_of(kind: BindingKind) -> RegisterClass {
+    match kind {
+        BindingKind::UniformBuffer { .. } => RegisterClass::Cbv,
+        // A read-only storage buffer is an SRV and a writable one a UAV — the
+        // same split `StructuredBuffer` and `RWStructuredBuffer` make in the
+        // HLSL `crcbl-shaders` generates, so the two agree by construction.
+        // A storage image splits the same way.
+        BindingKind::StorageBuffer { read_only, .. }
+        | BindingKind::StorageImage { read_only, .. } => {
+            if read_only {
+                RegisterClass::Srv
+            } else {
+                RegisterClass::Uav
+            }
+        }
+        BindingKind::SampledImage { .. } => RegisterClass::Srv,
+        // A `SamplerComparisonState` and a `SamplerState` occupy the same `s#`
+        // register file.
+        BindingKind::Sampler { .. } => RegisterClass::Sampler,
+    }
+}
+
 /// One binding, reduced to what register assignment needs of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct Binding {
-    /// The seam's binding number, which decides the order registers are taken
-    /// in and is *not* the register.
+    /// The seam's binding number, which is also the register — see
+    /// [`assign_registers`].
     pub(crate) binding: u32,
     /// Which HLSL register file it takes from.
     pub(crate) class: RegisterClass,
@@ -176,14 +213,14 @@ impl SetShape {
 
 /// The root-constants parameter one [`PushConstantRange`] becomes.
 ///
-/// Built by [`plan_push_constants`] while the pipeline layout's register counter
-/// is still in hand, because the `b` register this takes is the one after every
-/// binding's — see the module docs.
+/// Built by [`plan_push_constants`]. The register is always `b0` in
+/// [`PUSH_CONSTANT_SPACE`] — see the module docs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RootConstants {
-    /// `D3D12_ROOT_CONSTANTS::ShaderRegister`, in space 0 like every other
-    /// register this backend assigns.
+    /// `D3D12_ROOT_CONSTANTS::ShaderRegister`.
     pub(crate) register: u32,
+    /// `D3D12_ROOT_CONSTANTS::RegisterSpace`: [`PUSH_CONSTANT_SPACE`].
+    pub(crate) space: u32,
     /// `D3D12_ROOT_CONSTANTS::Num32BitValues`: the block from word zero to the
     /// end of the declared range, because a `cbuffer`'s first member is at byte
     /// zero whatever the range's offset is.
@@ -254,37 +291,80 @@ pub(crate) struct RootLayout {
     pub(crate) push_constants: Option<u32>,
 }
 
-/// Assigns each binding its HLSL register.
+/// Assigns each binding its HLSL register: **the binding number**, in the space
+/// named by the binding's set — see [`space_of`].
 ///
-/// **The register is not the binding number.** `[[vk::binding(binding, set)]]`
-/// reaches SPIR-V and nothing else; Slang's HLSL output drops it and `dxc`
-/// numbers each register class from zero in declaration order, in space 0. So a
-/// binding's register is its position among the bindings of its own class, and
-/// the count runs across a pipeline layout's sets rather than restarting at each
-/// — which is why `registers` is threaded in rather than created here.
+/// Every source in `crcbl-shaders` declares each resource's D3D12 register
+/// explicitly, as `register(<class><binding>, space<set>)` beside its
+/// `[[vk::binding(binding, set)]]`, and that crate's `declaration_order`
+/// lint holds the two to the same numbers. So a register is a property of the
+/// binding alone, and two stages compiled from different sources agree about
+/// it whatever else each declares.
 ///
-/// The order is ascending [`Binding::binding`], which is the same thing as
-/// declaration order because `crcbl-shaders`' `declaration_order` lint requires
-/// every source to declare its resources in ascending `(set, binding)`. Sorting
-/// rather than trusting the caller's order means a layout that declared its
-/// entries out of order still gets the registers the artifact has, rather than a
-/// root signature that is wrong in a way only a Windows runner would report.
-///
-/// A **dynamic** binding is in this list beside the table ones: it becomes a
-/// root descriptor rather than a table entry, but it is still a `ConstantBuffer`
-/// or a `StructuredBuffer` in the source and still consumes a register in its
-/// class. Leaving it out would shift every later binding of that class by one.
+/// It used to be a count: a binding's position among the layout's bindings of
+/// its class, run across the sets in space 0, which is what `dxc` gives a
+/// source with no annotations. That agreed with a shader only while the layout
+/// declared exactly the resources the shader did, and the renderer's mesh
+/// pipeline — task and mesh stages from one source, the fragment stage from
+/// another — could not satisfy it for both. `crate::renderer_registers` holds
+/// every renderer layout to every container it serves.
 ///
 /// Returns one register per input, in the input's order.
-pub(crate) fn assign_registers(bindings: &[Binding], registers: &mut Registers) -> Vec<u32> {
-    let mut order: Vec<usize> = (0..bindings.len()).collect();
-    order.sort_by_key(|index| bindings[*index].binding);
-    let mut assigned = vec![0; bindings.len()];
-    for index in order {
-        let binding = bindings[index];
-        assigned[index] = registers.take(binding.class, binding.declared);
+pub(crate) fn assign_registers(bindings: &[Binding]) -> Vec<u32> {
+    bindings.iter().map(|binding| binding.binding).collect()
+}
+
+/// The register space a set's bindings are declared in: the set's index.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] for a set at or past
+/// [`PUSH_CONSTANT_SPACE`], whose space would be the push-constant block's.
+pub(crate) fn space_of(set: usize) -> Result<u32, HalError> {
+    u32::try_from(set)
+        .ok()
+        .filter(|space| *space < PUSH_CONSTANT_SPACE)
+        .ok_or_else(|| {
+            HalError::InvalidDescriptor(format!(
+                "set {set} would be declared in register space {set}, and this backend keeps \
+                 space {PUSH_CONSTANT_SPACE} and above for the push-constant block"
+            ))
+        })
+}
+
+/// Refuses a set whose bindings would claim one register twice.
+///
+/// A register is the binding number, so an array of `count` descriptors at
+/// binding `n` covers registers `n` to `n + count - 1` of its class, and an
+/// unbounded one every register from `n` up. Vulkan numbers an array as one
+/// binding and has no such overlap; D3D12 refuses it when the root signature is
+/// serialised, with a sentence about ranges that names no binding. This is that
+/// refusal at bind-group-layout creation, naming both.
+///
+/// # Errors
+///
+/// [`HalError::InvalidDescriptor`] naming the two bindings whose registers
+/// overlap.
+pub(crate) fn check_registers(bindings: &[Binding]) -> Result<(), HalError> {
+    let mut order: Vec<&Binding> = bindings.iter().collect();
+    order.sort_by_key(|binding| (binding.class, binding.binding));
+    for pair in order.windows(2) {
+        let (first, second) = (pair[0], pair[1]);
+        let end = u64::from(first.binding) + u64::from(first.declared);
+        if first.class == second.class && u64::from(second.binding) < end {
+            return Err(HalError::InvalidDescriptor(format!(
+                "binding {} covers {:?} registers from {} up to {} on D3D12, where a register is \
+                 the binding number, and binding {} is one of them; number the array's later \
+                 neighbours of that class past its end",
+                first.binding,
+                first.class,
+                first.binding,
+                end - 1,
+                second.binding,
+            )));
+        }
     }
-    assigned
+    Ok(())
 }
 
 /// Lays every set's root parameters out, in set order, and the root-constants
@@ -372,12 +452,7 @@ fn next(slots: &mut Vec<Slot>, slot: Slot) -> u32 {
 }
 
 /// Turns the seam's push-constant range into the root-constants parameter it
-/// becomes, taking its shader register from `registers`.
-///
-/// **Call this after every set has taken its registers**, because the `b`
-/// register a push-constant block lands on is the one after them — see the
-/// module docs on why that is a property of the committed artifacts rather than
-/// a choice.
+/// becomes, at `b0` in [`PUSH_CONSTANT_SPACE`] — see the module docs.
 ///
 /// The word count is derived from the range's **end**, not its size: the
 /// `cbuffer` `dxc` binds starts at byte zero, so a range at a non-zero offset
@@ -397,7 +472,6 @@ fn next(slots: &mut Vec<Slot>, slot: Slot) -> u32 {
 /// this one, because that is a property of the whole signature.
 pub(crate) fn plan_push_constants(
     range: Option<PushConstantRange>,
-    registers: &mut Registers,
     caps: &DeviceCaps,
 ) -> Result<Option<RootConstants>, HalError> {
     let Some(range) = range else {
@@ -440,7 +514,8 @@ pub(crate) fn plan_push_constants(
         )));
     }
     Ok(Some(RootConstants {
-        register: registers.take(RegisterClass::Cbv, 1),
+        register: PUSH_CONSTANT_REGISTER,
+        space: PUSH_CONSTANT_SPACE,
         words: end / BYTES_PER_WORD,
         stages: range.stages,
         range,
@@ -729,89 +804,102 @@ mod tests {
     /// The root-constants parameter a range plans to, or a panic naming the
     /// refusal.
     fn planned(range: PushConstantRange) -> RootConstants {
-        planned_with(range, &mut Registers::default())
-    }
-
-    /// As [`planned`], against a register counter some bindings have already
-    /// taken from.
-    fn planned_with(range: PushConstantRange, registers: &mut Registers) -> RootConstants {
-        plan_push_constants(Some(range), registers, &caps())
+        plan_push_constants(Some(range), &caps())
             .expect("a range this device can express")
             .expect("a range was asked for")
     }
 
-    /// **A binding's register is its index among the bindings of its own class,
-    /// and a dynamic binding is counted with the rest.**
+    /// **A binding's register is its binding number, whatever class it is and
+    /// whatever else the set declares.**
     ///
-    /// The dynamic binding is the assertion that matters. It becomes a root
-    /// descriptor rather than a table entry, so it is easy to leave out of the
-    /// numbering — and leaving it out shifts every later binding of its class by
-    /// one, which is a root signature naming registers the shader does not read.
-    /// `CreateGraphicsPipelineState` rejects that, on Windows, at the end of a
-    /// CI round trip.
+    /// The dynamic binding and the gaps are the assertions that matter. A
+    /// dynamic binding becomes a root descriptor rather than a table entry, and
+    /// the gap at binding 3 is a resource this set does not declare — under the
+    /// counting rule this replaced, either shifted every later binding of its
+    /// class, which is a root signature naming registers a shader compiled
+    /// against a different binding set does not read.
     #[test]
-    fn a_dynamic_binding_still_takes_its_register_in_declaration_order() {
-        let mut registers = Registers::default();
-        // b0, t0, u0, b1 (dynamic), t1, s0 — in ascending binding order.
+    fn a_bindings_register_is_its_binding_number() {
         let bindings = [
             binding(0, RegisterClass::Cbv),
             binding(1, RegisterClass::Srv),
             binding(2, RegisterClass::Uav),
-            binding(3, RegisterClass::Cbv),
-            binding(4, RegisterClass::Srv),
+            // Dynamic: a root CBV, still at its own number.
+            binding(4, RegisterClass::Cbv),
+            binding(9, RegisterClass::Srv),
             binding(5, RegisterClass::Sampler),
         ];
         assert_eq!(
-            assign_registers(&bindings, &mut registers),
-            vec![0, 0, 0, 1, 1, 0],
-            "each class counts from zero, and the dynamic b1 sits between b0 and the next CBV"
-        );
-
-        // The counter carries across sets, which is what makes a two-set
-        // pipeline layout agree with a source `dxc` numbered end to end.
-        let second = [
-            binding(0, RegisterClass::Cbv),
-            binding(1, RegisterClass::Srv),
-        ];
-        assert_eq!(assign_registers(&second, &mut registers), vec![2, 2]);
-    }
-
-    /// Registers are taken in ascending *binding* order however the entries were
-    /// listed, so a caller that declared them out of order still gets the
-    /// artifact's numbering.
-    #[test]
-    fn registers_follow_the_binding_number_and_not_the_slices_order() {
-        let mut registers = Registers::default();
-        let bindings = [
-            binding(9, RegisterClass::Srv),
-            binding(2, RegisterClass::Srv),
-            binding(5, RegisterClass::Srv),
-        ];
-        assert_eq!(
-            assign_registers(&bindings, &mut registers),
-            vec![2, 0, 1],
-            "binding 2 is t0, binding 5 is t1 and binding 9 is t2, whatever order they arrived in"
+            assign_registers(&bindings),
+            vec![0, 1, 2, 4, 9, 5],
+            "b0, t1, u2, b4, t9 and s5, in the input's order"
         );
     }
 
-    /// An unbounded range consumes the rest of its class, so a binding declared
-    /// after one lands somewhere legal rather than back on top of it.
+    /// A set's space is its index, and the push-constant block's space is past
+    /// every set a layout may hold.
     #[test]
-    fn an_unbounded_range_consumes_the_rest_of_its_class() {
-        let mut registers = Registers::default();
-        let bindings = [
-            binding(0, RegisterClass::Srv),
-            Binding {
-                declared: u32::MAX,
-                ..binding(1, RegisterClass::Srv)
-            },
-        ];
-        assert_eq!(assign_registers(&bindings, &mut registers), vec![0, 1]);
+    fn a_sets_space_is_its_index_below_the_push_constant_space() {
+        assert_eq!(space_of(0).expect("set 0"), 0);
+        assert_eq!(space_of(3).expect("set 3"), 3);
+        let last = PUSH_CONSTANT_SPACE as usize - 1;
         assert_eq!(
-            assign_registers(&[binding(2, RegisterClass::Srv)], &mut registers),
-            vec![u32::MAX],
-            "the saturating count is what keeps a later SRV off the unbounded range's registers"
+            space_of(last).expect("the last set below the block's space"),
+            PUSH_CONSTANT_SPACE - 1
         );
+        let error = space_of(last + 1).expect_err("the push-constant block's own space");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(
+            text.contains(&format!("space {PUSH_CONSTANT_SPACE}")),
+            "{text}"
+        );
+    }
+
+    /// **The block's space is the one every source annotates its block with.**
+    ///
+    /// The two constants are one decision written in two crates, because the
+    /// shader side is a literal in `.slang` source and this side is Rust; the
+    /// equality is what makes them one.
+    #[test]
+    fn the_push_constant_space_is_the_one_the_shaders_declare() {
+        assert_eq!(
+            PUSH_CONSTANT_SPACE,
+            crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE
+        );
+    }
+
+    /// **An array whose registers run into a later binding of its class is
+    /// refused, naming both.**
+    ///
+    /// The boundary is the assertion: an array of three at binding 1 covers
+    /// `t1` to `t3`, so a texture at binding 4 is legal and one at binding 3 is
+    /// not. A binding of another class at 3 is legal either way — each class is
+    /// its own register file — and an unbounded range collides with anything
+    /// of its class after it.
+    #[test]
+    fn an_array_that_overlaps_a_later_binding_is_refused() {
+        let array = |declared| Binding {
+            declared,
+            ..binding(1, RegisterClass::Srv)
+        };
+        check_registers(&[array(3), binding(4, RegisterClass::Srv)])
+            .expect("t1..t3 and t4 do not overlap");
+        check_registers(&[array(3), binding(3, RegisterClass::Uav)])
+            .expect("u3 is another register file");
+
+        let error = check_registers(&[binding(3, RegisterClass::Srv), array(3)])
+            .expect_err("t3 is inside t1..t3");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(text.contains("binding 1"), "{text}");
+        assert!(text.contains("binding 3"), "{text}");
+
+        check_registers(&[array(u32::MAX)]).expect("an unbounded range alone");
+        check_registers(&[array(u32::MAX), binding(40, RegisterClass::Srv)])
+            .expect_err("an unbounded range covers every register after it");
     }
 
     /// **The two halves of a [`RootLayout`] describe the same parameter array.**
@@ -980,41 +1068,16 @@ mod tests {
         .expect("63 words and one table are exactly 64 DWORDs");
     }
 
-    /// **The block's register is the one after every binding's, because that is
-    /// where `dxc` puts it.**
+    /// **The block is `b0` in its own space, whatever the sets declare.**
     ///
-    /// The assertion that matters is the second: a layout whose sets declare
-    /// constant buffers pushes the block along, and a root signature naming `b0`
-    /// there would collide with a binding the shader also reads at `b0`. The
-    /// first is `push_constant_probe.slang`'s own measured answer — one UAV
-    /// binding, so the block is `b0`.
+    /// `push_constant_probe.slang` annotates its block with exactly this, and
+    /// a set's constant buffer at binding 0 is `b0` in that set's space — so
+    /// the two never meet.
     #[test]
-    fn the_block_takes_the_b_register_after_every_bound_constant_buffer() {
-        let mut registers = Registers::default();
-        assert_eq!(
-            assign_registers(&[binding(0, RegisterClass::Uav)], &mut registers),
-            vec![0],
-            "the probe's one binding is a UAV and takes no b register"
-        );
-        assert_eq!(
-            planned_with(range(16), &mut registers).register,
-            0,
-            "cb0, which is where dxc -dumpbin found the probe's block"
-        );
-
-        let mut registers = Registers::default();
-        assign_registers(
-            &[
-                binding(0, RegisterClass::Cbv),
-                binding(1, RegisterClass::Cbv),
-            ],
-            &mut registers,
-        );
-        assert_eq!(
-            planned_with(range(16), &mut registers).register,
-            2,
-            "two bound constant buffers take b0 and b1, so the block is b2"
-        );
+    fn the_block_is_b0_in_the_push_constant_space() {
+        let constants = planned(range(16));
+        assert_eq!(constants.register, 0);
+        assert_eq!(constants.space, PUSH_CONSTANT_SPACE);
     }
 
     /// **A range at a non-zero offset declares the words in front of it.**
@@ -1061,8 +1124,7 @@ mod tests {
         ];
         assert!(!cases.is_empty(), "nothing to check");
         for (expected, range) in cases {
-            let error = plan_push_constants(Some(range), &mut Registers::default(), &caps())
-                .expect_err(expected);
+            let error = plan_push_constants(Some(range), &caps()).expect_err(expected);
             let HalError::InvalidDescriptor(text) = &error else {
                 panic!("{expected}: {error:?}");
             };
@@ -1074,7 +1136,6 @@ mod tests {
         // the seam's dynamic-offset substitute.
         let error = plan_push_constants(
             Some(range(16)),
-            &mut Registers::default(),
             &DeviceCaps {
                 features: Features::empty(),
                 limits: limits(),
@@ -1089,7 +1150,7 @@ mod tests {
         // And no range at all is not a refusal, which is every pipeline layout
         // this backend built before this slice.
         assert_eq!(
-            plan_push_constants(None, &mut Registers::default(), &caps()).expect("nothing to plan"),
+            plan_push_constants(None, &caps()).expect("nothing to plan"),
             None
         );
     }

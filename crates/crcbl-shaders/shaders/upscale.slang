@@ -54,6 +54,18 @@
 // artifact, so an include would be a file whose edits nothing downstream
 // notices. The fullscreen triangle below is `tonemap.slang`'s, copied.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass takes from the CPU.
 ///
 /// `crcbl_shaders::upscale::UpscaleParams` is the Rust mirror and
@@ -74,7 +86,7 @@ struct UpscaleParams
 
 /// The resolved frame at the internal render extent.
 [[vk::binding(0, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t0, space0);
 
 /// A **linear** sampler, and the renderer creates it that way.
 ///
@@ -84,10 +96,10 @@ Texture2D<float4> source;
 /// `ClampToEdge` decides, and a linear sampler reaching a clamped edge returns
 /// the edge texel exactly, which is what the filter wants there.
 [[vk::binding(1, 0)]]
-SamplerState sourceSampler;
+SamplerState sourceSampler D3D12_REGISTER(s1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<UpscaleParams> params;
+ConstantBuffer<UpscaleParams> params D3D12_REGISTER(b2, space0);
 
 struct FullscreenOutput
 {

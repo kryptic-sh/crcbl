@@ -108,6 +108,10 @@ windows = { version = "0.62.2", default-features = false, features = [
 # that produced them, or the test would draw a triangle the engine does not ship.
 [dev-dependencies]
 crcbl-shaders = { workspace = true }
+# The renderer, run against the null backend so every layout it builds can be
+# held to the containers it serves — see `src/renderer_registers.rs`. Test-only
+# and workspace-internal, like `crcbl-shaders` above.
+crcbl-render = { workspace = true }
 
 [lints]
 workspace = true

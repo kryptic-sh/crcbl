@@ -69,6 +69,18 @@
 // `crcbl_shaders::cull`'s `the_shared_structs_are_declared_identically_in_every_shader`
 // compares them character for character.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One light, matching `struct GpuLight` in `mesh.slang` and
 /// `crcbl_shaders::light::GpuLight`.
 struct GpuLight
@@ -190,10 +202,10 @@ struct LightClusterParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<LightClusterParams> params;
+ConstantBuffer<LightClusterParams> params D3D12_REGISTER(b0, space0);
 
 [[vk::binding(1, 0)]]
-StructuredBuffer<GpuLight> lights;
+StructuredBuffer<GpuLight> lights D3D12_REGISTER(t1, space0);
 
 /// The grid: `CLUSTER_STRIDE` words per froxel, count first. Written here and
 /// read by `mesh.slang`'s fragment stage.
@@ -201,7 +213,7 @@ StructuredBuffer<GpuLight> lights;
 /// **One writer per froxel**, so nothing here is atomic and the list's order is
 /// the light list's order. See the header.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> cluster_lights;
+RWStructuredBuffer<uint> cluster_lights D3D12_REGISTER(u2, space0);
 
 /// The frame's culling statistics, which this pass adds its dropped assignments
 /// to at `CLUSTER_OVERFLOW_WORD`.
@@ -212,7 +224,7 @@ RWStructuredBuffer<uint> cluster_lights;
 /// `InterlockedAdd` for that file's reason: spelled as a type it lowers on every
 /// target.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<Atomic<uint> > cull_stats;
+RWStructuredBuffer<Atomic<uint> > cull_stats D3D12_REGISTER(u3, space0);
 
 /// A point's view depth — the `w` a perspective divide would use.
 float view_depth(float3 point)

@@ -57,6 +57,18 @@
 // in the ray, so a last-place difference there moves the colour by a last place
 // too rather than flipping a decision.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The uniform block this pass reads. `crcbl_shaders::sky::SkyParams` is the
 /// Rust mirror and `crcbl_render::sky_pass` is what writes it.
 ///
@@ -107,7 +119,7 @@ struct SkyParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SkyParams> camera;
+ConstantBuffer<SkyParams> camera D3D12_REGISTER(b0, space0);
 
 /// `crcbl_shaders::atmosphere::SkyView::rows` — the sky's radiance for this
 /// frame's sun, one `float4` per texel with the direction's `y` slow.
@@ -125,7 +137,7 @@ ConstantBuffer<SkyParams> camera;
 /// or which have no sky at all, and holds zeroes there. A binding that came and
 /// went with the arm would be two pipeline layouts.
 [[vk::binding(1, 0)]]
-StructuredBuffer<float4> sky_view;
+StructuredBuffer<float4> sky_view D3D12_REGISTER(t1, space0);
 
 /// `crcbl_shaders::atmosphere::SKY_VIEW_WIDTH`, which is the azimuth away from
 /// the sun.

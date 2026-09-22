@@ -57,6 +57,18 @@
 // frame without this effect multiplies its sun by 1.0 and this file has no
 // switched-off arm to keep working.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// `crcbl_shaders::contact_shadows::ContactShadowParams` is the Rust mirror and
 /// `crcbl_render::contact_shadows` is what writes it.
 struct ContactShadowParams
@@ -77,11 +89,11 @@ struct ContactShadowParams
 /// UV, no texel-centre arithmetic and no filter for four rasterisers to disagree
 /// about — `ssao.slang`'s binding block makes the same argument.
 [[vk::binding(0, 0)]]
-ConstantBuffer<ContactShadowParams> camera;
+ConstantBuffer<ContactShadowParams> camera D3D12_REGISTER(b0, space0);
 /// The depth prepass, `DepthTexture2D` for the seam's `SampleType::Depth` — the
 /// only sample type WebGPU will bind a `D32Float` view through.
 [[vk::binding(1, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t1, space0);
 
 /// The reversed-Z far plane: the value the prepass clears to, and the depth at
 /// which an infinite projection's `clip.w` reaches zero.

@@ -66,6 +66,18 @@
 // block and the four resource declarations below are that file's, copied,
 // because one bind-group layout serves both.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the CMAA2 passes take from the CPU — `cmaa2_edges.slang` declares
 /// the same block and its header says why there is one.
 struct Cmaa2Params
@@ -81,20 +93,20 @@ struct Cmaa2Params
 // its order, because one layout serves both files.
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<Cmaa2Params> params;
+ConstantBuffer<Cmaa2Params> params D3D12_REGISTER(b0, space0);
 
 /// The tonemapped frame, read for the colour a share carries part of.
 [[vk::binding(1, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t1, space0);
 
 /// `[pixel]`: the edge bits `cmaa2_edges.slang` wrote.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> edges;
+RWStructuredBuffer<uint> edges D3D12_REGISTER(u2, space0);
 
 /// `[pixel * ACCUM_WORDS]`: the fixed-point accumulation, three colour words
 /// and a weight word per pixel.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<Atomic<uint> > accum;
+RWStructuredBuffer<Atomic<uint> > accum D3D12_REGISTER(u3, space0);
 
 /// Words per pixel in `accum`, matching `crcbl_shaders::cmaa2::ACCUM_WORDS`.
 static const uint ACCUM_WORDS = 4;

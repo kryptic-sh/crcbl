@@ -234,6 +234,18 @@
 // at offset zero because it used to be its own allocation reads the region in
 // front of it.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance` and
 /// `mesh.slang`'s copy.
 struct GpuInstance
@@ -604,20 +616,20 @@ struct DrawGenParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<DrawGenParams> gen;
+ConstantBuffer<DrawGenParams> gen D3D12_REGISTER(b0, space0);
 
 /// The instance array, read for `GpuInstance::mesh` and `transform`: which
 /// bucket an instance scatters into, and — since `docs/plan/25-lod.md`'s uniform
 /// cut runs here — where its mesh's group spheres are in world space.
 [[vk::binding(1, 0)]]
-StructuredBuffer<GpuInstance> instances;
+StructuredBuffer<GpuInstance> instances D3D12_REGISTER(t1, space0);
 
 /// The mesh table, indexed by `bucket_meshes`. The index range in a bucket's
 /// argument structure comes from here — which is the whole translation this
 /// pass performs, and what makes the arguments checkable against the draws a
 /// CPU would have recorded from the same table.
 [[vk::binding(2, 0)]]
-StructuredBuffer<GpuMesh> meshes;
+StructuredBuffer<GpuMesh> meshes D3D12_REGISTER(t2, space0);
 
 /// How many survivors `cull.slang` found, in element
 /// `crcbl_shaders::cull::INSTANCE_SURVIVOR_WORD`. The *true* count, so it can
@@ -627,7 +639,7 @@ StructuredBuffer<GpuMesh> meshes;
 /// The frame's whole culling-statistics block rather than a counter of its own —
 /// see `cull.slang`, which writes it.
 [[vk::binding(3, 0)]]
-StructuredBuffer<uint> visible_count;
+StructuredBuffer<uint> visible_count D3D12_REGISTER(t3, space0);
 
 /// Every host-written table this pass reads, as one flat array of words.
 ///
@@ -652,7 +664,7 @@ StructuredBuffer<uint> visible_count;
 /// directly — a bare offset arithmetic at a use site is exactly the drift the
 /// named word constants exist to prevent.
 [[vk::binding(4, 0)]]
-StructuredBuffer<uint> tables;
+StructuredBuffer<uint> tables D3D12_REGISTER(t4, space0);
 
 /// `cull.slang`'s compacted survivors, each survivor's route, the per-bucket runs
 /// of instance indices the geometry stages read, and where each run starts.
@@ -692,7 +704,7 @@ StructuredBuffer<uint> tables;
 /// is a usage conflict on WebGPU. A `RWStructuredBuffer` reads perfectly well,
 /// and the survivor half is read-only here by what this shader does with it.
 [[vk::binding(5, 0)]]
-RWStructuredBuffer<uint> visible_instances;
+RWStructuredBuffer<uint> visible_instances D3D12_REGISTER(u5, space0);
 
 /// The indirect arguments, `DRAW_ARGS_WORDS` per bucket, as a flat array of
 /// words.
@@ -706,7 +718,7 @@ RWStructuredBuffer<uint> visible_instances;
 /// path reads these as *data* in the same pass that executes those as indirect
 /// arguments, and a resource is in one resource state at a time.
 [[vk::binding(6, 0)]]
-RWStructuredBuffer<Atomic<uint> > args;
+RWStructuredBuffer<Atomic<uint> > args D3D12_REGISTER(u6, space0);
 
 /// One draw count per bucket, then the per-bucket mesh-dispatch arguments.
 ///
@@ -736,7 +748,7 @@ RWStructuredBuffer<Atomic<uint> > args;
 /// stores by the invocation that owns the bucket. The draw counts are plain
 /// stores too, by `startsMain` alone.
 [[vk::binding(7, 0)]]
-RWStructuredBuffer<Atomic<uint> > counts_and_mesh_args;
+RWStructuredBuffer<Atomic<uint> > counts_and_mesh_args D3D12_REGISTER(u7, space0);
 
 /// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance, group),
 /// `1` where that instance had that group expanded last frame.
@@ -767,7 +779,7 @@ RWStructuredBuffer<Atomic<uint> > counts_and_mesh_args;
 ///
 /// Zeroed once when the renderer builds it, which is where the induction starts.
 [[vk::binding(8, 0)]]
-RWStructuredBuffer<uint> group_state;
+RWStructuredBuffer<uint> group_state D3D12_REGISTER(u8, space0);
 
 /// Which mesh bucket `bucket` draws, as an index into `meshes`.
 uint bucket_mesh(uint bucket)

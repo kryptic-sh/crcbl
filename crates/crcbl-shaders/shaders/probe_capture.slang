@@ -29,6 +29,18 @@
 // geometry sees that geometry's back faces, and the distance to them is
 // exactly what says it is inside.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One tile of the atlas: where its face looks from, and where "from" is.
 struct CaptureFace
 {
@@ -47,7 +59,7 @@ struct CaptureFace
 /// The tile being drawn. One dynamic offset per tile, which is how a device
 /// with no push constants selects it — see `crcbl_hal::BindingKind::UniformBuffer`.
 [[vk::binding(0, 0)]]
-ConstantBuffer<CaptureFace> capture;
+ConstantBuffer<CaptureFace> capture D3D12_REGISTER(b0, space0);
 
 /// Every occluding triangle in **world space**, three floats a vertex and
 /// three vertices a triangle, in no order.
@@ -58,7 +70,7 @@ ConstantBuffer<CaptureFace> capture;
 /// walk on the host for its own reasons. Pulling from a flat buffer here means
 /// this pipeline needs no instance table, no material table and no cull.
 [[vk::binding(1, 0)]]
-StructuredBuffer<float> positions;
+StructuredBuffer<float> positions D3D12_REGISTER(t1, space0);
 
 /// What the vertex stage hands the fragment stage: the clip position the
 /// rasteriser needs, and the world position the distance is measured from.

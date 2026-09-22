@@ -384,6 +384,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl-core",
  "crcbl-hal",
+ "crcbl-render",
  "crcbl-shaders",
  "windows",
 ]

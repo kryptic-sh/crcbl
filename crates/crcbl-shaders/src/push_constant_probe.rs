@@ -29,11 +29,13 @@
 //!   the block with `setBytes:length:atIndex:` at the index past the last
 //!   binding.
 //! * **DXIL** (`dxil/push_constant_probe.computeMain.dxil`) — HLSL has no push
-//!   constants either; Slang emits a `cbuffer` and `dxc` binds it at **`cb0`**
-//!   (register `b0`, space 0), sixteen bytes, with `destination` at `u0`. A
-//!   D3D12 root signature therefore carries a root-constants entry of
+//!   constants either; Slang emits a `cbuffer`, which the source declares at
+//!   register **`b0`** in
+//!   [`D3D12_PUSH_CONSTANT_SPACE`](crate::D3D12_PUSH_CONSTANT_SPACE), sixteen
+//!   bytes, with `destination` at `u0` in space 0. A D3D12 root
+//!   signature therefore carries a root-constants entry of
 //!   [`CONSTANTS_SIZE`](crate::push_constant_probe::CONSTANTS_SIZE) / 4 32-bit
-//!   values at shader register `b0`.
+//!   values at shader register `b0` in that space.
 //!
 //! Both of the two backends that must translate the range put it in a slot
 //! **numbered independently of the bind groups** — Metal's buffer table shares
@@ -179,7 +181,9 @@ mod tests {
     fn the_source_declares_a_push_constant_and_no_wgsl_target() {
         let source = include_str!("../shaders/push_constant_probe.slang");
         assert!(
-            source.contains("[[vk::push_constant]]\nConstantBuffer<ProbeConstants> constants;"),
+            source.contains(
+                "[[vk::push_constant]]\nConstantBuffer<ProbeConstants> constants D3D12_REGISTER("
+            ),
             "push_constant_probe.slang no longer declares its block as a push constant"
         );
         assert!(
@@ -215,10 +219,11 @@ mod tests {
     /// nothing has any more. The DXIL register is the one bullet not asserted
     /// here: its resource table lives in the container's `RDEF` chunk, and
     /// parsing DXBC to reach it is more machinery than this crate — which has
-    /// no dependencies — should carry for one number. It was read with
-    /// `dxc -dumpbin` over the committed container, and the byte-for-byte
-    /// recompile gate is what keeps that container the one this source
-    /// produces.
+    /// no dependencies — should carry for one number. `crcbl-dx12`'s `dxil`
+    /// module reads it from the container's `PSV0` part and accepts a
+    /// resource with no binding only at `b0` in the push-constant space, and the
+    /// byte-for-byte recompile gate is what keeps that container the one this
+    /// source produces.
     #[test]
     fn each_artifact_puts_the_block_where_the_docs_say() {
         let msl = crate::PUSH_CONSTANT_PROBE

@@ -88,6 +88,18 @@
 // mesh table's `base_vertex` — so there is no draw-call number in this file at
 // all, and nothing for a target to disagree about.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The most vertices one cluster may reference, and the size of this stage's
 /// vertex output array.
 ///
@@ -986,11 +998,11 @@ static const uint LEVEL_GROUP_CENTER_Z = 4;
 static const uint LEVEL_GROUP_RADIUS = 5;
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<FrameUniforms> frame;
+ConstantBuffer<FrameUniforms> frame D3D12_REGISTER(b0, space0);
 
 /// The vertex pool, read as raw words — `mesh.slang`'s binding, on its terms.
 [[vk::binding(1, 0)]]
-StructuredBuffer<uint> vertices;
+StructuredBuffer<uint> vertices D3D12_REGISTER(t1, space0);
 
 /// Where vertex `at`'s position sits, and nothing else.
 ///
@@ -1020,43 +1032,43 @@ MeshVertex load_vertex(uint at, float4 range)
 }
 
 [[vk::binding(2, 0)]]
-StructuredBuffer<GpuInstance> instances;
+StructuredBuffer<GpuInstance> instances D3D12_REGISTER(t2, space0);
 
 [[vk::binding(3, 0)]]
-ConstantBuffer<ClusterDrawConstants> draw;
+ConstantBuffer<ClusterDrawConstants> draw D3D12_REGISTER(b3, space0);
 
 [[vk::binding(4, 0)]]
-StructuredBuffer<GpuMesh> meshes;
+StructuredBuffer<GpuMesh> meshes D3D12_REGISTER(t4, space0);
 
 [[vk::binding(5, 0)]]
-StructuredBuffer<uint> visible_instances;
+StructuredBuffer<uint> visible_instances D3D12_REGISTER(t5, space0);
 
 /// Shared fragment resources must precede every mesh-only buffer. Metal assigns
 /// buffer indices in declaration order, while the backend counts the global
 /// layout in binding order. These placeholders preserve the fragment stage's
 /// common buffer prefix (0 through 9) even when this module does not read them.
 [[vk::binding(6, 0)]]
-StructuredBuffer<GpuMaterial> materials;
+StructuredBuffer<GpuMaterial> materials D3D12_REGISTER(t6, space0);
 
 /// The base-colour page, on `materials`' terms exactly: the fragment stage
 /// samples it, this stage does not, and the declaration is what keeps the
 /// Metal tables aligned with the layout.
 [[vk::binding(7, 0)]]
-Texture2DArray<float4> base_color_textures;
+Texture2DArray<float4> base_color_textures D3D12_REGISTER(t7, space0);
 
 /// The page's sampler, for the same reason.
 [[vk::binding(8, 0)]]
-SamplerState base_color_sampler;
+SamplerState base_color_sampler D3D12_REGISTER(s8, space0);
 
 /// The frame's light list, on `materials`' terms exactly: the fragment stage
 /// reads it, this file does not, and the declaration is what keeps the Metal
 /// argument table aligned with the layout.
 [[vk::binding(20, 0)]]
-StructuredBuffer<GpuLight> lights;
+StructuredBuffer<GpuLight> lights D3D12_REGISTER(t20, space0);
 
 /// The froxel grid, for the same reason.
 [[vk::binding(21, 0)]]
-StructuredBuffer<uint> cluster_lights;
+StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t21, space0);
 
 /// The irradiance grid's rows, for the same reason and one more of its own.
 ///
@@ -1067,7 +1079,7 @@ StructuredBuffer<uint> cluster_lights;
 /// would put `tables` one index below where `crcbl-mtl` binds it — that backend
 /// counts the same-table entries of the layout, which carries 23 on every path.
 [[vk::binding(23, 0)]]
-StructuredBuffer<GpuProbe> probes;
+StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t23, space0);
 
 /// Every host-written table `draw_gen.slang` reads, as one flat array of words —
 /// the same buffer and the same regions, described there in full.
@@ -1082,17 +1094,17 @@ StructuredBuffer<GpuProbe> probes;
 /// binding present for one entry point and absent for the other is a descriptor
 /// read out of an empty slot.
 [[vk::binding(24, 0)]]
-StructuredBuffer<uint> tables;
+StructuredBuffer<uint> tables D3D12_REGISTER(t24, space0);
 
 /// Every resident mesh's clusters, back to back, in mesh order. A bucket's
 /// mesh names its own run with `draw.cluster_base` and `draw.cluster_count`.
 [[vk::binding(32, 0)]]
-StructuredBuffer<Meshlet> clusters;
+StructuredBuffer<Meshlet> clusters D3D12_REGISTER(t32, space0);
 
 /// Original vertex indices, one run per cluster. **Mesh-relative**, like the
 /// index buffer the raster path reads: `GpuMesh::base_vertex` is added here.
 [[vk::binding(33, 0)]]
-StructuredBuffer<uint> cluster_vertices;
+StructuredBuffer<uint> cluster_vertices D3D12_REGISTER(t33, space0);
 
 /// Triangle corners, packed four to a word, least significant byte first.
 ///
@@ -1102,19 +1114,19 @@ StructuredBuffer<uint> cluster_vertices;
 /// of that statement. Packing by word rather than padding each cluster's run
 /// is what lets a cluster closed early by the vertex bound end on any corner.
 [[vk::binding(34, 0)]]
-StructuredBuffer<uint> cluster_corners;
+StructuredBuffer<uint> cluster_corners D3D12_REGISTER(t34, space0);
 
 /// The per-bucket indirect arguments `draw_gen.slang` wrote. Read for
 /// `instance_count` and nothing else.
 [[vk::binding(35, 0)]]
-StructuredBuffer<DrawIndexedArgs> draw_args;
+StructuredBuffer<DrawIndexedArgs> draw_args D3D12_REGISTER(t35, space0);
 
 /// This frame's frustum — the amplification stage's alone.
 ///
 /// Bound on both mesh paths to preserve the native argument table, even though
 /// only the amplification stage reads this and writes `cull_stats` below.
 [[vk::binding(36, 0)]]
-ConstantBuffer<CullParams> cull;
+ConstantBuffer<CullParams> cull D3D12_REGISTER(b36, space0);
 
 /// The frame's culling statistics, which this stage adds each cluster it tested
 /// into: `CLUSTER_SURVIVOR_WORD`, `CLUSTER_FRUSTUM_REJECT_WORD` or
@@ -1126,7 +1138,7 @@ ConstantBuffer<CullParams> cull;
 /// `InterlockedAdd` for `cull.slang`'s reason: spelled as a type it lowers on
 /// every target.
 [[vk::binding(37, 0)]]
-RWStructuredBuffer<Atomic<uint> > cull_stats;
+RWStructuredBuffer<Atomic<uint> > cull_stats D3D12_REGISTER(u37, space0);
 
 /// Every resident cluster's half of the DAG descent, parallel to `clusters`.
 ///
@@ -1135,7 +1147,7 @@ RWStructuredBuffer<Atomic<uint> > cull_stats;
 /// points have to resolve the right one. Mesh-only bindings start at 32, after
 /// every common fragment resource, so they cannot shift fragment buffer indices.
 [[vk::binding(38, 0)]]
-StructuredBuffer<ClusterSelect> cluster_select;
+StructuredBuffer<ClusterSelect> cluster_select D3D12_REGISTER(t38, space0);
 
 /// The cut this frame chose, one word per resident cluster: `1` where the
 /// descent selected the cluster and `0` where it did not.
@@ -1154,7 +1166,7 @@ StructuredBuffer<ClusterSelect> cluster_select;
 /// whatever the last frame that drew it wrote, which is why a reader compares
 /// two cameras rather than trusting one.
 [[vk::binding(39, 0)]]
-RWStructuredBuffer<uint> cluster_selection;
+RWStructuredBuffer<uint> cluster_selection D3D12_REGISTER(u39, space0);
 
 /// `docs/plan/25-lod.md`'s hysteresis state, as `draw_gen.slang` left it this
 /// frame: one word per (instance, group), `1` where that group is expanded.
@@ -1169,7 +1181,7 @@ RWStructuredBuffer<uint> cluster_selection;
 /// Bound whenever `cluster_select` is, because the two are one mechanism: the
 /// record names a group and this says what that group decided.
 [[vk::binding(40, 0)]]
-StructuredBuffer<uint> group_state;
+StructuredBuffer<uint> group_state D3D12_REGISTER(t40, space0);
 
 /// What the mesh stage emits and `mesh.slang`'s `fragmentMain` consumes.
 ///

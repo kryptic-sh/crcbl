@@ -6777,11 +6777,12 @@ did not do.
 - **Only radv ran it.** The e2e suite is `mesh_e2e`, which is Vulkan on this
   machine and lavapipe in CI; the DX12, Metal and WebGPU artifacts compile and
   are checked into `crates/crcbl-shaders/`, and
-  `registers_are_assigned_per_class_in_declaration_order` now covers the D3D12
-  root signature for `exposure` as well, but **no frame drawn through them has
-  been compared against the host histogram**. The `Atomic<uint>` spelling is
-  `cull.slang`'s, which does run on all four, so the risk is the reduce's serial
-  loop rather than the atomic. The bullet above is what would close this.
+  `every_container_declares_each_resource_at_its_binding_and_set` holds the
+  `exposure` containers' registers to their bindings, but **no frame drawn
+  through them has been compared against the host histogram**. The
+  `Atomic<uint>` spelling is `cull.slang`'s, which does run on all four, so the
+  risk is the reduce's serial loop rather than the atomic. The bullet above is
+  what would close this.
 
 - **`Exposure::new` refuses a ring shorter than two slots**, because the reduce
   reads the slot behind the one it writes and a graph pass cannot claim one
@@ -7592,37 +7593,6 @@ rather than a design, and it has landed: `GpuInstance::previous_transform`, at a
 stride of 160. Two rows this entry named have since been argued as well — the
 froxel pass is `docs/plan/51-volumetrics.md`, and specular IBL is
 `44-lighting.md`'s rung 3, whose `DFG` half `crcbl_shaders::dfg` already cooks.
-
-### The DXIL register rule is held two ways, and the table cannot be completed (2026-09-05)
-
-`crates/crcbl-dx12/src/dxil.rs` holds the per-class register rule in two places.
-`transcribed_cases` is the hand-written table — a row per source, its resource
-declarations transcribed from the `.slang` — and
-`registers_are_assigned_per_class_in_declaration_order` compares each row
-against the union of that shader's containers.
-`registers_are_dense_from_zero_in_every_committed_container` reads **every**
-shader in `crcbl_shaders::ALL` that commits a container and asserts what the
-rule implies with no transcription: each register class opens at zero, its
-ranges ascend and never overlap, and every record is in space 0. The "Every
-shader is listed" claim is gone from the doc comment, which is what this entry
-was about.
-
-**The table cannot be completed, and `mesh_cluster` is the proof.** All three of
-its entry points compile containers, yet the union of their `t` registers has
-interior gaps: `dxc` reserves a register for a declaration no compiled entry
-point reaches and then leaves it out of every container's resource table. A
-transcription of that source's declarations therefore cannot equal any union of
-its containers, which is the comparison the transcribed test _is_. So "a case
-per shader in the artifact directory" — what this entry used to propose — is not
-something that can be written.
-
-**What the density test cannot say** is that a register is _missing_: a gap and
-a declaration nobody reached look identical from the container. `mesh_cluster`
-is named in the test as the one source that gaps and the expectation is an
-equality on that list, so a second source starting to gap is red and a
-`mesh_cluster` that goes dense is red too. But a root signature naming a
-register its shader does not use is still caught only by a row in the
-transcribed table, or by pipeline creation on a Windows runner.
 
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
 
@@ -13289,91 +13259,44 @@ asserting precedence between those two errors would flip. Judged unlikely and
 the cleaner factoring kept; it compiles under the darwin gate and no macOS test
 has run.
 
-## DEFERRED — D3D12 registers are assigned by counting, and the mesh path collides
+## The committed DXIL was built by the Windows `dxc`, not the pinned Linux one (2026-09-22)
 
-The record behind this — the argument, the options and the measurements — is in
-`docs/notes/backends.md` under this heading.
+**Must be regenerated on Linux before the change that made registers follow the
+binding number is pushed, or CI's `shaders` job fails.** That change edited
+every `shaders/*.slang`, so every artifact was regenerated with
+`crates/crcbl-shaders/tools/compile-shaders.sh`, on a Windows machine with no
+WSL distribution. The script refuses to run there as written, so it was driven
+through shims: the Windows builds of the pinned `slangc` 2026.14 and `dxc`
+v1.9.2607 (`dxc_2026_07_29.zip`), a `slangc` wrapper that strips the CRLF the
+Windows build writes, a `dxc` wrapper reporting the Linux pin's version string,
+and a `spirv-dis` stand-in printing the entry points the manifest already
+records. None of that is committed.
 
-**Found 2026-08-21 while building the cluster-shader probe, by checking an
-assumption rather than by running anything.** It is almost certainly the WARP
-device removal, and it is ours rather than Microsoft's.
+**What was measured.** Over the tree before the change, that setup reproduced
+every committed SPIR-V, WGSL and MSL artifact byte for byte, and **no** DXIL
+container: the Windows `dxc` reports `1.9.0.5402` where the Linux build reports
+`1.9.0.1`, and its `DXIL` and `STAT` parts come out 12 bytes longer (the
+compiler identity in the bitcode) with a different `HASH`. The `PSV0` parts —
+the registers — were identical. So the DXIL in the tree is correct in everything
+this backend reads and is not what `compile-shaders.sh --check` will produce:
+`build.rs` hashes pass (the manifest matches the files), and the CI job that
+recompiles with the pinned Linux `dxc` does not.
 
-**The mechanism.** A D3D12 register is a position among _that HLSL source's own
-declarations of that class_. `crcbl-dx12` reproduces it in
-`root::assign_registers`, which sorts the **layout's** entries by binding number
-and hands out `registers.take(class, …)` in order — so a resource's register is
-decided by how many same-class entries precede it **in the bind group layout**.
-That agrees with the shader only when the layout's binding set is exactly the
-set that source file declares.
+**The fix is one command on a Linux machine** with the pinned toolchain the
+script's own error text describes:
+`crates/crcbl-shaders/tools/compile-shaders.sh`, then commit the `dxil/` files
+and `spirv/manifest.txt` it rewrites. Nothing else should move; if anything but
+DXIL and its manifest lines does, that is a finding.
 
-**On the raster path it is, which is why nothing has ever caught this.**
-`ForwardRenderer::mesh_layout` minus its mesh-only rows is precisely what
-`mesh.slang` declares, so every register lines up and WARP renders the non-mesh
-frame correctly.
-
-**On the mesh path it is not, and the two stages cannot even agree with each
-other.** Read straight out of the generated HLSL the build already writes to
-`target/debug/build/crcbl-shaders-*/out/*.check.hlsl`:
-
-| source                  | resource         | register |
-| ----------------------- | ---------------- | -------- |
-| `mesh_cluster.taskMain` | `clusters`       | `t6`     |
-| `mesh.fragmentMain`     | `shadow_atlas`   | `t6`     |
-| `mesh_cluster.taskMain` | `cluster_select` | `t10`    |
-| `mesh.fragmentMain`     | `probes`         | `t10`    |
-
-One root signature serves both stages of one pipeline, so `t6` cannot be both a
-`StructuredBuffer<Meshlet>` and a `Texture2D<float>`. The renderer's mesh
-pipeline borrows its fragment stage from `mesh.slang` while its task and mesh
-stages come from `mesh_cluster.slang`, and those two files declare different
-binding sets. **No single bind group layout can make this correct** — the fix
-cannot be a layout change.
-
-**What that predicts, and it matches every measurement in the WARP entry.** On
-the mesh path `taskMain` reads `cluster_select` out of the shadow-atlas texture
-descriptor and `group_state` out of the `cluster_select` buffer — a texture SRV
-read as a structured buffer, unconditionally, on the first thing the
-amplification stage does. A descriptor-type mismatch is not something the debug
-layer catches without GPU-based validation, which is why there are **zero**
-debug-layer errors; the fault is inside the shader before any command-list work
-completes, which is why DRED reports **zero** breadcrumbs. Vulkan is unaffected
-because SPIR-V uses the `[[vk::binding]]` numbers directly and never counts.
-Nobody has seen it on hardware D3D12 because nobody has run the mesh path there.
-
-**DECIDED 2026-09-06 —** option (b): registers follow the binding number, with
-explicit `register(tN, spaceM)` emitted from it. naga's HLSL backend and every
-Slang or DXC multi-backend engine do the same, because counting is what collides
-the moment a stage's binding set differs. The work stays deferred with dx12; the
-decision is taken so it does not have to be retaken.
-
-**Whatever is chosen, it needs a gate that fails**, because nothing today
-compares a layout's assigned registers against what the containers declare.
-`crcbl-dx12/src/dxil.rs` already parses the PSV0 resource table, so the check is
-available: assert the renderer's layouts agree with every container they are
-used with. Written today it would be red, which is why it is not in the tree — a
-green test pinning this defect would be worse than none.
-
-**What is measured and what is inferred.** The registers above are read from the
-generated HLSL and confirmed against the containers' PSV0 tables; the counting
-rule is read from `root::assign_registers`. The collision is therefore a fact,
-and it makes the renderer's D3D12 mesh pipeline incorrect whatever else is true.
-
-**But it is _not_ what removes the device, and that was tested rather than
-assumed.** The probe of 2026-08-21 ran `mesh_cluster.slang`'s own containers
-under a layout trimmed to exactly that file's 22 declarations. Recomputing the
-assignment by hand over that declaration list gives `frame` `b0`, `instances`
-`t1`, `visible_instances` `t3`, `clusters` `t6`, `draw_args` `t9`,
-`cluster_select` `t10`, `group_state` `t11`, `cull_stats` `u0` and
-`cluster_selection` `u1` — every one matching the generated HLSL, so no register
-disagreed with anything the shader asked for. **WARP removed the device
-anyway**, with the renderer's exact signature: `DXGI_ERROR_DEVICE_REMOVED` out
-of `ID3D12Resource::Map`, DRED reporting `0 command list(s) with recorded work`,
-on run 32416192662.
-
-So there are **two** defects and this entry is only one of them. Fixing the
-registers is still required — as it stands the renderer's mesh pipeline reads a
-texture descriptor as a structured buffer — but it will not by itself make the
-mesh path work.
+**Coverage the register change left, stated plainly.** `crcbl_dx12`'s
+`renderer_registers` gate builds `ForwardRenderer` on three device shapes,
+`SpriteRenderer`, `UiRenderer` and `Grid` — 122 distinct pipeline stages. It
+does not build the pipelines made lazily or behind other configuration:
+`debug_draw`, `probe_capture` and `probe_octahedral`, `probe_gather`, `skinning`
+and `wind`. Their containers are still held to their own SPIR-V's bindings by
+`dxil`'s `every_container_declares_each_resource_at_its_binding_and_set`, but
+their layouts are not compared with anything off a device. Adding each is a
+constructor call in that test.
 
 ## DEFERRED — dx12 mesh shading: WARP claims it and dies, hardware works
 
@@ -13392,6 +13315,36 @@ before that change no storage buffer was readable on hardware at all, so this is
 the first hardware run of either — and the second repro's expected values were
 never checked against a device that survived, so its pass says the descent
 agrees with its own synthetic expectation, not that the expectation is right.
+
+**Registers were one defect, and not the one that removes the device.** Until
+2026-09-22 a D3D12 register was counted over the layout, and the renderer's mesh
+pipeline — task and mesh stages from `mesh_cluster.slang`, the fragment stage
+from `mesh.slang` — read one register as different resources in different
+stages. That is fixed: a register is the binding number, and `crcbl_dx12`'s
+`renderer_registers` test holds every renderer layout to every container it
+serves. It was never the WARP removal: the probe of 2026-08-21 ran
+`mesh_cluster.slang`'s own containers under a layout whose counted registers
+matched the generated HLSL exactly, and WARP removed the device anyway (run
+32416192662). After the fix WARP still removes it, measured 2026-09-22 with
+`CRCBL_DX12_ADAPTER=warp`.
+
+**Measured on hardware, 2026-09-22: the cluster probe now draws nothing, for a
+reason that is its own.** On an RX 7900 XTX (driver 32.0.21036.18), with the
+debug layer off because this machine has none,
+`a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` passes and
+`the_cluster_shaders_dag_descent_draws_the_cut_it_chose` builds its pipeline,
+runs, and fails its depth assertion: nothing rasterised. Its layout had been
+transcribed when `mesh_cluster.slang`'s cluster bindings were 9 to 19; they are
+32 to 40 now, which the counting rule hid and binding-numbered registers do not,
+so it was renumbered. Read back with the depth assertion moved last, the
+descent's cut is right — `cluster_selection` is `[1, 1, 1, 0, 0]` — and the cull
+rejects **all three** selected clusters by the frustum: the statistics words are
+0 survivors, 3 frustum rejections, 0 cone rejections, where the test expects one
+of each. So the synthetic frustum or cull parameters disagree with what
+`mesh_cluster.slang` reads, which is the "expected values never checked against
+a device that survived" caveat above coming true. Not investigated further; the
+next step is to compare the probe's `CullParams` and `FrameUniforms` bytes with
+the shader's current layout.
 
 **The next step, for whoever picks this up.** `NumRenderTargets = 0` with an
 all-`UNKNOWN` `RTFormats` array is what the failing pipeline hands
@@ -17654,14 +17607,6 @@ The measurement, the two DX1 decisions a later slice may have to undo, and the
 LUID rule are in docs/notes/backends.md under the same heading. Deferred inside
 DX4, each with what it would take:
 
-- **Register-space mapping is verified for set 0 only.** Every committed shader
-  declares `[[vk::binding(N, 0)]]`. **Settled by measurement, and the
-  expectation was wrong**: `[[vk::binding]]` is Vulkan-only, and `dxc` numbers
-  each register class from zero in declaration order across the whole source,
-  all in space 0 — `sprite`'s set-1 texture is `t1` in space 0, not `t0` in
-  space 1. Read out of the `PSV0` resource table of every committed container. A
-  multi-set layout is still only checked by that artifact test, never by a
-  driver.
 - **The shader-visible descriptor heaps do not grow.** One heap per type at a
   fixed capacity, and `HalError::OutOfDeviceMemory` past it, because a bind
   group's GPU handle is an address inside the heap it came from. A real

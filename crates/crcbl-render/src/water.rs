@@ -1031,7 +1031,12 @@ mod tests {
             (binding::FROXELS, "StructuredBuffer<float4> volumetrics;"),
             (binding::LIGHTING, "StructuredBuffer<float4> lighting;"),
         ] {
-            let spelled = format!("[[vk::binding({number}, 0)]]\n{name}");
+            // The declaration and then its D3D12 register, whose numbers are
+            // `crcbl_shaders`' `declaration_order` lint's to check.
+            let spelled = format!(
+                "[[vk::binding({number}, 0)]]\n{} D3D12_REGISTER(",
+                name.trim_end_matches(';')
+            );
             assert!(
                 source.contains(&spelled),
                 "water.slang does not declare `{name}` at binding {number}"

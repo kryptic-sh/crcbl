@@ -44,6 +44,18 @@
 // several times the octahedral resolution; `crcbl_render::probe_capture::FACE`
 // carries the arithmetic.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the resolve needs that is not a buffer or an image.
 struct OctahedralParams
 {
@@ -70,14 +82,14 @@ struct OctahedralParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<OctahedralParams> params;
+ConstantBuffer<OctahedralParams> params D3D12_REGISTER(b0, space0);
 
 /// `extent * extent` unit directions in `xyz`, one per texel of a layer, row
 /// major — `crcbl_shaders::probe_visibility::texel_direction` evaluated on the
 /// host. `w` is that direction's cube face as a whole number, from
 /// `crcbl_render::probe_capture::face_of`.
 [[vk::binding(1, 0)]]
-StructuredBuffer<float4> directions;
+StructuredBuffer<float4> directions D3D12_REGISTER(t1, space0);
 
 /// Every probe's world → face-clip matrices, six per probe in face order, for
 /// the **whole** capture rather than for this chunk. One buffer for every
@@ -85,19 +97,19 @@ StructuredBuffer<float4> directions;
 /// rewritten between two recorded dispatches would hold only its last contents
 /// by the time either of them ran.
 [[vk::binding(2, 0)]]
-StructuredBuffer<float4x4> faces;
+StructuredBuffer<float4x4> faces D3D12_REGISTER(t2, space0);
 
 /// The distance atlas `probe_capture.slang` filled: `R32Float`, read with
 /// `Load` and no sampler, which is what an unfilterable format allows.
 [[vk::binding(3, 0)]]
-Texture2D<float> distances;
+Texture2D<float> distances D3D12_REGISTER(t3, space0);
 
 /// The moments, as flat floats: `layer_floats` a probe, `row_floats` a row, two
 /// per texel. Copied into the `Rg32Float` array image afterwards rather than
 /// written as a storage image, so the layout question is a buffer offset rather
 /// than a per-backend storage-format capability.
 [[vk::binding(4, 0)]]
-RWStructuredBuffer<float> moments;
+RWStructuredBuffer<float> moments D3D12_REGISTER(u4, space0);
 
 [shader("compute")]
 [numthreads(64, 1, 1)]

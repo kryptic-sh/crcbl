@@ -35,6 +35,18 @@
 // camera and the gust phase arrives already reduced into `0..1`, so no `float`
 // in this file ever holds a world-scale coordinate.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The wind's uniform block, matching `crcbl_shaders::wind::WindParams`.
 struct WindParams
 {
@@ -61,23 +73,23 @@ struct WindParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<WindParams> wind;
+ConstantBuffer<WindParams> wind D3D12_REGISTER(b0, space0);
 
 /// The coarse direction layer: a deflection from `baseDirection` per texel, in
 /// red and green over `-1..1`. Blue and alpha are unread.
 [[vk::binding(1, 0)]]
-Texture2D<float4> windDirectionLayer;
+Texture2D<float4> windDirectionLayer D3D12_REGISTER(t1, space0);
 
 /// The fine intensity layer: a speed multiplier per texel, in red. Zero is
 /// calm, and calm stays calm however hard the gust blows, because the gust is a
 /// factor on this and not a term beside it.
 [[vk::binding(2, 0)]]
-Texture2D<float4> windIntensityLayer;
+Texture2D<float4> windIntensityLayer D3D12_REGISTER(t2, space0);
 
 /// Linear filtering, `repeat` on both axes — the addressing the CPU copy's
 /// wrapped texel indices are the statement of.
 [[vk::binding(3, 0)]]
-SamplerState windSampler;
+SamplerState windSampler D3D12_REGISTER(s3, space0);
 
 /// What the agreement probe needs that is not buffer contents, matching
 /// `crcbl_shaders::wind::ProbeParams`.
@@ -90,15 +102,15 @@ struct WindProbeParams
 };
 
 [[vk::binding(0, 1)]]
-ConstantBuffer<WindProbeParams> probe;
+ConstantBuffer<WindProbeParams> probe D3D12_REGISTER(b0, space1);
 
 /// Camera-relative sample positions in `xyz`; `w` is unread.
 [[vk::binding(1, 1)]]
-StructuredBuffer<float4> points;
+StructuredBuffer<float4> points D3D12_REGISTER(t1, space1);
 
 /// One wind velocity per point in `xyz`, in m/s; `w` is written as zero.
 [[vk::binding(2, 1)]]
-RWStructuredBuffer<float4> velocities;
+RWStructuredBuffer<float4> velocities D3D12_REGISTER(u2, space1);
 
 /// Below this squared length a composed direction has no direction left, and
 /// the base direction answers instead. Matches

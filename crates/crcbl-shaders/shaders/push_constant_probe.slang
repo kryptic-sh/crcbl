@@ -43,6 +43,18 @@
 // even if the declaration is edited by someone who has not read this comment.
 // See this crate's docs, "A push constant costs the WGSL target".
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Words the block carries, the elements `destination` needs, and the length of
 /// `ProbeConstants::values`. Matches
 /// `crcbl_shaders::push_constant_probe::WORD_COUNT`.
@@ -56,7 +68,7 @@ static const uint WORD_COUNT = 4;
 /// what enforces that, and this is the first shipped source to exercise its
 /// push-constant arm.
 [[vk::binding(0, 0)]]
-RWStructuredBuffer<uint> destination;
+RWStructuredBuffer<uint> destination D3D12_REGISTER(u0, space0);
 
 /// The push-constant block, matching
 /// `crcbl_shaders::push_constant_probe::Constants`.
@@ -76,7 +88,7 @@ struct ProbeConstants
 
 /// Declared last, after every numbered binding — see `destination` above.
 [[vk::push_constant]]
-ConstantBuffer<ProbeConstants> constants;
+ConstantBuffer<ProbeConstants> constants D3D12_REGISTER(b0, space64);
 
 /// One group covers the block: a caller dispatches `(1, 1, 1)`.
 ///

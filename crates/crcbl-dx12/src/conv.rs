@@ -129,6 +129,8 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT_R32G32_FLOAT, DXGI_FORMAT_R32G32_UINT, DXGI_FORMAT_R32G32B32A32_FLOAT,
 };
 
+use crate::dxil::RegisterClass;
+
 /// The seam's texel format as DXGI spells it, for a **view**.
 ///
 /// See the module docs for why nothing here approximates, and why a depth
@@ -701,33 +703,19 @@ pub(crate) const fn stencil_op(op: StencilOp) -> D3D12_STENCIL_OP {
 pub(crate) const fn descriptor_range_type(
     kind: BindingKind,
 ) -> Option<D3D12_DESCRIPTOR_RANGE_TYPE> {
-    match kind {
-        BindingKind::UniformBuffer { .. } => Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV),
-        // A read-only storage buffer is an SRV and a writable one a UAV — the
-        // same split `StructuredBuffer` and `RWStructuredBuffer` make in the
-        // HLSL `crcbl-shaders` generates, so the two agree by construction.
-        // A storage image splits the same way and drops its `view_type` and its
-        // `format` doing it: a `D3D12_UNORDERED_ACCESS_VIEW_DESC` carries both,
-        // and it is written when the view is created rather than when the range
-        // is declared — see `crate::device`'s view creation.
-        BindingKind::StorageBuffer { read_only, .. }
-        | BindingKind::StorageImage { read_only, .. } => Some(if read_only {
-            D3D12_DESCRIPTOR_RANGE_TYPE_SRV
-        } else {
-            D3D12_DESCRIPTOR_RANGE_TYPE_UAV
-        }),
-        // The `view_type` and the `sample_type` are both dropped: a descriptor
-        // range names a register and a type, never a dimension or a format. What
-        // the shader reads is decided by the `D3D12_SHADER_RESOURCE_VIEW_DESC`
-        // the SRV was created with — see `crate::device`'s view creation. Only
-        // WebGPU wants either in the layout.
-        BindingKind::SampledImage { .. } => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
-        // `comparison` is dropped with it: a `D3D12_SAMPLER_DESC` decides
-        // whether it compares through its `ComparisonFunc` and a `_COMPARISON_`
-        // filter, which is `sampler_desc` below reading `SamplerDesc::compare`.
-        // A `SamplerComparisonState` and a `SamplerState` occupy the same `s#`
-        // register space and the same heap.
-        BindingKind::Sampler { .. } => None,
+    // The register file is `crate::root::class_of`'s answer, and the range
+    // type is that answer in D3D12's spelling. Everything else about the kind
+    // is dropped: a descriptor range names a register and a type, never a
+    // dimension or a format. A storage image's `view_type` and `format` are
+    // written when its UAV is created, an image's `view_type` and
+    // `sample_type` when its SRV is, and a sampler's `comparison` by
+    // `sampler_desc` below reading `SamplerDesc::compare` — see
+    // `crate::device`'s view creation.
+    match crate::root::class_of(kind) {
+        RegisterClass::Cbv => Some(D3D12_DESCRIPTOR_RANGE_TYPE_CBV),
+        RegisterClass::Srv => Some(D3D12_DESCRIPTOR_RANGE_TYPE_SRV),
+        RegisterClass::Uav => Some(D3D12_DESCRIPTOR_RANGE_TYPE_UAV),
+        RegisterClass::Sampler => None,
     }
 }
 

@@ -33,6 +33,18 @@
 //   level's kernel — so spending taps on a better kernel per level buys much
 //   less than another level does.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass takes from the CPU — `bloom_down.slang`'s block, member
 /// for member.
 ///
@@ -55,13 +67,13 @@ struct BloomParams
 // Declaration order is binding order and it is load-bearing on Metal — see
 // `crcbl_shaders::declaration_order`, which lints it over every source.
 [[vk::binding(0, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t0, space0);
 
 [[vk::binding(1, 0)]]
-SamplerState sourceSampler;
+SamplerState sourceSampler D3D12_REGISTER(s1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<BloomParams> params;
+ConstantBuffer<BloomParams> params D3D12_REGISTER(b2, space0);
 
 struct FullscreenOutput
 {

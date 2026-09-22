@@ -49,6 +49,18 @@
 // counter-clockwise in framebuffer space — matching `FrontFace::Ccw`, exactly
 // as `crcbl_shaders::triangle::VERTICES` does.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One pulled vertex, in the `std430` layout
 /// `crcbl_shaders::mesh_shader::vertex_bytes` writes: two `float4`s, 32 bytes,
 /// no padding. The same shape `triangle.slang`'s `Vertex` has, and a separate
@@ -65,7 +77,7 @@ struct Vertex
 /// storage buffer, matching `BindingKind::StorageBuffer { read_only: true }`
 /// with `ShaderStages::MESH` visibility on the Rust side.
 [[vk::binding(0, 0)]]
-StructuredBuffer<Vertex> vertices;
+StructuredBuffer<Vertex> vertices D3D12_REGISTER(t0, space0);
 
 /// What the mesh stage emits: the same two fields, with the semantics the
 /// rasteriser reads.

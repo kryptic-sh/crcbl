@@ -78,6 +78,18 @@
 // the parameter block, and the two that share a bind-group layout declare the
 // same four resources in the same order.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the CMAA2 passes take from the CPU.
 ///
 /// `crcbl_shaders::cmaa2::Cmaa2Params` is the Rust mirror and
@@ -100,7 +112,7 @@ struct Cmaa2Params
 // points — `crcbl_render::cmaa2` builds exactly one.
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<Cmaa2Params> params;
+ConstantBuffer<Cmaa2Params> params D3D12_REGISTER(b0, space0);
 
 /// The tonemapped frame, at this tier's own extent.
 ///
@@ -108,7 +120,7 @@ ConstantBuffer<Cmaa2Params> params;
 /// fetch this tier makes is a whole texel read for its own value, which is what
 /// a filtered tap would destroy.
 [[vk::binding(1, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t1, space0);
 
 /// `[pixel]`: which of a pixel's two owned boundaries carry an edge.
 ///
@@ -119,7 +131,7 @@ Texture2D<float4> source;
 ///
 /// Written whole by `edgesMain`, so nothing clears it.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> edges;
+RWStructuredBuffer<uint> edges D3D12_REGISTER(u2, space0);
 
 /// `[pixel * ACCUM_WORDS]`: the fixed-point accumulation, three colour words
 /// and a weight word per pixel.
@@ -129,7 +141,7 @@ RWStructuredBuffer<uint> edges;
 /// there is no race to separate out, and `cmaa2_shapes.slang` — the only thing
 /// that adds to them — runs in a later dispatch.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<Atomic<uint> > accum;
+RWStructuredBuffer<Atomic<uint> > accum D3D12_REGISTER(u3, space0);
 
 /// Invocations per workgroup, matching `crcbl_shaders::cmaa2::WORKGROUP_SIZE`.
 static const uint WORKGROUP_SIZE = 64;

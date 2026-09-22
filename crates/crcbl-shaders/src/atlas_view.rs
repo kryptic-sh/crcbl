@@ -200,7 +200,7 @@ mod tests {
             );
         }
         assert!(
-            SOURCE.contains("ConstantBuffer<AtlasViewParams> params;"),
+            SOURCE.contains("ConstantBuffer<AtlasViewParams> params D3D12_REGISTER("),
             "atlas_view.slang does not bind the block `to_bytes` writes"
         );
     }

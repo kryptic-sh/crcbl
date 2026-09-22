@@ -65,6 +65,18 @@
 // artifact, so an include would be a file whose edits nothing downstream
 // notices. The fullscreen triangle below is `tonemap.slang`'s, copied.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass takes from the CPU.
 ///
 /// `crcbl_shaders::fxaa::FxaaParams` is the Rust mirror and
@@ -94,7 +106,7 @@ struct FxaaParams
 
 /// The tonemapped frame, at this pass's own extent.
 [[vk::binding(0, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t0, space0);
 
 /// A **linear** sampler, and the renderer creates it that way — unlike
 /// `tonemap.slang`'s nearest one. This pass samples at fractional offsets by
@@ -102,10 +114,10 @@ Texture2D<float4> source;
 /// amount it computed, so nearest filtering would round every one of those
 /// offsets back to the pixel it started from and the pass would be a blit.
 [[vk::binding(1, 0)]]
-SamplerState sourceSampler;
+SamplerState sourceSampler D3D12_REGISTER(s1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<FxaaParams> params;
+ConstantBuffer<FxaaParams> params D3D12_REGISTER(b2, space0);
 
 struct FullscreenOutput
 {

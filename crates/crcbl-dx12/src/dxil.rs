@@ -36,23 +36,19 @@
 //! `crcbl-shaders` commits does say — see this module's tests, which read the
 //! real files.
 //!
-//! # The register a binding lands on is *not* its binding number
+//! # The register a binding lands on is its binding number
 //!
-//! `[[vk::binding(binding, set)]]` is a Vulkan attribute. Slang's HLSL output
-//! ignores it and lets `dxc` assign registers **per class, in declaration order,
-//! across the whole source file, all in space 0** — so a set holding a
+//! Every source in `crcbl-shaders` declares each resource's D3D12 register
+//! beside its `[[vk::binding(binding, set)]]`, as
+//! `register(<class><binding>, space<set>)`, so a set holding a
 //! `ConstantBuffer`, a `StructuredBuffer` and an `RWStructuredBuffer` at
-//! bindings 0, 1 and 2 is `b0`, `t0` and `u0` in the artifact, not `b0`, `t1`
-//! and `u2`.
+//! bindings 0, 1 and 2 of set 1 is `b0`, `t1` and `u2` in space 1 — and a
+//! push-constant block is `b0` in `crate::root::PUSH_CONSTANT_SPACE`.
+//! `crate::root::assign_registers` is the same rule on the root-signature side.
 //!
-//! [`Registers`] is that rule, and `crcbl_dx12::binding` runs it over a pipeline
-//! layout's sets in order. It is correct only because `crcbl-shaders`'
-//! `declaration_order` lint already requires every source to declare its
-//! resources in ascending `(set, binding)` order — the same guarantee
-//! `crcbl-mtl` depends on for its flat argument tables, and for the same reason.
-//!
-//! This module's tests check the rule against the resource table in every
-//! committed container, so it is measured rather than asserted.
+//! This module's tests hold the resource table of every committed container to
+//! the bindings its own SPIR-V declares, so the rule is measured rather than
+//! asserted.
 
 use crcbl_hal::{HalError, ShaderModuleDesc, ShaderSources, ShaderStages};
 #[cfg(target_os = "windows")]
@@ -211,10 +207,10 @@ impl Dxil {
     /// declared buffer this stage does not use is not compared — one layout
     /// serves every stage, and each container declares only what it reads.
     ///
-    /// The register a binding is compared at is the one `crate::binding`
-    /// assigned it, which is where the module docs' counting rule lives; a
-    /// layout whose registers do not line up with the container fails here
-    /// naming both, rather than at a draw.
+    /// The register and space a binding is compared at are the ones
+    /// `crate::binding` assigned it — its binding number and its set; a layout
+    /// whose registers do not line up with the container fails here naming both,
+    /// rather than at a draw.
     ///
     /// # Errors
     ///
@@ -241,7 +237,9 @@ impl Dxil {
                 RegisterClass::Cbv | RegisterClass::Sampler => continue,
             };
             let Some(shader) = structured.iter().find(|buffer| {
-                buffer.class == class && buffer.space == 0 && buffer.register == layout.register
+                buffer.class == class
+                    && buffer.space == layout.set
+                    && buffer.register == layout.register
             }) else {
                 continue;
             };
@@ -531,7 +529,7 @@ pub(crate) enum RegisterClass {
 /// each container to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StorageRegister {
-    /// The set, for the message.
+    /// The set, which is also the register space.
     pub(crate) set: u32,
     /// The seam's binding number, for the message.
     pub(crate) binding: u32,
@@ -543,36 +541,86 @@ pub(crate) struct StorageRegister {
     pub(crate) stride: u32,
 }
 
-/// The next free register in each class, as `dxc` counts them.
-///
-/// One of these is threaded through a whole pipeline layout — see the module
-/// docs on why the count does not restart per set.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Registers {
-    cbv: u32,
-    srv: u32,
-    uav: u32,
-    sampler: u32,
+/// One record of a container's `PSV0` resource table.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PsvResource {
+    /// The register file it is declared in.
+    pub(crate) class: RegisterClass,
+    /// The register space.
+    pub(crate) space: u32,
+    /// The first register it covers.
+    pub(crate) lower: u32,
+    /// The last register it covers — above `lower` for an array of
+    /// descriptors, and `u32::MAX` for an unbounded one.
+    pub(crate) upper: u32,
+    /// `PSVResourceKind`: what the shader declared it as — a `Texture2D`, a
+    /// `StructuredBuffer`, a `cbuffer`. `None` for a record too old to carry
+    /// it.
+    pub(crate) kind: Option<u32>,
 }
 
-impl Registers {
-    /// Takes `count` consecutive registers in `class` and returns the first.
-    ///
-    /// `count` is a *root signature* range length, so an unbounded range arrives
-    /// as [`u32::MAX`]: it consumes the rest of its class, and the saturating
-    /// add is what makes a binding declared after one land somewhere legal
-    /// rather than wrapping back onto a register the unbounded range covers.
-    pub(crate) const fn take(&mut self, class: RegisterClass, count: u32) -> u32 {
-        let slot = match class {
-            RegisterClass::Cbv => &mut self.cbv,
-            RegisterClass::Srv => &mut self.srv,
-            RegisterClass::Uav => &mut self.uav,
-            RegisterClass::Sampler => &mut self.sampler,
-        };
-        let base = *slot;
-        *slot = slot.saturating_add(count);
-        base
+/// A container's `PSV0` resource table: every resource the entry point reads,
+/// where, and as what.
+///
+/// Test-only, because the runtime path never needs it: the root signature is
+/// built from the caller's declared layout, and this is how that layout is
+/// checked against the artifact rather than a second source for it.
+///
+/// The table follows the runtime info: a `u32` count, a `u32` stride, then
+/// that many records. Each opens `ResType`, `Space`, `LowerBound`,
+/// `UpperBound` — `PSVResourceBindInfo0` — and a record of 24 bytes or more
+/// is a `PSVResourceBindInfo1`, which goes on with `ResKind` and `ResFlags`.
+/// `PSVResourceType` numbers sampler 1, CBV 2, the three SRV kinds 3–5 and
+/// the UAV kinds from 6. All of it is fixed by the container format.
+///
+/// # Panics
+///
+/// On a container without a well-formed `PSV0` part, which no committed
+/// artifact is.
+#[cfg(test)]
+pub(crate) fn psv_resources(bytes: &[u8]) -> Vec<PsvResource> {
+    /// Bytes of a `PSVResourceBindInfo1`, the first record to carry a kind.
+    const BIND_INFO_1: usize = 24;
+    let part = parts(bytes)
+        .expect("a well-formed part table")
+        .into_iter()
+        .find(|part| part.fourcc == b"PSV0")
+        .expect("a PSV0 part");
+    let info_size = word(bytes, part.data).expect("a runtime info size") as usize;
+    let mut at = part.data + 4 + info_size;
+    let count = word(bytes, at).expect("a resource count") as usize;
+    at += 4;
+    if count == 0 {
+        return Vec::new();
     }
+    let stride = word(bytes, at).expect("a resource record stride") as usize;
+    at += 4;
+    (0..count)
+        .map(|index| {
+            let record = at + index * stride;
+            let class = match word(bytes, record).expect("a resource type") {
+                1 => RegisterClass::Sampler,
+                2 => RegisterClass::Cbv,
+                3..=5 => RegisterClass::Srv,
+                other => {
+                    assert!(
+                        other >= 6,
+                        "PSVResourceType {other} is not a bound resource"
+                    );
+                    RegisterClass::Uav
+                }
+            };
+            PsvResource {
+                class,
+                space: word(bytes, record + 4).expect("a register space"),
+                lower: word(bytes, record + 8).expect("a lower bound"),
+                upper: word(bytes, record + 12).expect("an upper bound"),
+                kind: (stride >= BIND_INFO_1)
+                    .then(|| word(bytes, record + 16).expect("a resource kind")),
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -978,443 +1026,23 @@ mod tests {
         assert_eq!(parsed.numthreads(), None);
     }
 
-    /// One row of [`transcribed_cases`]: the source's name, the shader it names,
-    /// the entry points whose containers are read, and the register classes the
-    /// source's bindings take in ascending `(set, binding)` order.
-    type TranscribedCase = (
-        &'static str,
-        &'static crcbl_shaders::Shader,
-        &'static [&'static str],
-        &'static [RegisterClass],
-    );
-
-    /// The sources whose resource declarations are transcribed here, each with
-    /// the entry points that together reach all of them.
+    /// **Every committed container declares each resource at the register and
+    /// space its own SPIR-V's binding and set name**, over every shader that
+    /// commits one — the rule `crate::root::assign_registers` builds every root
+    /// signature on, measured against the artifacts rather than restated.
     ///
-    /// Every entry point of a row is named because `dxc` numbers across the
-    /// whole source while a container records only what its own entry point
-    /// reached — so the union over a row's containers is what that source
-    /// declares, and only then can a hand-written class list be compared with
-    /// it as a whole.
+    /// The SPIR-V is the other side because it is compiled from the same
+    /// source, and `[[vk::binding(binding, set)]]` is what reaches it: a
+    /// container whose resource is not at `(set, binding)` of some decorated
+    /// SPIR-V resource is a container whose register a root signature built
+    /// from the layout would miss. The one resource with no binding is a
+    /// push-constant block, which must be `b0` in its own space.
     ///
-    /// **That is also what decides which sources can be here at all**, and it is
-    /// a narrower set than "every shader that commits a container": a source may
-    /// declare a resource that *no* compiled entry point reaches, and `dxc`
-    /// reserves its register while leaving it out of every container's table.
-    /// `mesh_cluster` is the shipped counterexample — its containers' `t`
-    /// registers have interior gaps, which
-    /// [`registers_are_dense_from_zero_in_every_committed_container`] names and
-    /// asserts. A transcription of that source's declarations could not match
-    /// any union of its containers, so the rule is held over it by the density
-    /// test rather than by a row here.
-    fn transcribed_cases() -> &'static [TranscribedCase] {
-        use RegisterClass::{Cbv, Sampler, Srv, Uav};
-
-        // A `static` rather than a temporary, because a row borrows the shader
-        // `crcbl-shaders` publishes and a temporary array of those does not
-        // outlive this call.
-        static CASES: &[TranscribedCase] = &[
-            (
-                "bindless_probe",
-                &crcbl_shaders::BINDLESS_PROBE,
-                &["computeMain"],
-                // The written destination in set 0 and the descriptor array in
-                // set 1 — the one shipped source that declares an array of
-                // descriptors, so its `t0` opens a range of
-                // `crcbl_shaders::bindless_probe::SOURCE_CAPACITY` registers
-                // rather than covering one. The class list is unaffected: a
-                // range is one resource record whatever its length, and this
-                // test reads each record's lower bound.
-                //
-                // It also earns its place in `resource_table`'s space assertion
-                // below. The array used to be unbounded and needed a `register`
-                // annotation to stay out of `space1`, because Slang keeps an
-                // unbounded range out of everything else's way; bounded and
-                // inside a `ParameterBlock` it lands in space 0 on its own, and
-                // that assertion is now the only thing holding it there.
-                &[Uav, Srv],
-            ),
-            (
-                "cmaa2_edges",
-                &crcbl_shaders::CMAA2_EDGES,
-                &["edgesMain"],
-                // The block, the tonemapped frame it reads, and the two working
-                // buffers — in declaration order, which is binding order, so
-                // `b0`, `t0`, `u0` and `u1`. Both buffers are UAVs, where
-                // `exposure` above has one SRV in the middle of its run, because
-                // both are written somewhere in the tier.
-                //
-                // The whole declaration, with nothing left over: this source's
-                // one entry point reaches every resource it declares, so there
-                // is no register `dxc` reserves and drops and no gap for
-                // [`registers_are_dense_from_zero_in_every_committed_container`]
-                // to refuse. `cmaa2_shapes` below declares the same four,
-                // because one bind-group layout serves both.
-                &[Cbv, Srv, Uav, Uav],
-            ),
-            (
-                "cmaa2_shapes",
-                &crcbl_shaders::CMAA2_SHAPES,
-                &["shapesMain"],
-                // The same four in the same order, because one bind-group
-                // layout serves both files and Metal takes its indices from the
-                // declarations — see `crcbl_shaders::declaration_order`. A row
-                // of its own because the two containers are compiled separately
-                // and nothing else compares them: that the two sources agree is
-                // something a reader has to check, and this is where it is.
-                &[Cbv, Srv, Uav, Uav],
-            ),
-            (
-                "cmaa2_apply",
-                &crcbl_shaders::CMAA2_APPLY,
-                &["vertexMain", "fragmentMain"],
-                // The resolve's own layout: the tonemapped frame at `t0`, the
-                // accumulation it reads **read-only** at `t1` — which is why it
-                // is an SRV here where the same buffer is a UAV in the two rows
-                // above — and the block at `b0`.
-                &[Srv, Srv, Cbv],
-            ),
-            (
-                "compute_probe",
-                &crcbl_shaders::COMPUTE_PROBE,
-                &["computeMain"],
-                &[Cbv, Srv, Uav],
-            ),
-            (
-                "cull",
-                &crcbl_shaders::CULL,
-                // The frustum cull reaches set 0 alone; the two occlusion phases
-                // reach the farthest-depth pyramid's eight levels in set 1 too,
-                // each a depth texture read with `Load`.
-                &["computeMain", "occlusionMain", "lateMain"],
-                &[
-                    Cbv, Srv, Srv, Uav, Uav, Srv, Srv, Srv, Srv, Srv, Srv, Srv, Srv,
-                ],
-            ),
-            (
-                "draw_gen",
-                &crcbl_shaders::DRAW_GEN,
-                // Three entry points over one layout; `binMain` alone reaches
-                // every binding, and the other two a share of them.
-                &[
-                    "binMain",
-                    "startsMain",
-                    "scatterMain",
-                    "lateScatterMain",
-                    "lateFinishMain",
-                ],
-                // **Eight storage bindings and no more**, which is what a
-                // WebGPU device guarantees per stage — see that source's
-                // header. Read only: the instance array (1), the mesh table
-                // (2), the culling statistics (3) and every host-written table
-                // in one buffer (4). Writable: the survivor list, its routes,
-                // the per-bucket runs and their starts (5), the indirect
-                // arguments (6), the draw counts beside the mesh-dispatch
-                // extents (7), and `docs/plan/25-lod.md`'s hysteresis state
-                // (8).
-                &[Cbv, Srv, Srv, Srv, Srv, Uav, Uav, Uav, Uav],
-            ),
-            (
-                "fxaa",
-                &crcbl_shaders::FXAA,
-                &["vertexMain", "fragmentMain"],
-                // The tonemapped frame, the linear sampler that reads it, and
-                // the edge-threshold block — the same three in the same order as
-                // `tonemap` above, so `t0`, `s0` and `b0`.
-                &[Srv, Sampler, Cbv],
-            ),
-            (
-                "hiz",
-                &crcbl_shaders::HIZ,
-                // Both reductions: the reflection march's nearest one and the
-                // occlusion cull's farthest one, over the same one binding.
-                &["vertexMain", "fragmentMain", "farthestMain"],
-                // One binding and no sampler — the reduction fetches by integer
-                // texel, so the level being reduced is `t0` and there is nothing
-                // else in the set.
-                &[Srv],
-            ),
-            (
-                "mesh",
-                &crcbl_shaders::MESH,
-                &["vertexMain", "depthVertexMain", "fragmentMain"],
-                // The tail is §3.2's material table and the texture page it
-                // indexes, in declaration order: the table (binding 6), the
-                // `Texture2DArray` of base colours (7) and the sampler that
-                // reads it (8). The sampler is the row's first `Sampler`, so it
-                // takes `s0` while the images go on counting `t`s.
-                //
-                // Then topic 18's sun cascades, at bindings 15 and 16 — the gap
-                // is `mesh_cluster.slang`'s and D3D12 does not see it, because
-                // a register is counted per class in declaration order and not
-                // taken from the binding number. So the shadow atlas is `t6`
-                // and its **comparison** sampler is `s1`: HLSL puts a
-                // `SamplerComparisonState` in the same `s#` space as a
-                // `SamplerState`, which is why it is one more `Sampler` here
-                // rather than a class of its own.
-                //
-                // Then topic 18's light list and froxel grid, at bindings 20 and
-                // 21 — another gap `mesh_cluster.slang` owns and D3D12 likewise
-                // does not see, so they are `t7` and `t8`. Both are
-                // `StructuredBuffer` rather than `RW`, because this file only
-                // reads what `light_cluster.slang` wrote.
-                //
-                // Then that file's screen-space occlusion channel at binding
-                // 22, and therefore `t9`: an ordinary `Texture2D<float>` read by
-                // `Load`, so it takes no sampler beside it.
-                //
-                // Then the same topic's irradiance probe table at binding 23,
-                // and therefore `t10` — a read-only `StructuredBuffer` like the
-                // light list, appended past the occlusion channel because this
-                // whole list only ever grows at its top.
-                //
-                // Then the split-sum `DFG` table at binding 25, and therefore
-                // `t11`: an `Rgba8Unorm` `Texture2D<float4>` read by `Load`, so
-                // it takes no sampler beside it either. Binding 24 belongs to
-                // `mesh_cluster.slang` and is another gap D3D12 does not see.
-                //
-                // Then §2's normal page at binding 26, and therefore `t12`: a
-                // second `Texture2DArray` beside the base-colour one, read
-                // through the **same** sampler — which is why it adds an `Srv`
-                // here and no `Sampler`.
-                //
-                // Then `docs/plan/44-lighting.md`'s area-light table at binding
-                // 27, and therefore `t13`: an `Rgba16Float`
-                // `Texture2D<float4>`, read by `Load` like the `DFG` pair beside
-                // it and taking no sampler for the same reason.
-                //
-                // Then `docs/plan/45-shadows.md`'s contact-shadow channel at
-                // binding 28, and therefore `t14`: an `R8Unorm`
-                // `Texture2D<float>` read by `Load`, so it takes no sampler
-                // either — the occlusion channel's shape at the top of the list
-                // rather than a new one.
-                //
-                // Then `docs/plan/50-irradiance-probes.md`'s per-probe
-                // visibility maps at binding 29, and therefore `t15`: an
-                // `Rg32Float` `Texture2DArray<float4>` read by `Load`, which is
-                // a second `Texture2DArray` taking no sampler — the normal
-                // page's shape without that row's shared sampler, because an
-                // unfilterable format has none to share.
-                //
-                // Last are §2's packed metallic-roughness-occlusion page at
-                // binding 30 and its emissive page at 31, and therefore `t16`
-                // and `t17`: two more `Texture2DArray`s beside the normal one,
-                // both read through the **same** sampler the base-colour page
-                // uses — which is why they add two `Srv`s here and no
-                // `Sampler`.
-                &[
-                    Cbv, Srv, Srv, Cbv, Srv, Srv, Srv, Srv, Sampler, Srv, Sampler, Srv, Srv, Srv,
-                    Srv, Srv, Srv, Srv, Srv, Srv, Srv, Srv,
-                ],
-            ),
-            (
-                "exposure",
-                &crcbl_shaders::EXPOSURE,
-                &["clearMain", "histogramMain", "reduceMain"],
-                // The block, the scene target it bins, the bins, the exposure it
-                // reduces to and the frame before's exposure — in declaration
-                // order, which is binding order, so `b0`, `t0`, `u0`, `u1` and
-                // `t1`. The read-only buffer is an SRV and the two written ones
-                // are UAVs, which is the whole reason the classes interleave.
-                &[Cbv, Srv, Uav, Uav, Srv],
-            ),
-            (
-                "light_cluster",
-                &crcbl_shaders::LIGHT_CLUSTER,
-                &["computeMain"],
-                // The parameters, the light list it reads, the grid it fills and
-                // the culling statistics it counts overflow into.
-                &[Cbv, Srv, Uav, Uav],
-            ),
-            (
-                "sprite",
-                &crcbl_shaders::SPRITE,
-                &["vertexMain", "fragmentMain"],
-                // Set 0 then set 1: the sheet is `t1` in space 0, not `t0` in
-                // space 1.
-                &[Cbv, Srv, Srv, Sampler],
-            ),
-            (
-                "tonemap",
-                &crcbl_shaders::TONEMAP,
-                &["vertexMain", "fragmentMain"],
-                // The scene target, the sampler that reads it, the exposure
-                // block, and the buffer auto-exposure measured into — in
-                // declaration order, which is binding order, so `t0`, `s0`, `b0`
-                // and `t1`.
-                &[Srv, Sampler, Cbv, Srv],
-            ),
-            (
-                "triangle",
-                &crcbl_shaders::TRIANGLE,
-                &["vertexMain", "fragmentMain"],
-                &[Srv],
-            ),
-            (
-                "ui",
-                &crcbl_shaders::UI,
-                &["vertexMain", "fragmentMain"],
-                // The bitmap font's atlas and its sampler, the vertices, the
-                // constants, the image atlas and its sampler, the glyph pages.
-                &[Srv, Sampler, Srv, Cbv, Srv, Sampler, Srv],
-            ),
-        ];
-
-        CASES
-    }
-
-    /// **The register each binding lands on is what the committed container
-    /// declares**, checked against the resource tables of every container
-    /// [`transcribed_cases`] names.
-    ///
-    /// The rule under test is the module docs': per class, in ascending
-    /// `(set, binding)` order, across the whole source. It matters because a
-    /// root signature whose ranges name registers the shader does not use is
-    /// rejected by pipeline creation — on a Windows runner, one CI round trip
-    /// away from here.
-    ///
-    /// **What the table covers is the rule's shapes, not the shader set.** A row
-    /// is a hand transcription of one source's declarations, so rows are added
-    /// for what they can get wrong rather than for coverage: a set holding a
-    /// single resource class, where the mistake this replaced was invisible
-    /// (`hiz`, `triangle`); classes interleaved along one set, where a counter
-    /// that did not restart per class diverges (`exposure`, `tonemap`, `ui`);
-    /// bindings spread across **two** sets and numbered end to end in space 0,
-    /// which is what the running counter reproduces and a per-set one could not
-    /// (`sprite`); an array of descriptors, whose `t0` opens a range rather than
-    /// covering one register (`bindless_probe`); and the widest tables shipped,
-    /// where a binding-number gap the source leaves is one D3D12 does not see
-    /// (`mesh`, `draw_gen`).
-    ///
-    /// The shaders with no row are not unchecked. Every committed container is
-    /// read by [`registers_are_dense_from_zero_in_every_committed_container`],
-    /// which holds the same rule in the form that needs no transcription — and
-    /// which is where a source whose declarations a transcription could not
-    /// match has to be held. [`transcribed_cases`] says why that set is narrower
-    /// than the set of shaders that commit a container.
+    /// Each container declares only what its entry point reads, so the check
+    /// is that every record is **among** the SPIR-V's slots — and, so that it
+    /// cannot pass vacuously, that the records it checked are not empty.
     #[test]
-    fn registers_are_assigned_per_class_in_declaration_order() {
-        let cases = transcribed_cases();
-        assert!(!cases.is_empty(), "nothing to check");
-        for (name, shader, entry_points, classes) in cases {
-            assert!(!entry_points.is_empty(), "{name}: no entry point to read");
-            let mut declared: Vec<(RegisterClass, u32)> = Vec::new();
-            for entry_point in *entry_points {
-                let bytes = shader.dxil(entry_point).unwrap_or_else(|| {
-                    panic!("{name} commits a DXIL container for `{entry_point}`")
-                });
-                for (class, first, _) in resource_table(bytes) {
-                    let binding = (class, first);
-                    if !declared.contains(&binding) {
-                        declared.push(binding);
-                    }
-                }
-            }
-            declared.sort_unstable();
-
-            let mut registers = Registers::default();
-            let mut assigned: Vec<(RegisterClass, u32)> = classes
-                .iter()
-                .map(|class| (*class, registers.take(*class, 1)))
-                .collect();
-            assigned.sort_unstable();
-            // The whole *set*, not membership one at a time: a counter that
-            // never advanced would hand every binding of a class register zero,
-            // and every one of those is a register the container really
-            // declares — so only comparing the collections catches it.
-            assert_eq!(
-                assigned, declared,
-                "{name}: the registers this backend would put in a root signature are not the \
-                 ones the container declares"
-            );
-        }
-    }
-
-    /// A container's `PSV0` resource table: what each binding is, and the run of
-    /// registers it covers as `(class, first, last)`.
-    ///
-    /// The two bounds are both returned because a range is one record whatever
-    /// its length — `bindless_probe`'s descriptor array is the shipped example
-    /// — so the register after it is the *last* bound plus one, and a test
-    /// walking a class's registers in order needs to know where each range ends.
-    ///
-    /// Test-only, because the runtime path never needs it: the root signature is
-    /// built from the caller's declared layout, and this is how that layout is
-    /// checked against the artifact rather than a second source for it.
-    ///
-    /// The table follows the runtime info: a `u32` count, a `u32` stride, then
-    /// that many records, each opening `ResType`, `Space`, `LowerBound`,
-    /// `UpperBound`. `PSVResourceType` numbers sampler 1, CBV 2, the three SRV
-    /// kinds 3–5 and the UAV kinds from 6.
-    fn resource_table(bytes: &[u8]) -> Vec<(RegisterClass, u32, u32)> {
-        let part = parts(bytes)
-            .expect("a well-formed part table")
-            .into_iter()
-            .find(|part| part.fourcc == b"PSV0")
-            .expect("a PSV0 part");
-        let info_size = word(bytes, part.data).expect("a runtime info size") as usize;
-        let mut at = part.data + 4 + info_size;
-        let count = word(bytes, at).expect("a resource count") as usize;
-        at += 4;
-        if count == 0 {
-            return Vec::new();
-        }
-        let stride = word(bytes, at).expect("a resource record stride") as usize;
-        at += 4;
-        (0..count)
-            .map(|index| {
-                let record = at + index * stride;
-                let class = match word(bytes, record).expect("a resource type") {
-                    1 => RegisterClass::Sampler,
-                    2 => RegisterClass::Cbv,
-                    3..=5 => RegisterClass::Srv,
-                    other => {
-                        assert!(
-                            other >= 6,
-                            "PSVResourceType {other} is not a bound resource"
-                        );
-                        RegisterClass::Uav
-                    }
-                };
-                let space = word(bytes, record + 4).expect("a register space");
-                assert_eq!(
-                    space, 0,
-                    "Slang's HLSL output puts every resource in space 0; this one is in {space}"
-                );
-                (
-                    class,
-                    word(bytes, record + 8).expect("a lower bound"),
-                    word(bytes, record + 12).expect("an upper bound"),
-                )
-            })
-            .collect()
-    }
-
-    /// **Every committed container's registers open at zero and count up within
-    /// their class**, over every shader that commits one — the module docs'
-    /// rule in the form that needs no transcription, and so the only check that
-    /// reaches the sources [`transcribed_cases`] has no row for.
-    ///
-    /// What a container alone can be asked: each class the shader uses opens at
-    /// register zero, its ranges ascend and never overlap, and — through
-    /// [`resource_table`]'s own assertion — every record is in space 0. A `dxc`
-    /// that numbered by binding, or per set, or from one counter shared across
-    /// classes would break the first or the second wherever a set holds more
-    /// than one class.
-    ///
-    /// What it cannot be asked is whether anything is *missing*: an interior gap
-    /// is a register `dxc` reserved for a declaration no compiled entry point
-    /// reached, and the container has nothing to compare it with. The one
-    /// shipped source where that happens is named below and **asserted** rather
-    /// than excused — a run where it comes back dense is a run where its
-    /// declarations could be transcribed like every other row's.
-    #[test]
-    fn registers_are_dense_from_zero_in_every_committed_container() {
-        // The one shipped source that declares resources no compiled entry
-        // point reaches. See this test's docs for why that is a gap and not a
-        // broken rule.
-        const GAPPED: &str = "mesh_cluster";
-
+    fn every_container_declares_each_resource_at_its_binding_and_set() {
         let compiled: Vec<&crcbl_shaders::Shader> = crcbl_shaders::ALL
             .iter()
             .copied()
@@ -1422,96 +1050,69 @@ mod tests {
             .collect();
         assert!(!compiled.is_empty(), "no shader commits a DXIL container");
 
-        // The transcribed table is a share of that set, and each row's label is
-        // the shader it names — a row labelled one shader while reading
-        // another's containers would compare a transcription with the wrong
-        // artifact and still pass.
-        for (name, shader, ..) in transcribed_cases() {
-            assert_eq!(*name, shader.name(), "a row's label is not its shader");
-            assert!(
-                compiled.iter().any(|it| it.name() == *name),
-                "{name} is in the register table but commits no DXIL container"
-            );
-        }
-
-        let mut gapped: Vec<&str> = Vec::new();
+        let mut checked = 0;
         for shader in compiled {
-            let mut declared: Vec<(RegisterClass, u32, u32)> = Vec::new();
-            for (_, bytes) in shader.dxil_containers() {
-                for record in resource_table(bytes) {
-                    if !declared.contains(&record) {
-                        declared.push(record);
-                    }
-                }
-            }
-            for class in [
-                RegisterClass::Cbv,
-                RegisterClass::Srv,
-                RegisterClass::Uav,
-                RegisterClass::Sampler,
-            ] {
-                let mut ranges: Vec<(u32, u32)> = declared
-                    .iter()
-                    .filter(|(it, ..)| *it == class)
-                    .map(|(_, first, last)| (*first, *last))
-                    .collect();
-                if ranges.is_empty() {
-                    continue;
-                }
-                ranges.sort_unstable();
-                let mut next = 0;
-                for (first, last) in ranges {
+            let slots = crcbl_shaders::descriptor_slots(shader.spirv());
+            for (entry_point, bytes) in shader.dxil_containers() {
+                for record in psv_resources(bytes) {
+                    checked += 1;
+                    let pushed = record.class == RegisterClass::Cbv
+                        && record.space == crate::root::PUSH_CONSTANT_SPACE
+                        && record.lower == 0;
                     assert!(
-                        first >= next,
-                        "{}: {class:?} register {first} is claimed twice",
-                        shader.name()
+                        pushed || slots.contains(&(record.space, record.lower)),
+                        "{}:{entry_point}: the container declares {:?} register {} in space {}, \
+                         and the SPIR-V decorates nothing at set {} binding {}; its (set, \
+                         binding)s are {slots:?}",
+                        shader.name(),
+                        record.class,
+                        record.lower,
+                        record.space,
+                        record.space,
+                        record.lower,
                     );
-                    assert!(
-                        last >= first,
-                        "{}: a {class:?} range ends before it starts",
-                        shader.name()
-                    );
-                    // A class opening above zero counts here too: `next` starts
-                    // at zero, so the first range leaving it behind is a gap.
-                    if first > next {
-                        gapped.push(shader.name());
-                    }
-                    next = last.saturating_add(1);
                 }
             }
         }
-        gapped.sort_unstable();
-        gapped.dedup();
-        assert_eq!(
-            gapped,
-            [GAPPED],
-            "the sources whose containers leave a register unaccounted for are not the one this \
-             test names"
-        );
+        assert!(checked > 0, "no container declared a resource at all");
     }
 
-    /// Each class counts on its own, and an unbounded range takes the rest of
-    /// its own.
+    /// **The walk reads what the containers say, not what the rule wants.**
+    ///
+    /// The test above passes for any container whose registers are a subset of
+    /// its bindings, so it is held to two answers read by hand: `sprite`'s
+    /// sheet is set 1 binding 0, which is `t0` in space 1 — a count run across
+    /// the sets in space 0 would have made it `t1` in space 0 — and
+    /// `mesh_cluster`'s task stage reads `clusters` at binding 32, which the
+    /// counting rule put at `t6`, the register `mesh.slang`'s fragment stage
+    /// gave the shadow atlas.
     #[test]
-    fn each_register_class_counts_independently() {
-        let mut registers = Registers::default();
-        assert_eq!(registers.take(RegisterClass::Cbv, 1), 0);
-        assert_eq!(
-            registers.take(RegisterClass::Srv, 1),
-            0,
-            "t restarts at zero"
+    fn the_resource_table_names_the_registers_the_bindings_do() {
+        let fragment = crcbl_shaders::SPRITE
+            .dxil("fragmentMain")
+            .expect("sprite commits a fragment container");
+        assert!(
+            psv_resources(fragment)
+                .iter()
+                .any(|record| record.class == RegisterClass::Srv
+                    && record.space == 1
+                    && record.lower == 0),
+            "sprite's sheet is not t0 in space 1: {:?}",
+            psv_resources(fragment)
         );
-        assert_eq!(registers.take(RegisterClass::Srv, 2), 1);
-        assert_eq!(registers.take(RegisterClass::Srv, 1), 3);
-        assert_eq!(registers.take(RegisterClass::Uav, 1), 0, "u restarts too");
-        assert_eq!(registers.take(RegisterClass::Sampler, 1), 0);
 
-        // An unbounded range consumes the rest of its class, and the next
-        // binding of that class lands at the ceiling rather than wrapping onto
-        // a register the unbounded range already covers.
-        let mut unbounded = Registers::default();
-        assert_eq!(unbounded.take(RegisterClass::Srv, u32::MAX), 0);
-        assert_eq!(unbounded.take(RegisterClass::Srv, 1), u32::MAX);
+        let task = crcbl_shaders::MESH_CLUSTER
+            .dxil("taskMain")
+            .expect("mesh_cluster commits a task container");
+        let records = psv_resources(task);
+        assert!(
+            records
+                .iter()
+                .any(|record| record.class == RegisterClass::Srv
+                    && record.space == 0
+                    && record.lower == 32),
+            "mesh_cluster's task stage does not read clusters at t32: {records:?}"
+        );
     }
 
     /// **A declared storage stride is held to the container at its register.**

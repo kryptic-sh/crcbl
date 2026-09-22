@@ -43,6 +43,18 @@
 // `crcbl_shaders::fog::the_shader_spells_the_same_constants` enumerates every
 // source carrying it and is what stops the copies drifting.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Depth slices a perspective grid has, matching
 /// `crcbl_shaders::light::CLUSTER_DEPTH_SLICES`.
 static const uint CLUSTER_DEPTH_SLICES = 24;
@@ -262,7 +274,7 @@ struct VolumetricParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<VolumetricParams> params;
+ConstantBuffer<VolumetricParams> params D3D12_REGISTER(b0, space0);
 
 /// One `float4` per froxel, and it means two different things — see the header.
 ///
@@ -271,7 +283,7 @@ ConstantBuffer<VolumetricParams> params;
 /// After `integrateMain`: `rgb` is the radiance accumulated **in front of**
 /// that slice and `a` is the transmittance through all of it.
 [[vk::binding(1, 0)]]
-RWStructuredBuffer<float4> volumetrics;
+RWStructuredBuffer<float4> volumetrics D3D12_REGISTER(u1, space0);
 
 /// The sun's cascades, in the atlas `crcbl_render::shadow` fills — the same
 /// image `mesh.slang` reads at its own binding 15.
@@ -280,7 +292,7 @@ RWStructuredBuffer<float4> volumetrics;
 /// through a depth sample type, and the WGSL artifact declares
 /// `texture_depth_2d`.
 [[vk::binding(2, 0)]]
-DepthTexture2D shadow_atlas;
+DepthTexture2D shadow_atlas D3D12_REGISTER(t2, space0);
 
 /// `SamplerComparisonState`, so a tap returns the *fraction* the hardware
 /// filtered rather than a depth to compare on this side.
@@ -289,7 +301,7 @@ DepthTexture2D shadow_atlas;
 /// asks for no derivatives and is allowed outside a fragment shader on all four
 /// targets, where the implicit-LOD `SampleCmp` is not.
 [[vk::binding(3, 0)]]
-SamplerComparisonState shadow_sampler;
+SamplerComparisonState shadow_sampler D3D12_REGISTER(s3, space0);
 
 /// What each froxel's lights put into it, written by `scatterMain` and read by
 /// `volumetric_composite.slang`: the radiance the punctual lights in its list
@@ -305,20 +317,20 @@ SamplerComparisonState shadow_sampler;
 /// writes it — the scan is over the column buffer alone, and this survives it
 /// untouched.
 [[vk::binding(4, 0)]]
-RWStructuredBuffer<float4> lighting;
+RWStructuredBuffer<float4> lighting D3D12_REGISTER(u4, space0);
 
 /// The frame's light rows — the buffer `mesh.slang` binds at its 20, and the
 /// same rows: the sun is among them and is skipped below by its kind, because
 /// its share of a froxel is the cascade walk's and not this loop's.
 [[vk::binding(5, 0)]]
-StructuredBuffer<GpuLight> lights;
+StructuredBuffer<GpuLight> lights D3D12_REGISTER(t5, space0);
 
 /// The froxel grid `light_cluster.slang` filled — `mesh.slang`'s binding 21 —
 /// and the reason a froxel can afford a light loop at all: it is cut into the
 /// same froxels this pass walks, so a slab reads the list built for exactly its
 /// own volume rather than testing every light in the scene.
 [[vk::binding(6, 0)]]
-StructuredBuffer<uint> cluster_lights;
+StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t6, space0);
 
 /// `e^-x`, without calling a transcendental.
 /// `crcbl_shaders::fog::exp_neg`; see `mesh.slang`'s copy for the derivation.

@@ -27,47 +27,47 @@ struct KernelContext_0
 };
 
 
-#line 173 "shaders/contact_shadows.slang"
+#line 185 "shaders/contact_shadows.slang"
 float depth_at_0(int2 pixel_0, int2 extent_0, KernelContext_0 thread* kernelContext_0)
 {
 
     int3 _S1 = int3(clamp(pixel_0, int2(int(0), int(0)), extent_0 - int2(int(1), int(1))), int(0));
 
-#line 176
+#line 188
     return ((kernelContext_0->scene_depth_0).read(vec<uint,2>(((_S1)).xy), uint(((_S1)).z)));
 }
 
 
-#line 173
+#line 185
 float depth_at_1(int2 pixel_1, int2 extent_1, KernelContext_0 thread* kernelContext_1)
 {
 
     int3 _S2 = int3(clamp(pixel_1, int2(int(0), int(0)), extent_1 - int2(int(1), int(1))), int(0));
 
-#line 176
+#line 188
     return ((kernelContext_1->scene_depth_0).read(vec<uint,2>(((_S2)).xy), uint(((_S2)).z)));
 }
 
 
-#line 194
+#line 206
 float2 unproject_z_0(float depth_0, KernelContext_0 thread* kernelContext_2)
 {
     return float2((&kernelContext_2->camera_0->inv_proj_0)->data_0[int(2)].z * depth_0 + (&kernelContext_2->camera_0->inv_proj_0)->data_0[int(3)].z, (&kernelContext_2->camera_0->inv_proj_0)->data_0[int(2)].w * depth_0 + (&kernelContext_2->camera_0->inv_proj_0)->data_0[int(3)].w);
 }
 
 
-#line 194
+#line 206
 float2 unproject_z_1(float depth_1, KernelContext_0 thread* kernelContext_3)
 {
     return float2((&kernelContext_3->camera_0->inv_proj_0)->data_0[int(2)].z * depth_1 + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].z, (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(2)].w * depth_1 + (&kernelContext_3->camera_0->inv_proj_0)->data_0[int(3)].w);
 }
 
 
-#line 225
+#line 237
 float4 unproject_0(float2 ndc_0, float depth_2, KernelContext_0 thread* kernelContext_4)
 {
 
-#line 225
+#line 237
     float2 _S3 = unproject_z_0(depth_2, kernelContext_4);
 
 
@@ -75,26 +75,26 @@ float4 unproject_0(float2 ndc_0, float depth_2, KernelContext_0 thread* kernelCo
 }
 
 
-#line 235
+#line 247
 float3 view_position_0(int2 pixel_2, float depth_3, float2 extent_2, KernelContext_0 thread* kernelContext_5)
 {
 
-#line 235
+#line 247
     float4 _S4 = unproject_0(float2((float(pixel_2.x) + 0.5f) / extent_2.x * 2.0f - 1.0f, 1.0f - (float(pixel_2.y) + 0.5f) / extent_2.y * 2.0f), depth_3, kernelContext_5);
 
-#line 246
+#line 258
     return _S4.xyz / float3(_S4.w) ;
 }
 
 
-#line 235
+#line 247
 float3 view_position_1(int2 pixel_3, float depth_4, float2 extent_3, KernelContext_0 thread* kernelContext_6)
 {
 
-#line 235
+#line 247
     float4 _S5 = unproject_0(float2((float(pixel_3.x) + 0.5f) / extent_3.x * 2.0f - 1.0f, 1.0f - (float(pixel_3.y) + 0.5f) / extent_3.y * 2.0f), depth_4, kernelContext_6);
 
-#line 246
+#line 258
     return _S5.xyz / float3(_S5.w) ;
 }
 
@@ -102,76 +102,76 @@ float3 normal_at_0(int2 pixel_4, float3 centre_0, int2 extent_4, float2 size_0, 
 {
     int2 _S6 = pixel_4 + int2(int(-1), int(0));
 
-#line 251
+#line 263
     float _S7 = depth_at_1(_S6, extent_4, kernelContext_7);
 
-#line 251
+#line 263
     float3 _S8 = view_position_1(_S6, _S7, size_0, kernelContext_7);
     int2 _S9 = pixel_4 + int2(int(1), int(0));
 
-#line 252
+#line 264
     float _S10 = depth_at_1(_S9, extent_4, kernelContext_7);
 
-#line 252
+#line 264
     float3 _S11 = view_position_1(_S9, _S10, size_0, kernelContext_7);
     int2 _S12 = pixel_4 + int2(int(0), int(-1));
 
-#line 253
+#line 265
     float _S13 = depth_at_1(_S12, extent_4, kernelContext_7);
 
-#line 253
+#line 265
     float3 _S14 = view_position_1(_S12, _S13, size_0, kernelContext_7);
     int2 _S15 = pixel_4 + int2(int(0), int(1));
 
-#line 254
+#line 266
     float _S16 = depth_at_1(_S15, extent_4, kernelContext_7);
 
-#line 254
+#line 266
     float3 _S17 = view_position_1(_S15, _S16, size_0, kernelContext_7);
 
     float _S18 = centre_0.z;
 
-#line 256
+#line 268
     float3 horizontal_0;
     if((abs(_S11.z - _S18)) < (abs(_S18 - _S8.z)))
     {
 
-#line 257
+#line 269
         horizontal_0 = _S11 - centre_0;
 
-#line 257
+#line 269
     }
     else
     {
 
-#line 257
+#line 269
         horizontal_0 = centre_0 - _S8;
 
-#line 257
+#line 269
     }
 
-#line 257
+#line 269
     float3 vertical_0;
 
 
     if((abs(_S17.z - _S18)) < (abs(_S18 - _S14.z)))
     {
 
-#line 260
+#line 272
         vertical_0 = _S17 - centre_0;
 
-#line 260
+#line 272
     }
     else
     {
 
-#line 260
+#line 272
         vertical_0 = centre_0 - _S14;
 
-#line 260
+#line 272
     }
 
-#line 270
+#line 282
     return normalize(cross(vertical_0, horizontal_0));
 }
 
@@ -186,145 +186,145 @@ float2 ndc_of_0(float2 at_0, float2 size_2)
 }
 
 
-#line 294
+#line 306
 float cell_exit_0(float2 at_1, float2 forward_0, float size_3, float reach_0)
 {
 
     float _S19 = forward_0.x;
 
-#line 297
+#line 309
     bool _S20 = _S19 > 0.0f;
 
-#line 297
+#line 309
     float along_x_0;
 
-#line 297
+#line 309
     if(_S20)
     {
 
-#line 297
+#line 309
         along_x_0 = (floor(at_1.x / size_3) + 1.0f) * size_3;
 
-#line 297
+#line 309
     }
     else
     {
 
-#line 297
+#line 309
         along_x_0 = floor(at_1.x / size_3) * size_3;
 
-#line 297
+#line 309
     }
     float _S21 = forward_0.y;
 
-#line 298
+#line 310
     bool _S22 = _S21 > 0.0f;
 
-#line 298
+#line 310
     float along_y_0;
 
-#line 298
+#line 310
     if(_S22)
     {
 
-#line 298
+#line 310
         along_y_0 = (floor(at_1.y / size_3) + 1.0f) * size_3;
 
-#line 298
+#line 310
     }
     else
     {
 
-#line 298
+#line 310
         along_y_0 = floor(at_1.y / size_3) * size_3;
 
-#line 298
+#line 310
     }
     float nudge_0 = size_3 * 0.00390625f;
 
-#line 299
+#line 311
     float _S23;
 
     if((abs(_S19)) < 9.99999997475242708e-07f)
     {
 
-#line 301
+#line 313
         along_x_0 = reach_0;
 
-#line 301
+#line 313
     }
     else
     {
 
-#line 302
+#line 314
         if(_S20)
         {
 
-#line 302
+#line 314
             _S23 = nudge_0;
 
-#line 302
+#line 314
         }
         else
         {
 
-#line 302
+#line 314
             _S23 = - nudge_0;
 
-#line 302
+#line 314
         }
 
-#line 302
+#line 314
         along_x_0 = (along_x_0 + _S23 - at_1.x) / _S19;
 
-#line 301
+#line 313
     }
 
 
     if((abs(_S21)) < 9.99999997475242708e-07f)
     {
 
-#line 304
+#line 316
         along_y_0 = reach_0;
 
-#line 304
+#line 316
     }
     else
     {
 
-#line 305
+#line 317
         if(_S22)
         {
 
-#line 305
+#line 317
             _S23 = nudge_0;
 
-#line 305
+#line 317
         }
         else
         {
 
-#line 305
+#line 317
             _S23 = - nudge_0;
 
-#line 305
+#line 317
         }
 
-#line 305
+#line 317
         along_y_0 = (along_y_0 + _S23 - at_1.y) / _S21;
 
-#line 304
+#line 316
     }
 
     return max(min(along_x_0, along_y_0), nudge_0);
 }
 
 
-#line 288
+#line 300
 float view_z_of_0(float depth_5, KernelContext_0 thread* kernelContext_8)
 {
 
-#line 288
+#line 300
     float2 _S24 = unproject_z_1(depth_5, kernelContext_8);
 
 
@@ -332,38 +332,38 @@ float view_z_of_0(float depth_5, KernelContext_0 thread* kernelContext_8)
 }
 
 
-#line 283
+#line 295
 float thickness_at_0(float advance_0, float depth_6)
 {
     return max(advance_0, abs(depth_6) * 0.01999999955296516f);
 }
 
 
-#line 285
+#line 297
 struct pixelOutput_0
 {
     float output_0 [[color(0)]];
 };
 
 
-#line 285
+#line 297
 struct pixelInput_0
 {
     float2 uv_0 [[user(TEXCOORD)]];
 };
 
 
-#line 319
+#line 331
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S25 [[stage_in]], float4 position_0 [[position]], depth2d<float, access::sample> scene_depth_1 [[texture(0)]], ContactShadowParams_natural_0 constant* camera_1 [[buffer(0)]])
 {
 
-#line 319
+#line 331
     thread KernelContext_0 kernelContext_9;
 
-#line 319
+#line 331
     (&kernelContext_9)->scene_depth_0 = scene_depth_1;
 
-#line 319
+#line 331
     (&kernelContext_9)->camera_0 = camera_1;
 
     thread uint width_0;
@@ -372,21 +372,21 @@ struct pixelInput_0
     int2 extent_5 = int2(int(width_0), int(height_0));
     float _S26 = float(width_0);
 
-#line 325
+#line 337
     float _S27 = float(height_0);
 
-#line 325
+#line 337
     float2 size_4 = float2(_S26, _S27);
     int2 _S28 = int2(position_0.xy);
 
-#line 326
+#line 338
     float _S29 = depth_at_0(_S28, extent_5, &kernelContext_9);
 
 
     if(_S29 <= 0.0f)
     {
 
-#line 329
+#line 341
         pixelOutput_0 _S30 = { 1.0f };
 
 
@@ -394,20 +394,20 @@ struct pixelInput_0
         return _S30;
     }
 
-#line 333
+#line 345
     float3 _S31 = view_position_0(_S28, _S29, size_4, &kernelContext_9);
 
-#line 333
+#line 345
     float3 _S32 = normal_at_0(_S28, _S31, extent_5, size_4, &kernelContext_9);
 
-#line 338
+#line 350
     float3 ray_0 = (&kernelContext_9)->camera_0->to_light_0.xyz;
 
     float facing_0 = saturate(dot(_S32, ray_0) / 0.10000000149011612f);
     if(facing_0 <= 0.0f)
     {
 
-#line 341
+#line 353
         pixelOutput_0 _S33 = { 1.0f };
 
         return _S33;
@@ -415,17 +415,17 @@ struct pixelInput_0
 
     float _S34 = _S31.z;
 
-#line 346
+#line 358
     float3 start_0 = _S31 + _S32 * float3((abs(_S34) * 0.00499999988824129f)) ;
     float4 clip_start_0 = (((float4(start_0, 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(3)]))));
     float4 clip_ray_0 = (((float4(ray_0, 0.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(3)]))));
     float _S35 = clip_start_0.w;
 
-#line 349
+#line 361
     if(_S35 <= 0.0f)
     {
 
-#line 349
+#line 361
         pixelOutput_0 _S36 = { 1.0f };
 
         return _S36;
@@ -433,22 +433,22 @@ struct pixelInput_0
 
     float2 _S37 = clip_start_0.xy;
 
-#line 354
+#line 366
     float2 _S38 = float2(_S35) ;
 
-#line 354
+#line 366
     float2 at_start_0 = pixel_of_0(_S37 / _S38, size_4);
 
     float _S39 = clip_ray_0.w;
 
-#line 356
+#line 368
     float2 ndc_rate_0 = (clip_ray_0.xy * _S38 - _S37 * float2(_S39) ) / float2((_S35 * _S35)) ;
     float2 screen_rate_0 = float2(ndc_rate_0.x * 0.5f * _S26, - ndc_rate_0.y * 0.5f * _S27);
     float rate_0 = length(screen_rate_0);
     if(rate_0 < 9.99999997475242708e-07f)
     {
 
-#line 359
+#line 371
         pixelOutput_0 _S40 = { 1.0f };
 
 
@@ -457,42 +457,42 @@ struct pixelInput_0
     }
     float2 forward_1 = screen_rate_0 / float2(rate_0) ;
 
-#line 372
+#line 384
     float4 clip_end_0 = (((float4(start_0 + ray_0 * float3(0.25f) , 1.0f)) * (matrix<float,int(4),int(4)> ((&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(0)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(1)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(2)], (&kernelContext_9)->camera_0->proj_0.data_0[int(0)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(1)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(2)][int(3)], (&kernelContext_9)->camera_0->proj_0.data_0[int(3)][int(3)]))));
     float _S41 = clip_end_0.w;
 
-#line 373
+#line 385
     float travel_0;
 
-#line 373
+#line 385
     if(_S41 > 0.0f)
     {
 
-#line 373
+#line 385
         travel_0 = min(15.0f, max(dot(pixel_of_0(clip_end_0.xy / float2(_S41) , size_4) - at_start_0, forward_1), 0.0f));
 
-#line 373
+#line 385
     }
     else
     {
 
-#line 373
+#line 385
         travel_0 = 15.0f;
 
-#line 373
+#line 385
     }
 
-#line 378
+#line 390
     float _S42 = forward_1.x;
 
-#line 378
+#line 390
     if(_S42 > 0.0f)
     {
 
-#line 378
+#line 390
         travel_0 = min(travel_0, (_S26 - 1.0f - at_start_0.x) / _S42);
 
-#line 378
+#line 390
     }
     else
     {
@@ -500,26 +500,26 @@ struct pixelInput_0
         if(_S42 < 0.0f)
         {
 
-#line 382
+#line 394
             travel_0 = min(travel_0, - at_start_0.x / _S42);
 
-#line 382
+#line 394
         }
 
-#line 378
+#line 390
     }
 
-#line 386
+#line 398
     float _S43 = forward_1.y;
 
-#line 386
+#line 398
     if(_S43 > 0.0f)
     {
 
-#line 386
+#line 398
         travel_0 = min(travel_0, (_S27 - 1.0f - at_start_0.y) / _S43);
 
-#line 386
+#line 398
     }
     else
     {
@@ -527,16 +527,16 @@ struct pixelInput_0
         if(_S43 < 0.0f)
         {
 
-#line 390
+#line 402
             travel_0 = min(travel_0, - at_start_0.y / _S43);
 
-#line 390
+#line 402
         }
 
-#line 386
+#line 398
     }
 
-#line 394
+#line 406
     if(_S39 < 0.0f)
     {
 
@@ -546,18 +546,18 @@ struct pixelInput_0
 
         float4 clip_near_0 = clip_start_0 + clip_ray_0 * float4(((- on_near_0.z / on_near_0.w - _S35) / _S39)) ;
 
-#line 401
+#line 413
         travel_0 = min(travel_0, max(dot(pixel_of_0(clip_near_0.xy / float2(clip_near_0.w) , size_4) - at_start_0, forward_1), 0.0f));
 
-#line 394
+#line 406
     }
 
-#line 405
+#line 417
     float _S44 = max(travel_0, 0.0f);
     if(_S44 < 2.0f)
     {
 
-#line 406
+#line 418
         pixelOutput_0 _S45 = { 1.0f };
 
 
@@ -568,57 +568,57 @@ struct pixelInput_0
 
     float2 ndc_end_0 = ndc_of_0(at_start_0 + forward_1 * float2(_S44) , size_4);
 
-#line 414
+#line 426
     float when_end_0;
 
     if((abs(_S42)) >= (abs(_S43)))
     {
 
-#line 416
+#line 428
         float _S46 = ndc_end_0.x;
 
-#line 416
+#line 428
         when_end_0 = (_S46 * _S35 - clip_start_0.x) / (clip_ray_0.x - _S46 * _S39);
 
-#line 416
+#line 428
     }
     else
     {
 
-#line 417
+#line 429
         float _S47 = ndc_end_0.y;
 
-#line 417
+#line 429
         when_end_0 = (_S47 * _S35 - clip_start_0.y) / (clip_ray_0.y - _S47 * _S39);
 
-#line 416
+#line 428
     }
 
-#line 416
+#line 428
     bool _S48;
 
     if(!(when_end_0 > 0.0f))
     {
 
-#line 418
+#line 430
         _S48 = true;
 
-#line 418
+#line 430
     }
     else
     {
 
-#line 418
+#line 430
         _S48 = !isfinite(when_end_0);
 
-#line 418
+#line 430
     }
 
-#line 418
+#line 430
     if(_S48)
     {
 
-#line 418
+#line 430
         pixelOutput_0 _S49 = { 1.0f };
 
         return _S49;
@@ -629,35 +629,35 @@ struct pixelInput_0
     float inverse_w_end_0 = 1.0f / (_S35 + when_end_0 * _S39);
     float _S50 = start_0.z;
 
-#line 426
+#line 438
     float _S51 = _S50 * inverse_w_start_0;
     float _S52 = (_S50 + when_end_0 * ray_0.z) * inverse_w_end_0;
 
-#line 435
+#line 447
     float _S53 = _S50 - _S34;
 
-#line 435
+#line 447
     float at_travel_0 = min(cell_exit_0(at_start_0, forward_1, 1.0f, _S44), _S44);
 
-#line 435
+#line 447
     float previous_gap_0 = _S53;
 
-#line 435
+#line 447
     float entry_z_0 = _S50;
 
-#line 435
+#line 447
     uint step_0 = 0U;
     for(;;)
     {
 
-#line 436
+#line 448
         if(step_0 < 16U)
         {
         }
         else
         {
 
-#line 436
+#line 448
             break;
         }
         float2 at_2 = at_start_0 + forward_1 * float2(at_travel_0) ;
@@ -667,10 +667,10 @@ struct pixelInput_0
 
         float exit_z_0 = mix(_S51, _S52, along_0) / mix(inverse_w_start_0, inverse_w_end_0, along_0);
 
-#line 443
+#line 455
         float _S55 = depth_at_0(int2(floor(at_2)), extent_5, &kernelContext_9);
 
-#line 443
+#line 455
         float gap_0;
 
 
@@ -678,40 +678,40 @@ struct pixelInput_0
         if(_S55 <= 0.0f)
         {
 
-#line 447
+#line 459
             gap_0 = 1.0f;
 
-#line 447
+#line 459
         }
         else
         {
 
-#line 447
+#line 459
             float _S56 = view_z_of_0(_S55, &kernelContext_9);
 
-#line 447
+#line 459
             gap_0 = exit_z_0 - _S56;
 
-#line 447
+#line 459
         }
         if(gap_0 <= 0.0f)
         {
 
-#line 448
+#line 460
             _S48 = previous_gap_0 > 0.0f;
 
-#line 448
+#line 460
         }
         else
         {
 
-#line 448
+#line 460
             _S48 = false;
 
-#line 448
+#line 460
         }
 
-#line 448
+#line 460
         if(_S48)
         {
             float behind_0 = - gap_0;
@@ -722,7 +722,7 @@ struct pixelInput_0
 
                 float2 hit_ndc_0 = ndc_of_0(mix(at_2, exit_at_0, float2((previous_gap_0 / max(previous_gap_0 - gap_0, 9.99999993922529029e-09f))) ), size_4);
 
-#line 456
+#line 468
                 pixelOutput_0 _S57 = { saturate(1.0f - facing_0 * saturate((1.0f - max(abs(hit_ndc_0.x), abs(hit_ndc_0.y))) / 0.15000000596046448f) * saturate((1.0f - _S54 / _S44) / 0.25f) * saturate(1.0f - behind_0 / thickness_0)) };
 
 
@@ -730,42 +730,42 @@ struct pixelInput_0
                 return _S57;
             }
 
-#line 448
+#line 460
         }
 
-#line 466
+#line 478
         if(_S54 >= _S44)
         {
             break;
         }
 
-#line 436
+#line 448
         uint step_1 = step_0 + 1U;
 
-#line 436
+#line 448
         at_travel_0 = _S54;
 
-#line 436
+#line 448
         previous_gap_0 = gap_0;
 
-#line 436
+#line 448
         entry_z_0 = exit_z_0;
 
-#line 436
+#line 448
         step_0 = step_1;
 
-#line 436
+#line 448
     }
 
-#line 436
+#line 448
     pixelOutput_0 _S58 = { 1.0f };
 
-#line 471
+#line 483
     return _S58;
 }
 
 
-#line 471
+#line 483
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -773,7 +773,7 @@ struct vertexMain_Result_0
 };
 
 
-#line 167
+#line 179
 struct FullscreenOutput_0
 {
     float4 position_2;
@@ -781,37 +781,37 @@ struct FullscreenOutput_0
 };
 
 
-#line 167
+#line 179
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], depth2d<float, access::sample> scene_depth_2 [[texture(0)]], ContactShadowParams_natural_0 constant* camera_2 [[buffer(0)]])
 {
 
-#line 167
+#line 179
     thread KernelContext_0 kernelContext_10;
 
-#line 167
+#line 179
     (&kernelContext_10)->scene_depth_0 = scene_depth_2;
 
-#line 167
+#line 179
     (&kernelContext_10)->camera_0 = camera_2;
 
-#line 312
+#line 324
     thread FullscreenOutput_0 output_1;
     float2 _S59 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
-#line 313
+#line 325
     (&output_1)->uv_2 = _S59;
     (&output_1)->position_2 = float4(_S59 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
-#line 314
+#line 326
     thread vertexMain_Result_0 _S60;
 
-#line 314
+#line 326
     (&_S60)->position_1 = output_1.position_2;
 
-#line 314
+#line 326
     (&_S60)->uv_1 = output_1.uv_2;
 
-#line 314
+#line 326
     return _S60;
 }
 

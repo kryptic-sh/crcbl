@@ -36,6 +36,18 @@
 // `bloom_composite.slang`'s rule; `cmaa2_edges.slang` repeats it. The parameter
 // block and the fullscreen triangle below are copies.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the CMAA2 passes take from the CPU — `cmaa2_edges.slang` declares
 /// the same block and its header says why there is one.
 struct Cmaa2Params
@@ -57,7 +69,7 @@ struct Cmaa2Params
 /// The tonemapped frame, read by `Load` for this pixel's own texel — the resolve
 /// is 1:1 and a filtered tap would mix in a neighbour nothing asked for.
 [[vk::binding(0, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t0, space0);
 
 /// `[pixel * ACCUM_WORDS]`: three colour words and a weight word per pixel, as
 /// `cmaa2_shapes.slang` left them.
@@ -65,10 +77,10 @@ Texture2D<float4> source;
 /// `StructuredBuffer` rather than `RWStructuredBuffer`: nothing here writes it,
 /// and read-only is what lets it be bound to a fragment stage on every backend.
 [[vk::binding(1, 0)]]
-StructuredBuffer<uint> accum;
+StructuredBuffer<uint> accum D3D12_REGISTER(t1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<Cmaa2Params> params;
+ConstantBuffer<Cmaa2Params> params D3D12_REGISTER(b2, space0);
 
 struct FullscreenOutput
 {

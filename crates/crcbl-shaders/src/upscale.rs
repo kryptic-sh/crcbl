@@ -118,7 +118,7 @@ mod tests {
             );
         }
         assert!(
-            source.contains("ConstantBuffer<UpscaleParams> params;"),
+            source.contains("ConstantBuffer<UpscaleParams> params D3D12_REGISTER("),
             "upscale.slang does not bind the block `to_bytes` writes"
         );
     }

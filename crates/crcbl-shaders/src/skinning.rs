@@ -466,6 +466,11 @@ mod tests {
                 .expect("a binding attribute is never the last line of a shader")
                 .trim()
                 .trim_end_matches(';')
+                // The D3D12 register is `declaration_order`'s to check, and
+                // not part of what is bound here.
+                .split(" D3D12_REGISTER(")
+                .next()
+                .unwrap_or_default()
                 .to_string();
             found.push((binding, declaration));
         }

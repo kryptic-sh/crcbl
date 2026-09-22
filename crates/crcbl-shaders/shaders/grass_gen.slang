@@ -68,6 +68,18 @@
 // buffers, well inside the eight a browser guarantees — four since the shells'
 // `grassCells` joined them.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// `wind.slang`'s uniform block, bound here as the very buffer that pass is
 /// handed. `crcbl_shaders::grass`'s `the_wind_block_is_the_field_s` is where
 /// the two are compared.
@@ -98,21 +110,21 @@ struct WindParams
 /// The wind's own three bindings and its sampler, at the numbers `wind.slang`
 /// gives them, so the copied sampler below reads the names it was written with.
 [[vk::binding(0, 0)]]
-ConstantBuffer<WindParams> wind;
+ConstantBuffer<WindParams> wind D3D12_REGISTER(b0, space0);
 
 /// The coarse direction layer: a deflection from `baseDirection` per texel, in
 /// red and green over `-1..1`. Blue and alpha are unread.
 [[vk::binding(1, 0)]]
-Texture2D<float4> windDirectionLayer;
+Texture2D<float4> windDirectionLayer D3D12_REGISTER(t1, space0);
 
 /// The fine intensity layer: a speed multiplier per texel, in red. Zero is
 /// calm, and a calm texel is what leaves a blade upright.
 [[vk::binding(2, 0)]]
-Texture2D<float4> windIntensityLayer;
+Texture2D<float4> windIntensityLayer D3D12_REGISTER(t2, space0);
 
 /// Linear filtering, `repeat` on both axes — `wind.slang`'s sampler.
 [[vk::binding(3, 0)]]
-SamplerState windSampler;
+SamplerState windSampler D3D12_REGISTER(s3, space0);
 
 /// What a generation pass needs that is not a buffer's contents, matching
 /// `crcbl_shaders::grass::GenParams`.
@@ -148,7 +160,7 @@ struct GrassGenParams
 };
 
 [[vk::binding(4, 0)]]
-ConstantBuffer<GrassGenParams> grass;
+ConstantBuffer<GrassGenParams> grass D3D12_REGISTER(b4, space0);
 
 /// Which tile this dispatch is generating. Bound at a dynamic offset, one row
 /// of the ring per tile, which is how "one dispatch per tile" reaches the
@@ -164,7 +176,7 @@ struct GrassTile
 };
 
 [[vk::binding(5, 0)]]
-ConstantBuffer<GrassTile> tile;
+ConstantBuffer<GrassTile> tile D3D12_REGISTER(b5, space0);
 
 /// The blade description a cover map's `g` channel indexes — one row per look a
 /// field mixes. `crcbl_shaders::grass::GrassBlade`.
@@ -233,24 +245,24 @@ struct GrassInstance
 };
 
 [[vk::binding(6, 0)]]
-StructuredBuffer<GrassBlade> blades;
+StructuredBuffer<GrassBlade> blades D3D12_REGISTER(t6, space0);
 
 /// The ground the field stands on: one height in metres per texel. Read with
 /// `Load`, never sampled — a hardware filter has eight bits of sub-texel
 /// precision and the CPU copy of this placement has all of them.
 [[vk::binding(7, 0)]]
-Texture2D<float> grassGround;
+Texture2D<float> grassGround D3D12_REGISTER(t7, space0);
 
 /// The cover map: density in red and the blade row in green, both as eight-bit
 /// numbers. Read with `Load` for the ground field's reason, and compared as
 /// integers so the density test is exact.
 [[vk::binding(8, 0)]]
-Texture2D<float4> grassCover;
+Texture2D<float4> grassCover D3D12_REGISTER(t8, space0);
 
 /// Every slot's instances, in two regions of `slots * capacity` rows — see this
 /// file's header for which run is where.
 [[vk::binding(9, 0)]]
-RWStructuredBuffer<GrassInstance> instances;
+RWStructuredBuffer<GrassInstance> instances D3D12_REGISTER(u9, space0);
 
 /// One non-indexed draw's arguments per slot — vertex count, instance count,
 /// first vertex, first instance — which `clearMain` writes and the appends
@@ -261,7 +273,7 @@ RWStructuredBuffer<GrassInstance> instances;
 /// distinct `atomic<u32>` type — and Slang refuses the entry point outright for
 /// that target. Spelled as a type it lowers on all four.
 [[vk::binding(10, 0)]]
-RWStructuredBuffer<Atomic<uint> > drawArgs;
+RWStructuredBuffer<Atomic<uint> > drawArgs D3D12_REGISTER(u10, space0);
 
 /// Every cell's blade, **at the cell's own index** — `[s * capacity + lane]` for
 /// lane `lane` of slot `s` — and zero where the cell carries none. What the
@@ -269,7 +281,7 @@ RWStructuredBuffer<Atomic<uint> > drawArgs;
 /// it knows its cell, and an appended run in scheduler order could not answer
 /// it.
 [[vk::binding(11, 0)]]
-RWStructuredBuffer<GrassInstance> grassCells;
+RWStructuredBuffer<GrassInstance> grassCells D3D12_REGISTER(u11, space0);
 
 static const float WIND_MIN_DIRECTION_LENGTH_SQUARED = 1e-12;
 

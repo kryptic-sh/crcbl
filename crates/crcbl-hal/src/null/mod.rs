@@ -86,7 +86,9 @@
 
 mod record;
 
-pub use record::{Command, Event, ObjectKind, Recorder, ValidationError};
+pub use record::{
+    Command, Event, ObjectKind, PipelineRecord, Recorder, StageRecord, ValidationError,
+};
 
 use record::Detail;
 
@@ -649,17 +651,13 @@ impl NullDevice {
         let bits = stage.module.to_bits();
         self.check(ObjectKind::ShaderModule, bits, "shader module")?;
         let state = self.recorder.lock();
-        let Some(Detail::ShaderModule { dxil_entry_points }) = state
+        let Some(Detail::ShaderModule { dxil }) = state
             .get(ObjectKind::ShaderModule, bits)
             .map(|object| &object.detail)
         else {
             return Ok(());
         };
-        if dxil_entry_points.is_empty()
-            || dxil_entry_points
-                .iter()
-                .any(|name| name == stage.entry_point)
-        {
+        if dxil.is_empty() || dxil.iter().any(|(name, _)| name == stage.entry_point) {
             return Ok(());
         }
         Err(HalError::ShaderCompilation(format!(
@@ -670,9 +668,58 @@ impl NullDevice {
                 .get(ObjectKind::ShaderModule, bits)
                 .and_then(|object| object.label.as_deref())
                 .unwrap_or("<unlabelled>"),
-            held = dxil_entry_points.join(", "),
+            held = dxil
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             wanted = stage.entry_point,
         )))
+    }
+
+    /// Files a pipeline that has passed every check in
+    /// [`Recorder::pipelines_created`], resolving its layout's sets and each
+    /// stage's DXIL container while the handles are still live.
+    fn record_pipeline(
+        &self,
+        label: Option<&str>,
+        layout: PipelineLayoutHandle,
+        stages: &[(ShaderStages, crate::ShaderEntry<'_>)],
+    ) {
+        let mut state = self.recorder.lock();
+        let (sets, push_constants) = match state
+            .get(ObjectKind::PipelineLayout, layout.to_bits())
+            .map(|object| &object.detail)
+        {
+            Some(Detail::PipelineLayout {
+                sets,
+                push_constants,
+            }) => (sets.clone(), *push_constants),
+            _ => unreachable!("every caller checked the pipeline layout handle first"),
+        };
+        let stages = stages
+            .iter()
+            .map(|(stage, entry)| StageRecord {
+                stage: *stage,
+                entry_point: entry.entry_point.to_owned(),
+                dxil: match state
+                    .get(ObjectKind::ShaderModule, entry.module.to_bits())
+                    .map(|object| &object.detail)
+                {
+                    Some(Detail::ShaderModule { dxil }) => dxil
+                        .iter()
+                        .find(|(name, _)| name == entry.entry_point)
+                        .map(|(_, bytes)| bytes.clone()),
+                    _ => None,
+                },
+            })
+            .collect();
+        state.pipelines_created.push(PipelineRecord {
+            label: label.map(ToOwned::to_owned),
+            sets,
+            push_constants,
+            stages,
+        });
     }
 
     fn insert<T>(&self, kind: ObjectKind, label: Option<&str>, detail: Detail) -> Handle<T> {
@@ -1269,10 +1316,10 @@ impl Device for NullDevice {
             ObjectKind::ShaderModule,
             desc.label,
             Detail::ShaderModule {
-                dxil_entry_points: desc
+                dxil: desc
                     .dxil
                     .iter()
-                    .map(|(entry_point, _)| (*entry_point).to_owned())
+                    .map(|(entry_point, bytes)| ((*entry_point).to_owned(), bytes.to_vec()))
                     .collect(),
             },
         ))
@@ -1425,7 +1472,19 @@ impl Device for NullDevice {
                 )));
             }
         }
-        Ok(self.insert(ObjectKind::PipelineLayout, desc.label, Detail::None))
+        let sets = desc
+            .bind_group_layouts
+            .iter()
+            .map(|layout| self.layout_of(*layout).map(|record| record.entries))
+            .collect::<Result<_, _>>()?;
+        Ok(self.insert(
+            ObjectKind::PipelineLayout,
+            desc.label,
+            Detail::PipelineLayout {
+                sets,
+                push_constants: desc.push_constants,
+            },
+        ))
     }
 
     fn destroy_pipeline_layout(&self, layout: PipelineLayoutHandle) {
@@ -1444,6 +1503,9 @@ impl Device for NullDevice {
             desc.primitive,
             desc.depth_stencil,
         )?;
+        let mut stages = vec![(ShaderStages::VERTEX, desc.vertex)];
+        stages.extend(desc.fragment.map(|entry| (ShaderStages::FRAGMENT, entry)));
+        self.record_pipeline(desc.label, desc.layout, &stages);
         // **The vertex stage is filed rather than dropped**, which is what makes
         // "this pass runs that entry point" a question with a no-GPU answer —
         // see [`Detail::GraphicsPipeline`], which carries the argument.
@@ -1484,6 +1546,14 @@ impl Device for NullDevice {
             desc.primitive,
             desc.depth_stencil,
         )?;
+        let mut stages: Vec<_> = desc
+            .task
+            .map(|entry| (ShaderStages::TASK, entry))
+            .into_iter()
+            .collect();
+        stages.push((ShaderStages::MESH, desc.mesh));
+        stages.extend(desc.fragment.map(|entry| (ShaderStages::FRAGMENT, entry)));
+        self.record_pipeline(desc.label, desc.layout, &stages);
         // The same pool as a raster pipeline, because the seam gives the two
         // one handle type — see `MeshPipelineDesc`'s decision note. `Detail::None`
         // beside the raster arm's `Detail::GraphicsPipeline` and it is not an
@@ -1512,6 +1582,11 @@ impl Device for NullDevice {
         // against, so it checks the half that needs none: a size the device's
         // own limits could not launch.
         desc.check_workgroup_size(&self.caps.limits)?;
+        self.record_pipeline(
+            desc.label,
+            desc.layout,
+            &[(ShaderStages::COMPUTE, desc.compute)],
+        );
         Ok(self.insert(ObjectKind::ComputePipeline, desc.label, Detail::None))
     }
 

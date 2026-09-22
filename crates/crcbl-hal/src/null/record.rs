@@ -25,9 +25,36 @@ use crate::{
     AdapterId, BindGroupHandle, BindGroupLayoutEntry, BindGroupLayoutHandle, BufferBarrier,
     BufferCopy, BufferHandle, BufferImageCopy, CommandBufferHandle, ComputePipelineHandle,
     DepthStencilAttachment, DrawIndirect, DrawIndirectCount, GraphicsPipelineHandle, ImageBarrier,
-    ImageCopy, ImageHandle, IndexFormat, MemoryLocation, QuerySetHandle, QueueHandle, Rect2d,
-    SemaphoreSignal, SemaphoreWait, ShaderSources, ShaderStages, SwapchainHandle, Viewport,
+    ImageCopy, ImageHandle, IndexFormat, MemoryLocation, PushConstantRange, QuerySetHandle,
+    QueueHandle, Rect2d, SemaphoreSignal, SemaphoreWait, ShaderSources, ShaderStages,
+    SwapchainHandle, Viewport,
 };
+
+/// One pipeline as [`Recorder::pipelines_created`] reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PipelineRecord {
+    /// The descriptor's label.
+    pub label: Option<String>,
+    /// Each set's declared entries, in set order.
+    pub sets: Vec<Vec<BindGroupLayoutEntry>>,
+    /// The layout's push-constant range, if it declared one.
+    pub push_constants: Option<PushConstantRange>,
+    /// Every stage the pipeline runs, in pipeline order: vertex then fragment,
+    /// task then mesh then fragment, or the one compute stage.
+    pub stages: Vec<StageRecord>,
+}
+
+/// One stage of a [`PipelineRecord`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StageRecord {
+    /// The single stage this entry runs at.
+    pub stage: ShaderStages,
+    /// The entry point the stage names.
+    pub entry_point: String,
+    /// The DXIL container its module offered for that entry point, or `None`
+    /// for a module created without DXIL.
+    pub dxil: Option<Vec<u8>>,
+}
 
 /// Every kind of object the null backend tracks.
 ///
@@ -668,13 +695,24 @@ pub(super) enum Detail {
         layout: BindGroupLayoutHandle,
         update_after_bind: bool,
     },
-    /// A shader module: the entry points it offered a DXIL container for.
+    /// A shader module: the DXIL container it offered per entry point.
     ///
     /// Empty for a module created without DXIL, which is every call site that
     /// ships only the other three artifacts — so this is a *claim* to check
     /// rather than a requirement, and only a module that made one is held to
     /// it. See `check_stage`.
-    ShaderModule { dxil_entry_points: Vec<String> },
+    ///
+    /// The bytes are kept, not just the names, because
+    /// [`Recorder::pipelines_created`] hands each stage its container: the
+    /// registers a D3D12 root signature must name are read out of it.
+    ShaderModule { dxil: Vec<(String, Vec<u8>)> },
+    /// A pipeline layout: every set's declared entries, in set order, and the
+    /// push-constant range — what [`Recorder::pipelines_created`] reports for
+    /// each pipeline built against it.
+    PipelineLayout {
+        sets: Vec<Vec<BindGroupLayoutEntry>>,
+        push_constants: Option<PushConstantRange>,
+    },
     /// A raster graphics pipeline: the entry point its **vertex** stage names.
     ///
     /// **What `create_graphics_pipeline` used to throw away.** It filed
@@ -770,6 +808,9 @@ pub(super) struct State {
     /// `crcbl-mtl` turns into Metal argument-table indices by counting. See
     /// [`Recorder::bind_group_layouts_created`].
     pub(super) bind_group_layouts_created: Vec<(Option<String>, Vec<BindGroupLayoutEntry>)>,
+    /// Every pipeline created, with its layout and stages resolved — a log for
+    /// the same reason as the two above. See [`Recorder::pipelines_created`].
+    pub(super) pipelines_created: Vec<PipelineRecord>,
     /// Queued out-of-band device errors. See [`Recorder::report_device_error`].
     pub(super) device_errors: std::collections::VecDeque<String>,
     /// How many `reconfigure_swapchain` calls fail before succeeding again. See
@@ -809,6 +850,7 @@ impl State {
             device_latency: 0,
             shader_modules_created: Vec::new(),
             bind_group_layouts_created: Vec::new(),
+            pipelines_created: Vec::new(),
             device_errors: std::collections::VecDeque::new(),
             reconfigure_failures: 0,
             swapchain_out_of_date: false,
@@ -1071,6 +1113,27 @@ impl Recorder {
         self.lock().bind_group_layouts_created.clone()
     }
 
+    /// Every pipeline created so far — raster, mesh and compute — with the
+    /// entries of every set its layout declared and the DXIL container each
+    /// stage was given, in creation order.
+    ///
+    /// **What pairs a layout with the shaders it serves.** A bind-group layout
+    /// on its own says nothing about which artifact reads it, and the registers
+    /// a D3D12 root signature names have to agree with the ones compiled into
+    /// every container of every pipeline built on it. This is the one place
+    /// both halves are in hand without a device: `crcbl-dx12` runs the
+    /// renderer against this recorder and checks each record's layout against
+    /// each stage's container.
+    ///
+    /// A log rather than a live lookup, for
+    /// [`shader_modules_created`](Self::shader_modules_created)'s reason: the
+    /// modules and layouts a pipeline was built from are destroyed as soon as
+    /// it exists.
+    #[must_use]
+    pub fn pipelines_created(&self) -> Vec<PipelineRecord> {
+        self.lock().pipelines_created.clone()
+    }
+
     /// Every **live** raster graphics pipeline, as `(label, the entry point its
     /// vertex stage names)`.
     ///
@@ -1128,6 +1191,7 @@ impl Recorder {
         state.validation.clear();
         state.shader_modules_created.clear();
         state.bind_group_layouts_created.clear();
+        state.pipelines_created.clear();
     }
 
     /// Makes the next `poll_readback` calls report

@@ -193,11 +193,11 @@ mod tests {
             "tonemap.slang does not declare `uint auto_exposure;`"
         );
         assert!(
-            source.contains("ConstantBuffer<TonemapParams> params;"),
+            source.contains("ConstantBuffer<TonemapParams> params D3D12_REGISTER("),
             "tonemap.slang does not bind the block `to_bytes` writes"
         );
         assert!(
-            source.contains("StructuredBuffer<float> measured;"),
+            source.contains("StructuredBuffer<float> measured D3D12_REGISTER("),
             "tonemap.slang does not bind the buffer the auto-exposure lane selects, \
              so the lane selects nothing"
         );

@@ -50,6 +50,18 @@
 // `crcbl_shaders::fog`, `crcbl_shaders::volumetric`, `crcbl_shaders::probe` and
 // `crcbl_shaders::probe_visibility` list this file beside the others they hold.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 static const uint SHADOW_CASCADES = 2;
 static const uint SHADOW_LIGHT_TILES = 14;
 static const uint SHADOW_ATLAS_TILES = 16;
@@ -169,67 +181,67 @@ struct WaterMedium
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<WaterParams> water;
+ConstantBuffer<WaterParams> water D3D12_REGISTER(b0, space0);
 
 /// Read by both stages: the vertex stage projects with `view_proj`.
 [[vk::binding(1, 0)]]
-ConstantBuffer<FrameUniforms> frame;
+ConstantBuffer<FrameUniforms> frame D3D12_REGISTER(b1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<SsrParams> camera;
+ConstantBuffer<SsrParams> camera D3D12_REGISTER(b2, space0);
 
 [[vk::binding(3, 0)]]
-ConstantBuffer<VolumetricParams> params;
+ConstantBuffer<VolumetricParams> params D3D12_REGISTER(b3, space0);
 
 /// Every body's surface grid, one buffer for all of them; each draw is a range
 /// of the index buffer into it.
 [[vk::binding(4, 0)]]
-StructuredBuffer<WaterVertex> water_vertices;
+StructuredBuffer<WaterVertex> water_vertices D3D12_REGISTER(t4, space0);
 
 /// One row per body, indexed by `WaterVertex::body`.
 [[vk::binding(5, 0)]]
-StructuredBuffer<WaterMedium> media;
+StructuredBuffer<WaterMedium> media D3D12_REGISTER(t5, space0);
 
 /// `water_copy.slang`'s copy of the HDR frame as the opaque passes left it.
 /// Read with `Load` only, on `ssr.slang`'s terms: a hardware filter is
 /// fixed-function arithmetic four rasterisers compute independently.
 [[vk::binding(6, 0)]]
-Texture2D<float4> scene_color;
+Texture2D<float4> scene_color D3D12_REGISTER(t6, space0);
 
 /// `water_copy.slang`'s copy of the opaque frame's depth, read by `Load`.
 [[vk::binding(7, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t7, space0);
 
 /// The shadow atlas and its comparison sampler, as `mesh.slang` binds them.
 [[vk::binding(8, 0)]]
-DepthTexture2D shadow_atlas;
+DepthTexture2D shadow_atlas D3D12_REGISTER(t8, space0);
 
 [[vk::binding(9, 0)]]
-SamplerComparisonState shadow_sampler;
+SamplerComparisonState shadow_sampler D3D12_REGISTER(s9, space0);
 
 /// The irradiance probe rows, as `ssr.slang` binds them.
 [[vk::binding(10, 0)]]
-StructuredBuffer<GpuProbe> probes;
+StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t10, space0);
 
 /// `crcbl_shaders::sky_prefilter`'s table, as `ssr.slang` binds it.
 [[vk::binding(11, 0)]]
-Texture2D<float4> sky_prefilter;
+Texture2D<float4> sky_prefilter D3D12_REGISTER(t11, space0);
 
 /// The per-probe visibility maps, as `ssr.slang` binds them.
 [[vk::binding(12, 0)]]
-Texture2DArray<float4> probe_visibility;
+Texture2DArray<float4> probe_visibility D3D12_REGISTER(t12, space0);
 
 /// The sky-view LUT, as `ssr.slang` binds it — `crcbl_render::sky_pass`'s slot.
 [[vk::binding(13, 0)]]
-StructuredBuffer<float4> sky_view;
+StructuredBuffer<float4> sky_view D3D12_REGISTER(t13, space0);
 
 /// The froxel column and its lighting, as `volumetric_composite.slang` binds
 /// them. Read only on a frame whose `WaterParams::froxels.x` says the volume ran.
 [[vk::binding(14, 0)]]
-StructuredBuffer<float4> volumetrics;
+StructuredBuffer<float4> volumetrics D3D12_REGISTER(t14, space0);
 
 [[vk::binding(15, 0)]]
-StructuredBuffer<float4> lighting;
+StructuredBuffer<float4> lighting D3D12_REGISTER(t15, space0);
 
 static const float DEPTH_FAR = 0.0;
 static const uint CLUSTER_DEPTH_SLICES = 24;

@@ -3309,29 +3309,21 @@ impl Device for Dx12Device {
         }
         let mut state = self.state();
         let mut sets = Vec::with_capacity(desc.bind_group_layouts.len());
-        // One running count for the whole signature, because `dxc` numbers a
-        // source's registers end to end and does not restart at a set boundary.
-        // See `crate::binding`.
-        let mut registers = crate::dxil::Registers::default();
-        for handle in desc.bind_group_layouts {
+        // Each set's registers are its binding numbers in the space its index
+        // names, so no set's assignment depends on another's. See
+        // `crate::binding`.
+        for (index, handle) in desc.bind_group_layouts.iter().enumerate() {
             let record = handle::lookup(
                 &state.bind_group_layouts,
                 "bind group layout",
                 *handle,
                 self.inner.owner,
             )?;
-            sets.push((*handle, binding::ranges(record, &mut registers)));
+            let space = crate::root::space_of(index)?;
+            sets.push((*handle, binding::ranges(record, space)));
         }
-        // **After the sets, and that is the whole rule.** HLSL has no push
-        // constants: the block is a `cbuffer` `dxc` numbers in the `b` file with
-        // every other constant buffer, and `crcbl-shaders` requires each source
-        // to declare it last — so its register is the one left once the
-        // bindings have taken theirs. See `crate::root`.
-        let push = crate::root::plan_push_constants(
-            desc.push_constants,
-            &mut registers,
-            &self.inner.caps,
-        )?;
+        // `b0` in a space of its own, past every set's. See `crate::root`.
+        let push = crate::root::plan_push_constants(desc.push_constants, &self.inner.caps)?;
         let entry = pipeline::layout(&self.inner.raw, desc, &sets, push, self.inner.owner.id)?;
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
@@ -5888,10 +5880,10 @@ pub(crate) mod tests {
                 .expect("an upload-heap buffer is host-visible");
 
             // The geometry, then one writable binding per buffer the caller
-            // named. `task_write_probe.slang` declares its two in the same
-            // order, which is what puts them on the registers this layout
-            // assigns: a read-only storage binding is an SRV and a writable one
-            // a UAV, so the geometry is `t0` and these are `u0` and `u1`.
+            // named. `task_write_probe.slang` declares its two at bindings 1
+            // and 2, which is what puts them on the registers this layout
+            // assigns: a register is the binding number, so the geometry is
+            // `t0` and these are `u1` and `u2`.
             let mut layout_entries = vec![BindGroupLayoutEntry {
                 binding: 0,
                 // See the doc comment on why this is not `MESH`.
@@ -7275,31 +7267,25 @@ pub(crate) mod tests {
     /// the entries below are transcribed from it: the same binding numbers, the
     /// same kinds, the same read-only-ness, in the same ascending order. What is
     /// **not** transcribed is bindings 15, 16 and 22 — the shadow atlas, its
-    /// comparison sampler and the occlusion channel — and dropping them is
-    /// load-bearing rather than tidy.
+    /// comparison sampler and the occlusion channel — which neither geometry
+    /// stage reads.
     ///
-    /// **A D3D12 register is not a binding number.** Slang's HLSL output
-    /// annotates each resource with a `register(…)` it numbers per class, from
-    /// zero, in the declaration order of **that source file**; `crate::binding`'s
-    /// `ranges` reproduces that by counting the entries of the *layout*. The two
-    /// agree only when the layout's binding set is exactly the source's. It is
-    /// for `mesh.slang` on the raster path — that layout is bindings 0–8, 15, 16
-    /// and 20–23, which is precisely what that file declares. It is **not** for
-    /// either stage of the mesh path: `mesh_cluster.slang` declares no binding
-    /// 15, 16 or 22, so the layout carrying them numbers its `cluster_select`
-    /// `t11` where its own container says `t10`, and its `tables` `t17` where the
-    /// container says `t15`. Dropping the three rows the geometry stages do not
-    /// declare is what makes every register this probe binds the register the
-    /// containers ask for; see the module-level note this test's report carries.
+    /// Dropping them used to be load-bearing. A register was counted over the
+    /// layout's entries, so rows `mesh_cluster.slang` does not declare shifted
+    /// every register after them away from the ones its containers ask for. A
+    /// register is now the binding number — see `crate::root::assign_registers`
+    /// — so the rows could stay without moving anything, and are left out only
+    /// because nothing here binds a resource to them.
     ///
-    /// # There is no fragment stage, and that is the same fact from the other side
+    /// # There is no fragment stage
     ///
     /// `mesh_cluster.slang` has no fragment entry point: the renderer pairs it
-    /// with `mesh.slang`'s `fragmentMain`, which numbers **its** registers from
-    /// **its** declarations and puts the shadow atlas on `t6` — the register
-    /// `mesh_cluster.slang` gives `clusters`. One root signature cannot satisfy
-    /// both, so a probe that bound a fragment stage would be testing the
-    /// disagreement rather than the shader.
+    /// with `mesh.slang`'s `fragmentMain`. Under the counting rule the two
+    /// sources put different resources on one register, and one root signature
+    /// could not serve both; with registers taken from binding numbers it does,
+    /// and `crate::renderer_registers` checks that pipeline's layout against all
+    /// three of its containers on any host. This probe still binds no fragment
+    /// stage, because what it bisects is the geometry stages.
     ///
     /// What it uses instead is the shape `ForwardRenderer::depth_pipeline`
     /// already builds for the shadow cascades: the same task and mesh stages,
@@ -7406,8 +7392,8 @@ pub(crate) mod tests {
     /// instance and one triangle. There is **no fragment stage**, so nothing
     /// below says anything about `mesh.slang`'s shading, its texture page or the
     /// registers that stage asks for. And this is not `crcbl-render`'s layout: it
-    /// is that layout minus three rows, for the reason above, so a pass here does
-    /// **not** say the renderer's own mesh pipeline would survive.
+    /// is that layout minus three rows, so a pass here does **not** say the
+    /// renderer's own mesh pipeline would survive.
     ///
     /// # What only CI can settle
     ///
@@ -7882,8 +7868,9 @@ pub(crate) mod tests {
             entry(2, read_only(crcbl_shaders::mesh::INSTANCE_STRIDE)),
             // **Dynamic, and that is the renderer's mechanism**: one block per
             // bucket reached through an offset. It becomes a root descriptor
-            // here rather than a table entry, and it still takes a `b` register
-            // in declaration order — which is what puts `cull` on `b2`.
+            // here rather than a table entry, and still takes the register its
+            // binding number names: `b3`, where `mesh_cluster.slang` declares
+            // `draw`.
             entry(3, BindingKind::UniformBuffer { dynamic: true }),
             entry(4, read_only(crcbl_shaders::mesh::MESH_ENTRY_STRIDE)),
             entry(5, read_only(word)),
@@ -7905,25 +7892,25 @@ pub(crate) mod tests {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
-            entry(9, read_only(crcbl_shaders::meshlet::MESHLET_STRIDE)),
-            entry(10, read_only(word)),
-            entry(11, read_only(word)),
-            entry(
-                12,
-                read_only(crcbl_hal::indirect::DRAW_INDEXED_ARGS_BYTES as usize),
-            ),
-            entry(13, BindingKind::UniformBuffer { dynamic: false }),
-            entry(14, writable(word)),
-            entry(
-                17,
-                read_only(crcbl_shaders::cluster_select::CLUSTER_SELECT_STRIDE),
-            ),
-            entry(18, writable(word)),
-            entry(19, read_only(word)),
             entry(20, read_only(crcbl_shaders::light::LIGHT_STRIDE)),
             entry(21, read_only(word)),
             entry(23, read_only(crcbl_shaders::probe::PROBE_STRIDE)),
             entry(24, read_only(word)),
+            entry(32, read_only(crcbl_shaders::meshlet::MESHLET_STRIDE)),
+            entry(33, read_only(word)),
+            entry(34, read_only(word)),
+            entry(
+                35,
+                read_only(crcbl_hal::indirect::DRAW_INDEXED_ARGS_BYTES as usize),
+            ),
+            entry(36, BindingKind::UniformBuffer { dynamic: false }),
+            entry(37, writable(word)),
+            entry(
+                38,
+                read_only(crcbl_shaders::cluster_select::CLUSTER_SELECT_STRIDE),
+            ),
+            entry(39, writable(word)),
+            entry(40, read_only(word)),
         ];
         let set_layout = device
             .create_bind_group_layout(&BindGroupLayoutDesc {
@@ -7947,19 +7934,19 @@ pub(crate) mod tests {
             (4, meshes),
             (5, visible_instances),
             (6, materials),
-            (9, cluster_buffer),
-            (10, cluster_vertices),
-            (11, cluster_corners),
-            (12, draw_args),
-            (13, cull_buffer),
-            (14, cull_stats),
-            (17, cluster_select),
-            (18, cluster_selection),
-            (19, group_state_buffer),
             (20, lights),
             (21, cluster_lights),
             (23, probes),
             (24, tables),
+            (32, cluster_buffer),
+            (33, cluster_vertices),
+            (34, cluster_corners),
+            (35, draw_args),
+            (36, cull_buffer),
+            (37, cull_stats),
+            (38, cluster_select),
+            (39, cluster_selection),
+            (40, group_state_buffer),
         ];
         let mut bound: Vec<BindGroupEntry> = buffers
             .iter()

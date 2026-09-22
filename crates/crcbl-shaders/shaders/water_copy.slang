@@ -21,15 +21,27 @@
 // On `hiz.slang`'s terms: the destination is the source's own size, so a pixel
 // fetches the texel it covers and nothing is filtered.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The HDR frame as the passes before water left it.
 [[vk::binding(0, 0)]]
-Texture2D<float4> source_color;
+Texture2D<float4> source_color D3D12_REGISTER(t0, space0);
 
 /// The opaque frame's depth. `DepthTexture2D` for the reason `hiz.slang` gives
 /// under the same declaration: it is the spelling that lowers to a
 /// `texture_depth_2d` a `D32Float` view can fill.
 [[vk::binding(1, 0)]]
-DepthTexture2D source_depth;
+DepthTexture2D source_depth D3D12_REGISTER(t1, space0);
 
 struct FullscreenOutput
 {

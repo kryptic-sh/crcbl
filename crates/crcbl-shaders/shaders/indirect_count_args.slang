@@ -50,6 +50,18 @@
 // `clear_counters.slang` takes its lengths rather than re-declaring
 // `draw_gen.slang`'s argument layout.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The one-block description of the copy, matching
 /// `crcbl_shaders::indirect_count_args::Params`.
 struct PackParams
@@ -82,22 +94,22 @@ struct PackParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<PackParams> pack;
+ConstantBuffer<PackParams> pack D3D12_REGISTER(b0, space0);
 
 /// The buffer holding the GPU-written draw count, read at
 /// `pack.count_word`.
 [[vk::binding(1, 0)]]
-StructuredBuffer<uint> count;
+StructuredBuffer<uint> count D3D12_REGISTER(t1, space0);
 
 /// The caller's argument buffer, as the flat array of words this kernel copies
 /// out of. Read-only: see the header.
 [[vk::binding(2, 0)]]
-StructuredBuffer<uint> source;
+StructuredBuffer<uint> source D3D12_REGISTER(t2, space0);
 
 /// The backend's packed copy, which the draws read. One structure per issued
 /// draw, `pack.structure_words` apart, with no padding between them.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> packed;
+RWStructuredBuffer<uint> packed D3D12_REGISTER(u3, space0);
 
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::indirect_count_args::WORKGROUP_SIZE`.

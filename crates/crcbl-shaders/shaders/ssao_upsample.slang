@@ -62,6 +62,18 @@
 // against an exact constant, which is the comparison `ssao_blur.slang` argues is
 // the acceptable kind.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything this pass needs that is not in a texture, and it is
 /// `ssao.slang`'s block — same members, same order, same buffer.
 ///
@@ -99,7 +111,7 @@ struct SsaoParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SsaoParams> camera;
+ConstantBuffer<SsaoParams> camera D3D12_REGISTER(b0, space0);
 
 /// The filtered occlusion `ssao_blur.slang` wrote, at the pair's own extent and
 /// fetched by integer pixel: the visibility in `r` and the encoded bent
@@ -113,7 +125,7 @@ ConstantBuffer<SsaoParams> camera;
 /// The three bindings of this pass are that file's three, in its order, which is
 /// what lets `crcbl_render::ssao` build one bind group layout for both.
 [[vk::binding(1, 0)]]
-Texture2D<float4> occlusion;
+Texture2D<float4> occlusion D3D12_REGISTER(t1, space0);
 
 /// The depth prepass's output, at the **scene's** extent rather than the pair's.
 ///
@@ -123,7 +135,7 @@ Texture2D<float4> occlusion;
 /// declaration and are not the same WGSL, and only this one lowers to a
 /// `texture_depth_2d` a `D32Float` view can fill.
 [[vk::binding(2, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t2, space0);
 
 /// The reversed-Z far plane: `crcbl_hal::depth::CLEAR`, and the value
 /// `ssao.slang` and `ssao_blur.slang` declare under this name.

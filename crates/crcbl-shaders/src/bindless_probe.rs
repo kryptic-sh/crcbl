@@ -32,10 +32,10 @@
 //!   smaller length inside that ceiling — which is what
 //!   `BindingFlags::VARIABLE_COUNT` asks for.
 //! * **DXIL** (`dxil/bindless_probe.computeMain.dxil`) — `sources` is an SRV
-//!   range of [`SOURCE_CAPACITY`] descriptors from `t0`, space 0, and
-//!   `destination` is `u0`. `crcbl_dx12::binding` plans a range whose
-//!   `NumDescriptors` is `u32::MAX` for a `VARIABLE_COUNT` entry, and an
-//!   unbounded root-signature range covers this bounded declaration.
+//!   range of [`SOURCE_CAPACITY`] descriptors from `t0`, space 1 — its set —
+//!   and `destination` is `u0` in space 0. `crcbl_dx12::binding` plans a
+//!   range whose `NumDescriptors` is `u32::MAX` for a `VARIABLE_COUNT` entry,
+//!   and an unbounded root-signature range covers this bounded declaration.
 //! * **MSL** (`msl/bindless_probe.metal`) — `destination` is `[[buffer(0)]]`
 //!   and the block is `[[buffer(1)]]`, an argument buffer whose one member is
 //!   `array<uint device*, int(SOURCE_CAPACITY)>`: [`SOURCE_CAPACITY`] device
@@ -96,63 +96,6 @@ pub const SOURCE_BYTES: u64 = WORDS_PER_SOURCE as u64 * size_of::<u32>() as u64;
 
 /// Bytes the destination occupies.
 pub const DESTINATION_BYTES: u64 = DESTINATION_WORDS as u64 * size_of::<u32>() as u64;
-
-/// The `(set, binding)` of every decorated resource in `words` — a SPIR-V
-/// module — in ascending order.
-///
-/// The instruction stream is stepped through by length rather than scanned for
-/// the bare decoration numbers, for [`crate::push_constant_probe::push_constant_variables`]'s
-/// reason: a scan would match any operand that happened to equal one, which is
-/// a check that cannot fail.
-#[cfg(test)]
-fn descriptor_slots(words: &[u32]) -> Vec<(u32, u32)> {
-    /// `OpDecorate`, whose operands are the target, the decoration and — for
-    /// these two — one literal.
-    const OP_DECORATE: u32 = 71;
-    /// `Decoration Binding`.
-    const BINDING: u32 = 33;
-    /// `Decoration DescriptorSet`.
-    const DESCRIPTOR_SET: u32 = 34;
-    /// Words of a SPIR-V module header, before the first instruction.
-    const HEADER_WORDS: usize = 5;
-
-    let mut sets: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
-    let mut bindings: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
-    let mut cursor = HEADER_WORDS;
-    while cursor < words.len() {
-        let length = (words[cursor] >> 16) as usize;
-        assert!(length > 0, "a zero-length instruction never terminates");
-        assert!(
-            cursor + length <= words.len(),
-            "instruction at word {cursor} runs past the end of the module"
-        );
-        if words[cursor] & 0xffff == OP_DECORATE && length == 4 {
-            let (target, literal) = (words[cursor + 1], words[cursor + 3]);
-            match words[cursor + 2] {
-                DESCRIPTOR_SET => {
-                    sets.insert(target, literal);
-                }
-                BINDING => {
-                    bindings.insert(target, literal);
-                }
-                _ => {}
-            }
-        }
-        cursor += length;
-    }
-
-    let mut slots: Vec<(u32, u32)> = sets
-        .into_iter()
-        .map(|(target, set)| {
-            let binding = bindings.get(&target).copied().unwrap_or_else(|| {
-                panic!("%{target} carries a DescriptorSet decoration and no Binding")
-            });
-            (set, binding)
-        })
-        .collect();
-    slots.sort_unstable();
-    slots
-}
 
 /// The parameter of the MSL kernel's signature that carries `[[buffer(index)]]`.
 ///
@@ -230,21 +173,23 @@ mod tests {
     }
 
     /// The shader must declare the array as a **bounded** `ParameterBlock` in
-    /// set 1, and must carry no `register` annotation.
+    /// set 1, and its `register` must be the HLSL-only `D3D12_REGISTER` one.
     ///
     /// Each clause is one line to check and each has a measured artifact
     /// consequence. Without the `ParameterBlock` the MSL has no `[[buffer]]`
     /// attribute on the block at all; unbounded inside one, Metal's front end
-    /// refuses the emitted source as a C99 flexible array member; and a
-    /// `register` annotation put back on the block swaps Metal's two buffer
-    /// indices, which is the failure `crate::declaration_order` exists to stop
-    /// and which no lint over `[[vk::binding]]` can see.
+    /// refuses the emitted source as a C99 flexible array member; and a bare
+    /// `register` annotation on the block swaps Metal's two buffer indices,
+    /// which is the failure `crate::declaration_order` exists to stop and which
+    /// no lint over `[[vk::binding]]` can see. The `D3D12_REGISTER` suffix
+    /// expands to one in the HLSL leg alone, so the MSL never sees it.
     #[test]
     fn the_source_declares_a_bounded_parameter_block_in_its_own_set() {
         let source = include_str!("../shaders/bindless_probe.slang");
         for declaration in [
             "    StructuredBuffer<uint> buffers[SOURCE_CAPACITY];".to_string(),
-            "[[vk::binding(0, 1)]]\nParameterBlock<Sources> sources;\n".to_string(),
+            "[[vk::binding(0, 1)]]\nParameterBlock<Sources> sources D3D12_REGISTER(t0, space1);\n"
+                .to_string(),
         ] {
             assert!(
                 source.contains(&declaration),
@@ -257,7 +202,7 @@ mod tests {
         // the check names the declaration rather than scanning the file.
         assert!(
             !source.contains("ParameterBlock<Sources> sources :"),
-            "bindless_probe.slang has a `register` annotation on the block again; on this source \
+            "bindless_probe.slang has a bare `register` annotation on the block; on this source \
              that moves the block to Metal's [[buffer(0)]] and the destination to [[buffer(1)]], \
              which is the reverse of the order crcbl-mtl binds by"
         );
@@ -286,7 +231,7 @@ mod tests {
     #[test]
     fn the_artifacts_put_the_table_in_a_set_of_its_own() {
         assert_eq!(
-            descriptor_slots(crate::BINDLESS_PROBE.spirv()),
+            crate::descriptor_slots(crate::BINDLESS_PROBE.spirv()),
             [(0, 0), (1, 0)],
             "the SPIR-V no longer puts the destination at set 0 binding 0 and the descriptor \
              table at set 1 binding 0, so a caller building two bind groups is building the \
@@ -297,7 +242,7 @@ mod tests {
         // resource whatever the module said — would answer `[(0, 0), (1, 0)]`
         // here too and the assertion above would mean nothing.
         assert_eq!(
-            descriptor_slots(crate::COMPUTE_PROBE.spirv()),
+            crate::descriptor_slots(crate::COMPUTE_PROBE.spirv()),
             [(0, 0), (0, 1), (0, 2)],
             "compute_probe.slang declares three scalar bindings in one set, so a walk that finds \
              anything else is reading something other than the decorations"

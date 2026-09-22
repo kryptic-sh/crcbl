@@ -31,6 +31,18 @@
 // steps where the medium is thick. Rung 3 of topic 51 is where a filtered
 // lookup buys that back, and it is the rung that needs a 3D image.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Depth slices a perspective grid has, matching
 /// `crcbl_shaders::light::CLUSTER_DEPTH_SLICES`.
 static const uint CLUSTER_DEPTH_SLICES = 24;
@@ -147,17 +159,17 @@ struct VolumetricParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<VolumetricParams> params;
+ConstantBuffer<VolumetricParams> params D3D12_REGISTER(b0, space0);
 
 /// The depth prepass's output, fetched by integer pixel and never filtered —
 /// `ssr.slang`'s binding and its reasons, unchanged.
 [[vk::binding(1, 0)]]
-DepthTexture2D scene_depth;
+DepthTexture2D scene_depth D3D12_REGISTER(t1, space0);
 
 /// The `Rgba16Float` frame this pass composites over: the forward pass's
 /// output, or the reflection composite's where that ran.
 [[vk::binding(2, 0)]]
-Texture2D<float4> scene_color;
+Texture2D<float4> scene_color D3D12_REGISTER(t2, space0);
 
 /// The column, after `integrateMain`: `rgb` is the radiance accumulated in
 /// front of that froxel's slice, `a` the transmittance through all of it.
@@ -165,7 +177,7 @@ Texture2D<float4> scene_color;
 /// Read-only here, which is what lets the graph barrier the compute pass's
 /// writes against this pass's reads rather than leaving them in one state.
 [[vk::binding(3, 0)]]
-StructuredBuffer<float4> volumetrics;
+StructuredBuffer<float4> volumetrics D3D12_REGISTER(t3, space0);
 
 /// What each froxel's lights put into it, as `scatterMain` measured them —
 /// what the punctual lights in its list scatter in `rgb`, what fraction of
@@ -177,7 +189,7 @@ StructuredBuffer<float4> volumetrics;
 /// and the light loop in one shader instead of running them again for every
 /// pixel on screen.
 [[vk::binding(4, 0)]]
-StructuredBuffer<float4> lighting;
+StructuredBuffer<float4> lighting D3D12_REGISTER(t4, space0);
 
 struct FullscreenOutput
 {

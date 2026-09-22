@@ -3,7 +3,7 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 42 "shaders/clear_counters.slang"
+#line 54 "shaders/clear_counters.slang"
 struct ClearParams_0
 {
     uint args_words_0;
@@ -13,7 +13,7 @@ struct ClearParams_0
 };
 
 
-#line 111
+#line 123
 struct KernelContext_0
 {
     ClearParams_0 constant* clear_0;
@@ -23,23 +23,23 @@ struct KernelContext_0
 };
 
 
-#line 105
+#line 117
 [[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], ClearParams_0 constant* clear_1 [[buffer(0)]], uint device* cull_stats_1 [[buffer(1)]], uint device* args_1 [[buffer(2)]], uint device* counts_and_mesh_args_1 [[buffer(3)]])
 {
 
-#line 105
+#line 117
     thread KernelContext_0 kernelContext_0;
 
-#line 105
+#line 117
     (&kernelContext_0)->clear_0 = clear_1;
 
-#line 105
+#line 117
     (&kernelContext_0)->cull_stats_0 = cull_stats_1;
 
-#line 105
+#line 117
     (&kernelContext_0)->args_0 = args_1;
 
-#line 105
+#line 117
     (&kernelContext_0)->counts_and_mesh_args_0 = counts_and_mesh_args_1;
 
     uint index_0 = thread_0.x;
@@ -48,7 +48,7 @@ struct KernelContext_0
     {
         *((&kernelContext_0)->cull_stats_0+index_0) = 0U;
 
-#line 109
+#line 121
     }
 
 
@@ -57,7 +57,7 @@ struct KernelContext_0
     {
         *((&kernelContext_0)->args_0+index_0) = 0U;
 
-#line 113
+#line 125
     }
 
 
@@ -66,15 +66,15 @@ struct KernelContext_0
     {
         *((&kernelContext_0)->counts_and_mesh_args_0+index_0) = 0U;
 
-#line 117
+#line 129
     }
 
-#line 123
+#line 135
     if(index_0 < ((&kernelContext_0)->clear_0->mesh_args_words_0))
     {
         *((&kernelContext_0)->counts_and_mesh_args_0+((&kernelContext_0)->clear_0->counts_words_0 + index_0)) = 0U;
 
-#line 123
+#line 135
     }
 
 

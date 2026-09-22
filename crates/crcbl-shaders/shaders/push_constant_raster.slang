@@ -51,6 +51,18 @@
 // tree, and `tests/wgsl_validation.rs` is what catches it being added back. See
 // this crate's docs, "A push constant costs the WGSL target".
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The clip-space depth every corner is emitted at.
 ///
 /// Anywhere inside the clip volume would do — the seam's exercise binds no
@@ -88,7 +100,7 @@ struct RasterConstants
 /// position `crcbl_shaders::declaration_order` requires a push constant to hold
 /// and the one `crcbl-mtl` leaves free past the numbered bindings.
 [[vk::push_constant]]
-ConstantBuffer<RasterConstants> constants;
+ConstantBuffer<RasterConstants> constants D3D12_REGISTER(b0, space64);
 
 struct VertexOutput
 {

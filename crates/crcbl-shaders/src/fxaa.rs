@@ -126,7 +126,7 @@ mod tests {
             );
         }
         assert!(
-            source.contains("ConstantBuffer<FxaaParams> params;"),
+            source.contains("ConstantBuffer<FxaaParams> params D3D12_REGISTER("),
             "fxaa.slang does not bind the block `to_bytes` writes"
         );
     }

@@ -77,6 +77,18 @@
 // byte-identical to the ones the passing probes use, and the amplification
 // container is the only thing that differs.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// What this stage hands the mesh stage: the layout `mesh_shader.slang`'s
 /// `Amplification` declares, and `amplifiedMeshMain` there is what reads it.
 ///
@@ -98,14 +110,14 @@ struct Amplification
 ///
 /// **The binding number is the slot in the probe's set, not this file's own
 /// count.** `crcbl-dx12`'s `MeshProbe` binds `mesh_shader.slang`'s geometry at
-/// binding 0 and appends these two, and only SPIR-V reads the numbers at all:
-/// `dxc` numbers each register class from zero in declaration order, so the
-/// container declares this `u0`, and Slang's Metal target gives it the first
-/// index in this module's own buffer table. Nothing on Metal loads this probe
-/// — `crcbl-mtl` would index the two by ascending `(set, binding)` and reach 1
+/// binding 0 and appends these two. SPIR-V reads the numbers, and so does the
+/// container, which declares this `u1` because a D3D12 register is the binding
+/// number. Slang's Metal target alone ignores them and gives it the first index
+/// in this module's own buffer table; nothing on Metal loads this probe —
+/// `crcbl-mtl` would index the two by ascending `(set, binding)` and reach 1
 /// and 2 — so the D3D12 numbering is the one that has to agree, and it does.
 [[vk::binding(1, 0)]]
-RWStructuredBuffer<Atomic<uint> > count;
+RWStructuredBuffer<Atomic<uint> > count D3D12_REGISTER(u1, space0);
 
 /// Where the plain indexed store lands: one word per amplification group, the
 /// shape `cluster_selection` has for one word per resident cluster.
@@ -114,7 +126,7 @@ RWStructuredBuffer<Atomic<uint> > count;
 /// performs is an ordinary store, and an atomic one would be the same
 /// instruction as the counter above rather than a second thing to eliminate.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> slots;
+RWStructuredBuffer<uint> slots D3D12_REGISTER(u2, space0);
 
 /// One amplification group: two storage writes, then one mesh group.
 ///

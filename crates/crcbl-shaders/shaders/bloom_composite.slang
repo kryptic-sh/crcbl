@@ -38,6 +38,18 @@
 // is a genuine magnification and is sampled with the linear sampler
 // `crcbl_render::bloom` creates for exactly this.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass takes from the CPU — `bloom_down.slang`'s block, member
 /// for member.
 ///
@@ -69,7 +81,7 @@ struct BloomParams
 /// `Texture2D<float4>` read by `Load`, so there is no sampler beside it — see
 /// the header.
 [[vk::binding(0, 0)]]
-Texture2D<float4> scene;
+Texture2D<float4> scene D3D12_REGISTER(t0, space0);
 
 /// Mip 1 of the chain, holding the sum of every level `bloom_up.slang` walked
 /// back down.
@@ -78,13 +90,13 @@ Texture2D<float4> scene;
 /// verbatim out of that shader and the guard that holds the copies together
 /// compares their bodies as text — see `crcbl_shaders::bloom`.
 [[vk::binding(1, 0)]]
-Texture2D<float4> source;
+Texture2D<float4> source D3D12_REGISTER(t1, space0);
 
 [[vk::binding(2, 0)]]
-SamplerState sourceSampler;
+SamplerState sourceSampler D3D12_REGISTER(s2, space0);
 
 [[vk::binding(3, 0)]]
-ConstantBuffer<BloomParams> params;
+ConstantBuffer<BloomParams> params D3D12_REGISTER(b3, space0);
 
 struct FullscreenOutput
 {

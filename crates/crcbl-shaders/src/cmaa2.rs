@@ -171,7 +171,7 @@ mod tests {
                 );
             }
             assert!(
-                source.contains("ConstantBuffer<Cmaa2Params> params;"),
+                source.contains("ConstantBuffer<Cmaa2Params> params D3D12_REGISTER("),
                 "{name} does not bind the block `to_bytes` writes"
             );
         }

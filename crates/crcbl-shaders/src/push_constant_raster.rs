@@ -27,12 +27,13 @@
 //!   tables are per stage.
 //! * **DXIL** (`dxil/push_constant_raster.vertexMain.dxil` and its
 //!   `fragmentMain` twin) — HLSL has no push constants either; Slang emits a
-//!   `cbuffer` and `dxc` binds it at **`cb0`** (register `b0`, space 0),
+//!   `cbuffer`, which the source declares at register **`b0`** in
+//!   [`D3D12_PUSH_CONSTANT_SPACE`](crate::D3D12_PUSH_CONSTANT_SPACE),
 //!   [`CONSTANTS_SIZE`](crate::push_constant_raster::CONSTANTS_SIZE) bytes, in
 //!   each container. A D3D12 root signature therefore carries a root-constants
-//!   entry of that many bytes' worth of 32-bit values at `b0`, whose *shader
-//!   visibility* is computed from the range's stages — the per-stage plumbing a
-//!   compute-only range never exercises.
+//!   entry of that many bytes' worth of 32-bit values at `b0` in that space,
+//!   whose *shader visibility* is computed from the range's stages — the
+//!   per-stage plumbing a compute-only range never exercises.
 //!
 //! # The two stages read different halves, and that is deliberate
 //!
@@ -104,7 +105,9 @@ mod tests {
     fn the_source_declares_a_push_constant_and_no_wgsl_target() {
         let source = include_str!("../shaders/push_constant_raster.slang");
         assert!(
-            source.contains("[[vk::push_constant]]\nConstantBuffer<RasterConstants> constants;"),
+            source.contains(
+                "[[vk::push_constant]]\nConstantBuffer<RasterConstants> constants D3D12_REGISTER("
+            ),
             "push_constant_raster.slang no longer declares its block as a push constant"
         );
         assert!(
@@ -140,9 +143,10 @@ mod tests {
     /// here, for [`crate::push_constant_probe`]'s reason: it lives in the
     /// container's `RDEF` chunk, and parsing DXBC to reach it is more machinery
     /// than this crate — which has no dependencies — should carry for one
-    /// number. It was read with `dxc -dumpbin` over the committed containers,
-    /// and the byte-for-byte recompile gate is what keeps those containers the
-    /// ones this source produces.
+    /// number. `crcbl-dx12`'s `dxil` module reads it from each container's
+    /// `PSV0` part and accepts a resource with no binding only at `b0` in the
+    /// push-constant space, and the byte-for-byte recompile gate is what keeps
+    /// those containers the ones this source produces.
     /// The two MSL assertions are matched per **stage** rather than by
     /// searching the whole file, because "both stages take the block" is half of
     /// what this shader exists to prove and a file-wide match is satisfied by

@@ -75,6 +75,18 @@
 // A survivor-list entry is the instance index below `ENTRY_INDEX_MASK` and the
 // cull's tags above it; `draw_gen.slang` reads both.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance` and
 /// `mesh.slang`'s copy.
 struct GpuInstance
@@ -312,24 +324,24 @@ struct CullParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<CullParams> cull;
+ConstantBuffer<CullParams> cull D3D12_REGISTER(b0, space0);
 
 /// The instance array. `StructuredBuffer`, so this is a read-only storage
 /// buffer: the cull pass decides what is visible and never edits an instance.
 [[vk::binding(1, 0)]]
-StructuredBuffer<GpuInstance> instances;
+StructuredBuffer<GpuInstance> instances D3D12_REGISTER(t1, space0);
 
 /// The mesh table, indexed by `GpuInstance::mesh`. Read-only for the same
 /// reason.
 [[vk::binding(2, 0)]]
-StructuredBuffer<GpuMesh> meshes;
+StructuredBuffer<GpuMesh> meshes D3D12_REGISTER(t2, space0);
 
 /// The compacted survivors, as indices into `instances`. **Written in whatever
 /// order the atomic below hands slots out**, which is not ascending and is not
 /// reproducible between runs — a consumer reads `visible_count` of them and
 /// must not assume anything else.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> visible;
+RWStructuredBuffer<uint> visible D3D12_REGISTER(u3, space0);
 
 /// How many survivors there were, in element `INSTANCE_SURVIVOR_WORD`.
 /// `clear_counters.slang` zeroes it before the dispatch.
@@ -354,7 +366,7 @@ RWStructuredBuffer<uint> visible;
 /// WGSL, `atomic_fetch_add_explicit` in MSL, and `InterlockedAdd` again in the
 /// HLSL the DXIL is built from.
 [[vk::binding(4, 0)]]
-RWStructuredBuffer<Atomic<uint> > visible_count;
+RWStructuredBuffer<Atomic<uint> > visible_count D3D12_REGISTER(u4, space0);
 
 // # The farthest-depth pyramid, for the two occlusion phases
 //
@@ -373,21 +385,21 @@ RWStructuredBuffer<Atomic<uint> > visible_count;
 // deepest level — and `CullParams::pyramid_levels` bounds what is read.
 
 [[vk::binding(0, 1)]]
-DepthTexture2D pyramid_1;
+DepthTexture2D pyramid_1 D3D12_REGISTER(t0, space1);
 [[vk::binding(1, 1)]]
-DepthTexture2D pyramid_2;
+DepthTexture2D pyramid_2 D3D12_REGISTER(t1, space1);
 [[vk::binding(2, 1)]]
-DepthTexture2D pyramid_3;
+DepthTexture2D pyramid_3 D3D12_REGISTER(t2, space1);
 [[vk::binding(3, 1)]]
-DepthTexture2D pyramid_4;
+DepthTexture2D pyramid_4 D3D12_REGISTER(t3, space1);
 [[vk::binding(4, 1)]]
-DepthTexture2D pyramid_5;
+DepthTexture2D pyramid_5 D3D12_REGISTER(t4, space1);
 [[vk::binding(5, 1)]]
-DepthTexture2D pyramid_6;
+DepthTexture2D pyramid_6 D3D12_REGISTER(t5, space1);
 [[vk::binding(6, 1)]]
-DepthTexture2D pyramid_7;
+DepthTexture2D pyramid_7 D3D12_REGISTER(t6, space1);
 [[vk::binding(7, 1)]]
-DepthTexture2D pyramid_8;
+DepthTexture2D pyramid_8 D3D12_REGISTER(t7, space1);
 
 /// Whether `instance` is a record this view's cull may read at all.
 ///

@@ -43,6 +43,18 @@
 // triangles would rasterise a seam down the diagonal where the two halves meet,
 // and would need geometry — which `crcbl-hal` has no way to bind anyway.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass takes from the CPU, which is one number.
 ///
 /// `crcbl_shaders::tonemap::TonemapParams` is the Rust mirror and
@@ -133,13 +145,13 @@ float3 rrt_and_odt_fit(float3 v)
 // block is numbered last and therefore declared last: it is the buffer table's
 // only entry either way, and the rule is checked globally rather than per table.
 [[vk::binding(0, 0)]]
-Texture2D<float4> scene;
+Texture2D<float4> scene D3D12_REGISTER(t0, space0);
 
 [[vk::binding(1, 0)]]
-SamplerState sceneSampler;
+SamplerState sceneSampler D3D12_REGISTER(s1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<TonemapParams> params;
+ConstantBuffer<TonemapParams> params D3D12_REGISTER(b2, space0);
 
 /// `[0]`: the exposure `exposure.slang`'s `reduceMain` measured from this
 /// frame, read only when [`TonemapParams::auto_exposure`] says to.
@@ -150,7 +162,7 @@ ConstantBuffer<TonemapParams> params;
 /// bytes; `crcbl_render::exposure` creates the buffer with the renderer and
 /// writes it only on a frame that measures.
 [[vk::binding(3, 0)]]
-StructuredBuffer<float> measured;
+StructuredBuffer<float> measured D3D12_REGISTER(t3, space0);
 
 struct FullscreenOutput
 {

@@ -82,23 +82,23 @@
 //!   slot left.
 //! * [`BindingFlags::UPDATE_AFTER_BIND`] — see above.
 //!
-//! # The register a binding lands on comes from the artifact, not from its
-//! number
+//! # The register a binding lands on is its number, in its set's space
 //!
-//! `[[vk::binding(binding, set)]]` reaches SPIR-V and nothing else. Slang's HLSL
-//! output drops it, and `dxc` numbers each register class from zero in
-//! declaration order across the whole source, in space 0 — so a set holding a
+//! Every source `crcbl-shaders` compiles declares each resource's D3D12
+//! register beside its `[[vk::binding(binding, set)]]`, as
+//! `register(<class><binding>, space<set>)` — so a set holding a
 //! `ConstantBuffer`, a `StructuredBuffer` and an `RWStructuredBuffer` at
-//! bindings 0, 1 and 2 is `b0`/`t0`/`u0` in the container, not `b0`/`t1`/`u2`.
-//! A root signature naming registers the shader does not read is rejected by
-//! pipeline creation, so this is not a subtlety a caller can absorb.
+//! bindings 0, 1 and 2 of set 1 is `b0`/`t1`/`u2` in space 1. A root signature
+//! naming registers the shader does not read is a stage reading the wrong
+//! descriptor, and nothing in D3D12 reports it.
 //!
-//! [`ranges`] therefore assigns registers with [`root::assign_registers`],
-//! threaded across a pipeline layout's sets in order, and `crate::dxil` checks
-//! the rule against every committed container on any host. It is correct because
-//! `crcbl-shaders`' `declaration_order` lint already requires each source to
-//! declare its resources in ascending `(set, binding)` order — the same
-//! guarantee `crcbl-mtl` leans on for its flat argument tables.
+//! [`ranges`] takes each register from [`root::assign_registers`] and each space
+//! from [`root::space_of`], so a register depends on its binding alone and
+//! never on what else a layout declares. `crate::dxil` checks every committed
+//! container against its own SPIR-V's bindings, and
+//! `crate::renderer_registers` every renderer layout against every container
+//! it serves, both on any host. A layout whose array would run into a later
+//! binding's register is refused at creation — see [`root::check_registers`].
 //!
 //! # A dynamic offset leaves the table and becomes a root descriptor
 //!
@@ -114,8 +114,8 @@
 //!
 //! What this module still owns is everything about the *binding*: that a dynamic
 //! binding is a single buffer rather than an array or an image, that it still
-//! takes its register in declaration order beside the table's, and that the
-//! address a group holds for it is the buffer's plus the entry's offset.
+//! takes the register its binding number names, and that the address a group
+//! holds for it is the buffer's plus the entry's offset.
 
 use crcbl_hal::{
     BackendKind, BindGroupDesc, BindGroupEntry, BindGroupLayoutDesc, BindGroupLayoutEntry,
@@ -477,7 +477,8 @@ impl VisibleHeaps {
 /// Whatever [`BindGroupLayoutDesc::check_entries`] returns, plus
 /// [`HalError::InvalidDescriptor`] for a dynamic-offset binding that is an
 /// array or carries a [`BindingFlags`] — neither of which a root descriptor can
-/// encode. See [`check_entry`].
+/// encode, see [`check_entry`] — and for an array whose registers would run
+/// into a later binding's, see [`root::check_registers`].
 pub(crate) fn plan_layout(
     desc: &BindGroupLayoutDesc<'_>,
     caps: &DeviceCaps,
@@ -531,7 +532,7 @@ pub(crate) fn plan_layout(
     // and `desc.entries` is not required to be sorted.
     roots.sort_by_key(|root| root.binding);
 
-    Ok(BindGroupLayoutRecord {
+    let record = BindGroupLayoutRecord {
         owner,
         view_descriptors: next_offset(&views),
         sampler_descriptors: next_offset(&samplers),
@@ -540,7 +541,35 @@ pub(crate) fn plan_layout(
         roots,
         variable,
         visibility,
-    })
+    };
+    root::check_registers(&register_bindings(&record))?;
+    Ok(record)
+}
+
+/// Every binding a layout declares, reduced to what register assignment needs,
+/// in a fixed order: views, then samplers, then root descriptors.
+///
+/// One list for the tables and the root descriptors together, because they
+/// share the `b`/`t`/`u` register files and an overlap between the two is as
+/// real as one inside a table.
+fn register_bindings(layout: &BindGroupLayoutRecord) -> Vec<root::Binding> {
+    layout
+        .views
+        .iter()
+        .chain(&layout.samplers)
+        .map(|plan| root::Binding {
+            binding: plan.binding,
+            class: register_class(plan.range_type),
+            declared: plan.declared,
+        })
+        .chain(layout.roots.iter().map(|plan| root::Binding {
+            binding: plan.binding,
+            class: register_class(plan.range_type),
+            // A root descriptor is exactly one resource; there is no unbounded
+            // form of it.
+            declared: 1,
+        }))
+        .collect()
 }
 
 /// A storage buffer's declared element stride, or zero for any other kind —
@@ -615,7 +644,7 @@ pub(crate) struct SetTables {
     pub(crate) visibility: ShaderStages,
     /// Every storage buffer the set declares, at the register it was assigned —
     /// tables and root descriptors alike, since both are `StructuredBuffer`s in
-    /// the source. `set` is zero here; `crate::pipeline` fills it in.
+    /// the source.
     pub(crate) storage: Vec<dxil::StorageRegister>,
 }
 
@@ -629,39 +658,12 @@ pub(crate) struct RootDescriptor {
 /// The root parameters one set contributes: its two tables' ranges, and a root
 /// descriptor per dynamic binding.
 ///
-/// **The register is not the binding number, and the space is not the set.**
-/// `[[vk::binding(binding, set)]]` is a Vulkan attribute; Slang's HLSL output
-/// ignores it and lets `dxc` number each register class from zero in
-/// declaration order, in space 0. So the registers are assigned by
-/// [`root::assign_registers`] — threaded across a pipeline layout's sets by the
-/// caller, because the count does not restart at a set boundary.
-/// `crate::dxil` measures the rule against every committed container.
-///
-/// Everything the set declares is numbered in **one** call, tables and root
-/// descriptors together: they share the `b`/`t`/`u` register files, so numbering
-/// them separately would put the order of two calls in charge of what the
-/// artifact is compared against.
-pub(crate) fn ranges(layout: &BindGroupLayoutRecord, registers: &mut dxil::Registers) -> SetTables {
-    // One list in a fixed order — views, then samplers, then root descriptors —
-    // so the registers come back indexable by the same order.
-    let bindings: Vec<root::Binding> = layout
-        .views
-        .iter()
-        .chain(&layout.samplers)
-        .map(|plan| root::Binding {
-            binding: plan.binding,
-            class: register_class(plan.range_type),
-            declared: plan.declared,
-        })
-        .chain(layout.roots.iter().map(|plan| root::Binding {
-            binding: plan.binding,
-            class: register_class(plan.range_type),
-            // A root descriptor is exactly one resource; there is no unbounded
-            // form of it.
-            declared: 1,
-        }))
-        .collect();
-    let assigned = root::assign_registers(&bindings, registers);
+/// **The register is the binding number, and the space is the set** — `space`,
+/// which the caller takes from [`root::space_of`]. See the module docs.
+pub(crate) fn ranges(layout: &BindGroupLayoutRecord, space: u32) -> SetTables {
+    // The registers come back in `register_bindings`' order — views, then
+    // samplers, then root descriptors — and are indexed by it below.
+    let assigned = root::assign_registers(&register_bindings(layout));
 
     let mut tables: Vec<D3D12_DESCRIPTOR_RANGE> = layout
         .views
@@ -672,7 +674,7 @@ pub(crate) fn ranges(layout: &BindGroupLayoutRecord, registers: &mut dxil::Regis
             RangeType: plan.range_type,
             NumDescriptors: plan.declared,
             BaseShaderRegister: *register,
-            RegisterSpace: 0,
+            RegisterSpace: space,
             OffsetInDescriptorsFromTableStart: plan.offset,
         })
         .collect();
@@ -686,7 +688,7 @@ pub(crate) fn ranges(layout: &BindGroupLayoutRecord, registers: &mut dxil::Regis
             parameter_type: plan.parameter_type(),
             descriptor: D3D12_ROOT_DESCRIPTOR {
                 ShaderRegister: *register,
-                RegisterSpace: 0,
+                RegisterSpace: space,
             },
             visibility: plan.visibility,
         })
@@ -711,7 +713,7 @@ pub(crate) fn ranges(layout: &BindGroupLayoutRecord, registers: &mut dxil::Regis
         .filter(|(.., stride, _)| *stride > 0)
         .map(
             |(binding, range_type, stride, register)| dxil::StorageRegister {
-                set: 0,
+                set: space,
                 binding,
                 class: register_class(range_type),
                 register,
@@ -1503,12 +1505,21 @@ mod tests {
         assert_eq!(layout.views[0].declared, limits.max_bindless_descriptors);
 
         // A second range after it, so the offset arithmetic is exercised rather
-        // than assumed.
+        // than assumed. Writable, so it is a UAV in the same view table: an SRV
+        // at binding 1 would be inside the first range's registers, which
+        // `root::check_registers` refuses.
         let pair = [
             flat[0],
             BindGroupLayoutEntry {
                 count: 2,
-                ..entry(1, image)
+                ..entry(
+                    1,
+                    BindingKind::StorageBuffer {
+                        read_only: false,
+                        dynamic: false,
+                        stride: 4,
+                    },
+                )
             },
         ];
         let layout = plan(&pair).expect("two ranges");
@@ -1526,18 +1537,18 @@ mod tests {
         assert_eq!(layout.views[0].count, 0);
     }
 
-    /// **A binding's register is its position among the bindings of its own
-    /// class, and every set is space 0.**
+    /// **A binding's register is its binding number, and its space is its
+    /// set.**
     ///
-    /// This replaces an assertion that the register *was* the binding number and
-    /// the space *was* the set index. That claim was checked against nothing but
-    /// itself and is false of every artifact this workspace commits — see
-    /// `crate::dxil`'s `registers_are_assigned_per_class_in_declaration_order`,
-    /// which reads the register out of the container's own resource table. A
-    /// root signature built the old way names `t1` and `u2` for a shader that
-    /// reads `t0` and `u0`, which pipeline creation rejects.
+    /// That was this test's claim once before, checked against nothing but
+    /// itself and false of every artifact then committed, whose registers `dxc`
+    /// counted. It is true now because every source declares its registers
+    /// that way — `crcbl-shaders`' `declaration_order` lint holds each
+    /// annotation to its binding, and `crate::dxil`'s
+    /// `every_container_declares_each_resource_at_its_binding_and_set` reads
+    /// every committed container's resource table back against its SPIR-V.
     #[test]
-    fn a_bindings_register_is_its_index_among_its_own_class() {
+    fn a_bindings_register_is_its_binding_number_in_its_sets_space() {
         let entries = [
             entry(0, BindingKind::UniformBuffer { dynamic: false }),
             entry(
@@ -1566,45 +1577,64 @@ mod tests {
             ),
         ];
         let layout = plan(&entries).expect("five bindings");
-        let mut registers = dxil::Registers::default();
-        let tables = ranges(&layout, &mut registers);
+        let tables = ranges(&layout, 1);
         let (views, samplers) = (&tables.views, &tables.samplers);
 
-        // In `views` order, which is declaration order: b0, t0, u0, t1.
-        assert_eq!(views.len(), 4);
-        assert_eq!(views[0].BaseShaderRegister, 0, "the only CBV is b0");
-        assert_eq!(views[1].BaseShaderRegister, 0, "the first SRV is t0");
-        assert_eq!(views[2].BaseShaderRegister, 0, "the only UAV is u0");
+        // In `views` order, which is declaration order: b0, t1, u3, t4.
         assert_eq!(
-            views[3].BaseShaderRegister, 1,
-            "the second SRV is t1, and the UAV between them did not consume a t"
+            views
+                .iter()
+                .map(|range| range.BaseShaderRegister)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 3, 4],
+            "each register is its binding number, whatever class the bindings around it are"
         );
         assert_eq!(samplers.len(), 1);
-        assert_eq!(samplers[0].BaseShaderRegister, 0, "the only sampler is s0");
+        assert_eq!(samplers[0].BaseShaderRegister, 2, "the sampler is s2");
         for range in views.iter().chain(samplers) {
-            assert_eq!(
-                range.RegisterSpace, 0,
-                "Slang's HLSL output puts every set in space 0"
-            );
+            assert_eq!(range.RegisterSpace, 1, "every range is in its set's space");
         }
+        // The table still packs: the registers have gaps, the descriptors do
+        // not, because the offset is where the group wrote the descriptor.
+        assert_eq!(
+            views
+                .iter()
+                .map(|range| range.OffsetInDescriptorsFromTableStart)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
         assert_eq!(views[0].NumDescriptors, 1);
-        assert_eq!(views[0].OffsetInDescriptorsFromTableStart, 0);
         assert!(tables.roots.is_empty(), "no binding here is dynamic");
+        assert!(
+            tables
+                .storage
+                .iter()
+                .all(|storage| storage.set == 1 && storage.register == storage.binding),
+            "a stride is held to the container at the same register and space: {:?}",
+            tables.storage
+        );
+    }
 
-        // The counter carries across sets, so a second layout continues where
-        // the first stopped — which is what makes a two-set pipeline layout
-        // agree with a source `dxc` numbered end to end.
-        let more = [entry(
-            0,
-            BindingKind::StorageBuffer {
-                read_only: true,
-                dynamic: false,
-                stride: 4,
-            },
-        )];
-        let second = plan(&more).expect("one binding");
-        let tables = ranges(&second, &mut registers);
-        assert_eq!(tables.views[0].BaseShaderRegister, 2, "the third SRV is t2");
+    /// **An array that would run into a later binding's register is refused
+    /// at layout creation**, where Vulkan, which numbers an array as one
+    /// binding, would accept it.
+    #[test]
+    fn an_array_overlapping_a_later_binding_is_refused_at_layout_creation() {
+        let image = BindingKind::SampledImage {
+            view_type: ImageViewType::D2,
+            sample_type: SampleType::Float,
+        };
+        let array = BindGroupLayoutEntry {
+            count: 4,
+            ..entry(0, image)
+        };
+        plan(&[array, entry(4, image)]).expect("t0..t3 and t4 do not overlap");
+        let error = plan(&[array, entry(2, image)]).expect_err("t2 is inside t0..t3");
+        let HalError::InvalidDescriptor(text) = &error else {
+            panic!("{error:?}");
+        };
+        assert!(text.contains("binding 0"), "{text}");
+        assert!(text.contains("binding 2"), "{text}");
     }
 
     /// **A dynamic binding leaves the descriptor table and becomes a root
@@ -1615,7 +1645,7 @@ mod tests {
     /// it would put every later binding one slot past the descriptor its group
     /// wrote — a shader reading the wrong resource, with nothing in D3D12 to say
     /// so. The registers are the other half: it is still a `ConstantBuffer` in
-    /// the source, so it still takes `b1` and the CBV after it takes `b2`.
+    /// the source, and it takes `b1`, the register its binding number names.
     #[test]
     fn a_dynamic_binding_leaves_the_table_and_becomes_a_root_descriptor() {
         let entries = [
@@ -1670,16 +1700,15 @@ mod tests {
             "binding 3 is a writable storage buffer, so a root UAV"
         );
 
-        let mut registers = dxil::Registers::default();
-        let tables = ranges(&layout, &mut registers);
+        let tables = ranges(&layout, 0);
         assert_eq!(
             tables
                 .views
                 .iter()
                 .map(|range| range.BaseShaderRegister)
                 .collect::<Vec<_>>(),
-            vec![0, 2, 0],
-            "b0 and b2 in the table, and t0 for the sampled image — b1 went to the root descriptor"
+            vec![0, 2, 4],
+            "b0 and b2 in the table, and t4 for the sampled image — b1 went to the root descriptor"
         );
         assert_eq!(tables.roots.len(), 2);
         assert_eq!(
@@ -1692,7 +1721,7 @@ mod tests {
             tables.roots[1].parameter_type,
             D3D12_ROOT_PARAMETER_TYPE_UAV
         );
-        assert_eq!(tables.roots[1].descriptor.ShaderRegister, 0, "u0");
+        assert_eq!(tables.roots[1].descriptor.ShaderRegister, 3, "u3");
     }
 
     /// A block's addresses are its start times the stride, in both spaces —

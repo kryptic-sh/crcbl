@@ -29,6 +29,18 @@
 // unbuildable on one of the three targets the compile script emits. A uniform
 // buffer is what `mesh.slang` already uses for the same reason.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The one thing an invocation needs that is not buffer contents, matching
 /// `crcbl_shaders::compute_probe::Params`.
 struct Params
@@ -40,17 +52,17 @@ struct Params
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<Params> params;
+ConstantBuffer<Params> params D3D12_REGISTER(b0, space0);
 
 /// Read-only input. `StructuredBuffer` rather than `RWStructuredBuffer` is what
 /// makes this a `BindingKind::StorageBuffer { read_only: true }` on the Rust
 /// side, exactly as in `triangle.slang`.
 [[vk::binding(1, 0)]]
-StructuredBuffer<uint> source;
+StructuredBuffer<uint> source D3D12_REGISTER(t1, space0);
 
 /// Written output, one element per invocation.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> destination;
+RWStructuredBuffer<uint> destination D3D12_REGISTER(u2, space0);
 
 /// One dimension, so a dispatch is `(groups, 1, 1)` and the element index is the
 /// global invocation index. That is the smallest mapping which still leaves a

@@ -37,6 +37,18 @@
 // two dispatches is two passes. The render graph computes it from what each
 // pass declares.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The buffer lengths this pass cannot derive for itself, matching
 /// `crcbl_shaders::clear_counters::Params`.
 struct ClearParams
@@ -65,20 +77,20 @@ struct ClearParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<ClearParams> clear;
+ConstantBuffer<ClearParams> clear D3D12_REGISTER(b0, space0);
 
 /// The frame's culling statistics: `cull.slang`'s surviving instances in
 /// element 0 and `mesh_cluster.slang`'s surviving clusters in element 1. Both
 /// are atomic adds, so both start here at zero.
 [[vk::binding(1, 0)]]
-RWStructuredBuffer<uint> cull_stats;
+RWStructuredBuffer<uint> cull_stats D3D12_REGISTER(u1, space0);
 
 /// The indirect arguments, as the flat array of words `draw_gen.slang` writes
 /// them through. Zeroed whole rather than only at the accumulating word: the
 /// generating pass rewrites every static word of every bucket it owns, so there
 /// is nothing here worth preserving.
 [[vk::binding(2, 0)]]
-RWStructuredBuffer<uint> args;
+RWStructuredBuffer<uint> args D3D12_REGISTER(u2, space0);
 
 /// One draw count per bucket, then the per-bucket mesh-dispatch arguments —
 /// **one buffer with two regions**, which is `draw_gen.slang`'s
@@ -91,7 +103,7 @@ RWStructuredBuffer<uint> args;
 /// the surviving-instance count and is accumulated by atomic add, so it starts
 /// here at zero like every other counter this pass owns.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> counts_and_mesh_args;
+RWStructuredBuffer<uint> counts_and_mesh_args D3D12_REGISTER(u3, space0);
 
 /// Invocations per workgroup, matching
 /// `crcbl_shaders::clear_counters::WORKGROUP_SIZE`.

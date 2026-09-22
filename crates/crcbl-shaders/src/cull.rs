@@ -744,7 +744,7 @@ mod tests {
         // Eight pyramid bindings, one per level, in set 1 and in order.
         for level in 1..=OCCLUSION_MAX_LEVELS {
             let declaration = format!(
-                "[[vk::binding({}, 1)]]\nDepthTexture2D pyramid_{level};",
+                "[[vk::binding({}, 1)]]\nDepthTexture2D pyramid_{level} D3D12_REGISTER(",
                 level - 1
             );
             assert!(

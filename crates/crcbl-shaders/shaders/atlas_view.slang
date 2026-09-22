@@ -45,6 +45,18 @@
 // artifact, so an include would be a file whose edits nothing downstream
 // notices. The fullscreen triangle below is `fxaa.slang`'s, copied.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Slots the shadow atlas has, matching
 /// `crcbl_shaders::mesh::SHADOW_ATLAS_TILES` and `mesh.slang`'s own copy.
 ///
@@ -83,7 +95,7 @@ struct AtlasViewParams
 // `crcbl_shaders::declaration_order`, which lints it over every source.
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<AtlasViewParams> params;
+ConstantBuffer<AtlasViewParams> params D3D12_REGISTER(b0, space0);
 
 /// The sun's cascades and the lit tiles beside them, as depth.
 ///
@@ -91,7 +103,7 @@ ConstantBuffer<AtlasViewParams> params;
 /// WebGPU will bind a `D32Float` view through, and the type `mesh.slang`'s own
 /// binding of this image carries the argument for.
 [[vk::binding(1, 0)]]
-DepthTexture2D shadow_atlas;
+DepthTexture2D shadow_atlas D3D12_REGISTER(t1, space0);
 
 struct FullscreenOutput
 {

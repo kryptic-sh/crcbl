@@ -121,6 +121,18 @@
 // reflectivity targets keep what the forward pass cleared them to, which is
 // exactly "this pixel does not move" and "this pixel reflects nothing".
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 static const uint SHADOW_CASCADES = 2;
 
 static const uint SHADOW_LIGHT_TILES = 14;
@@ -552,23 +564,23 @@ struct GrassInstance
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<FrameUniforms> frame;
+ConstantBuffer<FrameUniforms> frame D3D12_REGISTER(b0, space0);
 
 [[vk::binding(1, 0)]]
-ConstantBuffer<GrassParams> grass;
+ConstantBuffer<GrassParams> grass D3D12_REGISTER(b1, space0);
 
 [[vk::binding(2, 0)]]
-ConstantBuffer<GrassTile> tile;
+ConstantBuffer<GrassTile> tile D3D12_REGISTER(b2, space0);
 
 /// Every slot's instances, as `grass_gen.slang` appended them: the cards from
 /// the start of the slot's first region, the far blades from its end, and the
 /// near blades from the start of its second — see that file's header.
 [[vk::binding(3, 0)]]
-StructuredBuffer<GrassInstance> instances;
+StructuredBuffer<GrassInstance> instances D3D12_REGISTER(t3, space0);
 
 /// The blade rows, indexed by `GrassInstance::lanes.y`.
 [[vk::binding(4, 0)]]
-StructuredBuffer<GrassBlade> blades;
+StructuredBuffer<GrassBlade> blades D3D12_REGISTER(t4, space0);
 
 /// The card's coverage-preserving mip chain — decision 3's "Castaño's
 /// coverage-preserving alpha mipmaps are cooked at build time so a distant card
@@ -586,26 +598,26 @@ StructuredBuffer<GrassBlade> blades;
 /// second upload path is a second place D3D12's 256-byte row pitch has to be
 /// got right.
 [[vk::binding(5, 0)]]
-Texture2DArray<float4> grassCard;
+Texture2DArray<float4> grassCard D3D12_REGISTER(t5, space0);
 
 [[vk::binding(6, 0)]]
-SamplerState grassCardSampler;
+SamplerState grassCardSampler D3D12_REGISTER(s6, space0);
 
 /// The shadow atlas and its comparison sampler, as `mesh.slang` binds them.
 [[vk::binding(7, 0)]]
-DepthTexture2D shadow_atlas;
+DepthTexture2D shadow_atlas D3D12_REGISTER(t7, space0);
 
 [[vk::binding(8, 0)]]
-SamplerComparisonState shadow_sampler;
+SamplerComparisonState shadow_sampler D3D12_REGISTER(s8, space0);
 
 /// The light rows, as `mesh.slang` binds them.
 [[vk::binding(9, 0)]]
-StructuredBuffer<GpuLight> lights;
+StructuredBuffer<GpuLight> lights D3D12_REGISTER(t9, space0);
 
 /// The froxel lists, as `mesh.slang` binds them: a count and then that many
 /// indices into `lights`, `CLUSTER_STRIDE` words apart.
 [[vk::binding(10, 0)]]
-StructuredBuffer<uint> cluster_lights;
+StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t10, space0);
 
 /// A field's static block: where its placement lattice is, the ground under it
 /// and its shell stack. `crcbl_shaders::grass::FieldBlock`.
@@ -635,17 +647,17 @@ struct GrassField
 };
 
 [[vk::binding(11, 0)]]
-ConstantBuffer<GrassField> field;
+ConstantBuffer<GrassField> field D3D12_REGISTER(b11, space0);
 
 /// Every cell's blade at the cell's own index, zero where it carries none —
 /// `grass_gen.slang`'s `grassCells`, read here by the shells and fins.
 [[vk::binding(12, 0)]]
-StructuredBuffer<GrassInstance> grassCells;
+StructuredBuffer<GrassInstance> grassCells D3D12_REGISTER(t12, space0);
 
 /// The ground the field stands on, which a shell's sheet is lifted off. Read
 /// with `Load`, on `grass_gen.slang`'s terms.
 [[vk::binding(13, 0)]]
-Texture2D<float> grassGround;
+Texture2D<float> grassGround D3D12_REGISTER(t13, space0);
 
 /// `wind.slang`'s uniform block, bound here as the very buffer the generation
 /// pass reads.
@@ -674,17 +686,17 @@ struct WindParams
 };
 
 [[vk::binding(14, 0)]]
-ConstantBuffer<WindParams> wind;
+ConstantBuffer<WindParams> wind D3D12_REGISTER(b14, space0);
 
 /// The wind's two layers and its sampler, as `grass_gen.slang` binds them.
 [[vk::binding(15, 0)]]
-Texture2D<float4> windDirectionLayer;
+Texture2D<float4> windDirectionLayer D3D12_REGISTER(t15, space0);
 
 [[vk::binding(16, 0)]]
-Texture2D<float4> windIntensityLayer;
+Texture2D<float4> windIntensityLayer D3D12_REGISTER(t16, space0);
 
 [[vk::binding(17, 0)]]
-SamplerState windSampler;
+SamplerState windSampler D3D12_REGISTER(s17, space0);
 
 static const float PUNCTUAL_DEPTH_BIAS_TEXELS = 2.0;
 

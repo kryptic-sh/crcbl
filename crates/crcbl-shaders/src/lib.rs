@@ -551,6 +551,83 @@ pub struct Shader {
 /// The SPIR-V magic number, as the first word of any valid module.
 pub const SPIRV_MAGIC: u32 = 0x0723_0203;
 
+/// The `(set, binding)` of every decorated resource in `words` — a SPIR-V
+/// module — in ascending order.
+///
+/// The instruction stream is stepped through by length rather than scanned for
+/// the bare decoration numbers, for the reason `crate::push_constant_probe`'s
+/// `push_constant_variables` gives: a scan would match any operand that
+/// happened to equal one, which is a check that cannot fail.
+///
+/// Public because `crcbl-dx12` holds every committed DXIL container's
+/// registers to the bindings its SPIR-V declares, and this is the reading of
+/// the second half.
+///
+/// # Panics
+///
+/// On a module whose instruction stream is malformed, or a resource
+/// decorated with a set and no binding — neither of which a committed artifact
+/// is.
+#[must_use]
+pub fn descriptor_slots(words: &[u32]) -> Vec<(u32, u32)> {
+    /// `OpDecorate`, whose operands are the target, the decoration and — for
+    /// these two — one literal.
+    const OP_DECORATE: u32 = 71;
+    /// `Decoration Binding`.
+    const BINDING: u32 = 33;
+    /// `Decoration DescriptorSet`.
+    const DESCRIPTOR_SET: u32 = 34;
+    /// Words of a SPIR-V module header, before the first instruction.
+    const HEADER_WORDS: usize = 5;
+
+    let mut sets: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    let mut bindings: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    let mut cursor = HEADER_WORDS;
+    while cursor < words.len() {
+        let length = (words[cursor] >> 16) as usize;
+        assert!(length > 0, "a zero-length instruction never terminates");
+        assert!(
+            cursor + length <= words.len(),
+            "instruction at word {cursor} runs past the end of the module"
+        );
+        if words[cursor] & 0xffff == OP_DECORATE && length == 4 {
+            let (target, literal) = (words[cursor + 1], words[cursor + 3]);
+            match words[cursor + 2] {
+                DESCRIPTOR_SET => {
+                    sets.insert(target, literal);
+                }
+                BINDING => {
+                    bindings.insert(target, literal);
+                }
+                _ => {}
+            }
+        }
+        cursor += length;
+    }
+
+    let mut slots: Vec<(u32, u32)> = sets
+        .into_iter()
+        .map(|(target, set)| {
+            let binding = bindings.get(&target).copied().unwrap_or_else(|| {
+                panic!("%{target} carries a DescriptorSet decoration and no Binding")
+            });
+            (set, binding)
+        })
+        .collect();
+    slots.sort_unstable();
+    slots
+}
+
+/// The D3D12 register space every source's push-constant block is declared
+/// in: each block is annotated `D3D12_REGISTER(b0, space<this>)`.
+///
+/// A set's resources are declared in the space numbered by the set, so the
+/// block needs a space no set reaches. The sources spell the number as a
+/// literal, which `declaration_order`'s lint holds to this constant, and
+/// `crcbl-dx12`'s root constants take it from their own twin, which that
+/// crate's tests hold equal to this one.
+pub const D3D12_PUSH_CONSTANT_SPACE: u32 = 64;
+
 impl Shader {
     /// Declares a shader. Called only by the generated table.
     #[must_use]

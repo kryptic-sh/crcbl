@@ -481,11 +481,43 @@ decision already taken safer rather than shakier: a mechanism whose smallest
 probe silently draws nothing on some runs is not one to have built the indirect
 count on, and `crcbl_mtl::indirect_count` does not.
 
-## DEFERRED — D3D12 registers are assigned by counting, and the mesh path collides
+## D3D12 registers follow the binding number
 
-Decision record; the decision is in `docs/backlog.md`.
+**Done 2026-09-22, option (b) below, decided 2026-09-06.** A D3D12 register used
+to be counted: a binding's position among the layout's bindings of its class,
+run across the sets in space 0, which is what `dxc` gives a source with no
+annotations. That agreed with a shader only while the layout declared exactly
+the resources the source did, and the renderer's mesh pipeline — task and mesh
+stages from `mesh_cluster.slang`, the fragment stage from `mesh.slang` — read
+one register as a structured buffer in one stage and a texture in another.
+naga's HLSL backend and every Slang or DXC multi-backend engine take the
+register from the binding for the same reason.
 
-**The options, and the trade-off is real:**
+**How it is built.** Each source declares every resource's register beside its
+`[[vk::binding(binding, set)]]` as a
+`D3D12_REGISTER(<class><binding>, space<set>)` suffix, a macro that expands to
+`register(…)` only where `CRCBL_TARGET_HLSL` is defined. HLSL only because
+Slang's Metal target takes its argument-table indices from a `register` too —
+measured on `mesh.slang` with 2026.14, where a plain annotation renumbered every
+texture and sampler in the MSL. A push-constant block is `b0` in
+`crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`, a space no set reaches. On a
+`ParameterBlock` the suffix names its contents' first register; a bare
+`register(space1)` is ignored by Slang's HLSL target.
+`crcbl_dx12::root::assign_registers` and `space_of` are the rule on the
+root-signature side; descriptor tables still pack, one range per binding with
+its own offset, so the gaps in the register numbers cost nothing.
+
+**What holds it.** `crcbl_shaders`' `declaration_order` lint refuses an
+annotation whose numbers or class disagree with its binding;
+`crcbl_dx12::dxil`'s
+`every_container_declares_each_resource_at_its_binding_and_set` reads every
+committed container back against its own SPIR-V; and
+`crcbl_dx12::renderer_registers` runs the renderer against the null backend's
+recorder and holds every layout to every container it serves. Written against
+the counting rule, that last test reported 96 disagreements, every one on the
+mesh path, and none on the raster path.
+
+**The options, as they stood, kept so they are not re-argued:**
 
 - **(a) Make the two shaders declare the same binding set.**
   `mesh_cluster.slang` gains the rows it does not use and `mesh.slang` gains the
@@ -505,7 +537,7 @@ Decision record; the decision is in `docs/backlog.md`.
 - **(c) Give the mesh path its own fragment shader in `mesh_cluster.slang`.**
   Removes the cross-file half of the problem, leaving only the layout-vs-source
   question that (a) or (b) still has to answer for a single file. Not a fix on
-  its own.
+  its own, and not taken.
 
 ## DEFERRED — dx12 mesh shading: WARP claims it and dies, hardware works
 
@@ -1821,11 +1853,15 @@ exist now ships: `push_constant_probe.slang`, emitted for spirv, msl and dxil,
 whose dispatch writes the constants into a buffer word by word. Read out of the
 **emitted files**, not assumed:
 
-| target | the block lands at                                                       | the bound buffer |
-| ------ | ------------------------------------------------------------------------ | ---------------- |
-| SPIR-V | `PushConstant` storage class, member offset 0, 16 bytes — no set/binding | set 0, binding 0 |
-| MSL    | `buffer(1)`                                                              | `buffer(0)`      |
-| DXIL   | `cb0` — register `b0`, space 0, size 16                                  | `u0`             |
+| target | the block lands at                                                         | the bound buffer |
+| ------ | -------------------------------------------------------------------------- | ---------------- |
+| SPIR-V | `PushConstant` storage class, member offset 0, 16 bytes — no set/binding   | set 0, binding 0 |
+| MSL    | `buffer(1)`                                                                | `buffer(0)`      |
+| DXIL   | register `b0` in space `crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`, size 16 | `u0`             |
+
+The DXIL row was `cb0` in space 0 when this was measured; since 2026-09-22 every
+source declares its block in a space of its own — see "D3D12 registers follow
+the binding number" above.
 
 **This corrects Metal's row, and makes that slice smaller.** The MSL puts the
 block **behind** the bound buffer, not ahead of it. `ui.slang`'s old artifact

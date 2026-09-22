@@ -53,6 +53,18 @@
 // costs the march a level of skipping, and one that reports a farther surface
 // costs it the reflection.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The level being reduced: the depth prepass for level 1, and the level above
 /// for every level after it.
 ///
@@ -60,7 +72,7 @@
 /// declaration — it is the only spelling that lowers to a `texture_depth_2d` a
 /// `D32Float` view can fill through the seam's `SampleType::Depth`.
 [[vk::binding(0, 0)]]
-DepthTexture2D source;
+DepthTexture2D source D3D12_REGISTER(t0, space0);
 
 struct FullscreenOutput
 {

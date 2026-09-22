@@ -1647,6 +1647,9 @@ mod tests {
                     && !line.starts_with('#')
                     && !line.starts_with("static")
                     && !line.starts_with("struct")
+                    // A resource declaration, whose parenthesis is its D3D12
+                    // register rather than a parameter list.
+                    && !line.contains("D3D12_REGISTER(")
                     && line.contains('(')
             })
             .filter_map(|line| {

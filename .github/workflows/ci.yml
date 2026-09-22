@@ -2891,7 +2891,29 @@ jobs:
           chmod +x "${RUNNER_TEMP}/dxc/bin/dxc"
           echo "CRCBL_DXC=${RUNNER_TEMP}/dxc/bin/dxc" >>"$GITHUB_ENV"
       - name: Check the committed artifacts against their sources
+        id: check
         run: crates/crcbl-shaders/tools/compile-shaders.sh --check
+      # **The artifacts this job would have committed, for a machine that
+      # cannot make them.** `dxc`'s Windows build embeds a different version
+      # string in every container than the Linux one pinned above, so DXIL
+      # compiled on Windows is correct and still fails the byte comparison.
+      # On a failed check this regenerates the tree with the pinned tools and
+      # uploads it; a Windows developer takes the bytes from here rather than
+      # from their own `dxc`.
+      - name: Regenerate the artifacts after a failed check
+        if: failure() && steps.check.outcome == 'failure'
+        run: crates/crcbl-shaders/tools/compile-shaders.sh
+      - name: Upload the regenerated artifacts
+        if: failure() && steps.check.outcome == 'failure'
+        uses: actions/upload-artifact@v7
+        with:
+          name: regenerated-shaders
+          path: |
+            crates/crcbl-shaders/spirv/
+            crates/crcbl-shaders/wgsl/
+            crates/crcbl-shaders/msl/
+            crates/crcbl-shaders/dxil/
+          if-no-files-found: error
 
   decoder-fuzz:
     name: decoder fuzz (libFuzzer)

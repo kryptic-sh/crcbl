@@ -118,6 +118,18 @@
 // `the_visibility_map_constants_match_the_ones_the_shaders_declare`'s terms:
 // nothing else in the tree knows what the right answer was.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Texels along one side of a visibility map's interior — the part that holds
 /// directions. `crcbl_shaders::probe_visibility::SIDE`, and
 /// `the_visibility_map_constants_match_the_ones_the_shaders_declare` is what
@@ -222,7 +234,7 @@ struct PunctualProducer
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<GatherParams> params;
+ConstantBuffer<GatherParams> params D3D12_REGISTER(b0, space0);
 
 /// Where each probe stands, in world space, `xyz`; `w` is unread padding.
 ///
@@ -233,27 +245,27 @@ ConstantBuffer<GatherParams> params;
 /// volume it is supposed to agree with. One entry per row of the table, in the
 /// table's own order.
 [[vk::binding(1, 0)]]
-StructuredBuffer<float4> probe_positions;
+StructuredBuffer<float4> probe_positions D3D12_REGISTER(t1, space0);
 
 /// The captured per-probe visibility maps, one layer per row of the table —
 /// `crcbl_render::probe_capture` writes them and `mesh.slang` reads them with
 /// this same name. `Rg32Float`, read with `Load` and no sampler, which is what
 /// an unfilterable format allows.
 [[vk::binding(2, 0)]]
-Texture2DArray<float4> probe_visibility;
+Texture2DArray<float4> probe_visibility D3D12_REGISTER(t2, space0);
 
 /// The reflective shadow map's diffuse albedo — `RsmOutput::albedo`.
 [[vk::binding(3, 0)]]
-Texture2D<float4> rsm_albedo;
+Texture2D<float4> rsm_albedo D3D12_REGISTER(t3, space0);
 
 /// Its world normals, encoded `n * 0.5 + 0.5` — `RsmOutput::normal`.
 [[vk::binding(4, 0)]]
-Texture2D<float4> rsm_normal;
+Texture2D<float4> rsm_normal D3D12_REGISTER(t4, space0);
 
 /// Its world positions in `xyz`, with the coverage flag in `w` —
 /// `RsmOutput::world`.
 [[vk::binding(5, 0)]]
-Texture2D<float4> rsm_world;
+Texture2D<float4> rsm_world D3D12_REGISTER(t5, space0);
 
 /// The probe table, three `float4`s a row: `sh_r`, `sh_g`, `sh_b` in that order,
 /// which is `crcbl_shaders::probe::GpuProbe`'s layout and its `to_bytes` order.
@@ -262,27 +274,27 @@ Texture2D<float4> rsm_world;
 /// natural vector on every backend and no `std430` struct stride has to agree
 /// between four compilers and one Rust serialiser.
 [[vk::binding(6, 0)]]
-RWStructuredBuffer<float4> probes;
+RWStructuredBuffer<float4> probes D3D12_REGISTER(u6, space0);
 
 /// The punctual map's diffuse albedo — the same `RsmOutput::albedo` the sun's
 /// map carries, drawn one tile per shadowed light face.
 [[vk::binding(7, 0)]]
-Texture2D<float4> punctual_albedo;
+Texture2D<float4> punctual_albedo D3D12_REGISTER(t7, space0);
 
 /// Its world normals, encoded `n * 0.5 + 0.5` — `RsmOutput::normal`.
 [[vk::binding(8, 0)]]
-Texture2D<float4> punctual_normal;
+Texture2D<float4> punctual_normal D3D12_REGISTER(t8, space0);
 
 /// Its world positions in `xyz`, with the coverage flag in `w` —
 /// `RsmOutput::world`.
 [[vk::binding(9, 0)]]
-Texture2D<float4> punctual_world;
+Texture2D<float4> punctual_world D3D12_REGISTER(t9, space0);
 
 /// Which light each tile of that map was drawn for, `params.producers` rows of
 /// it — `crcbl_render::probe_gather` writes it from the same list
 /// `crcbl_render::forward`'s punctual pass draws.
 [[vk::binding(10, 0)]]
-StructuredBuffer<PunctualProducer> producers;
+StructuredBuffer<PunctualProducer> producers D3D12_REGISTER(t10, space0);
 
 /// `+1` for a positive or zero value and `-1` for a negative one — the
 /// octahedral mapping's `signNotZero`.

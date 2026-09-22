@@ -73,6 +73,18 @@
 // `crcbl_shaders::skinning::Params::to_bytes` is where it is actually enforced:
 // it refuses a block whose two ranges intersect.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// The lengths and offsets one dispatch cannot derive for itself, matching
 /// `crcbl_shaders::skinning::Params`.
 struct SkinParams
@@ -322,7 +334,7 @@ struct SkinBinding
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SkinParams> skin;
+ConstantBuffer<SkinParams> skin D3D12_REGISTER(b0, space0);
 
 /// Every animated instance's joint palette, end to end; this range's starts at
 /// `SkinParams::joint_base`.
@@ -339,19 +351,19 @@ ConstantBuffer<SkinParams> skin;
 /// as `OpVectorTimesMatrix`, and composing the two puts the HLSL matrix's column
 /// 0 in the first sixteen bytes.
 [[vk::binding(1, 0)]]
-StructuredBuffer<float4x4> joints;
+StructuredBuffer<float4x4> joints D3D12_REGISTER(t1, space0);
 
 /// Which joints own each vertex, and by how much. One entry per **skinned**
 /// vertex, indexed at `SkinParams::binding_base + i`, parallel to the bind-pose
 /// run at `SkinParams::input_base + i`.
 [[vk::binding(2, 0)]]
-StructuredBuffer<SkinBinding> bindings;
+StructuredBuffer<SkinBinding> bindings D3D12_REGISTER(t2, space0);
 
 /// The vertex pool: bind pose read out of it, skinned vertices written back
 /// into it. The header says why it is one binding and not two, and what the two
 /// ranges owe each other.
 [[vk::binding(3, 0)]]
-RWStructuredBuffer<uint> vertices;
+RWStructuredBuffer<uint> vertices D3D12_REGISTER(u3, space0);
 
 /// Where vertex `at`'s position sits in the pool.
 float3 load_position(uint at)

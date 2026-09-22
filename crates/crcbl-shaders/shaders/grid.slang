@@ -56,6 +56,18 @@
 // holds `colour * alpha` for the pair and there is nothing for the blender to
 // multiply again.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Everything the pass needs. `crcbl_render::grid::GridParams` is the Rust
 /// mirror, and it is what writes the buffer.
 struct GridParams
@@ -79,7 +91,7 @@ struct GridParams
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<GridParams> grid;
+ConstantBuffer<GridParams> grid D3D12_REGISTER(b0, space0);
 
 /// The depth the ray's origin is unprojected at: the **near plane** under
 /// reversed-Z, where `crcbl_hal::depth`'s `NEAR` is 1.

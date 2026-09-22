@@ -48,6 +48,18 @@
 // therefore the whole frame: sampling inside a branch here is exactly how a
 // browser once drew nothing at all.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Per-frame constants: the framebuffer size the vertex stage divides by.
 ///
 /// A uniform buffer on every target — see the header. `viewport` is the size in
@@ -92,34 +104,34 @@ static const float PRIMITIVE_FONT_GLYPH = 4.0;
 // The glyph atlas: R8_UNORM, so the shader sees r=alpha, g=b=a=0 or 1 depending
 // on the implementation. We only read `.r`.
 [[vk::binding(0, 0)]]
-Texture2D<float> glyphAtlas;
+Texture2D<float> glyphAtlas D3D12_REGISTER(t0, space0);
 
 /// Nearest: the glyphs are a bitmap font drawn at whole multiples.
 [[vk::binding(1, 0)]]
-SamplerState glyphSampler;
+SamplerState glyphSampler D3D12_REGISTER(s1, space0);
 
 /// The merged UI geometry for this frame. Read-only storage buffer.
 [[vk::binding(2, 0)]]
-StructuredBuffer<Vertex> vertices;
+StructuredBuffer<Vertex> vertices D3D12_REGISTER(t2, space0);
 
 [[vk::binding(3, 0)]]
-ConstantBuffer<UiConstants> constants;
+ConstantBuffer<UiConstants> constants D3D12_REGISTER(b3, space0);
 
 /// The image atlas: `Rgba8UnormSrgb`, straight alpha — `crcbl_ui::image`.
 [[vk::binding(4, 0)]]
-Texture2D<float4> imageAtlas;
+Texture2D<float4> imageAtlas D3D12_REGISTER(t4, space0);
 
 /// **Linear**, bent into sharp-bilinear by `sharpen` below: the same sampling
 /// the sprite pass gives `SampleMode::Pixel` sheets.
 [[vk::binding(5, 0)]]
-SamplerState imageSampler;
+SamplerState imageSampler D3D12_REGISTER(s5, space0);
 
 /// The glyph atlas's pages, a layer each: `R8Unorm` coverage —
 /// `crcbl_ui::font::atlas`. Sampled through `glyphSampler`: a glyph's mask is
 /// drawn one texel to one pixel with its corners on whole pixels, so a nearest
 /// sample at each fragment centre reads exactly its own texel.
 [[vk::binding(6, 0)]]
-Texture2DArray<float> glyphPages;
+Texture2DArray<float> glyphPages D3D12_REGISTER(t6, space0);
 
 struct UiOutput
 {

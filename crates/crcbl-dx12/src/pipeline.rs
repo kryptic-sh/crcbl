@@ -277,10 +277,8 @@ struct RootSignaturePlan {
 /// Builds a root signature from a pipeline layout's sets and its push-constant
 /// range.
 ///
-/// `push` is the range already planned by
-/// [`root::plan_push_constants`], because the shader register it takes comes
-/// from the same counter the sets' registers do and `crate::device` is where
-/// that counter lives.
+/// `push` is the range already planned by [`root::plan_push_constants`], and
+/// each set's tables carry the space [`root::space_of`] gave it.
 ///
 /// # Errors
 ///
@@ -357,14 +355,9 @@ pub(crate) fn layout(
         sets: plan.sets,
         layouts: sets.iter().map(|(handle, _)| *handle).collect(),
         push_constants: plan.push_constants,
-        storage: (0_u32..)
-            .zip(sets)
-            .flat_map(|(set, (_, tables))| {
-                tables
-                    .storage
-                    .iter()
-                    .map(move |register| crate::dxil::StorageRegister { set, ..*register })
-            })
+        storage: sets
+            .iter()
+            .flat_map(|(_, tables)| tables.storage.iter().copied())
             .collect(),
     })
 }
@@ -410,7 +403,7 @@ fn plan_root(
                 Anonymous: D3D12_ROOT_PARAMETER_0 {
                     Constants: D3D12_ROOT_CONSTANTS {
                         ShaderRegister: constants.register,
-                        RegisterSpace: 0,
+                        RegisterSpace: constants.space,
                         Num32BitValues: constants.words,
                     },
                 },

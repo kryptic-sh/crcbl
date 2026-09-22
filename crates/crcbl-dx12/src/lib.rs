@@ -234,8 +234,8 @@
 //! `D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS` parameter
 //! `create_pipeline_layout` builds and the `SetGraphicsRoot32BitConstants`
 //! behind `CommandEncoder::push_constants` — see `crcbl_dx12::root` for the
-//! shader register that parameter takes, which is read off the committed DXIL
-//! rather than chosen here.
+//! shader register that parameter takes, which every source declares and
+//! `crate::dxil`'s tests read back out of the committed DXIL.
 //!
 //! **A device reports exactly the caps of the adapter it came from**, which is
 //! worth saying because it was once nearly untrue. The timestamp clock's rate
@@ -398,6 +398,9 @@ mod retire;
 // was built with.
 #[cfg(any(target_os = "windows", test))]
 mod root;
+// The renderer's layouts against the containers they serve; see the module.
+#[cfg(test)]
+mod renderer_registers;
 // Where each subobject of a pipeline state stream lands, in bytes. Not
 // Windows-only for the reason `present` below is not — it holds no `windows`
 // type — and that matters here as much as it does in `root`: a mesh pipeline is

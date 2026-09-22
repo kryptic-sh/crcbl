@@ -1852,6 +1852,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **dx12: a D3D12 register is now the binding number, in the set's register
+  space, so the mesh pipeline's root signature matches all three of its
+  stages.** Registers used to be counted: a binding's position among the
+  layout's bindings of its class, run across the sets in space 0, which matched
+  `dxc`'s numbering only while the layout declared exactly the resources the
+  source did. The renderer's mesh pipeline takes its task and mesh stages from
+  `mesh_cluster.slang` and its fragment stage from `mesh.slang`, which declare
+  different binding sets, so the stages read one register as different resources
+  — a texture descriptor as a structured buffer — with nothing in D3D12 to
+  report it. Every shader in `crcbl-shaders` now declares each resource's
+  register as `register(<class><binding>, space<set>)` through an HLSL-only
+  `D3D12_REGISTER` macro (the SPIR-V and WGSL are unchanged; the MSL moves only
+  in its `#line` comments), a push-constant block is `b0` in space
+  `crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`, and `crcbl-dx12`'s root signatures
+  name the same registers. A set's spaces and descriptor tables change shape for
+  every D3D12 pipeline; the table offsets do not. Two checks hold it: the
+  `declaration_order` lint refuses an annotation that does not match its
+  `[[vk::binding]]`, and `crcbl-dx12` runs the renderer against the null
+  backend's recorder (which now logs each pipeline's layout and DXIL, as
+  `Recorder::pipelines_created`) and holds every layout to every container it
+  serves. A bind-group layout whose array would run into a later binding's
+  register is now refused at creation on dx12.
+
 - **dx12: GPU pass timers no longer drain the queue every frame.**
   `Device::query_results` recorded a `ResolveQueryData` of its own and waited on
   the device fence for it, and on the one in-order queue that wait covered

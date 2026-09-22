@@ -55,6 +55,22 @@
 //! before you can tell whether a file is wrong. The cost is that a source may
 //! be asked to move a declaration that would have been harmless — a one-line
 //! edit, made once, at authoring time.
+//!
+//! # Every resource names its D3D12 register, and it is the binding's
+//!
+//! The same sweep holds the other attribute a declaration carries. D3D12 takes
+//! a resource's register from `register(<class><binding>, space<set>)`, which
+//! each source writes as a `D3D12_REGISTER(…)` suffix — a macro that expands
+//! to it in the HLSL leg alone, because Slang's Metal target would take its
+//! argument-table indices from a `register` too. `crcbl-dx12` builds every
+//! root signature on the rule that a register **is** the binding number and a
+//! space the set, so a suffix whose numbers differ from its
+//! `[[vk::binding(binding, set)]]` is a stage reading a descriptor the root
+//! signature put somewhere else. [`check_registers`] refuses that, a missing
+//! suffix, and a class letter that is not the one the declared type lives in.
+//!
+//! A push-constant block has no binding, and is declared `b0` in
+//! [`crate::D3D12_PUSH_CONSTANT_SPACE`] — a space no set reaches.
 
 /// Where a resource sorts in the order the Metal target must agree with.
 ///
@@ -97,7 +113,27 @@ struct Resource {
     line: usize,
     /// Where it sorts.
     slot: Slot,
+    /// The register file its declared type lives in, or `None` for a
+    /// `ParameterBlock`, whose suffix names the file of its contents.
+    class: Option<char>,
+    /// Its `D3D12_REGISTER(…)` suffix, if it has one.
+    register: Option<Register>,
 }
+
+/// What a `D3D12_REGISTER(<class><number>, space<space>)` suffix names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Register {
+    /// `b`, `t`, `u` or `s`.
+    class: char,
+    /// The register within the class.
+    number: u32,
+    /// The register space.
+    space: u32,
+}
+
+/// The macro a declaration's D3D12 register is written with, and the
+/// parenthesis that opens its arguments.
+const REGISTER_MACRO: &str = "D3D12_REGISTER(";
 
 /// Every resource `source` declares, in declaration order.
 ///
@@ -177,6 +213,16 @@ fn resources(source: &str) -> Result<Vec<Resource>, String> {
             ));
         };
         let declaration = &text[cursor..cursor + semicolon];
+        let (declaration, register) = match declaration.find(REGISTER_MACRO) {
+            Some(at) => (
+                &declaration[..at],
+                Some(
+                    register(&declaration[at + REGISTER_MACRO.len()..])
+                        .map_err(|why| format!("line {}: {why}", line_of(&text, start)))?,
+                ),
+            ),
+            None => (declaration, None),
+        };
         let name = declared_name(declaration).ok_or_else(|| {
             format!(
                 "line {}: `[[vk::{body}]]` decorates `{}`, which declares no name",
@@ -188,6 +234,8 @@ fn resources(source: &str) -> Result<Vec<Resource>, String> {
             name,
             line: line_of(&text, start),
             slot,
+            class: class_of(declaration),
+            register,
         });
         cursor += semicolon + 1;
     }
@@ -223,6 +271,102 @@ fn check_order(resources: &[Resource]) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Refuses a resource whose `D3D12_REGISTER` suffix is missing or names a
+/// register other than the one its binding decides — see the module docs.
+///
+/// # Errors
+///
+/// A `String` naming the resource, its line, and what its suffix should say.
+fn check_registers(resources: &[Resource]) -> Result<(), String> {
+    for resource in resources {
+        let (number, space) = match resource.slot {
+            Slot::Bound { set, binding } => (binding, set),
+            Slot::PushConstant => (0, crate::D3D12_PUSH_CONSTANT_SPACE),
+        };
+        let class = resource.class.unwrap_or('?');
+        let expected = format!("D3D12_REGISTER({class}{number}, space{space})");
+        let agrees = resource.register.is_some_and(|register| {
+            register.number == number
+                && register.space == space
+                && resource.class.is_none_or(|class| class == register.class)
+        });
+        if !agrees {
+            let found = resource.register.map_or_else(
+                || "no D3D12_REGISTER suffix".to_owned(),
+                |register| {
+                    format!(
+                        "D3D12_REGISTER({}{}, space{})",
+                        register.class, register.number, register.space
+                    )
+                },
+            );
+            return Err(format!(
+                "line {}: `{}` ({}) is declared with {found}, and crcbl-dx12 puts it at \
+                 {expected} — a register is the binding number and a space the set, and a push \
+                 constant is b0 in crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE.",
+                resource.line, resource.name, resource.slot,
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The arguments of a `D3D12_REGISTER(` suffix, starting just past the
+/// parenthesis.
+///
+/// # Errors
+///
+/// A `String` saying what could not be read.
+fn register(arguments: &str) -> Result<Register, String> {
+    let malformed = || {
+        format!(
+            "`{REGISTER_MACRO}{}` must read `<class><number>, space<space>`",
+            arguments.trim()
+        )
+    };
+    let inside = arguments
+        .split(')')
+        .next()
+        .filter(|_| arguments.contains(')'))
+        .ok_or_else(malformed)?;
+    let mut parts = inside.split(',').map(str::trim);
+    let (Some(slot), Some(space), None) = (parts.next(), parts.next(), parts.next()) else {
+        return Err(malformed());
+    };
+    let mut characters = slot.chars();
+    let class = characters
+        .next()
+        .filter(|class| matches!(class, 'b' | 't' | 'u' | 's'))
+        .ok_or_else(malformed)?;
+    Ok(Register {
+        class,
+        number: characters.as_str().parse().map_err(|_| malformed())?,
+        space: space
+            .strip_prefix("space")
+            .and_then(|space| space.parse().ok())
+            .ok_or_else(malformed)?,
+    })
+}
+
+/// The register file a declaration's type lives in: `b` for a
+/// `ConstantBuffer`, `u` for anything read-write, `s` for a sampler and `t`
+/// for every other resource. `None` for a `ParameterBlock`, whose suffix
+/// names its contents' file rather than its own.
+fn class_of(declaration: &str) -> Option<char> {
+    let declared = declaration.trim_start();
+    if declared.starts_with("ParameterBlock") {
+        None
+    } else if declared.starts_with("ConstantBuffer") {
+        Some('b')
+    } else if declared.starts_with("RW") {
+        Some('u')
+    } else if declared.starts_with("Sampler") {
+        Some('s')
+    } else {
+        Some('t')
+    }
 }
 
 /// `source` with every comment's bytes replaced by spaces.
@@ -403,6 +547,8 @@ mod tests {
             }
             total += declared.len();
             check_order(&declared).unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+            check_registers(&declared)
+                .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
         }
         assert!(
             total > 0,
@@ -569,5 +715,61 @@ StructuredBuffer<Vertex> vertices;
             Some("params")
         );
         assert_eq!(declared_name("   ").as_deref(), None);
+    }
+
+    /// **A suffix whose numbers are its binding's is accepted, and every way of
+    /// disagreeing with it is refused by name.**
+    ///
+    /// The accepted source comes first so each refusal below is the check
+    /// firing rather than a parser refusing everything.
+    #[test]
+    fn a_register_suffix_must_name_its_bindings_register() {
+        let source = "\
+[[vk::binding(0, 0)]]
+ConstantBuffer<Frame> frame D3D12_REGISTER(b0, space0);
+[[vk::binding(3, 1)]]
+RWStructuredBuffer<uint> counts D3D12_REGISTER(u3, space1);
+[[vk::binding(0, 2)]]
+ParameterBlock<Sources> sources D3D12_REGISTER(t0, space2);
+[[vk::push_constant]]
+ConstantBuffer<Push> push D3D12_REGISTER(b0, space64);
+";
+        let declared = resources(source).expect("parses");
+        assert_eq!(declared[1].name, "counts", "the suffix is not the name");
+        check_registers(&declared).expect("every suffix is its binding's");
+
+        for (bad, expected) in [
+            (
+                "[[vk::binding(4, 0)]]\nStructuredBuffer<uint> a D3D12_REGISTER(t3, space0);",
+                "D3D12_REGISTER(t4, space0)",
+            ),
+            (
+                "[[vk::binding(4, 1)]]\nStructuredBuffer<uint> a D3D12_REGISTER(t4, space0);",
+                "D3D12_REGISTER(t4, space1)",
+            ),
+            (
+                "[[vk::binding(4, 0)]]\nRWStructuredBuffer<uint> a D3D12_REGISTER(t4, space0);",
+                "D3D12_REGISTER(u4, space0)",
+            ),
+            (
+                "[[vk::binding(4, 0)]]\nSamplerState a;",
+                "no D3D12_REGISTER suffix",
+            ),
+            (
+                "[[vk::push_constant]]\nConstantBuffer<P> p D3D12_REGISTER(b0, space0);",
+                "D3D12_REGISTER(b0, space64)",
+            ),
+        ] {
+            let error = check_registers(&resources(bad).expect("parses")).expect_err(bad);
+            assert!(error.contains(expected), "{bad}: {error}");
+        }
+
+        for malformed in [
+            "[[vk::binding(0, 0)]]\nTexture2D<float> a D3D12_REGISTER(t0);",
+            "[[vk::binding(0, 0)]]\nTexture2D<float> a D3D12_REGISTER(x0, space0);",
+            "[[vk::binding(0, 0)]]\nTexture2D<float> a D3D12_REGISTER(t0, 0);",
+        ] {
+            resources(malformed).expect_err(malformed);
+        }
     }
 }

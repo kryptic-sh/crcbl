@@ -64,22 +64,22 @@
 // the binding". A capacity the layout declares room for and a length the group
 // chooses inside it is exactly that.
 //
-// # THERE IS NO `register` ANNOTATION, AND THERE MUST NOT BE ONE
+// # THE `register` IS D3D12'S ALONE, AND MUST STAY THAT WAY
 //
-// The unbounded form needed `: register(t0, space0)`, because Slang moves an
-// unbounded array into a register space of its own and `crcbl-dx12` builds
-// every descriptor range with `RegisterSpace: 0`. A bounded array is already in
-// space 0 — measured with `-target hlsl`, which emits `sources_buffers_0[int(7)]
-// : register(t0)` — so the annotation is now unnecessary, and it is worse than
-// unnecessary: adding it back **swaps Metal's buffer indices**. With it,
-// `slangc -target metal` puts `sources` at `[[buffer(0)]]` and `destination` at
-// `[[buffer(1)]]`, which is the reverse of the ascending-(set, binding) order
-// `crcbl-mtl` binds by and the exact failure `crcbl_shaders`' `declaration_order`
-// lint exists to stop. Measured, on this pair, with 2026.14.
+// `sources` carries a `D3D12_REGISTER(t0, space1)` suffix like every resource
+// here, which puts the array's first element at `t0` in space 1 — set 1's
+// space, where `crcbl-dx12` declares every range of set 1. On a
+// `ParameterBlock` the suffix names its contents' first register: a bare
+// `register(space1)` is ignored by Slang's HLSL target and leaves the array at
+// `t0` in space 0, measured with `-target hlsl` on 2026.14.
 //
-// `crcbl_dx12::dxil`'s `resource_table` asserts space 0 over every committed
-// container, so a Slang release that moved this one is caught there rather than
-// pinned here.
+// It must never become a plain `: register(…)`, which **swaps Metal's buffer
+// indices**. With one, `slangc -target metal` puts `sources` at
+// `[[buffer(0)]]` and `destination` at `[[buffer(1)]]`, which is the reverse of
+// the ascending-(set, binding) order `crcbl-mtl` binds by and the exact failure
+// `crcbl_shaders`' `declaration_order` lint exists to stop. Measured, on this
+// pair, with 2026.14. The suffix expands only where `CRCBL_TARGET_HLSL` is
+// defined, so the MSL never sees it.
 //
 // # The descriptor index is dynamically uniform, and that is not decoration
 //
@@ -102,6 +102,18 @@
 // loads. `push_constant_raster.slang` omits the same target for an
 // unrelated reason — WGSL has no push constants — so the two declarations read
 // alike and are not the same rule.
+
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
 
 /// Descriptors the `sources` block declares room for.
 ///
@@ -149,7 +161,7 @@ static const uint WORDS_PER_SOURCE = 4;
 /// which numbers its argument table in declaration order and ignores
 /// `[[vk::binding]]`, agrees with the index `crcbl-mtl` computes.
 [[vk::binding(0, 0)]]
-RWStructuredBuffer<uint> destination;
+RWStructuredBuffer<uint> destination D3D12_REGISTER(u0, space0);
 
 /// The descriptor table's contents: [`SOURCE_CAPACITY`] read-only storage
 /// buffers, of which a bind group fills the first [`SOURCE_COUNT`].
@@ -171,7 +183,7 @@ struct Sources
 /// the same set either way, measured, and the attribute is also what the
 /// `declaration_order` lint sorts on.
 [[vk::binding(0, 1)]]
-ParameterBlock<Sources> sources;
+ParameterBlock<Sources> sources D3D12_REGISTER(t0, space1);
 
 /// One workgroup per bound descriptor, copying that element's words into the
 /// element's block of `destination`.

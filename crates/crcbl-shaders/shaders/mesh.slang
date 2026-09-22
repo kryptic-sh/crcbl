@@ -195,6 +195,18 @@
 // A drift here is not a compile error anywhere: every file builds, and the
 // shaders simply read the same bytes as different numbers.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Words one vertex spends in the pool's **position** region, matching
 /// `crcbl_shaders::mesh::POSITION_STRIDE`.
 static const uint POSITION_WORDS = 3;
@@ -1375,7 +1387,7 @@ struct DrawConstants
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<FrameUniforms> frame;
+ConstantBuffer<FrameUniforms> frame D3D12_REGISTER(b0, space0);
 
 /// The vertex pool, read as raw words: both streams of every resident mesh.
 ///
@@ -1387,7 +1399,7 @@ ConstantBuffer<FrameUniforms> frame;
 /// system sees the same two contiguous runs either way, and a pass that wants
 /// geometry alone still reads twelve bytes a vertex.
 [[vk::binding(1, 0)]]
-StructuredBuffer<uint> vertices;
+StructuredBuffer<uint> vertices D3D12_REGISTER(t1, space0);
 
 /// Where vertex `at`'s position sits, and nothing else.
 ///
@@ -1417,19 +1429,19 @@ MeshVertex load_vertex(uint at, float4 range)
 }
 
 [[vk::binding(2, 0)]]
-StructuredBuffer<GpuInstance> instances;
+StructuredBuffer<GpuInstance> instances D3D12_REGISTER(t2, space0);
 
 [[vk::binding(3, 0)]]
-ConstantBuffer<DrawConstants> draw;
+ConstantBuffer<DrawConstants> draw D3D12_REGISTER(b3, space0);
 
 [[vk::binding(4, 0)]]
-StructuredBuffer<GpuMesh> meshes;
+StructuredBuffer<GpuMesh> meshes D3D12_REGISTER(t4, space0);
 
 /// The per-bucket runs of surviving instance indices `draw_gen.slang` scatters
 /// into, and the word per bucket saying where each run starts this frame.
 /// Read-only here: this stage picks its instance out of a run and edits nothing.
 [[vk::binding(5, 0)]]
-StructuredBuffer<uint> visible_instances;
+StructuredBuffer<uint> visible_instances D3D12_REGISTER(t5, space0);
 
 /// The material table §3.2 asks for, indexed by `GpuInstance::material`.
 ///
@@ -1445,7 +1457,7 @@ StructuredBuffer<uint> visible_instances;
 /// `VertexOutput::material` is the id that got it here, and its declaration is
 /// where the per-target risk is written down.
 [[vk::binding(6, 0)]]
-StructuredBuffer<GpuMaterial> materials;
+StructuredBuffer<GpuMaterial> materials D3D12_REGISTER(t6, space0);
 
 /// §3.2's texture side: **one `ArrayPages` page**, indexed by
 /// `base_color_layer(material)`.
@@ -1472,7 +1484,7 @@ StructuredBuffer<GpuMaterial> materials;
 /// texture, where its base-colour *factor* is linear; the two spaces meeting in
 /// one product is the trap this arrangement removes.
 [[vk::binding(7, 0)]]
-Texture2DArray<float4> base_color_textures;
+Texture2DArray<float4> base_color_textures D3D12_REGISTER(t7, space0);
 
 /// The one sampler the page is read through: nearest, **wrapped**.
 ///
@@ -1490,7 +1502,7 @@ Texture2DArray<float4> base_color_textures;
 /// wrapped and a clamped read return the same texel for it. `crcbl_render`'s
 /// forward pass is what sets the address mode and says so.
 [[vk::binding(8, 0)]]
-SamplerState base_color_sampler;
+SamplerState base_color_sampler D3D12_REGISTER(s8, space0);
 
 /// The base-colour texel a material row samples at `uv`, or the multiplicative
 /// identity when the row names no page.
@@ -1569,7 +1581,7 @@ float4 base_color_texel(GpuMaterial material, float2 uv)
 /// down: a depth image is a different *kind* of sampled image on the two targets
 /// that have a binding model, and identical on the two that do not.
 [[vk::binding(15, 0)]]
-DepthTexture2D shadow_atlas;
+DepthTexture2D shadow_atlas D3D12_REGISTER(t15, space0);
 
 /// The comparison sampler the atlas is read through — **hardware PCF**.
 ///
@@ -1582,7 +1594,7 @@ DepthTexture2D shadow_atlas;
 /// than whatever was stored" — see `crcbl_hal::SamplerDesc::compare`, which
 /// carries the same warning.
 [[vk::binding(16, 0)]]
-SamplerComparisonState shadow_sampler;
+SamplerComparisonState shadow_sampler D3D12_REGISTER(s16, space0);
 
 /// `docs/plan/18-render-features.md`'s light list: every light in the frame, one
 /// row each, **the sun included**.
@@ -1597,7 +1609,7 @@ SamplerComparisonState shadow_sampler;
 /// amplification stages of the pipeline this file's `fragmentMain` completes, so
 /// the numbering skips past them exactly as it skipped 9 to 14 above.
 [[vk::binding(20, 0)]]
-StructuredBuffer<GpuLight> lights;
+StructuredBuffer<GpuLight> lights D3D12_REGISTER(t20, space0);
 
 /// The froxel grid `light_cluster.slang` filled: `CLUSTER_STRIDE` words per
 /// froxel, the count first and then that many indices into `lights`.
@@ -1606,7 +1618,7 @@ StructuredBuffer<GpuLight> lights;
 /// view depth gives the slice — which is the whole of what clustered forward
 /// buys over looping the scene's lights.
 [[vk::binding(21, 0)]]
-StructuredBuffer<uint> cluster_lights;
+StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t21, space0);
 
 /// `docs/plan/18-render-features.md`'s screen-space ambient occlusion, as
 /// `ssao_upsample.slang` left it: one `Rgba8Unorm` channel the size of the
@@ -1658,7 +1670,7 @@ StructuredBuffer<uint> cluster_lights;
 /// there and no Metal argument-table index moves. See `SHADOW_ATLAS_BINDING`'s
 /// note in `crcbl_render::forward` on why the list stays ascending.
 [[vk::binding(22, 0)]]
-Texture2D<float4> ambient_occlusion;
+Texture2D<float4> ambient_occlusion D3D12_REGISTER(t22, space0);
 
 /// `docs/plan/18-render-features.md`'s irradiance grid, row by row — the
 /// `FrameUniforms::probe_*` header above says where they are.
@@ -1677,7 +1689,7 @@ Texture2D<float4> ambient_occlusion;
 /// off-switch is the grid's counts being zero rather than a branch here — the
 /// same shape as the white 1×1 image `ambient_occlusion` falls back to.
 [[vk::binding(23, 0)]]
-StructuredBuffer<GpuProbe> probes;
+StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t23, space0);
 
 /// The split-sum `DFG` table: the **scale and bias on `f0`** whose sum is how
 /// much of the light arriving at a GGX lobe that lobe hands back.
@@ -1720,7 +1732,7 @@ StructuredBuffer<GpuProbe> probes;
 /// everything `mesh_cluster.slang` declares — that file reaches 24 — so it needs
 /// no mirror there and no index it already owns moves.
 [[vk::binding(25, 0)]]
-Texture2D<float4> specular_dfg;
+Texture2D<float4> specular_dfg D3D12_REGISTER(t25, space0);
 
 /// §2's second texture page: the **normal** map, one `Texture2DArray` indexed
 /// by `normal_layer(material)`.
@@ -1754,7 +1766,7 @@ Texture2D<float4> specular_dfg;
 /// `mesh_cluster.slang` declares — that file reaches 24 — so it needs no mirror
 /// there and no index anything already owns moves.
 [[vk::binding(26, 0)]]
-Texture2DArray<float4> normal_textures;
+Texture2DArray<float4> normal_textures D3D12_REGISTER(t26, space0);
 
 /// `docs/plan/44-lighting.md`'s rung 5: the linearly transformed cosine fit of
 /// the GGX lobe, four matrix entries per texel over the same `(N·V, roughness)`
@@ -1784,7 +1796,7 @@ Texture2DArray<float4> normal_textures;
 /// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
 /// index anything already owns moves.
 [[vk::binding(27, 0)]]
-Texture2D<float4> ltc_matrix;
+Texture2D<float4> ltc_matrix D3D12_REGISTER(t27, space0);
 
 /// `docs/plan/45-shadows.md`'s screen-space contact shadows, as
 /// `contact_shadows.slang` left them: one `R8Unorm` channel the size of the
@@ -1820,7 +1832,7 @@ Texture2D<float4> ltc_matrix;
 /// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
 /// index anything already owns moves.
 [[vk::binding(28, 0)]]
-Texture2D<float> contact_shadow;
+Texture2D<float> contact_shadow D3D12_REGISTER(t28, space0);
 
 /// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**: one layer
 /// per row of `probes`, `PROBE_VISIBILITY_EXTENT` texels square, `r` the mean
@@ -1869,7 +1881,7 @@ Texture2D<float> contact_shadow;
 /// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
 /// index anything already owns moves.
 [[vk::binding(29, 0)]]
-Texture2DArray<float4> probe_visibility;
+Texture2DArray<float4> probe_visibility D3D12_REGISTER(t29, space0);
 
 /// §2's third texture page: glTF's packed **metallic-roughness-occlusion** map,
 /// one `Texture2DArray` indexed by `mro_layer(material)`.
@@ -1901,7 +1913,7 @@ Texture2DArray<float4> probe_visibility;
 /// everything `mesh_cluster.slang` declares, so it needs no mirror there and no
 /// index anything already owns moves.
 [[vk::binding(30, 0)]]
-Texture2DArray<float4> mro_textures;
+Texture2DArray<float4> mro_textures D3D12_REGISTER(t30, space0);
 
 /// §2's fourth texture page: the **emissive** map, one `Texture2DArray` indexed
 /// by `emissive_layer(material)`.
@@ -1917,7 +1929,7 @@ Texture2DArray<float4> mro_textures;
 /// exactly. 31 is past everything `mesh_cluster.slang` declares, so it needs no
 /// mirror there and no index anything already owns moves.
 [[vk::binding(31, 0)]]
-Texture2DArray<float4> emissive_textures;
+Texture2DArray<float4> emissive_textures D3D12_REGISTER(t31, space0);
 
 /// The packed occlusion, roughness and metallic a material row samples at `uv`,
 /// or the multiplicative identity when the row names no such page.

@@ -71,6 +71,18 @@
 // would then be relying on Slang's WGSL lowering *disagreeing* with its SPIR-V
 // one. A Slang release that made the two agree would silently break the browser.
 
+// D3D12 takes each resource's register from its binding. A declaration's
+// `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the
+// numbers its `[[vk::binding(binding, set)]]` names, and
+// `crcbl_shaders::declaration_order` checks that the two agree. HLSL only,
+// because Slang's Metal target would take its argument-table indices from a
+// `register` as well.
+#if defined(CRCBL_TARGET_HLSL)
+#define D3D12_REGISTER(...) : register(__VA_ARGS__)
+#else
+#define D3D12_REGISTER(...)
+#endif
+
 /// Per-frame constants. A uniform buffer on every tier — see the header.
 struct SpriteConstants
 {
@@ -100,7 +112,7 @@ struct SpriteConstants
 };
 
 [[vk::binding(0, 0)]]
-ConstantBuffer<SpriteConstants> constants;
+ConstantBuffer<SpriteConstants> constants D3D12_REGISTER(b0, space0);
 
 /// One sprite, matching `crcbl_render::sprite_pass::SpriteInstance`.
 ///
@@ -148,19 +160,19 @@ struct SpriteInstance
 };
 
 [[vk::binding(1, 0)]]
-StructuredBuffer<SpriteInstance> sprites;
+StructuredBuffer<SpriteInstance> sprites D3D12_REGISTER(t1, space0);
 
 /// The sheet: `Rgba8UnormSrgb` or `Rgba8Unorm`, straight (not premultiplied)
 /// alpha.
 [[vk::binding(0, 1)]]
-Texture2D<float4> sheet;
+Texture2D<float4> sheet D3D12_REGISTER(t0, space1);
 
 /// **Always linear, for both modes.** `SampleMode::Pixel` is sharp-bilinear,
 /// which is linear sampling of a bent UV — see `fragmentMain` — so a nearest
 /// sampler would defeat it exactly. There is one sampler in the whole pass and
 /// nothing in this file needs to know which it got.
 [[vk::binding(1, 1)]]
-SamplerState sheetSampler;
+SamplerState sheetSampler D3D12_REGISTER(s1, space1);
 
 /// The unit quad, as two counter-clockwise triangles.
 ///
