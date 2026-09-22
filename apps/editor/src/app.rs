@@ -48,7 +48,7 @@ use crcbl::core::input::{Modifiers, PointerButton, ScrollDelta};
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GpuContext, GpuContextDesc, GpuError,
     Handled, LoopError, ModeRequest, Pending, PointerCapture, RunSummary, SettingsSource,
-    WINDOWED_IDLE, accept_close, open_window, wait_for_configure,
+    accept_close, open_window, wait_for_configure,
 };
 use crcbl::greybox::scene3d;
 use crcbl::hal::CommandEncoderDesc;
@@ -389,8 +389,14 @@ impl<S: Shell + ?Sized> Editor<S> {
         if self.budget.is_spent() {
             return Ok(Flow::Stop(ExitReason::FrameBudget));
         }
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
+        // Only up to the frame limiter's next deadline, and not at all without
+        // one, as `crcbl::engine::Loop::frame` does: this loop draws every
+        // frame, so a fixed idle was paid in full on each of them, because
+        // nothing but input ends a Win32 or X11 wait early.
+        if self.windowed
+            && let Some(idle) = self.clock_source.idle()
+        {
+            self.shell.wait_events(Some(idle));
         }
 
         // **Read at the top of the frame, which is last frame's answer**, as
@@ -916,6 +922,7 @@ mod tests {
     use std::path::Path;
 
     use crcbl::core::input::KeyCode;
+    use crcbl::engine::FrameLimit;
     use crcbl::shell::{HeadlessShell, PhysicalPoint};
     use crcbl::ui::tree::NodeKey;
 
@@ -945,6 +952,43 @@ mod tests {
         /// The shell, for a test to inject into.
         fn shell_mut(&mut self) -> &mut S {
             self.shell.as_mut()
+        }
+    }
+
+    /// **A windowed frame idles only until the frame limiter's deadline.**
+    ///
+    /// The defect this guards: [`Editor::frame`] used to hand a fixed
+    /// `WINDOWED_IDLE` to [`Shell::wait_events`] on every windowed frame, and
+    /// on Win32 and X11 only input ends that wait early — so an editor that
+    /// draws every frame paid all of it on top of each one. Observed through
+    /// the headless shell's count of waits, which that fixed idle raised once
+    /// a frame.
+    ///
+    /// Built headless, then switched to windowed on a real clock, because the
+    /// limiter's deadline lives on a real clock alone — and because a
+    /// non-headless build would open the person's own settings. Two limited
+    /// frames: the first has no deadline behind it, the second has a whole
+    /// period ahead.
+    #[test]
+    fn a_windowed_frame_idles_only_until_the_frame_limiters_deadline() {
+        for (limit, frames, waits) in [(FrameLimit::unlimited(), 5, 0), (FrameLimit::fps(50), 2, 1)]
+        {
+            let mut editor = headless(frames);
+            editor.windowed = true;
+            editor.clock_source = Clock::new(false);
+            editor.clock_source.set_limit(limit);
+            // Waiting for the window to configure already waited on the shell.
+            let before = editor.shell_mut().wait_count();
+            for _ in 0..frames {
+                assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+            }
+            assert_eq!(
+                editor.shell_mut().wait_count() - before,
+                waits,
+                "{frames} windowed frames at {limit} waited on the shell a \
+                 different number of times than the limiter's deadlines allow",
+            );
+            editor.finish(ExitReason::FrameBudget).expect("teardown");
         }
     }
 

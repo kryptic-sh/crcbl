@@ -141,12 +141,13 @@ pub use pause::PauseControl;
 /// How long to wait for the window to configure before giving up.
 pub const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Advisory idle for a hand-written windowed loop, handed to
-/// [`Shell::wait_events`].
+/// A fixed advisory idle for [`Shell::wait_events`], kept for games that
+/// already pass it.
 ///
-/// [`Loop`] does not use it: it idles only until its frame limiter's next
-/// deadline — see [`Clock::idle`] — because a fixed idle is paid in full on
-/// every frame of a game that is rendering.
+/// No loop in this workspace uses it: [`Loop`] and the hand-written loops idle
+/// only until the frame limiter's next deadline — see [`Clock::idle`] —
+/// because a fixed idle is paid in full on every frame of a game that is
+/// rendering. A new loop should do the same.
 pub const WINDOWED_IDLE: Duration = Duration::from_millis(4);
 
 /// The simulated step a headless frame advances by: a 60 Hz wall clock.

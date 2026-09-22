@@ -3685,27 +3685,28 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 ### Non-render CPU
 
 - **P31 — price idle and background pacing before changing policy.**
-  `Loop::frame` no longer idles a fixed `WINDOWED_IDLE` per windowed frame: it
-  hands `Shell::wait_events` only the time to the limiter's next deadline
+  `Loop::frame`, and the hand-written loops in `apps/bare` and `apps/editor`, no
+  longer idle a fixed `WINDOWED_IDLE` per windowed frame: they hand
+  `Shell::wait_events` only the time to the limiter's next deadline
   (`Clock::idle`), and nothing with no limit or a due deadline. So the only
   thing between a windowed `Loop` and its cap is now the limiter itself: at the
   default `FrameLimit::DEFAULT_FPS` a non-FIFO game runs up to that rate, where
   the old fixed idle held it under roughly 250 fps. A minimized window is not
   detected by `Loop` (it tracks no minimized state; `GpuContext::resize` just
   ignores a zero extent), so it keeps rendering at the cap too — measure before
-  adding a minimized idle. `apps/bare` and `apps/editor` still call
-  `wait_events(Some(WINDOWED_IDLE))` in their own loops, so they still pay the
-  fixed idle per frame. `FrameLimit::DEFAULT_FPS` is only a ceiling;
-  `GpuContext::frame_limit` clamps it to video settings, and present/acquire
-  waits may further limit the observed rate. Focus loss releases input and
-  paused frames intentionally keep presenting; no focus-based reduced cadence
-  was established in the inspected frame path. Measure idle CPU time, wakeups,
-  present rate and input latency under each pacing mode, focused/background
-  states and minimized windows before selecting background limits or skipping
-  drawing. Preserve event responsiveness, redraw obligations, pause semantics,
-  deterministic headless runs and return from minimized state. Power and
-  platform-specific visibility behaviour remain unverified; P32 separately
-  covers the limiter's spin mechanism.
+  adding a minimized idle. The editor draws every frame, so it too runs up to
+  its cap while nothing changes; redrawing on demand is a separate change.
+  `FrameLimit::DEFAULT_FPS` is only a ceiling; `GpuContext::frame_limit` clamps
+  it to video settings, and present/acquire waits may further limit the observed
+  rate. Focus loss releases input and paused frames intentionally keep
+  presenting; no focus-based reduced cadence was established in the inspected
+  frame path. Measure idle CPU time, wakeups, present rate and input latency
+  under each pacing mode, focused/background states and minimized windows before
+  selecting background limits or skipping drawing. Preserve event
+  responsiveness, redraw obligations, pause semantics, deterministic headless
+  runs and return from minimized state. Power and platform-specific visibility
+  behaviour remain unverified; P32 separately covers the limiter's spin
+  mechanism.
 - **P32 — `spin_until` busy-spins up to half of each period.** `SPIN_GUARD` is
   100 µs but the slack is capped only at `SLACK_PERIOD_SHARE` of the period. Cap
   the spin absolutely and skip it under FIFO.

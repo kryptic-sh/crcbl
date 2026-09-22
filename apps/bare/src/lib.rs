@@ -36,8 +36,8 @@ use core::time::Duration;
 use crcbl::args::{Common, Consumed};
 use crcbl::engine::{
     Clock, ExitReason, Flow, FrameBudget, FrameOutcome, GpuContext, GpuContextDesc, GpuError,
-    LoopError, ModeRequest, Pending, RunSummary, WINDOWED_IDLE, accept_close, open_window,
-    run_ticks, wait_for_configure,
+    LoopError, ModeRequest, Pending, RunSummary, accept_close, open_window, run_ticks,
+    wait_for_configure,
 };
 use crcbl::hal::{CommandEncoderDesc, Format, ResourceState};
 use crcbl::prelude::*;
@@ -188,8 +188,14 @@ impl<S: Shell + ?Sized> Bare<S> {
         if self.budget.is_spent() {
             return Ok(Flow::Stop(ExitReason::FrameBudget));
         }
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
+        // Only up to the frame limiter's next deadline, and not at all without
+        // one, as `crcbl::engine::Loop::frame` does: a fixed idle is paid in
+        // full on every frame, because nothing but input ends a Win32 or X11
+        // wait early.
+        if self.windowed
+            && let Some(idle) = self.clock_source.idle()
+        {
+            self.shell.wait_events(Some(idle));
         }
 
         // The engine folds the window's half of a batch; what comes back as
@@ -426,6 +432,8 @@ pub const fn tick_period() -> Duration {
 mod tests {
     use super::*;
 
+    use crcbl::engine::FrameLimit;
+
     fn headless(frames: u64) -> Common {
         let mut common = Common::new(DEFAULT_TICK_HZ);
         common.headless = true;
@@ -486,6 +494,44 @@ mod tests {
         );
         let summary = engine.finish(ExitReason::FrameBudget).expect("teardown");
         assert_eq!(summary.run.frames, 3);
+    }
+
+    /// **A windowed frame idles only until the frame limiter's deadline.**
+    ///
+    /// The defect this guards: [`Bare::frame`] used to hand a fixed
+    /// `WINDOWED_IDLE` to [`Shell::wait_events`] on every windowed frame, and
+    /// on Win32 and X11 only input ends that wait early — so this loop paid all
+    /// of it on top of every frame it drew. Observed through the headless
+    /// shell's count of waits, which that fixed idle raised once a frame.
+    ///
+    /// Built headless, then switched to windowed on a real clock, because the
+    /// limiter's deadline lives on a real clock alone. Two limited frames: the
+    /// first has no deadline behind it, the second has a whole period ahead.
+    #[test]
+    fn a_windowed_frame_idles_only_until_the_frame_limiters_deadline() {
+        for (limit, frames, waits) in [(FrameLimit::unlimited(), 5, 0), (FrameLimit::fps(50), 2, 1)]
+        {
+            let mut engine = Bare::with_shell(
+                Box::new(crcbl::shell::HeadlessShell::new()),
+                &headless(frames),
+            )
+            .expect("headless starts");
+            engine.windowed = true;
+            engine.clock_source = Clock::new(false);
+            engine.clock_source.set_limit(limit);
+            // Waiting for the window to configure already waited on the shell.
+            let before = engine.shell.wait_count();
+            for _ in 0..frames {
+                assert_eq!(engine.frame().expect("a frame"), Flow::Continue);
+            }
+            assert_eq!(
+                engine.shell.wait_count() - before,
+                waits,
+                "{frames} windowed frames at {limit} waited on the shell a \
+                 different number of times than the limiter's deadlines allow",
+            );
+            engine.finish(ExitReason::FrameBudget).expect("teardown");
+        }
     }
 
     /// Unknown arguments are refused rather than ignored; this sample claims no

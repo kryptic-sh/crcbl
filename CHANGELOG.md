@@ -1904,8 +1904,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the whole idle on top of render and present — enough to miss every other
   vblank on a 180 Hz panel. The loop now idles only until the frame limiter's
   next deadline (the new `Clock::idle`), and not at all with no limit or a
-  deadline already due. `WINDOWED_IDLE` stays public for hand-written loops.
-  Reported by EW: 6.71 ms a frame windowed on Vulkan against 2.26 ms headless.
+  deadline already due. The hand-written loops in `apps/bare` and `apps/editor`
+  paid the same idle and now do the same. `WINDOWED_IDLE` stays public. Reported
+  by EW: 6.71 ms a frame windowed on Vulkan against 2.26 ms headless.
 
 - **Windowed games on Win32 are no longer capped near 64 frames a second.**
   `wait_events` with a short timeout slept on `MsgWaitForMultipleObjectsEx`'s
