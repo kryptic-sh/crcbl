@@ -125,6 +125,19 @@ Initial measurements and harness findings:
   0.054 ms versus 0.201 ms. The overflow scan therefore costs about 0.147 ms,
   but does not change fragment work and is not the next dominant target; do not
   change cluster capacity or policy on this evidence.
+- The `moving` control rewrites every transform in the same 10,000-instance grid
+  while keeping local lights off. The null recording backend isolates the host
+  path: over alternating 5,000-frame release runs, `instances` reported
+  0.205–0.209 ms mean real-clock frames and `moving` reported 0.701 ms, pricing
+  transform generation, dirty coalescing and the full upload at 0.492–0.496 ms.
+  On the pinned MX550 at 320x180, alternating 1,800-frame runs were effectively
+  even: 1.784–1.800 ms mean for `instances` and 1.786–1.792 ms for `moving`,
+  with pass-sum p50 ranges of 1.750–1.766 ms and 1.755–1.759 ms. At 1920x1080,
+  rotating the whole grid changes pixel coverage enough to make `moving`'s
+  forward pass faster, so those runs are not upload evidence. Keep the fixture,
+  but do not add a bulk-update API on this result: the measured host work is not
+  limiting the real-device frame. This covers a combined update/render load, not
+  the still-missing simulation-heavy physics scene.
 
 ## Performance review and execution priority (2026-09-17)
 

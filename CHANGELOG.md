@@ -16,10 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- `sandbox --scene instances|lights-fit|lights` provides fixed sustained
-  renderer-load scenes, including within-budget and overflowing light grids, and
-  `--wall-clock` makes a headless run report real CPU frame time while
-  preserving the deterministic clock by default.
+- `sandbox --scene instances|moving|lights-fit|lights` provides fixed sustained
+  renderer-load scenes, including full-grid transform updates and within-budget
+  and overflowing light grids. `--wall-clock` makes a headless run report real
+  CPU frame time while preserving the deterministic clock by default.
 
 ### Changed
 

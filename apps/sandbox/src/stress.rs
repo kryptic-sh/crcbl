@@ -27,6 +27,8 @@ pub enum Scene {
     Cube,
     /// A screen-filling grid of static instances, with one animated cell.
     Instances,
+    /// The instance grid with every transform rewritten each frame.
+    Moving,
     /// The instance grid with the froxel budget filled but not exceeded.
     LightsFit,
     /// The instance grid under an overlapping field of local lights.
@@ -40,6 +42,7 @@ impl Scene {
         match name {
             "cube" => Some(Self::Cube),
             "instances" => Some(Self::Instances),
+            "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
             "lights" => Some(Self::Lights),
             _ => None,
@@ -52,6 +55,7 @@ impl Scene {
         match self {
             Self::Cube => "cube",
             Self::Instances => "instances",
+            Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
             Self::Lights => "lights",
         }
@@ -62,7 +66,7 @@ impl Scene {
     pub const fn instance_count(self) -> usize {
         match self {
             Self::Cube => 1,
-            Self::Instances | Self::LightsFit | Self::Lights => INSTANCE_COUNT,
+            Self::Instances | Self::Moving | Self::LightsFit | Self::Lights => INSTANCE_COUNT,
         }
     }
 
@@ -70,40 +74,50 @@ impl Scene {
     #[must_use]
     pub const fn light_count(self) -> usize {
         match self {
-            Self::Cube | Self::Instances => 0,
+            Self::Cube | Self::Instances | Self::Moving => 0,
             Self::LightsFit => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
     }
 }
 
-/// Populates `renderer` and returns the one instance animated each frame.
-pub fn populate(renderer: &mut ForwardRenderer, scene: Scene) -> InstanceHandle {
-    let animated = renderer
-        .add_instance(&instance(scene, 0, 0.0))
-        .expect("the fixed sandbox scene fits the demo instance pool");
-
-    for index in 1..scene.instance_count() {
-        renderer
-            .add_instance(&instance(scene, index, 0.0))
-            .expect("the fixed sandbox scene fits the demo instance pool");
+/// Populates `renderer` and returns the instances the fixture may animate.
+pub fn populate(renderer: &mut ForwardRenderer, scene: Scene) -> Vec<InstanceHandle> {
+    let mut instances = Vec::with_capacity(scene.instance_count());
+    for index in 0..scene.instance_count() {
+        instances.push(
+            renderer
+                .add_instance(&instance(scene, index, 0.0))
+                .expect("the fixed sandbox scene fits the demo instance pool"),
+        );
     }
 
     let lights = lights(scene);
     renderer.set_lights(&lights);
-    animated
+    instances
 }
 
-/// The animated instance's next description.
-#[must_use]
-pub fn animated(scene: Scene, seconds: f32) -> InstanceDesc {
-    instance(scene, 0, seconds)
+/// Rewrites the transforms this fixture animates.
+pub fn animate(
+    renderer: &mut ForwardRenderer,
+    scene: Scene,
+    handles: &[InstanceHandle],
+    seconds: f32,
+) {
+    let count = if scene == Scene::Moving {
+        handles.len()
+    } else {
+        1
+    };
+    for (index, handle) in handles.iter().copied().take(count).enumerate() {
+        renderer.set_instance(handle, &instance(scene, index, seconds));
+    }
 }
 
 fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
     let transform = match scene {
         Scene::Cube => ForwardRenderer::spin(seconds),
-        Scene::Instances | Scene::LightsFit | Scene::Lights => {
+        Scene::Instances | Scene::Moving | Scene::LightsFit | Scene::Lights => {
             grid_transform(index) * Mat4::from_quat(Quat::from_rotation_y(seconds * 0.9))
         }
     };
@@ -155,11 +169,23 @@ fn light(index: usize) -> Light {
 mod tests {
     use super::*;
 
+    use std::collections::HashSet;
+
+    use crcbl::hal::null::{Event, NullInstance, ObjectKind, Recorder};
+    use crcbl::hal::{DeviceDesc, Format, Instance, QueueKind};
+    use crcbl::render::{Camera, DirectionalLight};
+    use crcbl::shaders::mesh::INSTANCE_STRIDE;
+
     #[test]
     fn every_scene_name_round_trips_and_names_a_fixed_load() {
+        assert!(
+            Scene::from_name("moving").is_some(),
+            "the moving-instance workload must be selectable",
+        );
         for scene in [
             Scene::Cube,
             Scene::Instances,
+            Scene::Moving,
             Scene::LightsFit,
             Scene::Lights,
         ] {
@@ -167,6 +193,7 @@ mod tests {
             assert!(scene.instance_count() > 0);
         }
         assert_eq!(Scene::Instances.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
         assert_eq!(
@@ -176,6 +203,7 @@ mod tests {
         );
         assert_eq!(Scene::Lights.light_count(), LIGHT_COUNT);
         assert_eq!(Scene::Instances.light_count(), 0);
+        assert_eq!(Scene::Moving.light_count(), 0);
     }
 
     #[test]
@@ -190,6 +218,77 @@ mod tests {
             animated.transform_point3(Vec3::ZERO),
             "animation must not move the cell through the grid",
         );
+    }
+
+    #[test]
+    fn the_moving_fixture_rewrites_the_complete_instance_grid() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let adapter = instance.adapters().remove(0);
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(adapter.id))
+            .expect("the null device opens");
+        let queue = device.queue(QueueKind::Graphics).expect("graphics queue");
+        let mut renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+            .expect("the demo renderer builds");
+        let handles = populate(&mut renderer, Scene::Moving);
+        let instance_buffers: HashSet<_> = recorder
+            .events()
+            .windows(2)
+            .filter_map(|events| match (&events[0], &events[1]) {
+                (
+                    Event::Created {
+                        kind: ObjectKind::Buffer,
+                        label: Some(label),
+                    },
+                    Event::BufferWritten { buffer, .. },
+                ) if label.starts_with("forward instances instances ") => Some(*buffer),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            instance_buffers.len() > 1,
+            "the observer must cover the complete instance-buffer ring",
+        );
+
+        for _ in 0..instance_buffers.len() {
+            renderer
+                .begin_frame(
+                    device.as_ref(),
+                    &Camera::default(),
+                    &DirectionalLight::default(),
+                    (64, 64),
+                )
+                .expect("the initial grid uploads");
+        }
+        let seen = recorder.events().len();
+        animate(&mut renderer, Scene::Moving, &handles, 1.0);
+        renderer
+            .begin_frame(
+                device.as_ref(),
+                &Camera::default(),
+                &DirectionalLight::default(),
+                (64, 64),
+            )
+            .expect("the moving grid uploads");
+        let written = recorder.events()[seen..]
+            .iter()
+            .filter_map(|event| match event {
+                Event::BufferWritten { buffer, len, .. } if instance_buffers.contains(buffer) => {
+                    Some(*len)
+                }
+                _ => None,
+            })
+            .sum::<usize>();
+        assert_eq!(
+            written,
+            INSTANCE_COUNT * INSTANCE_STRIDE,
+            "every moving instance must reach the current frame's device buffer",
+        );
+
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+        assert_eq!(recorder.total_live_objects(), 0);
     }
 
     #[test]

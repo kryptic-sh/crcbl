@@ -127,11 +127,9 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 pub struct Gpu {
     ctx: GpuContext,
     renderer: ForwardRenderer,
-    /// The one object the sandbox animates, whether it is the original cube or
-    /// the first cell of a stress scene.
-    animated: InstanceHandle,
-    /// The fixed workload whose first instance [`animated`](Self::animated)
-    /// rewrites.
+    /// The objects the selected fixed workload may animate.
+    instances: Vec<InstanceHandle>,
+    /// The fixed workload whose instances [`stress::animate`] rewrites.
     scene: Scene,
     pool: TransientPool,
     /// `None` on a device without timestamp queries — the report degrades, the
@@ -229,7 +227,7 @@ impl Gpu {
         renderer.set_effect_request(ctx.effect_request());
         // The selected fixed scene, placed through the same public instance
         // and light APIs an application uses.
-        let animated = stress::populate(&mut renderer, scene);
+        let instances = stress::populate(&mut renderer, scene);
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
@@ -247,7 +245,7 @@ impl Gpu {
         Ok(Self {
             ctx,
             renderer,
-            animated,
+            instances,
             scene,
             pool: TransientPool::new(),
             timers,
@@ -388,10 +386,14 @@ impl Gpu {
         };
         let extent = acquired.extent;
 
-        // The animation, and the only object this sample moves: a rewrite of
-        // one instance, which the pool uploads and nothing else.
-        self.renderer
-            .set_instance(self.animated, &stress::animated(self.scene, self.elapsed));
+        // The ordinary fixtures rewrite one instance; the moving fixture
+        // rewrites the complete grid so update and upload cost stays live.
+        stress::animate(
+            &mut self.renderer,
+            self.scene,
+            &self.instances,
+            self.elapsed,
+        );
         self.renderer
             .begin_frame(self.ctx.device(), &self.camera, &self.light, extent)?;
         // Upload this frame's UI geometry: the debug overlay, and only that.
