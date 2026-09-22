@@ -56,9 +56,10 @@ use crcbl::backend::GpuBackend;
 // shared with `apps/breakout`. It was two copies of the same code, and only one
 // of them carried the rationale.
 //
-// `WINDOWED_IDLE` is advisory: `Shell::wait_events` may return immediately, but
-// on the backends that honour it this is the difference between an idle sandbox
-// using 4% of a core and using all of one.
+// An idle windowed sandbox is kept off a whole core by its pacing, not by a
+// fixed idle: the default present mode waits on the display, and without vsync
+// `Loop::frame` hands `Shell::wait_events` the time until the frame limiter's
+// next deadline (`Clock::idle`).
 //
 // `MAX_CONSECUTIVE_RECONFIGURES` is what makes `--frames N` terminate when the
 // swapchain never becomes presentable — a budget of *presented* frames cannot.

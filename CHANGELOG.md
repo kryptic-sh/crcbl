@@ -1843,6 +1843,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Windowed frames no longer idle 4 ms each while rendering.** `Loop::frame`
+  handed `WINDOWED_IDLE` to `Shell::wait_events` before every windowed frame,
+  and on Win32 and X11 only input ends that wait early, so a rendering game paid
+  the whole idle on top of render and present — enough to miss every other
+  vblank on a 180 Hz panel. The loop now idles only until the frame limiter's
+  next deadline (the new `Clock::idle`), and not at all with no limit or a
+  deadline already due. `WINDOWED_IDLE` stays public for hand-written loops.
+  Reported by EW: 6.71 ms a frame windowed on Vulkan against 2.26 ms headless.
+
 - **Windowed games on Win32 are no longer capped near 64 frames a second.**
   `wait_events` with a short timeout slept on `MsgWaitForMultipleObjectsEx`'s
   millisecond timeout, which expires on the 15.6 ms system clock tick, so the

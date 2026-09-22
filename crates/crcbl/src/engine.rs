@@ -141,7 +141,12 @@ pub use pause::PauseControl;
 /// How long to wait for the window to configure before giving up.
 pub const CONFIGURE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Advisory idle for windowed frames, handed to [`Shell::wait_events`].
+/// Advisory idle for a hand-written windowed loop, handed to
+/// [`Shell::wait_events`].
+///
+/// [`Loop`] does not use it: it idles only until its frame limiter's next
+/// deadline — see [`Clock::idle`] — because a fixed idle is paid in full on
+/// every frame of a game that is rendering.
 pub const WINDOWED_IDLE: Duration = Duration::from_millis(4);
 
 /// The simulated step a headless frame advances by: a 60 Hz wall clock.
@@ -2899,6 +2904,23 @@ impl RealClock {
         spin_until(&self.time, deadline);
     }
 
+    /// How long the loop may idle before [`wait_for_deadline`] has to take
+    /// over, or `None` when the next frame may start now.
+    ///
+    /// The wait still ahead, less [`slack`](Self::slack): an idle that ends
+    /// there leaves the spin its whole stretch, so a wake that lands on time
+    /// costs the deadline nothing. `None` without a limit, before the first
+    /// frame and once the deadline is (nearly) due — [`FramePacer::wait`]'s
+    /// three cases, each one where idling would only make the frame late.
+    ///
+    /// [`wait_for_deadline`]: Self::wait_for_deadline
+    fn idle(&self) -> Option<Duration> {
+        self.pacer
+            .wait(self.time.elapsed())
+            .map(|wait| wait.saturating_sub(self.slack))
+            .filter(|idle| !idle.is_zero())
+    }
+
     /// Changes the limit. Takes effect on the next frame.
     ///
     /// # The log line
@@ -3021,6 +3043,23 @@ impl Clock {
         match self {
             Self::Real(real) => real.time.elapsed(),
             Self::Manual { time, .. } => time.elapsed(),
+        }
+    }
+
+    /// How long a windowed loop may hand to [`Shell::wait_events`] before this
+    /// frame, or `None` when it should not wait at all.
+    ///
+    /// Bounded by the [`FramePacer`]'s next deadline on a real clock, so an
+    /// event still wakes the loop early and [`advance`](Self::advance) waits
+    /// out whatever the idle left; `None` when there is no limit or the
+    /// deadline has passed, because a wait there is time added to a frame the
+    /// limiter would already have let start. A manual clock never waits, so it
+    /// always answers `None`.
+    #[must_use]
+    pub fn idle(&self) -> Option<Duration> {
+        match self {
+            Self::Real(real) => real.idle(),
+            Self::Manual { .. } => None,
         }
     }
 
@@ -6467,8 +6506,16 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // timeout would be the timeout on every still frame — larger than any
         // GPU total, and "CPU-bound" as the answer to a question it never looked
         // at. `crate::perf` says which spans are work and which are waiting.
-        if self.windowed {
-            self.shell.wait_events(Some(WINDOWED_IDLE));
+        //
+        // **Only up to the limiter's next deadline, and not at all without
+        // one.** A fixed idle here was paid in full on every frame of a
+        // rendering game — nothing but input wakes a Win32 or X11 wait — which
+        // put a 180 Hz panel's frames past every other vblank. The limiter owns
+        // pacing; this only lets input arrive during time it would have slept.
+        if self.windowed
+            && let Some(idle) = self.clock_source.idle()
+        {
+            self.shell.wait_events(Some(idle));
         }
 
         let flow = self.frame_body();
@@ -10331,6 +10378,96 @@ mod tests {
              should not be",
             second - first
         );
+    }
+
+    /// **A clock offers an idle only up to its next deadline.**
+    ///
+    /// The bound [`Loop::frame`] hands to [`Shell::wait_events`]: a wait that
+    /// ran past the deadline would make the frame late however the limiter
+    /// then paced it, and one offered with no limit, before the first frame or
+    /// after the deadline is time added to a frame that may already start.
+    #[test]
+    fn a_clocks_idle_ends_at_its_next_deadline() {
+        let mut clock = Clock::new(false);
+        clock.set_limit(FrameLimit::fps(50)); // 20ms
+        let period = FrameLimit::fps(50).period().expect("50 is a limit");
+        assert_eq!(clock.idle(), None, "no frame has started, so none may wait");
+        clock.advance();
+        let idle = clock
+            .idle()
+            .expect("the next deadline is a whole period away, so there is time to idle");
+        assert!(
+            idle < period,
+            "offered {idle:?} of idle, more than the {period:?} to the next deadline",
+        );
+
+        // Past the deadline: the frame is due, and idling would only delay it.
+        let mut due = Clock::new(false);
+        due.set_limit(FrameLimit::fps(1000)); // 1ms
+        due.advance();
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(due.idle(), None, "the deadline has passed");
+
+        let mut unlimited = Clock::new(false);
+        unlimited.set_limit(FrameLimit::unlimited());
+        unlimited.advance();
+        assert_eq!(
+            unlimited.idle(),
+            None,
+            "no limit means no deadline to idle to"
+        );
+
+        let mut manual = Clock::manual(HEADLESS_FRAME_STEP);
+        manual.advance();
+        assert_eq!(manual.idle(), None, "a manual clock never waits");
+    }
+
+    /// **A windowed loop does not idle while nothing asks it to.**
+    ///
+    /// The defect this guards: [`Loop::frame`] used to hand a fixed
+    /// [`WINDOWED_IDLE`] to [`Shell::wait_events`] on every windowed frame,
+    /// and on Win32 and X11 only input ends that wait early — so a rendering
+    /// game paid all of it on top of every frame. Observed through the headless
+    /// shell's own count of waits, which that fixed idle raised once a frame.
+    ///
+    /// With a limit the idle is still taken, up to the deadline, so input can
+    /// arrive during time the limiter would have slept anyway. Two frames: the
+    /// first has no deadline behind it, the second has a whole period ahead.
+    #[test]
+    fn a_windowed_loop_idles_only_until_its_frame_limiters_deadline() {
+        for (limit, frames, waits) in [(FrameLimit::unlimited(), 5, 0), (FrameLimit::fps(50), 2, 1)]
+        {
+            let mut shell = crcbl_shell::HeadlessShell::new();
+            let window = shell
+                .create_window(&crcbl_shell::WindowDesc::default())
+                .expect("headless always creates a window");
+            let mut engine: Loop<_, FakeGame> = Loop::new(
+                Booted {
+                    shell: Box::new(shell),
+                    window,
+                    gpu: FakeGpu::at((640, 480)),
+                    // Real, because the limiter's deadline lives on that one.
+                    clock_source: Clock::new(false),
+                    events: 0,
+                },
+                FakeGame::default(),
+                LoopConfig {
+                    windowed: true,
+                    limit,
+                    ..hosted_config(None)
+                },
+            );
+            for _ in 0..frames {
+                engine.frame().expect("a frame");
+            }
+            assert_eq!(
+                engine.shell_mut().wait_count(),
+                waits,
+                "{frames} windowed frames at {limit} waited on the shell a \
+                 different number of times than the limiter's deadlines allow",
+            );
+            engine.finish(ExitReason::FrameBudget).expect("teardown");
+        }
     }
 
     /// **A run of frames is never faster than the cap.**

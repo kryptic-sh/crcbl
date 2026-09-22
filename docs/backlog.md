@@ -3684,10 +3684,18 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### Non-render CPU
 
-- **P31 — price idle and background pacing before changing policy.** Revalidated
-  `Loop::frame`: a native windowed frame calls
-  `Shell::wait_events(Some(WINDOWED_IDLE))` before frame work, so this is not an
-  unconditional idle busy loop. `FrameLimit::DEFAULT_FPS` is only a ceiling;
+- **P31 — price idle and background pacing before changing policy.**
+  `Loop::frame` no longer idles a fixed `WINDOWED_IDLE` per windowed frame: it
+  hands `Shell::wait_events` only the time to the limiter's next deadline
+  (`Clock::idle`), and nothing with no limit or a due deadline. So the only
+  thing between a windowed `Loop` and its cap is now the limiter itself: at the
+  default `FrameLimit::DEFAULT_FPS` a non-FIFO game runs up to that rate, where
+  the old fixed idle held it under roughly 250 fps. A minimized window is not
+  detected by `Loop` (it tracks no minimized state; `GpuContext::resize` just
+  ignores a zero extent), so it keeps rendering at the cap too — measure before
+  adding a minimized idle. `apps/bare` and `apps/editor` still call
+  `wait_events(Some(WINDOWED_IDLE))` in their own loops, so they still pay the
+  fixed idle per frame. `FrameLimit::DEFAULT_FPS` is only a ceiling;
   `GpuContext::frame_limit` clamps it to video settings, and present/acquire
   waits may further limit the observed rate. Focus loss releases input and
   paused frames intentionally keep presenting; no focus-based reduced cadence
@@ -21841,3 +21849,33 @@ draws, and expansion would have meant a width in world or screen units, a
 miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
+
+## EW's engine-port audit: three gaps crcbl does not cover (2026-09-22)
+
+EW audited its reusable features against crcbl `c9b45000`'s public API (EW
+`docs/backlog.md`, section "Port proven reusable EW features into crcbl", EW
+commit `eccc3f6`). Not started; recorded for triage. EW's own list also named
+the `Mixer` voice budget and the typed grid drag/drop hoist, which this backlog
+already carries.
+
+- **Compound ray and closest-point queries (`crcbl-phys`).** `crcbl-phys` has
+  only world-axis-aligned primitives, no compound shape, and no
+  closest-point-on-box (only `closest_on_segment`). EW's
+  `asset_placement::interaction_ray_hit` moves the ray into local space, runs
+  `ray_vs_aabb` per part and keeps the nearest; `corpse_interaction_contact`
+  clamps to each local box and rotates back. Proposed shape: a compound of local
+  boxes plus a pose, with ray and closest-point queries. EW keeps loot reach,
+  visibility and ranking on its side.
+- **Two-bone IK and parent-space joint rotation (`crcbl-anim`).** Already listed
+  as absent in the animation plan. EW's `character_ik.rs` (`solve_two_bone`,
+  `rotate_joint` over `Skeleton`/`Pose`/`Palette`) has four callers: arm hand
+  placement, support-shoulder reach, upper-body aim and foot rotation. Before
+  porting, validate zero-length chains, pose/palette size mismatch, invalid
+  indices, non-finite inputs and non-uniform scale — EW's version does not.
+- **CPU bounds of a `SceneDesc` instance set under a root transform.** EW's
+  `asset_placement::bounds` / `collision_parts` reject non-finite values, where
+  `Aabb::from_points` skips NaN. This is what would produce the parts for the
+  compound query above.
+
+Not verified from the crcbl side beyond EW's report: the absence claims were
+EW's reading of the public API.
