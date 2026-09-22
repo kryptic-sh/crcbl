@@ -292,7 +292,10 @@ mod tests {
     #[test]
     fn a_missing_function_is_no_symbol_naming_it() {
         let err = resolve_all_but("SteamAPI_ManualDispatch_GetNextCallback").unwrap_err();
-        assert_eq!(err, InitError::NoSymbol("SteamAPI_ManualDispatch_GetNextCallback"));
+        assert_eq!(
+            err,
+            InitError::NoSymbol("SteamAPI_ManualDispatch_GetNextCallback")
+        );
     }
 
     #[test]
@@ -310,7 +313,11 @@ mod tests {
         })
         .unwrap();
         for bound in BINDINGS {
-            assert!(asked.contains(&bound.symbol), "{} never resolved", bound.symbol);
+            assert!(
+                asked.contains(&bound.symbol),
+                "{} never resolved",
+                bound.symbol
+            );
             // A declaration pasted under the wrong symbol would pass the drift
             // gate for the other function and leave this one unchecked.
             assert!(

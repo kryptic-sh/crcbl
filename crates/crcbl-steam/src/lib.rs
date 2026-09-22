@@ -51,42 +51,78 @@
 
 #![warn(missing_docs)]
 
-/// Applies the one target gate to every item it wraps: 64-bit Linux, Windows
-/// and macOS, the targets Valve ships a 64-bit `steam_api` for.
-macro_rules! supported {
-    ($($item:item)*) => {
-        $(
-            #[cfg(all(
-                target_pointer_width = "64",
-                any(target_os = "linux", target_os = "windows", target_os = "macos")
-            ))]
-            $item
-        )*
-    };
-}
+// The one target gate — 64-bit Linux, Windows and macOS, the targets Valve
+// ships a 64-bit `steam_api` for — written on each item, as `crcbl-dx12`
+// writes its own. Not a macro wrapping the list: rustfmt does not look inside
+// macro invocations, so a module declared in one is never formatted.
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod apps;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod callbacks;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod client;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod error;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod ffi;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod friends;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod pump;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod strings;
+#[cfg(all(
+    test,
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod testing;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod user;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod utils;
 
-supported! {
-    mod apps;
-    mod callbacks;
-    mod client;
-    mod error;
-    mod ffi;
-    mod friends;
-    mod pump;
-    mod strings;
-    #[cfg(test)]
-    mod testing;
-    mod user;
-    mod utils;
-
-    pub use crate::{
-        apps::Apps,
-        callbacks::SteamEvent,
-        client::{AppId, Steam},
-        error::InitError,
-        friends::Friends,
-        pump::PumpDiagnostics,
-        user::{SteamId, User},
-        utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},
-    };
-}
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+pub use crate::{
+    apps::Apps,
+    callbacks::SteamEvent,
+    client::{AppId, Steam},
+    error::InitError,
+    friends::Friends,
+    pump::PumpDiagnostics,
+    user::{SteamId, User},
+    utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},
+};

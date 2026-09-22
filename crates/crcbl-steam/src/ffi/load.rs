@@ -220,7 +220,9 @@ fn last_dl_error() -> String {
         if message.is_null() {
             "dlopen failed without a message".to_owned()
         } else {
-            std::ffi::CStr::from_ptr(message).to_string_lossy().into_owned()
+            std::ffi::CStr::from_ptr(message)
+                .to_string_lossy()
+                .into_owned()
         }
     }
 }
@@ -231,7 +233,11 @@ mod os {
 
     #[link(name = "kernel32")]
     unsafe extern "system" {
-        pub(super) fn LoadLibraryExW(name: *const u16, file: *mut c_void, flags: u32) -> *mut c_void;
+        pub(super) fn LoadLibraryExW(
+            name: *const u16,
+            file: *mut c_void,
+            flags: u32,
+        ) -> *mut c_void;
         pub(super) fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
         pub(super) fn GetLastError() -> u32;
     }
@@ -289,7 +295,12 @@ mod tests {
     fn empty_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("crcbl-steam-{}-{name}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{}", dir.display());
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().count(),
+            0,
+            "{}",
+            dir.display()
+        );
         dir
     }
 

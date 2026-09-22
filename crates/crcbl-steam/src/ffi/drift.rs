@@ -126,7 +126,10 @@ fn contains_word(hay: &str, needle: &str) -> bool {
     let word = |c: char| c.is_ascii_alphanumeric() || c == '_';
     hay.match_indices(needle).any(|(at, _)| {
         let before = hay[..at].chars().next_back().is_none_or(|c| !word(c));
-        let after = hay[at + needle.len()..].chars().next().is_none_or(|c| !word(c));
+        let after = hay[at + needle.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| !word(c));
         before && after
     })
 }
@@ -195,7 +198,9 @@ fn struct_blocks(text: &str, name: &str) -> Vec<Block> {
             match selection {
                 Selection::Small => stack.push(Scanned::Callback),
                 Selection::Other => {}
-                Selection::Outside => stack.push(n.parse().map_or(Scanned::Unreadable, Scanned::Fixed)),
+                Selection::Outside => {
+                    stack.push(n.parse().map_or(Scanned::Unreadable, Scanned::Fixed))
+                }
             }
         } else if flat == "#pragma pack(pop)" {
             stack.pop();
@@ -270,12 +275,20 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
     let mut failures = Vec::new();
     let lines: HashSet<String> = headers
         .iter()
-        .flat_map(|header| strip_comments(&header.text).lines().map(normalize).collect::<Vec<_>>())
+        .flat_map(|header| {
+            strip_comments(&header.text)
+                .lines()
+                .map(normalize)
+                .collect::<Vec<_>>()
+        })
         .collect();
 
     for bound in tables.bindings {
         if !lines.contains(&normalize(bound.declaration)) {
-            failures.push(format!("{}: no header declares `{}`", bound.symbol, bound.declaration));
+            failures.push(format!(
+                "{}: no header declares `{}`",
+                bound.symbol, bound.declaration
+            ));
         }
     }
 
@@ -289,7 +302,10 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
     for iface in tables.interfaces {
         let call = format!("{}(", iface.accessor);
         if !lines.iter().any(|line| line.contains(&call)) {
-            failures.push(format!("{}: no header declares the accessor", iface.accessor));
+            failures.push(format!(
+                "{}: no header declares the accessor",
+                iface.accessor
+            ));
         }
         match define_value(headers, iface.define) {
             Some(value) if value == iface.version => {}
@@ -306,7 +322,11 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
                 "{}: in_init_ex is {}, but steam_api.h {} it",
                 iface.define,
                 iface.in_init_ex,
-                if iface.in_init_ex { "does not name" } else { "names" }
+                if iface.in_init_ex {
+                    "does not name"
+                } else {
+                    "names"
+                }
             ));
         }
     }
@@ -317,7 +337,11 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
             .flat_map(|header| struct_blocks(&header.text, decl.name))
             .collect();
         let [block] = blocks.as_slice() else {
-            failures.push(format!("{}: {} definitions found, expected one", decl.name, blocks.len()));
+            failures.push(format!(
+                "{}: {} definitions found, expected one",
+                decl.name,
+                blocks.len()
+            ));
             continue;
         };
         let fields: Vec<String> = decl.fields.iter().map(|field| normalize(field)).collect();
@@ -347,7 +371,10 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
     }
     for row in tables.rows {
         if !tables.decls.iter().any(|decl| decl.name == row.name) {
-            failures.push(format!("{}: a callback row with no struct declaration", row.name));
+            failures.push(format!(
+                "{}: a callback row with no struct declaration",
+                row.name
+            ));
         }
     }
     failures
@@ -357,10 +384,18 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
 fn read_headers(dir: &Path) -> Vec<Header> {
     let mut headers: Vec<Header> = std::fs::read_dir(dir)
         .unwrap_or_else(|err| panic!("cannot read {}: {err}", dir.display()))
-        .map(|entry| entry.unwrap_or_else(|err| panic!("{}: {err}", dir.display())).path())
+        .map(|entry| {
+            entry
+                .unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+                .path()
+        })
         .filter(|path| path.extension().is_some_and(|ext| ext == "h"))
         .map(|path| Header {
-            name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+            name: path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
             text: String::from_utf8_lossy(
                 &std::fs::read(&path).unwrap_or_else(|err| panic!("{}: {err}", path.display())),
             )
@@ -380,7 +415,11 @@ fn drift() {
     let headers = read_headers(&Path::new(&sdk).join("public").join("steam"));
     assert!(headers.len() > 10, "{} headers found", headers.len());
     let failures = check(&headers, REAL);
-    assert!(failures.is_empty(), "drift from the SDK:\n{}", failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "drift from the SDK:\n{}",
+        failures.join("\n")
+    );
 }
 
 #[cfg(test)]
@@ -400,7 +439,10 @@ mod tests {
         let mut init_ex = String::from("inline bool SteamAPI_InitEx()\n{\n");
         for iface in tables.interfaces {
             flat.push_str(&format!("S_API void *{}();\n", iface.accessor));
-            defines.push_str(&format!("#define {} \"{}\" /* rev */\n", iface.define, iface.version));
+            defines.push_str(&format!(
+                "#define {} \"{}\" /* rev */\n",
+                iface.define, iface.version
+            ));
             if iface.in_init_ex {
                 init_ex.push_str(&format!("\t\t{}  \"\\0\"\n", iface.define));
             }
@@ -426,10 +468,22 @@ mod tests {
         }
         structs.push_str("#pragma pack( pop )\n");
         vec![
-            Header { name: "steam_api_flat.h".into(), text: flat },
-            Header { name: "isteamthings.h".into(), text: defines },
-            Header { name: "steam_api.h".into(), text: init_ex },
-            Header { name: "callbacks.h".into(), text: structs },
+            Header {
+                name: "steam_api_flat.h".into(),
+                text: flat,
+            },
+            Header {
+                name: "isteamthings.h".into(),
+                text: defines,
+            },
+            Header {
+                name: "steam_api.h".into(),
+                text: init_ex,
+            },
+            Header {
+                name: "callbacks.h".into(),
+                text: structs,
+            },
         ]
     }
 
@@ -447,8 +501,14 @@ mod tests {
 
     #[test]
     fn normalize_ignores_spacing_but_not_words() {
-        assert_eq!(normalize("S_API  bool  f( ISteamUser* self );"), "S_API bool f(ISteamUser*self);");
-        assert_eq!(normalize("S_API bool f(ISteamUser *self);"), normalize("S_API bool f( ISteamUser* self );"));
+        assert_eq!(
+            normalize("S_API  bool  f( ISteamUser* self );"),
+            "S_API bool f(ISteamUser*self);"
+        );
+        assert_eq!(
+            normalize("S_API bool f(ISteamUser *self);"),
+            normalize("S_API bool f( ISteamUser* self );")
+        );
         assert_ne!(normalize("unsigned int x"), normalize("unsignedint x"));
     }
 
@@ -466,10 +526,17 @@ mod tests {
     #[test]
     fn a_changed_parameter_type_fails() {
         let mut headers = synthetic(REAL);
-        edit(&mut headers, "SteamAPI_ManualDispatch_RunFrame( HSteamPipe", "SteamAPI_ManualDispatch_RunFrame( int64");
+        edit(
+            &mut headers,
+            "SteamAPI_ManualDispatch_RunFrame( HSteamPipe",
+            "SteamAPI_ManualDispatch_RunFrame( int64",
+        );
         let failures = check(&headers, REAL);
         assert_eq!(failures.len(), 1, "{failures:#?}");
-        assert!(failures[0].starts_with("SteamAPI_ManualDispatch_RunFrame:"), "{failures:#?}");
+        assert!(
+            failures[0].starts_with("SteamAPI_ManualDispatch_RunFrame:"),
+            "{failures:#?}"
+        );
     }
 
     #[test]
@@ -478,7 +545,11 @@ mod tests {
         edit(&mut headers, "\"SteamUser023\"", "\"SteamUser024\"");
         assert_eq!(check(&headers, REAL).len(), 1);
         let mut headers = synthetic(REAL);
-        edit(&mut headers, "SteamAPI_SteamUtils_v011(", "SteamAPI_SteamUtils_v012(");
+        edit(
+            &mut headers,
+            "SteamAPI_SteamUtils_v011(",
+            "SteamAPI_SteamUtils_v012(",
+        );
         assert_eq!(check(&headers, REAL).len(), 1);
     }
 
@@ -497,22 +568,36 @@ mod tests {
         edit(&mut headers, "uint8 m_bActive", "uint8 m_bIsActive");
         let failures = check(&headers, REAL);
         assert_eq!(failures.len(), 1, "{failures:#?}");
-        assert!(failures[0].starts_with("GameOverlayActivated_t:"), "{failures:#?}");
+        assert!(
+            failures[0].starts_with("GameOverlayActivated_t:"),
+            "{failures:#?}"
+        );
     }
 
     #[test]
     fn a_changed_pragma_fails() {
         let mut headers = synthetic(REAL);
-        edit(&mut headers, "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )", "#if 0\n#endif\n#pragma pack( push, 1 )\n#if defined( VALVE_CALLBACK_PACK_SMALL )");
+        edit(
+            &mut headers,
+            "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )",
+            "#if 0\n#endif\n#pragma pack( push, 1 )\n#if defined( VALVE_CALLBACK_PACK_SMALL )",
+        );
         let failures = check(&headers, REAL);
         assert_eq!(failures.len(), DECLS.len(), "{failures:#?}");
-        assert!(failures.iter().all(|f| f.contains("packs it Fixed(1)")), "{failures:#?}");
+        assert!(
+            failures.iter().all(|f| f.contains("packs it Fixed(1)")),
+            "{failures:#?}"
+        );
     }
 
     #[test]
     fn a_wrong_callback_offset_fails() {
         let mut headers = synthetic(REAL);
-        edit(&mut headers, "k_iSteamFriendsCallbacks + 31", "k_iSteamFriendsCallbacks + 32");
+        edit(
+            &mut headers,
+            "k_iSteamFriendsCallbacks + 31",
+            "k_iSteamFriendsCallbacks + 32",
+        );
         let failures = check(&headers, REAL);
         assert_eq!(failures.len(), 1, "{failures:#?}");
         assert!(failures[0].contains("k_iCallback"), "{failures:#?}");
@@ -523,18 +608,29 @@ mod tests {
         let blocks = struct_blocks("struct A\n{\n\tint x;\n};\n", "A");
         assert_eq!(
             blocks,
-            [Block { pack: Scanned::Natural, callback: None, fields: vec!["int x".into()] }]
+            [Block {
+                pack: Scanned::Natural,
+                callback: None,
+                fields: vec!["int x".into()]
+            }]
         );
     }
 
     #[test]
     fn a_missing_or_duplicated_struct_fails() {
         let mut headers = synthetic(REAL);
-        edit(&mut headers, "typedef struct CallbackMsg_t\n", "typedef struct CallbackMsgRenamed_t\n");
+        edit(
+            &mut headers,
+            "typedef struct CallbackMsg_t\n",
+            "typedef struct CallbackMsgRenamed_t\n",
+        );
         assert_eq!(check(&headers, REAL).len(), 1);
         let mut headers = synthetic(REAL);
         let copy = headers[3].clone();
-        headers.push(Header { name: "again.h".into(), ..copy });
+        headers.push(Header {
+            name: "again.h".into(),
+            ..copy
+        });
         assert_eq!(check(&headers, REAL).len(), DECLS.len());
     }
 }

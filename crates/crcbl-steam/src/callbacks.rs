@@ -165,8 +165,14 @@ mod tests {
 
     #[test]
     fn the_ids_are_valves() {
-        assert_eq!(find(331).map(|row| row.name), Some("GameOverlayActivated_t"));
-        assert_eq!(find(703).map(|row| row.name), Some("SteamAPICallCompleted_t"));
+        assert_eq!(
+            find(331).map(|row| row.name),
+            Some("GameOverlayActivated_t")
+        );
+        assert_eq!(
+            find(703).map(|row| row.name),
+            Some("SteamAPICallCompleted_t")
+        );
         assert!(find(332).is_none());
     }
 
@@ -184,11 +190,15 @@ mod tests {
         let row = find(331).unwrap();
         assert_eq!(
             (row.decode)(&overlay_bytes(1)),
-            Some(Decoded::Event(SteamEvent::OverlayActivated { active: true }))
+            Some(Decoded::Event(SteamEvent::OverlayActivated {
+                active: true
+            }))
         );
         assert_eq!(
             (row.decode)(&overlay_bytes(0)),
-            Some(Decoded::Event(SteamEvent::OverlayActivated { active: false }))
+            Some(Decoded::Event(SteamEvent::OverlayActivated {
+                active: false
+            }))
         );
     }
 

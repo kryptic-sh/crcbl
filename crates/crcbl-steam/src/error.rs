@@ -68,6 +68,9 @@ pub enum InitError {
 }
 
 fn display_paths(paths: &[PathBuf]) -> String {
-    let shown: Vec<String> = paths.iter().map(|path| path.display().to_string()).collect();
+    let shown: Vec<String> = paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
     shown.join(", ")
 }

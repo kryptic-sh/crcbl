@@ -165,7 +165,10 @@ impl Script {
     /// Overwrites the one string buffer every string call answers from, in
     /// place — as Steam reuses its buffer — with `text` and a NUL.
     pub(crate) fn set_string(&mut self, text: &[u8]) {
-        assert!(text.len() < STRING_CAPACITY && !text.contains(&0), "{text:?}");
+        assert!(
+            text.len() < STRING_CAPACITY && !text.contains(&0),
+            "{text:?}"
+        );
         let mut buffer = [0; STRING_CAPACITY];
         buffer[..text.len()].copy_from_slice(text);
         STRING.with(|cell| cell.set(buffer));
@@ -267,7 +270,10 @@ fn accessor(name: &str) -> *mut c_void {
     }
 }
 
-unsafe extern "C" fn fake_init(versions: *const core::ffi::c_char, message: *mut SteamErrMsg) -> i32 {
+unsafe extern "C" fn fake_init(
+    versions: *const core::ffi::c_char,
+    message: *mut SteamErrMsg,
+) -> i32 {
     // SAFETY: the caller passes a double-NUL-terminated list; read up to and
     // including the second NUL of a pair.
     let handshake = unsafe {

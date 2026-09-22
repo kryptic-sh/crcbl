@@ -164,8 +164,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     };
     let user = interface(lib.fns.user.accessor, &versions::USER)?.cast::<ISteamUser>();
     let utils = interface(lib.fns.utils.accessor, &versions::UTILS)?.cast::<ISteamUtils>();
-    let friends =
-        interface(lib.fns.friends.accessor, &versions::FRIENDS)?.cast::<ISteamFriends>();
+    let friends = interface(lib.fns.friends.accessor, &versions::FRIENDS)?.cast::<ISteamFriends>();
     let apps = interface(lib.fns.apps.accessor, &versions::APPS)?.cast::<ISteamApps>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.

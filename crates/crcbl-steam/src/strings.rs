@@ -68,7 +68,11 @@ mod tests {
         assert_eq!(steam.diagnostics().lossy_strings, 1);
         testing::script(|s| s.set_string(b"english"));
         assert_eq!(steam.apps().game_language(), "english");
-        assert_eq!(steam.diagnostics().lossy_strings, 1, "valid UTF-8 is not lossy");
+        assert_eq!(
+            steam.diagnostics().lossy_strings,
+            1,
+            "valid UTF-8 is not lossy"
+        );
     }
 
     #[test]

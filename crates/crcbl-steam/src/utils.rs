@@ -230,7 +230,9 @@ impl Utils<'_> {
     pub fn set_notification_corner(&self, corner: NotificationCorner) {
         let client = &self.steam.client;
         // SAFETY: see `app_id`; the value is a named `ENotificationPosition`.
-        unsafe { (client.lib.fns.utils.set_overlay_notification_position)(client.utils, corner.raw()) }
+        unsafe {
+            (client.lib.fns.utils.set_overlay_notification_position)(client.utils, corner.raw())
+        }
     }
 
     /// Insets the notification pop-ups from their corner by this many pixels
@@ -239,7 +241,11 @@ impl Utils<'_> {
         let client = &self.steam.client;
         // SAFETY: see `app_id`.
         unsafe {
-            (client.lib.fns.utils.set_overlay_notification_inset)(client.utils, horizontal, vertical);
+            (client.lib.fns.utils.set_overlay_notification_inset)(
+                client.utils,
+                horizontal,
+                vertical,
+            );
         }
     }
 }
@@ -274,8 +280,14 @@ mod tests {
         for (raw, expected) in (0..).zip(named) {
             assert_eq!(HardwareDefaultConfig::from_raw(raw), expected, "{raw}");
         }
-        assert_eq!(HardwareDefaultConfig::from_raw(8), HardwareDefaultConfig::Unknown(8));
-        assert_eq!(HardwareDefaultConfig::from_raw(-1), HardwareDefaultConfig::Unknown(-1));
+        assert_eq!(
+            HardwareDefaultConfig::from_raw(8),
+            HardwareDefaultConfig::Unknown(8)
+        );
+        assert_eq!(
+            HardwareDefaultConfig::from_raw(-1),
+            HardwareDefaultConfig::Unknown(-1)
+        );
     }
 
     #[test]
@@ -292,7 +304,10 @@ mod tests {
         });
         let utils = steam.utils();
         assert_eq!(utils.steam_hardware(), SteamHardware::SteamDeck);
-        assert_eq!(utils.hardware_default_config(), HardwareDefaultConfig::SteamDeck);
+        assert_eq!(
+            utils.hardware_default_config(),
+            HardwareDefaultConfig::SteamDeck
+        );
         assert!(utils.under_proton());
         assert!(utils.overlay_enabled());
         assert!(utils.big_picture());
@@ -315,8 +330,12 @@ mod tests {
             steam.utils().set_notification_corner(corner);
         }
         steam.utils().set_notification_inset(16, -8);
-        let (positions, insets) =
-            testing::script(|s| (s.notification_positions.clone(), s.notification_insets.clone()));
+        let (positions, insets) = testing::script(|s| {
+            (
+                s.notification_positions.clone(),
+                s.notification_insets.clone(),
+            )
+        });
         assert_eq!(positions, [0, 1, 2, 3]);
         assert_eq!(insets, [(16, -8)]);
     }
