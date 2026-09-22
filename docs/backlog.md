@@ -338,13 +338,16 @@ Initial measurements and harness findings:
   900-frame 1920x1080 runs kept `light-cluster` at 0.055 ms and measured
   3.770–3.793 ms `forward` for specular versus 2.961–3.054 ms for fill. The
   punctual GGX path therefore adds 0.739–0.809 ms, or 24.2–27.3%, and the
-  complete pass-sum delta was nearly identical at 0.729–0.806 ms. The bounded
-  next trial is to compute `ggx_lobe`'s view-side Smith square root once per
-  fragment: it depends only on `alpha2` and `n_dot_v`, but the function
-  currently repeats it inside every ordinary punctual-light iteration. Require
-  unchanged native point-light images and alternating shadow-disabled timings
-  before retaining the hoist; a compiler that already performs it will make the
-  trial neutral rather than justify more shader state.
+  complete pass-sum delta was nearly identical at 0.729–0.806 ms. Hoisting
+  `ggx_lobe`'s view-side Smith square root out of the light loop had a
+  structural observer that failed before the edit and passed after all four
+  shader targets compiled. It failed the performance gate before image testing:
+  specular `forward` regressed to 3.822–3.848 ms from 3.770–3.793 ms, while the
+  fill control also regressed to 3.058–3.117 ms from 2.961–3.054 ms. Computing
+  that term unconditionally for fragments that never evaluate punctual GGX costs
+  more than sharing it saves on this adapter. The shader, observer and generated
+  artifacts were removed; keep the term inside `ggx_lobe` unless a conditional
+  reuse shape can avoid per-light branching and extra live state.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
