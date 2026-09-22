@@ -202,7 +202,10 @@ Initial measurements and harness findings:
   target. Its edge and shape shaders currently flatten the viewport and recover
   coordinates with integer division in every invocation; trial a two-dimensional
   dispatch that preserves the algorithm and compare all three rows, the pass sum
-  and a non-CMAA control before retaining it.
+  and a non-CMAA control before retaining it. The 8×8 trial regressed edge p50
+  to 0.639 ms, shape p50 to 0.923 ms and their three-pass sum to 2.046 ms. The
+  one-dimensional 64-thread dispatch remains faster on this adapter, so do not
+  repeat that layout change without evidence from different hardware.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
