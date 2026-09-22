@@ -74,3 +74,103 @@ fn display_paths(paths: &[PathBuf]) -> String {
         .collect();
     shown.join(", ")
 }
+
+/// Steam's `EResult`: the outcome code most calls and call results carry.
+///
+/// A newtype over the raw value rather than an enum, because the SDK names
+/// well over a hundred codes and adds more; the few this crate acts on are
+/// named constants, and every other value is kept, never mapped to a guess.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EResult(pub i32);
+
+impl EResult {
+    /// `k_EResultOK`.
+    pub const OK: Self = Self(1);
+    /// `k_EResultFail` — a generic failure.
+    pub const FAIL: Self = Self(2);
+    /// `k_EResultNoConnection` — the client has no connection to Steam's
+    /// servers.
+    pub const NO_CONNECTION: Self = Self(3);
+    /// `k_EResultAccessDenied`.
+    pub const ACCESS_DENIED: Self = Self(15);
+    /// `k_EResultTimeout`.
+    pub const TIMEOUT: Self = Self(16);
+    /// `k_EResultLimitExceeded` — too many of something, e.g. lobbies.
+    pub const LIMIT_EXCEEDED: Self = Self(25);
+}
+
+impl core::fmt::Display for EResult {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let name = match *self {
+            Self::OK => "OK",
+            Self::FAIL => "Fail",
+            Self::NO_CONNECTION => "NoConnection",
+            Self::ACCESS_DENIED => "AccessDenied",
+            Self::TIMEOUT => "Timeout",
+            Self::LIMIT_EXCEEDED => "LimitExceeded",
+            _ => return write!(f, "EResult {}", self.0),
+        };
+        write!(f, "{name} ({})", self.0)
+    }
+}
+
+/// Why a Steam call made through an initialised [`Steam`](crate::Steam)
+/// failed. Each variant names the argument or the call, so a log line says
+/// which.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum SteamError {
+    /// A string argument contains a NUL, which would silently cut it short at
+    /// the C boundary; it is refused rather than truncated.
+    #[error("{0} contains a NUL byte")]
+    InteriorNul(&'static str),
+    /// An argument is longer than Steam accepts; refused before the call.
+    #[error("{argument} is {len} bytes, over Steam's limit of {max}")]
+    TooLong {
+        /// Which argument.
+        argument: &'static str,
+        /// Its length in bytes.
+        len: usize,
+        /// The most Steam accepts.
+        max: usize,
+    },
+    /// One more of something Steam holds a fixed number of; refused before
+    /// the call.
+    #[error("{what}: Steam holds at most {max}")]
+    TooMany {
+        /// What there would be too many of.
+        what: &'static str,
+        /// The most Steam holds.
+        max: usize,
+    },
+    /// Steam answered `false`, or an invalid call handle, for the named call.
+    #[error("Steam refused {0}")]
+    Refused(&'static str),
+    /// Steam answered with this `EResult`.
+    #[error("Steam answered {0}")]
+    Result(EResult),
+    /// Joining a lobby failed with this `EChatRoomEnterResponse`.
+    #[error("could not enter the lobby: {0:?}")]
+    LobbyEnter(crate::matchmaking::EnterResponse),
+    /// What Steam returned filled the whole buffer, so it may have been cut
+    /// short; the named call's answer is refused rather than guessed at.
+    #[error("{0} filled its whole buffer and may be truncated")]
+    Truncated(&'static str),
+}
+
+/// Copies a Rust string into a NUL-terminated one for a call, refusing an
+/// interior NUL and anything longer than `max` bytes (the NUL not counted).
+pub(crate) fn c_string(
+    text: &str,
+    argument: &'static str,
+    max: usize,
+) -> Result<std::ffi::CString, SteamError> {
+    if text.len() > max {
+        return Err(SteamError::TooLong {
+            argument,
+            len: text.len(),
+            max,
+        });
+    }
+    std::ffi::CString::new(text).map_err(|_| SteamError::InteriorNul(argument))
+}

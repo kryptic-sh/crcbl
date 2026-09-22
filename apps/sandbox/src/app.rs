@@ -533,7 +533,11 @@ impl HostedGame for Sandbox {
 
     /// The sandbox binds no keys of its own: the three the loop reserves are
     /// the three it has.
-    fn key_event(&mut self, _key: crcbl::core::input::KeyCode, _pressed: bool) {}
+    /// The Steam lobby keys, when the `steam` feature is live; see
+    /// [`crate::steam`].
+    fn key_event(&mut self, key: crcbl::core::input::KeyCode, pressed: bool) {
+        self.steam.key_event(key, pressed);
+    }
 
     /// The action a widget id of this game's names; the mapping lives in the
     /// menu module, which owns the ids.
@@ -570,6 +574,11 @@ impl HostedGame for Sandbox {
             self.shown = Some((self.pacing, self.limit));
         }
         paused
+    }
+
+    /// The "steam" section, when the `steam` feature is live.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        self.steam.debug_sections(panel);
     }
 
     fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {

@@ -26,8 +26,11 @@ use std::{
 };
 
 use crate::ffi::{
-    HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
-    manifest::{AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, UserFns, UtilsFns},
+    HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils, Lib,
+    SteamApiCall, SteamErrMsg,
+    manifest::{
+        AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, MatchmakingFns, UserFns, UtilsFns,
+    },
     structs::CallbackMsg,
 };
 
@@ -91,6 +94,7 @@ pub(crate) struct Calls {
     pub(crate) next_while_unfreed: u32,
     /// A dispatch call on a pipe the fake never handed out.
     pub(crate) wrong_pipe: u32,
+    pub(crate) clear_rich_presence: u32,
 }
 
 /// What the fake answers, and what it has seen.
@@ -123,6 +127,44 @@ pub(crate) struct Script {
     pub(crate) notification_insets: Vec<(i32, i32)>,
     /// Every string call answers null instead of [`STRING`]'s buffer.
     pub(crate) null_string: bool,
+    /// Every bool-returning call the fake makes answers `false`.
+    pub(crate) refuse: bool,
+    /// What `GetLaunchCommandLine` copies out, before its NUL.
+    pub(crate) launch_line: Vec<u8>,
+    /// Every `(key, value)` `SetRichPresence` received.
+    pub(crate) rich_presence: Vec<(String, String)>,
+    /// Every lobby `ActivateGameOverlayInviteDialog` opened for.
+    pub(crate) invite_dialogs: Vec<u64>,
+    /// Every `(friend, connect)` `InviteUserToGame` sent.
+    pub(crate) game_invites: Vec<(u64, String)>,
+    /// The handle the next `CreateLobby` or `JoinLobby` answers; `0` is
+    /// `k_uAPICallInvalid`.
+    pub(crate) next_call: SteamApiCall,
+    /// Every `(type, max members)` `CreateLobby` received.
+    pub(crate) created: Vec<(i32, i32)>,
+    /// Every lobby `JoinLobby` was asked for.
+    pub(crate) joined: Vec<u64>,
+    /// Every lobby `LeaveLobby` left, in order.
+    pub(crate) left: Vec<u64>,
+    /// What `GetAPICallResult` answers per call: the bytes it writes, and
+    /// whether it reports an IO failure. A call with no entry answers
+    /// `false`.
+    pub(crate) results: Vec<(SteamApiCall, Vec<u8>, bool)>,
+    /// Every `(call, size, id)` `GetAPICallResult` was asked for.
+    pub(crate) results_asked: Vec<(SteamApiCall, i32, i32)>,
+    /// What `GetLobbyOwner` answers.
+    pub(crate) lobby_owner: u64,
+    /// What `GetLobbyMemberByIndex` walks.
+    pub(crate) members: Vec<u64>,
+    /// What `GetLobbyMemberLimit` answers.
+    pub(crate) member_limit: i32,
+    /// Every lobby-side write: `(call, lobby, key or friend, value)`.
+    pub(crate) lobby_writes: Vec<(&'static str, u64, String, String)>,
+    /// Every body `SendLobbyChatMsg` sent.
+    pub(crate) chat_sent: Vec<Vec<u8>>,
+    /// What `GetLobbyChatEntry` answers: sender, entry type, body, and the
+    /// count it returns (normally the body's length).
+    pub(crate) chat_entry: (u64, i32, Vec<u8>, i32),
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -154,6 +196,23 @@ impl Default for Script {
             notification_positions: Vec::new(),
             notification_insets: Vec::new(),
             null_string: false,
+            refuse: false,
+            launch_line: Vec::new(),
+            rich_presence: Vec::new(),
+            invite_dialogs: Vec::new(),
+            game_invites: Vec::new(),
+            next_call: 0,
+            created: Vec::new(),
+            joined: Vec::new(),
+            left: Vec::new(),
+            results: Vec::new(),
+            results_asked: Vec::new(),
+            lobby_owner: 0,
+            members: Vec::new(),
+            member_limit: 0,
+            lobby_writes: Vec::new(),
+            chat_sent: Vec::new(),
+            chat_entry: (0, 0, Vec::new(), 0),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -220,6 +279,7 @@ pub(crate) fn fake_lib() -> &'static Lib {
             run_frame: fake_run_frame,
             get_next_callback: fake_get_next_callback,
             free_last_callback: fake_free_last_callback,
+            get_api_call_result: fake_get_api_call_result,
         },
         user: UserFns {
             accessor: fake_user_accessor,
@@ -230,11 +290,36 @@ pub(crate) fn fake_lib() -> &'static Lib {
         friends: FriendsFns {
             accessor: fake_friends_accessor,
             get_persona_name: fake_get_persona_name,
+            activate_game_overlay_invite_dialog: fake_activate_game_overlay_invite_dialog,
+            set_rich_presence: fake_set_rich_presence,
+            clear_rich_presence: fake_clear_rich_presence,
+            invite_user_to_game: fake_invite_user_to_game,
+        },
+        matchmaking: MatchmakingFns {
+            accessor: fake_matchmaking_accessor,
+            create_lobby: fake_create_lobby,
+            join_lobby: fake_join_lobby,
+            leave_lobby: fake_leave_lobby,
+            invite_user_to_lobby: fake_invite_user_to_lobby,
+            get_num_lobby_members: fake_get_num_lobby_members,
+            get_lobby_member_by_index: fake_get_lobby_member_by_index,
+            get_lobby_data: fake_get_lobby_data,
+            set_lobby_data: fake_set_lobby_data,
+            get_lobby_member_data: fake_get_lobby_member_data,
+            set_lobby_member_data: fake_set_lobby_member_data,
+            send_lobby_chat_msg: fake_send_lobby_chat_msg,
+            get_lobby_chat_entry: fake_get_lobby_chat_entry,
+            set_lobby_member_limit: fake_set_lobby_member_limit,
+            get_lobby_member_limit: fake_get_lobby_member_limit,
+            set_lobby_type: fake_set_lobby_type,
+            set_lobby_joinable: fake_set_lobby_joinable,
+            get_lobby_owner: fake_get_lobby_owner,
         },
         apps: AppsFns {
             accessor: fake_apps_accessor,
             is_subscribed: fake_is_subscribed,
             get_current_game_language: fake_get_current_game_language,
+            get_launch_command_line: fake_get_launch_command_line,
         },
         utils: UtilsFns {
             accessor: fake_utils_accessor,
@@ -460,4 +545,334 @@ unsafe extern "C" fn fake_get_server_real_time(_: *mut ISteamUtils) -> u32 {
 
 unsafe extern "C" fn fake_get_ip_country(_: *mut ISteamUtils) -> *const c_char {
     fake_string()
+}
+
+/// A C string argument, copied.
+///
+/// # Safety
+///
+/// `text` is a NUL-terminated string live for the call.
+unsafe fn arg(text: *const c_char) -> String {
+    // SAFETY: the caller's promise.
+    unsafe { std::ffi::CStr::from_ptr(text) }
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// What every bool-returning call answers.
+fn allowed() -> bool {
+    !script(|s| s.refuse)
+}
+
+unsafe extern "C" fn fake_get_api_call_result(
+    pipe: HSteamPipe,
+    call: SteamApiCall,
+    out: *mut c_void,
+    size: i32,
+    id: i32,
+    failed: *mut bool,
+) -> bool {
+    script(|s| {
+        if pipe != PIPE {
+            s.calls.wrong_pipe += 1;
+        }
+        s.results_asked.push((call, size, id));
+        let Some((_, bytes, io_failure)) = s.results.iter().find(|(c, ..)| *c == call) else {
+            return false;
+        };
+        // SAFETY: the caller passes `size` writable bytes and a writable bool.
+        unsafe {
+            failed.write(*io_failure);
+            let len = bytes.len().min(usize::try_from(size).unwrap_or(0));
+            core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), len);
+        }
+        true
+    })
+}
+
+unsafe extern "C" fn fake_activate_game_overlay_invite_dialog(_: *mut ISteamFriends, lobby: u64) {
+    script(|s| s.invite_dialogs.push(lobby));
+}
+
+unsafe extern "C" fn fake_set_rich_presence(
+    _: *mut ISteamFriends,
+    key: *const c_char,
+    value: *const c_char,
+) -> bool {
+    // SAFETY: the caller passes two NUL-terminated strings.
+    let pair = unsafe { (arg(key), arg(value)) };
+    let allowed = allowed();
+    if allowed {
+        script(|s| s.rich_presence.push(pair));
+    }
+    allowed
+}
+
+unsafe extern "C" fn fake_clear_rich_presence(_: *mut ISteamFriends) {
+    script(|s| s.calls.clear_rich_presence += 1);
+}
+
+unsafe extern "C" fn fake_invite_user_to_game(
+    _: *mut ISteamFriends,
+    friend: u64,
+    connect: *const c_char,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated string.
+    let connect = unsafe { arg(connect) };
+    script(|s| s.game_invites.push((friend, connect)));
+    allowed()
+}
+
+unsafe extern "C" fn fake_matchmaking_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::MATCHMAKING.accessor)
+}
+
+unsafe extern "C" fn fake_create_lobby(
+    _: *mut ISteamMatchmaking,
+    kind: i32,
+    max: i32,
+) -> SteamApiCall {
+    script(|s| {
+        s.created.push((kind, max));
+        s.next_call
+    })
+}
+
+unsafe extern "C" fn fake_join_lobby(_: *mut ISteamMatchmaking, lobby: u64) -> SteamApiCall {
+    script(|s| {
+        s.joined.push(lobby);
+        s.next_call
+    })
+}
+
+unsafe extern "C" fn fake_leave_lobby(_: *mut ISteamMatchmaking, lobby: u64) {
+    script(|s| s.left.push(lobby));
+}
+
+unsafe extern "C" fn fake_invite_user_to_lobby(
+    _: *mut ISteamMatchmaking,
+    lobby: u64,
+    friend: u64,
+) -> bool {
+    script(|s| {
+        s.lobby_writes.push((
+            "InviteUserToLobby",
+            lobby,
+            friend.to_string(),
+            String::new(),
+        ));
+    });
+    allowed()
+}
+
+unsafe extern "C" fn fake_get_num_lobby_members(_: *mut ISteamMatchmaking, _: u64) -> i32 {
+    script(|s| i32::try_from(s.members.len()).unwrap())
+}
+
+unsafe extern "C" fn fake_get_lobby_member_by_index(
+    _: *mut ISteamMatchmaking,
+    _: u64,
+    index: i32,
+) -> u64 {
+    script(|s| s.members[usize::try_from(index).unwrap()])
+}
+
+unsafe extern "C" fn fake_get_lobby_data(
+    _: *mut ISteamMatchmaking,
+    _: u64,
+    _: *const c_char,
+) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_set_lobby_data(
+    _: *mut ISteamMatchmaking,
+    lobby: u64,
+    key: *const c_char,
+    value: *const c_char,
+) -> bool {
+    // SAFETY: the caller passes two NUL-terminated strings.
+    let (key, value) = unsafe { (arg(key), arg(value)) };
+    script(|s| s.lobby_writes.push(("SetLobbyData", lobby, key, value)));
+    allowed()
+}
+
+unsafe extern "C" fn fake_get_lobby_member_data(
+    _: *mut ISteamMatchmaking,
+    _: u64,
+    _: u64,
+    _: *const c_char,
+) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_set_lobby_member_data(
+    _: *mut ISteamMatchmaking,
+    lobby: u64,
+    key: *const c_char,
+    value: *const c_char,
+) {
+    // SAFETY: the caller passes two NUL-terminated strings.
+    let (key, value) = unsafe { (arg(key), arg(value)) };
+    script(|s| {
+        s.lobby_writes
+            .push(("SetLobbyMemberData", lobby, key, value))
+    });
+}
+
+unsafe extern "C" fn fake_send_lobby_chat_msg(
+    _: *mut ISteamMatchmaking,
+    _: u64,
+    body: *const c_void,
+    len: i32,
+) -> bool {
+    // SAFETY: the caller passes `len` readable bytes.
+    let body =
+        unsafe { core::slice::from_raw_parts(body.cast::<u8>(), usize::try_from(len).unwrap()) }
+            .to_vec();
+    script(|s| s.chat_sent.push(body));
+    allowed()
+}
+
+unsafe extern "C" fn fake_get_lobby_chat_entry(
+    _: *mut ISteamMatchmaking,
+    _: u64,
+    _: i32,
+    sender: *mut u64,
+    out: *mut c_void,
+    capacity: i32,
+    kind: *mut i32,
+) -> i32 {
+    script(|s| {
+        let (from, entry_type, body, count) = &s.chat_entry;
+        // SAFETY: the caller passes writable `sender` and `kind`, and
+        // `capacity` writable bytes at `out`.
+        unsafe {
+            sender.write(*from);
+            kind.write(*entry_type);
+            let len = body.len().min(usize::try_from(capacity).unwrap());
+            core::ptr::copy_nonoverlapping(body.as_ptr(), out.cast::<u8>(), len);
+        }
+        *count
+    })
+}
+
+unsafe extern "C" fn fake_set_lobby_member_limit(
+    _: *mut ISteamMatchmaking,
+    lobby: u64,
+    limit: i32,
+) -> bool {
+    script(|s| {
+        s.lobby_writes.push((
+            "SetLobbyMemberLimit",
+            lobby,
+            limit.to_string(),
+            String::new(),
+        ));
+    });
+    allowed()
+}
+
+unsafe extern "C" fn fake_get_lobby_member_limit(_: *mut ISteamMatchmaking, _: u64) -> i32 {
+    script(|s| s.member_limit)
+}
+
+unsafe extern "C" fn fake_set_lobby_type(_: *mut ISteamMatchmaking, lobby: u64, kind: i32) -> bool {
+    script(|s| {
+        s.lobby_writes
+            .push(("SetLobbyType", lobby, kind.to_string(), String::new()));
+    });
+    allowed()
+}
+
+unsafe extern "C" fn fake_set_lobby_joinable(
+    _: *mut ISteamMatchmaking,
+    lobby: u64,
+    joinable: bool,
+) -> bool {
+    script(|s| {
+        s.lobby_writes.push((
+            "SetLobbyJoinable",
+            lobby,
+            joinable.to_string(),
+            String::new(),
+        ));
+    });
+    allowed()
+}
+
+unsafe extern "C" fn fake_get_lobby_owner(_: *mut ISteamMatchmaking, _: u64) -> u64 {
+    script(|s| s.lobby_owner)
+}
+
+unsafe extern "C" fn fake_get_launch_command_line(
+    _: *mut ISteamApps,
+    out: *mut c_char,
+    capacity: i32,
+) -> i32 {
+    script(|s| {
+        let capacity = usize::try_from(capacity).unwrap();
+        let len = s.launch_line.len().min(capacity);
+        // SAFETY: the caller passes `capacity` writable bytes; the NUL goes
+        // in only when it fits, as a C strncpy-shaped copy would leave it.
+        unsafe {
+            core::ptr::copy_nonoverlapping(s.launch_line.as_ptr(), out.cast::<u8>(), len);
+            if len < capacity {
+                out.cast::<u8>().add(len).write(0);
+            }
+        }
+        i32::try_from(len).unwrap()
+    })
+}
+
+/// A `SteamAPICallCompleted_t` on the pipe: `call` answered with callback
+/// `id` of `size` bytes.
+pub(crate) fn completion(call: SteamApiCall, id: i32, size: usize) -> FakeMsg {
+    let mut bytes = call.to_le_bytes().to_vec();
+    bytes.extend_from_slice(&id.to_le_bytes());
+    bytes.extend_from_slice(&u32::try_from(size).unwrap().to_le_bytes());
+    FakeMsg::payload(703, bytes)
+}
+
+/// A payload of `T`'s size, zeroed, with each `(offset, bytes)` written in.
+pub(crate) fn payload<T>(fields: &[(usize, &[u8])]) -> Vec<u8> {
+    let mut bytes = vec![0; size_of::<T>()];
+    for &(at, field) in fields {
+        bytes[at..at + field.len()].copy_from_slice(field);
+    }
+    bytes
+}
+
+/// A `LobbyCreated_t` answer.
+pub(crate) fn lobby_created(result: i32, lobby: u64) -> Vec<u8> {
+    use crate::ffi::structs::LobbyCreated;
+    payload::<LobbyCreated>(&[
+        (
+            core::mem::offset_of!(LobbyCreated, result),
+            &result.to_le_bytes(),
+        ),
+        (
+            core::mem::offset_of!(LobbyCreated, lobby),
+            &lobby.to_le_bytes(),
+        ),
+    ])
+}
+
+/// A `LobbyEnter_t` answer.
+pub(crate) fn lobby_enter(lobby: u64, response: u32, locked: bool) -> Vec<u8> {
+    use crate::ffi::structs::LobbyEnter;
+    payload::<LobbyEnter>(&[
+        (
+            core::mem::offset_of!(LobbyEnter, lobby),
+            &lobby.to_le_bytes(),
+        ),
+        (
+            core::mem::offset_of!(LobbyEnter, locked),
+            &[u8::from(locked)],
+        ),
+        (
+            core::mem::offset_of!(LobbyEnter, response),
+            &response.to_le_bytes(),
+        ),
+    ])
 }

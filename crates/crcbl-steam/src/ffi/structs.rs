@@ -117,6 +117,68 @@ pub(crate) const DECLS: &[StructDecl] = &[
             "uint32 m_dwOverlayPID",
         ],
     },
+    StructDecl {
+        name: "GameLobbyJoinRequested_t",
+        pack: Pack::Callback,
+        fields: &["CSteamID m_steamIDLobby", "CSteamID m_steamIDFriend"],
+    },
+    StructDecl {
+        name: "GameRichPresenceJoinRequested_t",
+        pack: Pack::Callback,
+        fields: &[
+            "CSteamID m_steamIDFriend",
+            "char m_rgchConnect[k_cchMaxRichPresenceValueLength]",
+        ],
+    },
+    StructDecl {
+        name: "NewUrlLaunchParameters_t",
+        pack: Pack::Callback,
+        fields: &[],
+    },
+    StructDecl {
+        name: "LobbyCreated_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
+    },
+    StructDecl {
+        name: "LobbyEnter_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_ulSteamIDLobby",
+            "uint32 m_rgfChatPermissions",
+            "bool m_bLocked",
+            "uint32 m_EChatRoomEnterResponse",
+        ],
+    },
+    StructDecl {
+        name: "LobbyDataUpdate_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_ulSteamIDLobby",
+            "uint64 m_ulSteamIDMember",
+            "uint8 m_bSuccess",
+        ],
+    },
+    StructDecl {
+        name: "LobbyChatUpdate_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_ulSteamIDLobby",
+            "uint64 m_ulSteamIDUserChanged",
+            "uint64 m_ulSteamIDMakingChange",
+            "uint32 m_rgfChatMemberStateChange",
+        ],
+    },
+    StructDecl {
+        name: "LobbyChatMsg_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_ulSteamIDLobby",
+            "uint64 m_ulSteamIDUser",
+            "uint8 m_eChatEntryType",
+            "uint32 m_iChatID",
+        ],
+    },
 ];
 
 #[cfg(test)]
@@ -191,6 +253,128 @@ callback_packed! {
     }
 }
 
+/// `CSteamID` as it sits in a struct: a class under `#pragma pack( push, 1 )`
+/// holding one 64-bit union, so 8 bytes **aligned to 1**. Declared as bytes,
+/// not `u64`, because the alignment changes layouts: `AvatarImageLoaded_t`
+/// (a `CSteamID` and three `int`s) is 20 bytes under either packing in C,
+/// and would be 24 under `pack(8)` with a `u64` in its place. Read it with
+/// [`steam_id`].
+pub(crate) type CSteamId = [u8; 8];
+
+/// A [`CSteamId`]'s 64-bit value. The union is a `uint64` in the target's own
+/// byte order, which is little-endian on every supported target.
+pub(crate) const fn steam_id(raw: CSteamId) -> u64 {
+    u64::from_ne_bytes(raw)
+}
+
+callback_packed! {
+    /// `GameLobbyJoinRequested_t` (`isteamfriends.h`,
+    /// `k_iSteamFriendsCallbacks + 33`): the player accepted a lobby invite,
+    /// or chose "Join game" on a friend, while the game was running.
+    pub(crate) struct GameLobbyJoinRequested {
+        /// `CSteamID m_steamIDLobby`.
+        pub(crate) lobby: CSteamId,
+        /// `CSteamID m_steamIDFriend` — invalid when not joined through a
+        /// friend.
+        pub(crate) friend: CSteamId,
+    }
+}
+
+callback_packed! {
+    /// `GameRichPresenceJoinRequested_t` (`isteamfriends.h`,
+    /// `k_iSteamFriendsCallbacks + 37`): the player accepted a rich-presence
+    /// invite while the game was running.
+    pub(crate) struct GameRichPresenceJoinRequested {
+        /// `CSteamID m_steamIDFriend`.
+        pub(crate) friend: CSteamId,
+        /// `char m_rgchConnect[k_cchMaxRichPresenceValueLength]` — the
+        /// connect string, NUL-terminated inside the array.
+        pub(crate) connect: [u8; 256],
+    }
+}
+
+callback_packed! {
+    /// `NewUrlLaunchParameters_t` (`isteamapps.h`, `k_iSteamAppsCallbacks +
+    /// 14`): the game was launched again through a Steam URL while running.
+    /// The C++ struct has no members; a C++ struct is never empty, so it is
+    /// one byte, which is this field.
+    pub(crate) struct NewUrlLaunchParameters {
+        /// The one byte an empty C++ struct occupies; never meaningful.
+        pub(crate) unused: u8,
+    }
+}
+
+callback_packed! {
+    /// `LobbyCreated_t` (`isteammatchmaking.h`, `k_iSteamMatchmakingCallbacks
+    /// + 13`): the call result of `CreateLobby`.
+    pub(crate) struct LobbyCreated {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `uint64 m_ulSteamIDLobby` — zero on failure.
+        pub(crate) lobby: u64,
+    }
+}
+
+callback_packed! {
+    /// `LobbyEnter_t` (`isteammatchmaking.h`, `k_iSteamMatchmakingCallbacks +
+    /// 4`): the call result of `JoinLobby`, also broadcast on every entry.
+    pub(crate) struct LobbyEnter {
+        /// `uint64 m_ulSteamIDLobby`.
+        pub(crate) lobby: u64,
+        /// `uint32 m_rgfChatPermissions`.
+        pub(crate) chat_permissions: u32,
+        /// `bool m_bLocked` — only invitees may join.
+        pub(crate) locked: u8,
+        /// `uint32 m_EChatRoomEnterResponse`.
+        pub(crate) response: u32,
+    }
+}
+
+callback_packed! {
+    /// `LobbyDataUpdate_t` (`isteammatchmaking.h`,
+    /// `k_iSteamMatchmakingCallbacks + 5`): a lobby's or a member's data
+    /// changed.
+    pub(crate) struct LobbyDataUpdate {
+        /// `uint64 m_ulSteamIDLobby`.
+        pub(crate) lobby: u64,
+        /// `uint64 m_ulSteamIDMember` — the lobby itself for lobby data.
+        pub(crate) member: u64,
+        /// `uint8 m_bSuccess`.
+        pub(crate) success: u8,
+    }
+}
+
+callback_packed! {
+    /// `LobbyChatUpdate_t` (`isteammatchmaking.h`,
+    /// `k_iSteamMatchmakingCallbacks + 6`): a member entered, left, dropped or
+    /// was removed.
+    pub(crate) struct LobbyChatUpdate {
+        /// `uint64 m_ulSteamIDLobby`.
+        pub(crate) lobby: u64,
+        /// `uint64 m_ulSteamIDUserChanged`.
+        pub(crate) changed: u64,
+        /// `uint64 m_ulSteamIDMakingChange`.
+        pub(crate) making_change: u64,
+        /// `uint32 m_rgfChatMemberStateChange` — `EChatMemberStateChange` bits.
+        pub(crate) state_change: u32,
+    }
+}
+
+callback_packed! {
+    /// `LobbyChatMsg_t` (`isteammatchmaking.h`, `k_iSteamMatchmakingCallbacks
+    /// + 7`): a lobby chat message arrived; `GetLobbyChatEntry` reads it.
+    pub(crate) struct LobbyChatMsg {
+        /// `uint64 m_ulSteamIDLobby`.
+        pub(crate) lobby: u64,
+        /// `uint64 m_ulSteamIDUser`.
+        pub(crate) user: u64,
+        /// `uint8 m_eChatEntryType`.
+        pub(crate) entry_type: u8,
+        /// `uint32 m_iChatID`.
+        pub(crate) chat_id: u32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,6 +428,28 @@ mod tests {
             app_id: 4, 4;
             overlay_pid: 8, 4;
         });
+        assert_layout!(GameLobbyJoinRequested, 16, {
+            lobby: 0, 8;
+            friend: 8, 8;
+        });
+        assert_layout!(GameRichPresenceJoinRequested, 264, {
+            friend: 0, 8;
+            connect: 8, 256;
+        });
+        // Made only of 1-aligned `CSteamID`s and bytes, so 1-aligned in C too;
+        // a `u64` in place of `CSteamId` would make these 4 or 8.
+        assert_eq!(align_of::<GameLobbyJoinRequested>(), 1);
+        assert_eq!(align_of::<GameRichPresenceJoinRequested>(), 1);
+        assert_layout!(NewUrlLaunchParameters, 1, {
+            unused: 0, 1;
+        });
+        // The `uint32` after the `uint8` is 4-aligned under either packing.
+        assert_layout!(LobbyChatMsg, 24, {
+            lobby: 0, 8;
+            user: 8, 8;
+            entry_type: 16, 1;
+            chat_id: 20, 4;
+        });
     }
 
     /// `pack(4)`: Linux and macOS.
@@ -264,6 +470,29 @@ mod tests {
             param: 8, 8;
             param_size: 16, 4;
         });
+        // The `uint64` after a 4-byte `EResult` sits at 4, not 8.
+        assert_layout!(LobbyCreated, 12, {
+            result: 0, 4;
+            lobby: 4, 8;
+        });
+        // No tail padding after the last `uint32`.
+        assert_layout!(LobbyEnter, 20, {
+            lobby: 0, 8;
+            chat_permissions: 8, 4;
+            locked: 12, 1;
+            response: 16, 4;
+        });
+        assert_layout!(LobbyDataUpdate, 20, {
+            lobby: 0, 8;
+            member: 8, 8;
+            success: 16, 1;
+        });
+        assert_layout!(LobbyChatUpdate, 28, {
+            lobby: 0, 8;
+            changed: 8, 8;
+            making_change: 16, 8;
+            state_change: 24, 4;
+        });
     }
 
     /// `pack(8)`: Windows.
@@ -282,6 +511,27 @@ mod tests {
             callback: 4, 4;
             param: 8, 8;
             param_size: 16, 4;
+        });
+        assert_layout!(LobbyCreated, 16, {
+            result: 0, 4;
+            lobby: 8, 8;
+        });
+        assert_layout!(LobbyEnter, 24, {
+            lobby: 0, 8;
+            chat_permissions: 8, 4;
+            locked: 12, 1;
+            response: 16, 4;
+        });
+        assert_layout!(LobbyDataUpdate, 24, {
+            lobby: 0, 8;
+            member: 8, 8;
+            success: 16, 1;
+        });
+        assert_layout!(LobbyChatUpdate, 32, {
+            lobby: 0, 8;
+            changed: 8, 8;
+            making_change: 16, 8;
+            state_change: 24, 4;
         });
     }
 }

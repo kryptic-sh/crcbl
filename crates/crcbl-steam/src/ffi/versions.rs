@@ -49,6 +49,15 @@ pub(crate) const FRIENDS: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamMatchmaking`. The version string has a capital M the accessor
+/// lacks.
+pub(crate) const MATCHMAKING: Interface = Interface {
+    accessor: "SteamAPI_SteamMatchmaking_v009",
+    version: "SteamMatchMaking009",
+    define: "STEAMMATCHMAKING_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamUser`.
 pub(crate) const USER: Interface = Interface {
     accessor: "SteamAPI_SteamUser_v023",

@@ -5,18 +5,22 @@
 //! Steam::init(AppId) ──▶ once per frame: pump() ──▶ events() ──▶ act
 //!        │
 //!        ├── user(): steam_id(), logged_on(), steam_level()
-//!        ├── friends(): persona_name()
-//!        ├── apps(): subscribed(), game_language()
-//!        └── utils(): app_id(), steam_hardware(), overlay_enabled(), …
+//!        ├── friends(): persona_name(), set_rich_presence(), open_invite_dialog()
+//!        ├── apps(): subscribed(), game_language(), launch_command_line()
+//!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …
+//!        └── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
+//!                                  └──▶ a later frame: steam.take(call) ──▶ Lobby
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1 and 1b: the library is found and opened
-//! at runtime, Steam is initialised with a version handshake, the callback
-//! pipe is drained by manual dispatch into a queue of `SteamEvent`s, the local
-//! player's identity and the machine's basics are read, and the API is shut
-//! down exactly once, when the last owner of it is gone. Every string Steam
-//! returns is copied before the call that got it returns.
+//! land. What exists now is slices 1, 1b and 3a: the library is found and
+//! opened at runtime, Steam is initialised with a version handshake, the
+//! callback pipe is drained by manual dispatch into a queue of `SteamEvent`s,
+//! the local player's identity and the machine's basics are read,
+//! asynchronous calls are typed tokens redeemed after the pump, lobbies are
+//! created, joined, invited to and left, and the API is shut down exactly
+//! once, when the last owner of it is gone. Every string Steam returns is
+//! copied before the call that got it returns.
 //!
 //! # No SDK in the repository, no link-time dependency
 //!
@@ -64,6 +68,11 @@ mod apps;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod call;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod callbacks;
 #[cfg(all(
     target_pointer_width = "64",
@@ -85,6 +94,16 @@ mod ffi;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod friends;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod matchmaking;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod presence;
 #[cfg(all(
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
@@ -117,11 +136,19 @@ mod utils;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 pub use crate::{
-    apps::Apps,
+    apps::{Apps, CONNECT_LOBBY, connect_lobby},
+    call::{CallError, CallResult, CallState, SteamCall},
     callbacks::SteamEvent,
     client::{AppId, Steam},
-    error::InitError,
+    error::{EResult, InitError, SteamError},
     friends::Friends,
+    matchmaking::{
+        EnterResponse, Lobby, LobbyCreated, LobbyEntered, LobbyId, LobbyKind,
+        MAX_LOBBY_CHAT_MESSAGE, MAX_LOBBY_KEY_LENGTH, Matchmaking, MemberChange,
+    },
+    presence::{
+        MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
+    },
     pump::PumpDiagnostics,
     user::{SteamId, User},
     utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},

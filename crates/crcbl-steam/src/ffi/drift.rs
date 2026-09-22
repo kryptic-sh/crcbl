@@ -19,8 +19,15 @@
 //!    `#define` if and only if the row says Valve's `InitEx` passes it;
 //! 3. **every bound struct matches its header block**: the ordered field
 //!    declarations, the `#pragma pack` in force at the struct, and for a
-//!    callback, the `k_iCallback = base + n` expression against the row in
-//!    `callbacks`.
+//!    callback or call result, the `k_iCallback = base + n` expression
+//!    against its row in `callbacks` or `call`;
+//! 4. **every callback base has its header's value**: `enum {
+//!    k_iSteamFriendsCallbacks = 300 };` and the rest, which the symbolic
+//!    comparison in 3 takes on trust;
+//! 5. **every SDK constant a limit here is derived from has the header's
+//!    value** — `k_cchMaxRichPresenceKeyLength` and the rest ([`LIMITS`]),
+//!    so a limit this crate checks before a call cannot drift from the one
+//!    Steam enforces.
 //!
 //! Without `CRCBL_STEAM_SDK` it **fails**: it only ever runs on purpose, and
 //! "skipped" must not read as "passed".
@@ -43,7 +50,28 @@ use super::{
     structs::{DECLS, Pack, StructDecl},
     versions::Interface,
 };
-use crate::callbacks::{ROWS, Row};
+use crate::{
+    MAX_LOBBY_KEY_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS,
+    MAX_RICH_PRESENCE_VALUE_LENGTH,
+    call::{CALL_ROWS, CallRow},
+    callbacks::{Base, ROWS, Row},
+};
+
+/// Each SDK constant a limit in this crate comes from, and the value the
+/// crate's limit implies for it. The `cch` lengths count the NUL; the
+/// crate's limits do not.
+const LIMITS: &[(&str, usize)] = &[
+    ("k_cchMaxRichPresenceKeys", MAX_RICH_PRESENCE_KEYS),
+    (
+        "k_cchMaxRichPresenceKeyLength",
+        MAX_RICH_PRESENCE_KEY_LENGTH + 1,
+    ),
+    (
+        "k_cchMaxRichPresenceValueLength",
+        MAX_RICH_PRESENCE_VALUE_LENGTH + 1,
+    ),
+    ("k_nMaxLobbyKeyLength", MAX_LOBBY_KEY_LENGTH),
+];
 
 /// One header's name and text.
 #[derive(Debug, Clone)]
@@ -59,6 +87,9 @@ struct Tables<'a> {
     interfaces: &'a [Interface],
     decls: &'a [StructDecl],
     rows: &'a [Row],
+    call_rows: &'a [CallRow],
+    bases: &'a [Base],
+    limits: &'a [(&'static str, usize)],
 }
 
 const REAL: Tables<'static> = Tables {
@@ -66,7 +97,29 @@ const REAL: Tables<'static> = Tables {
     interfaces: INTERFACES,
     decls: DECLS,
     rows: ROWS,
+    call_rows: CALL_ROWS,
+    bases: Base::ALL,
+    limits: LIMITS,
 };
+
+impl Tables<'_> {
+    /// The `base + offset` a callback or call-result row gives `name`, as
+    /// Valve writes it.
+    fn callback_expression(&self, name: &str) -> Option<String> {
+        let row = self
+            .rows
+            .iter()
+            .find(|row| row.name == name)
+            .map(|row| (row.base, row.offset));
+        let call = self
+            .call_rows
+            .iter()
+            .find(|row| row.name == name)
+            .map(|row| (row.base, row.offset));
+        row.or(call)
+            .map(|(base, offset)| normalize(&format!("{} + {offset}", base.valve_name())))
+    }
+}
 
 /// Collapses whitespace to single spaces, then drops every space next to a
 /// character that cannot be part of an identifier — so `ISteamUser* self` and
@@ -270,6 +323,25 @@ fn define_value(headers: &[Header], name: &str) -> Option<String> {
     })
 }
 
+/// The value of `enum { name = value };` in any header.
+fn enum_value(headers: &[Header], name: &str) -> Option<i64> {
+    let prefix = format!("enum{{{name}=");
+    headers.iter().find_map(|header| {
+        strip_comments(&header.text).lines().find_map(|line| {
+            normalize(line)
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix("};"))
+                .and_then(|value| value.parse().ok())
+        })
+    })
+}
+
+/// The value of a constant as the headers give it: `enum { name = value };`,
+/// or `#define name value`.
+fn constant_value(headers: &[Header], name: &str) -> Option<i64> {
+    enum_value(headers, name).or_else(|| define_value(headers, name)?.parse().ok())
+}
+
 /// Every failure, as a line a human can act on.
 fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
     let mut failures = Vec::new();
@@ -357,11 +429,7 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
                 decl.name, block.pack, decl.pack
             ));
         }
-        let expected = tables
-            .rows
-            .iter()
-            .find(|row| row.name == decl.name)
-            .map(|row| normalize(&format!("{} + {}", row.base.valve_name(), row.offset)));
+        let expected = tables.callback_expression(decl.name);
         if block.callback != expected {
             failures.push(format!(
                 "{}: the header's k_iCallback is {:?}, the callback table says {expected:?}",
@@ -369,12 +437,30 @@ fn check(headers: &[Header], tables: Tables<'_>) -> Vec<String> {
             ));
         }
     }
-    for row in tables.rows {
-        if !tables.decls.iter().any(|decl| decl.name == row.name) {
-            failures.push(format!(
-                "{}: a callback row with no struct declaration",
-                row.name
-            ));
+    let names = tables.rows.iter().map(|row| row.name);
+    for name in names.chain(tables.call_rows.iter().map(|row| row.name)) {
+        if !tables.decls.iter().any(|decl| decl.name == name) {
+            failures.push(format!("{name}: a callback row with no struct declaration"));
+        }
+    }
+    for &base in tables.bases {
+        match enum_value(headers, base.valve_name()) {
+            Some(value) if value == i64::from(base as i32) => {}
+            Some(value) => failures.push(format!(
+                "{}: the header says {value}, the table says {}",
+                base.valve_name(),
+                base as i32
+            )),
+            None => failures.push(format!("{}: no header defines it", base.valve_name())),
+        }
+    }
+    for &(name, implied) in tables.limits {
+        match constant_value(headers, name) {
+            Some(value) if usize::try_from(value).ok() == Some(implied) => {}
+            Some(value) => failures.push(format!(
+                "{name}: the header says {value}, this crate's limit implies {implied}"
+            )),
+            None => failures.push(format!("{name}: no header defines it")),
         }
     }
     failures
@@ -422,7 +508,10 @@ fn drift() {
     );
 }
 
-#[cfg(test)]
+// Not under Miri: this is text scanning with no `unsafe` in it, and
+// interpreting its synthetic SDKs takes longer than the Miri job's whole
+// budget. The ordinary test run is what proves the scanner.
+#[cfg(all(test, not(miri)))]
 mod tests {
     use super::*;
 
@@ -448,17 +537,41 @@ mod tests {
             }
         }
         init_ex.push_str("}\n");
+        let mut bases = String::new();
+        for (index, &(name, value)) in tables.limits.iter().enumerate() {
+            if index % 2 == 0 {
+                bases.push_str(&format!("enum {{ {name} = {value} }};\n"));
+            } else {
+                bases.push_str(&format!("#define {name} {value}\n"));
+            }
+        }
+        for &base in tables.bases {
+            bases.push_str(&format!(
+                "enum {{ {} = {} }};\n",
+                base.valve_name(),
+                base as i32
+            ));
+        }
         let mut structs = String::from(
             "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )\n#elif defined( VALVE_CALLBACK_PACK_LARGE )\n#pragma pack( push, 8 )\n#else\n#error pack\n#endif\n",
         );
         for decl in tables.decls {
             structs.push_str(&format!("struct {};\n", decl.name));
             structs.push_str(&format!("typedef struct {}\n{{\n", decl.name));
-            if let Some(row) = tables.rows.iter().find(|row| row.name == decl.name) {
+            let row = tables
+                .rows
+                .iter()
+                .find(|row| row.name == decl.name)
+                .map(|row| (row.base, row.offset));
+            let call = tables
+                .call_rows
+                .iter()
+                .find(|row| row.name == decl.name)
+                .map(|row| (row.base, row.offset));
+            if let Some((base, offset)) = row.or(call) {
                 structs.push_str(&format!(
-                    "\tenum {{ k_iCallback = {} + {} }};\n",
-                    row.base.valve_name(),
-                    row.offset
+                    "\tenum {{ k_iCallback = {} + {offset} }};\n",
+                    base.valve_name()
                 ));
             }
             for field in decl.fields {
@@ -483,6 +596,10 @@ mod tests {
             Header {
                 name: "callbacks.h".into(),
                 text: structs,
+            },
+            Header {
+                name: "steam_api_internal.h".into(),
+                text: bases,
             },
         ]
     }
@@ -601,6 +718,61 @@ mod tests {
         let failures = check(&headers, REAL);
         assert_eq!(failures.len(), 1, "{failures:#?}");
         assert!(failures[0].contains("k_iCallback"), "{failures:#?}");
+    }
+
+    #[test]
+    fn a_wrong_call_result_offset_fails() {
+        let mut headers = synthetic(REAL);
+        edit(
+            &mut headers,
+            "k_iSteamMatchmakingCallbacks + 13",
+            "k_iSteamMatchmakingCallbacks + 14",
+        );
+        let failures = check(&headers, REAL);
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(failures[0].starts_with("LobbyCreated_t:"), "{failures:#?}");
+    }
+
+    #[test]
+    fn a_wrong_or_missing_base_value_fails() {
+        let mut headers = synthetic(REAL);
+        edit(
+            &mut headers,
+            "k_iSteamMatchmakingCallbacks = 500",
+            "k_iSteamMatchmakingCallbacks = 501",
+        );
+        let failures = check(&headers, REAL);
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(failures[0].contains("the header says 501"), "{failures:#?}");
+        let mut headers = synthetic(REAL);
+        edit(&mut headers, "enum { k_iSteamAppsCallbacks = 1000 };\n", "");
+        assert_eq!(check(&headers, REAL).len(), 1);
+    }
+
+    #[test]
+    fn a_limit_the_header_disagrees_with_fails() {
+        let mut headers = synthetic(REAL);
+        edit(
+            &mut headers,
+            "#define k_cchMaxRichPresenceKeyLength 64",
+            "#define k_cchMaxRichPresenceKeyLength 128",
+        );
+        let failures = check(&headers, REAL);
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(failures[0].contains("implies 64"), "{failures:#?}");
+        let mut headers = synthetic(REAL);
+        edit(
+            &mut headers,
+            "#define k_cchMaxRichPresenceKeyLength",
+            "#define k_cchSomethingElse",
+        );
+        let failures = check(&headers, REAL);
+        assert!(
+            failures
+                .iter()
+                .any(|f| f.contains("k_cchMaxRichPresenceKeyLength")),
+            "{failures:#?}"
+        );
     }
 
     #[test]

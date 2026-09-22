@@ -1,10 +1,38 @@
 //! `ISteamApps`: the running game as Steam sees it.
 //!
-//! The basics so far — ownership and the game's language; the launch command
-//! line arrives with `docs/plan/42-steam.md`'s slice 3a, and DLC, betas and
-//! the rest of ownership with slice 11.
+//! Ownership, the game's language, and how the game was launched — including
+//! the `+connect_lobby <id>` argument Steam launches a game with when the
+//! player accepts a lobby invite while it is not running. DLC, betas and the
+//! rest of ownership arrive with `docs/plan/42-steam.md`'s slice 11.
 
-use crate::Steam;
+use core::ffi::c_char;
+
+use crate::{LobbyId, Steam, callbacks::fixed_string, error::SteamError};
+
+/// The buffer `launch_command_line` reads into. The header states no
+/// maximum, so the size is this crate's choice; a command line that fills it
+/// is reported as [`SteamError::Truncated`] rather than cut short.
+const LAUNCH_COMMAND_LINE_CAPACITY: usize = 1024;
+
+/// The argument Steam passes a game launched to join a lobby, followed by the
+/// lobby id.
+pub const CONNECT_LOBBY: &str = "+connect_lobby";
+
+/// The lobby a launch asked to join: the id after the first
+/// [`CONNECT_LOBBY`] among `args` — `std::env::args()` for a launch Steam
+/// made to accept an invite, or the words of
+/// [`Apps::launch_command_line`]. `None` when there is no
+/// `+connect_lobby`, or the word after it is not a lobby id.
+pub fn connect_lobby<I, S>(args: I) -> Option<LobbyId>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut args = args.into_iter();
+    args.by_ref().find(|arg| arg.as_ref() == CONNECT_LOBBY)?;
+    let id: u64 = args.next()?.as_ref().parse().ok()?;
+    (id != 0).then_some(LobbyId(id))
+}
 
 /// `ISteamApps`, borrowed from a [`Steam`]; from [`Steam::apps`].
 #[derive(Debug, Clone, Copy)]
@@ -47,11 +75,106 @@ impl Apps<'_> {
             self.steam.copy_string(language)
         }
     }
+
+    /// The command line a `steam://run/<appid>//<command line>/` launch passed
+    /// (`ISteamApps::GetLaunchCommandLine`); empty when there was none. Read it
+    /// at start-up and again on
+    /// [`SteamEvent::NewLaunchParameters`](crate::SteamEvent::NewLaunchParameters),
+    /// and pass its words to [`connect_lobby`].
+    ///
+    /// # Errors
+    ///
+    /// [`SteamError::Truncated`] when it filled the whole buffer.
+    pub fn launch_command_line(&self) -> Result<String, SteamError> {
+        let client = &self.steam.client;
+        let mut buffer = [0_u8; LAUNCH_COMMAND_LINE_CAPACITY];
+        let capacity = i32::try_from(buffer.len())
+            .map_err(|_| SteamError::Truncated("GetLaunchCommandLine"))?;
+        // SAFETY: see `subscribed`; `buffer` is `capacity` writable bytes.
+        unsafe {
+            (client.lib.fns.apps.get_launch_command_line)(
+                client.apps,
+                buffer.as_mut_ptr().cast::<c_char>(),
+                capacity,
+            );
+        }
+        // Whatever Steam's return counts, a line that fit left a NUL.
+        if !buffer.contains(&0) {
+            return Err(SteamError::Truncated("GetLaunchCommandLine"));
+        }
+        let (line, lossy) = fixed_string(&buffer);
+        if lossy {
+            self.steam
+                .lossy_strings
+                .set(self.steam.lossy_strings.get() + 1);
+        }
+        Ok(line)
+    }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::{AppId, client::init_on, testing};
+
+    #[test]
+    fn connect_lobby_finds_the_id_after_the_flag() {
+        assert_eq!(
+            connect_lobby(["game.exe", "+connect_lobby", "109775241"]),
+            Some(LobbyId(109_775_241))
+        );
+        // Trailing arguments after it do not matter.
+        assert_eq!(
+            connect_lobby("-windowed +connect_lobby 42 -novid".split_whitespace()),
+            Some(LobbyId(42))
+        );
+    }
+
+    #[test]
+    fn connect_lobby_is_none_when_absent_or_malformed() {
+        assert_eq!(connect_lobby(["game.exe", "-windowed"]), None);
+        assert_eq!(connect_lobby(Vec::<String>::new()), None);
+        assert_eq!(connect_lobby(["+connect_lobby"]), None, "no id after it");
+        assert_eq!(connect_lobby(["+connect_lobby", "lobby"]), None);
+        assert_eq!(connect_lobby(["+connect_lobby", "-1"]), None);
+        assert_eq!(connect_lobby(["+connect_lobby", "0"]), None, "the nil id");
+        assert_eq!(
+            connect_lobby(["+connect_lobby", "18446744073709551616"]),
+            None,
+            "over u64"
+        );
+        assert_eq!(
+            connect_lobby(["connect_lobby", "42"]),
+            None,
+            "the plus is part of it"
+        );
+    }
+
+    #[test]
+    fn the_launch_command_line_is_copied_up_to_its_nul() {
+        let steam = init_on(testing::fake_lib(), AppId(480)).unwrap();
+        assert_eq!(steam.apps().launch_command_line(), Ok(String::new()));
+        testing::script(|s| s.launch_line = b"+connect_lobby 42".to_vec());
+        assert_eq!(
+            steam.apps().launch_command_line(),
+            Ok("+connect_lobby 42".into())
+        );
+    }
+
+    #[test]
+    fn a_launch_command_line_that_fills_the_buffer_is_truncated_not_cut() {
+        let steam = init_on(testing::fake_lib(), AppId(480)).unwrap();
+        testing::script(|s| s.launch_line = vec![b'x'; LAUNCH_COMMAND_LINE_CAPACITY]);
+        assert_eq!(
+            steam.apps().launch_command_line(),
+            Err(SteamError::Truncated("GetLaunchCommandLine"))
+        );
+        testing::script(|s| s.launch_line = vec![b'x'; LAUNCH_COMMAND_LINE_CAPACITY - 1]);
+        assert_eq!(
+            steam.apps().launch_command_line().map(|line| line.len()),
+            Ok(LAUNCH_COMMAND_LINE_CAPACITY - 1)
+        );
+    }
 
     #[test]
     fn subscribed_is_the_clients_answer() {

@@ -6,10 +6,13 @@
 //! decodes what it claims into a queue, and [`Steam::events`] hands the queue
 //! to the game — the same pump-then-drain idiom as the shell's event loop.
 
+use std::rc::Rc;
+
 use crate::{
-    Steam, SteamEvent,
+    LobbyId, Steam, SteamEvent, SteamId, call,
     callbacks::{self, Decoded},
-    ffi::structs::CallbackMsg,
+    ffi::structs::{CallbackMsg, SteamApiCallCompleted},
+    matchmaking::MAX_LOBBY_CHAT_MESSAGE,
 };
 
 /// Counters over everything the pump has seen, and every string Steam handed
@@ -41,12 +44,15 @@ impl Steam {
     /// Drains Steam's callback pipe: `SteamAPI_ManualDispatch_RunFrame`, then
     /// each message between `GetNextCallback` and `FreeLastCallback`, then
     /// `SteamAPI_ReleaseCurrentThreadMemory` (which `SteamAPI_RunCallbacks`
-    /// used to call, and manual dispatch does not).
+    /// used to call, and manual dispatch does not). First, answers whose
+    /// tokens were dropped untaken are released (see `SteamCall`).
     ///
     /// Call once per frame, then drain [`events`](Self::events).
     pub fn pump(&mut self) {
-        let lib = self.client.lib;
-        let pipe = self.client.pipe;
+        let client = Rc::clone(&self.client);
+        self.calls.prune(&client);
+        let lib = client.lib;
+        let pipe = client.pipe;
         // SAFETY: Steam is initialised with manual dispatch, and `pipe` is its
         // pipe.
         unsafe { (lib.fns.dispatch.run_frame)(pipe) };
@@ -100,9 +106,87 @@ impl Steam {
         // this function, and `decode` copies out of it.
         let bytes = unsafe { core::slice::from_raw_parts(msg.param, row.size) };
         match (row.decode)(bytes) {
-            Some(Decoded::Event(event)) => self.queue.push_back(event),
-            Some(Decoded::CallCompleted(_)) => self.diagnostics.unclaimed_completions += 1,
+            Some(Decoded::Event(event)) => self.push_event(event),
+            Some(Decoded::LossyEvent(event)) => {
+                self.lossy_strings.set(self.lossy_strings.get() + 1);
+                self.push_event(event);
+            }
+            Some(Decoded::CallCompleted(done)) => self.complete(done),
+            Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
             None => self.diagnostics.decode_mismatches += 1,
+        }
+    }
+
+    /// Queues an event, then re-reads the owner of the lobby a member or data
+    /// change names — the change that moves ownership arrives as one of those.
+    fn push_event(&mut self, event: SteamEvent) {
+        let lobby = match &event {
+            SteamEvent::LobbyMemberChanged { lobby, .. }
+            | SteamEvent::LobbyDataChanged { lobby, .. } => Some(*lobby),
+            _ => None,
+        };
+        self.queue.push_back(event);
+        if let Some(lobby) = lobby {
+            self.recheck_owner(lobby);
+        }
+    }
+
+    /// Hands a `SteamAPICallCompleted_t` to the registry, which fetches the
+    /// answer now — Valve's header says `GetAPICallResult` belongs in the
+    /// completion's handler.
+    fn complete(&mut self, done: SteamApiCallCompleted) {
+        let client = Rc::clone(&self.client);
+        let pipe = client.pipe;
+        let claimed = self.calls.complete(
+            &client,
+            done.async_call,
+            done.callback,
+            done.param_size,
+            |call, size, id| call::fetch(&client, pipe, call, size, id),
+        );
+        if !claimed {
+            self.diagnostics.unclaimed_completions += 1;
+        }
+    }
+
+    /// Reads a lobby chat entry (`GetLobbyChatEntry`) and queues it.
+    fn read_chat(&mut self, lobby: LobbyId, chat_id: u32) {
+        let mut body = vec![0_u8; MAX_LOBBY_CHAT_MESSAGE];
+        let (Ok(chat_id), Ok(capacity)) = (i32::try_from(chat_id), i32::try_from(body.len()))
+        else {
+            self.diagnostics.decode_mismatches += 1;
+            return;
+        };
+        let client = &self.client;
+        let mut sender = 0_u64;
+        let mut kind = 0_i32;
+        // SAFETY: `client.matchmaking` is the non-null interface init resolved;
+        // `sender`, `body` (`capacity` bytes) and `kind` are writable for the
+        // call and outlive it.
+        let written = unsafe {
+            (client.lib.fns.matchmaking.get_lobby_chat_entry)(
+                client.matchmaking,
+                lobby.0,
+                chat_id,
+                &raw mut sender,
+                body.as_mut_ptr().cast(),
+                capacity,
+                &raw mut kind,
+            )
+        };
+        // A negative count, or more than the buffer, is a library that broke
+        // its own contract: counted, not guessed at.
+        match usize::try_from(written) {
+            Ok(written) if written <= body.len() => {
+                body.truncate(written);
+                self.queue.push_back(SteamEvent::LobbyChatMessage {
+                    lobby,
+                    sender: SteamId(sender),
+                    kind,
+                    body,
+                });
+            }
+            _ => self.diagnostics.decode_mismatches += 1,
         }
     }
 }
@@ -224,5 +308,22 @@ mod tests {
         assert_eq!(calls.run_frame, 3);
         assert_eq!(calls.release_thread_memory, 3);
         assert_eq!(steam.diagnostics().callbacks, 1);
+    }
+
+    #[test]
+    fn a_join_request_with_a_lossy_connect_string_is_queued_and_counted() {
+        let mut steam = init_on(testing::fake_lib(), AppId(480)).unwrap();
+        let mut bytes = vec![0; 264];
+        bytes[8..13].copy_from_slice(b"caf\xE9\0");
+        script(|s| s.queue.push_back(FakeMsg::payload(337, bytes)));
+        steam.pump();
+        assert_eq!(
+            steam.events().collect::<Vec<_>>(),
+            [SteamEvent::RichPresenceJoinRequested {
+                friend: None,
+                connect: "caf\u{FFFD}".into(),
+            }]
+        );
+        assert_eq!(steam.diagnostics().lossy_strings, 1);
     }
 }

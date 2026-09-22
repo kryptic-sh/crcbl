@@ -1,10 +1,24 @@
 //! Steam in the sandbox, behind its `steam` feature.
 //!
-//! `docs/plan/42-steam.md` slice 1b: on a windowed run, initialise Steam under
-//! Valve's shared test app 480, log who is playing, pump once a frame, log the
-//! overlay, and hand an opened overlay to the loop as a focus loss — which
+//! `docs/plan/42-steam.md` slices 1b and 3a: on a windowed run, initialise
+//! Steam under Valve's shared test app 480, log who is playing, pump once a
+//! frame, and hand an opened overlay to the loop as a focus loss — which
 //! pauses and releases held input exactly as alt-tab does. Without Steam, the
 //! reason is logged once and the sandbox runs on.
+//!
+//! The lobby half is driven from the keyboard and shown in the F3 debug
+//! panel's "steam" section:
+//!
+//! - **F5** creates a friends-only lobby for four and sets the rich-presence
+//!   `connect` key, so friends can "Join game" from their list;
+//! - **F6** opens the overlay's invite dialog for it;
+//! - **F7** leaves it.
+//!
+//! Every join path joins by itself: an accepted invite or "Join game" while
+//! running (`LobbyJoinRequested`, `RichPresenceJoinRequested`), a launch
+//! carrying `+connect_lobby <id>` (on the command line, or in
+//! `launch_command_line`), and a relaunch while running
+//! (`NewLaunchParameters`). Member, owner and chat changes are logged.
 //!
 //! Live only with the feature on and where `crcbl-steam` has items (64-bit
 //! Linux, Windows and macOS). Everywhere else [`SteamLink`] is inert — it
@@ -22,12 +36,22 @@ pub use imp::SteamLink;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod imp {
-    use crcbl::steam::{AppId, Steam, SteamEvent};
+    use crcbl::{
+        core::input::KeyCode,
+        steam::{
+            AppId, CallState, Lobby, LobbyCreated, LobbyEntered, LobbyId, LobbyKind, Steam,
+            SteamCall, SteamEvent, connect_lobby,
+        },
+        ui::{DebugModule, DebugPanel, DebugSection},
+    };
 
     /// Valve's shared SpaceWar test app, which every Steamworks developer may
     /// run under. Development launches need `steam_appid.txt` containing it in
     /// the working directory.
     const SPACEWAR: AppId = AppId(480);
+
+    /// The squad size the F5 lobby admits: the host and three friends.
+    const SQUAD: i32 = 4;
 
     /// The sandbox's Steam session, or the lack of one.
     #[derive(Debug)]
@@ -36,6 +60,12 @@ mod imp {
         steam: Option<Steam>,
         /// The overlay opened since the loop last asked.
         overlay_opened: bool,
+        /// The lobby this client is in.
+        lobby: Option<Lobby>,
+        /// A `CreateLobby` waiting on its answer.
+        creating: Option<SteamCall<LobbyCreated>>,
+        /// A `JoinLobby` waiting on its answer.
+        joining: Option<SteamCall<LobbyEntered>>,
     }
 
     impl SteamLink {
@@ -44,54 +74,182 @@ mod imp {
             Self {
                 steam: None,
                 overlay_opened: false,
+                lobby: None,
+                creating: None,
+                joining: None,
             }
         }
 
         /// Initialises Steam, logging who is playing — or, if it cannot, why,
-        /// and carrying on without it.
+        /// and carrying on without it — and joins the lobby a
+        /// `+connect_lobby` launch names.
         pub fn start() -> Self {
+            let mut link = Self::off();
             let steam = match Steam::init(SPACEWAR) {
-                Ok(steam) => {
-                    crcbl::log::info!(
-                        "steam: signed in as {:?} ({:?}, level {}), app {:?}, hardware {:?}, \
-                         language {:?}, overlay enabled {}",
-                        steam.friends().persona_name(),
-                        steam.user().steam_id(),
-                        steam.user().steam_level(),
-                        steam.utils().app_id(),
-                        steam.utils().steam_hardware(),
-                        steam.apps().game_language(),
-                        steam.utils().overlay_enabled(),
-                    );
-                    Some(steam)
-                }
+                Ok(steam) => steam,
                 Err(error) => {
                     crcbl::log::warn!("steam: running without it: {error}");
-                    None
+                    return link;
                 }
             };
-            Self {
-                steam,
-                overlay_opened: false,
+            crcbl::log::info!(
+                "steam: signed in as {:?} ({:?}, level {}), app {:?}, hardware {:?}, \
+                 language {:?}, overlay enabled {}",
+                steam.friends().persona_name(),
+                steam.user().steam_id(),
+                steam.user().steam_level(),
+                steam.utils().app_id(),
+                steam.utils().steam_hardware(),
+                steam.apps().game_language(),
+                steam.utils().overlay_enabled(),
+            );
+            link.steam = Some(steam);
+            let launched = connect_lobby(std::env::args()).or_else(|| link.url_lobby());
+            if let Some(lobby) = launched {
+                crcbl::log::info!("steam: launched to join {lobby:?}");
+                link.join(lobby);
+            }
+            link
+        }
+
+        /// The lobby a `steam://run` launch's command line names, if any.
+        fn url_lobby(&self) -> Option<LobbyId> {
+            let line = self.steam.as_ref()?.apps().launch_command_line();
+            match line {
+                Ok(line) => connect_lobby(line.split_whitespace()),
+                Err(error) => {
+                    crcbl::log::warn!("steam: launch command line unreadable: {error}");
+                    None
+                }
             }
         }
 
-        /// Drains Steam's callbacks, once a frame.
+        /// Leaves any lobby held and asks to join `lobby`.
+        fn join(&mut self, lobby: LobbyId) {
+            let Some(steam) = &mut self.steam else {
+                return;
+            };
+            self.lobby = None;
+            match steam.matchmaking().join_lobby(lobby) {
+                Ok(call) => self.joining = Some(call),
+                Err(error) => crcbl::log::warn!("steam: join {lobby:?}: {error}"),
+            }
+        }
+
+        /// The lobby keys: F5 create, F6 invite, F7 leave.
+        pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
+            let Some(steam) = &mut self.steam else {
+                return;
+            };
+            if !pressed {
+                return;
+            }
+            match key {
+                KeyCode::F5 if self.lobby.is_none() && self.creating.is_none() => {
+                    match steam
+                        .matchmaking()
+                        .create_lobby(LobbyKind::FriendsOnly, SQUAD)
+                    {
+                        Ok(call) => self.creating = Some(call),
+                        Err(error) => crcbl::log::warn!("steam: create lobby: {error}"),
+                    }
+                }
+                KeyCode::F6 => match &self.lobby {
+                    Some(lobby) => steam.friends().open_invite_dialog(lobby.id()),
+                    None => crcbl::log::info!("steam: F5 creates a lobby to invite to first"),
+                },
+                KeyCode::F7 => {
+                    if let Some(lobby) = self.lobby.take() {
+                        crcbl::log::info!("steam: left {:?}", lobby.id());
+                        steam.friends().clear_rich_presence();
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        /// Drains Steam's callbacks and redeems pending calls, once a frame.
         pub fn pump(&mut self) {
             let Some(steam) = &mut self.steam else {
                 return;
             };
             steam.pump();
-            for event in steam.events() {
-                match event {
-                    SteamEvent::OverlayActivated { active } => {
-                        crcbl::log::info!(
-                            "steam: overlay {}",
-                            if active { "opened" } else { "closed" }
-                        );
-                        self.overlay_opened |= active;
+            let events: Vec<SteamEvent> = steam.events().collect();
+            for event in events {
+                self.handle(event);
+            }
+            self.take_calls();
+        }
+
+        /// Acts on one event.
+        fn handle(&mut self, event: SteamEvent) {
+            match event {
+                SteamEvent::OverlayActivated { active } => {
+                    crcbl::log::info!(
+                        "steam: overlay {}",
+                        if active { "opened" } else { "closed" }
+                    );
+                    self.overlay_opened |= active;
+                }
+                SteamEvent::LobbyJoinRequested { lobby, friend } => {
+                    crcbl::log::info!("steam: asked to join {lobby:?} through {friend:?}");
+                    self.join(lobby);
+                }
+                SteamEvent::RichPresenceJoinRequested { connect, .. } => {
+                    match connect_lobby(connect.split_whitespace()) {
+                        Some(lobby) => self.join(lobby),
+                        None => crcbl::log::warn!("steam: no lobby in connect {connect:?}"),
                     }
-                    other => crcbl::log::debug!("steam: {other:?}"),
+                }
+                SteamEvent::NewLaunchParameters => {
+                    if let Some(lobby) = self.url_lobby() {
+                        self.join(lobby);
+                    }
+                }
+                other => crcbl::log::info!("steam: {other:?}"),
+            }
+        }
+
+        /// Takes the answers to pending create and join calls.
+        fn take_calls(&mut self) {
+            let Some(steam) = &mut self.steam else {
+                return;
+            };
+            if let Some(call) = self.creating.take() {
+                match steam.take(call) {
+                    CallState::Pending(call) => self.creating = Some(call),
+                    CallState::Ready(created) => match created.lobby() {
+                        Ok(lobby) => {
+                            let connect = format!("+connect_lobby {}", lobby.id().0);
+                            if let Err(error) =
+                                steam.friends().set_rich_presence("connect", &connect)
+                            {
+                                crcbl::log::warn!("steam: rich presence: {error}");
+                            }
+                            crcbl::log::info!("steam: created {:?}; F6 invites", lobby.id());
+                            self.lobby = Some(lobby);
+                        }
+                        Err(error) => crcbl::log::warn!("steam: create lobby: {error}"),
+                    },
+                    CallState::Failed(error) => crcbl::log::warn!("steam: create lobby: {error}"),
+                }
+            }
+            if let Some(call) = self.joining.take() {
+                match steam.take(call) {
+                    CallState::Pending(call) => self.joining = Some(call),
+                    CallState::Ready(entered) => match entered.lobby() {
+                        Ok(lobby) => {
+                            crcbl::log::info!(
+                                "steam: joined {:?}, owner {:?}, members {:?}",
+                                lobby.id(),
+                                lobby.owner(steam),
+                                lobby.members(steam)
+                            );
+                            self.lobby = Some(lobby);
+                        }
+                        Err(error) => crcbl::log::warn!("steam: join: {error}"),
+                    },
+                    CallState::Failed(error) => crcbl::log::warn!("steam: join: {error}"),
                 }
             }
         }
@@ -99,6 +257,46 @@ mod imp {
         /// Whether the overlay opened since the last call.
         pub fn take_overlay_opened(&mut self) -> bool {
             std::mem::take(&mut self.overlay_opened)
+        }
+
+        /// Adds the "steam" section to the F3 panel — only with a session, so
+        /// a headless run's panel is the one it would have without the
+        /// feature.
+        pub fn debug_sections(&self, panel: &mut DebugPanel) {
+            if self.steam.is_some() {
+                panel.add(self);
+            }
+        }
+    }
+
+    impl DebugModule for SteamLink {
+        fn debug_section(&self, out: &mut DebugSection) {
+            out.set_title("steam");
+            let Some(steam) = &self.steam else {
+                out.row_str("session", "none");
+                return;
+            };
+            out.row("me", format_args!("{:?}", steam.user().steam_id()));
+            match &self.lobby {
+                Some(lobby) => {
+                    out.row("lobby", format_args!("{:?}", lobby.id()));
+                    out.row("owner", format_args!("{:?}", lobby.owner(steam)));
+                    out.row("members", format_args!("{}", lobby.members(steam).len()));
+                    out.row_str("keys", "F6 invite, F7 leave");
+                }
+                None if self.creating.is_some() || self.joining.is_some() => {
+                    out.row_str("lobby", "waiting on Steam");
+                }
+                None => out.row_str("lobby", "none (F5 creates one)"),
+            }
+            let diagnostics = steam.diagnostics();
+            out.row(
+                "pump",
+                format_args!(
+                    "{} callbacks, {} mismatched",
+                    diagnostics.callbacks, diagnostics.decode_mismatches
+                ),
+            );
         }
     }
 
@@ -119,8 +317,11 @@ mod imp {
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 )))]
 mod imp {
+    use crcbl::{core::input::KeyCode, ui::DebugPanel};
+
     /// No Steam: the feature is off, or `crcbl-steam` has no items on this
-    /// target. Never starts, pumps nothing, reports no overlay.
+    /// target. Never starts, pumps nothing, reports no overlay, adds no panel
+    /// section.
     #[derive(Debug)]
     pub struct SteamLink;
 
@@ -135,6 +336,9 @@ mod imp {
             Self
         }
 
+        /// No lobby keys without Steam.
+        pub fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
+
         /// Nothing to pump.
         pub fn pump(&mut self) {}
 
@@ -142,5 +346,8 @@ mod imp {
         pub fn take_overlay_opened(&mut self) -> bool {
             false
         }
+
+        /// No section without Steam.
+        pub fn debug_sections(&self, _panel: &mut DebugPanel) {}
     }
 }

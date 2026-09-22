@@ -1,9 +1,10 @@
 //! `ISteamFriends`: the player's social identity.
 //!
-//! Only the local persona name so far; lobbies, invites, rich presence and the
-//! friends list arrive with `docs/plan/42-steam.md`'s slices 3a and 3b.
+//! The local persona name, the overlay's invite dialog, and (in
+//! `crate::presence`) rich presence and game invites; the friends list and
+//! avatars arrive with `docs/plan/42-steam.md`'s slice 3b.
 
-use crate::Steam;
+use crate::{LobbyId, Steam};
 
 /// `ISteamFriends`, borrowed from a [`Steam`]; from [`Steam::friends`].
 #[derive(Debug, Clone, Copy)]
@@ -19,7 +20,26 @@ impl Steam {
     }
 }
 
-impl Friends<'_> {
+impl<'a> Friends<'a> {
+    /// The `Steam` this was borrowed from.
+    pub(crate) const fn steam(&self) -> &'a Steam {
+        self.steam
+    }
+
+    /// Opens the overlay's invite dialog for `lobby`
+    /// (`ActivateGameOverlayInviteDialog`): the friends the player picks are
+    /// invited, and accepting delivers
+    /// [`SteamEvent::LobbyJoinRequested`](crate::SteamEvent::LobbyJoinRequested)
+    /// to them. Does nothing visible when the overlay is not injected — see
+    /// [`Utils::overlay_enabled`](crate::Utils::overlay_enabled).
+    pub fn open_invite_dialog(&self, lobby: LobbyId) {
+        let client = &self.steam.client;
+        // SAFETY: `client.friends` is the non-null interface init resolved.
+        unsafe {
+            (client.lib.fns.friends.activate_game_overlay_invite_dialog)(client.friends, lobby.0)
+        };
+    }
+
     /// The local player's display name (`ISteamFriends::GetPersonaName`) —
     /// what friends see, not the account name, and free to change between
     /// sessions; key nothing on it. Use [`User::steam_id`](crate::User::steam_id)

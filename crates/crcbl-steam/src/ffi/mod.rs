@@ -71,6 +71,8 @@ opaque! {
     ISteamApps;
     /// `class ISteamFriends`.
     ISteamFriends;
+    /// `class ISteamMatchmaking`.
+    ISteamMatchmaking;
     /// `class ISteamUser`.
     ISteamUser;
     /// `class ISteamUtils`.

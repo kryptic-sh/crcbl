@@ -221,9 +221,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1 and 1b** (`docs/plan/42-steam.md`), and
-  `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the
-  SDK's flat C API with no link-time dependency and nothing from the SDK
+- **`crcbl-steam`: Steamworks, slices 1, 1b and 3a** (`docs/plan/42-steam.md`),
+  and `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over
+  the SDK's flat C API with no link-time dependency and nothing from the SDK
   committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
   under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
   path at runtime, initialises with an interface-version handshake and switches
@@ -241,9 +241,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   typed `InitError` — no library (listing each path tried), a missing symbol, an
   interface the client cannot provide, Steam not running (saying whether
   `steam_appid.txt` was present), the wrong app, or a second live `Steam` — so a
-  game without Steam runs on. 64-bit Linux, Windows and macOS; elsewhere the
-  crate is empty. `apps/sandbox --features steam` exercises it. Not yet run
-  against a Steam client with a 1.65 library.
+  game without Steam runs on. Asynchronous calls are typed tokens:
+  `steam.matchmaking().create_lobby(kind, max)` and `join_lobby(id)` return a
+  `SteamCall<T>` redeemed after a later pump with `steam.take(call)`, which
+  answers `Pending` (the token back), `Ready` or `Failed(CallError)`; a dropped
+  token's lobby is left rather than leaked. A `Lobby` leaves on drop, reads its
+  owner, members and data, sets data, invites and sends chat. `SteamEvent` gains
+  the join requests (`LobbyJoinRequested`, `RichPresenceJoinRequested`,
+  `NewLaunchParameters`), `LobbyMemberChanged`, `LobbyOwnerChanged`,
+  `LobbyDataChanged` and `LobbyChatMessage`. `friends().set_rich_presence`,
+  `open_invite_dialog` and `invite_to_game` send invites, with Steam's limits
+  checked before the call, and `connect_lobby(args)` reads the
+  `+connect_lobby <id>` a launch carries. 64-bit Linux, Windows and macOS;
+  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
+  Not yet run against a Steam client with a 1.65 library.
 - `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
   window never sees — the Steam overlay opening — and the loop answers it
   exactly as it answers the window losing focus: held keys, buttons and contacts

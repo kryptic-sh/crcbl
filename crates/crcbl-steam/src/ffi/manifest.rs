@@ -21,17 +21,21 @@
 //! run against that mirror's headers, and **not** yet against an SDK zip
 //! downloaded from Valve, which no machine this was written on had; until it
 //! has, a declaration here is a claim about the mirror's fidelity as much as
-//! about the SDK. Two are worth naming: every enum crossing here
+//! about the SDK. Some choices are worth naming. Every enum crossing here
 //! (`ESteamHardwareType`, `ESteamHardwareDefaultConfig`,
-//! `ENotificationPosition`) is taken to be `int`-sized, as every Steamworks
-//! enum without an explicit base is; and `bool` is C's one-byte `_Bool`, which
-//! Rust's `bool` matches across `extern "C"`. A `const char *` return is
-//! Steam's buffer, copied before anything else runs (`crate::strings`).
+//! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`) is taken to be
+//! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
+//! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
+//! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
+//! one 64-bit value, and Steam writes it into storage this crate owns and
+//! aligns. A `const char *` return is Steam's buffer, copied before anything
+//! else runs (`crate::strings`).
 
 use core::ffi::{c_char, c_void};
 
 use super::{
-    HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, SteamErrMsg,
+    HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils,
+    SteamApiCall, SteamErrMsg,
     structs::CallbackMsg,
     versions::{self, Interface},
 };
@@ -201,6 +205,9 @@ bindings! {
         free_last_callback: ManualDispatchFreeLastCallback = "SteamAPI_ManualDispatch_FreeLastCallback",
             "S_API void S_CALLTYPE SteamAPI_ManualDispatch_FreeLastCallback( HSteamPipe hSteamPipe );",
             fn(HSteamPipe);
+        get_api_call_result: ManualDispatchGetApiCallResult = "SteamAPI_ManualDispatch_GetAPICallResult",
+            "S_API bool S_CALLTYPE SteamAPI_ManualDispatch_GetAPICallResult( HSteamPipe hSteamPipe, SteamAPICall_t hSteamAPICall, void *pCallback, int cubCallback, int iCallbackExpected, bool *pbFailed );",
+            fn(HSteamPipe, SteamApiCall, *mut c_void, i32, i32, *mut bool) -> bool;
     }
 
     /// `ISteamUser` (`steam_api_flat.h`).
@@ -221,6 +228,73 @@ bindings! {
         get_persona_name: FriendsGetPersonaName = "SteamAPI_ISteamFriends_GetPersonaName",
             "S_API const char * SteamAPI_ISteamFriends_GetPersonaName( ISteamFriends* self );",
             fn(*mut ISteamFriends) -> *const c_char;
+        activate_game_overlay_invite_dialog: FriendsActivateGameOverlayInviteDialog = "SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog",
+            "S_API void SteamAPI_ISteamFriends_ActivateGameOverlayInviteDialog( ISteamFriends* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamFriends, u64);
+        set_rich_presence: FriendsSetRichPresence = "SteamAPI_ISteamFriends_SetRichPresence",
+            "S_API bool SteamAPI_ISteamFriends_SetRichPresence( ISteamFriends* self, const char * pchKey, const char * pchValue );",
+            fn(*mut ISteamFriends, *const c_char, *const c_char) -> bool;
+        clear_rich_presence: FriendsClearRichPresence = "SteamAPI_ISteamFriends_ClearRichPresence",
+            "S_API void SteamAPI_ISteamFriends_ClearRichPresence( ISteamFriends* self );",
+            fn(*mut ISteamFriends);
+        invite_user_to_game: FriendsInviteUserToGame = "SteamAPI_ISteamFriends_InviteUserToGame",
+            "S_API bool SteamAPI_ISteamFriends_InviteUserToGame( ISteamFriends* self, uint64_steamid steamIDFriend, const char * pchConnectString );",
+            fn(*mut ISteamFriends, u64, *const c_char) -> bool;
+    }
+
+    /// `ISteamMatchmaking`, lobbies only (`steam_api_flat.h`).
+    matchmaking: MatchmakingFns for versions::MATCHMAKING {
+        create_lobby: MatchmakingCreateLobby = "SteamAPI_ISteamMatchmaking_CreateLobby",
+            "S_API SteamAPICall_t SteamAPI_ISteamMatchmaking_CreateLobby( ISteamMatchmaking* self, ELobbyType eLobbyType, int cMaxMembers );",
+            fn(*mut ISteamMatchmaking, i32, i32) -> SteamApiCall;
+        join_lobby: MatchmakingJoinLobby = "SteamAPI_ISteamMatchmaking_JoinLobby",
+            "S_API SteamAPICall_t SteamAPI_ISteamMatchmaking_JoinLobby( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamMatchmaking, u64) -> SteamApiCall;
+        leave_lobby: MatchmakingLeaveLobby = "SteamAPI_ISteamMatchmaking_LeaveLobby",
+            "S_API void SteamAPI_ISteamMatchmaking_LeaveLobby( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamMatchmaking, u64);
+        invite_user_to_lobby: MatchmakingInviteUserToLobby = "SteamAPI_ISteamMatchmaking_InviteUserToLobby",
+            "S_API bool SteamAPI_ISteamMatchmaking_InviteUserToLobby( ISteamMatchmaking* self, uint64_steamid steamIDLobby, uint64_steamid steamIDInvitee );",
+            fn(*mut ISteamMatchmaking, u64, u64) -> bool;
+        get_num_lobby_members: MatchmakingGetNumLobbyMembers = "SteamAPI_ISteamMatchmaking_GetNumLobbyMembers",
+            "S_API int SteamAPI_ISteamMatchmaking_GetNumLobbyMembers( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamMatchmaking, u64) -> i32;
+        get_lobby_member_by_index: MatchmakingGetLobbyMemberByIndex = "SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex",
+            "S_API uint64_steamid SteamAPI_ISteamMatchmaking_GetLobbyMemberByIndex( ISteamMatchmaking* self, uint64_steamid steamIDLobby, int iMember );",
+            fn(*mut ISteamMatchmaking, u64, i32) -> u64;
+        get_lobby_data: MatchmakingGetLobbyData = "SteamAPI_ISteamMatchmaking_GetLobbyData",
+            "S_API const char * SteamAPI_ISteamMatchmaking_GetLobbyData( ISteamMatchmaking* self, uint64_steamid steamIDLobby, const char * pchKey );",
+            fn(*mut ISteamMatchmaking, u64, *const c_char) -> *const c_char;
+        set_lobby_data: MatchmakingSetLobbyData = "SteamAPI_ISteamMatchmaking_SetLobbyData",
+            "S_API bool SteamAPI_ISteamMatchmaking_SetLobbyData( ISteamMatchmaking* self, uint64_steamid steamIDLobby, const char * pchKey, const char * pchValue );",
+            fn(*mut ISteamMatchmaking, u64, *const c_char, *const c_char) -> bool;
+        get_lobby_member_data: MatchmakingGetLobbyMemberData = "SteamAPI_ISteamMatchmaking_GetLobbyMemberData",
+            "S_API const char * SteamAPI_ISteamMatchmaking_GetLobbyMemberData( ISteamMatchmaking* self, uint64_steamid steamIDLobby, uint64_steamid steamIDUser, const char * pchKey );",
+            fn(*mut ISteamMatchmaking, u64, u64, *const c_char) -> *const c_char;
+        set_lobby_member_data: MatchmakingSetLobbyMemberData = "SteamAPI_ISteamMatchmaking_SetLobbyMemberData",
+            "S_API void SteamAPI_ISteamMatchmaking_SetLobbyMemberData( ISteamMatchmaking* self, uint64_steamid steamIDLobby, const char * pchKey, const char * pchValue );",
+            fn(*mut ISteamMatchmaking, u64, *const c_char, *const c_char);
+        send_lobby_chat_msg: MatchmakingSendLobbyChatMsg = "SteamAPI_ISteamMatchmaking_SendLobbyChatMsg",
+            "S_API bool SteamAPI_ISteamMatchmaking_SendLobbyChatMsg( ISteamMatchmaking* self, uint64_steamid steamIDLobby, const void * pvMsgBody, int cubMsgBody );",
+            fn(*mut ISteamMatchmaking, u64, *const c_void, i32) -> bool;
+        get_lobby_chat_entry: MatchmakingGetLobbyChatEntry = "SteamAPI_ISteamMatchmaking_GetLobbyChatEntry",
+            "S_API int SteamAPI_ISteamMatchmaking_GetLobbyChatEntry( ISteamMatchmaking* self, uint64_steamid steamIDLobby, int iChatID, CSteamID * pSteamIDUser, void * pvData, int cubData, EChatEntryType * peChatEntryType );",
+            fn(*mut ISteamMatchmaking, u64, i32, *mut u64, *mut c_void, i32, *mut i32) -> i32;
+        set_lobby_member_limit: MatchmakingSetLobbyMemberLimit = "SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit",
+            "S_API bool SteamAPI_ISteamMatchmaking_SetLobbyMemberLimit( ISteamMatchmaking* self, uint64_steamid steamIDLobby, int cMaxMembers );",
+            fn(*mut ISteamMatchmaking, u64, i32) -> bool;
+        get_lobby_member_limit: MatchmakingGetLobbyMemberLimit = "SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit",
+            "S_API int SteamAPI_ISteamMatchmaking_GetLobbyMemberLimit( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamMatchmaking, u64) -> i32;
+        set_lobby_type: MatchmakingSetLobbyType = "SteamAPI_ISteamMatchmaking_SetLobbyType",
+            "S_API bool SteamAPI_ISteamMatchmaking_SetLobbyType( ISteamMatchmaking* self, uint64_steamid steamIDLobby, ELobbyType eLobbyType );",
+            fn(*mut ISteamMatchmaking, u64, i32) -> bool;
+        set_lobby_joinable: MatchmakingSetLobbyJoinable = "SteamAPI_ISteamMatchmaking_SetLobbyJoinable",
+            "S_API bool SteamAPI_ISteamMatchmaking_SetLobbyJoinable( ISteamMatchmaking* self, uint64_steamid steamIDLobby, bool bLobbyJoinable );",
+            fn(*mut ISteamMatchmaking, u64, bool) -> bool;
+        get_lobby_owner: MatchmakingGetLobbyOwner = "SteamAPI_ISteamMatchmaking_GetLobbyOwner",
+            "S_API uint64_steamid SteamAPI_ISteamMatchmaking_GetLobbyOwner( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
+            fn(*mut ISteamMatchmaking, u64) -> u64;
     }
 
     /// `ISteamApps` (`steam_api_flat.h`).
@@ -231,6 +305,9 @@ bindings! {
         get_current_game_language: AppsGetCurrentGameLanguage = "SteamAPI_ISteamApps_GetCurrentGameLanguage",
             "S_API const char * SteamAPI_ISteamApps_GetCurrentGameLanguage( ISteamApps* self );",
             fn(*mut ISteamApps) -> *const c_char;
+        get_launch_command_line: AppsGetLaunchCommandLine = "SteamAPI_ISteamApps_GetLaunchCommandLine",
+            "S_API int SteamAPI_ISteamApps_GetLaunchCommandLine( ISteamApps* self, char * pszCommandLine, int cubCommandLine );",
+            fn(*mut ISteamApps, *mut c_char, i32) -> i32;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).

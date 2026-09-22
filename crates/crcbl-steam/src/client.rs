@@ -4,11 +4,14 @@ use std::{cell::Cell, collections::VecDeque, fmt, rc::Rc, sync::atomic::Ordering
 
 use crate::{
     SteamEvent,
+    call::CallRegistry,
     error::InitError,
     ffi::{
-        HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
-        init_result, load, manifest, manifest::Accessor, versions,
+        HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils, Lib,
+        SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
     },
+    matchmaking::Tracked,
+    presence::PresenceKeys,
     pump::PumpDiagnostics,
 };
 
@@ -48,7 +51,11 @@ impl Drop for Session {
 /// `!Sync`, and so everything holding it. `docs/plan/42-steam.md`'s first
 /// `Send` surface (slice 4's transport) is what turns it into an `Arc`, with
 /// the pump-thread check that makes sharing it across threads sound.
-pub(crate) struct Client {
+///
+/// Nominally `pub` inside this private module, and never exported: the
+/// sealed `CallResult` trait names it in a method only this crate can call,
+/// and a sealed trait may only mention types as visible as itself.
+pub struct Client {
     /// The loaded library.
     pub(crate) lib: &'static Lib,
     /// The pipe manual dispatch drains.
@@ -61,6 +68,8 @@ pub(crate) struct Client {
     pub(crate) friends: *mut ISteamFriends,
     /// `SteamAPI_SteamApps_v009()`; never null.
     pub(crate) apps: *mut ISteamApps,
+    /// `SteamAPI_SteamMatchmaking_v009()`; never null.
+    pub(crate) matchmaking: *mut ISteamMatchmaking,
     /// Dropped last, after every other field: the shutdown.
     _session: Session,
 }
@@ -80,6 +89,20 @@ pub struct Steam {
     /// Strings Steam returned that were not intact UTF-8. A `Cell` because
     /// strings are read through `&Steam`; `Steam` is `!Sync` regardless.
     pub(crate) lossy_strings: Cell<u64>,
+    /// The asynchronous calls waiting on an answer.
+    pub(crate) calls: CallRegistry,
+    /// The lobbies a `Lobby` value is held for, and their last-seen owner.
+    pub(crate) lobbies: Vec<Tracked>,
+    /// The rich-presence keys set, for the key limit.
+    pub(crate) presence_keys: PresenceKeys,
+}
+
+impl fmt::Debug for Client {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Client")
+            .field("pipe", &self.pipe)
+            .finish_non_exhaustive()
+    }
 }
 
 impl fmt::Debug for Steam {
@@ -166,6 +189,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     let utils = interface(lib.fns.utils.accessor, &versions::UTILS)?.cast::<ISteamUtils>();
     let friends = interface(lib.fns.friends.accessor, &versions::FRIENDS)?.cast::<ISteamFriends>();
     let apps = interface(lib.fns.apps.accessor, &versions::APPS)?.cast::<ISteamApps>();
+    let matchmaking = interface(lib.fns.matchmaking.accessor, &versions::MATCHMAKING)?
+        .cast::<ISteamMatchmaking>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -184,11 +209,15 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             utils,
             friends,
             apps,
+            matchmaking,
             _session: session,
         }),
         queue: VecDeque::new(),
         diagnostics: PumpDiagnostics::default(),
         lossy_strings: Cell::new(0),
+        calls: CallRegistry::default(),
+        lobbies: Vec::new(),
+        presence_keys: PresenceKeys::default(),
     })
 }
 
@@ -262,7 +291,8 @@ mod tests {
         // rather than vanishing from both sides of the comparison above.
         assert_eq!(
             versions::handshake(manifest::INTERFACES),
-            b"SteamUser023\0SteamFriends018\0STEAMAPPS_INTERFACE_VERSION009\0SteamUtils011\0\0"
+            b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
+              STEAMAPPS_INTERFACE_VERSION009\0SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -270,6 +300,7 @@ mod tests {
         assert!(!steam.client.utils.is_null());
         assert!(!steam.client.friends.is_null());
         assert!(!steam.client.apps.is_null());
+        assert!(!steam.client.matchmaking.is_null());
     }
 
     #[test]

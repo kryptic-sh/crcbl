@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1 and 1b built on branch `steam-sdk`, the rest
+**Status (2026-09-23): slices 1, 1b and 3a built on branch `steam-sdk`, the rest
 planned** — see "Status by slice" under "Slice order". The four decisions the
 earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
 "the full Steam API" is now in scope, which reverses two earlier "not now" calls
@@ -402,6 +402,11 @@ Target gating follows the `crcbl-dx12` pattern — no `#![cfg(...)]` crate root:
   sweep builds every crate `--all-features`. `apps/sandbox/src/steam.rs` asks
   once, beside an inert stand-in; slice 8's `Loop` limb is where the question
   moves for games the loop hosts.
+- **The attribute is written on each module, not through a macro.** Slice 1
+  wrapped the module list in a `supported!` macro, and rustfmt does not look
+  inside macro invocations: `cargo fmt` never formatted the crate and CI's
+  `--check` could not see it. Corrected before slice 3a (`eb583ac0`), the way
+  `crcbl-dx12` writes it.
 - Pure-logic modules — the callback-id table, payload decode, the call registry,
   the lobby/connection state machines, the voice resampling, the synced-file
   conflict rules — are additionally compiled under `test`, so they run on every
@@ -1170,8 +1175,16 @@ On branch `steam-sdk`, not merged to `main`:
   the shared development machine; `crcbl` and `sandbox` clippy for
   `x86_64-unknown-linux-gnu` (their `alsa-sys` build script needs a Linux
   sysroot; `crcbl-steam` itself was clippy'd for Linux, macOS and wasm32).
-- **Slice 3a: next.**
-- Slices 3b, 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
+- **Slice 3a: done** (2026-09-23). The call registry, lobbies, invites, rich
+  presence and every join path, over the fake; Miri clean; the drift gate passes
+  against the mirror for every new declaration, struct, callback id, callback
+  base and limit constant. The `pack(4)` tables for the four lobby structs that
+  differ by OS run only in CI. **Not run:** everything under "Needs a real
+  client" below (two accounts, four join paths), on every OS. Before it,
+  `eb583ac0` made `cargo fmt` see the crate at all (see "The crate and its
+  gating").
+- **Slice 3b: next.**
+- Slices 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1254,6 +1267,75 @@ On branch `steam-sdk`, not merged to `main`:
   like `SteamHardware`), `Utils::set_notification_corner` (`NotificationCorner`,
   without Valve's `k_EPositionInvalid`), `Utils::server_unix_time`,
   `User::steam_level`.
+
+**Slice 3a as built, where it differs from the text below:**
+
+- **The registry fetches each answer at the pump, not at `take`.** `steam_api.h`
+  says `GetAPICallResult` should "only [be called] in a handler for
+  `SteamAPICallCompleted_t`", so the pump fetches a registered call's answer
+  (exactly the registered id and size) while handling its completion, and `take`
+  decodes the stored bytes. A completion nobody registered is fetched and
+  discarded, as Valve's manual-dispatch template does for every completion
+  (sizes over `MAX_UNCLAIMED_RESULT`, 64 KiB, are left with Steam), and counted.
+- **Dropping a token abandons the answer, never the effect.** The plan called a
+  dropped token "legal fire-and-forget"; for `CreateLobby`/`JoinLobby` that
+  would leave the client in a lobby no value owns. Each answer type has an
+  `abandon` that the registry runs for a dropped token's answer — a created or
+  joined lobby is left — whether the token died before the completion or after
+  it (pruned at the start of each pump). Both tested, and seen red.
+- **`CallError` has four variants**: `IoFailure`, `NoResult` (`GetAPICallResult`
+  answered false), `Decode { expected_id, id, expected, got }` (the plan's
+  shape, plus the expected id, since an id mismatch at an equal size otherwise
+  reads as no mismatch at all) and `NotRegistered` (a token from an earlier
+  `Steam`). `CallResult` is sealed; `Client` and `CallRow` are nominally `pub`
+  in private modules for it, never exported.
+- **`matchmaking()` takes `&mut Steam`**, because registering a call does; so
+  does `take`. A game collects `steam.events()` before acting on them.
+- **A `Lobby` exists from the moment its answer is taken**:
+  `LobbyCreated::lobby()` / `LobbyEntered::lobby()` return
+  `Result<Lobby, SteamError>` by value (`SteamError::Result(EResult)` for a
+  failed create, `SteamError::LobbyEnter(EnterResponse)` for a refused join). It
+  holds an `Rc<Client>` for its `Drop`, and its methods take `&Steam` as the
+  plan says.
+- **The owner change is derived.** Steam has no owner-changed callback; the pump
+  re-reads `GetLobbyOwner` for each held lobby after every `LobbyChatUpdate_t`
+  and `LobbyDataUpdate_t` and queues `SteamEvent::LobbyOwnerChanged` when it
+  moved. That is the "lobby-member tracking state machine": member changes
+  decode to `LobbyMemberChanged { change: MemberChange }` (the most severe flag
+  wins; unnamed bits are `Other`), and the tracked state is the owner. A
+  member-list copy was not kept — `Lobby::members` reads Steam, the one source.
+- **`+connect_lobby` arrives on the command line**, not only through
+  `GetLaunchCommandLine`: Steam launches a closed game with it as process
+  arguments (`isteamfriends.h` calls that the deprecated path, but it is the one
+  an invite with the game closed takes), and `GetLaunchCommandLine` carries
+  `steam://run` URL launches. `connect_lobby(args)` parses either.
+- **Rich-presence limits count the NUL**: `k_cchMaxRichPresenceKeyLength` (64)
+  and `…ValueLength` (256) are buffer sizes, so keys are at most 63 bytes and
+  values 255 (the `connect` value arrives in a 256-byte `char` array). Lobby
+  data keys are capped at `k_nMaxLobbyKeyLength` (255) and chat messages at 4096
+  (the header's "up to 4k").
+- **The drift gate grew two checks**: every callback base's value
+  (`enum { k_iSteamMatchmakingCallbacks = 500 };`), and every SDK constant a
+  limit here is derived from. Both pass against the mirror; each was seen red.
+- **`LobbyEnter_t` is not claimed on the pipe.** Steam broadcasts it on every
+  entry as well as answering `JoinLobby` with it; only the answer is decoded,
+  and the broadcast counts as an unknown id.
+- **The sandbox's "lobby panel" is keys and the F3 debug panel**: F5 creates a
+  friends-only lobby for four and sets `connect`, F6 opens the invite dialog, F7
+  leaves; a "steam" section shows the lobby, owner and member count. It does not
+  set `steam_display`, which needs localisation tokens configured on the partner
+  site — under 480 those are SpaceWar's (R3).
+- **Layout numbers for the new structs** come from the same probe over the
+  mirror's headers as slice 1's. **`CSteamID` is 8 bytes aligned to 1** (it is
+  under `pack( push, 1 )`), so struct fields of that type are declared `[u8; 8]`
+  (`ffi::structs::CSteamId`), not `u64`: the two 3a structs would have come out
+  the same size either way, but `AvatarImageLoaded_t` (slice 3b) is 20 bytes
+  under both packings in C and would be 24 under `pack(8)` with a `u64`. The
+  layout test pins both structs' alignment at 1.
+- **The drift gate's scanner tests do not run under Miri** (`cfg(not(miri))`).
+  They are text scanning with no `unsafe`, and with 3a's tables their synthetic
+  SDKs took longer to interpret than the `miri (crcbl-steam)` job's budget; the
+  rest of the lib tests (80) interpret in about 20 seconds.
 
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
@@ -1439,9 +1521,11 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   (`GameLobbyJoinRequested_t`, `GameRichPresenceJoinRequested_t`, launch command
   line, `NewUrlLaunchParameters_t`); rich presence **set** (`connect`,
   `steam_display`). EW requirement 1's invitation path.
-- **Files:** `crcbl-steam/src/{call,matchmaking,presence}.rs`, additions to
-  `ffi/`, `callbacks.rs`, `friends.rs`, `apps.rs`; `apps/sandbox` lobby panel
-  behind the feature.
+- **Files:** `crates/crcbl-steam/src/call.rs`,
+  `crates/crcbl-steam/src/matchmaking.rs`, `crates/crcbl-steam/src/presence.rs`,
+  additions to `ffi/`, `callbacks.rs`, `friends.rs`, `apps.rs`, `error.rs`;
+  `apps/sandbox/src/steam.rs` (the lobby keys and debug section) behind the
+  feature.
 - **API:**
 
   ```rust
