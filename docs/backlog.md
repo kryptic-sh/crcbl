@@ -4069,6 +4069,12 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   order, and inspect generated SPIR-V before timing. Code size and live-range
   growth are explicit rejection risks; require matched `instances` and
   `specular-lights-fit` A/B pairs to avoid trading loop overhead for occupancy.
+  Before spelling that sequence by hand, trial Slang 2026.14's stronger
+  `[ForceUnroll]` attribute: the installed standard module uses it on fixed
+  generic loops, separately from `[unroll]`. It only counts if the generated
+  blocker loop and dynamic table subscript actually disappear; otherwise fall
+  back to the explicit sequence rather than treating another annotation as the
+  optimization.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
