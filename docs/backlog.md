@@ -315,9 +315,16 @@ Initial measurements and harness findings:
   55.3% of the area-specific delta in both pairs and specular for 44.7%; neither
   half alone is the bottleneck. The next common calculation to price is
   `ltc_shading_frame`, which depends only on the fragment normal and eye vector
-  but is rebuilt inside every rectangle iteration. Trial a first-use cache that
-  keeps point-only fragments free of the calculation, and require all three
-  fixed scenes plus native area images before retaining it.
+  but is rebuilt inside every rectangle iteration. A first-use cache kept
+  point-only fragments free of the calculation and its structural observer
+  failed before the cache existed. It did not pass the performance gate:
+  ordinary area-light `forward` stayed neutral at 8.860–8.870 ms p50, while the
+  more sensitive area-fill control regressed to 6.540–6.610 ms from its
+  6.446–6.513 ms baseline. Point-fill measured 3.498–3.590 ms. The shader,
+  observer and generated artifacts were removed before image testing; the
+  cache's branch or live matrix costs more than the repeated frame calculation
+  saves. Keep rebuilding `ltc_shading_frame` inside the rectangle arm on this
+  adapter.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
