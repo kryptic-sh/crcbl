@@ -1587,6 +1587,22 @@ impl ComputeProbe {
         headless: &Headless,
         record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
     ) -> Vec<u32> {
+        self.run_unbound(headless, |encoder| {
+            encoder.bind_compute_pipeline(self.pipeline);
+            // Inside the pass, because the open scope is the only signal the
+            // seam gives the backend about which bind point a group is for.
+            encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
+            record(encoder);
+        })
+    }
+
+    /// [`run`](Self::run) with nothing bound: `record` opens the pass empty and
+    /// binds what it dispatches with, in whatever order it is asking about.
+    fn run_unbound(
+        &self,
+        headless: &Headless,
+        record: impl FnOnce(&mut dyn crcbl::hal::CommandEncoder),
+    ) -> Vec<u32> {
         let device = headless.device.as_ref();
         let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
             label: Some("compute probe dispatch"),
@@ -1645,10 +1661,6 @@ impl ComputeProbe {
             label: Some("compute probe"),
             timestamp_writes: None,
         });
-        encoder.bind_compute_pipeline(self.pipeline);
-        // Inside the pass, because the open scope is the only signal the seam
-        // gives the backend about which bind point a group is for.
-        encoder.bind_group(0, self.bind_group, &[], self.pipeline_layout);
         record(encoder.as_mut());
         encoder.end_compute_pass();
 
@@ -1761,6 +1773,42 @@ fn a_compute_dispatch_writes_the_values_it_was_asked_for() {
         "a compute pass with no dispatch in it must write nothing, or the assertion above \
          was about the sentinel copy rather than about the dispatch; got {:?}…",
         &empty[..4]
+    );
+
+    probe.destroy(device);
+    headless.finish();
+}
+
+/// **A group bound before its pipeline is still bound when the dispatch runs.**
+///
+/// The seam permits either order, as Vulkan does, and D3D12 does not: a root
+/// argument is an index into the command list's root signature, and changing
+/// the root signature leaves the arguments set under the old one stale. `crcbl-dx12`
+/// sets the layout's signature itself when a group arrives with no pipeline, and
+/// then the pipeline sets its own — the same object, built from the same layout.
+/// Whether that second set keeps the group is the driver's answer, so it is
+/// measured here rather than assumed: a group that was dropped leaves the
+/// destination holding [`PROBE_SENTINEL`], or the list fails to close.
+///
+/// Every other test here binds the pipeline first, which is why nothing caught
+/// the order before.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_group_bound_before_its_pipeline_is_still_bound_at_the_dispatch() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let probe = ComputeProbe::new(&headless);
+
+    let values = probe.run_unbound(&headless, |encoder| {
+        encoder.bind_group(0, probe.bind_group, &[], probe.pipeline_layout);
+        encoder.bind_compute_pipeline(probe.pipeline);
+        encoder.dispatch(PROBE_GROUPS, 1, 1);
+    });
+
+    assert_probe(
+        &values,
+        &probe_expected(PROBE_ELEMENTS),
+        "a dispatch whose group was bound before its pipeline",
     );
 
     probe.destroy(device);
@@ -1884,6 +1932,156 @@ fn an_indirect_dispatch_reads_its_workgroup_count_from_the_buffer() {
 
     device.destroy_buffer(args);
     probe.destroy(device);
+    headless.finish();
+}
+
+/// **A second copy into bytes the first just wrote lands after it.**
+///
+/// Two copies into one buffer, the second overwriting the tail of the first,
+/// with the `TransferDst` to `TransferDst` barrier between them the seam asks a
+/// caller for — the write-after-write hazard Vulkan requires a barrier for.
+/// `crcbl-dx12` maps both sides of that barrier to `COPY_DEST` and records
+/// nothing, so on D3D12 this is the question of whether a queue orders two
+/// copies by itself: if it does not, the first copy's bytes can land over the
+/// second's and the tail reads back as the first pattern.
+///
+/// The first copy is large and the second small on purpose. The overlap is the
+/// last bytes the first copy writes, so a queue that let the second start while
+/// the first was still in flight would have to be slow at exactly the place a
+/// race is visible. Several rounds, because a race is a probability.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn a_second_copy_into_the_same_bytes_lands_after_the_first() {
+    /// Bytes the first copy writes: large enough to still be in flight when the
+    /// second is issued, on any queue that would let it be.
+    const WHOLE: u64 = 32 << 20;
+    /// Bytes the second copy writes, at the end of the destination.
+    const TAIL: u64 = 64 << 10;
+    /// Independent submissions of the pair.
+    const ROUNDS: usize = 8;
+    const FIRST: u8 = 0xA1;
+    const SECOND: u8 = 0xB2;
+
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    let upload = |label, byte, size| {
+        let buffer = device
+            .create_buffer(&BufferDesc {
+                label: Some(label),
+                size,
+                usage: BufferUsage::TRANSFER_SRC,
+                memory: MemoryLocation::HostUpload,
+            })
+            .expect("a host-upload buffer");
+        device
+            .write_buffer(buffer, 0, &vec![byte; size as usize])
+            .expect("a host-upload buffer is what write_buffer is for");
+        buffer
+    };
+    let first = upload("first copy source", FIRST, WHOLE);
+    let second = upload("second copy source", SECOND, TAIL);
+    let destination = device
+        .create_buffer(&BufferDesc {
+            label: Some("copy after copy destination"),
+            size: WHOLE,
+            usage: BufferUsage::TRANSFER_DST | BufferUsage::TRANSFER_SRC,
+            memory: MemoryLocation::DeviceLocal,
+        })
+        .expect("a device-local buffer");
+    let staging = device
+        .create_buffer(&BufferDesc {
+            label: Some("copy after copy readback"),
+            size: WHOLE,
+            usage: BufferUsage::TRANSFER_DST,
+            memory: MemoryLocation::HostReadback,
+        })
+        .expect("a host-readback buffer");
+    let barrier = |from, to| crcbl::hal::BufferBarrier {
+        buffer: destination,
+        from,
+        to,
+        queue_transfer: None,
+    };
+
+    for round in 0..ROUNDS {
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("copy after copy"),
+            queue: headless.queue,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[barrier(
+                ResourceState::Undefined,
+                ResourceState::TransferDst,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: first,
+            src_offset: 0,
+            dst: destination,
+            dst_offset: 0,
+            size: WHOLE,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[barrier(
+                ResourceState::TransferDst,
+                ResourceState::TransferDst,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: second,
+            src_offset: 0,
+            dst: destination,
+            dst_offset: WHOLE - TAIL,
+            size: TAIL,
+        });
+        encoder.pipeline_barrier(&Barriers {
+            buffers: &[barrier(
+                ResourceState::TransferDst,
+                ResourceState::TransferSrc,
+            )],
+            ..Barriers::default()
+        });
+        encoder.copy_buffer_to_buffer(&crcbl::hal::BufferCopy {
+            src: destination,
+            src_offset: 0,
+            dst: staging,
+            dst_offset: 0,
+            size: WHOLE,
+        });
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device.wait_idle().expect("idle");
+        device.destroy_command_buffer(commands);
+
+        let mut read = poisoned(WHOLE as usize);
+        headless.readback(staging, WHOLE, &mut read);
+        let (head, tail) = read.split_at((WHOLE - TAIL) as usize);
+        if let Some(at) = head.iter().position(|byte| *byte != FIRST) {
+            panic!(
+                "round {round}: byte {at} is {:#04x} where only the first copy wrote, which put \
+                 {FIRST:#04x} there",
+                head[at]
+            );
+        }
+        if let Some(at) = tail.iter().position(|byte| *byte != SECOND) {
+            panic!(
+                "round {round}: byte {} of the tail is {:#04x} where the second copy wrote \
+                 {SECOND:#04x} after the first wrote {FIRST:#04x} — the two copies were not \
+                 ordered, and the barrier between them did not order them",
+                WHOLE - TAIL + at as u64,
+                tail[at]
+            );
+        }
+    }
+
+    device.destroy_buffer(staging);
+    device.destroy_buffer(destination);
+    device.destroy_buffer(second);
+    device.destroy_buffer(first);
     headless.finish();
 }
 
@@ -5958,7 +6156,7 @@ const _: () = {
 /// creation refuses both. Running it after a compute half that did not work
 /// would report the same refusal twice and hide which one was asked first.
 fn exercise_push_constants(headless: &Headless) -> Exercise {
-    match exercise_push_constants_on_compute(headless) {
+    match exercise_push_constants_on_compute(headless, PushOrder::AfterPipeline) {
         Exercise::Worked => exercise_push_constants_on_graphics(headless),
         other => other,
     }
@@ -6048,7 +6246,7 @@ fn exercise_push_constants(headless: &Headless) -> Exercise {
 ///
 /// **Do not put the index back.** It reads more naturally and it is the form
 /// that was measured wrong.
-fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
+fn exercise_push_constants_on_compute(headless: &Headless, order: PushOrder) -> Exercise {
     use crcbl::shaders::push_constant_probe::{CONSTANTS_SIZE, WORD_COUNT, WORKGROUP_SIZE};
 
     let device = headless.device.as_ref();
@@ -6165,16 +6363,24 @@ fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
             }) {
                 Err(error) => Exercise::Refused(error),
                 Ok(pipeline) => {
+                    let push = |e: &mut dyn crcbl::hal::CommandEncoder| {
+                        e.push_constants(
+                            crcbl::hal::ShaderStages::COMPUTE,
+                            0,
+                            &PUSHED.to_bytes(),
+                            pipeline_layout,
+                        );
+                    };
                     let outcome =
                         push_constant_dispatch(headless, prime, destination, staging, bytes, |e| {
+                            if order == PushOrder::BeforePipeline {
+                                push(e);
+                            }
                             e.bind_compute_pipeline(pipeline);
                             e.bind_group(0, bind_group, &[], pipeline_layout);
-                            e.push_constants(
-                                crcbl::hal::ShaderStages::COMPUTE,
-                                0,
-                                &PUSHED.to_bytes(),
-                                pipeline_layout,
-                            );
+                            if order == PushOrder::AfterPipeline {
+                                push(e);
+                            }
                             // One group, which is wider than WORD_COUNT on
                             // purpose: the shader's bounds check is a branch this
                             // dispatch really takes.
@@ -6196,6 +6402,56 @@ fn exercise_push_constants_on_compute(headless: &Headless) -> Exercise {
     device.destroy_buffer(destination);
     device.destroy_buffer(prime);
     outcome
+}
+
+/// Where [`exercise_push_constants_on_compute`] records its `push_constants`
+/// call relative to binding the pipeline it dispatches with.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PushOrder {
+    /// The order the capability exercise uses, and every renderer here.
+    AfterPipeline,
+    /// Before any pipeline is bound, which the seam permits — `push_constants`
+    /// names its layout — and which
+    /// [`push_constants_recorded_before_their_pipeline_reach_the_dispatch`]
+    /// holds a backend to.
+    BeforePipeline,
+}
+
+/// **Push constants recorded before their pipeline reach the dispatch.**
+///
+/// The seam's `push_constants` names the layout it writes through, so nothing
+/// requires a pipeline to be bound first, and Vulkan's `vkCmdPushConstants`
+/// needs none. D3D12's root constants are arguments to the command list's
+/// root signature, and before a pipeline there is none unless the backend sets
+/// the layout's own — the defect `bind_group` had, where AMD's driver removed
+/// the device at `Close` while WARP recorded the call.
+///
+/// [`Capability::PushConstants`] decides whether there is anything to ask: a
+/// device that declares it absent refuses at layout creation, which the
+/// capability test already holds it to.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-hal-seam-e2e.sh"]
+fn push_constants_recorded_before_their_pipeline_reach_the_dispatch() {
+    use crcbl::hal::{Capability, Support};
+
+    let headless = Headless::open_with_every_optional_feature();
+    match headless.device.supports(Capability::PushConstants) {
+        Support::Yes => {
+            match exercise_push_constants_on_compute(&headless, PushOrder::BeforePipeline) {
+                Exercise::Worked => {}
+                other => panic!(
+                    "push constants recorded before the pipeline did not reach the dispatch, where \
+                 the same recording with the push after the pipeline does: {other:?}"
+                ),
+            }
+        }
+        Support::No(why) | Support::NotOnThisDevice(why) => eprintln!(
+            "crcbl hal seam e2e: this device declares no push constants ({why}), so there is no \
+             order to ask about"
+        ),
+    }
+
+    headless.finish();
 }
 
 /// Primes the destination, runs `record` inside a compute pass, and reads the

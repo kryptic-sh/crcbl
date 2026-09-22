@@ -1232,6 +1232,10 @@ impl DeviceInner {
     /// the device lock held and records without it, so everything that reads
     /// device state happens before the call returns.
     ///
+    /// The layout's root signature comes back beside the write, for the reason
+    /// [`BoundGroup::root_signature`] does: the write's parameter index is an
+    /// index into it, and the encoder sets it when no pipeline has.
+    ///
     /// # Errors
     ///
     /// As [`handle::lookup`] for the layout, plus every refusal
@@ -1242,7 +1246,7 @@ impl DeviceInner {
         layout: PipelineLayoutHandle,
         offset: u32,
         data: &[u8],
-    ) -> Result<crate::root::Write, HalError> {
+    ) -> Result<(crate::root::Write, ID3D12RootSignature), HalError> {
         let state = self.state();
         let entry = handle::lookup(
             &state.pipeline_layouts,
@@ -1250,7 +1254,8 @@ impl DeviceInner {
             layout,
             self.owner,
         )?;
-        crate::root::write(entry.push_constants, offset, data)
+        let write = crate::root::write(entry.push_constants, offset, data)?;
+        Ok((write, entry.raw.clone()))
     }
 
     /// Files a finished command buffer and stamps its handle.

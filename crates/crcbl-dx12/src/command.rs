@@ -112,7 +112,7 @@ use windows::Win32::Graphics::Direct3D12::{
     D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT, D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX,
     D3D12_TEXTURE_DATA_PITCH_ALIGNMENT, D3D12_TEXTURE_DATA_PLACEMENT_ALIGNMENT, D3D12_VIEWPORT,
     ID3D12CommandAllocator, ID3D12CommandSignature, ID3D12GraphicsCommandList,
-    ID3D12GraphicsCommandList6, ID3D12QueryHeap, ID3D12Resource,
+    ID3D12GraphicsCommandList6, ID3D12QueryHeap, ID3D12Resource, ID3D12RootSignature,
 };
 use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::core::Interface;
@@ -662,6 +662,46 @@ impl Dx12CommandEncoder {
              nothing"
         )));
         false
+    }
+
+    /// Sets `signature` at the open scope's bind point when no pipeline is bound
+    /// there, so a root argument recorded before any pipeline has a root
+    /// signature to index into.
+    ///
+    /// **A root argument is an index into the command list's current root
+    /// signature**, and before any is set there is nothing for it to index —
+    /// WARP records the call anyway, while AMD's driver fails the whole list at
+    /// `Close` with `DXGI_ERROR_DEVICE_REMOVED`. The seam permits a bind or a
+    /// push before a pipeline, as Vulkan does, so the backend supplies the
+    /// signature the layout names. With a pipeline bound its signature is left
+    /// alone: replacing it would reset the arguments set before this one.
+    ///
+    /// The pipeline bound later sets its own signature, which is this same
+    /// object when it was built from the same layout. That the arguments survive
+    /// it is measured rather than assumed, by
+    /// `a_group_bound_before_its_pipeline_is_still_bound_at_the_dispatch` and
+    /// `push_constants_recorded_before_their_pipeline_reach_the_dispatch` in
+    /// `crates/crcbl/tests/hal_seam_e2e.rs`.
+    fn set_root_signature_if_unbound(&self, signature: &ID3D12RootSignature) {
+        let compute = self.in_compute_pass;
+        let unbound = if compute {
+            self.compute.is_none()
+        } else {
+            self.pipeline.is_none()
+        };
+        if !unbound {
+            return;
+        }
+        let Some(list) = self.list() else { return };
+        // SAFETY: `list` is live and recording, and the signature is one this
+        // device created, borrowed from the caller for the duration of the call.
+        unsafe {
+            if compute {
+                list.SetComputeRootSignature(signature);
+            } else {
+                list.SetGraphicsRootSignature(signature);
+            }
+        }
     }
 
     /// Records one batch of transitions, if there is anything to record.
@@ -2161,13 +2201,8 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// last draw's arguments.
     ///
     /// **A bind with no pipeline at its bind point sets the layout's root
-    /// signature first.** A root argument is an index into the command list's
-    /// current root signature, and before any is set there is nothing for it to
-    /// index — WARP records the call anyway, while AMD's driver fails the whole
-    /// list at `Close` with `DXGI_ERROR_DEVICE_REMOVED`. The seam permits a
-    /// bind before a pipeline, as Vulkan does, so the backend supplies the
-    /// signature the layout names. With a pipeline bound its signature is left
-    /// alone: replacing it would reset the arguments bound before this one.
+    /// signature first** — see
+    /// [`set_root_signature_if_unbound`](Self::set_root_signature_if_unbound).
     fn bind_group(
         &mut self,
         index: u32,
@@ -2191,24 +2226,9 @@ impl CommandEncoder for Dx12CommandEncoder {
         for resource in &bound.retained {
             self.retain(resource);
         }
+        self.set_root_signature_if_unbound(&bound.root_signature);
         let compute = self.in_compute_pass;
-        let unset = if compute {
-            self.compute.is_none()
-        } else {
-            self.pipeline.is_none()
-        };
         let Some(list) = self.list() else { return };
-        if unset {
-            // SAFETY: `list` is live and recording, and the signature is one this
-            // device created, held by `bound` for the duration of the call.
-            unsafe {
-                if compute {
-                    list.SetComputeRootSignature(&bound.root_signature);
-                } else {
-                    list.SetGraphicsRootSignature(&bound.root_signature);
-                }
-            }
-        }
         // SAFETY: `list` is live and recording. `bound.heaps` is a live slice of
         // shader-visible heaps this device owns, borrowed for the call and
         // containing no null entry — `VisibleHeaps::bound` drops a heap that was
@@ -2249,6 +2269,10 @@ impl CommandEncoder for Dx12CommandEncoder {
     /// [`bind_group`](Self::bind_group): a `DIRECT` command list carries a
     /// graphics and a compute root signature, and constants set on the wrong one
     /// leave the dispatch reading whatever the last draw put there.
+    ///
+    /// **A push with no pipeline at its bind point sets the layout's root
+    /// signature first**, exactly as `bind_group` does — see
+    /// [`set_root_signature_if_unbound`](Self::set_root_signature_if_unbound).
     fn push_constants(
         &mut self,
         _stages: ShaderStages,
@@ -2259,8 +2283,8 @@ impl CommandEncoder for Dx12CommandEncoder {
         if self.list().is_none() {
             return;
         }
-        let write = match self.device.push_constants(layout, offset, data) {
-            Ok(write) => write,
+        let (write, root_signature) = match self.device.push_constants(layout, offset, data) {
+            Ok(resolved) => resolved,
             Err(error) => {
                 self.fail(error);
                 return;
@@ -2273,6 +2297,7 @@ impl CommandEncoder for Dx12CommandEncoder {
             // range a refusal rather than a quiet no-op.
             return;
         }
+        self.set_root_signature_if_unbound(&root_signature);
         let compute = self.in_compute_pass;
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is live and recording. `words` is a live slice this

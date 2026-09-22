@@ -1850,7 +1850,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   binding a group before any pipeline now sets the layout's root signature
   first, where it used to fail the command list on AMD hardware with
   `DXGI_ERROR_DEVICE_REMOVED`. On an RX 7900 XTX the GPU suites went from 144 of
-  302 passing to all 302.
+  302 passing to all 302. `push_constants` before a pipeline now does the same.
 
 - **A debug `crcbl screenshot` no longer overflows the main stack on Windows.**
   On an AMD Radeon RX 7900 XTX the driver recurses deeply inside the first

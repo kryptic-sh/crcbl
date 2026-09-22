@@ -4515,16 +4515,13 @@ dynamic-offset, froxel, exposure and cross-path groups it listed all pass on the
 
 **Still open, none of it verified either way:**
 
-- `push_constants` with no pipeline bound sets root constants the way
-  `bind_group` did, so it probably has the same fault. No test binds push
-  constants before a pipeline.
-- `plan_barriers` still drops a copy-destination to copy-destination barrier
-  without recording anything, so two copies writing one buffer are unordered.
-  Nothing has failed from it.
-- Whether binding a pipeline after a group keeps the arguments that group set.
-  The pipeline's root signature comes from the same layout, and
-  `a_binds_dynamic_offsets_are_held_to_the_layout_that_declared_them` passes,
-  but no test covers bind-group-then-pipeline-then-draw directly.
+- `plan_barriers` records nothing for a copy-destination to copy-destination
+  barrier, and whether legacy D3D12 barriers order two copies into the same
+  bytes without one has not been settled from the documentation.
+  `a_second_copy_into_the_same_bytes_lands_after_the_first` (hal_seam_e2e)
+  measures it: 8 rounds of a 32 MiB copy overwritten at its tail by a 64 KiB one
+  read back correctly on the 7900 XTX and on WARP, so no hazard has been
+  observed. If another GPU ever fails it, the fix is a barrier there.
 - `crcbl-dx12`'s own device tests (`--run-ignored only`, pin unset so the
   discrete GPU is used) fail three on hardware and four on WARP, and did before
   these fixes: the two debug-layer self-tests (no layer installed here),
