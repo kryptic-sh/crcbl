@@ -19,6 +19,10 @@ const LIGHT_ROWS: usize = 16;
 pub const LIGHT_COUNT: usize = LIGHT_COLUMNS * LIGHT_ROWS;
 const WITHIN_BUDGET_LIGHT_COUNT: usize = CLUSTER_LIGHT_CAPACITY as usize - 1;
 
+mod simulation;
+
+pub use simulation::Simulation;
+
 /// The fixed scene the sandbox presents.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Scene {
@@ -33,6 +37,9 @@ pub enum Scene {
     LightsFit,
     /// The instance grid under an overlapping field of local lights.
     Lights,
+    /// The instance and within-budget light grid while dense broadphase bodies
+    /// refit and query on the simulation clock.
+    Combined,
 }
 
 impl Scene {
@@ -45,6 +52,7 @@ impl Scene {
             "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
             "lights" => Some(Self::Lights),
+            "combined" => Some(Self::Combined),
             _ => None,
         }
     }
@@ -58,6 +66,7 @@ impl Scene {
             Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
             Self::Lights => "lights",
+            Self::Combined => "combined",
         }
     }
 
@@ -66,7 +75,9 @@ impl Scene {
     pub const fn instance_count(self) -> usize {
         match self {
             Self::Cube => 1,
-            Self::Instances | Self::Moving | Self::LightsFit | Self::Lights => INSTANCE_COUNT,
+            Self::Instances | Self::Moving | Self::LightsFit | Self::Lights | Self::Combined => {
+                INSTANCE_COUNT
+            }
         }
     }
 
@@ -75,9 +86,15 @@ impl Scene {
     pub const fn light_count(self) -> usize {
         match self {
             Self::Cube | Self::Instances | Self::Moving => 0,
-            Self::LightsFit => WITHIN_BUDGET_LIGHT_COUNT,
+            Self::LightsFit | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
+    }
+
+    /// Whether the scene runs the dense broadphase workload on each tick.
+    #[must_use]
+    pub const fn simulates(self) -> bool {
+        matches!(self, Self::Combined)
     }
 }
 
@@ -117,7 +134,7 @@ pub fn animate(
 fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
     let transform = match scene {
         Scene::Cube => ForwardRenderer::spin(seconds),
-        Scene::Instances | Scene::Moving | Scene::LightsFit | Scene::Lights => {
+        Scene::Instances | Scene::Moving | Scene::LightsFit | Scene::Lights | Scene::Combined => {
             grid_transform(index) * Mat4::from_quat(Quat::from_rotation_y(seconds * 0.9))
         }
     };
@@ -182,12 +199,17 @@ mod tests {
             Scene::from_name("moving").is_some(),
             "the moving-instance workload must be selectable",
         );
+        assert!(
+            Scene::from_name("combined").is_some(),
+            "the combined simulation and renderer workload must be selectable",
+        );
         for scene in [
             Scene::Cube,
             Scene::Instances,
             Scene::Moving,
             Scene::LightsFit,
             Scene::Lights,
+            Scene::Combined,
         ] {
             assert_eq!(Scene::from_name(scene.name()), Some(scene));
             assert!(scene.instance_count() > 0);
@@ -196,14 +218,21 @@ mod tests {
         assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::Combined.instance_count(), INSTANCE_COUNT);
         assert_eq!(
             Scene::LightsFit.light_count() + 1,
             usize::try_from(CLUSTER_LIGHT_CAPACITY).expect("the light budget fits usize"),
             "the local rows and the sun fill one froxel without overflowing it",
         );
         assert_eq!(Scene::Lights.light_count(), LIGHT_COUNT);
+        assert_eq!(
+            Scene::Combined.light_count(),
+            Scene::LightsFit.light_count()
+        );
         assert_eq!(Scene::Instances.light_count(), 0);
         assert_eq!(Scene::Moving.light_count(), 0);
+        assert!(Scene::Combined.simulates());
+        assert!(!Scene::Lights.simulates());
     }
 
     #[test]

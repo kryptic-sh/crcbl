@@ -33,7 +33,7 @@ OPTIONS:
                           The 2D story is a projection-matrix swap and nothing
                           else, which is what this flag exists to demonstrate.
         --scene <NAME>    Fixed scene: `cube`, `instances`, `moving`,
-                          `lights-fit` or `lights`.
+                          `lights-fit`, `lights` or `combined`.
                           Default: cube. The stress scenes keep their load live
                           for the complete run so tail timings are comparable.
         --frames <N>      Stop after N presented frames.
@@ -235,6 +235,7 @@ mod tests {
         assert_eq!(options(&["--scene", "moving"]).scene, Scene::Moving);
         assert_eq!(options(&["--scene", "lights-fit"]).scene, Scene::LightsFit);
         assert_eq!(options(&["--scene", "lights"]).scene, Scene::Lights);
+        assert_eq!(options(&["--scene", "combined"]).scene, Scene::Combined);
         assert!(matches!(
             parse_args(&["--scene", "unknown"]),
             Invocation::BadUsage(message) if message.contains("unknown")

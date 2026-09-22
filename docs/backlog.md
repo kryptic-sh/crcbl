@@ -52,9 +52,6 @@ helps the reference adapter.
 
 Open work:
 
-- Add the smallest reusable high-load scenes needed to isolate render-heavy,
-  simulation-heavy and combined-frame limits. Keep correctness assertions
-  separate from timing so a faster wrong frame cannot pass.
 - Profile the selected scenes on the discrete Vulkan adapter and attribute the
   limiting work before changing production code. Record declined trials and
   unverified backends here as they arise.
@@ -158,8 +155,20 @@ Initial measurements and harness findings:
   rotating the whole grid changes pixel coverage enough to make `moving`'s
   forward pass faster, so those runs are not upload evidence. Keep the fixture,
   but do not add a bulk-update API on this result: the measured host work is not
-  limiting the real-device frame. This covers a combined update/render load, not
-  the still-missing simulation-heavy physics scene.
+  limiting the real-device frame. The `phys` benchmark covers the isolated
+  simulation-heavy case instead.
+- The `combined` sandbox scene now runs the `lights-fit` render fixture
+  unchanged while 5,000 dense sphere bodies move, refit and run one overlap
+  query each at the fixed simulation rate. A unit observer verifies that every
+  body moves, refits and finds at least itself. On the pinned MX550 at
+  1920x1080, alternating 900-frame release runs reported 10.443 and 10.503 ms
+  mean real-clock frames versus 10.223 and 10.465 ms for `lights-fit`; GPU
+  pass-sum p50 was 10.074–10.160 ms versus 9.981–10.103 ms. The workload remains
+  GPU-limited at that resolution. At 320x180 over 1,800 frames, the combined
+  frame mean was 1.878–1.932 ms versus 1.846–1.870 ms, but its worst frame rose
+  to 4.294–5.131 ms from 2.018–2.235 ms when a physics tick landed. Use this
+  scene to test CPU/GPU contention and tick spikes; use `phys` for stable
+  broadphase percentiles rather than treating the frame mean as a physics timer.
 
 ## Performance review and execution priority (2026-09-17)
 

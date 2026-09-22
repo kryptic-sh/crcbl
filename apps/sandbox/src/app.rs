@@ -322,6 +322,8 @@ pub struct Sandbox {
     effects: RenderEffects,
     /// The fixed workload this run presents.
     scene: Scene,
+    /// Dense broadphase work for the combined stress scene.
+    simulation: Option<crate::stress::Simulation>,
 }
 
 impl Sandbox {
@@ -349,6 +351,7 @@ impl Sandbox {
             unpresented: None,
             effects,
             scene,
+            simulation: crate::stress::Simulation::for_scene(scene),
         }
     }
 }
@@ -520,6 +523,9 @@ impl HostedGame for Sandbox {
             });
         }
         tick(tick_dt);
+        if let Some(simulation) = self.simulation.as_mut() {
+            simulation.step(tick_dt);
+        }
         // The cube spins on the **fixed** timestep, not on the frame rate. That
         // is what makes `--headless --frames N` render a bit-reproducible
         // picture on every machine, and therefore what makes a golden image of
