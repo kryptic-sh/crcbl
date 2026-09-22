@@ -4018,13 +4018,22 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   0.292/0.353 ms (4.0/4.8%). Shadow-map rendering itself stayed flat at
   0.552/0.564 ms for `pcss` and 0.555/0.560 ms for `disc`, locating the cost in
   forward filtering rather than atlas production. This is attribution, not
-  permission to replace the adaptive filter. First trial reusing
+  permission to replace the adaptive filter. Declined a trial reusing
   `cascade_visibility`'s already-fetched atlas rectangle and a single derived
-  texel step in both `sun_penumbra_texels` and the final `tile_pcf`; preserve
-  the exact taps, accumulation order, atlas clamping, bias, adaptive penumbra
-  width and cascade blending. Retain only with shadow golden and cascade-ladder
-  parity plus repeated GPU timing. Fully lit/shadowed interiors, contact edges
-  and Metal/Direct3D image parity remain unverified.
+  texel step in both `sun_penumbra_texels` and the final `tile_pcf`, and passing
+  the same setup into the box, punctual and volumetric filters. The observer
+  failed before the edit and passed after all shader targets compiled; mesh
+  SPIR-V shrank from 210,776 to 206,808 bytes and grass from 263,576 to 251,672
+  bytes. That smaller code did not make the heavier path faster. `instances`
+  forward moved from 1.651/1.690 ms to 1.642/1.655 ms (0.5/2.1% faster), but its
+  complete pass sum moved by -0.2/+0.6%, and `specular-lights-fit` forward
+  regressed from 3.842/3.869 ms to 3.884/3.914 ms (1.1/1.2%). The broader live
+  rectangle, step and rotation plausibly increased register pressure; the
+  source, observer and generated artifacts were removed. Do not retry this
+  value-passing shape solely because its binaries are smaller. A future trial
+  must preserve the exact taps, accumulation order, atlas clamping, bias,
+  adaptive penumbra width and cascade blending. Fully lit/shadowed interiors,
+  contact edges and Metal/Direct3D image parity remain unverified.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
