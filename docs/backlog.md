@@ -9008,15 +9008,18 @@ feature, sandbox, remaining basics) is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
-- **The drift gate has never run**
-  (`cargo test -p crcbl-steam -- --ignored drift`): no machine had the SDK,
-  which needs a partner login. Every declaration in `ffi::manifest`, every row
-  of `ffi::versions` and every field list in `ffi::structs::DECLS` is written
-  from the SDK 1.65 header mirror and is a claim until it has. Its scanner is
-  proven only against synthetic headers built from the crate's own tables. The
-  header each struct lives in was not assumed (the gate searches every header),
-  because the plan and memory disagree on whether `CallbackMsg_t` is in
-  `steam_api_internal.h` or `steam_api_common.h`.
+- **The drift gate has run only against the Steamworks.NET mirror**
+  (`cargo test -p crcbl-steam -- --ignored drift`, 2026-09-23, with
+  `CRCBL_STEAM_SDK` pointing at a scratch directory holding the mirror's
+  `CodeGen/steam/*.h` as `public/steam/`, mirror commit `ba71581f`, "Update to
+  Steamworks 1.65[a]"). Its first run failed on a real transcription error —
+  `GetAppID` declared as returning `AppId_t` where the header says `uint32` —
+  and it passes since the fix. No machine has had an SDK zip from Valve, which
+  needs a partner login, so every declaration is still only as good as the
+  mirror's copy. How to reproduce: download `CodeGen/steam/` from
+  `rlabrecque/Steamworks.NET` into `<dir>/public/steam/` and set
+  `CRCBL_STEAM_SDK=<dir>`; the mirror is never committed or fetched by CI (see
+  the plan's "Defaulted decisions").
 - **`tests/smoke.rs` has never passed against a real client.** On the Windows
   development machine (Steam running, no SDK), the only `steam_api64.dll` was
   one bundled with an installed game, from an older SDK (`SteamUtils010`).
@@ -9026,8 +9029,10 @@ feature, sandbox, remaining basics) is next.
   1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
   and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
 - **The `pack(4)` layout tables** (Linux and macOS) run only in CI; the local
-  run was Windows (`pack(8)`). The numbers come from a C program compiled with
-  MinGW GCC over this crate's own transcription of the fields, both packings.
+  run was Windows (`pack(8)`). The numbers come from a C++ program compiled with
+  MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
+  platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
+  compiler's, but no Linux or macOS compiler has produced them.
 - **Miri** ran locally on Windows (nightly 2026-09-21, 45 tests, clean, leak
   check on); the CI job itself has not run, because CI runs on pull requests and
   `main` only.

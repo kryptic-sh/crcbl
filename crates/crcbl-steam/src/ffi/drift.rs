@@ -25,12 +25,16 @@
 //! Without `CRCBL_STEAM_SDK` it **fails**: it only ever runs on purpose, and
 //! "skipped" must not read as "passed".
 //!
-//! **It has never run against a real SDK** — no machine this crate was
-//! written on had one. The scanner itself is proven by this module's other
-//! tests, which build a synthetic SDK out of the crate's own tables, check
-//! that it passes, and check that one changed parameter type, one renamed
-//! field, one changed pragma, one wrong version string and one wrong callback
-//! offset each fail it.
+//! **It has run against the Steamworks.NET mirror of the 1.65 headers**
+//! (`docs/plan/42-steam.md`, "Conventions"), laid out as
+//! `$CRCBL_STEAM_SDK/public/steam/*.h`, and never against an SDK zip from
+//! Valve, which no machine this crate was written on had. Its first run there
+//! found a real transcription error (`GetAppID` declared as returning
+//! `AppId_t`; the header says `uint32`). The scanner itself is also proven by
+//! this module's other tests, which build a synthetic SDK out of the crate's
+//! own tables, check that it passes, and check that one changed parameter
+//! type, one renamed field, one changed pragma, one wrong version string and
+//! one wrong callback offset each fail it.
 
 use std::{collections::HashSet, path::Path};
 

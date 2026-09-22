@@ -17,10 +17,11 @@
 //! reads, and its declaration exists in one place.
 //!
 //! **Provenance.** Every declaration was written from the SDK 1.65 header
-//! mirror (see `docs/plan/42-steam.md`, "Conventions") and has **not** yet
-//! been compared with a downloaded SDK: the drift gate has never run, because
-//! no machine this was written on had the SDK. Until it has, a declaration
-//! here is a claim. Two are worth naming: `ESteamHardwareType` is taken to be
+//! mirror (see `docs/plan/42-steam.md`, "Conventions"). The drift gate has
+//! run against that mirror's headers, and **not** yet against an SDK zip
+//! downloaded from Valve, which no machine this was written on had; until it
+//! has, a declaration here is a claim about the mirror's fidelity as much as
+//! about the SDK. Two are worth naming: `ESteamHardwareType` is taken to be
 //! an `int`-sized enum, as every Steamworks enum without an explicit base is;
 //! and `bool` is C's one-byte `_Bool`, which Rust's `bool` matches across
 //! `extern "C"`.
@@ -210,7 +211,7 @@ bindings! {
     /// `ISteamUtils` (`steam_api_flat.h`).
     utils: UtilsFns for versions::UTILS {
         get_app_id: UtilsGetAppId = "SteamAPI_ISteamUtils_GetAppID",
-            "S_API AppId_t SteamAPI_ISteamUtils_GetAppID( ISteamUtils* self );",
+            "S_API uint32 SteamAPI_ISteamUtils_GetAppID( ISteamUtils* self );",
             fn(*mut ISteamUtils) -> u32;
         is_running_on_steam_hardware: UtilsIsRunningOnSteamHardware = "SteamAPI_ISteamUtils_IsRunningOnSteamHardware",
             "S_API ESteamHardwareType SteamAPI_ISteamUtils_IsRunningOnSteamHardware( ISteamUtils* self );",

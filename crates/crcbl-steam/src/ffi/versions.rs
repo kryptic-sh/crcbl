@@ -8,8 +8,8 @@
 //!
 //! The rows a slice binds are the ones `manifest` names; the init handshake
 //! is built from exactly those (see [`handshake`]). Read from the SDK 1.65
-//! header mirror on 2026-09-22 and not yet compared with a real SDK — the
-//! drift gate does that.
+//! header mirror on 2026-09-22, and checked against it by the drift gate; not
+//! yet against an SDK zip from Valve.
 
 /// One interface: how to get it, and which ABI revision that returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

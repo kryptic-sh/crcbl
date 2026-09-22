@@ -28,16 +28,18 @@
 //!
 //! # Where the layout numbers come from
 //!
-//! The tables in this module's tests are the output of a C program, compiled
-//! with MinGW-w64 GCC 16.2.0 for x86-64, that declares each struct's fields
-//! exactly as `docs/plan/42-steam.md` quotes them from the SDK 1.65 headers,
-//! once under `#pragma pack(push, 4)` and once under `pack(push, 8)`, and
-//! prints `sizeof` and every field's `offsetof` and `sizeof`. The field types
-//! are all fixed-width integers, `double` and one pointer, whose layout under
-//! an explicit pack is the same on the SysV, AArch64 and Windows x64 ABIs.
-//! **The program was fed this crate's transcription of the fields, not the
-//! SDK's headers**, which were not on the machine: it proves the packing
-//! arithmetic, and the drift gate is what proves the transcription.
+//! The tables in this module's tests are the output of a C++ program,
+//! compiled with MinGW-w64 GCC 16.2.0 for x86-64, that includes the SDK 1.65
+//! headers — the Steamworks.NET mirror's copy (`docs/plan/42-steam.md`,
+//! "Conventions"), not a Valve zip — and prints `sizeof` and every field's
+//! `offsetof` and `sizeof`. It is compiled twice: as is, which selects
+//! `VALVE_CALLBACK_PACK_LARGE` (Windows), and against a copy of
+//! `steamclientpublic.h` whose platform test is forced true, which selects
+//! `VALVE_CALLBACK_PACK_SMALL` (Linux and macOS). The field types are
+//! fixed-width integers, `double`, enums and pointers, whose layout under an
+//! explicit pack is the same on the SysV, AArch64 and Windows x64 ABIs.
+//! Slice 1's tables were first computed over this crate's own transcription
+//! of the fields and re-derived from the headers without a change.
 //! `ValvePackingSentinel_t` is the independent check: the header itself
 //! asserts it is 24 bytes under `VALVE_CALLBACK_PACK_SMALL` and 32 under
 //! `VALVE_CALLBACK_PACK_LARGE`, so if `callback_packed!` picked the wrong

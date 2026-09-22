@@ -1142,8 +1142,12 @@ On branch `steam-sdk`, not merged to `main`:
 
 - **Slice 1: done** (2026-09-22). CI-side tests green on Windows; `pack(4)`
   tables, the Linux/macOS loaders and the `miri (crcbl-steam)` job run only in
-  CI. **Not run:** the drift gate and `tests/smoke.rs`, since no SDK was
-  available; the manual steps below, on every OS.
+  CI. The drift gate has run (2026-09-23) against the Steamworks.NET mirror of
+  the 1.65 headers (commit `ba71581f`, "Update to Steamworks 1.65[a]"), laid out
+  as `$CRCBL_STEAM_SDK/public/steam/`: its first run found `GetAppID` declared
+  as returning `AppId_t` where the header says `uint32` (the same ABI), and it
+  passes since the fix. **Not run:** the drift gate against an SDK zip from
+  Valve, `tests/smoke.rs`, and the manual steps below, on every OS.
 - **Slice 1b: next.**
 - Slices 3a, 3b, 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
 
@@ -1180,9 +1184,11 @@ On branch `steam-sdk`, not merged to `main`:
   finds each struct in whichever header defines it, rather than trusting a
   header name: the plan says `CallbackMsg_t` is in `steam_api_internal.h`, and
   it may be in `steam_api_common.h`.
-- **Layout numbers come from a C program over this crate's transcription**
-  (MinGW GCC, both packings), not over the SDK's headers, which were not on the
-  machine. The drift gate is what ties the transcription to the SDK.
+- **Layout numbers come from a C++ program over the mirror's headers** (MinGW
+  GCC; `pack(8)` as compiled on Windows, `pack(4)` by forcing
+  `steamclientpublic.h`'s platform test in a copy), not over a Valve zip. Slice
+  1's tables were first computed over this crate's own transcription and came
+  out identical when re-derived from the headers.
 - **`log` is not a dependency yet.** Slice 1 logs nothing, and `cargo machete`
   refuses an unused dependency.
 
