@@ -4062,7 +4062,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   table access in mesh SPIR-V, changing only `OpLoopMerge`'s loop control from
   `None` to `Unroll`. Mesh, grass and water SPIR-V sizes did not change. The
   annotation and its generated artifacts were removed; do not retry a loop hint
-  as though it forces this compiler to expand the search.
+  as though it forces this compiler to expand the search. The next bounded
+  compiler-shape trial is an explicit constant-index tap sequence, which gives
+  Slang no dynamic loop or table subscript to preserve. Keep the shared tap body
+  single-sourced within each shader, retain the exact tap and accumulation
+  order, and inspect generated SPIR-V before timing. Code size and live-range
+  growth are explicit rejection risks; require matched `instances` and
+  `specular-lights-fit` A/B pairs to avoid trading loop overhead for occupancy.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
