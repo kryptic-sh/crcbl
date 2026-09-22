@@ -430,7 +430,7 @@ mod tests {
         ("mesh.slang", "float SHADOW_SUN_TAN_RADIUS", ";"),
         ("mesh.slang", "float SHADOW_SEARCH_TEXELS", ";"),
         ("mesh.slang", "uint SHADOW_SEARCH_TAPS", ";"),
-        ("mesh.slang", "float2 SHADOW_SEARCH_DISC", "};"),
+        ("mesh.slang", "float2 SHADOW_SEARCH_OFFSET", "};"),
         ("mesh.slang", "uint SHADOW_FILTER_PCSS", ";"),
         ("mesh.slang", "uint SHADOW_FILTER_DISC", ";"),
         ("mesh.slang", "uint SHADOW_FILTER_BOX", ";"),

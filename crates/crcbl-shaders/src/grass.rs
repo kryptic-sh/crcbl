@@ -904,7 +904,7 @@ mod tests {
         ("float SHADOW_SUN_TAN_RADIUS", ";"),
         ("float SHADOW_SEARCH_TEXELS", ";"),
         ("uint SHADOW_SEARCH_TAPS", ";"),
-        ("float2 SHADOW_SEARCH_DISC", "};"),
+        ("float2 SHADOW_SEARCH_OFFSET", "};"),
         ("uint SHADOW_FILTER_PCSS", ";"),
         ("uint SHADOW_FILTER_DISC", ";"),
         ("uint SHADOW_FILTER_BOX", ";"),

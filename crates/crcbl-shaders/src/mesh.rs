@@ -6646,8 +6646,8 @@ mod tests {
             .collect()
     }
 
-    /// **Both shadow discs are the Vogel spirals their doc comments say they
-    /// are.**
+    /// **The shadow filter disc is the Vogel spiral its doc comment says it
+    /// is.**
     ///
     /// Four dozen coordinates transcribed by hand into a shader are four dozen
     /// chances to fat-finger a digit, and nothing downstream would say so: a
@@ -6657,19 +6657,11 @@ mod tests {
     /// `sqrt((i + 0.5) / n)` at angle `i π (3 - sqrt 5)` — rather than pinned to
     /// a copy of itself.
     ///
-    /// **Both, and separately**, because the generator's radii depend on the
-    /// count it was generated for: `SHADOW_SEARCH_DISC` is not a prefix or a
-    /// stride of `SHADOW_DISC` and re-deriving it against the filter's count
-    /// would pass a table that is neither.
-    ///
     /// The tolerance is what six printed decimals can carry.
     #[test]
-    fn the_shadow_discs_are_the_vogel_spirals_they_claim_to_be() {
+    fn the_shadow_disc_is_the_vogel_spiral_it_claims_to_be() {
         let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
-        for (table, taps) in [
-            ("SHADOW_DISC", "SHADOW_TAPS"),
-            ("SHADOW_SEARCH_DISC", "SHADOW_SEARCH_TAPS"),
-        ] {
+        for (table, taps) in [("SHADOW_DISC", "SHADOW_TAPS")] {
             let disc = shader_table(table);
             let count = disc.len();
             let declared = format!("static const uint {taps} = {count};");
@@ -6694,6 +6686,49 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The blocker loop consumes offsets at the search radius, so storing a
+    /// unit disc and multiplying every tap by that fixed radius repeats work
+    /// for every shaded fragment. The reach is a power of two: scaling the old
+    /// six-decimal `f32` literals is exact, and the pre-scaled table must keep
+    /// those exact bits rather than merely land near the same coordinates.
+    #[test]
+    fn the_blocker_offsets_precompute_their_fixed_reach() {
+        let source = include_str!("../shaders/mesh.slang");
+        let offsets = shader_table("SHADOW_SEARCH_OFFSET");
+        let count = offsets.len();
+        let golden_angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt());
+        let reach = shader_float(source, "SHADOW_SEARCH_TEXELS");
+        for (index, &(x, y)) in offsets.iter().enumerate() {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a tap index is at most a few dozen"
+            )]
+            let position = index as f64;
+            let radius = ((position + 0.5) / count as f64).sqrt();
+            let angle = position * golden_angle;
+            for (actual, unit) in [x, y]
+                .into_iter()
+                .zip([radius * angle.cos(), radius * angle.sin()])
+            {
+                let old_literal = (unit * 1_000_000.0).round() as f32 / 1_000_000.0;
+                let expected = old_literal * reach;
+                assert_eq!(
+                    (actual as f32).to_bits(),
+                    expected.to_bits(),
+                    "SHADOW_SEARCH_OFFSET[{index}] changed the old tap coordinate"
+                );
+            }
+        }
+        let search = one_body(
+            source,
+            "float sun_penumbra_texels(uint cascade, float2 tile_uv",
+        );
+        assert!(
+            !search.contains("SHADOW_SEARCH_OFFSET[index] * SHADOW_SEARCH_TEXELS"),
+            "the blocker loop still scales every constant search offset at runtime"
+        );
     }
 
     /// **The rotation table is the sixteen sixteenths of a turn, in order.**

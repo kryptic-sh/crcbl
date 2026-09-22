@@ -4033,13 +4033,22 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   value-passing shape solely because its binaries are smaller. A future trial
   must preserve the exact taps, accumulation order, atlas clamping, bias,
   adaptive penumbra width and cascade blending. Fully lit/shadowed interiors,
-  contact edges and Metal/Direct3D image parity remain unverified. The next
-  bounded trial is narrower: current mesh SPIR-V retains the expression
-  `SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS` as an `OpVectorTimesScalar`
-  inside the 16-iteration blocker loop. Pre-scale the constant search-offset
-  table, prove each parsed `f32` component is bitwise equal to the old component
-  multiplied by the power-of-two reach, and verify that the generated loop loses
-  that operation before GPU timing.
+  contact edges and Metal/Direct3D image parity remain unverified. A narrower
+  trial was retained: mesh SPIR-V kept
+  `SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS` as a runtime
+  `OpVectorTimesScalar` inside each inlined blocker loop. The search table now
+  stores offsets pre-scaled by the power-of-two reach. Its observer failed
+  before the edit, then proved every parsed `f32` component bit-identical to the
+  old coordinate multiplied by that reach; all shader targets compiled, and
+  matching vector-times-eight operations in mesh SPIR-V fell from three to one,
+  with the remaining operation belonging to an unrelated debug output. Warm
+  matched A/B pairs measured `instances` forward at 1.724/1.741 ms before and
+  1.706/1.722 ms after, a 1.0/1.1% reduction. Complete pass sums moved from
+  7.658/7.718 ms to 7.660/7.698 ms, so no full-frame gain is established. The
+  heavier `specular-lights-fit` control was neutral: forward moved from
+  3.901/3.952 ms to 3.914/3.948 ms and pass sums from 10.746/10.849 ms to
+  10.790/10.860 ms. Retain the exact arithmetic removal for the repeatable
+  focused-path reduction; do not claim a general frame-time improvement.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the

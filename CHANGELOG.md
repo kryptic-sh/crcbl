@@ -29,6 +29,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- PCSS blocker searches now read pre-scaled Vogel offsets instead of multiplying
+  every search tap by the fixed reach in mesh, grass and water shading. The
+  offsets remain bit-identical to the previous filter coordinates.
 - Empty probe volumes now skip their eight-corner forward, water and reflection
   gathers while preserving populated clipmaps and the sky fallback.
 - Mixed-edge PCSS filtering now reuses the shadow comparisons already made by
