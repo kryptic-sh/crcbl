@@ -3650,7 +3650,7 @@ pub fn lose_focus(
     }
     if !*paused {
         *paused = true;
-        log::info!("paused: the window lost focus");
+        log::info!("paused: input focus lost");
     }
 }
 
@@ -6060,6 +6060,23 @@ pub trait HostedGame: Sized {
         false
     }
 
+    /// Whether something only the game can see took the player's input away
+    /// since the loop last looked — the Steam overlay opening, say.
+    ///
+    /// The loop treats `true` exactly as it treats the window losing focus:
+    /// every held key, button and contact is released through the path a
+    /// player's own release would take, and the game pauses. That is
+    /// [`lose_focus`], and unlike [`take_pending_pause`](Self::take_pending_pause)
+    /// it is not a toggle — a second report while paused changes nothing, and
+    /// resuming stays the player's action.
+    ///
+    /// Taken once a frame, like the pause request. The `false` default is the
+    /// honest answer for a game with no such source: its only focus is the
+    /// window's, which the loop already watches.
+    fn take_pending_focus_loss(&mut self) -> bool {
+        false
+    }
+
     /// Everything this game exposes to the debug console.
     ///
     /// The one seam `docs/plan/52-debug-console.md` decision 2 puts on a host:
@@ -6863,8 +6880,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
         // Before the pause toggle, so a batch carrying both a focus loss and an
         // Escape resolves as "paused, then the player unpaused" rather than the
-        // reverse.
-        if pending.focus_lost {
+        // reverse. Taken every frame, like the pause request below, and one
+        // path for both causes: the obligations are the window's either way.
+        let game_focus_lost = self.game.take_pending_focus_loss();
+        if pending.focus_lost || game_focus_lost {
             let game = &mut self.game;
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
@@ -12938,6 +12957,8 @@ mod tests {
         pending_limit: Option<FrameLimit>,
         /// A pause an on-screen control asked for, taken by the loop.
         pending_pause: bool,
+        /// A focus loss only the game could see, taken by the loop.
+        pending_focus_loss: bool,
         /// What [`HostedGame::pointer_mode`] answers, so a test can change this
         /// game's mind between frames.
         wanted_pointer: PointerMode,
@@ -13154,6 +13175,10 @@ mod tests {
 
         fn take_pending_pause(&mut self) -> bool {
             std::mem::take(&mut self.pending_pause)
+        }
+
+        fn take_pending_focus_loss(&mut self) -> bool {
+            std::mem::take(&mut self.pending_focus_loss)
         }
 
         fn summary(&self, run: RunSummary) -> FakeSummary {
@@ -14405,6 +14430,45 @@ mod tests {
             engine.game().ticks > ticks_paused,
             "the simulation did not start again",
         );
+    }
+
+    /// **A focus loss the game reports is the window's focus loss.**
+    ///
+    /// The seam an overlay the loop cannot see comes through — the Steam
+    /// overlay, for `docs/plan/42-steam.md`. The held key comes up through the
+    /// game's own key path and the loop pauses; a second report while paused
+    /// leaves it paused, because this is a loss rather than a toggle and
+    /// resuming stays the player's.
+    #[test]
+    fn a_focus_loss_the_game_reports_releases_held_keys_and_pauses() {
+        let mut engine = hosted(None);
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, SERVE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert_eq!(engine.held_keys(), [SERVE_KEY]);
+        assert!(!engine.is_paused());
+
+        engine.game_mut().pending_focus_loss = true;
+        step(&mut engine);
+        assert!(
+            !engine.game().pending_focus_loss,
+            "the report was not taken"
+        );
+        assert!(engine.is_paused(), "the reported focus loss did not pause");
+        assert_eq!(
+            engine.game.keys.last().copied(),
+            Some((SERVE_KEY, false)),
+            "the held key was not released to the game: {:?}",
+            engine.game.keys,
+        );
+        assert!(engine.held_keys().is_empty());
+
+        engine.game_mut().pending_focus_loss = true;
+        step(&mut engine);
+        assert!(engine.is_paused(), "a second report toggled the pause off");
     }
 
     /// **The game is handed every contact, normalised, in order.**

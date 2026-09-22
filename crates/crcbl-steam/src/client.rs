@@ -1,13 +1,13 @@
 //! Bringing Steam up, and taking it down exactly once.
 
-use std::{collections::VecDeque, fmt, rc::Rc, sync::atomic::Ordering};
+use std::{cell::Cell, collections::VecDeque, fmt, rc::Rc, sync::atomic::Ordering};
 
 use crate::{
     SteamEvent,
     error::InitError,
     ffi::{
-        HSteamPipe, ISteamUser, ISteamUtils, Lib, SteamErrMsg, init_result, load, manifest,
-        manifest::Accessor, versions,
+        HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
+        init_result, load, manifest, manifest::Accessor, versions,
     },
     pump::PumpDiagnostics,
 };
@@ -57,6 +57,10 @@ pub(crate) struct Client {
     pub(crate) user: *mut ISteamUser,
     /// `SteamAPI_SteamUtils_v011()`; never null.
     pub(crate) utils: *mut ISteamUtils,
+    /// `SteamAPI_SteamFriends_v018()`; never null.
+    pub(crate) friends: *mut ISteamFriends,
+    /// `SteamAPI_SteamApps_v009()`; never null.
+    pub(crate) apps: *mut ISteamApps,
     /// Dropped last, after every other field: the shutdown.
     _session: Session,
 }
@@ -73,6 +77,9 @@ pub struct Steam {
     pub(crate) client: Rc<Client>,
     pub(crate) queue: VecDeque<SteamEvent>,
     pub(crate) diagnostics: PumpDiagnostics,
+    /// Strings Steam returned that were not intact UTF-8. A `Cell` because
+    /// strings are read through `&Steam`; `Steam` is `!Sync` regardless.
+    pub(crate) lossy_strings: Cell<u64>,
 }
 
 impl fmt::Debug for Steam {
@@ -109,6 +116,31 @@ impl Steam {
     pub fn init(app: AppId) -> Result<Self, InitError> {
         init_on(load::real()?, app)
     }
+
+    /// The ships-through-Steam guard (`SteamAPI_RestartAppIfNecessary`):
+    /// `Ok(true)` means Steam is relaunching the game through the client, and
+    /// this process should quit now; `Ok(false)` means carry on.
+    ///
+    /// Called before [`init`](Self::init), and needs no running `Steam`. It
+    /// loads the library into the same never-unloaded cache `init` uses, so
+    /// calling both opens it once. **Always `Ok(false)` while a
+    /// `steam_appid.txt` is in the working directory** — right for
+    /// development, and why a shipped build must not carry one.
+    ///
+    /// # Errors
+    ///
+    /// [`InitError::NoLibrary`] or [`InitError::NoSymbol`] when the library
+    /// cannot be loaded; a game that ships through Steam treats either as
+    /// "not launched properly".
+    pub fn relaunch_via_steam(app: AppId) -> Result<bool, InitError> {
+        Ok(relaunch_on(load::real()?, app))
+    }
+}
+
+/// `Steam::relaunch_via_steam` over a given library.
+pub(crate) fn relaunch_on(lib: &'static Lib, app: AppId) -> bool {
+    // SAFETY: takes the app id by value and needs no prior init.
+    unsafe { (lib.fns.lifecycle.restart_app_if_necessary)(app.0) }
 }
 
 /// `Steam::init` over a given library: the real one, or a test's fake.
@@ -132,6 +164,9 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     };
     let user = interface(lib.fns.user.accessor, &versions::USER)?.cast::<ISteamUser>();
     let utils = interface(lib.fns.utils.accessor, &versions::UTILS)?.cast::<ISteamUtils>();
+    let friends =
+        interface(lib.fns.friends.accessor, &versions::FRIENDS)?.cast::<ISteamFriends>();
+    let apps = interface(lib.fns.apps.accessor, &versions::APPS)?.cast::<ISteamApps>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -148,10 +183,13 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             pipe,
             user,
             utils,
+            friends,
+            apps,
             _session: session,
         }),
         queue: VecDeque::new(),
         diagnostics: PumpDiagnostics::default(),
+        lossy_strings: Cell::new(0),
     })
 }
 
@@ -221,10 +259,18 @@ mod tests {
             script(|s| s.handshake.clone()),
             Some(versions::handshake(manifest::INTERFACES))
         );
+        // Spelled out once, so a row dropped from the manifest shows up here
+        // rather than vanishing from both sides of the comparison above.
+        assert_eq!(
+            versions::handshake(manifest::INTERFACES),
+            b"SteamUser023\0SteamFriends018\0STEAMAPPS_INTERFACE_VERSION009\0SteamUtils011\0\0"
+        );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
         assert!(!steam.client.user.is_null());
         assert!(!steam.client.utils.is_null());
+        assert!(!steam.client.friends.is_null());
+        assert!(!steam.client.apps.is_null());
     }
 
     #[test]
@@ -298,22 +344,29 @@ mod tests {
 
     #[test]
     fn a_null_interface_is_no_interface_naming_it_and_shuts_down_once() {
-        for (null_user, name) in [
-            (true, "SteamAPI_SteamUser_v023"),
-            (false, "SteamAPI_SteamUtils_v011"),
-        ] {
+        for iface in manifest::INTERFACES {
             let lib = testing::fake_lib();
-            script(|s| {
-                s.null_user = null_user;
-                s.null_utils = !null_user;
-            });
+            script(|s| s.null_accessor = Some(iface.accessor));
             assert_eq!(
                 init_on(lib, AppId(480)).unwrap_err(),
-                InitError::NoInterface(name)
+                InitError::NoInterface(iface.accessor)
             );
-            assert_eq!(script(|s| s.calls.shutdown), 1, "{name}");
+            assert_eq!(script(|s| s.calls.shutdown), 1, "{}", iface.accessor);
             script(|s| s.calls.shutdown = 0);
         }
+        assert!(!manifest::INTERFACES.is_empty(), "the loop checked nothing");
+    }
+
+    #[test]
+    fn relaunch_passes_the_app_and_steams_answer_through() {
+        let lib = testing::fake_lib();
+        for answer in [false, true] {
+            script(|s| s.restart = answer);
+            assert_eq!(relaunch_on(lib, AppId(480)), answer);
+        }
+        assert_eq!(script(|s| s.restart_asked.clone()), [480, 480]);
+        // Needs no init, and starts none.
+        assert_eq!(script(|s| (s.calls.init, s.calls.shutdown)), (0, 0));
     }
 
     #[test]

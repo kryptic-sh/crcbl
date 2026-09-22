@@ -33,6 +33,22 @@ pub(crate) struct Interface {
     pub(crate) in_init_ex: bool,
 }
 
+/// `ISteamApps`.
+pub(crate) const APPS: Interface = Interface {
+    accessor: "SteamAPI_SteamApps_v009",
+    version: "STEAMAPPS_INTERFACE_VERSION009",
+    define: "STEAMAPPS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
+/// `ISteamFriends`.
+pub(crate) const FRIENDS: Interface = Interface {
+    accessor: "SteamAPI_SteamFriends_v018",
+    version: "SteamFriends018",
+    define: "STEAMFRIENDS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamUser`.
 pub(crate) const USER: Interface = Interface {
     accessor: "SteamAPI_SteamUser_v023",

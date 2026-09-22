@@ -41,6 +41,15 @@ impl User<'_> {
         // SAFETY: as in `steam_id`.
         unsafe { (client.lib.fns.user.logged_on)(client.user) }
     }
+
+    /// The local user's Steam level, the number on their profile
+    /// (`ISteamUser::GetPlayerSteamLevel`).
+    #[must_use]
+    pub fn steam_level(&self) -> i32 {
+        let client = &self.steam.client;
+        // SAFETY: as in `steam_id`.
+        unsafe { (client.lib.fns.user.get_player_steam_level)(client.user) }
+    }
 }
 
 #[cfg(test)]
@@ -55,5 +64,12 @@ mod tests {
         assert!(steam.user().logged_on());
         testing::script(|s| s.logged_on = false);
         assert!(!steam.user().logged_on());
+    }
+
+    #[test]
+    fn the_steam_level_is_the_clients() {
+        let steam = init_on(testing::fake_lib(), AppId(480)).unwrap();
+        testing::script(|s| s.steam_level = 42);
+        assert_eq!(steam.user().steam_level(), 42);
     }
 }

@@ -68,6 +68,8 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
+
+use crate::steam::SteamLink;
 use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, open_backend};
 use crcbl::ui::draw_list::DrawList;
@@ -305,6 +307,9 @@ pub struct Sandbox {
     /// Every frame rather than once at start-up, so the field is about the
     /// frames rather than about a value copied before any of them ran.
     effects: RenderEffects,
+    /// Steam, when the `steam` feature is on and a windowed run started it;
+    /// inert otherwise. See [`crate::steam`].
+    steam: SteamLink,
 }
 
 impl Sandbox {
@@ -330,6 +335,7 @@ impl Sandbox {
             wait_unpresented,
             unpresented: None,
             effects,
+            steam: SteamLink::off(),
         }
     }
 }
@@ -427,6 +433,18 @@ pub fn with_shell<S: Shell + ?Sized>(
     // actually be drawn with.
     let effects = gpu.effects();
 
+    let mut sandbox = Sandbox::new(
+        options.pacing,
+        options.limit,
+        options.wait_unpresented,
+        effects,
+    );
+    // Windowed runs only: a headless run is CI's, and must neither need nor
+    // touch a developer's Steam client.
+    if !options.headless {
+        sandbox.steam = SteamLink::start();
+    }
+
     Ok(Loop::new(
         Booted {
             shell,
@@ -435,12 +453,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Sandbox::new(
-            options.pacing,
-            options.limit,
-            options.wait_unpresented,
-            effects,
-        ),
+        sandbox,
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -563,11 +576,20 @@ impl HostedGame for Sandbox {
         self.pending_limit.take()
     }
 
+    /// The Steam overlay opening is a focus loss the window never reports.
+    fn take_pending_focus_loss(&mut self) -> bool {
+        self.steam.take_overlay_opened()
+    }
+
     fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
         // `alpha` is read after the tick loop, never before: before, the
         // accumulator may still hold whole ticks. `FrameInfo` is handed over
         // after `run_ticks` for exactly that reason.
         render(frame.alpha);
+        // Here because `draw` is the one hook that runs on every frame, paused
+        // or not, and an overlay opened over the pause menu still has to be
+        // seen; what it reports reaches the loop on the next frame.
+        self.steam.pump();
         // Re-read rather than kept: the device clamps last, so what the summary
         // reports comes back off the renderer.
         self.effects = gpu.effects();

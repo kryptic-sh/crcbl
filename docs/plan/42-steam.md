@@ -16,14 +16,15 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-22): slice 1 built on branch `steam-sdk`, the rest planned** —
-see "Status by slice" under "Slice order". The four decisions the earlier draft
-asked for were ratified 2026-09-06 (see "Decisions" below), and "the full Steam
-API" is now in scope, which reverses two earlier "not now" calls — Steam Input
-and `SteamTransport` — and pulls the first consumer's requirements (the game EW,
-below) forward in the slice order. The plan was reviewed the same day against
-the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists what that
-changed, including EW's answers to the questions the first draft left open.
+**Status (2026-09-23): slices 1 and 1b built on branch `steam-sdk`, the rest
+planned** — see "Status by slice" under "Slice order". The four decisions the
+earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
+"the full Steam API" is now in scope, which reverses two earlier "not now" calls
+— Steam Input and `SteamTransport` — and pulls the first consumer's requirements
+(the game EW, below) forward in the slice order. The plan was reviewed the same
+day against the SDK 1.65 headers and this tree; "Review (step 2)" at the end
+lists what that changed, including EW's answers to the questions the first draft
+left open.
 
 Two findings shape everything below, so they come first:
 
@@ -394,8 +395,13 @@ Target gating follows the `crcbl-dx12` pattern — no `#![cfg(...)]` crate root:
 
 - Every module that touches the FFI is
   `#[cfg(all(target_pointer_width = "64", any(target_os = "linux", target_os = "windows", target_os = "macos")))]`.
-  Elsewhere the crate is its documentation and no public items; nothing above
-  the crate ever writes `cfg(target_os)` to ask about Steam.
+  Elsewhere the crate is its documentation and no public items. _Corrected in
+  slice 1b:_ the first draft said nothing above the crate would ever ask
+  `cfg(target_os)` about Steam, which cannot hold for a consumer that turns the
+  feature on for a target with no items — and the workspace's `wasm32` clippy
+  sweep builds every crate `--all-features`. `apps/sandbox/src/steam.rs` asks
+  once, beside an inert stand-in; slice 8's `Loop` limb is where the question
+  moves for games the loop hosts.
 - Pure-logic modules — the callback-id table, payload decode, the call registry,
   the lobby/connection state machines, the voice resampling, the synced-file
   conflict rules — are additionally compiled under `test`, so they run on every
@@ -1050,8 +1056,13 @@ obligation is pause: `SteamEvent::OverlayActivated { active: true }` must pause
 and release held input exactly as focus loss does. The engine already has that
 function — `lose_focus` in `crates/crcbl/src/engine.rs`, which releases held
 keys as real release events and sets `paused` — so slice 8's `Loop` limb routes
-`OverlayActivated { active: true }` through it, and until then each app calls it
-itself. **Whether the overlay composites over `crcbl-shell`'s own
+`OverlayActivated { active: true }` through it. _Corrected in slice 1b:_ the
+first draft said that until then each app calls `lose_focus` itself, but a game
+the `Loop` hosts cannot — the held keys and the pause are the loop's. So slice
+1b gave `HostedGame` a `take_pending_focus_loss` hook (default `false`) that the
+loop folds into its own focus-loss path; a game that pumps Steam reports an
+opened overlay through it, and slice 8 can keep the hook as the seam its limb
+feeds. **Whether the overlay composites over `crcbl-shell`'s own
 Wayland/X11/Win32/AppKit windows and each GPU backend's swapchain is
 unverified**, and stays a named line in every slice's manual checklist.
 
@@ -1148,8 +1159,19 @@ On branch `steam-sdk`, not merged to `main`:
   as returning `AppId_t` where the header says `uint32` (the same ABI), and it
   passes since the fix. **Not run:** the drift gate against an SDK zip from
   Valve, `tests/smoke.rs`, and the manual steps below, on every OS.
-- **Slice 1b: next.**
-- Slices 3a, 3b, 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
+- **Slice 1b: done** (2026-09-23). CI-side tests green on Windows (Miri clean,
+  54 lib tests); the drift gate passes against the mirror with every new
+  declaration and both new interface rows. Through the old Godot-bundled
+  `steam_api64.dll` on the Windows machine the real loader resolved every
+  lifecycle, `ISteamUser` and `ISteamFriends` symbol 1b added and stopped at
+  `NoSymbol("SteamAPI_SteamApps_v009")` — that DLL predates `SteamApps009`.
+  **Not run:** everything under "Needs a real client" below, on every OS — no
+  1.65 redistributable was available, and a windowed sandbox run was not made on
+  the shared development machine; `crcbl` and `sandbox` clippy for
+  `x86_64-unknown-linux-gnu` (their `alsa-sys` build script needs a Linux
+  sysroot; `crcbl-steam` itself was clippy'd for Linux, macOS and wasm32).
+- **Slice 3a: next.**
+- Slices 3b, 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1191,6 +1213,47 @@ On branch `steam-sdk`, not merged to `main`:
   out identical when re-derived from the headers.
 - **`log` is not a dependency yet.** Slice 1 logs nothing, and `cargo machete`
   refuses an unused dependency.
+
+**Slice 1b as built, where it differs from the text below:**
+
+- **The overlay pause goes through a `HostedGame` hook, not a direct
+  `lose_focus` call.** `apps/sandbox` is hosted by `crcbl::engine::Loop`, which
+  owns the held keys and the pause, so it cannot call `lose_focus`. 1b added
+  `HostedGame::take_pending_focus_loss` (default `false`), which the loop takes
+  every frame and folds into the window's focus-loss path; the sandbox answers
+  it from `SteamEvent::OverlayActivated { active: true }`. Tested in
+  `crcbl::engine` (a held key is released to the game and the loop pauses; a
+  second report while paused leaves it paused) and seen red with the wiring
+  removed. `lose_focus`'s log line now says "input focus lost" rather than
+  naming the window.
+- **The sandbox pumps Steam from `HostedGame::draw`**, the one hook the loop
+  calls every frame, paused or not; the overlay a frame sees reaches the loop on
+  the next. It initialises Steam on windowed runs only — a `--headless` run is
+  CI's and must not touch a developer's client — and `SteamLink` is inert
+  without the feature or on a target with no Steam items (see "The crate and its
+  gating").
+- **`ISteamApps` joined the handshake too**, not only `ISteamFriends`:
+  `BIsSubscribed` and `GetCurrentGameLanguage` need its accessor. The handshake
+  is now `SteamUser023`, `SteamFriends018`, `STEAMAPPS_INTERFACE_VERSION009`,
+  `SteamUtils011`, spelled out once in a test.
+- **A null string counts as lossy.** No 1b binding is documented to return null;
+  one that did reads as empty and lands in `PumpDiagnostics::lossy_strings`,
+  like invalid UTF-8.
+- **"A borrowed return fails" is enforced by the type, not a test.** Every
+  string accessor returns `String`, so a borrow of Steam's buffer is not
+  expressible. The test that stands in keeps the fake's one buffer, overwrites
+  it in place after the call, and checks the copy survived; the lossy and null
+  tests were each seen red.
+- **`relaunch_via_steam`'s shared cache is tested at the cache.** Both entry
+  points call `load::real`, which goes through `load::cached`; the test proves
+  `cached` runs its loader once and keeps a failure. That `init` and
+  `relaunch_via_steam` share `load::real` is by reading, not by test — there is
+  no seam to count real loads through without loading the real library.
+- **Named where the catalogue left names open:**
+  `Utils::hardware_default_config` (`HardwareDefaultConfig`, with `Unknown(i32)`
+  like `SteamHardware`), `Utils::set_notification_corner` (`NotificationCorner`,
+  without Valve's `k_EPositionInvalid`), `Utils::server_unix_time`,
+  `User::steam_level`.
 
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
@@ -1291,14 +1354,19 @@ and reads the local `SteamId`. No sample, no umbrella feature, no async calls.
 - **Scope:** `crates/crcbl/Cargo.toml` gains `steam = ["dep:crcbl-steam"]`
   beside `scene = ["dep:crcbl-scene", …]`, and `pub use crcbl_steam as steam;`
   behind it; `apps/sandbox` behind its own `steam` feature calls init/pump, logs
-  identity and overlay events, and calls `lose_focus` on
-  `OverlayActivated { active: true }`; `Steam::relaunch_via_steam`; the rest of
-  the `ISteamUtils`/`ISteamApps`/`ISteamUser` basics in the catalogue
+  identity and overlay events, and pauses through the loop's focus-loss path on
+  `OverlayActivated { active: true }` (as built: the
+  `HostedGame::take_pending_focus_loss` hook — see "Slice 1b as built");
+  `Steam::relaunch_via_steam`; the rest of the
+  `ISteamUtils`/`ISteamApps`/`ISteamUser` basics in the catalogue
   (`friends().persona_name()` included, which adds `ISteamFriends`'s accessor
   and `SteamFriends018` to the handshake).
 - **Files:** `crates/crcbl/Cargo.toml`, `crates/crcbl/src/lib.rs`,
-  `apps/sandbox/Cargo.toml` and its main, `crcbl-steam/src/{apps,friends}.rs`
-  (the latter holding only `persona_name` until 3b), additions to `ffi/`.
+  `crates/crcbl/src/engine.rs` (the hook), `apps/sandbox/Cargo.toml`,
+  `apps/sandbox/src/app.rs`, `apps/sandbox/src/steam.rs`,
+  `crates/crcbl-steam/src/apps.rs`, `crates/crcbl-steam/src/friends.rs` (only
+  `persona_name` until 3b), `crates/crcbl-steam/src/strings.rs`, additions to
+  `ffi/`.
 - **Tests (CI):** `relaunch_via_steam` over the fake (`true`/`false`
   passthrough, library cached once across `relaunch_via_steam` then `init`);
   string-returning calls copy before returning (the fake reuses one buffer and

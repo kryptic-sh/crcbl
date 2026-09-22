@@ -67,6 +67,10 @@ macro_rules! opaque {
 }
 
 opaque! {
+    /// `class ISteamApps`.
+    ISteamApps;
+    /// `class ISteamFriends`.
+    ISteamFriends;
     /// `class ISteamUser`.
     ISteamUser;
     /// `class ISteamUtils`.

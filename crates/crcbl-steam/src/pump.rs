@@ -12,11 +12,12 @@ use crate::{
     ffi::structs::CallbackMsg,
 };
 
-/// Counters over everything the pump has seen, for smoke tests and logs.
+/// Counters over everything the pump has seen, and every string Steam handed
+/// back, for smoke tests and logs.
 ///
-/// `decode_mismatches` and `null_payloads` must stay zero: either is SDK
-/// drift or a broken library, never normal traffic. `unknown` grows in
-/// ordinary play — the pipe carries callbacks nobody bound.
+/// `decode_mismatches`, `null_payloads` and `lossy_strings` must stay zero:
+/// each is SDK drift or a broken library, never normal traffic. `unknown`
+/// grows in ordinary play — the pipe carries callbacks nobody bound.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PumpDiagnostics {
@@ -31,6 +32,9 @@ pub struct PumpDiagnostics {
     pub null_payloads: u64,
     /// `SteamAPICallCompleted_t`s for calls nothing is waiting on.
     pub unclaimed_completions: u64,
+    /// Strings Steam returned that were not valid UTF-8 (read lossily) or
+    /// were null (read as empty).
+    pub lossy_strings: u64,
 }
 
 impl Steam {
@@ -64,10 +68,14 @@ impl Steam {
         self.queue.drain(..)
     }
 
-    /// Counters over everything [`pump`](Self::pump) has seen.
+    /// Counters over everything [`pump`](Self::pump) has seen, and every
+    /// string read since init.
     #[must_use]
     pub fn diagnostics(&self) -> PumpDiagnostics {
-        self.diagnostics
+        PumpDiagnostics {
+            lossy_strings: self.lossy_strings.get(),
+            ..self.diagnostics
+        }
     }
 
     /// Decodes one message. Runs strictly between `GetNextCallback` and

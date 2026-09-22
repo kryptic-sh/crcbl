@@ -110,15 +110,26 @@ fn search_paths() -> (Vec<PathBuf>, Vec<String>) {
     (candidates(exe_dir.as_deref(), sdk_root.as_deref()), notes)
 }
 
+/// What a load answers, cached.
+type Loaded = Result<&'static Lib, InitError>;
+
 /// The real library, loaded once per process and never unloaded. A failure
 /// is cached too: the search looks at the same places every time.
-pub(crate) fn real() -> Result<&'static Lib, InitError> {
-    static REAL: OnceLock<Result<&'static Lib, InitError>> = OnceLock::new();
-    REAL.get_or_init(|| {
+///
+/// `Steam::init` and `Steam::relaunch_via_steam` both come through here, so a
+/// game that calls both opens the library once — there is no "transient"
+/// load, because nothing is ever unloaded.
+pub(crate) fn real() -> Loaded {
+    static REAL: OnceLock<Loaded> = OnceLock::new();
+    cached(&REAL, || {
         let (paths, notes) = search_paths();
         load_from(&paths, &notes)
     })
-    .clone()
+}
+
+/// `load`'s answer, computed at most once per `cell`.
+fn cached(cell: &OnceLock<Loaded>, load: impl FnOnce() -> Loaded) -> Loaded {
+    cell.get_or_init(load).clone()
 }
 
 /// Opens the first path that opens and resolves every symbol from it.
@@ -280,6 +291,31 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "{}", dir.display());
         dir
+    }
+
+    #[test]
+    fn a_load_runs_once_and_its_answer_is_kept_success_or_failure() {
+        let mut loads = 0;
+        let lib = crate::testing::fake_lib();
+        let cell = OnceLock::new();
+        for _ in 0..3 {
+            let got = cached(&cell, || {
+                loads += 1;
+                Ok(lib)
+            });
+            assert!(core::ptr::eq(got.unwrap(), lib));
+        }
+        assert_eq!(loads, 1);
+
+        let failed = OnceLock::new();
+        for _ in 0..2 {
+            let got = cached(&failed, || {
+                loads += 1;
+                Err(InitError::NoSymbol("x"))
+            });
+            assert_eq!(got.unwrap_err(), InitError::NoSymbol("x"));
+        }
+        assert_eq!(loads, 2, "a failed load is not retried");
     }
 
     #[test]

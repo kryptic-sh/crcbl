@@ -300,6 +300,7 @@ dependencies = [
  "crcbl-shaders",
  "crcbl-shell",
  "crcbl-sprite",
+ "crcbl-steam",
  "crcbl-store",
  "crcbl-ui",
  "crcbl-vfx",

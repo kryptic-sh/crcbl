@@ -21,15 +21,17 @@
 //! run against that mirror's headers, and **not** yet against an SDK zip
 //! downloaded from Valve, which no machine this was written on had; until it
 //! has, a declaration here is a claim about the mirror's fidelity as much as
-//! about the SDK. Two are worth naming: `ESteamHardwareType` is taken to be
-//! an `int`-sized enum, as every Steamworks enum without an explicit base is;
-//! and `bool` is C's one-byte `_Bool`, which Rust's `bool` matches across
-//! `extern "C"`.
+//! about the SDK. Two are worth naming: every enum crossing here
+//! (`ESteamHardwareType`, `ESteamHardwareDefaultConfig`,
+//! `ENotificationPosition`) is taken to be `int`-sized, as every Steamworks
+//! enum without an explicit base is; and `bool` is C's one-byte `_Bool`, which
+//! Rust's `bool` matches across `extern "C"`. A `const char *` return is
+//! Steam's buffer, copied before anything else runs (`crate::strings`).
 
 use core::ffi::{c_char, c_void};
 
 use super::{
-    HSteamPipe, ISteamUser, ISteamUtils, SteamErrMsg,
+    HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, SteamErrMsg,
     structs::CallbackMsg,
     versions::{self, Interface},
 };
@@ -179,6 +181,9 @@ bindings! {
         release_thread_memory: ReleaseCurrentThreadMemory = "SteamAPI_ReleaseCurrentThreadMemory",
             "S_API void S_CALLTYPE SteamAPI_ReleaseCurrentThreadMemory();",
             fn();
+        restart_app_if_necessary: RestartAppIfNecessary = "SteamAPI_RestartAppIfNecessary",
+            "S_API bool S_CALLTYPE SteamAPI_RestartAppIfNecessary( uint32 unOwnAppID );",
+            fn(u32) -> bool;
     }
 
     /// Manual callback dispatch (`steam_api.h`). Never mixed with
@@ -206,6 +211,26 @@ bindings! {
         logged_on: UserBLoggedOn = "SteamAPI_ISteamUser_BLoggedOn",
             "S_API bool SteamAPI_ISteamUser_BLoggedOn( ISteamUser* self );",
             fn(*mut ISteamUser) -> bool;
+        get_player_steam_level: UserGetPlayerSteamLevel = "SteamAPI_ISteamUser_GetPlayerSteamLevel",
+            "S_API int SteamAPI_ISteamUser_GetPlayerSteamLevel( ISteamUser* self );",
+            fn(*mut ISteamUser) -> i32;
+    }
+
+    /// `ISteamFriends` (`steam_api_flat.h`).
+    friends: FriendsFns for versions::FRIENDS {
+        get_persona_name: FriendsGetPersonaName = "SteamAPI_ISteamFriends_GetPersonaName",
+            "S_API const char * SteamAPI_ISteamFriends_GetPersonaName( ISteamFriends* self );",
+            fn(*mut ISteamFriends) -> *const c_char;
+    }
+
+    /// `ISteamApps` (`steam_api_flat.h`).
+    apps: AppsFns for versions::APPS {
+        is_subscribed: AppsBIsSubscribed = "SteamAPI_ISteamApps_BIsSubscribed",
+            "S_API bool SteamAPI_ISteamApps_BIsSubscribed( ISteamApps* self );",
+            fn(*mut ISteamApps) -> bool;
+        get_current_game_language: AppsGetCurrentGameLanguage = "SteamAPI_ISteamApps_GetCurrentGameLanguage",
+            "S_API const char * SteamAPI_ISteamApps_GetCurrentGameLanguage( ISteamApps* self );",
+            fn(*mut ISteamApps) -> *const c_char;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).
@@ -216,6 +241,33 @@ bindings! {
         is_running_on_steam_hardware: UtilsIsRunningOnSteamHardware = "SteamAPI_ISteamUtils_IsRunningOnSteamHardware",
             "S_API ESteamHardwareType SteamAPI_ISteamUtils_IsRunningOnSteamHardware( ISteamUtils* self );",
             fn(*mut ISteamUtils) -> i32;
+        get_steam_hardware_default_config: UtilsGetSteamHardwareDefaultConfig = "SteamAPI_ISteamUtils_GetSteamHardwareDefaultConfig",
+            "S_API ESteamHardwareDefaultConfig SteamAPI_ISteamUtils_GetSteamHardwareDefaultConfig( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> i32;
+        is_running_under_proton: UtilsIsRunningUnderProton = "SteamAPI_ISteamUtils_IsRunningUnderProton",
+            "S_API bool SteamAPI_ISteamUtils_IsRunningUnderProton( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> bool;
+        get_steam_ui_language: UtilsGetSteamUiLanguage = "SteamAPI_ISteamUtils_GetSteamUILanguage",
+            "S_API const char * SteamAPI_ISteamUtils_GetSteamUILanguage( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> *const c_char;
+        is_overlay_enabled: UtilsIsOverlayEnabled = "SteamAPI_ISteamUtils_IsOverlayEnabled",
+            "S_API bool SteamAPI_ISteamUtils_IsOverlayEnabled( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> bool;
+        is_steam_in_big_picture_mode: UtilsIsSteamInBigPictureMode = "SteamAPI_ISteamUtils_IsSteamInBigPictureMode",
+            "S_API bool SteamAPI_ISteamUtils_IsSteamInBigPictureMode( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> bool;
+        set_overlay_notification_position: UtilsSetOverlayNotificationPosition = "SteamAPI_ISteamUtils_SetOverlayNotificationPosition",
+            "S_API void SteamAPI_ISteamUtils_SetOverlayNotificationPosition( ISteamUtils* self, ENotificationPosition eNotificationPosition );",
+            fn(*mut ISteamUtils, i32);
+        set_overlay_notification_inset: UtilsSetOverlayNotificationInset = "SteamAPI_ISteamUtils_SetOverlayNotificationInset",
+            "S_API void SteamAPI_ISteamUtils_SetOverlayNotificationInset( ISteamUtils* self, int nHorizontalInset, int nVerticalInset );",
+            fn(*mut ISteamUtils, i32, i32);
+        get_server_real_time: UtilsGetServerRealTime = "SteamAPI_ISteamUtils_GetServerRealTime",
+            "S_API uint32 SteamAPI_ISteamUtils_GetServerRealTime( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> u32;
+        get_ip_country: UtilsGetIpCountry = "SteamAPI_ISteamUtils_GetIPCountry",
+            "S_API const char * SteamAPI_ISteamUtils_GetIPCountry( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> *const c_char;
     }
 }
 

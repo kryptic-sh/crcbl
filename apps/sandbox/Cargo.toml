@@ -23,3 +23,11 @@ crcbl-sample-test = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+# Steamworks in the sandbox: init under Valve's shared test app 480 on a
+# windowed run, pump once a frame, log the player's identity and the overlay,
+# and pause the way focus loss does when the overlay opens. Off by default,
+# because a sandbox run should not touch a developer's Steam client unless
+# asked; `docs/plan/42-steam.md` slice 1b is what it exists to check by hand.
+steam = ["crcbl/steam"]

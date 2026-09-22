@@ -17,11 +17,17 @@
 //! from [`Script::default`]. Each test also leaks its own [`Lib`], so the
 //! one-live-`Steam` guard is per test.
 
-use std::{cell::RefCell, collections::VecDeque, ffi::c_void, ptr::NonNull, sync::Mutex};
+use std::{
+    cell::{Cell, RefCell},
+    collections::VecDeque,
+    ffi::{c_char, c_void},
+    ptr::NonNull,
+    sync::Mutex,
+};
 
 use crate::ffi::{
-    HSteamPipe, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
-    manifest::{DispatchFns, Fns, LifecycleFns, UserFns, UtilsFns},
+    HSteamPipe, ISteamApps, ISteamFriends, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
+    manifest::{AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, UserFns, UtilsFns},
     structs::CallbackMsg,
 };
 
@@ -95,11 +101,28 @@ pub(crate) struct Script {
     /// The handshake `SteamInternal_SteamAPI_Init` received, through its
     /// double NUL.
     pub(crate) handshake: Option<Vec<u8>>,
-    pub(crate) null_user: bool,
-    pub(crate) null_utils: bool,
+    /// The one interface accessor that answers null, by accessor name.
+    pub(crate) null_accessor: Option<&'static str>,
+    /// What `SteamAPI_RestartAppIfNecessary` answers.
+    pub(crate) restart: bool,
+    /// Every app id `SteamAPI_RestartAppIfNecessary` was asked about.
+    pub(crate) restart_asked: Vec<u32>,
     pub(crate) logged_on: bool,
+    pub(crate) steam_level: i32,
     pub(crate) app_id: u32,
     pub(crate) hardware: i32,
+    pub(crate) default_config: i32,
+    pub(crate) proton: bool,
+    pub(crate) overlay_enabled: bool,
+    pub(crate) big_picture: bool,
+    pub(crate) server_time: u32,
+    pub(crate) subscribed: bool,
+    /// Every `SetOverlayNotificationPosition` argument, in order.
+    pub(crate) notification_positions: Vec<i32>,
+    /// Every `SetOverlayNotificationInset` pair, in order.
+    pub(crate) notification_insets: Vec<(i32, i32)>,
+    /// Every string call answers null instead of [`STRING`]'s buffer.
+    pub(crate) null_string: bool,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -115,11 +138,22 @@ impl Default for Script {
             init_result: crate::ffi::init_result::OK,
             init_message: Vec::new(),
             handshake: None,
-            null_user: false,
-            null_utils: false,
+            null_accessor: None,
+            restart: false,
+            restart_asked: Vec::new(),
             logged_on: true,
+            steam_level: 0,
             app_id: 480,
             hardware: 0,
+            default_config: 0,
+            proton: false,
+            overlay_enabled: false,
+            big_picture: false,
+            server_time: 0,
+            subscribed: false,
+            notification_positions: Vec::new(),
+            notification_insets: Vec::new(),
+            null_string: false,
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -127,8 +161,35 @@ impl Default for Script {
     }
 }
 
+impl Script {
+    /// Overwrites the one string buffer every string call answers from, in
+    /// place — as Steam reuses its buffer — with `text` and a NUL.
+    pub(crate) fn set_string(&mut self, text: &[u8]) {
+        assert!(text.len() < STRING_CAPACITY && !text.contains(&0), "{text:?}");
+        let mut buffer = [0; STRING_CAPACITY];
+        buffer[..text.len()].copy_from_slice(text);
+        STRING.with(|cell| cell.set(buffer));
+    }
+}
+
+/// The string buffer's size, NUL included.
+const STRING_CAPACITY: usize = 64;
+
 thread_local! {
     static SCRIPT: RefCell<Script> = RefCell::new(Script::default());
+    /// The one buffer every string call answers from. A `Cell`, apart from the
+    /// script, so a pointer into it stays valid while the script is borrowed
+    /// and sees every later overwrite.
+    static STRING: Cell<[u8; STRING_CAPACITY]> = const { Cell::new([0; STRING_CAPACITY]) };
+}
+
+/// A pointer into [`STRING`], or null when the script says so.
+fn fake_string() -> *const c_char {
+    if script(|s| s.null_string) {
+        core::ptr::null()
+    } else {
+        STRING.with(|cell| cell.as_ptr().cast::<c_char>().cast_const())
+    }
 }
 
 /// Reads or edits this thread's script.
@@ -149,6 +210,7 @@ pub(crate) fn fake_lib() -> &'static Lib {
             shutdown: fake_shutdown,
             get_pipe: fake_get_pipe,
             release_thread_memory: fake_release_thread_memory,
+            restart_app_if_necessary: fake_restart_app_if_necessary,
         },
         dispatch: DispatchFns {
             init: fake_dispatch_init,
@@ -160,11 +222,30 @@ pub(crate) fn fake_lib() -> &'static Lib {
             accessor: fake_user_accessor,
             get_steam_id: fake_get_steam_id,
             logged_on: fake_logged_on,
+            get_player_steam_level: fake_get_player_steam_level,
+        },
+        friends: FriendsFns {
+            accessor: fake_friends_accessor,
+            get_persona_name: fake_get_persona_name,
+        },
+        apps: AppsFns {
+            accessor: fake_apps_accessor,
+            is_subscribed: fake_is_subscribed,
+            get_current_game_language: fake_get_current_game_language,
         },
         utils: UtilsFns {
             accessor: fake_utils_accessor,
             get_app_id: fake_get_app_id,
             is_running_on_steam_hardware: fake_is_running_on_steam_hardware,
+            get_steam_hardware_default_config: fake_get_steam_hardware_default_config,
+            is_running_under_proton: fake_is_running_under_proton,
+            get_steam_ui_language: fake_get_steam_ui_language,
+            is_overlay_enabled: fake_is_overlay_enabled,
+            is_steam_in_big_picture_mode: fake_is_steam_in_big_picture_mode,
+            set_overlay_notification_position: fake_set_overlay_notification_position,
+            set_overlay_notification_inset: fake_set_overlay_notification_inset,
+            get_server_real_time: fake_get_server_real_time,
+            get_ip_country: fake_get_ip_country,
         },
     })));
     FAKES.lock().unwrap().push(lib);
@@ -174,6 +255,16 @@ pub(crate) fn fake_lib() -> &'static Lib {
 /// A non-null interface pointer the fake never dereferences.
 fn sentinel() -> *mut c_void {
     NonNull::<u64>::dangling().as_ptr().cast()
+}
+
+/// What an accessor answers: the sentinel, or null for the one the script
+/// names.
+fn accessor(name: &str) -> *mut c_void {
+    if script(|s| s.null_accessor == Some(name)) {
+        core::ptr::null_mut()
+    } else {
+        sentinel()
+    }
 }
 
 unsafe extern "C" fn fake_init(versions: *const core::ffi::c_char, message: *mut SteamErrMsg) -> i32 {
@@ -270,12 +361,15 @@ unsafe extern "C" fn fake_free_last_callback(pipe: HSteamPipe) {
     });
 }
 
+unsafe extern "C" fn fake_restart_app_if_necessary(app: u32) -> bool {
+    script(|s| {
+        s.restart_asked.push(app);
+        s.restart
+    })
+}
+
 unsafe extern "C" fn fake_user_accessor() -> *mut c_void {
-    if script(|s| s.null_user) {
-        core::ptr::null_mut()
-    } else {
-        sentinel()
-    }
+    accessor(crate::ffi::versions::USER.accessor)
 }
 
 unsafe extern "C" fn fake_get_steam_id(_: *mut ISteamUser) -> u64 {
@@ -286,12 +380,32 @@ unsafe extern "C" fn fake_logged_on(_: *mut ISteamUser) -> bool {
     script(|s| s.logged_on)
 }
 
+unsafe extern "C" fn fake_get_player_steam_level(_: *mut ISteamUser) -> i32 {
+    script(|s| s.steam_level)
+}
+
+unsafe extern "C" fn fake_friends_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::FRIENDS.accessor)
+}
+
+unsafe extern "C" fn fake_get_persona_name(_: *mut ISteamFriends) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_apps_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::APPS.accessor)
+}
+
+unsafe extern "C" fn fake_is_subscribed(_: *mut ISteamApps) -> bool {
+    script(|s| s.subscribed)
+}
+
+unsafe extern "C" fn fake_get_current_game_language(_: *mut ISteamApps) -> *const c_char {
+    fake_string()
+}
+
 unsafe extern "C" fn fake_utils_accessor() -> *mut c_void {
-    if script(|s| s.null_utils) {
-        core::ptr::null_mut()
-    } else {
-        sentinel()
-    }
+    accessor(crate::ffi::versions::UTILS.accessor)
 }
 
 unsafe extern "C" fn fake_get_app_id(_: *mut ISteamUtils) -> u32 {
@@ -300,4 +414,44 @@ unsafe extern "C" fn fake_get_app_id(_: *mut ISteamUtils) -> u32 {
 
 unsafe extern "C" fn fake_is_running_on_steam_hardware(_: *mut ISteamUtils) -> i32 {
     script(|s| s.hardware)
+}
+
+unsafe extern "C" fn fake_get_steam_hardware_default_config(_: *mut ISteamUtils) -> i32 {
+    script(|s| s.default_config)
+}
+
+unsafe extern "C" fn fake_is_running_under_proton(_: *mut ISteamUtils) -> bool {
+    script(|s| s.proton)
+}
+
+unsafe extern "C" fn fake_get_steam_ui_language(_: *mut ISteamUtils) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_is_overlay_enabled(_: *mut ISteamUtils) -> bool {
+    script(|s| s.overlay_enabled)
+}
+
+unsafe extern "C" fn fake_is_steam_in_big_picture_mode(_: *mut ISteamUtils) -> bool {
+    script(|s| s.big_picture)
+}
+
+unsafe extern "C" fn fake_set_overlay_notification_position(_: *mut ISteamUtils, position: i32) {
+    script(|s| s.notification_positions.push(position));
+}
+
+unsafe extern "C" fn fake_set_overlay_notification_inset(
+    _: *mut ISteamUtils,
+    horizontal: i32,
+    vertical: i32,
+) {
+    script(|s| s.notification_insets.push((horizontal, vertical)));
+}
+
+unsafe extern "C" fn fake_get_server_real_time(_: *mut ISteamUtils) -> u32 {
+    script(|s| s.server_time)
+}
+
+unsafe extern "C" fn fake_get_ip_country(_: *mut ISteamUtils) -> *const c_char {
+    fake_string()
 }

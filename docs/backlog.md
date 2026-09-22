@@ -8996,15 +8996,17 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slice 1 built on `steam-sdk`, nothing verified against Steam (2026-09-22)
+### Steamworks: slices 1 and 1b built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slice 1 is built on branch `steam-sdk`** (not merged): `crates/crcbl-steam` —
-the runtime loader, `Steam::init` with the version handshake, the
-manual-dispatch pump, shutdown on the last owner's drop, the local `SteamId`,
-the fake-library rig, the drift gate and the CI steps (clippy and rustdoc for
-macOS and Windows, a `miri (crcbl-steam)` job). The plan,
-`docs/plan/42-steam.md`, carries a status line per slice; slice 1b (umbrella
-feature, sandbox, remaining basics) is next.
+**Slices 1 and 1b are built on branch `steam-sdk`** (not merged):
+`crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
+handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
+local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
+the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
+`miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
+`HostedGame::take_pending_focus_loss`, and `apps/sandbox --features steam`. The
+plan, `docs/plan/42-steam.md`, carries a status line per slice; slice 3a
+(lobbies, invites, the call registry) is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9022,10 +9024,11 @@ feature, sandbox, remaining basics) is next.
   the plan's "Defaulted decisions").
 - **`tests/smoke.rs` has never passed against a real client.** On the Windows
   development machine (Steam running, no SDK), the only `steam_api64.dll` was
-  one bundled with an installed game, from an older SDK (`SteamUtils010`).
-  Through it, `Steam::init` opened the library with `LoadLibraryExW`, resolved
-  every lifecycle, dispatch and `ISteamUser` symbol, and failed with
-  `NoSymbol("SteamAPI_SteamUtils_v011")` — the loader works on a real DLL; the
+  one bundled with an installed game, from an older SDK. Through it,
+  `Steam::init` opened the library with `LoadLibraryExW` and resolved every
+  lifecycle, dispatch, `ISteamUser` and `ISteamFriends` symbol bound so far,
+  then failed with `NoSymbol("SteamAPI_SteamApps_v009")` (slice 1 stopped
+  earlier, at `SteamAPI_SteamUtils_v011`) — the loader works on a real DLL; the
   1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
   and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
 - **The `pack(4)` layout tables** (Linux and macOS) run only in CI; the local
@@ -9033,9 +9036,18 @@ feature, sandbox, remaining basics) is next.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21, 45 tests, clean, leak
-  check on); the CI job itself has not run, because CI runs on pull requests and
-  `main` only.
+- **Miri** ran locally on Windows (nightly 2026-09-21; 54 lib tests after slice
+  1b, clean, leak check on); the CI job itself has not run, because CI runs on
+  pull requests and `main` only.
+- **Slice 1b's manual steps have not run on any OS**: the overlay opening over
+  `apps/sandbox --features steam` and pausing it, which launch injects the
+  overlay per OS, and the `NoSteamClient` fall-through with Steam stopped. The
+  loop half is tested (`crcbl::engine`'s
+  `a_focus_loss_the_game_reports_releases_held_keys_and_pauses`); the Steam half
+  needs a 1.65 library and a windowed run.
+- **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
+  `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
+  1b changes are target-neutral; CI's Linux jobs are the check.
 - **`aarch64` Linux** (`linuxarm64`) has a loader path and no machine.
 
 **EW's requirements and priority set the order.** EW is the first consumer. Its

@@ -26,6 +26,7 @@
 //! crcbl::input     → crcbl-input     action maps and bindings
 //! crcbl::audio     → crcbl-audio     the mixer, the sound bank, the cue grammar
 //! crcbl::store     → crcbl-store     platform storage and atomic writes
+//! crcbl::steam     → crcbl-steam     Steamworks, loaded at run time (feature `steam`)
 //! crcbl::sprite    → crcbl-sprite    sheets, clips and the baked-pair reader
 //! crcbl::webgpu    → crcbl-webgpu    the wasm → JS command stream (wasm32 only)
 //! crcbl::math      → glam            the maths the renderer's types are spelled in
@@ -263,6 +264,18 @@ pub use crcbl_shell as shell;
 /// build-dependency features separately from these, so the encoder never
 /// reaches a shipped binary.
 pub use crcbl_sprite as sprite;
+/// [`crcbl-steam`](crcbl_steam): Steamworks — init, the per-frame callback
+/// pump, the local player's identity, and the Steam features
+/// `docs/plan/42-steam.md` lands slice by slice.
+///
+/// Behind the non-default `steam` feature, on `inventory`'s terms: a game
+/// not shipping on Steam links none of it. With it on, a machine without Steam
+/// still runs the game — `Steam::init` answers an ordinary `Err` — and on a
+/// target Valve ships no 64-bit library for (`wasm32`, Android) the crate is
+/// its documentation and no items, which is why nothing in it is linked from
+/// here.
+#[cfg(feature = "steam")]
+pub use crcbl_steam as steam;
 /// [`crcbl-store`](crcbl_store): platform-standard storage roots, atomic
 /// writes, and the browser's `fetch` and OPFS backends.
 pub use crcbl_store as store;

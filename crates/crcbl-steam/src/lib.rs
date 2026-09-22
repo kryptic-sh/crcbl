@@ -1,17 +1,22 @@
 //! `crcbl-steam` — Steamworks for the engine, over the SDK's flat C API.
 //!
 //! ```text
+//! Steam::relaunch_via_steam(AppId)?  ── true: quit, Steam relaunches the game
 //! Steam::init(AppId) ──▶ once per frame: pump() ──▶ events() ──▶ act
 //!        │
-//!        └── user().steam_id(), utils().app_id(), utils().steam_hardware()
+//!        ├── user(): steam_id(), logged_on(), steam_level()
+//!        ├── friends(): persona_name()
+//!        ├── apps(): subscribed(), game_language()
+//!        └── utils(): app_id(), steam_hardware(), overlay_enabled(), …
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slice 1: the library is found and opened at
-//! runtime, Steam is initialised with a version handshake, the callback pipe is
-//! drained by manual dispatch into a queue of `SteamEvent`s, the local
-//! `SteamId` is read, and the API is shut down exactly once, when the last
-//! owner of it is gone.
+//! land. What exists now is slices 1 and 1b: the library is found and opened
+//! at runtime, Steam is initialised with a version handshake, the callback
+//! pipe is drained by manual dispatch into a queue of `SteamEvent`s, the local
+//! player's identity and the machine's basics are read, and the API is shut
+//! down exactly once, when the last owner of it is gone. Every string Steam
+//! returns is copied before the call that got it returns.
 //!
 //! # No SDK in the repository, no link-time dependency
 //!
@@ -61,22 +66,27 @@ macro_rules! supported {
 }
 
 supported! {
+    mod apps;
     mod callbacks;
     mod client;
     mod error;
     mod ffi;
+    mod friends;
     mod pump;
+    mod strings;
     #[cfg(test)]
     mod testing;
     mod user;
     mod utils;
 
     pub use crate::{
+        apps::Apps,
         callbacks::SteamEvent,
         client::{AppId, Steam},
         error::InitError,
+        friends::Friends,
         pump::PumpDiagnostics,
         user::{SteamId, User},
-        utils::{SteamHardware, Utils},
+        utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},
     };
 }

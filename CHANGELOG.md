@@ -221,20 +221,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slice 1** (`docs/plan/42-steam.md`). A new crate
-  over the SDK's flat C API with no link-time dependency and nothing from the
-  SDK committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
+- **`crcbl-steam`: Steamworks, slices 1 and 1b** (`docs/plan/42-steam.md`), and
+  `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the
+  SDK's flat C API with no link-time dependency and nothing from the SDK
+  committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
   under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
   path at runtime, initialises with an interface-version handshake and switches
-  to manual callback dispatch. `Steam::pump` drains the pipe once per frame and
-  `Steam::events` yields `SteamEvent::OverlayActivated`;
-  `steam.user().steam_id()`, `logged_on()`, `steam.utils().app_id()` and
-  `steam_hardware()` read identity and machine. Every failure is a typed
-  `InitError` — no library (listing each path tried), a missing symbol, an
+  to manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
+  ships-through-Steam guard (`SteamAPI_RestartAppIfNecessary`). `Steam::pump`
+  drains the pipe once per frame and `Steam::events` yields
+  `SteamEvent::OverlayActivated`. `steam.user()` reads `steam_id()`,
+  `logged_on()` and `steam_level()`; `steam.friends().persona_name()`;
+  `steam.apps()` reads `subscribed()` and `game_language()`; `steam.utils()`
+  reads the app id, the Steam hardware and its suggested settings preset,
+  Proton, the overlay's and Big Picture's state, the UI language, the IP country
+  and Steam's server time, and places overlay notifications. Every string is
+  copied out of Steam's buffer before the call returns, and any that was not
+  valid UTF-8 is counted in `PumpDiagnostics::lossy_strings`. Every failure is a
+  typed `InitError` — no library (listing each path tried), a missing symbol, an
   interface the client cannot provide, Steam not running (saying whether
   `steam_appid.txt` was present), the wrong app, or a second live `Steam` — so a
   game without Steam runs on. 64-bit Linux, Windows and macOS; elsewhere the
-  crate is empty. Not yet run against a real SDK or Steam client.
+  crate is empty. `apps/sandbox --features steam` exercises it. Not yet run
+  against a Steam client with a 1.65 library.
+- `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
+  window never sees — the Steam overlay opening — and the loop answers it
+  exactly as it answers the window losing focus: held keys, buttons and contacts
+  released through the game's own paths, then paused. Not a toggle: a second
+  report while paused leaves the game paused. The default is `false`.
 - `PhysicsWorld::cast_ray_excluding` and its shared `OverlapQueries` form omit a
   live collider before selecting the closest exact ray hit. Character support
   and traversal probes can skip their own capsule while retaining geometry
