@@ -9000,43 +9000,48 @@ emits JSON beside an environment block.
 
 **Nothing exists** — no `crcbl-steam` crate, no `steamworks` dependency, no
 `CRCBL_STEAM_SDK` anywhere. **Re-planned 2026-09-22 for the full Steam API on
-Linux, Windows and macOS** (branch `steam-sdk`): `docs/plan/42-steam.md` now
-carries an interface catalogue marking the slice that lands each Steamworks
-interface, and ordered slices, each with its files, API sketch, tests that can
-fail, and manual checks under app 480 per OS. The plan claims no roadmap phase
-yet — slice 1 does. Slice 1 is the next work: loader, lifecycle, manual-dispatch
-pump and local `SteamId`.
+Linux, Windows and macOS** (branch `steam-sdk`), and reviewed the same day
+against the SDK 1.65 headers and this tree: `docs/plan/42-steam.md` carries an
+interface catalogue marking the slice that lands each Steamworks interface, and
+slices, each with its files, API sketch, tests that can fail, and manual checks
+under app 480 per OS. Its "Review (step 2)" section lists what the review
+corrected. The plan claims no roadmap phase yet — slice 1 does. Slice 1 is the
+next work, and deliberately small: loader, init with the version handshake,
+manual-dispatch pump, shutdown and the local `SteamId`, with fake-library tests.
 
-**EW's requirements set the order.** EW is the first consumer. Its six hard
-requirements are listen-server co-op over Steam networking with friend invites,
-no anti-cheat or encrypted tickets, voice as raw PCM into its own mixer, Steam
-Input as ordinary `crcbl-input` gamepad events, cloud conflicts surfaced to the
-game, and the local `SteamId` as its identity. Slices 3–7 cover all six. The
-plan's "The first consumer: EW's requirements" table maps each requirement to
-its slice.
+**EW's requirements and priority set the order.** EW is the first consumer. Its
+six hard requirements are listen-server co-op over Steam networking with friend
+invites, no anti-cheat or encrypted tickets, voice as raw PCM into its own
+mixer, Steam Input as ordinary `crcbl-input` gamepad events, cloud conflicts
+surfaced to the game, and the local `SteamId` as its identity. EW's build order
+(2026-09-22): 1, 1b, 3a, 3b, 4, then the multi-session host (slice 2), then 6,
+5, 7a–7c; slice 9 optional; 10–15 after, for the full API.
 
-**Two engine gaps EW needs no matter which transport it uses**, recorded here
-because the Steam plan depends on them without owning them (its "slice 2"
-placeholder):
+**Two engine pieces EW needs whatever the transport, now scheduled inside the
+Steam plan:**
 
-- **A multi-session server.** `Server<T: Transport>` in
+- **A multi-session host (slice 2).** `Server<T: Transport>` in
   `crates/crcbl-server/src/lib.rs` owns one transport and one `SessionManager`.
-  A host serving three remote peers and its own client needs N of each over one
-  world. Until that exists, the Steam networking slice can prove only one host
-  and one peer. **User's call:** schedule this with the Steam slices, or let
-  EW's host fan out over several transports itself.
-- **A gamepad seam in `crcbl-input`.** There is none yet (see "Input: patterns,
-  RON bindings, rebind persistence and every gamepad backend"). The Steam plan
-  sketches the minimum: `GamepadSnapshot`, `GamepadEvent`,
-  `ActionMap::gamepad_event`, and `Binding::PadButton`/`PadStick`/`PadTrigger`.
-  By default, whichever of topic 19's evdev slice and the Steam Input slice
-  lands first defines it. The other adopts it.
+  EW decided it is built with the Steam slices, right after slice 4:
+  transport-generic (`Box<dyn Transport>` peers, since a listen host mixes an
+  in-memory local client with remote transports), N a parameter, the engine
+  owning sessions, admission, per-peer resume and host-left, the game owning
+  authority. It adds a transport-neutral "session ended" control message,
+  because `crcbl-net`'s `ServerToClient` has no goodbye today.
+- **A gamepad seam in `crcbl-input` (slice 7a).** There is none yet (see "Input:
+  patterns, RON bindings, rebind persistence and every gamepad backend"). EW
+  accepted a minimal seam landed by the Steam plan; topic 19's
+  evdev/XInput/GameController backends adopt it.
 
 **Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
-cloud quota; whether SpaceWar's achievements, leaderboard and inventory item
-definitions exist; whether `ISteamRemoteStorage` is safe to call off the pump
-thread; whether the overlay composites over our own windowing on each shell and
-GPU backend; and the macOS signing and entitlement needs for the dylib.
+cloud quota or honours a Steam Input manifest path; whether SpaceWar's
+achievements, leaderboard and inventory item definitions exist; whether the
+overlay injects into a terminal-launched process on Linux and macOS, and
+composites over our own windowing on each shell and GPU backend; the by-value
+struct-return ABI for Steam Input action data on each target; and the macOS
+signing and entitlement needs for the dylib. Valve documents no thread safety
+for `ISteamNetworkingSockets` or `ISteamRemoteStorage`, so the plan restricts
+their Steam calls to the pump thread by a runtime check.
 
 ### `check-doc-citations.sh` misses crate-relative paths too (2026-08-27)
 
@@ -9050,7 +9055,7 @@ by hand, not by the gate.
 **What it would take:** the same widening the relative-link entry proposes, plus
 a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
 The awkward part is that some such paths are deliberately external —
-`42-steam.md` cites `public/steam/steam_api.json` inside the Steam SDK and
+`42-steam.md` cites `public/steam/steam_api_flat.h` inside the Steam SDK and
 `steamworks-sys/build.rs` in a third-party repo — so widening needs an opt-out,
 which is a design question rather than a script change. Since 2026-09-22,
 `42-steam.md` also relies on this blind spot on purpose. It writes the files of
@@ -15056,8 +15061,12 @@ The plan's "Defaulted decisions" table records every other call made while the
 user was away, each with its alternative. The ones most worth a look:
 
 - CI never fetches the SDK, so the drift gate runs locally only.
-- `serde_json` becomes a dev-dependency. It is already in `Cargo.lock`, but the
-  direct edge is new.
+- The drift gate reads the SDK headers as text with hand-written code. No JSON
+  dependency is added: an earlier draft proposed `serde_json`, and review found
+  `steam_api.json` lacks the lifecycle functions and struct sizes anyway.
+- `SteamTransport` and `SteamCloudStorage` are `Send` but call Steam only on the
+  pump thread, checked at runtime, because Valve states no thread safety for
+  either interface.
 - The crate never writes `steam_appid.txt` or sets `SteamAppId`.
 - 32-bit targets are out of scope.
 - Microtransactions are declined: they need a server that holds a publisher key.
