@@ -9590,24 +9590,21 @@ not exist and neither does the editor.
 **What it blocks:** the grid kit's entire interaction model, and outliner
 reparenting and VFX curve handles in an editor that does not exist yet.
 
-**Measured from a consumer, 2026-09-07.** `apps/shard/src/panel.rs` builds a
-working grid drag on `UiState::interact`'s press capture alone: read
-`UiState::active()` before the cells interact (the capture is cleared on the
-frame the button comes up), hit-test each cell, and the drag is the captured
-cell plus the hovered one. So a game can have a drag today; what it cannot have
-is a **typed** one — no payload, no `can_accept`, no drop-state feedback — that
-a second panel reuses without copying that hit test and its bookkeeping.
+**The mechanism shipped 2026-09-23 as `crcbl_ui::grid_drag`** (`CellGrid`,
+`GridDrag<P>`, a typed payload, `can_accept`, drop feedback as widget state,
+cross-grid drags and the grab offset), and `apps/shard` and `apps/breach` use it
+with their copies deleted. What remains:
 
-**The second consumer arrived 2026-09-07, so the moment is now.**
-`apps/breach/src/panel.rs` is that copy: the same `UiState::active()` read
-before the cells interact, the same per-cell rectangle hit test, the same
-`(captured, hovered)` pair filtered for a release that ended where it began —
-and `apps/breach/src/loadout.rs::dragged_origin` is a second copy of shard's
-grab-offset arithmetic (`apps/shard/src/loot.rs`). Neither sample could reuse
-the other's, and neither made an engine change to avoid copying it. What to
-hoist, from the two: a drag source over a cell grid answering `(from, to)`
-cells, a typed payload a target can `can_accept`, and drop-state feedback as
-widget state.
+- **No non-mutating fit check in the kit.** `crcbl_inventory::Grid` has nothing
+  that ignores an item's own cells, so both panels' `can_accept` clone the grid
+  each frame a drag hovers; a
+  `Grid::can_move_within(catalog, slot, at, rotation)` would remove the clone.
+- **EW has not migrated.** Its equipment slots and medical quickslot are not
+  cell grids and have no single-slot target in the API, and it would map stash
+  scrolling (`first_row`) itself.
+- **Cross-grid drags and rotation mid-drag (`Held::refit`, `payload_mut`) have
+  no in-tree consumer**; they are unit-tested only.
+- **Nothing is drawn under the pointer mid-drag**; no sample draws a ghost.
 
 ### A save's grid is rebuilt by placing, not by deserialising (2026-09-07)
 

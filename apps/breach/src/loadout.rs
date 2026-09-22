@@ -49,7 +49,7 @@
 //! the same ids however the session went. `StackId(0)` is never one this sample
 //! mints, so a zeroed byte range cannot read as a stack.
 
-use crcbl::inventory::{Catalog, Cell, Grid, Stack, StackId};
+use crcbl::inventory::{Catalog, Grid, Stack, StackId};
 
 /// The item table, compiled in. See the module docs for why it is not an asset.
 const ITEMS_RON: &str = include_str!("../data/items.ron");
@@ -175,32 +175,10 @@ pub fn summary(items: usize, grams: u64) -> String {
     format!("{items} items {grams} g")
 }
 
-/// Where inside a footprint the pointer grabbed it, applied to where it was
-/// dropped.
-///
-/// A drag names the cell under the pointer, not the placement's origin, so a
-/// `2×1` sidearm grabbed by its right-hand cell and dropped two cells over has
-/// to land two cells over — not with its *origin* under the pointer, which
-/// would jump it left by its own width. `None` is a destination that would put
-/// the origin off the top or the left edge, which is a move
-/// [`Grid::move_within`] would refuse anyway.
-///
-/// The second copy of this arithmetic in the workspace —
-/// `apps/shard/src/loot.rs` has the first — and `docs/backlog.md` carries it as
-/// the hoist a second consumer earns.
-#[must_use]
-pub fn dragged_origin(origin: Cell, grabbed: Cell, dropped_on: Cell) -> Option<Cell> {
-    let dx = grabbed.x.checked_sub(origin.x)?;
-    let dy = grabbed.y.checked_sub(origin.y)?;
-    Some(Cell::new(
-        dropped_on.x.checked_sub(dx)?,
-        dropped_on.y.checked_sub(dy)?,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl::inventory::Cell;
 
     /// **The shipped table is one the kit accepts, and it names the tag the
     /// trigger reads.** [`catalog`] panics on a file that is not a catalogue,
@@ -299,32 +277,6 @@ mod tests {
         // …and an empty rig is not armed either, which is what the trigger
         // check in `crate::game` is written against.
         assert!(!is_armed(&empty()));
-    }
-
-    /// **A drag lands where the hand let go, whatever part of the item it took
-    /// hold of.** A build that moved the *origin* under the pointer would jump
-    /// a `2×1` left by its own width on every drag that grabbed it by its
-    /// right-hand cell.
-    #[test]
-    fn a_drag_keeps_the_grip_it_started_with() {
-        let origin = Cell::new(1, 1);
-        // Grabbed by its origin: the item goes exactly where it is dropped.
-        assert_eq!(
-            dragged_origin(origin, origin, Cell::new(2, 2)),
-            Some(Cell::new(2, 2)),
-        );
-        // Grabbed by the right-hand cell of a 2x1 and dropped one cell right:
-        // the origin follows by one, rather than landing on the drop.
-        assert_eq!(
-            dragged_origin(origin, Cell::new(2, 1), Cell::new(3, 1)),
-            Some(Cell::new(2, 1)),
-        );
-        // …and a drop that would put the origin off the grid is refused rather
-        // than wrapped.
-        assert_eq!(
-            dragged_origin(origin, Cell::new(2, 1), Cell::new(0, 0)),
-            None
-        );
     }
 
     /// **What the rig weighs is what is in it, and taking something out makes

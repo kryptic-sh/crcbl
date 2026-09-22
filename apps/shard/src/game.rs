@@ -84,7 +84,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::inventory::{Cell, Grid, Stack};
+use crcbl::inventory::{Cell, Grid, SlotId, Stack};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{CharacterConfig, CharacterController, MoveOutcome, PhysicsWorld};
@@ -1292,8 +1292,9 @@ impl Game {
         lock(&self.shared).grid.clone()
     }
 
-    /// Moves whatever is under `from` so that the cell the pointer let go over
-    /// is `to`. Answers whether anything moved.
+    /// Moves the stack at `slot` so its origin is `at` — the cell a panel's
+    /// drag landed it on, grab offset already applied by
+    /// [`crcbl::ui::grid_drag`]. Answers whether anything moved.
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
@@ -1307,15 +1308,9 @@ impl Game {
     /// The move itself is [`crcbl::inventory::Grid::move_within`], which is
     /// atomic: a refused drag leaves the grid exactly as it was, down to the
     /// slot id the panel is holding.
-    pub fn drag(&mut self, from: Cell, to: Cell) -> bool {
+    pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
         let mut stage = lock(&self.shared);
-        let Some(slot) = stage.grid.at(from) else {
-            return false;
-        };
         let Some(placement) = stage.grid.slot(slot) else {
-            return false;
-        };
-        let Some(at) = loot::dragged_origin(placement.at(), from, to) else {
             return false;
         };
         stage
@@ -2039,13 +2034,14 @@ mod tests {
 
         let bandage = loot::catalog().id_of("bandage").expect("a bandage");
         let mut grid = loot::carried();
-        grid.place(
-            loot::catalog(),
-            Stack::new(bandage, loot::stack_id(0), 1),
-            Cell::new(0, 0),
-            Rotation::Deg0,
-        )
-        .expect("an empty grid takes a 1x1");
+        let first = grid
+            .place(
+                loot::catalog(),
+                Stack::new(bandage, loot::stack_id(0), 1),
+                Cell::new(0, 0),
+                Rotation::Deg0,
+            )
+            .expect("an empty grid takes a 1x1");
         grid.place(
             loot::catalog(),
             Stack::new(bandage, loot::stack_id(1), 1),
@@ -2061,7 +2057,7 @@ mod tests {
             .expect("the loopback comes up");
 
         assert!(
-            game.drag(Cell::new(0, 0), Cell::new(1, 0)),
+            game.drag(first, Cell::new(1, 0)),
             "a drag onto an empty cell was refused",
         );
         let moved = game.grid();
@@ -2069,7 +2065,7 @@ mod tests {
         assert!(moved.at(Cell::new(1, 0)).is_some(), "it did not arrive");
 
         assert!(
-            !game.drag(Cell::new(1, 0), Cell::new(2, 2)),
+            !game.drag(first, Cell::new(2, 2)),
             "a drag onto a taken cell was accepted",
         );
         let back = game.grid();

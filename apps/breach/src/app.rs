@@ -64,7 +64,7 @@ use crcbl::inventory::Grid;
 use crcbl::math::{Vec2, Vec3};
 use crcbl::prelude::*;
 use crcbl::shell::{DisplayMode, PointerMode, WindowId};
-use crcbl::ui::widget::{PointerInput, UiState};
+use crcbl::ui::widget::PointerInput;
 
 use crate::camera::Eye;
 use crate::game::{ArenaStats, Controls, Game, RenderState, Scene, Stats};
@@ -72,7 +72,7 @@ use crate::gpu::{Gpu, Paths};
 use crate::loadout;
 use crate::menu::{MenuKind, Menus};
 use crate::page::PageStats;
-use crate::panel::PanelStats;
+use crate::panel::{PanelState, PanelStats};
 
 pub use crate::args::Options;
 
@@ -297,9 +297,10 @@ pub struct Breach {
     /// [`crate::panel`] argues: the browser gate looks at a canvas with nothing
     /// on it but the room.
     panel_open: bool,
-    /// Which cell of that panel owns the pointer press, across frames. The one
-    /// piece of state an immediate-mode drag cannot do without.
-    ui: UiState,
+    /// Which cell of that panel owns the pointer press, and which stack the drag
+    /// riding on it holds, across frames — what an immediate-mode drag cannot
+    /// do without.
+    ui: PanelState,
     /// The last pointer update carrying an absolute surface position.
     ///
     /// Kept because [`PointerUpdate::at`] is `Some` only on the frames it
@@ -543,7 +544,7 @@ fn assemble<S: Shell + ?Sized>(
             captured: false,
             pending_fire: false,
             panel_open: false,
-            ui: UiState::new(),
+            ui: PanelState::new(),
             panel_pointer: PointerUpdate {
                 at: Some(Vec2::ZERO),
                 motion: None,
@@ -631,7 +632,7 @@ impl HostedGame for Breach {
         if key == PANEL_KEY {
             if pressed {
                 self.panel_open = !self.panel_open;
-                // A panel torn down mid-press is what `UiState::clear` is for:
+                // A panel torn down mid-press is what `PanelState::clear` is for:
                 // without it the capture outlives the panel and the next drag
                 // starts already holding a cell.
                 self.ui.clear();
@@ -830,8 +831,8 @@ impl HostedGame for Breach {
                     released: std::mem::take(&mut self.pointer_released),
                 },
             );
-            if let Some((from, to)) = self.panel.dragged {
-                self.game.drag(from, to);
+            if let Some((slot, at)) = self.panel.dragged {
+                self.game.drag(slot, at);
             }
         } else {
             self.panel = PanelStats::default();
@@ -1519,11 +1520,10 @@ mod tests {
     /// **A pointer drag moves a stack between two cells of the panel, and the
     /// same clicks do not fire the pistol.**
     ///
-    /// The claim `docs/plan/34-inventory.md`'s part 1 is about, made with the
-    /// press capture `crcbl-ui` already has and made a second time — the first
-    /// is `apps/shard`'s. The whole path: shell button → `PointerUpdate` →
-    /// [`PointerUpdate::pixels`] → `crate::panel`'s hit test → `Game::drag` →
-    /// `Grid::move_within`.
+    /// The claim `docs/plan/34-inventory.md`'s part 1 is about, made through
+    /// `crcbl::ui::grid_drag`, the drag `apps/shard` shares. The whole path:
+    /// shell button → `PointerUpdate` → [`PointerUpdate::pixels`] →
+    /// `crate::panel`'s grid drag → `Game::drag` → `Grid::move_within`.
     ///
     /// Two controls. The cell the stack left must be empty, because a panel
     /// that drew the item under the pointer without moving the placement would

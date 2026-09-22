@@ -35,24 +35,17 @@
 //! mouse neither turns the view nor pulls the trigger. That is not a
 //! concession to the panel: a click on a rig is a click on a rig.
 //!
-//! # The drag is this sample's, not the engine's
+//! # The drag is the engine's; the payload and the rule are breach's
 //!
-//! `docs/plan/34-inventory.md`'s part 1 is a drag-drop capability in
-//! `crcbl-ui` — typed payloads, drop targets, `can_accept`, `:drop-ok`
-//! feedback — and it is not built. What exists is
-//! [`UiState::interact`](crcbl::ui::widget::UiState::interact)'s press capture:
-//! the press latches the widget it started over, so the cell the pointer let go
-//! on is a *different* question from the cell that owns the press. A drag is
-//! those two cells, and this module asks them of one `UiState` and a rectangle
-//! per cell.
-//!
-//! **This is the second copy of that hit test and its bookkeeping** —
-//! `apps/shard/src/panel.rs` has the first, and the two are the measurement
-//! `docs/backlog.md`'s topic-34 finding was waiting for: a game can have a drag
-//! today, and what it cannot have is a typed one a second panel reuses without
-//! copying this function. Copying it was the deliberate choice for this slice,
-//! because hoisting it is an engine change and this sample's adoption is worth
-//! more when it makes none.
+//! [`crcbl::ui::grid_drag`] is the drag: the per-cell hit test, the press
+//! capture it rides on, the grab offset, and the release that ended where it
+//! began filtered out. It was hoisted out of this module and
+//! `apps/shard/src/panel.rs`, which had each written it for themselves. What
+//! this module supplies is what only the game knows — what a cell holds when a
+//! press lands on it (the [`SlotId`] of the placement covering it, gripped at
+//! that placement's origin) and whether the rig would take it where the
+//! pointer is (a trial [`Grid::move_within`] on a copy). The answer comes back
+//! as [`DropFeedback`], which is what a refusing cell is drawn from.
 //!
 //! # There are no icons
 //!
@@ -62,9 +55,10 @@
 //! `docs/plan/sample/11-breach.md`'s rule 11 is where the `.crpix` sheets that
 //! replace them are owed.
 
-use crcbl::inventory::{Cell, Grid};
-use crcbl::math::Vec2;
+use crcbl::inventory::{Cell, Grid, SlotId};
+use crcbl::math::{UVec2, Vec2};
 use crcbl::ui::draw_list::DrawList;
+use crcbl::ui::grid_drag::{CellGrid, DropFeedback, GridDrag, Grip};
 use crcbl::ui::text::FontAtlas;
 use crcbl::ui::widget::{ButtonState, NATURAL_FONT_SIZE, PointerInput, UiState, WidgetId};
 
@@ -78,8 +72,11 @@ const PANEL_BG: [f32; 4] = [0.04, 0.05, 0.08, 0.94];
 const BORDER: [f32; 4] = [0.34, 0.38, 0.48, 1.0];
 /// An empty cell.
 const CELL_BG: [f32; 4] = [0.09, 0.10, 0.14, 1.0];
-/// A cell the pointer is over, or one it is dragging from.
+/// A cell the pointer is over, one it is dragging from, or one a drag held
+/// over it would land in.
 const CELL_LIT: [f32; 4] = [0.18, 0.20, 0.26, 1.0];
+/// A cell a drag held over it would not land in.
+const CELL_REFUSED: [f32; 4] = [0.32, 0.10, 0.10, 1.0];
 /// The title and the summary line.
 const LABEL: [f32; 4] = [0.66, 0.70, 0.80, 1.0];
 /// A letter or a count drawn over an item's own colour.
@@ -112,11 +109,12 @@ const CELL_ID_BASE: WidgetId = 0x5_0000;
 pub struct PanelStats {
     /// How many draw commands it produced.
     pub commands: usize,
-    /// The drag the pointer just finished: the cell it took hold of and the
-    /// cell it let go over. `None` on every frame but the one a drag ends on,
-    /// and on a release that ended where it began — which is a click, and this
-    /// panel has nothing for a click to do.
-    pub dragged: Option<(Cell, Cell)>,
+    /// The drag the pointer just finished: the stack it took hold of and the
+    /// cell that stack's origin lands on, grab offset applied. `None` on every
+    /// frame but the one a drag ends on, on a release that ended where it
+    /// began — which is a click, and this panel has nothing for a click to do —
+    /// and on a release over a cell the rig would not take it in.
+    pub dragged: Option<(SlotId, Cell)>,
 }
 
 /// Where the panel's outer rectangle sits on a surface of `extent`.
@@ -136,17 +134,36 @@ pub fn bounds(extent: (u32, u32)) -> (Vec2, Vec2) {
     (min, min + Vec2::new(width, height))
 }
 
-/// Where cell `(0, 0)`'s top-left corner is.
-fn origin(extent: (u32, u32)) -> Vec2 {
+/// The rig's cells on a surface of `extent`: where cell `(0, 0)`'s top-left
+/// corner is, how big a cell is, and the widget ids they answer to.
+fn cells(extent: (u32, u32)) -> CellGrid {
     let (min, _) = bounds(extent);
-    Vec2::new(min.x + PANEL_PAD, min.y + PANEL_PAD + ROW_HEIGHT)
+    CellGrid {
+        origin: Vec2::new(min.x + PANEL_PAD, min.y + PANEL_PAD + ROW_HEIGHT),
+        cell: CELL_PX,
+        columns: u32::from(loadout::GRID_W),
+        rows: u32::from(loadout::GRID_H),
+        id_base: CELL_ID_BASE,
+    }
+}
+
+/// A kit cell as the drag's coordinates.
+fn to_drag(cell: Cell) -> UVec2 {
+    UVec2::new(u32::from(cell.x), u32::from(cell.y))
+}
+
+/// The drag's coordinates as a kit cell, or `None` past what a `u8` holds.
+fn from_drag(cell: UVec2) -> Option<Cell> {
+    Some(Cell::new(
+        u8::try_from(cell.x).ok()?,
+        u8::try_from(cell.y).ok()?,
+    ))
 }
 
 /// Where `cell` is drawn, in pixels.
 #[must_use]
 pub fn cell_bounds(extent: (u32, u32), cell: Cell) -> (Vec2, Vec2) {
-    let at = origin(extent) + Vec2::new(f32::from(cell.x), f32::from(cell.y)) * CELL_PX;
-    (at, at + Vec2::splat(CELL_PX))
+    cells(extent).cell_bounds(to_drag(cell))
 }
 
 /// Which cell `pos` is over, or `None` for a point outside the rig.
@@ -156,38 +173,58 @@ pub fn cell_bounds(extent: (u32, u32), cell: Cell) -> (Vec2, Vec2) {
 /// out for itself.
 #[must_use]
 pub fn cell_at(extent: (u32, u32), pos: Vec2) -> Option<Cell> {
-    let local = (pos - origin(extent)) / CELL_PX;
-    if local.x < 0.0 || local.y < 0.0 {
-        return None;
+    cells(extent).cell_at(pos).and_then(from_drag)
+}
+
+/// Whether `grid` would take the stack at `slot` with its origin on `at`, in
+/// the rotation it already has.
+///
+/// Asked of a copy, because [`Grid::move_within`] is the one check that does
+/// not count the stack's own cells as occupied — so a one-cell nudge of the
+/// `2×1` sidearm is a move rather than a collision with itself — and it only
+/// exists as the move.
+fn accepts(grid: &Grid, slot: SlotId, at: Cell) -> bool {
+    let Some(placement) = grid.slot(slot) else {
+        return false;
+    };
+    grid.clone()
+        .move_within(loadout::catalog(), slot, at, placement.rotation())
+        .is_ok()
+}
+
+/// What the panel keeps between frames: which cell owns the pointer press, and
+/// the drag riding on that press — which stack it took hold of, and where.
+#[derive(Debug, Default)]
+pub struct PanelState {
+    ui: UiState,
+    drag: GridDrag<SlotId>,
+}
+
+impl PanelState {
+    /// Nothing pressed and nothing held.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
     }
-    let cell = Cell::new(local.x as u8, local.y as u8);
-    (cell.x < loadout::GRID_W && cell.y < loadout::GRID_H).then_some(cell)
-}
 
-/// The widget id of `cell`.
-fn id_of(cell: Cell) -> WidgetId {
-    CELL_ID_BASE + WidgetId::from(cell.y) * WidgetId::from(loadout::GRID_W) + WidgetId::from(cell.x)
-}
-
-/// [`id_of`] undone, for the cell that captured a press.
-fn cell_of(id: WidgetId) -> Option<Cell> {
-    let index = id.checked_sub(CELL_ID_BASE)?;
-    let width = WidgetId::from(loadout::GRID_W);
-    let x = u8::try_from(index % width).ok()?;
-    let y = u8::try_from(index / width).ok()?;
-    (y < loadout::GRID_H).then_some(Cell::new(x, y))
+    /// Drops the press and the drag with it — for a panel torn down mid-press,
+    /// which is what [`UiState::clear`] is for.
+    pub fn clear(&mut self) {
+        self.ui.clear();
+        self.drag = GridDrag::new();
+    }
 }
 
 /// Draws the panel and resolves this frame's pointer against it.
 ///
-/// `ui` is the one piece of state a drag cannot do without — which cell owns the
-/// press — and it is the caller's because it has to survive between frames.
+/// `state` is what a drag cannot do without, and it is the caller's because it
+/// has to survive between frames.
 pub fn draw(
     list: &mut DrawList,
     atlas: &FontAtlas,
     extent: (u32, u32),
     grid: &Grid,
-    ui: &mut UiState,
+    state: &mut PanelState,
     pointer: PointerInput,
 ) -> PanelStats {
     let (min, max) = bounds(extent);
@@ -200,29 +237,32 @@ pub fn draw(
         NATURAL_FONT_SIZE,
     );
 
-    // **Read before any cell interacts.** `UiState::interact` clears the
-    // capture on the frame the button comes up, so the cell that owns the drag
-    // is only knowable from here.
-    let held = ui.active().and_then(cell_of);
-    let mut over = None;
+    let cells = cells(extent);
+    let mut frame = state.drag.frame(&mut state.ui, pointer);
+    let response = frame.grid(
+        &cells,
+        |cell| {
+            let slot = grid.at(from_drag(cell)?)?;
+            Some(Grip {
+                payload: slot,
+                origin: to_drag(grid.slot(slot)?.at()),
+            })
+        },
+        |slot, target| from_drag(target.origin).is_some_and(|at| accepts(grid, *slot, at)),
+    );
+    let dropped = frame.finish();
 
-    for y in 0..loadout::GRID_H {
-        for x in 0..loadout::GRID_W {
-            let cell = Cell::new(x, y);
-            let (at, to) = cell_bounds(extent, cell);
-            let hovered = pointer.pos.x >= at.x
-                && pointer.pos.x < to.x
-                && pointer.pos.y >= at.y
-                && pointer.pos.y < to.y;
-            if hovered {
-                over = Some(cell);
-            }
-            let (state, _clicked) =
-                ui.interact(id_of(cell), hovered, pointer.down, pointer.released);
-            let lit = state != ButtonState::Idle || held == Some(cell);
-            list.rect(at, to, if lit { CELL_LIT } else { CELL_BG });
-            list.rect_outline(at, to, BORDER_WIDTH, BORDER);
-        }
+    for cell in cells.cells() {
+        let (at, to) = cells.cell_bounds(cell);
+        let answer = response.cell(cell);
+        let fill = match answer.drop {
+            DropFeedback::Refusing => CELL_REFUSED,
+            DropFeedback::Accepting => CELL_LIT,
+            DropFeedback::None if answer.state != ButtonState::Idle => CELL_LIT,
+            DropFeedback::None => CELL_BG,
+        };
+        list.rect(at, to, fill);
+        list.rect_outline(at, to, BORDER_WIDTH, BORDER);
     }
 
     let catalog = loadout::catalog();
@@ -278,12 +318,7 @@ pub fn draw(
 
     PanelStats {
         commands: list.len(),
-        dragged: pointer
-            .released
-            .then_some(())
-            .and(held)
-            .zip(over)
-            .filter(|(from, to)| from != to),
+        dragged: dropped.and_then(|dropped| Some((dropped.payload, from_drag(dropped.to.origin)?))),
     }
 }
 
@@ -338,7 +373,12 @@ mod tests {
                     Some(cell),
                     "the top-left corner of {cell:?}",
                 );
-                assert_eq!(cell_of(id_of(cell)), Some(cell), "the id of {cell:?}");
+                let grid = cells(EXTENT);
+                assert_eq!(
+                    grid.cell_of(grid.id_of(to_drag(cell))).and_then(from_drag),
+                    Some(cell),
+                    "the id of {cell:?}",
+                );
             }
         }
         // …and a point outside is nobody's, rather than the nearest cell's.
@@ -356,7 +396,7 @@ mod tests {
     #[test]
     fn the_panel_draws_a_cell_for_every_cell_an_item_covers() {
         let atlas = FontAtlas::built_in();
-        let mut ui = UiState::new();
+        let mut ui = PanelState::new();
         let mut empty = DrawList::new();
         let bare = draw(
             &mut empty,
@@ -404,7 +444,7 @@ mod tests {
         let atlas = FontAtlas::built_in();
         let grid = loadout::packed();
         let commands = || {
-            let mut ui = UiState::new();
+            let mut ui = PanelState::new();
             let mut list = DrawList::new();
             draw(
                 &mut list,
@@ -423,6 +463,58 @@ mod tests {
         );
     }
 
+    /// Presses over `from`, drags to `to` and lets go there, one frame each;
+    /// answers the frame the pointer was held over `to` and the release.
+    fn drag_across(
+        grid: &Grid,
+        state: &mut PanelState,
+        from: Cell,
+        to: Cell,
+    ) -> ((PanelStats, DrawList), PanelStats) {
+        let atlas = FontAtlas::built_in();
+        let centre = |cell: Cell| {
+            let (at, to) = cell_bounds(EXTENT, cell);
+            (at + to) * 0.5
+        };
+        let mut frame = |pos: Vec2, down: bool| {
+            let mut list = DrawList::new();
+            let stats = draw(
+                &mut list,
+                &atlas,
+                EXTENT,
+                grid,
+                state,
+                PointerInput {
+                    pos,
+                    down,
+                    released: !down,
+                },
+            );
+            (stats, list)
+        };
+        let (pressed, _) = frame(centre(from), true);
+        assert_eq!(pressed.dragged, None, "a press alone moved something");
+        let held = frame(centre(to), true);
+        assert_eq!(
+            held.0.dragged, None,
+            "a drag moved something before release"
+        );
+        let (done, _) = frame(centre(to), false);
+        (held, done)
+    }
+
+    /// The fill `cell` was drawn with.
+    fn fill(list: &DrawList, cell: Cell) -> [f32; 4] {
+        let (at, _) = cell_bounds(EXTENT, cell);
+        list.commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Rect { min, color, .. } if *min == at => Some(*color),
+                _ => None,
+            })
+            .expect("every cell is filled")
+    }
+
     /// **A press on one cell and a release on another is a drag; a press and a
     /// release on the same cell is not.**
     ///
@@ -432,76 +524,55 @@ mod tests {
     /// asked to move every item onto its own cell on every click.
     #[test]
     fn a_press_on_one_cell_and_a_release_on_another_is_a_drag() {
-        let atlas = FontAtlas::built_in();
         let grid = loadout::packed();
-        let mut ui = UiState::new();
-        let centre = |cell: Cell| {
-            let (at, to) = cell_bounds(EXTENT, cell);
-            (at + to) * 0.5
-        };
-        let frame = |ui: &mut UiState, pointer: PointerInput| {
-            let mut list = DrawList::new();
-            draw(&mut list, &atlas, EXTENT, &grid, ui, pointer)
-        };
+        let sidearm = grid.at(Cell::new(0, 0)).expect("the sidearm");
+        let mut state = PanelState::new();
 
         let from = Cell::new(0, 0);
         let to = Cell::new(1, 2);
-        // Down over the sidearm…
-        let pressed = frame(
-            &mut ui,
-            PointerInput {
-                pos: centre(from),
-                down: true,
-                released: false,
-            },
-        );
-        assert_eq!(pressed.dragged, None, "a press alone moved something");
-        assert_eq!(ui.active(), Some(id_of(from)), "the press was not captured");
-
-        // …dragged across, still held…
-        let moving = frame(
-            &mut ui,
-            PointerInput {
-                pos: centre(to),
-                down: true,
-                released: false,
-            },
+        let ((_, held), done) = drag_across(&grid, &mut state, from, to);
+        assert_eq!(
+            fill(&held, to),
+            CELL_LIT,
+            "a free cell was not lit as a target"
         );
         assert_eq!(
-            moving.dragged, None,
-            "a drag moved something before release"
+            done.dragged,
+            Some((sidearm, to)),
+            "the drag was not reported"
         );
-
-        // …and released.
-        let done = frame(
-            &mut ui,
-            PointerInput {
-                pos: centre(to),
-                down: false,
-                released: true,
-            },
-        );
-        assert_eq!(done.dragged, Some((from, to)), "the drag was not reported");
-        assert_eq!(ui.active(), None, "the capture outlived the press");
+        assert_eq!(state.ui.active(), None, "the capture outlived the press");
 
         // The control: a press and a release over one cell is a click, and this
         // panel has nothing for a click to do.
-        frame(
-            &mut ui,
-            PointerInput {
-                pos: centre(from),
-                down: true,
-                released: false,
-            },
-        );
-        let clicked = frame(
-            &mut ui,
-            PointerInput {
-                pos: centre(from),
-                down: false,
-                released: true,
-            },
-        );
+        let (_, clicked) = drag_across(&grid, &mut state, from, from);
         assert_eq!(clicked.dragged, None, "a click was reported as a drag");
+    }
+
+    /// **A stack lands where the hand let go, whatever part of it the hand
+    /// took hold of.** The `2×1` sidearm grabbed by its right-hand cell and let
+    /// go one cell right of that moves its origin by one — a panel that put the
+    /// *origin* under the pointer would land it on `(2, 2)`.
+    #[test]
+    fn a_drag_keeps_the_grip_it_started_with() {
+        let grid = loadout::packed();
+        let sidearm = grid.at(Cell::new(0, 0)).expect("the sidearm");
+        let mut state = PanelState::new();
+        let (_, done) = drag_across(&grid, &mut state, Cell::new(1, 0), Cell::new(2, 2));
+        assert_eq!(done.dragged, Some((sidearm, Cell::new(1, 2))));
+    }
+
+    /// **A cell the rig would not take the stack in is drawn refusing, and
+    /// letting go there moves nothing.** The sidearm with its origin on the
+    /// last column runs off the right edge; the control is the free cell of the
+    /// first test, drawn lit rather than refusing.
+    #[test]
+    fn a_refused_cell_is_drawn_refusing_and_drops_nothing() {
+        let grid = loadout::packed();
+        let mut state = PanelState::new();
+        let refused = Cell::new(3, 2);
+        let ((_, held), done) = drag_across(&grid, &mut state, Cell::new(0, 0), refused);
+        assert_eq!(fill(&held, refused), CELL_REFUSED);
+        assert_eq!(done.dragged, None, "a refused drop was reported");
     }
 }

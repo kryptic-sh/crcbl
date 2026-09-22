@@ -229,6 +229,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A typed grid drag-and-drop in `crcbl_ui::grid_drag`.** `CellGrid` places a
+  grid of square cells on screen (`origin`, `cell`, `columns`, `rows`,
+  `id_base`) and owns its hit test (`cell_at`, `cell_bounds`) and cell widget
+  ids. `GridDrag<P>` is the drag, kept across frames beside the `UiState` whose
+  press capture it rides on: each frame `GridDrag::frame(ui, pointer)` opens a
+  `DragFrame`, `DragFrame::grid(grid, source, can_accept)` runs one grid, and
+  `DragFrame::finish` returns the `Dropped { payload, from, to }`, if any. The
+  source hands over a `Grip { payload, origin }` when a press latches, and the
+  grab offset (the pressed cell minus `origin`) is kept, so an item lands with
+  the cell it was taken by under the pointer. `can_accept(&payload, &target)` is
+  asked about the hovered cell only, and its answer comes back as a
+  `DropFeedback` (`None`, `Accepting`, `Refusing`) on that cell's
+  `CellResponse`, beside its `ButtonState`, for the panel to style. A release
+  where the drag began, over a refusing cell or over nothing drops nothing. One
+  drag spans any number of grids, so a press on one grid and a release on
+  another is one drop. `Held::payload_mut` and `Held::refit` let a game turn an
+  item mid-drag and keep the grip inside its new footprint. Shard's inventory
+  panel and breach's loadout panel now use it in place of their own copies,
+  report a drop as the stack's `SlotId` and the cell its origin lands on, and
+  tint a refusing cell while a drag is held over it.
 - **A non-moving ground probe on `crcbl_phys::CharacterController`.**
   `probe_ground(world, distance)` and
   `probe_ground_at(world, position, distance)` sweep the controller's capsule
