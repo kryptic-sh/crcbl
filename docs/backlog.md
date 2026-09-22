@@ -18,6 +18,53 @@ complete the required verification and shipping gates before starting the next
 production change. Authored interior and browser culling measurements, CPU
 draw-recording cost, and overlapping grass workloads remain open below.
 
+## Local hardware performance campaign (2026-09-22)
+
+Make this checkout's engine as fast as measured workloads justify on the local
+Linux machine, without trading away correctness or portability. The reference
+hardware observed at the start of the campaign is a 13th Gen Intel Core i7-1355U
+with 12 logical CPUs, 15 GiB of memory, Intel Raptor Lake-P integrated graphics
+and an NVIDIA GeForce MX550 with 2 GiB of VRAM. The NVIDIA driver reported
+version 615.71.09. Record the selected adapter, driver, backend, build profile,
+commit and command with each result so later runs can refuse invalid comparisons
+instead of mixing environments.
+
+Build representative sustained-load scenes before changing hot paths. Cover at
+least a render-heavy scene that stresses visible geometry, materials and lights,
+a simulation-heavy scene with dense moving bodies, and an overlapping workload
+that forces rendering and simulation to compete for the same frame budget. Use
+the engine's existing uncapped release-mode frame and pass distributions; add a
+new measurement seam only when an existing observable cannot answer the
+question. Warm each workload, preserve deterministic scene inputs where the
+engine supports them, report tail percentiles rather than a mean, and repeat
+comparisons in alternating order to expose thermal or scheduler drift on this
+laptop-class CPU and GPU.
+
+For each measured bottleneck, record the workload and evidence here before
+implementation. Make one coherent optimization at a time, prove its observer
+fails when the mechanism is broken, run the workspace verification gates, and
+compare it against the unchanged baseline on this hardware. Retain only changes
+that produce a repeatable benefit or remove demonstrated allocation/resource
+churn without regressing another representative workload. Native Vulkan on the
+MX550 is the first hardware path to measure; Intel Vulkan and WebGPU/browser
+coverage remain required portability checks rather than evidence that a change
+helps the reference adapter.
+
+Open work:
+
+- Establish clean release baselines for the existing Horde rendering and dense
+  simulation workloads on this machine, then select the next bottleneck from
+  measured CPU spans, GPU pass timings and system profiling.
+- Add the smallest reusable high-load scenes needed to isolate render-heavy,
+  simulation-heavy and combined-frame limits. Keep correctness assertions
+  separate from timing so a faster wrong frame cannot pass.
+- Profile the selected scenes on the discrete Vulkan adapter and attribute the
+  limiting work before changing production code. Record declined trials and
+  unverified backends here as they arise.
+- Re-run the same commands after every retained optimization and record both
+  absolute tail latency and the paired change. A throughput claim without the
+  exact local workload remains unverified.
+
 ## Performance review and execution priority (2026-09-17)
 
 Performance work takes priority over feature expansion. Complete the review and
