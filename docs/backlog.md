@@ -21881,17 +21881,19 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   review — then a merge into main by the coordinating session. Done: the plan
   (`ec108d81`) and its review (`520ae563`), both on `origin/steam-sdk`, in
   `docs/plan/42-steam.md`. Step 3 (implementation) stopped at the session's end
-  after slice 1: `cc422c7e` adds `crates/crcbl-steam` (runtime loader, init with
-  the version handshake, manual-dispatch pump, `SteamId`, the fake library, the
-  drift gate and smoke test as `#[ignore]`d tests, a CI Miri job), green locally
-  and pushed; its status is in the plan's "Status by slice" section. Not run:
-  the drift gate and smoke test (no Steamworks SDK on this machine; someone with
-  a partner login has to download SDK 1.65), every manual Steam-client step, and
-  CI itself — CI runs only on `main` and pull requests, so dispatch it on the
-  branch (`gh workflow run CI --ref steam-sdk`) before trusting it. Owed: finish
-  step 3 through the plan's build order (next 1b, then 3a, 3b, 4, 2, 6, 5, 7a–c,
-  8, 9, 10–15), then step 4 (an independent review on the same branch), then
-  merge into main and push. The worktree was
+  after slice 1: `cc422c7e` adds a `crcbl-steam` crate — on that branch only, so
+  the path is not written here; the citation gate reads every `crates/…` path
+  against **this** tree — (runtime loader, init with the version handshake,
+  manual-dispatch pump, `SteamId`, the fake library, the drift gate and smoke
+  test as `#[ignore]`d tests, a CI Miri job), green locally and pushed; its
+  status is in the plan's "Status by slice" section. Not run: the drift gate and
+  smoke test (no Steamworks SDK on this machine; someone with a partner login
+  has to download SDK 1.65), every manual Steam-client step, and CI itself — CI
+  runs only on `main` and pull requests, so dispatch it on the branch
+  (`gh workflow run CI --ref steam-sdk`) before trusting it. Owed: finish step 3
+  through the plan's build order (next 1b, then 3a, 3b, 4, 2, 6, 5, 7a–c, 8, 9,
+  10–15), then step 4 (an independent review on the same branch), then merge
+  into main and push. The worktree was
   `.claude/worktrees/agent-a2d90b487b193d94c`; the branch is what matters, not
   the directory. EW's hard requirements for Steam (listen-server co-op for four
   with reconnect and host-left, raw voice PCM with game-controlled push-to-talk,
