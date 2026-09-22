@@ -87,9 +87,17 @@ Initial measurements and harness findings:
   p50 rose from 2.718 ms to 3.101, 3.576 and 4.153 ms. The sparse cost rose only
   from 490,934.116 to 531,047.696 by tick 600 while query p50 moved from 1.167
   ms to 1.233 ms. This supports a cost ratio relative to the most recent build
-  as the trigger signal. Price periodic scans and the rebuild spike before
-  selecting and shipping a threshold; the diagnostic is currently `O(n)` and
-  deliberately stays out of the query path.
+  as the trigger signal. A temporary probe priced 1,000 complete
+  `BroadphaseStats` reads at 37.214 ms; because each read performs both the
+  depth and surface-area walks, this bounds one quality scan below 37.214 µs on
+  this tree. The retained policy normalizes the cost by root surface area,
+  checks after four full-tree equivalents of refits, and rebuilds at a 1.2
+  ratio. The scan's amortized upper bound is therefore 9.304 µs per full refit
+  pass. Post-change dense query p50 measured 3.017–3.114 ms at tick 300 and
+  3.164–3.291 ms at tick 600, with one and two automatic rebuilds respectively,
+  versus the 3.576–3.672 ms and 4.153–4.281 ms aged baselines. The sparse
+  tick-600 control did not rebuild and measured 1.234–1.252 ms p50, overlapping
+  its prior 1.229–1.296 ms range.
 - The first pinned NVIDIA Vulkan Horde run used release mode at 1920x1080,
   uncapped, one simulation tick per second, 2,400 frames and 10,000 prefilled
   enemies with the debug overlay enabled. The last 120 of 2,397 timestamped

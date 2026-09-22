@@ -26,6 +26,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- `PhysicsWorld` now periodically measures scale-normalized BVH surface-area
+  cost and rebuilds refit-aged trees whose partition has degraded, avoiding
+  sustained broadphase query slowdown without imposing a fixed rebuild cadence.
 - Fill lights skip the forward shader's unused GGX or LTC specular work instead
   of evaluating a lobe that their contract discards.
 
