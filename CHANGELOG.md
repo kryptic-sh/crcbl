@@ -1843,6 +1843,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The shared `--help` blocks indent their first flag.** `COMMON_OPTIONS_HELP`,
+  `SCREENSHOT_HELP`, `FORCED_PATH_HELP` and `COMMON_TAIL_HELP` were written as
+  `"` plus a newline, which also strips the next line's indent, so each block's
+  first flag printed at column 0 in every consumer's `--help` while the rest sat
+  four spaces in. Reported by EW.
+
 - **Tapping Alt on its own no longer freezes the keyboard on Win32.** The
   release of a bare Alt (or F10) reached `DefWindowProc`, which answered it with
   `SC_KEYMENU` and entered the modal window-menu loop, so every key after it

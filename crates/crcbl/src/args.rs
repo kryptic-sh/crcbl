@@ -45,8 +45,8 @@ use crate::hal::{BindingModel, GeometryPath};
 /// with this pasted in for the common set. Kept as one string rather than
 /// assembled from the parser because help text is read, not parsed, and the
 /// alignment is part of it.
-pub const COMMON_OPTIONS_HELP: &str = "\
-    --headless           Run without a window (for CI / determinism tests)
+pub const COMMON_OPTIONS_HELP: &str =
+    "    --headless           Run without a window (for CI / determinism tests)
     --frames <N>         Stop after N presented frames
     --tick-hz <N>        Simulation rate in Hz (default 60). Sets the server's
                          clock, the ECS timestep and every integrator.
@@ -76,8 +76,8 @@ pub const COMMON_OPTIONS_HELP: &str = "\
 /// that same binary answers with exit 2 would be worse than not listing it.
 /// Spliced in where a game's own flags go — between the two shared blocks — so
 /// the ordering is the one every other flag already has.
-pub const SCREENSHOT_HELP: &str = "\
-    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
+pub const SCREENSHOT_HELP: &str =
+    "    --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
                          Turns --headless on: the frame is read back off the
                          offscreen ring, which is the only surface every backend
                          can copy a presented image out of.";
@@ -95,8 +95,8 @@ pub const SCREENSHOT_HELP: &str = "\
 /// [`binding_from_name`]'s, which is why the two live here beside it: a sample
 /// that offered a name the parser did not take would be advertising a flag
 /// value that is rejected.
-pub const FORCED_PATH_HELP: &str = "\
-    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
+pub const FORCED_PATH_HELP: &str =
+    "    --force-geometry <P> Require 'mesh-shader', 'indirect-count' or
                          'indirect-per-batch'; unsupported paths fail startup.
                          Default: this device's preferred geometry path.
     --force-binding <B>  Request a 'bindless' or 'array-pages' capability ceiling.
@@ -106,8 +106,8 @@ pub const FORCED_PATH_HELP: &str = "\
 ///
 /// Separate from [`COMMON_OPTIONS_HELP`] so a game can list its own flags
 /// *between* the two, which is where all four already had them.
-pub const COMMON_TAIL_HELP: &str = "\
-    --debug-overlay      Start with the debug panel visible (F3 toggles it)
+pub const COMMON_TAIL_HELP: &str =
+    "    --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
     -h, --help           Print this help";
@@ -1178,6 +1178,30 @@ mod tests {
 
         let mut one = ["17".to_string()].into_iter();
         assert_eq!(seed_u64(&mut one), Ok(17));
+    }
+
+    /// Every line of every shared block is indented, the first included.
+    ///
+    /// A block written as `"\` plus a newline loses its first line's indent,
+    /// because a trailing backslash also strips the next line's leading
+    /// whitespace — so the first flag printed at column 0 in every consumer's
+    /// `--help` while the rest sat four spaces in. `contains` in the asserts
+    /// above cannot see that, which is why it is held here.
+    #[test]
+    fn every_line_of_a_shared_help_block_is_indented() {
+        for block in [
+            COMMON_OPTIONS_HELP,
+            SCREENSHOT_HELP,
+            FORCED_PATH_HELP,
+            COMMON_TAIL_HELP,
+        ] {
+            for line in block.lines() {
+                assert!(
+                    line.starts_with("    "),
+                    "a help line is not indented like its neighbours: {line:?}"
+                );
+            }
+        }
     }
 
     /// The shared-help asserts are themselves a check, so they have to be able
