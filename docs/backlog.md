@@ -276,7 +276,15 @@ Initial measurements and harness findings:
   baseline's 8.849–8.985 ms, while the point control measured 3.478–3.508 ms
   versus 3.511–3.569 ms. Both ranges overlap their baselines. The trial and its
   artifacts were removed; do not repeat this source-level cache without shader
-  ISA evidence that the backend is actually issuing redundant table reads.
+  ISA evidence that the backend is actually issuing redundant table reads. The
+  next bounded area-light trial is inside `ltc_irradiance`: `ltc_clip`
+  duplicates corner zero to close every surviving triangle or quad, but the
+  caller then normalizes all five slots and recomputes that identical
+  normalization. Trial normalizing only the polygon's real corners and copying
+  the normalized first corner into its closing slot. Require the host polygon
+  oracle, all native area-light images and alternating point/area stress timings
+  before retaining it; a changed integral value or a neutral/regressed GPU range
+  rejects it.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
