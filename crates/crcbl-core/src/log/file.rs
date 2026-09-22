@@ -96,6 +96,15 @@ impl FileSink {
         &self.path
     }
 
+    /// A second handle on this run's file, for the panic hook to write through
+    /// without taking the logger's lock — see `panic_hook`.
+    ///
+    /// Both handles share one open file, and with it one write position, so a
+    /// line written through either lands after everything already written.
+    pub(super) fn try_clone_file(&self) -> io::Result<File> {
+        self.file.try_clone()
+    }
+
     /// Writes one line, newline included, unless the cap has been reached.
     ///
     /// A write error is dropped for the reason stderr's is: a failed log write
@@ -160,20 +169,20 @@ fn rotate(dir: &Path, stem: &str, kept: usize) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
 
     /// A fresh directory of this test's own under the system temp directory,
     /// removed when dropped. `crcbl-core` has no `tempfile`, and a new
-    /// dependency edge for one test module is not worth it.
-    struct TempDir(PathBuf);
+    /// dependency edge for the log's test modules is not worth it.
+    pub(in crate::log) struct TempDir(pub(in crate::log) PathBuf);
 
     impl TempDir {
         /// # Panics
         ///
         /// If the directory is already there — a leftover would decide the
         /// assertions, so it is refused rather than cleared.
-        fn new(name: &str) -> Self {
+        pub(in crate::log) fn new(name: &str) -> Self {
             let path = std::env::temp_dir()
                 .join(format!("crcbl-core-log-file-{name}-{}", std::process::id()));
             fs::create_dir(&path).expect("a fresh temp directory for this test");

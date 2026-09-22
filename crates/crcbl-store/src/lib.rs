@@ -276,6 +276,13 @@ impl NativeStorage {
 /// [`crcbl_core::log::attach_file`] says how it rotates and why a crash does not
 /// lose its last lines.
 ///
+/// **It installs a panic hook**, as `attach_file` does, which writes a panic's
+/// message, location and thread to the file and then calls the hook it
+/// replaced. A game that manages the process's panic hook itself and wants
+/// nothing chained in front of it skips this and calls
+/// [`crcbl_core::log::attach_file_without_panic_hook`] with
+/// [`NativeStorage::log_root`] instead.
+///
 /// **Never fatal.** A platform with no log directory, a directory that cannot be
 /// made, a file that cannot be opened: each is a warning through the log — which
 /// still reaches stderr — and `None`, and the run carries on without the file.

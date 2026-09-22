@@ -16602,12 +16602,14 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
     fix.
 - **The log file's loose ends** (`crcbl_store::enable_log_file`,
   `crcbl_core::log::attach_file`). The file itself shipped; these did not:
-  - **A panic's message is not in the file.** The default panic hook prints to
-    stderr, which a GUI-subsystem exe does not have, so the file keeps every
-    line up to the panic but not the panic's own text and location. Fix: a panic
-    hook that logs at `error` and then chains to the previous hook, installed by
-    `attach_file`. Not done because replacing a process-wide hook is a decision
-    a game may already have made.
+  - **A hook set after `attach_file` replaces the log file's panic hook** unless
+    it chains to `std::panic::take_hook`'s result. `attach_file` chains to
+    whatever was set before it, but a game setting its own hook later silently
+    drops the file line. Separately, `take_hook` and `set_hook` are not one
+    atomic step, so a hook set on another thread between the two is lost
+    (`std::panic::update_hook` would fix that; it is unstable). Not verified
+    beyond reading the std API. Opting out is
+    `crcbl_core::log::attach_file_without_panic_hook`.
   - **No `--log-file` flag, only `CRCBL_LOG_FILE=1`.** `run_front_end` receives
     an already-parsed, game-generic `Invocation<O>`, so a `Common` flag would
     need every sample to act on it or `run_front_end` to see `Common`. A game

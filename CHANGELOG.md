@@ -251,7 +251,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   returns, so a crash keeps its last lines. A failure to open the file is a
   warning, never fatal. `crcbl_core::log::attach_file` takes an explicit
   directory, and every `crcbl::args::run_front_end` sample opens the file when a
-  player sets `CRCBL_LOG_FILE=1` (`crcbl_core::log::file_requested`).
+  player sets `CRCBL_LOG_FILE=1` (`crcbl_core::log::file_requested`). Attaching
+  the file also installs a panic hook, once per process, that writes the panic's
+  message, `file:line:col` and thread name to the file as an `ERROR panic` line
+  and then calls the hook it replaced, so the default stderr report and any hook
+  the game set earlier still run. A game that manages the panic hook itself
+  attaches with `crcbl_core::log::attach_file_without_panic_hook` instead.
 - `Shell::keep_alive` lets the window system run without delivering anything: a
   game loading assets on the loop thread before its first frame calls it a few
   times a second, and Windows no longer ghosts the window as "Not Responding"

@@ -53,7 +53,8 @@
 //!
 //! A log file is the fourth, and the only one that is opt-in: [`attach_file`]
 //! sends every line stderr gets to a rotated file as well, for the build that
-//! has no stderr — a `windows_subsystem = "windows"` exe. Nothing opens one
+//! has no stderr — a `windows_subsystem = "windows"` exe — and chains a panic
+//! hook that writes the panic's own message there too. Nothing opens one
 //! unless a game calls that, or a player sets [`FILE_ENV_VAR`] for a front end
 //! that honours it.
 //!
@@ -84,6 +85,7 @@
 
 pub mod console;
 mod file;
+mod panic_hook;
 
 use std::cell::RefCell;
 use std::env;
@@ -798,23 +800,60 @@ const fn civil_from_days(days: i64) -> (i64, u32, u32) {
 /// through to the operating system before the logging call returns, so the last
 /// lines before a panic or a crash are in the file.
 ///
+/// **It also installs a panic hook**, because the default one prints a panic's
+/// message and location to stderr alone, which is exactly what such a build
+/// lacks. The hook writes one `ERROR panic` line — the message, `file:line:col`
+/// and the panicking thread's name — to the file and then calls the hook it
+/// replaced, so stderr's report and any hook the game set earlier still run. A
+/// game that owns the process's hook and wants nothing chained in front of it
+/// calls [`attach_file_without_panic_hook`] instead. A hook set *after* this
+/// call replaces this one unless it chains, as this one does, to
+/// [`std::panic::take_hook`]'s result.
+///
 /// `crcbl_store::enable_log_file` is the usual way in: it picks the platform's
 /// directory for logs and turns a failure into a warning. This takes the
 /// directory explicitly, for a caller that has its own.
 ///
-/// Returns the path of this run's file.
+/// Returns the path of this run's file. A hook that could not be installed is
+/// a warning through the log, not an error: the file is open either way.
 ///
 /// # Errors
 ///
 /// When this module's logger is not the one installed (see [`is_installed`]),
 /// when a file is already attached, when `stem` is not a plain file name, and
 /// when the filesystem refuses the directory, the rotation or the file. Logging
-/// to stderr carries on in every case.
+/// to stderr carries on in every case, and no panic hook is installed.
 pub fn attach_file(dir: &Path, stem: &str) -> io::Result<PathBuf> {
+    let logger = installed_logger()?;
+    let path = logger.attach(dir, stem, LOG_FILES_KEPT, LOG_FILE_MAX_BYTES)?;
+    // After a successful attach only, and `attach` refuses a second file for
+    // the run — which is what makes this at most once per process.
+    if let Err(error) = panic_hook::install(logger) {
+        warn!(
+            "log: panics will not be written to {} ({error})",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// [`attach_file`] without the panic hook, for a game that manages the
+/// process's panic hook itself.
+///
+/// A panic's own message and location then reach only whatever that hook
+/// writes; every line logged before it is in the file as usual.
+///
+/// # Errors
+///
+/// As [`attach_file`].
+pub fn attach_file_without_panic_hook(dir: &Path, stem: &str) -> io::Result<PathBuf> {
+    installed_logger()?.attach(dir, stem, LOG_FILES_KEPT, LOG_FILE_MAX_BYTES)
+}
+
+/// [`LOGGER`], when it is the logger the process is calling.
+fn installed_logger() -> io::Result<&'static StderrLogger> {
     match LOGGER.get() {
-        Some(logger) if is_installed() => {
-            logger.attach(dir, stem, LOG_FILES_KEPT, LOG_FILE_MAX_BYTES)
-        }
+        Some(logger) if is_installed() => Ok(logger),
         _ => Err(io::Error::other(
             "the engine's logger is not the process's, so there is no log to copy to a file",
         )),
