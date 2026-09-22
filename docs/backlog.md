@@ -284,7 +284,24 @@ Initial measurements and harness findings:
   the normalized first corner into its closing slot. Require the host polygon
   oracle, all native area-light images and alternating point/area stress timings
   before retaining it; a changed integral value or a neutral/regressed GPU range
-  rejects it.
+  rejects it. The first implementation bounded the normalization loop by
+  `polygon.count`. The host oracle and all three area-light image observers
+  passed, but area-light `forward` regressed to 11.020–11.133 ms p50, 22.6–25.8%
+  above the baseline, while point controls measured 3.547–3.601 ms. A dynamic
+  loop bound therefore loses the compiler's profitable fixed unrolling on this
+  adapter. Do not keep that shape. Trial explicit normalization of the fixed
+  corner slots with conditional copies for the triangle and quad closing slots;
+  this preserves a statically unrolled instruction stream while still removing
+  duplicate vector normalization. The fixed-slot form restored performance but
+  did not improve it: its area-light `forward` p50 was 8.925–8.958 ms, entirely
+  inside the 8.849–8.985 ms baseline, and point controls measured 3.502–3.537
+  ms. The host oracle passed; the shader, structural observer and generated
+  artifacts were removed because the timing criterion failed. During the
+  dynamic-loop trial, the three native area-light image observers passed but the
+  separate 256x192 pricing observer failed when its sun-only p50 exceeded its
+  point-light p50 and saturated the differential at 1 ns. Do not weaken that
+  observer; its short timing window is not evidence for this optimization. Keep
+  the original unconditional five-slot normalization on this adapter.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
