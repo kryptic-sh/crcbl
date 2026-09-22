@@ -29,6 +29,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Sun-only light clustering now writes its invariant froxel lists without
+  rebuilding per-tile geometry and depth bounds.
 - Fixed-size PCSS blocker searches now compile to constant tap sequences instead
   of dynamic loops and offset-table lookups in mesh, grass and water shading.
 - PCSS blocker searches now read pre-scaled Vogel offsets instead of multiplying

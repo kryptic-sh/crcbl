@@ -83,36 +83,51 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         return;
     }
+    var base_0 : u32 = froxel_0 * u32(17);
+    var _S2 : bool;
+    if((params_0.light_count_0) == u32(1))
+    {
+        _S2 = (lights_0[i32(0)].kind_0) == u32(0);
+    }
+    else
+    {
+        _S2 = false;
+    }
+    if(_S2)
+    {
+        cluster_lights_0[base_0] = u32(1);
+        cluster_lights_0[base_0 + u32(1)] = u32(0);
+        return;
+    }
     var tile_x_0 : u32 = froxel_0 % params_0.grid_x_0;
-    var _S2 : u32 = froxel_0 / params_0.grid_x_0;
-    var tile_y_0 : u32 = _S2 % params_0.grid_y_0;
+    var _S3 : u32 = froxel_0 / params_0.grid_x_0;
+    var tile_y_0 : u32 = _S3 % params_0.grid_y_0;
     var slice_0 : u32 = froxel_0 / tiles_0;
-    var _S3 : f32 = f32(params_0.viewport_x_0);
-    var _S4 : f32 = f32(params_0.viewport_y_0);
+    var _S4 : f32 = f32(params_0.viewport_x_0);
+    var _S5 : f32 = f32(params_0.viewport_y_0);
     var pixel_min_0 : vec2<f32> = vec2<f32>(f32(tile_x_0), f32(tile_y_0)) * vec2<f32>(f32(params_0.tile_pixels_0));
     var pixel_max_0 : vec2<f32> = pixel_min_0 + vec2<f32>(f32(params_0.tile_pixels_0));
-    var _S5 : f32 = pixel_min_0.x / _S3 * 2.0f - 1.0f;
-    var _S6 : f32 = 1.0f - pixel_max_0.y / _S4 * 2.0f;
-    var _S7 : f32 = pixel_max_0.x / _S3 * 2.0f - 1.0f;
-    var _S8 : f32 = 1.0f - pixel_min_0.y / _S4 * 2.0f;
+    var _S6 : f32 = pixel_min_0.x / _S4 * 2.0f - 1.0f;
+    var _S7 : f32 = 1.0f - pixel_max_0.y / _S5 * 2.0f;
+    var _S8 : f32 = pixel_max_0.x / _S4 * 2.0f - 1.0f;
+    var _S9 : f32 = 1.0f - pixel_min_0.y / _S5 * 2.0f;
     var corner_near_0 : array<vec3<f32>, i32(4)>;
-    corner_near_0[i32(0)] = unproject_0(vec2<f32>(_S5, _S6), 1.0f);
-    corner_near_0[i32(1)] = unproject_0(vec2<f32>(_S7, _S6), 1.0f);
-    corner_near_0[i32(2)] = unproject_0(vec2<f32>(_S5, _S8), 1.0f);
-    corner_near_0[i32(3)] = unproject_0(vec2<f32>(_S7, _S8), 1.0f);
+    corner_near_0[i32(0)] = unproject_0(vec2<f32>(_S6, _S7), 1.0f);
+    corner_near_0[i32(1)] = unproject_0(vec2<f32>(_S8, _S7), 1.0f);
+    corner_near_0[i32(2)] = unproject_0(vec2<f32>(_S6, _S9), 1.0f);
+    corner_near_0[i32(3)] = unproject_0(vec2<f32>(_S8, _S9), 1.0f);
     var perspective_1 : bool = (params_0.perspective_0) != u32(0);
-    const _S9 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
+    const _S10 : vec3<f32> = vec3<f32>(0.0f, 0.0f, 0.0f);
     var ortho_lo_0 : vec3<f32>;
     var ortho_hi_0 : vec3<f32>;
     var index_1 : u32;
-    var _S10 : bool;
     var eye_to_near_0 : f32;
     var _S11 : f32;
     if(perspective_1)
     {
         eye_to_near_0 = view_depth_0(corner_near_0[i32(0)]);
-        ortho_lo_0 = _S9;
-        ortho_hi_0 = _S9;
+        ortho_lo_0 = _S10;
+        ortho_hi_0 = _S10;
     }
     else
     {
@@ -130,27 +145,27 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
             }
             if(index_1 == u32(1))
             {
-                _S10 = true;
+                _S2 = true;
             }
             else
             {
-                _S10 = index_1 == u32(3);
+                _S2 = index_1 == u32(3);
             }
-            if(_S10)
+            if(_S2)
             {
-                eye_to_near_0 = _S7;
+                eye_to_near_0 = _S8;
             }
             else
             {
-                eye_to_near_0 = _S5;
+                eye_to_near_0 = _S6;
             }
             if(index_1 < u32(2))
             {
-                _S11 = _S6;
+                _S11 = _S7;
             }
             else
             {
-                _S11 = _S8;
+                _S11 = _S9;
             }
             var far_point_0 : vec3<f32> = unproject_0(vec2<f32>(eye_to_near_0, _S11), 0.0f);
             var _S12 : vec3<f32> = min(ortho_lo_0, min(corner_near_0[index_1], far_point_0));
@@ -172,14 +187,14 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     }
     if(!perspective_1)
     {
-        _S10 = true;
+        _S2 = true;
     }
     else
     {
-        _S10 = (slice_0 + u32(1)) >= (params_0.slices_0);
+        _S2 = (slice_0 + u32(1)) >= (params_0.slices_0);
     }
     var _S14 : f32;
-    if(_S10)
+    if(_S2)
     {
         _S14 = 3.4028234663852886e+38f;
     }
@@ -187,7 +202,6 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         _S14 = slice_start_0(slice_0 + u32(1));
     }
-    var base_0 : u32 = froxel_0 * u32(17);
     index_1 = u32(0);
     var kept_0 : u32 = u32(0);
     var dropped_0 : u32 = u32(0);
@@ -201,8 +215,8 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
             break;
         }
         var light_0 : GpuLight_std430_0 = lights_0[index_1];
-        var kept_1 : u32;
         var touches_0 : bool;
+        var kept_1 : u32;
         if((light_0.kind_0) == u32(0))
         {
             touches_0 = true;
@@ -220,13 +234,13 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
                 var light_hi_0 : f32 = depth_1 + radius_1;
                 if(light_hi_0 < _S11)
                 {
-                    _S10 = true;
+                    _S2 = true;
                 }
                 else
                 {
-                    _S10 = light_lo_0 > _S14;
+                    _S2 = light_lo_0 > _S14;
                 }
-                if(_S10)
+                if(_S2)
                 {
                     index_1 = index_1 + u32(1);
                     continue;
@@ -266,13 +280,13 @@ fn computeMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
             var touches_1 : bool = (dot(offset_1, offset_1)) <= (radius_1 * radius_1);
             if(touches_1)
             {
-                _S10 = (light_0.kind_0) == u32(2);
+                _S2 = (light_0.kind_0) == u32(2);
             }
             else
             {
-                _S10 = false;
+                _S2 = false;
             }
-            if(_S10)
+            if(_S2)
             {
                 touches_0 = cone_touches_sphere_0(center_1, light_0.direction_0.xyz, light_0.direction_0.w, radius_1, (box_lo_0 + box_hi_0) * vec3<f32>(0.5f), length(box_hi_0 - box_lo_0) * 0.5f);
             }
