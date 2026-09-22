@@ -4033,7 +4033,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   value-passing shape solely because its binaries are smaller. A future trial
   must preserve the exact taps, accumulation order, atlas clamping, bias,
   adaptive penumbra width and cascade blending. Fully lit/shadowed interiors,
-  contact edges and Metal/Direct3D image parity remain unverified.
+  contact edges and Metal/Direct3D image parity remain unverified. The next
+  bounded trial is narrower: current mesh SPIR-V retains the expression
+  `SHADOW_SEARCH_DISC[index] * SHADOW_SEARCH_TEXELS` as an `OpVectorTimesScalar`
+  inside the 16-iteration blocker loop. Pre-scale the constant search-offset
+  table, prove each parsed `f32` component is bitwise equal to the old component
+  multiplied by the power-of-two reach, and verify that the generated loop loses
+  that operation before GPU timing.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
