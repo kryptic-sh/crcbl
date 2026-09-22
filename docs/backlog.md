@@ -114,6 +114,14 @@ Initial measurements and harness findings:
   intervening `instances` control measured 2.685 ms in `forward` and 9.201 ms in
   the pass sum, both inside its pre-change range, so the result is localized to
   the intended light path rather than general run drift.
+- A temporary read of the existing cull-statistics overflow word found that the
+  fixed `lights` scene drops 1,316,374 froxel assignments on every measured
+  frame. At 1920x1080 the grid has 12,240 froxels, so this is about 108 dropped
+  assignments per froxel in addition to each retained prefix. The scene is a
+  useful deterministic overflow and capped-fragment-loop stressor, but it does
+  not measure shading all 256 lights. Add a separate within-budget light scene
+  before changing cluster capacity or policy; the current cluster pass is only
+  about 0.19 ms and does not justify that production trade-off.
 - The first workspace test run observed
   `forward::tests::the_atlas_viewer_replaces_the_display_passes_and_the_count_follows`
   report 52 draws where it expected 53. The exact test passed twice in isolation
