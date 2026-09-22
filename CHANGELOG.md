@@ -229,6 +229,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **CPU bounds of a scene's instances: `SceneDesc::instance_bounds` and
+  `instance_parts`.** `instance_bounds(&instances, root)` returns the box around
+  every vertex of the instances placed by `root * instance.transform`, folded
+  from the vertices (tight under rotation, unlike `Aabb::transformed`'s
+  conservative box); a DAG is bounded by its finest level. `instance_parts`
+  returns one local box per instance, which widened with `as_dvec3()` are the
+  parts `crcbl_phys::AabbCompound::new` takes. Both return
+  `crcbl_render::SceneBoundsError` naming the instance: a missing mesh, a DAG
+  with no levels, a partial vertex, an empty mesh as a part, no vertices at all,
+  or a placed vertex that is `NaN` or infinite — refused, where
+  `Aabb::from_points` (unchanged) skips a `NaN` for the cull's sake.
 - **Two-bone IK and model-space joint rotation: `crcbl_anim::ik`.**
   `rotate_joint(skeleton, model, pose, palette, joint, model_rotation)` turns
   one joint about its own origin by a rotation given in model space (the frame

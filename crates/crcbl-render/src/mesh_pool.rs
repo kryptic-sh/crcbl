@@ -1169,17 +1169,23 @@ impl MeshPool {
 
 /// The box holding every vertex position in `vertices`.
 ///
-/// The position is the first three floats of each [`VERTEX_STRIDE`]-byte vertex
-/// — [`crcbl_shaders::mesh::MeshVertex::position`], whose `w` is unused — read
-/// straight out of the bytes rather than through a decoded `MeshVertex`,
-/// because the pool never builds one and a second decoder is a second thing
-/// that can disagree with the layout.
-///
 /// A zero box for no vertices, which [`MeshPool::upload`] has already refused by
 /// name ([`MeshPoolError::EmptyMesh`]) before it gets here; the fallback exists
 /// so this is total rather than panicking on a case its caller has excluded.
 fn local_bounds(vertices: &[u8]) -> Aabb {
-    let positions = vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
+    Aabb::from_points(vertex_positions(vertices)).unwrap_or_default()
+}
+
+/// The position of each whole [`VERTEX_STRIDE`]-byte vertex in `vertices`; a
+/// trailing partial vertex is not read.
+///
+/// The position is the first three floats of each vertex —
+/// [`crcbl_shaders::mesh::MeshVertex::position`], whose `w` is unused — read
+/// straight out of the bytes rather than through a decoded `MeshVertex`,
+/// because the pool never builds one and a second decoder is a second thing
+/// that can disagree with the layout.
+pub(crate) fn vertex_positions(vertices: &[u8]) -> impl Iterator<Item = Vec3> + '_ {
+    vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
         let float_at = |offset: usize| {
             f32::from_le_bytes(
                 vertex[offset..offset + 4]
@@ -1188,8 +1194,7 @@ fn local_bounds(vertices: &[u8]) -> Aabb {
             )
         };
         Vec3::new(float_at(0), float_at(4), float_at(8))
-    });
-    Aabb::from_points(positions).unwrap_or_default()
+    })
 }
 
 /// What [`MeshPool::write_and_submit`] needs that is not the device or the

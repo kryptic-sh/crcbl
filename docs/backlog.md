@@ -21955,10 +21955,22 @@ already carries.
   `reach_support_shoulder` could use but has not asked for. Not verified: EW's
   authored rigs under the port, and whether they carry non-uniform scale above a
   turned joint, which is now refused with `NonConformalFrame`.
-- **CPU bounds of a `SceneDesc` instance set under a root transform.** EW's
-  `asset_placement::bounds` / `collision_parts` reject non-finite values, where
-  `Aabb::from_points` skips NaN. This is what would produce the parts for the
-  compound query above.
+- **Scene instance bounds shipped; EW's migration remains.**
+  `SceneDesc::instance_bounds(&instances, root)` and
+  `instance_parts(&instances)` landed 2026-09-23 in `crcbl-render`, folding the
+  placed vertices (not the looser abs-matrix box, which would float EW's surface
+  placement) into `f32` `crcbl_render::Aabb`, refusing a non-finite placed
+  vertex with `SceneBoundsError` naming the instance. `Aabb::from_points` still
+  skips `NaN`, deliberately, for culling. EW still has to move its 9 `bounds`
+  and 7 `collision_parts` call sites (counted by grep) and delete
+  `asset_placement::{bounds, collision_parts}`, widening parts with `as_dvec3()`
+  and keeping its own `MIN_HALF_EXTENT_M` padding. Behaviour change: a part
+  whose mesh has no vertices is `EmptyPart { instance }`. Seen and not
+  investigated:
+  `cargo clippy -p crcbl-render --all-targets --target wasm32-unknown-unknown`
+  fails on unused `Instance` imports in test code (`forward.rs` and
+  `mesh_pool.rs` tests, `tests/graph_compile.rs`); CI's wasm32 job lints without
+  `--all-targets`, so it does not see them.
 
 Not verified from the crcbl side beyond EW's report: the absence claims were
 EW's reading of the public API.

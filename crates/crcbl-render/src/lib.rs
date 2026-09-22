@@ -252,7 +252,7 @@ pub use orbit::OrbitCamera;
 pub use pass_stats::PassStats;
 pub use scene::{
     Capacities, Geometry, InstanceDesc, MeshDesc, PageDesc, PageKind, ProbeGrid, ProbeUpdate,
-    SceneDesc,
+    SceneBoundsError, SceneDesc,
 };
 pub use shadow::Cascades;
 pub use skinning::{
