@@ -78,7 +78,7 @@ fn boundary_height_0( t_0 : f32,  start_0 : i32,  end_0 : i32,  u_shape_0 : bool
     return -0.5f * f32(start_0) * (1.0f - t_0) - 0.5f * f32(end_0) * t_0;
 }
 
-fn accumulate_0( target_0 : u32,  from_0 : u32,  share_0 : f32)
+fn accumulate_0( target_0 : u32,  from_0 : u32,  from_texel_0 : vec2<i32>,  share_0 : f32)
 {
     if(share_0 < 0.001953125f)
     {
@@ -98,39 +98,35 @@ fn accumulate_0( target_0 : u32,  from_0 : u32,  share_0 : f32)
     {
         return;
     }
-    var width_0 : u32 = params_0.viewport_x_0;
-    var _S4 : u32 = from_0 % params_0.viewport_x_0;
-    var _S5 : i32 = i32(_S4);
-    var _S6 : u32 = from_0 / width_0;
-    var _S7 : vec3<i32> = vec3<i32>(vec2<i32>(_S5, i32(_S6)), i32(0));
-    var color_0 : vec3<f32> = saturate((textureLoad((source_0), ((_S7)).xy, ((_S7)).z)).xyz);
+    var _S4 : vec3<i32> = vec3<i32>(from_texel_0, i32(0));
+    var color_0 : vec3<f32> = saturate((textureLoad((source_0), ((_S4)).xy, ((_S4)).z)).xyz);
     var weight_0 : u32 = u32(min(share_0, 0.5f) * 1.048576e+06f);
     var scaled_0 : f32 = f32(weight_0);
-    var _S8 : u32 = target_0 * u32(4);
-    var _S9 : u32 = atomicAdd(&(accum_0[_S8]), u32(color_0.x * scaled_0));
-    var _S10 : u32 = atomicAdd(&(accum_0[_S8 + u32(1)]), u32(color_0.y * scaled_0));
-    var _S11 : u32 = atomicAdd(&(accum_0[_S8 + u32(2)]), u32(color_0.z * scaled_0));
-    var _S12 : u32 = atomicAdd(&(accum_0[_S8 + u32(3)]), weight_0);
+    var _S5 : u32 = target_0 * u32(4);
+    var _S6 : u32 = atomicAdd(&(accum_0[_S5]), u32(color_0.x * scaled_0));
+    var _S7 : u32 = atomicAdd(&(accum_0[_S5 + u32(1)]), u32(color_0.y * scaled_0));
+    var _S8 : u32 = atomicAdd(&(accum_0[_S5 + u32(2)]), u32(color_0.z * scaled_0));
+    var _S9 : u32 = atomicAdd(&(accum_0[_S5 + u32(3)]), weight_0);
     return;
 }
 
-fn blend_line_0( first_0 : u32,  stride_0 : u32,  len_0 : u32,  offset_0 : u32,  start_1 : i32,  end_1 : i32)
+fn blend_line_0( first_0 : u32,  stride_0 : u32,  len_0 : u32,  offset_0 : u32,  start_1 : i32,  end_1 : i32,  first_texel_0 : vec2<i32>,  texel_step_0 : vec2<i32>,  across_0 : vec2<i32>)
 {
-    var _S13 : bool;
+    var _S10 : bool;
     if(start_1 == i32(0))
     {
-        _S13 = true;
+        _S10 = true;
     }
     else
     {
-        _S13 = end_1 == i32(0);
+        _S10 = end_1 == i32(0);
     }
-    if(_S13)
+    if(_S10)
     {
         return;
     }
-    var _S14 : f32 = 1.0f / f32(len_0);
-    var _S15 : bool = start_1 == end_1;
+    var _S11 : f32 = 1.0f / f32(len_0);
+    var _S12 : bool = start_1 == end_1;
     var i_0 : u32 = u32(0);
     for(;;)
     {
@@ -141,45 +137,45 @@ fn blend_line_0( first_0 : u32,  stride_0 : u32,  len_0 : u32,  offset_0 : u32, 
         {
             break;
         }
-        var near_0 : f32 = boundary_height_0(f32(i_0) * _S14, start_1, end_1, _S15);
-        var _S16 : u32 = i_0 + u32(1);
-        var far_0 : f32 = boundary_height_0(f32(_S16) * _S14, start_1, end_1, _S15);
+        var near_0 : f32 = boundary_height_0(f32(i_0) * _S11, start_1, end_1, _S12);
+        var _S13 : u32 = i_0 + u32(1);
+        var far_0 : f32 = boundary_height_0(f32(_S13) * _S11, start_1, end_1, _S12);
         if(near_0 <= 0.0f)
         {
-            _S13 = far_0 <= 0.0f;
+            _S10 = far_0 <= 0.0f;
         }
         else
         {
-            _S13 = false;
+            _S10 = false;
         }
         var below_1 : f32;
         var above_1 : f32;
-        if(_S13)
+        if(_S10)
         {
             below_1 = -0.5f * (near_0 + far_0);
             above_1 = 0.0f;
         }
         else
         {
-            var _S17 : bool;
+            var _S14 : bool;
             if(near_0 >= 0.0f)
             {
-                _S17 = far_0 >= 0.0f;
+                _S14 = far_0 >= 0.0f;
             }
             else
             {
-                _S17 = false;
+                _S14 = false;
             }
-            if(_S17)
+            if(_S14)
             {
-                var _S18 : f32 = 0.5f * (near_0 + far_0);
+                var _S15 : f32 = 0.5f * (near_0 + far_0);
                 below_1 = 0.0f;
-                above_1 = _S18;
+                above_1 = _S15;
             }
             else
             {
                 var crossing_0 : f32 = near_0 / (near_0 - far_0);
-                var _S19 : f32 = 0.5f * abs(min(near_0, far_0));
+                var _S16 : f32 = 0.5f * abs(min(near_0, far_0));
                 if(near_0 < 0.0f)
                 {
                     below_1 = crossing_0;
@@ -188,8 +184,8 @@ fn blend_line_0( first_0 : u32,  stride_0 : u32,  len_0 : u32,  offset_0 : u32, 
                 {
                     below_1 = 1.0f - crossing_0;
                 }
-                var _S20 : f32 = _S19 * below_1;
-                var _S21 : f32 = 0.5f * max(near_0, far_0);
+                var _S17 : f32 = _S16 * below_1;
+                var _S18 : f32 = 0.5f * max(near_0, far_0);
                 if(near_0 > 0.0f)
                 {
                     above_1 = crossing_0;
@@ -198,16 +194,17 @@ fn blend_line_0( first_0 : u32,  stride_0 : u32,  len_0 : u32,  offset_0 : u32, 
                 {
                     above_1 = 1.0f - crossing_0;
                 }
-                var _S22 : f32 = _S21 * above_1;
-                below_1 = _S20;
-                above_1 = _S22;
+                var _S19 : f32 = _S18 * above_1;
+                below_1 = _S17;
+                above_1 = _S19;
             }
         }
         var pixel_0 : u32 = first_0 + i_0 * stride_0;
-        var _S23 : u32 = pixel_0 - offset_0;
-        accumulate_0(_S23, pixel_0, below_1);
-        accumulate_0(pixel_0, _S23, above_1);
-        i_0 = _S16;
+        var texel_0 : vec2<i32> = first_texel_0 + vec2<i32>(i32(i_0)) * texel_step_0;
+        var _S20 : u32 = pixel_0 - offset_0;
+        accumulate_0(_S20, pixel_0, texel_0, below_1);
+        accumulate_0(pixel_0, _S20, texel_0 - across_0, above_1);
+        i_0 = _S13;
     }
     return;
 }
@@ -224,16 +221,16 @@ fn vertical_turn_0( column_1 : u32,  row_1 : u32) -> i32
     {
         left_0 = false;
     }
-    var _S24 : bool;
+    var _S21 : bool;
     if(left_0)
     {
-        _S24 = !right_0;
+        _S21 = !right_0;
     }
     else
     {
-        _S24 = false;
+        _S21 = false;
     }
-    if(_S24)
+    if(_S21)
     {
         return i32(1);
     }
@@ -256,10 +253,10 @@ fn vertical_turn_0( column_1 : u32,  row_1 : u32) -> i32
 @workgroup_size(64, 1, 1)
 fn shapesMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
 {
-    var _S25 : bool;
-    var _S26 : bool;
+    var _S22 : bool;
+    var _S23 : bool;
     var index_0 : u32 = thread_0.x;
-    var width_1 : u32 = params_0.viewport_x_0;
+    var width_0 : u32 = params_0.viewport_x_0;
     if(index_0 >= (params_0.viewport_x_0 * params_0.viewport_y_0))
     {
         return;
@@ -269,34 +266,34 @@ fn shapesMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
     {
         return;
     }
-    var x_1 : u32 = index_0 % width_1;
-    var y_1 : u32 = index_0 / width_1;
-    var _S27 : bool;
+    var x_1 : u32 = index_0 % width_0;
+    var y_1 : u32 = index_0 / width_0;
+    var _S24 : bool;
     if(((own_0 & (u32(2)))) != u32(0))
     {
-        _S27 = (((edge_at_0(x_1 - u32(1), y_1)) & (u32(2)))) == u32(0);
+        _S24 = (((edge_at_0(x_1 - u32(1), y_1)) & (u32(2)))) == u32(0);
     }
     else
     {
-        _S27 = false;
+        _S24 = false;
     }
     var len_1 : u32;
-    if(_S27)
+    if(_S24)
     {
         len_1 = u32(1);
         for(;;)
         {
-            var _S28 : bool = len_1 <= u32(64);
-            _S25 = _S28;
-            if(_S28)
+            var _S25 : bool = len_1 <= u32(64);
+            _S22 = _S25;
+            if(_S25)
             {
-                _S27 = (((edge_at_0(x_1 + len_1, y_1)) & (u32(2)))) != u32(0);
+                _S24 = (((edge_at_0(x_1 + len_1, y_1)) & (u32(2)))) != u32(0);
             }
             else
             {
-                _S27 = false;
+                _S24 = false;
             }
-            if(_S27)
+            if(_S24)
             {
             }
             else
@@ -305,35 +302,35 @@ fn shapesMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
             }
             len_1 = len_1 + u32(1);
         }
-        if(_S25)
+        if(_S22)
         {
-            blend_line_0(index_0, u32(1), len_1, width_1, horizontal_turn_0(x_1, y_1), horizontal_turn_0(x_1 + len_1, y_1));
+            blend_line_0(index_0, u32(1), len_1, width_0, horizontal_turn_0(x_1, y_1), horizontal_turn_0(x_1 + len_1, y_1), vec2<i32>(i32(x_1), i32(y_1)), vec2<i32>(i32(1), i32(0)), vec2<i32>(i32(0), i32(1)));
         }
     }
     if(((own_0 & (u32(1)))) != u32(0))
     {
-        _S27 = (((edge_at_0(x_1, y_1 - u32(1))) & (u32(1)))) == u32(0);
+        _S24 = (((edge_at_0(x_1, y_1 - u32(1))) & (u32(1)))) == u32(0);
     }
     else
     {
-        _S27 = false;
+        _S24 = false;
     }
-    if(_S27)
+    if(_S24)
     {
         len_1 = u32(1);
         for(;;)
         {
-            var _S29 : bool = len_1 <= u32(64);
-            _S26 = _S29;
-            if(_S29)
+            var _S26 : bool = len_1 <= u32(64);
+            _S23 = _S26;
+            if(_S26)
             {
-                _S27 = (((edge_at_0(x_1, y_1 + len_1)) & (u32(1)))) != u32(0);
+                _S24 = (((edge_at_0(x_1, y_1 + len_1)) & (u32(1)))) != u32(0);
             }
             else
             {
-                _S27 = false;
+                _S24 = false;
             }
-            if(_S27)
+            if(_S24)
             {
             }
             else
@@ -342,9 +339,9 @@ fn shapesMain(@builtin(global_invocation_id) thread_0 : vec3<u32>)
             }
             len_1 = len_1 + u32(1);
         }
-        if(_S26)
+        if(_S23)
         {
-            blend_line_0(index_0, width_1, len_1, u32(1), vertical_turn_0(x_1, y_1), vertical_turn_0(x_1, y_1 + len_1));
+            blend_line_0(index_0, width_0, len_1, u32(1), vertical_turn_0(x_1, y_1), vertical_turn_0(x_1, y_1 + len_1), vec2<i32>(i32(x_1), i32(y_1)), vec2<i32>(i32(0), i32(1)), vec2<i32>(i32(1), i32(0)));
         }
     }
     return;

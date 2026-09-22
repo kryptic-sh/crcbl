@@ -210,8 +210,16 @@ Initial measurements and harness findings:
   `cmaa2_shapes.slang::accumulate` recovers a source texel from a flat index for
   every emitted share, although `blend_line` already walks that texel in two
   dimensions. Trial passing the known coordinate into `accumulate`; this keeps
-  the dispatch layout and coverage arithmetic unchanged, and must preserve the
-  CMAA2 image goldens byte for byte before any timing result is considered.
+  the dispatch layout and coverage arithmetic unchanged, and must pass every
+  CMAA2 real-GPU image observer before any timing result is considered. The
+  retained trial passed all three observers. In alternating 1920x1080 combined
+  runs, the committed baseline's shape p50 was 0.793 and 0.851 ms versus 0.721
+  and 0.726 ms with the coordinate carried through, an 8.4–15.3% reduction. The
+  complete three-pass CMAA2 sum improved by 3.2–8.1%. Whole-frame pass sums
+  overlapped, so no full-frame percentage follows from this change. The mesh-e2e
+  wrapper still exited unsuccessfully after its three tests passed because
+  `VK_LAYER_KHRONOS_validation` is not installed; rerun the suite with that
+  layer before treating native validation as covered.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.

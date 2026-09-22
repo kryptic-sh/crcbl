@@ -29,6 +29,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- CMAA2 shape classification now carries each run's already-known source texel
+  into its blend accumulation instead of recovering it with integer division for
+  every emitted share.
 - The sandbox's combined stress scene now runs its per-body overlap queries on
   the engine jobs pool with thread-local query scratch, while reporting how many
   chunks workers actually completed. This keeps the same deterministic answers

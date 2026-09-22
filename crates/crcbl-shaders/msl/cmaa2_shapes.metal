@@ -11,7 +11,7 @@ struct Cmaa2Params_0
 };
 
 
-#line 283
+#line 281
 struct KernelContext_0
 {
     Cmaa2Params_0 constant* params_0;
@@ -180,7 +180,7 @@ float boundary_height_0(float t_0, int start_0, int end_0, bool u_shape_0)
 
 
 #line 262
-void accumulate_0(uint target_0, uint from_0, float share_0, KernelContext_0 thread* kernelContext_3)
+void accumulate_0(uint target_0, uint from_0, int2 from_texel_0, float share_0, KernelContext_0 thread* kernelContext_3)
 {
     if(share_0 < 0.001953125f)
     {
@@ -213,245 +213,236 @@ void accumulate_0(uint target_0, uint from_0, float share_0, KernelContext_0 thr
         return;
     }
 
-    uint width_0 = kernelContext_3->params_0->viewport_x_0;
-    uint _S7 = from_0 % kernelContext_3->params_0->viewport_x_0;
+#line 277
+    int3 _S7 = int3(from_texel_0, int(0));
 
-#line 275
-    int _S8 = int(_S7);
-
-#line 275
-    uint _S9 = from_0 / width_0;
-
-
-
-    int3 _S10 = int3(int2(_S8, int(_S9)), int(0));
-
-#line 279
-    float3 color_0 = saturate(((kernelContext_3->source_0).read(vec<uint,2>(((_S10)).xy), uint(((_S10)).z))).xyz);
+#line 277
+    float3 color_0 = saturate(((kernelContext_3->source_0).read(vec<uint,2>(((_S7)).xy), uint(((_S7)).z))).xyz);
     uint weight_0 = uint(min(share_0, 0.5f) * 1.048576e+06f);
     float scaled_0 = float(weight_0);
 
-    uint _S11 = target_0 * 4U;
+    uint _S8 = target_0 * 4U;
 
-#line 283
-    uint _S12 = atomic_fetch_add_explicit(kernelContext_3->accum_0+_S11, uint(color_0.x * scaled_0), memory_order_relaxed);
-    uint _S13 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S11 + 1U), uint(color_0.y * scaled_0), memory_order_relaxed);
-    uint _S14 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S11 + 2U), uint(color_0.z * scaled_0), memory_order_relaxed);
-    uint _S15 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S11 + 3U), weight_0, memory_order_relaxed);
+#line 281
+    uint _S9 = atomic_fetch_add_explicit(kernelContext_3->accum_0+_S8, uint(color_0.x * scaled_0), memory_order_relaxed);
+    uint _S10 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S8 + 1U), uint(color_0.y * scaled_0), memory_order_relaxed);
+    uint _S11 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S8 + 2U), uint(color_0.z * scaled_0), memory_order_relaxed);
+    uint _S12 = atomic_fetch_add_explicit(kernelContext_3->accum_0+(_S8 + 3U), weight_0, memory_order_relaxed);
     return;
 }
 
 
-#line 311
-void blend_line_0(uint first_0, uint stride_0, uint len_0, uint offset_0, int start_1, int end_1, KernelContext_0 thread* kernelContext_4)
+#line 309
+void blend_line_0(uint first_0, uint stride_0, uint len_0, uint offset_0, int start_1, int end_1, int2 first_texel_0, int2 texel_step_0, int2 across_0, KernelContext_0 thread* kernelContext_4)
 {
 
-#line 311
-    bool _S16;
+#line 318
+    bool _S13;
 
     if(start_1 == int(0))
     {
 
-#line 313
-        _S16 = true;
+#line 320
+        _S13 = true;
 
-#line 313
+#line 320
     }
     else
     {
 
-#line 313
-        _S16 = end_1 == int(0);
+#line 320
+        _S13 = end_1 == int(0);
 
-#line 313
+#line 320
     }
 
-#line 313
-    if(_S16)
+#line 320
+    if(_S13)
     {
         return;
     }
-    float _S17 = 1.0f / float(len_0);
-    bool _S18 = start_1 == end_1;
+    float _S14 = 1.0f / float(len_0);
+    bool _S15 = start_1 == end_1;
 
-#line 318
+#line 325
     uint i_0 = 0U;
     for(;;)
     {
 
-#line 319
+#line 326
         if(i_0 < len_0)
         {
         }
         else
         {
 
-#line 319
+#line 326
             break;
         }
 
-#line 326
-        float near_0 = boundary_height_0(float(i_0) * _S17, start_1, end_1, _S18);
-        uint _S19 = i_0 + 1U;
-
-#line 327
-        float far_0 = boundary_height_0(float(_S19) * _S17, start_1, end_1, _S18);
+#line 333
+        float near_0 = boundary_height_0(float(i_0) * _S14, start_1, end_1, _S15);
+        uint _S16 = i_0 + 1U;
 
 #line 334
+        float far_0 = boundary_height_0(float(_S16) * _S14, start_1, end_1, _S15);
+
+#line 341
         if(near_0 <= 0.0f)
         {
 
-#line 334
-            _S16 = far_0 <= 0.0f;
+#line 341
+            _S13 = far_0 <= 0.0f;
 
-#line 334
+#line 341
         }
         else
         {
 
-#line 334
-            _S16 = false;
+#line 341
+            _S13 = false;
 
-#line 334
+#line 341
         }
 
-#line 334
+#line 341
         float below_1;
 
-#line 334
+#line 341
         float above_1;
 
-#line 334
-        if(_S16)
+#line 341
+        if(_S13)
         {
 
-#line 334
+#line 341
             below_1 = -0.5f * (near_0 + far_0);
 
-#line 334
+#line 341
             above_1 = 0.0f;
 
-#line 334
+#line 341
         }
         else
         {
 
-#line 334
-            bool _S20;
+#line 341
+            bool _S17;
 
-#line 339
+#line 346
             if(near_0 >= 0.0f)
             {
 
-#line 339
-                _S20 = far_0 >= 0.0f;
+#line 346
+                _S17 = far_0 >= 0.0f;
 
-#line 339
-            }
-            else
-            {
-
-#line 339
-                _S20 = false;
-
-#line 339
-            }
-
-#line 339
-            if(_S20)
-            {
-
-                float _S21 = 0.5f * (near_0 + far_0);
-
-#line 342
-                below_1 = 0.0f;
-
-#line 342
-                above_1 = _S21;
-
-#line 339
+#line 346
             }
             else
             {
 
 #line 346
-                float crossing_0 = near_0 / (near_0 - far_0);
-                float _S22 = 0.5f * abs(min(near_0, far_0));
+                _S17 = false;
 
-#line 347
+#line 346
+            }
+
+#line 346
+            if(_S17)
+            {
+
+                float _S18 = 0.5f * (near_0 + far_0);
+
+#line 349
+                below_1 = 0.0f;
+
+#line 349
+                above_1 = _S18;
+
+#line 346
+            }
+            else
+            {
+
+#line 353
+                float crossing_0 = near_0 / (near_0 - far_0);
+                float _S19 = 0.5f * abs(min(near_0, far_0));
+
+#line 354
                 if(near_0 < 0.0f)
                 {
 
-#line 347
+#line 354
                     below_1 = crossing_0;
 
-#line 347
+#line 354
                 }
                 else
                 {
 
-#line 347
+#line 354
                     below_1 = 1.0f - crossing_0;
 
-#line 347
+#line 354
                 }
 
-#line 347
-                float _S23 = _S22 * below_1;
-                float _S24 = 0.5f * max(near_0, far_0);
+#line 354
+                float _S20 = _S19 * below_1;
+                float _S21 = 0.5f * max(near_0, far_0);
 
-#line 348
+#line 355
                 if(near_0 > 0.0f)
                 {
 
-#line 348
+#line 355
                     above_1 = crossing_0;
 
-#line 348
+#line 355
                 }
                 else
                 {
 
-#line 348
+#line 355
                     above_1 = 1.0f - crossing_0;
 
-#line 348
+#line 355
                 }
 
-#line 348
-                float _S25 = _S24 * above_1;
+#line 355
+                float _S22 = _S21 * above_1;
 
-#line 348
-                below_1 = _S23;
+#line 355
+                below_1 = _S20;
 
-#line 348
-                above_1 = _S25;
+#line 355
+                above_1 = _S22;
 
-#line 339
+#line 346
             }
 
-#line 334
+#line 341
         }
 
-#line 351
+#line 358
         uint pixel_0 = first_0 + i_0 * stride_0;
 
-#line 360
-        uint _S26 = pixel_0 - offset_0;
+#line 367
+        int2 texel_0 = first_texel_0 + int2(int(i_0))  * texel_step_0;
+        uint _S23 = pixel_0 - offset_0;
 
-#line 360
-        accumulate_0(_S26, pixel_0, below_1, kernelContext_4);
+#line 368
+        accumulate_0(_S23, pixel_0, texel_0, below_1, kernelContext_4);
 
-#line 360
-        accumulate_0(pixel_0, _S26, above_1, kernelContext_4);
+#line 368
+        accumulate_0(pixel_0, _S23, texel_0 - across_0, above_1, kernelContext_4);
 
-#line 319
-        i_0 = _S19;
+#line 326
+        i_0 = _S16;
 
-#line 319
+#line 326
     }
 
-#line 363
+#line 371
     return;
 }
 
@@ -461,9 +452,9 @@ int vertical_turn_0(uint column_1, uint row_1, KernelContext_0 thread* kernelCon
 {
 
 #line 206
-    uint _S27 = edge_at_1(column_1, row_1, kernelContext_5);
+    uint _S24 = edge_at_1(column_1, row_1, kernelContext_5);
 
-    bool right_0 = (_S27 & 2U) != 0U;
+    bool right_0 = (_S24 & 2U) != 0U;
 
 #line 208
     bool left_0;
@@ -471,10 +462,10 @@ int vertical_turn_0(uint column_1, uint row_1, KernelContext_0 thread* kernelCon
     {
 
 #line 209
-        uint _S28 = edge_at_1(column_1 - 1U, row_1, kernelContext_5);
+        uint _S25 = edge_at_1(column_1 - 1U, row_1, kernelContext_5);
 
 #line 209
-        left_0 = (_S28 & 2U) != 0U;
+        left_0 = (_S25 & 2U) != 0U;
 
 #line 209
     }
@@ -488,12 +479,12 @@ int vertical_turn_0(uint column_1, uint row_1, KernelContext_0 thread* kernelCon
     }
 
 #line 209
-    bool _S29;
+    bool _S26;
     if(left_0)
     {
 
 #line 210
-        _S29 = !right_0;
+        _S26 = !right_0;
 
 #line 210
     }
@@ -501,13 +492,13 @@ int vertical_turn_0(uint column_1, uint row_1, KernelContext_0 thread* kernelCon
     {
 
 #line 210
-        _S29 = false;
+        _S26 = false;
 
 #line 210
     }
 
 #line 210
-    if(_S29)
+    if(_S26)
     {
         return int(1);
     }
@@ -537,251 +528,251 @@ int vertical_turn_0(uint column_1, uint row_1, KernelContext_0 thread* kernelCon
 }
 
 
-#line 375
+#line 383
 [[kernel]] void shapesMain(uint3 thread_0 [[thread_position_in_grid]], Cmaa2Params_0 constant* params_1 [[buffer(0)]], uint device* edges_1 [[buffer(1)]], texture2d<float, access::sample> source_1 [[texture(0)]], atomic<uint> device* accum_1 [[buffer(2)]])
 {
 
-#line 375
-    bool _S30;
+#line 383
+    bool _S27;
 
-#line 375
-    bool _S31;
+#line 383
+    bool _S28;
 
-#line 375
+#line 383
     thread KernelContext_0 kernelContext_6;
 
-#line 375
+#line 383
     (&kernelContext_6)->params_0 = params_1;
 
-#line 375
+#line 383
     (&kernelContext_6)->edges_0 = edges_1;
 
-#line 375
+#line 383
     (&kernelContext_6)->source_0 = source_1;
 
-#line 375
+#line 383
     (&kernelContext_6)->accum_0 = accum_1;
 
     uint index_0 = thread_0.x;
-    uint width_1 = params_1->viewport_x_0;
+    uint width_0 = params_1->viewport_x_0;
 
     if(index_0 >= (params_1->viewport_x_0 * params_1->viewport_y_0))
     {
         return;
     }
 
-    uint device* _S32 = (&kernelContext_6)->edges_0+index_0;
+    uint device* _S29 = (&kernelContext_6)->edges_0+index_0;
 
-#line 385
-    uint own_0 = *_S32;
-    if((*_S32) == 0U)
+#line 393
+    uint own_0 = *_S29;
+    if((*_S29) == 0U)
     {
         return;
     }
 
-    uint x_2 = index_0 % width_1;
-    uint y_2 = index_0 / width_1;
+    uint x_2 = index_0 % width_0;
+    uint y_2 = index_0 / width_0;
 
-#line 392
-    bool _S33;
+#line 400
+    bool _S30;
 
 
 
     if((own_0 & 2U) != 0U)
     {
 
-#line 396
-        uint _S34 = edge_at_0(x_2 - 1U, y_2, &kernelContext_6);
+#line 404
+        uint _S31 = edge_at_0(x_2 - 1U, y_2, &kernelContext_6);
 
-#line 396
-        _S33 = (_S34 & 2U) == 0U;
+#line 404
+        _S30 = (_S31 & 2U) == 0U;
 
-#line 396
+#line 404
     }
     else
     {
 
-#line 396
-        _S33 = false;
+#line 404
+        _S30 = false;
 
-#line 396
+#line 404
     }
 
-#line 396
+#line 404
     uint len_1;
 
-#line 396
-    if(_S33)
+#line 404
+    if(_S30)
     {
 
-#line 396
+#line 404
         len_1 = 1U;
 
 
         for(;;)
         {
 
-#line 399
-            bool _S35 = len_1 <= 64U;
+#line 407
+            bool _S32 = len_1 <= 64U;
 
-#line 399
-            _S30 = _S35;
+#line 407
+            _S27 = _S32;
 
-#line 399
-            if(_S35)
+#line 407
+            if(_S32)
             {
 
-#line 399
-                uint _S36 = edge_at_0(x_2 + len_1, y_2, &kernelContext_6);
+#line 407
+                uint _S33 = edge_at_0(x_2 + len_1, y_2, &kernelContext_6);
 
-#line 399
-                _S33 = (_S36 & 2U) != 0U;
+#line 407
+                _S30 = (_S33 & 2U) != 0U;
 
-#line 399
+#line 407
             }
             else
             {
 
-#line 399
-                _S33 = false;
+#line 407
+                _S30 = false;
 
-#line 399
+#line 407
             }
 
-#line 399
-            if(_S33)
+#line 407
+            if(_S30)
             {
             }
             else
             {
 
-#line 399
+#line 407
                 break;
             }
 
-#line 399
+#line 407
             len_1 = len_1 + 1U;
 
-#line 399
+#line 407
         }
 
 
 
-        if(_S30)
+        if(_S27)
         {
 
-#line 403
-            int _S37 = horizontal_turn_0(x_2, y_2, &kernelContext_6);
-
-#line 403
-            int _S38 = horizontal_turn_0(x_2 + len_1, y_2, &kernelContext_6);
-
-#line 403
-            blend_line_0(index_0, 1U, len_1, width_1, _S37, _S38, &kernelContext_6);
-
-#line 403
-        }
-
-#line 396
-    }
+#line 411
+            int _S34 = horizontal_turn_0(x_2, y_2, &kernelContext_6);
 
 #line 411
+            int _S35 = horizontal_turn_0(x_2 + len_1, y_2, &kernelContext_6);
+
+#line 411
+            blend_line_0(index_0, 1U, len_1, width_0, _S34, _S35, int2(int(x_2), int(y_2)), int2(int(1), int(0)), int2(int(0), int(1)), &kernelContext_6);
+
+#line 411
+        }
+
+#line 404
+    }
+
+#line 428
     if((own_0 & 1U) != 0U)
     {
 
-#line 411
-        uint _S39 = edge_at_0(x_2, y_2 - 1U, &kernelContext_6);
+#line 428
+        uint _S36 = edge_at_0(x_2, y_2 - 1U, &kernelContext_6);
 
-#line 411
-        _S33 = (_S39 & 1U) == 0U;
+#line 428
+        _S30 = (_S36 & 1U) == 0U;
 
-#line 411
+#line 428
     }
     else
     {
 
-#line 411
-        _S33 = false;
+#line 428
+        _S30 = false;
 
-#line 411
+#line 428
     }
 
-#line 411
-    if(_S33)
+#line 428
+    if(_S30)
     {
 
-#line 411
+#line 428
         len_1 = 1U;
 
 
         for(;;)
         {
 
-#line 414
-            bool _S40 = len_1 <= 64U;
+#line 431
+            bool _S37 = len_1 <= 64U;
 
-#line 414
-            _S31 = _S40;
+#line 431
+            _S28 = _S37;
 
-#line 414
-            if(_S40)
+#line 431
+            if(_S37)
             {
 
-#line 414
-                uint _S41 = edge_at_0(x_2, y_2 + len_1, &kernelContext_6);
+#line 431
+                uint _S38 = edge_at_0(x_2, y_2 + len_1, &kernelContext_6);
 
-#line 414
-                _S33 = (_S41 & 1U) != 0U;
+#line 431
+                _S30 = (_S38 & 1U) != 0U;
 
-#line 414
+#line 431
             }
             else
             {
 
-#line 414
-                _S33 = false;
+#line 431
+                _S30 = false;
 
-#line 414
+#line 431
             }
 
-#line 414
-            if(_S33)
+#line 431
+            if(_S30)
             {
             }
             else
             {
 
-#line 414
+#line 431
                 break;
             }
 
-#line 414
+#line 431
             len_1 = len_1 + 1U;
 
-#line 414
+#line 431
         }
 
 
 
-        if(_S31)
+        if(_S28)
         {
 
-#line 418
-            int _S42 = vertical_turn_0(x_2, y_2, &kernelContext_6);
+#line 435
+            int _S39 = vertical_turn_0(x_2, y_2, &kernelContext_6);
 
-#line 418
-            int _S43 = vertical_turn_0(x_2, y_2 + len_1, &kernelContext_6);
+#line 435
+            int _S40 = vertical_turn_0(x_2, y_2 + len_1, &kernelContext_6);
 
-#line 418
-            blend_line_0(index_0, width_1, len_1, 1U, _S42, _S43, &kernelContext_6);
+#line 435
+            blend_line_0(index_0, width_0, len_1, 1U, _S39, _S40, int2(int(x_2), int(y_2)), int2(int(0), int(1)), int2(int(1), int(0)), &kernelContext_6);
 
-#line 418
+#line 435
         }
 
-#line 411
+#line 428
     }
 
-#line 423
+#line 449
     return;
 }
 

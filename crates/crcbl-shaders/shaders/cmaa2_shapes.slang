@@ -259,7 +259,7 @@ float boundary_height(float t, int start, int end, bool u_shape)
 /// that says the pixel across it exists — and they are here because these are
 /// unchecked buffer indices: the cost is a comparison and what it buys is that
 /// a future walk cannot scribble outside the accumulation.
-void accumulate(uint target, uint from, float share)
+void accumulate(uint target, uint from, int2 from_texel, float share)
 {
     if (share < MIN_BLEND_WEIGHT)
     {
@@ -271,12 +271,10 @@ void accumulate(uint target, uint from, float share)
         return;
     }
 
-    uint width = params.viewport_x;
-    int2 texel = int2(int(from % width), int(from / width));
     // Saturated, so the products below cannot exceed the weight and the
     // headroom argument holds for any frame — including one an earlier pass
     // left above one.
-    float3 color = saturate(source.Load(int3(texel, 0)).rgb);
+    float3 color = saturate(source.Load(int3(from_texel, 0)).rgb);
     uint weight = uint(min(share, MAX_BLEND_WEIGHT) * BLEND_FIXED_POINT_SCALE);
     float scaled = float(weight);
 
@@ -308,7 +306,16 @@ void accumulate(uint target, uint from, float share)
 /// an eighth below belongs above, which is a mix a filter must make and a mean
 /// says is unnecessary. So the two areas are integrated separately, and a pixel
 /// the line crosses contributes **two** shares.
-void blend_line(uint first, uint stride, uint len, uint offset, int start, int end)
+void blend_line(
+    uint first,
+    uint stride,
+    uint len,
+    uint offset,
+    int start,
+    int end,
+    int2 first_texel,
+    int2 texel_step,
+    int2 across)
 {
     if (start == 0 || end == 0)
     {
@@ -357,8 +364,9 @@ void blend_line(uint first, uint stride, uint len, uint offset, int start, int e
         // Handing each share to the other pixel blends the one that was right
         // and leaves the one that was wrong, which is one darkened corner per
         // step and a staircase that stays a staircase.
-        accumulate(pixel - offset, pixel, below);
-        accumulate(pixel, pixel - offset, above);
+        int2 texel = first_texel + int(i) * texel_step;
+        accumulate(pixel - offset, pixel, texel, below);
+        accumulate(pixel, pixel - offset, texel - across, above);
     }
 }
 
@@ -402,7 +410,16 @@ void shapesMain(uint3 thread: SV_DispatchThreadID)
         }
         if (len <= MAX_LINE_LENGTH)
         {
-            blend_line(index, 1, len, width, horizontal_turn(x, y), horizontal_turn(x + len, y));
+            blend_line(
+                index,
+                1,
+                len,
+                width,
+                horizontal_turn(x, y),
+                horizontal_turn(x + len, y),
+                int2(int(x), int(y)),
+                int2(1, 0),
+                int2(0, 1));
         }
     }
 
@@ -417,7 +434,16 @@ void shapesMain(uint3 thread: SV_DispatchThreadID)
         }
         if (len <= MAX_LINE_LENGTH)
         {
-            blend_line(index, width, len, 1, vertical_turn(x, y), vertical_turn(x, y + len));
+            blend_line(
+                index,
+                width,
+                len,
+                1,
+                vertical_turn(x, y),
+                vertical_turn(x, y + len),
+                int2(int(x), int(y)),
+                int2(0, 1),
+                int2(1, 0));
         }
     }
 }
