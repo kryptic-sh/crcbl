@@ -4140,7 +4140,33 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   follows that same bit while water reads the volume buffers. A skip must not
   expose stale ring-slot volume data, and must preserve re-enabling the medium,
   multiple views, sun/point/spot lighting, water integration and overflow/debug
-  reporting. GPU timing and skip-transition tests remain open.
+  reporting. GPU timing and skip-transition tests remain open. The next bounded
+  trial is the exposure histogram, priced first on Lantern's all-effects frame
+  at 1920×1080 and 3840×2160. Sundial is not that fixture: its command-line
+  effect ceiling still resolves through a default camera stack and therefore
+  records no exposure passes. Only pursue a workgroup-local histogram if
+  `exposure-histogram` is material on this MX550; retain the exact bin
+  population and measured exposure in the existing GPU readback checks, and
+  inspect all four generated targets before timing. Sampling fewer pixels
+  changes the metering population and is therefore a separate image-quality
+  decision, not an interchangeable implementation optimisation. A 900-frame
+  Lantern run with a temporary all-effects camera stack measured
+  `exposure-histogram` at 0.487 ms p50 at 1920×1080 and 1.830 ms at 3840×2160,
+  respectively 3.6% and 3.3% of the pass-span sum. The near-fourfold scaling
+  with pixel count makes the pass material. Trial a 16×16 tile-local histogram,
+  then merge only its nonzero bins into the frame histogram. The acceptance gate
+  is an exact one-texel/one-count GPU readback plus matched Lantern timings at
+  both extents; reject the shape if shared-memory setup and merging merely move
+  the contention. The retained 16×16 form passed that gate: the exact GPU
+  readback matched all 49,152 texels of the fixture, and two mirrored 900-frame
+  pairs measured 0.487/0.497 ms before versus 0.141/0.141 ms after at 1920×1080,
+  a 71.3% reduction by the pair means. At 3840×2160 the same pairs measured
+  1.830/1.843 ms before versus 0.544/0.547 ms after, a 70.3% reduction. Complete
+  pass-span sums moved less consistently and are not a whole-frame measurement.
+  SPIR-V, WGSL, MSL and DXIL all compile the local atomic array and both
+  barriers. Slang's MSL still allocates that threadgroup array for this source's
+  clear and reduce entry points as well as the histogram; Metal performance
+  remains unmeasured and should be checked on Apple hardware.
 
 ### Non-render CPU
 

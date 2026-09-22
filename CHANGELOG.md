@@ -29,6 +29,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Auto-exposure now merges each tile's luminance histogram in workgroup memory,
+  substantially reducing frame-wide atomic contention without changing the
+  metered pixel population.
 - Sun-only light clustering now writes its invariant froxel lists without
   rebuilding per-tile geometry and depth bounds.
 - Fixed-size PCSS blocker searches now compile to constant tap sequences instead

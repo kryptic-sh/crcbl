@@ -2161,6 +2161,26 @@ pub(crate) fn compute_pipeline_entry(
     layout: PipelineLayoutHandle,
     workgroup_size: u32,
 ) -> Result<ComputePipelineHandle, HalError> {
+    compute_pipeline_entry_with_workgroup(
+        device,
+        label,
+        shader,
+        entry_point,
+        layout,
+        [workgroup_size, 1, 1],
+    )
+}
+
+/// [`compute_pipeline_entry`] with the complete three-dimensional workgroup
+/// shape for kernels whose lanes form a tile rather than a row.
+pub(crate) fn compute_pipeline_entry_with_workgroup(
+    device: &dyn Device,
+    label: &str,
+    shader: &crcbl_shaders::Shader,
+    entry_point: &str,
+    layout: PipelineLayoutHandle,
+    workgroup_size: [u32; 3],
+) -> Result<ComputePipelineHandle, HalError> {
     let module = device.create_shader_module(&ShaderModuleDesc {
         label: Some(shader.name()),
         spirv: shader.spirv(),
@@ -2178,9 +2198,9 @@ pub(crate) fn compute_pipeline_entry(
             module,
             entry_point,
         },
-        // The shader's own number rather than a literal: a dispatch sized
-        // against a different one tests part of the array and reads as a cull.
-        workgroup_size: [workgroup_size, 1, 1],
+        // The shader's own shape rather than literals: a dispatch sized against
+        // a different one tests part of the array and reads as a cull.
+        workgroup_size,
     });
     device.destroy_shader_module(module);
     pipeline
