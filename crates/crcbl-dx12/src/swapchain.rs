@@ -1169,8 +1169,10 @@ mod tests {
     /// decoration. D3D12 validates the *declared* before-state of every
     /// transition, and the next trip round the ring declares `Undefined`, which
     /// is `D3D12_RESOURCE_STATE_COMMON`. Leaving the image in `COPY_SOURCE`
-    /// would make that a lie the debug layer reports — see the note about
-    /// `crcbl::screenshot` in `docs/backlog.md`.
+    /// would make that a lie the debug layer reports. `crcbl::screenshot`
+    /// brackets its own copy the same way, and its test
+    /// `every_readback_barrier_declares_the_state_the_image_is_actually_in`
+    /// holds it there.
     ///
     /// # What only CI can settle
     ///

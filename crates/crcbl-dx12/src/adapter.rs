@@ -485,17 +485,13 @@ fn device_type_of(raw: &RawCaps) -> DeviceType {
 ///   `docs/plan/09-backends-metal-dx12.md`'s mapping table calls a near-direct
 ///   fit and the one `docs/backlog.md` wants measured on WARP.
 ///
-///   **It is reported ahead of the call that will back it, and that is a
-///   deliberate exception.** `crcbl-mtl` reported this flag from
-///   `argumentBuffersSupport` in its first slice and had to *withdraw* it when
-///   its bind groups turned out to bind flat argument tables with no
-///   runtime-sized array. The reason the same reversal is not a lie here is that
-///   nothing a caller can reach acts on the flag: the device slice creates no
-///   bind group layout and no pipeline, so there is nothing to be misled. **The
-///   slice that builds bind groups owns this flag** — if
-///   `create_bind_group_layout` cannot honour
-///   [`BindingFlags`](crcbl_hal::BindingFlags) on a descriptor heap, it must
-///   come off, exactly as it came off Metal.
+///   `crcbl-mtl` reported this flag from `argumentBuffersSupport` in its first
+///   slice and had to *withdraw* it when its bind groups turned out to bind
+///   flat argument tables with no runtime-sized array. Here the call behind it
+///   exists: `create_bind_group_layout` honours
+///   [`BindingFlags`](crcbl_hal::BindingFlags), turning a `VARIABLE_COUNT`
+///   binding into an unbounded descriptor range — `crcbl_dx12::binding` gives
+///   the argument.
 /// * [`Features::BUFFER_DEVICE_ADDRESS`] — **unconditional, and there is no
 ///   query to make.** Every D3D12 buffer resource answers
 ///   `ID3D12Resource::GetGPUVirtualAddress`, and a root SRV/UAV/CBV descriptor

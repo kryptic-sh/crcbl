@@ -204,24 +204,23 @@
 //! dynamic-resources answer is the statement about the adapter, and it is the
 //! one the backlog asked for.
 //!
-//! # `DESCRIPTOR_INDEXING` is reported ahead of the call behind it, on purpose
+//! # Every reported flag has a call behind it
 //!
 //! `crcbl-mtl`'s rule is that a backend reports a feature once a call in the
 //! crate makes it true, and it withdrew
 //! [`DESCRIPTOR_INDEXING`](crcbl_hal::Features::DESCRIPTOR_INDEXING) when its
-//! bind groups turned out not to deliver one. This backend reports it anyway,
-//! and the reason it is not the same mistake is that **no caller can act on it
-//! here**: `create_bind_group_layout` and every pipeline entry point refuse, so
-//! there is no layout and no pipeline to be misled. It is an adapter-level fact
-//! read from real queries, and answering the backlog's question requires
-//! reporting it.
+//! bind groups turned out not to deliver one. This backend reported the flag
+//! from its adapter queries before it had bind groups at all, on the grounds
+//! that nothing could act on it yet. That is no longer the argument: the flag
+//! now stands on the same rule as every other one, because
+//! `create_bind_group_layout` honours
+//! [`BindingFlags`](crcbl_hal::BindingFlags) — a `VARIABLE_COUNT` binding
+//! becomes D3D12's own unbounded descriptor range — and the pipeline layouts
+//! and pipelines built on it are real `ID3D12RootSignature` and
+//! `ID3D12PipelineState` objects. `crcbl_dx12::binding` says why each flag
+//! holds.
 //!
-//! What *would* be the mistake is keeping it past the slice that discovers
-//! whether this backend's bind groups can deliver a runtime-sized array.
-//! `crcbl_dx12::adapter` says so on the flag itself, so the withdrawal is a
-//! decision someone has already been warned about rather than a surprise.
-//!
-//! The other reported flags do have a call behind them:
+//! The rest:
 //! [`BUFFER_DEVICE_ADDRESS`](crcbl_hal::Features::BUFFER_DEVICE_ADDRESS) is not
 //! optional in D3D12 and has no query to make,
 //! [`TEXTURE_COMPRESSION_BC`](crcbl_hal::Features::TEXTURE_COMPRESSION_BC) is

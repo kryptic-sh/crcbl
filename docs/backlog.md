@@ -14735,24 +14735,6 @@ would be a dependency taken for one lint hole. Work: name the block in
 `impl_game_gpu!`'s own docs, and require it of any future macro that expands to
 a `Self::method(self)` forward.
 
-### `crcbl-dx12` points at a backlog note about `crcbl::screenshot` that is not here
-
-`an_offscreen_ring_draws_reads_back_and_comes_round_again`, in
-`crates/crcbl-dx12/src/swapchain.rs`, explains its closing `TransferSrc` →
-`Present` barrier with "see the note about `crcbl::screenshot` in
-`docs/backlog.md`". There is no such note, and
-`grep -n screenshot docs/backlog.md` finds nothing about barriers at all — it
-was either never written or deleted with something else.
-
-The defect it was about is fixed:
-`crcbl::screenshot::OffscreenSetup::draw_and_readback` now brackets its copy
-with `Present` → `TransferSrc` and `TransferSrc` → `Present`, and
-`every_readback_barrier_declares_the_state_the_image_is_actually_in` replays the
-null backend's recorded stream to hold it there. So what is left is a dangling
-cross-reference in a doc comment, in a crate outside the paths that fix owned.
-Either repoint it at that test or drop the clause; it is a one-line edit and
-needs a Windows-crate touch, not a decision.
-
 ### The Win32 pointer-clip tests are held out of the ordinary sweep
 
 Three pointer-clip tests are `#[ignore]`d in the workspace sweep and still gate
@@ -17963,9 +17945,6 @@ heading. What is left:
 Not proven on any device: dynamic offsets, offscreen surfaces, and a recorded
 frame.
 
-Also: `crcbl-dx12`'s crate docs still say bind groups and pipelines refuse,
-which the code contradicts.
-
 ### Owed by GPU-driven draw generation
 
 §3.3 is wired end to end — `cull` → `draw-args` → `forward` — and every golden
@@ -18320,18 +18299,24 @@ running the whole crate to `--run-ignored only`, so the count each guards on is
 the number of device tests. `docs/plan/12-testing.md`'s placement section
 records what landed. What it did not settle:
 
-### The device-test counts are a source reading, not a measured run
+### The Metal device-test count is a source reading, not a measured run
 
-`run-mtl-e2e.sh` should select 71 tests and `run-dx12-e2e.sh` 73 (the mtl CI job
-filters `a_layer_swapchain_acquires_a_drawable_and_presents_it` out, so it
-should report 70). **Those numbers come from classifying the test bodies, not
-from watching nextest select them** — nothing on this team's machines executes
-either crate, and `cargo nextest list --run-ignored only` for both is empty on
-Linux because every device test lives in a `#[cfg(target_os = …)]` module Linux
-does not compile. The first `mtl e2e` and `dx12 e2e` runs after this are the
-first observation of the real counts; a number well below these means an
-`#[ignore]` did not land where it was thought to, and a number above means the
-classification missed a device path.
+`run-mtl-e2e.sh` should select 71 tests (the mtl CI job filters
+`a_layer_swapchain_acquires_a_drawable_and_presents_it` out, so it should report
+70). **That number comes from classifying the test bodies, not from watching
+nextest select them** — `cargo nextest list --run-ignored only` is empty off
+macOS because every device test lives in a `#[cfg(target_os = …)]` module
+nothing else compiles. A number well below it means an `#[ignore]` did not land
+where it was thought to, and a number above means the classification missed a
+device path.
+
+The D3D12 count is measured, on 2026-09-22 on Windows:
+`cargo nextest list --locked -p crcbl-dx12 --all-features --run-ignored only`
+selects **89** of the crate's **262** tests (the same without `--all-features`,
+which is how `run-dx12-e2e.sh` invokes it; the crate has no features). The
+harness then excludes whatever `crates/crcbl-dx12/tests/known-red.txt` names
+from the run itself. The 73 this entry used to give came from the classification
+below, not from this command.
 
 The classification traced `instance::tests::open`, `device::tests::open_device`
 and `instance::tests::pinned_adapter` transitively through each module's local
@@ -18343,9 +18328,9 @@ rather than in the harness.
 
 `.github/workflows/ci.yml`'s `dx12 e2e` job still records "the HAL suite above
 passed **155/155 on WARP**" from runs on `dc846ff` and `0354eec`. That is a
-dated account and correct for those runs; a reader comparing it against the ~73
-the harness will now print should read the drop as the selection narrowing, not
-as tests disappearing.
+dated account and correct for those runs; a reader comparing it against the 89
+the harness now selects should read the drop as the selection narrowing, not as
+tests disappearing.
 
 ### The workspace sweep deliberately did not gain `--run-ignored all`
 
@@ -18913,7 +18898,7 @@ theoretical; a device producing more than the limit would start dropping _new_
 ones. `attach` could raise it with `SetMessageCountLimit`. Left alone as
 premature.
 
-**Never executed anywhere:** whether the 73 D3D12 and 71 Metal device tests are
+**Never executed anywhere:** whether the 89 D3D12 and 71 Metal device tests are
 actually clean under their layers, whether the D3D12 gate's message really names
 `CreateCommittedResource`, whether the Metal suite survives `abort` on warnings,
 and whether the paravirtual device supports shader validation at all. The layer

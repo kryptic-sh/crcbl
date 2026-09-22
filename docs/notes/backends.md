@@ -2668,9 +2668,9 @@ those are exactly the two policies this entry chose between.
 ### Declined: minimum-count floors on the e2e harnesses
 
 Both backend harnesses now select `--run-ignored only`, so the number they guard
-on is the device-test count — 70 on the Metal runner and 73 on the D3D12 one,
-measured. The zero-count guard still passes a selection that collapsed from 73
-to 3.
+on is the device-test count — 70 on the Metal runner, and 89 on the D3D12 one by
+`cargo nextest list --locked -p crcbl-dx12 --run-ignored only` on 2026-09-22.
+The zero-count guard still passes a selection that collapsed from 89 to 3.
 
 A floor would catch that, and it is **not** being added: any threshold below the
 real number is arbitrary, and a threshold equal to it fails CI every time a
