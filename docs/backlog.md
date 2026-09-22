@@ -8999,14 +8999,44 @@ emits JSON beside an environment block.
 ### Steamworks: nothing built (2026-08-27)
 
 **Nothing exists** — no `crcbl-steam` crate, no `steamworks` dependency, no
-`CRCBL_STEAM_SDK` anywhere. `docs/plan/42-steam.md` is research and design only,
-and claims no roadmap phase. Its four open decisions are **not repeated here**:
-they are this file's own "Steamworks: four decisions the plan is waiting on"
-entry, which the doc now points at instead of carrying its own copy. Nothing was
-lost in that removal — the binding-route argument lives in the doc's "The
-binding route — presented, not decided" section, the cloud and Steam Input
-arguments in "Where Steam meets seams the engine already has", and the app-id
-decision only ever existed in the backlog's form.
+`CRCBL_STEAM_SDK` anywhere. **Re-planned 2026-09-22 for the full Steam API on
+Linux, Windows and macOS** (branch `steam-sdk`): `docs/plan/42-steam.md` now
+carries an interface catalogue marking the slice that lands each Steamworks
+interface, and ordered slices, each with its files, API sketch, tests that can
+fail, and manual checks under app 480 per OS. The plan claims no roadmap phase
+yet — slice 1 does. Slice 1 is the next work: loader, lifecycle, manual-dispatch
+pump and local `SteamId`.
+
+**EW's requirements set the order.** EW is the first consumer. Its six hard
+requirements are listen-server co-op over Steam networking with friend invites,
+no anti-cheat or encrypted tickets, voice as raw PCM into its own mixer, Steam
+Input as ordinary `crcbl-input` gamepad events, cloud conflicts surfaced to the
+game, and the local `SteamId` as its identity. Slices 3–7 cover all six. The
+plan's "The first consumer: EW's requirements" table maps each requirement to
+its slice.
+
+**Two engine gaps EW needs no matter which transport it uses**, recorded here
+because the Steam plan depends on them without owning them (its "slice 2"
+placeholder):
+
+- **A multi-session server.** `Server<T: Transport>` in
+  `crates/crcbl-server/src/lib.rs` owns one transport and one `SessionManager`.
+  A host serving three remote peers and its own client needs N of each over one
+  world. Until that exists, the Steam networking slice can prove only one host
+  and one peer. **User's call:** schedule this with the Steam slices, or let
+  EW's host fan out over several transports itself.
+- **A gamepad seam in `crcbl-input`.** There is none yet (see "Input: patterns,
+  RON bindings, rebind persistence and every gamepad backend"). The Steam plan
+  sketches the minimum: `GamepadSnapshot`, `GamepadEvent`,
+  `ActionMap::gamepad_event`, and `Binding::PadButton`/`PadStick`/`PadTrigger`.
+  By default, whichever of topic 19's evdev slice and the Steam Input slice
+  lands first defines it. The other adopts it.
+
+**Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
+cloud quota; whether SpaceWar's achievements, leaderboard and inventory item
+definitions exist; whether `ISteamRemoteStorage` is safe to call off the pump
+thread; whether the overlay composites over our own windowing on each shell and
+GPU backend; and the macOS signing and entitlement needs for the dylib.
 
 ### `check-doc-citations.sh` misses crate-relative paths too (2026-08-27)
 
@@ -9022,7 +9052,12 @@ a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
 The awkward part is that some such paths are deliberately external —
 `42-steam.md` cites `public/steam/steam_api.json` inside the Steam SDK and
 `steamworks-sys/build.rs` in a third-party repo — so widening needs an opt-out,
-which is a design question rather than a script change.
+which is a design question rather than a script change. Since 2026-09-22,
+`42-steam.md` also relies on this blind spot on purpose. It writes the files of
+the not-yet-created `crcbl-steam` crate crate-relative
+(`crcbl-steam/src/pump.rs`), and its "Conventions" section says so. Widening the
+gate would flag every one of those paths, so a widened gate needs an opt-out for
+them too, or the plan must switch to another marker.
 
 **Verified in this pass:** every relative `.md` link in `docs/plan/` and
 `docs/plan/sample/` resolves today, checked by a one-off script rather than by
@@ -14999,8 +15034,33 @@ is wanted; and Steam Input only if the Deck is targeted, returning then as a
 slice feeding `ActionMap` through `Binding::Virtual`. Precedent: Steamworks.NET
 has published its own flat-API declarations under MIT for a decade, and
 Auto-Cloud is the zero-code path Valve documents for a game with an atomic save
-layout. Work: none until Steam is in scope. The four option trees are in
-docs/notes/simulation.md under the same heading.
+layout. The four option trees are in docs/notes/simulation.md under the same
+heading.
+
+**IN SCOPE 2026-09-22 — "the full Steam API" is now asked for**, and
+`docs/plan/42-steam.md` was re-planned on that basis. Two of the ratified
+defaults changed as a result:
+
+- **Cloud: the `ISteamRemoteStorage` backend is now required.** EW needs sync
+  conflicts surfaced to the game. Auto-Cloud cannot do that: the Steam client
+  resolves a conflict in its own dialog before launch and tells the game
+  nothing. That is exactly the ratification's own trigger ("only if per-file
+  control … is wanted"). Detecting the conflict is a backend-neutral synced-file
+  protocol in `crcbl-store`: a generation header plus a local shadow.
+- **Steam Input is in scope.** It feeds a shared gamepad seam, so it arrives as
+  the same `GamepadEvent`s a native backend would produce. It does not use
+  `Binding::Virtual`. EW requires the same events, and `Binding::Virtual` is the
+  on-screen-control path.
+
+The plan's "Defaulted decisions" table records every other call made while the
+user was away, each with its alternative. The ones most worth a look:
+
+- CI never fetches the SDK, so the drift gate runs locally only.
+- `serde_json` becomes a dev-dependency. It is already in `Cargo.lock`, but the
+  direct edge is new.
+- The crate never writes `steam_appid.txt` or sets `SteamAppId`.
+- 32-bit targets are out of scope.
+- Microtransactions are declined: they need a server that holds a publisher key.
 
 **Still the user's call, and a product decision rather than a technical one:**
 
