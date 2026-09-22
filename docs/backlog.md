@@ -4049,6 +4049,15 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   3.901/3.952 ms to 3.914/3.948 ms and pass sums from 10.746/10.849 ms to
   10.790/10.860 ms. Retain the exact arithmetic removal for the repeatable
   focused-path reduction; do not claim a general frame-time improvement.
+  Post-change SPIR-V inspection found the sixteen-tap search still emitted as a
+  dynamic loop. Each iteration dynamically indexes a function-local offset
+  array, rotates the selected pair, fetches one depth and branches around the
+  two blocker accumulations. Trial an explicit unroll request before changing
+  the algorithm: confirm the generated loop and dynamic table access disappear,
+  then run matched `instances` and `specular-lights-fit` A/B pairs. Preserve tap
+  order, depth comparisons, accumulation order, clamping and the no-blocker
+  fallback; reject the trial if code growth or register pressure makes either
+  control slower.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
