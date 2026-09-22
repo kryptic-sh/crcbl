@@ -60,8 +60,12 @@ fn main() -> ExitCode {
                     let millis =
                         |nanos| std::time::Duration::from_nanos(nanos).as_secs_f64() * 1_000.0;
                     println!(
-                        "sandbox simulation (p50 / p95 over the last {} ticks): complete {:.3} / \
-                         {:.3} ms, move+refit {:.3} / {:.3} ms, queries {:.3} / {:.3} ms",
+                        "sandbox simulation ({} workers, {} / {} driver / worker query chunks, \
+                         p50 / p95 over the last {} ticks): complete {:.3} / {:.3} ms, move+refit \
+                         {:.3} / {:.3} ms, queries {:.3} / {:.3} ms",
+                        timings.workers,
+                        timings.query_chunks.0,
+                        timings.query_chunks.1,
                         timings.samples,
                         millis(timings.complete_ns.0),
                         millis(timings.complete_ns.1),

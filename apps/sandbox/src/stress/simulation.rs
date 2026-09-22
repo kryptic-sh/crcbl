@@ -3,7 +3,12 @@
 use std::time::Instant;
 
 use crcbl::core::stats::Window;
+#[cfg(test)]
+use crcbl::jobs::Inline;
+use crcbl::jobs::{Pool, SpawnError, default_spawner};
 use crcbl::math::DVec3;
+#[cfg(test)]
+use crcbl::phys::sphere_overlaps_sphere;
 use crcbl::phys::{ColliderId, PhysicsWorld, QueryScratch, Sphere};
 
 use super::Scene;
@@ -14,12 +19,22 @@ const BODY_RADIUS: f64 = 0.2;
 const QUERY_RADIUS: f64 = 1.0;
 const SPEED: f64 = 1.5;
 const TIMING_SAMPLES: usize = 120;
+const QUERY_CHUNK: usize = 64;
+
+thread_local! {
+    static QUERY_SCRATCH: std::cell::RefCell<(QueryScratch, Vec<ColliderId>)> =
+        std::cell::RefCell::new((QueryScratch::new(), Vec::new()));
+}
 
 /// Recent complete simulation-tick latency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimulationTimings {
     /// Samples currently in the rolling window.
     pub samples: usize,
+    /// Worker threads available to the overlap-query pass.
+    pub workers: usize,
+    /// Query chunks completed by the calling thread and worker threads.
+    pub query_chunks: (u64, u64),
     /// Complete-tick nearest-rank median and p95, in nanoseconds.
     pub complete_ns: (u64, u64),
     /// Movement and broadphase-refit median and p95, in nanoseconds.
@@ -52,23 +67,30 @@ pub struct Simulation {
     ids: Vec<ColliderId>,
     positions: Vec<DVec3>,
     velocities: Vec<DVec3>,
-    scratch: QueryScratch,
-    out: Vec<ColliderId>,
+    query_pool: Pool,
+    query_results: Vec<usize>,
     last_results: usize,
     profiler: Option<SimulationProfiler>,
 }
 
 impl Simulation {
     /// Build the fixed dense crowd, or no simulation for a render-only scene.
-    #[must_use]
-    pub fn for_scene(scene: Scene, measure: bool) -> Option<Self> {
-        scene
-            .simulates()
-            .then(|| Self::with_count(BODY_COUNT, measure))
+    pub fn for_scene(scene: Scene, measure: bool) -> Result<Option<Self>, SpawnError> {
+        if !scene.simulates() {
+            return Ok(None);
+        }
+        let spawner = default_spawner();
+        Pool::new(spawner.as_ref()).map(|pool| Some(Self::with_pool(BODY_COUNT, measure, pool)))
+    }
+
+    #[cfg(test)]
+    fn with_count(count: usize, measure: bool) -> Self {
+        let query_pool = Pool::new(&Inline).expect("the inline pool spawns no workers");
+        Self::with_pool(count, measure, query_pool)
     }
 
     #[allow(clippy::cast_precision_loss)]
-    fn with_count(count: usize, measure: bool) -> Self {
+    fn with_pool(count: usize, measure: bool, query_pool: Pool) -> Self {
         assert!(count > 0, "a stress crowd must contain a body");
         let columns = (count as f64).sqrt().ceil() as usize;
         let mut world = PhysicsWorld::new();
@@ -93,8 +115,8 @@ impl Simulation {
             ids,
             positions,
             velocities,
-            scratch: QueryScratch::new(),
-            out: Vec::new(),
+            query_pool,
+            query_results: vec![0; count],
             last_results: 0,
             profiler: measure.then(SimulationProfiler::new),
         }
@@ -128,11 +150,26 @@ impl Simulation {
         let refit_finished = started.map(|_| Instant::now());
 
         let queries = self.world.overlap_queries();
-        let mut results = 0usize;
-        for &position in &self.positions {
-            queries.overlap_sphere_into(position, QUERY_RADIUS, &mut self.scratch, &mut self.out);
-            results = results.saturating_add(self.out.len());
-        }
+        let positions = &self.positions;
+        self.query_pool
+            .par_for(&mut self.query_results, QUERY_CHUNK, |start, counts| {
+                QUERY_SCRATCH.with_borrow_mut(|(scratch, out)| {
+                    for (offset, count) in counts.iter_mut().enumerate() {
+                        queries.overlap_sphere_into(
+                            positions[start + offset],
+                            QUERY_RADIUS,
+                            scratch,
+                            out,
+                        );
+                        *count = out.len();
+                    }
+                });
+            });
+        let results = self
+            .query_results
+            .iter()
+            .copied()
+            .fold(0usize, usize::saturating_add);
         self.last_results = std::hint::black_box(results);
         if let (Some(started), Some(refit_finished), Some(profiler)) =
             (started, refit_finished, self.profiler.as_mut())
@@ -152,8 +189,11 @@ impl Simulation {
     #[must_use]
     pub fn timings(&self) -> Option<SimulationTimings> {
         let profiler = self.profiler.as_ref()?;
+        let pool = self.query_pool.stats();
         Some(SimulationTimings {
             samples: profiler.complete.len(),
+            workers: self.query_pool.workers(),
+            query_chunks: (pool.chunks_run_by_driver, pool.chunks_run_by_workers),
             complete_ns: profiler.complete.percentiles()?,
             refit_ns: profiler.refit.percentiles()?,
             query_ns: profiler.query.percentiles()?,
@@ -199,5 +239,36 @@ mod tests {
         }
         assert!(timings.complete_ns.0 >= timings.refit_ns.0);
         assert!(timings.complete_ns.0 >= timings.query_ns.0);
+    }
+
+    #[test]
+    #[cfg(not(target_arch = "wasm32"))]
+    fn parallel_queries_match_an_independent_scan_exactly() {
+        let spawner = default_spawner();
+        let pool = Pool::with_workers(spawner.as_ref(), 3).expect("native query workers");
+        let mut parallel = Simulation::with_pool(BODY_COUNT, false, pool);
+
+        parallel.step(1.0 / 60.0);
+
+        let expected: Vec<_> = parallel
+            .positions
+            .iter()
+            .map(|centre| {
+                let query = Sphere::new(*centre, QUERY_RADIUS);
+                parallel
+                    .positions
+                    .iter()
+                    .filter(|candidate| {
+                        sphere_overlaps_sphere(&query, &Sphere::new(**candidate, BODY_RADIUS))
+                    })
+                    .count()
+            })
+            .collect();
+        assert_eq!(parallel.query_results, expected);
+        assert_eq!(parallel.last_results, expected.iter().sum::<usize>());
+        assert!(
+            parallel.query_pool.stats().chunks_run_by_workers > 0,
+            "the threaded comparison ran no query chunk on a worker",
+        );
     }
 }

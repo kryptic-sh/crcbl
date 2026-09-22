@@ -29,6 +29,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- The sandbox's combined stress scene now runs its per-body overlap queries on
+  the engine jobs pool with thread-local query scratch, while reporting how many
+  chunks workers actually completed. This keeps the same deterministic answers
+  while exercising the engine's intended parallel crowd-query path.
 - `PhysicsWorld` now periodically measures scale-normalized BVH surface-area
   cost and rebuilds refit-aged trees whose partition has degraded, avoiding
   sustained broadphase query slowdown without imposing a fixed rebuild cadence.

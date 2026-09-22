@@ -180,9 +180,20 @@ Initial measurements and harness findings:
   resolution-sensitive phase alone, so the evidence supports thermal or
   scheduler variance and contradicts the initial resolution-causality claim.
   Queries account for 84.1–87.1% of complete-tick p50 in the phase-instrumented
-  runs, making the existing parallel overlap-query seam the next trial. Use
-  `phys` for uncontended broadphase percentiles rather than treating the
-  combined frame mean as a physics timer.
+  runs. The retained combined scene therefore shares one read-only query view
+  across the jobs pool and gives each worker thread reusable scratch storage.
+  With all 11 available workers and fixed 64-body chunks, low-resolution query
+  p50 fell to 0.482–0.491 ms and complete-tick p50 to 1.167–1.206 ms; 1080p
+  query p50 was 0.496–0.560 ms and complete-tick p50 was 1.270–1.399 ms. Against
+  the matching fresh serial ranges, the conservative improvements are 77.8% for
+  low-resolution query p50, 75.2% for 1080p query p50, 53.1% for low-resolution
+  complete-tick p50 and 47.1% for 1080p complete-tick p50. A subsequent 1080p
+  run recorded 37,600 of 43,450 chunks on worker threads, so the result is not
+  an inline execution mistaken for parallel work. Three workers raised query p50
+  to 0.929–1.117 ms and seven workers to 0.575–0.608 ms. Chunks of 128 were
+  effectively tied with 64, while 256 began losing p50 to load imbalance; keep
+  the existing 64-item jobs tuning. Use `phys` for uncontended broadphase
+  percentiles rather than treating the combined frame mean as a physics timer.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.

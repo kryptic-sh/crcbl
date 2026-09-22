@@ -280,17 +280,17 @@ pub struct Summary {
 /// Anything that can stop the sandbox before it starts.
 ///
 /// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
-/// variants for every sample. The sandbox has no simulation of its own to
-/// fail, so it takes the default type parameter and its `Game` variant is
-/// [`Infallible`](core::convert::Infallible) — uninhabited, and free.
-pub type SandboxError = crcbl::engine::LoopError;
+/// variants for every sample. Its `Game` variant is
+/// [`crcbl::jobs::SpawnError`] when the combined scene's query pool cannot
+/// start.
+pub type SandboxError = crcbl::engine::LoopError<crcbl::jobs::SpawnError>;
 
 /// The sandbox, as the engine's loop hosts it.
 ///
-/// **A game with no game in it, and that is the point.** The sandbox exists to
-/// show the engine's frame with nothing of its own in the way: no simulation, no
-/// HUD, no score. What is left is [`tick`] and [`render`], both empty and both
-/// load-bearing — the call sites are what everything later grows around.
+/// **A game with no game in it, and that is the point.** Except for an optional
+/// stress workload, the sandbox shows the engine's frame with nothing of its
+/// own in the way: no HUD and no score. What is left is [`tick`] and [`render`],
+/// both load-bearing — the call sites are what everything later grows around.
 ///
 /// Its only state is the pause menu's two settings rows: the pacing and frame
 /// limit they show, and the copies that have reached the GPU and the clock.
@@ -335,7 +335,6 @@ impl Sandbox {
     /// `effects` is the resolved set the device and the player's settings left
     /// standing, read off the renderer by the caller — a run that stops before
     /// its first frame still reports what it would have drawn.
-    #[must_use]
     pub fn new(
         pacing: Pacing,
         limit: FrameLimit,
@@ -343,8 +342,8 @@ impl Sandbox {
         effects: RenderEffects,
         scene: Scene,
         measure_simulation: bool,
-    ) -> Self {
-        Self {
+    ) -> Result<Self, crcbl::jobs::SpawnError> {
+        Ok(Self {
             pacing,
             applied: pacing,
             limit,
@@ -354,8 +353,8 @@ impl Sandbox {
             unpresented: None,
             effects,
             scene,
-            simulation: crate::stress::Simulation::for_scene(scene, measure_simulation),
-        }
+            simulation: crate::stress::Simulation::for_scene(scene, measure_simulation)?,
+        })
     }
 }
 
@@ -379,7 +378,8 @@ pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Sandbox>;
 /// # Errors
 ///
 /// [`SandboxError`] if no shell backend opened, if the window was never
-/// configured, or if the HAL seam failed.
+/// configured, if the HAL seam failed or if the stress query pool could not
+/// start.
 /// Teardown runs on **every** path, including a failing frame: neither `Loop`
 /// nor `Gpu` has a `Drop` impl to fall back on, and while the `crcbl-vk` ones do
 /// reclaim the objects, they log "N object(s) still alive at device teardown"
@@ -392,7 +392,8 @@ pub fn run(options: &Options) -> Result<Summary, SandboxError> {
 ///
 /// # Errors
 ///
-/// [`SandboxError`] if the shell, the window or the HAL seam refused.
+/// [`SandboxError`] if the shell, the window, the HAL seam or the stress query
+/// pool refused.
 pub fn start(options: &Options) -> Result<Loop, SandboxError> {
     let shell = if options.headless {
         // By name, never by fallback: `crcbl-shell`'s registry deliberately
@@ -409,7 +410,8 @@ pub fn start(options: &Options) -> Result<Loop, SandboxError> {
 ///
 /// # Errors
 ///
-/// [`SandboxError`] if the window is never configured or the HAL seam fails.
+/// [`SandboxError`] if the window is never configured, the HAL seam fails or
+/// the stress query pool cannot start.
 pub fn with_shell<S: Shell + ?Sized>(
     mut shell: Box<S>,
     options: &Options,
@@ -468,7 +470,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             effects,
             options.scene,
             options.real_clock(),
-        ),
+        )
+        .map_err(SandboxError::Game)?,
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -486,10 +489,8 @@ pub fn with_shell<S: Shell + ?Sized>(
 /// spin is on the fixed timestep so a `--headless --frames N` run is a
 /// bit-reproducible picture on every machine.
 impl HostedGame for Sandbox {
-    /// The sandbox has no simulation, so it has nothing of its own to fail at.
-    /// [`LoopError`](crcbl::engine::LoopError)'s `Game` variant is uninhabited
-    /// as a result, which is the type system agreeing.
-    type Error = core::convert::Infallible;
+    /// The combined scene can fail while starting its query-worker pool.
+    type Error = crcbl::jobs::SpawnError;
     type Gpu = Gpu;
     /// Paused or not, which is the sandbox's whole state machine.
     type MenuKind = bool;
