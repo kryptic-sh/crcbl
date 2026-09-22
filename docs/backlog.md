@@ -240,6 +240,17 @@ Initial measurements and harness findings:
   control flow costs 2.4–3.2% on this adapter even though it skips zero-result
   arithmetic; keep the branchless loop and do not repeat this change without
   evidence from different hardware or a different light mix.
+- The material-page audit found no new low-risk fetch skip: `mro_texel`,
+  `emissive_texel` and `shading_normal_of` already avoid absent pages, while the
+  unconditional base-colour fetch is the measured lavapipe-anisotropy constraint
+  recorded in "The base-colour page fetch skip is still owed". A smaller forward
+  trial remains: `VertexOutput::clip_position` already carries the current clip
+  coordinate for motion vectors, but `fragmentMain` multiplies
+  `input.world_position` by `frame.view_proj` again only to recover `.w` for
+  `froxel_of`. Trial the carried `input.clip_position.w`; require unchanged
+  froxel/image observers because interpolation rounding can move a fragment on a
+  logarithmic slice boundary, then measure the combined scene before keeping the
+  saved matrix-row product.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
