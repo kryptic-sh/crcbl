@@ -16558,18 +16558,25 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   calls is judged hung, and with them it is not. Still open:
   - **EW has to call it.** The fix is a seam, not a behaviour change, so the
     report closes only when EW's loader takes the turns.
-  - **`ForwardRenderer::with_scene` cannot take a turn, and it is EW's long
-    load.** Measured by EW on 2026-09-22 (release, dx12, RX 7900 XTX,
-    uncontended): its scene start is `WorldScene::new` inside a frame, not a
-    load before `Loop::new` — glTF import 519 ms then `with_scene` 821 ms
-    (`--raid-demo`), `with_scene` 906 ms with the import cached (`--ai-demo`);
-    under the contention it reported earlier the start stretched about 8x, which
-    puts `with_scene` alone past the five-second threshold. EW is moving the
-    import to a worker. Requested and accepted: let the upload service the
-    window, either a `&mut dyn FnMut()` called between meshes and textures or an
-    incremental upload the caller drives (which would also let a game draw a
-    loading frame). Measure where the 0.8–0.9 s goes before choosing. Next
-    Windows slice.
+  - **What `ForwardRenderer::with_scene_serviced` leaves.** EW's scene start was
+    one `with_scene` call (821–906 ms measured by EW); the serviced variant now
+    calls back between uploads and before each pipeline batch, and `apps/viewer`
+    passes `keep_alive`. Measured on the RX 7900 XTX with the viewer on EW's
+    `heist-sandbox.gltf`: pipeline creation is the cost (about 90% of a 2.2–2.4
+    s cold-shader-cache build; about 0.1 s of uploads either way), and the
+    longest gap left is one forward colour pipeline, 313 ms on vk and 361 ms on
+    dx12 cold. Still open:
+    - `with_scene_on_path` has no serviced variant (lantern, alcove, quarry,
+      sundial and tide call it); add one when a caller needs it.
+    - `ForwardRenderer::add_view`, the viewer's reload path and the browser
+      start path pass a no-op, so they are not serviced.
+    - `DrawGen::new` builds its compute pipelines in one gap (167 ms cold);
+      splitting it changes a public signature nobody needs yet.
+    - The floor is one pipeline compile. Lower needs asynchronous or cached
+      pipeline compilation — considered and declined for now.
+    - Not measured: EW's own scenes, and any machine under real contention (the
+      8x EW saw is extrapolated). AMD caches compiled shaders per executable, so
+      a renamed exe is how a cold build is reproduced.
   - **The engine's own start-up is not covered.** `wait_for_configure` pumps,
     but a game's `Gpu::open` (device, swapchain, pipelines) gets the shell as
     `&S` and cannot take a turn. Nobody has measured it past five seconds, even

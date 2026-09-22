@@ -229,6 +229,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`ForwardRenderer::with_scene_serviced` keeps a window alive while a renderer
+  builds.** It is `with_scene` with a `&mut dyn FnMut()` that is called between
+  the build's steps, so a game building on its loop thread passes
+  `&mut || shell.keep_alive()` and Windows does not mark its window "Not
+  Responding". On a cold driver shader cache pipeline creation is most of the
+  build (about 2 s against 0.25 s warm, on an RX 7900 XTX), so the calls come
+  after every mesh upload and page layer, after each post-processing subsystem,
+  and before every mesh-pass and grass pipeline. The longest gap left is one
+  pipeline, about 0.3 s cold. `with_scene` and `with_scene_on_path` are
+  unchanged, and the viewer sample now builds its renderer this way.
 - **An opt-in log file, for builds with no console.** A
   `windows_subsystem = "windows"` exe has no stderr, so every log line was lost.
   `crcbl_store::enable_log_file(app_name)`, called after `init_logging`, copies

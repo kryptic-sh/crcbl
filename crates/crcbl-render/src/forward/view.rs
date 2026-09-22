@@ -666,6 +666,11 @@ impl View {
     /// hands every handle to the returned [`View`] — none of them is left in a
     /// rollback the caller might run later.
     ///
+    /// `service` is called after each subsystem is built, and between the
+    /// grass pass's pipelines — see
+    /// [`ForwardRenderer::with_scene_serviced`], which is where the reason and
+    /// the measurement are.
+    ///
     /// # Errors
     ///
     /// [`HalError`] if any buffer, group or pipeline could not be created.
@@ -673,9 +678,10 @@ impl View {
         device: &dyn Device,
         queue: QueueHandle,
         inputs: &ViewInputs<'_>,
+        service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         let mut rollback = Rollback::default();
-        let built = Self::build_into(device, queue, inputs, &mut rollback);
+        let built = Self::build_into(device, queue, inputs, &mut rollback, service);
         if built.is_err() {
             rollback.run(device);
         }
@@ -689,6 +695,7 @@ impl View {
         queue: QueueHandle,
         inputs: &ViewInputs<'_>,
         rollback: &mut Rollback,
+        service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         let frames = inputs.instances.len();
         let draws = DrawGen::new(
@@ -722,6 +729,7 @@ impl View {
             .map(|frame| draws.visible_count(frame))
             .collect();
         rollback.draws = Some(draws);
+        service();
 
         // `docs/plan/25-lod.md`'s observable: one word per resident cluster,
         // holding the cut the descent chose. Empty where there is no
@@ -773,6 +781,7 @@ impl View {
                 stats: &cull_stats,
             },
         )?);
+        service();
         let lights = rollback.lights.as_ref().expect("just stored");
         let draws = rollback.draws.as_ref().expect("stored above");
 
@@ -921,6 +930,7 @@ impl View {
             frames,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the screen-space contact-shadow march ---
         //
@@ -931,6 +941,7 @@ impl View {
             frames,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the screen-space reflection march ---
         //
@@ -942,6 +953,7 @@ impl View {
             frames,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the Hi-Z pyramid the march climbs ---
         //
@@ -954,6 +966,7 @@ impl View {
             frames,
             ForwardRenderer::build_depth_fullscreen,
         )?);
+        service();
         // The occlusion cull's farthest pyramid beside it, built from the same
         // reduction. Its images wait for a frame's extent.
         rollback.occlusion_pyramid = Some(OcclusionPyramid::new(
@@ -961,6 +974,7 @@ impl View {
             frames,
             ForwardRenderer::build_depth_fullscreen,
         )?);
+        service();
 
         // --- the froxel volume ---
         //
@@ -979,6 +993,7 @@ impl View {
             lights,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- auto-exposure ---
         //
@@ -988,6 +1003,7 @@ impl View {
         // picture the tonemap is about to read, which is the one with the lens
         // already on it — see [`crate::exposure`].
         rollback.exposure = Some(Exposure::new(device, queue, frames)?);
+        service();
 
         // --- the bloom chain ---
         //
@@ -1000,6 +1016,7 @@ impl View {
             frames,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the antialiasing resolve ---
         //
@@ -1015,6 +1032,7 @@ impl View {
             inputs.target_format,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the higher antialiasing tier ---
         //
@@ -1029,6 +1047,7 @@ impl View {
             inputs.target_format,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the render-scale upscale ---
         //
@@ -1042,6 +1061,7 @@ impl View {
             inputs.target_format,
             ForwardRenderer::build_fullscreen,
         )?);
+        service();
 
         // --- the background ---
         //
@@ -1057,6 +1077,7 @@ impl View {
             Format::D32Float,
             ForwardRenderer::build_tested_fullscreen,
         )?);
+        service();
 
         // --- the water surface ---
         //
@@ -1071,6 +1092,7 @@ impl View {
             inputs.shadow_sampler,
             ForwardRenderer::build_fullscreen_with,
         )?);
+        service();
 
         // --- the grass field ---
         //
@@ -1083,7 +1105,9 @@ impl View {
             device,
             frames,
             inputs.shadow_sampler,
+            service,
         )?);
+        service();
 
         // Whole, so the rollback lets go of every handle: the view owns them
         // from here, and a rollback still naming one would release it twice.
@@ -2937,6 +2961,7 @@ impl ForwardRenderer {
                 contact_shadow: self.contact_shadow_placeholder.view,
                 probe_visibility,
             },
+            &mut || {},
         )?;
         if self.views.len() <= free {
             self.views.resize_with(free + 1, || None);

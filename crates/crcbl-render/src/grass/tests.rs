@@ -431,7 +431,7 @@ fn the_pipelines_build_and_release() {
             ..crcbl_hal::SamplerDesc::default()
         })
         .expect("a comparison sampler");
-    let grass = Grass::new(device, 2, sampler).expect("the pipelines build");
+    let grass = Grass::new(device, 2, sampler, &mut || {}).expect("the pipelines build");
     grass.destroy(device);
     device.destroy_sampler(sampler);
     let _ = queue;
