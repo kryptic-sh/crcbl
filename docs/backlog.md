@@ -17851,10 +17851,10 @@ docs/notes/simulation.md under its own heading.
 - **DXIL gets structural validation and nothing more.** `spirv-val` runs on the
   SPIR-V, the WGSL has `crates/crcbl-shaders/tests/wgsl_validation.rs`, the
   macOS leg compiles every committed MSL artifact with `xcrun metal`, and
-  `tools/compile-shaders.sh`'s `require_signed_dxil` refuses any container
-  `libdxil` did not sign, which it signs only after its validator passes. What
-  no gate checks is the DXIL's meaning against the other targets'; see "The
-  differential render gate does not reach D3D12" below.
+  `crates/crcbl-shaders/tools/compile-shaders.sh`'s `require_signed_dxil`
+  refuses any container `libdxil` did not sign, which it signs only after its
+  validator passes. What no gate checks is the DXIL's meaning against the other
+  targets'; see "The differential render gate does not reach D3D12" below.
 - **L0's static trimesh/heightfield colliders do not exist.** `05-physics.md`
   puts them in L0 (MVP); the ROADMAP marks "P3 L0" done against a narrower list.
   towers demands them, and so does the character controller, which can only walk
