@@ -302,6 +302,15 @@ Initial measurements and harness findings:
   point-light p50 and saturated the differential at 1 ns. Do not weaken that
   observer; its short timing window is not evidence for this optimization. Keep
   the original unconditional five-slot normalization on this adapter.
+- `area-lights-fit` currently measures diffuse and fitted-specular polygon
+  integration together, so its 8.849–8.985 ms `forward` range cannot identify
+  which integral dominates. Add a matched `area-fill-lights-fit` sandbox scene
+  that changes only each rectangle's fill flag, retaining the same positions,
+  extents, radiance, radius and within-budget froxel occupancy. Verify those
+  scene properties directly, then alternate point-fill, area-fill and ordinary
+  area runs on the pinned MX550. Use the area-fill delta to price diffuse LTC
+  integration and the ordinary-area delta to price the fitted specular half
+  before choosing another algorithmic shader trial.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
