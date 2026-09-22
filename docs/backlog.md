@@ -3986,11 +3986,17 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
   corners even when `frame.probe_counts` describes the zeroed placeholder.
   `probe_moments` queries dimensions and reads visibility moments per corner.
-  `ssr.slang` builds `probe_environment` before its sharpness early-out. Price
-  forward and SSR passes with empty volumes before adding uniform empty-volume
-  branches or hoisting dimension queries. Preserve exact zero irradiance,
-  captured visibility, clipmap blends and the sky fallback. Actual driver load
-  counts have not been measured; shader source is not a compiled-cost report.
+  `ssr.slang` builds `probe_environment` before its sharpness early-out. Price a
+  uniform empty-volume branch before the gathers; `ProbeVolume::to_bytes` writes
+  `ProbeVolume::total()` to `probe_counts.w`, so zero is an unambiguous
+  host-authored sentinel and populated volumes keep the existing path. The
+  1920×1080 Vulkan baselines over the last 120 of 897 measured frames were
+  2.607/2.632 ms forward and 0.986/0.995 ms SSR in `instances`, and 5.257/5.239
+  ms forward and 0.975/0.979 ms SSR in `specular-lights-fit`. Compare paired
+  alternating runs after the branch and keep it only for a repeatable pass
+  reduction. Preserve exact zero irradiance, captured visibility, clipmap blends
+  and the sky fallback. Actual driver load counts have not been measured; shader
+  source is not a compiled-cost report.
 - **P24 — price PCSS blocker searches; fixed-radius probe reordering is not
   established as equivalent.** Revalidated `mesh.slang::cascade_visibility`: box
   and fixed-disc modes return before the blocker search; only the adaptive mode
