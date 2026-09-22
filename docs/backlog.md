@@ -16558,6 +16558,18 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   calls is judged hung, and with them it is not. Still open:
   - **EW has to call it.** The fix is a seam, not a behaviour change, so the
     report closes only when EW's loader takes the turns.
+  - **`ForwardRenderer::with_scene` cannot take a turn, and it is EW's long
+    load.** Measured by EW on 2026-09-22 (release, dx12, RX 7900 XTX,
+    uncontended): its scene start is `WorldScene::new` inside a frame, not a
+    load before `Loop::new` — glTF import 519 ms then `with_scene` 821 ms
+    (`--raid-demo`), `with_scene` 906 ms with the import cached (`--ai-demo`);
+    under the contention it reported earlier the start stretched about 8x, which
+    puts `with_scene` alone past the five-second threshold. EW is moving the
+    import to a worker. Requested and accepted: let the upload service the
+    window, either a `&mut dyn FnMut()` called between meshes and textures or an
+    incremental upload the caller drives (which would also let a game draw a
+    loading frame). Measure where the 0.8–0.9 s goes before choosing. Next
+    Windows slice.
   - **The engine's own start-up is not covered.** `wait_for_configure` pumps,
     but a game's `Gpu::open` (device, swapchain, pipelines) gets the shell as
     `&S` and cannot take a turn. Nobody has measured it past five seconds, even
@@ -21861,6 +21873,42 @@ draws, and expansion would have meant a width in world or screen units, a
 miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
+
+## Session hand-off, 2026-09-22: work in flight
+
+- **Steamworks, on branch `steam-sdk` (not merged).** The user asked for a
+  four-step chain in one worktree — plan, plan review, implementation, final
+  review — then a merge into main by the coordinating session. Done: the plan
+  (`ec108d81`) and its review (`520ae563`), both on `origin/steam-sdk`, in
+  `docs/plan/42-steam.md`. Step 3 (implementation) stopped at the session's end
+  after slice 1: `cc422c7e` adds `crates/crcbl-steam` (runtime loader, init with
+  the version handshake, manual-dispatch pump, `SteamId`, the fake library, the
+  drift gate and smoke test as `#[ignore]`d tests, a CI Miri job), green locally
+  and pushed; its status is in the plan's "Status by slice" section. Not run:
+  the drift gate and smoke test (no Steamworks SDK on this machine; someone with
+  a partner login has to download SDK 1.65), every manual Steam-client step, and
+  CI itself — CI runs only on `main` and pull requests, so dispatch it on the
+  branch (`gh workflow run CI --ref steam-sdk`) before trusting it. Owed: finish
+  step 3 through the plan's build order (next 1b, then 3a, 3b, 4, 2, 6, 5, 7a–c,
+  8, 9, 10–15), then step 4 (an independent review on the same branch), then
+  merge into main and push. The worktree was
+  `.claude/worktrees/agent-a2d90b487b193d94c`; the branch is what matters, not
+  the directory. EW's hard requirements for Steam (listen-server co-op for four
+  with reconnect and host-left, raw voice PCM with game-controlled push-to-talk,
+  Steam Input as the shared gamepad events, whole-file cloud with surfaced
+  conflicts, the Steam ID as identity, no anti-cheat) are folded into the plan.
+- **CI has not been checked since `37901008`** (run 35716420973, green). The
+  pushes after it — the dx12 mesh-flag notes, the bare/editor idle fix, the
+  Win32 focus helper, the Windows windowed-samples script, `Shell::keep_alive`,
+  the dx12 register check at pipeline creation and the log file — were each
+  verified locally (Win32 harness, GPU suites on dx12 hardware, WARP and vk
+  where relevant, cross-target clippy), not on CI. Read the next main run before
+  building on them.
+- **The dx12 mesh flag waits on the user.** Options (a) withhold everywhere, the
+  current state, (b) report on hardware and accept empty frames on the RX 7900
+  XTX driver 32.0.21036.18, (c) gate by driver version after more measurement;
+  the evidence is in "DEFERRED — dx12 mesh shading: WARP needs a pixel shader,
+  one AMD driver culls everything".
 
 ## EW's engine-port audit: three gaps crcbl does not cover (2026-09-22)
 
