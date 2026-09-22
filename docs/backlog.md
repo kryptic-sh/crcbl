@@ -9599,9 +9599,11 @@ with their copies deleted. What remains:
   that ignores an item's own cells, so both panels' `can_accept` clone the grid
   each frame a drag hovers; a
   `Grid::can_move_within(catalog, slot, at, rotation)` would remove the clone.
-- **EW has not migrated.** Its equipment slots and medical quickslot are not
-  cell grids and have no single-slot target in the API, and it would map stash
-  scrolling (`first_row`) itself.
+- **EW will not migrate for now, by EW's decision.** Its inventory and hideout
+  draw with `DrawList` and route pointer events themselves across three drag
+  systems, and use none of `UiState`, `WidgetId` or `PointerInput`, so adopting
+  `GridDrag` is a UI-input architecture change for EW's user, not a port (EW
+  backlog `acf54c4`). Revisit if EW moves its UI input onto `UiState`.
 - **Cross-grid drags and rotation mid-drag (`Held::refit`, `payload_mut`) have
   no in-tree consumer**; they are unit-tested only.
 - **Nothing is drawn under the pointer mid-drag**; no sample draws a ghost.
