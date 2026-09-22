@@ -374,9 +374,71 @@ fn settings_render_scale_reaches_the_graph_extents() {
 }
 
 /// **Every persisted `VIDEO_KEYS` clamp reaches the frame and removes only its effect.**
+///
+/// One test per switch rather than one test walking all of them, because every
+/// frame here opens a fresh device and a fresh renderer, and on a software
+/// rasteriser with no shader cache that frame compiles the forward pipeline's
+/// shaders again inside its first submission. Walked in one test, the control
+/// and every arm were back-to-back frames of that kind, and on the Windows
+/// lavapipe runner the walk used nearly all of the kill that `slow-timeout` in
+/// `.config/nextest.toml` sets, on every green run (read off ten CI logs on
+/// 2026-09-22), so a slower runner timed it out. Split, each test is the
+/// control and its own arm, and nextest schedules the arms beside the rest of
+/// the suite.
+///
+/// The arm list is written once, here, and generates both the tests and
+/// `each_persisted_video_effect_switch_reaches_the_frame::ARMS`, which
+/// [`every_video_key_has_its_own_frame_test`] holds against `VIDEO_KEYS`. A
+/// switch added to the settings layer therefore fails that check until it has a
+/// test of its own — the guarantee the single test's `unknown => panic!` arm
+/// gave before.
+macro_rules! persisted_video_switch_tests {
+    ($($key:ident),+ $(,)?) => {
+        mod each_persisted_video_effect_switch_reaches_the_frame {
+            /// The `VIDEO_KEYS` entries with a test below, in its spelling.
+            pub(super) const ARMS: &[&str] = &[$(stringify!($key)),+];
+
+            $(
+                #[test]
+                #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+                fn $key() {
+                    super::a_persisted_video_switch_reaches_the_frame(stringify!($key));
+                }
+            )+
+        }
+    };
+}
+
+persisted_video_switch_tests!(
+    shadows,
+    ambient_occlusion,
+    reflections,
+    bloom,
+    volumetric_fog,
+    auto_exposure,
+);
+
+/// **No `VIDEO_KEYS` switch is without a frame test.**
+///
+/// Needs no device: it compares the settings layer's switch list against the
+/// arms `persisted_video_switch_tests!` generated a test for.
 #[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
-fn each_persisted_video_effect_switch_reaches_the_frame() {
+fn every_video_key_has_its_own_frame_test() {
+    let keys: Vec<&str> = crcbl::settings::VIDEO_KEYS
+        .iter()
+        .map(|(key, _)| *key)
+        .collect();
+    assert_eq!(
+        keys,
+        each_persisted_video_effect_switch_reaches_the_frame::ARMS,
+        "every `VIDEO_KEYS` switch needs an arm in `persisted_video_switch_tests!`, and every arm \
+         there must name a `VIDEO_KEYS` switch"
+    );
+}
+
+/// The all-on control, then the frame with `key`'s persisted switch off, and
+/// the assertion that the switch removed its own pass family and nothing else.
+fn a_persisted_video_switch_reaches_the_frame(key: &str) {
     // An untouched stack is the all-on control. `frame_passes` explicitly asks
     // for `RenderEffects::all()` in the camera layer before applying this video
     // section, because the default stack excludes lens effects.
@@ -418,106 +480,108 @@ fn each_persisted_video_effect_switch_reaches_the_frame() {
         );
     }
 
-    for (key, effect) in crcbl::settings::VIDEO_KEYS {
-        let witness_labels: &[&str] = match key {
-            "shadows" => &[],
-            "ambient_occlusion" => &["ssao", "ssao-blur", "ssao-upsample"],
-            "reflections" => &["hiz-1", "hiz-2", "ssr", "ssr-blur"],
-            "bloom" => &[
-                "bloom-down-1",
-                "bloom-down-2",
-                "bloom-up-1",
-                "bloom-composite",
-            ],
-            "volumetric_fog" => &[
-                "volumetric-scatter",
-                "volumetric-integrate",
-                "volumetric-composite",
-            ],
-            "auto_exposure" => &["exposure-clear", "exposure-histogram", "exposure-reduce"],
-            unknown => panic!("VIDEO_KEYS gained an untested effect switch `{unknown}`"),
-        };
-        let storage = MemoryStorage::new();
-        let mut written = SettingsStack::from_storage(&storage);
-        let expected_effects = RenderEffects::all().difference(effect);
-        crcbl::settings::set_video_effects(&mut written, expected_effects)
-            .expect("every public video switch writes to the user layer");
-        written
-            .save(
-                &storage,
-                std::path::Path::new(crcbl::store::settings::SETTINGS_FILE),
-            )
-            .expect("the video-effect switches persist");
-        let reopened = SettingsStack::from_storage(&storage);
-        let video = crcbl::settings::video(&reopened);
-        assert_eq!(
-            video.effects, expected_effects,
-            "reopening the saved `{key}` arm must resolve exactly all effects but its bit"
-        );
-        let off = frame_labels(&reopened, &format!("{key} disabled frame"));
+    let effect = crcbl::settings::VIDEO_KEYS
+        .iter()
+        .find_map(|&(candidate, effect)| (candidate == key).then_some(effect))
+        .unwrap_or_else(|| panic!("`{key}` is not a `VIDEO_KEYS` switch"));
+    let witness_labels: &[&str] = match key {
+        "shadows" => &[],
+        "ambient_occlusion" => &["ssao", "ssao-blur", "ssao-upsample"],
+        "reflections" => &["hiz-1", "hiz-2", "ssr", "ssr-blur"],
+        "bloom" => &[
+            "bloom-down-1",
+            "bloom-down-2",
+            "bloom-up-1",
+            "bloom-composite",
+        ],
+        "volumetric_fog" => &[
+            "volumetric-scatter",
+            "volumetric-integrate",
+            "volumetric-composite",
+        ],
+        "auto_exposure" => &["exposure-clear", "exposure-histogram", "exposure-reduce"],
+        unknown => panic!("VIDEO_KEYS gained an untested effect switch `{unknown}`"),
+    };
+    let storage = MemoryStorage::new();
+    let mut written = SettingsStack::from_storage(&storage);
+    let expected_effects = RenderEffects::all().difference(effect);
+    crcbl::settings::set_video_effects(&mut written, expected_effects)
+        .expect("every public video switch writes to the user layer");
+    written
+        .save(
+            &storage,
+            std::path::Path::new(crcbl::store::settings::SETTINGS_FILE),
+        )
+        .expect("the video-effect switches persist");
+    let reopened = SettingsStack::from_storage(&storage);
+    let video = crcbl::settings::video(&reopened);
+    assert_eq!(
+        video.effects, expected_effects,
+        "reopening the saved `{key}` arm must resolve exactly all effects but its bit"
+    );
+    let off = frame_labels(&reopened, &format!("{key} disabled frame"));
 
-        if effect == RenderEffects::SHADOWS {
-            let shadow = full
-                .iter()
-                .position(|label| label == "shadow")
-                .expect("the all-on control records the shadow atlas pass");
-            assert!(
-                shadow > 0,
-                "the all-on frame must have shadow culls before `shadow`: {full:?}"
-            );
-            let off_shadow = off
-                .iter()
-                .position(|label| label == "shadow")
-                .expect("the shadow atlas pass remains when its rendering is disabled");
-            assert_eq!(
-                shadow.checked_sub(off_shadow),
-                Some(crcbl::render::DrawGen::MAX_PASSES as usize * crcbl::render::shadow::CASCADES,),
-                "disabling persisted shadows must remove every cascade's cull passes: \
-                 full {full:?}, off {off:?}"
-            );
-            assert!(
-                off[..off_shadow].iter().any(|label| label == "cull"),
-                "the shadow-off frame must retain camera culls before `shadow`: {off:?}"
-            );
-            assert_eq!(
-                &off[off_shadow..],
-                &full[shadow..],
-                "the full suffix beginning at `shadow` must be unchanged when persisted shadows are disabled"
-            );
-        } else {
-            let expected: Vec<String> = full
-                .iter()
-                .filter(|label| {
-                    let label = label.as_str();
-                    let removed = match key {
-                        "ambient_occlusion" => {
-                            label == "ssao"
-                                || label.starts_with("ssao-blur")
-                                || label == "ssao-upsample"
-                        }
-                        "reflections" => {
-                            label.starts_with("hiz-") || label == "ssr" || label == "ssr-blur"
-                        }
-                        "bloom" => {
-                            label.starts_with("bloom-down-")
-                                || label.starts_with("bloom-up-")
-                                || label == "bloom-composite"
-                        }
-                        "volumetric_fog" => witness_labels.contains(&label),
-                        "auto_exposure" => witness_labels.contains(&label),
-                        "shadows" => false,
-                        unknown => {
-                            panic!("VIDEO_KEYS gained an untested effect switch `{unknown}`")
-                        }
-                    };
-                    !removed
-                })
-                .cloned()
-                .collect();
-            assert_eq!(
-                off, expected,
-                "disabling persisted `{key}` must remove only its pass family; the control witnesses {witness_labels:?}"
-            );
-        }
+    if effect == RenderEffects::SHADOWS {
+        let shadow = full
+            .iter()
+            .position(|label| label == "shadow")
+            .expect("the all-on control records the shadow atlas pass");
+        assert!(
+            shadow > 0,
+            "the all-on frame must have shadow culls before `shadow`: {full:?}"
+        );
+        let off_shadow = off
+            .iter()
+            .position(|label| label == "shadow")
+            .expect("the shadow atlas pass remains when its rendering is disabled");
+        assert_eq!(
+            shadow.checked_sub(off_shadow),
+            Some(crcbl::render::DrawGen::MAX_PASSES as usize * crcbl::render::shadow::CASCADES,),
+            "disabling persisted shadows must remove every cascade's cull passes: \
+             full {full:?}, off {off:?}"
+        );
+        assert!(
+            off[..off_shadow].iter().any(|label| label == "cull"),
+            "the shadow-off frame must retain camera culls before `shadow`: {off:?}"
+        );
+        assert_eq!(
+            &off[off_shadow..],
+            &full[shadow..],
+            "the full suffix beginning at `shadow` must be unchanged when persisted shadows are disabled"
+        );
+    } else {
+        let expected: Vec<String> = full
+            .iter()
+            .filter(|label| {
+                let label = label.as_str();
+                let removed = match key {
+                    "ambient_occlusion" => {
+                        label == "ssao"
+                            || label.starts_with("ssao-blur")
+                            || label == "ssao-upsample"
+                    }
+                    "reflections" => {
+                        label.starts_with("hiz-") || label == "ssr" || label == "ssr-blur"
+                    }
+                    "bloom" => {
+                        label.starts_with("bloom-down-")
+                            || label.starts_with("bloom-up-")
+                            || label == "bloom-composite"
+                    }
+                    "volumetric_fog" => witness_labels.contains(&label),
+                    "auto_exposure" => witness_labels.contains(&label),
+                    "shadows" => false,
+                    unknown => {
+                        panic!("VIDEO_KEYS gained an untested effect switch `{unknown}`")
+                    }
+                };
+                !removed
+            })
+            .cloned()
+            .collect();
+        assert_eq!(
+            off, expected,
+            "disabling persisted `{key}` must remove only its pass family; the control witnesses {witness_labels:?}"
+        );
     }
 }

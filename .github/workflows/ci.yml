@@ -2210,6 +2210,21 @@ jobs:
       LAVAPIPE_RELEASE: '20260730'
       LAVAPIPE_ASSET: lavapipe-x64-26.1.5.zip
       LAVAPIPE_ROOT: C:\lavapipe
+      # **llvmpipe's shader JIT without LLVM's optimisation passes.** This Mesa
+      # build has no shader cache on Windows, so every test process compiles
+      # the pipelines it draws with inside its first submission, and on this
+      # runner that compile was most of each test: green runs had the mesh
+      # tests' first readbacks just under `READBACK_DEADLINE` in
+      # `crates/crcbl-vk/tests/vk_e2e/harness.rs`, and the reds were those
+      # same readbacks landing just past it. `nopt` is the driver's own switch,
+      # described in the DLL as "disable optimization passes to speed up shader
+      # compilation". It changes how fast lavapipe builds its code, not what a
+      # frame holds: on this lavapipe build and SDK, with validation and sync
+      # validation on, both suites stayed green and the golden comparisons
+      # printed identical statistics with and without it. The measurements are
+      # in `docs/backlog.md`. The Linux legs keep Mesa's shader cache and do not
+      # need this.
+      GALLIVM_PERF: nopt
     steps:
       - uses: actions/checkout@v7
       - uses: actions-rust-lang/setup-rust-toolchain@v2

@@ -19641,6 +19641,14 @@ was learned — this only restores the configuration that can report it. If it
 fires again, what follows is what would settle it, and the depth-attachment
 readback is still the diagnostic nobody has built.
 
+**Read any recurrence after 2026-09-22 against a changed driver setting.** From
+that date the Windows job sets `GALLIVM_PERF: nopt`, so llvmpipe compiles
+without LLVM's optimisation passes (the reason is in "The Windows lavapipe vk
+e2e job reds in bursts of readback timeouts"). The `depth_probe` test in the
+forward step runs under that setting too. A burst, or a quiet spell, after that
+date says something about unoptimised codegen, not about the configuration that
+showed the five occurrences.
+
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
 while the same test passes on Linux lavapipe and radv.
@@ -19766,56 +19774,34 @@ Still open, and not touched here:
 
 ## Where the Windows vk e2e leg's time goes, and the one measurement nobody has taken
 
-Where the 4.39x goes — GPU time at parity, the loader's debug output ruled out,
-and the serial-execution cause that is fixed — is in docs/notes/ci.md under the
-same heading. What is still unmeasured:
+Where the 4.39x goes (GPU time at parity, the loader's debug output ruled out,
+and the serial-execution cause that is fixed) is in docs/notes/ci.md under the
+same heading.
 
-### The suspicion that is still unmeasured: synchronisation validation
+**Measured 2026-09-22: synchronisation validation is not the cost, so it stays
+on, per the 2026-09-06 decision.** The measurement ran locally rather than as
+the one-off CI edit this entry planned. It used the same binaries the job
+installs: `VkLayer_khronos_validation.dll` extracted from the LunarG SDK
+1.4.357.0 installer, and `lavapipe-x64-26.1.5.zip`. The process tree was pinned
+to four logical CPUs, with `-j 4` and `LP_NUM_THREADS=4`. The probe printed the
+same reach as the Windows leg:
+`sync-validation reach: record-time=yes one-submission=yes cross-submission=no`.
+Readings from the `crcbl-vk` `vk_e2e` suite's summary line, 64 tests:
 
-`CRCBL_VK_SYNC_VALIDATION: '1'` is set on both legs and sync validation is
-expensive. **Nobody has measured what it costs on the Windows leg**, and turning
-it off is a coverage decision that is not ours to take —
-`docs/plan/ 02-vulkan-backend.md` names sync bugs as this stage's headline risk
-and this as the mitigation.
+- `CRCBL_VK_SYNC_VALIDATION=1`: 39.1 s and 40.8 s, all passed.
+- `CRCBL_VK_SYNC_VALIDATION=0`: 37.7 s and 37.6 s, all passed. Sync validation
+  is 3–8% of the suite.
+- `CRCBL_VK_VALIDATION=0` (diagnostic only; 61 tests fail at `finish` because no
+  layer loaded): 30.9 s. The largest readback wait was 4.78 s, against 4.97 s
+  with both layers on, so validation is not what the slow readbacks wait on.
 
-What makes it worth measuring rather than arguing about: that leg's own probe
-reports
-`sync-validation reach: record-time=yes one-submission=yes cross-submission=no`,
-where the Linux leg reports `cross-submission=yes`. So the Windows leg is paying
-for sync validation and getting **less** from it than the leg beside it — the
-class of hazard that only submit-time validation can see is out of its scope,
-and `crcbl-render`'s graph-compile suite is what actually gates that class.
-
-The measurement, to be run as a one-off and then reverted:
-
-1. On `vk e2e (lavapipe, windows)`, in the `Run the suite against lavapipe`
-   step's `env:` block, change `CRCBL_VK_SYNC_VALIDATION: '1'` to `'0'`. That
-   variable is read by `crcbl_vk::debug::sync_validation_wanted` and by nothing
-   else; leave `CRCBL_VK_VALIDATION` alone, or the whole suite fails on
-   `ValidationReport::assert_clean`'s "validation was not enabled".
-2. Read the `Summary [...] 95 tests run` line the harness prints, against the
-   142.05s the same line reports today. Read the `vk e2e: gpu` timings in the
-   same log too: they should not move at all, because sync validation is host
-   work.
-3. What each outcome means:
-   - **Most of the 142s goes away** — sync validation is the cost. The decision
-     in front of the user is then whether the Windows leg keeps paying for a
-     layer that already reports `cross-submission=no`, given the Linux leg runs
-     the same suite with the fuller reach. Note that
-     `validation_gate::synchronisation_validation_catches_a_missing_barrier`
-     skips itself when the variable is not `1`, so switching it off silently
-     removes that test's teeth — it would need a matching `if:` on the job.
-   - **Little changes** — sync validation is not it, and the next suspect is
-     ordinary validation plus Windows' per-call overhead, which the same
-     procedure measures by flipping `CRCBL_VK_VALIDATION` instead. That one is a
-     bigger coverage loss and would only ever be a diagnostic run.
-
-**DECIDED 2026-09-06 —** run the one-off measurement above, then keep sync
-validation on if it is not the cost. The coverage it buys is what
-`docs/plan/02-vulkan-backend.md` names as this stage's headline-risk mitigation,
-so it is not traded away on a guess; if the measurement says it _is_ most of the
-142 s, the decision about the Windows leg goes to the user with a number behind
-it. Work: the three steps above, run once and reverted.
+The time on this leg goes to lavapipe compiling shaders in each test's first
+submission. The Windows build has no shader cache, and the runner compiles about
+5x slower than this workstation. The measurements and the fixes
+(`GALLIVM_PERF: nopt` on the job, and the split persisted-effects test) are in
+"The Windows lavapipe vk e2e job reds in bursts of readback timeouts" below.
+**Not measured:** the same toggle on the runner itself. The local share is an
+inference for it, not a CI reading.
 
 ## A recording that names a swapchain view is still not protected
 
@@ -21688,178 +21674,92 @@ joint's index on a skeleton. Nothing shipping.
 
 ## The Windows lavapipe vk e2e job reds in bursts of readback timeouts (2026-09-06)
 
-**Six times now, on six unrelated commits, and every time a rerun of the one job
-was green.** `vk e2e (lavapipe, windows)` fails a handful of
-`crcbl-vk::vk_e2e mesh::*` tests with `harness.rs`'s readback deadline — "the
-196608-byte readback was still Pending after 30.0s, past the 30s this polls for"
-— while the same suite passes on the Linux lavapipe leg of the same run and on
-both local drivers. The tests that red are the frame-sized readbacks, and the
-copies simply never complete inside the deadline. Seen once before 2026-09-05,
-on `03830d0` (eight tests), on `e17f0df` (four tests), on `56b98f0` and again on
-`252d77c` (2026-09-07; the same two tests both times,
-`the_gpu_descends_a_scaled_instance_at_the_size_it_draws` and
-`the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`, each at 33 s, with
-`wait_idle: Ok` and a clean validation report):
+**Root cause measured 2026-09-22: no deadlock and no lost completion. Every red
+was the first frame's shader compile costing about as much as the limit it was
+measured against.** Fixed in two places. What is still owed is reading the next
+Windows CI run.
 
-- `the_mesh_dispatch_extent_is_the_culled_instance_count`
-- `the_mesh_shader_path_matches_the_indirect_path_s_golden`
-- `the_shadow_cascades_select_coarser_than_the_camera`
-- `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is`
+**The two failure shapes are one cause.** The Mesa 26.1.5 lavapipe the job pins
+has no shader cache on Windows, so each test process JIT-compiles every pipeline
+it draws with inside its first submission, serially on the queue thread. On the
+runner, that compile is nearly all of a rendering test:
 
-**What is known and what is not.** Verified: the log carries no validation line,
-no panic other than the deadline, and the run's other GPU jobs are green.
-`READBACK_DEADLINE` in `crates/crcbl-vk/tests/vk_e2e/harness.rs` is 30 s per
-readback, and a lavapipe frame at 256×192 through the mesh path takes well under
-a second on an idle runner, so a 30 s stall is not the frame. Not verified:
-whether `poll_readback` on the Windows lavapipe ICD can lose a fence, or whether
-the copy is ever executed — the paragraph after the options is what the fifth
-burst settled about the runner itself.
+- `crcbl-vk::vk_e2e` mesh readbacks. On the green Windows vk step of
+  [job 106606743006](https://github.com/kryptic-sh/crcbl/actions/runs/35683945866/job/106606743006)
+  the 55 logged readbacks had a median of 0.042 s, a p90 of 28.6 s and a max of
+  29.3 s, against the 30 s `READBACK_DEADLINE` in
+  `crates/crcbl-vk/tests/vk_e2e/harness.rs`. Green runs were a second under the
+  deadline. The reds (the `9253b7d`, `9a9a694` and `590fec01` bursts, all LATE,
+  never STUCK or LOST) were the same readbacks a second over it.
+- `crcbl::forward_e2e antialiasing::each_persisted_video_effect_switch_reaches_the_frame`
+  TIMEOUT at nextest's 240 s kill on `9253b7da` (run 35311395020) and `190c574c`
+  (run 35683945866). The test walked the all-on control and six `VIDEO_KEYS`
+  arms, each on a fresh device and renderer, so each was a cold compile. The
+  timed-out run's stage lines show `renderer built` at 4.0–6.3 s and `idle` at
+  24.3–45.5 s per frame. Six frames were done at 203.5 s and the seventh was
+  killed. Nine green Windows runs in the saved log history passed it at
+  203.8–235.2 s, apart from one at 100.1 s (run 35372105178). So it sat at
+  85–98% of the kill on every ordinary run, and was not a flake.
 
-**Options, and none is taken yet.** (1) Raise the deadline for that leg alone —
-cheap, but a longer wait on a starved runner is still a wait, and the deadline
-exists so a hung copy is reported rather than sat on. (2) Retry the
-readback-timeout tests once inside the job (nextest's `retries` for that
-profile) — turns a burst into a slow green, at the cost of hiding a real hang
-behind one retry. (3) Read the runner's load in the job (`Get-Counter` processor
-time before the suite) and print it beside the summary, so the next red carries
-the evidence this entry lacks. (3) is in place since the fourth burst:
-`vk e2e (lavapipe, windows)` has a "Read the runner's load before the suite"
-step that prints processor time over a 3 s sample, free memory and the eight
-busiest processes.
+**How it was measured.** Measured locally on the RX 7900 XTX workstation, with
+lavapipe pinned through `VK_DRIVER_FILES`, `CRCBL_ADAPTER=cpu`, the same
+`lavapipe-x64-26.1.5.zip`, and `VkLayer_khronos_validation.dll` extracted from
+the same LunarG SDK 1.4.357.0 installer CI uses (validation on, as in CI). To
+resemble the 4-vCPU runner, the process tree was pinned to four logical CPUs
+(two cores), with `-j 4` and `LP_NUM_THREADS=4`.
 
-**2026-09-16: the premise was wrong — the first mesh frame on Windows lavapipe
-is not "well under a second".** The passing one-frame mesh tests in the
-`3750aec` logs take 28.6–31.0 s in total and the reds 33.4–36.3 s, which is the
-30 s deadline plus the fixture. Mesa 26.1.5's `meson.build` disables the shader
-cache on Windows ("Shader Cache does not currently work on Windows"), so every
-test process compiles the whole forward and mesh pipeline inside its first
-submission, four processes at once on four vCPUs; the load step samples before
-the suite, not during it, which is why it read idle. Reproduced on Linux
-lavapipe with `MESA_SHADER_CACHE_DISABLE=true`: the first-frame readback goes
-from 52–72 ms to 2.0–3.6 s on four CPUs and to 18.4–18.8 s on one CPU with nine
-tests at once, and six busy-loop processes beside that gave the CI signature
-exactly — `Pending` at 30 s, then `wait_idle: Ok`. The code rules out a
-`crcbl-vk` completion bug: `submit` signals the retire timeline on every
-submission, and every readback in the suite already has nothing submitted after
-it. Bursts six (`3750aec`) and seven (`e112ec0`, 2026-09-16) are the same
-signature.
+- **The runner is uniformly slower, not stuck.** Per test, run 35602188497's
+  forward times were 3.5–5.6x the local ones for every rendering test, and the
+  long test was no outlier at 4.6x (226.5 s against 49.0 s). The vk suite gave
+  the same picture: 4.7–5.1x on every heavy test of job 106606743006. Tests that
+  barely touch the rasteriser were 2.0–2.3x. Why the runner's JIT is about 5x
+  slower than this machine's is not established.
+- **The first frame is JIT, and single-threaded.** The old test alone took 28.65
+  s pinned to one logical CPU and 28.09 s unpinned (validation off).
+  `GALLIVM_PERF=nopt` turns off LLVM's optimisation passes, and with it the
+  local vk suite went from 39.1–40.8 s to 20.4–20.8 s. Its readback max went
+  from 4.97 s to 1.61–1.64 s, and the forward suite from 103–107 s to 57.5 s.
+  All tests stayed green, and every golden comparison printed statistics
+  identical to the optimised run's.
+- **Contention is not the lever.** Two probes, both reverted. The first limited
+  the heavy vk tests (`mesh::`, `draw_gen::`, the skinned cubes,
+  `per_pass_gpu_timers`) to two slots through a nextest test group. The suite
+  went from 39.1 s to 62.2 s and the readback max only from 4.97 s to 4.54 s.
+  The second swapped the forward harness's `yield_now` busy poll for a 1 ms
+  sleep: 93.4 s against 93.3–96.6 s, inside the run-to-run spread.
 
-**Instrumented, not fixed.** `Headless::readback` in
-`crates/crcbl-vk/tests/vk_e2e/harness.rs` now prints every readback's wait, so a
-green Windows log shows the margin, and a miss prints `vk e2e: stall:` lines —
-the device's submission count and retire timeline at the request and at the
-deadline, the staging bytes read past the timeline, 60 s more of slower polling,
-and a timed `wait_idle` — then panics with a LATE, STUCK or LOST verdict.
-**Next:** read the first-frame wait in the next Windows run, green or red. LATE
-on the runner confirms the cause and puts a longer deadline for that leg, or a
-smaller mesh test group running at once, back on the table; LOST or STUCK
-reopens the driver question. The Windows runner is now observed on `9253b7d` in
-[job 105494004842](https://github.com/kryptic-sh/crcbl/actions/runs/35311395020/job/105494004842):
-`draw_gen::every_geometry_path_draws_the_same_frame`,
-`mesh::a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths`,
-`mesh::the_mesh_dispatch_extent_is_the_culled_instance_count` and
-`mesh::the_mesh_shader_path_matches_the_indirect_path_s_golden` failed their
-readback deadlines. Every failed readback became Ready during diagnostic polling
-with changed destination bytes and matching submitted/retired timeline values,
-yielding LATE rather than STUCK or LOST verdicts. The same-commit rerun passed
-the complete backend suite, but its forward suite subsequently timed out in
-`antialiasing::each_persisted_video_effect_switch_reaches_the_frame`; real Win32
-presentation was skipped. Subsequent diagnostic CI and deployment passed, but
-the earlier timeout cause remains unknown. Whether busy polling materially
-affects Windows remains unverified. Deadline changes and automatic test retries
-have not been adopted; reducing concurrent cold mesh work remains an option
-requiring a priced test-group change.
+**Fixed:**
 
-Successor run `35400375474`, Windows Vulkan job `105778661364`, reproduced LATE
-readbacks on `9a9a694b9323973e026471845488f9ee30536856`. The runner reported 63
-tests run: 59 passed, 4 failed, 0 skipped. Failures were
-`draw_gen::every_geometry_path_draws_the_same_frame`,
-`mesh::a_multi_cluster_mesh_draws_the_same_frame_through_both_geometry_paths`,
-`mesh::the_gpu_descends_the_dag_to_the_cut_the_host_rule_says` and
-`mesh::the_gpu_descends_a_scaled_instance_at_the_size_it_draws`. Every failed
-request and deadline snapshot showed submitted timeline 35 and retired timeline
-34; diagnostic polling subsequently completed with changed staging bytes and
-retired timeline 35. This establishes late execution rather than a permanently
-lost completion for these requests. The pre-suite sample reported 3.8% processor
-time and 13.1 GiB free of 15.99 GiB on 4 logical processors, which does not
-measure contention during cold compilation. The forward-pass and Win32
-presentation steps were skipped after the suite failed. Keep their coverage
-open; do not claim a complete Windows Vulkan pass. Price reduced concurrency for
-cold mesh tests against the complete suite, preserving deadlines, image
-assertions and validation controls, before choosing a harness change. This
-recurrence alone does not establish that busy polling or compilation is the
-cause, and no automatic retry has been added.
+1. `crates/crcbl/tests/forward_e2e/antialiasing.rs`: the walk is split into one
+   test per `VIDEO_KEYS` switch
+   (`each_persisted_video_effect_switch_reaches_the_frame::<key>`), each
+   rendering the all-on control and its own arm with the same fresh fixtures and
+   assertions. A macro generates the tests and an `ARMS` list from one arm list.
+   `every_video_key_has_its_own_frame_test` holds `ARMS` against `VIDEO_KEYS`,
+   so a new switch fails until it has a test. It was shown red by dropping an
+   arm, and the arm assertions were shown red by feeding the control's frame in
+   as the arm's. Locally, under the settings above, the old test took 45.3–49.0
+   s within 93.3–96.6 s suites (five runs). After the split, the slowest arm
+   took 13.3–13.8 s within 103.4–107.0 s suites (five runs), and ten runs of the
+   six arms alone took 21.9–25.7 s. The suite's slowest test is now
+   `shadow::the_seam_puts_the_console_s_filter_on_one_side_and_the_shipped_one_on_the_other`
+   at 24.6–25.8 s. At the observed 4.6x, an arm is about a quarter of the kill.
+2. `.github/workflows/ci.yml`, job `vk-e2e-windows`: `GALLIVM_PERF: nopt` at job
+   level, for the mesh readbacks. The deadline, the stall report and the
+   assertions are untouched.
 
-Cold backend-suite scheduling screen on the current successor source used Linux
-llvmpipe, sync validation, disabled Mesa shader caching, four-CPU affinity and
-four global test slots. The default run reported 63 tests run: 63 passed, 0
-skipped in 20.093 s, with maximum logged readback 3.102314801 s. An external
-nextest configuration limited only `vk_e2e` mesh and draw-generation tests to
-two concurrent slots; the complete suite again reported 63 tests run: 63 passed,
-0 skipped in 25.738 s, with maximum logged readback 2.536692321 s. An invalid
-named-group control was rejected by nextest, confirming the external
-configuration is read. Reverse-order runs again reported 63 tests run: 63
-passed, 0 skipped in both configurations: the two-slot mesh group took 25.149 s
-with maximum logged readback 2.588259423 s; default concurrency took 20.424 s
-with maximum logged readback 3.223727493 s. Nextest's group report confirms the
-mesh and draw-generation tests belong to the two-slot group, including every
-failed successor test. Both pairs show lower worst observed readback wait at a
-higher suite cost. They do not resolve the Windows deadline failures or
-establish an engine performance improvement. No repository configuration was
-changed. Actual Windows scheduling evidence remains required before adopting the
-limit.
+**Next:** read the next `vk e2e (lavapipe, windows)` run. Take the readback
+waits from `vk e2e: the … readback was Ready after` lines and the forward arms'
+times, then delete this entry if both have margin. **Not verified:** whether the
+runner honours `GALLIVM_PERF` the way this machine did, and whether its gain
+matches the local 3x. The same build and SDK make that likely, but it is not
+proven.
 
-Linux cold-compilation forward-suite follow-up: both complete runs used the
-pinned llvmpipe adapter, validation and `MESA_SHADER_CACHE_DISABLE=true`,
-without filtering the suite or changing deadlines. The runner reported 38 passed
-and zero skipped in each run. Default concurrency took 23.807 s; one test at a
-time took 163.230 s. The persisted-effects test took 23.806 s and 19.819 s
-respectively. Declined blanket serialization from this evidence; Windows
-contention and per-case stage timing remain unverified.
-
-An external release prototype reused only the device while retaining a fresh
-`ForwardRenderer` and `TransientPool` for every persisted-settings comparison.
-All existing control witnesses, pass-family comparisons, submit/present/idle and
-per-renderer teardown remained. Reversed paired runs reported original test
-19.62/19.55 s and device reuse 18.75/18.58 s on Linux cold compilation.
-Bypassing the persisted clamp failed the shadow-cull comparison; the restored
-prototype passed. This small difference does not establish a fix for the Windows
-hard timeout, so device reuse has not been implemented. Reusing the renderer
-itself would change the fresh-startup contract and has not been adopted. Next
-inspect individual setup/execution stages on the constrained workload before
-choosing fixture changes or independent per-switch cases; preserve every
-`VIDEO_KEYS` arm, its all-on control, fresh-renderer startup checks and existing
-deadlines.
-
-A release observer copied the original persisted-effects fixture and added only
-stage timers; removing those observers reconstructed the entire original source
-exactly. With cold compilation, pinned llvmpipe and validation, both
-CPU-affinity runs passed every original effect assertion. Restricting the
-process to four CPUs reported 19.60 s; one CPU reported 19.53 s. Aggregate
-renderer creation was 5.932989/5.945199 s, and command finish, submission,
-presentation and idle was 13.367208/13.301657 s respectively. Device opening was
-0.182738/0.174874 s. These are fixture-stage CPU/wait observations, not GPU
-frame times, and the combined submission stage does not isolate compilation from
-rendering or waiting. Every settings label had every expected stage; removing
-one stage made the observation guard fail before restoration. These runs did not
-reproduce the Windows timeout or concurrent Windows load.
-
-`forward_e2e::antialiasing::frame_passes` emits settings-label and elapsed-stage
-observations without changing fresh fixture construction, assertions or existing
-deadlines. The diagnostic branch and main exact-commit
-[CI](https://github.com/kryptic-sh/crcbl/actions/runs/35318805086) passed every
-job. Main exact-commit
-[Pages](https://github.com/kryptic-sh/crcbl/actions/runs/35318805062) passed its
-browser, golden, Windows seam and deployment jobs; the owner-deferred macOS seam
-job was skipped. Every terminal job was enumerated and the deployed live site
-returned HTTP 200. Shipping gates are closed; the earlier Windows timeout's
-cause remains unresolved. The successful Windows
-[job](https://github.com/kryptic-sh/crcbl/actions/runs/35316357329/job/105508739038)
-stage trace locates substantial elapsed time between submission and idle,
-without isolating driver compilation, software rendering or waiting. Read these
-stage observations on any recurrence before choosing fixture changes. Preserve
-fresh fixtures, every settings arm and control, effect assertions and deadlines;
-diagnostics do not fix variability.
+**Stale, not fixed here:** `docs/notes/ci.md`'s "draws runners three times
+apart" note says `READBACK_DEADLINE` "is 120 s now", but the harness says 30 s.
+Its "Where the Windows vk e2e leg's time goes" record says flat inter-frame gaps
+rule out one-time shader JIT. That was read off one four-frame test, and the
+cold first frame is where the JIT goes.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
