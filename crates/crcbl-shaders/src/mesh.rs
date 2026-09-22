@@ -6911,6 +6911,36 @@ mod tests {
         );
     }
 
+    /// **A mixed edge samples the complete disc without sampling its probe a
+    /// second time.**
+    ///
+    /// The probe comparisons are already the complete disc's comparisons at
+    /// `SHADOW_PROBE_INDEX`. Retaining them makes the mixed path strictly less
+    /// work while preserving the original accumulation order. If this quietly
+    /// returns to a loop over the complete disc, rendered output stays correct
+    /// and only the performance regression exposes the duplicate work.
+    #[test]
+    fn the_mixed_shadow_filter_reuses_its_probe_taps() {
+        const SOURCE: &str = include_str!("../shaders/mesh.slang");
+        let filter = SOURCE
+            .split_once("float tile_pcf(")
+            .expect("mesh.slang declares tile_pcf")
+            .1;
+        let filter = &filter[..filter.find("\n}").expect("tile_pcf closes")];
+        assert!(
+            filter.contains("float probe_taps[SHADOW_PROBE_TAPS];"),
+            "tile_pcf must retain the probe comparisons for a mixed edge",
+        );
+        assert!(
+            filter.contains("float visibility = probe_taps[0];"),
+            "the full filter must begin with the retained centre comparison",
+        );
+        assert!(
+            !filter.contains("for (uint index = 0u; index < SHADOW_TAPS; ++index)"),
+            "the mixed-edge path still samples all taps again, including its probe",
+        );
+    }
+
     /// **A normal taken through `normal_basis` stays perpendicular to its
     /// surface under a non-uniform scale; one taken through the bare 3×3 does
     /// not.**

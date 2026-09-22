@@ -359,13 +359,27 @@ Initial measurements and harness findings:
   `disc` deliberately share the rotated disc while `box` takes the hardware-PCF
   grid, so this is attribution rather than permission to lower the shipped
   quality tier; a default change still needs image-quality evidence and a user
-  decision. A bounded same-quality trial exists in `tile_pcf`: its five-tap
-  unanimity probe decides whether the other taps are needed, but the mixed-edge
-  path currently samples all 32 positions again, including those five. Reuse the
-  probe results while adding the full filter in its original index order,
-  require unchanged native shadow images, and compare alternating PCSS
-  specular/fill timings. Reject it if lookup branches or live probe values erase
-  the saved texture comparisons or regress the fill control.
+  decision. The bounded same-quality `tile_pcf` trial was retained: its
+  unanimity probe now keeps each comparison, and a mixed edge adds those values
+  in the complete disc's original order instead of sampling them again. The
+  structural observer failed against the duplicate-sampling path before passing
+  the implementation, every shader target compiled, the native filter-ladder and
+  moving point-shadow observers passed, and both point- and spot-shadow goldens
+  remained within their existing tolerances. The parity guards required the same
+  filter body in the grass, volumetric and water shaders; their meadow,
+  occluded-froxel and still-pool native observers passed after synchronization.
+  Across two alternating PCSS pairs, ordinary `specular-lights-fit` `forward`
+  p50 fell from 5.540/5.647 ms to 5.253/5.245 ms, a paired 5.2/7.1% reduction,
+  while the fill control moved from 3.507/3.637 ms to 3.480/3.537 ms. Complete
+  pass-sum p50 fell from 12.732/12.913 ms to 12.420/12.439 ms, a paired 2.5/3.7%
+  reduction. Replacing literal split points with the probe index table preserved
+  the gain: a final ordinary/fill pair measured 5.190/3.490 ms in `forward` and
+  12.344/10.022 ms in the pass sum. An explicit-scalar variant was considered to
+  avoid the retained local array's dynamic indexing, but its generated SPIR-V
+  grew from 263,576 to 284,560 bytes for grass and from 210,632 to 217,664 bytes
+  for mesh; it was reverted before timing. Keep the smaller measured array form
+  unless a compiler-level profile shows its indexing is a remaining cost. Metal
+  and Direct3D image parity remain unverified on this Linux machine.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.

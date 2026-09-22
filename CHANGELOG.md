@@ -29,6 +29,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Mixed-edge PCSS filtering now reuses the shadow comparisons already made by
+  its unanimity probe instead of sampling those disc positions twice, preserving
+  the complete filter result while reducing shadow-filter work in mesh, grass,
+  water and volumetric shading.
 - CMAA2 shape classification now carries each run's already-known source texel
   into its blend accumulation instead of recovering it with integer division for
   every emitted share.
