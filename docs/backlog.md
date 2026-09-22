@@ -4110,7 +4110,16 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   camera, viewport, projection mode, grid shape and light generation, not merely
   equality against the immediately preceding frame. The clear-counters pass
   resets overflow statistics, so a skipped build must retain truthful overflow
-  reporting. Both GPU price and invalidation tests remain open.
+  reporting. Two alternating 900-frame 1920×1080 MX550 pairs now price the
+  current split: the sun-only `instances` scene measured `light-cluster` at
+  0.026 ms p50 in both runs, while `lights-fit` measured 0.054 ms in both. The
+  directional-only setup therefore has at most 0.026 ms to recover at 1080p; it
+  is not a frame-time priority on that workload. Trial a shader return after
+  writing the sole directional row, because it preserves the grid contents and
+  avoids every unprojection and slice-bound calculation. Retain it only if a 4K
+  control makes the absolute saving material and mirrored mixed-light runs
+  remain neutral. Caching unchanged grids still needs the invalidation tests
+  above and remains open.
 - **P29 — smaller GPU items.** Pages sampled for materials that have none (a
   pipeline variant or uniform branch — check WGSL's uniformity rule); the
   exposure histogram bins every full-resolution texel (sample every fourth, or a
