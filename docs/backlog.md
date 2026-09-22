@@ -8996,18 +8996,42 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: nothing built (2026-08-27)
+### Steamworks: slice 1 built on `steam-sdk`, nothing verified against Steam (2026-09-22)
 
-**Nothing exists** — no `crcbl-steam` crate, no `steamworks` dependency, no
-`CRCBL_STEAM_SDK` anywhere. **Re-planned 2026-09-22 for the full Steam API on
-Linux, Windows and macOS** (branch `steam-sdk`), and reviewed the same day
-against the SDK 1.65 headers and this tree: `docs/plan/42-steam.md` carries an
-interface catalogue marking the slice that lands each Steamworks interface, and
-slices, each with its files, API sketch, tests that can fail, and manual checks
-under app 480 per OS. Its "Review (step 2)" section lists what the review
-corrected. The plan claims no roadmap phase yet — slice 1 does. Slice 1 is the
-next work, and deliberately small: loader, init with the version handshake,
-manual-dispatch pump, shutdown and the local `SteamId`, with fake-library tests.
+**Slice 1 is built on branch `steam-sdk`** (not merged): `crates/crcbl-steam` —
+the runtime loader, `Steam::init` with the version handshake, the
+manual-dispatch pump, shutdown on the last owner's drop, the local `SteamId`,
+the fake-library rig, the drift gate and the CI steps (clippy and rustdoc for
+macOS and Windows, a `miri (crcbl-steam)` job). The plan,
+`docs/plan/42-steam.md`, carries a status line per slice; slice 1b (umbrella
+feature, sandbox, remaining basics) is next.
+
+**Not verified, and each is a gap rather than a pass:**
+
+- **The drift gate has never run**
+  (`cargo test -p crcbl-steam -- --ignored drift`): no machine had the SDK,
+  which needs a partner login. Every declaration in `ffi::manifest`, every row
+  of `ffi::versions` and every field list in `ffi::structs::DECLS` is written
+  from the SDK 1.65 header mirror and is a claim until it has. Its scanner is
+  proven only against synthetic headers built from the crate's own tables. The
+  header each struct lives in was not assumed (the gate searches every header),
+  because the plan and memory disagree on whether `CallbackMsg_t` is in
+  `steam_api_internal.h` or `steam_api_common.h`.
+- **`tests/smoke.rs` has never passed against a real client.** On the Windows
+  development machine (Steam running, no SDK), the only `steam_api64.dll` was
+  one bundled with an installed game, from an older SDK (`SteamUtils010`).
+  Through it, `Steam::init` opened the library with `LoadLibraryExW`, resolved
+  every lifecycle, dispatch and `ISteamUser` symbol, and failed with
+  `NoSymbol("SteamAPI_SteamUtils_v011")` — the loader works on a real DLL; the
+  1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
+  and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
+- **The `pack(4)` layout tables** (Linux and macOS) run only in CI; the local
+  run was Windows (`pack(8)`). The numbers come from a C program compiled with
+  MinGW GCC over this crate's own transcription of the fields, both packings.
+- **Miri** ran locally on Windows (nightly 2026-09-21, 45 tests, clean, leak
+  check on); the CI job itself has not run, because CI runs on pull requests and
+  `main` only.
+- **`aarch64` Linux** (`linuxarm64`) has a loader path and no machine.
 
 **EW's requirements and priority set the order.** EW is the first consumer. Its
 six hard requirements are listen-server co-op over Steam networking with friend

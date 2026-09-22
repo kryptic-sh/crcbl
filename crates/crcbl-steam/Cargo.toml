@@ -1,0 +1,21 @@
+[package]
+name = "crcbl-steam"
+description = "Crucible Steamworks: the SDK's flat C API, loaded at runtime, behind an event queue drained once per frame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# One dependency. `docs/plan/42-steam.md` rules out every binding crate — the
+# SDK cannot be vendored, and a link-time dependency on `steam_api` kills the
+# process in the dynamic loader on a machine without Steam — so the declarations
+# are hand-written and the library is opened at runtime. `log`, `crcbl-net`,
+# `crcbl-store` and `crcbl-input` arrive with the slices that call them; a
+# dependency nothing reads is one `cargo machete` refuses.
+[dependencies]
+# `InitError` is what `Steam::init` returns, so it needs `Display` and `Error`
+# without a macro of this crate's own.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

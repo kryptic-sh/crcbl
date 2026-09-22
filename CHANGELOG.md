@@ -221,6 +221,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-steam`: Steamworks, slice 1** (`docs/plan/42-steam.md`). A new crate
+  over the SDK's flat C API with no link-time dependency and nothing from the
+  SDK committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
+  under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
+  path at runtime, initialises with an interface-version handshake and switches
+  to manual callback dispatch. `Steam::pump` drains the pipe once per frame and
+  `Steam::events` yields `SteamEvent::OverlayActivated`;
+  `steam.user().steam_id()`, `logged_on()`, `steam.utils().app_id()` and
+  `steam_hardware()` read identity and machine. Every failure is a typed
+  `InitError` — no library (listing each path tried), a missing symbol, an
+  interface the client cannot provide, Steam not running (saying whether
+  `steam_appid.txt` was present), the wrong app, or a second live `Steam` — so a
+  game without Steam runs on. 64-bit Linux, Windows and macOS; elsewhere the
+  crate is empty. Not yet run against a real SDK or Steam client.
 - `PhysicsWorld::cast_ray_excluding` and its shared `OverlapQueries` form omit a
   live collider before selecting the closest exact ray hit. Character support
   and traversal probes can skip their own capsule while retaining geometry

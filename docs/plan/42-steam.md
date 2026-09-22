@@ -16,14 +16,14 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-22): planned, nothing built.** The four decisions the earlier
-draft asked for were ratified 2026-09-06 (see "Decisions" below), and "the full
-Steam API" is now in scope, which reverses two earlier "not now" calls — Steam
-Input and `SteamTransport` — and pulls the first consumer's requirements (the
-game EW, below) forward in the slice order. The plan was reviewed the same day
-against the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists
-what that changed, including EW's answers to the questions the first draft left
-open.
+**Status (2026-09-22): slice 1 built on branch `steam-sdk`, the rest planned** —
+see "Status by slice" under "Slice order". The four decisions the earlier draft
+asked for were ratified 2026-09-06 (see "Decisions" below), and "the full Steam
+API" is now in scope, which reverses two earlier "not now" calls — Steam Input
+and `SteamTransport` — and pulls the first consumer's requirements (the game EW,
+below) forward in the slice order. The plan was reviewed the same day against
+the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists what that
+changed, including EW's answers to the questions the first draft left open.
 
 Two findings shape everything below, so they come first:
 
@@ -47,7 +47,7 @@ Two findings shape everything below, so they come first:
 ## Conventions in this document
 
 - **Paths inside the proposed crate are written crate-relative**
-  (`crcbl-steam/src/pump.rs`), because the crate does not exist yet and
+  (`crates/crcbl-steam/src/pump.rs`), because the crate does not exist yet and
   `tools/check-doc-citations.sh` checks only paths rooted at a top-level
   directory. The slice that creates a file switches its citations here to the
   rooted `crates/crcbl-steam/…` form in the same commit, so the gate starts
@@ -163,8 +163,8 @@ build order is stated separately.
   `STEAM*_INTERFACE_VERSION` string baked in at compile time. **`crcbl-steam`
   calls `SteamInternal_SteamAPI_Init` with exactly the interface-version strings
   of the accessors it binds** (`"SteamUtils011\0SteamUser023\0…\0\0"`, derived
-  from one table in `crcbl-steam/src/ffi/versions.rs`, never typed twice), so a
-  client that cannot honour them fails init with
+  from one table in `crates/crcbl-steam/src/ffi/versions.rs`, never typed
+  twice), so a client that cannot honour them fails init with
   `k_ESteamAPIInitResult_VersionMismatch` and an English `SteamErrMsg`
   (`typedef char SteamErrMsg[1024]`). `ESteamAPIInitResult` is
   `OK = 0, FailedGeneric = 1, NoSteamClient = 2, VersionMismatch = 3`.
@@ -424,14 +424,16 @@ Target gating follows the `crcbl-dx12` pattern — no `#![cfg(...)]` crate root:
 **Hand-written flat-API declarations + runtime loading** (ratified 2026-09-06).
 The `crcbl-shell` pattern applied verbatim, laid out as:
 
-- `crcbl-steam/src/ffi/mod.rs` — scalar aliases (`HSteamPipe = i32`,
+- `crates/crcbl-steam/src/ffi/mod.rs` — scalar aliases (`HSteamPipe = i32`,
   `SteamAPICall = u64`, `AppId = u32`, …), and the `Lib` struct of typed
   function pointers, grouped per interface (`Lib.user`, `Lib.friends`, …) so a
   slice adds one group.
-- `crcbl-steam/src/ffi/prototype.rs` — one `type` per function pointer, each
-  carrying in its doc comment **the C declaration it was copied from and the SDK
-  version it was read from**.
-- `crcbl-steam/src/ffi/structs.rs` — the structs (callback payloads,
+- the `prototype` aliases — one `type` per function pointer, each carrying in
+  its doc comment **the C declaration it was copied from**. _Corrected in slice
+  1:_ there is no `prototype.rs` file. The aliases are emitted by the
+  `bindings!` macro invocation in `manifest.rs`, which is the only way they can
+  be "generated from the same list" as the loads and the drift table.
+- `crates/crcbl-steam/src/ffi/structs.rs` — the structs (callback payloads,
   `SteamNetworkingIdentity`, `InputAnalogActionData_t`, …) with the
   field-by-field layout table (below). Packing is chosen by one macro per
   pragma: callback-packed structs are
@@ -440,22 +442,22 @@ The `crcbl-shell` pattern applied verbatim, laid out as:
   spelling it keeps the "never reference a field" rule uniform on every OS);
   `pack(1)` structs are `repr(C, packed)`; structs declared outside any pragma
   (`SteamNetworkingMessage_t`) are plain `repr(C)`.
-- `crcbl-steam/src/ffi/versions.rs` — the accessor/interface-version table
-  (`("SteamAPI_SteamUser_v023", "SteamUser023")`, …, both columns literal), the
-  single source for accessor lookup and the init handshake string.
-- `crcbl-steam/src/ffi/load.rs` — the per-OS loader and the `symbol!` macro that
-  resolves a name or returns `InitError::NoSymbol(name)`.
-- `crcbl-steam/src/ffi/manifest.rs` — a `const BINDINGS: &[BoundFn]` table in
-  which each entry holds the function's name and **the C declaration it was
-  copied from, verbatim**
+- `crates/crcbl-steam/src/ffi/versions.rs` — the accessor/interface-version
+  table (`("SteamAPI_SteamUser_v023", "SteamUser023")`, …, both columns
+  literal), the single source for accessor lookup and the init handshake string.
+- `crates/crcbl-steam/src/ffi/load.rs` — the per-OS loader and the `symbol!`
+  macro that resolves a name or returns `InitError::NoSymbol(name)`.
+- `crates/crcbl-steam/src/ffi/manifest.rs` — a `const BINDINGS: &[BoundFn]`
+  table in which each entry holds the function's name and **the C declaration it
+  was copied from, verbatim**
   (`"S_API uint64_steamid SteamAPI_ISteamUser_GetSteamID( ISteamUser* self );"`),
-  which is what the drift gate looks for in the headers. The `symbol!` loads and
-  the `prototype.rs` doc comments are generated from the same list by a
-  declarative macro, so a function cannot be loaded without being in the
-  manifest and the declaration is written once.
-- `crcbl-steam/src/ffi/drift.rs` — the drift gate, a `#[cfg(test)]` module
-  inside the crate rather than a `tests/` file, because `BINDINGS` and the
-  struct tables are private and an integration test cannot see them.
+  which is what the drift gate looks for in the headers. The symbol loads and
+  the `prototype` aliases are generated from the same list by a declarative
+  macro, so a function cannot be loaded without being in the manifest and the
+  declaration is written once.
+- `crates/crcbl-steam/src/ffi/drift.rs` — the drift gate, a `#[cfg(test)]`
+  module inside the crate rather than a `tests/` file, because `BINDINGS` and
+  the struct tables are private and an integration test cannot see them.
 
 **Only what a slice uses is declared** — the flat header has on the order of a
 thousand functions; each slice binds its dozens. Two checks keep the
@@ -467,8 +469,8 @@ destructuring pattern that makes a field without a row a compile error. Each
 struct's table is per-OS where the packing differs (see the traps section), and
 the numbers come from the SDK's own `sizeof`/`offsetof`, printed by a C program
 compiled against the downloaded headers on each OS — the program is described in
-`crcbl-steam/src/ffi/structs.rs`'s docs, run locally, and its output pasted as
-the table, the same provenance the Win32 table documents. Because the
+`crates/crcbl-steam/src/ffi/structs.rs`'s docs, run locally, and its output
+pasted as the table, the same provenance the Win32 table documents. Because the
 `test-cross-platform` matrix runs natively (`windows-latest` x86-64,
 `macos-latest` arm64) and the Linux jobs cover x86-64 Linux, the Windows
 (`pack(8)`) and Linux/macOS (`pack(4)`) tables both execute in CI; macOS x86-64
@@ -479,7 +481,7 @@ sentinel**, `ValvePackingSentinel_t { uint32; uint64; uint16; double; }` from
 packing macro picks the wrong arm on some target, that one test says so before
 any real struct is read.
 
-**The drift gate** (`crcbl-steam/src/ffi/drift.rs`, `#[ignore]`d, run as
+**The drift gate** (`crates/crcbl-steam/src/ffi/drift.rs`, `#[ignore]`d, run as
 `cargo test -p crcbl-steam -- --ignored drift`): with `CRCBL_STEAM_SDK` set, it
 reads the headers under `public/steam/` as text — no JSON — and asserts three
 things:
@@ -606,18 +608,18 @@ The lifetime rules are enforced by shape, not by comment:
 
 ### The fake `Lib`
 
-`crcbl-steam/src/testing.rs` (`#[cfg(test)]`) builds a `Lib` whose function
-pointers are Rust `extern "C" fn`s reading a thread-local script (a function
-pointer captures nothing, and each unit test runs on its own thread): what
-`GetNextCallback` yields and in what order, what each accessor returns (a
+`crates/crcbl-steam/src/testing.rs` (`#[cfg(test)]`) builds a `Lib` whose
+function pointers are Rust `extern "C" fn`s reading a thread-local script (a
+function pointer captures nothing, and each unit test runs on its own thread):
+what `GetNextCallback` yields and in what order, what each accessor returns (a
 non-null dangling sentinel, or null), what `SteamInternal_SteamAPI_Init`
 answers, and counters for every call that matters (`FreeLastCallback`,
 `SteamAPI_Shutdown`, `SteamNetworkingMessage_t_Release`, …). The pointers take
-the exact types `prototype.rs` declares, so the code under test calls through
-the same signatures it calls the real library through. What the fake **cannot**
-prove is that those signatures match C — a Rust callee compiled from the same
-declaration agrees with it by construction. That is the drift gate's job for
-types, and a real client's for calling convention and by-value returns.
+the exact types the `prototype` aliases declare, so the code under test calls
+through the same signatures it calls the real library through. What the fake
+**cannot** prove is that those signatures match C — a Rust callee compiled from
+the same declaration agrees with it by construction. That is the drift gate's
+job for types, and a real client's for calling convention and by-value returns.
 
 ### Shutdown order
 
@@ -650,9 +652,10 @@ pub enum InitError {
     NoLibrary { tried: Vec<PathBuf>, loader: String }, // every path + dlerror/GetLastError
     NoSymbol(&'static str),                            // SDK older than the declarations
     NoInterface(&'static str),                         // accessor returned null
-    NoSteamClient { message: String, cwd: PathBuf, appid_file: bool },
+    NoSteamClient { message: String, cwd: Option<PathBuf>, appid_file: bool },
     VersionMismatch(String),                           // Valve's SteamErrMsg
     Failed(String),                                    // FailedGeneric
+    WrongApp { expected: AppId, running: AppId },         // slice 1: GetAppID disagreed
     AlreadyInitialised,
 }
 
@@ -745,9 +748,10 @@ pub enum SteamEvent {
   size-checked before read** — `m_cubParam` compared to `size_of`, a null
   `m_pubParam` refused, then one `read_unaligned` copy-out, fields only ever
   copied.
-- **`k_iCallback` ids live in one table** (`crcbl-steam/src/callbacks.rs`), each
-  row `(id, name, decode fn)` — the size is `size_of` the declared struct, which
-  the layout tables pin per OS — each id written as Valve's base plus offset
+- **`k_iCallback` ids live in one table**
+  (`crates/crcbl-steam/src/callbacks.rs`), each row `(id, name, decode fn)` —
+  the size is `size_of` the declared struct, which the layout tables pin per OS
+  — each id written as Valve's base plus offset
   (`K_I_STEAM_FRIENDS_CALLBACKS + 31`, which is 331 for
   `GameOverlayActivated_t`), and each checked by the drift gate against the
   header's own `k_iCallback` expression.
@@ -1132,6 +1136,56 @@ may trail 4 if EW asks; slice 8 lands once `apps/sandbox` and EW both pump
 `Steam` by hand (the second-caller rule). 10–15 stay in scope for "the full
 Steam API" and are built after everything EW uses.
 
+### Status by slice
+
+On branch `steam-sdk`, not merged to `main`:
+
+- **Slice 1: done** (2026-09-22). CI-side tests green on Windows; `pack(4)`
+  tables, the Linux/macOS loaders and the `miri (crcbl-steam)` job run only in
+  CI. **Not run:** the drift gate and `tests/smoke.rs`, since no SDK was
+  available; the manual steps below, on every OS.
+- **Slice 1b: next.**
+- Slices 3a, 3b, 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
+
+**Slice 1 as built, where it differs from the text below**, each for a reason:
+
+- **No `prototype.rs`.** The aliases come from the `bindings!` macro in
+  `crates/crcbl-steam/src/ffi/manifest.rs`, beside the loads and the drift table
+  (see "The binding route").
+- **`Rc<Client>`, not `Arc`, and no pump-thread record yet.** Slice 1 has no
+  `Send` surface. An `Arc` of a `!Send` type is what clippy's
+  `arc_with_non_send_sync` rejects, and a thread id nothing reads would be dead
+  code. Slice 4's `SteamTransport` brings the `Arc`, the `ThreadId`, the
+  `on_pump_thread()` check and the `unsafe impl Send + Sync` together.
+- **A successful init that fails later still shuts down.** "A failed init never
+  calls `SteamAPI_Shutdown`" holds for a failure of
+  `SteamInternal_SteamAPI_Init` itself. Once that succeeds, a null accessor or
+  the wrong app drops the session, which calls `SteamAPI_Shutdown` exactly once,
+  balancing the init (tested both ways).
+- **`init(app)` checks the app.** `ISteamUtils::GetAppID` must equal `app`, or
+  init fails with the new `InitError::WrongApp { expected, running }`. The
+  typical cause is a stale `steam_appid.txt`. `NoSteamClient::cwd` is an
+  `Option<PathBuf>`: the working directory can be unreadable, and reporting that
+  is better than inventing one.
+- **`SteamAPI_IsSteamRunning` is not bound.** Nothing in slice 1 calls it, and
+  only what a slice uses is declared.
+- **`PumpDiagnostics` counts null payloads separately** (`null_payloads`) from
+  size mismatches. The lossy-string counter arrives with slice 1b's first string
+  return.
+- **No `test` arm on the target gate.** Every CI host that runs tests is a
+  supported target, so compiling pure modules under `test` elsewhere would add
+  no coverage.
+- **The drift gate normalises spacing next to punctuation**, not just whitespace
+  runs: the headers write both `ISteamUser* self` and `ISteamUser *self`. It
+  finds each struct in whichever header defines it, rather than trusting a
+  header name: the plan says `CallbackMsg_t` is in `steam_api_internal.h`, and
+  it may be in `steam_api_common.h`.
+- **Layout numbers come from a C program over this crate's transcription**
+  (MinGW GCC, both packings), not over the SDK's headers, which were not on the
+  machine. The drift gate is what ties the transcription to the SDK.
+- **`log` is not a dependency yet.** Slice 1 logs nothing, and `cargo machete`
+  refuses an unused dependency.
+
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
 Deliberately small: the crate exists, loads the library on three OSes, inits
@@ -1151,13 +1205,18 @@ and reads the local `SteamId`. No sample, no umbrella feature, no async calls.
   `user().logged_on()`, `utils().app_id()`, `utils().steam_hardware()`;
   `PumpDiagnostics`; the fake-`Lib` rig; the drift gate; CI steps; `.gitignore`
   lines; the `ROADMAP.md` phase claim.
-- **Files:** `crcbl-steam/Cargo.toml`, `crcbl-steam/src/lib.rs`,
-  `crcbl-steam/src/ffi/{mod,prototype,structs,versions,load,manifest,drift}.rs`,
-  `crcbl-steam/src/{client,pump,callbacks,error,user,utils}.rs`,
-  `crcbl-steam/src/testing.rs` (`#[cfg(test)]` fake `Lib`),
-  `crcbl-steam/tests/smoke.rs` (`#[ignore]`, public API only); root `Cargo.toml`
-  (workspace dependency pin), `.github/workflows/ci.yml`, `.gitignore`,
-  `docs/plan/ROADMAP.md`.
+- **Files:** `crates/crcbl-steam/Cargo.toml`, `crates/crcbl-steam/src/lib.rs`,
+  `crates/crcbl-steam/src/ffi/mod.rs`, `crates/crcbl-steam/src/ffi/structs.rs`,
+  `crates/crcbl-steam/src/ffi/versions.rs`,
+  `crates/crcbl-steam/src/ffi/load.rs`,
+  `crates/crcbl-steam/src/ffi/manifest.rs`,
+  `crates/crcbl-steam/src/ffi/drift.rs`, `crates/crcbl-steam/src/client.rs`,
+  `crates/crcbl-steam/src/pump.rs`, `crates/crcbl-steam/src/callbacks.rs`,
+  `crates/crcbl-steam/src/error.rs`, `crates/crcbl-steam/src/user.rs`,
+  `crates/crcbl-steam/src/utils.rs`, `crates/crcbl-steam/src/testing.rs`
+  (`#[cfg(test)]` fake `Lib`), `crates/crcbl-steam/tests/smoke.rs` (`#[ignore]`,
+  public API only); root `Cargo.toml` (workspace dependency pin),
+  `.github/workflows/ci.yml`, `.gitignore`, `docs/plan/ROADMAP.md`.
 - **API:**
 
   ```rust
@@ -1375,10 +1434,10 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   reads lobby membership). Implements `crcbl_net::Transport`.
 - **Files:**
   `crcbl-steam/src/net/{mod,transport,listener,identity,end_reason}.rs`;
-  `crcbl-steam/Cargo.toml` gains `crcbl-net`; a `crcbl-steam/tests/net_smoke.rs`
-  (`#[ignore]`); `apps/sandbox` connects the lobby owner and exchanges a
-  `crcbl-net` handshake. Plus, as its **own first commit**, a transport
-  conformance suite in `crcbl-net` (below).
+  `crates/crcbl-steam/Cargo.toml` gains `crcbl-net`; a
+  `crcbl-steam/tests/net_smoke.rs` (`#[ignore]`); `apps/sandbox` connects the
+  lobby owner and exchanges a `crcbl-net` handshake. Plus, as its **own first
+  commit**, a transport conformance suite in `crcbl-net` (below).
 - **API:**
 
   ```rust
@@ -1473,7 +1532,8 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 - **Scope:** everything under "Cloud" above. EW requirement 5.
 - **Files:** `crates/crcbl-store/src/lib.rs` (module declaration) plus a new
   `crcbl-store/src/synced.rs` for the header, shadow and classification;
-  `crcbl-steam/src/cloud.rs`; `crcbl-steam/Cargo.toml` gains `crcbl-store`.
+  `crcbl-steam/src/cloud.rs`; `crates/crcbl-steam/Cargo.toml` gains
+  `crcbl-store`.
 - **API:**
 
   ```rust
