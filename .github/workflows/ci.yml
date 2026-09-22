@@ -79,8 +79,9 @@ jobs:
   # a cancelled run, a zero-test run, an absent summary, one wrapped in the
   # colour escapes CI's own `CARGO_TERM_COLOR: always` produces.
   #
-  # No toolchain and no build — `ubuntu-latest` ships `shellcheck`, and the
-  # scripts under test are shell.
+  # No toolchain and no build — `ubuntu-latest` ships `shellcheck` and `pwsh`,
+  # and the scripts under test are shell plus `tools/nextest-summary.ps1`, which
+  # the summary test holds to the bash helper.
   shell:
     name: shell (e2e harness guards)
     runs-on: ubuntu-latest

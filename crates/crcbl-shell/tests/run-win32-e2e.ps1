@@ -42,6 +42,7 @@ Set-StrictMode -Version Latest
 # tests/ -> crcbl-shell/ -> crates/ -> the repository root.
 $repoRoot = Split-Path -Parent (
     Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath)))
+. (Join-Path $repoRoot 'tools/nextest-summary.ps1')
 
 $runtimeDir = Join-Path ([System.IO.Path]::GetTempPath()) "crcbl-win32-e2e-$PID"
 New-Item -ItemType Directory -Force -Path $runtimeDir | Out-Null
@@ -89,43 +90,14 @@ try {
     }
 
     # The trap `docs/plan/12-testing.md` names by name: a job that skips
-    # everything and reports success is worse than no job.
-    # `Summary [ 0.1s] <n> tests run: …`
-    #
-    # Matched against a colour-stripped copy, exactly as the two bash harnesses
-    # do it and for the same reason: CI sets `CARGO_TERM_COLOR: always`, so
-    # nextest emits the count as `\e[1m<n>\e[0m tests run` and a plain-text match
-    # sees no digits next to "tests run". That is how the Wayland harness's guard
-    # first fired — on a run where every test had in fact passed.
-    #
-    # # A cut-short run has a different summary, and the old pattern read it as
-    # # a healthy one
-    #
-    # nextest prints `<n> tests run:` for a complete run and `<ran>/<total>
-    # tests run:` for one it cancelled. `(\d+) tests? run` matches the digits
-    # immediately before the words in both — which for `2/15 tests run` is
-    # **15**, the total, not the two that executed. So a run that stopped after
-    # two tests reported a healthy-looking fifteen. The optional `<ran>/` group
-    # below is what tells the two shapes apart; when it is present the run was
-    # cancelled and that is a failure of the gate whatever the exit status said.
-    $escape = [char]27
-    $plain = (Get-Content -Raw -Path $log) -replace "$escape\[[0-9;]*[a-zA-Z]", ''
-    $hits = [regex]::Matches($plain, '(?:(\d+)/)?(\d+) tests? run')
-    if ($hits.Count -eq 0) {
-        Write-Error 'crcbl e2e: nextest printed no test count at all — the gate is not gating'
-        exit 1
-    }
-    $summary = $hits[$hits.Count - 1]
-    if ($summary.Groups[1].Success) {
-        $ran = [int]$summary.Groups[1].Value
-        $total = [int]$summary.Groups[2].Value
-        Write-Error ("crcbl e2e: the run was cancelled after $ran of $total tests — " +
-            'the remaining ones never executed, so a green count here would be a lie')
-        exit 1
-    }
-    $ran = [int]$summary.Groups[2].Value
-    if ($ran -eq 0) {
-        Write-Error 'crcbl e2e: the suite reported no tests run — the gate is not gating'
+    # everything and reports success is worse than no job — and so is one
+    # nextest cancelled after two tests, whose summary still ends in the total
+    # it never reached. `tools/nextest-summary.ps1` is the one PowerShell copy of
+    # that guard, and `tools/nextest-summary-test.sh` holds it to the bash one.
+    $plain = ConvertTo-CrcblNextestPlain -Text (Get-Content -Raw -Path $log)
+    $ran = Get-CrcblNextestTestsRun -Plain $plain -Label 'crcbl e2e' `
+        -ZeroReason 'The win32-e2e feature or the ignore attribute stopped matching the tests.'
+    if ($null -eq $ran) {
         exit 1
     }
     Write-Host "crcbl e2e: $ran tests ran against this session's desktop"

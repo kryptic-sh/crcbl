@@ -68,6 +68,7 @@ Set-StrictMode -Version Latest
 # tests/ -> crcbl-vk/ -> crates/ -> the repository root.
 $repoRoot = Split-Path -Parent (
     Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSCommandPath)))
+. (Join-Path $repoRoot 'tools/nextest-summary.ps1')
 
 # Validation is the point of this suite: `ValidationReport::assert_clean` fails
 # when the layer was never loaded, so a run without it fails loudly rather than
@@ -228,34 +229,14 @@ try {
         exit $status
     }
 
-    # Matched against a colour-stripped copy, exactly as the bash harnesses do it
-    # and for the same reason: CI sets `CARGO_TERM_COLOR: always`, so nextest
-    # emits the count as `\e[1m<n>\e[0m tests run` and a plain-text match sees no
-    # digits next to "tests run".
-    #
-    # nextest prints `<n> tests run:` for a complete run and `<ran>/<total> tests
-    # run:` for one it cancelled, and a pattern that reads only the digits
-    # immediately before the words takes the *total* out of the second shape — so
-    # a run that stopped after two of fifteen reports a healthy-looking fifteen.
-    # The optional `<ran>/` group is what tells the two apart.
-    $escape = [char]27
-    $plain = (Get-Content -Raw -Path $log) -replace "$escape\[[0-9;]*[a-zA-Z]", ''
-    $hits = [regex]::Matches($plain, '(?:(\d+)/)?(\d+) tests? run')
-    if ($hits.Count -eq 0) {
-        Write-Error 'crcbl vk e2e: nextest printed no test count at all — the gate is not gating'
-        exit 1
-    }
-    $summary = $hits[$hits.Count - 1]
-    if ($summary.Groups[1].Success) {
-        $ran = [int]$summary.Groups[1].Value
-        $total = [int]$summary.Groups[2].Value
-        Write-Error ("crcbl vk e2e: the run was cancelled after $ran of $total tests — " +
-            'the remaining ones never executed, so a green count here would be a lie')
-        exit 1
-    }
-    $ran = [int]$summary.Groups[2].Value
-    if ($ran -eq 0) {
-        Write-Error 'crcbl vk e2e: the suite reported no tests run — the gate is not gating'
+    # The same guard `run-vk-e2e.sh` sources from `tools/nextest-summary.sh`, in
+    # its PowerShell copy, which `tools/nextest-summary-test.sh` holds to the
+    # bash one. The plain copy is kept: the adapter and reach matches below read
+    # it too.
+    $plain = ConvertTo-CrcblNextestPlain -Text (Get-Content -Raw -Path $log)
+    $ran = Get-CrcblNextestTestsRun -Plain $plain -Label 'crcbl vk e2e' `
+        -ZeroReason 'The vk-e2e feature or the ignore attribute stopped matching the tests.'
+    if ($null -eq $ran) {
         exit 1
     }
 

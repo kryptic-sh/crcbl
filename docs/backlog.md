@@ -18214,35 +18214,6 @@ after.
   null backend does not report must produce the named error; a `required` that
   cannot fail is not a gate.
 
-### The two PowerShell harnesses keep their own copy of the nextest summary guard
-
-Every bash e2e harness now sources `tools/nextest-summary.sh` for the one thing
-they all have to do — strip the colour, find nextest's summary line, tell a
-complete run from the `<ran>/<total>` shape nextest prints for one it cancelled,
-fail on zero. That is eight copies collapsed to one, after five of them had
-drifted into reading `2/15 tests run` as a healthy fifteen.
-
-`crates/crcbl-vk/tests/run-vk-e2e.ps1` and
-`crates/crcbl-shell/tests/run-win32-e2e.ps1` cannot source a bash file, so each
-keeps a PowerShell transcription of the same logic. Both are **correct today** —
-their `(?:(\d+)/)?(\d+) tests? run` is where the bash fix came from — and both
-are now the only place the guard can drift, since nothing compares them against
-the shared one and no fix to it reaches them. `run-vk-e2e.ps1` and
-`run-vk-e2e.sh` are two harnesses over the same `crcbl-vk` `vk_e2e` suite, which
-is the sharpest version of the problem: one suite, two guards, one of them
-shared and one of them a copy.
-
-**DECIDED 2026-09-06 — keep the two PowerShell copies.** Porting the Windows
-harnesses to bash buys the shared guard and risks the one thing that was
-measured rather than preferred: `run-vk-e2e.sh` **was** the Windows harness for
-three CI runs and the Vulkan loader never saw its environment. Precedent: a
-native process launching a native process is the shape with no environment
-translation in it. Work: add a test that runs both the bash and the PowerShell
-regexes against the same fixture lines — `tools/nextest-summary-test.sh` gains a
-pwsh leg on the Windows job — so the two copies cannot drift silently. The
-argument on both sides, and the correction to this entry's premise, are in
-docs/notes/ci.md under the same heading.
-
 ## Test-file names: what the rename slice left, and one rename declined
 
 The declined `appkit_session.rs` rename and the stale path references that are

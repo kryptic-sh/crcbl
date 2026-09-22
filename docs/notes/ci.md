@@ -898,9 +898,11 @@ variable never set on the job it described.
 
 ### The two PowerShell harnesses keep their own copy of the nextest summary guard
 
-Decision record; the decision and the work it schedules are in docs/backlog.md.
-**The option, stated and not taken: make the Windows harnesses bash and delete
-the `.ps1` copies.** It is demonstrably possible for at least one of them —
+Decision record. The work it scheduled is done: both harnesses dot-source
+`tools/nextest-summary.ps1`, and `tools/nextest-summary-test.sh` runs every
+fixture through it as well as through the bash helper. **The option, stated and
+not taken: make the Windows harnesses bash and delete the `.ps1` copies.** It is
+demonstrably possible for at least one of them —
 `crates/crcbl-dx12/tests/run-dx12-e2e.sh` runs on `windows-latest` today, and
 its "Why bash, when `run-win32-e2e.ps1` argued for PowerShell" section argues
 that the Git Bash that image ships has `mktemp`, `tee`, `sed` and `grep`, that
