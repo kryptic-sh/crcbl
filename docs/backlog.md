@@ -17327,24 +17327,26 @@ annotated.
   0.17 % of a frame to this sample. Keep it as the reason P7 exists for _other_
   scenes; it is not the reason it exists for this one.
 
-- **`crcbl-audio` has no voice limit, no priority and no stealing.** Still true
-  after the mixer-adoption slice, which deliberately left it there.
-  `apps/horde/src/audio.rs` caps itself at `MAX_VOICES` = 16 and refuses the
-  newest voice, counting refusals in `Audio::dropped()`. Refusing the newest is
-  the crudest answer that is honest and it is audibly wrong in one case: a
-  player's _death_ cue can be refused by sixteen kill cues raised on the same
-  tick. Wanted in the crate: a voice budget with a priority, so an important cue
-  steals the oldest cheap one. The refusal count is on the debug panel now (the
-  `audio` section's `dropped` row), so the pressure is visible while the
-  crate-level budget stays undecided.
-
-  One detail changed with the adoption and is worth knowing before anyone moves
-  the cap into the crate: horde now reads `Mixer::voice_count` and then calls
-  `Mixer::play`, two lock acquisitions where the hand-rolled queue held one
-  across both. Only the game thread adds and only the audio thread removes, so
-  the count can be stale **low** and never stale high — the cap can refuse a cue
-  that had just been made room for, and can never let the count past
-  `MAX_VOICES`. A cap inside the crate would not need the two-step at all.
+- **`crcbl-audio`'s voice budget does the minimum.** `Mixer::set_voice_budget`,
+  `Voice::with_priority` and `Mixer::try_play` landed 2026-09-23: a full mixer
+  steals the lowest-priority, oldest voice when the new priority is `>=` its own
+  (an equal cue takes the oldest's place), or refuses, all under the voice lock,
+  and a stolen voice fades over one block. `apps/horde` uses it (`MAX_VOICES`,
+  `priority`), with `dropped` and `stolen` rows on its debug panel. Still
+  missing, verified:
+  - **No distance term in stealing.** `docs/plan/13-audio.md` asks for priority
+    plus distance; only priority and age decide now.
+  - **Releasing voices sit outside the budget** for the one block they fade, so
+    per-block work is the budget plus steals per block.
+  - **A finished voice holds its slot until the next `fill`** reaps it.
+  - **The audio thread still frees memory**: `fill` drops finished voices and
+    may free the last `Arc` of their sample data. `tests/fill_allocation.rs`
+    counts allocations only, and the plan's lock-free audio thread is not built.
+  - **`docs/plan/13-audio.md` is stale**: its "Voices" bullet and "What of this
+    list actually runs" still say there is no priority or stealing.
+  - EW's `ClientAudio::play` still caps itself; migration is
+    `set_voice_budget(Some(32))` plus `try_play`, and its bound test's last
+    assertion must change because an equal-priority 33rd cue now steals.
 
 - **Nothing has listened to the five cues**, on any device. They are synthesised
   deterministically from a fixed seed, so a golden buffer is possible and there

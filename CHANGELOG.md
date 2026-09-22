@@ -229,6 +229,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A voice budget with priority and stealing on `crcbl_audio::mixer::Mixer`.**
+  `Mixer::set_voice_budget(Some(n))` caps the voices sounding at once (`None`,
+  the default, is unlimited, as before). A voice carries a priority
+  (`Voice::with_priority(u8)`, default `0`, higher outranks lower), and a play
+  into a full mixer steals the lowest-priority voice, the oldest among equals,
+  when its own priority is at least that voice's (**equal priority steals**);
+  otherwise it is refused. The count check, the steal and the insert happen
+  under one lock, and a stolen voice fades out over one block as a stopped one
+  does. `Mixer::try_play` answers with a `PlayOutcome` (`Played(id)`,
+  `Stole { id, stolen }`, `Refused`); `Mixer::play` keeps its signature and
+  returns a handle that is stale from the start when the voice was refused.
+  `Mixer::refused_count` and `Mixer::stolen_count` are running totals for a
+  debug panel. Horde drops its own `voice_count`-then-`play` cap for the budget,
+  ranks its death cue above its level and potion cues and those above the
+  routine ones, and shows a `stolen` row beside `dropped` in its audio panel.
 - **CPU bounds of a scene's instances: `SceneDesc::instance_bounds` and
   `instance_parts`.** `instance_bounds(&instances, root)` returns the box around
   every vertex of the instances placed by `root * instance.transform`, folded
