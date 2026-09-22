@@ -16529,23 +16529,20 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   own. Considered and declined for W3 (it buys feedback rather than drops, and
   `ShellEvent::DroppedFile` is what the seam actually names); owed before the
   editor's asset browser wants a drop target that looks like one (P12).
-- **A `text/uri-list` offer does not publish `CF_HDROP`.** Reading is done: a
-  `MimeType::UriList` request falls back to `CF_HDROP` (Explorer's "copy") when
-  no registered `text/uri-list` is on the clipboard, encoded by
-  `clipboard::windows_uri`. Writing is not: `clipboard_offer` still publishes
-  only the registered format, so Explorer cannot paste files the engine copied.
-  Closing it means building a `DROPFILES` block in `clipboard_offer` from
-  `parse_uri_list`'s paths (`ffi::DropFiles` is `cfg(test)` today and is
-  4-aligned where the SDK's is packed — safe for writing, which is this
-  direction), and an e2e peer `get` that reads `CF_HDROP` back with
-  `DragQueryFileW`. Explorer may also want `Preferred DropEffect`; not
-  investigated.
-- **The uri-list precedence has no end-to-end test.** When a registered
-  `text/uri-list` and `CF_HDROP` are both on the clipboard, the registered one
-  is answered (reasons in `win32::clipboard`'s module docs). `win32_e2e`'s
-  `files_another_process_copied_read_as_a_uri_list` checks each format alone,
-  because `crcbl-e2e-win32-clip` publishes one format per call; checking both
-  together needs a peer verb that publishes two.
+- **A real Explorer paste of files the engine copied has not been watched.** A
+  `MimeType::UriList` offer publishes `CF_HDROP` and a `Preferred DropEffect` of
+  `DROPEFFECT_COPY` beside the registered `text/uri-list` (see
+  `win32::clipboard`'s module docs). `win32_e2e`'s
+  `files_we_copied_as_a_uri_list_are_a_file_list_another_process_reads` proves
+  another process reads the file list with `DragQueryFileW` and sees the copy
+  effect, which is what Explorer calls; nobody has yet pressed Ctrl+V in an
+  Explorer window over real files the engine copied, so Explorer's own handling
+  (including whether it honours the effect as a copy) is unverified by hand.
+- **A uri-list offer publishes no `CF_HDROP` when none of its URIs names a
+  Windows file.** Deliberate (an empty file list is a paste of nothing), and
+  covered by the same e2e test; recorded because a caller offering only `https:`
+  URLs or POSIX paths will find Explorer's Paste greyed out, and
+  `clipboard_offer` still succeeds on the registered format alone.
 - **The POSIX and Windows `file:` decoders disagree about a raw `#` or `?`.**
   `clipboard::windows_uri::file_uri_to_windows_path` ends the path there, as RFC
   3986 section 3.3 says; `clipboard::file_uri_to_posix_path` keeps both as part

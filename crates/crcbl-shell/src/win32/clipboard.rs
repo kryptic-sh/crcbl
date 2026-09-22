@@ -72,9 +72,36 @@
 //! There is no staleness to weigh: every write starts with `EmptyClipboard`,
 //! so two formats on the clipboard at once were put there by one publisher.
 //!
-//! Publishing `CF_HDROP` from a `text/uri-list` offer is not done: an offer is
-//! still only the registered format, so Explorer cannot paste files this
-//! engine copied.
+//! # A `text/uri-list` offer is also published as `CF_HDROP`
+//!
+//! The write direction of the same bridge: Explorer pastes files from
+//! `CF_HDROP` and knows nothing of a registered `text/uri-list`, so an offer
+//! of one publishes both. The registered format carries the caller's bytes
+//! verbatim, as every other registered offer does; the `CF_HDROP` beside it is
+//! a [`drop_files_block`] naming the paths [`hdrop_paths`] decodes from those
+//! bytes, with `crate::clipboard::windows_uri` — the decoder
+//! [`parse_uri_list`](crate::parse_uri_list) uses on Windows, so a `CF_HDROP`
+//! reader and a uri-list reader see the same files.
+//!
+//! **A URI that names no Windows file is left out of the file list, logged.**
+//! A file list holds paths and nothing else, so an `https:` URI, a POSIX
+//! `file:///tmp/x` with no drive to resolve against, or a name that decodes
+//! to a separator has nowhere to go; the registered format still carries it.
+//! One unnameable entry does not cost the rest of the list — the rule the read
+//! direction follows. When **no** entry is nameable, no `CF_HDROP` is
+//! published at all: an empty file list is a paste of nothing, which is worse
+//! than Explorer greying out Paste.
+//!
+//! Beside the file list goes a registered `Preferred DropEffect` of
+//! `DROPEFFECT_COPY` ([`PREFERRED_DROP_EFFECT`], [`DROP_EFFECT_COPY`]). Explorer
+//! reads it on paste to choose between copying the files and moving them —
+//! "cut" in Explorer publishes `DROPEFFECT_MOVE` there — and a clipboard offer
+//! from the engine is never a request to delete the originals. Without it the
+//! choice is left to whichever application pastes, which is not ours to leave
+//! to chance.
+//!
+//! Both are rendered immediately, like every other format here, for the
+//! reason the first section gives.
 //!
 //! # Decision: a payload is NUL-terminated and read back NUL-trimmed
 //!
@@ -231,6 +258,76 @@ pub fn trim_trailing_nuls(bytes: &[u8]) -> &[u8] {
         end -= 1;
     }
     &bytes[..end]
+}
+
+/// `sizeof(DROPFILES)`, which is also the `pFiles` offset of a file list that
+/// starts straight after its header.
+///
+/// `shlobj_core.h` declares `DROPFILES` under `pshpack1.h`: a `DWORD`, a
+/// `POINT` and two `BOOL`s with no padding between them.
+pub const DROP_FILES_HEADER: u32 = 20;
+
+/// The registered format Explorer reads on paste to choose between copying
+/// the files a `CF_HDROP` names and moving them.
+#[cfg(target_os = "windows")]
+pub const PREFERRED_DROP_EFFECT: &str = "Preferred DropEffect";
+
+/// `DROPEFFECT_COPY`, from `oleidl.h` — the `DWORD` a
+/// [`PREFERRED_DROP_EFFECT`] carries when the originals are to be kept.
+#[cfg(target_os = "windows")]
+pub const DROP_EFFECT_COPY: u32 = 1;
+
+/// The `CF_HDROP` block naming `paths`: a `DROPFILES` header followed by a
+/// wide file list.
+///
+/// Built field by field rather than by writing a `#[repr(C)]` structure,
+/// because the SDK's structure is packed and a Rust one of the same fields is
+/// not; spelling the five fields out at their offsets leaves no padding rule
+/// to disagree about. Every field is little-endian, which is what every
+/// Windows target is.
+///
+/// * `pFiles` is [`DROP_FILES_HEADER`]: the list starts after the header.
+/// * `pt` and `fNC` are zero — they describe where a *drop* landed, and a
+///   clipboard file list landed nowhere.
+/// * `fWide` is `TRUE`, because the list is UTF-16.
+///
+/// The list is each path followed by a NUL, then one more NUL that ends it.
+#[must_use]
+pub fn drop_files_block<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
+    let mut block = Vec::new();
+    // pFiles, pt.x, pt.y, fNC, fWide.
+    for field in [DROP_FILES_HEADER, 0, 0, 0, 1] {
+        block.extend_from_slice(&field.to_le_bytes());
+    }
+    for path in paths {
+        for unit in path.encode_utf16() {
+            block.extend_from_slice(&unit.to_le_bytes());
+        }
+        block.extend_from_slice(&0u16.to_le_bytes());
+    }
+    block.extend_from_slice(&0u16.to_le_bytes());
+    block
+}
+
+/// The Windows paths a `text/uri-list` names, for its `CF_HDROP` rendering.
+///
+/// Comment and blank lines are skipped as [`parse_uri_list`](crate::parse_uri_list)
+/// skips them. A URI that names no Windows file — see the
+/// [module docs](self) — is left out and logged.
+#[must_use]
+pub fn hdrop_paths(uri_list: &[u8]) -> Vec<String> {
+    crate::clipboard::uri_list_lines(uri_list)
+        .filter_map(|uri| {
+            let path = crate::clipboard::windows_uri::file_uri_to_windows_path(uri);
+            if path.is_none() {
+                crcbl_core::log::warn!(
+                    "{:?} names no Windows file, so it is left out of the CF_HDROP file list",
+                    String::from_utf8_lossy(uri)
+                );
+            }
+            path
+        })
+        .collect()
 }
 
 /// How many times `OpenClipboard` is tried before the read or write gives up.
@@ -477,6 +574,37 @@ mod system {
             });
             Some(crate::clipboard::windows_uri::uri_list_from_windows_paths(names).into_bytes())
         }
+
+        /// Publishes the files a `text/uri-list` names as a `CF_HDROP`, with a
+        /// `Preferred DropEffect` of copy beside it, and answers whether the
+        /// `CF_HDROP` was published.
+        ///
+        /// Nothing is published when no URI in the list names a Windows file;
+        /// see the [module docs](super). A `Preferred DropEffect` that cannot
+        /// be published is logged and does not fail the file list, which
+        /// Explorer then pastes under its own default.
+        pub(in super::super) fn put_file_list(&self, uri_list: &[u8]) -> bool {
+            let paths = super::hdrop_paths(uri_list);
+            if paths.is_empty() {
+                crcbl_core::log::debug!(
+                    "the text/uri-list names no Windows file, so no CF_HDROP is published"
+                );
+                return false;
+            }
+            let block = super::drop_files_block(paths.iter().map(String::as_str));
+            if !self.put(value::CF_HDROP, &block) {
+                return false;
+            }
+            let effect = registered_format(super::PREFERRED_DROP_EFFECT)
+                .is_some_and(|format| self.put(format, &super::DROP_EFFECT_COPY.to_le_bytes()));
+            if !effect {
+                crcbl_core::log::warn!(
+                    "the CF_HDROP was published without a Preferred DropEffect; Explorer will \
+                     choose between copy and move by itself"
+                );
+            }
+            true
+        }
     }
 
     impl Drop for Clipboard {
@@ -499,25 +627,29 @@ mod system {
     pub(in super::super) fn format_id(mime: MimeType) -> Option<u32> {
         match encoding_for(mime) {
             Encoding::UnicodeText => Some(value::CF_UNICODETEXT),
-            Encoding::Registered(name) => {
-                let wide = ffi::wide(name)?;
-                // SAFETY: `wide` is NUL-terminated UTF-16 that outlives the
-                // call, which copies the name into the window station's atom
-                // table. Registering a name that is already there answers the
-                // same id rather than failing, so this is idempotent.
-                let id = unsafe { ffi::RegisterClipboardFormatW(wide.as_ptr()) };
-                if id == 0 {
-                    // SAFETY: reads this thread's last error, set above.
-                    let error = unsafe { ffi::GetLastError() };
-                    crcbl_core::log::warn!(
-                        "RegisterClipboardFormatW({name}) failed with Win32 error {error}; \
-                         that format cannot be published or read"
-                    );
-                    return None;
-                }
-                Some(id)
-            }
+            Encoding::Registered(name) => registered_format(name),
         }
+    }
+
+    /// The format number the window station interns `name` under, or `None`
+    /// for the two reasons [`format_id`] gives.
+    fn registered_format(name: &str) -> Option<u32> {
+        let wide = ffi::wide(name)?;
+        // SAFETY: `wide` is NUL-terminated UTF-16 that outlives the call,
+        // which copies the name into the window station's atom table.
+        // Registering a name that is already there answers the same id rather
+        // than failing, so this is idempotent.
+        let id = unsafe { ffi::RegisterClipboardFormatW(wide.as_ptr()) };
+        if id == 0 {
+            // SAFETY: reads this thread's last error, set above.
+            let error = unsafe { ffi::GetLastError() };
+            crcbl_core::log::warn!(
+                "RegisterClipboardFormatW({name}) failed with Win32 error {error}; that format \
+                 cannot be published or read"
+            );
+            return None;
+        }
+        Some(id)
     }
 }
 
@@ -627,6 +759,60 @@ mod tests {
         // worse.
         let payload = payload_bytes(Encoding::UnicodeText, b"ok\xFFbad");
         assert_eq!(utf8_from_utf16_bytes(&payload), "ok\u{FFFD}bad".as_bytes());
+    }
+
+    #[test]
+    fn a_drop_files_block_is_the_packed_sdk_header_and_a_double_nul_wide_list() {
+        // Written out by hand from `shlobj_core.h`, not produced by the
+        // builder: pFiles = 20, pt = (0, 0), fNC = FALSE, fWide = TRUE, then
+        // `C:\a` and `D:\é` in UTF-16LE, each NUL-terminated, then the NUL
+        // that ends the list.
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            20, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  1, 0, 0, 0,
+            b'C', 0, b':', 0, b'\\', 0, b'a', 0, 0, 0,
+            b'D', 0, b':', 0, b'\\', 0, 0xE9, 0, 0, 0,
+            0, 0,
+        ];
+        assert_eq!(drop_files_block([r"C:\a", r"D:\é"]), expected);
+
+        // The header agrees with the structure the synthetic-drop tests write,
+        // field by field, so the two descriptions of `DROPFILES` cannot drift.
+        use super::super::ffi::DropFiles;
+        use core::mem::offset_of;
+        let block = drop_files_block([]);
+        let field = |at: usize| u32::from_le_bytes(block[at..at + 4].try_into().unwrap());
+        assert_eq!(DROP_FILES_HEADER as usize, size_of::<DropFiles>());
+        assert_eq!(field(offset_of!(DropFiles, p_files)), DROP_FILES_HEADER);
+        assert_eq!(field(offset_of!(DropFiles, f_nc)), 0);
+        assert_eq!(field(offset_of!(DropFiles, f_wide)), 1, "a wide list");
+        assert_eq!(
+            &block[DROP_FILES_HEADER as usize..],
+            &[0, 0],
+            "no paths is the terminating NUL alone"
+        );
+    }
+
+    #[test]
+    fn only_the_uris_that_name_windows_files_reach_the_file_list() {
+        let list = b"# a comment\r\n\
+            file:///C:/a%20b/c.ron\r\n\
+            https://example.com/x\r\n\
+            file:///tmp/posix\r\n\
+            file://server/share/x\n\
+            \r\n\
+            file:///C:/a%5Cb\r\n";
+        assert_eq!(
+            hdrop_paths(list),
+            [r"C:\a b\c.ron", r"\\server\share\x"],
+            "the URL, the drive-less path and the escaped separator are left out; a bare LF \
+             still ends a line"
+        );
+        assert_eq!(
+            hdrop_paths(b"https://example.com/\r\n# only this\r\n"),
+            Vec::<String>::new(),
+            "nothing nameable is an empty list, which the offer publishes no CF_HDROP for"
+        );
     }
 
     #[test]

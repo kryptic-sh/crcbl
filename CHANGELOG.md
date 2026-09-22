@@ -1820,6 +1820,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   writing `SsaoParams::radius` has to stay inside. Widening the disc costs no
   samples: the march takes the same count whatever its reach.
 
+- **Win32: copying files publishes `CF_HDROP`, so Explorer can paste them.** A
+  `clipboard_offer` of `MimeType::UriList` still publishes the registered
+  `text/uri-list` byte for byte, and now also a `CF_HDROP` file list naming the
+  Windows paths its `file:` URIs decode to (the same decoder `parse_uri_list`
+  uses on Windows), with a `Preferred DropEffect` of `DROPEFFECT_COPY` so a
+  paste copies rather than moves. URIs that name no Windows file — an `https:`
+  URL, a drive-less `file:///tmp/x` — are left out of the file list and logged;
+  a list with none left publishes no `CF_HDROP`.
+
 ### Removed
 
 - `crcbl_ui::Hud` and `crcbl_ui::HudPanel`, which nothing called; panel sizing

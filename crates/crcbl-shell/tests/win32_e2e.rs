@@ -2831,6 +2831,136 @@ fn files_another_process_copied_read_as_a_uri_list() {
     assert_eq!(content.text(), Some("file:///C:/registered.ron"));
 }
 
+/// The `file` lines of a peer `get-files`, and its `effect` line; `None` when
+/// the clipboard held no `CF_HDROP`.
+fn clip_files() -> Option<(Vec<String>, String)> {
+    let printed = clip(&["get-files"]);
+    if printed.contains("crcbl-e2e-win32-clip: absent") {
+        return None;
+    }
+    let files = printed
+        .lines()
+        .filter_map(|line| line.strip_prefix("crcbl-e2e-win32-clip: file "))
+        .map(str::to_owned)
+        .collect();
+    let effect = printed
+        .lines()
+        .find_map(|line| line.strip_prefix("crcbl-e2e-win32-clip: effect "))
+        .unwrap_or_else(|| panic!("the peer read a CF_HDROP and reported no effect: {printed:?}"))
+        .to_owned();
+    Some((files, effect))
+}
+
+/// Files we copied as a `text/uri-list` are a `CF_HDROP` another process reads
+/// with `DragQueryFileW`, which is what Explorer's paste does.
+///
+/// The list carries what a file list cannot — a comment line and an `https:`
+/// URI — between the two files, and those are left out of the `CF_HDROP`
+/// while the registered format beside it keeps every byte. The
+/// `Preferred DropEffect` is `DROPEFFECT_COPY` (1), so a paste in Explorer
+/// copies rather than moves. A list naming no Windows file at all publishes
+/// no `CF_HDROP`, rather than an empty one.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn files_we_copied_as_a_uri_list_are_a_file_list_another_process_reads() {
+    const LIST: &str = "file:///C:/crcbl%20e2e/My%20Scene.ron\r\n\
+                        # a comment\r\n\
+                        https://example.com/x\r\n\
+                        file:///C:/%E3%83%97%E3%83%AD%E3%82%B8%E3%82%A7%E3%82%AF%E3%83%88/\
+                        caf%C3%A9%20%F0%9F%8E%AE.png\r\n";
+    let mut session = Session::open();
+    let window = session.window("copy files");
+
+    session
+        .shell
+        .clipboard_offer(
+            window,
+            &[ClipboardOffer {
+                mime: MimeType::UriList,
+                bytes: LIST.as_bytes(),
+            }],
+        )
+        .expect("Win32 needs no recent user interaction to claim the clipboard");
+    let (files, effect) =
+        clip_files().expect("a uri-list naming Windows files is published as CF_HDROP");
+    assert_eq!(
+        files,
+        [r"C:\crcbl e2e\My Scene.ron", r"C:\プロジェクト\café 🎮.png"],
+        "each file: URI as the path it names, in order, and nothing for the comment or the URL"
+    );
+    assert_eq!(effect, "1", "Preferred DropEffect is DROPEFFECT_COPY");
+    // Read as the whole of the peer's output rather than through `clip_text`,
+    // which keeps one line and this payload is several.
+    let printed = clip(&["get", MimeType::UriList.as_str()]);
+    assert!(
+        printed.ends_with(&format!("crcbl-e2e-win32-clip: text {LIST}\n")),
+        "the registered format still carries the offer byte for byte: {printed:?}"
+    );
+
+    session
+        .shell
+        .clipboard_offer(
+            window,
+            &[ClipboardOffer {
+                mime: MimeType::UriList,
+                bytes: b"https://example.com/x\r\nfile:///tmp/posix\r\n",
+            }],
+        )
+        .expect("the registered format alone is still a publish");
+    assert_eq!(
+        clip_files(),
+        None,
+        "no URI names a Windows file, so there is no file list to paste"
+    );
+    let printed = clip(&["get", MimeType::UriList.as_str()]);
+    assert!(
+        printed.ends_with(
+            "crcbl-e2e-win32-clip: text https://example.com/x\r\nfile:///tmp/posix\r\n\n"
+        ),
+        "and the registered format is published without it: {printed:?}"
+    );
+}
+
+/// When a registered `text/uri-list` and a `CF_HDROP` are both on the
+/// clipboard, a `text/uri-list` read answers the registered one, as
+/// `win32::clipboard`'s module docs decide.
+///
+/// The peer publishes the two in one write with different contents, so the
+/// answer says which was read.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_registered_uri_list_is_read_in_preference_to_a_file_list_beside_it() {
+    let mut session = Session::open();
+    let window = session.window("paste both");
+
+    clip(&[
+        "put-uri-list-and-files",
+        "file:///C:/registered.ron",
+        r"C:\from the file list.ron",
+    ]);
+    // Both really are there, or the answer below says nothing about a choice.
+    assert_eq!(
+        clip_files().map(|(files, _)| files),
+        Some(vec![r"C:\from the file list.ron".to_owned()]),
+    );
+    assert_eq!(
+        clip_text(&["get", MimeType::UriList.as_str()]).as_deref(),
+        Some("file:///C:/registered.ron"),
+    );
+
+    let request = session
+        .shell
+        .clipboard_request(window, MimeType::UriList)
+        .expect("CLIPBOARD is claimed");
+    let (mime, content) = session.clipboard_answer(request);
+    assert!(mime.matches(MimeType::UriList));
+    assert_eq!(
+        content.text(),
+        Some("file:///C:/registered.ron"),
+        "the registered format wins over the CF_HDROP synthesis"
+    );
+}
+
 /// An empty offer empties the clipboard for every process, not just for this
 /// one.
 #[test]

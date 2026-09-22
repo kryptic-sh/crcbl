@@ -1548,7 +1548,9 @@ impl Shell for Win32Shell {
     /// Every offer is written under its own format — `CF_UNICODETEXT` for text
     /// and a registered format named after the mime for everything else — so a
     /// `[text, ron]` pair reaches Notepad *and* round-trips through another
-    /// Crucible losslessly. The reader picks; see [`clipboard`].
+    /// Crucible losslessly. The reader picks; see [`clipboard`]. A
+    /// `text/uri-list` offer is published a second time as the `CF_HDROP` file
+    /// list Explorer pastes, from the URIs in it that name Windows files.
     ///
     /// # "Release" means "empty", because that is what Win32 has
     ///
@@ -1626,6 +1628,10 @@ impl Shell for Win32Shell {
                 );
             }
             if board.put(format, &clipboard::payload_bytes(encoding, offer.bytes)) {
+                published += 1;
+            }
+            // Explorer pastes files from `CF_HDROP` alone; see `clipboard`.
+            if offer.mime == MimeType::UriList && board.put_file_list(offer.bytes) {
                 published += 1;
             }
         }
