@@ -153,12 +153,12 @@ touched `crates/crcbl-vk`, `crates/crcbl-shaders` or the harness, and between
 and the `lights::` readbacks 9 s against 24 to 30 s. So the first diagnosis — a
 starved pool, rerun and move on — was wrong in the half that matters: the pool
 is the variable, but the spread is the ordinary spread of that runner class, and
-`READBACK_DEADLINE` at 30 s sat inside it. It is 120 s now, four times the
-slowest legitimate landing seen and still under `.config/nextest.toml`'s
-per-test kill, so a lost copy is still reported by the harness's own message.
-Worth keeping because the failure names whichever tests drew the slow runner and
-reads as a regression in them, and because a green rerun of a threshold that
-sits inside the spread proves nothing about the threshold.
+`READBACK_DEADLINE` at 30 s sat inside it. It is still 30 s. What actually
+filled it on Windows was lavapipe compiling each test's shaders in its first
+submission, which `GALLIVM_PERF: nopt` on that job cut (2026-09-22). Worth
+keeping because the failure names whichever tests drew the slow runner and reads
+as a regression in them, and because a green rerun of a threshold that sits
+inside the spread proves nothing about the threshold.
 
 ### `--document-private-items` does not license a link to a private item (2026-09-04)
 
@@ -963,8 +963,10 @@ over the same 95 tests), read out of the two jobs' logs. Inside that:
   work on Windows against 7.629 ms on Linux while wall time is 7.4x apart, so
   four frames of GPU work is 1.7% of that test's runtime and ~98% of a rendering
   test's cost on Windows is host-side, on every recorded command. The
-  inter-frame gaps are flat (1.927, 1.904, 1.656, 1.643 s), which rules out
-  one-time shader JIT.
+  inter-frame gaps are flat (1.927, 1.904, 1.656, 1.643 s). That was read as
+  ruling out one-time shader JIT, but it only covers frames after the first: the
+  cold first frame is where the JIT goes, and on 2026-09-22 it was measured as
+  most of a rendering test there.
 - **The loader's debug output is not the cost.** 2035 occurrences of the
   package-scan line, 19 per test; a 421-line test completes in 0.075s on Windows
   against 0.086s on Linux. `VK_LOADER_DEBUG: all` is deliberate and the reason

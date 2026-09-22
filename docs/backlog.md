@@ -19673,11 +19673,11 @@ readback is still the diagnostic nobody has built.
 
 **Read any recurrence after 2026-09-22 against a changed driver setting.** From
 that date the Windows job sets `GALLIVM_PERF: nopt`, so llvmpipe compiles
-without LLVM's optimisation passes (the reason is in "The Windows lavapipe vk
-e2e job reds in bursts of readback timeouts"). The `depth_probe` test in the
-forward step runs under that setting too. A burst, or a quiet spell, after that
-date says something about unoptimised codegen, not about the configuration that
-showed the five occurrences.
+without LLVM's optimisation passes (the reason is the comment on that variable
+in `.github/workflows/ci.yml`). The `depth_probe` test in the forward step runs
+under that setting too. A burst, or a quiet spell, after that date says
+something about unoptimised codegen, not about the configuration that showed the
+five occurrences.
 
 `depth_probe::reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not`
 fails on `vk e2e (lavapipe, windows)` with `[0, 0, 0, 255]` at the centre pixel,
@@ -19827,11 +19827,13 @@ Readings from the `crcbl-vk` `vk_e2e` suite's summary line, 64 tests:
 
 The time on this leg goes to lavapipe compiling shaders in each test's first
 submission. The Windows build has no shader cache, and the runner compiles about
-5x slower than this workstation. The measurements and the fixes
-(`GALLIVM_PERF: nopt` on the job, and the split persisted-effects test) are in
-"The Windows lavapipe vk e2e job reds in bursts of readback timeouts" below.
-**Not measured:** the same toggle on the runner itself. The local share is an
-inference for it, not a CI reading.
+5x slower than this workstation. The fixes are `GALLIVM_PERF: nopt` on the job
+(its comment in `.github/workflows/ci.yml` carries the reasoning) and the split
+persisted-effects test in `crates/crcbl/tests/forward_e2e/antialiasing.rs`. On
+the first CI run with both (run 35691957865), the vk suite took 70 s against
+about 142 s before, its worst readback waited 7.8 s of the 30 s deadline, and
+each split arm took 20–22 s of the 240 s kill. **Not measured:** the same toggle
+on the runner itself. The local share is an inference for it, not a CI reading.
 
 ## A recording that names a swapchain view is still not protected
 
@@ -21701,95 +21703,6 @@ reach, which is the real coupling.
 **Blocks.** Any overlay that has to name something in the world rather than
 outline it: per-cluster error figures, a light's name beside its reach, a
 joint's index on a skeleton. Nothing shipping.
-
-## The Windows lavapipe vk e2e job reds in bursts of readback timeouts (2026-09-06)
-
-**Root cause measured 2026-09-22: no deadlock and no lost completion. Every red
-was the first frame's shader compile costing about as much as the limit it was
-measured against.** Fixed in two places. What is still owed is reading the next
-Windows CI run.
-
-**The two failure shapes are one cause.** The Mesa 26.1.5 lavapipe the job pins
-has no shader cache on Windows, so each test process JIT-compiles every pipeline
-it draws with inside its first submission, serially on the queue thread. On the
-runner, that compile is nearly all of a rendering test:
-
-- `crcbl-vk::vk_e2e` mesh readbacks. On the green Windows vk step of
-  [job 106606743006](https://github.com/kryptic-sh/crcbl/actions/runs/35683945866/job/106606743006)
-  the 55 logged readbacks had a median of 0.042 s, a p90 of 28.6 s and a max of
-  29.3 s, against the 30 s `READBACK_DEADLINE` in
-  `crates/crcbl-vk/tests/vk_e2e/harness.rs`. Green runs were a second under the
-  deadline. The reds (the `9253b7d`, `9a9a694` and `590fec01` bursts, all LATE,
-  never STUCK or LOST) were the same readbacks a second over it.
-- `crcbl::forward_e2e antialiasing::each_persisted_video_effect_switch_reaches_the_frame`
-  TIMEOUT at nextest's 240 s kill on `9253b7da` (run 35311395020) and `190c574c`
-  (run 35683945866). The test walked the all-on control and six `VIDEO_KEYS`
-  arms, each on a fresh device and renderer, so each was a cold compile. The
-  timed-out run's stage lines show `renderer built` at 4.0–6.3 s and `idle` at
-  24.3–45.5 s per frame. Six frames were done at 203.5 s and the seventh was
-  killed. Nine green Windows runs in the saved log history passed it at
-  203.8–235.2 s, apart from one at 100.1 s (run 35372105178). So it sat at
-  85–98% of the kill on every ordinary run, and was not a flake.
-
-**How it was measured.** Measured locally on the RX 7900 XTX workstation, with
-lavapipe pinned through `VK_DRIVER_FILES`, `CRCBL_ADAPTER=cpu`, the same
-`lavapipe-x64-26.1.5.zip`, and `VkLayer_khronos_validation.dll` extracted from
-the same LunarG SDK 1.4.357.0 installer CI uses (validation on, as in CI). To
-resemble the 4-vCPU runner, the process tree was pinned to four logical CPUs
-(two cores), with `-j 4` and `LP_NUM_THREADS=4`.
-
-- **The runner is uniformly slower, not stuck.** Per test, run 35602188497's
-  forward times were 3.5–5.6x the local ones for every rendering test, and the
-  long test was no outlier at 4.6x (226.5 s against 49.0 s). The vk suite gave
-  the same picture: 4.7–5.1x on every heavy test of job 106606743006. Tests that
-  barely touch the rasteriser were 2.0–2.3x. Why the runner's JIT is about 5x
-  slower than this machine's is not established.
-- **The first frame is JIT, and single-threaded.** The old test alone took 28.65
-  s pinned to one logical CPU and 28.09 s unpinned (validation off).
-  `GALLIVM_PERF=nopt` turns off LLVM's optimisation passes, and with it the
-  local vk suite went from 39.1–40.8 s to 20.4–20.8 s. Its readback max went
-  from 4.97 s to 1.61–1.64 s, and the forward suite from 103–107 s to 57.5 s.
-  All tests stayed green, and every golden comparison printed statistics
-  identical to the optimised run's.
-- **Contention is not the lever.** Two probes, both reverted. The first limited
-  the heavy vk tests (`mesh::`, `draw_gen::`, the skinned cubes,
-  `per_pass_gpu_timers`) to two slots through a nextest test group. The suite
-  went from 39.1 s to 62.2 s and the readback max only from 4.97 s to 4.54 s.
-  The second swapped the forward harness's `yield_now` busy poll for a 1 ms
-  sleep: 93.4 s against 93.3–96.6 s, inside the run-to-run spread.
-
-**Fixed:**
-
-1. `crates/crcbl/tests/forward_e2e/antialiasing.rs`: the walk is split into one
-   test per `VIDEO_KEYS` switch
-   (`each_persisted_video_effect_switch_reaches_the_frame::<key>`), each
-   rendering the all-on control and its own arm with the same fresh fixtures and
-   assertions. A macro generates the tests and an `ARMS` list from one arm list.
-   `every_video_key_has_its_own_frame_test` holds `ARMS` against `VIDEO_KEYS`,
-   so a new switch fails until it has a test. It was shown red by dropping an
-   arm, and the arm assertions were shown red by feeding the control's frame in
-   as the arm's. Locally, under the settings above, the old test took 45.3–49.0
-   s within 93.3–96.6 s suites (five runs). After the split, the slowest arm
-   took 13.3–13.8 s within 103.4–107.0 s suites (five runs), and ten runs of the
-   six arms alone took 21.9–25.7 s. The suite's slowest test is now
-   `shadow::the_seam_puts_the_console_s_filter_on_one_side_and_the_shipped_one_on_the_other`
-   at 24.6–25.8 s. At the observed 4.6x, an arm is about a quarter of the kill.
-2. `.github/workflows/ci.yml`, job `vk-e2e-windows`: `GALLIVM_PERF: nopt` at job
-   level, for the mesh readbacks. The deadline, the stall report and the
-   assertions are untouched.
-
-**Next:** read the next `vk e2e (lavapipe, windows)` run. Take the readback
-waits from `vk e2e: the … readback was Ready after` lines and the forward arms'
-times, then delete this entry if both have margin. **Not verified:** whether the
-runner honours `GALLIVM_PERF` the way this machine did, and whether its gain
-matches the local 3x. The same build and SDK make that likely, but it is not
-proven.
-
-**Stale, not fixed here:** `docs/notes/ci.md`'s "draws runners three times
-apart" note says `READBACK_DEADLINE` "is 120 s now", but the harness says 30 s.
-Its "Where the Windows vk e2e leg's time goes" record says flat inter-frame gaps
-rule out one-time shader JIT. That was read off one four-frame test, and the
-cold first frame is where the JIT goes.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
