@@ -29,6 +29,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Draw generation now routes each survivor through a resident
+  `(mesh, material mode)` lookup instead of linearly searching every preceding
+  draw bucket. On the 10,000-instance, 938-bucket sandbox fixture, paired MX550
+  runs reduced the three aggregated `draw-args` passes by 62.834–75.871% at p50
+  and 60.995–62.694% at p95, reducing the complete measured pass sum by
+  2.153–2.406%.
 - Screen-space reflections now march a nearest-surface half-resolution grid and
   reconstruct it with full-resolution depth-aware filtering, substantially
   reducing the resolution-bound reflection cost while retaining thin foreground

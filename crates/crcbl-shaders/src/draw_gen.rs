@@ -209,6 +209,8 @@ pub struct Params {
     /// Where the face regions' runs start, in words — [`face_runs_at`]. Read
     /// only under [`DrawMode::Faces`].
     pub face_runs_at: u32,
+    /// Where the direct `(mesh, material mode) → bucket` table starts, in words.
+    pub routes_at: u32,
 }
 
 impl Params {
@@ -245,9 +247,14 @@ impl Params {
         for (slot, value) in self.lod_params.into_iter().enumerate() {
             put(48 + slot * 4, value.to_le_bytes());
         }
-        for (slot, value) in [self.mode.word(), self.draw_regions, self.face_runs_at]
-            .into_iter()
-            .enumerate()
+        for (slot, value) in [
+            self.mode.word(),
+            self.draw_regions,
+            self.face_runs_at,
+            self.routes_at,
+        ]
+        .into_iter()
+        .enumerate()
         {
             put(64 + slot * 4, value.to_le_bytes());
         }
@@ -258,7 +265,7 @@ impl Params {
 /// The single table buffer `draw_gen.slang` binds, and where each region starts.
 ///
 /// Produced by [`pack_tables`], which is the only thing that may produce one:
-/// the bytes and the four offsets have to be computed from the same lengths, and
+/// the bytes and their offsets have to be computed from the same lengths, and
 /// a caller that packed the buffer one way and filled
 /// [`Params::mesh_levels_at`] another would have a shader reading the region in
 /// front of the one it meant.
@@ -281,6 +288,8 @@ pub struct TableOffsets {
     pub bucket_modes_at: u32,
     /// [`Params::bucket_clusters_at`].
     pub bucket_clusters_at: u32,
+    /// [`Params::routes_at`].
+    pub routes_at: u32,
     /// [`Params::mesh_levels_at`].
     pub mesh_levels_at: u32,
     /// [`Params::level_groups_at`].
@@ -293,8 +302,8 @@ pub struct TableOffsets {
 ///
 /// The regions are laid out in the order that shader's `tables` binding
 /// documents: the bucket table at word zero, then the per-bucket material modes,
-/// then the per-bucket cluster counts, then the per-mesh
-/// [`MeshLevels`](crate::level_select::MeshLevels) records, then the
+/// then the per-bucket cluster counts, then the direct route table, then the
+/// per-mesh [`MeshLevels`](crate::level_select::MeshLevels) records, then the
 /// [`LevelGroup`](crate::level_select::LevelGroup) records, then the level →
 /// mesh id table. **One buffer because a WebGPU device guarantees only eight
 /// storage buffers per shader stage** and the pass bound fourteen; the tables
@@ -321,6 +330,9 @@ pub fn pack_tables(
     level_groups: &[crate::level_select::LevelGroup],
     level_meshes: &[u32],
 ) -> Option<Tables> {
+    if bucket_meshes.len() != bucket_modes.len() || bucket_meshes.len() != bucket_clusters.len() {
+        return None;
+    }
     let mut bytes: Vec<u8> = Vec::new();
     let offset = |bytes: &[u8]| u32::try_from(bytes.len() / 4).ok();
 
@@ -343,6 +355,27 @@ pub fn pack_tables(
     bytes.extend_from_slice(&words(bucket_modes));
     let bucket_clusters_at = offset(&bytes)?;
     bytes.extend_from_slice(&words(bucket_clusters));
+    let routes_at = offset(&bytes)?;
+    let named_meshes = match bucket_meshes.iter().chain(level_meshes).copied().max() {
+        Some(mesh) => mesh.checked_add(1)?,
+        None => 0,
+    };
+    let route_meshes = named_meshes
+        .max(u32::try_from(mesh_levels.len()).ok()?)
+        .max(1);
+    let route_words = route_meshes.checked_mul(ROUTE_MODES)?;
+    let mut routes = vec![NO_BUCKET; usize::try_from(route_words).ok()?];
+    for (bucket, (&mesh, &mode)) in bucket_meshes.iter().zip(bucket_modes).enumerate() {
+        if mode >= ROUTE_MODES {
+            return None;
+        }
+        let key = mesh.checked_mul(ROUTE_MODES)?.checked_add(mode)?;
+        let route = routes.get_mut(usize::try_from(key).ok()?)?;
+        if *route == NO_BUCKET {
+            *route = u32::try_from(bucket).ok()?;
+        }
+    }
+    bytes.extend_from_slice(&words(&routes));
     let mesh_levels_at = offset(&bytes)?;
     bytes.extend_from_slice(&padded(
         crate::level_select::mesh_levels_bytes(mesh_levels),
@@ -365,6 +398,7 @@ pub fn pack_tables(
         offsets: TableOffsets {
             bucket_modes_at,
             bucket_clusters_at,
+            routes_at,
             mesh_levels_at,
             level_groups_at,
             level_meshes_at,
@@ -376,6 +410,9 @@ pub fn pack_tables(
 /// mesh and its material mode, matching `NO_BUCKET` there. `scatterMain` sends
 /// such a survivor nowhere.
 pub const NO_BUCKET: u32 = u32::MAX;
+
+/// Material-mode keys per mesh in the direct routing table.
+pub const ROUTE_MODES: u32 = 4;
 
 /// The first word of the run region in the buffer `draw_gen.slang` binds as
 /// `visible_instances` — where the first bucket's run starts in every frame.
@@ -665,6 +702,7 @@ mod tests {
             mode: DrawMode::Faces,
             draw_regions: DRAW_REGIONS,
             face_runs_at: 29,
+            routes_at: 31,
         }
         .to_bytes();
         let uint_at =
@@ -689,11 +727,7 @@ mod tests {
         assert_eq!(uint_at(64), 2, "mode at offset 64");
         assert_eq!(uint_at(68), DRAW_REGIONS, "draw_regions at offset 68");
         assert_eq!(uint_at(72), 29, "face_runs_at at offset 72");
-        assert!(
-            bytes[76..].iter().all(|byte| *byte == 0),
-            "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[76..]
-        );
+        assert_eq!(uint_at(76), 31, "routes_at at offset 76");
     }
 
     /// The regions [`pack_tables`] lays out are the ones the offsets it returns
@@ -794,6 +828,37 @@ mod tests {
         for (index, mesh) in level_meshes.iter().enumerate() {
             let at = packed.offsets.level_meshes_at + u32::try_from(index).expect("small");
             assert_eq!(word_at(at), *mesh, "level table at level_meshes_at");
+        }
+    }
+
+    #[test]
+    fn the_route_table_maps_keys_and_leaves_missing_ones_unrouted() {
+        use crate::level_select::MeshLevels;
+
+        let packed = pack_tables(
+            &[2, 0, 2, 2],
+            &[1, 0, 3, 1],
+            &[1, 1, 1, 1],
+            &[MeshLevels::FLAT; 4],
+            &[],
+            &[0, 1, 2, 3],
+        )
+        .expect("a table this small addresses");
+        let route = |mesh: u32, mode: u32| {
+            let word = packed.offsets.routes_at + mesh * ROUTE_MODES + mode;
+            let at = word as usize * 4;
+            u32::from_le_bytes(packed.bytes[at..at + 4].try_into().expect("one word"))
+        };
+
+        assert_eq!(route(2, 1), 0, "the first duplicate bucket still wins");
+        assert_eq!(route(0, 0), 1);
+        assert_eq!(route(2, 3), 2);
+        for missing in [(0, 1), (1, 0), (2, 0), (3, 3)] {
+            assert_eq!(
+                route(missing.0, missing.1),
+                NO_BUCKET,
+                "missing key {missing:?} must remain unrouted"
+            );
         }
     }
 
@@ -951,19 +1016,17 @@ mod tests {
         );
     }
 
-    /// **The scatter's routing key is the mesh id and the material mode**, in
+    /// **The bin's routing key is the mesh id and the material mode**, in
     /// the bits this crate writes them into.
     ///
-    /// Three claims, and the third is the one a constant check alone would
-    /// miss. The two `static const uint` lines have to be the host's numbers, or
-    /// the shader reads the mode out of the wrong bits of
+    /// The constants have to be the host's numbers, or the shader reads the
+    /// mode out of the wrong bits of
     /// [`GpuInstance::flags`](crate::mesh::GpuInstance::flags) and every
     /// instance answers mode zero — which routes a cutout into the opaque bucket
-    /// and looks exactly like a scene with no cutout in it. And the scatter's
-    /// skip has to compare **both** halves: a shader that grew the region, the
-    /// offset and the accessor while going on comparing the mesh alone passes
-    /// every layout check in this module and sends both twins to whichever
-    /// bucket comes first.
+    /// and looks exactly like a scene with no cutout in it. The lookup has to
+    /// index **both** halves: a shader that grew the region, the offset and the
+    /// accessor while going on indexing by mesh alone passes every layout check
+    /// in this module and sends both twins to the same bucket.
     #[test]
     fn the_scatter_routes_by_the_mesh_and_the_material_mode() {
         use crate::mesh::GpuInstance;
@@ -978,6 +1041,7 @@ mod tests {
                 "INSTANCE_MATERIAL_MODE_MASK",
                 GpuInstance::MATERIAL_MODE_MASK,
             ),
+            ("ROUTE_MODES", ROUTE_MODES),
         ] {
             let declaration = format!("static const uint {name} = {value};");
             assert!(
@@ -987,9 +1051,13 @@ mod tests {
             );
         }
         assert!(
-            source.contains("if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)"),
-            "draw_gen.slang's scatter no longer skips a bucket whose mode differs, so a mesh's \
-             opaque and masked twins collapse into whichever bucket the table lists first"
+            source.contains("return tables[gen.routes_at + mesh * ROUTE_MODES + mode];"),
+            "draw_gen.slang's direct route no longer indexes both the mesh and mode, so a \
+             mesh's opaque and masked twins collapse into one bucket"
+        );
+        assert!(
+            source.contains("uint routed = route_bucket(mesh_id, mode);"),
+            "draw_gen.slang's bin no longer routes through the direct table"
         );
     }
 

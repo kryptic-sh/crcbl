@@ -612,7 +612,9 @@ struct DrawGenParams
     /// Where the face regions' runs start in `visible_instances`, in words —
     /// past every region's starts. Read only under `DRAW_MODE_FACES`.
     uint face_runs_at;
-    uint mode_pad;
+    /// Where the direct `(mesh, material mode) → bucket` table starts in
+    /// `tables`, in words.
+    uint routes_at;
 };
 
 [[vk::binding(0, 0)]]
@@ -652,6 +654,7 @@ StructuredBuffer<uint> visible_count D3D12_REGISTER(t3, space0);
 /// | bucket table: which mesh each bucket draws | word 0 | 1 | bucket |
 /// | per-bucket material modes | `gen.bucket_modes_at` | 1 | bucket |
 /// | per-bucket cluster counts | `gen.bucket_clusters_at` | 1 | bucket |
+/// | direct `(mesh, material mode) → bucket` routes | `gen.routes_at` | `ROUTE_MODES` | `GpuInstance::mesh`, material mode |
 /// | `MeshLevels` per mesh | `gen.mesh_levels_at` | `MESH_LEVELS_WORDS` | `GpuInstance::mesh` |
 /// | `LevelGroup` per DAG group | `gen.level_groups_at` | `LEVEL_GROUP_WORDS` | `MeshLevels::first_group + i` |
 /// | level → mesh id | `gen.level_meshes_at` | 1 | `MeshLevels::first_level + d` |
@@ -868,6 +871,17 @@ uint level_mesh_at(uint level)
 /// mode — and what `scatterMain` then sends nowhere. No table reaches this many
 /// buckets: `crcbl_render::DrawGen` counts them in a `u32`.
 static const uint NO_BUCKET = 0xffffffff;
+/// How many two-bit material-mode keys each mesh owns in the direct route
+/// table. Kept equal to `crcbl_shaders::draw_gen::ROUTE_MODES` by a source test.
+static const uint ROUTE_MODES = 4;
+
+/// The bucket that draws `mesh` under `mode`, or `NO_BUCKET` when that key has
+/// no resident bucket. `pack_tables` fills the complete two-bit mode domain for
+/// every mesh the level tables can name, so every valid key is in bounds.
+uint route_bucket(uint mesh, uint mode)
+{
+    return tables[gen.routes_at + mesh * ROUTE_MODES + mode];
+}
 
 /// Which word of `visible_instances` holds survivor `survivor`'s route, past the
 /// survivor list.
@@ -1164,18 +1178,9 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     // different buckets, so the depth prepass and the shadow atlas record the
     // first under a vertex-only pipeline and the second under the cutout twin.
     uint mode = instance_material_mode(instance);
-    // A linear walk of the bucket table. The table is small and fixed — one
-    // entry per (resident mesh, mode present in the scene) today — so this is a
-    // couple of comparisons; a (mesh, mode) → bucket map is what a table large
-    // enough to notice would want.
-    uint routed = NO_BUCKET;
-    for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+    uint routed = route_bucket(mesh_id, mode);
+    if (routed != NO_BUCKET)
     {
-        if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)
-        {
-            continue;
-        }
-        routed = bucket;
         // Counted into the mesh dispatch's y extent, which is what `startsMain`
         // sums. `scatterMain` counts the same survivors again into
         // `ARG_INSTANCE_COUNT`, so the two words reach the same total — held
@@ -1189,7 +1194,7 @@ void binMain(uint3 thread: SV_DispatchThreadID)
             {
                 if (((entry >> (ENTRY_FACE_SHIFT + face)) & 1) != 0)
                 {
-                    counts_and_mesh_args[mesh_arg_word(FACE_REGION_BASE + face, bucket,
+                    counts_and_mesh_args[mesh_arg_word(FACE_REGION_BASE + face, routed,
                         MESH_ARG_GROUP_Y)].add(1);
                 }
             }
@@ -1199,14 +1204,13 @@ void binMain(uint3 thread: SV_DispatchThreadID)
             // Region 0 counts **every** routed survivor, marked or not, because
             // under occlusion its runs are sized for the late scatter to append
             // into; the early region counts the ones drawn first.
-            counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].add(1);
+            counts_and_mesh_args[mesh_arg_word(0, routed, MESH_ARG_GROUP_Y)].add(1);
             if (gen.mode == DRAW_MODE_OCCLUSION && (entry & ENTRY_OCCLUDED) == 0)
             {
-                counts_and_mesh_args[mesh_arg_word(EARLY_REGION, bucket, MESH_ARG_GROUP_Y)]
+                counts_and_mesh_args[mesh_arg_word(EARLY_REGION, routed, MESH_ARG_GROUP_Y)]
                     .add(1);
             }
         }
-        break;
     }
     // Invocation `index` owns word `index` of the routes, so this is a plain
     // store rather than an atomic. An instance matching no bucket is routed

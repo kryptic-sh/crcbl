@@ -3980,26 +3980,16 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### GPU time
 
-- **P20 — draw generation routes survivors with a linear bucket search.**
-  `draw_gen.slang::binMain` walks the bucket table until `(mesh_id, mode)`
-  matches, then writes a route that scatter consumes. The old description of a
-  repeated scatter search is stale; the routing cost remains proportional to
-  survivors times the bucket-table prefix searched. Price `draw-bin` on a
-  many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
-  table. Add a fixed sandbox `buckets` fixture matching the recorded EW shape:
-  938 resident cube meshes distributed across the existing 10,000-instance grid.
-  The duplicated geometry deliberately isolates routing from triangle and
-  shading cost while putting matches throughout the bucket table. Record paired
-  MX550 `draw-args` distributions before and after; retain the lookup only if
-  the pass improves repeatably. Preserve material-mode and LOD routing, empty
-  buckets and `NO_BUCKET`, and make those cases observable in a GPU readback
-  test before replacing the search. The fixture rendered cleanly through the
-  MX550 Vulkan validation path. Two 900-frame 1920×1080 runs measured the three
-  aggregated `draw-args` passes at 0.373/0.374 ms p50 against complete p50 pass
-  sums of 8.545/8.562 ms, so routing is material and stable enough to trial.
-  They also exposed `draw-starts` at 0.525/0.527 ms: its single-invocation
-  prefix scan is now the larger draw-generation cost on this workload and should
-  be priced separately after the routing lookup.
+- **P20 — `draw-starts` serialises every bucket prefix.** After direct draw
+  routing removed the preceding linear search, paired 900-frame 1920×1080 runs
+  on the MX550 measured the three aggregated `draw-starts` passes at 0.526/0.531
+  ms p50, or 6.3/6.4% of their complete p50 pass sums. `startsMain` launches one
+  invocation and walks every bucket for each active region, so the fixed
+  `sandbox --scene buckets` workload leaves the GPU mostly idle while one lane
+  prefixes 938 counts. Trial a workgroup prefix scan per region while preserving
+  absolute run starts, empty-bucket indirect counts, face-region packing and the
+  existing GPU readback oracle. Record paired results on the same fixture and
+  retain it only if both the pass and complete pass sum improve repeatably.
 - **P21 — one bind and one indirect call per bucket per pass per view.**
   `BucketDraws::record` issues a call for every bucket, empty or not, in the
   prepass, the forward pass and every shadow view — about ten thousand calls a

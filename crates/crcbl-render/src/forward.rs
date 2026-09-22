@@ -13186,9 +13186,10 @@ mod tests {
     /// left empty.
     ///
     /// Growing the capacity by a known number of slots grows the tables buffer
-    /// by exactly what those slots occupy: one `MeshLevels` record and one
-    /// `level_meshes` word each. The arithmetic is the assertion, so nothing
-    /// here is a number to keep in step by hand.
+    /// by exactly what those slots occupy: one `MeshLevels` record, one
+    /// `level_meshes` word and a row of direct material-mode routes each. The
+    /// arithmetic is the assertion, so nothing here is a number to keep in step
+    /// by hand.
     #[test]
     fn the_level_tables_cover_every_slot_the_mesh_table_has() {
         const EXTRA: u32 = 4;
@@ -13210,11 +13211,13 @@ mod tests {
         };
 
         let grown = sized(EXTRA) - sized(0);
-        let want = EXTRA as usize * (crcbl_shaders::level_select::MESH_LEVELS_STRIDE + 4);
+        let route_stride = crcbl_shaders::draw_gen::ROUTE_MODES as usize * 4;
+        let want =
+            EXTRA as usize * (crcbl_shaders::level_select::MESH_LEVELS_STRIDE + 4 + route_stride);
         assert_eq!(
             grown, want,
-            "{EXTRA} more table slots must add {EXTRA} more selection records and {EXTRA} more \
-             level words, and added {grown} bytes"
+            "{EXTRA} more table slots must add their selection records, level words and route \
+             rows, and added {grown} bytes"
         );
     }
 

@@ -746,6 +746,7 @@ impl DrawGen {
                     group_stride,
                     bucket_modes_at: table_offsets.bucket_modes_at,
                     bucket_clusters_at: table_offsets.bucket_clusters_at,
+                    routes_at: table_offsets.routes_at,
                     mesh_levels_at: table_offsets.mesh_levels_at,
                     level_groups_at: table_offsets.level_groups_at,
                     level_meshes_at: table_offsets.level_meshes_at,
@@ -1631,6 +1632,7 @@ impl DrawGen {
                 mode,
                 draw_regions: self.mode.regions(),
                 face_runs_at: draw_gen::face_runs_at(self.capacity, self.bucket_count),
+                routes_at: self.table_offsets.routes_at,
             }
             .to_bytes(),
         )?;

@@ -186,19 +186,19 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = b127cf1e131a3f97f937d908b0c8dccd7467f40672188f4222fb9d073323b9bf
+source-sha256 = bc5fa75e94b7d042dcaac3fd2287933391c2766b3da80abed54eb562c338bcfe
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = 9d5e9405a6709f8d922cb52b617d86ce5db77eb3ea3ad3ed62dae996f7aacff9
+spirv-sha256 = d33ee8d83a8534485e85707201fd4070e01375f7efaf4990dada5c63eaf385ee
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = 61b7e8a6eedc11a59fc6dfbc0df3465a2756bdf5c50823d64f58bd9ee9c70f80
+wgsl-sha256 = 5946b79b2dfbcae82563f8f7f4a45171665d1988ab3179dcfe7b6cdefad9f8e7
 msl = msl/draw_gen.metal
-msl-sha256 = c550804d59e16a92dd74a8b44d7dc9f7a5ac3f6fc30c91edec2d961df2396515
-dxil = binMain:dxil/draw_gen.bin.dxil:56b25a04689de7bd0475f772f6c1625464f702af80a2260eaa2c8c86ce1e3079
-dxil = startsMain:dxil/draw_gen.starts.dxil:c5844bd77831f1ed018bef0491b00524fe0042a893112f978f37b5f3793019ff
-dxil = scatterMain:dxil/draw_gen.scatter.dxil:fc6e853ad27116a79125a85823f9d9a4261ac2881068cf5fc89899849069123e
-dxil = lateScatterMain:dxil/draw_gen.late_scatter.dxil:71eb28d3e860ddcfcc1066b8c4764221b5f90facd9d669118541980280791b5f
-dxil = lateFinishMain:dxil/draw_gen.late_finish.dxil:e4916f38690ed57354afc3a4b58f7e1d64a81cf9e96ef0a60cddfb5c3bb56219
+msl-sha256 = 7223a431c4507aff736b96baf34a0428c40635d6c46ab2a847d8cd7f6e4f94ab
+dxil = binMain:dxil/draw_gen.bin.dxil:4473f8b74c31459cfdf8976969a3d0affe57b79ed3c4fa4b3d9a67876f8c49f4
+dxil = startsMain:dxil/draw_gen.starts.dxil:785b385b87968cbef453c43ec4988ea14ed5906b732407dc332854a38c927d55
+dxil = scatterMain:dxil/draw_gen.scatter.dxil:c268275fc5d6ee7bf2bc948d4e0277efe64421b269343189dbc5204001577809
+dxil = lateScatterMain:dxil/draw_gen.late_scatter.dxil:fea03f43293974858e9a20c582d60042d549a93504ef929a0f05ccd034b6cd3d
+dxil = lateFinishMain:dxil/draw_gen.late_finish.dxil:9de43e03c50e5dc28f36fe7d278d758bc7914cd276c88ef509bfea262c0c6e2a
 entry-points = binMain:glcompute, startsMain:glcompute, scatterMain:glcompute, lateScatterMain:glcompute, lateFinishMain:glcompute
 
 [exposure]
