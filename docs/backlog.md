@@ -269,10 +269,14 @@ Initial measurements and harness findings:
   in both scenes. The cost is therefore rectangular fragment shading, not
   cluster construction. `mesh.slang::fragmentMain` currently calls `ltc_at` and
   builds the same material-dependent LTC transform inside every rectangle
-  iteration even though its table coordinates do not depend on the light. Trial
-  caching that transform after the first rectangle in a fragment; avoid charging
-  point-only fragments the LTC reads, require area-light real-GPU image
-  equality, and alternate both fixed scenes before retaining it.
+  iteration even though its table coordinates do not depend on the light. A
+  first-use cache passed all four native area-light GPU observers, including the
+  golden and rotated-highlight checks, but produced no repeatable speedup. In
+  alternating runs, area-light `forward` measured 8.937–8.958 ms p50 versus the
+  baseline's 8.849–8.985 ms, while the point control measured 3.478–3.508 ms
+  versus 3.511–3.569 ms. Both ranges overlap their baselines. The trial and its
+  artifacts were removed; do not repeat this source-level cache without shader
+  ISA evidence that the backend is actually issuing redundant table reads.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
