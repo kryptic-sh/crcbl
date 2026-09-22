@@ -45,7 +45,9 @@
 //! down <scancode>         a press on its own
 //! up <scancode>           a release on its own
 //! move <dx> <dy>          relative pointer motion, in mickeys
-//! click <left|right|middle>
+//! abs <x> <y>             an absolute move, normalized 0..=65535 over the
+//!                         primary monitor
+//! click <left|right|middle|back|forward>
 //! wheel <notches>         positive scrolls away from the user
 //! touch down <id> <x> <y> a finger lands at a screen pixel
 //! touch move <id> <x> <y> a finger that is down moves there
@@ -264,8 +266,21 @@ mod win32 {
     pub const MOUSEEVENTF_MIDDLE_DOWN: u32 = 0x0020;
     /// `MOUSEEVENTF_MIDDLEUP`.
     pub const MOUSEEVENTF_MIDDLE_UP: u32 = 0x0040;
+    /// `MOUSEEVENTF_XDOWN` — a thumb button, which `mouseData` names.
+    pub const MOUSEEVENTF_X_DOWN: u32 = 0x0080;
+    /// `MOUSEEVENTF_XUP`.
+    pub const MOUSEEVENTF_X_UP: u32 = 0x0100;
     /// `MOUSEEVENTF_WHEEL`.
     pub const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    /// `MOUSEEVENTF_ABSOLUTE` — `dx`/`dy` are a normalized position, not motion.
+    pub const MOUSEEVENTF_ABSOLUTE: u32 = 0x8000;
+    /// `XBUTTON1`, the `mouseData` of the back thumb button.
+    pub const XBUTTON1: u32 = 0x0001;
+    /// `XBUTTON2`, the `mouseData` of the forward thumb button.
+    pub const XBUTTON2: u32 = 0x0002;
+    /// The top of the range `MOUSEEVENTF_ABSOLUTE` coordinates are normalized
+    /// over.
+    pub const ABSOLUTE_MAX: i32 = 65_535;
     /// `WHEEL_DELTA` — one notch, which is not one.
     pub const WHEEL_DELTA: i32 = 120;
 
@@ -502,14 +517,54 @@ fn run(command: &str, fingers: &mut Fingers) -> Result<(), String> {
             let dy = number(words.next(), "dy")?;
             mouse(win32::MOUSEEVENTF_MOVE, 0, dx, dy)
         }
+        "abs" => {
+            let x = number(words.next(), "x")?;
+            let y = number(words.next(), "y")?;
+            let range = 0..=win32::ABSOLUTE_MAX;
+            if !range.contains(&x) || !range.contains(&y) {
+                return Err(format!(
+                    "({x}, {y}) is outside the normalized range {range:?}"
+                ));
+            }
+            mouse(
+                win32::MOUSEEVENTF_MOVE | win32::MOUSEEVENTF_ABSOLUTE,
+                0,
+                x,
+                y,
+            )
+        }
         "click" => {
-            let (down, up) = match words.next() {
-                Some("left") => (win32::MOUSEEVENTF_LEFT_DOWN, win32::MOUSEEVENTF_LEFT_UP),
-                Some("right") => (win32::MOUSEEVENTF_RIGHT_DOWN, win32::MOUSEEVENTF_RIGHT_UP),
-                Some("middle") => (win32::MOUSEEVENTF_MIDDLE_DOWN, win32::MOUSEEVENTF_MIDDLE_UP),
-                other => return Err(format!("{other:?} is not left, right or middle")),
+            // The thumb buttons share one flag pair and are told apart by
+            // `mouseData`, which `WM_XBUTTON*` carries on as its high word.
+            let (down, up, mouse_data) = match words.next() {
+                Some("left") => (win32::MOUSEEVENTF_LEFT_DOWN, win32::MOUSEEVENTF_LEFT_UP, 0),
+                Some("right") => (
+                    win32::MOUSEEVENTF_RIGHT_DOWN,
+                    win32::MOUSEEVENTF_RIGHT_UP,
+                    0,
+                ),
+                Some("middle") => (
+                    win32::MOUSEEVENTF_MIDDLE_DOWN,
+                    win32::MOUSEEVENTF_MIDDLE_UP,
+                    0,
+                ),
+                Some("back") => (
+                    win32::MOUSEEVENTF_X_DOWN,
+                    win32::MOUSEEVENTF_X_UP,
+                    win32::XBUTTON1,
+                ),
+                Some("forward") => (
+                    win32::MOUSEEVENTF_X_DOWN,
+                    win32::MOUSEEVENTF_X_UP,
+                    win32::XBUTTON2,
+                ),
+                other => {
+                    return Err(format!(
+                        "{other:?} is not left, right, middle, back or forward"
+                    ));
+                }
             };
-            mouse(down, 0, 0, 0).and_then(|()| mouse(up, 0, 0, 0))
+            mouse(down, mouse_data, 0, 0).and_then(|()| mouse(up, mouse_data, 0, 0))
         }
         "wheel" => {
             let notches: i32 = number(words.next(), "notches")?;
@@ -538,7 +593,7 @@ fn run(command: &str, fingers: &mut Fingers) -> Result<(), String> {
             }
         }
         other => Err(format!(
-            "{other:?} is not one of key, down, up, move, click, wheel, touch"
+            "{other:?} is not one of key, down, up, move, abs, click, wheel, touch"
         )),
     }
 }

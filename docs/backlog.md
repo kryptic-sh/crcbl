@@ -16333,17 +16333,18 @@ under the same heading, and it binds any Windows test written from now on.
   new structure needs one written again (print `sizeof` and every field's
   `offsetof`/`sizeof` from `windows.h`, build with `cl` for x64). No Windows
   target other than x64 is built by CI.
-- **`WM_INPUT`'s absolute path is untested; its relative path is not.** W4's
-  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` waits for a
-  `raw_delta`, which only `input::read_raw_mouse` and the `RIM_TYPE_MOUSE` check
-  produce, and `win32-e2e` runs it on `windows-latest` every push. What has
-  never run is the **absolute** report, which needs a machine that produces one
-  (a remote-desktop session or a tablet). W4's
-  `injected_motion_arrives_as_raw_relative_motion_for_mouselook` assumes
-  `SendInput` feeds the raw stack on a `windows-latest` image — the single
-  assertion most likely to be answered by the runner rather than by the backend;
-  if it fails with the ordinary `PointerMotion` present and `raw_delta` absent,
-  the finding is about the image, not the backend.
+- **`WM_INPUT`'s absolute path has only met injected reports.** On 2026-09-22,
+  on the RX 7900 XTX desktop, a `SendInput` move with
+  `MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE` arrived as a raw report with
+  `usFlags = MOUSE_MOVE_ABSOLUTE` and the normalized coordinates in
+  `lLastX`/`lLastY` (measured with temporary logging, since removed), so
+  `win32_e2e`'s `an_injected_absolute_move_is_differenced_into_raw_motion` now
+  drives `pointer::RawMotion`'s absolute branch through
+  `input::absolute_screen`. Still not run: the `MOUSE_VIRTUAL_DESKTOP` space
+  (the sender never sets `MOUSEEVENTF_VIRTUALDESK`), a report from a real
+  absolute device (a remote-desktop session or a tablet), and the test on
+  `windows-latest`, whose first CI run is what says whether that image delivers
+  injected absolute moves as absolute.
 - **`ClipCursor` and `SetCursorPos` are restricted to the foreground process.**
   The two pointer tests call `SetForegroundWindow` first; if a GitHub runner
   refuses the foreground, both fail — a finding about the runner, not the
@@ -16356,11 +16357,19 @@ under the same heading, and it binds any Windows test written from now on.
   (`cursor_display_count` reads it by moving it and putting it back). That test
   is the only thing standing between this backend and an invisible cursor for
   the rest of a session, so it is the one to keep rather than relax.
-- **No other process has ever contended for the clipboard**, so `Opened::After`
-  and `Opened::Refused` have never been produced and the retry loop itself is
-  unexercised; only the budget arithmetic is covered, on Linux. The clipboard
-  tests also share the desktop's clipboard — two Windows suites in parallel
-  would interfere, which is why the e2e suite is `--test-threads 1`.
+- **Clipboard contention is covered by timing, and one outcome by a log line.**
+  `crcbl-e2e-win32-clip hold <ms>` keeps the clipboard open from another
+  process. `a_clipboard_another_process_holds_briefly_is_waited_for` holds it
+  for a fraction of `win32::clipboard::OPEN_BUDGET` and finds `Opened::After`
+  only through the `debug!` line `read_clipboard` logs, so rewording that line
+  breaks the test. A round whose read starts after the hold has ended is
+  retried, up to the test's own round limit. The write under a short hold is
+  asserted to succeed, not to have waited.
+  `a_clipboard_another_process_will_not_release_is_refused_within_the_budget`
+  holds it far past the budget and gets `Unavailable` and the `Backend` error.
+  Both were run on the RX 7900 XTX desktop only; CI has not run them yet. The
+  clipboard tests also share the desktop's clipboard, so two Windows suites in
+  parallel would interfere, which is why the e2e suite is `--test-threads 1`.
 - **No sample-level pass in CI.** The Linux suites run the sandbox and press F11
   at it, and `samples-windowed` runs every sample in a window; Windows has
   neither. This entry used to say what blocked it was a missing job rather than
@@ -16441,8 +16450,10 @@ desktop, with a MonsGeek keyboard and a VID 3710 mouse, it passed all 13 steps:
 - Raw relative motion from a real mouse, and a real drag of a file from Explorer
   (`DroppedFile` with an existing path and a client position).
 
-Still not covered by it: the Forward button (the prompt asks only for Back), an
-absolute raw device, and another process contending for the clipboard.
+Still not covered by it: a real Forward button (the prompt asks only for Back;
+`win32_e2e`'s
+`the_back_and_forward_buttons_clicked_by_another_process_are_told_apart` injects
+both since 2026-09-22) and a real absolute raw device.
 
 ### Touch on Win32: what was measured and what was not (2026-09-21)
 

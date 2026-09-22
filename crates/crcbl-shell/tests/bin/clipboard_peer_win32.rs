@@ -4,7 +4,11 @@
 //! ```text
 //! crcbl-e2e-win32-clip get <format>
 //! crcbl-e2e-win32-clip put <format> <text…>
+//! crcbl-e2e-win32-clip hold <ms>
 //! ```
+//!
+//! `hold` keeps the clipboard open for that many milliseconds, which is how the
+//! suite makes another process contend for it.
 //!
 //! **Compiled only with the `win32-e2e` feature**, which nothing but
 //! `tests/run-win32-e2e.ps1` turns on.
@@ -43,6 +47,8 @@
 //! crcbl-e2e-win32-clip: text <content>   (get, when the format is present)
 //! crcbl-e2e-win32-clip: absent           (get, when it is not)
 //! crcbl-e2e-win32-clip: put <bytes>      (put)
+//! crcbl-e2e-win32-clip: holding <ms>     (hold, once the clipboard is open)
+//! crcbl-e2e-win32-clip: released         (hold, once it is closed again)
 //! ```
 //!
 //! `size` is `GlobalSize`, which Windows is entitled to round up, so it is
@@ -131,9 +137,26 @@ mod win32 {
 fn main() -> ExitCode {
     let mut args = std::env::args().skip(1);
     let (Some(verb), Some(format)) = (args.next(), args.next()) else {
-        eprintln!("crcbl-e2e-win32-clip: usage: crcbl-e2e-win32-clip <get|put> <format> [text…]");
+        eprintln!(
+            "crcbl-e2e-win32-clip: usage: crcbl-e2e-win32-clip <get|put> <format> [text…] | hold \
+             <ms>"
+        );
         return ExitCode::from(2);
     };
+    if verb == "hold" {
+        // The second word is a duration here, not a format.
+        let outcome = format
+            .parse::<u64>()
+            .map_err(|_| format!("{format:?} is not a whole number of milliseconds"))
+            .and_then(|ms| hold(std::time::Duration::from_millis(ms)));
+        return match outcome {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(problem) => {
+                eprintln!("crcbl-e2e-win32-clip: {problem}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let format_id = match format_id(&format) {
         Ok(id) => id,
         Err(problem) => {
@@ -149,7 +172,7 @@ fn main() -> ExitCode {
             put(&format, format_id, &text.join(" "))
         }
         other => {
-            eprintln!("crcbl-e2e-win32-clip: {other:?} is not get or put");
+            eprintln!("crcbl-e2e-win32-clip: {other:?} is not get, put or hold");
             return ExitCode::from(2);
         }
     };
@@ -284,6 +307,29 @@ fn put(name: &str, format: u32, text: &str) -> Result<(), String> {
     }
     println!("crcbl-e2e-win32-clip: put {}", payload.len());
     Ok(())
+}
+
+/// Opens the clipboard, says so, keeps it open for `span`, and gives it back.
+///
+/// The contention a clipboard manager or a slow application causes, on demand:
+/// while this holds it, every other process's `OpenClipboard` is refused. The
+/// `holding` line is printed only once the open has succeeded, and flushed, so
+/// a caller that waits for it knows the clipboard is taken from that moment
+/// until `released`.
+#[cfg(target_os = "windows")]
+fn hold(span: std::time::Duration) -> Result<(), String> {
+    use std::io::Write;
+
+    let clipboard = Clipboard::open()?;
+    let mut out = std::io::stdout().lock();
+    writeln!(out, "crcbl-e2e-win32-clip: holding {}", span.as_millis())
+        .and_then(|()| out.flush())
+        .map_err(|error| format!("could not say the clipboard is held: {error}"))?;
+    std::thread::sleep(span);
+    drop(clipboard);
+    writeln!(out, "crcbl-e2e-win32-clip: released")
+        .and_then(|()| out.flush())
+        .map_err(|error| format!("could not say the clipboard is released: {error}"))
 }
 
 /// `text` as the bytes this format carries, terminator included.

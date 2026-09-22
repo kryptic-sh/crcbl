@@ -43,8 +43,7 @@
 //!
 //! Also absent, each for a reason `docs/backlog.md` carries: a **real** drag and
 //! drop (the shell allocates the `HDROP` in the target's own context, so no test
-//! process can hand one over), the `WM_IME_*` family, absolute raw reports
-//! (which need a remote-desktop session or a tablet), and multi-monitor
+//! process can hand one over), the `WM_IME_*` family, and multi-monitor
 //! behaviour (the runner has one display).
 //!
 //! # Three facts about the runner that shaped every test below
@@ -229,6 +228,10 @@ mod desktop {
         assert!(core::mem::offset_of!(Point, y) == 4);
     };
 
+    /// `SM_CXSCREEN` — the primary monitor's width.
+    const SM_CX_SCREEN: i32 = 0;
+    /// `SM_CYSCREEN`.
+    const SM_CY_SCREEN: i32 = 1;
     /// `SM_XVIRTUALSCREEN`.
     const SM_X_VIRTUAL_SCREEN: i32 = 76;
     /// `SM_YVIRTUALSCREEN`.
@@ -669,6 +672,19 @@ mod desktop {
                 right: left + GetSystemMetrics(SM_CX_VIRTUAL_SCREEN),
                 bottom: top + GetSystemMetrics(SM_CY_VIRTUAL_SCREEN),
             }
+        }
+    }
+
+    /// The primary monitor's size in pixels: the extent a `MOUSEEVENTF_ABSOLUTE`
+    /// move without `MOUSEEVENTF_VIRTUALDESK` is normalized over.
+    #[must_use]
+    pub fn primary_screen() -> (i32, i32) {
+        // SAFETY: two metric queries by value; each reads no memory of ours.
+        unsafe {
+            (
+                GetSystemMetrics(SM_CX_SCREEN),
+                GetSystemMetrics(SM_CY_SCREEN),
+            )
         }
     }
 
@@ -1169,6 +1185,65 @@ fn clip(args: &[&str]) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     stdout
+}
+
+/// A running `crcbl-e2e-win32-clip hold`: another process with the clipboard
+/// open.
+struct Holder {
+    child: Child,
+    stdout: BufReader<std::process::ChildStdout>,
+    /// When the peer said it had the clipboard open.
+    since: Instant,
+}
+
+impl Holder {
+    /// Starts the peer holding the clipboard for `span`, and returns once it
+    /// says the clipboard is open.
+    ///
+    /// Read on this thread, blocking, rather than through [`drain`]'s polled
+    /// list: the time between the peer's `holding` line and this test acting on
+    /// it is time the hold is running out, and a poll interval would be spent
+    /// out of it for nothing.
+    fn start(span: Duration) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_crcbl-e2e-win32-clip"))
+            .args(["hold", &span.as_millis().to_string()])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("crcbl-e2e-win32-clip is a [[bin]] of this package under win32-e2e");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout was piped"));
+        let mut line = String::new();
+        stdout
+            .read_line(&mut line)
+            .expect("the clipboard peer's stdout is readable");
+        let since = Instant::now();
+        if !line.contains("crcbl-e2e-win32-clip: holding") {
+            let output = child.wait_with_output().expect("the peer exits");
+            panic!(
+                "the clipboard peer did not take the clipboard: it said {line:?}, then {:?}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        Self {
+            child,
+            stdout,
+            since,
+        }
+    }
+
+    /// Waits for the peer to give the clipboard back and exit cleanly.
+    fn finish(mut self) {
+        let mut rest = String::new();
+        std::io::Read::read_to_string(&mut self.stdout, &mut rest)
+            .expect("the clipboard peer's stdout is readable");
+        let output = self.child.wait_with_output().expect("the peer exits");
+        assert!(
+            output.status.success() && rest.contains("crcbl-e2e-win32-clip: released"),
+            "the clipboard peer did not release cleanly ({:?}): it said {rest:?} and {:?}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
 
 /// The `text` line of a peer read, or `None` when the format was absent.
@@ -2107,6 +2182,51 @@ fn a_pointer_driven_by_another_process_moves_clicks_and_scrolls() {
         .expect("shape");
 }
 
+/// Both thumb buttons, clicked from another process, arrive as the buttons
+/// they are.
+///
+/// They share one message pair, `WM_XBUTTONDOWN`/`WM_XBUTTONUP`, and are told
+/// apart only by the high word of `wParam`, so a backend that read the wrong
+/// half or swapped the two ids reports every thumb click as the same button, or
+/// as the other one. The hands-on check could only ask a person for Back; this
+/// is the one place Forward is pressed at all.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn the_back_and_forward_buttons_clicked_by_another_process_are_told_apart() {
+    let mut session = Session::open();
+    let window = session.window("thumb buttons");
+    session.foreground(window);
+    // Parked inside the client area, as for the other clicks: an X button
+    // message goes to the window under the cursor.
+    session
+        .shell
+        .warp_pointer(window, PhysicalPoint::new(100.0, 80.0))
+        .expect("POINTER_WARP is claimed");
+    session.settle();
+    session.events.clear();
+
+    let mut sender = Sender::start();
+    sender.send("click back");
+    sender.send("click forward");
+    session.pump_until("both thumb clicks", |session| buttons(session).len() >= 4);
+    let clicked: Vec<_> = buttons(&session)
+        .into_iter()
+        .map(|(button, state, _)| (button, state))
+        .collect();
+    assert_eq!(
+        clicked,
+        vec![
+            (PointerButton::Back, ButtonState::Pressed),
+            (PointerButton::Back, ButtonState::Released),
+            (PointerButton::Forward, ButtonState::Pressed),
+            (PointerButton::Forward, ButtonState::Released),
+        ],
+        "XBUTTON1 is Back and XBUTTON2 is Forward: {:?}, sender said {:?}",
+        session.names(),
+        sender.lines()
+    );
+}
+
 /// Every touch event delivered so far, flattened for assertion.
 fn touches(session: &Session) -> Vec<(ContactId, TouchPhase, PhysicalPoint)> {
     session
@@ -2404,6 +2524,120 @@ fn injected_motion_arrives_as_raw_relative_motion_for_mouselook() {
         .expect("unlock");
 }
 
+/// A desktop pixel as the normalized `0..=65535` coordinate a
+/// `MOUSEEVENTF_ABSOLUTE` move over the primary monitor takes.
+///
+/// Rounded to the nearest unit rather than truncated, so the pixel the system
+/// maps it back to is the one asked for.
+fn normalized(pixel: i32, extent: i32) -> i32 {
+    const RANGE: i64 = 65_536;
+    let scaled = (i64::from(pixel) * RANGE + i64::from(extent) / 2) / i64::from(extent);
+    i32::try_from(scaled.clamp(0, RANGE - 1)).expect("clamped into the normalized range")
+}
+
+/// An **absolute** raw report — what a remote-desktop session or a tablet
+/// sends — is differenced into relative motion rather than read as a delta.
+///
+/// Read as a delta, the first absolute report moves a first-person camera by
+/// tens of thousands of pixels; `pointer::RawMotion` is what stops that, and
+/// until this test no absolute report had ever reached it.
+///
+/// Two moves, and each one says something the other cannot. The first report
+/// of an absolute run has nothing to subtract from, so it must produce **no**
+/// raw delta at all — which is also what shows the report arrived absolute: had
+/// the system turned the injected move into a relative one, the first move
+/// would already be a delta. The second must be the distance between the two
+/// points, in pixels, not in normalized units.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn an_injected_absolute_move_is_differenced_into_raw_motion() {
+    /// The two client points the moves land on, and so the delta between them.
+    const FROM: (i32, i32) = (90, 70);
+    const TO: (i32, i32) = (150, 110);
+    /// How far the landing may be off, in pixels, from the rounding of a
+    /// normalized coordinate each way.
+    const SLACK: f64 = 2.0;
+
+    let mut session = Session::open();
+    let window = session.window("absolute");
+    session.foreground(window);
+    session
+        .shell
+        .warp_pointer(window, PhysicalPoint::new(100.0, 80.0))
+        .expect("POINTER_WARP is claimed");
+    session.settle();
+    session.events.clear();
+
+    let hwnd = session.hwnd(window);
+    let (width, height) = desktop::primary_screen();
+    let aim = |(x, y): (i32, i32)| {
+        let at = desktop::client_to_screen(hwnd, x, y);
+        format!(
+            "abs {} {}",
+            normalized(at.x, width),
+            normalized(at.y, height)
+        )
+    };
+    let raw_deltas = |session: &Session| -> Vec<(f64, f64)> {
+        session
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                ShellEvent::PointerMotion {
+                    raw_delta: Some(delta),
+                    ..
+                } => Some(*delta),
+                _ => None,
+            })
+            .collect()
+    };
+
+    let mut sender = Sender::start();
+    sender.send(&aim(FROM));
+    session.pump_until("the pointer to follow the first absolute move", |session| {
+        session
+            .events
+            .iter()
+            .any(|event| matches!(event, ShellEvent::PointerMotion { .. }))
+    });
+    session.settle();
+    let landed = session.events.iter().rev().find_map(|event| match event {
+        ShellEvent::PointerMotion { abs: Some(at), .. } => Some(*at),
+        _ => None,
+    });
+    assert!(
+        landed.is_some_and(|at| (at.x - f64::from(FROM.0)).abs() <= SLACK
+            && (at.y - f64::from(FROM.1)).abs() <= SLACK),
+        "the absolute move put the pointer on the client point {FROM:?} it was aimed at, not \
+         {landed:?}; the sender said {:?}",
+        sender.lines()
+    );
+    assert_eq!(
+        raw_deltas(&session),
+        vec![],
+        "the first absolute report has nothing to difference against, so it moves the pointer \
+         and reports no raw motion; a delta here means the report arrived relative, or was read \
+         as a delta. The events were {:?}, the sender said {:?}",
+        session.names(),
+        sender.lines()
+    );
+
+    session.events.clear();
+    sender.send(&aim(TO));
+    session.pump_until("raw motion from the second absolute move", |session| {
+        !raw_deltas(session).is_empty()
+    });
+    session.settle();
+    let deltas = raw_deltas(&session);
+    let (dx, dy) = (f64::from(TO.0 - FROM.0), f64::from(TO.1 - FROM.1));
+    assert!(
+        deltas.len() == 1 && (deltas[0].0 - dx).abs() <= SLACK && (deltas[0].1 - dy).abs() <= SLACK,
+        "one report, differenced into the ({dx}, {dy}) pixels between the two points: {deltas:?} \
+         on a primary monitor of {width}x{height}; the sender said {:?}",
+        sender.lines()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The clipboard, across a process boundary
 // ---------------------------------------------------------------------------
@@ -2536,5 +2770,130 @@ fn an_empty_offer_empties_the_clipboard_for_every_process() {
         content,
         ClipboardContent::Empty,
         "there is nothing on the clipboard, which is not the same as a read that failed"
+    );
+}
+
+/// A clipboard another process holds for a moment is waited for, not reported
+/// unavailable.
+///
+/// `win32::clipboard` retries a refused `OpenClipboard` for `OPEN_BUDGET`
+/// because a clipboard manager or Explorer holding it for an instant is
+/// routine. The peer holds it for a fraction of that budget, and the read has to
+/// come back with the bytes.
+///
+/// Success alone would not show the retry ran: had the hold already ended when
+/// the read began, the first attempt would take the clipboard. The backend logs
+/// the attempt count when an open had to wait (`Opened::After`), and that line
+/// is what the rounds below look for. A round whose read began after the hold
+/// ended is repeated rather than failed, because on a loaded runner that is a
+/// scheduling fact, not a backend one.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_clipboard_another_process_holds_briefly_is_waited_for() {
+    /// Well inside `win32::clipboard::OPEN_BUDGET`, with room to spare for the
+    /// peer oversleeping on a loaded runner.
+    const SHORT_HOLD: Duration = Duration::from_millis(30);
+    /// How many holds to try before concluding no read ever had to wait.
+    const ROUNDS: u32 = 5;
+    /// The start of the line the backend logs when an open succeeded on a
+    /// retry.
+    const WAITED: &str = "the clipboard was held by another process for";
+
+    let mut session = Session::open();
+    let window = session.window("contended");
+    clip(&["put", "text", "under", "contention"]);
+
+    let logs = crcbl_core::log::capture();
+    let mut waited_in = None;
+    for round in 1..=ROUNDS {
+        let holder = Holder::start(SHORT_HOLD);
+        let asked_after = holder.since.elapsed();
+        let request = session
+            .shell
+            .clipboard_request(window, MimeType::TextUtf8)
+            .expect("CLIPBOARD is claimed");
+        holder.finish();
+        let (_, content) = session.clipboard_answer(request);
+        session.events.clear();
+        assert_eq!(
+            content.text(),
+            Some("under contention"),
+            "round {round}: a hold of {SHORT_HOLD:?} is inside the retry budget, so the read \
+             waits it out; it was asked {asked_after:?} into the hold and answered {content:?}"
+        );
+        if logs
+            .records()
+            .iter()
+            .any(|record| record.message.starts_with(WAITED))
+        {
+            waited_in = Some(round);
+            break;
+        }
+    }
+    assert!(
+        waited_in.is_some(),
+        "in {ROUNDS} rounds no read ever found the clipboard held, so the retry never ran; the \
+         shell logged {:?}",
+        logs.records()
+    );
+
+    // A write under the same contention publishes rather than failing.
+    let holder = Holder::start(SHORT_HOLD);
+    let offered = session
+        .shell
+        .clipboard_offer(window, &[ClipboardOffer::text("written under contention")]);
+    holder.finish();
+    offered.expect("a hold inside the retry budget is waited out by a write as well");
+    assert_eq!(
+        clip_text(&["get", "text"]).as_deref(),
+        Some("written under contention")
+    );
+}
+
+/// A clipboard another process will not let go of is answered `Unavailable`
+/// within the budget, and a write fails with the backend's error rather than
+/// waiting.
+///
+/// Obligation 4's bound, observed: the peer holds the clipboard far longer than
+/// `win32::clipboard::OPEN_BUDGET`, and both calls must return while it still
+/// holds it. A backend that retried without a bound would sit here until the
+/// peer let go, and then answer with the bytes.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_clipboard_another_process_will_not_release_is_refused_within_the_budget() {
+    /// Far beyond `win32::clipboard::OPEN_BUDGET`, even on a runner slow
+    /// enough to stretch each of the backend's retry sleeps several times.
+    const LONG_HOLD: Duration = Duration::from_secs(3);
+
+    let mut session = Session::open();
+    let window = session.window("refused");
+
+    let holder = Holder::start(LONG_HOLD);
+    let request = session
+        .shell
+        .clipboard_request(window, MimeType::TextUtf8)
+        .expect("a refused open is an answer, not an error");
+    let offered = session
+        .shell
+        .clipboard_offer(window, &[ClipboardOffer::text("never published")]);
+    let acted_within = holder.since.elapsed();
+    let (_, content) = session.clipboard_answer(request);
+    holder.finish();
+
+    assert_eq!(
+        content,
+        ClipboardContent::Unavailable,
+        "another process held the clipboard for {LONG_HOLD:?}, so the read gives up and says \
+         so; both calls returned {acted_within:?} into the hold"
+    );
+    assert!(
+        matches!(&offered, Err(ShellError::Backend(message))
+            if message.contains("another process is holding it")),
+        "a write that cannot open the clipboard is the backend error naming why: {offered:?}"
+    );
+    assert!(
+        acted_within < LONG_HOLD,
+        "both calls returned while the peer still held the clipboard, which is the bound: \
+         {acted_within:?} of {LONG_HOLD:?}"
     );
 }
