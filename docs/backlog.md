@@ -255,6 +255,15 @@ Initial measurements and harness findings:
   3.614–3.619 ms from the alternating baseline's 3.555–3.588 ms. Retain the
   matrix-row expression: consuming the carried interpolant costs 0.7–1.8% on
   this adapter despite doing less source-level arithmetic.
+- The retained render stress scenes still cover only point fill lights. They do
+  not execute the rectangular-light LTC integration or the ordinary specular
+  path, so they cannot attribute either cost or guard an optimization there. Add
+  a deterministic `area-lights-fit` sandbox scene that keeps the existing
+  instance grid and fills, but does not overflow, the same froxel prefix with
+  non-shadowed rectangular lights. First verify the fixed instance and light
+  counts through the scene API, then measure its `forward`, `light-cluster` and
+  complete pass-sum percentiles against `lights-fit` on the pinned MX550 before
+  selecting any area-light shader change.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
