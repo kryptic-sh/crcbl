@@ -52,9 +52,6 @@ helps the reference adapter.
 
 Open work:
 
-- Establish clean release baselines for the existing Horde rendering and dense
-  simulation workloads on this machine, then select the next bottleneck from
-  measured CPU spans, GPU pass timings and system profiling.
 - Add the smallest reusable high-load scenes needed to isolate render-heavy,
   simulation-heavy and combined-frame limits. Keep correctness assertions
   separate from timing so a faster wrong frame cannot pass.
@@ -64,6 +61,58 @@ Open work:
 - Re-run the same commands after every retained optimization and record both
   absolute tail latency and the paired change. A throughput claim without the
   exact local workload remains unverified.
+
+Initial measurements and harness findings:
+
+- The existing CPU benchmark establishes that the job pool is effective on this
+  processor for its synthetic workload: release-mode `jobs` over 10,000 items
+  with chunks of 64 reported 1.485 ms p50 and 1.509 ms p95 with no workers,
+  versus 0.239 ms p50 and 0.281 ms p95 with the default 11 workers. This does
+  not establish the right worker or chunk count for an engine frame; sweep both
+  on a representative scene before changing either default.
+- Release-mode `phys` with 2,000 bodies in a 48-unit extent reported query
+  latency of 0.787 ms p50 and 0.837 ms p95 after one movement tick. With 5,000
+  bodies aged through 600 refits in the same extent, the query phase reported
+  4.601 ms p50 and 4.963 ms p95 at 12.851 results per query. This prices a
+  potential CPU bottleneck but does not isolate density from the refit-only
+  tree's ageing; sweep those controls separately before changing the broadphase.
+- The first pinned NVIDIA Vulkan Horde run used release mode at 1920x1080,
+  uncapped, one simulation tick per second, 2,400 frames and 10,000 prefilled
+  enemies with the debug overlay enabled. The last 120 of 2,397 timestamped
+  frames reported a 1.197 ms total GPU p50: 0.866 ms in `sprites`, 0.311 ms in
+  `ui-overlay`, 0.012 ms in `ui-composite` and 0.007 ms in `arena`. CPU frame
+  time reported a 1.155 ms mean, with a 0.542 ms best and 5.683 ms worst. The
+  fixture died after its second simulation tick, so the measured window was a
+  death screen rather than sustained gameplay. Do not use this run as an
+  optimization baseline. A dedicated deterministic render-load scene must keep
+  its workload alive and identify whether the overlay cost is glyph/geometry
+  upload, blending, or another pass-local effect before changing UI code.
+- The sandbox now has fixed `instances` and `lights` scenes and a `--wall-clock`
+  measurement mode. Both hold 10,000 instances for the complete run; `lights`
+  adds 256 overlapping fill lights. The baseline command is
+  `sandbox --headless --wall-clock --backend vk --scene NAME --pacing off --fps 0 --frames 900 --size 1920x1080 --debug-overlay`,
+  with the NVIDIA ICD pinned. Across alternating release runs, the sum of
+  per-pass GPU p50 values was 9.122–9.206 ms for `instances` and 10.660–10.890
+  ms for `lights`. The real-clock CPU frame interval was 9.284 ms mean for
+  `instances` and 11.074 ms for `lights` in the final pair. These are steady
+  live scenes rather than the Horde death screen, but the GPU total is a sum of
+  pass distributions and can double-count overlap; compare individual pass rows
+  as well as the CPU frame interval.
+- The repeatable light-scene delta is localized: `forward` measured 2.632–2.719
+  ms p50 for `instances` and 3.827–3.902 ms for `lights`, while `light-cluster`
+  moved from 0.026 ms to 0.193–0.207 ms. Cull and draw-generation rows stayed
+  effectively flat. SSAO p50 varied more between repeat order even though the
+  scene's depth geometry was unchanged, so these runs do not support an SSAO
+  optimization claim. Profile the forward fragment light loop and the froxel
+  occupancy/overflow produced by this scene before changing shader or grid
+  policy.
+- The first workspace test run observed
+  `forward::tests::the_atlas_viewer_replaces_the_display_passes_and_the_count_follows`
+  report 52 draws where it expected 53. The exact test passed twice in isolation
+  and the complete workspace passed on an immediate rerun, with no renderer
+  source changed by this work. Treat this as possible shared-state or
+  order-dependent test interference and investigate if it recurs; the cause is
+  not established by the passing reruns.
 
 ## Performance review and execution priority (2026-09-17)
 

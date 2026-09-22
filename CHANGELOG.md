@@ -14,6 +14,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ## [Unreleased]
 
+### Added
+
+- `sandbox --scene instances|lights` provides fixed sustained renderer-load
+  scenes, and `--wall-clock` makes a headless run report real CPU frame time
+  while preserving the deterministic clock by default.
+
 ### Breaking
 
 - **dx12: game-owned DXIL built without explicit registers must be rebuilt.** A

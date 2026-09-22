@@ -1,14 +1,14 @@
 //! Argument parsing, by hand.
 //!
-//! Four flags do not justify a dependency — see `crates/crcbl-cli/src/args.rs`,
-//! which makes the same argument at the length it deserves and is the one that
-//! had a real choice to make.
+//! Kept dependency-free like `crates/crcbl-cli/src/args.rs`; this front end is
+//! small enough that the accepted spellings remain clearer in one match.
 
 use crcbl::args::{MAX_TICK_RATE, size};
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameLimit, Pacing};
 
 use crate::app::{CameraMode, Options};
+use crate::stress::Scene;
 
 /// `--help` text, and the definition of the flag set.
 pub const USAGE: &str = "\
@@ -20,6 +20,9 @@ USAGE:
 OPTIONS:
         --headless        Run against HeadlessShell with a hand-driven clock.
                           Deterministic, needs no display, always terminates.
+        --wall-clock      Use real elapsed time in a headless run. Intended for
+                          performance measurements; without it the reported CPU
+                          frame time is the deterministic fixed step.
         --backend <NAME>  GPU backend: `vk`, `mtl`, `dx12`, `wgpu`, `webgpu` or
                           `null`.
                           Default: choose one, which means Metal on macOS and
@@ -29,6 +32,9 @@ OPTIONS:
         --camera <MODE>   `perspective` or `ortho`. Default: perspective.
                           The 2D story is a projection-matrix swap and nothing
                           else, which is what this flag exists to demonstrate.
+        --scene <NAME>    Fixed scene: `cube`, `instances` or `lights`.
+                          Default: cube. The stress scenes keep their load live
+                          for the complete run so tail timings are comparable.
         --frames <N>      Stop after N presented frames.
                           Default: unlimited windowed, 120 headless.
         --tick-hz <N>     Simulation rate. Default: 60.
@@ -86,6 +92,7 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--headless" => options.headless = true,
+            "--wall-clock" => options.wall_clock = true,
             "--fullscreen" => options.fullscreen = true,
             "--wait-unpresented" => options.wait_unpresented = true,
             "--debug-overlay" => options.debug_overlay = Some(true),
@@ -135,6 +142,17 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                     }
                 },
                 None => return Invocation::BadUsage("--camera needs a value".to_string()),
+            },
+            "--scene" => match args.next() {
+                Some(name) => match Scene::from_name(&name) {
+                    Some(scene) => options.scene = scene,
+                    None => {
+                        return Invocation::BadUsage(format!(
+                            "unknown --scene `{name}`; try `cube`, `instances` or `lights`"
+                        ));
+                    }
+                },
+                None => return Invocation::BadUsage("--scene needs a value".to_string()),
             },
             "--frames" => match take_number(&mut args, "--frames") {
                 Ok(frames) => options.frames = Some(frames),
@@ -201,9 +219,26 @@ mod tests {
     fn no_arguments_is_a_windowed_run() {
         let options = options(&[]);
         assert!(!options.headless);
+        assert!(options.real_clock());
+        assert!(!options.wall_clock);
         assert_eq!(options.frames, None);
         assert_eq!(options.tick_hz, 60);
         assert_eq!(options.size, crcbl::shell::PhysicalSize::new(1280, 720));
+        assert_eq!(options.scene, Scene::Cube);
+    }
+
+    #[test]
+    fn every_fixed_stress_scene_is_reachable_and_unknown_names_are_refused() {
+        assert_eq!(options(&["--scene", "instances"]).scene, Scene::Instances);
+        assert_eq!(options(&["--scene", "lights"]).scene, Scene::Lights);
+        assert!(matches!(
+            parse_args(&["--scene", "unknown"]),
+            Invocation::BadUsage(message) if message.contains("unknown")
+        ));
+        assert!(matches!(
+            parse_args(&["--scene"]),
+            Invocation::BadUsage(message) if message.contains("needs a value")
+        ));
     }
 
     /// Switching the debug overlay on is one flag, and the default follows the
@@ -253,6 +288,7 @@ mod tests {
     fn every_flag_the_sandbox_accepts_reaches_its_option_field() {
         let options = options(&[
             "--headless",
+            "--wall-clock",
             "--frames",
             "12",
             "--tick-hz",
@@ -273,6 +309,8 @@ mod tests {
         assert_eq!(options.pacing, crcbl::engine::Pacing::Adaptive);
         assert_eq!(options.limit, crcbl::engine::FrameLimit::fps(144));
         assert!(options.headless);
+        assert!(options.wall_clock);
+        assert!(options.real_clock());
         assert_eq!(options.frames, Some(12));
         assert_eq!(options.tick_hz, 30);
         assert!(options.fullscreen);

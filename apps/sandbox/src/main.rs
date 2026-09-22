@@ -1,16 +1,16 @@
 //! Development playground: the engine's first real loop.
 //!
 //! ```text
-//! sandbox [--headless] [--frames N] [--tick-hz N] [--title T] [--camera MODE]
+//! sandbox [--headless] [--wall-clock] [--scene NAME] [--frames N]
 //! ```
 //!
 //! Opens a window through `crcbl-shell`, joins it to `crcbl-hal` through
 //! [`SurfaceTarget`](crcbl::core::SurfaceTarget), and runs a fixed-timestep
-//! loop that draws a lit spinning cube through `crcbl-render`'s graph — into an
-//! HDR target, tonemapped to the swapchain, with every barrier computed rather
-//! than written. `--headless` runs the *same* loop against `HeadlessShell` for a
-//! fixed number of frames and exits, which is what makes it a CI job rather than
-//! a demo.
+//! loop that draws a selected fixed scene through `crcbl-render`'s graph — into
+//! an HDR target, tonemapped to the swapchain, with every barrier computed
+//! rather than written. `--headless` runs the *same* loop against
+//! `HeadlessShell` for a fixed number of frames and exits, which is what makes
+//! it a CI job rather than a demo.
 //!
 //! Exit codes match the `crcbl` CLI's, because a sample is something CI runs:
 //! **0** ran, **1** it failed, **2** the arguments were wrong.
@@ -19,6 +19,7 @@ mod app;
 mod args;
 mod gpu;
 mod menu;
+mod stress;
 
 use std::process::ExitCode;
 
@@ -38,7 +39,7 @@ fn main() -> ExitCode {
             Ok(summary) => {
                 println!(
                     "sandbox: {} frames, {} ticks, {} events on the {} shell at {}x{}, \
-                     {} (effects {}, {:?})",
+                     {} (scene {}, effects {}, {:?})",
                     summary.run.frames,
                     summary.run.ticks,
                     summary.run.events,
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
                     // What the window system actually did, not what
                     // `--fullscreen` asked for. It is free to refuse.
                     summary.run.mode,
+                    summary.scene.name(),
                     // And which of topic 18's effects were in those frames,
                     // resolved — the observable for this sample's own
                     // `[engine.video]` wiring.

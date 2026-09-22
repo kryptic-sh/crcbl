@@ -74,6 +74,7 @@ use crcbl::ui::draw_list::DrawList;
 
 use crate::gpu::Gpu;
 use crate::menu::{self, Menus, SandboxAction};
+use crate::stress::Scene;
 
 /// Which projection the camera uses.
 ///
@@ -129,6 +130,8 @@ pub struct Options {
     /// Run against [`HeadlessShell`](crcbl::shell::HeadlessShell) with a
     /// hand-driven clock instead of opening a window.
     pub headless: bool,
+    /// Whether a headless run reads real elapsed time for performance reports.
+    pub wall_clock: bool,
     /// GPU backend to force, or `None` to let [`crcbl::backend`]'s own table
     /// choose.
     ///
@@ -151,6 +154,8 @@ pub struct Options {
     pub size: PhysicalSize,
     /// Which projection the camera uses — milestone 5.
     pub camera: CameraMode,
+    /// The fixed renderer workload to present.
+    pub scene: Scene,
     /// Whether to open the window borderless rather than windowed.
     ///
     /// A *request*. `F11` toggles from either starting point, and a window
@@ -186,12 +191,14 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             headless: false,
+            wall_clock: false,
             backend: None,
             frames: None,
             tick_hz: 60,
             title: "Crucible sandbox".to_string(),
             size: PhysicalSize::new(1280, 720),
             camera: CameraMode::default(),
+            scene: Scene::default(),
             fullscreen: false,
             debug_overlay: None,
             pacing: Pacing::default(),
@@ -202,6 +209,12 @@ impl Default for Options {
 }
 
 impl Options {
+    /// Whether the loop reads the real monotonic clock.
+    #[must_use]
+    pub const fn real_clock(&self) -> bool {
+        !self.headless || self.wall_clock
+    }
+
     /// What the command line contributes to opening a GPU.
     ///
     /// The same value [`crcbl::args::Common::gpu`] gives every sample that
@@ -258,6 +271,8 @@ pub struct Summary {
     /// `renderer.set_effect_request(ctx.effect_request())`: without it that line
     /// could be deleted and every test here would stay green.
     pub effects: RenderEffects,
+    /// The fixed workload every completed frame presented.
+    pub scene: Scene,
 }
 
 /// Anything that can stop the sandbox before it starts.
@@ -305,6 +320,8 @@ pub struct Sandbox {
     /// Every frame rather than once at start-up, so the field is about the
     /// frames rather than about a value copied before any of them ran.
     effects: RenderEffects,
+    /// The fixed workload this run presents.
+    scene: Scene,
 }
 
 impl Sandbox {
@@ -320,6 +337,7 @@ impl Sandbox {
         limit: FrameLimit,
         wait_unpresented: bool,
         effects: RenderEffects,
+        scene: Scene,
     ) -> Self {
         Self {
             pacing,
@@ -330,6 +348,7 @@ impl Sandbox {
             wait_unpresented,
             unpresented: None,
             effects,
+            scene,
         }
     }
 }
@@ -389,7 +408,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     mut shell: Box<S>,
     options: &Options,
 ) -> Result<Loop<S>, SandboxError> {
-    let clock_source = Clock::new(options.headless);
+    let clock_source = Clock::new(!options.real_clock());
     crcbl::log::info!(
         "shell: {} backend, caps {:?}",
         shell.backend(),
@@ -420,6 +439,7 @@ pub fn with_shell<S: Shell + ?Sized>(
         extent,
         options.gpu(),
         options.camera.projection(),
+        options.scene,
     )?;
 
     // Read before the GPU moves into the loop, and off the renderer rather than
@@ -440,6 +460,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             options.limit,
             options.wait_unpresented,
             effects,
+            options.scene,
         ),
         LoopConfig {
             tick_hz: options.tick_hz,
@@ -577,17 +598,19 @@ impl HostedGame for Sandbox {
         Summary {
             run,
             effects: self.effects,
+            scene: self.scene,
         }
     }
 
     fn log_summary(summary: &Summary) {
         crcbl::log::info!(
-            "sandbox: {} frames, {} ticks on the {} shell at {}x{}, effects {} ({:?})",
+            "sandbox: {} frames, {} ticks on the {} shell at {}x{}, scene {}, effects {} ({:?})",
             summary.run.frames,
             summary.run.ticks,
             summary.run.backend,
             summary.run.extent.0,
             summary.run.extent.1,
+            summary.scene.name(),
             summary.effects.row(),
             summary.run.exit,
         );
@@ -670,18 +693,36 @@ mod tests {
     fn headless(frames: u64) -> Options {
         Options {
             headless: true,
+            wall_clock: false,
             backend: Some(GpuBackend::Null),
             frames: Some(frames),
             tick_hz: 60,
             title: "test".to_string(),
             size: PhysicalSize::new(1280, 720),
             camera: CameraMode::Perspective,
+            scene: Scene::Cube,
             fullscreen: false,
             debug_overlay: None,
             pacing: Pacing::default(),
             limit: FrameLimit::default(),
             wait_unpresented: false,
         }
+    }
+
+    #[test]
+    fn wall_clock_switches_a_headless_measurement_to_real_time() {
+        let fixed = scripted(&headless(8));
+        assert!(matches!(fixed.clock_source(), Clock::Manual { .. }));
+        fixed
+            .finish(ExitReason::CloseRequested)
+            .expect("the fixed loop tears down");
+
+        let mut options = headless(8);
+        options.wall_clock = true;
+        let real = scripted(&options);
+        assert!(matches!(real.clock_source(), Clock::Real(_)));
+        real.finish(ExitReason::CloseRequested)
+            .expect("the real-time loop tears down");
     }
 
     /// **The sandbox can turn the panel on too, and F3 is all it takes.**
