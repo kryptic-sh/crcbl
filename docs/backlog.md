@@ -3986,7 +3986,14 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   repeated scatter search is stale; the routing cost remains proportional to
   survivors times the bucket-table prefix searched. Price `draw-bin` on a
   many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
-  table. Preserve material-mode and LOD routing, empty buckets and `NO_BUCKET`.
+  table. Add a fixed sandbox `buckets` fixture matching the recorded EW shape:
+  938 resident cube meshes distributed across the existing 10,000-instance grid.
+  The duplicated geometry deliberately isolates routing from triangle and
+  shading cost while putting matches throughout the bucket table. Record paired
+  MX550 `draw-args` distributions before and after; retain the lookup only if
+  the pass improves repeatably. Preserve material-mode and LOD routing, empty
+  buckets and `NO_BUCKET`, and make those cases observable in a GPU readback
+  test before replacing the search.
 - **P21 — one bind and one indirect call per bucket per pass per view.**
   `BucketDraws::record` issues a call for every bucket, empty or not, in the
   prepass, the forward pass and every shadow view — about ten thousand calls a
