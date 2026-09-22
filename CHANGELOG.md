@@ -20,6 +20,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   scenes, and `--wall-clock` makes a headless run report real CPU frame time
   while preserving the deterministic clock by default.
 
+### Changed
+
+- Fill lights skip the forward shader's unused GGX or LTC specular work instead
+  of evaluating a lobe that their contract discards.
+
 ### Breaking
 
 - **dx12: game-owned DXIL built without explicit registers must be rebuilt.** A

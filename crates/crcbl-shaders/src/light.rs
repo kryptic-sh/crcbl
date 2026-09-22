@@ -736,4 +736,37 @@ mod tests {
         assert_eq!(word_at(120), 1, "perspective at offset 120");
         assert_eq!(word_at(124), 29, "tile_pixels at offset 124");
     }
+
+    /// A fill light's contract says its specular result is zero, so neither of
+    /// the two expensive ways of producing that result belongs ahead of the
+    /// flag. The branch count keeps both the rectangular LTC path and the
+    /// punctual GGX path honest.
+    #[test]
+    fn fill_lights_skip_the_specular_work_they_discard() {
+        let start = MESH_SOURCE
+            .find("for (uint slot = 0; slot < count; ++slot)")
+            .expect("mesh.slang has the direct-light loop");
+        let body = &MESH_SOURCE[start..];
+        let end = body
+            .find("// The shadow maps")
+            .expect("the direct-light loop reaches shadow selection");
+        let shading = &body[..end];
+
+        assert_eq!(
+            shading.matches("if (fill)").count(),
+            2,
+            "both LTC and GGX specular work must be guarded by the fill flag",
+        );
+        assert_eq!(
+            shading
+                .matches("bool fill = (light.flags & FLAG_FILL) != 0u;")
+                .count(),
+            1,
+            "the flag should be read once per light",
+        );
+        assert!(
+            !shading.contains("if ((light.flags & FLAG_FILL) != 0u)"),
+            "zeroing specular after computing it leaves the expensive work live",
+        );
+    }
 }

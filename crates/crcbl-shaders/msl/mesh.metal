@@ -4254,29 +4254,32 @@ struct pixelInput_0
 #line 5705
         thread GpuLight_natural_0 _S294 = (&kernelContext_37)->lights_0[(&kernelContext_37)->cluster_lights_0[base_2 + 1U + slot_0]];
 
-#line 5705
+#line 5713
+        bool fill_0 = (((&_S294)->flags_3) & 1U) != 0U;
+
+#line 5713
         uint _S295 = (&_S294)->kind_0;
 
-#line 5714
+#line 5720
         bool _S296 = ((&_S294)->kind_0) == 0U;
 
-#line 5714
+#line 5720
         float3 to_light_7;
 
-#line 5714
+#line 5720
         float reach_2;
 
-#line 5714
+#line 5720
         if(_S296)
         {
 
-#line 5714
+#line 5720
             to_light_7 = normalize((float4((&_S294)->direction_0) ).xyz);
 
-#line 5714
+#line 5720
             reach_2 = 1.0f;
 
-#line 5714
+#line 5720
         }
         else
         {
@@ -4285,30 +4288,30 @@ struct pixelInput_0
             if(_S295 == 3U)
             {
 
-#line 5719
+#line 5725
                 float4 _S297 = float4((&_S294)->position_0) ;
 
-#line 5727
+#line 5733
                 float3 offset_2 = _S297.xyz - _S265.world_position_15;
                 float distance_3 = length(offset_2);
 
                 float _S298 = range_window_0(distance_3, _S297.w);
 
-#line 5730
+#line 5736
                 to_light_7 = offset_2 / float3(max(distance_3, 9.99999997475242708e-07f)) ;
 
-#line 5730
+#line 5736
                 reach_2 = _S298;
 
-#line 5719
+#line 5725
             }
             else
             {
 
-#line 5719
+#line 5725
                 float4 _S299 = float4((&_S294)->position_0) ;
 
-#line 5734
+#line 5740
                 float3 offset_3 = _S299.xyz - _S265.world_position_15;
                 float distance_4 = length(offset_3);
                 float3 to_light_8 = offset_3 / float3(max(distance_4, 9.99999997475242708e-07f)) ;
@@ -4316,222 +4319,226 @@ struct pixelInput_0
                 if(_S295 == 2U)
                 {
 
-#line 5738
+#line 5744
                     float4 _S300 = float4((&_S294)->direction_0) ;
 
-#line 5738
+#line 5744
                     reach_2 = reach_3 * spot_cone_0(to_light_8, _S300.xyz, _S300.w, (&_S294)->cos_inner_0);
 
-#line 5738
+#line 5744
                 }
                 else
                 {
 
-#line 5738
+#line 5744
                     reach_2 = reach_3;
 
-#line 5738
+#line 5744
                 }
 
-#line 5738
+#line 5744
                 to_light_7 = to_light_8;
 
-#line 5719
+#line 5725
             }
 
-#line 5714
+#line 5720
         }
 
-#line 5747
+#line 5753
         float n_dot_l_5 = dot(_S275, to_light_7);
 
-#line 5747
+#line 5753
         float3 specular_0;
 
-#line 5747
+#line 5753
         float diffuse_0;
 
 
         if(_S295 == 3U)
         {
 
-#line 5760
+#line 5766
             thread array<float3, int(4)> corners_2;
 
-#line 5760
+#line 5766
             rect_corners_0(&_S294, _S265.world_position_15, &corners_2);
 
             matrix<float,int(3),int(3)>  to_local_0 = ltc_shading_frame_0(_S275, to_eye_1, _S283);
 
-#line 5762
+#line 5768
             thread array<float3, int(4)> _S301 = corners_2;
 
-#line 5762
+#line 5768
             float _S302 = ltc_irradiance_0(to_local_0, &_S301);
 
-#line 5762
-            thread TableTap_0 _S303 = _S287;
-
-#line 5762
-            float4 _S304 = ltc_at_0(&_S303, &kernelContext_37);
-
-            matrix<float,int(3),int(3)>  _S305 = (((to_local_0) * (ltc_transform_0(_S304))));
-
-#line 5764
-            thread array<float3, int(4)> _S306 = corners_2;
-
-#line 5764
-            float _S307 = ltc_irradiance_0(_S305, &_S306);
-            float3 _S308 = float3(_S307)  * _S292;
-
-#line 5765
-            diffuse_0 = _S302;
-
-#line 5765
-            specular_0 = _S308;
-
-#line 5750
-        }
-        else
-        {
+            if(fill_0)
+            {
 
 #line 5770
-            float _S309 = max(n_dot_l_5, 0.0f);
+                specular_0 = _S293;
 
-#line 5777
-            float3 half_vector_0 = normalize(to_light_7 + to_eye_1);
+#line 5770
+            }
+            else
+            {
 
-#line 5785
-            float3 specular_1 = ggx_lobe_0(_S281, f0_2, _S309, _S283, max(dot(_S275, half_vector_0), 0.0f), max(dot(to_eye_1, half_vector_0), 0.0f)) * float3(_S309) ;
+#line 5770
+                thread TableTap_0 _S303 = _S287;
 
-#line 5785
-            diffuse_0 = _S309;
+#line 5770
+                float4 _S304 = ltc_at_0(&_S303, &kernelContext_37);
 
-#line 5785
-            specular_0 = specular_1;
+#line 5776
+                matrix<float,int(3),int(3)>  _S305 = (((to_local_0) * (ltc_transform_0(_S304))));
 
-#line 5750
-        }
+#line 5776
+                thread array<float3, int(4)> _S306 = corners_2;
 
-#line 5750
-        float3 specular_2;
+#line 5776
+                float _S307 = ltc_irradiance_0(_S305, &_S306);
 
-#line 5793
-        if((((&_S294)->flags_3) & 1U) != 0U)
-        {
+#line 5776
+                specular_0 = float3(_S307)  * _S292;
 
-#line 5793
-            specular_2 = _S293;
+#line 5770
+            }
 
-#line 5793
+#line 5770
+            diffuse_0 = _S302;
+
+#line 5756
         }
         else
         {
 
-#line 5793
-            specular_2 = specular_0;
+#line 5783
+            float _S308 = max(n_dot_l_5, 0.0f);
 
-#line 5793
+            if(fill_0)
+            {
+
+#line 5785
+                specular_0 = _S293;
+
+#line 5785
+            }
+            else
+            {
+
+#line 5796
+                float3 half_vector_0 = normalize(to_light_7 + to_eye_1);
+
+#line 5796
+                specular_0 = ggx_lobe_0(_S281, f0_2, _S308, _S283, max(dot(_S275, half_vector_0), 0.0f), max(dot(to_eye_1, half_vector_0), 0.0f)) * float3(_S308) ;
+
+#line 5785
+            }
+
+#line 5785
+            diffuse_0 = _S308;
+
+#line 5756
         }
 
-#line 5793
+#line 5756
         float reach_4;
 
-#line 5811
+#line 5821
         if(_S296)
         {
             thread uint sun_cascade_0;
             thread float sun_fade_0;
 
-#line 5814
-            float _S310 = sun_visibility_0(_S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &sun_cascade_0, &sun_fade_0, &kernelContext_37);
+#line 5824
+            float _S309 = sun_visibility_0(_S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &sun_cascade_0, &sun_fade_0, &kernelContext_37);
 
-#line 5814
-            float _S311 = contact_at_0(_S284, &kernelContext_37);
+#line 5824
+            float _S310 = contact_at_0(_S284, &kernelContext_37);
 
-#line 5823
-            float _S312 = _S310 * _S311;
+#line 5833
+            float _S311 = _S309 * _S310;
 
-#line 5823
+#line 5833
             sun_cascade_tint_0 = cascade_tint_0(sun_cascade_0, sun_fade_0);
 
-#line 5823
-            reach_4 = _S312;
+#line 5833
+            reach_4 = _S311;
 
-#line 5811
+#line 5821
         }
         else
         {
 
-#line 5828
+#line 5838
             if(_S295 == 1U)
             {
 
-#line 5828
-                uint _S313 = (&_S294)->shadow_tile_0;
+#line 5838
+                uint _S312 = (&_S294)->shadow_tile_0;
 
-#line 5840
+#line 5850
                 if(((&_S294)->shadow_tile_0) <= 8U)
                 {
 
-#line 5840
-                    float _S314 = point_visibility_0(&_S294, _S313, _S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &kernelContext_37);
+#line 5850
+                    float _S313 = point_visibility_0(&_S294, _S312, _S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &kernelContext_37);
 
-#line 5840
-                    reach_4 = reach_2 * _S314;
+#line 5850
+                    reach_4 = reach_2 * _S313;
 
-#line 5840
+#line 5850
                 }
                 else
                 {
 
-#line 5840
+#line 5850
                     reach_4 = reach_2;
 
-#line 5840
+#line 5850
                 }
 
-#line 5828
+#line 5838
             }
             else
             {
 
-#line 5828
-                uint _S315 = (&_S294)->shadow_tile_0;
+#line 5838
+                uint _S314 = (&_S294)->shadow_tile_0;
 
-#line 5846
+#line 5856
                 if(((&_S294)->shadow_tile_0) < 14U)
                 {
 
-#line 5846
-                    float _S316 = spot_visibility_0(&_S294, _S315, _S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &kernelContext_37);
+#line 5856
+                    float _S315 = spot_visibility_0(&_S294, _S314, _S265.world_position_15, to_light_7, n_dot_l_5, _S277, _S284, &kernelContext_37);
 
-#line 5846
-                    reach_4 = reach_2 * _S316;
+#line 5856
+                    reach_4 = reach_2 * _S315;
 
-#line 5846
+#line 5856
                 }
                 else
                 {
 
-#line 5846
+#line 5856
                     reach_4 = reach_2;
 
-#line 5846
+#line 5856
                 }
 
-#line 5828
+#line 5838
             }
 
-#line 5811
+#line 5821
         }
 
-#line 5854
-        float3 _S317 = (float4((&_S294)->color_0) ).xyz;
+#line 5864
+        float3 _S316 = (float4((&_S294)->color_0) ).xyz;
 
-#line 5854
-        float3 direct_1 = direct_0 + _S317 * float3((diffuse_0 * reach_4)) ;
-        float3 gloss_1 = gloss_0 + _S317 * (specular_2 * float3(reach_4) );
+#line 5864
+        float3 direct_1 = direct_0 + _S316 * float3((diffuse_0 * reach_4)) ;
+        float3 gloss_1 = gloss_0 + _S316 * (specular_0 * float3(reach_4) );
 
 #line 5705
         slot_0 = slot_0 + 1U;
@@ -4545,39 +4552,39 @@ struct pixelInput_0
 #line 5705
     }
 
-#line 5869
+#line 5879
     float3 gloss_2 = gloss_0 * specular_compensation_0(f0_2, _S290 + _S291);
 
-#line 5869
-    float4 _S318 = occlusion_at_0(_S284, &kernelContext_37);
+#line 5879
+    float4 _S317 = occlusion_at_0(_S284, &kernelContext_37);
 
-#line 5888
-    float occluded_0 = _S318.x;
+#line 5898
+    float occluded_0 = _S317.x;
 
-#line 5897
-    float3 bent_normal_0 = bent_normal_at_0(_S318, _S275);
+#line 5907
+    float3 bent_normal_0 = bent_normal_at_0(_S317, _S275);
 
-#line 5920
-    float3 _S319 = frame_5->ambient_0.xyz;
+#line 5930
+    float3 _S318 = frame_5->ambient_0.xyz;
 
-#line 5920
-    float3 _S320 = sky_irradiance_0(bent_normal_0, &kernelContext_37);
+#line 5930
+    float3 _S319 = sky_irradiance_0(bent_normal_0, &kernelContext_37);
 
-#line 5920
-    float3 _S321 = _S319 + _S320;
+#line 5930
+    float3 _S320 = _S318 + _S319;
 
-#line 5920
-    float3 _S322 = probe_irradiance_0(_S265.world_position_15, bent_normal_0, &kernelContext_37);
+#line 5930
+    float3 _S321 = probe_irradiance_0(_S265.world_position_15, bent_normal_0, &kernelContext_37);
 
-#line 5976
-    float3 lit_1 = diffuse_albedo_0 * ((_S321 + _S322) * (multi_bounce_occlusion_0(occluded_0, diffuse_albedo_0) * float3(_S278.x) ) + direct_0) + gloss_2;
+#line 5986
+    float3 lit_1 = diffuse_albedo_0 * ((_S320 + _S321) * (multi_bounce_occlusion_0(occluded_0, diffuse_albedo_0) * float3(_S278.x) ) + direct_0) + gloss_2;
 
-#line 5976
-    float3 _S323 = emissive_of_0(&_S268);
+#line 5986
+    float3 _S322 = emissive_of_0(&_S268);
 
-#line 6018
+#line 6028
     float fog_survives_0 = fog_transmittance_0(fog_optical_depth_0((&kernelContext_37)->frame_0->fog_params_0.x, (&kernelContext_37)->frame_0->fog_params_0.y, (&kernelContext_37)->frame_0->camera_position_0.y - (&kernelContext_37)->frame_0->fog_params_0.z, _S265.world_position_15.y - (&kernelContext_37)->frame_0->fog_params_0.z, length((&kernelContext_37)->frame_0->camera_position_0.xyz - _S265.world_position_15)));
-    float3 lit_2 = (lit_1 + _S323 * _S279.xyz) * float3(fog_survives_0)  + (&kernelContext_37)->frame_0->fog_color_0.xyz * float3((1.0f - fog_survives_0)) ;
+    float3 lit_2 = (lit_1 + _S322 * _S279.xyz) * float3(fog_survives_0)  + (&kernelContext_37)->frame_0->fog_color_0.xyz * float3((1.0f - fog_survives_0)) ;
 
     thread FragmentOutput_0 output_2;
 
@@ -4590,23 +4597,23 @@ struct pixelInput_0
 
     (&output_2)->motion_0 = motion_1;
 
-#line 6038
+#line 6048
     if((frame_5->ambient_0.w) <= -0.5f)
     {
         (&output_2)->lit_0 = float4(lit_2 * sun_cascade_tint_0, _S270);
 
-#line 6047
+#line 6057
         (&output_2)->reflectivity_0 = float4(0.0f, 0.0f, 0.0f, 1.0f);
 
-#line 6038
+#line 6048
     }
 
-#line 6049
+#line 6059
     return output_2;
 }
 
 
-#line 6049
+#line 6059
 struct pixelInput_1
 {
     float3 world_position_16 [[user(CRCBL_WORLD_POSITION)]];
@@ -4621,115 +4628,115 @@ struct pixelInput_1
 };
 
 
-#line 6082
-[[fragment]] void depthMaskedFragmentMain(pixelInput_1 _S324 [[stage_in]], float4 position_6 [[position]], DrawConstants_0 constant* draw_4 [[buffer(3)]], uint device* visible_instances_4 [[buffer(5)]], GpuInstance_natural_0 device* instances_4 [[buffer(2)]], GpuMesh_0 device* meshes_4 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_7 [[buffer(0)]], uint device* vertices_4 [[buffer(1)]], texture2d<float, access::sample> ambient_occlusion_4 [[texture(2)]], GpuMaterial_natural_0 device* materials_4 [[buffer(6)]], texture2d_array<float, access::sample> base_color_textures_4 [[texture(0)]], sampler base_color_sampler_4 [[sampler(0)]], texture2d_array<float, access::sample> normal_textures_4 [[texture(4)]], texture2d_array<float, access::sample> mro_textures_4 [[texture(8)]], texture2d_array<float, access::sample> emissive_textures_4 [[texture(9)]], uint device* cluster_lights_4 [[buffer(8)]], texture2d<float, access::sample> specular_dfg_4 [[texture(3)]], GpuLight_natural_0 device* lights_4 [[buffer(7)]], texture2d<float, access::sample> ltc_matrix_4 [[texture(5)]], depth2d<float, access::sample> shadow_atlas_4 [[texture(1)]], sampler shadow_sampler_4 [[sampler(1)]], texture2d<float, access::sample> contact_shadow_4 [[texture(6)]], GpuProbe_natural_0 device* probes_4 [[buffer(9)]], texture2d_array<float, access::sample> probe_visibility_4 [[texture(7)]])
+#line 6092
+[[fragment]] void depthMaskedFragmentMain(pixelInput_1 _S323 [[stage_in]], float4 position_6 [[position]], DrawConstants_0 constant* draw_4 [[buffer(3)]], uint device* visible_instances_4 [[buffer(5)]], GpuInstance_natural_0 device* instances_4 [[buffer(2)]], GpuMesh_0 device* meshes_4 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_7 [[buffer(0)]], uint device* vertices_4 [[buffer(1)]], texture2d<float, access::sample> ambient_occlusion_4 [[texture(2)]], GpuMaterial_natural_0 device* materials_4 [[buffer(6)]], texture2d_array<float, access::sample> base_color_textures_4 [[texture(0)]], sampler base_color_sampler_4 [[sampler(0)]], texture2d_array<float, access::sample> normal_textures_4 [[texture(4)]], texture2d_array<float, access::sample> mro_textures_4 [[texture(8)]], texture2d_array<float, access::sample> emissive_textures_4 [[texture(9)]], uint device* cluster_lights_4 [[buffer(8)]], texture2d<float, access::sample> specular_dfg_4 [[texture(3)]], GpuLight_natural_0 device* lights_4 [[buffer(7)]], texture2d<float, access::sample> ltc_matrix_4 [[texture(5)]], depth2d<float, access::sample> shadow_atlas_4 [[texture(1)]], sampler shadow_sampler_4 [[sampler(1)]], texture2d<float, access::sample> contact_shadow_4 [[texture(6)]], GpuProbe_natural_0 device* probes_4 [[buffer(9)]], texture2d_array<float, access::sample> probe_visibility_4 [[texture(7)]])
 {
 
-#line 6082
+#line 6092
     thread KernelContext_0 kernelContext_38;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->draw_0 = draw_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->visible_instances_0 = visible_instances_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->instances_0 = instances_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->meshes_0 = meshes_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->frame_0 = frame_7;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->vertices_0 = vertices_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->ambient_occlusion_0 = ambient_occlusion_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->materials_0 = materials_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->base_color_textures_0 = base_color_textures_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->base_color_sampler_0 = base_color_sampler_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->normal_textures_0 = normal_textures_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->mro_textures_0 = mro_textures_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->emissive_textures_0 = emissive_textures_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->cluster_lights_0 = cluster_lights_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->specular_dfg_0 = specular_dfg_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->lights_0 = lights_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->ltc_matrix_0 = ltc_matrix_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->shadow_atlas_0 = shadow_atlas_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->shadow_sampler_0 = shadow_sampler_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->contact_shadow_0 = contact_shadow_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->probes_0 = probes_4;
 
-#line 6082
+#line 6092
     (&kernelContext_38)->probe_visibility_0 = probe_visibility_4;
 
-#line 6082
-    thread GpuMaterial_natural_0 _S325 = materials_4[_S324.material_14];
+#line 6092
+    thread GpuMaterial_natural_0 _S324 = materials_4[_S323.material_14];
 
-#line 6082
+#line 6092
     float2 uv_8;
 
-#line 6091
-    if(((&_S325)->tiling_0) == 1U)
+#line 6101
+    if(((&_S324)->tiling_0) == 1U)
     {
 
-#line 6091
-        uv_8 = physical_tile_uv_0(_S324.world_position_16, normalize(_S324.world_normal_2), (&_S325)->tile_metres_0);
+#line 6101
+        uv_8 = physical_tile_uv_0(_S323.world_position_16, normalize(_S323.world_normal_2), (&_S324)->tile_metres_0);
 
-#line 6091
+#line 6101
     }
     else
     {
 
-#line 6091
-        uv_8 = _S324.uv_7;
+#line 6101
+        uv_8 = _S323.uv_7;
 
-#line 6091
+#line 6101
     }
 
-#line 6091
-    float4 _S326 = base_color_texel_0(&_S325, uv_8, &kernelContext_38);
+#line 6101
+    float4 _S325 = base_color_texel_0(&_S324, uv_8, &kernelContext_38);
 
-#line 6091
-    bool _S327 = alpha_masked_0(&_S325, _S324.color_4.w * (float4((&_S325)->base_color_0) ).w * _S326.w);
+#line 6101
+    bool _S326 = alpha_masked_0(&_S324, _S323.color_4.w * (float4((&_S324)->base_color_0) ).w * _S325.w);
 
-#line 6100
-    if(_S327)
+#line 6110
+    if(_S326)
     {
         discard_fragment();
 
-#line 6100
+#line 6110
     }
 
 
@@ -4738,7 +4745,7 @@ struct pixelInput_1
 }
 
 
-#line 6134
+#line 6144
 struct RsmOutput_0
 {
     float4 albedo_2 [[color(0)]];
@@ -4747,7 +4754,7 @@ struct RsmOutput_0
 };
 
 
-#line 6134
+#line 6144
 struct pixelInput_2
 {
     float3 world_position_17 [[user(CRCBL_WORLD_POSITION)]];
@@ -4762,153 +4769,153 @@ struct pixelInput_2
 };
 
 
-#line 6177
-[[fragment]] RsmOutput_0 rsmFragmentMain(pixelInput_2 _S328 [[stage_in]], bool front_facing_2 [[front_facing]], float4 position_7 [[position]], DrawConstants_0 constant* draw_5 [[buffer(3)]], uint device* visible_instances_5 [[buffer(5)]], GpuInstance_natural_0 device* instances_5 [[buffer(2)]], GpuMesh_0 device* meshes_5 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_9 [[buffer(0)]], uint device* vertices_5 [[buffer(1)]], texture2d<float, access::sample> ambient_occlusion_5 [[texture(2)]], GpuMaterial_natural_0 device* materials_5 [[buffer(6)]], texture2d_array<float, access::sample> base_color_textures_5 [[texture(0)]], sampler base_color_sampler_5 [[sampler(0)]], texture2d_array<float, access::sample> normal_textures_5 [[texture(4)]], texture2d_array<float, access::sample> mro_textures_5 [[texture(8)]], texture2d_array<float, access::sample> emissive_textures_5 [[texture(9)]], uint device* cluster_lights_5 [[buffer(8)]], texture2d<float, access::sample> specular_dfg_5 [[texture(3)]], GpuLight_natural_0 device* lights_5 [[buffer(7)]], texture2d<float, access::sample> ltc_matrix_5 [[texture(5)]], depth2d<float, access::sample> shadow_atlas_5 [[texture(1)]], sampler shadow_sampler_5 [[sampler(1)]], texture2d<float, access::sample> contact_shadow_5 [[texture(6)]], GpuProbe_natural_0 device* probes_5 [[buffer(9)]], texture2d_array<float, access::sample> probe_visibility_5 [[texture(7)]])
+#line 6187
+[[fragment]] RsmOutput_0 rsmFragmentMain(pixelInput_2 _S327 [[stage_in]], bool front_facing_2 [[front_facing]], float4 position_7 [[position]], DrawConstants_0 constant* draw_5 [[buffer(3)]], uint device* visible_instances_5 [[buffer(5)]], GpuInstance_natural_0 device* instances_5 [[buffer(2)]], GpuMesh_0 device* meshes_5 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_9 [[buffer(0)]], uint device* vertices_5 [[buffer(1)]], texture2d<float, access::sample> ambient_occlusion_5 [[texture(2)]], GpuMaterial_natural_0 device* materials_5 [[buffer(6)]], texture2d_array<float, access::sample> base_color_textures_5 [[texture(0)]], sampler base_color_sampler_5 [[sampler(0)]], texture2d_array<float, access::sample> normal_textures_5 [[texture(4)]], texture2d_array<float, access::sample> mro_textures_5 [[texture(8)]], texture2d_array<float, access::sample> emissive_textures_5 [[texture(9)]], uint device* cluster_lights_5 [[buffer(8)]], texture2d<float, access::sample> specular_dfg_5 [[texture(3)]], GpuLight_natural_0 device* lights_5 [[buffer(7)]], texture2d<float, access::sample> ltc_matrix_5 [[texture(5)]], depth2d<float, access::sample> shadow_atlas_5 [[texture(1)]], sampler shadow_sampler_5 [[sampler(1)]], texture2d<float, access::sample> contact_shadow_5 [[texture(6)]], GpuProbe_natural_0 device* probes_5 [[buffer(9)]], texture2d_array<float, access::sample> probe_visibility_5 [[texture(7)]])
 {
 
-#line 6177
+#line 6187
     thread KernelContext_0 kernelContext_39;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->draw_0 = draw_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->visible_instances_0 = visible_instances_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->instances_0 = instances_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->meshes_0 = meshes_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->frame_0 = frame_9;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->vertices_0 = vertices_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->ambient_occlusion_0 = ambient_occlusion_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->materials_0 = materials_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->base_color_textures_0 = base_color_textures_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->base_color_sampler_0 = base_color_sampler_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->normal_textures_0 = normal_textures_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->mro_textures_0 = mro_textures_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->emissive_textures_0 = emissive_textures_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->cluster_lights_0 = cluster_lights_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->specular_dfg_0 = specular_dfg_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->lights_0 = lights_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->ltc_matrix_0 = ltc_matrix_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->shadow_atlas_0 = shadow_atlas_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->shadow_sampler_0 = shadow_sampler_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->contact_shadow_0 = contact_shadow_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->probes_0 = probes_5;
 
-#line 6177
+#line 6187
     (&kernelContext_39)->probe_visibility_0 = probe_visibility_5;
 
-#line 6182
-    float3 vertex_normal_1 = normalize(_S328.world_normal_3);
+#line 6192
+    float3 vertex_normal_1 = normalize(_S327.world_normal_3);
 
-#line 6182
-    thread GpuMaterial_natural_0 _S329 = materials_5[_S328.material_15];
+#line 6192
+    thread GpuMaterial_natural_0 _S328 = materials_5[_S327.material_15];
 
-#line 6182
+#line 6192
     float2 uv_10;
 
-#line 6189
-    if(((&_S329)->tiling_0) == 1U)
+#line 6199
+    if(((&_S328)->tiling_0) == 1U)
     {
 
-#line 6189
-        uv_10 = physical_tile_uv_0(_S328.world_position_17, vertex_normal_1, (&_S329)->tile_metres_0);
+#line 6199
+        uv_10 = physical_tile_uv_0(_S327.world_position_17, vertex_normal_1, (&_S328)->tile_metres_0);
 
-#line 6189
+#line 6199
     }
     else
     {
 
-#line 6189
-        uv_10 = _S328.uv_9;
+#line 6199
+        uv_10 = _S327.uv_9;
 
-#line 6189
+#line 6199
     }
 
-#line 6189
-    float4 _S330 = base_color_texel_0(&_S329, uv_10, &kernelContext_39);
+#line 6199
+    float4 _S329 = base_color_texel_0(&_S328, uv_10, &kernelContext_39);
 
-#line 6194
-    float4 albedo_3 = _S328.color_5 * float4((&_S329)->base_color_0)  * _S330;
+#line 6204
+    float4 albedo_3 = _S327.color_5 * float4((&_S328)->base_color_0)  * _S329;
 
-#line 6194
-    bool _S331 = alpha_masked_0(&_S329, albedo_3.w);
+#line 6204
+    bool _S330 = alpha_masked_0(&_S328, albedo_3.w);
 
-#line 6200
-    if(_S331)
+#line 6210
+    if(_S330)
     {
         discard_fragment();
 
-#line 6200
+#line 6210
     }
 
-#line 6205
+#line 6215
     thread RsmOutput_0 written_0;
 
-#line 6215
-    float3 _S332 = albedo_3.xyz;
+#line 6225
+    float3 _S331 = albedo_3.xyz;
 
-#line 6215
-    float4 _S333 = mro_texel_0(&_S329, uv_10, &kernelContext_39);
+#line 6225
+    float4 _S332 = mro_texel_0(&_S328, uv_10, &kernelContext_39);
 
-#line 6215
-    float _S334 = metallic_of_0(&_S329, _S333);
+#line 6225
+    float _S333 = metallic_of_0(&_S328, _S332);
 
-#line 6214
-    (&written_0)->albedo_2 = float4(_S332 * float3((1.0f - _S334)) , 1.0f);
+#line 6224
+    (&written_0)->albedo_2 = float4(_S331 * float3((1.0f - _S333)) , 1.0f);
 
-#line 6214
-    float3 _S335 = double_sided_normal_0(&_S329, vertex_normal_1, front_facing_2);
+#line 6224
+    float3 _S334 = double_sided_normal_0(&_S328, vertex_normal_1, front_facing_2);
 
-#line 6214
-    float3 _S336 = float3(0.5f) ;
+#line 6224
+    float3 _S335 = float3(0.5f) ;
 
-#line 6221
-    (&written_0)->normal_14 = float4(_S335 * _S336 + _S336, 1.0f);
+#line 6231
+    (&written_0)->normal_14 = float4(_S334 * _S335 + _S335, 1.0f);
 
-    (&written_0)->world_0 = float4(_S328.world_position_17, 1.0f);
+    (&written_0)->world_0 = float4(_S327.world_position_17, 1.0f);
     return written_0;
 }
 
 
-#line 6224
+#line 6234
 struct vertexMain_Result_0
 {
     float4 position_8 [[position]];
@@ -4924,95 +4931,95 @@ struct vertexMain_Result_0
 };
 
 
-#line 6224
+#line 6234
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_8 [[vertex_id]], uint instance_id_1 [[instance_id]], DrawConstants_0 constant* draw_6 [[buffer(3)]], uint device* visible_instances_6 [[buffer(5)]], GpuInstance_natural_0 device* instances_6 [[buffer(2)]], GpuMesh_0 device* meshes_6 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_11 [[buffer(0)]], uint device* vertices_6 [[buffer(1)]], texture2d<float, access::sample> ambient_occlusion_6 [[texture(2)]], GpuMaterial_natural_0 device* materials_6 [[buffer(6)]], texture2d_array<float, access::sample> base_color_textures_6 [[texture(0)]], sampler base_color_sampler_6 [[sampler(0)]], texture2d_array<float, access::sample> normal_textures_6 [[texture(4)]], texture2d_array<float, access::sample> mro_textures_6 [[texture(8)]], texture2d_array<float, access::sample> emissive_textures_6 [[texture(9)]], uint device* cluster_lights_6 [[buffer(8)]], texture2d<float, access::sample> specular_dfg_6 [[texture(3)]], GpuLight_natural_0 device* lights_6 [[buffer(7)]], texture2d<float, access::sample> ltc_matrix_6 [[texture(5)]], depth2d<float, access::sample> shadow_atlas_6 [[texture(1)]], sampler shadow_sampler_6 [[sampler(1)]], texture2d<float, access::sample> contact_shadow_6 [[texture(6)]], GpuProbe_natural_0 device* probes_6 [[buffer(9)]], texture2d_array<float, access::sample> probe_visibility_6 [[texture(7)]])
 {
 
-#line 6224
+#line 6234
     thread KernelContext_0 kernelContext_40;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->draw_0 = draw_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->visible_instances_0 = visible_instances_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->instances_0 = instances_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->meshes_0 = meshes_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->frame_0 = frame_11;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->vertices_0 = vertices_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->ambient_occlusion_0 = ambient_occlusion_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->materials_0 = materials_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->base_color_textures_0 = base_color_textures_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->base_color_sampler_0 = base_color_sampler_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->normal_textures_0 = normal_textures_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->mro_textures_0 = mro_textures_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->emissive_textures_0 = emissive_textures_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->cluster_lights_0 = cluster_lights_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->specular_dfg_0 = specular_dfg_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->lights_0 = lights_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->ltc_matrix_0 = ltc_matrix_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->shadow_atlas_0 = shadow_atlas_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->shadow_sampler_0 = shadow_sampler_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->contact_shadow_0 = contact_shadow_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->probes_0 = probes_6;
 
-#line 6224
+#line 6234
     (&kernelContext_40)->probe_visibility_0 = probe_visibility_6;
 
-#line 6224
-    GpuInstance_natural_0 device* _S337 = instances_6+visible_instances_6[visible_instances_6[draw_6->start_at_0] + instance_id_1];
+#line 6234
+    GpuInstance_natural_0 device* _S336 = instances_6+visible_instances_6[visible_instances_6[draw_6->start_at_0] + instance_id_1];
 
 #line 2199
     GpuMesh_0 mesh_3 = meshes_6[draw_6->mesh_0];
 
 #line 2207
-    bool _S338 = ((_S337->flags_0) & 2U) != 0U;
+    bool _S337 = ((_S336->flags_0) & 2U) != 0U;
 
 #line 2207
     uint base_vertex_3;
-    if(_S338)
+    if(_S337)
     {
 
 #line 2208
-        base_vertex_3 = _S337->base_vertex_0;
+        base_vertex_3 = _S336->base_vertex_0;
 
 #line 2208
     }
@@ -5026,17 +5033,17 @@ struct vertexMain_Result_0
     }
 
 #line 2208
-    MeshVertex_0 _S339 = load_vertex_0(index_8 + base_vertex_3, float4(mesh_3.uv_scale_u_0, mesh_3.uv_scale_v_0, mesh_3.uv_offset_u_0, mesh_3.uv_offset_v_0), &kernelContext_40);
+    MeshVertex_0 _S338 = load_vertex_0(index_8 + base_vertex_3, float4(mesh_3.uv_scale_u_0, mesh_3.uv_scale_v_0, mesh_3.uv_offset_u_0, mesh_3.uv_offset_v_0), &kernelContext_40);
 
 #line 2208
     uint previous_base_0;
 
 #line 2221
-    if(_S338)
+    if(_S337)
     {
 
 #line 2221
-        previous_base_0 = _S337->previous_base_vertex_0;
+        previous_base_0 = _S336->previous_base_vertex_0;
 
 #line 2221
     }
@@ -5050,44 +5057,44 @@ struct vertexMain_Result_0
     }
 
 #line 2221
-    float3 _S340 = load_position_0(index_8 + previous_base_0, &kernelContext_40);
+    float3 _S339 = load_position_0(index_8 + previous_base_0, &kernelContext_40);
 
 #line 2221
-    matrix<float,int(4),int(4)>  _S341 = matrix<float,int(4),int(4)> (_S337->transform_0.data_0[int(0)][int(0)], _S337->transform_0.data_0[int(1)][int(0)], _S337->transform_0.data_0[int(2)][int(0)], _S337->transform_0.data_0[int(3)][int(0)], _S337->transform_0.data_0[int(0)][int(1)], _S337->transform_0.data_0[int(1)][int(1)], _S337->transform_0.data_0[int(2)][int(1)], _S337->transform_0.data_0[int(3)][int(1)], _S337->transform_0.data_0[int(0)][int(2)], _S337->transform_0.data_0[int(1)][int(2)], _S337->transform_0.data_0[int(2)][int(2)], _S337->transform_0.data_0[int(3)][int(2)], _S337->transform_0.data_0[int(0)][int(3)], _S337->transform_0.data_0[int(1)][int(3)], _S337->transform_0.data_0[int(2)][int(3)], _S337->transform_0.data_0[int(3)][int(3)]);
+    matrix<float,int(4),int(4)>  _S340 = matrix<float,int(4),int(4)> (_S336->transform_0.data_0[int(0)][int(0)], _S336->transform_0.data_0[int(1)][int(0)], _S336->transform_0.data_0[int(2)][int(0)], _S336->transform_0.data_0[int(3)][int(0)], _S336->transform_0.data_0[int(0)][int(1)], _S336->transform_0.data_0[int(1)][int(1)], _S336->transform_0.data_0[int(2)][int(1)], _S336->transform_0.data_0[int(3)][int(1)], _S336->transform_0.data_0[int(0)][int(2)], _S336->transform_0.data_0[int(1)][int(2)], _S336->transform_0.data_0[int(2)][int(2)], _S336->transform_0.data_0[int(3)][int(2)], _S336->transform_0.data_0[int(0)][int(3)], _S336->transform_0.data_0[int(1)][int(3)], _S336->transform_0.data_0[int(2)][int(3)], _S336->transform_0.data_0[int(3)][int(3)]);
 
 
 
-    float4 world_1 = (((float4(_S339.position_1, 1.0f)) * (_S341)));
+    float4 world_1 = (((float4(_S338.position_1, 1.0f)) * (_S340)));
 
     thread VertexOutput_0 output_3;
     (&output_3)->position_3 = (((world_1) * (matrix<float,int(4),int(4)> ((&kernelContext_40)->frame_0->view_proj_0.data_1[int(0)][int(0)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(1)][int(0)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(2)][int(0)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(3)][int(0)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(0)][int(1)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(1)][int(1)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(2)][int(1)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(3)][int(1)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(0)][int(2)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(1)][int(2)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(2)][int(2)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(3)][int(2)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(0)][int(3)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(1)][int(3)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(2)][int(3)], (&kernelContext_40)->frame_0->view_proj_0.data_1[int(3)][int(3)]))));
     (&output_3)->world_position_1 = world_1.xyz;
 
 #line 2235
-    matrix<float,int(3),int(3)>  _S342 = matrix<float,int(3),int(3)> (_S341[int(0)].xyz, _S341[int(1)].xyz, _S341[int(2)].xyz);
+    matrix<float,int(3),int(3)>  _S341 = matrix<float,int(3),int(3)> (_S340[int(0)].xyz, _S340[int(1)].xyz, _S340[int(2)].xyz);
 
 #line 2235
-    (&output_3)->world_normal_0 = (((_S339.basis_1.normal_0) * (normal_basis_0(_S342))));
+    (&output_3)->world_normal_0 = (((_S338.basis_1.normal_0) * (normal_basis_0(_S341))));
 
 #line 2241
-    (&output_3)->world_tangent_0 = (((_S339.basis_1.tangent_1) * (_S342)));
+    (&output_3)->world_tangent_0 = (((_S338.basis_1.tangent_1) * (_S341)));
 
 #line 2241
-    thread TangentFrame_0 _S343 = _S339.basis_1;
+    thread TangentFrame_0 _S342 = _S338.basis_1;
 
 #line 2241
-    uint _S344 = frame_word_0(mesh_3.flags_1, &_S343);
-    (&output_3)->frame_3 = _S344;
+    uint _S343 = frame_word_0(mesh_3.flags_1, &_S342);
+    (&output_3)->frame_3 = _S343;
 
 #line 2242
-    float4 _S345;
+    float4 _S344;
 
 #line 2249
     if(((&kernelContext_40)->frame_0->ambient_0.w) >= 1.5f)
     {
 
 #line 2249
-        _S345 = float4(0.44999998807907104f, 0.44999998807907104f, 0.47999998927116394f, 1.0f);
+        _S344 = float4(0.44999998807907104f, 0.44999998807907104f, 0.47999998927116394f, 1.0f);
 
 #line 2249
     }
@@ -5095,59 +5102,59 @@ struct vertexMain_Result_0
     {
 
 #line 2249
-        _S345 = _S339.color_1;
+        _S344 = _S338.color_1;
 
 #line 2249
     }
 
 #line 2248
-    (&output_3)->color_2 = _S345;
+    (&output_3)->color_2 = _S344;
 
 #line 2255
-    (&output_3)->material_6 = _S337->material_0;
-    (&output_3)->uv_1 = _S339.uv0_0;
+    (&output_3)->material_6 = _S336->material_0;
+    (&output_3)->uv_1 = _S338.uv0_0;
 
 #line 2262
     (&output_3)->clip_position_0 = (&output_3)->position_3;
-    (&output_3)->previous_clip_position_0 = ((((((float4(_S340, 1.0f)) * (matrix<float,int(4),int(4)> (_S337->previous_transform_0.data_0[int(0)][int(0)], _S337->previous_transform_0.data_0[int(1)][int(0)], _S337->previous_transform_0.data_0[int(2)][int(0)], _S337->previous_transform_0.data_0[int(3)][int(0)], _S337->previous_transform_0.data_0[int(0)][int(1)], _S337->previous_transform_0.data_0[int(1)][int(1)], _S337->previous_transform_0.data_0[int(2)][int(1)], _S337->previous_transform_0.data_0[int(3)][int(1)], _S337->previous_transform_0.data_0[int(0)][int(2)], _S337->previous_transform_0.data_0[int(1)][int(2)], _S337->previous_transform_0.data_0[int(2)][int(2)], _S337->previous_transform_0.data_0[int(3)][int(2)], _S337->previous_transform_0.data_0[int(0)][int(3)], _S337->previous_transform_0.data_0[int(1)][int(3)], _S337->previous_transform_0.data_0[int(2)][int(3)], _S337->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
+    (&output_3)->previous_clip_position_0 = ((((((float4(_S339, 1.0f)) * (matrix<float,int(4),int(4)> (_S336->previous_transform_0.data_0[int(0)][int(0)], _S336->previous_transform_0.data_0[int(1)][int(0)], _S336->previous_transform_0.data_0[int(2)][int(0)], _S336->previous_transform_0.data_0[int(3)][int(0)], _S336->previous_transform_0.data_0[int(0)][int(1)], _S336->previous_transform_0.data_0[int(1)][int(1)], _S336->previous_transform_0.data_0[int(2)][int(1)], _S336->previous_transform_0.data_0[int(3)][int(1)], _S336->previous_transform_0.data_0[int(0)][int(2)], _S336->previous_transform_0.data_0[int(1)][int(2)], _S336->previous_transform_0.data_0[int(2)][int(2)], _S336->previous_transform_0.data_0[int(3)][int(2)], _S336->previous_transform_0.data_0[int(0)][int(3)], _S336->previous_transform_0.data_0[int(1)][int(3)], _S336->previous_transform_0.data_0[int(2)][int(3)], _S336->previous_transform_0.data_0[int(3)][int(3)]))))) * (matrix<float,int(4),int(4)> ((&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(0)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(1)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(2)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(0)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(1)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(2)][int(3)], (&kernelContext_40)->frame_0->previous_view_proj_0.data_1[int(3)][int(3)]))));
 
 
-    VertexOutput_0 _S346 = output_3;
-
-#line 2266
-    thread vertexMain_Result_0 _S347;
+    VertexOutput_0 _S345 = output_3;
 
 #line 2266
-    (&_S347)->position_8 = _S346.position_3;
+    thread vertexMain_Result_0 _S346;
 
 #line 2266
-    (&_S347)->world_position_18 = _S346.world_position_1;
+    (&_S346)->position_8 = _S345.position_3;
 
 #line 2266
-    (&_S347)->world_normal_4 = _S346.world_normal_0;
+    (&_S346)->world_position_18 = _S345.world_position_1;
 
 #line 2266
-    (&_S347)->color_6 = _S346.color_2;
+    (&_S346)->world_normal_4 = _S345.world_normal_0;
 
 #line 2266
-    (&_S347)->material_16 = _S346.material_6;
+    (&_S346)->color_6 = _S345.color_2;
 
 #line 2266
-    (&_S347)->uv_11 = _S346.uv_1;
+    (&_S346)->material_16 = _S345.material_6;
 
 #line 2266
-    (&_S347)->clip_position_4 = _S346.clip_position_0;
+    (&_S346)->uv_11 = _S345.uv_1;
 
 #line 2266
-    (&_S347)->previous_clip_position_4 = _S346.previous_clip_position_0;
+    (&_S346)->clip_position_4 = _S345.clip_position_0;
 
 #line 2266
-    (&_S347)->world_tangent_4 = _S346.world_tangent_0;
+    (&_S346)->previous_clip_position_4 = _S345.previous_clip_position_0;
 
 #line 2266
-    (&_S347)->frame_10 = _S346.frame_3;
+    (&_S346)->world_tangent_4 = _S345.world_tangent_0;
 
 #line 2266
-    return _S347;
+    (&_S346)->frame_10 = _S345.frame_3;
+
+#line 2266
+    return _S346;
 }
 

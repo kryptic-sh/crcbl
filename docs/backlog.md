@@ -106,6 +106,14 @@ Initial measurements and harness findings:
   optimization claim. Profile the forward fragment light loop and the froxel
   occupancy/overflow produced by this scene before changing shader or grid
   policy.
+- Moving `mesh.slang`'s fill-light flag ahead of its discarded specular work is
+  supported on the reference MX550. Across two post-change `lights` runs,
+  `forward` measured 3.448–3.471 ms p50, down 9.3–11.6% from the baseline range,
+  and the pass-sum p50 measured 10.232–10.422 ms. Real-clock CPU frame intervals
+  measured 10.626–10.643 ms, down 3.9–4.0% from the final paired baseline. The
+  intervening `instances` control measured 2.685 ms in `forward` and 9.201 ms in
+  the pass sum, both inside its pre-change range, so the result is localized to
+  the intended light path rather than general run drift.
 - The first workspace test run observed
   `forward::tests::the_atlas_viewer_replaces_the_display_passes_and_the_count_follows`
   report 52 draws where it expected 53. The exact test passed twice in isolation
