@@ -7039,6 +7039,12 @@ pub(crate) mod tests {
     ///   negative one, and the point at which the bisect moves inside one
     ///   `.slang` file.
     ///
+    /// **The toy died, and the bisect finished in the pipeline**: measured
+    /// 2026-09-22 on the OS WARP, the null pixel shader is the trigger. One
+    /// colour target nothing writes beside `fragment: None` still removes the
+    /// device; `mesh_shader.slang`'s `fragmentMain` with zero render targets
+    /// draws. `docs/backlog.md` has the rest.
+    ///
     /// # What it asserts, and why the centre texel
     ///
     /// The mesh stage writes `SV_Position` and nothing else reaches the
@@ -7058,7 +7064,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
-    #[ignore = "known-red: a depth-only mesh pipeline removes the WARP device (docs/backlog.md)"]
+    #[ignore = "known-red: a mesh pipeline with no pixel shader removes the WARP device (docs/backlog.md)"]
     fn a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device() {
         // What the rasteriser must leave at the centre, taken from the toy
         // shader's own vertices rather than written here. The guards that make
@@ -7341,9 +7347,17 @@ pub(crate) mod tests {
     /// zero debug-layer errors, DRED reporting `0 command list(s) with recorded
     /// work`: `crcbl-render`'s exact signature, out of a test with no renderer
     /// in it. That is what `docs/notes/backends.md`'s "DEFERRED — dx12 mesh
-    /// shading: WARP claims it and dies, hardware works" record holds, and this
-    /// is the repro it names; `docs/backlog.md`'s entry of the same name keeps
-    /// the next step.
+    /// shading: WARP needs a pixel shader, one AMD driver culls everything"
+    /// record holds, and `docs/backlog.md`'s entry of the same name keeps what
+    /// is owed.
+    ///
+    /// **Both reds are now explained, and neither is this test's data.** On
+    /// WARP the trigger is `fragment: None` on a mesh pipeline: with
+    /// `mesh.slang`'s `depthMaskedFragmentMain` added as its pixel shader this
+    /// test passes there, every assertion. On an RX 7900 XTX (driver
+    /// 32.0.21036.18) it survives and draws nothing, because `taskMain`'s
+    /// frustum test rejects all three selected clusters whatever the planes
+    /// hold — the backlog entry lists what was varied.
     ///
     /// Its `#[ignore]` reason therefore names the **defect**, not a hardware
     /// requirement — but read it as documentation and nothing more, because
@@ -7400,7 +7414,7 @@ pub(crate) mod tests {
     /// All of it. This crate compiles on Windows alone and the development box
     /// is Linux.
     #[test]
-    #[ignore = "known-red: mesh_cluster.slang removes the WARP device (docs/backlog.md)"]
+    #[ignore = "known-red: no pixel shader removes the WARP device, and an RX 7900 XTX culls every cluster (docs/backlog.md)"]
     fn the_cluster_shaders_dag_descent_draws_the_cut_it_chose() {
         use crcbl_shaders::cluster_select::{CLUSTER_SELECT_STRIDE, ClusterSelect};
         use crcbl_shaders::cull::{

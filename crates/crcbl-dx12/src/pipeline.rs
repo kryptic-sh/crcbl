@@ -892,7 +892,9 @@ pub(crate) fn mesh(
     // mesh-shading record has the measurement: with this subobject present and
     // empty,
     // `a_depth_only_mesh_pipeline_draws_the_toy_triangle_on_this_device` still
-    // removes the device on run 32421732642, exactly as it did without it.
+    // removes the device on run 32421732642, exactly as it did without it. The
+    // null bytecode itself is the trigger — the same pipeline with a real pixel
+    // shader draws on WARP — and no stream layout can supply one.
     add(
         &mut stream,
         PixelShader(fragment_dxil.map(Dxil::bytecode).unwrap_or_default()),

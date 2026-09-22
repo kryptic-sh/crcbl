@@ -539,10 +539,32 @@ mesh path, and none on the raster path.
   question that (a) or (b) still has to answer for a single file. Not a fix on
   its own, and not taken.
 
-## DEFERRED — dx12 mesh shading: WARP claims it and dies, hardware works
+## DEFERRED — dx12 mesh shading: WARP needs a pixel shader, one AMD driver culls everything
 
 Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.
+
+**Answered 2026-09-22: WARP removes the device on a mesh pipeline with no pixel
+shader, and render targets have nothing to do with it.** On the OS WARP
+(`D3D12 UMD 10.0.26100.9278`), a mesh pipeline with `fragment: None` and one
+colour target nothing writes still removes the device, and so does one with no
+amplification stage; the same depth-only pipeline with a fragment stage and zero
+render targets draws, and `mesh_cluster.slang`'s own probe passes every
+assertion once it has a pixel shader. Everything below that narrows to "a
+depth-only mesh pipeline" is right about the shape and wrong about which half of
+it matters: the null pixel shader is the trigger. The three probes the "What is
+still not separated" list below asks for exist and all pass on WARP:
+`a_cleared_depth_attachment_copies_back_as_the_clear_with_no_pipeline`,
+`a_mesh_pipeline_with_a_fragment_stage_and_a_depth_attachment_draws_both` and
+`a_depth_only_raster_pipeline_draws_the_triangle_into_depth`.
+
+**And "hardware works" was one card's answer.** An RX 7900 XTX on driver
+32.0.21036.18 runs the same cluster probe and its amplification stage rejects
+every cluster by the frustum whatever the planes, the transform or the constant
+buffers hold, while WARP, given a pixel shader, draws it correctly. With the
+flags reported the renderer's mesh path drew empty frames on that card. So the
+flags stay unreported on every D3D12 adapter; `docs/backlog.md` has the
+measurements and the decision.
 
 **Deferred 2026-08-21, mid-investigation and one step from the answer.** Work on
 `crcbl-dx12` and `crcbl-mtl` is stopped by the owner's decision; see
@@ -1968,12 +1990,12 @@ it.
 
 **Two of the ten can be moved without new hardware**, and they are different in
 kind from each other. dx12's pair is the subject of "DEFERRED — dx12 mesh
-shading: WARP claims it and dies, hardware works". The occlusion four are one
-piece of work, not four: the verb, then the five backends, and all of it
-runnable here — they are parked because nothing wants the counts, not because
-this machine cannot reach them. The two remaining Metal rows are unprovable here
-whatever anyone writes; the honest reachable state on this machine is two rows,
-not zero.
+shading: WARP needs a pixel shader, one AMD driver culls everything". The
+occlusion four are one piece of work, not four: the verb, then the five
+backends, and all of it runnable here — they are parked because nothing wants
+the counts, not because this machine cannot reach them. The two remaining Metal
+rows are unprovable here whatever anyone writes; the honest reachable state on
+this machine is two rows, not zero.
 
 ### Cross-format image views were declined, and the seam now says a view keeps its image's format
 
