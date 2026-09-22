@@ -250,7 +250,11 @@ Initial measurements and harness findings:
   `froxel_of`. Trial the carried `input.clip_position.w`; require unchanged
   froxel/image observers because interpolation rounding can move a fragment on a
   logarithmic slice boundary, then measure the combined scene before keeping the
-  saved matrix-row product.
+  saved matrix-row product. The trial passed six native froxel observers and
+  four native point/fill-light image observers, but regressed `forward` p50 to
+  3.614–3.619 ms from the alternating baseline's 3.555–3.588 ms. Retain the
+  matrix-row expression: consuming the carried interpolant costs 0.7–1.8% on
+  this adapter despite doing less source-level arithmetic.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
