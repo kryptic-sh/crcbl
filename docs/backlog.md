@@ -220,6 +220,21 @@ Initial measurements and harness findings:
   wrapper still exited unsuccessfully after its three tests passed because
   `VK_LAYER_KHRONOS_validation` is not installed; rerun the suite with that
   layer before treating native validation as covered.
+- The next SSAO source audit found no smaller safe tap reduction. Its four
+  normal-reconstruction depth reads deliberately choose the nearer neighbour on
+  each axis; the two-derivative alternative crosses silhouettes and produces
+  dark rims. The other 32 reads are the four-slice horizon march identified in
+  "What screen-space AO left owed", where reducing them changes the bought
+  banding quality and an AO-specific depth hierarchy remains a separate render
+  pass. Leave SSAO unchanged until a quality-preserving tap strategy or that
+  larger hierarchy rung is chosen. The next bounded forward-shader trial is the
+  non-rectangle backface path: after `mesh.slang::fragmentMain` computes
+  `n_dot_l`, a point, spot or directional light with `n_dot_l <= 0` contributes
+  zero diffuse and its GGX result is multiplied by the same zero, yet the shader
+  still evaluates the lobe and later accumulation. Trial an early loop
+  continuation for those light kinds, retain rectangle lights because their
+  polygon can straddle the horizon even when its centre does not, and require
+  real-GPU image equality before timing it.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
