@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **dx12: game-owned DXIL built without explicit registers must be rebuilt.** A
+  D3D12 register is now the binding number in the set's register space (see the
+  Fixed entry below), so a shader that declares no `register(…)` — which `dxc`
+  numbers per class from zero, `t0`, `s0`, `b0`, `t1` — no longer matches its
+  root signature, and its pipeline is refused. Declare every resource as
+  `register(<class><binding>, space<set>)` beside its `[[vk::binding]]`, and a
+  push-constant block as `register(b0, space64)`
+  (`crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`).
 - **Grass rows carry a blade shape and clumping, and the grass buffers grew
   again**: `crcbl_render::grass::BladeType` has `shape` and `clumping`,
   `BladeLook` has `Blades`, and `GrassError` has `BladeLod`. The instance buffer
@@ -1883,6 +1891,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Recorder::pipelines_created`) and holds every layout to every container it
   serves. A bind-group layout whose array would run into a later binding's
   register is now refused at creation on dx12.
+
+- **dx12: a pipeline whose shaders declare registers its layout does not hold is
+  refused by name, not with a bare `E_INVALIDARG`.** `create_graphics_pipeline`,
+  `create_mesh_pipeline` and `create_compute_pipeline` now hold each stage's
+  DXIL resource table (its `PSV0` part) to the registers the pipeline layout
+  assigns before calling D3D12, and fail with `HalError::ShaderCompilation`
+  naming the pipeline, the entry point, each resource the shader declares that
+  the layout lacks or holds as another kind (class, register, space), and what
+  the layout has at that binding — for example "`scope lens` fragmentMain
+  declares CBV b0 space0; layout set 0 binding 0 (SampledImage) is t0 space0;
+  layout set 0 binding 2 (UniformBuffer) is b2 space0; shaders must declare
+  register(<class><binding>, space<set>), …". A shader may still declare a
+  subset of the layout. The table is read once per container at
+  `create_shader_module`; nothing is added per draw. A container with no `PSV0`
+  part is now refused at pipeline creation.
 
 - **dx12: GPU pass timers no longer drain the queue every frame.**
   `Device::query_results` recorded a `ResolveQueryData` of its own and waited on

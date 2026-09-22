@@ -268,6 +268,11 @@ pub(crate) struct BindGroupLayoutRecord {
     /// The union of every entry's visibility, which is what a root parameter
     /// takes.
     pub(crate) visibility: ShaderStages,
+    /// The entries as the caller declared them, which is what
+    /// [`registers::place_set`](crate::registers::place_set) places when a
+    /// pipeline layout names this one — the registers every stage's container
+    /// is held to at pipeline creation.
+    pub(crate) entries: Vec<BindGroupLayoutEntry>,
 }
 
 /// A bind group: its blocks, and the resources its descriptors point into.
@@ -541,6 +546,7 @@ pub(crate) fn plan_layout(
         roots,
         variable,
         visibility,
+        entries: desc.entries.to_vec(),
     };
     root::check_registers(&register_bindings(&record))?;
     Ok(record)

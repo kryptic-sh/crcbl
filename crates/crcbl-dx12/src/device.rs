@@ -3309,6 +3309,7 @@ impl Device for Dx12Device {
         }
         let mut state = self.state();
         let mut sets = Vec::with_capacity(desc.bind_group_layouts.len());
+        let mut placed = Vec::new();
         // Each set's registers are its binding numbers in the space its index
         // names, so no set's assignment depends on another's. See
         // `crate::binding`.
@@ -3321,10 +3322,26 @@ impl Device for Dx12Device {
             )?;
             let space = crate::root::space_of(index)?;
             sets.push((*handle, binding::ranges(record, space)));
+            placed.extend(crate::registers::place_set(
+                &record.entries,
+                space,
+                &self.inner.caps.limits,
+            ));
         }
         // `b0` in a space of its own, past every set's. See `crate::root`.
         let push = crate::root::plan_push_constants(desc.push_constants, &self.inner.caps)?;
-        let entry = pipeline::layout(&self.inner.raw, desc, &sets, push, self.inner.owner.id)?;
+        let registers = crate::registers::LayoutRegisters {
+            bindings: placed,
+            push_constants: push.map(|constants| (constants.space, constants.register)),
+        };
+        let entry = pipeline::layout(
+            &self.inner.raw,
+            desc,
+            &sets,
+            push,
+            registers,
+            self.inner.owner.id,
+        )?;
         if let Some(label) = desc.label {
             label_object(&entry.raw, label);
         }
@@ -13516,6 +13533,96 @@ pub(crate) mod tests {
         assert!(text.contains("dispatch_indirect"), "{text}");
 
         device.destroy_buffer(short);
+        probe.destroy(&device);
+    }
+
+    /// **A layout that puts a container's resources at other registers is
+    /// refused at `create_compute_pipeline`, naming both sides**, rather than
+    /// handed to `CreateComputePipelineState` for an `E_INVALIDARG` that names
+    /// neither.
+    ///
+    /// `compute_probe`'s container reads `b0`, `t1` and `u2`. The layout here
+    /// declares the same three bindings numbered 2, 0 and 1, so every register
+    /// moves. The probe's own layout, numbered as the source is, builds the same
+    /// pipeline in [`ComputeProbe::new`] first — so the refusal is the check
+    /// firing, not this backend refusing the module.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn a_layout_that_moves_a_containers_registers_is_refused_by_name() {
+        let (_instance, device) = open_device();
+        let probe = ComputeProbe::new(&device);
+        let module = device
+            .create_shader_module(&ShaderModuleDesc {
+                label: Some("compute_probe.slang"),
+                dxil: &crcbl_shaders::COMPUTE_PROBE.dxil_containers(),
+                ..ShaderModuleDesc::default()
+            })
+            .expect("the committed DXIL is accepted");
+        let storage = |binding, read_only| BindGroupLayoutEntry {
+            binding,
+            visibility: ShaderStages::COMPUTE,
+            kind: BindingKind::StorageBuffer {
+                read_only,
+                dynamic: false,
+                stride: size_of::<u32>() as u32,
+            },
+            count: 1,
+            flags: BindingFlags::empty(),
+        };
+        let set_layout = device
+            .create_bind_group_layout(&BindGroupLayoutDesc {
+                label: Some("moved probe"),
+                entries: &[
+                    storage(0, true),
+                    storage(1, false),
+                    BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: ShaderStages::COMPUTE,
+                        kind: BindingKind::UniformBuffer { dynamic: false },
+                        count: 1,
+                        flags: BindingFlags::empty(),
+                    },
+                ],
+            })
+            .expect("a layout D3D12 can express");
+        let pipeline_layout = device
+            .create_pipeline_layout(&PipelineLayoutDesc {
+                label: Some("moved probe"),
+                bind_group_layouts: &[set_layout],
+                push_constants: None,
+            })
+            .expect("a root signature with one descriptor table");
+
+        let error = device
+            .create_compute_pipeline(&ComputePipelineDesc {
+                label: Some("moved probe"),
+                layout: pipeline_layout,
+                compute: ShaderEntry {
+                    module,
+                    entry_point: PROBE_ENTRY,
+                },
+                workgroup_size: [crcbl_shaders::compute_probe::WORKGROUP_SIZE, 1, 1],
+            })
+            .expect_err("no register the container reads is one the layout declares");
+        let HalError::ShaderCompilation(text) = &error else {
+            panic!("a register disagreement is not {error:?}");
+        };
+        assert!(
+            text.contains(&format!(
+                "`moved probe` {PROBE_ENTRY} declares CBV b0 space0; layout set 0 binding 0 \
+                 (StorageBuffer) is t0 space0; layout set 0 binding 2 (UniformBuffer) is b2 \
+                 space0"
+            )),
+            "{text}"
+        );
+        assert!(
+            text.contains("register(<class><binding>, space<set>)"),
+            "{text}"
+        );
+
+        device.destroy_pipeline_layout(pipeline_layout);
+        device.destroy_bind_group_layout(set_layout);
+        device.destroy_shader_module(module);
         probe.destroy(&device);
     }
 

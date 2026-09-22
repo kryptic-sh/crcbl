@@ -401,6 +401,10 @@ mod root;
 // The renderer's layouts against the containers they serve; see the module.
 #[cfg(test)]
 mod renderer_registers;
+// Each stage's declared registers against its pipeline layout's, at pipeline
+// creation. Not Windows-only for the reason `root` is not.
+#[cfg(any(target_os = "windows", test))]
+mod registers;
 // Where each subobject of a pipeline state stream lands, in bytes. Not
 // Windows-only for the reason `present` below is not — it holds no `windows`
 // type — and that matters here as much as it does in `root`: a mesh pipeline is

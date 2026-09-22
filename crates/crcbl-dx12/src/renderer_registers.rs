@@ -12,65 +12,28 @@
 //! and each layout is assigned its registers by this crate's own rule and held
 //! to each container's `PSV0` resource table.
 //!
+//! The comparison is [`crate::registers`]', the one `crate::pipeline` refuses a
+//! pipeline on at creation. This runs it over every pipeline the renderer
+//! builds on every geometry path, so a renderer layout that would be refused on
+//! a device is a red test on any host first.
+//!
 //! Host-only, and therefore on every CI leg, rather than a Windows run away.
 
 use crcbl_hal::null::{NullInstance, PipelineRecord, Recorder};
 use crcbl_hal::{
-    BindGroupLayoutEntry, BindingFlags, BindingKind, DeviceCaps, DeviceDesc, Features, Format,
-    ImageViewType, Instance, Limits, PushConstantRange, QueueKind,
+    DeviceCaps, DeviceDesc, Features, Format, Instance, Limits, PushConstantRange, QueueKind,
 };
 
-use crate::dxil::{PsvResource, RegisterClass, psv_resources};
+use crate::dxil::psv_resources;
+use crate::registers::{self, LayoutRegisters};
 use crate::root;
 
-/// Where one layout binding lands, as this crate would put it in a root
-/// signature.
-#[derive(Clone, Copy, Debug)]
-struct Placed {
-    set: usize,
-    binding: u32,
-    kind: BindingKind,
-    class: RegisterClass,
-    space: u32,
-    register: u32,
-    /// `NumDescriptors`: the declared count, or `u32::MAX` for an unbounded
-    /// range.
-    declared: u32,
-}
-
-/// Every binding of every set of one pipeline layout, placed by the rule
-/// `crate::device`'s `create_pipeline_layout` runs, and the push-constant
-/// block's `(space, register)` if the layout declares one.
+/// Every binding of every set of one pipeline layout and its push-constant
+/// block, placed by the rule `crate::device`'s `create_pipeline_layout` runs.
 fn place(
-    sets: &[Vec<BindGroupLayoutEntry>],
+    sets: &[Vec<crcbl_hal::BindGroupLayoutEntry>],
     push_constants: Option<PushConstantRange>,
-) -> (Vec<Placed>, Option<(u32, u32)>) {
-    let mut placed = Vec::new();
-    for (set, entries) in sets.iter().enumerate() {
-        let bindings: Vec<root::Binding> = entries
-            .iter()
-            .map(|entry| root::Binding {
-                binding: entry.binding,
-                class: root::class_of(entry.kind),
-                declared: declared(entry),
-            })
-            .collect();
-        root::check_registers(&bindings)
-            .unwrap_or_else(|error| panic!("set {set} is a layout this backend refuses: {error}"));
-        let space = root::space_of(set).expect("every renderer layout has few sets");
-        let assigned = root::assign_registers(&bindings);
-        for ((entry, binding), register) in entries.iter().zip(&bindings).zip(assigned) {
-            placed.push(Placed {
-                set,
-                binding: entry.binding,
-                kind: entry.kind,
-                class: binding.class,
-                space,
-                register,
-                declared: binding.declared,
-            });
-        }
-    }
+) -> LayoutRegisters {
     let caps = DeviceCaps {
         features: Features::PUSH_CONSTANTS | Features::MESH_SHADER | Features::TASK_SHADER,
         limits: Limits {
@@ -78,102 +41,42 @@ fn place(
             ..Limits::desktop()
         },
     };
-    let push = root::plan_push_constants(push_constants, &caps)
+    let mut bindings = Vec::new();
+    for (set, entries) in sets.iter().enumerate() {
+        let space = root::space_of(set).expect("every renderer layout has few sets");
+        let placed = registers::place_set(entries, space, &caps.limits);
+        let reduced: Vec<root::Binding> = placed
+            .iter()
+            .map(|placed| root::Binding {
+                binding: placed.binding,
+                class: placed.class,
+                declared: placed.declared,
+            })
+            .collect();
+        root::check_registers(&reduced)
+            .unwrap_or_else(|error| panic!("set {set} is a layout this backend refuses: {error}"));
+        bindings.extend(placed);
+    }
+    let push_constants = root::plan_push_constants(push_constants, &caps)
         .expect("every renderer push-constant range is one D3D12 can express")
         .map(|constants| (constants.space, constants.register));
-    (placed, push)
-}
-
-/// A layout entry's `NumDescriptors`, as `crate::binding` declares it.
-fn declared(entry: &BindGroupLayoutEntry) -> u32 {
-    if entry.flags.contains(BindingFlags::VARIABLE_COUNT) {
-        u32::MAX
-    } else {
-        entry.count
-    }
-}
-
-/// Whether a binding of `kind` can stand where the shader declared a resource
-/// of `PSVResourceKind` `resource`.
-///
-/// The kinds are the container format's: 1 to 9 the texture dimensions, 11 a
-/// raw and 12 a structured buffer, 13 a `cbuffer`, 14 a sampler.
-fn accepts(kind: BindingKind, resource: u32) -> bool {
-    const TEXTURE_1D: u32 = 1;
-    const TEXTURE_2D: u32 = 2;
-    const TEXTURE_3D: u32 = 4;
-    const TEXTURE_CUBE: u32 = 5;
-    const TEXTURE_2D_ARRAY: u32 = 7;
-    const TEXTURE_CUBE_ARRAY: u32 = 9;
-    const RAW_BUFFER: u32 = 11;
-    const STRUCTURED_BUFFER: u32 = 12;
-    const CBUFFER: u32 = 13;
-    const SAMPLER: u32 = 14;
-    let dimension = |view_type| match view_type {
-        ImageViewType::D1 => TEXTURE_1D,
-        ImageViewType::D2 => TEXTURE_2D,
-        ImageViewType::D2Array => TEXTURE_2D_ARRAY,
-        ImageViewType::Cube => TEXTURE_CUBE,
-        ImageViewType::CubeArray => TEXTURE_CUBE_ARRAY,
-        ImageViewType::D3 => TEXTURE_3D,
-    };
-    match kind {
-        BindingKind::UniformBuffer { .. } => resource == CBUFFER,
-        BindingKind::StorageBuffer { .. } => {
-            resource == STRUCTURED_BUFFER || resource == RAW_BUFFER
-        }
-        BindingKind::SampledImage { view_type, .. }
-        | BindingKind::StorageImage { view_type, .. } => resource == dimension(view_type),
-        BindingKind::Sampler { .. } => resource == SAMPLER,
+    LayoutRegisters {
+        bindings,
+        push_constants,
     }
 }
 
 /// Every disagreement between one pipeline's layout and one stage's container,
-/// as sentences naming both sides.
+/// as sentences naming both sides — the comparison
+/// `crate::pipeline` refuses a pipeline on.
 fn disagreements(pipeline: &PipelineRecord, entry_point: &str, dxil: &[u8]) -> Vec<String> {
-    let (placed, push) = place(&pipeline.sets, pipeline.push_constants);
+    let layout = place(&pipeline.sets, pipeline.push_constants);
     let name = pipeline.label.as_deref().unwrap_or("<unlabelled>");
-    let mut found = Vec::new();
-    for resource in psv_resources(dxil) {
-        let PsvResource {
-            class,
-            space,
-            lower,
-            upper,
-            kind,
-        } = resource;
-        if class == RegisterClass::Cbv && push == Some((space, lower)) {
-            continue;
-        }
-        let Some(binding) = placed.iter().find(|placed| {
-            placed.class == class && placed.space == space && placed.register == lower
-        }) else {
-            found.push(format!(
-                "pipeline `{name}`, `{entry_point}`: the container reads {class:?} register \
-                 {lower} in space {space}, and the root signature puts no binding there"
-            ));
-            continue;
-        };
-        if let Some(kind) = kind
-            && !accepts(binding.kind, kind)
-        {
-            found.push(format!(
-                "pipeline `{name}`, `{entry_point}`: {class:?} register {lower} in space {space} is \
-                 PSVResourceKind {kind} in the container, and the root signature puts set {} \
-                 binding {} there, which is {:?}",
-                binding.set, binding.binding, binding.kind
-            ));
-        }
-        let extent = u64::from(upper) - u64::from(lower) + 1;
-        if binding.declared != u32::MAX && extent > u64::from(binding.declared) {
-            found.push(format!(
-                "pipeline `{name}`, `{entry_point}`: the container reads {extent} {class:?} \
-                 registers from {lower} in space {space}, and set {} binding {} declares {}",
-                binding.set, binding.binding, binding.declared
-            ));
-        }
-    }
-    found
+    layout
+        .disagreements(&psv_resources(dxil))
+        .into_iter()
+        .map(|found| format!("pipeline `{name}`, `{entry_point}` {found}"))
+        .collect()
 }
 
 /// A null device offering `features`, recording into `recorder`.

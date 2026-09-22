@@ -4515,6 +4515,27 @@ frame before, 2.61 ms after, 2.56 ms with timers off (means of three runs).
   covers two encoders writing disjoint queries of one set in one submission,
   which the resolve-by-run logic handles by design only.
 
+## dx12 register check at pipeline creation: what it left open (2026-09-22)
+
+`crcbl-dx12` now holds each stage's `PSV0` resource table to the pipeline
+layout's registers before `Create*PipelineState` (`crate::registers`,
+`Dxil::require_registers`), so EW-style game DXIL numbered per class is refused
+by name instead of with `E_INVALIDARG`. Open:
+
+- **Two derivations of one layout's registers.** `binding::ranges` builds the
+  root signature from `BindGroupLayoutRecord`'s range plans, and
+  `registers::place_set` builds the checked registers from the record's stored
+  `entries`. Both call `root::assign_registers`, and the GPU suites plus
+  `renderer_registers` pass, but nothing asserts the two lists are equal. The
+  same goes for `PipelineLayoutEntry::storage`, which could be derived from
+  `LayoutRegisters` (a storage binding's kind carries its stride). Folding them
+  into one is a refactor with no outward effect, left out of the fix.
+- **A container with no `PSV0` part is now refused at pipeline creation.** Every
+  `dxc`-signed container carries one; a hand-built or stripped container that
+  D3D12 might have accepted is not. Not seen in practice.
+- **The per-class hint lists every same-class binding of the set.** For the mesh
+  layout's many SRVs a refusal is long. Readable, not trimmed.
+
 ## Vulkan queries on AMD Windows: what the fix left open (2026-09-22)
 
 `resolve_query_set` carries an extra all-commands/any-write barrier after
