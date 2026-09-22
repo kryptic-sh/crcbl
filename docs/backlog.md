@@ -194,6 +194,15 @@ Initial measurements and harness findings:
   effectively tied with 64, while 256 began losing p50 to load imbalance; keep
   the existing 64-item jobs tuning. Use `phys` for uncontended broadphase
   percentiles rather than treating the combined frame mean as a physics timer.
+- A fresh post-parallel 1920x1080 combined run on the pinned MX550 reported a
+  10.092 ms GPU pass-sum p50. `forward` remained the largest row at 3.480 ms.
+  CMAA2's stable 0.575 ms edge, 0.792 ms shape and 0.483 ms apply rows summed to
+  1.850 ms, while the four SSAO rows summed to 2.168 ms but the main row's p95
+  jumped from 1.485 ms to 2.543 ms. Profile CMAA2 next as the less noisy bounded
+  target. Its edge and shape shaders currently flatten the viewport and recover
+  coordinates with integer division in every invocation; trial a two-dimensional
+  dispatch that preserves the algorithm and compare all three rows, the pass sum
+  and a non-CMAA control before retaining it.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
