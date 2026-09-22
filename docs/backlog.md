@@ -4057,7 +4057,12 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   then run matched `instances` and `specular-lights-fit` A/B pairs. Preserve tap
   order, depth comparisons, accumulation order, clamping and the no-blocker
   fallback; reject the trial if code growth or register pressure makes either
-  control slower.
+  control slower. The explicit `[unroll]` trial was declined before GPU timing:
+  Slang 2026.14 kept the same sixteen-iteration dynamic loop and function-local
+  table access in mesh SPIR-V, changing only `OpLoopMerge`'s loop control from
+  `None` to `Unroll`. Mesh, grass and water SPIR-V sizes did not change. The
+  annotation and its generated artifacts were removed; do not retry a loop hint
+  as though it forces this compiler to expand the search.
 
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
