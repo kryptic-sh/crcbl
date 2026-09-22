@@ -4487,6 +4487,31 @@ would also reach the Linux and macOS linkers, which reject that flag. Considered
 and declined for now: moving `-D warnings` out of `RUSTFLAGS` workflow-wide,
 which is a larger CI change than a harmless gap warrants.
 
+## Vulkan queries on AMD Windows: what the fix left open (2026-09-22)
+
+`resolve_query_set` carries an extra all-commands/any-write barrier after
+`vkCmdCopyQueryPoolResults` because AMD's Windows driver 25.10.36 (RX 7900 XTX)
+did not make the copy visible through the spec's `COPY`/`TRANSFER_WRITE` scope,
+and `query_results` now waits on the retire timeline for the last submission
+that named the set. Open:
+
+- **The workaround rests on one driver.** Harmless elsewhere, but nobody has
+  reported it to AMD or re-checked a later driver; when one fixes it the extra
+  barrier can go.
+- **Frame timers can now stall on the offscreen ring.** `PassTimers` reads a
+  ring slot when it comes round, assuming its frame retired. Nothing throttles
+  the CPU on an offscreen ring, so a read that used to return the previous
+  frame's values now waits for that frame instead. Correct, but the "latency is
+  the synchronisation" argument in the timers' docs only holds on a presented
+  ring.
+- **`vk_e2e` cannot be run on this desk.** Its fixture refuses to vouch for any
+  test without `VK_LAYER_KHRONOS_validation`, and the LunarG SDK is not
+  installed (its installer needs administrator rights). The new
+  `queries::a_read_is_ordered_after_the_submission_that_rewrites_the_set` was
+  shown red with the wait disabled and green with it, its assertions passing
+  before the fixture's layer check; its real verdict comes from CI's lavapipe
+  jobs.
+
 ## D3D12 on hardware: fixed on an RX 7900 XTX, and what is left (2026-09-22)
 
 The 2026-09-15 run on an RX 9060 XT found 37 tests that WARP passed and hardware

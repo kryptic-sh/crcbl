@@ -1843,6 +1843,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Vulkan query results are right on AMD's Windows driver, and never stale.**
+  `resolve_query_set` now makes its copy visible with an all-commands barrier,
+  because driver 25.10.36 on an RX 7900 XTX ignored the specification's
+  copy-stage one and left the destination unwritten. And `query_results` now
+  waits for the latest submission that named the set, as D3D12's already did;
+  before, a frame timer reading ahead of the GPU got the previous frame's
+  values. `Device::query_results` documents that it blocks on both backends.
+
 - **D3D12 renders correctly on real GPUs, not only on WARP.** Two passes writing
   one storage buffer or image now get a `UAV` barrier between them; before, the
   equal-state transition was dropped and a hardware queue overlapped the passes

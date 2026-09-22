@@ -202,6 +202,10 @@ pub(crate) struct QuerySetEntry {
     pub(crate) raw: vk::QueryPool,
     pub(crate) count: u32,
     pub(crate) kind: QueryKind,
+    /// The retire-timeline value of the latest submission whose command
+    /// buffers name this pool, or zero before any has. What
+    /// [`Device::query_results`] waits for — see there for why.
+    pub(crate) last_submission: u64,
 }
 
 /// A recorded command buffer and the pool it came from.
@@ -2422,6 +2426,7 @@ impl Device for VkDevice {
                 raw,
                 count: desc.count,
                 kind: desc.kind,
+                last_submission: 0,
             })))
     }
 
@@ -2439,6 +2444,44 @@ impl Device for VkDevice {
         first_query: u32,
         out: &mut [u64],
     ) -> Result<(), HalError> {
+        // **The read is ordered after every submission that named the pool**,
+        // as `crcbl-dx12`'s is — its read is a resolve it runs on the queue and
+        // waits for. `vkGetQueryPoolResults` is a host read with no queue
+        // position, and the specification says what that costs: a query
+        // stays available, holding its previous use's value, until a
+        // submitted `vkCmdResetQueryPool` actually executes. So a caller
+        // running ahead of the GPU — `PassTimers` reading a ring slot whose
+        // frame is submitted and not yet executed, which nothing throttles on
+        // an offscreen ring — was handed the values of the slot's previous
+        // frame, or a mix of those and reset ones when the read raced the
+        // reset.
+        // Measured on an RX 7900 XTX: a read answered `VK_SUCCESS` and the next
+        // one, microseconds later, `VK_NOT_READY`, and the per-pass timings
+        // built from such reads came out bimodal, half of them two
+        // microseconds long.
+        //
+        // The wait is taken without the state lock, so other threads keep
+        // recording and submitting, and the handle is resolved again after it:
+        // a set destroyed meanwhile fails lookup rather than being read.
+        let pending = lookup(
+            &self.inner.state().query_sets,
+            "query set",
+            set,
+            &self.inner,
+        )?
+        .last_submission;
+        let semaphores = [self.inner.retire_timeline];
+        let values = [pending];
+        let wait = vk::SemaphoreWaitInfo::default()
+            .semaphores(&semaphores)
+            .values(&values);
+        // SAFETY: `retire_timeline` is this device's own timeline semaphore,
+        // alive for as long as `self`, and `pending` is a value a submission
+        // already in flight will signal — zero for a pool none has named,
+        // which the timeline has reached from creation.
+        unsafe { self.inner.raw.wait_semaphores(&wait, u64::MAX) }
+            .map_err(|error| conv::hal_error("vkWaitSemaphores", error))?;
+
         let state = self.inner.state();
         let entry = lookup(&state.query_sets, "query set", set, &self.inner)?;
         let end = first_query as u64 + out.len() as u64;
@@ -2811,15 +2854,26 @@ impl Device for VkDevice {
         // which the timeline will reach. Marked after the driver call for the
         // same reason the counter is committed after it — a submission that was
         // refused never runs, so its command buffers go on holding.
+        // Through a plain reborrow so the command buffer and the query sets can
+        // be borrowed as the two separate fields they are.
+        let tables = &mut *state;
         for handle in submit.command_buffers {
             let entry = lookup_mut(
-                &mut state.command_buffers,
+                &mut tables.command_buffers,
                 "command buffer",
                 *handle,
                 &self.inner,
             )
             .unwrap_or_else(|_| unreachable!("resolved twice above under this lock"));
             entry.submitted = true;
+            // The pools this submission resets and writes, for
+            // `query_results` to order its read after. Matched by raw handle,
+            // as the deletion queue's extension above is.
+            for (_, set) in tables.query_sets.iter_mut() {
+                if entry.references.contains(&set.raw.as_raw()) {
+                    set.last_submission = value;
+                }
+            }
         }
 
         self.inner.poll_retire(&mut state);

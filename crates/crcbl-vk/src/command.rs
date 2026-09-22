@@ -1389,6 +1389,43 @@ impl CommandEncoder for VkCommandEncoder {
                 vk::QueryResultFlags::TYPE_64 | vk::QueryResultFlags::WAIT,
             );
         }
+        // **The copy's write is made available here, not left to the caller's
+        // next barrier.** The specification classes `vkCmdCopyQueryPoolResults`
+        // as a copy — `COPY` stage, `TRANSFER_WRITE` access — so the seam's
+        // `TransferDst` barrier that follows ought to be enough, and on AMD's
+        // Windows driver it is not: measured on an RX 7900 XTX (driver
+        // 25.10.36), a `TransferDst -> TransferSrc` barrier after the copy left
+        // the buffer holding what it held before, and so did a global
+        // `COPY`/`TRANSFER_WRITE` one. The results arrived once the source
+        // scope named `ALL_COMMANDS` or `MEMORY_WRITE` — or
+        // `COMPUTE_SHADER`/`SHADER_WRITE`, which suggests the driver copies
+        // with a dispatch. Every stage and every write is the scope that
+        // covers whichever engine a driver copies with.
+        //
+        // The destination scope is `TransferDst`'s own, so the caller's
+        // barrier out of that state chains onto this one exactly as it would
+        // onto the copy.
+        let written = range.len() as u64 * core::mem::size_of::<u64>() as u64;
+        let dst = conv::state_masks(ResourceState::TransferDst);
+        let barrier = [vk::BufferMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+            .dst_stage_mask(dst.stage)
+            .dst_access_mask(dst.access | vk::AccessFlags2::TRANSFER_READ)
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(buffer)
+            .offset(dst_offset)
+            .size(written)];
+        // SAFETY: `self.raw` is recording outside a pass and `buffer` is the
+        // live destination the copy above wrote, over exactly the bytes it
+        // wrote.
+        unsafe {
+            self.device.raw.cmd_pipeline_barrier2(
+                self.raw,
+                &vk::DependencyInfo::default().buffer_memory_barriers(&barrier),
+            );
+        }
     }
 
     // --- finish ---

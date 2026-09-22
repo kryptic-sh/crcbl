@@ -15,8 +15,9 @@
 use crate::harness::Headless;
 use crate::mesh::{MESH_EXTENT, mesh_camera, place_cube};
 use crcbl_hal::{
-    CommandEncoderDesc, ComputePassDesc, Features, PassTimestampWrites, PresentInfo, QueryKind,
-    QuerySetDesc, SubmitInfo,
+    CommandEncoderDesc, ComputePassDesc, Device, Features, PassTimestampWrites, PresentInfo,
+    QueryKind, QuerySetDesc, QuerySetHandle, QueueHandle, SemaphoreDesc, SemaphoreKind,
+    SemaphoreWait, SubmitInfo,
 };
 use glam::Vec3;
 
@@ -137,6 +138,138 @@ fn timestamps_either_work_or_are_refused_cleanly() {
     lesser.finish();
 
     device.destroy_command_buffer(commands);
+    device.destroy_query_set(set);
+    headless.finish();
+}
+
+/// How long the host holds back the submission that rewrites the set in
+/// [`a_read_is_ordered_after_the_submission_that_rewrites_the_set`].
+///
+/// The read is issued at once and the release comes this long after it, so a
+/// read that does not wait has returned long before the GPU may start. Not a
+/// measurement: any margin comfortably longer than the gap between two host
+/// calls separates the two cases.
+const REWRITE_HOLD: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Records a reset of `set` and an empty compute pass that writes both of its
+/// queries.
+fn record_timed_pass(
+    device: &dyn Device,
+    queue: QueueHandle,
+    set: QuerySetHandle,
+) -> crcbl_hal::CommandBufferHandle {
+    let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+        label: Some("timed pass"),
+        queue,
+    });
+    encoder.reset_query_set(set, 0..2);
+    encoder.begin_compute_pass(&ComputePassDesc {
+        label: Some("timed"),
+        timestamp_writes: Some(PassTimestampWrites {
+            set,
+            beginning_of_pass: 0,
+            end_of_pass: 1,
+        }),
+    });
+    encoder.end_compute_pass();
+    encoder.finish().expect("recording succeeded")
+}
+
+/// `Device::query_results` reads what the queue has done to the set, not what
+/// the host happens to see first.
+///
+/// A ring of timer sets — `crcbl_render::PassTimers` — reads a slot while the
+/// frame that last rewrote it may still be queued, and Vulkan answers a bare
+/// `vkGetQueryPoolResults` from whatever state the pool is in: the specification
+/// says a query stays available with its previous value until a submitted
+/// `vkCmdResetQueryPool` executes. So a read that does not wait returns the
+/// *previous* use's timestamps as if they were this one's. `crcbl-dx12`'s read
+/// is a resolve on the queue and cannot do that; this holds `crcbl-vk` to the
+/// same order.
+///
+/// The second submission waits on a timeline the host releases only after the
+/// read is issued, so the GPU cannot have started it when the read begins. A
+/// read that returns without waiting for it can only hold the first use's
+/// values or zeros, and both are red here.
+#[test]
+#[ignore = "needs a real Vulkan implementation; run tests/run-vk-e2e.sh"]
+fn a_read_is_ordered_after_the_submission_that_rewrites_the_set() {
+    let headless = Headless::open();
+    let device = headless.device.as_ref();
+    if !device.caps().features.contains(Features::TIMESTAMP_QUERY) {
+        eprintln!("vk e2e: no timestamp queries on this device; there is no read to order");
+        headless.finish();
+        return;
+    }
+    let set = device
+        .create_query_set(&QuerySetDesc {
+            label: Some("rewritten timers"),
+            kind: QueryKind::Timestamp,
+            count: 2,
+        })
+        .expect("a device reporting TIMESTAMP_QUERY creates a timestamp set");
+
+    let first_use = record_timed_pass(device, headless.queue, set);
+    device
+        .submit(headless.queue, &SubmitInfo::new(&[first_use]))
+        .expect("submit");
+    device.wait_idle().expect("idle");
+    let mut first = [0u64; 2];
+    device
+        .query_results(set, 0, &mut first)
+        .expect("timestamps read back");
+    assert!(
+        first[0] > 0 && first[1] >= first[0],
+        "the first use must read as a real, ordered pair before the second can be compared \
+         with it: {first:?}"
+    );
+
+    let release = device
+        .create_semaphore(&SemaphoreDesc {
+            label: Some("rewrite release"),
+            kind: SemaphoreKind::Timeline { initial_value: 0 },
+        })
+        .expect("a timeline semaphore");
+    let second_use = record_timed_pass(device, headless.queue, set);
+    device
+        .submit(
+            headless.queue,
+            &SubmitInfo {
+                command_buffers: &[second_use],
+                waits: &[SemaphoreWait {
+                    semaphore: release,
+                    value: 1,
+                }],
+                signals: &[],
+            },
+        )
+        .expect("submit");
+
+    let second = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(REWRITE_HOLD);
+            device
+                .signal_semaphore(release, 1)
+                .expect("the host releases the rewrite");
+        });
+        let mut second = [0u64; 2];
+        device
+            .query_results(set, 0, &mut second)
+            .expect("timestamps read back");
+        second
+    });
+    assert!(
+        second[0] > first[1] && second[1] >= second[0],
+        "the set was rewritten by a submission queued before this read, and the read returned \
+         {second:?} after the first use's {first:?}. A pair that is not later than the first is \
+         the first use read again, or a pool caught mid-reset: the read did not wait for the \
+         queue."
+    );
+
+    device.wait_idle().expect("idle");
+    device.destroy_command_buffer(first_use);
+    device.destroy_command_buffer(second_use);
+    device.destroy_semaphore(release);
     device.destroy_query_set(set);
     headless.finish();
 }

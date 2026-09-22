@@ -1010,6 +1010,14 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// [`Features::TIMESTAMP_QUERY`] rather than failing — the profiler HUD
     /// degrades, it does not break.
     ///
+    /// **On `crcbl-vk` and `crcbl-dx12` it blocks until every submission that
+    /// names the set has finished**, so what it returns is that work's answer
+    /// and never a previous use's. A caller that reads a set whose latest
+    /// submission waits on a semaphore the caller has yet to signal therefore
+    /// waits forever there: signal first, then read. A caller that must not
+    /// stall reads a set whose frame is known to have retired, which is the
+    /// portable rule whatever a backend does.
+    ///
     /// # Errors
     ///
     /// [`HalError::InvalidHandle`], or [`HalError::InvalidDescriptor`] if the
