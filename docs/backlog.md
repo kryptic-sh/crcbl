@@ -16361,25 +16361,72 @@ under the same heading, and it binds any Windows test written from now on.
   parallel would interfere, which is why the e2e suite is `--test-threads 1`.
 - **No sample-level pass in CI.** The Linux suites run the sandbox and press F11
   at it, and `samples-windowed` runs every sample in a window; Windows has
-  neither. This entry used to say what blocked it was a missing job rather than
-  a missing renderer, and for Vulkan that was wrong: `crcbl-vk` refused
-  `SurfaceTarget::Win32` outright until 2026-09-15, so no sample could present
-  windowed on Vulkan at all, and nothing on the board could see it because every
-  Windows Vulkan step presented offscreen. That is fixed, and `windowed-e2e`'s
-  suite now runs on Windows too, as a step of `vk-e2e-windows` against lavapipe.
+  neither in CI. `tools/run-samples-windowed.ps1 -Backend vk|dx12` is the
+  Windows port of `tools/run-samples-windowed.sh`. It reads `SAMPLES`,
+  `SAMPLE_FRAMES`, `VIEWER_MODEL` and the `AUTOEXEC_*` constants out of the bash
+  script, so there is one table and `tools/check-windowed-samples.sh` guards
+  both scripts. It asserts exit 0, the frame count, the win32 shell, the
+  requested extent and `windowed`, and no teardown-leak line. It also runs the
+  autoexec pair. What is still open:
+  - **No CI step, by decision, on cost.** Measured on 2026-09-22 on the RX 7900
+    XTX desktop (32 logical processors). Against the lavapipe build
+    `vk-e2e-windows` pins (Mesa 26.1.5, `GALLIVM_PERF=nopt`, no validation
+    layer), the 23-sample loop took **196 s** and the whole script **240 s**.
+    Per sample it ranged from 0.2 s (`bare`) to 37.7 s (`tumble`); `lantern`
+    took 20.9 s, plus 21.8 s and 21.3 s for the two autoexec runs. Linux's
+    `samples-windowed` step took **640 s** on CI (run 35721821179). A Windows
+    runner is slower than this desktop and adds the layer and the self-test run,
+    so a lavapipe step is well past the five-minute budget. **WARP could not be
+    measured at all** (next point). Revisit if either number moves: a trial step
+    with `continue-on-error` on `dx12-e2e` would measure WARP in one round trip.
+  - **`CRCBL_ADAPTER` does not reach a windowed run.** Only
+    `crcbl::screenshot`'s offscreen setup calls `crcbl::adapter::select`. A
+    windowed (or `--headless`) sample opens the backend's first adapter, so on
+    this desktop `CRCBL_ADAPTER=cpu` with `--backend dx12` still opened the RX
+    7900 XTX. On `windows-latest` the first dx12 adapter should be the Microsoft
+    Basic Render Driver, but that has not been checked. Honouring the pin in the
+    windowed open is a Rust change and would make WARP measurable locally.
+  - **dx12 runs check no validation.** The D3D12 debug layer's messages are read
+    only by `crcbl-dx12`'s device tests (`debug::Validated`) and by
+    `debug::diagnosis` on a removed device. A sample that runs to the end never
+    writes them to its log, so the script warns and checks nothing. Grading them
+    needs `crcbl-dx12` to log the info queue's contents at teardown, as
+    `crcbl-vk`'s messenger already does.
+  - **The vk validation half has never run against a layer.** No layer is
+    installed on the desktop, so every local vk run used `-NoValidation`.
+    `crcbl_validation_saw_nothing` and `crcbl_validation_layer_checked` are
+    called through Git Bash, which is found through `git --exec-path`. That
+    plumbing was checked against fixture logs (clean, complaining, no layer,
+    provoked and unprovoked). With validation on and no layer, a run fails on
+    the first sample with "never loaded the layer". The self-test pass, which
+    must go red on an injected message, has not run anywhere.
+  - **The autoexec root moves through `USERPROFILE`, not `APPDATA`.** Measured
+    with `dirs` 7.0.0 on Windows 11 26200: `dirs::config_dir` is
+    `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, and `APPDATA` in the
+    child's environment moved nothing, alone or with `LOCALAPPDATA`. Setting
+    `USERPROFILE` does move it, because the known folder is stored as
+    `%USERPROFILE%\AppData\Roaming` under `HKCU\...\Explorer\User Shell Folders`
+    and is expanded against the process's environment. If that directory does
+    not exist, `config_dir()` answers `None`. The script reads the registry
+    value rather than assuming it, and fails on a machine whose AppData is not
+    under `%USERPROFILE%`. It builds every sample first and starts the binaries
+    directly, because `USERPROFILE` would also move `cargo`'s and `rustup`'s
+    homes. Fault injection confirmed both new refusals fire: a seed equal to the
+    default fails the seeded run, and a control profile with no `Roaming`
+    directory fails the control run. Considered and not built: a
+    `CRCBL_CONFIG_DIR` override in `NativeStorage::config_root`. It would be
+    platform-independent and would not depend on shell folder behaviour, but it
+    is a new public knob in `crcbl-store`, and `USERPROFILE` works without one.
+    Build it if the `USERPROFILE` route breaks, for example on a runner with
+    redirected folders.
 
-  **What has been run, once, by hand:** on 2026-09-15, on a Windows 11 desktop
-  with an AMD Radeon RX 9060 XT, every sample in
-  `tools/run-samples-windowed.sh`'s `SAMPLES` table ran windowed for 120 frames
-  on both `--backend vk` and `--backend dx12`, each exiting 0 with its summary
-  line naming the win32 shell, the requested extent and `windowed`, and no
-  teardown-leak line. **Neither validation layer was installed**, so those runs
-  say nothing about validation. The script itself still cannot run on Windows:
-  it sources `tools/x11-display.sh`, asserts `on the x11 shell`, and its
-  autoexec check moves the config root through `XDG_CONFIG_HOME`, which
-  `dirs::config_dir` does not read on Windows. Porting it is the job; the
-  autoexec half needs a different way to point `NativeStorage` at a scratch
-  directory.
+  **What has been run:** on 2026-09-15, on a Windows 11 desktop with an AMD
+  Radeon RX 9060 XT, every sample ran windowed for 120 frames on both backends,
+  by hand. On 2026-09-22 the script ran green on the RX 7900 XTX desktop (driver
+  32.0.21036.18): `-Backend dx12` in 33.2 s and 37.1 s for the 23-sample loop,
+  and `-Backend vk -NoValidation` in 60.8 s, the autoexec pair passing on both.
+  Neither validation layer was installed, so none of these runs says anything
+  about validation.
 
 ### The shell suites on a real desktop (2026-09-21)
 
@@ -16480,6 +16527,22 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   recorded in the entry above.
 
 ### Owed on the Win32 backend
+
+- **A long load on the loop thread ghosts the window as "Not Responding".**
+  Reported by EW 2026-09-22: under CPU contention its asset load ran about 15 s
+  before the loop pumped messages, and Windows ghosts a window that has not
+  pumped for about 5 s (uncontended, EW's first frame comes at 1.9 s). The
+  engine needs either a way to keep pumping during a long load or a
+  load-on-worker pattern games can follow. Next Windows slice.
+- **Logs go to stderr only, so a `windows_subsystem = "windows"` build loses
+  them.** Reported by EW 2026-09-22. `crcbl_core::log` writes to stderr and a
+  GUI-subsystem exe has none. Wanted: an opt-in rotating log file under the
+  app's data directory. Queued after the load item.
+- **An exe icon and version resource helper — declined for now.** EW asked
+  whether the engine should provide one; embedding a `.res` needs either
+  `rc.exe` from the Windows SDK at build time or a new build dependency
+  (`embed-resource`, `winres`), and a new dependency is the user's call. EW owns
+  it in its own `build.rs`; revisit if a second game wants the same.
 
 - **Drag feedback: there is only a drop, never a conversation.** `WM_DROPFILES`
   is a notification; `DragEnter`/`DragOver`, a drop cursor, non-file formats and
