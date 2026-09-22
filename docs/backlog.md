@@ -257,13 +257,22 @@ Initial measurements and harness findings:
   this adapter despite doing less source-level arithmetic.
 - The retained render stress scenes still cover only point fill lights. They do
   not execute the rectangular-light LTC integration or the ordinary specular
-  path, so they cannot attribute either cost or guard an optimization there. Add
-  a deterministic `area-lights-fit` sandbox scene that keeps the existing
+  path, so they could not attribute either cost or guard an optimization there.
+  The deterministic `area-lights-fit` sandbox scene now keeps the existing
   instance grid and fills, but does not overflow, the same froxel prefix with
-  non-shadowed rectangular lights. First verify the fixed instance and light
-  counts through the scene API, then measure its `forward`, `light-cluster` and
-  complete pass-sum percentiles against `lights-fit` on the pinned MX550 before
-  selecting any area-light shader change.
+  non-shadowed rectangular lights. Its scene observer failed before the variant
+  existed and now verifies the fixed instance/light counts and non-fill
+  rectangle kind. Across alternating 900-frame 1920x1080 runs on the pinned
+  MX550, `forward` measured 8.849–8.985 ms p50 versus 3.511–3.569 ms for
+  `lights-fit`, a paired 151.8–152.0% increase. The complete pass sum rose
+  52.2–52.3% to 15.245–15.400 ms, while `light-cluster` stayed at 0.054–0.055 ms
+  in both scenes. The cost is therefore rectangular fragment shading, not
+  cluster construction. `mesh.slang::fragmentMain` currently calls `ltc_at` and
+  builds the same material-dependent LTC transform inside every rectangle
+  iteration even though its table coordinates do not depend on the light. Trial
+  caching that transform after the first rectangle in a fragment; avoid charging
+  point-only fragments the LTC reads, require area-light real-GPU image
+  equality, and alternate both fixed scenes before retaining it.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.

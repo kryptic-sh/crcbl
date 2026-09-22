@@ -6,7 +6,7 @@
 
 use crcbl::math::{Mat4, Quat, Vec3};
 use crcbl::render::{
-    ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight,
+    ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight, RectLight,
     scene::{DEMO_CUBE, DEMO_UNTINTED},
 };
 use crcbl::shaders::light::CLUSTER_LIGHT_CAPACITY;
@@ -35,6 +35,8 @@ pub enum Scene {
     Moving,
     /// The instance grid with the froxel budget filled but not exceeded.
     LightsFit,
+    /// The instance grid with the froxel budget filled by rectangular lights.
+    AreaLightsFit,
     /// The instance grid under an overlapping field of local lights.
     Lights,
     /// The instance and within-budget light grid while dense broadphase bodies
@@ -51,6 +53,7 @@ impl Scene {
             "instances" => Some(Self::Instances),
             "moving" => Some(Self::Moving),
             "lights-fit" => Some(Self::LightsFit),
+            "area-lights-fit" => Some(Self::AreaLightsFit),
             "lights" => Some(Self::Lights),
             "combined" => Some(Self::Combined),
             _ => None,
@@ -65,6 +68,7 @@ impl Scene {
             Self::Instances => "instances",
             Self::Moving => "moving",
             Self::LightsFit => "lights-fit",
+            Self::AreaLightsFit => "area-lights-fit",
             Self::Lights => "lights",
             Self::Combined => "combined",
         }
@@ -75,9 +79,12 @@ impl Scene {
     pub const fn instance_count(self) -> usize {
         match self {
             Self::Cube => 1,
-            Self::Instances | Self::Moving | Self::LightsFit | Self::Lights | Self::Combined => {
-                INSTANCE_COUNT
-            }
+            Self::Instances
+            | Self::Moving
+            | Self::LightsFit
+            | Self::AreaLightsFit
+            | Self::Lights
+            | Self::Combined => INSTANCE_COUNT,
         }
     }
 
@@ -86,7 +93,7 @@ impl Scene {
     pub const fn light_count(self) -> usize {
         match self {
             Self::Cube | Self::Instances | Self::Moving => 0,
-            Self::LightsFit | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
+            Self::LightsFit | Self::AreaLightsFit | Self::Combined => WITHIN_BUDGET_LIGHT_COUNT,
             Self::Lights => LIGHT_COUNT,
         }
     }
@@ -134,7 +141,12 @@ pub fn animate(
 fn instance(scene: Scene, index: usize, seconds: f32) -> InstanceDesc {
     let transform = match scene {
         Scene::Cube => ForwardRenderer::spin(seconds),
-        Scene::Instances | Scene::Moving | Scene::LightsFit | Scene::Lights | Scene::Combined => {
+        Scene::Instances
+        | Scene::Moving
+        | Scene::LightsFit
+        | Scene::AreaLightsFit
+        | Scene::Lights
+        | Scene::Combined => {
             grid_transform(index) * Mat4::from_quat(Quat::from_rotation_y(seconds * 0.9))
         }
     };
@@ -165,21 +177,42 @@ fn lights(scene: Scene) -> Vec<Light> {
         return Vec::new();
     }
 
-    (0..count).map(light).collect()
+    if scene == Scene::AreaLightsFit {
+        (0..count).map(area_light).collect()
+    } else {
+        (0..count).map(point_light).collect()
+    }
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn light(index: usize) -> Light {
-    let column = index % LIGHT_COLUMNS;
-    let row = index / LIGHT_COLUMNS;
-    let x = (column as f32 + 0.5) / LIGHT_COLUMNS as f32 * 2.4 - 1.2;
-    let y = (row as f32 + 0.5) / LIGHT_ROWS as f32 * 1.35 - 0.675;
+fn point_light(index: usize) -> Light {
     Light::Point(PointLight {
-        position: Vec3::new(x, y, 0.35),
+        position: light_position(index),
         radius: 4.0,
         color: Vec3::splat(0.004),
         fill: true,
     })
+}
+
+fn area_light(index: usize) -> Light {
+    Light::Rect(RectLight {
+        position: light_position(index),
+        radius: 4.0,
+        color: Vec3::splat(0.004),
+        direction: -Vec3::Z,
+        tangent: Vec3::X,
+        half_width: 0.08,
+        half_height: 0.04,
+        fill: false,
+    })
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn light_position(index: usize) -> Vec3 {
+    let column = index % LIGHT_COLUMNS;
+    let row = index / LIGHT_COLUMNS;
+    let x = (column as f32 + 0.5) / LIGHT_COLUMNS as f32 * 2.4 - 1.2;
+    let y = (row as f32 + 0.5) / LIGHT_ROWS as f32 * 1.35 - 0.675;
+    Vec3::new(x, y, 0.35)
 }
 
 #[cfg(test)]
@@ -208,6 +241,7 @@ mod tests {
             Scene::Instances,
             Scene::Moving,
             Scene::LightsFit,
+            Scene::AreaLightsFit,
             Scene::Lights,
             Scene::Combined,
         ] {
@@ -217,6 +251,7 @@ mod tests {
         assert_eq!(Scene::Instances.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Moving.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::LightsFit.instance_count(), INSTANCE_COUNT);
+        assert_eq!(Scene::AreaLightsFit.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Lights.instance_count(), INSTANCE_COUNT);
         assert_eq!(Scene::Combined.instance_count(), INSTANCE_COUNT);
         assert_eq!(
@@ -225,6 +260,11 @@ mod tests {
             "the local rows and the sun fill one froxel without overflowing it",
         );
         assert_eq!(Scene::Lights.light_count(), LIGHT_COUNT);
+        assert_eq!(
+            Scene::AreaLightsFit.light_count(),
+            Scene::LightsFit.light_count(),
+            "both within-budget controls must fill the same froxel prefix",
+        );
         assert_eq!(
             Scene::Combined.light_count(),
             Scene::LightsFit.light_count()
@@ -323,8 +363,10 @@ mod tests {
     #[test]
     fn the_light_fixture_builds_the_count_the_scene_reports() {
         let within_budget = lights(Scene::LightsFit);
+        let area_lights = lights(Scene::AreaLightsFit);
         let local_lights = lights(Scene::Lights);
         assert_eq!(within_budget.len(), Scene::LightsFit.light_count());
+        assert_eq!(area_lights.len(), Scene::AreaLightsFit.light_count());
         assert_eq!(local_lights.len(), Scene::Lights.light_count());
         assert_eq!(
             within_budget,
@@ -335,6 +377,11 @@ mod tests {
             local_lights
                 .iter()
                 .all(|light| matches!(light, Light::Point(_)))
+        );
+        assert!(
+            area_lights
+                .iter()
+                .all(|light| matches!(light, Light::Rect(rect) if !rect.fill))
         );
         assert!(lights(Scene::Cube).is_empty());
     }
