@@ -234,7 +234,12 @@ Initial measurements and harness findings:
   still evaluates the lobe and later accumulation. Trial an early loop
   continuation for those light kinds, retain rectangle lights because their
   polygon can straddle the horizon even when its centre does not, and require
-  real-GPU image equality before timing it.
+  real-GPU image equality before timing it. The trial passed all six native GPU
+  fill- and area-light image observers, but regressed `forward` p50 to
+  3.585–3.590 ms from the alternating baseline's 3.477–3.500 ms. The extra
+  control flow costs 2.4–3.2% on this adapter even though it skips zero-result
+  arithmetic; keep the branchless loop and do not repeat this change without
+  evidence from different hardware or a different light mix.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
