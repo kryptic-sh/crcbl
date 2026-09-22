@@ -20,10 +20,29 @@ const TIMING_SAMPLES: usize = 120;
 pub struct SimulationTimings {
     /// Samples currently in the rolling window.
     pub samples: usize,
-    /// Nearest-rank median, in nanoseconds.
-    pub p50_ns: u64,
-    /// Nearest-rank p95, in nanoseconds.
-    pub p95_ns: u64,
+    /// Complete-tick nearest-rank median and p95, in nanoseconds.
+    pub complete_ns: (u64, u64),
+    /// Movement and broadphase-refit median and p95, in nanoseconds.
+    pub refit_ns: (u64, u64),
+    /// Overlap-query median and p95, in nanoseconds.
+    pub query_ns: (u64, u64),
+}
+
+#[derive(Debug)]
+struct SimulationProfiler {
+    complete: Window<TIMING_SAMPLES>,
+    refit: Window<TIMING_SAMPLES>,
+    query: Window<TIMING_SAMPLES>,
+}
+
+impl SimulationProfiler {
+    fn new() -> Self {
+        Self {
+            complete: Window::new(),
+            refit: Window::new(),
+            query: Window::new(),
+        }
+    }
 }
 
 /// The deterministic simulation half of [`Scene::Combined`].
@@ -36,7 +55,7 @@ pub struct Simulation {
     scratch: QueryScratch,
     out: Vec<ColliderId>,
     last_results: usize,
-    timings: Option<Window<TIMING_SAMPLES>>,
+    profiler: Option<SimulationProfiler>,
 }
 
 impl Simulation {
@@ -77,13 +96,13 @@ impl Simulation {
             scratch: QueryScratch::new(),
             out: Vec::new(),
             last_results: 0,
-            timings: measure.then(Window::new),
+            profiler: measure.then(SimulationProfiler::new),
         }
     }
 
     /// Move, refit and query the whole crowd once.
     pub fn step(&mut self, dt: f64) {
-        let started = self.timings.as_ref().map(|_| Instant::now());
+        let started = self.profiler.as_ref().map(|_| Instant::now());
         let boundary = EXTENT * 0.5;
         for ((position, velocity), &id) in self
             .positions
@@ -106,6 +125,7 @@ impl Simulation {
                 .set_sphere(id, Sphere::new(*position, BODY_RADIUS));
             assert!(moved, "the fixed crowd keeps every collider live");
         }
+        let refit_finished = started.map(|_| Instant::now());
 
         let queries = self.world.overlap_queries();
         let mut results = 0usize;
@@ -114,9 +134,16 @@ impl Simulation {
             results = results.saturating_add(self.out.len());
         }
         self.last_results = std::hint::black_box(results);
-        if let (Some(started), Some(timings)) = (started, self.timings.as_mut()) {
-            let nanos = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
-            timings.record(nanos);
+        if let (Some(started), Some(refit_finished), Some(profiler)) =
+            (started, refit_finished, self.profiler.as_mut())
+        {
+            let finished = Instant::now();
+            let nanos = |duration: std::time::Duration| {
+                u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+            };
+            profiler.complete.record(nanos(finished - started));
+            profiler.refit.record(nanos(refit_finished - started));
+            profiler.query.record(nanos(finished - refit_finished));
         }
     }
 
@@ -124,12 +151,12 @@ impl Simulation {
     /// is large enough that p95 is not merely the maximum under another name.
     #[must_use]
     pub fn timings(&self) -> Option<SimulationTimings> {
-        let timings = self.timings.as_ref()?;
-        let (p50_ns, p95_ns) = timings.percentiles()?;
+        let profiler = self.profiler.as_ref()?;
         Some(SimulationTimings {
-            samples: timings.len(),
-            p50_ns,
-            p95_ns,
+            samples: profiler.complete.len(),
+            complete_ns: profiler.complete.percentiles()?,
+            refit_ns: profiler.refit.percentiles()?,
+            query_ns: profiler.query.percentiles()?,
         })
     }
 }
@@ -166,7 +193,11 @@ mod tests {
         }
         let timings = simulation.timings().expect("enough ticks for a p95");
         assert_eq!(timings.samples, crcbl::core::stats::MIN_PERCENTILE_SAMPLES);
-        assert!(timings.p50_ns > 0);
-        assert!(timings.p95_ns >= timings.p50_ns);
+        for (p50_ns, p95_ns) in [timings.complete_ns, timings.refit_ns, timings.query_ns] {
+            assert!(p50_ns > 0);
+            assert!(p95_ns >= p50_ns);
+        }
+        assert!(timings.complete_ns.0 >= timings.refit_ns.0);
+        assert!(timings.complete_ns.0 >= timings.query_ns.0);
     }
 }

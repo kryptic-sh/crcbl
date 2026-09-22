@@ -167,19 +167,27 @@ Initial measurements and harness findings:
   GPU-limited at that resolution. At 320x180 over 1,800 frames, the combined
   frame mean was 1.878–1.932 ms versus 1.846–1.870 ms, but its worst frame rose
   to 4.294–5.131 ms from 2.018–2.235 ms when a physics tick landed. Use this
-  scene to test CPU/GPU contention and tick spikes. Complete-tick telemetry on
-  the same release binary measured simulation p50/p95 at 3.202/4.394 ms at
-  320x180, but 8.955/14.812 ms at 1920x1080. The 1080p run reported a 10.218 ms
-  GPU pass-sum p50 and 10.537 ms mean frame interval; its largest pass p50s were
-  3.449 ms in `forward`, 2.348 ms across the SSAO passes, 1.839 ms across CMAA2
-  and 1.192 ms across SSR. The resolution-dependent CPU tick slowdown is the
-  next contention issue to attribute. Use `phys` for uncontended broadphase
-  percentiles rather than treating the combined frame mean as a physics timer.
+  scene to test CPU/GPU contention and tick spikes. The first complete-tick
+  telemetry pair measured simulation p50/p95 at 3.202/4.394 ms at 320x180 and
+  8.955/14.812 ms at 1920x1080, but an alternating repeat did not reproduce a
+  resolution-dependent gap. Two low-resolution runs measured 2.570–2.739 ms p50
+  complete, 0.355–0.360 ms moving and refitting, and 2.212–2.387 ms querying.
+  The first two subsequent 1080p runs measured 2.643–2.670 ms complete, 0.366 ms
+  moving and refitting, and 2.256–2.282 ms querying. A third sustained 1080p run
+  slowed to 4.697 ms complete, 0.727 ms moving and refitting, and 3.949 ms
+  querying; immediately afterwards the CPU sensors reported 73–80°C and the
+  laptop fan reported its maximum speed. Both phases slowed rather than a
+  resolution-sensitive phase alone, so the evidence supports thermal or
+  scheduler variance and contradicts the initial resolution-causality claim.
+  Queries account for 84.1–87.1% of complete-tick p50 in the phase-instrumented
+  runs, making the existing parallel overlap-query seam the next trial. Use
+  `phys` for uncontended broadphase percentiles rather than treating the
+  combined frame mean as a physics timer.
 - Sampling profilers are not installed on this machine: `perf`, `samply`,
   `valgrind`, `hotspot`, `nsys` and `ncu` were unavailable when checked. Current
   attribution is limited to engine GPU timestamps and explicit phase timers.
   Install or provide one of those tools before claiming which CPU function or
-  driver wait causes the combined scene's resolution-dependent tick tail.
+  driver wait causes the combined scene's sustained-load tick tail.
 
 ## Performance review and execution priority (2026-09-17)
 

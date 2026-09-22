@@ -23,8 +23,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   sustained renderer-load scenes, including full-grid transform updates,
   within-budget and overflowing light grids, and a dense moving broadphase
   workload competing with rendering. `--wall-clock` makes a headless run report
-  real CPU frame time and complete combined-scene simulation tick percentiles
-  while preserving the deterministic clock by default.
+  real CPU frame time and complete, movement/refit, and overlap-query
+  combined-scene tick percentiles while preserving the deterministic clock by
+  default.
 
 ### Changed
 
