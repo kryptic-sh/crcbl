@@ -1866,21 +1866,33 @@ mod tests {
     /// `ClipCursor` and `SetCursorPos` are both restricted to the process that
     /// owns the foreground window — the desktop's protection against exactly the
     /// hostage-taking this backend is careful not to do — so a test that
-    /// exercises either has to arrange it. A runner where this does not take is
-    /// a runner where those two tests fail with the clip unchanged, which is the
-    /// honest report.
-    fn make_foreground(hwnd: Handle) {
+    /// exercises either has to arrange it. Only [`focus_and_confirm`] calls
+    /// it, because a grant is worth nothing until the system confirms it.
+    ///
+    /// Returns whether `SetForegroundWindow` said it took. A refusal is not an
+    /// error Windows reports anywhere else: `ClipCursor` then does nothing and
+    /// still succeeds, so the refusal has to be read here or not at all.
+    fn make_foreground(hwnd: Handle) -> bool {
         // SAFETY: this shell's own window, from the thread that created it.
-        unsafe { ffi::SetForegroundWindow(hwnd) };
+        unsafe { ffi::SetForegroundWindow(hwnd) != 0 }
+    }
+
+    /// Whether `hwnd` is the foreground window right now.
+    ///
+    /// Asked of the system rather than of `WindowState::focused`, which any
+    /// `WM_SETFOCUS` sets — including the synthetic one [`send_focus`] sends.
+    fn is_foreground(hwnd: Handle) -> bool {
+        // SAFETY: no arguments; the result is only compared, never used.
+        core::ptr::eq(unsafe { ffi::GetForegroundWindow() }, hwnd)
     }
 
     /// Gives a window the keyboard and **confirms it kept it**.
     ///
-    /// [`send_focus`] delivers `WM_SETFOCUS` synchronously, so the grant itself
-    /// never fails. Holding it is the part that can: the Windows runner is a
-    /// real, non-idle desktop — `docs/backlog.md` records the unbidden messages
-    /// that proved it — and anything on it may take the foreground straight
-    /// back. The theft arrives as a `WM_KILLFOCUS` that the *same* pump then
+    /// [`send_focus`] delivers `WM_SETFOCUS` synchronously, so the message
+    /// itself always arrives. Holding the focus is the part that can fail: the
+    /// Windows runner is a real, non-idle desktop — `docs/backlog.md` records
+    /// the unbidden messages that proved it — and anything on it may take the
+    /// foreground straight back. The theft arrives as a `WM_KILLFOCUS` that the *same* pump then
     /// processes, so granting focus and pumping once can leave the window
     /// unfocused with nothing said about why.
     ///
@@ -1891,6 +1903,18 @@ mod tests {
     /// `left: 0, right: -1` — a reference-count failure that is really a focus
     /// failure, which is how it was read the first time it happened.
     ///
+    /// **`focused` alone cannot confirm anything**, because the synthetic
+    /// `WM_SETFOCUS` sets it whether or not the window is really in front. The
+    /// first version of this helper judged by that flag and so failed only
+    /// when a foreign `WM_KILLFOCUS` happened to land in the same pump — and
+    /// passed when `SetForegroundWindow` had been refused outright, leaving
+    /// `ClipCursor` to do nothing and a clip assertion further down to fail
+    /// with no mention of focus. So every attempt also asks the system: the
+    /// grant has to have been accepted, and the window still has to be the
+    /// foreground one after the pump, before and after the synthetic message.
+    /// The pump before judging drains the real activation traffic the grant
+    /// produced, so a steal already in flight is seen rather than raced.
+    ///
     /// # Panics
     ///
     /// If the window will not keep the keyboard for long enough to ask it a
@@ -1899,18 +1923,31 @@ mod tests {
     fn focus_and_confirm(shell: &mut Win32Shell, window: WindowId, hwnd: Handle) {
         // Enough to outlast a transient steal without turning a genuinely
         // unfocusable window into a long hang.
-        const ATTEMPTS: usize = 8;
-        for _ in 0..ATTEMPTS {
-            make_foreground(hwnd);
-            send_focus(hwnd, true);
+        const ATTEMPTS: u32 = 8;
+        // The first back-off, doubled per attempt up to `BACKOFF_DOUBLINGS`
+        // times, so a sibling process that holds the foreground for a moment
+        // gets that moment instead of eight grants inside it.
+        const BACKOFF: Duration = Duration::from_millis(10);
+        const BACKOFF_DOUBLINGS: u32 = 4;
+        let mut granted = false;
+        for attempt in 0..ATTEMPTS {
+            granted = make_foreground(hwnd);
             shell.pump(&mut |_| {});
-            if shell.window_state(window).expect("live").focused {
-                return;
+            if granted && is_foreground(hwnd) {
+                send_focus(hwnd, true);
+                shell.pump(&mut |_| {});
+                if shell.window_state(window).expect("live").focused && is_foreground(hwnd) {
+                    return;
+                }
             }
+            std::thread::sleep(BACKOFF * (1 << attempt.min(BACKOFF_DOUBLINGS)));
         }
+        // SAFETY: no arguments; read only to name the holder in the message.
+        let foreground = unsafe { ffi::GetForegroundWindow() };
         panic!(
             "the window would not keep the keyboard over {ATTEMPTS} attempts, so nothing \
-             below this can be asked about a focused window"
+             below this can be asked about a focused window (last SetForegroundWindow \
+             granted: {granted}; foreground window {foreground:?}, ours {hwnd:?})"
         );
     }
 
@@ -2702,10 +2739,7 @@ mod tests {
         // The clip follows the focus, so the window has to have it. CI cannot
         // click on a window; the message is what a click would have produced,
         // and the foreground call is what makes `ClipCursor` allowed at all.
-        make_foreground(hwnd);
-        send_focus(hwnd, true);
-        shell.pump(&mut |_| {});
-        assert!(shell.window_state(window).expect("live").focused);
+        focus_and_confirm(&mut shell, window, hwnd);
 
         shell
             .set_pointer_mode(window, PointerMode::Confined)
@@ -2968,11 +3002,12 @@ mod tests {
 
     // **The third test of this class, and it is here for the same reason as the
     // two above.** Windows refuses `SetCursorPos` from a process that is not in
-    // the foreground, so this test's real precondition is `make_foreground`
-    // having taken — which nothing on a shared runner guarantees. It failed on
-    // `5889a3c`, a commit that changed a JavaScript file and two markdown files,
-    // reading back exactly the client origin: the warp had not moved the pointer
-    // at all.
+    // the foreground, so this test's real precondition is the foreground
+    // having taken — which nothing on a shared runner guarantees, and which
+    // `focus_and_confirm` now checks with the system before the warp. It failed
+    // on `5889a3c`, a commit that changed a JavaScript file and two markdown
+    // files, reading back exactly the client origin: the warp had not moved the
+    // pointer at all.
     //
     // What that flake bought was a real defect, now fixed: `warp_to_client`
     // discarded `SetCursorPos`'s `BOOL`, so a warp that moved nothing returned
@@ -2989,7 +3024,7 @@ mod tests {
         shell.pump(&mut |_| {});
         let hwnd = hwnd_of(&shell, window);
         let client = super::input::client_screen_rect(hwnd).expect("a live window has one");
-        make_foreground(hwnd);
+        focus_and_confirm(&mut shell, window, hwnd);
 
         shell
             .warp_pointer(window, PhysicalPoint::new(30.0, 20.0))

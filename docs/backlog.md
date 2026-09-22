@@ -14716,8 +14716,23 @@ under `run-win32-e2e.ps1`, which passes `--run-ignored all` on a real
 interactive desktop. The four flakes, the real defect the fourth one hid and the
 lesson about this family are in docs/notes/ci.md under the same heading.
 
-Still open and unrelated: the **focus** flake (three instances), where
-`focus_and_confirm` loses the foreground.
+**Open: whether they can leave `#[ignore]`.** Not yet, and not undone here. The
+focus half of their flakiness is fixed: `focus_and_confirm` now confirms the
+foreground with the system, and all three call it (see the focus-flake record in
+docs/notes/ci.md). Since 2026-08-24 the `windows-desktop` nextest group also
+keeps sibling test processes from contending. Two things the fix does not
+address are still there. The desktop can reposition the window or change its
+display set mid-test. And a steal after the helper returns can still clear the
+clip: one of 35 parallel stress runs with the fix failed
+`minimizing_a_captured_window_releases_the_clip` on its restore assertion with
+the full-screen rectangle, after focus had been confirmed. That run had no test
+group, so the steal was a sibling's, which is exactly what the group now
+prevents. Evidence to collect before un-ignoring: remove the `#[ignore]` on a
+branch and get about 20 consecutive green `build + test (windows-latest)` runs,
+or loop the three there under `--run-ignored only` for the same count, since the
+ordinary sweep's runner is where every instance landed. Check the
+`win32 e2e (real desktop)` job's history since `aef2872` for failures in these
+three first; any there answer the question already.
 
 ### `GpuInstance::flags` is a bare `u32`, not `bitflags`
 

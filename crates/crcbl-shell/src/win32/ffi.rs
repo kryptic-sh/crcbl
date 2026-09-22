@@ -1531,6 +1531,12 @@ unsafe extern "system" {
     // nobody to click on ours. This is the click.
     #[cfg(test)]
     pub fn SetForegroundWindow(hwnd: Handle) -> Bool32;
+    // Test-only, as the other half of that click: `SetForegroundWindow` can be
+    // refused, or honoured and then overtaken by another process, and neither
+    // shows up in anything this backend keeps. This is how a test confirms the
+    // foreground it depends on is really its own.
+    #[cfg(test)]
+    pub fn GetForegroundWindow() -> Handle;
     pub fn ClientToScreen(hwnd: Handle, point: *mut Point) -> Bool32;
     pub fn ScreenToClient(hwnd: Handle, point: *mut Point) -> Bool32;
     // Which kind of device a `WM_POINTER*` message's pointer id belongs to.

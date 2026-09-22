@@ -521,6 +521,53 @@ that "flaky on a shared runner" and "swallows the error that makes it flaky" are
 the same finding seen from two ends, and the next one in this family deserves a
 look at what the failing call ignores before it is filed as the desktop's fault.
 
+**The focus flake was the same lesson again (found 2026-09-22).** Seven
+`build + test (windows-latest)` failures, all before the `windows-desktop`
+nextest group serialised this suite (`217b049`, 2026-08-24):
+
+- job 92167914428 (`f023a2f`): `focus_and_confirm` itself panicked.
+- jobs 92323263466 (`371cb57`), 92354957041 (`7970a85`), 92424498394 (`aaabf55`)
+  and 93378601145 (`0354eec`): the confining test's inline `assert!(…focused)`.
+- jobs 92176730876 (`ac30571`) and 93346664173 (`28fc1b7`): the minimizing test
+  got past focus and then failed on the clip, which is the false pass below.
+
+The last was 2026-08-10.
+
+The cause was that the helper judged the focus by `WindowState::focused`, and
+any `WM_SETFOCUS` sets that flag, including the synthetic one the helper sends
+itself. `make_foreground` also discarded `SetForegroundWindow`'s result. So the
+check failed only when a real foreign `WM_KILLFOCUS` landed in the same pump,
+and it _passed_ when the foreground grant had been refused. `ClipCursor` then
+silently did nothing, and a clip assertion further down reported a wrong
+rectangle. The confining test did not even use the helper: it made one
+unconfirmed attempt inline. The foreign steals came from sibling test processes,
+since nextest ran the suite in parallel then.
+
+**Reproduced on demand** with a nextest config that has no test group, running
+`cargo nextest run -p crcbl-shell --run-ignored all --test-threads 8` filtered
+to `win32::shell::tests::`. Before the fix, 4 of 10 runs failed, all on the
+confining test's `focused` assertion. After it, 2 of 35 runs failed, and neither
+failure was focus: one was a clipboard open refused by a sibling (the contention
+the group exists for), and one was the minimizing test's restore assertion
+reading a clip cleared after focus was confirmed.
+
+The fix: `make_foreground` returns the grant, and a test-only `is_foreground`
+asks `GetForegroundWindow`. Each attempt in `focus_and_confirm` pumps first, to
+drain the real activation traffic, then requires the grant _and_ the foreground,
+then sends the synthetic focus and requires `focused` _and_ the foreground
+again. Otherwise it backs off with a doubling sleep. Both the confining and the
+warping test now go through it. It still never forces focus: no
+`AttachThreadInput`.
+
+**What the guard check showed.** With both system checks replaced by `true`, the
+false pass came back: 2 of 15 runs failed on the first clip assertion straight
+after the helper returned, reading the full-screen rectangle. With only
+`is_foreground` neutralised, no run failed on focus (1 of 15 failed, on the
+clipboard). With only the grant check neutralised, 0 of 20 failed. So under this
+load either check alone catches a refused grant, and dropping both is what lets
+it through. `is_foreground` stays because it is also the only check after the
+synthetic pump, where a grant that was accepted and then overtaken shows up.
+
 ## The published site went 15 commits stale, and three causes did it (2026-09-02)
 
 Record; the decision and what it leaves owed are in docs/backlog.md under the
