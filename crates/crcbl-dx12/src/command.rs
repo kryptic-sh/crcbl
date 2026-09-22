@@ -348,6 +348,10 @@ pub(crate) struct Dx12CommandEncoder {
     /// boundaries are two ordinary calls, and this carries the second one from
     /// the pass's opening to its close.
     pass_end_timestamp: Option<(ID3D12QueryHeap, D3D12_QUERY_TYPE, u32)>,
+    /// Every timestamp this encoder wrote, by set, for
+    /// [`finish`](CommandEncoder::finish) to resolve into each set's own
+    /// readback buffer. See [`WrittenQueries`].
+    written_queries: Vec<WrittenQueries>,
     /// Debug-event nesting, so an unbalanced
     /// [`end_debug_label`](CommandEncoder::end_debug_label) is dropped rather
     /// than closing an event nobody opened, and so `finish` can close what is
@@ -359,6 +363,43 @@ pub(crate) struct Dx12CommandEncoder {
     render_pass_label: bool,
     /// The same, for the open compute pass.
     compute_pass_label: bool,
+}
+
+/// The queries one encoder wrote into one set, and where they are resolved to.
+///
+/// # Why an encoder resolves timestamps nobody asked it to
+///
+/// **D3D12 has no CPU-side read of a query heap** — see
+/// `crate::device::QuerySetEntry` — so [`Device::query_results`] reads each
+/// set through a readback buffer the set owns. That buffer used to be filled
+/// by a resolve `query_results` recorded, submitted and waited for itself, and
+/// on this backend's one in-order queue that wait covered everything
+/// submitted before it: a profiler reading a frame that retired long ago still
+/// drained the frame just submitted, on every read.
+///
+/// So the resolve moves here, to the end of the command list that wrote the
+/// queries: [`finish`](CommandEncoder::finish) records one `ResolveQueryData`
+/// per contiguous run of written queries into the set's buffer, at the offset
+/// the query has there. The results reach that buffer when the list that
+/// produced them completes, and `query_results` waits for exactly that
+/// submission and nothing after it — which is what `crcbl-vk`'s
+/// `vkGetQueryPoolResults` read already did.
+///
+/// Only queries this encoder *wrote* are resolved: a query never ended since
+/// its heap was created has no value to resolve. The set's buffer keeps
+/// whatever an earlier list resolved for the others, which is what the heap
+/// itself still holds for them — D3D12 has no query reset.
+///
+/// [`Device::query_results`]: crcbl_hal::Device::query_results
+struct WrittenQueries {
+    heap: ID3D12QueryHeap,
+    query_type: D3D12_QUERY_TYPE,
+    kind: QueryKind,
+    /// The set's readback buffer, also held in [`Dx12CommandEncoder::retained`]
+    /// because the resolve names it.
+    resolve: ID3D12Resource,
+    /// Every query written, in recording order, repeats included.
+    queries: Vec<u32>,
 }
 
 /// `WINPIX_EVENT_UNICODE_VERSION` — the `Metadata` value that says an event's
@@ -431,6 +472,7 @@ impl Dx12CommandEncoder {
             in_compute_pass: false,
             resolves: Vec::new(),
             pass_end_timestamp: None,
+            written_queries: Vec::new(),
             label_depth: 0,
             render_pass_label: false,
             compute_pass_label: false,
@@ -605,6 +647,7 @@ impl Dx12CommandEncoder {
         }
         let heap = resolved.raw.clone();
         let query_type = resolved.query_type;
+        self.note_written(&resolved, [writes.beginning_of_pass, writes.end_of_pass]);
         let Some(list) = self.list() else { return };
         // SAFETY: `list` is live and recording, `heap` is a live query heap this
         // device created and this encoder retained in `query_set` above, the
@@ -614,6 +657,69 @@ impl Dx12CommandEncoder {
             list.EndQuery(&heap, query_type, writes.beginning_of_pass);
         }
         self.pass_end_timestamp = Some((heap, query_type, writes.end_of_pass));
+    }
+
+    /// Records that `queries` of `set` are written by this list, so
+    /// [`resolve_written_queries`](Self::resolve_written_queries) resolves
+    /// them, and takes a reference to the set's readback buffer.
+    fn note_written(&mut self, set: &QuerySetRef, queries: [u32; 2]) {
+        self.retain(&set.resolve);
+        let raw = set.raw.as_raw();
+        if let Some(written) = self
+            .written_queries
+            .iter_mut()
+            .find(|written| written.heap.as_raw() == raw)
+        {
+            written.queries.extend(queries);
+            return;
+        }
+        self.written_queries.push(WrittenQueries {
+            heap: set.raw.clone(),
+            query_type: set.query_type,
+            kind: set.kind,
+            resolve: set.resolve.clone(),
+            queries: queries.to_vec(),
+        });
+    }
+
+    /// Resolves every query this list wrote into its set's readback buffer.
+    /// See [`WrittenQueries`] for why, and `finish` for where.
+    fn resolve_written_queries(&mut self) {
+        let written = core::mem::take(&mut self.written_queries);
+        let Some(list) = self.list() else { return };
+        for mut set in written {
+            set.queries.sort_unstable();
+            set.queries.dedup();
+            for run in set.queries.chunk_by(|a, b| a.checked_add(1) == Some(*b)) {
+                let first = run[0];
+                // Bounded by the set's own `u32` query count: every index in
+                // the run was checked against it when it was written, and the
+                // run holds each index once.
+                let count = u32::try_from(run.len())
+                    .expect("a run of distinct u32 query indices fits a u32");
+                // SAFETY: `list` is live and recording; `set.heap` and
+                // `set.resolve` are live interfaces this encoder holds
+                // references to, in `query_heaps` and `retained`; the type is
+                // the one the heap was created for; every index in the run was
+                // bounds-checked against the heap's query count when it was
+                // written, and the set's buffer is sized for that whole count
+                // (`query::resolve_buffer_bytes`), so the destination span is
+                // in bounds. The offset is a multiple of the result width,
+                // which is what `AlignedDestinationBufferOffset` requires, and
+                // the buffer is on the readback heap and so permanently in
+                // `COPY_DEST`.
+                unsafe {
+                    list.ResolveQueryData(
+                        &set.heap,
+                        set.query_type,
+                        first,
+                        count,
+                        &set.resolve,
+                        query::span_bytes(set.kind, u64::from(first)),
+                    );
+                }
+            }
+        }
     }
 
     /// Writes the closing half of [`open_pass_timestamps`](Self::open_pass_timestamps),
@@ -2788,6 +2894,9 @@ impl CommandEncoder for Dx12CommandEncoder {
             ));
         }
         self.close_open_labels();
+        // Last in the list, after every pass that wrote a timestamp: the
+        // resolve reads the heap, so it has to follow the `EndQuery`s.
+        self.resolve_written_queries();
         if let Some(error) = self.failed.take() {
             return Err(error);
         }

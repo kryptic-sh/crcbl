@@ -384,6 +384,11 @@ pub(crate) enum Retired {
 /// the state `ResolveQueryData` requires of a destination, so the resolve needs
 /// no barrier and the map afterwards needs no copy.
 ///
+/// **The resolve into it is recorded by the list that wrote the queries**, at
+/// its end — see `crate::command::WrittenQueries` — so `query_results` has no
+/// submission of its own to make. It waits for
+/// [`last_submission`](Self::last_submission) and maps.
+///
 /// The cost is one committed resource per query set, sized by
 /// [`query::resolve_buffer_bytes`]. Created with the set rather than on first
 /// read: [`Capability::TimestampQuery`] names `query_results` as part of what
@@ -407,6 +412,17 @@ struct QuerySetEntry {
     /// in flight frees its pool slot rather than leaking one. See above for why
     /// a query set owns a buffer at all.
     resolve: BufferHandle,
+    /// The device-fence value of the latest submission whose command buffers
+    /// name this set, or zero if none has.
+    ///
+    /// What [`Device::query_results`] waits for, and all it waits for: that
+    /// submission's own lists resolved its queries into
+    /// [`resolve`](Self::resolve), and the queue is in order, so once the fence
+    /// passes this value the buffer holds every result any submission wrote.
+    /// Waiting on the fence's *latest* value instead is what made each read
+    /// drain every frame submitted after the one being read. `crcbl-vk` keeps
+    /// the same number, under the same name, for the same read.
+    last_submission: u64,
 }
 
 /// What [`crate::command`] needs to know about a query set.
@@ -420,6 +436,9 @@ pub(crate) struct QuerySetRef {
     pub(crate) kind: QueryKind,
     pub(crate) query_type: D3D12_QUERY_TYPE,
     pub(crate) count: u32,
+    /// The set's readback buffer, which the encoder resolves every query it
+    /// wrote into. See `crate::command::WrittenQueries`.
+    pub(crate) resolve: ID3D12Resource,
 }
 
 /// A semaphore: an `ID3D12Fence` either way, and `kind` is what tells them
@@ -887,60 +906,16 @@ impl DeviceInner {
     pub(crate) fn query_set(&self, handle: QuerySetHandle) -> Result<QuerySetRef, HalError> {
         let state = self.state();
         let entry = handle::lookup(&state.query_sets, "query set", handle, self.owner)?;
+        let resolve = handle::lookup(&state.buffers, "buffer", entry.resolve, self.owner)?
+            .raw
+            .clone();
         Ok(QuerySetRef {
             raw: entry.raw.clone(),
             kind: entry.kind,
             query_type: entry.query_type,
             count: entry.count,
+            resolve,
         })
-    }
-
-    /// Runs one command list on the queue and blocks until the GPU has finished
-    /// it.
-    ///
-    /// **The one-shot submission [`Device::query_results`] is built on**, and
-    /// the reason that call needs one at all: D3D12's only route out of a query
-    /// heap is `ResolveQueryData`, which is recorded rather than called, while
-    /// the seam's read is a device call with no encoder anywhere in it.
-    ///
-    /// The list and its allocator go on [`crate::retire`]'s queue at the value
-    /// this reserves rather than being dropped when the wait returns, so a
-    /// `Signal` that failed leaks them instead of freeing a list the driver may
-    /// still be reading — the same trade [`Device::submit`] makes and for the
-    /// same reason.
-    ///
-    /// # Errors
-    ///
-    /// [`HalError::DeviceLost`] from the signal or the wait.
-    fn run_and_wait(
-        &self,
-        allocator: ID3D12CommandAllocator,
-        list: ID3D12GraphicsCommandList,
-    ) -> Result<(), HalError> {
-        let value = {
-            let mut state = self.state();
-            let lists = [Some(ID3D12CommandList::from(list.clone()))];
-            // SAFETY: `list` is a live, closed command list this device created
-            // and is held both by this call and by the retire queue below for
-            // the duration of its execution. The array is a live local borrowed
-            // for the call, and the queue is externally synchronised by the
-            // state lock held here.
-            unsafe { self.queue.ExecuteCommandLists(&lists) };
-            let signalled = self.signal(&mut state);
-            let at = state.next_fence_value;
-            state.retire.park(
-                at,
-                Retired::Recording {
-                    _list: list,
-                    _allocator: allocator,
-                },
-            );
-            signalled?
-        };
-        self.wait_for(value)?;
-        let mut state = self.state();
-        self.poll_retire(&mut state);
-        Ok(())
     }
 
     /// Resolves a colour attachment's render target view.
@@ -3613,6 +3588,7 @@ impl Device for Dx12Device {
             query_type,
             count: desc.count,
             resolve,
+            last_submission: 0,
         });
         Ok(handle::stamp(self.inner.owner, handle))
     }
@@ -3623,11 +3599,12 @@ impl Device for Dx12Device {
     /// between the two objects rather than an inconsistency. The heap can be
     /// named by a command list a caller recorded and has not submitted yet, so
     /// it goes on [`crate::retire`]'s queue at the last value handed out, for
-    /// the reason [`Device::destroy_command_buffer`] parks. The buffer is
-    /// touched by exactly one list — the one [`Device::query_results`] records,
-    /// submits and *waits on* inside a single call, holding its own reference
-    /// throughout — so dropping this reference here can never free a resource
-    /// the GPU is reading, and it is what every other `destroy_buffer` does.
+    /// the reason [`Device::destroy_command_buffer`] parks. The buffer is named
+    /// only by the resolves the encoder appends to a list that wrote the set's
+    /// queries, and that encoder takes its own reference to it, which the
+    /// submission parks like any other resource's — so dropping this reference
+    /// here is what every other `destroy_buffer` does, and it can never free a
+    /// resource a running list resolves into.
     fn destroy_query_set(&self, set: QuerySetHandle) {
         let taken = {
             let mut state = self.state();
@@ -3645,12 +3622,12 @@ impl Device for Dx12Device {
         // Outside the guard, because this takes the same lock and it is not
         // reentrant. The buffer's own reference goes here; a `query_results`
         // running concurrently holds its own clone for the length of its call,
-        // and so cannot be reading a released resource.
+        // and so cannot be mapping a released resource.
         self.destroy_buffer(taken);
     }
 
-    /// Reads a query set back, through a resolve and a submission of this
-    /// call's own.
+    /// Reads a query set back from the readback buffer the set's own
+    /// submissions resolved into.
     ///
     /// # This is the one seam call D3D12 has no shape for
     ///
@@ -3659,17 +3636,22 @@ impl Device for Dx12Device {
     /// `resolveCounterRange:`: device calls, no encoder, no queue.
     /// **`ID3D12QueryHeap` has no such call at all** — it cannot be mapped and
     /// has no `GetData`, and `ResolveQueryData` is a command list method. So the
-    /// round trip is not avoidable here; it is moved *inside* this call, which
-    /// records a one-shot list, submits it and blocks on the fence through
-    /// [`DeviceInner::run_and_wait`] before mapping the set's own readback
-    /// buffer.
+    /// round trip is not avoidable here; it is moved into the lists that wrote
+    /// the queries, each of which ends by resolving them into the set's buffer
+    /// (see `crate::command::WrittenQueries`), and this call waits for the
+    /// set's [`last_submission`](QuerySetEntry::last_submission) and maps.
     ///
-    /// That is genuinely expensive — a submission and a queue drain per read —
-    /// and it is why [`resolve_query_set`](crcbl_hal::CommandEncoder::resolve_query_set)
-    /// exists beside it: a profiler reading a timer ring every frame should
-    /// resolve into its own buffer inside the frame's command buffer and read
-    /// that back through [`Device::request_readback`], which costs nothing
-    /// extra. This call is for the one-off, and it is correct rather than fast.
+    /// # It waits for the set, not for the queue
+    ///
+    /// This used to record a resolve of its own, submit it and wait for it —
+    /// and on the one in-order queue that wait covered **everything submitted
+    /// before the read**, so `PassTimers` reading a ring slot whose frame
+    /// retired frames ago still drained the frame just submitted, on every
+    /// read. Now a set whose submission has retired reads without waiting at
+    /// all, which is the case the seam's portable rule — read a set whose
+    /// frame is known to have retired — is written for, and a set still in
+    /// flight waits for its own submission and nothing queued after it, as on
+    /// `crcbl-vk`.
     ///
     /// # Errors
     ///
@@ -3694,7 +3676,7 @@ impl Device for Dx12Device {
         first_query: u32,
         out: &mut [u64],
     ) -> Result<(), HalError> {
-        let (heap, kind, query_type, resolve) = {
+        let (kind, pending, resolve) = {
             let state = self.state();
             let entry = handle::lookup(&state.query_sets, "query set", set, self.inner.owner)?;
             query::check_range(entry.count, first_query, out.len() as u64)?;
@@ -3715,44 +3697,23 @@ impl Device for Dx12Device {
                 handle::lookup(&state.buffers, "buffer", entry.resolve, self.inner.owner)?
                     .raw
                     .clone();
-            (entry.raw.clone(), entry.kind, entry.query_type, resolve)
+            (entry.kind, entry.last_submission, resolve)
         };
         if out.is_empty() {
             return Ok(());
         }
+        // Without the state lock, so other threads keep recording and
+        // submitting meanwhile. Zero for a set no submission has named, which
+        // the fence has reached from creation. `resolve` is this call's own
+        // reference, so a set destroyed during the wait cannot free it.
+        self.inner.wait_for(pending)?;
 
         // Every kind that reaches here resolves exactly one `u64` per query —
         // the refusal above is what guarantees it — so the bytes the resolve
-        // writes and the bytes `out` holds are the same number, and the copy
+        // wrote and the bytes `out` holds are the same number, and the copy
         // below cannot be told to overrun either.
         let bytes = size_of_val(out);
         let offset = query::span_bytes(kind, u64::from(first_query));
-        let (allocator, list) = self.inner.open_list(Some("crcbl-dx12 query_results"))?;
-        // SAFETY: `list` is a live list this call just opened and is recording,
-        // `heap` and `resolve` are live interfaces this device created and this
-        // call holds references to for longer than the submission below, and the
-        // range was bounds-checked against the heap's own query count. The
-        // destination offset is a multiple of the result width, which is what
-        // `AlignedDestinationBufferOffset` requires, and the destination is on
-        // the readback heap and so permanently in `COPY_DEST`.
-        unsafe {
-            list.ResolveQueryData(
-                &heap,
-                query_type,
-                first_query,
-                out.len() as u32,
-                &resolve,
-                offset,
-            );
-        }
-        // SAFETY: `list` is the list recorded into immediately above and is
-        // closed exactly once — nothing else holds it in a recording state.
-        unsafe { list.Close() }.map_err(|error| {
-            HalError::Backend(format!(
-                "ID3D12GraphicsCommandList::Close failed for a query resolve: {error}"
-            ))
-        })?;
-        self.inner.run_and_wait(allocator, list)?;
 
         // A `D3D12_RANGE` is expressed in `usize`; only reachable on a 32-bit
         // host, where the resolve buffer could not have existed either.
@@ -3796,8 +3757,9 @@ impl Device for Dx12Device {
         // which `create_query_set` sized for the set's whole query count, and
         // the span was bounds-checked against that count above. The two regions
         // cannot overlap: `out` is a caller-owned slice and the source is the
-        // buffer's own mapping. The fence has passed the resolve, so every byte
-        // it wrote is visible.
+        // buffer's own mapping. The fence has passed the last submission naming
+        // the set, whose lists ended with the resolve, so every byte it wrote
+        // is visible.
         //
         // Copied as **bytes** into `out`, rather than as `u64`s out of the
         // mapping: `Map` promises no particular alignment for the pointer it
@@ -4195,6 +4157,10 @@ impl Device for Dx12Device {
         let mut lists: Vec<Option<ID3D12CommandList>> =
             Vec::with_capacity(submit.command_buffers.len());
         let mut held: Vec<Retired> = Vec::new();
+        // The query heaps these lists name, so each set's `last_submission`
+        // can be moved to this submission's value below. Matched by interface
+        // address, which cannot be reused while `held` keeps the heap alive.
+        let mut named_heaps: Vec<*mut core::ffi::c_void> = Vec::new();
         for &buffer in submit.command_buffers {
             let entry = handle::lookup(
                 &state.command_buffers,
@@ -4210,6 +4176,7 @@ impl Device for Dx12Device {
                     .cloned()
                     .map(|raw| Retired::Resource { _raw: raw }),
             );
+            named_heaps.extend(entry.query_heaps.iter().map(Interface::as_raw));
             held.extend(
                 entry
                     .query_heaps
@@ -4280,6 +4247,16 @@ impl Device for Dx12Device {
         let at = state.next_fence_value;
         for item in held {
             state.retire.park(at, item);
+        }
+        // Only once the signal is on the queue: a read waiting for a value
+        // nothing will signal would block rather than report the failure,
+        // which the `?` below already returns to the caller that submitted.
+        if signalled.is_ok() && !named_heaps.is_empty() {
+            for (_, set) in state.query_sets.iter_mut() {
+                if named_heaps.contains(&set.raw.as_raw()) {
+                    set.last_submission = at;
+                }
+            }
         }
         signalled?;
         self.inner.poll_retire(&mut state);
@@ -12081,6 +12058,233 @@ pub(crate) mod tests {
 
         device.destroy_buffer(resolved);
         probe.destroy(&device);
+        device.destroy_query_set(set);
+    }
+
+    /// **Reading a set whose submission has retired does not wait for work
+    /// submitted after it.**
+    ///
+    /// The regression this holds: `query_results` used to record a resolve of
+    /// its own and wait on the device fence for it, and on this backend's one
+    /// in-order queue that resolve sat behind everything already submitted. So
+    /// `PassTimers`, reading the ring slot of a frame that finished frames ago,
+    /// still drained the frame just submitted on every read, and the CPU and
+    /// GPU never overlapped — about 2.4 ms a frame in a game that measured it.
+    ///
+    /// Held by a gate rather than by timing a long workload: the later
+    /// submission waits on a semaphore nothing has signalled, so the queue
+    /// cannot pass it until this test says so. A read that queues behind it
+    /// blocks; a read that waits only for the set's own submission returns.
+    /// The read runs on a second thread so the old behaviour arrives as a
+    /// failed assertion rather than a hung test, and the gate is opened before
+    /// any assertion so that thread always finishes.
+    ///
+    /// The fence is sampled after the read returned and before the gate
+    /// opens, and must still be short of the gated submission — otherwise the
+    /// gate was not holding and a prompt read would prove nothing.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn d3d12_a_retired_sets_read_does_not_wait_for_later_submissions() {
+        /// The value the gate is opened at.
+        const GATE: u64 = 1;
+        /// How long a read that does not queue behind the gate is given.
+        /// Generous against a slow CI machine: the read it bounds maps a
+        /// buffer, and the old one blocks until the gate opens, however long.
+        const PATIENCE: Duration = Duration::from_secs(5);
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 retired timestamps"),
+                kind: QueryKind::Timestamp,
+                count: TIMED_QUERIES,
+            })
+            .expect("a timestamp query heap");
+        // `run` waits for the queue, so this set's only submission has retired
+        // before anything below is queued.
+        run(&device, |encoder| {
+            encoder.reset_query_set(set, 0..TIMED_QUERIES);
+            encoder.begin_compute_pass(&ComputePassDesc {
+                label: Some("timed"),
+                timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+                    set,
+                    beginning_of_pass: 0,
+                    end_of_pass: 1,
+                }),
+            });
+            encoder.end_compute_pass();
+        });
+
+        let gate = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-dx12 query read gate"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("every D3D12 device creates fences");
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[],
+                    waits: &[SemaphoreWait {
+                        semaphore: gate,
+                        value: GATE,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect("a wait on an unsignalled value is accepted");
+        let gated = device.state().next_fence_value;
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let (returned, completed, read) = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut nanos = [0u64; TIMED_QUERIES as usize];
+                let result = device.query_results(set, 0, &mut nanos);
+                sent.send(())
+                    .expect("the receiver outlives this thread inside the scope");
+                result.map(|()| nanos)
+            });
+            let returned = received.recv_timeout(PATIENCE).is_ok();
+            let completed = device.inner.completed();
+            device
+                .signal_semaphore(gate, GATE)
+                .expect("the CPU side of the gate");
+            (
+                returned,
+                completed,
+                reader.join().expect("the reader thread did not panic"),
+            )
+        });
+
+        assert!(
+            returned,
+            "query_results on a set whose only submission had retired was still blocked after \
+             {PATIENCE:?}, behind a later submission it never named; the read is waiting for the \
+             whole queue rather than for the set"
+        );
+        assert!(
+            completed < gated,
+            "the fence reached {completed} (the gated submission is {gated}) before the gate \
+             opened, so the gate was not holding and the prompt read proves nothing"
+        );
+        let [start, end] = read.expect("reading the range this set was created with");
+        assert!(
+            start != 0 && end > start,
+            "the retired frame's timestamps came back as {start} then {end} nanoseconds; the read \
+             returned without the values its submission wrote"
+        );
+
+        device.wait_idle().expect("the gate is open");
+        device.destroy_semaphore(gate);
+        device.destroy_query_set(set);
+    }
+
+    /// **Reading a set whose submission is still in flight waits for it, and
+    /// returns what it wrote.**
+    ///
+    /// The other half of
+    /// [`d3d12_a_retired_sets_read_does_not_wait_for_later_submissions`]: a
+    /// read that stopped waiting altogether would pass that test and hand a
+    /// profiler whatever the buffer held before — zeros here, a previous
+    /// frame's values in a ring. The timed submission itself waits on a gate,
+    /// so the read has to be observed still blocked while the gate is shut and
+    /// then return the pass's timestamps once it opens. The seam says a read
+    /// behind an unsignalled wait blocks until it is signalled, which is the
+    /// behaviour held here.
+    #[test]
+    #[ignore = "needs a real D3D12 device; run tests/run-dx12-e2e.sh"]
+    fn d3d12_an_in_flight_sets_read_waits_for_its_own_submission() {
+        /// The value the gate is opened at.
+        const GATE: u64 = 1;
+        /// How long the read is watched for returning early. Only a false
+        /// pass can come of making it shorter: a read that waits correctly
+        /// never returns while the gate is shut, however long it is watched.
+        const WATCHED: Duration = Duration::from_millis(250);
+
+        let (_instance, device) = open_device();
+        let queue = device
+            .queue(QueueKind::Graphics)
+            .expect("the graphics queue exists");
+        let set = device
+            .create_query_set(&QuerySetDesc {
+                label: Some("crcbl-dx12 in-flight timestamps"),
+                kind: QueryKind::Timestamp,
+                count: TIMED_QUERIES,
+            })
+            .expect("a timestamp query heap");
+        let gate = device
+            .create_semaphore(&SemaphoreDesc {
+                label: Some("crcbl-dx12 timed pass gate"),
+                kind: SemaphoreKind::Timeline { initial_value: 0 },
+            })
+            .expect("every D3D12 device creates fences");
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("crcbl-dx12 gated timed pass"),
+            queue,
+        });
+        encoder.reset_query_set(set, 0..TIMED_QUERIES);
+        encoder.begin_compute_pass(&ComputePassDesc {
+            label: Some("timed"),
+            timestamp_writes: Some(crcbl_hal::PassTimestampWrites {
+                set,
+                beginning_of_pass: 0,
+                end_of_pass: 1,
+            }),
+        });
+        encoder.end_compute_pass();
+        let buffer = encoder.finish().expect("an empty timed pass records");
+        device
+            .submit(
+                queue,
+                &SubmitInfo {
+                    command_buffers: &[buffer],
+                    waits: &[SemaphoreWait {
+                        semaphore: gate,
+                        value: GATE,
+                    }],
+                    signals: &[],
+                },
+            )
+            .expect("a gated submission is accepted");
+
+        let (sent, received) = std::sync::mpsc::channel();
+        let (early, read) = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut nanos = [0u64; TIMED_QUERIES as usize];
+                let result = device.query_results(set, 0, &mut nanos);
+                sent.send(())
+                    .expect("the receiver outlives this thread inside the scope");
+                result.map(|()| nanos)
+            });
+            let early = received.recv_timeout(WATCHED).is_ok();
+            device
+                .signal_semaphore(gate, GATE)
+                .expect("the CPU side of the gate");
+            (
+                early,
+                reader.join().expect("the reader thread did not panic"),
+            )
+        });
+
+        assert!(
+            !early,
+            "query_results returned while the submission that writes the set was held behind a \
+             shut gate, so it read the buffer before the resolve could have reached it"
+        );
+        let [start, end] = read.expect("reading the range this set was created with");
+        assert!(
+            start != 0 && end > start,
+            "the gated pass's timestamps came back as {start} then {end} nanoseconds; the read \
+             waited and still did not see what the submission resolved"
+        );
+
+        device.wait_idle().expect("the gate is open");
+        device.destroy_command_buffer(buffer);
+        device.destroy_semaphore(gate);
         device.destroy_query_set(set);
     }
 

@@ -4495,6 +4495,25 @@ would also reach the Linux and macOS linkers, which reject that flag. Considered
 and declined for now: moving `-D warnings` out of `RUSTFLAGS` workflow-wide,
 which is a larger CI change than a harmless gap warrants.
 
+## dx12 query reads without a queue drain: decisions and gaps (2026-09-22)
+
+`crcbl-dx12` now resolves each command list's written timestamps into the set's
+own readback buffer at `finish`, and `query_results` waits only for the set's
+last submission. Measured with EW `--range-demo` on the RX 7900 XTX: 4.85 ms a
+frame before, 2.61 ms after, 2.56 ms with timers off (means of three runs).
+
+- **Considered and declined: resolving into per-slot buffers in `crcbl-render`'s
+  `PassTimers`.** `resolve_query_set` writes device ticks, and converting them
+  needs a timestamp period the seam deliberately does not carry (Metal has no
+  fixed one; see `Device::query_results`' docs). It would need a seam change and
+  a Metal answer for a problem only dx12 had.
+- **Every timed list now pays one `ResolveQueryData` per contiguous run of
+  written queries**, read or not. Not measured on its own; the EW figure above
+  includes it.
+- **Not run here:** Metal and WebGPU were not touched and not exercised. No test
+  covers two encoders writing disjoint queries of one set in one submission,
+  which the resolve-by-run logic handles by design only.
+
 ## Vulkan queries on AMD Windows: what the fix left open (2026-09-22)
 
 `resolve_query_set` carries an extra all-commands/any-write barrier after
@@ -4511,7 +4530,10 @@ that named the set. Open:
   the CPU on an offscreen ring, so a read that used to return the previous
   frame's values now waits for that frame instead. Correct, but the "latency is
   the synchronisation" argument in the timers' docs only holds on a presented
-  ring.
+  ring. Since 2026-09-22 `crcbl-dx12` behaves the same way: `query_results`
+  waits for the set's `QuerySetEntry::last_submission` rather than draining the
+  queue, and the resolve it reads is recorded by the encoder that wrote the
+  timestamps (`crcbl-dx12` `command::WrittenQueries`).
 - **`vk_e2e` cannot be run on this desk.** Its fixture refuses to vouch for any
   test without `VK_LAYER_KHRONOS_validation`, and the LunarG SDK is not
   installed (its installer needs administrator rights). The new

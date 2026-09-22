@@ -1843,6 +1843,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **dx12: GPU pass timers no longer drain the queue every frame.**
+  `Device::query_results` recorded a `ResolveQueryData` of its own and waited on
+  the device fence for it, and on the one in-order queue that wait covered
+  everything already submitted — so `PassTimers`, reading a ring slot whose
+  frame had long retired, still waited for the frame just submitted, and the CPU
+  and GPU never overlapped. Each command list that writes pass timestamps now
+  ends by resolving them into its query set's readback buffer, and
+  `query_results` waits only for the last submission that named the set (as
+  `crcbl-vk` does) before mapping it. Results are unchanged: still nanoseconds,
+  still that submission's values. Reported by EW: 4.85 ms a frame on dx12
+  against 2.61 ms after, the same as with timers off.
+
 - **dx12: a bind group bound repeatedly in one encoder no longer re-retains its
   resources on every bind.** Each `bind_group` cloned the group's whole list of
   resource references (an `AddRef` now and a `Release` later per resource), and
