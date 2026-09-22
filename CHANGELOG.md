@@ -229,6 +229,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Two-bone IK and model-space joint rotation: `crcbl_anim::ik`.**
+  `rotate_joint(skeleton, model, pose, palette, joint, model_rotation)` turns
+  one joint about its own origin by a rotation given in model space (the frame
+  of `model` times the palette's globals), writing only that joint's local
+  rotation.
+  `solve_two_bone(skeleton, model, pose, palette, [upper, middle, end], target, pole)`
+  puts the end joint on a model-space target with the middle joint bent towards
+  the pole, keeping bone lengths: a target out of reach extends the chain
+  straight towards it, one too close folds it to the nearest reachable distance,
+  and a pole along the target line keeps the current bend plane. Both recompute
+  the `Palette` before returning. Both return `IkError` — mismatched pose or
+  palette, a joint out of range, joints that are not an ancestor chain, a `NaN`
+  or infinite input, a zero rotation, a zero-length bone, or a parent frame with
+  non-uniform scale or shear (`FRAME_TOLERANCE`) — and write nothing when they
+  do. Mirrored frames and a joint's own non-uniform scale are handled.
 - **Rigid compound queries: `crcbl_phys::AabbCompound`.** A body made of several
   local-space boxes, queried at a `Transform`. `AabbCompound::new(&parts)`
   refuses a part with a `NaN` or infinite corner or with `min` past `max`

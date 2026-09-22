@@ -21943,12 +21943,18 @@ already carries.
   box corner (`f64::clamp` asserts), which rebuilding it on
   `Aabb::closest_point` would turn into "no overlap". Not done: compound sweeps
   and compound-vs-shape overlap, which EW did not ask for.
-- **Two-bone IK and parent-space joint rotation (`crcbl-anim`).** Already listed
-  as absent in the animation plan. EW's `character_ik.rs` (`solve_two_bone`,
-  `rotate_joint` over `Skeleton`/`Pose`/`Palette`) has four callers: arm hand
-  placement, support-shoulder reach, upper-body aim and foot rotation. Before
-  porting, validate zero-length chains, pose/palette size mismatch, invalid
-  indices, non-finite inputs and non-uniform scale — EW's version does not.
+- **Two-bone IK shipped; EW's migration remains.**
+  `crcbl_anim::{rotate_joint, solve_two_bone}` landed 2026-09-23 with EW's
+  argument order, returning `IkError` (the validation choices are in the `ik`
+  module docs). EW still has to move its 8 call sites (`ArmRig::apply_hand` and
+  `reach_support_shoulder`, `UpperBodyRig::apply`, `restore_foot_rotation`, one
+  medical test) and delete `character_ik.rs`. Behaviour change: `solve_two_bone`
+  extends fully to an unreachable target, where EW stopped `REACH_MARGIN_M`
+  short. Not done: look-at, per-call weights (the caller blends poses), and a
+  solve result reporting reached / clamped / folded, which EW's
+  `reach_support_shoulder` could use but has not asked for. Not verified: EW's
+  authored rigs under the port, and whether they carry non-uniform scale above a
+  turned joint, which is now refused with `NonConformalFrame`.
 - **CPU bounds of a `SceneDesc` instance set under a root transform.** EW's
   `asset_placement::bounds` / `collision_parts` reject non-finite values, where
   `Aabb::from_points` skips NaN. This is what would produce the parts for the
