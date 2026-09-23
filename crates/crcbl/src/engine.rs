@@ -14766,6 +14766,31 @@ mod tests {
         assert!(!engine.is_paused(), "South's release did not fire RESUME");
     }
 
+    /// **The d-pad walks the pause panel** as the stick does: down moves the
+    /// selection down a row, up moves it back.
+    #[test]
+    fn a_scripted_pad_dpad_moves_the_pause_selection() {
+        use crate::input::PadButton;
+        let mut engine = playing();
+        let pads = scripted_pads(&mut engine);
+
+        pads.send(pad_holding(&[PAUSE_BUTTON]));
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        assert_eq!(selected_row(&engine), 0);
+
+        pads.send(pad_holding(&[PadButton::DpadDown]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 1, "the d-pad did not move down");
+        pads.send(pad_holding(&[]));
+        pads.send(pad_holding(&[PadButton::DpadUp]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 0, "the d-pad did not move up");
+        assert!(engine.is_paused(), "moving the selection resumed the game");
+    }
+
     /// **East backs out of the pause panel**, which is what Escape does there
     /// — and with no panel up it pauses nothing.
     #[test]

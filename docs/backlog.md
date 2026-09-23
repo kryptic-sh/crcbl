@@ -8953,18 +8953,15 @@ browser-hosted single-player game with mods has no containment at all.
   - **XInput has met no real controller** — only a scripted `StateSource` and a
     real `XInputGetState` answering 1167 on an empty slot. Button positions,
     stick sign and reconnection are unverified.
-  - It re-probes empty slots every poll (about 54 µs for four, measured once);
-    throttling is the usual fix. A replugged pad gets a new `GamepadId`.
+  - Empty slots are re-probed once per `xinput::REPROBE_INTERVAL` (one second),
+    connected slots every poll: about 28 µs a poll for four empty slots before,
+    about 0.03 µs between re-probes after (release, 2026-09-23). A pad plugged
+    in shows up up to one interval late; a replugged pad gets a new `GamepadId`.
   - **The loop pumps pads now** (`engine::PadSource`, `Loop::set_pad_source`,
     `HostedGame::gamepad_event`; XInput on a windowed Windows run, none
     headless), and the ui context has a pad column. Left open:
-    - **The d-pad moves menus** (`Binding::PadDpad` on `ui::MOVE`, summed into
-      the unit disc like `Wasd`), but no `Loop` test drives the pause panel with
-      it yet; `engine::menu` shows the map keeps it and steps `ui::MOVE`. The
-      test goes next to `a_scripted_pad_pauses_and_drives_the_pause_menu` with
-      `pad_holding(&[PadButton::DpadDown])`. A d-pad held on one pad and its
-      opposite on another cancel out, by the every-pad-drives-every-binding
-      rule, until device assignment lands.
+    - A d-pad held on one pad and its opposite on another cancel out, by the
+      every-pad-drives-every-binding rule, until device assignment lands.
     - **Needs a decision: pad input is not withheld from the game while a menu
       is up.** Every `GamepadEvent` reaches both the menu map and the game, so
       South accepting a panel also reaches the game. Keys are claimed per key; a
@@ -22069,10 +22066,6 @@ there: 17, 8 and 10 call sites). The rest:
   - `write_slot` (host pixels straight into a cell, 2026-09-23) stages one
     buffer and one copy pass per call; a batched `write_slots` would cut both if
     EW fills many icons a frame. Nothing needs it yet.
-  - `SceneState::Sprite` in `crates/crcbl/src/screenshot.rs` sits near clippy's
-    `large_enum_variant` limit: +48 bytes on `SpriteRenderer` tripped it while
-    `write_slot` was built, +32 did not. Box the renderer in that variant, as
-    `Ui` and `Forward` are, before the next field lands.
 - **P3: gamepad backends** (evdev first for the Steam Deck, then XInput and
   GameController) and a tap/double-tap/hold evaluator — both already in "Input:
   patterns, RON bindings, rebind persistence and every gamepad backend". EW has

@@ -6116,7 +6116,10 @@ enum SceneState {
         renderer: Box<ForwardRenderer>,
     },
     Sprite {
-        renderer: SpriteRenderer,
+        /// Boxed for [`Forward`](Self::Forward)'s reason too: unboxed it sits
+        /// close enough to clippy's `large_enum_variant` limit that one more
+        /// field on the renderer trips it.
+        renderer: Box<SpriteRenderer>,
         sheets: [SheetId; 2],
     },
     Ui {
@@ -6585,7 +6588,10 @@ impl SceneState {
                         return Err(OffscreenError::Hal(error));
                     }
                 };
-                Self::Sprite { renderer, sheets }
+                Self::Sprite {
+                    renderer: Box::new(renderer),
+                    sheets,
+                }
             }
             Scene::Ao => {
                 // The open box alone, and the cube parked out of frame — see

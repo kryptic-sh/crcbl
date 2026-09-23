@@ -40,6 +40,14 @@
 //!   which is also what a recorder of it wants.
 //! - **Disconnected** when a slot that was answering stops.
 //!
+//! # Empty slots are re-probed at an interval
+//!
+//! Microsoft's `XInputGetState` docs advise against calling it for an empty
+//! slot every frame and suggest spacing out checks for new controllers. A slot
+//! that answered "not connected" is therefore asked again only once
+//! [`REPROBE_INTERVAL`] has passed, while a connected slot is read on every
+//! poll. A pad plugged in is reported at most that interval after it arrives.
+//!
 //! # The mapping
 //!
 //! Positional buttons (A is [`PadButton::South`]), sticks normalised from
@@ -60,6 +68,7 @@ mod ffi;
 
 use crate::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadButton, PadKind};
 use ffi::{ERROR_DEVICE_NOT_CONNECTED, XInputGamepad, XInputState, XUSER_MAX_COUNT};
+use std::time::{Duration, Instant};
 
 /// What went wrong reaching XInput.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -163,21 +172,38 @@ struct Slot {
     last: GamepadSnapshot,
 }
 
+/// How long a slot that answered "not connected" goes unasked.
+///
+/// A second: a pad takes a moment to plug in and enumerate anyway, so a
+/// connection reported that late is not something a player notices, while the
+/// empty-slot probe stops being a cost paid on every frame.
+pub const REPROBE_INTERVAL: Duration = Duration::from_secs(1);
+
 /// The four slots' connection state, and the transitions a poll reports.
 #[derive(Debug, Default)]
 struct Poller {
     slots: [Option<Slot>; XUSER_MAX_COUNT as usize],
+    /// When each slot last answered "not connected". A slot is read only once
+    /// that is an interval old, so the stale time a slot keeps after it
+    /// connects never skips a read.
+    found_empty: [Option<Instant>; XUSER_MAX_COUNT as usize],
 }
 
 impl Poller {
-    /// Reads every slot once and emits what changed — see the module docs.
+    /// Reads every slot due a read at `now` and emits what changed — see the
+    /// module docs. `now` is the caller's, so a test can step it.
     fn poll(
         &mut self,
         source: &mut impl StateSource,
+        now: Instant,
         emit: &mut impl FnMut(GamepadEvent),
     ) -> Result<(), XInputError> {
         let mut failure = None;
-        for (user, slot) in (0..XUSER_MAX_COUNT).zip(&mut self.slots) {
+        let slots = self.slots.iter_mut().zip(&mut self.found_empty);
+        for (user, (slot, found_empty)) in (0..XUSER_MAX_COUNT).zip(slots) {
+            if found_empty.is_some_and(|at| now.duration_since(at) < REPROBE_INTERVAL) {
+                continue;
+            }
             match source.get_state(user) {
                 Ok(state) => {
                     let snapshot = snapshot_of(&state.gamepad);
@@ -204,7 +230,9 @@ impl Poller {
                     if let Some(gone) = slot.take() {
                         emit(GamepadEvent::Disconnected { id: gone.id });
                     }
-                    if code != ERROR_DEVICE_NOT_CONNECTED {
+                    if code == ERROR_DEVICE_NOT_CONNECTED {
+                        *found_empty = Some(now);
+                    } else {
                         failure = Some(XInputError::GetState { user, code });
                     }
                 }
@@ -225,6 +253,7 @@ mod loaded {
     };
     use super::{Poller, StateSource, XInputError};
     use crate::GamepadEvent;
+    use std::time::Instant;
 
     /// The libraries tried, in order.
     const LIBRARIES: [&str; 2] = ["xinput1_4.dll", "xinput9_1_0.dll"];
@@ -332,16 +361,19 @@ mod loaded {
             self.library.name
         }
 
-        /// Reads all four slots once and calls `emit` with what changed:
+        /// Reads the four slots and calls `emit` with what changed:
         /// connections, disconnections, and snapshots that differ from the
-        /// last one reported.
+        /// last one reported. A connected slot is read on every call; an
+        /// empty one only once [`REPROBE_INTERVAL`](super::REPROBE_INTERVAL)
+        /// has passed since it was last found empty.
         ///
         /// # Errors
         /// [`XInputError::GetState`] if a slot answered with an unexpected
         /// error; the other slots were polled regardless, and that one is
         /// reported as disconnected.
         pub fn poll(&mut self, mut emit: impl FnMut(GamepadEvent)) -> Result<(), XInputError> {
-            self.poller.poll(&mut self.library, &mut emit)
+            self.poller
+                .poll(&mut self.library, Instant::now(), &mut emit)
         }
     }
 }
@@ -395,13 +427,29 @@ mod tests {
         assert_eq!(snapshot.kind, PadKind::Xbox);
     }
 
-    /// Four slots answered from a script.
+    /// Four slots answered from a script, counting the reads of each, with
+    /// the clock the tests poll at.
     #[derive(Debug)]
-    struct Fake([Result<XInputState, u32>; 4]);
+    struct Fake {
+        slots: [Result<XInputState, u32>; 4],
+        reads: [u32; 4],
+        now: Instant,
+    }
+
+    impl Fake {
+        fn new(slots: [Result<XInputState, u32>; 4]) -> Self {
+            Self {
+                slots,
+                reads: [0; 4],
+                now: Instant::now(),
+            }
+        }
+    }
 
     impl StateSource for Fake {
         fn get_state(&mut self, user: u32) -> Result<XInputState, u32> {
-            self.0[user as usize]
+            self.reads[user as usize] += 1;
+            self.slots[user as usize]
         }
     }
 
@@ -417,10 +465,109 @@ mod tests {
         })
     }
 
-    fn poll(poller: &mut Poller, fake: &mut Fake) -> (Vec<GamepadEvent>, Result<(), XInputError>) {
+    /// Polls `after` the fake's clock, moving the clock there.
+    fn poll_after(
+        poller: &mut Poller,
+        fake: &mut Fake,
+        after: Duration,
+    ) -> (Vec<GamepadEvent>, Result<(), XInputError>) {
+        fake.now += after;
+        let now = fake.now;
         let mut events = Vec::new();
-        let result = poller.poll(fake, &mut |event| events.push(event));
+        let result = poller.poll(fake, now, &mut |event| events.push(event));
         (events, result)
+    }
+
+    /// Polls a whole re-probe interval after the last poll, so every slot is
+    /// read.
+    fn poll(poller: &mut Poller, fake: &mut Fake) -> (Vec<GamepadEvent>, Result<(), XInputError>) {
+        poll_after(poller, fake, REPROBE_INTERVAL)
+    }
+
+    /// **An empty slot is not asked again within the interval**, and is once
+    /// it has passed.
+    #[test]
+    fn an_empty_slot_is_reprobed_only_after_the_interval() {
+        let mut poller = Poller::default();
+        let mut fake = Fake::new([EMPTY; 4]);
+        poll(&mut poller, &mut fake).1.expect("scripted");
+        assert_eq!(fake.reads, [1; 4], "the first poll asks every slot");
+
+        let almost = REPROBE_INTERVAL - Duration::from_millis(1);
+        poll_after(&mut poller, &mut fake, Duration::ZERO)
+            .1
+            .expect("scripted");
+        poll_after(&mut poller, &mut fake, almost)
+            .1
+            .expect("scripted");
+        assert_eq!(fake.reads, [1; 4], "nothing re-asked inside the interval");
+
+        poll_after(&mut poller, &mut fake, Duration::from_millis(1))
+            .1
+            .expect("scripted");
+        assert_eq!(fake.reads, [2; 4], "every slot re-asked once it passed");
+    }
+
+    /// **A connected slot is read on every poll**, however close together,
+    /// while the empty ones beside it wait out the interval.
+    #[test]
+    fn a_connected_slot_is_read_every_poll() {
+        let mut poller = Poller::default();
+        let mut fake = Fake::new([EMPTY, pad(0), EMPTY, EMPTY]);
+        poll(&mut poller, &mut fake).1.expect("scripted");
+        for _ in 0..3 {
+            poll_after(&mut poller, &mut fake, Duration::ZERO)
+                .1
+                .expect("scripted");
+        }
+        assert_eq!(fake.reads, [1, 4, 1, 1]);
+
+        fake.slots[1] = pad(ffi::XINPUT_GAMEPAD_A);
+        let (events, _) = poll_after(&mut poller, &mut fake, Duration::ZERO);
+        assert!(
+            matches!(events[..], [GamepadEvent::State { .. }]),
+            "a press on the connected pad arrives at once: {events:?}"
+        );
+    }
+
+    /// **A pad plugged into an empty slot is reported within one interval**
+    /// of the slot last being found empty, and not before it.
+    #[test]
+    fn a_new_pad_is_detected_within_one_interval() {
+        let mut poller = Poller::default();
+        let mut fake = Fake::new([EMPTY; 4]);
+        poll(&mut poller, &mut fake).1.expect("scripted");
+
+        let half = REPROBE_INTERVAL / 2;
+        let (events, _) = poll_after(&mut poller, &mut fake, half);
+        assert!(events.is_empty(), "{events:?}");
+        fake.slots[2] = pad(0);
+        let (events, _) = poll_after(&mut poller, &mut fake, half - Duration::from_millis(1));
+        assert!(events.is_empty(), "still inside the interval: {events:?}");
+
+        let (events, _) = poll_after(&mut poller, &mut fake, Duration::from_millis(1));
+        assert!(
+            matches!(events[..], [GamepadEvent::Connected { .. }]),
+            "{events:?}"
+        );
+    }
+
+    /// A slot that disconnects is empty like any other, so a pad plugged back
+    /// in is found once the interval has passed.
+    #[test]
+    fn an_unplugged_slot_is_reprobed_after_the_interval() {
+        let mut poller = Poller::default();
+        let mut fake = Fake::new([pad(0), EMPTY, EMPTY, EMPTY]);
+        poll(&mut poller, &mut fake).1.expect("scripted");
+        fake.slots[0] = EMPTY;
+        let (events, _) = poll_after(&mut poller, &mut fake, Duration::ZERO);
+        assert!(matches!(events[..], [GamepadEvent::Disconnected { .. }]));
+
+        fake.slots[0] = pad(0);
+        let (events, _) = poll_after(&mut poller, &mut fake, Duration::ZERO);
+        assert!(events.is_empty(), "inside the interval: {events:?}");
+        let (events, _) = poll(&mut poller, &mut fake);
+        assert!(matches!(events[..], [GamepadEvent::Connected { .. }]));
     }
 
     /// **Connect, change, disconnect, reconnect**, each reported once and only
@@ -428,10 +575,10 @@ mod tests {
     #[test]
     fn slot_transitions_are_reported_once_each() {
         let mut poller = Poller::default();
-        let mut fake = Fake([EMPTY; 4]);
+        let mut fake = Fake::new([EMPTY; 4]);
         assert_eq!(poll(&mut poller, &mut fake), (vec![], Ok(())), "all empty");
 
-        fake.0[1] = pad(ffi::XINPUT_GAMEPAD_A);
+        fake.slots[1] = pad(ffi::XINPUT_GAMEPAD_A);
         let (events, result) = poll(&mut poller, &mut fake);
         assert_eq!(result, Ok(()));
         let [
@@ -446,7 +593,7 @@ mod tests {
 
         assert_eq!(poll(&mut poller, &mut fake), (vec![], Ok(())), "unchanged");
 
-        fake.0[1] = pad(0);
+        fake.slots[1] = pad(0);
         let (events, _) = poll(&mut poller, &mut fake);
         assert_eq!(
             events,
@@ -456,13 +603,13 @@ mod tests {
             }],
         );
 
-        fake.0[1] = EMPTY;
+        fake.slots[1] = EMPTY;
         assert_eq!(
             poll(&mut poller, &mut fake),
             (vec![GamepadEvent::Disconnected { id }], Ok(())),
         );
 
-        fake.0[1] = pad(0);
+        fake.slots[1] = pad(0);
         let (events, _) = poll(&mut poller, &mut fake);
         let [GamepadEvent::Connected { id: again, .. }] = events[..] else {
             panic!("a reconnection at rest is one event: {events:?}");
@@ -475,14 +622,14 @@ mod tests {
     #[test]
     fn an_unexpected_error_disconnects_the_slot_and_is_reported() {
         let mut poller = Poller::default();
-        let mut fake = Fake([pad(0), EMPTY, EMPTY, EMPTY]);
+        let mut fake = Fake::new([pad(0), EMPTY, EMPTY, EMPTY]);
         let (events, _) = poll(&mut poller, &mut fake);
         let [GamepadEvent::Connected { id, .. }] = events[..] else {
             panic!("{events:?}");
         };
 
-        fake.0[0] = Err(5);
-        fake.0[3] = pad(ffi::XINPUT_GAMEPAD_B);
+        fake.slots[0] = Err(5);
+        fake.slots[3] = pad(ffi::XINPUT_GAMEPAD_B);
         let (events, result) = poll(&mut poller, &mut fake);
         assert_eq!(result, Err(XInputError::GetState { user: 0, code: 5 }));
         assert_eq!(events[0], GamepadEvent::Disconnected { id });
@@ -521,8 +668,8 @@ mod tests {
 
         let mut adapter = Adapter::default();
         let mut poller = Poller::default();
-        let mut fake = Fake([EMPTY; 4]);
-        fake.0[0] = Ok(XInputState {
+        let mut fake = Fake::new([EMPTY; 4]);
+        fake.slots[0] = Ok(XInputState {
             packet_number: 1,
             gamepad: XInputGamepad {
                 // Resting drift: a binding's dead zone would zero it, and the
@@ -533,14 +680,14 @@ mod tests {
             },
         });
         poller
-            .poll(&mut fake, &mut |event| adapter.feed(event))
+            .poll(&mut fake, Instant::now(), &mut |event| adapter.feed(event))
             .expect("scripted");
         assert_eq!(adapter.left, (stick_axis(3277), 1.0), "raw, and +Y up");
         let device = adapter.device.expect("a state arrived");
 
-        fake.0[0] = EMPTY;
+        fake.slots[0] = EMPTY;
         poller
-            .poll(&mut fake, &mut |event| adapter.feed(event))
+            .poll(&mut fake, Instant::now(), &mut |event| adapter.feed(event))
             .expect("scripted");
         assert_eq!(adapter.device, None, "pad {device} unplugged");
         assert_eq!(adapter.left, (0.0, 0.0));
@@ -557,15 +704,19 @@ mod tests {
             bindings: vec![Binding::PadButton(PadButton::South)],
         });
         let mut poller = Poller::default();
-        let mut fake = Fake([EMPTY, EMPTY, pad(ffi::XINPUT_GAMEPAD_A), EMPTY]);
+        let mut fake = Fake::new([EMPTY, EMPTY, pad(ffi::XINPUT_GAMEPAD_A), EMPTY]);
         poller
-            .poll(&mut fake, &mut |event| map.gamepad_event(&event))
+            .poll(&mut fake, Instant::now(), &mut |event| {
+                map.gamepad_event(&event)
+            })
             .expect("scripted");
         assert!(map.just_pressed("jump"));
 
-        fake.0[2] = EMPTY;
+        fake.slots[2] = EMPTY;
         poller
-            .poll(&mut fake, &mut |event| map.gamepad_event(&event))
+            .poll(&mut fake, Instant::now(), &mut |event| {
+                map.gamepad_event(&event)
+            })
             .expect("scripted");
         assert!(map.just_released("jump"), "unplugging releases");
     }
@@ -594,7 +745,9 @@ mod tests {
 
         let mut events = Vec::new();
         Poller::default()
-            .poll(&mut library, &mut |event| events.push(event))
+            .poll(&mut library, Instant::now(), &mut |event| {
+                events.push(event)
+            })
             .expect("1167 is an empty slot, not an error");
         let connected = events
             .iter()

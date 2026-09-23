@@ -252,11 +252,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **XInput on Windows, `crcbl_input::xinput`**: `XInput::load` finds
   `xinput1_4.dll` (or `xinput9_1_0.dll`) at runtime, and `XInput::poll` reads
   the four slots and emits `GamepadEvent`s — connections, disconnections, and a
-  snapshot whenever one changes. A game on its own loop polls it; the engine
-  loop polls it for games on `crcbl::engine::Loop` (see below). Tested without a
-  controller (a scripted state source, and a real `XInputGetState` answering an
-  empty slot); no controller has been through it yet. Other targets have no pad
-  backend and no stand-in module.
+  snapshot whenever one changes. A connected slot is read on every poll; a slot
+  found empty is asked again only once `xinput::REPROBE_INTERVAL` (one second)
+  has passed, as Microsoft advises, so a newly plugged pad is reported up to
+  that late and an idle poll no longer pays for four empty-slot probes (about 28
+  µs a poll on the machine it was measured on, now about 0.03 µs between
+  re-probes). A game on its own loop polls it; the engine loop polls it for
+  games on `crcbl::engine::Loop` (see below). Tested without a controller (a
+  scripted state source, and a real `XInputGetState` answering an empty slot);
+  no controller has been through it yet. Other targets have no pad backend and
+  no stand-in module.
 - **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
   at `Loop::new` (logging once and running padless if it cannot); other targets
   log once that they have no backend; a headless run polls nothing. Each frame,
