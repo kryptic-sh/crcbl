@@ -2,13 +2,13 @@
 //! is driven by, as `docs/plan/07-ui-debug.md`'s "Navigation = reserved UI
 //! actions" table defines them.
 //!
-//! | Action     | Kind    | Keyboard                      | Gamepad              | Repeat         |
-//! | ---------- | ------- | ----------------------------- | -------------------- | -------------- |
-//! | [`MOVE`]   | `Axis2` | the arrows, and W, A, S and D | the left stick       | [`Repeat::UI`] |
-//! | [`NEXT`]   | Button  | Tab                           | the right shoulder   | [`Repeat::UI`] |
-//! | [`PREV`]   | Button  | Shift+Tab                     | the left shoulder    | [`Repeat::UI`] |
-//! | [`ACCEPT`] | Button  | Enter, Space                  | [`PadButton::South`] | none           |
-//! | [`BACK`]   | Button  | Escape                        | [`PadButton::East`]  | none           |
+//! | Action     | Kind    | Keyboard                      | Gamepad                       | Repeat         |
+//! | ---------- | ------- | ----------------------------- | ----------------------------- | -------------- |
+//! | [`MOVE`]   | `Axis2` | the arrows, and W, A, S and D | the left stick, and the d-pad | [`Repeat::UI`] |
+//! | [`NEXT`]   | Button  | Tab                           | the right shoulder            | [`Repeat::UI`] |
+//! | [`PREV`]   | Button  | Shift+Tab                     | the left shoulder             | [`Repeat::UI`] |
+//! | [`ACCEPT`] | Button  | Enter, Space                  | [`PadButton::South`]          | none           |
+//! | [`BACK`]   | Button  | Escape                        | [`PadButton::East`]           | none           |
 //!
 //! **Rebindable like every action** — they are ordinary actions in an ordinary
 //! context, so [`ActionMap::rebind`] moves them.
@@ -16,18 +16,14 @@
 //! **Pushed only while a UI has input.** Declaring the context leaves it off
 //! the stack; whoever owns a UI's input pushes [`CONTEXT`] while that UI has
 //! it and pops it after, and while it is pushed the arrows, WASD, Tab, Enter,
-//! Space and Escape — and the pad's left stick, shoulders, South and East — are
-//! the UI's and not the game's beneath: the context stack is the disambiguator,
-//! not a list of special cases.
+//! Space and Escape — and the pad's left stick, d-pad, shoulders, South and
+//! East — are the UI's and not the game's beneath: the context stack is the
+//! disambiguator, not a list of special cases.
 //!
 //! **The stick reads through [`STICK_DEADZONE`]**, so a stick resting off
-//! centre does not walk a list.
-//!
-//! **The plan's d-pad row is not declared yet.** [`MOVE`] is an `Axis2`, and a
-//! [`Binding::PadButton`] drives nothing on an `Axis2`: the seam has no
-//! four-button composite for pads the way [`Binding::Wasd`] is one for keys, so
-//! a d-pad row here would be a binding nothing can move. It arrives with that
-//! binding.
+//! centre does not walk a list. **The d-pad is a [`Binding::PadDpad`]**, the
+//! pad's [`Binding::Wasd`], so it shares one unit disc with the stick and the
+//! keys.
 //!
 //! **Start is not in the table.** Like Escape's pause, it is the engine loop's,
 //! and the loop binds it outside this context.
@@ -84,6 +80,7 @@ fn declarations() -> [ActionDecl; 5] {
                     stick: Stick::Left,
                     deadzone: STICK_DEADZONE,
                 },
+                Binding::PadDpad,
             ],
         },
         button(
@@ -230,8 +227,9 @@ mod tests {
     }
 
     /// **Pushed, it takes the table's pad column too**: the left stick past
-    /// the dead zone moves, drift inside it does not, the shoulders step
-    /// through tree order, South accepts and East backs out.
+    /// the dead zone moves, drift inside it does not, each d-pad direction
+    /// steps its way, the shoulders step through tree order, South accepts and
+    /// East backs out.
     #[test]
     fn pushed_it_drives_the_reserved_actions_from_a_pad() {
         use crate::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadKind};
@@ -256,6 +254,19 @@ mod tests {
         assert_eq!(map.cardinal(MOVE), Some(Cardinal::Down));
         assert_eq!(map.axis2("walk"), (0.0, 0.0), "the game binds no stick");
         map.gamepad_event(&state(at_rest));
+
+        for (button, direction) in [
+            (PadButton::DpadUp, Cardinal::Up),
+            (PadButton::DpadDown, Cardinal::Down),
+            (PadButton::DpadLeft, Cardinal::Left),
+            (PadButton::DpadRight, Cardinal::Right),
+        ] {
+            map.begin_tick(TICK);
+            map.gamepad_event(&state(holding(button)));
+            assert_eq!(map.cardinal(MOVE), Some(direction), "{button:?}");
+            assert!(map.repeated(MOVE), "{button:?} steps once on the press");
+            map.gamepad_event(&state(at_rest));
+        }
 
         for (button, action) in [
             (PadButton::RightShoulder, NEXT),

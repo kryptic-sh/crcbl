@@ -26,8 +26,8 @@
 //! Every pad backend emits [`GamepadEvent`]s, by the conventions `gamepad.rs`
 //! states — positional buttons, sticks with +Y up, triggers 0…1, raw axes. A
 //! game reads them directly, or feeds [`ActionMap::gamepad_event`], where
-//! [`Binding::PadButton`], [`Binding::PadStick`] and [`Binding::PadTrigger`]
-//! read them. The Windows backend is `xinput`,
+//! [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
+//! [`Binding::PadTrigger`] read them. The Windows backend is `xinput`,
 //! compiled on Windows only: no other target has a backend yet, and none has a
 //! stand-in that would report "no pads" as though it had looked.
 
@@ -346,9 +346,20 @@ pub enum Binding {
     /// A pad button, by position — see [`PadButton`].
     ///
     /// Read like a [`Binding::Key`]: down on an [`ActionKind::Button`], +1.0 on
-    /// an [`ActionKind::Axis1`], nothing on an [`ActionKind::Axis2`]. Down
-    /// while any connected pad holds it.
+    /// an [`ActionKind::Axis1`], nothing on an [`ActionKind::Axis2`] — the
+    /// d-pad's `Axis2` is [`Binding::PadDpad`]. Down while any connected pad
+    /// holds it.
     PadButton(PadButton),
+    /// The d-pad as one 2-D axis: [`Binding::Wasd`] over
+    /// [`PadButton::DpadUp`], [`PadButton::DpadDown`], [`PadButton::DpadLeft`]
+    /// and [`PadButton::DpadRight`], +Y up.
+    ///
+    /// Resolved exactly as `Wasd` is: into the same unit disc as the keys and
+    /// the sticks on the action, so a diagonal is a unit vector and opposite
+    /// directions cancel; down on an [`ActionKind::Button`] while any of the
+    /// four is held; inert on an [`ActionKind::Axis1`]. It owns the four
+    /// buttons for routing, as `Wasd` owns its four keys.
+    PadDpad,
     /// A pad stick's deflection, +Y up, through a **scaled radial** dead zone:
     /// zero within `deadzone` of centre, rescaled so the zone's edge reads 0
     /// and full throw reads 1.
@@ -405,16 +416,18 @@ impl Binding {
             | Self::PointerPosition { .. }
             | Self::Virtual(_)
             | Self::PadButton(_)
+            | Self::PadDpad
             | Self::PadStick { .. }
             | Self::PadTrigger { .. } => {}
         }
     }
 
     /// Whether this binding reads a gamepad.
-    fn reads_gamepad(&self) -> bool {
+    #[must_use]
+    pub const fn reads_gamepad(&self) -> bool {
         matches!(
             self,
-            Self::PadButton(_) | Self::PadStick { .. } | Self::PadTrigger { .. }
+            Self::PadButton(_) | Self::PadDpad | Self::PadStick { .. } | Self::PadTrigger { .. }
         )
     }
 
@@ -1159,6 +1172,7 @@ impl ActionMap {
                     Binding::MouseButton(b) => view.button(*b),
                     Binding::Virtual(id) => view.control(id),
                     Binding::PadButton(button) => view.pad_button(*button),
+                    Binding::PadDpad => PadButton::DPAD.iter().any(|&b| view.pad_button(b)),
                     Binding::PadTrigger { trigger, threshold } => {
                         view.trigger(*trigger) && gamepad::pad_trigger(pads, *trigger) > *threshold
                     }
@@ -1299,6 +1313,20 @@ impl ActionMap {
                                 dir_x -= 1.0;
                             }
                             if view.key(*right) {
+                                dir_x += 1.0;
+                            }
+                        }
+                        Binding::PadDpad => {
+                            if view.pad_button(PadButton::DpadUp) {
+                                dir_y += 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadDown) {
+                                dir_y -= 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadLeft) {
+                                dir_x -= 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadRight) {
                                 dir_x += 1.0;
                             }
                         }

@@ -13,8 +13,8 @@
 //!   [`ActionMap`] at all.
 //! - **Through an [`ActionMap`]**, the optional layer on top:
 //!   [`ActionMap::gamepad_event`] resolves them against
-//!   [`Binding::PadButton`], [`Binding::PadStick`] and [`Binding::PadTrigger`],
-//!   with dead zones, contexts and `last_device`.
+//!   [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
+//!   [`Binding::PadTrigger`], with dead zones, contexts and `last_device`.
 //!
 //! A game can do both from one stream, since an event is `Copy`:
 //!
@@ -83,7 +83,8 @@
 //! Until local-multiplayer device assignment lands, a [`Binding::PadButton`] is
 //! down while *any* connected pad holds it, a trigger reads the furthest-pulled
 //! pad, and a [`Binding::PadStick`] sums every pad's filtered deflection into
-//! the same unit disc a [`Binding::Wasd`] shares with it.
+//! the same unit disc a [`Binding::Wasd`] and a [`Binding::PadDpad`] share
+//! with it.
 //!
 //! # Focus loss and disconnection release
 //!
@@ -177,6 +178,14 @@ impl PadButton {
         Self::DpadLeft,
         Self::DpadRight,
         Self::Guide,
+    ];
+
+    /// The four buttons a [`Binding::PadDpad`] reads.
+    pub(crate) const DPAD: [Self; 4] = [
+        Self::DpadUp,
+        Self::DpadDown,
+        Self::DpadLeft,
+        Self::DpadRight,
     ];
 
     const fn bit(self) -> u16 {
@@ -734,6 +743,196 @@ mod tests {
 
         map.gamepad_event(&state(PAD, with_axis(rest, PadAxis::LeftY, -0.5)));
         assert_eq!(map.axis2("move"), (0.0, -0.5));
+    }
+
+    /// **The d-pad resolves exactly as the WASD composite does**: +Y up, a
+    /// diagonal a unit vector, opposite directions cancelling — checked
+    /// against hand-worked values and against a [`Binding::Wasd`] fed the same
+    /// directions.
+    #[test]
+    fn the_dpad_resolves_to_an_axis2_like_wasd() {
+        use PadButton::{DpadDown, DpadLeft, DpadRight, DpadUp};
+        let mut map = ActionMap::new();
+        map.declare(action("move", ActionKind::Axis2, vec![Binding::PadDpad]));
+        map.declare(action(
+            "walk",
+            ActionKind::Axis2,
+            vec![Binding::Wasd {
+                up: KeyCode::KeyW,
+                down: KeyCode::KeyS,
+                left: KeyCode::KeyA,
+                right: KeyCode::KeyD,
+            }],
+        ));
+        let key = |button| match button {
+            DpadUp => KeyCode::KeyW,
+            DpadDown => KeyCode::KeyS,
+            DpadLeft => KeyCode::KeyA,
+            _ => KeyCode::KeyD,
+        };
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+        let cases: [(&[PadButton], (f32, f32)); 9] = [
+            (&[DpadUp], (0.0, 1.0)),
+            (&[DpadDown], (0.0, -1.0)),
+            (&[DpadLeft], (-1.0, 0.0)),
+            (&[DpadRight], (1.0, 0.0)),
+            (&[DpadUp, DpadRight], (half, half)),
+            (&[DpadUp, DpadLeft], (-half, half)),
+            (&[DpadDown, DpadRight], (half, -half)),
+            (&[DpadDown, DpadLeft], (-half, -half)),
+            (&[DpadUp, DpadDown], (0.0, 0.0)),
+        ];
+        for (buttons, expected) in cases {
+            map.gamepad_event(&state(PAD, holding(buttons)));
+            for &button in buttons {
+                map.key_event(key(button), true);
+            }
+            assert!(
+                close(map.axis2("move"), expected),
+                "{buttons:?}: {:?}",
+                map.axis2("move"),
+            );
+            assert_eq!(map.axis2("move"), map.axis2("walk"), "{buttons:?}");
+            for &button in buttons {
+                map.key_event(key(button), false);
+            }
+        }
+        map.gamepad_event(&state(PAD, holding(&[])));
+        assert_eq!(map.axis2("move"), (0.0, 0.0), "let go");
+    }
+
+    /// On a button the d-pad is down while any of its four is, as `Wasd` is
+    /// while any of its keys is; a face button is not one of them.
+    #[test]
+    fn the_dpad_on_a_button_is_down_while_any_direction_is() {
+        let mut map = ActionMap::new();
+        map.declare(action("any", ActionKind::Button, vec![Binding::PadDpad]));
+        map.gamepad_event(&state(PAD, holding(&[PadButton::South])));
+        assert!(!map.button_held("any"));
+        for button in PadButton::DPAD {
+            map.gamepad_event(&state(PAD, holding(&[button])));
+            assert!(map.button_held("any"), "{button:?}");
+            map.gamepad_event(&state(PAD, holding(&[])));
+            assert!(!map.button_held("any"));
+        }
+    }
+
+    /// **Keys, the d-pad and the stick share one unit disc**: they sum, then
+    /// clamp, so pushing two of them the same way is not faster and pushing
+    /// them apart is a diagonal or a cancel.
+    #[test]
+    fn keys_the_dpad_and_the_stick_sum_into_one_unit_disc() {
+        let mut map = ActionMap::new();
+        map.declare(action(
+            "move",
+            ActionKind::Axis2,
+            vec![
+                Binding::Wasd {
+                    up: KeyCode::KeyW,
+                    down: KeyCode::KeyS,
+                    left: KeyCode::KeyA,
+                    right: KeyCode::KeyD,
+                },
+                Binding::PadDpad,
+                Binding::PadStick {
+                    stick: Stick::Left,
+                    deadzone: 0.0,
+                },
+            ],
+        ));
+        let dpad = |button| holding(&[button]);
+        let half = std::f32::consts::FRAC_1_SQRT_2;
+
+        // The same way: clamped, not doubled.
+        map.gamepad_event(&state(
+            PAD,
+            with_axis(dpad(PadButton::DpadRight), PadAxis::LeftX, 0.5),
+        ));
+        assert!(
+            close(map.axis2("move"), (1.0, 0.0)),
+            "{:?}",
+            map.axis2("move")
+        );
+
+        // Crossed: a unit diagonal.
+        map.gamepad_event(&state(
+            PAD,
+            with_axis(dpad(PadButton::DpadRight), PadAxis::LeftY, 1.0),
+        ));
+        assert!(
+            close(map.axis2("move"), (half, half)),
+            "{:?}",
+            map.axis2("move")
+        );
+
+        // Opposed, inside the disc: the difference.
+        map.gamepad_event(&state(
+            PAD,
+            with_axis(dpad(PadButton::DpadLeft), PadAxis::LeftX, 0.5),
+        ));
+        assert!(
+            close(map.axis2("move"), (-0.5, 0.0)),
+            "{:?}",
+            map.axis2("move")
+        );
+
+        // A key against the d-pad cancels it; the three together up are up.
+        map.gamepad_event(&state(PAD, dpad(PadButton::DpadRight)));
+        map.key_event(KeyCode::KeyA, true);
+        assert_eq!(map.axis2("move"), (0.0, 0.0));
+        map.key_event(KeyCode::KeyA, false);
+        map.key_event(KeyCode::KeyW, true);
+        map.gamepad_event(&state(
+            PAD,
+            with_axis(dpad(PadButton::DpadUp), PadAxis::LeftY, 1.0),
+        ));
+        assert!(
+            close(map.axis2("move"), (0.0, 1.0)),
+            "{:?}",
+            map.axis2("move")
+        );
+    }
+
+    /// A d-pad press makes the pad the last device, as any pad button does,
+    /// and letting go of it does not.
+    #[test]
+    fn a_dpad_press_makes_the_pad_the_last_device() {
+        let mut map = ActionMap::new();
+        map.declare(action("move", ActionKind::Axis2, vec![Binding::PadDpad]));
+        map.key_event(KeyCode::KeyQ, true);
+        assert_eq!(map.last_device(), Some(Device::Keyboard));
+        map.gamepad_event(&state(PAD, holding(&[PadButton::DpadLeft])));
+        assert_eq!(map.last_device(), Some(Device::Gamepad));
+
+        map.key_event(KeyCode::KeyQ, false);
+        map.key_event(KeyCode::KeyQ, true);
+        map.gamepad_event(&state(PAD, holding(&[])));
+        assert_eq!(
+            map.last_device(),
+            Some(Device::Keyboard),
+            "letting go of the d-pad is not the pad speaking",
+        );
+    }
+
+    /// A d-pad composite in a pushed context takes the four d-pad buttons from
+    /// a plain [`Binding::PadButton`] beneath it, and leaves the rest.
+    #[test]
+    fn a_pushed_dpad_takes_its_four_buttons_from_the_context_beneath() {
+        let mut map = jump_map();
+        map.declare(action(
+            "up",
+            ActionKind::Button,
+            vec![Binding::PadButton(PadButton::DpadUp)],
+        ));
+        map.declare_in(
+            "menu",
+            action("move", ActionKind::Axis2, vec![Binding::PadDpad]),
+        );
+        map.push_context("menu").expect("declared");
+        map.gamepad_event(&state(PAD, holding(&[PadButton::DpadUp, PadButton::South])));
+        assert_eq!(map.axis2("move"), (0.0, 1.0));
+        assert!(!map.button_held("up"), "the menu owns DpadUp");
+        assert!(map.button_held("jump"), "and not South");
     }
 
     /// **The pad becomes the last device on activity and not on release**, as

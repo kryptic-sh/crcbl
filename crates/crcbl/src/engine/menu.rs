@@ -106,7 +106,8 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
 ///
 /// **Only the keys are narrowed.** The pad column of [`ui::declare`] stays as
-/// it is, so the left stick moves, South accepts and East backs out: the loop
+/// it is — every binding [`Binding::reads_gamepad`] names — so the left stick
+/// and the d-pad move, South accepts and East backs out: the loop
 /// withholds no pad event from the game (see
 /// [`HostedGame::gamepad_event`](super::HostedGame::gamepad_event)), so there
 /// is no game binding for the narrowing to protect.
@@ -158,7 +159,7 @@ pub fn menu_actions() -> ActionMap {
             .bindings(name)
             .unwrap_or_default()
             .iter()
-            .filter(|binding| reads_gamepad(binding))
+            .filter(|binding| binding.reads_gamepad())
             .cloned();
         let bindings = keys.into_iter().chain(pads).collect();
         actions
@@ -176,15 +177,6 @@ pub fn menu_actions() -> ActionMap {
 /// The loop's own action on [`PAUSE_BUTTON`], in the base context — see
 /// [`menu_actions`].
 pub(super) const PAUSE_ACTION: &str = "engine_pause";
-
-/// Whether `binding` reads a pad: what [`menu_actions`] keeps when it narrows
-/// the keys.
-const fn reads_gamepad(binding: &Binding) -> bool {
-    matches!(
-        binding,
-        Binding::PadButton(_) | Binding::PadStick { .. } | Binding::PadTrigger { .. }
-    )
-}
 
 /// Whether `actions`' `ui` context binds `key` at all: a key a menu may take.
 pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -> bool {
@@ -269,6 +261,49 @@ mod tests {
                 }),
             );
         }
+    }
+
+    /// **The d-pad walks a menu**: narrowing the keys keeps [`ui::MOVE`]'s pad
+    /// column, so a d-pad press on the loop's map steps once in its direction,
+    /// alongside the arrows.
+    #[test]
+    fn the_dpad_moves_through_the_loops_menu_map() {
+        use crcbl_input::{Cardinal, GamepadEvent, GamepadId, GamepadSnapshot, PadButton, PadKind};
+        let pad = GamepadId(1);
+        let holding = |buttons: &[PadButton]| GamepadEvent::State {
+            id: pad,
+            snapshot: GamepadSnapshot {
+                buttons: buttons.iter().copied().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        };
+        let mut actions = menu_actions();
+        assert!(
+            actions
+                .bindings(ui::MOVE)
+                .unwrap_or_default()
+                .contains(&Binding::PadDpad),
+            "menu_actions dropped the d-pad: {:?}",
+            actions.bindings(ui::MOVE),
+        );
+        actions.push_context(ui::CONTEXT).expect("declared");
+        for (button, direction) in [
+            (PadButton::DpadDown, Cardinal::Down),
+            (PadButton::DpadUp, Cardinal::Up),
+        ] {
+            actions.begin_tick(1.0 / 60.0);
+            actions.gamepad_event(&holding(&[button]));
+            assert_eq!(actions.cardinal(ui::MOVE), Some(direction), "{button:?}");
+            assert!(actions.repeated(ui::MOVE), "{button:?} stepped nothing");
+            actions.gamepad_event(&holding(&[]));
+        }
+        actions.begin_tick(1.0 / 60.0);
+        actions.key_event(MENU_DOWN_KEY, true);
+        assert_eq!(
+            actions.cardinal(ui::MOVE),
+            Some(Cardinal::Down),
+            "and the arrows still move",
+        );
     }
 
     /// The set draws nothing until it is shown the paused state, which is what

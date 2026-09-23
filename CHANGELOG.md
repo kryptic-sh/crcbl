@@ -17,9 +17,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Breaking
 
 - **`crcbl_input::Binding` has pad variants and is no longer `Eq`**:
-  `PadButton`, `PadStick { stick, deadzone }` and
+  `PadButton`, `PadDpad`, `PadStick { stick, deadzone }` and
   `PadTrigger { trigger, threshold }` join it, so an exhaustive `match` on it
-  needs three more arms, and the `f32` dead zones leave it `PartialEq` only.
+  needs four more arms, and the `f32` dead zones leave it `PartialEq` only.
   `ActionMapError` has `InvalidDeadzone`, returned by `try_declare`,
   `try_declare_in` and `rebind` for a dead zone or threshold that is not finite
   and in `0.0..1.0`.
@@ -266,14 +266,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   over — a game feeds it from the hook, as it feeds keys — but still releases it
   on focus loss, now after the frame's pads. `Loop::set_pad_source` swaps the
   source for any `crcbl::engine::PadSource`, which is how a test or replay
-  scripts a pad. The loop's menus answer the pad: the left stick moves, South
-  accepts, East backs out of the pause panel, and Start
+  scripts a pad. The loop's menus answer the pad: the left stick and the d-pad
+  move, South accepts, East backs out of the pause panel, and Start
   (`crcbl::engine::PAUSE_BUTTON`) toggles the pause like Escape, closing an open
   console first. Pad events are not withheld from the game while a menu is up.
 - **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
-  through `ui::STICK_DEADZONE`, `ui::NEXT`/`ui::PREV` on the right and left
-  shoulders, `ui::ACCEPT` on South, `ui::BACK` on East. The d-pad is not bound:
-  no binding lets pad buttons drive an `Axis2`.
+  through `ui::STICK_DEADZONE` and on the d-pad, `ui::NEXT`/`ui::PREV` on the
+  right and left shoulders, `ui::ACCEPT` on South, `ui::BACK` on East.
+- **`Binding::PadDpad`, the d-pad as one `Axis2`** — the pad's `Binding::Wasd`
+  over `DpadUp`, `DpadDown`, `DpadLeft` and `DpadRight`, +Y up. It resolves as
+  `Wasd` does: into the same unit disc as the keys and the sticks on the action,
+  so a diagonal is a unit vector, opposite directions cancel, and a d-pad
+  pressed with a stick or a key the same way is not faster; on a button it is
+  down while any of the four is held. It owns the four buttons for context
+  routing. `Binding::reads_gamepad` is public, so a caller narrowing an action
+  to its keys can keep its pad bindings the way `crcbl::engine::menu_actions`
+  does — which now keeps the d-pad on `ui::MOVE`.
 - **Tap, hold and double-tap patterns on `crcbl_input::ActionMap`**, beside
   `set_repeat` and on the same tick clock, so a scripted replay fires them on
   the same ticks every run. `set_tap(name, Some(Tap::new(time)?))` fires

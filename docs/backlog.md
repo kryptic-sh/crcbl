@@ -8958,10 +8958,13 @@ browser-hosted single-player game with mods has no containment at all.
   - **The loop pumps pads now** (`engine::PadSource`, `Loop::set_pad_source`,
     `HostedGame::gamepad_event`; XInput on a windowed Windows run, none
     headless), and the ui context has a pad column. Left open:
-    - **No d-pad in menus.** `ui::MOVE` is an `Axis2` and the seam has no
-      four-button pad composite like `Binding::Wasd`; a `Binding::PadDpad` is
-      owed, then declared in `ui::declarations` and kept by
-      `engine::menu::menu_actions`.
+    - **The d-pad moves menus** (`Binding::PadDpad` on `ui::MOVE`, summed into
+      the unit disc like `Wasd`), but no `Loop` test drives the pause panel with
+      it yet; `engine::menu` shows the map keeps it and steps `ui::MOVE`. The
+      test goes next to `a_scripted_pad_pauses_and_drives_the_pause_menu` with
+      `pad_holding(&[PadButton::DpadDown])`. A d-pad held on one pad and its
+      opposite on another cancel out, by the every-pad-drives-every-binding
+      rule, until device assignment lands.
     - **Needs a decision: pad input is not withheld from the game while a menu
       is up.** Every `GamepadEvent` reaches both the menu map and the game, so
       South accepting a panel also reaches the game. Keys are claimed per key; a

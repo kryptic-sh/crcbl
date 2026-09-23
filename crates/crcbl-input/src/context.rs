@@ -197,6 +197,11 @@ impl Routes {
                     Binding::PadButton(button) => {
                         routes.pad_buttons.entry(*button).or_insert(context);
                     }
+                    Binding::PadDpad => {
+                        for button in PadButton::DPAD {
+                            routes.pad_buttons.entry(button).or_insert(context);
+                        }
+                    }
                     Binding::PadStick { stick, .. } => {
                         routes.pad_sticks.entry(*stick).or_insert(context);
                     }
