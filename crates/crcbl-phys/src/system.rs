@@ -63,7 +63,9 @@ use crate::forces::ForceProvider;
 use crate::integrator::{Integrator as _, SemiImplicitEuler};
 use crate::material::SurfaceMaterial;
 use crate::query::ShapeHit;
-use crate::world::{ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
+use crate::world::{
+    ALL_LAYERS, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter, QueryScratch,
+};
 use crate::{Ray, Segment};
 
 // ---------------------------------------------------------------------------
@@ -96,6 +98,9 @@ pub(crate) struct BodyRecord {
     pub(crate) index: usize,
     /// Its collider in the world, and the component it was built from.
     pub(crate) collider: Option<(ColliderId, ColliderComponent)>,
+    /// The query layers its collider is put on, kept here so a collider that
+    /// [`PhysicsSystem::set_collider`] replaces is put back on them.
+    pub(crate) layers: u32,
     /// Its surface's friction and restitution.
     pub(crate) material: SurfaceMaterial,
     /// Its collider's proxies in the contact broadphase, one per part in part
@@ -179,6 +184,24 @@ impl AwakeSet {
 /// [`with_contacts`](Self::with_contacts) substeps inside `step` instead,
 /// because collision runs once a tick and the solver several times; see
 /// [`step`](Self::step).
+///
+/// # Entities
+///
+/// An [`Entity`] here is only a key: a generational
+/// `crcbl_core::Handle<EntityMarker>`, compared and hashed and never looked up
+/// anywhere else. It can come from any `crcbl_core::Pool<EntityMarker>` — a
+/// `crcbl_ecs::World`'s, or one a game allocates its own entities from — and
+/// nothing here asks that pool whether a handle is still alive.
+///
+/// That is why [`remove_entity`](Self::remove_entity) belongs **before** the
+/// handle is freed. The system never learns that a pool let one go: until it
+/// is removed the body keeps stepping, its collider stays in the world, and
+/// every query that meets it answers with a handle its pool calls dead. The
+/// old handle still removes the right body afterwards — its generation keeps
+/// it from naming whatever the pool reissues the slot to — but only a caller
+/// that kept it can say which body to remove. A system registered in a
+/// `crcbl_ecs` schedule is told by [`SystemTrait::sweep`], which removes each
+/// dead entity for it; a game with its own pool has to do the same itself.
 pub struct PhysicsSystem {
     world: PhysicsWorld,
 
@@ -245,10 +268,23 @@ impl EntityOverlapQueries<'_> {
         scratch: &mut QueryScratch,
         out: &mut Vec<Entity>,
     ) {
+        self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, scratch, out);
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) naming only the
+    /// entities whose collider `filter` admits — see [`QueryFilter`].
+    pub fn overlap_sphere_filtered_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<Entity>,
+    ) {
         out.clear();
         let mut ids = std::mem::take(&mut scratch.ids);
         self.queries
-            .overlap_sphere_into(centre, radius, scratch, &mut ids);
+            .overlap_sphere_filtered_into(centre, radius, filter, scratch, &mut ids);
         for id in ids.iter() {
             let Some(entity) = self.entity_for(*id) else {
                 continue;
@@ -272,9 +308,22 @@ impl EntityOverlapQueries<'_> {
         scratch: &mut QueryScratch,
         out: &mut Vec<Entity>,
     ) {
+        self.overlap_aabb_filtered_into(aabb, QueryFilter::ALL, scratch, out);
+    }
+
+    /// [`overlap_aabb_into`](Self::overlap_aabb_into) naming only the entities
+    /// whose collider `filter` admits — see [`QueryFilter`].
+    pub fn overlap_aabb_filtered_into(
+        &self,
+        aabb: &Aabb,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<Entity>,
+    ) {
         out.clear();
         let mut ids = std::mem::take(&mut scratch.ids);
-        self.queries.overlap_aabb_into(aabb, scratch, &mut ids);
+        self.queries
+            .overlap_aabb_filtered_into(aabb, filter, scratch, &mut ids);
         for id in ids.iter() {
             let Some(entity) = self.entity_for(*id) else {
                 continue;
@@ -292,7 +341,20 @@ impl EntityOverlapQueries<'_> {
     /// form, which calls this one.
     #[must_use]
     pub fn cast_ray(&self, ray: &Ray, scratch: &mut QueryScratch) -> Option<(Entity, ShapeHit)> {
-        let (id, hit) = self.queries.cast_ray(ray, scratch)?;
+        self.cast_ray_filtered(ray, QueryFilter::ALL, scratch)
+    }
+
+    /// [`cast_ray`](Self::cast_ray) over only the colliders `filter` admits —
+    /// see [`QueryFilter`]. Its exclusion is a [`ColliderId`], which
+    /// [`PhysicsSystem::collider_of`] gives for an entity.
+    #[must_use]
+    pub fn cast_ray_filtered(
+        &self,
+        ray: &Ray,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(Entity, ShapeHit)> {
+        let (id, hit) = self.queries.cast_ray_filtered(ray, filter, scratch)?;
         Some((self.entity_for(id)?, hit))
     }
 
@@ -310,7 +372,24 @@ impl EntityOverlapQueries<'_> {
         radius: f64,
         scratch: &mut QueryScratch,
     ) -> Option<(Entity, ShapeHit)> {
-        let (id, hit) = self.queries.sweep_sphere(segment, radius, scratch)?;
+        self.sweep_sphere_filtered(segment, radius, QueryFilter::ALL, scratch)
+    }
+
+    /// [`sweep_sphere`](Self::sweep_sphere) over only the colliders `filter`
+    /// admits — see [`QueryFilter`]. This is how a sweeper whose own entity
+    /// has a collider leaves itself out here: exclude
+    /// [`PhysicsSystem::collider_of`] it.
+    #[must_use]
+    pub fn sweep_sphere_filtered(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(Entity, ShapeHit)> {
+        let (id, hit) = self
+            .queries
+            .sweep_sphere_filtered(segment, radius, filter, scratch)?;
         Some((self.entity_for(id)?, hit))
     }
 
@@ -648,6 +727,10 @@ impl PhysicsSystem {
     /// The component is cached so [`PhysicsSystem::step`] can reposition the
     /// collider after integration.
     ///
+    /// The new collider has a new [`ColliderId`] — read it again with
+    /// [`collider_of`](Self::collider_of) — but keeps the entity's
+    /// [query layers](Self::set_collider_layers).
+    ///
     /// Replacing a collider wakes on [`remove_collider`](Self::remove_collider)'s
     /// terms.
     pub fn set_collider(
@@ -709,8 +792,9 @@ impl PhysicsSystem {
             }
         };
 
-        self.records.get_mut(id).expect("a live record").collider =
-            Some((collider, component.clone()));
+        let record = self.records.get_mut(id).expect("a live record");
+        record.collider = Some((collider, component.clone()));
+        self.world.set_layers(collider, record.layers);
         if let Some(pipeline) = self.contacts.as_mut() {
             let proxies = pipeline.create_body_proxies(
                 id,
@@ -793,6 +877,68 @@ impl PhysicsSystem {
                 self.collider_to_entity[slot] = None;
             }
         }
+    }
+
+    /// Put `entity`'s query collider on the layers in `bits`: see
+    /// [`PhysicsWorld::set_layers`]. For a compound that is its one query box.
+    /// Returns `false`, and changes nothing, if the entity has no collider.
+    ///
+    /// The layers belong to the entity rather than to one [`ColliderId`]:
+    /// they stay while [`step`](Self::step) moves the collider, and a
+    /// collider that [`set_collider`](Self::set_collider) replaces — or sets
+    /// again after [`remove_collider`](Self::remove_collider) — is put back
+    /// on them. Keeping them is the rule because a replacement is almost
+    /// always the same thing changing shape: an item re-shaped on pickup is
+    /// still an item, and a rule that reset it would put it back on every
+    /// layer, blocking every sweep, until the caller noticed. Only
+    /// [`remove_entity`](Self::remove_entity) forgets them.
+    ///
+    /// Layers filter queries only. The contact pipeline does not read them, so
+    /// a body on a layer a character's mask leaves out still collides with
+    /// other bodies.
+    pub fn set_collider_layers(&mut self, entity: Entity, bits: u32) -> bool {
+        let Some(&id) = self.entity_to_body.get(&entity) else {
+            return false;
+        };
+        let Some(record) = self.records.get_mut(id) else {
+            return false;
+        };
+        let Some((collider, _)) = record.collider else {
+            return false;
+        };
+        record.layers = bits;
+        self.world.set_layers(collider, bits)
+    }
+
+    /// The query collider [`set_collider`](Self::set_collider) made for
+    /// `entity` — for a compound, its one query box — or `None` if the entity
+    /// has no collider.
+    ///
+    /// The id changes when the collider is replaced, so read it again after a
+    /// `set_collider` rather than keeping it: an old one resolves to nothing.
+    /// It is what a [`QueryFilter`] excludes, and what
+    /// [`world`](Self::world)'s own queries answer with.
+    #[must_use]
+    pub fn collider_of(&self, entity: Entity) -> Option<ColliderId> {
+        self.record(entity)?
+            .collider
+            .as_ref()
+            .map(|(collider, _)| *collider)
+    }
+
+    /// The entity whose query collider `collider` is, or `None` if it is no
+    /// entity's — a collider added straight to [`world_mut`](Self::world_mut),
+    /// or an id that was removed or replaced since.
+    ///
+    /// The inverse of [`collider_of`](Self::collider_of), for turning a hit
+    /// from [`world`](Self::world)'s own queries back into an entity.
+    #[must_use]
+    pub fn entity_of(&self, collider: ColliderId) -> Option<Entity> {
+        let entity = self.entity_for(collider)?;
+        // The reverse map is keyed by slot alone, so a stale id whose slot now
+        // holds another entity's collider would name that entity: the
+        // generation is checked against the entity's own collider.
+        (self.collider_of(entity) == Some(collider)).then_some(entity)
     }
 
     // ── Integration ────────────────────────────────────────────────────
@@ -981,10 +1127,23 @@ impl PhysicsSystem {
     /// Cast a ray, returning the closest hit entity and details.
     #[must_use]
     pub fn cast_ray(&mut self, ray: &Ray) -> Option<(Entity, ShapeHit)> {
+        self.cast_ray_filtered(ray, QueryFilter::ALL)
+    }
+
+    /// [`cast_ray`](Self::cast_ray) over only the colliders `filter` admits —
+    /// see [`QueryFilter`] and [`set_collider_layers`](Self::set_collider_layers).
+    #[must_use]
+    pub fn cast_ray_filtered(
+        &mut self,
+        ray: &Ray,
+        filter: QueryFilter,
+    ) -> Option<(Entity, ShapeHit)> {
         // Lent to the view and put straight back, as
         // [`PhysicsSystem::overlap_sphere_into`] does and for the same reason.
         let mut scratch = std::mem::take(&mut self.scratch);
-        let hit = self.overlap_queries().cast_ray(ray, &mut scratch);
+        let hit = self
+            .overlap_queries()
+            .cast_ray_filtered(ray, filter, &mut scratch);
         self.scratch = scratch;
         hit
     }
@@ -996,10 +1155,22 @@ impl PhysicsSystem {
     /// builds the same segment and leaves that body out of the answer.
     #[must_use]
     pub fn sweep_sphere(&mut self, segment: &Segment, radius: f64) -> Option<(Entity, ShapeHit)> {
+        self.sweep_sphere_filtered(segment, radius, QueryFilter::ALL)
+    }
+
+    /// [`sweep_sphere`](Self::sweep_sphere) over only the colliders `filter`
+    /// admits — see [`QueryFilter`].
+    #[must_use]
+    pub fn sweep_sphere_filtered(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        filter: QueryFilter,
+    ) -> Option<(Entity, ShapeHit)> {
         let mut scratch = std::mem::take(&mut self.scratch);
-        let hit = self
-            .overlap_queries()
-            .sweep_sphere(segment, radius, &mut scratch);
+        let hit =
+            self.overlap_queries()
+                .sweep_sphere_filtered(segment, radius, filter, &mut scratch);
         self.scratch = scratch;
         hit
     }
@@ -1028,17 +1199,30 @@ impl PhysicsSystem {
         dt: f64,
         radius: f64,
     ) -> Option<(Entity, ShapeHit)> {
+        self.sweep_body_filtered(entity, dt, radius, ALL_LAYERS)
+    }
+
+    /// [`sweep_body`](Self::sweep_body) looking only at the colliders on a
+    /// layer in `mask` — see [`set_collider_layers`](Self::set_collider_layers).
+    ///
+    /// A mask and not a whole [`QueryFilter`], because the exclusion is not the
+    /// caller's to choose: it is always the swept body's own collider.
+    #[must_use]
+    pub fn sweep_body_filtered(
+        &mut self,
+        entity: Entity,
+        dt: f64,
+        radius: f64,
+        mask: u32,
+    ) -> Option<(Entity, ShapeHit)> {
         let body = self.body(entity).copied()?;
         let transform = self.transform(entity).copied()?;
         let segment = Segment {
             start: transform.position - body.velocity * dt,
             end: transform.position,
         };
-        let own = self
-            .record(entity)
-            .and_then(|record| record.collider.as_ref())
-            .map(|(collider, _)| *collider);
-        let (id, hit) = self.world.sweep_sphere_excluding(&segment, radius, own)?;
+        let filter = QueryFilter::excluding(self.collider_of(entity)).with_mask(mask);
+        let (id, hit) = self.world.sweep_sphere_filtered(&segment, radius, filter)?;
         Some((self.entity_for(id)?, hit))
     }
 
@@ -1093,12 +1277,43 @@ impl PhysicsSystem {
     /// therefore steers without a single allocation, where the owned form is
     /// three per agent per tick.
     pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<Entity>) {
+        self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, out);
+    }
+
+    /// [`overlap_sphere`](Self::overlap_sphere) naming only the entities whose
+    /// collider `filter` admits — see [`QueryFilter`].
+    #[must_use]
+    pub fn overlap_sphere_filtered(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+    ) -> Vec<Entity> {
+        let mut out = Vec::new();
+        self.overlap_sphere_filtered_into(centre, radius, filter, &mut out);
+        out
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) naming only the
+    /// entities whose collider `filter` admits — see [`QueryFilter`].
+    pub fn overlap_sphere_filtered_into(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+        out: &mut Vec<Entity>,
+    ) {
         // Lent to the view and put straight back — see
         // [`PhysicsWorld::overlap_sphere_into`], which does the same thing for
         // the same reason.
         let mut scratch = std::mem::take(&mut self.scratch);
-        self.overlap_queries()
-            .overlap_sphere_into(centre, radius, &mut scratch, out);
+        self.overlap_queries().overlap_sphere_filtered_into(
+            centre,
+            radius,
+            filter,
+            &mut scratch,
+            out,
+        );
         self.scratch = scratch;
     }
 
@@ -1126,10 +1341,17 @@ impl PhysicsSystem {
     /// Overlap query: return all entities whose AABB intersects `aabb`.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<Entity> {
+        self.overlap_aabb_filtered(aabb, QueryFilter::ALL)
+    }
+
+    /// [`overlap_aabb`](Self::overlap_aabb) naming only the entities whose
+    /// collider `filter` admits — see [`QueryFilter`].
+    #[must_use]
+    pub fn overlap_aabb_filtered(&mut self, aabb: &Aabb, filter: QueryFilter) -> Vec<Entity> {
         let mut scratch = std::mem::take(&mut self.scratch);
         let mut out = Vec::new();
         self.overlap_queries()
-            .overlap_aabb_into(aabb, &mut scratch, &mut out);
+            .overlap_aabb_filtered_into(aabb, filter, &mut scratch, &mut out);
         self.scratch = scratch;
         out
     }
@@ -1169,6 +1391,7 @@ impl PhysicsSystem {
             set: BodySet::Static,
             index: 0,
             collider: None,
+            layers: ALL_LAYERS,
             material: SurfaceMaterial::DEFAULT,
             proxies: Vec::new(),
             island: None,
@@ -2763,3 +2986,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "system/query_layer_tests.rs"]
+mod query_layer_tests;

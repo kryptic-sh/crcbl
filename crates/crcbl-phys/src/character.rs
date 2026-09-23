@@ -110,7 +110,7 @@ use glam::DVec3;
 use crate::broadphase::Segment;
 use crate::collider::Capsule;
 use crate::query::{Penetration, ShapeHit};
-use crate::world::{ColliderId, PhysicsWorld};
+use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter};
 
 /// The world's up axis. `crcbl` is right-handed with `+Y` up, and
 /// [`Capsule`] is Y-aligned, so a character controller has exactly one.
@@ -339,6 +339,8 @@ pub struct CharacterController {
     position: DVec3,
     ground: Option<GroundContact>,
     self_collider: Option<ColliderId>,
+    /// The layers every world query of this controller looks at.
+    query_mask: u32,
     /// Kept across calls so depenetration allocates nothing per tick.
     contacts: Vec<(ColliderId, Penetration)>,
 }
@@ -358,6 +360,7 @@ impl CharacterController {
             position,
             ground: None,
             self_collider: None,
+            query_mask: ALL_LAYERS,
             contacts: Vec::new(),
         }
     }
@@ -381,6 +384,35 @@ impl CharacterController {
     /// Change the world-collider binding without changing movement or ground state.
     pub fn set_self_collider(&mut self, collider: Option<ColliderId>) {
         self.self_collider = collider;
+    }
+
+    /// Look only at the world's colliders on a layer in `mask`: see
+    /// [`PhysicsWorld::set_layers`].
+    ///
+    /// Every query the controller makes — the move's sweeps, the step-up, the
+    /// ground probe that ends a move, [`probe_ground_at`](Self::probe_ground_at)
+    /// and depenetration — applies it together with the
+    /// [self collider](Self::with_self_collider) exclusion, so a collider
+    /// masked out is one the character walks through, stands on nothing of,
+    /// and is never pushed out of. The default is
+    /// [`ALL_LAYERS`]: every collider is solid.
+    #[must_use]
+    pub fn with_query_mask(mut self, mask: u32) -> Self {
+        self.set_query_mask(mask);
+        self
+    }
+
+    /// Change the query mask without changing movement or ground state: see
+    /// [`with_query_mask`](Self::with_query_mask).
+    pub fn set_query_mask(&mut self, mask: u32) {
+        self.query_mask = mask;
+    }
+
+    /// The layers this controller's queries look at.
+    #[inline]
+    #[must_use]
+    pub fn query_mask(&self) -> u32 {
+        self.query_mask
     }
 
     /// The centre of the capsule.
@@ -441,7 +473,8 @@ impl CharacterController {
     /// position and its [`ground`](Self::ground), and the world is only read.
     /// The sweep is the one [`move_and_slide`](Self::move_and_slide) ends
     /// with — the same capsule, the same [self collider](Self::with_self_collider)
-    /// left out of it, the same [`is_walkable`](Self::is_walkable) verdict —
+    /// left out of it, the same [query mask](Self::with_query_mask), the same
+    /// [`is_walkable`](Self::is_walkable) verdict —
     /// but it reports a surface too steep to stand on as well, with
     /// [`GroundProbe::walkable`] false, where a move treats that as no ground.
     ///
@@ -558,7 +591,7 @@ impl CharacterController {
         for _ in 0..self.config.depenetration_passes {
             let capsule = self.capsule();
             let mut contacts = std::mem::take(&mut self.contacts);
-            world.capsule_penetrations_into(&capsule, self.self_collider, &mut contacts);
+            world.capsule_penetrations_filtered_into(&capsule, self.filter(), &mut contacts);
             let deepest = contacts
                 .iter()
                 .max_by(|a, b| a.1.depth.total_cmp(&b.1.depth))
@@ -815,19 +848,25 @@ impl CharacterController {
         }
     }
 
-    /// The capsule's own sweep, with the character's body left out of it.
+    /// The capsule's own sweep, with the character's body and every collider
+    /// off its query mask left out of it.
     fn sweep(
         &self,
         world: &mut PhysicsWorld,
         from: DVec3,
         to: DVec3,
     ) -> Option<(ColliderId, ShapeHit)> {
-        world.sweep_capsule_excluding(
+        world.sweep_capsule_filtered(
             &Segment::new(from, to),
             self.config.radius,
             self.config.half_height,
-            self.self_collider,
+            self.filter(),
         )
+    }
+
+    /// The filter every world query of this controller runs under.
+    fn filter(&self) -> QueryFilter {
+        QueryFilter::excluding(self.self_collider).with_mask(self.query_mask)
     }
 }
 
@@ -1701,3 +1740,7 @@ mod tests {
         let _ = character.probe_ground(&mut world, -0.1);
     }
 }
+
+#[cfg(test)]
+#[path = "character/query_mask_tests.rs"]
+mod query_mask_tests;
