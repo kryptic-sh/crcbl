@@ -235,6 +235,44 @@ fn downloaded_entries_are_read_one_by_one_at_the_pump() {
     );
 }
 
+/// Steam frees a download only once every entry has been read
+/// (`isteamuserstats.h`), so an answer nobody takes is read out and dropped.
+#[test]
+fn an_abandoned_download_is_read_out_so_steam_frees_it() {
+    let mut steam = steam();
+    script(|s| {
+        s.next_call = 26;
+        s.stats.entries_handle = ENTRIES;
+        s.stats.entries = vec![(111, 1, 5000, Vec::new()), (222, 2, 4000, Vec::new())];
+    });
+    let call = steam
+        .leaderboards()
+        .download(Leaderboard(BOARD), Range::Global { first: 1, last: 2 })
+        .unwrap();
+    drop(call);
+    let bytes = payload::<LeaderboardScoresDownloaded>(&[
+        (
+            offset_of!(LeaderboardScoresDownloaded, entries),
+            &ENTRIES.to_le_bytes(),
+        ),
+        (
+            offset_of!(LeaderboardScoresDownloaded, count),
+            &2_i32.to_le_bytes(),
+        ),
+    ]);
+    let row = <Entries as crate::call::private::Answer>::ROW;
+    script(|s| {
+        s.results.push((26, bytes, false));
+        s.queue.push_back(completion(26, row.id(), row.size));
+    });
+    steam.pump();
+    assert_eq!(
+        script(|s| s.stats.details_offered.len()),
+        2,
+        "every entry read"
+    );
+}
+
 #[test]
 fn global_and_friends_ranges_are_steams_requests() {
     assert_eq!(Range::Global { first: 1, last: 10 }.raw(), (0, 1, 10));

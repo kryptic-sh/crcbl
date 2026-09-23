@@ -334,7 +334,8 @@ pub struct Entry {
 }
 
 /// The answer to [`Leaderboards::download`] (`LeaderboardScoresDownloaded_t`,
-/// then `GetDownloadedLeaderboardEntry` per entry, read at the pump).
+/// then `GetDownloadedLeaderboardEntry` per entry, read when the answer is
+/// taken).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Entries {
     /// The board.
@@ -355,51 +356,61 @@ impl Answer for Entries {
 
     fn build(bytes: &[u8], steam: &mut Steam) -> Option<Self> {
         let raw = read::<structs::LeaderboardScoresDownloaded>(bytes)?;
-        let client = &steam.client;
-        let count = raw.count.max(0);
-        let mut entries = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
-        for index in 0..count {
-            // SAFETY: an all-zero `LeaderboardEntry` is a valid value, being
-            // integers and bytes.
-            let mut entry: LeaderboardEntry = unsafe { core::mem::zeroed() };
-            let mut details = [0_i32; MAX_LEADERBOARD_DETAILS];
-            let capacity = i32::try_from(details.len()).unwrap_or(i32::MAX);
-            // SAFETY: `client.user_stats` is the non-null interface; the pump
-            // runs on the pump thread; `index` is below the count Steam gave;
-            // `entry` is writable, and `details` is `capacity` writable
-            // `int32`s.
-            let read = unsafe {
-                (client.lib.fns.user_stats.get_downloaded_leaderboard_entry)(
-                    client.user_stats,
-                    raw.entries,
-                    index,
-                    &raw mut entry,
-                    details.as_mut_ptr(),
-                    capacity,
-                )
-            };
-            if !read {
-                continue;
-            }
-            let held = usize::try_from(entry.details)
-                .unwrap_or(0)
-                .min(MAX_LEADERBOARD_DETAILS);
-            entries.push(Entry {
-                user: SteamId(steam_id(entry.user)),
-                rank: entry.rank,
-                score: entry.score,
-                details: details[..held].to_vec(),
-            });
-        }
         Some(Self {
             leaderboard: Leaderboard(raw.leaderboard),
-            entries,
+            entries: read_entries(&steam.client, raw),
         })
     }
 
-    /// Nothing to release: a leaderboard's handles are Steam's for the
-    /// session.
-    fn abandon(_: &[u8], _: &Client) {}
+    /// Reads every entry and drops them: Steam frees a download only once
+    /// all of its entries have been read (`isteamuserstats.h`).
+    fn abandon(bytes: &[u8], client: &Client) {
+        if let Some(raw) = read::<structs::LeaderboardScoresDownloaded>(bytes) {
+            drop(read_entries(client, raw));
+        }
+    }
+}
+
+/// Every entry of a download, through `GetDownloadedLeaderboardEntry` — which
+/// also lets Steam free it. One Steam will not hand over is left out.
+fn read_entries(client: &Client, raw: structs::LeaderboardScoresDownloaded) -> Vec<Entry> {
+    let count = raw.count.max(0);
+    let mut entries = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+    for index in 0..count {
+        // SAFETY: an all-zero `LeaderboardEntry` is a valid value, being
+        // integers and bytes.
+        let mut entry: LeaderboardEntry = unsafe { core::mem::zeroed() };
+        let mut details = [0_i32; MAX_LEADERBOARD_DETAILS];
+        let capacity = i32::try_from(details.len()).unwrap_or(i32::MAX);
+        // SAFETY: `client.user_stats` is the non-null interface; answers
+        // are built and abandoned on the pump thread, through the `!Send`
+        // `Steam`; `index` is below the count Steam gave;
+        // `entry` is writable, and `details` is `capacity` writable
+        // `int32`s.
+        let read = unsafe {
+            (client.lib.fns.user_stats.get_downloaded_leaderboard_entry)(
+                client.user_stats,
+                raw.entries,
+                index,
+                &raw mut entry,
+                details.as_mut_ptr(),
+                capacity,
+            )
+        };
+        if !read {
+            continue;
+        }
+        let held = usize::try_from(entry.details)
+            .unwrap_or(0)
+            .min(MAX_LEADERBOARD_DETAILS);
+        entries.push(Entry {
+            user: SteamId(steam_id(entry.user)),
+            rank: entry.rank,
+            score: entry.score,
+            details: details[..held].to_vec(),
+        });
+    }
+    entries
 }
 
 #[cfg(test)]
