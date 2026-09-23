@@ -16,8 +16,8 @@ use crate::{
     error::InitError,
     ffi::{
         HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamNetworkingSockets,
-        ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
-        init_result, load, manifest, manifest::Accessor, versions,
+        ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser, ISteamUserStats, ISteamUtils, Lib,
+        SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
     },
     matchmaking::Tracked,
     net::IncomingQueues,
@@ -110,6 +110,8 @@ pub struct Client {
     pub(crate) net_utils: *mut ISteamNetworkingUtils,
     /// `SteamAPI_SteamRemoteStorage_v016()`; never null.
     pub(crate) remote_storage: *mut ISteamRemoteStorage,
+    /// `SteamAPI_SteamUserStats_v013()`; never null.
+    pub(crate) user_stats: *mut ISteamUserStats,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -156,6 +158,10 @@ pub struct Steam {
     pub(crate) relay_started: Cell<bool>,
     /// Where each open `SteamListener` receives its incoming connections.
     pub(crate) incoming: IncomingQueues,
+    /// The app Steam is running, as init checked it.
+    pub(crate) app: AppId,
+    /// Whether the local user's stats have arrived (`UserStatsReceived_t`).
+    pub(crate) stats_ready: bool,
     /// The live `VoiceCapture`'s token, if one is open. A `RefCell` because
     /// a capture is opened through `&Steam`.
     pub(crate) voice_capture: RefCell<Weak<()>>,
@@ -263,6 +269,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         .cast::<ISteamNetworkingUtils>();
     let remote_storage = interface(lib.fns.remote_storage.accessor, &versions::REMOTE_STORAGE)?
         .cast::<ISteamRemoteStorage>();
+    let user_stats =
+        interface(lib.fns.user_stats.accessor, &versions::USER_STATS)?.cast::<ISteamUserStats>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -285,6 +293,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             net,
             net_utils,
             remote_storage,
+            user_stats,
             session,
         }),
         queue: VecDeque::new(),
@@ -295,6 +304,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         presence_keys: PresenceKeys::default(),
         relay_started: Cell::new(false),
         incoming: IncomingQueues::default(),
+        app: running,
+        stats_ready: false,
         voice_capture: RefCell::new(Weak::new()),
         _not_send: PhantomData,
     })
@@ -373,7 +384,7 @@ mod tests {
             b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
-              SteamUtils011\0\0"
+              STEAMUSERSTATS_INTERFACE_VERSION013\0SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -382,6 +393,7 @@ mod tests {
         assert!(!steam.client.friends.is_null());
         assert!(!steam.client.apps.is_null());
         assert!(!steam.client.remote_storage.is_null());
+        assert!(!steam.client.user_stats.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

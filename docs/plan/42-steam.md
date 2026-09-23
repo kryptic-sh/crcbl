@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6 and 5 built on branch
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5 and 9 built on branch
 `steam-sdk`, the rest planned** — see "Status by slice" under "Slice order". The
 four decisions the earlier draft asked for were ratified 2026-09-06 (see
 "Decisions" below), and "the full Steam API" is now in scope, which reverses two
@@ -1227,7 +1227,17 @@ On branch `steam-sdk`, not merged to `main`:
   sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
   Bringing it here means merging `main` into `steam-sdk`, which is the user's
   call (see the backlog).
-- Slices 7b–7c, 8, 9, 10–15: not started.
+- **Slice 9: done, out of order** (2026-09-23). With 7b waiting on the merge
+  decision, and 7c's glyphs and slice 8's pad release both building on 7a/7b,
+  slice 9 — which depends on none of them — was built next. `Stats`,
+  `Leaderboards` and their three call results, over the fake; every test in the
+  slice's list seen red against a deliberate break; Miri clean; the drift gate
+  passes against the mirror with the fourteen declarations, seven structs, the
+  new base and three limits. **Not run:** `tests/stats_smoke.rs` and every step
+  under "Needs a real client" below — so whether 480 has SpaceWar's
+  achievements, stats and board is still a belief — on every OS. The breakout
+  consumer is not built (see "Slice 9 as built").
+- Slices 7c, 8, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1453,6 +1463,33 @@ On branch `steam-sdk`, not merged to `main`:
   handshake's server side is a session host, which is slice 2's; the sandbox's
   owner listens, a joiner connects to the owner, and each logs the other's
   greeting and the `EndReason` a closed connection gives.
+
+**Slice 9 as built, where it differs from the text below:**
+
+- **No breakout consumer yet.** Breakout's high score as a stat needs stats
+  defined for an app of our own; under 480 only SpaceWar's exist, so a breakout
+  wired to them could not be checked, and one wired to its own names would
+  answer `Refused` on every call. `tests/stats_smoke.rs` (`#[ignore]`) is the
+  harness instead, on SpaceWar's names; the consumer is in the backlog.
+- **Readiness is the pump's.** `UserStatsReceived_t` for the local user, this
+  game (`m_nGameID` is the app id for a Steam game) and `EResult::OK` makes
+  `Stats::ready()` true; before it every `Stats` call is
+  `SteamError::StatsNotReady`, without calling Steam. Another game's stats
+  callbacks are counted unknown, not queued.
+- **Events:** `SteamEvent::StatsReceived { user, result }`,
+  `StatsStored { result }` and `AchievementStored { name, progress }` —
+  `progress` `None` when it unlocked (Valve's zero-of-zero). `clear_achievement`
+  and float stats are bound too, so the smoke test can leave 480 as it found it.
+- **Names:** `MAX_STAT_NAME_LENGTH` and `MAX_LEADERBOARD_NAME_LENGTH` are 127,
+  `k_cchStatNameMax` / `k_cchLeaderboardNameMax` less the NUL (the header's own
+  `char` arrays are that size); `MAX_LEADERBOARD_DETAILS` is 64. All three are
+  in the drift gate's limit table.
+- **`Entries` are read at the pump**, one `GetDownloadedLeaderboardEntry` per
+  entry with a 64-detail buffer, while Steam still holds the handle; an entry
+  Steam will not hand over is left out, and an entry claiming more details than
+  it may hold is cut to the limit. Nothing a leaderboard answer holds needs
+  releasing, so dropping a token only discards it. `Range` is
+  `Global { first, last }`, `AroundUser { before, after }` or `Friends`.
 
 **Slice 5 as built, where it differs from the text below:**
 
@@ -2063,7 +2100,9 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 - **Scope:** `ISteamUserStats`, post-1.61 model (stats arrive without
   `RequestCurrentStats`; `UserStatsReceived_t` still signals readiness). First
   in-repo consumer: breakout's high score as a stat with an achievement.
-- **Files:** `crcbl-steam/src/stats.rs`, `crcbl-steam/src/leaderboard.rs`.
+- **Files:** `crates/crcbl-steam/src/stats.rs`,
+  `crates/crcbl-steam/src/leaderboard.rs` (and, as built,
+  `crates/crcbl-steam/tests/stats_smoke.rs`).
 - **API:** `stats.set_achievement("ACH_WIN_ONE_GAME")?`,
   `stats.set_i32("NumGames", n)?`, `stats.store()?` → `SteamEvent::StatsStored`,
   `stats.achievement("…")? -> Achieved { unlocked, unlock_time }`,

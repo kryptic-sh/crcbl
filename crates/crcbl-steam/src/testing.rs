@@ -28,10 +28,10 @@ use std::{
 use crate::ffi::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
     ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
-    ISteamUser, ISteamUtils, Lib, SteamApiCall, SteamErrMsg,
+    ISteamUser, ISteamUserStats, ISteamUtils, Lib, SteamApiCall, SteamErrMsg,
     manifest::{
         AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, MatchmakingFns, NetFns, NetUtilsFns,
-        RemoteStorageFns, UserFns, UtilsFns,
+        RemoteStorageFns, UserFns, UserStatsFns, UtilsFns,
     },
     structs::CallbackMsg,
     structs::{
@@ -194,6 +194,7 @@ pub(crate) struct Script {
     pub(crate) net: FakeNet,
     pub(crate) cloud: FakeCloud,
     pub(crate) voice: FakeVoice,
+    pub(crate) stats: FakeStats,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -255,6 +256,7 @@ impl Default for Script {
             net: FakeNet::default(),
             cloud: FakeCloud::default(),
             voice: FakeVoice::default(),
+            stats: FakeStats::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -410,6 +412,22 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_local_file_change: fake_get_local_file_change,
             begin_file_write_batch: fake_begin_file_write_batch,
             end_file_write_batch: fake_end_file_write_batch,
+        },
+        user_stats: UserStatsFns {
+            accessor: fake_user_stats_accessor,
+            get_stat_i32: fake_get_stat_i32,
+            get_stat_f32: fake_get_stat_f32,
+            set_stat_i32: fake_set_stat_i32,
+            set_stat_f32: fake_set_stat_f32,
+            set_achievement: fake_set_achievement,
+            clear_achievement: fake_clear_achievement,
+            get_achievement_and_unlock_time: fake_get_achievement_and_unlock_time,
+            store_stats: fake_store_stats,
+            find_or_create_leaderboard: fake_find_or_create_leaderboard,
+            find_leaderboard: fake_find_leaderboard,
+            download_leaderboard_entries: fake_download_leaderboard_entries,
+            get_downloaded_leaderboard_entry: fake_get_downloaded_leaderboard_entry,
+            upload_leaderboard_score: fake_upload_leaderboard_score,
         },
         apps: AppsFns {
             accessor: fake_apps_accessor,
@@ -976,6 +994,261 @@ unsafe extern "C" fn fake_end_file_write_batch(_: *mut ISteamRemoteStorage) -> b
         s.cloud.log.push("end".into());
     });
     true
+}
+
+/// One downloaded leaderboard entry the fake holds: user, rank, score and
+/// details.
+pub(crate) type FakeEntry = (u64, i32, i32, Vec<i32>);
+
+/// The fake stats, achievements and leaderboards.
+#[derive(Debug, Default)]
+pub(crate) struct FakeStats {
+    pub(crate) ints: std::collections::BTreeMap<String, i32>,
+    pub(crate) floats: std::collections::BTreeMap<String, f32>,
+    /// Name to (unlocked, unlock time).
+    pub(crate) achievements: std::collections::BTreeMap<String, (bool, u32)>,
+    pub(crate) stores: u32,
+    /// Every `(name, sort, display)` `FindOrCreateLeaderboard` got; `FindLeaderboard`
+    /// records `-1` for both.
+    pub(crate) finds: Vec<(String, i32, i32)>,
+    /// Every `(leaderboard, method, score, details)` uploaded.
+    pub(crate) uploads: Vec<(u64, i32, i32, Vec<i32>)>,
+    /// Every `(leaderboard, request, start, end)` downloaded.
+    pub(crate) downloads: Vec<(u64, i32, i32, i32)>,
+    /// What `GetDownloadedLeaderboardEntry` hands out, by index.
+    pub(crate) entries: Vec<FakeEntry>,
+    /// The entries handle it answers for; any other is refused.
+    pub(crate) entries_handle: u64,
+    /// An index it refuses.
+    pub(crate) refuse_entry: Option<i32>,
+    /// Every details capacity it was offered.
+    pub(crate) details_offered: Vec<i32>,
+    /// How many times any user-stats function ran — for "no Steam call".
+    pub(crate) calls: u32,
+}
+
+/// Counts a user-stats call and copies its name argument.
+///
+/// # Safety
+///
+/// `name` is a NUL-terminated string live for the call.
+unsafe fn stats_call(name: *const c_char) -> String {
+    script(|s| s.stats.calls += 1);
+    // SAFETY: the caller's promise.
+    unsafe { arg(name) }
+}
+
+unsafe extern "C" fn fake_user_stats_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::USER_STATS.accessor)
+}
+
+unsafe extern "C" fn fake_get_stat_i32(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    out: *mut i32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    let Some(value) = script(|s| s.stats.ints.get(&name).copied()) else {
+        return false;
+    };
+    // SAFETY: the caller passes a writable `int32`.
+    unsafe { out.write(value) };
+    true
+}
+
+unsafe extern "C" fn fake_get_stat_f32(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    out: *mut f32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    let Some(value) = script(|s| s.stats.floats.get(&name).copied()) else {
+        return false;
+    };
+    // SAFETY: the caller passes a writable `float`.
+    unsafe { out.write(value) };
+    true
+}
+
+unsafe extern "C" fn fake_set_stat_i32(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    value: i32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats
+            .ints
+            .get_mut(&name)
+            .map(|slot| *slot = value)
+            .is_some()
+    })
+}
+
+unsafe extern "C" fn fake_set_stat_f32(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    value: f32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats
+            .floats
+            .get_mut(&name)
+            .map(|slot| *slot = value)
+            .is_some()
+    })
+}
+
+unsafe extern "C" fn fake_set_achievement(_: *mut ISteamUserStats, name: *const c_char) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats
+            .achievements
+            .get_mut(&name)
+            .map(|state| *state = (true, 1_700_000_000))
+            .is_some()
+    })
+}
+
+unsafe extern "C" fn fake_clear_achievement(_: *mut ISteamUserStats, name: *const c_char) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats
+            .achievements
+            .get_mut(&name)
+            .map(|state| *state = (false, 0))
+            .is_some()
+    })
+}
+
+unsafe extern "C" fn fake_get_achievement_and_unlock_time(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    unlocked: *mut bool,
+    time: *mut u32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    let Some((done, when)) = script(|s| s.stats.achievements.get(&name).copied()) else {
+        return false;
+    };
+    // SAFETY: the caller passes a writable `bool` and `uint32`.
+    unsafe {
+        unlocked.write(done);
+        time.write(when);
+    }
+    true
+}
+
+unsafe extern "C" fn fake_store_stats(_: *mut ISteamUserStats) -> bool {
+    script(|s| {
+        s.stats.calls += 1;
+        s.stats.stores += 1;
+    });
+    allowed()
+}
+
+unsafe extern "C" fn fake_find_or_create_leaderboard(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+    sort: i32,
+    display: i32,
+) -> SteamApiCall {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats.finds.push((name, sort, display));
+        s.next_call
+    })
+}
+
+unsafe extern "C" fn fake_find_leaderboard(
+    _: *mut ISteamUserStats,
+    name: *const c_char,
+) -> SteamApiCall {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { stats_call(name) };
+    script(|s| {
+        s.stats.finds.push((name, -1, -1));
+        s.next_call
+    })
+}
+
+unsafe extern "C" fn fake_download_leaderboard_entries(
+    _: *mut ISteamUserStats,
+    leaderboard: u64,
+    request: i32,
+    start: i32,
+    end: i32,
+) -> SteamApiCall {
+    script(|s| {
+        s.stats.calls += 1;
+        s.stats.downloads.push((leaderboard, request, start, end));
+        s.next_call
+    })
+}
+
+unsafe extern "C" fn fake_get_downloaded_leaderboard_entry(
+    _: *mut ISteamUserStats,
+    entries: u64,
+    index: i32,
+    out: *mut crate::ffi::structs::LeaderboardEntry,
+    details: *mut i32,
+    capacity: i32,
+) -> bool {
+    let found = script(|s| {
+        s.stats.calls += 1;
+        s.stats.details_offered.push(capacity);
+        if entries != s.stats.entries_handle || s.stats.refuse_entry == Some(index) {
+            return None;
+        }
+        usize::try_from(index)
+            .ok()
+            .and_then(|index| s.stats.entries.get(index).cloned())
+    });
+    let Some((user, rank, score, held)) = found else {
+        return false;
+    };
+    let written = held.len().min(usize::try_from(capacity).unwrap_or(0));
+    // SAFETY: the caller passes a writable `LeaderboardEntry_t` (written
+    // unaligned: the struct is packed) and `capacity` writable `int32`s, at
+    // least `written`.
+    unsafe {
+        out.write_unaligned(crate::ffi::structs::LeaderboardEntry {
+            user: user.to_le_bytes(),
+            rank,
+            score,
+            details: i32::try_from(held.len()).unwrap(),
+            ugc: 0,
+        });
+        core::ptr::copy_nonoverlapping(held.as_ptr(), details, written);
+    }
+    true
+}
+
+unsafe extern "C" fn fake_upload_leaderboard_score(
+    _: *mut ISteamUserStats,
+    leaderboard: u64,
+    method: i32,
+    score: i32,
+    details: *const i32,
+    count: i32,
+) -> SteamApiCall {
+    // SAFETY: the caller passes `count` readable `int32`s.
+    let held =
+        unsafe { core::slice::from_raw_parts(details, usize::try_from(count).unwrap()) }.to_vec();
+    script(|s| {
+        s.stats.calls += 1;
+        s.stats.uploads.push((leaderboard, method, score, held));
+        s.next_call
+    })
 }
 
 unsafe extern "C" fn fake_apps_accessor() -> *mut c_void {

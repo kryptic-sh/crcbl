@@ -53,8 +53,9 @@ use super::{
     versions::Interface,
 };
 use crate::{
-    MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES, MAX_LOBBY_KEY_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH,
-    MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
+    MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES, MAX_LEADERBOARD_DETAILS,
+    MAX_LEADERBOARD_NAME_LENGTH, MAX_LOBBY_KEY_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH,
+    MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH, MAX_STAT_NAME_LENGTH,
     call::{CALL_ROWS, CallRow},
     callbacks::{Base, ROWS, Row},
 };
@@ -75,6 +76,9 @@ const LIMITS: &[(&str, usize)] = &[
     ("k_nMaxLobbyKeyLength", MAX_LOBBY_KEY_LENGTH),
     ("k_cchFilenameMax", MAX_CLOUD_PATH_BYTES + 1),
     ("k_unMaxCloudFileChunkSize", MAX_CLOUD_FILE_BYTES),
+    ("k_cchStatNameMax", MAX_STAT_NAME_LENGTH + 1),
+    ("k_cchLeaderboardNameMax", MAX_LEADERBOARD_NAME_LENGTH + 1),
+    ("k_cLeaderboardDetailsMax", MAX_LEADERBOARD_DETAILS),
 ];
 
 /// One header's name and text.

@@ -114,6 +114,11 @@ impl Steam {
             Some(Decoded::CallCompleted(done)) => self.complete(done),
             Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
             Some(Decoded::LocalFileChange) => self.read_file_changes(),
+            Some(Decoded::Stats {
+                game_id,
+                event,
+                lossy,
+            }) => self.stats_event(game_id, event, lossy),
             Some(Decoded::ConnectionStatus {
                 connection,
                 listen_socket,
@@ -160,6 +165,26 @@ impl Steam {
         if !claimed {
             self.diagnostics.unclaimed_completions += 1;
         }
+    }
+
+    /// Queues a stats event for the running game — others are another
+    /// game's business, and counted as unknown — marking the stats ready when
+    /// the local user's arrive.
+    fn stats_event(&mut self, game_id: u64, event: SteamEvent, lossy: bool) {
+        if game_id != u64::from(self.app.0) {
+            self.diagnostics.unknown += 1;
+            return;
+        }
+        if let SteamEvent::StatsReceived { user, result } = &event
+            && *result == crate::EResult::OK
+            && *user == self.user().steam_id()
+        {
+            self.stats_ready = true;
+        }
+        if lossy {
+            self.lossy_strings.set(self.lossy_strings.get() + 1);
+        }
+        self.push_event(event);
     }
 
     /// Reads every cloud file change Steam holds (`GetLocalFileChangeCount`,

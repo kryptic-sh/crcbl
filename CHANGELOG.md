@@ -221,7 +221,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5 and 6**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6 and 9**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -273,9 +273,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   for the game's own transport — and
   `voice().decompress(packet, VOICE_SAMPLE_RATE)` turns any player's packet into
   mono `f32` PCM at `crcbl-audio`'s rate; `VoiceError` names a restricted
-  account and each other failure. 64-bit Linux, Windows and macOS; elsewhere the
-  crate is empty. `apps/sandbox --features steam` exercises it. Not yet run
-  against a Steam client with a 1.65 library.
+  account and each other failure. `steam.stats()` reads and sets achievements
+  and stats and `store()`s them — each call `SteamError::StatsNotReady` until
+  `SteamEvent::StatsReceived` — with `StatsStored` and `AchievementStored`
+  after; `steam.leaderboards()` finds or creates a board, uploads a score with
+  details and downloads a `Range` of entries, each a `SteamCall`. 64-bit Linux,
+  Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

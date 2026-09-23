@@ -170,6 +170,11 @@ pub enum SteamError {
         /// The height Steam reported.
         height: u32,
     },
+    /// A stats call before the local user's stats have arrived
+    /// (`UserStatsReceived_t`); Steam would answer `false`, which reads like
+    /// a misspelt name.
+    #[error("the local user's stats have not arrived from Steam yet")]
+    StatsNotReady,
     /// What Steam returned filled the whole buffer, so it may have been cut
     /// short; the named call's answer is refused rather than guessed at.
     #[error("{0} filled its whole buffer and may be truncated")]

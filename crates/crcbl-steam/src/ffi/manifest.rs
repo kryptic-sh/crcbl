@@ -26,7 +26,9 @@
 //! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`,
 //! `EPersonaState`, `EActivateGameOverlayToWebPageMode`,
 //! `ESteamNetworkingAvailability`, `ERemoteStorageLocalFileChange`,
-//! `ERemoteStorageFilePathType`, `EVoiceResult`) is taken to be
+//! `ERemoteStorageFilePathType`, `EVoiceResult`, `ELeaderboardSortMethod`,
+//! `ELeaderboardDisplayType`, `ELeaderboardDataRequest`,
+//! `ELeaderboardUploadScoreMethod`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -41,10 +43,11 @@ use core::ffi::{c_char, c_void};
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
     ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
-    ISteamUser, ISteamUtils, SteamApiCall, SteamErrMsg,
+    ISteamUser, ISteamUserStats, ISteamUtils, SteamApiCall, SteamErrMsg, SteamLeaderboard,
+    SteamLeaderboardEntries,
     structs::{
-        CallbackMsg, SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
-        SteamRelayNetworkStatus,
+        CallbackMsg, LeaderboardEntry, SteamNetConnectionInfo, SteamNetworkingIdentity,
+        SteamNetworkingMessage, SteamRelayNetworkStatus,
     },
     versions::{self, Interface},
 };
@@ -465,6 +468,50 @@ bindings! {
         end_file_write_batch: RemoteStorageEndFileWriteBatch = "SteamAPI_ISteamRemoteStorage_EndFileWriteBatch",
             "S_API bool SteamAPI_ISteamRemoteStorage_EndFileWriteBatch( ISteamRemoteStorage* self );",
             fn(*mut ISteamRemoteStorage) -> bool;
+    }
+
+    /// `ISteamUserStats` (`steam_api_flat.h`): stats, achievements and
+    /// leaderboards.
+    user_stats: UserStatsFns for versions::USER_STATS {
+        get_stat_i32: UserStatsGetStatInt32 = "SteamAPI_ISteamUserStats_GetStatInt32",
+            "S_API bool SteamAPI_ISteamUserStats_GetStatInt32( ISteamUserStats* self, const char * pchName, int32 * pData );",
+            fn(*mut ISteamUserStats, *const c_char, *mut i32) -> bool;
+        get_stat_f32: UserStatsGetStatFloat = "SteamAPI_ISteamUserStats_GetStatFloat",
+            "S_API bool SteamAPI_ISteamUserStats_GetStatFloat( ISteamUserStats* self, const char * pchName, float * pData );",
+            fn(*mut ISteamUserStats, *const c_char, *mut f32) -> bool;
+        set_stat_i32: UserStatsSetStatInt32 = "SteamAPI_ISteamUserStats_SetStatInt32",
+            "S_API bool SteamAPI_ISteamUserStats_SetStatInt32( ISteamUserStats* self, const char * pchName, int32 nData );",
+            fn(*mut ISteamUserStats, *const c_char, i32) -> bool;
+        set_stat_f32: UserStatsSetStatFloat = "SteamAPI_ISteamUserStats_SetStatFloat",
+            "S_API bool SteamAPI_ISteamUserStats_SetStatFloat( ISteamUserStats* self, const char * pchName, float fData );",
+            fn(*mut ISteamUserStats, *const c_char, f32) -> bool;
+        set_achievement: UserStatsSetAchievement = "SteamAPI_ISteamUserStats_SetAchievement",
+            "S_API bool SteamAPI_ISteamUserStats_SetAchievement( ISteamUserStats* self, const char * pchName );",
+            fn(*mut ISteamUserStats, *const c_char) -> bool;
+        clear_achievement: UserStatsClearAchievement = "SteamAPI_ISteamUserStats_ClearAchievement",
+            "S_API bool SteamAPI_ISteamUserStats_ClearAchievement( ISteamUserStats* self, const char * pchName );",
+            fn(*mut ISteamUserStats, *const c_char) -> bool;
+        get_achievement_and_unlock_time: UserStatsGetAchievementAndUnlockTime = "SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime",
+            "S_API bool SteamAPI_ISteamUserStats_GetAchievementAndUnlockTime( ISteamUserStats* self, const char * pchName, bool * pbAchieved, uint32 * punUnlockTime );",
+            fn(*mut ISteamUserStats, *const c_char, *mut bool, *mut u32) -> bool;
+        store_stats: UserStatsStoreStats = "SteamAPI_ISteamUserStats_StoreStats",
+            "S_API bool SteamAPI_ISteamUserStats_StoreStats( ISteamUserStats* self );",
+            fn(*mut ISteamUserStats) -> bool;
+        find_or_create_leaderboard: UserStatsFindOrCreateLeaderboard = "SteamAPI_ISteamUserStats_FindOrCreateLeaderboard",
+            "S_API SteamAPICall_t SteamAPI_ISteamUserStats_FindOrCreateLeaderboard( ISteamUserStats* self, const char * pchLeaderboardName, ELeaderboardSortMethod eLeaderboardSortMethod, ELeaderboardDisplayType eLeaderboardDisplayType );",
+            fn(*mut ISteamUserStats, *const c_char, i32, i32) -> SteamApiCall;
+        find_leaderboard: UserStatsFindLeaderboard = "SteamAPI_ISteamUserStats_FindLeaderboard",
+            "S_API SteamAPICall_t SteamAPI_ISteamUserStats_FindLeaderboard( ISteamUserStats* self, const char * pchLeaderboardName );",
+            fn(*mut ISteamUserStats, *const c_char) -> SteamApiCall;
+        download_leaderboard_entries: UserStatsDownloadLeaderboardEntries = "SteamAPI_ISteamUserStats_DownloadLeaderboardEntries",
+            "S_API SteamAPICall_t SteamAPI_ISteamUserStats_DownloadLeaderboardEntries( ISteamUserStats* self, SteamLeaderboard_t hSteamLeaderboard, ELeaderboardDataRequest eLeaderboardDataRequest, int nRangeStart, int nRangeEnd );",
+            fn(*mut ISteamUserStats, SteamLeaderboard, i32, i32, i32) -> SteamApiCall;
+        get_downloaded_leaderboard_entry: UserStatsGetDownloadedLeaderboardEntry = "SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry",
+            "S_API bool SteamAPI_ISteamUserStats_GetDownloadedLeaderboardEntry( ISteamUserStats* self, SteamLeaderboardEntries_t hSteamLeaderboardEntries, int index, LeaderboardEntry_t * pLeaderboardEntry, int32 * pDetails, int cDetailsMax );",
+            fn(*mut ISteamUserStats, SteamLeaderboardEntries, i32, *mut LeaderboardEntry, *mut i32, i32) -> bool;
+        upload_leaderboard_score: UserStatsUploadLeaderboardScore = "SteamAPI_ISteamUserStats_UploadLeaderboardScore",
+            "S_API SteamAPICall_t SteamAPI_ISteamUserStats_UploadLeaderboardScore( ISteamUserStats* self, SteamLeaderboard_t hSteamLeaderboard, ELeaderboardUploadScoreMethod eLeaderboardUploadScoreMethod, int32 nScore, const int32 * pScoreDetails, int cScoreDetailsCount );",
+            fn(*mut ISteamUserStats, SteamLeaderboard, i32, i32, *const i32, i32) -> SteamApiCall;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).

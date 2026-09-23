@@ -83,6 +83,14 @@ pub(crate) const REMOTE_STORAGE: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamUserStats`. Spelled like `ISteamRemoteStorage`'s.
+pub(crate) const USER_STATS: Interface = Interface {
+    accessor: "SteamAPI_SteamUserStats_v013",
+    version: "STEAMUSERSTATS_INTERFACE_VERSION013",
+    define: "STEAMUSERSTATS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamUser`.
 pub(crate) const USER: Interface = Interface {
     accessor: "SteamAPI_SteamUser_v023",

@@ -43,6 +43,10 @@ pub(crate) type HSteamNetConnection = u32;
 /// `HSteamListenSocket` — `typedef uint32 HSteamListenSocket;`, `0` being
 /// `k_HSteamListenSocket_Invalid`.
 pub(crate) type HSteamListenSocket = u32;
+/// `SteamLeaderboard_t` — `typedef uint64 SteamLeaderboard_t;`.
+pub(crate) type SteamLeaderboard = u64;
+/// `SteamLeaderboardEntries_t` — `typedef uint64 SteamLeaderboardEntries_t;`.
+pub(crate) type SteamLeaderboardEntries = u64;
 /// `SteamErrMsg` — `typedef char SteamErrMsg[ 1024 ];`, the English message
 /// `SteamInternal_SteamAPI_Init` fills in on failure.
 pub(crate) type SteamErrMsg = [core::ffi::c_char; 1024];
@@ -87,6 +91,8 @@ opaque! {
     ISteamRemoteStorage;
     /// `class ISteamUser`.
     ISteamUser;
+    /// `class ISteamUserStats`.
+    ISteamUserStats;
     /// `class ISteamUtils`.
     ISteamUtils;
 }

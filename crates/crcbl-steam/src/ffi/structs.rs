@@ -140,6 +140,71 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &[],
     },
     StructDecl {
+        name: "UserStatsReceived_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_nGameID",
+            "EResult m_eResult",
+            "CSteamID m_steamIDUser",
+        ],
+    },
+    StructDecl {
+        name: "UserStatsStored_t",
+        pack: Pack::Callback,
+        fields: &["uint64 m_nGameID", "EResult m_eResult"],
+    },
+    StructDecl {
+        name: "UserAchievementStored_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint64 m_nGameID",
+            "bool m_bGroupAchievement",
+            "char m_rgchAchievementName[k_cchStatNameMax]",
+            "uint32 m_nCurProgress",
+            "uint32 m_nMaxProgress",
+        ],
+    },
+    StructDecl {
+        name: "LeaderboardFindResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "SteamLeaderboard_t m_hSteamLeaderboard",
+            "uint8 m_bLeaderboardFound",
+        ],
+    },
+    StructDecl {
+        name: "LeaderboardScoresDownloaded_t",
+        pack: Pack::Callback,
+        fields: &[
+            "SteamLeaderboard_t m_hSteamLeaderboard",
+            "SteamLeaderboardEntries_t m_hSteamLeaderboardEntries",
+            "int m_cEntryCount",
+        ],
+    },
+    StructDecl {
+        name: "LeaderboardScoreUploaded_t",
+        pack: Pack::Callback,
+        fields: &[
+            "uint8 m_bSuccess",
+            "SteamLeaderboard_t m_hSteamLeaderboard",
+            "int32 m_nScore",
+            "uint8 m_bScoreChanged",
+            "int m_nGlobalRankNew",
+            "int m_nGlobalRankPrevious",
+        ],
+    },
+    StructDecl {
+        name: "LeaderboardEntry_t",
+        pack: Pack::Callback,
+        fields: &[
+            "CSteamID m_steamIDUser",
+            "int32 m_nGlobalRank",
+            "int32 m_nScore",
+            "int32 m_cDetails",
+            "UGCHandle_t m_hUGC",
+        ],
+    },
+    StructDecl {
         name: "RemoteStorageLocalFileChange_t",
         pack: Pack::Callback,
         fields: &[],
@@ -576,6 +641,113 @@ callback_packed! {
 }
 
 callback_packed! {
+    /// `UserStatsReceived_t` (`isteamuserstats.h`, `k_iSteamUserStatsCallbacks
+    /// + 1`): a user's stats and achievements arrived — for the local user,
+    /// on their own at start-up since SDK 1.61.
+    pub(crate) struct UserStatsReceived {
+        /// `uint64 m_nGameID`.
+        pub(crate) game_id: u64,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `CSteamID m_steamIDUser`.
+        pub(crate) user: CSteamId,
+    }
+}
+
+callback_packed! {
+    /// `UserStatsStored_t` (`isteamuserstats.h`, `k_iSteamUserStatsCallbacks
+    /// + 2`): the answer to `StoreStats`.
+    pub(crate) struct UserStatsStored {
+        /// `uint64 m_nGameID`.
+        pub(crate) game_id: u64,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `UserAchievementStored_t` (`isteamuserstats.h`,
+    /// `k_iSteamUserStatsCallbacks + 3`): an achievement was stored, or its
+    /// progress shown; zero progress of zero means unlocked.
+    pub(crate) struct UserAchievementStored {
+        /// `uint64 m_nGameID`.
+        pub(crate) game_id: u64,
+        /// `bool m_bGroupAchievement` — unused, per the header.
+        pub(crate) group_achievement: u8,
+        /// `char m_rgchAchievementName[k_cchStatNameMax]`.
+        pub(crate) name: [u8; 128],
+        /// `uint32 m_nCurProgress`.
+        pub(crate) current: u32,
+        /// `uint32 m_nMaxProgress`.
+        pub(crate) max: u32,
+    }
+}
+
+callback_packed! {
+    /// `LeaderboardFindResult_t` (`isteamuserstats.h`,
+    /// `k_iSteamUserStatsCallbacks + 4`): the call result of
+    /// `FindOrCreateLeaderboard` and `FindLeaderboard`.
+    pub(crate) struct LeaderboardFindResult {
+        /// `SteamLeaderboard_t m_hSteamLeaderboard` — zero when not found.
+        pub(crate) leaderboard: u64,
+        /// `uint8 m_bLeaderboardFound`.
+        pub(crate) found: u8,
+    }
+}
+
+callback_packed! {
+    /// `LeaderboardScoresDownloaded_t` (`isteamuserstats.h`,
+    /// `k_iSteamUserStatsCallbacks + 5`): the call result of
+    /// `DownloadLeaderboardEntries`.
+    pub(crate) struct LeaderboardScoresDownloaded {
+        /// `SteamLeaderboard_t m_hSteamLeaderboard`.
+        pub(crate) leaderboard: u64,
+        /// `SteamLeaderboardEntries_t m_hSteamLeaderboardEntries`.
+        pub(crate) entries: u64,
+        /// `int m_cEntryCount`.
+        pub(crate) count: i32,
+    }
+}
+
+callback_packed! {
+    /// `LeaderboardScoreUploaded_t` (`isteamuserstats.h`,
+    /// `k_iSteamUserStatsCallbacks + 6`): the call result of
+    /// `UploadLeaderboardScore`.
+    pub(crate) struct LeaderboardScoreUploaded {
+        /// `uint8 m_bSuccess`.
+        pub(crate) success: u8,
+        /// `SteamLeaderboard_t m_hSteamLeaderboard`.
+        pub(crate) leaderboard: u64,
+        /// `int32 m_nScore`.
+        pub(crate) score: i32,
+        /// `uint8 m_bScoreChanged`.
+        pub(crate) changed: u8,
+        /// `int m_nGlobalRankNew`.
+        pub(crate) rank_new: i32,
+        /// `int m_nGlobalRankPrevious` — zero for a first entry.
+        pub(crate) rank_previous: i32,
+    }
+}
+
+callback_packed! {
+    /// `LeaderboardEntry_t` (`isteamuserstats.h`): one downloaded entry, as
+    /// `GetDownloadedLeaderboardEntry` fills it. Under the callback packing
+    /// though it is no callback.
+    pub(crate) struct LeaderboardEntry {
+        /// `CSteamID m_steamIDUser`.
+        pub(crate) user: CSteamId,
+        /// `int32 m_nGlobalRank`.
+        pub(crate) rank: i32,
+        /// `int32 m_nScore`.
+        pub(crate) score: i32,
+        /// `int32 m_cDetails` — how many details the entry holds.
+        pub(crate) details: i32,
+        /// `UGCHandle_t m_hUGC`.
+        pub(crate) ugc: u64,
+    }
+}
+
+callback_packed! {
     /// `SteamNetConnectionStatusChangedCallback_t`
     /// (`isteamnetworkingsockets.h`, `k_iSteamNetworkingSocketsCallbacks + 1`):
     /// a connection changed state. The OS difference is here, not in the info:
@@ -837,6 +1009,47 @@ mod tests {
             making_change: 16, 8;
             state_change: 24, 4;
         });
+        assert_layout!(UserStatsReceived, 20, {
+            game_id: 0, 8;
+            result: 8, 4;
+            user: 12, 8;
+        });
+        assert_layout!(UserStatsStored, 12, {
+            game_id: 0, 8;
+            result: 8, 4;
+        });
+        assert_layout!(UserAchievementStored, 148, {
+            game_id: 0, 8;
+            group_achievement: 8, 1;
+            name: 9, 128;
+            current: 140, 4;
+            max: 144, 4;
+        });
+        assert_layout!(LeaderboardFindResult, 12, {
+            leaderboard: 0, 8;
+            found: 8, 1;
+        });
+        assert_layout!(LeaderboardScoresDownloaded, 20, {
+            leaderboard: 0, 8;
+            entries: 8, 8;
+            count: 16, 4;
+        });
+        // The `uint64` after a leading byte sits at 4, not 8.
+        assert_layout!(LeaderboardScoreUploaded, 28, {
+            success: 0, 1;
+            leaderboard: 4, 8;
+            score: 12, 4;
+            changed: 16, 1;
+            rank_new: 20, 4;
+            rank_previous: 24, 4;
+        });
+        assert_layout!(LeaderboardEntry, 28, {
+            user: 0, 8;
+            rank: 8, 4;
+            score: 12, 4;
+            details: 16, 4;
+            ugc: 20, 8;
+        });
     }
 
     /// `pack(8)`: Windows.
@@ -885,6 +1098,46 @@ mod tests {
             changed: 8, 8;
             making_change: 16, 8;
             state_change: 24, 4;
+        });
+        assert_layout!(UserStatsReceived, 24, {
+            game_id: 0, 8;
+            result: 8, 4;
+            user: 12, 8;
+        });
+        assert_layout!(UserStatsStored, 16, {
+            game_id: 0, 8;
+            result: 8, 4;
+        });
+        assert_layout!(UserAchievementStored, 152, {
+            game_id: 0, 8;
+            group_achievement: 8, 1;
+            name: 9, 128;
+            current: 140, 4;
+            max: 144, 4;
+        });
+        assert_layout!(LeaderboardFindResult, 16, {
+            leaderboard: 0, 8;
+            found: 8, 1;
+        });
+        assert_layout!(LeaderboardScoresDownloaded, 24, {
+            leaderboard: 0, 8;
+            entries: 8, 8;
+            count: 16, 4;
+        });
+        assert_layout!(LeaderboardScoreUploaded, 32, {
+            success: 0, 1;
+            leaderboard: 8, 8;
+            score: 16, 4;
+            changed: 20, 1;
+            rank_new: 24, 4;
+            rank_previous: 28, 4;
+        });
+        assert_layout!(LeaderboardEntry, 32, {
+            user: 0, 8;
+            rank: 8, 4;
+            score: 12, 4;
+            details: 16, 4;
+            ugc: 24, 8;
         });
     }
 }

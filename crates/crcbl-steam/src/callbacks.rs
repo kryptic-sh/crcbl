@@ -15,13 +15,14 @@
 //! on the pipe (`LobbyEnter_t`) is skipped there like any other unclaimed id.
 
 use crate::{
-    AppId, SteamId,
+    AppId, EResult, SteamId,
     ffi::structs::{
         AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
         GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
         NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
         SteamApiCallCompleted, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
-        SteamRelayNetworkStatus, steam_id,
+        SteamRelayNetworkStatus, UserAchievementStored, UserStatsReceived, UserStatsStored,
+        steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -40,6 +41,8 @@ pub(crate) enum Base {
     Utils = 700,
     /// `k_iSteamAppsCallbacks`.
     Apps = 1000,
+    /// `k_iSteamUserStatsCallbacks`.
+    UserStats = 1100,
     /// `k_iSteamNetworkingSocketsCallbacks`.
     NetworkingSockets = 1220,
     /// `k_iSteamNetworkingUtilsCallbacks`.
@@ -56,6 +59,7 @@ impl Base {
         Self::Matchmaking,
         Self::Utils,
         Self::Apps,
+        Self::UserStats,
         Self::NetworkingSockets,
         Self::NetworkingUtils,
         Self::RemoteStorage,
@@ -69,6 +73,7 @@ impl Base {
             Self::Matchmaking => "k_iSteamMatchmakingCallbacks",
             Self::Utils => "k_iSteamUtilsCallbacks",
             Self::Apps => "k_iSteamAppsCallbacks",
+            Self::UserStats => "k_iSteamUserStatsCallbacks",
             Self::RemoteStorage => "k_iSteamRemoteStorageCallbacks",
             Self::NetworkingSockets => "k_iSteamNetworkingSocketsCallbacks",
             Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
@@ -184,6 +189,29 @@ pub enum SteamEvent {
         /// for an Auto-Cloud file.
         path: String,
     },
+    /// A user's stats and achievements arrived for this game
+    /// (`UserStatsReceived_t`). For the local user with `EResult::OK`, this is
+    /// what makes [`Stats`](crate::Stats) usable; Steam sends it on its own
+    /// soon after init.
+    StatsReceived {
+        /// Whose.
+        user: SteamId,
+        /// Whether they could be fetched.
+        result: EResult,
+    },
+    /// [`Stats::store`](crate::Stats::store) finished (`UserStatsStored_t`).
+    StatsStored {
+        /// `EResult::OK`, or why not.
+        result: EResult,
+    },
+    /// An achievement was stored, or its progress shown
+    /// (`UserAchievementStored_t`).
+    AchievementStored {
+        /// Its API name.
+        name: String,
+        /// `(current, max)` for a progress notice; `None` when it unlocked.
+        progress: Option<(u32, u32)>,
+    },
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
     LobbyChatMessage {
@@ -226,6 +254,17 @@ pub(crate) enum Decoded {
     /// `GetLocalFileChange` and queues [`SteamEvent::CloudFileChanged`] for
     /// each.
     LocalFileChange,
+    /// `UserStatsReceived_t`, `UserStatsStored_t` or
+    /// `UserAchievementStored_t`: the pump keeps it only for the running
+    /// game, and marks the stats ready on the local user's arrival.
+    Stats {
+        /// `m_nGameID`: the app for a Steam game.
+        game_id: u64,
+        /// What happened.
+        event: SteamEvent,
+        /// Whether the event's text was read lossily.
+        lossy: bool,
+    },
     /// `LobbyChatMsg_t`: the pump reads the entry with `GetLobbyChatEntry`
     /// and queues [`SteamEvent::LobbyChatMessage`].
     ChatMessage {
@@ -394,6 +433,60 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::UserStats,
+        offset: 1,
+        #[cfg(test)]
+        name: "UserStatsReceived_t",
+        size: size_of::<UserStatsReceived>(),
+        decode: |bytes| {
+            read::<UserStatsReceived>(bytes).map(|payload| Decoded::Stats {
+                game_id: payload.game_id,
+                event: SteamEvent::StatsReceived {
+                    user: SteamId(steam_id(payload.user)),
+                    result: EResult(payload.result),
+                },
+                lossy: false,
+            })
+        },
+    },
+    Row {
+        base: Base::UserStats,
+        offset: 2,
+        #[cfg(test)]
+        name: "UserStatsStored_t",
+        size: size_of::<UserStatsStored>(),
+        decode: |bytes| {
+            read::<UserStatsStored>(bytes).map(|payload| Decoded::Stats {
+                game_id: payload.game_id,
+                event: SteamEvent::StatsStored {
+                    result: EResult(payload.result),
+                },
+                lossy: false,
+            })
+        },
+    },
+    Row {
+        base: Base::UserStats,
+        offset: 3,
+        #[cfg(test)]
+        name: "UserAchievementStored_t",
+        size: size_of::<UserAchievementStored>(),
+        decode: |bytes| {
+            read::<UserAchievementStored>(bytes).map(|payload| {
+                let (name, lossy) = fixed_string(&payload.name);
+                let (current, max) = (payload.current, payload.max);
+                Decoded::Stats {
+                    game_id: payload.game_id,
+                    event: SteamEvent::AchievementStored {
+                        name,
+                        progress: (current, max).ne(&(0, 0)).then_some((current, max)),
+                    },
+                    lossy,
+                }
+            })
+        },
+    },
+    Row {
         base: Base::RemoteStorage,
         offset: 33,
         #[cfg(test)]
@@ -526,6 +619,18 @@ unsafe impl Pod for NewUrlLaunchParameters {}
 unsafe impl Pod for PersonaStateChange {}
 // SAFETY: as above.
 unsafe impl Pod for RemoteStorageLocalFileChange {}
+// SAFETY: as above.
+unsafe impl Pod for UserStatsReceived {}
+// SAFETY: as above.
+unsafe impl Pod for UserStatsStored {}
+// SAFETY: as above.
+unsafe impl Pod for UserAchievementStored {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::LeaderboardFindResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::LeaderboardScoresDownloaded {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::LeaderboardScoreUploaded {}
 // SAFETY: as above.
 unsafe impl Pod for SteamNetConnectionInfo {}
 // SAFETY: as above.
