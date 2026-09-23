@@ -59,6 +59,8 @@ pub struct SystemSnapshot {
 /// transport (see [`encode_session_ended`](crate::codec::encode_session_ended)),
 /// so a client can tell a host that ended its session from a link that died —
 /// a difference no transport reports the same way, and some not at all.
+/// `crcbl_server::Host` sends it; the single-peer `crcbl_server::Server` does
+/// not, so its clients read every close as a lost link.
 ///
 /// A server full at handshake time is not a reason here: no session exists
 /// yet, so that is [`RejectReason::SERVER_FULL`](crate::RejectReason::SERVER_FULL).
