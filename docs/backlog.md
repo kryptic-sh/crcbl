@@ -9012,8 +9012,6 @@ browser-hosted single-player game with mods has no containment at all.
     ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
     (every pad drives every binding), a d-pad composite and pad rows in a RON
     binding asset.
-  - The Steam plan's slice 7a is this seam; `docs/plan/42-steam.md` on
-    `steam-sdk` still lists 7a as its own until that branch merges main.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the
@@ -9109,8 +9107,9 @@ and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
 `crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
 and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
 `SteamCloudStorage`, slice 5's voice capture and decoding, and slice 9's stats,
-achievements and leaderboards (built ahead of 7b–8, which wait on the decision
-below). The plan, `docs/plan/42-steam.md`, carries a status line per slice.
+achievements and leaderboards (built ahead of 7b–8, which waited on slice 7a's
+seam; `steam-sdk` has since merged `main`, which carries it). The plan,
+`docs/plan/42-steam.md`, carries a status line per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9204,14 +9203,6 @@ below). The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
   maps to its app codes (touches the trait every backend implements), or leave
   it and document the session end as the signal. Needs a decision; not done.
-- **Needs the user's decision: bringing slice 7a in from `main`.** The
-  coordinator reported the gamepad seam (slice 7a) being built on `main` with an
-  XInput backend, and asked that 7b be built on it by merging `origin/main` into
-  `steam-sdk`. The standing instruction for this branch is "never merge", so no
-  merge has been made. The options: merge `main` into `steam-sdk` when 7b starts
-  (a normal merge commit); or build 7b on `main` after `steam-sdk` lands there.
-  A rebase is ruled out, since the branch is pushed and must not be
-  force-pushed.
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.

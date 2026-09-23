@@ -17,14 +17,14 @@ Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
 **Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5 and 9 built on branch
-`steam-sdk`, the rest planned** — see "Status by slice" under "Slice order". The
-four decisions the earlier draft asked for were ratified 2026-09-06 (see
-"Decisions" below), and "the full Steam API" is now in scope, which reverses two
-earlier "not now" calls — Steam Input and `SteamTransport` — and pulls the first
-consumer's requirements (the game EW, below) forward in the slice order. The
-plan was reviewed the same day against the SDK 1.65 headers and this tree;
-"Review (step 2)" at the end lists what that changed, including EW's answers to
-the questions the first draft left open.
+`steam-sdk`, slice 7a landed on `main` and merged in, the rest planned** — see
+"Status by slice" under "Slice order". The four decisions the earlier draft
+asked for were ratified 2026-09-06 (see "Decisions" below), and "the full Steam
+API" is now in scope, which reverses two earlier "not now" calls — Steam Input
+and `SteamTransport` — and pulls the first consumer's requirements (the game EW,
+below) forward in the slice order. The plan was reviewed the same day against
+the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists what that
+changed, including EW's answers to the questions the first draft left open.
 
 Two findings shape everything below, so they come first:
 
@@ -1220,13 +1220,13 @@ On branch `steam-sdk`, not merged to `main`:
   real client" below — two accounts, a spoken round trip, the length of Steam's
   push-to-talk tail, the `Restricted` path — on every OS; nothing in the sandbox
   drives voice yet (see the backlog).
-- **Slice 7b: next, and blocked** on bringing slice 7a's seam in from `main`,
-  which is the user's call (see the backlog).
-- **Slice 7a: not on this branch.** The coordinator reported (2026-09-23) that
-  the gamepad seam is being built on `main` with an XInput backend, exactly as
-  sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
-  Bringing it here means merging `main` into `steam-sdk`, which is the user's
-  call (see the backlog).
+- **Slice 7a: landed on `main`** (2026-09-23), as
+  `crates/crcbl-input/src/gamepad.rs`, with an XInput backend
+  (`crates/crcbl-input/src/xinput.rs`) and the engine loop's `PadSource`
+  (`crates/crcbl/src/engine/pads.rs`). `steam-sdk` merged `main` in (`82a594ca`)
+  to build 7b on it. See "Slice 7a as built" for where it differs from the text
+  below.
+- **Slice 7b: next.**
 - **Slice 9: done, out of order** (2026-09-23). With 7b waiting on the merge
   decision, and 7c's glyphs and slice 8's pad release both building on 7a/7b,
   slice 9 — which depends on none of them — was built next. `Stats`,
@@ -1238,6 +1238,27 @@ On branch `steam-sdk`, not merged to `main`:
   achievements, stats and board is still a belief — on every OS. The breakout
   consumer is not built (see "Slice 9 as built").
 - Slices 7c, 8, 10–15: not started.
+
+**Slice 7a as built (on `main`), where it differs from the text below:**
+
+- **The event is `GamepadEvent::State { id, snapshot }`**, as sketched, and the
+  events are plain `Copy` data a game may read directly; `ActionMap` is the
+  optional layer over them. A `State` for a pad never announced connects it; one
+  with a non-finite axis is dropped.
+- **`Binding::PadDpad`** was added beside `PadButton`, `PadStick` and
+  `PadTrigger`: the d-pad as an `Axis2` composite resolved like `Wasd`, and
+  sharing one unit disc with it and the stick.
+- **The pad release is `ActionMap::release_gamepads`**, called by the engine
+  loop beside `lose_focus` on the map `HostedGame::actions` hands over; a pad
+  button held through it is withheld until released, like a key held across a
+  context push. Every pad drives every pad binding until per-player device
+  assignment exists.
+- **The loop pumps pads itself**: `PadSource` (one per `Loop`, XInput on a
+  windowed Windows run, none headless), `Loop::set_pad_source` to replace it,
+  and `HostedGame::gamepad_event` to receive each event. Slice 8's Steam limb
+  feeds the same path rather than adding a second one.
+- **`GamepadId::allocate`** hands out process-unique ids, so two backends never
+  collide; XInput names a slot, so a re-plugged pad there is a new id.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
