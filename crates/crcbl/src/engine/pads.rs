@@ -9,8 +9,9 @@
 //!
 //! # Which platforms have one
 //!
-//! - **Windows**: XInput, through [`crcbl_input::xinput`]. A windowed run that
-//!   cannot load it logs why once and runs with no pads.
+//! - **Windows**: XInput, through `crcbl_input::xinput` (Windows-only, so it is
+//!   not a doc link here: rustdoc on other targets cannot resolve it). A windowed
+//!   run that cannot load it logs why once and runs with no pads.
 //! - **Everywhere else**: no backend exists yet, and a windowed run logs that
 //!   once and runs with no pads.
 //! - **A headless run, on every target**, gets no source at all: a scripted or
