@@ -2814,12 +2814,14 @@ moves onto the growing buffer (it changes what an existing test asserts); what
 An adversarial review of everything `steam-sdk` adds over `main`, on 2026-09-23,
 after merging `main` into the branch (its evdev, GameController and browser
 gamepad backends; the conflicts were `CHANGELOG.md` and `docs/plan/19-input.md`,
-both sides kept). Two read-only sub-reviews covered the engine seams and every
-Steam call site against the SDK 1.65 headers; the FFI core was reviewed
-directly. **Verdict: ready to merge into `main`**, with the items under
-"Recorded, not fixed" in `docs/backlog.md` — none is a soundness problem, and
-each needs a decision, a real run, or work of its own. Nothing here changes what
-the plan says about real-client verification: none has happened.
+both sides kept), and again at the end for `main`'s physics query layers and a
+GameController linking fix (`CHANGELOG.md` again, both sides kept). Two
+read-only sub-reviews covered the engine seams and every Steam call site against
+the SDK 1.65 headers; the FFI core was reviewed directly. **Verdict: ready to
+merge into `main`**, with the items under "Recorded, not fixed" in
+`docs/backlog.md` — none is a soundness problem, and each needs a decision, a
+real run, or work of its own. Nothing here changes what the plan says about
+real-client verification: none has happened.
 
 **Soundness of the hand-written FFI, checked and holding:**
 
@@ -2892,21 +2894,22 @@ crates); no stubs or TODOs in the diff; the CHANGELOG entries are under
 `[Unreleased]`; the one swallowed-looking `let _` in non-test code is a default
 hook body.
 
-**Checks on the merged tree** (Windows 11, RX 7900 XTX machine):
-`cargo fmt --all --check`; workspace clippy `-D warnings`, default and all
-features;
+**Checks on the tree after the second merge** (Windows 11, RX 7900 XTX machine;
+Miri and the drift gate ran before it, which brought no change to
+`crates/crcbl-steam`): `cargo fmt --all --check`; workspace clippy
+`-D warnings`, default and all features;
 `cargo nextest run --locked --workspace -E 'not test(/^win32::shell::tests::/)'`
-— 7794 passed, 143 skipped by default, and 7815 passed, 595 skipped with all
+— 7812 passed, 143 skipped by default, and 7833 passed, 595 skipped with all
 features; `crcbl-steam` clippy for `x86_64-unknown-linux-gnu`,
 `aarch64-apple-darwin` and `wasm32-unknown-unknown`, and `crcbl-net`,
-`crcbl-store`, `crcbl-shell`, `crcbl-input`, `crcbl-server` and `crcbl-client`
-for the first two; rustdoc `-D warnings` for `crcbl-steam` with private items on
-the host, Linux and macOS targets, and CI's `wasm32` workspace rustdoc; Miri
-over `crcbl-steam`'s lib tests, 260 passed and 10 ignored, for the host and for
-`x86_64-unknown-linux-gnu`; the drift gate against the fresh mirror; and
-`tools/check-doc-citations.sh`. **Not run:** `crcbl` and `sandbox` clippy for
-Linux (their `alsa-sys` build script needs a Linux sysroot), every real-client
-step, and the drift gate against an SDK zip from Valve.
+`crcbl-store`, `crcbl-shell`, `crcbl-input`, `crcbl-server`, `crcbl-client` and
+`crcbl-phys` for the first two; rustdoc `-D warnings` for `crcbl-steam` with
+private items on the host, Linux and macOS targets, and CI's `wasm32` workspace
+rustdoc; Miri over `crcbl-steam`'s lib tests, 260 passed and 10 ignored, for the
+host and for `x86_64-unknown-linux-gnu`; the drift gate against the fresh
+mirror; and `tools/check-doc-citations.sh`. **Not run:** `crcbl` and `sandbox`
+clippy for Linux (their `alsa-sys` build script needs a Linux sysroot), every
+real-client step, and the drift gate against an SDK zip from Valve.
 
 ## Review (step 2)
 
