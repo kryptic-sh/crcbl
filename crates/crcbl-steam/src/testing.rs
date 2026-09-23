@@ -2252,6 +2252,14 @@ unsafe extern "C" fn fake_release_message(message: *mut SteamNetworkingMessage) 
 /// Joins `lobby` through the fake — `JoinLobby` answered at the next pump —
 /// and returns the held [`crate::Lobby`].
 pub(crate) fn joined_lobby(steam: &mut crate::Steam, lobby: u64) -> crate::Lobby {
+    joined_lobby_answer(steam, lobby)
+        .lobby()
+        .expect("the fake admits")
+}
+
+/// Joins `lobby` through the fake, Steam answering success, and returns the
+/// answer as the game takes it.
+pub(crate) fn joined_lobby_answer(steam: &mut crate::Steam, lobby: u64) -> crate::LobbyEntered {
     use crate::call::private::Answer as _;
     script(|s| {
         s.next_call = 88;
@@ -2265,7 +2273,7 @@ pub(crate) fn joined_lobby(steam: &mut crate::Steam, lobby: u64) -> crate::Lobby
     script(|s| s.queue.push_back(completion(88, row.id(), row.size)));
     steam.pump();
     match steam.take(call) {
-        crate::CallState::Ready(entered) => entered.lobby().expect("the fake admits"),
+        crate::CallState::Ready(entered) => entered,
         other => panic!("the fake answers at once: {other:?}"),
     }
 }

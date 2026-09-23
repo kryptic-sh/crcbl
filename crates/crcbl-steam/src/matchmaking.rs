@@ -630,7 +630,8 @@ impl LobbyEntered {
     ///
     /// # Errors
     ///
-    /// [`SteamError::LobbyEnter`] with Steam's `EChatRoomEnterResponse`.
+    /// [`SteamError::LobbyEnter`] with Steam's `EChatRoomEnterResponse`;
+    /// [`SteamError::AlreadyInLobby`] when a [`Lobby`] for it is already held.
     pub fn lobby(self) -> Result<Lobby, SteamError> {
         self.result
     }
@@ -653,13 +654,20 @@ impl Answer for LobbyEntered {
 
     fn build(bytes: &[u8], steam: &mut Steam) -> Option<Self> {
         let raw = read::<structs::LobbyEnter>(bytes)?;
+        let id = LobbyId(raw.lobby);
+        let held = steam
+            .lobbies
+            .iter()
+            .any(|tracked| tracked.id == id && tracked.alive.strong_count() > 0);
         Some(Self {
-            result: if raw.response == EnterResponse::SUCCESS {
-                Ok(Lobby::joined(steam, LobbyId(raw.lobby)))
-            } else {
+            result: if raw.response != EnterResponse::SUCCESS {
                 Err(SteamError::LobbyEnter(EnterResponse::from_raw(
                     raw.response,
                 )))
+            } else if held {
+                Err(SteamError::AlreadyInLobby(id))
+            } else {
+                Ok(Lobby::joined(steam, id))
             },
             locked: raw.locked != 0,
         })
@@ -753,6 +761,21 @@ mod tests {
             [LOBBY],
             "and not again at shutdown"
         );
+    }
+
+    /// Steam answers a join of a lobby this client is already in with
+    /// success; a second owner value would leave it when either dropped.
+    #[test]
+    fn joining_a_lobby_already_held_leaves_the_one_owner_in_charge() {
+        let (mut steam, lobby) = joined(testing::STEAM_ID);
+        let again = testing::joined_lobby_answer(&mut steam, LOBBY);
+        assert_eq!(
+            again.lobby().unwrap_err(),
+            SteamError::AlreadyInLobby(LobbyId(LOBBY))
+        );
+        assert!(script(|s| s.left.is_empty()), "the lobby is still held");
+        drop(lobby);
+        assert_eq!(script(|s| s.left.clone()), [LOBBY]);
     }
 
     #[test]

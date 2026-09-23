@@ -165,6 +165,11 @@ pub enum SteamError {
     /// Joining a lobby failed with this `EChatRoomEnterResponse`.
     #[error("could not enter the lobby: {0:?}")]
     LobbyEnter(crate::matchmaking::EnterResponse),
+    /// A lobby this client already holds a [`Lobby`](crate::Lobby) for was
+    /// joined again. Steam answers that with success, but the existing value
+    /// stays the lobby's one owner, and leaving is still its drop.
+    #[error("already in lobby {0:?}")]
+    AlreadyInLobby(crate::LobbyId),
     /// An image Steam reports is too large to allocate, or for its size to
     /// be handed back through the `int` `GetImageRGBA` takes.
     #[error("Steam reports a {width}x{height} image, too large to copy")]
