@@ -88,9 +88,10 @@ crcbl-vfx = { workspace = true, optional = true }
 crcbl-inventory = { workspace = true, optional = true }
 # Steamworks, over the SDK's flat C API opened at run time. **Optional**, on
 # `crcbl-inventory`'s terms above: a game not shipping on Steam links none of
-# it. It has no link-time dependency on Valve's library and depends on
-# `thiserror` alone, so turning it on adds no third-party crate; on a target
-# Valve ships no 64-bit library for it compiles to documentation. See the
+# it. It has no link-time dependency on Valve's library, and outside the
+# workspace depends on `thiserror` and `log` alone, so turning it on adds no
+# third-party crate; on a target Valve ships no 64-bit library for it compiles
+# to documentation. See the
 # `steam` feature and `src/lib.rs`'s `steam` re-export.
 crcbl-steam = { workspace = true, optional = true }
 # `load`, not `bake`: this is the half a shipped game links, and it reads the
