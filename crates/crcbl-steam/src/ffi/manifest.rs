@@ -11,7 +11,8 @@
 //!   naming the first one missing;
 //! - [`INTERFACES`], the accessor rows the handshake is built from;
 //! - `BINDINGS` (test builds), the symbol/declaration pairs the drift gate
-//!   looks for in the SDK headers.
+//!   looks for in the SDK headers, each with its Rust type, which
+//!   `ffi::signatures` checks against the declaration.
 //!
 //! So a function cannot be loaded without being in the table the drift gate
 //! reads, and its declaration exists in one place.
@@ -77,6 +78,10 @@ pub(crate) struct BoundFn {
     pub(crate) symbol: &'static str,
     /// The C declaration, as the header spells it.
     pub(crate) declaration: &'static str,
+    /// The Rust function-pointer type the symbol is called through, as
+    /// `stringify!` spells it — what `ffi::signatures` checks against
+    /// [`declaration`](Self::declaration).
+    pub(crate) rust: &'static str,
 }
 
 /// Every interface accessor — `ISteamXxx *SteamAPI_SteamXxx_vNNN();` — typed
@@ -164,7 +169,9 @@ macro_rules! bindings {
                                     // function pointer and a data pointer are
                                     // the same size on every supported target.
                                     // The drift gate checks the declaration
-                                    // against the SDK's.
+                                    // against the SDK's, and
+                                    // `ffi::signatures` the alias against the
+                                    // declaration.
                                     unsafe { core::mem::transmute::<*mut c_void, prototype::$Proto>(raw) }
                                 },
                             )+
@@ -181,7 +188,11 @@ macro_rules! bindings {
         /// Every bound function's symbol and declaration, for the drift gate.
         #[cfg(test)]
         pub(crate) const BINDINGS: &[BoundFn] = &[
-            $($(BoundFn { symbol: $symbol, declaration: $decl },)+)+
+            $($(BoundFn {
+                symbol: $symbol,
+                declaration: $decl,
+                rust: stringify!(fn($($arg),*) $(-> $ret)?),
+            },)+)+
         ];
     };
 }

@@ -14,6 +14,8 @@
 //! - `versions` — accessor names and interface-version strings, the single
 //!   source for both the accessor lookup and the init handshake.
 //! - `load` — the per-OS loader.
+//! - `signatures` (test builds) — each binding's Rust type against its own C
+//!   declaration, the half of the check the drift gate cannot make.
 //!
 //! Every function is `unsafe extern "C"`: `S_CALLTYPE` is `__cdecl`, and on
 //! every 64-bit target this crate compiles for there is one C convention.
@@ -25,6 +27,8 @@ pub(crate) mod versions;
 
 #[cfg(test)]
 mod drift;
+#[cfg(all(test, not(miri)))]
+mod signatures;
 
 use core::sync::atomic::AtomicBool;
 
