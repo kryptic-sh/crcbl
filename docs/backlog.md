@@ -8686,9 +8686,10 @@ remain, and from rung 2:
     variants of every query family, `PhysicsSystem::set_collider_layers`,
     `collider_of` / `entity_of`, and `CharacterController::with_query_mask`.
     Open: layers filter queries only, so a dynamic item still collides with
-    other bodies in the contact solver (contact filtering is not designed, and
-    nothing has asked for it); layers are not in `hash_state` or `replicate`, so
-    a client rebuilt from replication must re-tag (unchecked against EW's
+    other bodies in the contact solver (contact filtering is not designed; EW
+    confirmed on 2026-09-23 it wants items to collide with each other, so
+    nothing needs it); layers are not in `hash_state` or `replicate`, so a
+    client rebuilt from replication must re-tag (unchecked against EW's
     replication path); `EntityOverlapQueries` has no capsule sweep or
     penetration query, so AI capsule sweeps go through `world_mut()` plus
     `entity_of`. A callback filter was declined: plain data keeps
