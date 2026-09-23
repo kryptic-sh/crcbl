@@ -6,16 +6,26 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# One dependency. `docs/plan/42-steam.md` rules out every binding crate — the
-# SDK cannot be vendored, and a link-time dependency on `steam_api` kills the
+# No binding crate. `docs/plan/42-steam.md` rules out every one — the SDK
+# cannot be vendored, and a link-time dependency on `steam_api` kills the
 # process in the dynamic loader on a machine without Steam — so the declarations
-# are hand-written and the library is opened at runtime. `log`, `crcbl-net`,
-# `crcbl-store` and `crcbl-input` arrive with the slices that call them; a
-# dependency nothing reads is one `cargo machete` refuses.
+# are hand-written and the library is opened at runtime. `crcbl-store` and
+# `crcbl-input` arrive with the slices that call them; a dependency nothing
+# reads is one `cargo machete` refuses.
 [dependencies]
+# `SteamTransport` implements `crcbl_net::Transport` (slice 4).
+crcbl-net = { workspace = true }
+# The one thing a `Send` surface does when it is used off the pump thread and
+# cannot return an error — a `Drop` — is skip its Steam call and say so.
+log = { workspace = true }
 # `InitError` is what `Steam::init` returns, so it needs `Display` and `Error`
 # without a macro of this crate's own.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# The transport conformance suite, run against `SteamTransport` over the fake
+# library.
+crcbl-net = { workspace = true, features = ["conformance"] }
 
 [lints]
 workspace = true

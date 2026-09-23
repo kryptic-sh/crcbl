@@ -6,7 +6,7 @@
 //! decodes what it claims into a queue, and [`Steam::events`] hands the queue
 //! to the game — the same pump-then-drain idiom as the shell's event loop.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::{
     LobbyId, Steam, SteamEvent, SteamId, call,
@@ -49,7 +49,7 @@ impl Steam {
     ///
     /// Call once per frame, then drain [`events`](Self::events).
     pub fn pump(&mut self) {
-        let client = Rc::clone(&self.client);
+        let client = Arc::clone(&self.client);
         self.calls.prune(&client);
         let lib = client.lib;
         let pipe = client.pipe;
@@ -113,6 +113,18 @@ impl Steam {
             }
             Some(Decoded::CallCompleted(done)) => self.complete(done),
             Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
+            Some(Decoded::ConnectionStatus {
+                connection,
+                listen_socket,
+                state,
+                remote,
+            }) => {
+                // Only a connection arriving on a listen socket needs the
+                // pump: every `SteamTransport` reads its own state.
+                if listen_socket != 0 && state == crate::net::state::CONNECTING {
+                    self.route_incoming(listen_socket, crate::net::Incoming { connection, remote });
+                }
+            }
             None => self.diagnostics.decode_mismatches += 1,
         }
     }
@@ -135,7 +147,7 @@ impl Steam {
     /// answer now — Valve's header says `GetAPICallResult` belongs in the
     /// completion's handler.
     fn complete(&mut self, done: SteamApiCallCompleted) {
-        let client = Rc::clone(&self.client);
+        let client = Arc::clone(&self.client);
         let pipe = client.pipe;
         let claimed = self.calls.complete(
             &client,

@@ -110,6 +110,11 @@ mod matchmaking;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod net;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod presence;
 #[cfg(all(
     target_pointer_width = "64",
@@ -155,6 +160,10 @@ pub use crate::{
     matchmaking::{
         EnterResponse, Lobby, LobbyCreated, LobbyEntered, LobbyId, LobbyKind,
         MAX_LOBBY_CHAT_MESSAGE, MAX_LOBBY_KEY_LENGTH, Matchmaking, MemberChange,
+    },
+    net::{
+        Availability, EndReason, MAX_MESSAGE_BYTES, Networking, RelayStatus, SteamListener,
+        SteamTransport, VirtualPort,
     },
     presence::{
         MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,

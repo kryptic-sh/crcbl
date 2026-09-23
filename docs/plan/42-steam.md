@@ -16,15 +16,15 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a and 3b built on branch `steam-sdk`, the
-rest planned** — see "Status by slice" under "Slice order". The four decisions
-the earlier draft asked for were ratified 2026-09-06 (see "Decisions" below),
-and "the full Steam API" is now in scope, which reverses two earlier "not now"
-calls — Steam Input and `SteamTransport` — and pulls the first consumer's
-requirements (the game EW, below) forward in the slice order. The plan was
-reviewed the same day against the SDK 1.65 headers and this tree; "Review (step
-2)" at the end lists what that changed, including EW's answers to the questions
-the first draft left open.
+**Status (2026-09-23): slices 1, 1b, 3a, 3b and 4 built on branch `steam-sdk`,
+the rest planned** — see "Status by slice" under "Slice order". The four
+decisions the earlier draft asked for were ratified 2026-09-06 (see "Decisions"
+below), and "the full Steam API" is now in scope, which reverses two earlier
+"not now" calls — Steam Input and `SteamTransport` — and pulls the first
+consumer's requirements (the game EW, below) forward in the slice order. The
+plan was reviewed the same day against the SDK 1.65 headers and this tree;
+"Review (step 2)" at the end lists what that changed, including EW's answers to
+the questions the first draft left open.
 
 Two findings shape everything below, so they come first:
 
@@ -1188,8 +1188,19 @@ On branch `steam-sdk`, not merged to `main`:
   the drift gate passes against the mirror. **Not run:** the real-client steps
   below (friends list and avatars in the sandbox panel, the overlay to a profile
   and a web page), on every OS.
-- **Slice 4: next.**
-- Slices 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
+- **Slice 4: done** (2026-09-23). The conformance suite (its own commit,
+  `498ac039`), `SteamTransport`, `SteamListener`, end reasons, relay access and
+  the `Arc<Client>` pump-thread check, over the fake loop; Miri clean; the drift
+  gate passes against the mirror (after catching one wrong pragma, below). **Not
+  run:** `tests/net_smoke.rs` and every step under "Needs a real client" below —
+  two accounts on two machines — on every OS.
+- **Slice 2: next.**
+- **Slice 7a: not on this branch.** The coordinator reported (2026-09-23) that
+  the gamepad seam is being built on `main` with an XInput backend, exactly as
+  sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
+  Bringing it here means merging `main` into `steam-sdk`, which is the user's
+  call (see the backlog).
+- Slices 6, 5, 7b–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1362,6 +1373,59 @@ On branch `steam-sdk`, not merged to `main`:
 - **The sandbox panel** gains the friends-list size and whether the player's own
   medium avatar has loaded; F8 opens the overlay to the first friend's profile,
   F9 to a web page.
+
+**Slice 4 as built, where it differs from the text below:**
+
+- **The conformance suite is `crcbl_net::conformance`**, behind a `conformance`
+  feature (test support; `crcbl-steam` names it as a dev-dependency feature).
+  Six checks over a `Link` that pairs and settles any transport;
+  `InMemoryTransport` passes unchanged, and each check was seen red against a
+  deliberately broken copy of it.
+- **The OS difference is in the callback, not the info.** `m_nUserData` sits at
+  136 under both packings (136 is a multiple of 8), so
+  `SteamNetConnectionInfo_t` is 696 bytes on every OS; what moves is
+  `SteamNetConnectionStatusChangedCallback_t`'s `m_info`, at 4 under `pack(4)`
+  and 8 under `pack(8)` (704 and 712 bytes), because the info's alignment
+  follows the packing.
+- **`SteamRelayNetworkStatus_t` is under no pragma.** Declared with the callback
+  packing first; the drift gate's run over the mirror said natural, and it is
+  natural `repr(C)` now (the same layout either way, being `int`s and bytes).
+- **The drift gate skips member functions.** The networking structs declare
+  methods between their fields; a member line with a parameter list that is not
+  a function-pointer member (`(*name)(…)`) is skipped. Their unions are not
+  member lines the gate reads, so `SteamNetworkingIdentity`'s 128-byte union and
+  `SteamNetworkingIPAddr`'s 16 are pinned by the layout tables' sizes instead.
+  The synthetic SDK now emits each struct under its own pragma, as the headers
+  mix them.
+- **`EndReason` has `NotAdmitted`** (`App_Min + 4`) for the listener's refusal,
+  beside `HostLeft`, `Kicked`, `ServerFull`, `ShuttingDown` and `Lost(code)`. A
+  dropped transport closes with `ShuttingDown`; a quitting host calls
+  `close(EndReason::HostLeft)`.
+- **A send before the connection is up may be `Backpressure`.** The header does
+  not say messages sent while connecting are queued; `k_EResultInvalidState` on
+  a connection that has not ended is therefore `Backpressure` (try next frame),
+  and only on an ended one `Disconnected`.
+- **Transports poll; only listeners use the status callback.** `is_connected`,
+  and the end of a connection, come from `GetConnectionInfo` (true while
+  connecting); the pump uses `SteamNetConnectionStatusChangedCallback_t` only to
+  hand a connection arriving on a listen socket to its `SteamListener`, which is
+  opened with `&mut Steam` to register its arrival queue. No `SteamEvent` for
+  it.
+- **No poll groups, no ping location.** One `ReceiveMessagesOnConnection` per
+  transport is enough for a squad; both stay on demand. Relay access is
+  `steam.networking().start_relay()` (also run by connect and listen) and
+  `relay_status()`, with `SteamEvent::RelayStatusChanged`.
+- **Ownership as the plan set it, with two additions.** `Client` is behind an
+  `Arc`, records the pump thread, and is `Send + Sync` because every `Send`
+  holder checks `on_pump_thread()` before calling Steam; `Steam` and `Lobby`
+  carry explicit `!Send` markers, since `Arc<Client>` alone would be `Send`; and
+  when the last owner drops off the pump thread, `SteamAPI_Shutdown` is skipped,
+  logged, and the library stays live until exit. `log` became a dependency for
+  those off-thread drops.
+- **The sandbox exchanges a greeting, not a `crcbl-net` handshake.** The
+  handshake's server side is a session host, which is slice 2's; the sandbox's
+  owner listens, a joiner connects to the owner, and each logs the other's
+  greeting and the `EndReason` a closed connection gives.
 
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
@@ -1616,12 +1680,15 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 
 - **Scope:** everything under "Networking" above. After slice 3a (admission
   reads lobby membership). Implements `crcbl_net::Transport`.
-- **Files:**
-  `crcbl-steam/src/net/{mod,transport,listener,identity,end_reason}.rs`;
-  `crates/crcbl-steam/Cargo.toml` gains `crcbl-net`; a
-  `crcbl-steam/tests/net_smoke.rs` (`#[ignore]`); `apps/sandbox` connects the
-  lobby owner and exchanges a `crcbl-net` handshake. Plus, as its **own first
-  commit**, a transport conformance suite in `crcbl-net` (below).
+- **Files:** `crates/crcbl-steam/src/net/mod.rs`,
+  `crates/crcbl-steam/src/net/transport.rs`,
+  `crates/crcbl-steam/src/net/listener.rs`,
+  `crates/crcbl-steam/src/net/identity.rs`,
+  `crates/crcbl-steam/src/net/end_reason.rs`; `crates/crcbl-steam/Cargo.toml`
+  gains `crcbl-net`; `crates/crcbl-steam/tests/net_smoke.rs` (`#[ignore]`);
+  `crates/crcbl-net/src/conformance.rs`; `apps/sandbox` connects the lobby owner
+  and exchanges a `crcbl-net` handshake. Plus, as its **own first commit**, a
+  transport conformance suite in `crcbl-net` (below).
 - **API:**
 
   ```rust
@@ -1646,19 +1713,19 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   slice's call; it has exactly those two callers.
 - **Tests (CI):** layout tables for `SteamNetworkingIdentity` (`pack(1)`,
   identical on every OS), `SteamNetConnectionInfo_t` and
-  `SteamNetConnectionStatusChangedCallback_t` (1221; platform-packed — the
-  `int64 m_nUserData` after the 136-byte identity sits at a different offset
-  under `pack(4)` and `pack(8)`, so the tables must differ), and
-  `SteamNetworkingMessage_t` (natural `repr(C)`); the transport over a fake
-  `Lib` whose send/receive are an in-process loop: the conformance suite;
-  `MessageTooLarge` at `k_cbMaxSteamNetworkingSocketsMessageSizeSend` + 1 and
-  not at the limit; `Backpressure` on `k_EResultLimitExceeded`; every received
-  message released exactly once (the fake counts); `is_connected` follows the
-  fake's connection state; end-reason mapping for each SDK end code and each app
-  code; listener admission: a non-member's `Connecting` is closed, a member's
-  accepted — the admission test broken once (accept everyone) and seen red; a
-  call from a second thread returns `TransportError::Channel` and makes **no**
-  Steam call (the fake counts zero).
+  `SteamNetConnectionStatusChangedCallback_t` (1221; platform-packed — as built,
+  `m_info` sits at a different offset under `pack(4)` and `pack(8)`, so the
+  tables must differ; see "Slice 4 as built"), and `SteamNetworkingMessage_t`
+  (natural `repr(C)`); the transport over a fake `Lib` whose send/receive are an
+  in-process loop: the conformance suite; `MessageTooLarge` at
+  `k_cbMaxSteamNetworkingSocketsMessageSizeSend` + 1 and not at the limit;
+  `Backpressure` on `k_EResultLimitExceeded`; every received message released
+  exactly once (the fake counts); `is_connected` follows the fake's connection
+  state; end-reason mapping for each SDK end code and each app code; listener
+  admission: a non-member's `Connecting` is closed, a member's accepted — the
+  admission test broken once (accept everyone) and seen red; a call from a
+  second thread returns `TransportError::Channel` and makes **no** Steam call
+  (the fake counts zero).
 - **Needs a real client (two accounts, two machines, ideally two networks):**
   host + joiner connect through the lobby; handshake completes; 10 minutes of
   snapshots at the sample's tick rate with no disconnect; relay status reaches

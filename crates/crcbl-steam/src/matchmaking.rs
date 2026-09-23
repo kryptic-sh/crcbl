@@ -13,7 +13,11 @@
 //! when it moved — Steam passes ownership on by itself when an owner leaves,
 //! and sends no callback of its own for it.
 
-use std::rc::{Rc, Weak};
+use std::{
+    marker::PhantomData,
+    rc::{Rc, Weak},
+    sync::Arc,
+};
 
 use crate::{
     SteamId,
@@ -190,9 +194,12 @@ pub(crate) struct Tracked {
 /// (`LeaveLobby`), once.
 pub struct Lobby {
     id: LobbyId,
-    client: Rc<Client>,
-    /// The pump's [`Tracked`] entry holds the `Weak`.
+    client: Arc<Client>,
+    /// The pump's [`Tracked`] entry holds the `Weak`; it also keeps a
+    /// `Lobby` `!Send`, so its `Drop` runs on the pump thread.
     _alive: Rc<()>,
+    /// Belt and braces for the same: `Arc<Client>` alone would be `Send`.
+    _not_send: PhantomData<*const ()>,
 }
 
 impl core::fmt::Debug for Lobby {
@@ -228,8 +235,9 @@ impl Lobby {
         });
         Self {
             id,
-            client: Rc::clone(&steam.client),
+            client: Arc::clone(&steam.client),
             _alive: alive,
+            _not_send: PhantomData,
         }
     }
 
@@ -251,21 +259,7 @@ impl Lobby {
     /// `GetLobbyMemberByIndex`).
     #[must_use]
     pub fn members(&self, steam: &Steam) -> Vec<SteamId> {
-        let client = &steam.client;
-        let fns = &client.lib.fns.matchmaking;
-        // SAFETY: see `leave`; the index stays below the count Steam gave.
-        unsafe {
-            let count = (fns.get_num_lobby_members)(client.matchmaking, self.id.0);
-            (0..count.max(0))
-                .map(|index| {
-                    SteamId((fns.get_lobby_member_by_index)(
-                        client.matchmaking,
-                        self.id.0,
-                        index,
-                    ))
-                })
-                .collect()
-        }
+        members_of(&steam.client, self.id)
     }
 
     /// The most members the lobby admits (`GetLobbyMemberLimit`).
@@ -467,6 +461,25 @@ impl Lobby {
     }
 }
 
+/// `GetNumLobbyMembers` and `GetLobbyMemberByIndex`.
+pub(crate) fn members_of(client: &Client, lobby: LobbyId) -> Vec<SteamId> {
+    let fns = &client.lib.fns.matchmaking;
+    // SAFETY: see `leave`; callers are on the pump thread; the index stays
+    // below the count Steam gave.
+    unsafe {
+        let count = (fns.get_num_lobby_members)(client.matchmaking, lobby.0);
+        (0..count.max(0))
+            .map(|index| {
+                SteamId((fns.get_lobby_member_by_index)(
+                    client.matchmaking,
+                    lobby.0,
+                    index,
+                ))
+            })
+            .collect()
+    }
+}
+
 /// `GetLobbyOwner`.
 fn owner_of(client: &Client, lobby: LobbyId) -> SteamId {
     // SAFETY: see `leave`.
@@ -494,7 +507,7 @@ impl Steam {
     pub(crate) fn recheck_owner(&mut self, lobby: LobbyId) {
         self.lobbies
             .retain(|tracked| tracked.alive.strong_count() > 0);
-        let client = Rc::clone(&self.client);
+        let client = Arc::clone(&self.client);
         let Some(tracked) = self.lobbies.iter_mut().find(|tracked| tracked.id == lobby) else {
             return;
         };

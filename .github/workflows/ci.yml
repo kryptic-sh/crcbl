@@ -534,8 +534,8 @@ jobs:
   # Miri reports. The loader test is `cfg_attr(miri, ignore)`: it calls the OS
   # loader. Isolation is off for the one test that reads the working directory.
   # The drift gate's scanner tests are `cfg(not(miri))`: text scanning with no
-  # unsafe, and most of the old run time. Measured locally 2026-09-23: 80 tests
-  # in about 20 seconds of interpretation.
+  # unsafe, and most of the old run time. Measured locally 2026-09-23: 117 tests
+  # in about 16 seconds of interpretation.
   miri-steam:
     name: miri (crcbl-steam)
     runs-on: ubuntu-latest

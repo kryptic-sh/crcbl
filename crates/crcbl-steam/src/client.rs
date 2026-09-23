@@ -1,16 +1,25 @@
 //! Bringing Steam up, and taking it down exactly once.
 
-use std::{cell::Cell, collections::VecDeque, fmt, rc::Rc, sync::atomic::Ordering};
+use std::{
+    cell::Cell,
+    collections::VecDeque,
+    fmt,
+    marker::PhantomData,
+    sync::{Arc, atomic::Ordering},
+    thread::ThreadId,
+};
 
 use crate::{
     SteamEvent,
     call::CallRegistry,
     error::InitError,
     ffi::{
-        HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils, Lib,
-        SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
+        HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamNetworkingSockets,
+        ISteamNetworkingUtils, ISteamUser, ISteamUtils, Lib, SteamErrMsg, init_result, load,
+        manifest, manifest::Accessor, versions,
     },
     matchmaking::Tracked,
+    net::IncomingQueues,
     presence::PresenceKeys,
     pump::PumpDiagnostics,
 };
@@ -28,14 +37,29 @@ pub struct AppId(pub u32);
 /// still shuts down what it started. An init that fails at
 /// `SteamInternal_SteamAPI_Init` itself never builds one and never calls
 /// `SteamAPI_Shutdown`.
+///
+/// It also records the pump thread — the one init ran on — because the
+/// shutdown is the last Steam call the `Send` surfaces can cause: when the
+/// last owner of the [`Client`] is dropped on another thread, the shutdown is
+/// skipped (and logged) rather than made there. The library then stays
+/// initialised, and marked live, until the process exits.
 struct Session {
     lib: &'static Lib,
+    pump_thread: ThreadId,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
+        if std::thread::current().id() != self.pump_thread {
+            log::warn!(
+                "steam: the last owner of the Steam session was dropped off the pump thread; \
+                 SteamAPI_Shutdown was skipped and Steam stays initialised until exit"
+            );
+            return;
+        }
         // SAFETY: this session's init succeeded and has not been shut down;
-        // `SteamAPI_Shutdown` takes no arguments.
+        // `SteamAPI_Shutdown` takes no arguments, and this is the thread init
+        // ran on.
         unsafe { (self.lib.fns.lifecycle.shutdown)() };
         self.lib.live.store(false, Ordering::Release);
     }
@@ -45,12 +69,21 @@ impl Drop for Session {
 /// exactly once: the pipe and the interface pointers, plus the session whose
 /// drop is `SteamAPI_Shutdown`.
 ///
-/// Shared, so that a surface which must outlive the pump owner keeps Steam
-/// alive by holding a clone rather than calling into a shut-down API. An `Rc`
-/// while every holder is `!Send`: its raw pointers make it `!Send` and
-/// `!Sync`, and so everything holding it. `docs/plan/42-steam.md`'s first
-/// `Send` surface (slice 4's transport) is what turns it into an `Arc`, with
-/// the pump-thread check that makes sharing it across threads sound.
+/// Shared behind an `Arc`, so that a surface which must outlive the pump
+/// owner keeps Steam alive by holding a clone rather than calling into a
+/// shut-down API — and so the one `Send` surface, `SteamTransport` (whose
+/// `crcbl_net::Transport` bound requires `Send`), can hold it.
+///
+/// # Why `Send` and `Sync` are sound here
+///
+/// Valve documents no thread safety for the interfaces this holds. So nothing
+/// dereferences them off the thread init ran on: every call a `Send` surface
+/// makes goes through [`on_pump_thread`](Self::on_pump_thread) first, and off
+/// that thread it returns an error or, in a `Drop`, skips the call and logs
+/// — without touching Steam. Everything else that holds a `Client` (`Steam`,
+/// `Lobby`, `SteamListener`) is `!Send`, so it only ever runs on the pump
+/// thread. The pointers are therefore only ever used from one thread, which
+/// is the property the `unsafe impl`s below assert.
 ///
 /// Nominally `pub` inside this private module, and never exported: the
 /// sealed `CallResult` trait names it in a method only this crate can call,
@@ -70,20 +103,41 @@ pub struct Client {
     pub(crate) apps: *mut ISteamApps,
     /// `SteamAPI_SteamMatchmaking_v009()`; never null.
     pub(crate) matchmaking: *mut ISteamMatchmaking,
+    /// `SteamAPI_SteamNetworkingSockets_SteamAPI_v013()`; never null.
+    pub(crate) net: *mut ISteamNetworkingSockets,
+    /// `SteamAPI_SteamNetworkingUtils_SteamAPI_v004()`; never null.
+    pub(crate) net_utils: *mut ISteamNetworkingUtils,
     /// Dropped last, after every other field: the shutdown.
-    _session: Session,
+    session: Session,
+}
+
+// SAFETY: see "Why `Send` and `Sync` are sound here" above — the pointers
+// are only dereferenced on the pump thread, which every `Send` holder checks
+// before any Steam call, and `Session`'s `Drop` checks for itself.
+unsafe impl Send for Client {}
+// SAFETY: as above; `Client` has no interior mutability of its own.
+unsafe impl Sync for Client {}
+
+impl Client {
+    /// Whether the calling thread is the one Steam was initialised on — the
+    /// only thread any Steam call is made from.
+    pub(crate) fn on_pump_thread(&self) -> bool {
+        std::thread::current().id() == self.session.pump_thread
+    }
 }
 
 /// The Steam API, initialised: the pump owner and the way to every interface.
 ///
 /// One live `Steam` per loaded library — a second [`init`](Self::init) while
 /// one lives is [`InitError::AlreadyInitialised`]. `!Send` and `!Sync`: one
-/// owner, one pump thread. Dropping it shuts Steam down.
+/// owner, and the thread that initialised it is the pump thread. Dropping it
+/// shuts Steam down, once nothing else — a `SteamTransport`, a `Lobby` — still
+/// holds the session.
 ///
 /// Each frame: [`pump`](Self::pump), then drain [`events`](Self::events),
 /// then act on them.
 pub struct Steam {
-    pub(crate) client: Rc<Client>,
+    pub(crate) client: Arc<Client>,
     pub(crate) queue: VecDeque<SteamEvent>,
     pub(crate) diagnostics: PumpDiagnostics,
     /// Strings Steam returned that were not intact UTF-8. A `Cell` because
@@ -95,6 +149,12 @@ pub struct Steam {
     pub(crate) lobbies: Vec<Tracked>,
     /// The rich-presence keys set, for the key limit.
     pub(crate) presence_keys: PresenceKeys,
+    /// Whether `InitRelayNetworkAccess` has been called.
+    pub(crate) relay_started: Cell<bool>,
+    /// Where each open `SteamListener` receives its incoming connections.
+    pub(crate) incoming: IncomingQueues,
+    /// `Steam` stays on the thread that made it, whatever its fields allow.
+    pub(crate) _not_send: PhantomData<*const ()>,
 }
 
 impl fmt::Debug for Client {
@@ -171,7 +231,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     if lib.live.swap(true, Ordering::AcqRel) {
         return Err(InitError::AlreadyInitialised);
     }
-    let session = match start(lib) {
+    let session = match start(lib, std::thread::current().id()) {
         Ok(session) => session,
         Err(err) => {
             lib.live.store(false, Ordering::Release);
@@ -191,6 +251,10 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     let apps = interface(lib.fns.apps.accessor, &versions::APPS)?.cast::<ISteamApps>();
     let matchmaking = interface(lib.fns.matchmaking.accessor, &versions::MATCHMAKING)?
         .cast::<ISteamMatchmaking>();
+    let net = interface(lib.fns.net.accessor, &versions::NETWORKING_SOCKETS)?
+        .cast::<ISteamNetworkingSockets>();
+    let net_utils = interface(lib.fns.net_utils.accessor, &versions::NETWORKING_UTILS)?
+        .cast::<ISteamNetworkingUtils>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -202,7 +266,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     }
 
     Ok(Steam {
-        client: Rc::new(Client {
+        client: Arc::new(Client {
             lib,
             pipe,
             user,
@@ -210,7 +274,9 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             friends,
             apps,
             matchmaking,
-            _session: session,
+            net,
+            net_utils,
+            session,
         }),
         queue: VecDeque::new(),
         diagnostics: PumpDiagnostics::default(),
@@ -218,11 +284,14 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         calls: CallRegistry::default(),
         lobbies: Vec::new(),
         presence_keys: PresenceKeys::default(),
+        relay_started: Cell::new(false),
+        incoming: IncomingQueues::default(),
+        _not_send: PhantomData,
     })
 }
 
 /// `SteamInternal_SteamAPI_Init` with the bound interfaces' versions.
-fn start(lib: &'static Lib) -> Result<Session, InitError> {
+fn start(lib: &'static Lib, pump_thread: ThreadId) -> Result<Session, InitError> {
     let versions = versions::handshake(manifest::INTERFACES);
     let mut message: SteamErrMsg = [0; 1024];
     // SAFETY: `versions` is a NUL-separated, double-NUL-terminated list that
@@ -230,7 +299,7 @@ fn start(lib: &'static Lib) -> Result<Session, InitError> {
     let result = unsafe { (lib.fns.lifecycle.init)(versions.as_ptr().cast(), &raw mut message) };
     let message = err_msg(&message);
     match result {
-        init_result::OK => Ok(Session { lib }),
+        init_result::OK => Ok(Session { lib, pump_thread }),
         init_result::NO_STEAM_CLIENT => {
             let cwd = std::env::current_dir().ok();
             let appid_file = cwd
@@ -292,6 +361,7 @@ mod tests {
         assert_eq!(
             versions::handshake(manifest::INTERFACES),
             b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
+              SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
@@ -432,7 +502,7 @@ mod tests {
     fn shutdown_runs_once_when_the_last_owner_drops_and_not_before() {
         let lib = testing::fake_lib();
         let steam = init_on(lib, AppId(480)).unwrap();
-        let clone = Rc::clone(&steam.client);
+        let clone = Arc::clone(&steam.client);
         drop(steam);
         assert_eq!(script(|s| s.calls.shutdown), 0);
         drop(clone);

@@ -1,6 +1,6 @@
 //! Steam in the sandbox, behind its `steam` feature.
 //!
-//! `docs/plan/42-steam.md` slices 1b, 3a and 3b: on a windowed run, initialise
+//! `docs/plan/42-steam.md` slices 1b, 3a, 3b and 4: on a windowed run, initialise
 //! Steam under Valve's shared test app 480, log who is playing, pump once a
 //! frame, and hand an opened overlay to the loop as a focus loss — which
 //! pauses and releases held input exactly as alt-tab does. Without Steam, the
@@ -19,6 +19,11 @@
 //!
 //! The panel also shows the friends-list size and whether the player's own
 //! medium avatar has loaded — slice 3b's friends list and avatars.
+//!
+//! And slice 4's connection: the player who created the lobby listens on it,
+//! and one who joined connects to its owner. Each side sends a greeting over
+//! the new `SteamTransport` and logs what arrives, and a closed connection
+//! is logged with its `EndReason` — `HostLeft` when the owner leaves.
 //!
 //! Every join path joins by itself: an accepted invite or "Join game" while
 //! running (`LobbyJoinRequested`, `RichPresenceJoinRequested`), a launch
@@ -44,9 +49,11 @@ pub use imp::SteamLink;
 mod imp {
     use crcbl::{
         core::input::KeyCode,
+        net::{Message, Transport, TransportError},
         steam::{
             AppId, AvatarSize, CallState, FriendFlags, Lobby, LobbyCreated, LobbyEntered, LobbyId,
-            LobbyKind, Steam, SteamCall, SteamEvent, UserDialog, WebPageMode, connect_lobby,
+            LobbyKind, Steam, SteamCall, SteamEvent, SteamListener, SteamTransport, UserDialog,
+            VirtualPort, WebPageMode, connect_lobby,
         },
         ui::{DebugModule, DebugPanel, DebugSection},
     };
@@ -75,6 +82,11 @@ mod imp {
         creating: Option<SteamCall<LobbyCreated>>,
         /// A `JoinLobby` waiting on its answer.
         joining: Option<SteamCall<LobbyEntered>>,
+        /// The listen socket, while this player owns the lobby they created.
+        listener: Option<SteamListener>,
+        /// Every open connection — to the owner as a joiner, from each joiner
+        /// as the owner — and whether this sandbox has greeted it yet.
+        links: Vec<(SteamTransport, bool)>,
     }
 
     impl SteamLink {
@@ -86,6 +98,8 @@ mod imp {
                 lobby: None,
                 creating: None,
                 joining: None,
+                listener: None,
+                links: Vec::new(),
             }
         }
 
@@ -133,11 +147,14 @@ mod imp {
             }
         }
 
-        /// Leaves any lobby held and asks to join `lobby`.
+        /// Leaves any lobby held, and its connections, and asks to join
+        /// `lobby`.
         fn join(&mut self, lobby: LobbyId) {
             let Some(steam) = &mut self.steam else {
                 return;
             };
+            self.listener = None;
+            self.links.clear();
             self.lobby = None;
             match steam.matchmaking().join_lobby(lobby) {
                 Ok(call) => self.joining = Some(call),
@@ -188,6 +205,8 @@ mod imp {
                     if let Some(lobby) = self.lobby.take() {
                         crcbl::log::info!("steam: left {:?}", lobby.id());
                         steam.friends().clear_rich_presence();
+                        self.listener = None;
+                        self.links.clear();
                     }
                 }
                 _ => {}
@@ -205,6 +224,38 @@ mod imp {
                 self.handle(event);
             }
             self.take_calls();
+            self.serve_links();
+        }
+
+        /// Accepts joiners, and reads every connection, logging what arrives
+        /// and why a connection ended.
+        fn serve_links(&mut self) {
+            let Some(steam) = &self.steam else {
+                return;
+            };
+            if let Some(listener) = &mut self.listener {
+                while let Some(peer) = listener.accept(steam) {
+                    crcbl::log::info!("steam: {:?} connected", peer.remote());
+                    self.links.push((peer, false));
+                }
+            }
+            let me = steam.user().steam_id();
+            self.links.retain_mut(|(link, greeted)| {
+                // Once per connection; a send Steam will not take yet (the
+                // connection still coming up) is tried again next frame.
+                if !*greeted {
+                    let greeting = format!("hello from {me:?}").into_bytes();
+                    match link.send_reliable(Message::reliable(greeting)) {
+                        Ok(()) => *greeted = true,
+                        Err(TransportError::Backpressure) => {}
+                        Err(error) => {
+                            crcbl::log::warn!("steam: greeting {:?}: {error}", link.remote());
+                            *greeted = true;
+                        }
+                    }
+                }
+                drain(link)
+            });
         }
 
         /// Acts on one event.
@@ -253,6 +304,10 @@ mod imp {
                                 crcbl::log::warn!("steam: rich presence: {error}");
                             }
                             crcbl::log::info!("steam: created {:?}; F6 invites", lobby.id());
+                            match SteamListener::open(steam, &lobby, VirtualPort(0)) {
+                                Ok(listener) => self.listener = Some(listener),
+                                Err(error) => crcbl::log::warn!("steam: listen: {error}"),
+                            }
                             self.lobby = Some(lobby);
                         }
                         Err(error) => crcbl::log::warn!("steam: create lobby: {error}"),
@@ -271,6 +326,13 @@ mod imp {
                                 lobby.owner(steam),
                                 lobby.members(steam)
                             );
+                            let owner = lobby.owner(steam);
+                            if owner != steam.user().steam_id() {
+                                match SteamTransport::connect(steam, owner, VirtualPort(0)) {
+                                    Ok(link) => self.links.push((link, false)),
+                                    Err(error) => crcbl::log::warn!("steam: connect: {error}"),
+                                }
+                            }
                             self.lobby = Some(lobby);
                         }
                         Err(error) => crcbl::log::warn!("steam: join: {error}"),
@@ -291,6 +353,32 @@ mod imp {
         pub fn debug_sections(&self, panel: &mut DebugPanel) {
             if self.steam.is_some() {
                 panel.add(self);
+            }
+        }
+    }
+
+    /// Logs every message waiting on `link`; `false` once it has ended.
+    fn drain(link: &mut SteamTransport) -> bool {
+        loop {
+            match link.recv() {
+                Ok(Some(message)) => crcbl::log::info!(
+                    "steam: from {:?}: {:?}",
+                    link.remote(),
+                    String::from_utf8_lossy(&message.payload)
+                ),
+                Ok(None) => return true,
+                Err(TransportError::Disconnected) => {
+                    crcbl::log::info!(
+                        "steam: {:?} disconnected: {:?}",
+                        link.remote(),
+                        link.end_reason()
+                    );
+                    return false;
+                }
+                Err(error) => {
+                    crcbl::log::warn!("steam: {:?}: {error}", link.remote());
+                    return false;
+                }
             }
         }
     }
@@ -320,6 +408,7 @@ mod imp {
                     out.row("lobby", format_args!("{:?}", lobby.id()));
                     out.row("owner", format_args!("{:?}", lobby.owner(steam)));
                     out.row("members", format_args!("{}", lobby.members(steam).len()));
+                    out.row("links", format_args!("{}", self.links.len()));
                     out.row_str("keys", "F6 invite, F7 leave");
                 }
                 None if self.creating.is_some() || self.joining.is_some() => {

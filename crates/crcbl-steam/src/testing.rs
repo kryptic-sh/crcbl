@@ -26,12 +26,18 @@ use std::{
 };
 
 use crate::ffi::{
-    HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils, Lib,
-    SteamApiCall, SteamErrMsg,
+    HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
+    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamUser, ISteamUtils,
+    Lib, SteamApiCall, SteamErrMsg,
     manifest::{
-        AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, MatchmakingFns, UserFns, UtilsFns,
+        AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, MatchmakingFns, NetFns, NetUtilsFns,
+        UserFns, UtilsFns,
     },
     structs::CallbackMsg,
+    structs::{
+        SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
+        SteamRelayNetworkStatus,
+    },
 };
 
 /// The pipe the fake hands out.
@@ -184,6 +190,8 @@ pub(crate) struct Script {
     pub(crate) image: Option<(u32, u32, Vec<u8>)>,
     /// Every `(function, handle, buffer size)` the image calls received.
     pub(crate) image_calls: Vec<(&'static str, i32, i32)>,
+    /// The networking loop.
+    pub(crate) net: FakeNet,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -242,6 +250,7 @@ impl Default for Script {
             avatar_handles: [0; 3],
             image: None,
             image_calls: Vec::new(),
+            net: FakeNet::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -315,6 +324,23 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_steam_id: fake_get_steam_id,
             logged_on: fake_logged_on,
             get_player_steam_level: fake_get_player_steam_level,
+        },
+        net: NetFns {
+            accessor: fake_net_accessor,
+            create_listen_socket_p2p: fake_create_listen_socket_p2p,
+            connect_p2p: fake_connect_p2p,
+            accept_connection: fake_accept_connection,
+            close_connection: fake_close_connection,
+            close_listen_socket: fake_close_listen_socket,
+            send_message_to_connection: fake_send_message_to_connection,
+            receive_messages_on_connection: fake_receive_messages_on_connection,
+            get_connection_info: fake_get_connection_info,
+            release_message: fake_release_message,
+        },
+        net_utils: NetUtilsFns {
+            accessor: fake_net_utils_accessor,
+            init_relay_network_access: fake_init_relay_network_access,
+            get_relay_network_status: fake_get_relay_network_status,
         },
         friends: FriendsFns {
             accessor: fake_friends_accessor,
@@ -1053,4 +1079,420 @@ unsafe extern "C" fn fake_get_image_rgba(
         unsafe { core::ptr::copy_nonoverlapping(pixels.as_ptr(), out, len) };
         true
     })
+}
+
+/// One connection in the fake's loop.
+#[derive(Debug)]
+pub(crate) struct FakeConnection {
+    /// The other end, for a connection made by `ConnectP2P`.
+    pub(crate) peer: Option<HSteamNetConnection>,
+    /// Who is at the other end.
+    pub(crate) remote: u64,
+    pub(crate) listen_socket: HSteamListenSocket,
+    pub(crate) state: i32,
+    pub(crate) end_reason: i32,
+    /// Messages waiting to be received: bytes and send flags.
+    pub(crate) inbox: VecDeque<(Vec<u8>, i32)>,
+}
+
+/// The fake networking: an in-process loop in which `ConnectP2P` makes both
+/// ends at once, connected, and a send lands in the other end's inbox.
+#[derive(Debug, Default)]
+pub(crate) struct FakeNet {
+    pub(crate) relay_inits: u32,
+    pub(crate) relay_availability: i32,
+    pub(crate) next_handle: u32,
+    pub(crate) connections: std::collections::BTreeMap<HSteamNetConnection, FakeConnection>,
+    /// Every `(remote, port)` `ConnectP2P` was asked for.
+    pub(crate) connects: Vec<(u64, i32)>,
+    /// `ConnectP2P` and `CreateListenSocketP2P` answer the invalid handle.
+    pub(crate) refuse: bool,
+    pub(crate) listen_sockets: Vec<(HSteamListenSocket, i32)>,
+    pub(crate) closed_listen_sockets: Vec<HSteamListenSocket>,
+    pub(crate) accepted: Vec<HSteamNetConnection>,
+    /// What `AcceptConnection` answers instead of `k_EResultOK`.
+    pub(crate) accept_result: Option<i32>,
+    /// Every `(connection, reason, linger)` `CloseConnection` received.
+    pub(crate) closed: Vec<(HSteamNetConnection, i32, bool)>,
+    /// How many times `SendMessageToConnection` ran.
+    pub(crate) sends: u32,
+    /// What `SendMessageToConnection` answers instead of delivering.
+    pub(crate) send_result: Option<i32>,
+    /// Every message handed out and not yet released, by address.
+    pub(crate) outstanding: Vec<usize>,
+    pub(crate) released: u32,
+    /// `Release` on a message that was not outstanding.
+    pub(crate) bad_releases: u32,
+    /// How many times any networking function ran — for "no Steam call".
+    pub(crate) calls: u32,
+}
+
+impl FakeNet {
+    fn handle(&mut self) -> u32 {
+        self.next_handle += 1;
+        100 + self.next_handle
+    }
+}
+
+/// The far end of a connection `ConnectP2P` made.
+pub(crate) fn peer_of(connection: HSteamNetConnection) -> HSteamNetConnection {
+    script(|s| {
+        s.net.connections[&connection]
+            .peer
+            .expect("a ConnectP2P connection")
+    })
+}
+
+/// A connection from `from` arriving on `listen_socket`, still connecting,
+/// and the status callback announcing it.
+pub(crate) fn arriving(
+    listen_socket: HSteamListenSocket,
+    from: u64,
+) -> (HSteamNetConnection, FakeMsg) {
+    let connection = script(|s| {
+        let handle = s.net.handle();
+        s.net.connections.insert(
+            handle,
+            FakeConnection {
+                peer: None,
+                remote: from,
+                listen_socket,
+                state: crate::net::state::CONNECTING,
+                end_reason: 0,
+                inbox: VecDeque::new(),
+            },
+        );
+        handle
+    });
+    (connection, status_changed(connection))
+}
+
+/// A `SteamNetConnectionStatusChangedCallback_t` for `connection` as the fake
+/// holds it now.
+pub(crate) fn status_changed(connection: HSteamNetConnection) -> FakeMsg {
+    use crate::ffi::structs::SteamNetConnectionStatusChanged as Status;
+    use core::mem::offset_of;
+    let (remote, listen_socket, state) = script(|s| {
+        let c = &s.net.connections[&connection];
+        (c.remote, c.listen_socket, c.state)
+    });
+    let info = offset_of!(Status, info);
+    let identity = info + offset_of!(SteamNetConnectionInfo, identity);
+    let bytes = payload::<Status>(&[
+        (offset_of!(Status, connection), &connection.to_le_bytes()),
+        (
+            identity + offset_of!(SteamNetworkingIdentity, kind),
+            &16i32.to_le_bytes(),
+        ),
+        (
+            identity + offset_of!(SteamNetworkingIdentity, size),
+            &8i32.to_le_bytes(),
+        ),
+        (
+            identity + offset_of!(SteamNetworkingIdentity, data),
+            &remote.to_le_bytes(),
+        ),
+        (
+            info + offset_of!(SteamNetConnectionInfo, listen_socket),
+            &listen_socket.to_le_bytes(),
+        ),
+        (
+            info + offset_of!(SteamNetConnectionInfo, state),
+            &state.to_le_bytes(),
+        ),
+    ]);
+    FakeMsg::payload(1221, bytes)
+}
+
+/// Counts a networking call, whichever thread made it.
+fn net_call() {
+    script(|s| s.net.calls += 1);
+}
+
+unsafe extern "C" fn fake_net_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::NETWORKING_SOCKETS.accessor)
+}
+
+unsafe extern "C" fn fake_net_utils_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::NETWORKING_UTILS.accessor)
+}
+
+unsafe extern "C" fn fake_init_relay_network_access(_: *mut ISteamNetworkingUtils) {
+    net_call();
+    script(|s| s.net.relay_inits += 1);
+}
+
+unsafe extern "C" fn fake_get_relay_network_status(
+    _: *mut ISteamNetworkingUtils,
+    out: *mut SteamRelayNetworkStatus,
+) -> i32 {
+    net_call();
+    let availability = script(|s| s.net.relay_availability);
+    // SAFETY: the caller passes a writable `SteamRelayNetworkStatus_t`; the
+    // write is unaligned because the struct is packed.
+    unsafe {
+        out.write_unaligned(SteamRelayNetworkStatus {
+            availability,
+            ping_measurement_in_progress: 0,
+            network_config: availability,
+            any_relay: availability,
+            debug: [0; 256],
+        });
+    }
+    availability
+}
+
+unsafe extern "C" fn fake_create_listen_socket_p2p(
+    _: *mut ISteamNetworkingSockets,
+    port: i32,
+    _: i32,
+    _: *const c_void,
+) -> HSteamListenSocket {
+    net_call();
+    script(|s| {
+        if s.net.refuse {
+            return 0;
+        }
+        let handle = s.net.handle();
+        s.net.listen_sockets.push((handle, port));
+        handle
+    })
+}
+
+unsafe extern "C" fn fake_connect_p2p(
+    _: *mut ISteamNetworkingSockets,
+    identity: *const SteamNetworkingIdentity,
+    port: i32,
+    _: i32,
+    _: *const c_void,
+) -> HSteamNetConnection {
+    net_call();
+    // SAFETY: the caller passes a live identity; read unaligned (packed).
+    let identity = unsafe { identity.read_unaligned() };
+    let remote = crate::net::remote_of(&identity).map_or(0, |id| id.0);
+    script(|s| {
+        s.net.connects.push((remote, port));
+        if s.net.refuse {
+            return 0;
+        }
+        let near = s.net.handle();
+        let far = s.net.handle();
+        let connected = crate::net::state::CONNECTED;
+        let end = |peer, remote| FakeConnection {
+            peer: Some(peer),
+            remote,
+            listen_socket: 0,
+            state: connected,
+            end_reason: 0,
+            inbox: VecDeque::new(),
+        };
+        s.net.connections.insert(near, end(far, remote));
+        s.net.connections.insert(far, end(near, STEAM_ID));
+        near
+    })
+}
+
+unsafe extern "C" fn fake_accept_connection(
+    _: *mut ISteamNetworkingSockets,
+    connection: HSteamNetConnection,
+) -> i32 {
+    net_call();
+    script(|s| {
+        s.net.accepted.push(connection);
+        if let Some(result) = s.net.accept_result {
+            return result;
+        }
+        if let Some(c) = s.net.connections.get_mut(&connection) {
+            c.state = crate::net::state::CONNECTED;
+        }
+        1
+    })
+}
+
+unsafe extern "C" fn fake_close_connection(
+    _: *mut ISteamNetworkingSockets,
+    connection: HSteamNetConnection,
+    reason: i32,
+    _: *const c_char,
+    linger: bool,
+) -> bool {
+    net_call();
+    script(|s| {
+        s.net.closed.push((connection, reason, linger));
+        let Some(closed) = s.net.connections.remove(&connection) else {
+            return false;
+        };
+        if let Some(peer) = closed
+            .peer
+            .and_then(|peer| s.net.connections.get_mut(&peer))
+        {
+            peer.state = crate::net::state::CLOSED_BY_PEER;
+            peer.end_reason = reason;
+        }
+        true
+    })
+}
+
+unsafe extern "C" fn fake_close_listen_socket(
+    _: *mut ISteamNetworkingSockets,
+    socket: HSteamListenSocket,
+) -> bool {
+    net_call();
+    script(|s| s.net.closed_listen_sockets.push(socket));
+    true
+}
+
+unsafe extern "C" fn fake_send_message_to_connection(
+    _: *mut ISteamNetworkingSockets,
+    connection: HSteamNetConnection,
+    data: *const c_void,
+    len: u32,
+    flags: i32,
+    _: *mut i64,
+) -> i32 {
+    net_call();
+    // SAFETY: the caller passes `len` readable bytes.
+    let bytes =
+        unsafe { core::slice::from_raw_parts(data.cast::<u8>(), usize::try_from(len).unwrap()) }
+            .to_vec();
+    script(|s| {
+        s.net.sends += 1;
+        if let Some(result) = s.net.send_result {
+            return result;
+        }
+        let peer = match s.net.connections.get(&connection) {
+            Some(c) if c.state == crate::net::state::CONNECTED => c.peer,
+            // k_EResultNoConnection.
+            _ => return 3,
+        };
+        if let Some(peer) = peer.and_then(|peer| s.net.connections.get_mut(&peer)) {
+            // On a received message only the reliable bit is meaningful.
+            peer.inbox.push_back((bytes, flags & 8));
+        }
+        1
+    })
+}
+
+unsafe extern "C" fn fake_receive_messages_on_connection(
+    _: *mut ISteamNetworkingSockets,
+    connection: HSteamNetConnection,
+    out: *mut *mut SteamNetworkingMessage,
+    max: i32,
+) -> i32 {
+    net_call();
+    script(|s| {
+        let Some(c) = s.net.connections.get_mut(&connection) else {
+            return -1;
+        };
+        let mut count = 0;
+        while count < max {
+            let Some((bytes, flags)) = c.inbox.pop_front() else {
+                break;
+            };
+            let size = i32::try_from(bytes.len()).unwrap();
+            let data = Box::into_raw(bytes.into_boxed_slice()).cast::<c_void>();
+            let message = Box::into_raw(Box::new(SteamNetworkingMessage {
+                data,
+                size,
+                connection,
+                identity_peer: crate::net::identity_of(crate::SteamId(c.remote)),
+                connection_user_data: 0,
+                time_received: 0,
+                message_number: 0,
+                free_data: core::ptr::null(),
+                release: core::ptr::null(),
+                channel: 0,
+                flags,
+                user_data: 0,
+                lane: 0,
+                pad1: 0,
+            }));
+            s.net.outstanding.push(message as usize);
+            // SAFETY: the caller passes room for `max` pointers.
+            unsafe { out.add(usize::try_from(count).unwrap()).write(message) };
+            count += 1;
+        }
+        count
+    })
+}
+
+unsafe extern "C" fn fake_get_connection_info(
+    _: *mut ISteamNetworkingSockets,
+    connection: HSteamNetConnection,
+    out: *mut SteamNetConnectionInfo,
+) -> bool {
+    net_call();
+    script(|s| {
+        let Some(c) = s.net.connections.get(&connection) else {
+            return false;
+        };
+        let mut info = zeroed_info();
+        info.identity = crate::net::identity_of(crate::SteamId(c.remote));
+        info.listen_socket = c.listen_socket;
+        info.state = c.state;
+        info.end_reason = c.end_reason;
+        // SAFETY: the caller passes a writable `SteamNetConnectionInfo_t`.
+        unsafe { out.write_unaligned(info) };
+        true
+    })
+}
+
+/// An all-zero connection info.
+fn zeroed_info() -> SteamNetConnectionInfo {
+    crate::callbacks::read(&[0; size_of::<SteamNetConnectionInfo>()]).expect("exactly its size")
+}
+
+unsafe extern "C" fn fake_release_message(message: *mut SteamNetworkingMessage) {
+    net_call();
+    let known = script(|s| {
+        let at = s
+            .net
+            .outstanding
+            .iter()
+            .position(|&m| m == message as usize);
+        match at {
+            Some(at) => {
+                s.net.outstanding.swap_remove(at);
+                s.net.released += 1;
+                true
+            }
+            None => {
+                s.net.bad_releases += 1;
+                false
+            }
+        }
+    });
+    if known {
+        // SAFETY: the fake made `message` and its data with `Box`, and it was
+        // outstanding, so neither has been freed.
+        unsafe {
+            let message = Box::from_raw(message);
+            let len = usize::try_from(message.size).unwrap();
+            drop(Box::from_raw(core::ptr::slice_from_raw_parts_mut(
+                message.data.cast::<u8>(),
+                len,
+            )));
+        }
+    }
+}
+
+/// Joins `lobby` through the fake — `JoinLobby` answered at the next pump —
+/// and returns the held [`crate::Lobby`].
+pub(crate) fn joined_lobby(steam: &mut crate::Steam, lobby: u64) -> crate::Lobby {
+    use crate::call::private::Answer as _;
+    script(|s| {
+        s.next_call = 88;
+        s.results.push((88, lobby_enter(lobby, 1, false), false));
+    });
+    let call = steam
+        .matchmaking()
+        .join_lobby(crate::LobbyId(lobby))
+        .expect("the fake starts the call");
+    let row = crate::LobbyEntered::ROW;
+    script(|s| s.queue.push_back(completion(88, row.id(), row.size)));
+    steam.pump();
+    match steam.take(call) {
+        crate::CallState::Ready(entered) => entered.lobby().expect("the fake admits"),
+        other => panic!("the fake answers at once: {other:?}"),
+    }
 }

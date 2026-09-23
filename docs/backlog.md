@@ -8996,9 +8996,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a and 3b built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b and 4 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a and 3b are built on branch `steam-sdk`** (not merged):
+**Slices 1, 1b, 3a, 3b and 4 are built on branch `steam-sdk`** (not merged):
 `crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
 handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
 local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
@@ -9006,9 +9006,10 @@ the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
 `miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
 `HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
 slice 3a's async call registry, lobbies, invites, rich presence and join paths,
-and slice 3b's friends list, personas and avatars. The plan,
-`docs/plan/42-steam.md`, carries a status line per slice; slice 4
-(`SteamTransport`, `SteamListener`) is next.
+slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
+and `SteamListener` (with `crcbl_net::conformance`). The plan,
+`docs/plan/42-steam.md`, carries a status line per slice; slice 2 (the
+multi-session host) is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9038,8 +9039,8 @@ and slice 3b's friends list, personas and avatars. The plan,
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 91 lib tests after slice
-  3b, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 117 lib tests after slice
+  4, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9056,6 +9057,20 @@ and slice 3b's friends list, personas and avatars. The plan,
 - **Slice 3b's manual steps have not run on any OS**: the friends list and
   avatars in the sandbox's F3 panel, and the overlay opening to a profile (F8)
   and a web page (F9).
+- **Slice 4's manual steps have not run**: `tests/net_smoke.rs` (two accounts,
+  two machines, run once as `host` and once as `join`), ten minutes of traffic,
+  a network pull inside the grace period, a stranger refused, and the relay path
+  across NAT. The transport is exercised only over the fake loop, which cannot
+  show that the send flags, the message release or `ConnectP2P`'s identity
+  argument are right against a real client.
+- **Needs the user's decision: bringing slice 7a in from `main`.** The
+  coordinator reported the gamepad seam (slice 7a) being built on `main` with an
+  XInput backend, and asked that 7b be built on it by merging `origin/main` into
+  `steam-sdk`. The standing instruction for this branch is "never merge", so no
+  merge has been made. The options: merge `main` into `steam-sdk` when 7b starts
+  (a normal merge commit); or build 7b on `main` after `steam-sdk` lands there.
+  A rebase is ruled out, since the branch is pushed and must not be
+  force-pushed.
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.

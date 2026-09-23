@@ -19,7 +19,8 @@ use crate::{
     ffi::structs::{
         AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
         GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
-        NewUrlLaunchParameters, PersonaStateChange, SteamApiCallCompleted, steam_id,
+        NewUrlLaunchParameters, PersonaStateChange, SteamApiCallCompleted, SteamNetConnectionInfo,
+        SteamNetConnectionStatusChanged, SteamRelayNetworkStatus, steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -38,12 +39,23 @@ pub(crate) enum Base {
     Utils = 700,
     /// `k_iSteamAppsCallbacks`.
     Apps = 1000,
+    /// `k_iSteamNetworkingSocketsCallbacks`.
+    NetworkingSockets = 1220,
+    /// `k_iSteamNetworkingUtilsCallbacks`.
+    NetworkingUtils = 1280,
 }
 
 impl Base {
     /// Every base, for the drift gate.
     #[cfg(test)]
-    pub(crate) const ALL: &[Self] = &[Self::Friends, Self::Matchmaking, Self::Utils, Self::Apps];
+    pub(crate) const ALL: &[Self] = &[
+        Self::Friends,
+        Self::Matchmaking,
+        Self::Utils,
+        Self::Apps,
+        Self::NetworkingSockets,
+        Self::NetworkingUtils,
+    ];
 
     /// Valve's name for the base, as the headers spell it.
     #[cfg(test)]
@@ -53,6 +65,8 @@ impl Base {
             Self::Matchmaking => "k_iSteamMatchmakingCallbacks",
             Self::Utils => "k_iSteamUtilsCallbacks",
             Self::Apps => "k_iSteamAppsCallbacks",
+            Self::NetworkingSockets => "k_iSteamNetworkingSocketsCallbacks",
+            Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
         }
     }
 }
@@ -116,6 +130,9 @@ pub enum SteamEvent {
         /// The app the presence belongs to.
         app: AppId,
     },
+    /// The relay network's readiness changed (`SteamRelayNetworkStatus_t`);
+    /// see [`Networking::relay_status`](crate::Networking::relay_status).
+    RelayStatusChanged(crate::RelayStatus),
     /// The game was launched again through a Steam URL while running
     /// (`NewUrlLaunchParameters_t`): re-read
     /// [`Apps::launch_command_line`](crate::Apps::launch_command_line).
@@ -177,6 +194,18 @@ pub(crate) enum Decoded {
     /// `SteamAPICallCompleted_t`: an asynchronous call's answer is ready; the
     /// pump hands it to the call registry.
     CallCompleted(SteamApiCallCompleted),
+    /// `SteamNetConnectionStatusChangedCallback_t`: a connection changed
+    /// state; the pump hands one arriving on a listen socket to its listener.
+    ConnectionStatus {
+        /// The connection.
+        connection: u32,
+        /// The listen socket it arrived on, or zero for one this end opened.
+        listen_socket: u32,
+        /// Its `ESteamNetworkingConnectionState` now.
+        state: i32,
+        /// The certified identity at the other end, if it is a Steam id.
+        remote: Option<SteamId>,
+    },
     /// `LobbyChatMsg_t`: the pump reads the entry with `GetLobbyChatEntry`
     /// and queues [`SteamEvent::LobbyChatMessage`].
     ChatMessage {
@@ -391,6 +420,40 @@ pub(crate) const ROWS: &[Row] = &[
             })
         },
     },
+    Row {
+        base: Base::NetworkingSockets,
+        offset: 1,
+        #[cfg(test)]
+        name: "SteamNetConnectionStatusChangedCallback_t",
+        size: size_of::<SteamNetConnectionStatusChanged>(),
+        decode: |bytes| {
+            let payload = read::<SteamNetConnectionStatusChanged>(bytes)?;
+            let info = payload.info;
+            Some(Decoded::ConnectionStatus {
+                connection: payload.connection,
+                listen_socket: info.listen_socket,
+                state: info.state,
+                remote: crate::net::remote_of(&info.identity),
+            })
+        },
+    },
+    Row {
+        base: Base::NetworkingUtils,
+        offset: 1,
+        #[cfg(test)]
+        name: "SteamRelayNetworkStatus_t",
+        size: size_of::<SteamRelayNetworkStatus>(),
+        decode: |bytes| {
+            let payload = read::<SteamRelayNetworkStatus>(bytes)?;
+            let (status, lossy) = crate::RelayStatus::from_raw(&payload);
+            let event = SteamEvent::RelayStatusChanged(status);
+            Some(if lossy {
+                Decoded::LossyEvent(event)
+            } else {
+                Decoded::Event(event)
+            })
+        },
+    },
 ];
 
 /// The row claiming `id`, if any.
@@ -431,6 +494,12 @@ unsafe impl Pod for GameRichPresenceJoinRequested {}
 unsafe impl Pod for NewUrlLaunchParameters {}
 // SAFETY: as above.
 unsafe impl Pod for PersonaStateChange {}
+// SAFETY: as above.
+unsafe impl Pod for SteamNetConnectionInfo {}
+// SAFETY: as above.
+unsafe impl Pod for SteamNetConnectionStatusChanged {}
+// SAFETY: as above.
+unsafe impl Pod for SteamRelayNetworkStatus {}
 // SAFETY: as above.
 unsafe impl Pod for AvatarImageLoaded {}
 // SAFETY: as above.

@@ -24,20 +24,27 @@
 //! about the SDK. Some choices are worth naming. Every enum crossing here
 //! (`ESteamHardwareType`, `ESteamHardwareDefaultConfig`,
 //! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`,
-//! `EPersonaState`, `EActivateGameOverlayToWebPageMode`) is taken to be
+//! `EPersonaState`, `EActivateGameOverlayToWebPageMode`,
+//! `ESteamNetworkingAvailability`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
 //! one 64-bit value, and Steam writes it into storage this crate owns and
-//! aligns. A `const char *` return is Steam's buffer, copied before anything
+//! aligns. A C++ reference parameter (`ConnectP2P`'s
+//! `const SteamNetworkingIdentity &`) is a pointer at the ABI and is declared
+//! `*const`. A `const char *` return is Steam's buffer, copied before anything
 //! else runs (`crate::strings`).
 
 use core::ffi::{c_char, c_void};
 
 use super::{
-    HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamUser, ISteamUtils,
+    HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
+    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamUser, ISteamUtils,
     SteamApiCall, SteamErrMsg,
-    structs::CallbackMsg,
+    structs::{
+        CallbackMsg, SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
+        SteamRelayNetworkStatus,
+    },
     versions::{self, Interface},
 };
 use crate::error::InitError;
@@ -338,6 +345,48 @@ bindings! {
         get_lobby_owner: MatchmakingGetLobbyOwner = "SteamAPI_ISteamMatchmaking_GetLobbyOwner",
             "S_API uint64_steamid SteamAPI_ISteamMatchmaking_GetLobbyOwner( ISteamMatchmaking* self, uint64_steamid steamIDLobby );",
             fn(*mut ISteamMatchmaking, u64) -> u64;
+    }
+
+    /// `ISteamNetworkingSockets`, P2P connections only, and the message
+    /// release every received message needs (`steam_api_flat.h`).
+    net: NetFns for versions::NETWORKING_SOCKETS {
+        create_listen_socket_p2p: NetCreateListenSocketP2p = "SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P",
+            "S_API HSteamListenSocket SteamAPI_ISteamNetworkingSockets_CreateListenSocketP2P( ISteamNetworkingSockets* self, int nLocalVirtualPort, int nOptions, const SteamNetworkingConfigValue_t * pOptions );",
+            fn(*mut ISteamNetworkingSockets, i32, i32, *const c_void) -> HSteamListenSocket;
+        connect_p2p: NetConnectP2p = "SteamAPI_ISteamNetworkingSockets_ConnectP2P",
+            "S_API HSteamNetConnection SteamAPI_ISteamNetworkingSockets_ConnectP2P( ISteamNetworkingSockets* self, const SteamNetworkingIdentity & identityRemote, int nRemoteVirtualPort, int nOptions, const SteamNetworkingConfigValue_t * pOptions );",
+            fn(*mut ISteamNetworkingSockets, *const SteamNetworkingIdentity, i32, i32, *const c_void) -> HSteamNetConnection;
+        accept_connection: NetAcceptConnection = "SteamAPI_ISteamNetworkingSockets_AcceptConnection",
+            "S_API EResult SteamAPI_ISteamNetworkingSockets_AcceptConnection( ISteamNetworkingSockets* self, HSteamNetConnection hConn );",
+            fn(*mut ISteamNetworkingSockets, HSteamNetConnection) -> i32;
+        close_connection: NetCloseConnection = "SteamAPI_ISteamNetworkingSockets_CloseConnection",
+            "S_API bool SteamAPI_ISteamNetworkingSockets_CloseConnection( ISteamNetworkingSockets* self, HSteamNetConnection hPeer, int nReason, const char * pszDebug, bool bEnableLinger );",
+            fn(*mut ISteamNetworkingSockets, HSteamNetConnection, i32, *const c_char, bool) -> bool;
+        close_listen_socket: NetCloseListenSocket = "SteamAPI_ISteamNetworkingSockets_CloseListenSocket",
+            "S_API bool SteamAPI_ISteamNetworkingSockets_CloseListenSocket( ISteamNetworkingSockets* self, HSteamListenSocket hSocket );",
+            fn(*mut ISteamNetworkingSockets, HSteamListenSocket) -> bool;
+        send_message_to_connection: NetSendMessageToConnection = "SteamAPI_ISteamNetworkingSockets_SendMessageToConnection",
+            "S_API EResult SteamAPI_ISteamNetworkingSockets_SendMessageToConnection( ISteamNetworkingSockets* self, HSteamNetConnection hConn, const void * pData, uint32 cbData, int nSendFlags, int64 * pOutMessageNumber );",
+            fn(*mut ISteamNetworkingSockets, HSteamNetConnection, *const c_void, u32, i32, *mut i64) -> i32;
+        receive_messages_on_connection: NetReceiveMessagesOnConnection = "SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection",
+            "S_API int SteamAPI_ISteamNetworkingSockets_ReceiveMessagesOnConnection( ISteamNetworkingSockets* self, HSteamNetConnection hConn, SteamNetworkingMessage_t ** ppOutMessages, int nMaxMessages );",
+            fn(*mut ISteamNetworkingSockets, HSteamNetConnection, *mut *mut SteamNetworkingMessage, i32) -> i32;
+        get_connection_info: NetGetConnectionInfo = "SteamAPI_ISteamNetworkingSockets_GetConnectionInfo",
+            "S_API bool SteamAPI_ISteamNetworkingSockets_GetConnectionInfo( ISteamNetworkingSockets* self, HSteamNetConnection hConn, SteamNetConnectionInfo_t * pInfo );",
+            fn(*mut ISteamNetworkingSockets, HSteamNetConnection, *mut SteamNetConnectionInfo) -> bool;
+        release_message: NetReleaseMessage = "SteamAPI_SteamNetworkingMessage_t_Release",
+            "S_API void SteamAPI_SteamNetworkingMessage_t_Release( SteamNetworkingMessage_t* self );",
+            fn(*mut SteamNetworkingMessage);
+    }
+
+    /// `ISteamNetworkingUtils`: relay access (`steam_api_flat.h`).
+    net_utils: NetUtilsFns for versions::NETWORKING_UTILS {
+        init_relay_network_access: NetUtilsInitRelayNetworkAccess = "SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess",
+            "S_API void SteamAPI_ISteamNetworkingUtils_InitRelayNetworkAccess( ISteamNetworkingUtils* self );",
+            fn(*mut ISteamNetworkingUtils);
+        get_relay_network_status: NetUtilsGetRelayNetworkStatus = "SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus",
+            "S_API ESteamNetworkingAvailability SteamAPI_ISteamNetworkingUtils_GetRelayNetworkStatus( ISteamNetworkingUtils* self, SteamRelayNetworkStatus_t * pDetails );",
+            fn(*mut ISteamNetworkingUtils, *mut SteamRelayNetworkStatus) -> i32;
     }
 
     /// `ISteamApps` (`steam_api_flat.h`).

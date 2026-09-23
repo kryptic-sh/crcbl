@@ -91,12 +91,18 @@ impl EResult {
     /// `k_EResultNoConnection` — the client has no connection to Steam's
     /// servers.
     pub const NO_CONNECTION: Self = Self(3);
+    /// `k_EResultInvalidParam`.
+    pub const INVALID_PARAM: Self = Self(8);
+    /// `k_EResultInvalidState`.
+    pub const INVALID_STATE: Self = Self(11);
     /// `k_EResultAccessDenied`.
     pub const ACCESS_DENIED: Self = Self(15);
     /// `k_EResultTimeout`.
     pub const TIMEOUT: Self = Self(16);
     /// `k_EResultLimitExceeded` — too many of something, e.g. lobbies.
     pub const LIMIT_EXCEEDED: Self = Self(25);
+    /// `k_EResultIgnored`.
+    pub const IGNORED: Self = Self(41);
 }
 
 impl core::fmt::Display for EResult {
@@ -105,9 +111,12 @@ impl core::fmt::Display for EResult {
             Self::OK => "OK",
             Self::FAIL => "Fail",
             Self::NO_CONNECTION => "NoConnection",
+            Self::INVALID_PARAM => "InvalidParam",
+            Self::INVALID_STATE => "InvalidState",
             Self::ACCESS_DENIED => "AccessDenied",
             Self::TIMEOUT => "Timeout",
             Self::LIMIT_EXCEEDED => "LimitExceeded",
+            Self::IGNORED => "Ignored",
             _ => return write!(f, "EResult {}", self.0),
         };
         write!(f, "{name} ({})", self.0)

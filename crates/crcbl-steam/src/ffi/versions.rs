@@ -58,6 +58,22 @@ pub(crate) const MATCHMAKING: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamNetworkingSockets`, the client (not game-server) instance.
+pub(crate) const NETWORKING_SOCKETS: Interface = Interface {
+    accessor: "SteamAPI_SteamNetworkingSockets_SteamAPI_v013",
+    version: "SteamNetworkingSockets013",
+    define: "STEAMNETWORKINGSOCKETS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
+/// `ISteamNetworkingUtils`, shared by client and game server.
+pub(crate) const NETWORKING_UTILS: Interface = Interface {
+    accessor: "SteamAPI_SteamNetworkingUtils_SteamAPI_v004",
+    version: "SteamNetworkingUtils004",
+    define: "STEAMNETWORKINGUTILS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamUser`.
 pub(crate) const USER: Interface = Interface {
     accessor: "SteamAPI_SteamUser_v023",

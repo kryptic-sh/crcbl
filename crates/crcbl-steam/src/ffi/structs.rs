@@ -65,6 +65,10 @@ macro_rules! callback_packed {
 pub(crate) enum Pack {
     /// Valve's callback packing: 4 on Linux and macOS, 8 on Windows.
     Callback,
+    /// `#pragma pack(push,1)`, the same on every OS.
+    One,
+    /// No pragma: the compiler's natural layout.
+    Natural,
 }
 
 /// One bound struct as the drift gate compares it with its header: the C
@@ -154,6 +158,78 @@ pub(crate) const DECLS: &[StructDecl] = &[
         name: "FriendRichPresenceUpdate_t",
         pack: Pack::Callback,
         fields: &["CSteamID m_steamIDFriend", "AppId_t m_nAppID"],
+    },
+    StructDecl {
+        name: "SteamNetworkingIPAddr",
+        pack: Pack::One,
+        // The `union { uint8 m_ipv6[ 16 ]; … }` before it is not a member
+        // line the gate reads; the layout table pins its 16 bytes.
+        fields: &["uint16 m_port"],
+    },
+    StructDecl {
+        name: "SteamNetworkingIdentity",
+        pack: Pack::One,
+        // As above: the 128-byte union after `m_cbSize` is pinned by size.
+        fields: &["ESteamNetworkingIdentityType m_eType", "int m_cbSize"],
+    },
+    StructDecl {
+        name: "SteamNetConnectionInfo_t",
+        pack: Pack::Callback,
+        fields: &[
+            "SteamNetworkingIdentity m_identityRemote",
+            "int64 m_nUserData",
+            "HSteamListenSocket m_hListenSocket",
+            "SteamNetworkingIPAddr m_addrRemote",
+            "uint16 m__pad1",
+            "SteamNetworkingPOPID m_idPOPRemote",
+            "SteamNetworkingPOPID m_idPOPRelay",
+            "ESteamNetworkingConnectionState m_eState",
+            "int m_eEndReason",
+            "char m_szEndDebug[ k_cchSteamNetworkingMaxConnectionCloseReason ]",
+            "char m_szConnectionDescription[ k_cchSteamNetworkingMaxConnectionDescription ]",
+            "int m_nFlags",
+            "uint32 reserved[63]",
+        ],
+    },
+    StructDecl {
+        name: "SteamNetConnectionStatusChangedCallback_t",
+        pack: Pack::Callback,
+        fields: &[
+            "HSteamNetConnection m_hConn",
+            "SteamNetConnectionInfo_t m_info",
+            "ESteamNetworkingConnectionState m_eOldState",
+        ],
+    },
+    StructDecl {
+        name: "SteamRelayNetworkStatus_t",
+        pack: Pack::Natural,
+        fields: &[
+            "ESteamNetworkingAvailability m_eAvail",
+            "int m_bPingMeasurementInProgress",
+            "ESteamNetworkingAvailability m_eAvailNetworkConfig",
+            "ESteamNetworkingAvailability m_eAvailAnyRelay",
+            "char m_debugMsg[ 256 ]",
+        ],
+    },
+    StructDecl {
+        name: "SteamNetworkingMessage_t",
+        pack: Pack::Natural,
+        fields: &[
+            "void *m_pData",
+            "int m_cbSize",
+            "HSteamNetConnection m_conn",
+            "SteamNetworkingIdentity m_identityPeer",
+            "int64 m_nConnUserData",
+            "SteamNetworkingMicroseconds m_usecTimeReceived",
+            "int64 m_nMessageNumber",
+            "void (*m_pfnFreeData)( SteamNetworkingMessage_t *pMsg )",
+            "void (*m_pfnRelease)( SteamNetworkingMessage_t *pMsg )",
+            "int m_nChannel",
+            "int m_nFlags",
+            "int64 m_nUserData",
+            "uint16 m_idxLane",
+            "uint16 _pad1__",
+        ],
     },
     StructDecl {
         name: "LobbyCreated_t",
@@ -433,6 +509,130 @@ callback_packed! {
     }
 }
 
+/// `SteamNetworkingIdentity` (`steamnetworkingtypes.h`, under
+/// `#pragma pack(push,1)`): who is at the other end of a connection. Only
+/// the Steam-id form is built or read here.
+#[derive(Debug, Clone, Copy)]
+#[repr(C, packed)]
+pub(crate) struct SteamNetworkingIdentity {
+    /// `ESteamNetworkingIdentityType m_eType`.
+    pub(crate) kind: i32,
+    /// `int m_cbSize` — the bytes of `data` in use.
+    pub(crate) size: i32,
+    /// The union: `uint64 m_steamID64` in its first 8 bytes for a Steam id,
+    /// `uint32 m_reserved[ 32 ]` giving its 128-byte size.
+    pub(crate) data: [u8; 128],
+}
+
+callback_packed! {
+    /// `SteamNetConnectionInfo_t` (`steamnetworkingtypes.h`): a connection's
+    /// state, its remote identity and why it ended.
+    pub(crate) struct SteamNetConnectionInfo {
+        /// `SteamNetworkingIdentity m_identityRemote`.
+        pub(crate) identity: SteamNetworkingIdentity,
+        /// `int64 m_nUserData`.
+        pub(crate) user_data: i64,
+        /// `HSteamListenSocket m_hListenSocket` — the socket it arrived on, or
+        /// zero for one this end opened.
+        pub(crate) listen_socket: u32,
+        /// `SteamNetworkingIPAddr m_addrRemote` — 1-aligned, 18 bytes.
+        pub(crate) address: [u8; 18],
+        /// `uint16 m__pad1`.
+        pub(crate) pad1: u16,
+        /// `SteamNetworkingPOPID m_idPOPRemote`.
+        pub(crate) pop_remote: u32,
+        /// `SteamNetworkingPOPID m_idPOPRelay`.
+        pub(crate) pop_relay: u32,
+        /// `ESteamNetworkingConnectionState m_eState`.
+        pub(crate) state: i32,
+        /// `int m_eEndReason`.
+        pub(crate) end_reason: i32,
+        /// `char m_szEndDebug[ k_cchSteamNetworkingMaxConnectionCloseReason ]`.
+        pub(crate) end_debug: [u8; 128],
+        /// `char m_szConnectionDescription[ k_cchSteamNetworkingMaxConnectionDescription ]`.
+        pub(crate) description: [u8; 128],
+        /// `int m_nFlags`.
+        pub(crate) flags: i32,
+        /// `uint32 reserved[63]`.
+        pub(crate) reserved: [u32; 63],
+    }
+}
+
+callback_packed! {
+    /// `SteamNetConnectionStatusChangedCallback_t`
+    /// (`isteamnetworkingsockets.h`, `k_iSteamNetworkingSocketsCallbacks + 1`):
+    /// a connection changed state. The OS difference is here, not in the info:
+    /// `m_info` starts at 4 under `pack(4)` and 8 under `pack(8)`.
+    pub(crate) struct SteamNetConnectionStatusChanged {
+        /// `HSteamNetConnection m_hConn`.
+        pub(crate) connection: u32,
+        /// `SteamNetConnectionInfo_t m_info`.
+        pub(crate) info: SteamNetConnectionInfo,
+        /// `ESteamNetworkingConnectionState m_eOldState`.
+        pub(crate) old_state: i32,
+    }
+}
+
+/// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
+/// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
+/// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
+/// pragma, unlike the other callbacks — the drift gate's first run over it
+/// said so — so natural `repr(C)`; being `int`s and bytes, the layout is the
+/// same either way.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct SteamRelayNetworkStatus {
+    /// `ESteamNetworkingAvailability m_eAvail`.
+    pub(crate) availability: i32,
+    /// `int m_bPingMeasurementInProgress`.
+    pub(crate) ping_measurement_in_progress: i32,
+    /// `ESteamNetworkingAvailability m_eAvailNetworkConfig`.
+    pub(crate) network_config: i32,
+    /// `ESteamNetworkingAvailability m_eAvailAnyRelay`.
+    pub(crate) any_relay: i32,
+    /// `char m_debugMsg[ 256 ]`.
+    pub(crate) debug: [u8; 256],
+}
+
+/// `SteamNetworkingMessage_t` (`steamnetworkingtypes.h`, after the header
+/// pops its packing, so natural `repr(C)` on every OS): a received message,
+/// owned by Steam until `SteamAPI_SteamNetworkingMessage_t_Release`.
+#[derive(Debug, Clone, Copy)]
+#[repr(C)]
+pub(crate) struct SteamNetworkingMessage {
+    /// `void *m_pData`.
+    pub(crate) data: *mut core::ffi::c_void,
+    /// `int m_cbSize`.
+    pub(crate) size: i32,
+    /// `HSteamNetConnection m_conn`.
+    pub(crate) connection: u32,
+    /// `SteamNetworkingIdentity m_identityPeer`.
+    pub(crate) identity_peer: SteamNetworkingIdentity,
+    /// `int64 m_nConnUserData`.
+    pub(crate) connection_user_data: i64,
+    /// `SteamNetworkingMicroseconds m_usecTimeReceived`.
+    pub(crate) time_received: i64,
+    /// `int64 m_nMessageNumber`.
+    pub(crate) message_number: i64,
+    /// `void (*m_pfnFreeData)( SteamNetworkingMessage_t *pMsg )` — never
+    /// called here, so held as an opaque pointer.
+    pub(crate) free_data: *const core::ffi::c_void,
+    /// `void (*m_pfnRelease)( SteamNetworkingMessage_t *pMsg )` — never
+    /// called here; `SteamAPI_SteamNetworkingMessage_t_Release` is.
+    pub(crate) release: *const core::ffi::c_void,
+    /// `int m_nChannel`.
+    pub(crate) channel: i32,
+    /// `int m_nFlags` — on a received message only
+    /// `k_nSteamNetworkingSend_Reliable` is meaningful.
+    pub(crate) flags: i32,
+    /// `int64 m_nUserData`.
+    pub(crate) user_data: i64,
+    /// `uint16 m_idxLane`.
+    pub(crate) lane: u16,
+    /// `uint16 _pad1__`.
+    pub(crate) pad1: u16,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +705,52 @@ mod tests {
             friend: 0, 8;
             app: 8, 4;
         });
+        assert_layout!(SteamNetworkingIdentity, 136, {
+            kind: 0, 4;
+            size: 4, 4;
+            data: 8, 128;
+        });
+        assert_eq!(align_of::<SteamNetworkingIdentity>(), 1);
+        // 696 under both; its alignment (8 or 4) is what moves the callback.
+        assert_layout!(SteamNetConnectionInfo, 696, {
+            identity: 0, 136;
+            user_data: 136, 8;
+            listen_socket: 144, 4;
+            address: 148, 18;
+            pad1: 166, 2;
+            pop_remote: 168, 4;
+            pop_relay: 172, 4;
+            state: 176, 4;
+            end_reason: 180, 4;
+            end_debug: 184, 128;
+            description: 312, 128;
+            flags: 440, 4;
+            reserved: 444, 252;
+        });
+        assert_layout!(SteamRelayNetworkStatus, 272, {
+            availability: 0, 4;
+            ping_measurement_in_progress: 4, 4;
+            network_config: 8, 4;
+            any_relay: 12, 4;
+            debug: 16, 256;
+        });
+        // Natural `repr(C)`, 64-bit pointers on every supported target.
+        assert_layout!(SteamNetworkingMessage, 216, {
+            data: 0, 8;
+            size: 8, 4;
+            connection: 12, 4;
+            identity_peer: 16, 136;
+            connection_user_data: 152, 8;
+            time_received: 160, 8;
+            message_number: 168, 8;
+            free_data: 176, 8;
+            release: 184, 8;
+            channel: 192, 4;
+            flags: 196, 4;
+            user_data: 200, 8;
+            lane: 208, 2;
+            pad1: 210, 2;
+        });
         // Made only of 1-aligned `CSteamID`s and bytes, so 1-aligned in C too;
         // a `u64` in place of `CSteamId` would make these 4 or 8.
         assert_eq!(align_of::<GameLobbyJoinRequested>(), 1);
@@ -538,6 +784,11 @@ mod tests {
             callback: 4, 4;
             param: 8, 8;
             param_size: 16, 4;
+        });
+        assert_layout!(SteamNetConnectionStatusChanged, 704, {
+            connection: 0, 4;
+            info: 4, 696;
+            old_state: 700, 4;
         });
         assert_layout!(PersonaStateChange, 12, {
             user: 0, 8;
@@ -584,6 +835,11 @@ mod tests {
             callback: 4, 4;
             param: 8, 8;
             param_size: 16, 4;
+        });
+        assert_layout!(SteamNetConnectionStatusChanged, 712, {
+            connection: 0, 4;
+            info: 8, 696;
+            old_state: 704, 4;
         });
         assert_layout!(PersonaStateChange, 16, {
             user: 0, 8;

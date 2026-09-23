@@ -221,7 +221,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a and 3b**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b and 4**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -255,9 +255,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   checked before the call; `friends()` also lists friends, reads their names,
   states, avatars (`avatar(user, size)` as RGBA) and rich presence, and opens
   the overlay's dialogs, profile pages and browser; and `connect_lobby(args)`
-  reads the `+connect_lobby <id>` a launch carries. 64-bit Linux, Windows and
-  macOS; elsewhere the crate is empty. `apps/sandbox --features steam` exercises
-  it. Not yet run against a Steam client with a 1.65 library.
+  reads the `+connect_lobby <id>` a launch carries. `SteamTransport` is a Steam
+  P2P connection implementing `crcbl_net::Transport` —
+  `connect(steam, host, port)` on a joiner, `SteamListener::accept` on a host,
+  which admits only members of its lobby — with the peer's relay-certified
+  `SteamId` as `remote()` and `end_reason()` telling `HostLeft` from a lost
+  link; it is `Send`, but calls Steam only on the thread that initialised it and
+  answers a typed error off it. `steam.networking()` starts relay access and
+  reports its status. 64-bit Linux, Windows and macOS; elsewhere the crate is
+  empty. `apps/sandbox --features steam` exercises it. Not yet run against a
+  Steam client with a 1.65 library.
+- `crcbl_net::conformance` (feature `conformance`): the behaviour `Transport`'s
+  documentation promises, as checks any implementation can be run through with a
+  `Link` that pairs and settles it.
 - `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
   window never sees — the Steam overlay opening — and the loop answers it
   exactly as it answers the window losing focus: held keys, buttons and contacts

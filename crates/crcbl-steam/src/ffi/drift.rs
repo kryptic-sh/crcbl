@@ -204,6 +204,8 @@ impl From<Pack> for Scanned {
     fn from(pack: Pack) -> Self {
         match pack {
             Pack::Callback => Self::Callback,
+            Pack::One => Self::Fixed(1),
+            Pack::Natural => Self::Natural,
         }
     }
 }
@@ -276,6 +278,14 @@ fn is_struct_head(flat: &str, name: &str) -> bool {
     named && !flat.ends_with(';')
 }
 
+/// Whether a normalized member line declares a member function rather than
+/// a data member: it has a parameter list, and is not a function-pointer
+/// member, which is written `(*name)(…)`. The networking structs declare
+/// methods between their fields; the gate compares data members only.
+fn is_method(flat: &str) -> bool {
+    flat.contains('(') && !flat.contains("(*")
+}
+
 /// Reads a struct body from its opening `{` to the matching `}`.
 fn read_body<'a>(head: &str, lines: &mut impl Iterator<Item = &'a str>, pack: Scanned) -> Block {
     let mut block = Block {
@@ -299,7 +309,7 @@ fn read_body<'a>(head: &str, lines: &mut impl Iterator<Item = &'a str>, pack: Sc
         }
         let opens = flat.matches('{').count();
         let closes = flat.matches('}').count();
-        if depth == 1 && opens == 0 && closes == 0 && flat.ends_with(';') {
+        if depth == 1 && opens == 0 && closes == 0 && flat.ends_with(';') && !is_method(&flat) {
             block.fields.push(flat.trim_end_matches(';').to_owned());
         }
         depth = (depth + opens).saturating_sub(closes);
@@ -552,10 +562,16 @@ mod tests {
                 base as i32
             ));
         }
-        let mut structs = String::from(
-            "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )\n#elif defined( VALVE_CALLBACK_PACK_LARGE )\n#pragma pack( push, 8 )\n#else\n#error pack\n#endif\n",
-        );
+        // Each struct under its own pragma, as the real headers mix them.
+        let mut structs = String::new();
         for decl in tables.decls {
+            match decl.pack {
+                Pack::Callback => structs.push_str(
+                    "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )\n#elif defined( VALVE_CALLBACK_PACK_LARGE )\n#pragma pack( push, 8 )\n#else\n#error pack\n#endif\n",
+                ),
+                Pack::One => structs.push_str("#pragma pack(push,1)\n"),
+                Pack::Natural => {}
+            }
             structs.push_str(&format!("struct {};\n", decl.name));
             structs.push_str(&format!("typedef struct {}\n{{\n", decl.name));
             let row = tables
@@ -578,8 +594,10 @@ mod tests {
                 structs.push_str(&format!("\t{field};\t// what it is\n"));
             }
             structs.push_str(&format!("}} {};\n\n", decl.name));
+            if decl.pack != Pack::Natural {
+                structs.push_str("#pragma pack( pop )\n");
+            }
         }
-        structs.push_str("#pragma pack( pop )\n");
         vec![
             Header {
                 name: "steam_api_flat.h".into(),
@@ -699,10 +717,24 @@ mod tests {
             "#if defined( VALVE_CALLBACK_PACK_SMALL )\n#pragma pack( push, 4 )",
             "#if 0\n#endif\n#pragma pack( push, 1 )\n#if defined( VALVE_CALLBACK_PACK_SMALL )",
         );
+        // The first struct is the sentinel, under the callback selection.
         let failures = check(&headers, REAL);
-        assert_eq!(failures.len(), DECLS.len(), "{failures:#?}");
+        assert_eq!(failures.len(), 1, "{failures:#?}");
         assert!(
-            failures.iter().all(|f| f.contains("packs it Fixed(1)")),
+            failures[0].starts_with("ValvePackingSentinel_t: the header packs it Fixed(1)"),
+            "{failures:#?}"
+        );
+        // And the other way: a pack(1) struct found under another packing.
+        let mut headers = synthetic(REAL);
+        edit(
+            &mut headers,
+            "#pragma pack(push,1)\nstruct SteamNetworkingIPAddr;",
+            "#pragma pack(push,4)\nstruct SteamNetworkingIPAddr;",
+        );
+        let failures = check(&headers, REAL);
+        assert_eq!(failures.len(), 1, "{failures:#?}");
+        assert!(
+            failures[0].contains("packs it Fixed(4), not One"),
             "{failures:#?}"
         );
     }
@@ -773,6 +805,29 @@ mod tests {
                 .any(|f| f.contains("k_cchMaxRichPresenceKeyLength")),
             "{failures:#?}"
         );
+    }
+
+    #[test]
+    fn methods_are_skipped_and_function_pointer_members_kept() {
+        let blocks = struct_blocks(
+            "struct A
+{
+	int x;
+	void Clear();
+	bool Ok() const { return true; }
+	void (*m_pfn)( A *p );
+	enum {
+		k_n = 1,
+	};
+	union {
+		int u;
+	};
+};
+",
+            "A",
+        );
+        assert_eq!(blocks.len(), 1);
+        assert_eq!(blocks[0].fields, ["int x", "void(*m_pfn)(A*p)"]);
     }
 
     #[test]
