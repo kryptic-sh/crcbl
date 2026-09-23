@@ -226,7 +226,13 @@ impl CallRegistry {
         &mut self,
         call: SteamCall<T>,
     ) -> Result<Result<Vec<u8>, CallError>, SteamCall<T>> {
-        let Some(entry) = self.entries.get(&call.handle) else {
+        // By the token's own identity, not just the handle: Steam's handles
+        // are numbers another session may hand out again.
+        let Some(entry) = self
+            .entries
+            .get(&call.handle)
+            .filter(|entry| Weak::ptr_eq(&entry.alive, &Rc::downgrade(&call._alive)))
+        else {
             return Ok(Err(CallError::NotRegistered));
         };
         if entry.answer.is_none() {
@@ -566,5 +572,36 @@ mod tests {
             CallState::Failed(CallError::NotRegistered) => {}
             other => panic!("expected NotRegistered, got {other:?}"),
         }
+    }
+
+    /// Handles are Steam's numbers, so another session may hand out the same
+    /// one: a token redeems only the registration that made it.
+    #[test]
+    fn a_token_never_redeems_another_sessions_call_with_its_handle() {
+        let (id, size) = created_row();
+        let mut first = steam();
+        let stale = first
+            .matchmaking()
+            .create_lobby(LobbyKind::Private, 2)
+            .unwrap();
+        let mut second = init_on(testing::fake_lib(), AppId(480)).unwrap();
+        // The fake hands out handle 77 again.
+        let own = second
+            .matchmaking()
+            .create_lobby(LobbyKind::Private, 2)
+            .unwrap();
+        script(|s| {
+            s.results.push((77, lobby_created(1, 5), false));
+            s.queue.push_back(completion(77, id, size));
+        });
+        second.pump();
+        match second.take(stale) {
+            CallState::Failed(CallError::NotRegistered) => {}
+            other => panic!("expected NotRegistered, got {other:?}"),
+        }
+        let CallState::Ready(created) = second.take(own) else {
+            panic!("the answer went to another session's token");
+        };
+        assert_eq!(created.lobby().unwrap().id(), LobbyId(5));
     }
 }
