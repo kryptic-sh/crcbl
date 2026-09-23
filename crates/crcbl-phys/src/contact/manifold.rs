@@ -38,14 +38,21 @@
 //! bits.
 
 mod box_box;
+mod gap;
 
 use glam::{DQuat, DVec3};
 
 pub use self::box_box::SatCache;
+pub(crate) use self::gap::gap;
 use super::shape::ContactShape;
 
 /// The most points a manifold holds.
 pub const MAX_POINTS: usize = 4;
+
+/// Box2D's linear slop, in metres: the scale every tolerance of the box pair
+/// and of the sweeps is set against, and a quarter of
+/// [`crate::ContactSettings::DEFAULT`]'s speculative distance.
+pub(crate) const LINEAR_SLOP: f64 = 0.005;
 
 /// Golden-section iterations [`closest_on_segment_to_box`] takes. Fixed, so
 /// every run does the same arithmetic; each shrinks the bracket by the golden

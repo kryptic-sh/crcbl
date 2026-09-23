@@ -697,3 +697,81 @@ fn a_body_touching_nothing_steps_as_it_would_without_contacts() {
     assert_eq!(with.transform(a), without.transform(b));
     assert_eq!(with.body(a), without.body(b));
 }
+
+// ---------------------------------------------------------------------------
+// Spinning on a point
+// ---------------------------------------------------------------------------
+
+/// **A ball spinning about its contact normal slows to rest at the rate its
+/// contact patch predicts, and a frictionless one spins on.**
+///
+/// A one-point contact twists against a patch of Hertz radius `a = √(R δ)`,
+/// with a torque of up to `μ m g a` for a ball resting under its weight, so a
+/// solid ball's spin `ω₀` falls linearly to rest in `T = ω₀ · ⅖ R² / (μ g a)`.
+/// The depth `δ` is read off the contact the solver built. Measured on
+/// 2026-09-23: a 10 cm, 1 kg ball sunk 0.069 mm has a 2.6 mm patch, and at
+/// `μ = 0.5` its 5 rad/s is predicted to stop in 1.552 s and stops on the tick
+/// at 1.550 s; the bound, 3%, is about three ticks. Without the patch, twist
+/// acted only in manifolds of two points or more, and the ball spun at
+/// 5 rad/s for ever.
+#[test]
+fn a_ball_spinning_on_its_contact_point_stops_as_its_patch_predicts() {
+    const RADIUS: f64 = 0.1;
+    const SPIN: f64 = 5.0;
+    let run = |friction: f64| {
+        let mut phys = PhysicsSystem::with_contacts(ContactSettings {
+            sleep: false,
+            ..ContactSettings::DEFAULT
+        });
+        phys.add_force_provider(Box::new(GravityForce::EARTH));
+        let surface = SurfaceMaterial::new(friction, 0.0);
+        phys.add_plane(DVec3::Y, 0.0, surface);
+        let e = ball(
+            &mut phys,
+            1,
+            DVec3::new(0.0, RADIUS, 0.0),
+            RADIUS,
+            1.0,
+            surface,
+        );
+        for _ in 0..120 {
+            phys.step(DT);
+        }
+        let depth = -phys.contacts()[0].manifold.points()[0].separation;
+        phys.body_mut(e).expect("a body").angular_velocity = DVec3::Y * SPIN;
+        let mut stopped = None;
+        for tick in 1..=600u32 {
+            phys.step(DT);
+            let spin = phys.body(e).expect("a body").angular_velocity.y;
+            if stopped.is_none() && spin.abs() < 0.01 * SPIN {
+                stopped = Some(f64::from(tick) * DT);
+            }
+        }
+        let spin = phys.body(e).expect("a body").angular_velocity.y;
+        (depth, stopped, spin)
+    };
+
+    let friction = 0.5;
+    let (depth, stopped, _) = run(friction);
+    let mu = SurfaceMaterial::new(friction, 0.0)
+        .combine(&SurfaceMaterial::new(friction, 0.0))
+        .friction;
+    let patch = (RADIUS * depth).sqrt();
+    assert!(
+        patch > 1.0e-3,
+        "the patch {patch} m is the clamp's, not Hertz's"
+    );
+    let predicted = SPIN * 0.4 * RADIUS * RADIUS / (mu * G * patch);
+    let stopped = stopped.expect("the ball never stopped spinning");
+    assert!(
+        (stopped - predicted).abs() < 0.03 * predicted,
+        "stopped after {stopped} s against the {predicted} s a {patch} m patch predicts"
+    );
+
+    let (_, stopped, spin) = run(0.0);
+    assert_eq!(stopped, None, "a frictionless ball stopped spinning");
+    assert!(
+        (spin - SPIN).abs() < 1e-9,
+        "a frictionless ball's spin changed to {spin}"
+    );
+}

@@ -63,6 +63,12 @@ pub struct RigidBody {
     /// The inverse of [`local_inertia`](Self::local_inertia), or zero where
     /// that is zero.
     pub inverse_local_inertia: DMat3,
+    /// Whether this body is a **bullet**: in a system with contacts, a
+    /// dynamic bullet is swept every tick it moves, however slowly, and
+    /// against every other body as well as the static ones. See
+    /// [`crate::contact`]'s continuous collision. Off by default, and ignored
+    /// for a kinematic body, which nothing sweeps.
+    pub bullet: bool,
 }
 
 impl RigidBody {
@@ -96,7 +102,14 @@ impl RigidBody {
             torque_accum: DVec3::ZERO,
             local_inertia: DMat3::ZERO,
             inverse_local_inertia: DMat3::ZERO,
+            bullet: false,
         }
+    }
+
+    /// This body with its [`bullet`](Self::bullet) flag set to `bullet`.
+    #[must_use]
+    pub const fn with_bullet(self, bullet: bool) -> Self {
+        Self { bullet, ..self }
     }
 
     /// This body with `local_inertia` as its inertia tensor, about its centre

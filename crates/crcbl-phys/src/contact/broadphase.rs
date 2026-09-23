@@ -290,6 +290,30 @@ impl Broadphase {
         self.move_buffer.clear();
     }
 
+    /// Every static proxy and plane whose bounds reach `bounds`, into `out`,
+    /// and every moving proxy's too if `moving` — what a sweep's path could
+    /// meet. Static proxies come first in the tree's traversal order, then the
+    /// planes in the order they were made, then the moving proxies.
+    pub(crate) fn query_path(&mut self, bounds: &Aabb, moving: bool, out: &mut Vec<ProxyId>) {
+        out.clear();
+        let mut found = std::mem::take(&mut self.candidates);
+        self.static_tree
+            .traverse_aabb_into(bounds, &mut self.stack, &mut found);
+        out.extend_from_slice(&found);
+        out.extend(
+            self.planes
+                .iter()
+                .filter(|(_, plane)| plane.reaches(bounds))
+                .map(|(id, _)| *id),
+        );
+        if moving {
+            self.moving_tree
+                .traverse_aabb_into(bounds, &mut self.stack, &mut found);
+            out.extend_from_slice(&found);
+        }
+        self.candidates = found;
+    }
+
     /// Takes a pair out of the set, so the two can pair again later.
     pub(crate) fn remove_pair(&mut self, a: ProxyId, b: ProxyId) {
         self.pairs.remove(&pair_key(a, b));

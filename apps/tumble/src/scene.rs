@@ -1,16 +1,16 @@
-//! The gallery: four rooms, each with its own physics, all stepped every tick
+//! The gallery: five rooms, each with its own physics, all stepped every tick
 //! whichever one the camera is looking at.
 //!
 //! ```text
-//!   x = 0          x = 12              x = 26             x = 44
-//!   Spin           Wall                Pit                Tower
-//!   rung 0         rungs 1 and 2       rung 1             rung 2
-//!   T-handle,      the obstacle wall   a thousand balls   a column, a
-//!   a box landing  with balls, pills   poured into a pit  pyramid and
-//!                  and cubes                              dominoes
+//!   x = 0          x = 12              x = 26             x = 44        x = 66
+//!   Spin           Wall                Pit                Tower         Bullets
+//!   rung 0         rungs 1 and 2       rung 1             rung 2        rung 4
+//!   T-handle,      the obstacle wall   a thousand balls   a column, a   a cannon at a
+//!   a box landing  with balls, pills   poured into a pit  pyramid and   plate and a
+//!                  and cubes                              dominoes      wall; a plank
 //! ```
 //!
-//! **The view never reaches the simulation.** Keys `1` to `4` move the
+//! **The view never reaches the simulation.** Keys `1` to `5` move the
 //! camera and change which room's counters the panel shows, and nothing else:
 //! every room steps every tick from the same start, so the hash at
 //! [`CHECK_TICK`] is a constant whatever was pressed. [`PINNED_HASH`] is it,
@@ -23,8 +23,8 @@
 //! also makes every counter — pairs, contacts, each stage's time — the room's
 //! own rather than the gallery's.
 //!
-//! See [`crate::spin`], [`crate::wall`], [`crate::pit`] and [`crate::tower`]
-//! for what each room shows and what it cannot yet.
+//! See [`crate::spin`], [`crate::wall`], [`crate::pit`], [`crate::tower`] and
+//! [`crate::bullets`] for what each room shows and what it cannot yet.
 
 use std::hash::Hasher;
 
@@ -33,6 +33,7 @@ use crcbl::ecs::Entity;
 use crcbl::math::{DQuat, DVec3};
 use crcbl::phys::{ContactCounters, StageTimes};
 
+use crate::bullets::{Bullets, BulletsReading};
 use crate::pit::{Pit, PitReading};
 use crate::spin::{Spin, SpinReading};
 use crate::tower::{Tower, TowerReading};
@@ -48,14 +49,15 @@ pub const TICK_HZ: u32 = 60;
 
 /// The tick whose hash [`PINNED_HASH`] is: ten simulated seconds in, far enough
 /// that the handle has flipped, the box has landed three times, the wall has
-/// most of its bodies, the pit three quarters of its balls, and the dominoes
-/// have all fallen once and are falling again.
+/// most of its bodies, the pit three quarters of its balls, the dominoes
+/// have all fallen once and are falling again, and the cannon has fired
+/// twenty shots.
 pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
-/// after rung 3 put still islands to sleep and added each body's sleep to
-/// every room's hash.
-pub const PINNED_HASH: u64 = 0xa939_6834_c4e0_0788;
+/// after rung 4 swept fast bodies — which changes the wall's history — added
+/// the Bullets room, and gave one-point contacts twist friction.
+pub const PINNED_HASH: u64 = 0x810e_2250_7c7a_fc8f;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;
@@ -139,7 +141,7 @@ pub trait Room {
 }
 
 /// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
-/// rung 1's row, rung 2's and rung 3's.
+/// rung 1's row, rung 2's, rung 3's and rung 4's.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tally {
     /// Bodies that step: the awake ones.
@@ -174,6 +176,14 @@ pub struct Tally {
     pub bounces: u64,
     pub(crate) bounce_ratio_sum: f64,
     pub(crate) restitution_sum: f64,
+    /// Bodies swept in the last tick — rung 4's row.
+    pub swept: usize,
+    /// Times of impact computed in the last tick: the sweep candidates.
+    pub sweep_candidates: usize,
+    /// Swept bodies stopped at an impact, over the run.
+    pub sweep_hits: u64,
+    /// The motion those stops dropped, in seconds, over the run.
+    pub dropped_time: f64,
     /// The last tick's stage times, where the build had a clock.
     pub stages: Option<StageTimes>,
 }
@@ -202,6 +212,10 @@ impl Tally {
         self.bounces += counters.bounces;
         self.bounce_ratio_sum += counters.bounce_ratio_sum;
         self.restitution_sum += counters.restitution_sum;
+        self.swept = counters.swept;
+        self.sweep_candidates = counters.sweep_candidates;
+        self.sweep_hits += counters.sweep_hits as u64;
+        self.dropped_time += counters.dropped_time;
         self.stages = counters.stages;
     }
 
@@ -249,6 +263,8 @@ pub enum View {
     Pit,
     /// Rung 2's room: the column, the pyramid and the dominoes.
     Tower,
+    /// Rung 4's room: the cannon, the plate, the brick wall and the plank.
+    Bullets,
 }
 
 impl View {
@@ -260,6 +276,7 @@ impl View {
             KeyCode::Digit2 => Some(Self::Wall),
             KeyCode::Digit3 => Some(Self::Pit),
             KeyCode::Digit4 => Some(Self::Tower),
+            KeyCode::Digit5 => Some(Self::Bullets),
             _ => None,
         }
     }
@@ -272,6 +289,7 @@ impl View {
             Self::Wall => "wall",
             Self::Pit => "pit",
             Self::Tower => "tower",
+            Self::Bullets => "bullets",
         }
     }
 }
@@ -291,6 +309,8 @@ pub struct Reading {
     pub pit: PitReading,
     /// The Tower room.
     pub tower: TowerReading,
+    /// The Bullets room.
+    pub bullets: BulletsReading,
     /// The last tick's physics over every room, in microseconds, where
     /// this build has a clock to measure it with.
     pub step_micros: Option<f64>,
@@ -305,6 +325,7 @@ pub struct Scenes {
     wall: Wall,
     pit: Pit,
     tower: Tower,
+    bullets: Bullets,
     view: View,
     tick: u64,
     step_micros: Option<f64>,
@@ -327,6 +348,7 @@ impl Scenes {
             self.wall.step(tick_dt, Some(&mut clock));
             self.pit.step(tick_dt, Some(&mut clock));
             self.tower.step(tick_dt, Some(&mut clock));
+            self.bullets.step(tick_dt, Some(&mut clock));
             self.step_micros = Some(clock() * 1.0e6);
         }
         // The browser build has no clock a module can read —
@@ -338,6 +360,7 @@ impl Scenes {
             self.wall.step(tick_dt, None);
             self.pit.step(tick_dt, None);
             self.tower.step(tick_dt, None);
+            self.bullets.step(tick_dt, None);
         }
         self.tick += 1;
     }
@@ -365,6 +388,7 @@ impl Scenes {
         self.wall.hash(&mut hasher);
         self.pit.hash(&mut hasher);
         self.tower.hash(&mut hasher);
+        self.bullets.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -376,8 +400,14 @@ impl Scenes {
 
     /// Every room, for drawing, in a fixed order.
     #[must_use]
-    pub fn rooms(&self) -> [&dyn Room; 4] {
-        [&self.spin, &self.wall, &self.pit, &self.tower]
+    pub fn rooms(&self) -> [&dyn Room; 5] {
+        [
+            &self.spin,
+            &self.wall,
+            &self.pit,
+            &self.tower,
+            &self.bullets,
+        ]
     }
 
     /// Every counter, at this instant.
@@ -390,6 +420,7 @@ impl Scenes {
             wall: self.wall.reading(),
             pit: self.pit.reading(),
             tower: self.tower.reading(),
+            bullets: self.bullets.reading(),
             step_micros: self.step_micros,
             hash: self.hash(),
         }
@@ -461,6 +492,7 @@ pub(crate) mod tests {
         assert_eq!(View::for_key(KeyCode::Digit2), Some(View::Wall));
         assert_eq!(View::for_key(KeyCode::Digit3), Some(View::Pit));
         assert_eq!(View::for_key(KeyCode::Digit4), Some(View::Tower));
+        assert_eq!(View::for_key(KeyCode::Digit5), Some(View::Bullets));
         assert_eq!(View::for_key(KeyCode::Space), None);
         assert_eq!(Scenes::new().view(), View::Wall);
     }

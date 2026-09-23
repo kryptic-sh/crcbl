@@ -293,7 +293,8 @@ mod tests {
     /// and the pile still in the pit.
     ///
     /// Measured on 2026-09-23: the last wave spawns at tick 796, and every
-    /// ball is asleep at tick 1000, the whole pile one island.
+    /// ball is asleep at tick 1000, the whole pile one island. Since one-point
+    /// contacts twist against their patch, measured the same day, at tick 966.
     #[test]
     fn the_full_pit_settles_to_zero_awake_bodies() {
         let mut pit = Pit::new();

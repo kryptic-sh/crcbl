@@ -46,16 +46,18 @@ const FLOOR_MATERIAL: usize = 0;
 const MATERIALS: usize = 7;
 
 /// Each room's floor: its centre on `y = 0`, and its width and depth.
-const FLOORS: [([f32; 3], f32, f32); 4] = [
+const FLOORS: [([f32; 3], f32, f32); 5] = [
     ([0.0, 0.0, 0.0], 12.0, 12.0),
     ([12.0, 0.0, 0.0], 6.0, 3.0),
     ([26.0, 0.0, 0.0], 7.0, 7.0),
     ([44.0, 0.0, 0.0], 20.0, 9.0),
+    ([66.0, 0.0, 0.0], 10.0, 11.0),
 ];
 
-/// What this stage reserves. The pit's thousand balls and the Tower room's
-/// boxes are one instance each, the wall's pills and pegs three, and the rest
-/// is headroom for the wall's bodies turning over within a frame.
+/// What this stage reserves. The pit's thousand balls, the Tower room's boxes
+/// and the Bullets room's bricks and shots are one instance each, the wall's
+/// pills and pegs three, and the rest is headroom for the wall's bodies and
+/// the shots turning over within a frame.
 const CAPACITIES: Capacities = Capacities {
     vertices: 2048,
     indices: 8192,
@@ -343,6 +345,7 @@ pub fn camera(view: View) -> Camera {
         View::Wall => (Vec3::new(12.0, 3.0, 7.8), Vec3::new(12.0, 2.7, 0.0)),
         View::Pit => (Vec3::new(26.0, 4.2, 5.2), Vec3::new(26.0, 0.4, 0.0)),
         View::Tower => (Vec3::new(44.0, 5.5, 21.0), Vec3::new(44.0, 4.5, 0.0)),
+        View::Bullets => (Vec3::new(62.5, 3.2, 6.5), Vec3::new(66.0, 0.5, 0.0)),
     };
     Camera {
         eye,
@@ -380,8 +383,9 @@ mod tests {
 
     /// Everything the rooms hold at their fullest fits the instance pool: the
     /// floors, every fixture, the pit's thousand balls, the Tower room's
-    /// boxes and the wall's cap of bodies all as pills, with the wall's cap
-    /// again for a frame in which every body turned over.
+    /// boxes, the wall's cap of bodies all as pills, with the wall's cap
+    /// again for a frame in which every body turned over, and the Bullets
+    /// room's bricks, plank and cap of shots, twice over likewise.
     #[test]
     fn the_rooms_at_their_fullest_fit_the_instance_pool() {
         let scenes = Scenes::new();
@@ -399,7 +403,10 @@ mod tests {
             + 3
             + crate::pit::BALLS as usize
             + 2 * 3 * crate::wall::MAX_LIVE
-            + tower_bodies;
+            + tower_bodies
+            + (crate::bullets::BRICKS_ACROSS * crate::bullets::BRICK_ROWS) as usize
+            + 1
+            + 2 * crate::bullets::MAX_SHOTS;
         assert!(
             most <= CAPACITIES.instances as usize,
             "{most} instances against {}",

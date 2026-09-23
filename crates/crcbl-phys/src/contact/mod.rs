@@ -1,15 +1,15 @@
-//! Contacts: rungs 1 to 3 of `docs/plan/36-contact-solver.md`.
+//! Contacts: rungs 1 to 4 of `docs/plan/36-contact-solver.md`.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
 //!
-//!   broadphase ─▶ narrow phase ─▶ islands ─▶ forces ─▶ solver ×substeps ─▶ sleep
-//!   split trees   one manifold    wake what            integrate velocities  timers,
-//!   move buffer   per pair,       was touched,         warm start            split one
-//!   pair set      feature ids     merge what           solve (soft, biased)  island,
-//!                 matched to      began touching       integrate positions   sleep the
-//!                 last tick's                          relax (rigid)         still ones
-//!                 impulses                             then restitution
+//!   broadphase ─▶ narrow phase ─▶ islands ─▶ forces ─▶ solver ×substeps ─▶ sweep ─▶ sleep
+//!   split trees   one manifold    wake what            integrate velocities  fast     timers,
+//!   move buffer   per pair,       was touched,         warm start            bodies   split one
+//!   pair set      feature ids     merge what           solve (soft, biased)  and      island,
+//!                 matched to      began touching       integrate positions   bullets  sleep the
+//!                 last tick's                          relax (rigid)         to their still ones
+//!                 impulses                             then restitution      impacts
 //! ```
 //!
 //! Collision runs **once a tick** and the solver runs
@@ -62,6 +62,19 @@
 //! A query wakes nothing, and neither does reading a body or a transform. See
 //! `island.rs`.
 //!
+//! # What rung 4 added
+//!
+//! **Continuous collision**, after the solve: every awake dynamic body that
+//! went far for its size this tick is swept along its path against the static
+//! bodies and planes, and every [`crate::RigidBody::bullet`] that moved at
+//! all against every other body as well; one that meets something is put
+//! where it met it, and the rest of its tick is dropped. Time of impact is
+//! conservative advancement with the body's turning bounded, so a spinning
+//! corner is caught as well as a fast centre. A sleeping body is never
+//! swept. [`ContactSettings::continuous`] turns it off, and
+//! [`ContactCounters`] counts the bodies swept, the times of impact computed,
+//! the bodies stopped and the time dropped. See `sweep.rs`.
+//!
 //! # Compounds
 //!
 //! A [`crate::ColliderComponent::Compound`] body is several boxes. **Each part
@@ -87,9 +100,9 @@
 //!
 //! General convex hulls, and GJK for spheres and capsules against them: the
 //! collider set has no hull, and against a box the analytic pairs are exact.
-//! Nothing sweeps (rung 4): speculative contacts are
-//! what stop a fast body, and the speculative distance grows with the pair's
-//! speed so they can. The solver is scalar `f64` (rung 6 makes it wide). A
+//! Two dynamic bodies that are not bullets are never swept against each
+//! other, so a spinning cube can still turn a corner into a ball. The solver
+//! is scalar `f64` (rung 6 makes it wide). A
 //! tall stack needs [`ContactSettings::TALL_STACK`] for its whole system,
 //! since substeps are not yet per group.
 
@@ -98,6 +111,7 @@ pub(crate) mod island;
 pub mod manifold;
 pub mod shape;
 pub(crate) mod solver;
+pub(crate) mod sweep;
 
 use std::hash::Hasher;
 
@@ -157,14 +171,19 @@ pub struct ContactSettings {
     /// How long every body of an island must stay still before the island
     /// sleeps, in seconds.
     pub time_to_sleep: f64,
+    /// Whether fast bodies and bullets are swept after the solve — rung 4's
+    /// continuous collision; see `sweep.rs`. Turned off, speculative contacts
+    /// are all that stop a fast body, as before rung 4.
+    pub continuous: bool,
 }
 
 impl ContactSettings {
     /// Four substeps, 30 Hz contacts at damping ratio 10 pushing out at up to
     /// 3 m/s, a 2 cm speculative distance, bounces above 1 m/s,
     /// 400 m/s and a quarter turn a substep, warm starting on, any impulse
-    /// of a newton-second raising an event, and an island sleeping once its
-    /// bodies have stayed under 5 cm/s and 0.1 rad/s for half a second.
+    /// of a newton-second raising an event, an island sleeping once its
+    /// bodies have stayed under 5 cm/s and 0.1 rad/s for half a second, and
+    /// fast bodies swept.
     ///
     /// **The sleep thresholds.** Half a second under 5 cm/s is decision 4's,
     /// and Box2D v3's `B2_TIME_TO_SLEEP` and default sleep threshold. Box2D
@@ -188,6 +207,7 @@ impl ContactSettings {
         sleep_speed: 0.05,
         sleep_angular_speed: 0.1,
         time_to_sleep: 0.5,
+        continuous: true,
     };
 
     /// [`DEFAULT`](Self::DEFAULT) with twice the substeps and three times the
@@ -233,6 +253,8 @@ pub struct StageTimes {
     /// Keeping the islands: giving new bodies theirs, waking and merging
     /// them, the sleep timers, a split and putting still islands to sleep.
     pub islands: f64,
+    /// Sweeping the fast bodies and bullets.
+    pub continuous: f64,
 }
 
 /// What the last step of a system with contacts did.
@@ -271,6 +293,18 @@ pub struct ContactCounters {
     pub bounce_ratio_sum: f64,
     /// Over those, the sum of the restitution each was asked for.
     pub restitution_sum: f64,
+    /// Bodies the step swept: awake dynamic bodies that moved fast enough
+    /// for their size, and bullets that moved at all.
+    pub swept: usize,
+    /// Times of impact the sweeps computed — one per part of a swept body per
+    /// shape its path's bounds reached — rung 4's "sweep candidates".
+    pub sweep_candidates: usize,
+    /// Swept bodies that met something on the way and were stopped there.
+    pub sweep_hits: usize,
+    /// The motion those bodies did not make, summed over them, in seconds of
+    /// the tick: each stopped body's share of the tick after its time of
+    /// impact, which is dropped rather than solved again.
+    pub dropped_time: f64,
     /// Each stage's time, if the step was timed.
     pub stages: Option<StageTimes>,
 }
@@ -522,6 +556,7 @@ pub(crate) struct ContactPipeline {
     /// The contacts inside an island being split.
     edges: Vec<(BodyId, BodyId)>,
     solver: solver::Scratch,
+    continuous: sweep::Scratch,
 }
 
 impl ContactPipeline {
@@ -540,6 +575,7 @@ impl ContactPipeline {
             events: IslandEvents::default(),
             edges: Vec::new(),
             solver: solver::Scratch::default(),
+            continuous: sweep::Scratch::default(),
         }
     }
 

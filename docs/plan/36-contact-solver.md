@@ -7,7 +7,7 @@ in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
 **Status: rungs 0 and 1 built (2026-09-17); rung 2 built for boxes, not for
-general hulls (2026-09-23); rung 3 built (2026-09-23).** Rung 0: rotation
+general hulls (2026-09-23); rungs 3 and 4 built (2026-09-23).** Rung 0: rotation
 (inertia tensor, torque, the implicit-midpoint gyroscopic step), dense
 generational body sets, `SurfaceMaterial` per body and `crcbl_core::trig`. Rung
 1, opted into with `PhysicsSystem::with_contacts`: split fattened broadphase
@@ -74,7 +74,57 @@ moved out, which costs the pit at rest a mean 96 µs a tick in the narrow phase,
 measured the same way. **A stack sleeps before it is still**: under 5 cm/s is
 not stopped, so the Tower room's pyramid sleeps with its top cube 2.4 mm aside,
 where ten seconds awake would have crept it back to 0.39 mm. Decision 4's "a new
-joint" waits for joints. Nothing from rung 4 on: sweeps or joints.
+joint" waits for joints.
+
+Rung 4, in `crates/crcbl-phys/src/contact/sweep.rs`, on by default and turned
+off with `ContactSettings::continuous`: after the solve, every awake dynamic
+body whose path over the tick reached half its inner radius is swept against the
+static bodies and planes, and every `RigidBody::bullet` that moved at all
+against every other body but another bullet, after the rest, as Box2D orders
+them; a body that meets something is put there, keeps its velocity, and the rest
+of its tick is dropped. The path is Box2D's — the centre in a straight line, the
+orientation by normalised quaternion interpolation — and time of impact is
+conservative advancement (Mirtich 1996, as in Catto's "Continuous Collision",
+GDC 2013, and Bullet's `btContinuousConvexCollision`), the travel bounded along
+the gap's normal and the turning in full at the interpolation's peak rate,
+`4 tan(α/2)` for a turn of `2α`. The gap is exact for round shapes and the best
+of the fifteen axes for two boxes (`contact/manifold/gap.rs`). Compounds sweep
+part by part; a sleeping body is never swept. The counters are bodies swept,
+times of impact computed (the sweep candidates), bodies stopped and the time
+dropped. Four departures. **A path is stopped if it gets a linear slop into a
+shape, or deeper than it began, and is then put a slop short**: deciding by
+Box2D's "a slop short" undid the solve's landings — 2046 bodies stopped in
+twenty seconds, 10.9 s of motion dropped, against 229 and 1.5 s deciding by a
+slop in — and stopping a slop in left the next contact soft, so an 80 m/s shot
+came back off a dead brick at 8.9 m/s. **There is no circle at the centroid**
+for a body that begins touching, which cannot see a corner turn into the peg it
+touches; "no deeper than it began" is what stops that corner ratcheting in.
+**Turning is measured at the cores**, so a rolling ball's spin does not make it
+fast. **The path is interpolated**, not the substeps', so a body that bounced
+within the tick is swept along a chord.
+
+With it came **twist friction for one-point contacts**, in
+`crates/crcbl-phys/src/contact/solver.rs`: the sweeps changed the wall's
+history, and in the new one a ball rested on a bin floor spinning at 1.22 rad/s
+about the vertical for ever, because a one-point manifold's point is its own
+centroid and twist then acted only in manifolds of two points or more. A
+one-point contact now twists against a patch of Hertz radius `√(R δ)`, `R` the
+pair's effective radius of curvature and `δ` the point's depth, bounded by
+`μ λ a`, and clamped between `R` and half a millimetre — about the Hertz patch
+of a 0.2 kg, 7 cm hard-plastic ball on a plastic floor, and what a contact with
+no curvature (a box's corner) gets. Manifolds of two points or more twist as
+before. Measured: a 10 cm, 1 kg ball sunk 0.069 mm twists against a 2.6 mm
+patch, and at `μ = 0.5` its 5 rad/s spin stops at 1.550 s against the 1.552 s
+the model predicts; the wall settles 367 ticks after its spawner stops, and the
+pit at tick 966.
+
+With both, on the wall, the worst overlap against a fixture fell from 8.16 cm in
+any tick and 1.69 cm in the last to 1.36 cm and 0.40 cm; over everything the
+last tick's is 0.43 cm, back under rung 1's centimetre, and the worst in any
+tick 4.29 cm, not under rung 1's 4 cm, because it is between two drops, which
+only a bullet sweeps. In a release build on the same Ryzen 9 9950X3D, the wall's
+sweep takes a mean 12.2 µs a tick against its solver's 152.2 µs, and the pit's
+15.8 µs against 1310 µs. Nothing from rung 5 on: joints.
 
 Compound bodies, built 2026-09-23 for EW's dropped items, and not a rung:
 `ColliderComponent::Compound` carries a `CompoundShape` of up to
@@ -338,7 +388,7 @@ arriving with parallel islands; SIMD and parallelism come last.
 | 1 Pachinko (built)                  | Analytic sphere and capsule manifolds against static boxes and planes; split trees, move buffer, pair set, persistent contacts; scalar Soft Step with warm starting, speculative contacts and the restitution pass; `KineticContact` from impulses | the obstacle wall with falling balls; a thousand-ball pit                                 | bodies, pairs, contacts begun and ended; broadphase, narrow-phase and solver time; worst penetration; bounce ratio                              |
 | 2 Tower (built for boxes; no hulls) | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
 | 3 Settle (built)                    | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
-| 4 Bullets                           | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
+| 4 Bullets (built)                   | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
 | 5 Bridge                            | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
 | 6 Pit                               | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
 | 7 Pool and gale                     | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |

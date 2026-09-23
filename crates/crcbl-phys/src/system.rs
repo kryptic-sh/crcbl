@@ -811,7 +811,9 @@ impl PhysicsSystem {
     /// [`SemiImplicitEuler`] split around the contact impulses. A force applied
     /// before the call is held for the whole tick. A body that touches nothing
     /// integrates exactly as the same number of contact-free substeps would,
-    /// short of the speed and rotation caps. An island that has been still
+    /// short of the speed and rotation caps and of the sweep that follows,
+    /// which stops a fast body or a bullet where its path met something. An
+    /// island that has been still
     /// long enough sleeps, and a sleeping body is not stepped at all. See
     /// [`crate::contact`].
     ///
@@ -895,6 +897,7 @@ impl PhysicsSystem {
         let linked = read();
 
         apply_forces(&mut self.awake, &self.force_providers, dt);
+        pipeline.remember_starts(&self.awake);
         pipeline.solve(
             &self.records,
             &self.statics,
@@ -903,6 +906,14 @@ impl PhysicsSystem {
             dt,
         );
         let solved = read();
+        pipeline.sweep(
+            &self.records,
+            &self.statics,
+            &mut self.awake,
+            &self.islands,
+            dt,
+        );
+        let swept = read();
 
         // Colliders follow before anything sleeps, so a body put to sleep
         // this tick leaves its collider where it stopped.
@@ -942,7 +953,7 @@ impl PhysicsSystem {
         counters.islands = self.islands.awake_islands();
         counters.sleeping_islands = self.islands.sleeping_islands();
         counters.stages = match (
-            start, reconciled, paired, collided, linked, solved, synced, settled,
+            start, reconciled, paired, collided, linked, solved, swept, synced, settled,
         ) {
             (
                 Some(start),
@@ -951,6 +962,7 @@ impl PhysicsSystem {
                 Some(collided),
                 Some(linked),
                 Some(solved),
+                Some(swept),
                 Some(synced),
                 Some(settled),
             ) => Some(StageTimes {
@@ -958,6 +970,7 @@ impl PhysicsSystem {
                 narrow_phase: collided - paired,
                 solver: solved - linked,
                 islands: (reconciled - start) + (linked - collided) + (settled - synced),
+                continuous: swept - solved,
             }),
             _ => None,
         };
@@ -1425,6 +1438,11 @@ impl SystemTrait for PhysicsSystem {
                     .chain(body.local_inertia.to_cols_array())
                     {
                         hasher.write(&canonical_bits(value).to_le_bytes());
+                    }
+                    // Only a bullet writes its flag, so a state with none
+                    // hashes as it did before the flag existed.
+                    if body.bullet {
+                        hasher.write(&[3]);
                     }
                     if self.contacts.is_some() {
                         match record.set {

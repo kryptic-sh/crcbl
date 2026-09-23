@@ -8612,10 +8612,15 @@ remain, and from rung 2:
   `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
   workaround; options are per-island or per-group substeps (decision 1's "more
   substeps for its group") or stiffness scaled by load.
-- **Fast spinners tunnel into static capsules**: wall cubes at up to 80 rad/s
-  reach 6.9 cm deep in one tick. Rung 4's sweeps own it; until then the wall
-  test's penetration bounds are 2 cm (last tick) and 8 cm (any tick), loosened
-  from 1 and 4 cm when cubes joined the wall.
+- **Rung 4 (continuous collision) shipped 2026-09-23**: conservative advancement
+  for fast bodies against statics, bullets against everything but bullets, and
+  one-point twist friction from a Hertz patch radius. Left open: dynamic pairs
+  are swept only when one side is a bullet; advancement that runs out of steps
+  (`MAX_ADVANCES`, 32) stops the body where it got to; the sweep follows the
+  start-to-end chord, not the substeps' path; the one-point twist model takes
+  `a` for the exact ⅔ a and gives box corners a 0.5 mm minimum patch; the new
+  `PINNED_HASH` (`0x810e_2250_7c7a_fc8f`) awaits the `pages.yml` browser gate;
+  no golden frame for the Bullets room.
 - **`PINNED_HASH` was re-pinned on Windows** (`0x76aa_2acd_7b93_d586`); the
   browser gate in `pages.yml` is what proves wasm matches it.
 - Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
@@ -8623,10 +8628,14 @@ remain, and from rung 2:
 - **Needs the user's review: test bounds widened across rungs 2 and 3
   (2026-09-23).** Each was measured and explained, but the rule is that a
   tolerance is not widened to make a change pass, so they wait for an OK:
-  - `apps/tumble` wall peak penetration, 4 cm → 8 cm (rung 2, when spinning
-    cubes joined the wall) → 10 cm (rung 3: 8.2 cm measured from a 43 rad/s cube
-    in a different history). Both are the rung-4 fast-spinner tunnelling; the
-    alternative is to keep spinning cubes off the wall until rung 4.
+  - `apps/tumble` wall penetration. Rung 2 widened the any-tick bound 4 → 8 cm
+    and rung 3 to 10 cm, both from fast-spinning cubes tunnelling into pegs.
+    Rung 4's sweeps (2026-09-23) brought the last-tick bound back to rung 1's 1
+    cm (0.43 cm measured) and the any-tick bound down to 5 cm (4.29 cm measured,
+    between two dropped bodies, which only a bullet sweeps), and added
+    fixture-only bounds of 1 cm and 2 cm (0.40 / 1.36 cm). So one bound remains
+    wider than rung 1's: any tick, 5 cm against 4 cm. Options: accept it, make
+    the wall's drops bullets, or sweep every dynamic pair.
   - Tower pyramid sideways drift in the tumble test, 1 mm → 3 mm (rung 3): with
     sleep on, the top cube freezes 2.4 mm aside at tick 58 (awake it creeps back
     to 0.39 mm). The 1 mm claim stands in `a_base_twenty_pyramid_holds` with

@@ -72,12 +72,7 @@
 
 use glam::{DMat3, DQuat, DVec3};
 
-use super::{MAX_POINTS, Manifold, closest_between_segments};
-
-/// Box2D's linear slop, in metres: the scale every tolerance here is set
-/// against, and a quarter of [`crate::ContactSettings::DEFAULT`]'s speculative
-/// distance.
-const LINEAR_SLOP: f64 = 0.005;
+use super::{LINEAR_SLOP, MAX_POINTS, Manifold, closest_between_segments};
 
 /// Gregorius's absolute tolerance: half a linear slop.
 const ABSOLUTE_TOLERANCE: f64 = 0.5 * LINEAR_SLOP;
@@ -402,6 +397,31 @@ fn reference_corner_code(f1: usize, f2: usize, face: usize) -> u32 {
     }
     let corner = ((f1 & 1) << a1) | ((f2 & 1) << a2) | ((face & 1) << (face / 2));
     corner_code(corner)
+}
+
+/// How far apart two boxes are, as the greatest separation over all fifteen
+/// axes, and that axis's normal from `A` towards `B`.
+///
+/// Apart, that is a lower bound on the distance between them, since every
+/// axis's separation is; in overlap it is minus the depth along the axis of
+/// least overlap, which for two boxes is the depth itself short of the
+/// near-parallel edge pairs [`EDGE_SINE`] skips. The sweeps step by it.
+pub(super) fn gap(
+    ca: DVec3,
+    ra: DQuat,
+    ha: DVec3,
+    cb: DVec3,
+    rb: DQuat,
+    hb: DVec3,
+) -> (f64, DVec3) {
+    let a = Obb::new(ca, ra, ha);
+    let b = Obb::new(cb, rb, hb);
+    let axes = (0..3)
+        .map(Axis::FaceA)
+        .chain((0..3).map(Axis::FaceB))
+        .chain((0..9).map(|k| Axis::Edge(k / 3, k % 3)));
+    let best = best_of(&a, &b, axes).expect("a face axis always exists");
+    (best.separation, best.normal)
 }
 
 /// A point of the manifold before reduction.

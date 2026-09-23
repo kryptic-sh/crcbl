@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys` structs gained public fields for continuous collision**, so a
+  struct literal of any of them that names every field needs the new ones:
+  `RigidBody::bullet`, `ContactSettings::continuous`, `ContactCounters::swept`,
+  `sweep_candidates`, `sweep_hits` and `dropped_time`, and
+  `StageTimes::continuous`. Literals built with `..` from a constructor or a
+  constant are unaffected.
 - **`crcbl_phys::ColliderComponent` has a `Compound` variant**, so an exhaustive
   `match` on it needs another arm; `CompoundError` has `NoParts`,
   `TooManyParts`, `NonUnitRotation` and `NoVolume`, which only
@@ -241,6 +247,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Continuous collision for fast bodies and bullets in `crcbl_phys`** — rung 4
+  of `docs/plan/36-contact-solver.md`. In a system made with
+  `PhysicsSystem::with_contacts`, after the solve every awake dynamic body that
+  went at least half its inner radius over the tick (its turning counted) is
+  swept along its path against static bodies and planes, and stopped where it
+  met one, keeping its velocity, with the rest of its tick dropped. The new
+  `RigidBody::bullet` flag (and `RigidBody::with_bullet`) sweeps a body every
+  tick it moves at all, and against dynamic, kinematic and sleeping bodies too.
+  So a body launched within a tick at a thin plate, which speculative contacts
+  cannot see coming, stops at it, and a spinning plank or cube no longer sinks
+  its corner into a static pillar or peg: on `apps/tumble`'s obstacle wall the
+  deepest overlap with a fixture fell from 8.16 cm to 1.36 cm. Sleeping bodies
+  are never swept; compounds are swept part by part.
+  `ContactSettings::continuous` (on by default) turns it off, `ContactCounters`
+  gains `swept`, `sweep_candidates`, `sweep_hits` and `dropped_time`, and
+  `StageTimes` gains `continuous`. `apps/tumble` has a fifth room on key `5`,
+  Bullets: a point-blank cannon at a centimetre plate and a dynamic brick wall
+  and a plank spinning at a pillar, with a tunnel sensor behind each. The sweeps
+  change the wall's history, so tumble's pinned hash is re-pinned; the bullet
+  flag enters a body's hash only when it is set.
 - **Compound bodies in the contact solver: `crcbl_phys::CompoundShape`.** A
   rigid body made of several boxes fixed in its frame — a rifle's receiver,
   magazine and stock — collides part by part, so it lies on the parts that are
@@ -2154,6 +2180,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **A ball spinning about its contact normal on a single contact point now slows
+  and stops**, where it spun for ever and never slept. The contact solver's
+  twist friction acted only in manifolds of two points or more; a one-point
+  contact now twists against a contact patch of Hertz radius `√(R δ)` (the
+  pair's effective curvature radius and the point's depth), clamped between half
+  a millimetre and `R`, up to `μ` times the normal impulse times that radius.
+  Manifolds of two points or more are unchanged. Found on `apps/tumble`'s
+  obstacle wall, where a ball on a bin floor kept the wall from ever settling;
+  the wall, the pit and the Bullets room step differently, and tumble's pinned
+  hash is re-pinned.
 
 - **dx12: a D3D12 register is now the binding number, in the set's register
   space, so the mesh pipeline's root signature matches all three of its
