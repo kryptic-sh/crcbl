@@ -3302,10 +3302,34 @@ What the plans leave open:
   Uncharted and Zelda; Assassin's Creed III and IV and Far Cry coastline
   internals; Far Cry 5's wind runtime; primary sources for Breath of the Wild,
   Genshin, Sable and Ghibli-style grass.
-- **Doc drift seen while surveying, not fixed**: `docs/plan/00-overview.md`
-  still says towers is missing from `apps/`, which was built 2026-09-07, and
-  counts seventeen browser demos where `web/build.sh`'s `DEMOS` lists nineteen
-  since tide. (`README.md`'s count was corrected with tide.)
+
+## Doc drift found 2026-09-23
+
+Seen while correcting other stale docs, and not fixed because each was outside
+that pass's list. Each claim below was read in the tree on that date; what is
+marked unverified was not checked further.
+
+- **`docs/plan/sample/00-samples-overview.md`'s "Where the ladder stands" is
+  stale.** It says towers is "not yet on the site", and `web/build.sh`'s `DEMOS`
+  lists it. It also says every sample but arena and mirrors has an `apps/`
+  crate, and meadow, mane and relief have none.
+- **`crates/crcbl/src/lib.rs`'s `pub use crcbl_webgpu` doc still says nothing
+  encodes into the stream** and the exports answer `0` on every frame.
+  `StreamChannel::encode_awaited` exists and `WebGpuInstanceOpen` installs a
+  channel, so this reads stale; what the exports answer today is unverified.
+- **`crcbl-vk` still names `apps/sandbox` as taking `adapters()[0]` blind**:
+  `crates/crcbl-vk/src/adapter.rs`'s `enumerate` doc and its "Openability first"
+  comment, and two places in `crates/crcbl-vk/src/lib.rs`'s crate docs. Adapter
+  selection is `GpuContext::start_device`'s surface-aware loop now; whether
+  anything still takes the first adapter blind is unverified.
+- **`crates/crcbl-vk/src/instance.rs`'s surface-caps comment says the seam
+  "should probably say out loud"** the try-the-next-adapter rule. The
+  `Instance::surface_caps` doc in `crcbl-hal` already does.
+- **`crates/crcbl-render/src/rsm.rs`'s `world_target` doc calls
+  `SampleType::Depth` "a comparison-sampler slot"**, the narrow reading that
+  type's doc no longer makes (it is also fetched with no sampler, as SSAO does).
+  Its conclusion — no plain-float read of a depth image — may still hold; the
+  reason it gives does not.
 
 ## Performance: VRAM, CPU and GPU cost (2026-09-15)
 
@@ -8120,22 +8144,6 @@ ones.
 
 **Evidence:** `grep -rn 'error-scope-bench' .github/ web/README.md` finds no
 caller.
-
-### `web/engine/audio-worklet.js` still cites a reason that no longer exists (2026-08-27)
-
-**A stale comment, not a defect.** Its "WHY THIS IS SHAPE B" block gives two
-independent reasons, and the first — "the artifact carries 300-odd
-`wasm-bindgen` imports whose glue touches `document`, `window` and `fetch`" — is
-no longer true: `web/build.sh` runs no `wasm-bindgen` at all and
-`web/tools/check-exports.mjs` asserts the single-threaded artifact imports
-nothing. The second reason (a second wasm instance would have its own linear
-memory and none of the queued voices, and there is no `play(id)` in the audio
-ABI) is untouched and is sufficient on its own, so shape B is still the right
-choice.
-
-**Action:** drop reason 1 from that comment, or restate it as history.
-`docs/plan/10-wasm-webgpu.md` was corrected in this pass and now disagrees with
-the shim. Out of scope for the docs task; `web/` was not in its write set.
 
 ### Task 6 of stage 10 — editor-in-browser — was never examined (2026-08-27)
 
@@ -14957,9 +14965,7 @@ also said five readback exports where there are seven.
 
 `surface_caps`'s contract obliges a caller doing selection to read an `Err` as
 "try the next adapter" rather than as fatal. `crcbl::engine`'s
-`GpuContext::start_device` is the loop that does it — **not** `apps/sandbox`,
-which the HAL doc and `crcbl-vk`'s own comment both still name; the loop moved
-into the engine and those two sentences did not follow it.
+`GpuContext::start_device` is the loop that does it.
 
 **The WebGPU backend can never produce that answer.** Its capability query names
 no adapter — it is an argument-less instance-level question, because the record
@@ -15099,15 +15105,6 @@ expands to `Self::method(self)` forwards has the same hole and will not be
 warned about it. `web_exports!` is not affected — it forwards to free functions
 in `crcbl::web`, not to same-named methods — but it is the kind of macro that
 would be.
-
-**DECIDED 2026-09-06 —** the guard becomes a convention with a name rather than
-a new dev-dependency: the `const _` coercion block `impl_game_gpu!` already
-carries is the shape every forwarding macro we write adopts. Precedent: a
-compile-time coercion in a scope where the trait is not imported is the standard
-way to pin a macro's expansion without a compile-fail harness, and `trybuild`
-would be a dependency taken for one lint hole. Work: name the block in
-`impl_game_gpu!`'s own docs, and require it of any future macro that expands to
-a `Self::method(self)` forward.
 
 ### The Win32 pointer-clip tests are held out of the ordinary sweep
 
@@ -17747,8 +17744,6 @@ annotated.
   - **The audio thread still frees memory**: `fill` drops finished voices and
     may free the last `Arc` of their sample data. `tests/fill_allocation.rs`
     counts allocations only, and the plan's lock-free audio thread is not built.
-  - **`docs/plan/13-audio.md` is stale**: its "Voices" bullet and "What of this
-    list actually runs" still say there is no priority or stealing.
   - EW's `ClientAudio::play` still caps itself; migration is
     `set_voice_budget(Some(32))` plus `try_play`, and its bound test's last
     assertion must change because an equal-priority 33rd cue now steals.
@@ -20406,10 +20401,6 @@ the first slice deferred or turned up:
   constant and the margin it was swept against live on `AO_RATIO` in
   `crates/crcbl/tests/render_e2e.rs`; both have moved as the pass changed, so
   this entry points at them rather than restating digits that go stale here.
-- **`crcbl_hal::SampleType::Depth`'s doc is now narrower than the type.** It
-  says the variant means "read through a comparison sampler" and that the paired
-  sampler must set `comparison: true`; the SSAO layout uses it with **no sampler
-  at all** and works on every backend.
 - **`prepass_stats` is a wrapping counter nobody clears.** Documented in code
   and harmless, but a smell.
 - **Metal and D3D12 compiled the depth `Load` and never ran it.** SPIR-V and
@@ -21382,16 +21373,6 @@ room produced. `docs/plan/sample/13-lantern.md` carries the status.
   on every deploy, so the runner question that used to sit here is answered too.
   What the runner costs is the live half, and it is the "every simulation-heavy
   demo's browser gate is near the CI step cap" entry that carries it.
-- **Sound.** Rule 8 says no sample ships silent after P4A. lantern has no audio
-  at all, and it is not obvious it should: it is an acceptance fixture with no
-  events, and `hud` — the other fixture — is the precedent for a sample with no
-
-- **Sound — DECIDED 2026-09-06: lantern claims the exemption.** Rule 8 says no
-  sample ships silent after P4A; lantern is an acceptance fixture with no
-  events, and `hud` is the precedent for a fixture with no cue grammar. It
-  states the exemption in its own doc the way rule 11's is claimed, rather than
-  inventing a cue grammar for the rule's sake. Work: the sentence in
-  `docs/plan/sample/13-lantern.md`.
 
 The findings the first real room produced are in docs/notes/samples.md under the
 same heading. The one that is a live gap:
@@ -21719,12 +21700,6 @@ wiring.
   `check-exports.mjs` lists it as informational and does not fail on it. It is
   the diagnostic for "the engine stopped draining"; keep it when a shim reads
   it, drop it if the HAL work arrives without one.
-- **`crates/crcbl/src/lib.rs`'s `pub use` doc undercounts the exports.** It says
-  "the three `__crcbl_web_gpu_stream_*` exports", which is right for the stream
-  family and reads as if it covers the module — the module exports more than
-  that now. `demo.js` carried the same sentence and no longer does. The
-  byte-identical-artifact measurement recorded beside the `pub use` was taken
-  before the reply exports existed and has not been re-run.
 - **`poll_readback`'s exact-length contract cannot be enforced at decode time.**
   Nothing in a reply buffer says what size the descriptor asked for, so the
   payload's own length prefix is all the decoder has. Whoever implements the HAL

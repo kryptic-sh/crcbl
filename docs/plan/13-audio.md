@@ -55,15 +55,21 @@ Grammar invariants (what makes it a learnable skill):
   them).
 - **Voices**: pooled, priority + distance-based stealing, per-voice state =
   {source cursor, resampler, spatial state (ITD delay lines L/R, gains, pitch
-  ratio), bus route}. **The per-voice state is built and the pool is not**
-  (2026-08-27): a `Voice` carries its cursor, varispeed pitch, per-channel gains
-  and its L/R fractional delay lines, but `Mixer` holds voices in a plain
-  growable `Vec` behind a `Mutex` — no capacity, no priority, no stealing, and
-  therefore nothing that bounds what a game can start playing. There is a
-  release list, so a stopped voice fades over one block rather than clicking.
-  Whoever adds the pool inherits the invariant the release list already keeps:
-  ids are monotonic and never reused, so a stale `VoiceId` can never name a
-  later voice, and a stealing scheme that recycles slots must not break that.
+  ratio), bus route}. **The per-voice state and a priority budget are built; the
+  pool and the distance term are not** (2026-09-23): a `Voice` carries its
+  cursor, varispeed pitch, per-channel gains, its L/R fractional delay lines and
+  a priority (`Voice::with_priority`). `Mixer` still holds voices in a growable
+  `Vec` behind a `Mutex`, but `Mixer::set_voice_budget` can now cap it: with the
+  budget full, `Mixer::try_play` steals the lowest-priority voice, the oldest
+  among equals, when the new voice's priority is at least that voice's (`>=`, so
+  an equal cue takes the oldest's place), and refuses it otherwise — the check,
+  the steal and the insert under the one voice lock. No budget is the default,
+  and `Mixer::play` under one is `try_play` with the outcome dropped. Only
+  priority and age decide; there is no distance term yet. A stopped or stolen
+  voice moves to a release list and fades over one block rather than clicking,
+  outside the budget for that block. Ids are monotonic and never reused, so a
+  stale `VoiceId` can never name a later voice, and a pool that recycles slots
+  must not break that.
 - **Pitch shift** = resampling ratio (varispeed) — cheap, artifact-free at the
   small cents ranges rules 3/4 use; duration change is irrelevant for cue SFX.
 - **Mixer**: per-bus gain + soft-knee limiter on master. Mix snapshots
@@ -320,12 +326,15 @@ and the elevation cues go with them.
 description and is a plan: `crates/crcbl-audio/tests/spatial_chain.rs` covers
 the chain end to end — centre is symmetric, right pans right, an event stream
 hashes the same twice and differently reversed — and `synth`'s in-crate tests
-cover the one golden buffer. **Not written**: the sphere sweep against
-closed-form values, the resampler SNR bound, the limiter assertion (there is no
-limiter), the continuity property, the voice-steal delay-line property (there is
-no stealing either), and the e2e (there is no `crcbl audio render`). The
-headless claim is the one thing this list can already prove — the null output
-backend makes every test above run with no device.
+cover the one golden buffer. Stealing exists since 2026-09-23 and `mixer`'s
+in-crate tests cover its rule and its one-block fade
+(`a_stolen_voice_fades_out_over_one_block`). **Not written**: the sphere sweep
+against closed-form values, the resampler SNR bound, the limiter assertion
+(there is no limiter), the continuity property, the voice-steal delay-line
+property as stated (the fade is asserted, not the delay-line state), and the e2e
+(there is no `crcbl audio render`). The headless claim is the one thing this
+list can already prove — the null output backend makes every test above run with
+no device.
 
 ## Delivery (interleaved — see ROADMAP)
 

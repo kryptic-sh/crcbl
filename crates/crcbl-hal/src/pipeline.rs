@@ -93,13 +93,18 @@ pub enum SampleType {
     /// The other three backends take the interpretation off the view's format
     /// and ignore this exactly as they ignore [`Float`](SampleType::Float).
     UnfilterableFloat,
-    /// A depth texture read through a comparison sampler: HLSL's
-    /// `Texture2D<float>` beside a `SamplerComparisonState`, WGSL's
-    /// `texture_depth_2d`.
+    /// A depth texture: HLSL's `Texture2D<float>`, WGSL's `texture_depth_2d`.
+    /// WebGPU binds a depth-format view through nothing else, so this is the
+    /// slot for every depth read, however the shader goes on to read it.
     ///
-    /// The [`BindingKind::Sampler`] filtering it must set its
-    /// `comparison` flag, and the sampler object
-    /// bound into that slot must carry a
+    /// **Fetched, with no sampler at all** — `Load`/`textureLoad`, as the SSAO
+    /// pass reads its depth. Nothing else is owed; the layout carries no
+    /// sampler beside it.
+    ///
+    /// **Through a comparison sampler** — beside a `SamplerComparisonState`,
+    /// as a shadow lookup reads it. Then the [`BindingKind::Sampler`] filtering
+    /// it must set its `comparison` flag, and the sampler object bound into
+    /// that slot must carry a
     /// [`SamplerDesc::compare`](crate::SamplerDesc::compare) — the layout says
     /// what the shader declared, the descriptor says what the hardware does, and
     /// WebGPU checks the pair.

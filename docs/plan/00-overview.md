@@ -170,21 +170,22 @@ baked in from the start — wasm is a first-class target, not a port.
 Each roadmap S-phase is proven by a **sample project** — small complete
 games/tools in `apps/`, numbered in build order: see
 [sample/00-samples-overview.md](sample/00-samples-overview.md), which is the
-canonical list and now runs to twenty-three documents (breakout, asteroids,
+canonical list and now runs to twenty-five documents (breakout, asteroids,
 horde, hud, viewer, orbit, towers, arena, puppet, sparks, breach, flappy,
 lantern, quarry, shard, bracket, mirrors, sundial, alcove, options, tide,
-meadow, mane).
+meadow, mane, tumble, relief).
 
-**What is in `apps/` today, read from the tree on 2026-09-06**, is seventeen of
-the twenty documents that existed then — `breakout`, `asteroids`, `flappy`,
-`horde`, `hud`, `lantern`, `viewer`, `orbit`, `puppet`, `sparks`, `quarry`,
-`shard`, `breach`, `bracket`, `options`, `sundial` and `alcove` — beside three
-that are not samples at all: `apps/bare` (the engine used as a plain library,
-loop hand-written), `apps/sandbox` (the dev playground the first window lived
-in) and `apps/render-harness` (drives the backend-agnostic golden scenes through
-a browser). The three still missing are **towers**, **arena** and **mirrors**,
-which is worth knowing because exit criteria all over these documents name
-towers as the thing that proves them.
+**What is in `apps/` today, read from the tree on 2026-09-23**, is twenty of the
+twenty-five documents — `breakout`, `asteroids`, `flappy`, `horde`, `hud`,
+`lantern`, `viewer`, `orbit`, `towers`, `puppet`, `sparks`, `quarry`, `shard`,
+`breach`, `bracket`, `options`, `sundial`, `alcove`, `tide` and `tumble` —
+beside five that are not samples at all: `apps/bare` (the engine used as a plain
+library, loop hand-written), `apps/sandbox` (the dev playground the first window
+lived in), `apps/render-harness` (drives the backend-agnostic golden scenes
+through a browser), `apps/editor` (the scene editor) and
+`apps/crcbl-sample-test` (the fixture the sample golden suite runs a sample
+binary through). The five still missing are **arena**, **mirrors**, **meadow**,
+**mane** and **relief**.
 [sample/00-samples-overview.md](sample/00-samples-overview.md) is the canonical
 count and dates `sundial` and `alcove` to 2026-09-04. _This paragraph said `sim`
 and listed six samples, until 2026-08-27. That app was real — a headless
@@ -192,9 +193,10 @@ simulation harness — and was deleted on 2026-08-23; the CLI verb `crcbl sim`
 outlived it and is what that work is reached through now._
 
 Every sample ships as a browser demo on the Pages site: `web/demos/` holds
-seventeen, one for each sample app above, with a page apiece under `web/pages/`.
-`bare` and `sandbox` have no browser presence at all; `render-harness` has one
-that is not a demo — `web/harness/`, driven by `web/run-render-harness-e2e.sh`.
+twenty, one for each sample app above, with a page apiece under `web/pages/`;
+`web/build.sh`'s `DEMOS` array is the list. The other apps have no browser
+presence at all, except `render-harness`, which has one that is not a demo —
+`web/harness/`, driven by `web/run-render-harness-e2e.sh`.
 
 ## MVP feature → stage map
 

@@ -5185,6 +5185,13 @@ pub fn arm_screenshot<S: Shell + ?Sized, G>(
 /// can only resolve to the inherent method — a bundle missing one gets `E0599`
 /// naming it. That block is load-bearing, not decoration.
 ///
+/// **It is the workspace's convention, the _coercion guard_, not a trick local
+/// to this macro.** Any macro written here that expands to a
+/// `Self::method(self)` forward opens with the same `const _` block, one
+/// coercion per forwarded method, because nothing else will catch the missing
+/// method inside an external expansion. It stands in for a compile-fail harness
+/// such as `trybuild`, which would be a dependency taken for this one lint hole.
+///
 /// Nothing here is optional: a bundle that wants a different `frame` writes the
 /// impl by hand rather than reaching for a macro flag, because at that point the
 /// block is no longer the shared one.

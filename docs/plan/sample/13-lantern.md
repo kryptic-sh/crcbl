@@ -70,6 +70,12 @@ the camera is the viewer's own. So this crate opens no `World`, registers no
 system and implements no `GameModule`, and their absence is the charter's answer
 rather than an oversight.
 
+**Exempt from sample rule 8** (sound through `crcbl-audio`; no sample ships
+silent after P4A), decided 2026-09-06: the rule is about positional game events,
+and an acceptance fixture has none to cue. `hud` is the precedent for a fixture
+with no cue grammar, and inventing one here would exercise the rule rather than
+anything the room needs, so lantern ships silent on purpose.
+
 ## Status: milestone 1a, and the blocker is gone (2026-08-14)
 
 **`apps/lantern` exists and renders the charter's room.** The blocker this

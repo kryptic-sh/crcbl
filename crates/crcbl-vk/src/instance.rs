@@ -948,8 +948,8 @@ impl Instance for VkInstance {
         // would break its promise that `Fifo` is always there. `Unsupported` is
         // the honest answer, and it obliges a caller doing adapter selection to
         // treat an `Err` from this call as "try the next one" rather than as
-        // fatal — which `apps/sandbox` does, and which the seam should probably
-        // say out loud. See the crate docs.
+        // fatal — which `crcbl::engine`'s `GpuContext::start_device` does, and
+        // which the seam should probably say out loud. See the crate docs.
         let mut presentable = false;
         // SAFETY: `record.physical` came from this instance.
         let families = unsafe {

@@ -8,18 +8,11 @@
 // Shape A instantiates the wasm module *inside* this scope and calls
 // `__crcbl_web_audio_render` from `process()`; it has the lower latency and is
 // the module's primary. This shim uses shape B — render on the main thread,
-// ship blocks across with `postMessage` — for two independent reasons, either
-// of which alone would decide it:
-//
-//   1. The module cannot be instantiated here. `wgpu` reaches WebGPU through
-//      `web-sys`, so the artifact carries 300-odd `wasm-bindgen` imports whose
-//      glue touches `document`, `window` and `fetch`. `AudioWorkletGlobalScope`
-//      has none of them. The audio module's own docs name exactly this case as
-//      shape B's reason for existing.
-//   2. Even if it could, it would be a *second* wasm instance with its own
-//      linear memory, and the voices breakout queues live in the first one.
-//      There is no `play(id)` in the audio ABI — what is playing is the
-//      application's business — so a second instance would render silence.
+// ship blocks across with `postMessage` — because a module instantiated here
+// would be a *second* wasm instance with its own linear memory, and the voices
+// breakout queues live in the first one. There is no `play(id)` in the audio
+// ABI — what is playing is the application's business — so a second instance
+// would render silence.
 //
 // There is no `SharedArrayBuffer` in either shape: GitHub Pages cannot set the
 // COOP/COEP headers it needs, which `docs/plan/10-wasm-webgpu.md`'s 2026-07-27

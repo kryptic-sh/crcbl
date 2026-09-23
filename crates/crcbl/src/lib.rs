@@ -280,8 +280,8 @@ pub use crcbl_steam as steam;
 /// writes, and the browser's `fetch` and OPFS backends.
 pub use crcbl_store as store;
 /// [`crcbl-webgpu`](crcbl_webgpu): the wasm → JS command stream — the encoding,
-/// and the three `__crcbl_web_gpu_stream_*` exports a browser shim drains it
-/// through.
+/// and the `__crcbl_web_gpu_*` exports a browser shim drains it and answers it
+/// through, which [`crcbl_webgpu::web::shim`] lists.
 ///
 /// **`wasm32` only**, like the dependency itself: the transport's whole purpose
 /// is to hand a frame to JavaScript, and a native build has nothing to hand it
@@ -291,16 +291,17 @@ pub use crcbl_store as store;
 /// `crcbl`" true above.
 ///
 /// **The manifest entry is what carries the symbols; this line is what stops
-/// that being luck.** The three exports in [`crcbl_webgpu::web::shim`] are
+/// that being luck.** The exports in [`crcbl_webgpu::web::shim`] are
 /// `#[unsafe(no_mangle)]`, and `web/tools/check-exports.mjs`'s own header states
 /// the risk they run: a `no_mangle` symbol in a dependency rlib is not
 /// *guaranteed* to survive into a `cdylib`. Measured on this toolchain it does
 /// even with nothing referencing the crate — dropping this `pub use` and
-/// rebuilding `crcbl_breakout.wasm` produces a byte-identical artifact, `cmp`
-/// says so, and all three symbols are in both. So the re-export is not load
-/// bearing today; it is here so the crate is genuinely named by something,
+/// rebuilding `crcbl_breakout.wasm` produced a byte-identical artifact, `cmp`
+/// said so, and every stream symbol was in both. That measurement predates the
+/// reply exports and has not been re-run. So the re-export was not load
+/// bearing then; it is here so the crate is genuinely named by something,
 /// rather than the ABI resting on a linker behaviour nobody promised. Removing
-/// the dependency line above *does* take all three symbols out of the artifact,
+/// the dependency line above *does* take the symbols out of the artifact,
 /// which is the state the gate found and this change fixes.
 ///
 /// Nothing encodes into the stream yet — no HAL implementation writes through
