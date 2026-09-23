@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4 and 2 built on branch
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2 and 6 built on branch
 `steam-sdk`, the rest planned** — see "Status by slice" under "Slice order". The
 four decisions the earlier draft asked for were ratified 2026-09-06 (see
 "Decisions" below), and "the full Steam API" is now in scope, which reverses two
@@ -1205,13 +1205,21 @@ On branch `steam-sdk`, not merged to `main`:
   run:** the exit's Steam run — slice 4's two-machine run with three joiners —
   on every OS; nothing drives a `Host` over `SteamTransport` yet (see the
   backlog).
-- **Slice 6: next.**
+- **Slice 6: done** (2026-09-23). `crcbl_store::synced` (its own commit,
+  `b9945114`, with the workspace's one CRC-32), `SteamCloudStorage` and
+  `SteamEvent::CloudFileChanged`, over `MemoryStorage` and the fake; every
+  classification row and every guard seen red against a deliberate break; Miri
+  clean; the drift gate passes against the mirror, now reading
+  `STEAM_CALLBACK_BEGIN` callbacks and `const` limits. **Not run:**
+  `tests/cloud_smoke.rs` and every step under "Needs a real client" below — so
+  whether app 480 has a cloud quota is still unknown — on every OS.
+- **Slice 5: next.**
 - **Slice 7a: not on this branch.** The coordinator reported (2026-09-23) that
   the gamepad seam is being built on `main` with an XInput backend, exactly as
   sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
   Bringing it here means merging `main` into `steam-sdk`, which is the user's
   call (see the backlog).
-- Slices 5, 7b–7c, 8, 9, 10–15: not started.
+- Slices 7b–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1437,6 +1445,45 @@ On branch `steam-sdk`, not merged to `main`:
   handshake's server side is a session host, which is slice 2's; the sandbox's
   owner listens, a joiner connects to the owner, and each logs the other's
   greeting and the `EndReason` a closed connection gives.
+
+**Slice 6 as built, where it differs from the text below:**
+
+- **A version is its generation and its CRC.** Generations alone repeat — two
+  devices that start from version 5 both write 6 — so the header names its base
+  by generation _and_ CRC (`base_crc`, beside the listed fields), and the CRC
+  covers the header fields before it as well as the payload, so a damaged
+  generation is caught like a damaged payload. **No writer id:** two devices
+  that write the same payload on the same base wrote the same version, and a
+  writer id would make that a conflict with nothing in it; nothing in the
+  classification needed one.
+- **The shadow keeps the unconfirmed write itself**, not only a flag: a conflict
+  hands the game its local payload even after Steam's own launch dialog replaced
+  the file on disk, and a write the cloud never took (a crash between the two
+  writes, a refused `FileWrite`) is sent again by the next load. A save is built
+  on that write when there is one, else on the version last seen. The full table
+  is in `crates/crcbl-store/src/synced.rs`'s docs.
+- **`save` refuses before any `load`, and while a conflict stands**
+  (`SyncError::NotLoaded`, `Unresolved`): a blind save overwrites a version it
+  never saw. `resolve(Resolution::KeepLocal | KeepRemote)` returns the payload
+  kept.
+- **Both storages are owned**
+  (`SyncedFile::new(Box<dyn StorageSource>, Box<dyn StorageSource>, path)`), so
+  a game can hold a `SyncedFile`.
+- **Truncation is caught by the length field**, before the CRC would be.
+- **`SteamCloudStorage` checks the chunk limit too**
+  (`k_unMaxCloudFileChunkSize`, 100 MiB, as `MAX_CLOUD_FILE_BYTES`), and the
+  path limit is `MAX_CLOUD_PATH_BYTES` = 259, `k_cchFilenameMax` less the NUL;
+  both are in the drift gate's limit table. Steam's names are case-insensitive
+  and stored lowercase, per the header, so `list` answers lowercase paths.
+  `quota()` reads `GetQuota`, and `tests/cloud_smoke.rs` (`#[ignore]`) is the
+  harness for the first manual step.
+- **`RemoteStorageLocalFileChange_t` is declared with `STEAM_CALLBACK_BEGIN`**,
+  which the drift gate could not read; it now reads those macros (members and
+  arrays included) as it reads written-out structs, and `const` limits beside
+  `enum` and `#define` ones. The event carries the path only; a deletion loads
+  as `Missing`.
+- **The CRC-32 is table-driven** (`crates/crcbl-store/src/crc32.rs`), with a
+  resumable form for the PNG fixtures' chunk CRCs.
 
 **Slice 2 as built, where it differs from the text below:**
 
@@ -1835,8 +1882,9 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 
 - **Scope:** everything under "Cloud" above. EW requirement 5.
 - **Files:** `crates/crcbl-store/src/lib.rs` (module declaration) plus a new
-  `crcbl-store/src/synced.rs` for the header, shadow and classification;
-  `crcbl-steam/src/cloud.rs`; `crates/crcbl-steam/Cargo.toml` gains
+  `crates/crcbl-store/src/synced.rs` for the header, shadow and classification
+  (and, as built, `crates/crcbl-store/src/crc32.rs`);
+  `crates/crcbl-steam/src/cloud.rs`; `crates/crcbl-steam/Cargo.toml` gains
   `crcbl-store`.
 - **API:**
 

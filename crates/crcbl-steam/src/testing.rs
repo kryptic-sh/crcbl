@@ -27,11 +27,11 @@ use std::{
 
 use crate::ffi::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
-    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamUser, ISteamUtils,
-    Lib, SteamApiCall, SteamErrMsg,
+    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
+    ISteamUser, ISteamUtils, Lib, SteamApiCall, SteamErrMsg,
     manifest::{
         AppsFns, DispatchFns, Fns, FriendsFns, LifecycleFns, MatchmakingFns, NetFns, NetUtilsFns,
-        UserFns, UtilsFns,
+        RemoteStorageFns, UserFns, UtilsFns,
     },
     structs::CallbackMsg,
     structs::{
@@ -192,6 +192,7 @@ pub(crate) struct Script {
     pub(crate) image_calls: Vec<(&'static str, i32, i32)>,
     /// The networking loop.
     pub(crate) net: FakeNet,
+    pub(crate) cloud: FakeCloud,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -251,6 +252,7 @@ impl Default for Script {
             image: None,
             image_calls: Vec::new(),
             net: FakeNet::default(),
+            cloud: FakeCloud::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -383,6 +385,23 @@ pub(crate) fn fake_lib() -> &'static Lib {
             set_lobby_type: fake_set_lobby_type,
             set_lobby_joinable: fake_set_lobby_joinable,
             get_lobby_owner: fake_get_lobby_owner,
+        },
+        remote_storage: RemoteStorageFns {
+            accessor: fake_remote_storage_accessor,
+            file_write: fake_file_write,
+            file_read: fake_file_read,
+            file_delete: fake_file_delete,
+            file_exists: fake_file_exists,
+            get_file_size: fake_get_file_size,
+            get_file_count: fake_get_file_count,
+            get_file_name_and_size: fake_get_file_name_and_size,
+            get_quota: fake_get_quota,
+            is_cloud_enabled_for_account: fake_is_cloud_enabled_for_account,
+            is_cloud_enabled_for_app: fake_is_cloud_enabled_for_app,
+            get_local_file_change_count: fake_get_local_file_change_count,
+            get_local_file_change: fake_get_local_file_change,
+            begin_file_write_batch: fake_begin_file_write_batch,
+            end_file_write_batch: fake_end_file_write_batch,
         },
         apps: AppsFns {
             accessor: fake_apps_accessor,
@@ -552,6 +571,233 @@ unsafe extern "C" fn fake_friends_accessor() -> *mut c_void {
 
 unsafe extern "C" fn fake_get_persona_name(_: *mut ISteamFriends) -> *const c_char {
     fake_string()
+}
+
+/// The fake Steam Cloud: files by name, and a log of the calls that matter.
+#[derive(Debug)]
+pub(crate) struct FakeCloud {
+    pub(crate) account_enabled: bool,
+    pub(crate) app_enabled: bool,
+    pub(crate) files: std::collections::BTreeMap<String, Vec<u8>>,
+    /// `FileWrite` answers false and stores nothing.
+    pub(crate) refuse_writes: bool,
+    /// `FileRead` hands back one byte fewer than asked.
+    pub(crate) short_reads: bool,
+    /// `(total, available)` for `GetQuota`, or `None` to answer false.
+    pub(crate) quota: Option<(u64, u64)>,
+    /// The batch and write calls, in order: `begin`, `write <name>`, `end`.
+    pub(crate) log: Vec<String>,
+    /// What `GetLocalFileChange` reports: the path, the change, the path type.
+    pub(crate) changes: Vec<(String, i32, i32)>,
+    /// How many times any remote-storage function ran — for "no Steam call".
+    pub(crate) calls: u32,
+}
+
+impl Default for FakeCloud {
+    fn default() -> Self {
+        Self {
+            account_enabled: true,
+            app_enabled: true,
+            files: std::collections::BTreeMap::new(),
+            refuse_writes: false,
+            short_reads: false,
+            quota: None,
+            log: Vec::new(),
+            changes: Vec::new(),
+            calls: 0,
+        }
+    }
+}
+
+/// Counts a remote-storage call, whichever thread made it, and copies its
+/// file-name argument.
+///
+/// # Safety
+///
+/// `name` is a NUL-terminated string live for the call.
+unsafe fn cloud_call(name: *const c_char) -> String {
+    script(|s| s.cloud.calls += 1);
+    // SAFETY: the caller's promise.
+    unsafe { arg(name) }
+}
+
+unsafe extern "C" fn fake_remote_storage_accessor() -> *mut c_void {
+    accessor(crate::ffi::versions::REMOTE_STORAGE.accessor)
+}
+
+unsafe extern "C" fn fake_file_write(
+    _: *mut ISteamRemoteStorage,
+    name: *const c_char,
+    data: *const c_void,
+    size: i32,
+) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name and `size` readable
+    // bytes.
+    let (name, bytes) = unsafe {
+        (
+            cloud_call(name),
+            core::slice::from_raw_parts(data.cast::<u8>(), usize::try_from(size).unwrap_or(0))
+                .to_vec(),
+        )
+    };
+    script(|s| {
+        s.cloud.log.push(format!("write {name}"));
+        if s.cloud.refuse_writes {
+            return false;
+        }
+        s.cloud.files.insert(name, bytes);
+        true
+    })
+}
+
+unsafe extern "C" fn fake_file_read(
+    _: *mut ISteamRemoteStorage,
+    name: *const c_char,
+    out: *mut c_void,
+    size: i32,
+) -> i32 {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { cloud_call(name) };
+    script(|s| {
+        let Some(bytes) = s.cloud.files.get(&name) else {
+            return 0;
+        };
+        let mut len = bytes.len().min(usize::try_from(size).unwrap_or(0));
+        if s.cloud.short_reads {
+            len = len.saturating_sub(1);
+        }
+        // SAFETY: the caller passes `size` writable bytes, and `len` is no
+        // more than that.
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), out.cast::<u8>(), len) };
+        i32::try_from(len).unwrap_or(i32::MAX)
+    })
+}
+
+unsafe extern "C" fn fake_file_delete(_: *mut ISteamRemoteStorage, name: *const c_char) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { cloud_call(name) };
+    script(|s| s.cloud.files.remove(&name).is_some())
+}
+
+unsafe extern "C" fn fake_file_exists(_: *mut ISteamRemoteStorage, name: *const c_char) -> bool {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { cloud_call(name) };
+    script(|s| s.cloud.files.contains_key(&name))
+}
+
+unsafe extern "C" fn fake_get_file_size(_: *mut ISteamRemoteStorage, name: *const c_char) -> i32 {
+    // SAFETY: the caller passes a NUL-terminated name.
+    let name = unsafe { cloud_call(name) };
+    script(|s| {
+        s.cloud
+            .files
+            .get(&name)
+            .map_or(0, |bytes| i32::try_from(bytes.len()).unwrap_or(i32::MAX))
+    })
+}
+
+unsafe extern "C" fn fake_get_file_count(_: *mut ISteamRemoteStorage) -> i32 {
+    script(|s| {
+        s.cloud.calls += 1;
+        i32::try_from(s.cloud.files.len()).unwrap_or(i32::MAX)
+    })
+}
+
+unsafe extern "C" fn fake_get_file_name_and_size(
+    _: *mut ISteamRemoteStorage,
+    index: i32,
+    size: *mut i32,
+) -> *const c_char {
+    let (name, len) = script(|s| {
+        s.cloud.calls += 1;
+        let (name, bytes) = s
+            .cloud
+            .files
+            .iter()
+            .nth(usize::try_from(index).expect("a valid index"))
+            .expect("an index below the count");
+        (name.clone(), bytes.len())
+    });
+    script(|s| s.set_string(name.as_bytes()));
+    // SAFETY: the caller passes a writable `int32`.
+    unsafe { size.write(i32::try_from(len).unwrap_or(i32::MAX)) };
+    fake_string()
+}
+
+unsafe extern "C" fn fake_get_quota(
+    _: *mut ISteamRemoteStorage,
+    total: *mut u64,
+    available: *mut u64,
+) -> bool {
+    let quota = script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.quota
+    });
+    let Some((all, free)) = quota else {
+        return false;
+    };
+    // SAFETY: the caller passes two writable `uint64`s.
+    unsafe {
+        total.write(all);
+        available.write(free);
+    }
+    true
+}
+
+unsafe extern "C" fn fake_is_cloud_enabled_for_account(_: *mut ISteamRemoteStorage) -> bool {
+    script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.account_enabled
+    })
+}
+
+unsafe extern "C" fn fake_is_cloud_enabled_for_app(_: *mut ISteamRemoteStorage) -> bool {
+    script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.app_enabled
+    })
+}
+
+unsafe extern "C" fn fake_get_local_file_change_count(_: *mut ISteamRemoteStorage) -> i32 {
+    script(|s| {
+        s.cloud.calls += 1;
+        i32::try_from(s.cloud.changes.len()).unwrap_or(i32::MAX)
+    })
+}
+
+unsafe extern "C" fn fake_get_local_file_change(
+    _: *mut ISteamRemoteStorage,
+    index: i32,
+    change: *mut i32,
+    path_type: *mut i32,
+) -> *const c_char {
+    let (path, kind, path_kind) = script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.changes[usize::try_from(index).expect("a valid index")].clone()
+    });
+    script(|s| s.set_string(path.as_bytes()));
+    // SAFETY: the caller passes two writable enums, `int`-sized.
+    unsafe {
+        change.write(kind);
+        path_type.write(path_kind);
+    }
+    fake_string()
+}
+
+unsafe extern "C" fn fake_begin_file_write_batch(_: *mut ISteamRemoteStorage) -> bool {
+    script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.log.push("begin".into());
+    });
+    true
+}
+
+unsafe extern "C" fn fake_end_file_write_batch(_: *mut ISteamRemoteStorage) -> bool {
+    script(|s| {
+        s.cloud.calls += 1;
+        s.cloud.log.push("end".into());
+    });
+    true
 }
 
 unsafe extern "C" fn fake_apps_accessor() -> *mut c_void {

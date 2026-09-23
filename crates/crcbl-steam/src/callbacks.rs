@@ -19,8 +19,9 @@ use crate::{
     ffi::structs::{
         AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
         GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
-        NewUrlLaunchParameters, PersonaStateChange, SteamApiCallCompleted, SteamNetConnectionInfo,
-        SteamNetConnectionStatusChanged, SteamRelayNetworkStatus, steam_id,
+        NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
+        SteamApiCallCompleted, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
+        SteamRelayNetworkStatus, steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -43,6 +44,8 @@ pub(crate) enum Base {
     NetworkingSockets = 1220,
     /// `k_iSteamNetworkingUtilsCallbacks`.
     NetworkingUtils = 1280,
+    /// `k_iSteamRemoteStorageCallbacks`.
+    RemoteStorage = 1300,
 }
 
 impl Base {
@@ -55,6 +58,7 @@ impl Base {
         Self::Apps,
         Self::NetworkingSockets,
         Self::NetworkingUtils,
+        Self::RemoteStorage,
     ];
 
     /// Valve's name for the base, as the headers spell it.
@@ -65,6 +69,7 @@ impl Base {
             Self::Matchmaking => "k_iSteamMatchmakingCallbacks",
             Self::Utils => "k_iSteamUtilsCallbacks",
             Self::Apps => "k_iSteamAppsCallbacks",
+            Self::RemoteStorage => "k_iSteamRemoteStorageCallbacks",
             Self::NetworkingSockets => "k_iSteamNetworkingSocketsCallbacks",
             Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
         }
@@ -168,6 +173,17 @@ pub enum SteamEvent {
         /// `false` only when the lobby no longer exists.
         success: bool,
     },
+    /// A Steam Cloud file changed while the game was running
+    /// (`RemoteStorageLocalFileChange_t`, read with `GetLocalFileChange`) —
+    /// another device's write synced down, as when a Steam Deck resumes.
+    /// Load the file again; `crcbl_store::synced::SyncedFile::load`
+    /// classifies the change as it would at start-up.
+    CloudFileChanged {
+        /// The cloud file name, for a file written through
+        /// [`SteamCloudStorage`](crate::SteamCloudStorage); an absolute path
+        /// for an Auto-Cloud file.
+        path: String,
+    },
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
     LobbyChatMessage {
@@ -206,6 +222,10 @@ pub(crate) enum Decoded {
         /// The certified identity at the other end, if it is a Steam id.
         remote: Option<SteamId>,
     },
+    /// `RemoteStorageLocalFileChange_t`: the pump reads the changes with
+    /// `GetLocalFileChange` and queues [`SteamEvent::CloudFileChanged`] for
+    /// each.
+    LocalFileChange,
     /// `LobbyChatMsg_t`: the pump reads the entry with `GetLobbyChatEntry`
     /// and queues [`SteamEvent::LobbyChatMessage`].
     ChatMessage {
@@ -374,6 +394,16 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::RemoteStorage,
+        offset: 33,
+        #[cfg(test)]
+        name: "RemoteStorageLocalFileChange_t",
+        size: size_of::<RemoteStorageLocalFileChange>(),
+        decode: |bytes| {
+            read::<RemoteStorageLocalFileChange>(bytes).map(|_| Decoded::LocalFileChange)
+        },
+    },
+    Row {
         base: Base::Matchmaking,
         offset: 5,
         #[cfg(test)]
@@ -494,6 +524,8 @@ unsafe impl Pod for GameRichPresenceJoinRequested {}
 unsafe impl Pod for NewUrlLaunchParameters {}
 // SAFETY: as above.
 unsafe impl Pod for PersonaStateChange {}
+// SAFETY: as above.
+unsafe impl Pod for RemoteStorageLocalFileChange {}
 // SAFETY: as above.
 unsafe impl Pod for SteamNetConnectionInfo {}
 // SAFETY: as above.

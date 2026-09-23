@@ -140,6 +140,11 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &[],
     },
     StructDecl {
+        name: "RemoteStorageLocalFileChange_t",
+        pack: Pack::Callback,
+        fields: &[],
+    },
+    StructDecl {
         name: "PersonaStateChange_t",
         pack: Pack::Callback,
         fields: &["uint64 m_ulSteamID", "int m_nChangeFlags"],
@@ -433,6 +438,18 @@ callback_packed! {
     /// The C++ struct has no members; a C++ struct is never empty, so it is
     /// one byte, which is this field.
     pub(crate) struct NewUrlLaunchParameters {
+        /// The one byte an empty C++ struct occupies; never meaningful.
+        pub(crate) unused: u8,
+    }
+}
+
+callback_packed! {
+    /// `RemoteStorageLocalFileChange_t` (`isteamremotestorage.h`,
+    /// `k_iSteamRemoteStorageCallbacks + 33`, declared with
+    /// `STEAM_CALLBACK_BEGIN`): a cloud file changed during the session; the
+    /// changes themselves are read with `GetLocalFileChange`. No members, so
+    /// one byte, as [`NewUrlLaunchParameters`].
+    pub(crate) struct RemoteStorageLocalFileChange {
         /// The one byte an empty C++ struct occupies; never meaningful.
         pub(crate) unused: u8,
     }
@@ -756,6 +773,9 @@ mod tests {
         assert_eq!(align_of::<GameLobbyJoinRequested>(), 1);
         assert_eq!(align_of::<GameRichPresenceJoinRequested>(), 1);
         assert_layout!(NewUrlLaunchParameters, 1, {
+            unused: 0, 1;
+        });
+        assert_layout!(RemoteStorageLocalFileChange, 1, {
             unused: 0, 1;
         });
         // The `uint32` after the `uint8` is 4-aligned under either packing.

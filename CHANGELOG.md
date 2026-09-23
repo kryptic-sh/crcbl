@@ -221,7 +221,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b and 4**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4 and 6**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -262,9 +262,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `SteamId` as `remote()` and `end_reason()` telling `HostLeft` from a lost
   link; it is `Send`, but calls Steam only on the thread that initialised it and
   answers a typed error off it. `steam.networking()` starts relay access and
-  reports its status. 64-bit Linux, Windows and macOS; elsewhere the crate is
-  empty. `apps/sandbox --features steam` exercises it. Not yet run against a
-  Steam client with a 1.65 library.
+  reports its status. `SteamCloudStorage` is Steam Cloud as a
+  `crcbl_store::StorageSource` — `Unsupported` when cloud is off for the account
+  or the app, paths checked against Steam's limits before any call, a refused
+  `FileWrite` an error — and `SteamEvent::CloudFileChanged` names a file another
+  device changed mid-session; `crcbl_store::synced::SyncedFile` over it surfaces
+  conflicts. 64-bit Linux, Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

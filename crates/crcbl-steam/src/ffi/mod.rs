@@ -83,6 +83,8 @@ opaque! {
     ISteamNetworkingSockets;
     /// `class ISteamNetworkingUtils`.
     ISteamNetworkingUtils;
+    /// `class ISteamRemoteStorage`.
+    ISteamRemoteStorage;
     /// `class ISteamUser`.
     ISteamUser;
     /// `class ISteamUtils`.

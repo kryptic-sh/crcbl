@@ -15,8 +15,8 @@ use crate::{
     error::InitError,
     ffi::{
         HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamNetworkingSockets,
-        ISteamNetworkingUtils, ISteamUser, ISteamUtils, Lib, SteamErrMsg, init_result, load,
-        manifest, manifest::Accessor, versions,
+        ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser, ISteamUtils, Lib, SteamErrMsg,
+        init_result, load, manifest, manifest::Accessor, versions,
     },
     matchmaking::Tracked,
     net::IncomingQueues,
@@ -107,6 +107,8 @@ pub struct Client {
     pub(crate) net: *mut ISteamNetworkingSockets,
     /// `SteamAPI_SteamNetworkingUtils_SteamAPI_v004()`; never null.
     pub(crate) net_utils: *mut ISteamNetworkingUtils,
+    /// `SteamAPI_SteamRemoteStorage_v016()`; never null.
+    pub(crate) remote_storage: *mut ISteamRemoteStorage,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -255,6 +257,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         .cast::<ISteamNetworkingSockets>();
     let net_utils = interface(lib.fns.net_utils.accessor, &versions::NETWORKING_UTILS)?
         .cast::<ISteamNetworkingUtils>();
+    let remote_storage = interface(lib.fns.remote_storage.accessor, &versions::REMOTE_STORAGE)?
+        .cast::<ISteamRemoteStorage>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -276,6 +280,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             matchmaking,
             net,
             net_utils,
+            remote_storage,
             session,
         }),
         queue: VecDeque::new(),
@@ -362,7 +367,8 @@ mod tests {
             versions::handshake(manifest::INTERFACES),
             b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
-              STEAMAPPS_INTERFACE_VERSION009\0SteamUtils011\0\0"
+              STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
+              SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -370,6 +376,7 @@ mod tests {
         assert!(!steam.client.utils.is_null());
         assert!(!steam.client.friends.is_null());
         assert!(!steam.client.apps.is_null());
+        assert!(!steam.client.remote_storage.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

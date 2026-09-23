@@ -8996,21 +8996,22 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4 and 2 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2 and 6 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4 and 2 are built on branch `steam-sdk`** (not merged):
-`crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
-handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
-local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
-the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
-`miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
+**Slices 1, 1b, 3a, 3b, 4, 2 and 6 are built on branch `steam-sdk`** (not
+merged): `crates/crcbl-steam` — the runtime loader, `Steam::init` with the
+version handshake, the manual-dispatch pump, shutdown on the last owner's drop,
+the local identity and machine basics, `relaunch_via_steam`, the fake-library
+rig, the drift gate and the CI steps (clippy and rustdoc for macOS and Windows,
+a `miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
 `HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
 slice 3a's async call registry, lobbies, invites, rich presence and join paths,
 slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
 and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
 `crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
-and `crcbl_client::Client::ended`. The plan, `docs/plan/42-steam.md`, carries a
-status line per slice; slice 6 is next.
+and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
+`SteamCloudStorage`. The plan, `docs/plan/42-steam.md`, carries a status line
+per slice; slice 5 is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9040,8 +9041,8 @@ status line per slice; slice 6 is next.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 117 lib tests after slice
-  4, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 126 lib tests after slice
+  6, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9064,6 +9065,14 @@ status line per slice; slice 6 is next.
   across NAT. The transport is exercised only over the fake loop, which cannot
   show that the send flags, the message release or `ConnectP2P`'s identity
   argument are right against a real client.
+- **Slice 6's manual steps have not run**: `tests/cloud_smoke.rs` (whether app
+  480 has a cloud quota at all — unknown; if it has none, the rest waits for an
+  app id of our own), a write on one machine read on another as a fast-forward,
+  an offline write on both surfaced as a `Conflict` (and whether Steam's own
+  dialog appeared first, and what the game saw after each choice), and a Steam
+  Deck suspended while another machine changes the file, resumed into
+  `CloudFileChanged`. The protocol is exercised over `MemoryStorage` and the
+  fake only.
 - **Slice 2's exit run has not happened, and nothing can run it yet**: slice 4's
   two-machine run repeated with three joiners, through a `Host`. Neither
   `apps/sandbox` (which exchanges greetings over raw `SteamTransport`s) nor

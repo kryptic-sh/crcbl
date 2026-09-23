@@ -9,19 +9,24 @@
 //!        │              open_invite_dialog(), open_overlay(), …
 //!        ├── apps(): subscribed(), game_language(), launch_command_line()
 //!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …
-//!        └── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
-//!                                  └──▶ a later frame: steam.take(call) ──▶ Lobby
+//!        ├── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
+//!        │                         └──▶ a later frame: steam.take(call) ──▶ Lobby
+//!        ├── networking(): start_relay(), relay_status()
+//!        ├── SteamListener::open(lobby) / SteamTransport::connect(owner): crcbl_net::Transport
+//!        └── SteamCloudStorage::new(): crcbl_store::StorageSource
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a and 3b: the library is found and
-//! opened at runtime, Steam is initialised with a version handshake, the
-//! callback pipe is drained by manual dispatch into a queue of `SteamEvent`s,
-//! the local player's identity, the machine's basics and the friends list —
-//! names, states, avatars, rich presence — are read,
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4 and 6: the library is
+//! found and opened at runtime, Steam is initialised with a version
+//! handshake, the callback pipe is drained by manual dispatch into a queue of
+//! `SteamEvent`s, the local player's identity, the machine's basics and the
+//! friends list — names, states, avatars, rich presence — are read,
 //! asynchronous calls are typed tokens redeemed after the pump, lobbies are
-//! created, joined, invited to and left, and the API is shut down exactly
-//! once, when the last owner of it is gone. Every string Steam returns is
+//! created, joined, invited to and left, peers connect over Steam P2P as a
+//! `crcbl_net::Transport`, files are kept in Steam Cloud as a
+//! `crcbl_store::StorageSource`, and the API is shut down exactly once, when
+//! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
 //!
 //! # No SDK in the repository, no link-time dependency
@@ -90,6 +95,11 @@ mod client;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod cloud;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod error;
 #[cfg(all(
     target_pointer_width = "64",
@@ -153,6 +163,7 @@ pub use crate::{
     call::{CallError, CallResult, CallState, SteamCall},
     callbacks::SteamEvent,
     client::{AppId, Steam},
+    cloud::{CloudQuota, MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES, SteamCloudStorage},
     error::{EResult, InitError, SteamError},
     friends::{
         FriendFlags, Friends, OverlayDialog, PersonaChange, PersonaState, UserDialog, WebPageMode,

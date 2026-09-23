@@ -25,7 +25,8 @@
 //! (`ESteamHardwareType`, `ESteamHardwareDefaultConfig`,
 //! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`,
 //! `EPersonaState`, `EActivateGameOverlayToWebPageMode`,
-//! `ESteamNetworkingAvailability`) is taken to be
+//! `ESteamNetworkingAvailability`, `ERemoteStorageLocalFileChange`,
+//! `ERemoteStorageFilePathType`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -39,8 +40,8 @@ use core::ffi::{c_char, c_void};
 
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
-    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamUser, ISteamUtils,
-    SteamApiCall, SteamErrMsg,
+    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
+    ISteamUser, ISteamUtils, SteamApiCall, SteamErrMsg,
     structs::{
         CallbackMsg, SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
         SteamRelayNetworkStatus,
@@ -400,6 +401,52 @@ bindings! {
         get_launch_command_line: AppsGetLaunchCommandLine = "SteamAPI_ISteamApps_GetLaunchCommandLine",
             "S_API int SteamAPI_ISteamApps_GetLaunchCommandLine( ISteamApps* self, char * pszCommandLine, int cubCommandLine );",
             fn(*mut ISteamApps, *mut c_char, i32) -> i32;
+    }
+
+    /// `ISteamRemoteStorage` (`steam_api_flat.h`): Steam Cloud files.
+    remote_storage: RemoteStorageFns for versions::REMOTE_STORAGE {
+        file_write: RemoteStorageFileWrite = "SteamAPI_ISteamRemoteStorage_FileWrite",
+            "S_API bool SteamAPI_ISteamRemoteStorage_FileWrite( ISteamRemoteStorage* self, const char * pchFile, const void * pvData, int32 cubData );",
+            fn(*mut ISteamRemoteStorage, *const c_char, *const c_void, i32) -> bool;
+        file_read: RemoteStorageFileRead = "SteamAPI_ISteamRemoteStorage_FileRead",
+            "S_API int32 SteamAPI_ISteamRemoteStorage_FileRead( ISteamRemoteStorage* self, const char * pchFile, void * pvData, int32 cubDataToRead );",
+            fn(*mut ISteamRemoteStorage, *const c_char, *mut c_void, i32) -> i32;
+        file_delete: RemoteStorageFileDelete = "SteamAPI_ISteamRemoteStorage_FileDelete",
+            "S_API bool SteamAPI_ISteamRemoteStorage_FileDelete( ISteamRemoteStorage* self, const char * pchFile );",
+            fn(*mut ISteamRemoteStorage, *const c_char) -> bool;
+        file_exists: RemoteStorageFileExists = "SteamAPI_ISteamRemoteStorage_FileExists",
+            "S_API bool SteamAPI_ISteamRemoteStorage_FileExists( ISteamRemoteStorage* self, const char * pchFile );",
+            fn(*mut ISteamRemoteStorage, *const c_char) -> bool;
+        get_file_size: RemoteStorageGetFileSize = "SteamAPI_ISteamRemoteStorage_GetFileSize",
+            "S_API int32 SteamAPI_ISteamRemoteStorage_GetFileSize( ISteamRemoteStorage* self, const char * pchFile );",
+            fn(*mut ISteamRemoteStorage, *const c_char) -> i32;
+        get_file_count: RemoteStorageGetFileCount = "SteamAPI_ISteamRemoteStorage_GetFileCount",
+            "S_API int32 SteamAPI_ISteamRemoteStorage_GetFileCount( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> i32;
+        get_file_name_and_size: RemoteStorageGetFileNameAndSize = "SteamAPI_ISteamRemoteStorage_GetFileNameAndSize",
+            "S_API const char * SteamAPI_ISteamRemoteStorage_GetFileNameAndSize( ISteamRemoteStorage* self, int iFile, int32 * pnFileSizeInBytes );",
+            fn(*mut ISteamRemoteStorage, i32, *mut i32) -> *const c_char;
+        get_quota: RemoteStorageGetQuota = "SteamAPI_ISteamRemoteStorage_GetQuota",
+            "S_API bool SteamAPI_ISteamRemoteStorage_GetQuota( ISteamRemoteStorage* self, uint64 * pnTotalBytes, uint64 * puAvailableBytes );",
+            fn(*mut ISteamRemoteStorage, *mut u64, *mut u64) -> bool;
+        is_cloud_enabled_for_account: RemoteStorageIsCloudEnabledForAccount = "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount",
+            "S_API bool SteamAPI_ISteamRemoteStorage_IsCloudEnabledForAccount( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> bool;
+        is_cloud_enabled_for_app: RemoteStorageIsCloudEnabledForApp = "SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp",
+            "S_API bool SteamAPI_ISteamRemoteStorage_IsCloudEnabledForApp( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> bool;
+        get_local_file_change_count: RemoteStorageGetLocalFileChangeCount = "SteamAPI_ISteamRemoteStorage_GetLocalFileChangeCount",
+            "S_API int32 SteamAPI_ISteamRemoteStorage_GetLocalFileChangeCount( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> i32;
+        get_local_file_change: RemoteStorageGetLocalFileChange = "SteamAPI_ISteamRemoteStorage_GetLocalFileChange",
+            "S_API const char * SteamAPI_ISteamRemoteStorage_GetLocalFileChange( ISteamRemoteStorage* self, int iFile, ERemoteStorageLocalFileChange * pEChangeType, ERemoteStorageFilePathType * pEFilePathType );",
+            fn(*mut ISteamRemoteStorage, i32, *mut i32, *mut i32) -> *const c_char;
+        begin_file_write_batch: RemoteStorageBeginFileWriteBatch = "SteamAPI_ISteamRemoteStorage_BeginFileWriteBatch",
+            "S_API bool SteamAPI_ISteamRemoteStorage_BeginFileWriteBatch( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> bool;
+        end_file_write_batch: RemoteStorageEndFileWriteBatch = "SteamAPI_ISteamRemoteStorage_EndFileWriteBatch",
+            "S_API bool SteamAPI_ISteamRemoteStorage_EndFileWriteBatch( ISteamRemoteStorage* self );",
+            fn(*mut ISteamRemoteStorage) -> bool;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).

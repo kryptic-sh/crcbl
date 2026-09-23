@@ -113,6 +113,7 @@ impl Steam {
             }
             Some(Decoded::CallCompleted(done)) => self.complete(done),
             Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
+            Some(Decoded::LocalFileChange) => self.read_file_changes(),
             Some(Decoded::ConnectionStatus {
                 connection,
                 listen_socket,
@@ -158,6 +159,33 @@ impl Steam {
         );
         if !claimed {
             self.diagnostics.unclaimed_completions += 1;
+        }
+    }
+
+    /// Reads every cloud file change Steam holds (`GetLocalFileChangeCount`,
+    /// `GetLocalFileChange`) and queues one event for each.
+    fn read_file_changes(&mut self) {
+        let client = Arc::clone(&self.client);
+        let storage = &client.lib.fns.remote_storage;
+        // SAFETY: `client.remote_storage` is the non-null interface init
+        // resolved, and this is the pump thread.
+        let count = unsafe { (storage.get_local_file_change_count)(client.remote_storage) };
+        for index in 0..count {
+            let mut change = 0_i32;
+            let mut path_type = 0_i32;
+            // SAFETY: as above; `index` is below the count Steam just gave,
+            // and both out-parameters are writable for the call.
+            let path = unsafe {
+                (storage.get_local_file_change)(
+                    client.remote_storage,
+                    index,
+                    &raw mut change,
+                    &raw mut path_type,
+                )
+            };
+            // SAFETY: straight out of the call, before any other Steam call.
+            let path = unsafe { self.copy_string(path) };
+            self.queue.push_back(SteamEvent::CloudFileChanged { path });
         }
     }
 

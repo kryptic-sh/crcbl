@@ -20,12 +20,14 @@
 //! 3. **every bound struct matches its header block**: the ordered field
 //!    declarations, the `#pragma pack` in force at the struct, and for a
 //!    callback or call result, the `k_iCallback = base + n` expression
-//!    against its row in `callbacks` or `call`;
+//!    against its row in `callbacks` or `call` — whether the header writes
+//!    the struct out or declares it with `STEAM_CALLBACK_BEGIN`;
 //! 4. **every callback base has its header's value**: `enum {
 //!    k_iSteamFriendsCallbacks = 300 };` and the rest, which the symbolic
 //!    comparison in 3 takes on trust;
 //! 5. **every SDK constant a limit here is derived from has the header's
 //!    value** — `k_cchMaxRichPresenceKeyLength` and the rest ([`LIMITS`]),
+//!    written as an `enum`, a `#define` or a `const`,
 //!    so a limit this crate checks before a call cannot drift from the one
 //!    Steam enforces.
 //!
@@ -51,8 +53,8 @@ use super::{
     versions::Interface,
 };
 use crate::{
-    MAX_LOBBY_KEY_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS,
-    MAX_RICH_PRESENCE_VALUE_LENGTH,
+    MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES, MAX_LOBBY_KEY_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH,
+    MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
     call::{CALL_ROWS, CallRow},
     callbacks::{Base, ROWS, Row},
 };
@@ -71,6 +73,8 @@ const LIMITS: &[(&str, usize)] = &[
         MAX_RICH_PRESENCE_VALUE_LENGTH + 1,
     ),
     ("k_nMaxLobbyKeyLength", MAX_LOBBY_KEY_LENGTH),
+    ("k_cchFilenameMax", MAX_CLOUD_PATH_BYTES + 1),
+    ("k_unMaxCloudFileChunkSize", MAX_CLOUD_FILE_BYTES),
 ];
 
 /// One header's name and text.
@@ -262,6 +266,9 @@ fn struct_blocks(text: &str, name: &str) -> Vec<Block> {
         } else if is_struct_head(&flat, name) {
             let pack = stack.last().copied().unwrap_or(Scanned::Natural);
             blocks.push(read_body(&flat, &mut lines, pack));
+        } else if let Some(callback) = macro_head(&flat, name) {
+            let pack = stack.last().copied().unwrap_or(Scanned::Natural);
+            blocks.push(read_macro_body(callback, &mut lines, pack));
         }
     }
     blocks
@@ -276,6 +283,55 @@ fn is_struct_head(flat: &str, name: &str) -> bool {
         .collect();
     let named = tokens.windows(2).any(|w| w[0] == "struct" && w[1] == name);
     named && !flat.ends_with(';')
+}
+
+/// The `k_iCallback` expression of a normalized
+/// `STEAM_CALLBACK_BEGIN( name, expression )` line for `name`.
+fn macro_head(flat: &str, name: &str) -> Option<String> {
+    let (callback, expression) = flat
+        .strip_prefix("STEAM_CALLBACK_BEGIN(")?
+        .strip_suffix(')')?
+        .split_once(',')?;
+    (callback == name).then(|| expression.to_owned())
+}
+
+/// Reads a `STEAM_CALLBACK_BEGIN` body up to `STEAM_CALLBACK_END`:
+/// `STEAM_CALLBACK_MEMBER( n, type, name )` is the field `type name`, and
+/// `STEAM_CALLBACK_MEMBER_ARRAY( n, type, name, count )` is `type
+/// name[count]`.
+fn read_macro_body<'a>(
+    callback: String,
+    lines: &mut impl Iterator<Item = &'a str>,
+    pack: Scanned,
+) -> Block {
+    let mut block = Block {
+        pack,
+        callback: Some(callback),
+        fields: Vec::new(),
+    };
+    for line in lines {
+        let flat = normalize(line);
+        if flat.starts_with("STEAM_CALLBACK_END(") {
+            break;
+        }
+        let member = flat
+            .strip_prefix("STEAM_CALLBACK_MEMBER_ARRAY(")
+            .or_else(|| flat.strip_prefix("STEAM_CALLBACK_MEMBER("))
+            .and_then(|rest| rest.strip_suffix(')'));
+        let Some(member) = member else {
+            continue;
+        };
+        let parts: Vec<&str> = member.split(',').collect();
+        let field = match parts.as_slice() {
+            [_, kind, name] => format!("{kind} {name}"),
+            [_, kind, name, count] => format!("{kind} {name}[{count}]"),
+            // Not a shape the macros take: kept whole, so it cannot match a
+            // declared field by accident.
+            _ => flat.clone(),
+        };
+        block.fields.push(normalize(&field));
+    }
+    block
 }
 
 /// Whether a normalized member line declares a member function rather than
@@ -346,10 +402,33 @@ fn enum_value(headers: &[Header], name: &str) -> Option<i64> {
     })
 }
 
+/// The value of `const type name = value;` in any header, where `value` is
+/// an integer or a product of integers (`100 * 1024 * 1024`).
+fn const_value(headers: &[Header], name: &str) -> Option<i64> {
+    let suffix = format!(" {name}");
+    headers.iter().find_map(|header| {
+        strip_comments(&header.text).lines().find_map(|line| {
+            let flat = normalize(line);
+            let (declared, value) = flat
+                .strip_prefix("const ")?
+                .strip_suffix(';')?
+                .split_once('=')?;
+            if !declared.ends_with(&suffix) {
+                return None;
+            }
+            value.split('*').try_fold(1_i64, |product, factor| {
+                product.checked_mul(factor.parse().ok()?)
+            })
+        })
+    })
+}
+
 /// The value of a constant as the headers give it: `enum { name = value };`,
-/// or `#define name value`.
+/// `#define name value`, or `const type name = value;`.
 fn constant_value(headers: &[Header], name: &str) -> Option<i64> {
-    enum_value(headers, name).or_else(|| define_value(headers, name)?.parse().ok())
+    enum_value(headers, name)
+        .or_else(|| define_value(headers, name)?.parse().ok())
+        .or_else(|| const_value(headers, name))
 }
 
 /// Every failure, as a line a human can act on.
@@ -549,10 +628,10 @@ mod tests {
         init_ex.push_str("}\n");
         let mut bases = String::new();
         for (index, &(name, value)) in tables.limits.iter().enumerate() {
-            if index % 2 == 0 {
-                bases.push_str(&format!("enum {{ {name} = {value} }};\n"));
-            } else {
-                bases.push_str(&format!("#define {name} {value}\n"));
+            match index % 3 {
+                0 => bases.push_str(&format!("enum {{ {name} = {value} }};\n")),
+                1 => bases.push_str(&format!("#define {name} {value}\n")),
+                _ => bases.push_str(&format!("const uint32 {name} = {value};\n")),
             }
         }
         for &base in tables.bases {
@@ -572,8 +651,6 @@ mod tests {
                 Pack::One => structs.push_str("#pragma pack(push,1)\n"),
                 Pack::Natural => {}
             }
-            structs.push_str(&format!("struct {};\n", decl.name));
-            structs.push_str(&format!("typedef struct {}\n{{\n", decl.name));
             let row = tables
                 .rows
                 .iter()
@@ -584,16 +661,29 @@ mod tests {
                 .iter()
                 .find(|row| row.name == decl.name)
                 .map(|row| (row.base, row.offset));
-            if let Some((base, offset)) = row.or(call) {
-                structs.push_str(&format!(
-                    "\tenum {{ k_iCallback = {} + {offset} }};\n",
+            match row.or(call) {
+                // A callback with no members, as Valve declares its empty
+                // ones: through the macros.
+                Some((base, offset)) if decl.fields.is_empty() => structs.push_str(&format!(
+                    "STEAM_CALLBACK_BEGIN( {}, {} + {offset} )\nSTEAM_CALLBACK_END(0)\n",
+                    decl.name,
                     base.valve_name()
-                ));
+                )),
+                callback => {
+                    structs.push_str(&format!("struct {};\n", decl.name));
+                    structs.push_str(&format!("typedef struct {}\n{{\n", decl.name));
+                    if let Some((base, offset)) = callback {
+                        structs.push_str(&format!(
+                            "\tenum {{ k_iCallback = {} + {offset} }};\n",
+                            base.valve_name()
+                        ));
+                    }
+                    for field in decl.fields {
+                        structs.push_str(&format!("\t{field};\t// what it is\n"));
+                    }
+                    structs.push_str(&format!("}} {};\n\n", decl.name));
+                }
             }
-            for field in decl.fields {
-                structs.push_str(&format!("\t{field};\t// what it is\n"));
-            }
-            structs.push_str(&format!("}} {};\n\n", decl.name));
             if decl.pack != Pack::Natural {
                 structs.push_str("#pragma pack( pop )\n");
             }
@@ -828,6 +918,56 @@ mod tests {
         );
         assert_eq!(blocks.len(), 1);
         assert_eq!(blocks[0].fields, ["int x", "void(*m_pfn)(A*p)"]);
+    }
+
+    #[test]
+    fn a_macro_declared_callback_reads_like_a_written_out_one() {
+        let text = "#pragma pack( push, 1 )
+STEAM_CALLBACK_BEGIN( A_t, k_iSteamVideoCallbacks + 11 )
+\tSTEAM_CALLBACK_MEMBER( 0, EResult, m_eResult ) // result
+\tSTEAM_CALLBACK_MEMBER( 1, char, m_rgchURL[256] )
+\tSTEAM_CALLBACK_MEMBER_ARRAY( 2, uint8, m_rgubData, 16 )
+STEAM_CALLBACK_END(3)
+STEAM_CALLBACK_BEGIN( B_t, k_iSteamVideoCallbacks + 12 )
+STEAM_CALLBACK_END(0)
+#pragma pack( pop )
+";
+        assert_eq!(
+            struct_blocks(text, "A_t"),
+            [Block {
+                pack: Scanned::Fixed(1),
+                callback: Some("k_iSteamVideoCallbacks+11".into()),
+                fields: vec![
+                    "EResult m_eResult".into(),
+                    "char m_rgchURL[256]".into(),
+                    "uint8 m_rgubData[16]".into()
+                ]
+            }]
+        );
+        let empty = struct_blocks(text, "B_t");
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].fields.is_empty());
+        assert_eq!(
+            empty[0].callback.as_deref(),
+            Some("k_iSteamVideoCallbacks+12")
+        );
+    }
+
+    #[test]
+    fn a_const_limit_is_read_and_a_product_multiplied() {
+        let headers = [Header {
+            name: "a.h".into(),
+            text: "const uint32 k_cchFilenameMax = 260;\n\
+                   const uint32 k_unChunk = 100 * 1024 * 1024; // 100MB\n"
+                .into(),
+        }];
+        assert_eq!(constant_value(&headers, "k_cchFilenameMax"), Some(260));
+        assert_eq!(constant_value(&headers, "k_unChunk"), Some(104_857_600));
+        assert_eq!(
+            constant_value(&headers, "k_cchFilename"),
+            None,
+            "whole names only"
+        );
     }
 
     #[test]
