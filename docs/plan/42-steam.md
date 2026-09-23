@@ -1290,7 +1290,17 @@ On branch `steam-sdk`, not merged to `main`:
   `Hello::session_token`, topic 27's design) and server-side decryption of
   encrypted tickets. **Not run:** every step under "Needs a real client" below,
   on every OS. See "Slice 12 as built".
-- Slices 13–15: not started.
+- **Slice 13: waiting on a decision, not started.** Its text makes "a module of
+  `crcbl-steam` or its own crate" this slice's call, "when a dedicated headless
+  build wants it", and nothing does: EW is a listen server, and no headless
+  server exists in the workspace. What building it now would change is not small
+  — a second init (`SteamInternal_GameServer_Init_V2`, with its own handshake
+  list), a second pipe the pump drains apart from the client's, its own one-live
+  guard in `Lib`, and a fake library that tells two pipes apart — so it waits
+  for the consumer and the decision (see the backlog).
+- Slices 14–15: not started. Neither needs a decision to begin: 14 (Workshop)
+  and 15's inventory half build over the fake like 9–12; 15's shipping half
+  needs an app id of our own.
 
 **Slice 12 as built, where it differs from the text below:**
 

@@ -9246,6 +9246,20 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   the ownership, DLC, beta and install-directory calls answer at all; and a
   Remote Play Together session detected when a friend joins through Steam's
   invite. DLC semantics are untestable until an app id of our own has some.
+- **Needs a decision: slice 13 (the game-server API) — module or crate, and who
+  it is for.** The plan defers "a module of `crcbl-steam` or its own crate" to
+  "when a dedicated headless build wants it"; none does (EW is a listen server).
+  Options: (a) a `game_server` module sharing the loader and the `Lib` —
+  cheapest, but the crate's init, pump and fake all learn a second pipe; (b) a
+  `crcbl-steam-server` crate over a loader moved into a shared crate — a clean
+  split for a headless binary that must not pull in the client surface, at the
+  cost of that move. Either way the work is a second init with its own handshake
+  list (`SteamInternal_GameServer_Init_V2`, the `SteamGameServer_InitEx`
+  versions), the game-server pipe, a one-live guard of its own,
+  `ISteamGameServer` (logon, server info, auth sessions, advertising),
+  `ISteamGameServerStats` and `ISteamMatchmakingServers`, with the plan's
+  pipe-separation test. Slice 12's `AuthGate` already serves a game server's
+  verdicts unchanged.
 - **Slice 12's manual steps have not run, and two halves are not built**: one
   account's ticket validating on another's machine, a tampered ticket rejected,
   and a cancelled ticket ending the validator's session — on every OS. Not
