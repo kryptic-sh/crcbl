@@ -287,7 +287,7 @@ pub fn init_from_env() -> bool {
 ///
 /// `None` for anything unreadable, including the empty string, which
 /// [`init_from_env`] resolves to [`DEFAULT_ENABLED`].
-fn parse_enabled(value: &str) -> Option<bool> {
+pub(crate) fn parse_enabled(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "1" | "true" | "on" | "yes" => Some(true),
         "0" | "false" | "off" | "no" => Some(false),

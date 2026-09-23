@@ -729,6 +729,36 @@ mod desktop {
         unsafe { GetCursorPos(&raw mut point) };
         point
     }
+
+    /// `WM_CLOSE`.
+    const WM_CLOSE: u32 = 0x0010;
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn IsHungAppWindow(hwnd: Handle) -> i32;
+        fn PostMessageW(hwnd: Handle, message: u32, wparam: usize, lparam: isize) -> i32;
+    }
+
+    /// Whether the desktop has judged the window's thread hung — the verdict
+    /// that ghosts it as "Not Responding".
+    ///
+    /// Takes the handle as an address, because the question is asked from a
+    /// thread other than the window's, the way the desktop asks it, and a raw
+    /// pointer is not `Send`.
+    #[must_use]
+    pub fn is_hung(hwnd: usize) -> bool {
+        // SAFETY: a window handle by value; the call only reads, and answers
+        // `FALSE` for a handle that is not a window.
+        unsafe { IsHungAppWindow(core::ptr::with_exposed_provenance_mut(hwnd)) != 0 }
+    }
+
+    /// Posts `WM_CLOSE`, as the title bar's close button ends up doing.
+    pub fn post_close(hwnd: Handle) {
+        // SAFETY: a window this process created and has not destroyed; posting
+        // only queues the message.
+        let posted = unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
+        assert_ne!(posted, 0, "PostMessageW(WM_CLOSE) was refused");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3121,4 +3151,131 @@ fn a_clipboard_another_process_will_not_release_is_refused_within_the_budget() {
         "both calls returned while the peer still held the clipboard, which is the bound: \
          {acted_within:?} of {LONG_HOLD:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// A long load on the window's thread
+// ---------------------------------------------------------------------------
+
+/// Holds the window's thread for up to `span` — a load — taking a
+/// [`Shell::keep_alive`] turn every `every` when that is `Some`, while another
+/// thread asks the desktop whether the window is hung.
+///
+/// Returns how far into the load the desktop first said so, and stops there;
+/// `None` means it never did. The load sleeps rather than spins: what the
+/// desktop times is how long the thread has gone without asking for a message,
+/// and a sleeping thread asks for none, exactly like a busy one.
+fn load(
+    shell: &mut dyn Shell,
+    hwnd: desktop::Handle,
+    span: Duration,
+    every: Option<Duration>,
+) -> Option<Duration> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// How often the observer asks, and how finely the load is sliced.
+    const TURN: Duration = Duration::from_millis(20);
+
+    let address = hwnd.expose_provenance();
+    let hung = AtomicBool::new(false);
+    let done = AtomicBool::new(false);
+    let started = Instant::now();
+    std::thread::scope(|scope| {
+        let observer = scope.spawn(|| {
+            while !done.load(Ordering::Acquire) {
+                if desktop::is_hung(address) {
+                    hung.store(true, Ordering::Release);
+                    return Some(started.elapsed());
+                }
+                std::thread::sleep(TURN);
+            }
+            None
+        });
+        let mut last_turn = Instant::now();
+        while started.elapsed() < span && !hung.load(Ordering::Acquire) {
+            if every.is_some_and(|every| last_turn.elapsed() >= every) {
+                shell.keep_alive();
+                last_turn = Instant::now();
+            }
+            std::thread::sleep(TURN);
+        }
+        done.store(true, Ordering::Release);
+        observer.join().expect("the observer thread panicked")
+    })
+}
+
+/// A load that takes `keep_alive` turns is never ghosted as "Not Responding",
+/// and loses nothing that arrived while it ran.
+///
+/// Reported by a game that loads its assets on the loop thread after opening
+/// its window: under contention the load ran about fifteen seconds without a
+/// pump, and the desktop ghosted the window. `IsHungAppWindow` is that verdict,
+/// asked from another thread the way the desktop asks it.
+///
+/// **The control half is what makes the verdict worth trusting.** The same load
+/// without the turns must be judged hung, or this desktop does not ghost at all
+/// (`HungAppTimeout` raised, say) and the serviced half would pass having
+/// proved nothing. Its time to hang is also what the serviced load is measured
+/// against, so the test does not carry the desktop's timeout as a number.
+///
+/// Slow by nature: the control takes as long as the desktop's timeout, and the
+/// serviced load half as long again.
+#[test]
+#[ignore = "needs a Windows desktop; run tests/run-win32-e2e.ps1"]
+fn a_load_that_keeps_the_window_alive_is_never_hung_and_loses_nothing() {
+    /// A few turns a second, as `Shell::keep_alive` recommends.
+    const EVERY: Duration = Duration::from_millis(100);
+
+    let mut session = Session::open();
+    let window = session.window("loading");
+    let hwnd = session.hwnd(window);
+    // What creating and settling the window produced, so what is left after
+    // the loads is theirs.
+    session.events.clear();
+
+    let hung_after = load(session.shell.as_mut(), hwnd, WAIT, None).unwrap_or_else(|| {
+        panic!(
+            "a thread that asked for no message for {WAIT:?} was never judged hung, so this \
+             desktop does not ghost windows and the rest of this test would prove nothing"
+        )
+    });
+    session.shell.keep_alive();
+    assert!(
+        !desktop::is_hung(hwnd.expose_provenance()),
+        "one keep_alive turn is a message asked for, which ends the verdict; the window read as \
+         hung after {hung_after:?} of not asking"
+    );
+
+    // A close request made during the load: kept, not answered and not lost.
+    desktop::post_close(hwnd);
+    let span = hung_after + hung_after / 2;
+    let serviced = load(session.shell.as_mut(), hwnd, span, Some(EVERY));
+    assert_eq!(
+        serviced, None,
+        "a load taking a keep_alive turn every {EVERY:?} was judged hung, against {hung_after:?} \
+         for one taking none"
+    );
+    assert!(
+        session.events.is_empty(),
+        "keep_alive delivers nothing: {:?}",
+        session.names()
+    );
+    session.pump();
+    let closes = session
+        .events
+        .iter()
+        .filter(
+            |event| matches!(event, ShellEvent::CloseRequested { window: got } if *got == window),
+        )
+        .count();
+    assert_eq!(
+        closes,
+        1,
+        "the close request made during the load arrives on the first pump after it, once: {:?}",
+        session.names()
+    );
+    session
+        .shell
+        .reply_close_request(window, crcbl_shell::CloseReply::Keep)
+        .expect("the request is outstanding until it is answered");
 }

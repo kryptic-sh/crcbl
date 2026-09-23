@@ -250,24 +250,33 @@ impl Gpu {
     /// [`PendingGpu`] already carried, so both bring-up paths now name one
     /// argument and cannot be handed a rig from a different file.
     ///
+    /// **`shell` is kept alive while the renderer builds.** A glTF of any size
+    /// is a build of seconds on a cold driver shader cache, on the thread that
+    /// owns the window, so the build calls [`Shell::keep_alive`] between its
+    /// steps — see
+    /// [`ForwardRenderer::with_scene_serviced`](crcbl::render::ForwardRenderer::with_scene_serviced).
+    /// Whatever the window saw meanwhile is the first frame's to handle.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, or if the renderer refused the
     /// description — which for a converted glTF means a document larger than
     /// the pools it asked to be sized for.
     pub fn open<S: Shell + ?Sized>(
-        shell: &S,
+        shell: &mut S,
         window: WindowId,
         extent: (u32, u32),
         gpu: GpuOptions,
         model: &crate::model::Model,
     ) -> Result<Self, GpuError> {
+        let ctx = GpuContext::open(shell, window, extent, &desc(gpu))?;
         Self::from_context(
-            GpuContext::open(shell, window, extent, &desc(gpu))?,
+            ctx,
             &model.render.scene,
             &model.render.instances,
             &model.skinned,
             grid_extent_for(model),
+            &mut || shell.keep_alive(),
         )
     }
 
@@ -276,6 +285,9 @@ impl Gpu {
     /// Split from [`Gpu::open`] the way every other sample splits one out: the
     /// context is where the player's `[engine.video]` settings are read, so a
     /// test that wants to say what they are has to be able to hand one over.
+    ///
+    /// `service` is called between the renderer build's steps — see
+    /// [`Gpu::open`], which is the caller with a window to keep alive.
     ///
     /// # Errors
     ///
@@ -287,16 +299,22 @@ impl Gpu {
         instances: &[InstanceDesc],
         skinned: &crate::model::Skinned,
         grid_extent: f32,
+        service: &mut dyn FnMut(),
     ) -> Result<Self, GpuError> {
         let format = ctx.format();
-        let mut renderer =
-            match ForwardRenderer::with_scene(ctx.device(), ctx.queue(), format, scene) {
-                Ok(renderer) => renderer,
-                Err(error) => {
-                    ctx.destroy()?;
-                    return Err(GpuError::Hal(error));
-                }
-            };
+        let mut renderer = match ForwardRenderer::with_scene_serviced(
+            ctx.device(),
+            ctx.queue(),
+            format,
+            scene,
+            service,
+        ) {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                ctx.destroy()?;
+                return Err(GpuError::Hal(error));
+            }
+        };
         // The player's `[engine.video]` clamp, which the context read while it
         // opened. It only ever removes, so a run with no settings file draws
         // what it drew before. `reload` carries the answer across a document
@@ -1026,6 +1044,7 @@ impl PendingGpu {
                 &self.model.render.instances,
                 &self.model.skinned,
                 grid_extent_for(&self.model),
+                &mut || {},
             )
             .map(Some),
             None => Ok(None),
@@ -1930,6 +1949,7 @@ mod tests {
             &[],
             &nothing_skinned,
             1.0,
+            &mut || {},
         )
         .expect("the null device builds the viewer's renderer");
         let opened = gpu.effects();
@@ -1996,6 +2016,7 @@ mod tests {
             &[],
             &nothing_skinned,
             1.0,
+            &mut || {},
         )
         .expect("the null device builds the viewer's renderer");
 

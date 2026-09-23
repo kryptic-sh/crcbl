@@ -1196,12 +1196,10 @@ impl Shell for AppKitShell {
     /// same shape as the Win32 modal resize loop, and it costs the same thing —
     /// see the [module docs](super).
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
+        // Around the delivery as well as inside `keep_alive`, so a sink that
+        // calls back into AppKit drains into a pool as it always did.
         let _pool = AutoreleasePool::push();
-        // SAFETY: the main thread — a `Shell` is not `Send`, and `open` refused
-        // anywhere else — with the pool above in scope.
-        unsafe { self.drain_events() };
-        self.translate();
-        self.publish_configurations();
+        self.keep_alive();
         // Drain by count, not `while let`: a sink that creates a window must not
         // be able to spin this loop, and whatever it queued belongs to the next
         // frame — which is what the event queue would have done anyway.
@@ -1211,6 +1209,19 @@ impl Shell for AppKitShell {
             };
             sink(event);
         }
+    }
+
+    /// Runs the event queue and keeps what it produced.
+    ///
+    /// Taking events off `NSApp`'s queue is what keeps the window server from
+    /// putting the spinning cursor over a busy application.
+    fn keep_alive(&mut self) {
+        let _pool = AutoreleasePool::push();
+        // SAFETY: the main thread — a `Shell` is not `Send`, and `open` refused
+        // anywhere else — with the pool above in scope.
+        unsafe { self.drain_events() };
+        self.translate();
+        self.publish_configurations();
     }
 
     /// Blocks until an event arrives or `timeout` elapses.

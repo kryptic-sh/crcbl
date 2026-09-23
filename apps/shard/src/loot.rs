@@ -71,7 +71,7 @@
 //! grid is exactly the set of felled foes, and `crate::save`'s decoder refuses
 //! a payload claiming a stack no foe could have left.
 
-use crcbl::inventory::{Catalog, Cell, Grid, InventoryError, ItemId, Stack, StackId};
+use crcbl::inventory::{Catalog, Grid, InventoryError, ItemId, Stack, StackId};
 
 /// The item table, compiled in. See the module docs for why it is not an asset.
 const ITEMS_RON: &str = include_str!("../data/items.ron");
@@ -301,25 +301,6 @@ pub fn foe_of(stack: StackId, roster: usize) -> Option<usize> {
     (index < roster).then_some(index)
 }
 
-/// Where inside a footprint the pointer grabbed it, applied to where it was
-/// dropped.
-///
-/// A drag names the cell under the pointer, not the placement's origin, so a
-/// `2×2` plate grabbed by its bottom-right corner and dropped two cells over
-/// has to land two cells over — not with its *origin* under the pointer, which
-/// would jump it up and left by its own size. `None` is a destination that
-/// would put the origin off the top or the left edge, which is a move
-/// [`Grid::move_within`] would refuse anyway.
-#[must_use]
-pub fn dragged_origin(origin: Cell, grabbed: Cell, dropped_on: Cell) -> Option<Cell> {
-    let dx = grabbed.x.checked_sub(origin.x)?;
-    let dy = grabbed.y.checked_sub(origin.y)?;
-    Some(Cell::new(
-        dropped_on.x.checked_sub(dx)?,
-        dropped_on.y.checked_sub(dy)?,
-    ))
-}
-
 /// What the character is carrying, in grams — the kit's flat sum over one grid.
 #[must_use]
 pub fn weight_g(grid: &Grid) -> u64 {
@@ -530,33 +511,6 @@ mod tests {
             foe_of(stack_id(FOES), FOES),
             None,
             "a fourth stack in a three-foe zone",
-        );
-    }
-
-    /// **A drag lands where the hand let go, whatever part of the item it took
-    /// hold of.** A build that moved the *origin* under the pointer would jump
-    /// a `2×2` up and left by its own size on every drag that grabbed it
-    /// anywhere but its top-left cell.
-    #[test]
-    fn a_drag_keeps_the_grip_it_started_with() {
-        let origin = Cell::new(1, 1);
-        // Grabbed by the top-left cell: the item goes exactly where it is
-        // dropped.
-        assert_eq!(
-            dragged_origin(origin, origin, Cell::new(2, 3)),
-            Some(Cell::new(2, 3)),
-        );
-        // Grabbed by the bottom-right of a 2x2 and dropped one cell right: the
-        // origin follows by one, rather than landing on the drop.
-        assert_eq!(
-            dragged_origin(origin, Cell::new(2, 2), Cell::new(3, 2)),
-            Some(Cell::new(2, 1)),
-        );
-        // …and a drop that would put the origin off the grid is refused rather
-        // than wrapped.
-        assert_eq!(
-            dragged_origin(origin, Cell::new(2, 2), Cell::new(0, 0)),
-            None
         );
     }
 }

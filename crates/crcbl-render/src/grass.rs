@@ -996,6 +996,10 @@ impl Grass {
     /// Builds the seven pipelines — two dispatches and a card, a shell, a fin
     /// and two mesh blade draws — the two samplers and the three uniform rings.
     ///
+    /// `service` runs before each pipeline: on a cold driver cache these seven
+    /// are the longest run of compilations in a renderer's build — see
+    /// [`ForwardRenderer::with_scene_serviced`](crate::forward::ForwardRenderer::with_scene_serviced).
+    ///
     /// # Errors
     ///
     /// [`HalError`] from any seam call. **Nothing is released on the failing
@@ -1005,6 +1009,7 @@ impl Grass {
         device: &dyn Device,
         frames: usize,
         shadow_sampler: SamplerHandle,
+        service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         let compute = ShaderStages::COMPUTE;
         let gen_entries = [
@@ -1049,6 +1054,7 @@ impl Grass {
             bind_group_layouts: &[gen_layout],
             push_constants: None,
         })?;
+        service();
         let clear_pipeline = compute_pipeline_entry(
             device,
             "grass clear",
@@ -1057,6 +1063,7 @@ impl Grass {
             gen_pipeline_layout,
             WORKGROUP_SIZE,
         )?;
+        service();
         let generate_pipeline = compute_pipeline_entry(
             device,
             "grass generate",
@@ -1136,18 +1143,21 @@ impl Grass {
             push_constants: None,
         })?;
         let list = PrimitiveTopology::TriangleList;
+        service();
         let raster_pipeline = build_raster(
             device,
             raster_pipeline_layout,
             ("vertexMain", "fragmentMain"),
             list,
         )?;
+        service();
         let shell_pipeline = build_raster(
             device,
             raster_pipeline_layout,
             ("shellVertexMain", "shellFragmentMain"),
             list,
         )?;
+        service();
         let fin_pipeline = build_raster(
             device,
             raster_pipeline_layout,
@@ -1157,12 +1167,14 @@ impl Grass {
         // **Strips**: a blade is a pair of vertices at each height and one at
         // the tip, which is decision 3's fifteen and seven only as a strip.
         let strip = PrimitiveTopology::TriangleStrip;
+        service();
         let blade_near_pipeline = build_raster(
             device,
             raster_pipeline_layout,
             ("bladeNearVertexMain", "bladeFragmentMain"),
             strip,
         )?;
+        service();
         let blade_far_pipeline = build_raster(
             device,
             raster_pipeline_layout,

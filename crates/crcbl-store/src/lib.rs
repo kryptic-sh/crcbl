@@ -6,6 +6,8 @@
 //! - [`StorageSource`] — the abstract seam (sync for native, see notes below)
 //! - [`NativeStorage`] — platform-directory-backed storage
 //! - [`write_atomic`] — write-then-rename for crash-safe file writes
+//! - [`enable_log_file`] — the opt-in rotated log file, in the platform's log
+//!   directory
 //! - Settings (TOML layers, typed access) — module `settings`
 //! - Saves (binary save/load container) — module `save`
 //! - A file kept in a cloud, conflicts surfaced to the game — module [`synced`]
@@ -187,6 +189,40 @@ impl NativeStorage {
         Some(dirs::config_dir()?.join(app_name))
     }
 
+    /// Where `app_name`'s log files belong, creating nothing.
+    ///
+    /// Each platform's own place for logs, which is not its data directory:
+    ///
+    /// | Platform | Directory                                               |
+    /// | -------- | ------------------------------------------------------- |
+    /// | Windows  | `%LOCALAPPDATA%\<app_name>\logs`                        |
+    /// | Linux    | `$XDG_STATE_HOME/<app_name>/logs` (`~/.local/state/…`)  |
+    /// | macOS    | `~/Library/Logs/<app_name>`                             |
+    ///
+    /// **Windows takes the local, not the roaming, application data**: a log
+    /// describes this machine's run, and a roaming profile would copy megabytes
+    /// of it to every other machine the player signs in to. **Linux takes the
+    /// XDG state directory**, which the base-directory spec names for exactly
+    /// this — "actions history (logs, …)" — and falls back to the local data
+    /// directory where [`dirs`] cannot name one. **macOS takes `~/Library/Logs`**,
+    /// the per-user log directory Console.app lists; [`dirs`] has no name for
+    /// it, so it is spelled here.
+    ///
+    /// `None` where the platform names none of these, which includes `wasm32`.
+    #[must_use]
+    pub fn log_root(app_name: &str) -> Option<PathBuf> {
+        if cfg!(target_os = "macos") {
+            return Some(
+                dirs::home_dir()?
+                    .join("Library")
+                    .join("Logs")
+                    .join(app_name),
+            );
+        }
+        let base = dirs::state_dir().or_else(dirs::data_local_dir)?;
+        Some(base.join(app_name).join("logs"))
+    }
+
     /// Create a storage root under a platform-standard config directory.
     ///
     /// `app_name` is used as a subdirectory name, e.g. `~/.config/<app_name>/`.
@@ -232,6 +268,45 @@ impl NativeStorage {
             return Err(StorageError::InvalidPath(path.to_path_buf()));
         }
         Ok(self.root.join(path))
+    }
+}
+
+/// Copies this run's log to a rotated `<app_name>.log` in the platform's log
+/// directory, and returns its path.
+///
+/// **The one call a game makes to keep its logs in a build with no console** —
+/// after [`crcbl_core::log::init_logging`], and only when it wants the file:
+/// nothing opens one otherwise. [`NativeStorage::log_root`] says where it goes;
+/// [`crcbl_core::log::attach_file`] says how it rotates and why a crash does not
+/// lose its last lines.
+///
+/// **It installs a panic hook**, as `attach_file` does, which writes a panic's
+/// message, location and thread to the file and then calls the hook it
+/// replaced. A game that manages the process's panic hook itself and wants
+/// nothing chained in front of it skips this and calls
+/// [`crcbl_core::log::attach_file_without_panic_hook`] with
+/// [`NativeStorage::log_root`] instead.
+///
+/// **Never fatal.** A platform with no log directory, a directory that cannot be
+/// made, a file that cannot be opened: each is a warning through the log — which
+/// still reaches stderr — and `None`, and the run carries on without the file.
+pub fn enable_log_file(app_name: &str) -> Option<PathBuf> {
+    let Some(dir) = NativeStorage::log_root(app_name) else {
+        crcbl_core::log::warn!("log: this platform names no log directory; logging to stderr only");
+        return None;
+    };
+    match crcbl_core::log::attach_file(&dir, app_name) {
+        Ok(path) => {
+            crcbl_core::log::info!("log: writing this run to {}", path.display());
+            Some(path)
+        }
+        Err(error) => {
+            crcbl_core::log::warn!(
+                "log: no log file in {} ({error}); logging to stderr only",
+                dir.display()
+            );
+            None
+        }
     }
 }
 
@@ -450,6 +525,38 @@ impl StorageSource for MemoryStorage {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// **The log directory is the platform's place for logs, and naming it
+    /// creates nothing.**
+    ///
+    /// The macOS arm is not compiled into a Windows or Linux run of this test,
+    /// so it is checked where CI runs macOS, not here.
+    #[test]
+    fn the_log_root_is_named_per_platform_and_not_created() {
+        let app = "crcbl-store-log-root-test";
+        let root = NativeStorage::log_root(app).expect("a desktop names a log directory");
+        assert!(!root.exists(), "{} was created", root.display());
+        if cfg!(target_os = "macos") {
+            assert!(
+                root.ends_with(Path::new("Library").join("Logs").join(app)),
+                "{}",
+                root.display()
+            );
+        } else {
+            assert!(
+                root.ends_with(Path::new(app).join("logs")),
+                "{}",
+                root.display()
+            );
+            if cfg!(windows) {
+                assert_eq!(
+                    root.parent().and_then(Path::parent),
+                    dirs::data_local_dir().as_deref(),
+                    "local, not roaming, application data"
+                );
+            }
+        }
+    }
 
     // ── MemoryStorage tests ──────────────────────────────────────────────
 

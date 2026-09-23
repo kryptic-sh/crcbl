@@ -1,22 +1,25 @@
 //! Tumble — the physics gallery: each rung of the contact solver on the scene
 //! built to prove it.
 //!
-//! `docs/plan/sample/24-tumble.md`, **milestone 3, rung 1 "Pachinko"**, from
-//! `docs/plan/36-contact-solver.md`'s rung table, beside milestone 2's rung 0
-//! "Spin": three rooms, each its own physics system — the zero-g T-handle and
-//! a box that lands ([`spin`]), the obstacle wall with falling balls
-//! ([`wall`]) and a thousand-ball pit ([`pit`]) — with every counter of both
-//! rungs on the page. See [`scene`] for how the rooms share a tick and a hash.
+//! `docs/plan/sample/24-tumble.md`, **milestone 4, rung 2 "Tower"**, from
+//! `docs/plan/36-contact-solver.md`'s rung table, beside milestone 3's rung 1
+//! "Pachinko" and milestone 2's rung 0 "Spin": four rooms — the zero-g
+//! T-handle and a box that lands ([`spin`]), the obstacle wall with falling
+//! balls, pills and cubes ([`wall`]), a thousand-ball pit ([`pit`]), and a
+//! column, a pyramid and dominoes ([`tower`]) — with every counter of the
+//! three rungs on the page. See [`scene`] for how the rooms share a tick and a
+//! hash.
 //!
 //! # What is not here yet
 //!
 //! **Milestone 1 was skipped rather than built**: the bullet scene, the wind
-//! tunnel and the golden frame. Every later rung's scene is `docs/backlog.md`'s
-//! to carry, and what each room cannot show yet is on its hint line.
+//! tunnel and the golden frame. Milestone 4's Galton board is not built
+//! either. Every later rung's scene is `docs/backlog.md`'s to carry, and what
+//! each room cannot show yet is on its hint line.
 //!
 //! # It runs itself
 //!
-//! The one key it reads — `1`, `2`, `3` — picks the room on screen and never
+//! The one key it reads — `1` to `4` — picks the room on screen and never
 //! reaches the simulation. The rooms start the same way every run, which is
 //! what lets the browser gate hold the wasm build's hash to the constant the
 //! native test pins.
@@ -35,6 +38,7 @@ pub mod pit;
 pub mod scene;
 pub mod spin;
 pub mod stage;
+pub mod tower;
 pub mod wall;
 
 #[cfg(target_arch = "wasm32")]

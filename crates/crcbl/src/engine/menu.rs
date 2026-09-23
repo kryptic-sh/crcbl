@@ -33,12 +33,12 @@
 //! toolkit cannot see them, and giving it a "resume" would be the layer
 //! boundary this crate's split exists to hold.
 
-use crcbl_input::{ActionMap, Binding, text, ui};
+use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding, text, ui};
 use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
 
 use super::{
     DEBUG_OVERLAY_ID, FULLSCREEN_ID, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_LEFT_KEY,
-    MENU_RIGHT_KEY, MENU_UP_KEY, RESUME_ID,
+    MENU_RIGHT_KEY, MENU_UP_KEY, PAUSE_BUTTON, RESUME_ID,
 };
 
 /// The panel's heading.
@@ -105,6 +105,20 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// [`ui::MOVE`], [`MENU_ACTIVATE_KEY`] as [`ui::ACCEPT`], and nothing for
 /// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
 ///
+/// **Only the keys are narrowed.** The pad column of [`ui::declare`] stays as
+/// it is — every binding [`Binding::reads_gamepad`] names — so the left stick
+/// and the d-pad move, South accepts and East backs out: the loop
+/// withholds no pad event from the game (see
+/// [`HostedGame::gamepad_event`](super::HostedGame::gamepad_event)), so there
+/// is no game binding for the narrowing to protect.
+///
+/// # The pad's pause
+///
+/// [`PAUSE_BUTTON`] is bound here too, to an action of
+/// the loop's own in the base context: [`PAUSE_KEY`](super::PAUSE_KEY)'s twin,
+/// which has to work with no panel up, so it cannot live in `ui`. Nothing in
+/// `ui` binds it, so a pushed context leaves it where it is.
+///
 /// # The `text` context rides on the same map
 ///
 /// [`text::declare`] puts the reserved `text` context here too, off the stack,
@@ -140,13 +154,29 @@ pub fn menu_actions() -> ActionMap {
         (ui::PREV, Vec::new()),
         (ui::BACK, Vec::new()),
     ];
-    for (name, bindings) in rebinds {
+    for (name, keys) in rebinds {
+        let pads = actions
+            .bindings(name)
+            .unwrap_or_default()
+            .iter()
+            .filter(|binding| binding.reads_gamepad())
+            .cloned();
+        let bindings = keys.into_iter().chain(pads).collect();
         actions
             .rebind(name, bindings)
             .expect("ui::declare declared every reserved action");
     }
+    actions.declare(ActionDecl {
+        name: PAUSE_ACTION.to_owned(),
+        kind: ActionKind::Button,
+        bindings: vec![Binding::PadButton(PAUSE_BUTTON)],
+    });
     actions
 }
+
+/// The loop's own action on [`PAUSE_BUTTON`], in the base context — see
+/// [`menu_actions`].
+pub(super) const PAUSE_ACTION: &str = "engine_pause";
 
 /// Whether `actions`' `ui` context binds `key` at all: a key a menu may take.
 pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -> bool {
@@ -231,6 +261,49 @@ mod tests {
                 }),
             );
         }
+    }
+
+    /// **The d-pad walks a menu**: narrowing the keys keeps [`ui::MOVE`]'s pad
+    /// column, so a d-pad press on the loop's map steps once in its direction,
+    /// alongside the arrows.
+    #[test]
+    fn the_dpad_moves_through_the_loops_menu_map() {
+        use crcbl_input::{Cardinal, GamepadEvent, GamepadId, GamepadSnapshot, PadButton, PadKind};
+        let pad = GamepadId(1);
+        let holding = |buttons: &[PadButton]| GamepadEvent::State {
+            id: pad,
+            snapshot: GamepadSnapshot {
+                buttons: buttons.iter().copied().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        };
+        let mut actions = menu_actions();
+        assert!(
+            actions
+                .bindings(ui::MOVE)
+                .unwrap_or_default()
+                .contains(&Binding::PadDpad),
+            "menu_actions dropped the d-pad: {:?}",
+            actions.bindings(ui::MOVE),
+        );
+        actions.push_context(ui::CONTEXT).expect("declared");
+        for (button, direction) in [
+            (PadButton::DpadDown, Cardinal::Down),
+            (PadButton::DpadUp, Cardinal::Up),
+        ] {
+            actions.begin_tick(1.0 / 60.0);
+            actions.gamepad_event(&holding(&[button]));
+            assert_eq!(actions.cardinal(ui::MOVE), Some(direction), "{button:?}");
+            assert!(actions.repeated(ui::MOVE), "{button:?} stepped nothing");
+            actions.gamepad_event(&holding(&[]));
+        }
+        actions.begin_tick(1.0 / 60.0);
+        actions.key_event(MENU_DOWN_KEY, true);
+        assert_eq!(
+            actions.cardinal(ui::MOVE),
+            Some(Cardinal::Down),
+            "and the arrows still move",
+        );
     }
 
     /// The set draws nothing until it is shown the paused state, which is what

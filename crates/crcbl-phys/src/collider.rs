@@ -167,7 +167,26 @@ impl Aabb {
             && self.max.z >= other.max.z
     }
 
-    // -- ray intersection (slab method) ---------------------------------------
+    /// The point of this box (a solid, so its interior counts) nearest to
+    /// `point`: `point` itself when it is inside or on the surface, otherwise
+    /// the point on the surface it is closest to.
+    ///
+    /// `None` when there is no answer to give: the box is empty (`min` past
+    /// `max` on an axis), or `point` or either corner holds a `NaN`. Clamping
+    /// against such a box would either panic in `f64::clamp` or hand back a
+    /// `NaN` that reads as a position everywhere downstream.
+    #[inline]
+    #[must_use]
+    pub fn closest_point(&self, point: DVec3) -> Option<DVec3> {
+        // `cmple` is false on a `NaN` lane, so one test refuses both an
+        // inverted box and a poisoned one — `is_empty` alone passes a `NaN`.
+        if !self.min.cmple(self.max).all() || point.is_nan() {
+            return None;
+        }
+        Some(point.clamp(self.min, self.max))
+    }
+
+    // -- ray intersection (slab method)---------------------------------------
 
     /// The parametric interval `(t_near, t_far)` over which a ray is inside
     /// this AABB, or `None` if the ray misses it entirely.
@@ -549,6 +568,51 @@ mod tests {
         let (near, far) = aabb.ray_slab(DVec3::ZERO, dir.recip(), neg).unwrap();
         assert!((near + 1.0).abs() < 1e-12);
         assert!((far - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn the_closest_point_of_a_box_is_on_its_surface_from_outside() {
+        let aabb = Aabb::new(DVec3::ZERO, DVec3::new(1.0, 2.0, 3.0));
+        // Past a face: only that axis moves.
+        assert_eq!(
+            aabb.closest_point(DVec3::new(0.5, 5.0, 1.0)),
+            Some(DVec3::new(0.5, 2.0, 1.0))
+        );
+        // Past a corner: every axis clamps.
+        assert_eq!(
+            aabb.closest_point(DVec3::new(-4.0, -1.0, 9.0)),
+            Some(DVec3::new(0.0, 0.0, 3.0))
+        );
+    }
+
+    #[test]
+    fn the_closest_point_of_a_box_to_a_point_inside_it_is_that_point() {
+        let aabb = Aabb::new(DVec3::ZERO, DVec3::new(1.0, 2.0, 3.0));
+        let inside = DVec3::new(0.25, 1.5, 2.75);
+        assert_eq!(aabb.closest_point(inside), Some(inside));
+        // A flat box is a real box: its face is its interior.
+        let flat = Aabb::new(DVec3::ZERO, DVec3::new(1.0, 0.0, 1.0));
+        assert_eq!(
+            flat.closest_point(DVec3::new(0.5, 3.0, 0.5)),
+            Some(DVec3::new(0.5, 0.0, 0.5))
+        );
+    }
+
+    #[test]
+    fn an_empty_or_nan_box_or_a_nan_point_has_no_closest_point() {
+        let unit = Aabb::new(DVec3::ZERO, DVec3::ONE);
+        assert_eq!(Aabb::EMPTY.closest_point(DVec3::ZERO), None);
+        assert_eq!(
+            Aabb::new(DVec3::ONE, DVec3::ZERO).closest_point(DVec3::ZERO),
+            None
+        );
+        let poisoned = Aabb::new(DVec3::new(f64::NAN, 0.0, 0.0), DVec3::ONE);
+        assert!(
+            !poisoned.is_empty(),
+            "a NaN box reads as non-empty, so is_empty alone would not refuse it"
+        );
+        assert_eq!(poisoned.closest_point(DVec3::ZERO), None);
+        assert_eq!(unit.closest_point(DVec3::new(0.0, f64::NAN, 0.0)), None);
     }
 
     #[test]

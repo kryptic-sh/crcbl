@@ -6,8 +6,9 @@ as L2 (contacts) and L3 (constraints) and left it as a paragraph because nothing
 in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
-**Status: rungs 0 and 1 built (2026-09-17).** Rung 0: rotation (inertia tensor,
-torque, the implicit-midpoint gyroscopic step), dense generational body sets,
+**Status: rungs 0 and 1 built (2026-09-17); rung 2 built for boxes, not for
+general hulls (2026-09-23).** Rung 0: rotation (inertia tensor, torque, the
+implicit-midpoint gyroscopic step), dense generational body sets,
 `SurfaceMaterial` per body and `crcbl_core::trig`. Rung 1, opted into with
 `PhysicsSystem::with_contacts`: split fattened broadphase trees with a move
 buffer and pair set; analytic sphere and capsule manifolds against spheres,
@@ -18,8 +19,33 @@ sections below: **the speculative distance grows with the pair's closing
 speed**, because decision 5's fixed four slops let a 30 m/s ball through a 2 cm
 plate, and **separation within a tick is tracked to first order** rather than
 through Box2D's turned anchors, which made a rolling ball slip. Sphere against
-sphere is in rung 1 because the ball pit needs it. Nothing from rung 2 on: no
-box against box, islands, sleep, sweeps or joints.
+sphere is in rung 1 because the ball pit needs it.
+
+Rung 2, for boxes: box against box, static or dynamic, through Ericson's
+fifteen-axis separating axis test with the pair's last axis cached (`SatCache`),
+Gregorius's face-over-edge tolerances, Sutherland–Hodgman clipping, reduction to
+four points and flip-invariant feature ids naming a feature of each box; and
+friction at each manifold's centroid with a twist term. Measured: a base-20
+pyramid of one-metre cubes holds for ten seconds at the defaults, its top box
+sunk 2.76 cm and 0.05 mm off sideways, 4 points a manifold, never under 99.7% of
+ids persisted; the Tower room's base-20 pyramid takes 766 µs a tick in the
+solver and 186 µs in the narrow phase, in a release build on a Ryzen 9 9950X3D,
+one thread, scalar `f64`. Four departures. **Sphere and capsule against a box
+stay analytic** rather than GJK with a SAT fallback: against a box the closest
+point is a clamp, exact and cheaper, and GJK arrives with the hull it is for —
+though rung 2 fixed two rung 1 cases where a capsule along a box edge, or across
+a face and past its end, rested on one wandering point, and named the box's
+feature in those pairs' ids. **The 20-box column does not stand at decision 1's
+30 Hz**: a soft contact's stiffness is `m ω²` whatever it carries, so a column
+buckles under its own weight past Greenhill's height, `(1.96 ω² w / g)^⅓` cubes
+of half-extent `w` — fifteen one-metre cubes at 30 Hz, and measured, fourteen
+stood and seventeen fell. The column runs `ContactSettings::TALL_STACK`, eight
+substeps at 90 Hz, for its whole system until substeps are per group. **Fast
+spinners still sink** — a 5 cm cube at 80 rad/s turned a corner 6.9 cm into a
+peg on the wall — because rotation outruns a once-a-tick manifold, which is rung
+4's. **Not built: general convex hulls** (there is no hull collider) and GJK for
+spheres and capsules against them. Nothing from rung 3 on: islands, sleep,
+sweeps or joints.
 
 ## Decisions from the engine research (2026-09-15)
 
@@ -259,16 +285,16 @@ Each rung lands with a scene in [sample/24-tumble.md](sample/24-tumble.md) and
 the counters that scene displays. Sleep follows contacts and boxes rather than
 arriving with parallel islands; SIMD and parallelism come last.
 
-| Rung            | Scope                                                                                                                                                                                                                                              | Proving scene                                                                             | Counters                                                                                                                                        |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| 0 Spin          | Inertia tensors, quaternion integration, gyroscopic torque; dense solver sets replacing the hash maps; friction and restitution from materials ([37-materials.md](37-materials.md)); pinned trigonometry for the simulation                        | a zero-g tumbling T-handle; a box dropped flat                                            | angular momentum and energy drift, step time, hash                                                                                              |
-| 1 Pachinko      | Analytic sphere and capsule manifolds against static boxes and planes; split trees, move buffer, pair set, persistent contacts; scalar Soft Step with warm starting, speculative contacts and the restitution pass; `KineticContact` from impulses | the obstacle wall with falling balls; a thousand-ball pit                                 | bodies, pairs, contacts begun and ended; broadphase, narrow-phase and solver time; worst penetration; bounce ratio                              |
-| 2 Tower         | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
-| 3 Settle        | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
-| 4 Bullets       | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
-| 5 Bridge        | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
-| 6 Pit           | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
-| 7 Pool and gale | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |
+| Rung                                | Scope                                                                                                                                                                                                                                              | Proving scene                                                                             | Counters                                                                                                                                        |
+| ----------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| 0 Spin (built)                      | Inertia tensors, quaternion integration, gyroscopic torque; dense solver sets replacing the hash maps; friction and restitution from materials ([37-materials.md](37-materials.md)); pinned trigonometry for the simulation                        | a zero-g tumbling T-handle; a box dropped flat                                            | angular momentum and energy drift, step time, hash                                                                                              |
+| 1 Pachinko (built)                  | Analytic sphere and capsule manifolds against static boxes and planes; split trees, move buffer, pair set, persistent contacts; scalar Soft Step with warm starting, speculative contacts and the restitution pass; `KineticContact` from impulses | the obstacle wall with falling balls; a thousand-ball pit                                 | bodies, pairs, contacts begun and ended; broadphase, narrow-phase and solver time; worst penetration; bounce ratio                              |
+| 2 Tower (built for boxes; no hulls) | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
+| 3 Settle                            | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
+| 4 Bullets                           | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
+| 5 Bridge                            | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
+| 6 Pit                               | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
+| 7 Pool and gale                     | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |
 
 ## Risks
 

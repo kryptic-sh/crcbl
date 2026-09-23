@@ -27,12 +27,14 @@
 //! are made.
 //! [`SurfaceMaterial`] carries each body's friction and restitution.
 //!
-//! L2 is rung 1 of `docs/plan/36-contact-solver.md`, in [`contact`]: a system
-//! made with [`PhysicsSystem::with_contacts`] collides spheres, capsules and
-//! (against planes) boxes through split broadphase trees, analytic manifolds
-//! and a substepped soft solver with warm starting, speculative contacts and a
-//! restitution pass, and raises a [`KineticContact`] for each hard impact.
-//! Box against box, islands and sleep are later rungs.
+//! L2 is rungs 1 and 2 of `docs/plan/36-contact-solver.md`, in [`contact`]: a
+//! system made with [`PhysicsSystem::with_contacts`] collides spheres,
+//! capsules and boxes through split broadphase trees, analytic manifolds, a
+//! cached separating axis test with clipping for box pairs, and a substepped
+//! soft solver with warm starting by feature id, centroid and twist friction,
+//! speculative contacts and a restitution pass, and raises a
+//! [`KineticContact`] for each hard impact. Convex hulls, islands and sleep
+//! are later rungs.
 //!
 //! [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries
@@ -46,6 +48,10 @@
 //! displacement and knows nothing about any camera, which is what lets one
 //! controller serve a first-person and a third-person game.
 //!
+//! [`AabbCompound`] is L0's query surface for a rigid body made of several
+//! boxes: a ray cast and a closest-point query against local-space parts at a
+//! [`Transform`], naming the part each answer came from.
+//!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
 //!
@@ -56,6 +62,7 @@ pub mod broadphase;
 pub mod character;
 pub mod collider;
 pub mod components;
+pub mod compound;
 pub mod contact;
 pub mod forces;
 pub mod frames;
@@ -70,9 +77,12 @@ pub mod world;
 
 pub use atmosphere::{Atmosphere, AtmosphericDrag};
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
-pub use character::{CharacterConfig, CharacterController, GroundContact, MoveOutcome};
+pub use character::{
+    CharacterConfig, CharacterController, GroundContact, GroundProbe, MoveOutcome,
+};
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
+pub use compound::{AabbCompound, CompoundError, CompoundHit, CompoundPoint};
 pub use contact::{
     ContactBody, ContactCounters, ContactReport, ContactSettings, KineticContact, KineticSource,
     PlaneId, StageTimes,

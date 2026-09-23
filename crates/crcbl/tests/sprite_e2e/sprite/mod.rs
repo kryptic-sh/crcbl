@@ -18,8 +18,9 @@
 //!
 //! The children split by claim rather than by size: `drawing` is the pass
 //! putting pixels where it was told and compositing them, `filtering` is
-//! sharp-bilinear, `rotation` is the vertex stage's rotation, and `mirror` is a
-//! reversed `u` range. `button_skin`, `menu` and `nine_slice` sit outside the
+//! sharp-bilinear, `rotation` is the vertex stage's rotation, `mirror` is a
+//! reversed `u` range, and `atlas` is a rendered image copied into an atlas slot
+//! and drawn. `button_skin`, `menu` and `nine_slice` sit outside the
 //! subtree and import this fixture anyway, because they are sprite quads with a
 //! different generator in front of them.
 
@@ -30,6 +31,7 @@ use crcbl::hal::{
     SubmitInfo,
 };
 
+mod atlas;
 mod drawing;
 mod filtering;
 mod mirror;
@@ -64,7 +66,7 @@ const SPRITE_HALF_HEIGHT: f32 = 96.0;
 
 /// The camera every sprite frame is drawn with: orthographic, looking down −Z at
 /// the plane the sprites live on.
-fn sprite_camera() -> crcbl::render::Camera {
+pub(crate) fn sprite_camera() -> crcbl::render::Camera {
     crcbl::render::Camera {
         eye: crcbl::math::Vec3::new(0.0, 0.0, 1.0),
         target: crcbl::math::Vec3::ZERO,

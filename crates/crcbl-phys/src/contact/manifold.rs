@@ -1,22 +1,25 @@
-//! Contact manifolds: the analytic pairs of rung 1.
+//! Contact manifolds: the analytic pairs of rung 1 and the box pair of rung 2.
 //!
 //! `docs/plan/36-contact-solver.md` decision 2 makes sphere, capsule and their
-//! pairs analytic and leaves boxes and hulls to a cached separating axis test
-//! with clipping, which is rung 2. What is here is every pair rung 1's scenes
-//! need that has a closed form:
+//! pairs analytic, and boxes and hulls a cached separating axis test with
+//! clipping:
 //!
 //! | A \ B   | sphere | capsule | box      | plane |
 //! | ------- | ------ | ------- | -------- | ----- |
 //! | sphere  | 1 pt   | 1 pt    | 1 pt     | 1 pt  |
 //! | capsule |        | 1–2 pts | 1–2 pts  | 1–2   |
-//! | box     |        |         | **none** | 1–4   |
+//! | box     |        |         | 1–4 pts  | 1–4   |
 //!
-//! **Box against box has no manifold** — that is rung 2's separating axis test
-//! and clipping — so two boxes pass through each other. Box against a plane is
-//! the one box pair here: its manifold is the box's corners below the plane,
-//! which needs no clipping, and it is what lets rung 0's dropped box land.
-//! Sphere against sphere is not in the plan's rung 1 row, which names only
-//! static boxes and planes; a ball pit is balls against balls, so it is here.
+//! **Box against box** is rung 2's, in `box_box`: the fifteen-axis separating
+//! axis test with the pair's last axis cached in a [`SatCache`], the incident
+//! face clipped to the reference face, and four points kept of up to eight.
+//! Box against a plane is the box's corners below the plane, which needs no
+//! clipping. Sphere and capsule against a box stay analytic rather than going
+//! through GJK, which the plan names for spheres and capsules against _hulls_:
+//! against a box the closest point is a clamp, exact and cheaper, and GJK
+//! arrives with the general hull it is needed for. Sphere against sphere is
+//! not in the plan's rung 1 row, which names only static boxes and planes; a
+//! ball pit is balls against balls, so it is here.
 //!
 //! # Conventions
 //!
@@ -34,8 +37,11 @@
 //! All arithmetic is `+ − × ÷` and `sqrt`, so every target reaches the same
 //! bits.
 
+mod box_box;
+
 use glam::{DQuat, DVec3};
 
+pub use self::box_box::SatCache;
 use super::shape::ContactShape;
 
 /// The most points a manifold holds.
@@ -120,10 +126,24 @@ impl Manifold {
 /// The manifold between `a` and `b`, keeping points within `speculative` of
 /// touching.
 ///
-/// `a` must not rank above `b`; see [`ContactShape::rank`]. A pair with no
-/// manifold — box against box, or two planes — answers [`Manifold::EMPTY`].
+/// `a` must not rank above `b`; see [`ContactShape::rank`]. Two planes have no
+/// manifold and answer [`Manifold::EMPTY`]. A box pair runs its separating axis
+/// test from nothing; [`collide_cached`] is the same with the pair's cached
+/// axis, and answers the same.
 #[must_use]
 pub fn collide(a: &ContactShape, b: &ContactShape, speculative: f64) -> Manifold {
+    collide_cached(a, b, speculative, &mut SatCache::default())
+}
+
+/// [`collide`], trying a box pair's last separating axis first and leaving its
+/// new one in `cache`. Every other pair ignores the cache.
+#[must_use]
+pub fn collide_cached(
+    a: &ContactShape,
+    b: &ContactShape,
+    speculative: f64,
+    cache: &mut SatCache,
+) -> Manifold {
     debug_assert!(a.rank() <= b.rank(), "shape A ranks above shape B");
     use ContactShape::{Box, Capsule, Plane, Sphere};
     match (*a, *b) {
@@ -218,6 +238,18 @@ pub fn collide(a: &ContactShape, b: &ContactShape, speculative: f64) -> Manifold
             },
             Plane { normal, offset },
         ) => box_plane(centre, rotation, half, normal, offset, speculative),
+        (
+            Box {
+                centre: ca,
+                rotation: ra,
+                half: ha,
+            },
+            Box {
+                centre: cb,
+                rotation: rb,
+                half: hb,
+            },
+        ) => box_box::boxes(ca, ra, ha, cb, rb, hb, speculative, cache),
         _ => Manifold::EMPTY,
     }
 }
@@ -288,7 +320,7 @@ fn sphere_box(
         manifold.push(
             box_centre + rotation * ((on_box + on_sphere) * 0.5),
             separation,
-            0,
+            box_box::feature_near(local, half),
         );
     }
     manifold
@@ -391,12 +423,31 @@ fn capsule_box(
     let distance = distance_squared.sqrt();
 
     // The face the capsule is against, if it is against a face: the one axis
-    // its nearest point lies outside, or, in overlap, the face whose outward
-    // direction the whole segment is least deep along.
+    // its nearest point lies outside; or, where it lies outside two, the face
+    // of the two the segment lies along and is furthest out from — a segment
+    // across a face and past its end is nearest just past the end, over an
+    // edge, and still rests on the face; or, in overlap, the face whose
+    // outward direction the whole segment is least deep along.
     let face = if distance > 0.0 {
+        let side = |k: usize| (k, if p[k] < 0.0 { -1.0 } else { 1.0 });
         let mut outside = (0..3).filter(|&k| p[k].abs() > half[k]);
         match (outside.next(), outside.next()) {
-            (Some(k), None) => Some((k, if p[k] < 0.0 { -1.0 } else { 1.0 })),
+            (Some(k), None) => Some(side(k)),
+            (Some(i), Some(j)) => {
+                let lies_along = |k: usize| {
+                    along[k] * along[k] <= PARALLEL_SINE * PARALLEL_SINE * along.length_squared()
+                };
+                let excess = |k: usize| p[k].abs() - half[k];
+                let (first, second) = if excess(j) > excess(i) {
+                    (j, i)
+                } else {
+                    (i, j)
+                };
+                [first, second]
+                    .into_iter()
+                    .find(|&k| lies_along(k))
+                    .map(side)
+            }
             _ => None,
         }
     } else {
@@ -432,7 +483,7 @@ fn capsule_box(
                     manifold.push(
                         box_centre + rotation * (point - outward * (0.5 * (radius + delta))),
                         separation,
-                        id,
+                        (box_box::face_feature(k, sign > 0.0) << 8) | id,
                     );
                 }
             }
@@ -462,18 +513,67 @@ fn capsule_box(
         manifold.push(
             box_centre + rotation * (p - outward * (0.5 * (radius + delta))),
             delta - radius,
-            2,
+            (box_box::feature_near(p, half) << 8) | 2,
         );
         return manifold;
     }
     let outward = (p - q) / distance;
     let mut manifold = Manifold::with_normal(-(rotation * outward));
+
+    // Against an edge the segment lies along, the nearest point is anywhere
+    // on the stretch they share, so a single point would wander along it from
+    // tick to tick: rest on both ends of that stretch instead, as along a face.
+    // Where along the edge the nearest point lands is a tie, and may land just
+    // past the edge's end, so the edge is the one the segment is parallel to
+    // with the nearest point outside on both the other axes.
+    let edge = (0..3).find(|&k| {
+        let (i, j) = ((k + 1) % 3, (k + 2) % 3);
+        p[i].abs() > half[i]
+            && p[j].abs() > half[j]
+            && along.length_squared() - along[k] * along[k]
+                <= PARALLEL_SINE * PARALLEL_SINE * along.length_squared()
+    });
+    if let Some(k) = edge
+        && let Some((lo, hi)) = clip_to_edge(p0, along, half, k)
+        && hi > lo
+    {
+        for (id, param) in [(0u32, lo), (1, hi)] {
+            let point = p0 + along * param;
+            let on_edge = point.clamp(-half, half);
+            let gap = (point - on_edge).dot(outward);
+            let separation = gap - radius;
+            if separation <= speculative {
+                manifold.push(
+                    box_centre + rotation * (point - outward * (0.5 * (radius + gap))),
+                    separation,
+                    (box_box::feature_near(p, half) << 8) | id,
+                );
+            }
+        }
+        if manifold.count > 0 {
+            return manifold;
+        }
+    }
+
     manifold.push(
         box_centre + rotation * (p - outward * (0.5 * (radius + distance))),
         distance - radius,
-        2,
+        (box_box::feature_near(p, half) << 8) | 2,
     );
     manifold
+}
+
+/// The stretch of the segment `p0 + along · t`, `t ∈ [0, 1]`, that lies
+/// alongside the box's edges on axis `k`: inside the box's extent on that
+/// axis.
+fn clip_to_edge(p0: DVec3, along: DVec3, half: DVec3, k: usize) -> Option<(f64, f64)> {
+    if along[k] == 0.0 {
+        return (p0[k].abs() <= half[k]).then_some((0.0, 1.0));
+    }
+    let t0 = (-half[k] - p0[k]) / along[k];
+    let t1 = (half[k] - p0[k]) / along[k];
+    let (lo, hi) = (t0.min(t1).max(0.0), t0.max(t1).min(1.0));
+    (lo <= hi).then_some((lo, hi))
 }
 
 /// The stretch of the segment `p0 + along · t`, `t ∈ [0, 1]`, that lies over
@@ -718,7 +818,12 @@ mod tests {
         assert!(close(along.points()[0].separation, -0.01), "{along:?}");
     }
 
-    /// A capsule standing on a box's corner edge meets it at one point.
+    /// A capsule crossing a box's edge square on meets it at one point: its
+    /// core passes 0.1 out from the edge both ways, at the crossing.
+    ///
+    /// Rung 1's version of this test laid the capsule _along_ the edge and
+    /// asserted one point, which was the wandering point
+    /// `a_capsule_lying_along_a_box_edge_rests_on_two_points` replaces.
     #[test]
     fn a_capsule_crossing_a_box_edge_meets_it_at_one_point() {
         let slab = ContactShape::Box {
@@ -727,15 +832,92 @@ mod tests {
             half: DVec3::splat(0.5),
         };
         let crossing = ContactShape::Capsule {
-            a: DVec3::new(0.6, 0.6, -1.0),
-            b: DVec3::new(0.6, 0.6, 1.0),
+            a: DVec3::new(-0.4, 1.6, 0.2),
+            b: DVec3::new(1.6, -0.4, 0.2),
             radius: 0.15,
         };
         let m = collide(&crossing, &slab, SPEC);
         assert_eq!(m.points().len(), 1, "{m:?}");
         let expected = (0.1f64 * 0.1 + 0.1 * 0.1).sqrt() - 0.15;
         assert!(close(m.points()[0].separation, expected), "{m:?}");
-        assert_eq!(m.points()[0].id, 2);
+        // Against the box's edge along Z at +X, +Y: edge 2 · 4 + 1 + 2 = 11,
+        // whose code is 9 + 11.
+        let id = m.points()[0].id;
+        assert_eq!(id & 0xff, 2, "{m:?}");
+        assert_eq!(id >> 8, 20, "{m:?}");
+    }
+
+    /// **A capsule lying along a box's edge rests on two points**, one at each
+    /// end of the stretch it lies along the edge over, not on one point whose
+    /// place along the edge is anyone's guess. A capsule of radius 0.15 along
+    /// the top +Z edge of a unit box, its core 0.1 out from the edge both
+    /// ways, is `√0.02 − 0.15` from it at both ends of its core.
+    #[test]
+    fn a_capsule_lying_along_a_box_edge_rests_on_two_points() {
+        let slab = ContactShape::Box {
+            centre: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            half: DVec3::splat(0.5),
+        };
+        let along = ContactShape::Capsule {
+            a: DVec3::new(-0.4, 0.6, 0.6),
+            b: DVec3::new(0.3, 0.6, 0.6),
+            radius: 0.15,
+        };
+        let m = collide(&along, &slab, SPEC);
+        assert_eq!(m.points().len(), 2, "{m:?}");
+        let expected = 0.02f64.sqrt() - 0.15;
+        let diagonal = DVec3::new(0.0, -1.0, -1.0).normalize();
+        assert!((m.normal - diagonal).length() < 1e-9, "{m:?}");
+        let mut xs: Vec<f64> = m.points().iter().map(|p| p.point.x).collect();
+        xs.sort_by(f64::total_cmp);
+        assert!(close(xs[0], -0.4) && close(xs[1], 0.3), "{m:?}");
+        for point in m.points() {
+            assert!(close(point.separation, expected), "{m:?}");
+        }
+        // And over the end of the edge, only the stretch over the box counts.
+        let over = ContactShape::Capsule {
+            a: DVec3::new(0.2, 0.6, 0.6),
+            b: DVec3::new(0.9, 0.6, 0.6),
+            radius: 0.15,
+        };
+        let m = collide(&over, &slab, SPEC);
+        let mut xs: Vec<f64> = m.points().iter().map(|p| p.point.x).collect();
+        xs.sort_by(f64::total_cmp);
+        assert_eq!(xs.len(), 2, "{m:?}");
+        assert!(close(xs[0], 0.2) && close(xs[1], 0.5), "{m:?}");
+    }
+
+    /// **A capsule lying across a face and past its ends, tilted a little
+    /// towards it, rests on the face at both its ends** — not on one point at
+    /// the end it is nearer, though its nearest point lies just past that end,
+    /// over an edge. A long capsule over the +X face of a unit box, its core
+    /// 0.1075 out at the face's lower end and 0.1125 at its upper, of radius
+    /// 0.15, touches at both, 4.25 cm and 3.75 cm deep.
+    #[test]
+    fn a_capsule_across_a_face_and_past_it_rests_on_the_face() {
+        let slab = ContactShape::Box {
+            centre: DVec3::ZERO,
+            rotation: DQuat::IDENTITY,
+            half: DVec3::splat(0.5),
+        };
+        let across = ContactShape::Capsule {
+            a: DVec3::new(0.6, -2.0, 0.0),
+            b: DVec3::new(0.62, 2.0, 0.0),
+            radius: 0.15,
+        };
+        let m = collide(&across, &slab, SPEC);
+        assert_eq!(m.points().len(), 2, "{m:?}");
+        assert_eq!(m.normal, -DVec3::X, "{m:?}");
+        let mut points: Vec<(f64, f64)> = m
+            .points()
+            .iter()
+            .map(|p| (p.point.y, p.separation))
+            .collect();
+        points.sort_by(|p, q| p.0.total_cmp(&q.0));
+        assert!(close(points[0].0, -0.5) && close(points[1].0, 0.5), "{m:?}");
+        assert!(close(points[0].1, -0.0425), "{m:?}");
+        assert!(close(points[1].1, -0.0375), "{m:?}");
     }
 
     /// A sphere sunk into a turned box is pushed out through the nearest face
@@ -779,16 +961,9 @@ mod tests {
         assert_eq!(low.points().len(), 2, "{low:?}");
     }
 
-    /// Box against box has no manifold at rung 1, and the basis is
-    /// orthonormal whichever way the normal points.
+    /// The basis is orthonormal whichever way the normal points.
     #[test]
-    fn boxes_pass_through_each_other_and_the_basis_is_orthonormal() {
-        let unit = ContactShape::Box {
-            centre: DVec3::ZERO,
-            rotation: DQuat::IDENTITY,
-            half: DVec3::splat(0.5),
-        };
-        assert!(collide(&unit, &unit, SPEC).points().is_empty());
+    fn the_basis_is_orthonormal() {
         for n in [
             DVec3::Y,
             -DVec3::Z,

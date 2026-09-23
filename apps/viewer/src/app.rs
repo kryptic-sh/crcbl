@@ -521,7 +521,7 @@ pub fn with_shell<S: Shell + ?Sized>(
     // The whole document, because a rigged one is a scene, its instances and
     // the rig that pairs them, and the grid extent is derived from it too — see
     // `Gpu::open`.
-    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu(), &model)?;
+    let gpu = Gpu::open(shell.as_mut(), window, extent, options.common.gpu(), &model)?;
 
     Ok(assemble(
         Booted {

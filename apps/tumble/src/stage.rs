@@ -46,15 +46,16 @@ const FLOOR_MATERIAL: usize = 0;
 const MATERIALS: usize = 7;
 
 /// Each room's floor: its centre on `y = 0`, and its width and depth.
-const FLOORS: [([f32; 3], f32, f32); 3] = [
+const FLOORS: [([f32; 3], f32, f32); 4] = [
     ([0.0, 0.0, 0.0], 12.0, 12.0),
     ([12.0, 0.0, 0.0], 6.0, 3.0),
     ([26.0, 0.0, 0.0], 7.0, 7.0),
+    ([44.0, 0.0, 0.0], 20.0, 9.0),
 ];
 
-/// What this stage reserves. The pit's thousand balls are one instance each,
-/// the wall's pills and pegs three, and the rest is headroom for the wall's
-/// bodies turning over within a frame.
+/// What this stage reserves. The pit's thousand balls and the Tower room's
+/// boxes are one instance each, the wall's pills and pegs three, and the rest
+/// is headroom for the wall's bodies turning over within a frame.
 const CAPACITIES: Capacities = Capacities {
     vertices: 2048,
     indices: 8192,
@@ -341,6 +342,7 @@ pub fn camera(view: View) -> Camera {
         View::Spin => (Vec3::new(0.0, 3.2, 8.5), Vec3::new(0.0, 1.6, 0.0)),
         View::Wall => (Vec3::new(12.0, 3.0, 7.8), Vec3::new(12.0, 2.7, 0.0)),
         View::Pit => (Vec3::new(26.0, 4.2, 5.2), Vec3::new(26.0, 0.4, 0.0)),
+        View::Tower => (Vec3::new(44.0, 5.5, 21.0), Vec3::new(44.0, 4.5, 0.0)),
     };
     Camera {
         eye,
@@ -377,9 +379,9 @@ mod tests {
     }
 
     /// Everything the rooms hold at their fullest fits the instance pool: the
-    /// floors, every fixture, the pit's thousand balls and the wall's cap of
-    /// bodies all as pills, with the wall's cap again for a frame in which
-    /// every body turned over.
+    /// floors, every fixture, the pit's thousand balls, the Tower room's
+    /// boxes and the wall's cap of bodies all as pills, with the wall's cap
+    /// again for a frame in which every body turned over.
     #[test]
     fn the_rooms_at_their_fullest_fit_the_instance_pool() {
         let scenes = Scenes::new();
@@ -388,11 +390,16 @@ mod tests {
             room.fixtures(&mut fixtures);
         }
         let fixture_instances: usize = fixtures.iter().map(|s| instances(s).1).sum();
+        // The Tower room's bodies never come or go: one box instance each.
+        let mut tower = Vec::new();
+        scenes.rooms()[3].bodies(&mut tower);
+        let tower_bodies = tower.len();
         let most = FLOORS.len()
             + fixture_instances
             + 3
             + crate::pit::BALLS as usize
-            + 2 * 3 * crate::wall::MAX_LIVE;
+            + 2 * 3 * crate::wall::MAX_LIVE
+            + tower_bodies;
         assert!(
             most <= CAPACITIES.instances as usize,
             "{most} instances against {}",

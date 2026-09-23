@@ -196,6 +196,10 @@ pub(crate) struct PipelineLayoutEntry {
     /// its declared stride — what every stage's container is held to by
     /// [`Dxil::require_storage_strides`](crate::dxil::Dxil::require_storage_strides).
     pub(crate) storage: Vec<crate::dxil::StorageRegister>,
+    /// Every register the root signature declares, and the binding behind it —
+    /// what every stage's container is held to by
+    /// [`Dxil::require_registers`] before D3D12 sees the pipeline.
+    pub(crate) registers: crate::registers::LayoutRegisters,
 }
 
 /// A graphics pipeline: the state object, plus what D3D12 left on the encoder.
@@ -293,6 +297,7 @@ pub(crate) fn layout(
     desc: &PipelineLayoutDesc<'_>,
     sets: &[(crcbl_hal::BindGroupLayoutHandle, SetTables)],
     push: Option<RootConstants>,
+    registers: crate::registers::LayoutRegisters,
     owner: u64,
 ) -> Result<PipelineLayoutEntry, HalError> {
     let plan = plan_root(sets, push)?;
@@ -359,6 +364,7 @@ pub(crate) fn layout(
             .iter()
             .flat_map(|(_, tables)| tables.storage.iter().copied())
             .collect(),
+        registers,
     })
 }
 
@@ -501,9 +507,11 @@ fn blob_message(errors: Option<&ID3DBlob>) -> String {
 ///
 /// [`HalError::InvalidDescriptor`] for a descriptor D3D12 cannot express — more
 /// colour targets than a pipeline state has slots, a depth format with no depth
-/// plane, a stencil state on a format with no stencil plane — and
-/// [`HalError::PipelineCreation`] carrying D3D12's own message when the driver
-/// refuses the object.
+/// plane, a stencil state on a format with no stencil plane —
+/// [`HalError::ShaderCompilation`] for a container that is not the stage it was
+/// bound as or that declares a register the layout does not hold — see
+/// [`crate::registers`] — and [`HalError::PipelineCreation`] carrying D3D12's
+/// own message when the driver refuses the object.
 pub(crate) fn graphics(
     device: &ID3D12Device,
     desc: &GraphicsPipelineDesc<'_>,
@@ -516,13 +524,19 @@ pub(crate) fn graphics(
     // Both stages routinely come out of *one* module — Slang emits a vertex and
     // a fragment entry point into one file, and the seam carries a container per
     // entry point so the caller need not split the module in two.
+    let label = desc.label.unwrap_or("<unlabelled>");
     let vertex_dxil = vertex.container(desc.vertex.entry_point)?;
     vertex_dxil.expect(ShaderStages::VERTEX, desc.vertex.entry_point)?;
+    // Registers before strides: a stride is compared at a register, so a
+    // container whose registers moved would fail that check with the wrong
+    // sentence.
+    vertex_dxil.require_registers(&layout.registers, label, desc.vertex.entry_point)?;
     vertex_dxil.require_storage_strides(&layout.storage, desc.vertex.entry_point)?;
     let fragment_dxil = match (fragment, desc.fragment) {
         (Some(module), Some(entry)) => {
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
+            dxil.require_registers(&layout.registers, label, entry.entry_point)?;
             dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
             Some(dxil)
         }
@@ -803,7 +817,8 @@ fn add<T: Subobject>(stream: &mut Stream, object: T) {
 /// which is where the stream path lives.
 /// [`HalError::InvalidDescriptor`] for a descriptor D3D12 cannot express — the
 /// same ones [`graphics`] refuses — [`HalError::ShaderCompilation`] for a
-/// container that is not the stage it was bound as, and
+/// container that is not the stage it was bound as or that declares a register
+/// the layout does not hold, and
 /// [`HalError::PipelineCreation`] carrying D3D12's own message when the driver
 /// refuses the object, which is what a malformed stream arrives as.
 pub(crate) fn mesh(
@@ -830,11 +845,14 @@ pub(crate) fn mesh(
 
     let mesh_dxil = mesh.container(desc.mesh.entry_point)?;
     mesh_dxil.expect(ShaderStages::MESH, desc.mesh.entry_point)?;
+    // Registers before strides, as in `graphics`.
+    mesh_dxil.require_registers(&layout.registers, label, desc.mesh.entry_point)?;
     mesh_dxil.require_storage_strides(&layout.storage, desc.mesh.entry_point)?;
     let task_dxil = match (task, desc.task) {
         (Some(module), Some(entry)) => {
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::TASK, entry.entry_point)?;
+            dxil.require_registers(&layout.registers, label, entry.entry_point)?;
             dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
             Some(dxil)
         }
@@ -844,6 +862,7 @@ pub(crate) fn mesh(
         (Some(module), Some(entry)) => {
             let dxil = module.container(entry.entry_point)?;
             dxil.expect(ShaderStages::FRAGMENT, entry.entry_point)?;
+            dxil.require_registers(&layout.registers, label, entry.entry_point)?;
             dxil.require_storage_strides(&layout.storage, entry.entry_point)?;
             Some(dxil)
         }
@@ -972,11 +991,11 @@ pub(crate) fn mesh(
 ///
 /// # Errors
 ///
-/// [`HalError::ShaderCompilation`] for a container that is not a compute shader
-/// or whose thread-group size is not the one the descriptor declares, and
-/// [`HalError::PipelineCreation`] carrying D3D12's own message when the driver
-/// refuses the object — which is what a root signature that does not cover the
-/// registers the shader reads arrives as.
+/// [`HalError::ShaderCompilation`] for a container that is not a compute shader,
+/// whose thread-group size is not the one the descriptor declares, or which
+/// declares a register the layout does not hold — see [`crate::registers`] —
+/// and [`HalError::PipelineCreation`] carrying D3D12's own message when the
+/// driver refuses the object.
 pub(crate) fn compute(
     device: &ID3D12Device,
     desc: &ComputePipelineDesc<'_>,
@@ -987,6 +1006,8 @@ pub(crate) fn compute(
     let label = desc.label.unwrap_or("<unlabelled>");
     let dxil = module.container(desc.compute.entry_point)?;
     dxil.expect(ShaderStages::COMPUTE, desc.compute.entry_point)?;
+    // Registers before strides, as in `graphics`.
+    dxil.require_registers(&layout.registers, label, desc.compute.entry_point)?;
     dxil.require_storage_strides(&layout.storage, desc.compute.entry_point)?;
     if let Some(declared) = dxil.numthreads()
         && declared != desc.workgroup_size

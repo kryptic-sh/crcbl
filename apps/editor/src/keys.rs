@@ -174,16 +174,23 @@ pub fn map() -> ActionMap {
     // shortcut. `docs/plan/07-ui-debug.md`'s rung 7d1 status already records
     // that default as unsettled, for the same collision under four samples'
     // start panels. Navigation keeps the arrows, Tab, Enter, Space and Escape.
-    map.rebind(
-        ui::MOVE,
-        vec![Binding::Wasd {
-            up: KeyCode::ArrowUp,
-            down: KeyCode::ArrowDown,
-            left: KeyCode::ArrowLeft,
-            right: KeyCode::ArrowRight,
-        }],
-    )
-    .expect("the reserved context was just declared");
+    // Only the keys are narrowed: the pad bindings stay, as the engine loop's
+    // own `menu_actions` keeps them, though the editor feeds no pad yet.
+    let pads = map
+        .bindings(ui::MOVE)
+        .unwrap_or_default()
+        .iter()
+        .filter(|binding| binding.reads_gamepad())
+        .cloned();
+    let arrows = Binding::Wasd {
+        up: KeyCode::ArrowUp,
+        down: KeyCode::ArrowDown,
+        left: KeyCode::ArrowLeft,
+        right: KeyCode::ArrowRight,
+    };
+    let bindings = std::iter::once(arrows).chain(pads).collect();
+    map.rebind(ui::MOVE, bindings)
+        .expect("the reserved context was just declared");
     map
 }
 

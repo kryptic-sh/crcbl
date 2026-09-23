@@ -4,7 +4,7 @@
 //! state (position, volume, looping flag). [`Mixer::fill`] advances every
 //! active voice each audio block, mixing the result into the output buffer.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::spatial::{CueGrammar, Listener, SpatialCue, compute_cue};
@@ -149,6 +149,40 @@ impl From<&crate::spatial::SpatialCue> for VoiceMix {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct VoiceId(u64);
 
+/// What [`Mixer::try_play`] did with a voice.
+///
+/// Only a mixer with a [voice budget](Mixer::set_voice_budget) ever answers
+/// anything but [`PlayOutcome::Played`]: an unlimited one has room for every
+/// voice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PlayOutcome {
+    /// There was room, and the voice is playing under this handle.
+    Played(VoiceId),
+    /// The budget was full, and the voice took the place of `stolen` — the
+    /// lowest-priority voice playing, the oldest among equals. `stolen` fades
+    /// out over one block, as a [`Mixer::stop`]ped voice does.
+    Stole {
+        /// The handle the new voice is playing under.
+        id: VoiceId,
+        /// The voice that made room. Stale from this call on.
+        stolen: VoiceId,
+    },
+    /// The budget was full and every voice playing outranks this one, so it
+    /// never started.
+    Refused,
+}
+
+impl PlayOutcome {
+    /// The handle of the voice this call started, if it started one.
+    #[must_use]
+    pub const fn id(self) -> Option<VoiceId> {
+        match self {
+            Self::Played(id) | Self::Stole { id, .. } => Some(id),
+            Self::Refused => None,
+        }
+    }
+}
+
 /// Which of the mixer's six fixed gain stages a voice passes through.
 ///
 /// `docs/plan/13-audio.md`'s bus decision, and the set is **fixed and not
@@ -270,6 +304,9 @@ pub struct Voice {
     delay: [DelayLine; CHANNELS],
     /// Which gain stage this voice passes through, fixed for its lifetime.
     bus: Bus,
+    /// How much this voice matters when a [voice budget](Mixer::set_voice_budget)
+    /// is full. Higher outranks lower; `0` is the default and the lowest.
+    priority: u8,
 }
 
 impl Voice {
@@ -297,6 +334,7 @@ impl Voice {
             itd_samples: 0.0,
             delay: std::array::from_fn(|_| DelayLine::new(DELAY_CAPACITY)),
             bus: Bus::default(),
+            priority: 0,
         }
     }
 
@@ -349,6 +387,25 @@ impl Voice {
     #[must_use]
     pub const fn bus(&self) -> Bus {
         self.bus
+    }
+
+    /// Set how much this voice matters when the mixer's
+    /// [voice budget](Mixer::set_voice_budget) is full: a new voice steals the
+    /// lowest-priority voice playing, and only if it ranks at least as high.
+    ///
+    /// Higher outranks lower, and `0` — what a voice built without one has —
+    /// is the lowest. Meaningless on a mixer with no budget, which starts every
+    /// voice it is given.
+    #[must_use]
+    pub const fn with_priority(mut self, priority: u8) -> Self {
+        self.priority = priority;
+        self
+    }
+
+    /// How much this voice matters when a voice budget is full.
+    #[must_use]
+    pub const fn priority(&self) -> u8 {
+        self.priority
     }
 
     /// Set level, pan and speed together, clamped as the individual setters do.
@@ -538,20 +595,103 @@ pub struct Mixer {
     /// Behind the same kind of [`Mutex`] the voice lists are, for the reason
     /// `listener` gives: every entry point takes `&self`.
     bus_gains: Mutex<[f32; Bus::ALL.len()]>,
+    /// The most voices [`Mixer::play`] lets sound at once, or
+    /// [`UNLIMITED_VOICES`] for no budget. See [`Mixer::set_voice_budget`].
+    ///
+    /// An atomic rather than a field behind the voice lock because it is read
+    /// only while that lock is held, which is what makes the budget check and
+    /// the insert one step; the atomic is just the `&self` setter's way in.
+    voice_budget: AtomicUsize,
+    /// Voices the budget refused since the mixer was built.
+    refused: AtomicU64,
+    /// Voices the budget stole to make room, since the mixer was built.
+    stolen: AtomicU64,
 }
 
+/// The stored budget that means "no budget". A list of this many voices cannot
+/// exist, so no real budget is mistaken for it.
+const UNLIMITED_VOICES: usize = usize::MAX;
+
 impl Mixer {
-    /// Create an empty mixer, hearing from [`Listener::ORIGIN`].
+    /// Create an empty mixer, hearing from [`Listener::ORIGIN`], with no voice
+    /// budget.
+    ///
+    /// # Every lock is taken once here, off the audio thread
+    ///
+    /// On the pthread platforms — macOS among them — `std::sync::Mutex`
+    /// allocates its platform mutex on the **first** `lock`, not in `new`.
+    /// [`AudioSource::fill`] takes the voice, release and bus-gain locks, and a
+    /// mixer whose bus gains were never set would otherwise make that first
+    /// allocation inside the first audio callback. Taking each lock once here
+    /// moves it to the thread that builds the mixer. The macOS CI run of
+    /// `tests/fill_allocation.rs` is what caught it; Linux and Windows locks
+    /// never allocate, so they could not.
     #[must_use]
     pub fn new() -> Self {
-        Self {
+        let mixer = Self {
             voices: Mutex::new(Vec::new()),
             releasing: Mutex::new(Vec::new()),
             listener: Mutex::new(Listener::ORIGIN),
             cue_grammar: Mutex::new(CueGrammar::default()),
             next_id: AtomicU64::new(1),
             bus_gains: Mutex::new([1.0; Bus::ALL.len()]),
+            voice_budget: AtomicUsize::new(UNLIMITED_VOICES),
+            refused: AtomicU64::new(0),
+            stolen: AtomicU64::new(0),
+        };
+        drop(mixer.lock());
+        drop(mixer.lock_releasing());
+        drop(mixer.lock_bus_gains());
+        drop(mixer.lock_listener());
+        drop(mixer.lock_cue_grammar());
+        mixer
+    }
+
+    /// Cap how many voices may sound at once; `None` removes the cap.
+    ///
+    /// **No budget is the default**, and a mixer without one starts every
+    /// voice it is given, as every mixer did before budgets existed. With one,
+    /// a voice played into a full mixer either steals or is refused — see
+    /// [`Mixer::try_play`] for the rule.
+    ///
+    /// The budget bounds the voices [`Mixer::voice_count`] counts, and so the
+    /// audio thread's per-block work: a stolen or stopped voice mixes one
+    /// fade-out block outside the count and is then gone.
+    ///
+    /// **Lowering it cuts nothing that is already playing.** A mixer over its
+    /// new budget stays over until voices finish; meanwhile each new voice
+    /// still has to steal a place, so the count never grows.
+    pub fn set_voice_budget(&self, max_voices: Option<usize>) {
+        self.voice_budget
+            .store(max_voices.unwrap_or(UNLIMITED_VOICES), Ordering::Relaxed);
+    }
+
+    /// The cap [`Mixer::set_voice_budget`] set, or `None` for no cap.
+    #[must_use]
+    pub fn voice_budget(&self) -> Option<usize> {
+        match self.voice_budget.load(Ordering::Relaxed) {
+            UNLIMITED_VOICES => None,
+            max => Some(max),
         }
+    }
+
+    /// How many voices the budget has refused since this mixer was built.
+    ///
+    /// Monotonic, for a debug panel: the number that says a cue happened and
+    /// was not heard at all.
+    #[must_use]
+    pub fn refused_count(&self) -> u64 {
+        self.refused.load(Ordering::Relaxed)
+    }
+
+    /// How many voices the budget has stolen since this mixer was built.
+    ///
+    /// Monotonic, for a debug panel: the number that says sounds are being cut
+    /// short to make room, which is the pressure a budget that steals shows
+    /// before it ever refuses.
+    #[must_use]
+    pub fn stolen_count(&self) -> u64 {
+        self.stolen.load(Ordering::Relaxed)
     }
 
     /// Set `bus`'s linear gain, clamped to `[0, 1]`.
@@ -672,10 +812,82 @@ impl Mixer {
     /// The handle is worth keeping only for a sound that outlives the call:
     /// [`Mixer::stop`] and [`Mixer::set_mix`] need it. A one-shot cue can drop
     /// it, which is why this is not `#[must_use]`.
+    ///
+    /// **Under a [voice budget](Mixer::set_voice_budget) this is
+    /// [`Mixer::try_play`] with the outcome thrown away.** A refused voice's
+    /// handle is still issued, and it is stale from the start: every call that
+    /// takes it answers `false`, exactly as for a voice that ran out.
     pub fn play(&self, voice: Voice) -> VoiceId {
-        let id = VoiceId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        self.lock().push((id, voice));
+        let id = self.issue_id();
+        self.admit(id, voice);
         id
+    }
+
+    /// Start a voice within the [voice budget](Mixer::set_voice_budget), and
+    /// answer with what happened to it.
+    ///
+    /// With room, it plays. With the budget full, it steals the place of the
+    /// voice with the lowest [priority](Voice::with_priority) — the oldest of
+    /// those, if several tie — **provided its own priority is at least that
+    /// voice's**; otherwise it is refused. The count check, the steal and the
+    /// insert happen under one lock, so no other `play` or the audio thread can
+    /// get between them.
+    ///
+    /// **Equal priority steals (`>=`, not `>`).** Among cues of one rank the
+    /// newest is the one the player is reacting to, and the oldest has mostly
+    /// finished sounding; refusing the newest is the behaviour that let sixteen
+    /// kill cues silence the next one. The cost is that a voice meant to hold —
+    /// a loop, a music bed — must be given a priority above the cues that could
+    /// otherwise take its place.
+    ///
+    /// A stolen voice is not cut: it fades to silence over the next block, as
+    /// [`Mixer::stop`] fades one, and it stops counting against the budget on
+    /// the spot.
+    pub fn try_play(&self, voice: Voice) -> PlayOutcome {
+        let id = self.issue_id();
+        self.admit(id, voice)
+    }
+
+    /// The next handle. Monotonic, so ids are never reused.
+    fn issue_id(&self) -> VoiceId {
+        VoiceId(self.next_id.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Put `voice` in the list under `id` if the budget allows, stealing a
+    /// place if it must. One lock acquisition for the whole decision.
+    fn admit(&self, id: VoiceId, voice: Voice) -> PlayOutcome {
+        let mut voices = self.lock();
+        if voices.len() < self.voice_budget.load(Ordering::Relaxed) {
+            voices.push((id, voice));
+            return PlayOutcome::Played(id);
+        }
+        // Ids are monotonic, so the smallest id is the oldest voice: ranking by
+        // `(priority, id)` finds the lowest priority and the oldest among it.
+        let victim = voices
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, (voice_id, voice))| (voice.priority, *voice_id))
+            .map(|(index, (voice_id, playing))| (index, *voice_id, playing.priority));
+        match victim {
+            Some((index, stolen, priority)) if voice.priority >= priority => {
+                self.release(&mut voices, index);
+                voices.push((id, voice));
+                self.stolen.fetch_add(1, Ordering::Relaxed);
+                PlayOutcome::Stole { id, stolen }
+            }
+            _ => {
+                self.refused.fetch_add(1, Ordering::Relaxed);
+                PlayOutcome::Refused
+            }
+        }
+    }
+
+    /// Move `voices[index]` onto the release list, where the next fill fades it
+    /// to silence and drops it. The caller holds the voice lock.
+    fn release(&self, voices: &mut Vec<(VoiceId, Voice)>, index: usize) {
+        let (id, mut voice) = voices.remove(index);
+        voice.releasing = true;
+        self.lock_releasing().push((id, voice));
     }
 
     /// Stop `id` and fade it out. Answers whether it was still playing.
@@ -694,9 +906,7 @@ impl Mixer {
         let Some(index) = voices.iter().position(|(voice_id, _)| *voice_id == id) else {
             return false;
         };
-        let (_, mut voice) = voices.remove(index);
-        voice.releasing = true;
-        self.lock_releasing().push((id, voice));
+        self.release(&mut voices, index);
         true
     }
 
@@ -903,6 +1113,9 @@ impl std::fmt::Debug for Mixer {
             .field("releasing_count", &releasing)
             .field("listener", &listener)
             .field("cue_grammar", &self.cue_grammar())
+            .field("voice_budget", &self.voice_budget())
+            .field("refused_count", &self.refused_count())
+            .field("stolen_count", &self.stolen_count())
             .finish()
     }
 }
@@ -1275,6 +1488,178 @@ mod tests {
         assert!(!mixer.is_playing(first), "the stopped voice still counts");
         assert_eq!(mixer.voice_count(), 1, "the cap slot must free on the spot");
         assert!(mixer.is_playing(second), "stop took the wrong voice");
+    }
+
+    /// A long voice at `priority`, long enough that no test here outlives it.
+    fn held(priority: u8) -> Voice {
+        Voice::new(vec![0.25f32; 256 * CHANNELS]).with_priority(priority)
+    }
+
+    /// **A mixer nobody gave a budget starts every voice**, which is what every
+    /// caller that predates budgets relies on.
+    #[test]
+    fn a_mixer_has_no_voice_budget_until_one_is_set() {
+        let mixer = Mixer::new();
+        assert_eq!(mixer.voice_budget(), None);
+        for _ in 0..100 {
+            assert!(matches!(mixer.try_play(held(0)), PlayOutcome::Played(_)));
+        }
+        assert_eq!(mixer.voice_count(), 100);
+        assert_eq!((mixer.refused_count(), mixer.stolen_count()), (0, 0));
+
+        mixer.set_voice_budget(Some(4));
+        assert_eq!(mixer.voice_budget(), Some(4));
+        mixer.set_voice_budget(None);
+        assert_eq!(mixer.voice_budget(), None, "the budget did not come off");
+    }
+
+    /// **The budget holds: `N + 1` plays leave `N` voices.** The extra one has
+    /// to go somewhere — here it steals, because it ties — and the count is
+    /// what the audio thread pays for, so it is what is asserted.
+    #[test]
+    fn a_voice_budget_bounds_the_voices_sounding() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(4));
+        let first: Vec<PlayOutcome> = (0..4).map(|_| mixer.try_play(held(0))).collect();
+        assert!(
+            first.iter().all(|o| matches!(o, PlayOutcome::Played(_))),
+            "a voice under the budget did not simply play: {first:?}",
+        );
+        assert_eq!(mixer.voice_count(), 4);
+
+        let fifth = mixer.try_play(held(0));
+        assert!(matches!(fifth, PlayOutcome::Stole { .. }), "{fifth:?}");
+        assert_eq!(mixer.voice_count(), 4, "the budget let a fifth voice in");
+        // `play` goes through the same gate as `try_play`.
+        mixer.play(held(0));
+        assert_eq!(mixer.voice_count(), 4, "`play` bypassed the budget");
+    }
+
+    /// **A higher priority steals the lowest-priority voice, and the oldest of
+    /// those.** The mix is chosen so that each wrong rule picks a different
+    /// victim: the oldest voice overall is a priority-2, the newest low one is
+    /// a priority-1, and the one that must go is the *older* of two
+    /// priority-1s.
+    #[test]
+    fn a_higher_priority_steals_the_lowest_and_oldest_voice() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(4));
+        let oldest_high = mixer.play(held(2));
+        let old_low = mixer.play(held(1));
+        let mid_high = mixer.play(held(3));
+        let new_low = mixer.play(held(1));
+
+        let outcome = mixer.try_play(held(5));
+        let PlayOutcome::Stole { id, stolen } = outcome else {
+            panic!("a priority-5 voice into a full mixer did not steal: {outcome:?}");
+        };
+        assert_eq!(stolen, old_low, "stole the wrong voice");
+        assert!(!mixer.is_playing(old_low));
+        for kept in [oldest_high, mid_high, new_low, id] {
+            assert!(mixer.is_playing(kept), "{kept:?} went missing");
+        }
+        assert_eq!(mixer.voice_count(), 4);
+    }
+
+    /// **A lower priority is refused**, and a refused voice's handle is stale
+    /// from the start: `play` still issues one, and it steers nothing.
+    #[test]
+    fn a_lower_priority_is_refused() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(2));
+        let keep = [mixer.play(held(3)), mixer.play(held(3))];
+
+        assert_eq!(mixer.try_play(held(2)), PlayOutcome::Refused);
+        let refused = mixer.play(held(0));
+        assert!(!mixer.is_playing(refused));
+        assert!(!mixer.stop(refused));
+        assert!(!mixer.set_mix(refused, VoiceMix::UNITY));
+        for id in keep {
+            assert!(mixer.is_playing(id), "a refusal cost a playing voice");
+        }
+        assert_eq!(mixer.voice_count(), 2);
+    }
+
+    /// **The tie rule is `>=`: an equal priority steals the oldest.** A `>`
+    /// rule refuses here instead, which is the behaviour that let a burst of
+    /// same-rank cues silence the newest one.
+    #[test]
+    fn an_equal_priority_steals_the_oldest() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(3));
+        let ids = [
+            mixer.play(held(1)),
+            mixer.play(held(1)),
+            mixer.play(held(1)),
+        ];
+
+        let outcome = mixer.try_play(held(1));
+        assert!(
+            matches!(outcome, PlayOutcome::Stole { stolen, .. } if stolen == ids[0]),
+            "an equal priority must steal the oldest voice: {outcome:?}",
+        );
+        assert!(mixer.is_playing(ids[1]) && mixer.is_playing(ids[2]));
+    }
+
+    /// **The counters count what happened, once each** — two steals and three
+    /// refusals, and a play with room counts as neither.
+    #[test]
+    fn the_budget_counts_its_refusals_and_its_steals() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(2));
+        mixer.play(held(1));
+        mixer.play(held(1));
+        assert_eq!((mixer.refused_count(), mixer.stolen_count()), (0, 0));
+
+        mixer.play(held(1));
+        mixer.play(held(2));
+        for _ in 0..3 {
+            mixer.play(held(0));
+        }
+        assert_eq!(mixer.stolen_count(), 2);
+        assert_eq!(mixer.refused_count(), 3);
+    }
+
+    /// A budget of zero refuses everything rather than stealing from nothing.
+    #[test]
+    fn a_zero_budget_refuses_every_voice() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(0));
+        assert_eq!(mixer.try_play(held(u8::MAX)), PlayOutcome::Refused);
+        assert_eq!(mixer.voice_count(), 0);
+        assert_eq!(mixer.refused_count(), 1);
+    }
+
+    /// **A stolen voice fades out rather than cutting**, over the same
+    /// one-block ramp [`Mixer::stop`] uses, and is gone after it.
+    #[test]
+    fn a_stolen_voice_fades_out_over_one_block() {
+        let mixer = Mixer::new();
+        mixer.set_voice_budget(Some(1));
+        mixer.play(Voice::new(vec![0.5f32; 256 * CHANNELS]));
+        // Silent data, so the output is the stolen voice's ramp alone.
+        let outcome = mixer.try_play(Voice::new(vec![0.0f32; 256 * CHANNELS]));
+        assert!(matches!(outcome, PlayOutcome::Stole { .. }), "{outcome:?}");
+
+        let mut buf = vec![0.0f32; 16 * CHANNELS];
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            (buf[0] - 0.5).abs() < 1e-6,
+            "the ramp must start at the stolen voice's level, not cut: {}",
+            buf[0],
+        );
+        assert!(
+            buf[buf.len() - CHANNELS].abs() < 1e-6,
+            "the ramp must end at silence: {}",
+            buf[buf.len() - CHANNELS],
+        );
+
+        buf.fill(0.0);
+        mixer.fill(&mut buf, 48_000);
+        assert!(
+            buf.iter().all(|s| *s == 0.0),
+            "the stolen voice outlived its release block",
+        );
     }
 
     /// Ids are never reused, so a handle held past the end of its sound is inert

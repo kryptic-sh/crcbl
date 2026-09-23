@@ -126,11 +126,13 @@ use crate::backend::GpuBackend;
 
 pub mod console_button;
 pub mod menu;
+pub mod pads;
 pub mod page;
 pub mod pause;
 
 pub use console_button::ConsoleButton;
 pub use menu::{PAUSE_TITLE, menu_actions, pause_items, pause_menu, pause_only};
+pub use pads::PadSource;
 pub use page::PageBundle;
 pub use pause::PauseControl;
 
@@ -3428,6 +3430,13 @@ pub const DEBUG_OVERLAY_KEY: crcbl_core::input::KeyCode = crcbl_core::input::Key
 /// Stops and resumes the simulation.
 pub const PAUSE_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::Escape;
 
+/// [`PAUSE_KEY`] on a pad: stops and resumes the simulation, and closes an
+/// open console first, exactly as the key does.
+///
+/// **Unlike the key, it also reaches the game** — see
+/// [`HostedGame::gamepad_event`].
+pub const PAUSE_BUTTON: crate::input::PadButton = crate::input::PadButton::Start;
+
 /// Toggles fullscreen.
 pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCode::F11;
 
@@ -4232,6 +4241,11 @@ pub struct MenuPump<'a, K> {
     /// Set on **release**, not press, so the pressed frame of the skin is on
     /// screen for as long as the key is held.
     pub activated: Option<crcbl_ui::WidgetId>,
+    /// Whether [`PAUSE_BUTTON`] went down during this batch.
+    pub pause: bool,
+    /// Whether [`crate::input::ui::BACK`] went down during this batch while a
+    /// menu had input.
+    pub back: bool,
 }
 
 impl<'a, K: Copy + Eq> MenuPump<'a, K> {
@@ -4285,9 +4299,26 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
             showing,
             console,
             activated: None,
+            pause: false,
+            back: false,
         };
         pump.navigate();
         pump
+    }
+
+    /// Offers one pad event, in the order the pad source reported it.
+    ///
+    /// The pad's half of [`Self::observe`], on the same terms: the map's
+    /// edges are cleared first, so every press in a batch is a step of its
+    /// own, and the menu moves on what the `ui` actions did. **Nothing is
+    /// claimed** — the event goes to the game as well, see
+    /// [`HostedGame::gamepad_event`] — because a snapshot is a level for the
+    /// whole pad and there is no single key in it to withhold.
+    pub fn observe_pad(&mut self, event: &crate::input::GamepadEvent) {
+        self.actions.begin_tick(0.0);
+        self.actions.gamepad_event(event);
+        self.pause |= self.actions.just_pressed(menu::PAUSE_ACTION);
+        self.navigate();
     }
 
     /// Offers one event, and returns the key the game should be told about.
@@ -4407,6 +4438,7 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         if nav.accept {
             self.menus.press(true);
         }
+        self.back |= nav.back;
         if self.actions.just_released(crate::input::ui::ACCEPT) {
             self.activated = self.menus.activate();
         }
@@ -4721,6 +4753,16 @@ enum BootStage<G: PolledGpu> {
 /// The engine stops here rather than building the loop itself: assembling one is
 /// the game's, and a `Loop` type parameter would drag its `Options` and its
 /// error type in behind it for no gain.
+///
+/// # A long load before the first frame
+///
+/// Whatever a game loads between here and [`Loop::new`] runs on the thread
+/// that owns the window, with nothing pumping it, and a desktop that hears
+/// nothing from a window for a few seconds marks it hung — Windows ghosts it
+/// as "Not Responding". Such a load calls [`Shell::keep_alive`] on
+/// [`shell`](Self::shell) a few times a second. Nothing it sees is lost: input
+/// and a close request made during the load are kept for the first frame's
+/// pump.
 #[derive(Debug)]
 pub struct Booted<S: Shell + ?Sized, G> {
     /// The shell the window belongs to.
@@ -5879,6 +5921,37 @@ pub trait HostedGame: Sized {
         let _ = path;
     }
 
+    /// One pad event, once per event the loop's [`PadSource`] reported, in
+    /// its order — see [`crate::input::GamepadEvent`] for what each means.
+    ///
+    /// Polled once a frame, after the shell's events and before the frame's
+    /// ticks, so it arrives in the same phase [`key_event`](Self::key_event)'s
+    /// keys do. A headless run has no source and never calls this; see
+    /// [`pads`] for which targets have one.
+    ///
+    /// **Every event, whether or not a menu is up.** A key a menu takes is
+    /// withheld from the game, but a pad reports a snapshot of the whole pad,
+    /// and the loop has no single button in it to withhold — so South
+    /// accepting a panel reaches the game as South as well, and so does
+    /// [`PAUSE_BUTTON`]. A game that binds a menu's pad buttons to something of
+    /// its own reads [`FrameInfo::paused`] or its own menu state to ignore
+    /// them.
+    ///
+    /// **The loop does not feed [`actions`](Self::actions)' map itself**, for
+    /// the reason it never feeds it a key: the map is the game's, and edges
+    /// are per tick, so only the game knows where
+    /// [`begin_tick`](crate::input::ActionMap::begin_tick) falls. A game
+    /// feeding these into that map does it here, the way its `key_event`
+    /// feeds keys; the loop still releases the map on focus loss.
+    ///
+    /// The empty default carries [`touch_event`](Self::touch_event)'s
+    /// argument: nothing is verified by this method, and a game that never
+    /// overrides it is a game with no pad controls — the loop's own menus
+    /// still answer the pad.
+    fn gamepad_event(&mut self, event: &crate::input::GamepadEvent) {
+        let _ = event;
+    }
+
     /// Where the pointer should be allowed to go, as of this frame.
     ///
     /// **Polled, and reconciled by the loop.** This is asked once a frame and
@@ -6114,6 +6187,11 @@ pub trait HostedGame: Sized {
     /// terms: a game with no action map has nothing to rebind, and the loop's
     /// drain says so out loud rather than printing a binding it never made. A
     /// game that keeps one overrides this with a single line.
+    ///
+    /// The loop also reaches it on focus loss, to
+    /// [`release_gamepads`](crate::input::ActionMap::release_gamepads): a
+    /// game that feeds pads into a map it does not hand over here releases
+    /// them itself.
     fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
         None
     }
@@ -6379,6 +6457,9 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// [`Shell::create_window`] leaves it, so a game that never overrides
     /// [`HostedGame::cursor`] issues no call at all.
     cursor: Option<CursorIcon>,
+    /// Where this loop's pad events come from, or `None` for a run with no
+    /// pads — which costs a frame one branch. See [`pads`].
+    pads: Option<Box<dyn PadSource>>,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -6488,6 +6569,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer_asked: PointerMode::Free,
             pointer_mode: PointerMode::Free,
             cursor: Some(CursorIcon::Default),
+            pads: pads::for_run(config.windowed),
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -6612,6 +6694,20 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 game.key_event(code, pressed);
             }
         });
+        // **The pads, after the shell's events and in the same pump**, so the
+        // menu hears them on last frame's panel exactly as it heard the keys.
+        // Each event goes to the menu's map and to the game once each, and
+        // never to the game's own map: see `HostedGame::gamepad_event`.
+        if let Some(pads) = &mut self.pads {
+            pads.poll(&mut |event| {
+                menu.observe_pad(&event);
+                game.gamepad_event(&event);
+            });
+        }
+        // The pad's pause is the key's, so it closes an open console first
+        // below; and East on a paused panel resumes, which is what Escape does
+        // there.
+        pending.toggle_pause |= menu.pause || (menu.back && self.paused);
         let from_keyboard = menu.activated;
         self.events += pending.count;
         // Hit-tested against **this** frame's layout, which is why the pointer
@@ -6888,7 +6984,17 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
             });
+            // The pads' half. The loop never feeds the game's map — the game
+            // feeds it from `gamepad_event`, or from a backend of its own — so
+            // it reaches the map the game hands over, and a pad button held
+            // through the alt-tab stays released until the player lets go of
+            // it. After this frame's pads, so a press in the same batch as the
+            // focus loss is released too.
+            if let Some(actions) = self.game.actions() {
+                actions.release_gamepads();
+            }
             menu::release_menu_keys(&mut self.menu_actions);
+            self.menu_actions.release_gamepads();
             // The same obligation for the button: no platform sends the release
             // for a pointer that was down when focus left, and a game still
             // holding it sees no edge on the next tap.
@@ -7611,6 +7717,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// player's way in and goes through the same field.
     pub const fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
+    }
+
+    /// Replaces where this loop's pad events come from, or takes them away
+    /// with `None`.
+    ///
+    /// [`Loop::new`] picked the platform's source for a windowed run and none
+    /// for a headless one — see [`pads`]. This is for a caller that knows
+    /// better: a test scripting a pad, a replay, or a page with a pad backend
+    /// of its own. The old source is dropped, and with it whatever it knew
+    /// about the pads it was reporting, so a map fed from it still holds their
+    /// last state until the new source reports them.
+    pub fn set_pad_source(&mut self, source: Option<Box<dyn PadSource>>) {
+        self.pads = source;
     }
 
     /// The swapchain's current extent, in pixels.
@@ -12949,6 +13068,8 @@ mod tests {
         scrolls: Vec<crcbl_core::input::ScrollDelta>,
         /// Every dropped file the loop forwarded, in order.
         dropped: Vec<PathBuf>,
+        /// Every pad event the loop forwarded, in order.
+        pads: Vec<crate::input::GamepadEvent>,
         /// What each `draw` was told about its frame.
         draws: Vec<FrameInfo>,
         /// Whether the ball has been served.
@@ -13107,6 +13228,12 @@ mod tests {
 
         fn dropped_file(&mut self, path: &Path) {
             self.dropped.push(path.to_path_buf());
+        }
+
+        /// Fed straight into the map, as `key_event` feeds keys.
+        fn gamepad_event(&mut self, event: &crate::input::GamepadEvent) {
+            self.actions.0.gamepad_event(event);
+            self.pads.push(*event);
         }
 
         fn pointer_mode(&self) -> PointerMode {
@@ -14526,6 +14653,283 @@ mod tests {
                 },
             ],
         );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A pad button held when the window loses focus is released**, on the
+    /// map the game hands over, and stays released while the pad keeps
+    /// reporting it held — the pad half of `lose_focus`.
+    #[test]
+    fn a_pad_button_held_when_focus_is_lost_is_released() {
+        use crate::input::{
+            ActionDecl, ActionKind, Binding, GamepadEvent, GamepadId, GamepadSnapshot, PadButton,
+            PadKind,
+        };
+        let mut engine = hosted(None);
+        let window = engine.window();
+        let pad = GamepadId(1);
+        let held = GamepadEvent::State {
+            id: pad,
+            snapshot: GamepadSnapshot {
+                buttons: [PadButton::South].into_iter().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        };
+        let actions = &mut engine.game_mut().actions.0;
+        actions.declare(ActionDecl {
+            name: "pad_jump".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::PadButton(PadButton::South)],
+        });
+        actions.gamepad_event(&held);
+        assert!(actions.button_held("pad_jump"));
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        let actions = &mut engine.game_mut().actions.0;
+        assert!(!actions.button_held("pad_jump"), "focus loss released it");
+        actions.gamepad_event(&held);
+        assert!(
+            !actions.button_held("pad_jump"),
+            "and a pad still holding it has not pressed it again",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    // -- the pad pump --------------------------------------------------------
+
+    /// A pad source a test scripts: what is queued is reported on the next
+    /// poll, once. Cloned so the test keeps a handle after the loop owns it.
+    #[derive(Clone, Debug, Default)]
+    struct ScriptedPads(std::rc::Rc<std::cell::RefCell<Vec<crate::input::GamepadEvent>>>);
+
+    impl ScriptedPads {
+        fn send(&self, event: crate::input::GamepadEvent) {
+            self.0.borrow_mut().push(event);
+        }
+    }
+
+    impl PadSource for ScriptedPads {
+        fn poll(&mut self, emit: &mut dyn FnMut(crate::input::GamepadEvent)) {
+            for event in self.0.borrow_mut().drain(..) {
+                emit(event);
+            }
+        }
+    }
+
+    /// The scripted pad's id.
+    const PAD: crate::input::GamepadId = crate::input::GamepadId(1);
+
+    /// Gives `engine` a scripted pad source and hands back the script.
+    fn scripted_pads(engine: &mut Hosted) -> ScriptedPads {
+        let pads = ScriptedPads::default();
+        engine.set_pad_source(Some(Box::new(pads.clone())));
+        pads
+    }
+
+    /// [`PAD`] holding `buttons`, sticks centred.
+    fn pad_holding(buttons: &[crate::input::PadButton]) -> crate::input::GamepadEvent {
+        crate::input::GamepadEvent::State {
+            id: PAD,
+            snapshot: crate::input::GamepadSnapshot {
+                buttons: buttons.iter().copied().collect(),
+                ..crate::input::GamepadSnapshot::neutral(crate::input::PadKind::Xbox)
+            },
+        }
+    }
+
+    /// [`PAD`] with its left stick at `y`, +Y up, and nothing held.
+    fn pad_stick_y(y: f32) -> crate::input::GamepadEvent {
+        let mut snapshot = crate::input::GamepadSnapshot::neutral(crate::input::PadKind::Xbox);
+        snapshot.axes[crate::input::PadAxis::LeftY as usize] = y;
+        crate::input::GamepadEvent::State { id: PAD, snapshot }
+    }
+
+    /// Declares `pad_jump` on South in the fixture's own map.
+    fn declare_pad_jump(engine: &mut Hosted) {
+        engine
+            .game_mut()
+            .actions
+            .0
+            .declare(crate::input::ActionDecl {
+                name: "pad_jump".to_owned(),
+                kind: crate::input::ActionKind::Button,
+                bindings: vec![crate::input::Binding::PadButton(
+                    crate::input::PadButton::South,
+                )],
+            });
+    }
+
+    /// **A scripted pad press reaches the game's hook, once and in order, and
+    /// the game's map resolves a pad binding from it.**
+    #[test]
+    fn a_scripted_pad_press_reaches_the_game_and_its_map() {
+        use crate::input::{GamepadEvent, PadButton, PadKind};
+        let mut engine = hosted(None);
+        declare_pad_jump(&mut engine);
+        let pads = scripted_pads(&mut engine);
+        let connected = GamepadEvent::Connected {
+            id: PAD,
+            kind: PadKind::Xbox,
+        };
+        let pressed = pad_holding(&[PadButton::South]);
+        pads.send(connected);
+        pads.send(pressed);
+        engine.frame().expect("the fake never fails");
+
+        assert_eq!(engine.game().pads, [connected, pressed]);
+        assert!(
+            engine.game_mut().actions.0.just_pressed("pad_jump"),
+            "the game's map never saw South go down",
+        );
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().pads.len(),
+            2,
+            "an event was delivered twice: {:?}",
+            engine.game().pads,
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A pad alone pauses, walks the pause panel and resumes from it**:
+    /// Start opens it, the left stick moves the selection, and South's
+    /// release fires `RESUME`.
+    #[test]
+    fn a_scripted_pad_pauses_and_drives_the_pause_menu() {
+        use crate::input::PadButton;
+        let mut engine = playing();
+        let pads = scripted_pads(&mut engine);
+
+        pads.send(pad_holding(&[PAUSE_BUTTON]));
+        engine.frame().expect("the fake never fails");
+        assert!(engine.is_paused(), "Start did not pause");
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        assert!(engine.is_paused(), "letting go of Start toggled it again");
+        assert_eq!(selected_row(&engine), 0);
+
+        pads.send(pad_stick_y(-1.0));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 1, "the stick did not move down");
+        pads.send(pad_stick_y(0.0));
+        pads.send(pad_stick_y(1.0));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 0, "the stick did not move up");
+        pads.send(pad_stick_y(0.0));
+
+        pads.send(pad_holding(&[PadButton::South]));
+        engine.frame().expect("the fake never fails");
+        assert!(engine.is_paused(), "a press is not a release");
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "South's release did not fire RESUME");
+    }
+
+    /// **The d-pad walks the pause panel** as the stick does: down moves the
+    /// selection down a row, up moves it back.
+    #[test]
+    fn a_scripted_pad_dpad_moves_the_pause_selection() {
+        use crate::input::PadButton;
+        let mut engine = playing();
+        let pads = scripted_pads(&mut engine);
+
+        pads.send(pad_holding(&[PAUSE_BUTTON]));
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        assert_eq!(selected_row(&engine), 0);
+
+        pads.send(pad_holding(&[PadButton::DpadDown]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 1, "the d-pad did not move down");
+        pads.send(pad_holding(&[]));
+        pads.send(pad_holding(&[PadButton::DpadUp]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(selected_row(&engine), 0, "the d-pad did not move up");
+        assert!(engine.is_paused(), "moving the selection resumed the game");
+    }
+
+    /// **East backs out of the pause panel**, which is what Escape does there
+    /// — and with no panel up it pauses nothing.
+    #[test]
+    fn east_backs_out_of_the_pause_panel_and_nothing_else() {
+        use crate::input::PadButton;
+        let mut engine = playing();
+        let pads = scripted_pads(&mut engine);
+
+        pads.send(pad_holding(&[PadButton::East]));
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "East paused a game with no panel up");
+
+        pads.send(pad_holding(&[PAUSE_BUTTON]));
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+
+        pads.send(pad_holding(&[PadButton::East]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "East did not resume from the panel");
+    }
+
+    /// **Focus loss releases what the pump pressed**, including a press in
+    /// the very batch the window lost focus in, and it stays released while
+    /// the pad keeps reporting it — until the player lets go and presses
+    /// again.
+    #[test]
+    fn focus_loss_releases_a_pad_button_the_pump_pressed() {
+        use crate::input::PadButton;
+        let mut engine = hosted(None);
+        let window = engine.window();
+        declare_pad_jump(&mut engine);
+        let pads = scripted_pads(&mut engine);
+
+        pads.send(pad_holding(&[PadButton::South]));
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert!(
+            !engine.game_mut().actions.0.button_held("pad_jump"),
+            "a press in the focus-loss batch survived it",
+        );
+
+        // Re-sent, as a backend does when anything else on the pad moves.
+        pads.send(pad_holding(&[PadButton::South]));
+        engine.frame().expect("the fake never fails");
+        assert!(
+            !engine.game_mut().actions.0.button_held("pad_jump"),
+            "a pad still holding South pressed it again",
+        );
+
+        pads.send(pad_holding(&[]));
+        pads.send(pad_holding(&[PadButton::South]));
+        engine.frame().expect("the fake never fails");
+        assert!(
+            engine.game_mut().actions.0.button_held("pad_jump"),
+            "a fresh press after letting go was withheld",
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A headless loop has no pad source**, and a run of frames hands the
+    /// game no pad events at all.
+    #[test]
+    fn a_headless_loop_polls_no_pads() {
+        let mut engine = hosted(None);
+        assert!(engine.pads.is_none(), "a headless loop picked a pad source");
+        for _ in 0..3 {
+            engine.frame().expect("the fake never fails");
+        }
+        assert!(engine.game().pads.is_empty());
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

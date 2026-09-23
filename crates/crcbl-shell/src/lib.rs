@@ -537,6 +537,43 @@ pub trait Shell: core::fmt::Debug {
     /// `Iterator`-returning shape could not while the shell is also borrowed.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent));
 
+    /// Lets the window system run, and delivers nothing.
+    ///
+    /// Everything [`pump`](Self::pump) does except hand events to a sink: the
+    /// platform's queue is drained, whatever it asks of the client is answered,
+    /// and what it produced is **kept** in this shell's queue, in order, for the
+    /// next `pump`. Every backend implements `pump` as this followed by the
+    /// delivery, so the two cannot drift apart.
+    ///
+    /// # What it is for: a long load on the thread that owns the window
+    ///
+    /// Desktops mark a client that stops draining its queue as hung. Windows
+    /// ghosts a window whose thread has not asked for a message for about five
+    /// seconds — `IsHungAppWindow`, a greyed "Not Responding" title, clicks
+    /// held — a Wayland compositor pings through `xdg_wm_base` and offers to
+    /// kill a client that does not answer (GNOME's "not responding" dialog),
+    /// and macOS puts the spinning cursor over an application whose main thread
+    /// has stopped taking events. A game that loads its assets between opening
+    /// its window and its first frame calls this every so often — a few times a
+    /// second is plenty — and stays responsive to all three.
+    ///
+    /// **Nothing is dropped**, which is why this is not `pump` with an empty
+    /// sink: a key pressed, a resize or a close request made during the load is
+    /// delivered by the first frame's `pump`, exactly as if the load had been
+    /// one long frame. So a close request stays unanswered until then — the
+    /// window stays open and the load finishes first — and a loader that must
+    /// stop for one has to pump and handle events itself.
+    ///
+    /// Work that can leave the loop thread should, instead: a loop that keeps
+    /// running frames keeps pumping on its own, and can show progress while it
+    /// does. This is for the load that cannot — work on the device the loop
+    /// owns, or on anything else tied to this thread.
+    ///
+    /// Non-blocking and finite, like `pump`, and with the same exception: on
+    /// Win32 and AppKit it does not return while the user is dragging the
+    /// window's border.
+    fn keep_alive(&mut self);
+
     /// Blocks until an event arrives or `timeout` elapses.
     ///
     /// **Advisory.** Returning immediately is always correct, and backends

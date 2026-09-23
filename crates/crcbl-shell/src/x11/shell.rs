@@ -497,11 +497,7 @@ impl Shell for X11Shell {
     /// configurations, so a resize and its scale change land together; then
     /// delivery.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
-        if self.lost.is_none() {
-            self.drain();
-        }
-        self.service_transfers();
-        self.publish_configurations();
+        self.keep_alive();
         // Drain by count, not `while let`: a sink that creates a window must
         // not be able to spin this loop, and whatever it queued belongs to the
         // next frame — which is what the socket would have done anyway.
@@ -511,6 +507,21 @@ impl Shell for X11Shell {
             };
             sink(event);
         }
+    }
+
+    /// Drains the connection and keeps what arrived.
+    ///
+    /// No window manager pings this client — the window does not advertise
+    /// `_NET_WM_PING` in `WM_PROTOCOLS` — so what a busy X11 client risks is
+    /// narrower than on Wayland: a paste of our own selection by another client
+    /// is answered here, in [`drain`](Self::drain), and would otherwise wait
+    /// out the load.
+    fn keep_alive(&mut self) {
+        if self.lost.is_none() {
+            self.drain();
+        }
+        self.service_transfers();
+        self.publish_configurations();
     }
 
     /// Blocks until something arrives on the connection or `timeout` elapses.

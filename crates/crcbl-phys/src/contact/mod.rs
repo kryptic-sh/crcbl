@@ -1,4 +1,4 @@
-//! Contacts: rung 1 of `docs/plan/36-contact-solver.md`.
+//! Contacts: rungs 1 and 2 of `docs/plan/36-contact-solver.md`.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
@@ -29,14 +29,23 @@
 //! colliders that were never meant to push each other, and paying a
 //! broadphase for them would be a cost those samples never asked for.
 //!
-//! # What rung 1 does not do
+//! # What rung 2 added
 //!
-//! Boxes collide only with planes, spheres and capsules — box against box is
-//! rung 2. Nothing sleeps (rung 3). Nothing sweeps (rung 4): speculative
-//! contacts are what stop a fast body, and the speculative distance grows with
-//! the pair's speed so they can. The solver is scalar `f64` (rung 6 makes it
-//! wide). Friction acts at each point rather than at the manifold's centroid
-//! with a twist term, which is rung 2's.
+//! Box against box, through a separating axis test whose last axis each
+//! contact caches, with clipping, four-point reduction and flip-invariant
+//! feature ids — see [`manifold`]. And friction at each manifold's centroid
+//! with a twist term about its normal, in place of friction at every point —
+//! see `solver.rs`.
+//!
+//! # What is not done yet
+//!
+//! General convex hulls, and GJK for spheres and capsules against them: the
+//! collider set has no hull, and against a box the analytic pairs are exact.
+//! Nothing sleeps (rung 3). Nothing sweeps (rung 4): speculative contacts are
+//! what stop a fast body, and the speculative distance grows with the pair's
+//! speed so they can. The solver is scalar `f64` (rung 6 makes it wide). A
+//! tall stack needs [`ContactSettings::TALL_STACK`] for its whole system,
+//! since substeps are not yet per group.
 
 pub(crate) mod broadphase;
 pub mod manifold;
@@ -50,7 +59,7 @@ use crcbl_ecs::Entity;
 use glam::DVec3;
 
 use self::broadphase::{Broadphase, PlaneBounds, ProxyId, ProxyKind};
-use self::manifold::{MAX_POINTS, Manifold};
+use self::manifold::{MAX_POINTS, Manifold, SatCache};
 use self::shape::ContactShape;
 use crate::collider::Aabb;
 use crate::material::SurfaceMaterial;
@@ -109,6 +118,28 @@ impl ContactSettings {
         warm_starting: true,
         kinetic_impulse: 1.0,
     };
+
+    /// [`DEFAULT`](Self::DEFAULT) with twice the substeps and three times the
+    /// stiffness — 90 Hz, under the 120 Hz cap eight substeps allow — for a
+    /// tall stack, which is decision 1's "more substeps for its group".
+    ///
+    /// **Why a column needs it.** A soft contact is a spring of stiffness
+    /// `m ω²` on the pair's effective mass, whatever it carries, so a column's
+    /// joints resist rocking with a stiffness that does not grow with the
+    /// weight above them. That is a heavy column on elastic joints, which
+    /// buckles under its own weight past Greenhill's height `L³ = 7.837 EI / q`.
+    /// For cubes of half-extent `w` — each corner's effective mass `m / 8`,
+    /// four corners, `EI = 4 (m/8) ω² w² · 2w` and `q = m g / 2w` — that is
+    /// `N = (1.96 ω² w / g)^⅓` cubes, whatever their mass: at the default
+    /// 30 Hz, 15 one-metre cubes, and at 90 Hz, 32. Measured on 2026-09-23: at
+    /// the defaults 14 one-metre cubes stood and 17 fell; with these settings
+    /// 20 stood. Box2D's contacts default to the same 30 Hz, so the same
+    /// arithmetic applies to it.
+    pub const TALL_STACK: Self = Self {
+        substeps: 8,
+        contact_hertz: 90.0,
+        ..Self::DEFAULT
+    };
 }
 
 impl Default for ContactSettings {
@@ -166,6 +197,22 @@ impl ContactCounters {
     #[must_use]
     pub fn bounce_ratio(&self) -> Option<f64> {
         (self.bounces > 0).then(|| self.bounce_ratio_sum / self.bounces as f64)
+    }
+
+    /// Manifold points over touching contacts — rung 2's "points per
+    /// manifold" — or `None` if nothing touched.
+    #[must_use]
+    pub fn points_per_manifold(&self) -> Option<f64> {
+        (self.touching > 0).then(|| self.points as f64 / self.touching as f64)
+    }
+
+    /// The share of this step's points whose feature id matched one of the
+    /// step before's, and so were warm-started — rung 2's "persisted-id
+    /// ratio" — or `None` if there were no points. A stack at rest reads one;
+    /// flickering ids read less.
+    #[must_use]
+    pub fn persisted_ratio(&self) -> Option<f64> {
+        (self.points > 0).then(|| self.persisted as f64 / self.points as f64)
     }
 }
 
@@ -258,13 +305,17 @@ struct PlaneRecord {
     material: SurfaceMaterial,
 }
 
-/// An impulse kept for warm starting, by feature id.
+/// The impulses a contact keeps for warm starting: one normal impulse per
+/// point, matched to the next tick's points by feature id, and the friction
+/// and twist the whole manifold carries at its centroid.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-struct WarmImpulse {
-    normal: f64,
+struct WarmImpulses {
+    normal: [f64; MAX_POINTS],
     /// The friction impulse as a world vector, so a normal that turns between
     /// ticks still hands its successor the right amount.
-    tangent: DVec3,
+    friction: DVec3,
+    /// The twist impulse about the normal, in N·m·s.
+    twist: f64,
 }
 
 /// A pair in the pool.
@@ -273,8 +324,11 @@ struct Contact {
     a: ProxyId,
     b: ProxyId,
     manifold: Manifold,
-    impulses: [WarmImpulse; MAX_POINTS],
+    impulses: WarmImpulses,
     touching: bool,
+    /// A box pair's last separating axis. It only ever saves work, so it is
+    /// not part of the hashed state.
+    cache: SatCache,
 }
 
 /// One side of a contact, resolved against the bodies for one tick.
@@ -488,8 +542,9 @@ impl ContactPipeline {
                 a,
                 b,
                 manifold: Manifold::EMPTY,
-                impulses: [WarmImpulse::default(); MAX_POINTS],
+                impulses: WarmImpulses::default(),
                 touching: false,
+                cache: SatCache::default(),
             };
             match self.free_contacts.pop() {
                 Some(slot) => self.contacts[slot as usize] = Some(contact),
@@ -511,7 +566,7 @@ impl ContactPipeline {
         counters.worst_penetration = 0.0;
 
         for slot in 0..self.contacts.len() {
-            let Some(contact) = self.contacts[slot] else {
+            let Some(mut contact) = self.contacts[slot] else {
                 continue;
             };
             let sides = (self.side(contact.a, bodies), self.side(contact.b, bodies));
@@ -530,13 +585,14 @@ impl ContactPipeline {
                         + side.angular_velocity.length() * side.shape.reach_from(side.position)
                 };
                 let speculative = self.settings.speculative_distance + dt * (reach(&a) + reach(&b));
-                manifold::collide(&a.shape, &b.shape, speculative)
+                manifold::collide_cached(&a.shape, &b.shape, speculative, &mut contact.cache)
             } else {
                 Manifold::EMPTY
             };
 
-            let mut impulses = [WarmImpulse::default(); MAX_POINTS];
+            let mut impulses = WarmImpulses::default();
             let mut manifold = manifold;
+            let mut persisted = false;
             for (k, point) in manifold.points_mut().iter_mut().enumerate() {
                 if let Some(old) = contact
                     .manifold
@@ -544,11 +600,18 @@ impl ContactPipeline {
                     .iter()
                     .position(|p| p.id == point.id)
                 {
-                    impulses[k] = contact.impulses[old];
+                    impulses.normal[k] = contact.impulses.normal[old];
+                    persisted = true;
                     self.counters.persisted += 1;
                 }
                 self.counters.worst_penetration =
                     self.counters.worst_penetration.max(-point.separation);
+            }
+            // The manifold's friction and twist carry over while any of its
+            // points does: a contact that kept none is a new contact.
+            if persisted {
+                impulses.friction = contact.impulses.friction;
+                impulses.twist = contact.impulses.twist;
             }
 
             let touching = !manifold.points().is_empty();
@@ -579,16 +642,12 @@ impl ContactPipeline {
             .enumerate()
             .filter_map(|(slot, contact)| {
                 let contact = contact.as_ref()?;
-                let mut normal_impulses = [0.0; MAX_POINTS];
-                for (k, impulse) in contact.impulses.iter().enumerate() {
-                    normal_impulses[k] = impulse.normal;
-                }
                 Some(ContactReport {
                     slot: slot as u32,
                     a: self.contact_body(contact.a, records)?,
                     b: self.contact_body(contact.b, records)?,
                     manifold: contact.manifold,
-                    normal_impulses,
+                    normal_impulses: contact.impulses.normal,
                 })
             })
             .collect()
@@ -635,17 +694,18 @@ impl ContactPipeline {
             for value in contact.manifold.normal.to_array() {
                 write(hasher, value);
             }
-            for (point, impulse) in points.iter().zip(&contact.impulses) {
+            for (point, &impulse) in points.iter().zip(&contact.impulses.normal) {
                 hasher.write(&point.id.to_le_bytes());
                 for value in point.point.to_array() {
                     write(hasher, value);
                 }
                 write(hasher, point.separation);
-                write(hasher, impulse.normal);
-                for value in impulse.tangent.to_array() {
-                    write(hasher, value);
-                }
+                write(hasher, impulse);
             }
+            for value in contact.impulses.friction.to_array() {
+                write(hasher, value);
+            }
+            write(hasher, contact.impulses.twist);
         }
     }
 

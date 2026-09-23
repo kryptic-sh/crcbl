@@ -109,6 +109,13 @@ pub(crate) struct Dxil {
     /// needs the answer — see [`require_storage_strides`](Self::require_storage_strides),
     /// which is where a failure reaches the caller.
     structured: Result<Vec<crate::bitcode::StructuredBuffer>, String>,
+    /// The `PSV0` part's resource table, or why it could not be read.
+    ///
+    /// Read here, once per container, and held to each pipeline layout the
+    /// container is used with by [`require_registers`](Self::require_registers)
+    /// — which is also where a failure reaches the caller, as with
+    /// [`structured`](Self::structured).
+    resources: Result<Vec<PsvResource>, String>,
 }
 
 impl Dxil {
@@ -167,6 +174,7 @@ impl Dxil {
         let mut kind = None;
         let mut numthreads = None;
         let mut structured = Err(String::from("the container has no DXIL part"));
+        let mut resources = Err(String::from("the container has no PSV0 part"));
         for part in parts(bytes).ok_or_else(|| refuse("has a truncated part table"))? {
             match part.fourcc {
                 b"DXIL" => {
@@ -183,7 +191,10 @@ impl Dxil {
                         .ok_or_else(|| String::from("the DXIL part runs past the container"))
                         .and_then(crate::bitcode::structured_buffers);
                 }
-                b"PSV0" => numthreads = psv_numthreads(bytes, part.data),
+                b"PSV0" => {
+                    numthreads = psv_numthreads(bytes, part.data);
+                    resources = psv_table(bytes, part.data);
+                }
                 _ => {}
             }
         }
@@ -193,7 +204,31 @@ impl Dxil {
             kind,
             numthreads,
             structured,
+            resources,
         })
+    }
+
+    /// Checks every resource this container's `PSV0` table declares against
+    /// the registers `layout` puts its bindings at, and refuses one the layout
+    /// does not hold. See [`crate::registers`].
+    ///
+    /// # Errors
+    ///
+    /// [`HalError::ShaderCompilation`] naming `pipeline`, `entry_point` and
+    /// both sides of each disagreement — or why the table could not be read.
+    pub(crate) fn require_registers(
+        &self,
+        layout: &crate::registers::LayoutRegisters,
+        pipeline: &str,
+        entry_point: &str,
+    ) -> Result<(), HalError> {
+        let resources = self.resources.as_ref().map_err(|reason| {
+            HalError::ShaderCompilation(format!(
+                "`{pipeline}` {entry_point}: the container's registers cannot be checked against \
+                 its pipeline layout: {reason}"
+            ))
+        })?;
+        layout.check(resources, pipeline, entry_point)
     }
 
     /// Checks every storage buffer a pipeline layout declares against the
@@ -542,7 +577,6 @@ pub(crate) struct StorageRegister {
 }
 
 /// One record of a container's `PSV0` resource table.
-#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct PsvResource {
     /// The register file it is declared in.
@@ -560,12 +594,8 @@ pub(crate) struct PsvResource {
     pub(crate) kind: Option<u32>,
 }
 
-/// A container's `PSV0` resource table: every resource the entry point reads,
-/// where, and as what.
-///
-/// Test-only, because the runtime path never needs it: the root signature is
-/// built from the caller's declared layout, and this is how that layout is
-/// checked against the artifact rather than a second source for it.
+/// The resource table of the `PSV0` part whose data starts at `data`: every
+/// resource the entry point reads, where, and as what.
 ///
 /// The table follows the runtime info: a `u32` count, a `u32` stride, then
 /// that many records. Each opens `ResType`, `Space`, `LowerBound`,
@@ -574,79 +604,150 @@ pub(crate) struct PsvResource {
 /// `PSVResourceType` numbers sampler 1, CBV 2, the three SRV kinds 3–5 and
 /// the UAV kinds from 6. All of it is fixed by the container format.
 ///
+/// # Errors
+///
+/// Why the table could not be read: truncated, a record stride too short to
+/// hold `PSVResourceBindInfo0`, or a record of `PSVResourceType` 0, which
+/// binds nothing.
+fn psv_table(bytes: &[u8], data: usize) -> Result<Vec<PsvResource>, String> {
+    /// Bytes of a `PSVResourceBindInfo0`.
+    const BIND_INFO_0: usize = 16;
+    /// Bytes of a `PSVResourceBindInfo1`, the first record to carry a kind.
+    const BIND_INFO_1: usize = 24;
+    let truncated = || String::from("the PSV0 resource table runs past the container");
+    let info_size = word(bytes, data).ok_or_else(truncated)? as usize;
+    let mut at = data
+        .checked_add(4)
+        .and_then(|at| at.checked_add(info_size))
+        .ok_or_else(truncated)?;
+    let count = word(bytes, at).ok_or_else(truncated)? as usize;
+    at += 4;
+    if count == 0 {
+        return Ok(Vec::new());
+    }
+    let stride = word(bytes, at).ok_or_else(truncated)? as usize;
+    at += 4;
+    if stride < BIND_INFO_0 {
+        return Err(format!(
+            "the PSV0 resource records are {stride} bytes, too short to hold a register"
+        ));
+    }
+    (0..count)
+        .map(|index| {
+            let record = index
+                .checked_mul(stride)
+                .and_then(|offset| at.checked_add(offset))
+                .ok_or_else(truncated)?;
+            let field = |offset: usize| word(bytes, record + offset).ok_or_else(truncated);
+            let class = match field(0)? {
+                0 => {
+                    return Err(format!(
+                        "PSV0 resource record {index} has PSVResourceType 0, which binds nothing"
+                    ));
+                }
+                1 => RegisterClass::Sampler,
+                2 => RegisterClass::Cbv,
+                3..=5 => RegisterClass::Srv,
+                _ => RegisterClass::Uav,
+            };
+            Ok(PsvResource {
+                class,
+                space: field(4)?,
+                lower: field(8)?,
+                upper: field(12)?,
+                kind: if stride >= BIND_INFO_1 {
+                    Some(field(16)?)
+                } else {
+                    None
+                },
+            })
+        })
+        .collect()
+}
+
+/// A container's `PSV0` resource table, for a test that reads a committed
+/// artifact directly.
+///
 /// # Panics
 ///
 /// On a container without a well-formed `PSV0` part, which no committed
 /// artifact is.
 #[cfg(test)]
 pub(crate) fn psv_resources(bytes: &[u8]) -> Vec<PsvResource> {
-    /// Bytes of a `PSVResourceBindInfo1`, the first record to carry a kind.
-    const BIND_INFO_1: usize = 24;
     let part = parts(bytes)
         .expect("a well-formed part table")
         .into_iter()
         .find(|part| part.fourcc == b"PSV0")
         .expect("a PSV0 part");
-    let info_size = word(bytes, part.data).expect("a runtime info size") as usize;
-    let mut at = part.data + 4 + info_size;
-    let count = word(bytes, at).expect("a resource count") as usize;
-    at += 4;
-    if count == 0 {
-        return Vec::new();
-    }
-    let stride = word(bytes, at).expect("a resource record stride") as usize;
-    at += 4;
-    (0..count)
-        .map(|index| {
-            let record = at + index * stride;
-            let class = match word(bytes, record).expect("a resource type") {
-                1 => RegisterClass::Sampler,
-                2 => RegisterClass::Cbv,
-                3..=5 => RegisterClass::Srv,
-                other => {
-                    assert!(
-                        other >= 6,
-                        "PSVResourceType {other} is not a bound resource"
-                    );
-                    RegisterClass::Uav
-                }
+    psv_table(bytes, part.data).unwrap_or_else(|reason| panic!("{reason}"))
+}
+
+/// A signed container whose `DXIL` part names `kind` and holds no bitcode,
+/// with a `PSV0` part listing `resources` when they are given.
+///
+/// Built to the format's own layout — magic, a non-zero digest, a version, the
+/// size, the part offsets, then each part as a fourcc, a size and its data —
+/// so a test can hand [`Dxil::parse`] a resource table no committed artifact
+/// has. Each record is a `PSVResourceBindInfo1` behind an empty runtime info.
+#[cfg(test)]
+pub(crate) fn test_container(kind: u32, resources: Option<&[PsvResource]>) -> Vec<u8> {
+    let le = |value: u32| value.to_le_bytes();
+    let program = [le((kind << 16) | (6 << 4) | 6), le(0)].concat();
+    let mut parts: Vec<(&[u8; 4], Vec<u8>)> = vec![(b"DXIL", program)];
+    if let Some(resources) = resources {
+        let count = u32::try_from(resources.len()).expect("a small table");
+        let mut psv = [le(0), le(count), le(24)].concat();
+        for resource in resources {
+            let resource_type: u32 = match resource.class {
+                RegisterClass::Sampler => 1,
+                RegisterClass::Cbv => 2,
+                RegisterClass::Srv => 3,
+                RegisterClass::Uav => 6,
             };
-            PsvResource {
-                class,
-                space: word(bytes, record + 4).expect("a register space"),
-                lower: word(bytes, record + 8).expect("a lower bound"),
-                upper: word(bytes, record + 12).expect("an upper bound"),
-                kind: (stride >= BIND_INFO_1)
-                    .then(|| word(bytes, record + 16).expect("a resource kind")),
+            for field in [
+                resource_type,
+                resource.space,
+                resource.lower,
+                resource.upper,
+                resource.kind.unwrap_or(0),
+                0,
+            ] {
+                psv.extend_from_slice(&le(field));
             }
-        })
-        .collect()
+        }
+        parts.push((b"PSV0", psv));
+    }
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"DXBC");
+    bytes.extend_from_slice(&[0xAB; 16]);
+    bytes.extend_from_slice(&1u16.to_le_bytes());
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    // The size is patched below, once the length is known.
+    bytes.extend_from_slice(&le(0));
+    bytes.extend_from_slice(&le(u32::try_from(parts.len()).expect("few parts")));
+    let mut offset = 32 + 4 * parts.len();
+    for (_, data) in &parts {
+        bytes.extend_from_slice(&le(u32::try_from(offset).expect("a small container")));
+        offset += 8 + data.len();
+    }
+    for (fourcc, data) in &parts {
+        bytes.extend_from_slice(*fourcc);
+        bytes.extend_from_slice(&le(u32::try_from(data.len()).expect("a small part")));
+        bytes.extend_from_slice(data);
+    }
+    let size = u32::try_from(bytes.len()).expect("a small container");
+    bytes[24..28].copy_from_slice(&size.to_le_bytes());
+    bytes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A minimal signed container, built to the format's own layout: magic, a
-    /// non-zero digest, a version, the size, one part offset, and a `DXIL` part
-    /// whose program header names `kind`.
+    /// A minimal signed container whose `DXIL` part names `kind`, with no
+    /// `PSV0` part.
     fn container(kind: u32) -> Vec<u8> {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"DXBC");
-        bytes.extend_from_slice(&[0xAB; 16]);
-        bytes.extend_from_slice(&1u16.to_le_bytes());
-        bytes.extend_from_slice(&0u16.to_le_bytes());
-        // Size and part count are patched below, once the length is known.
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        bytes.extend_from_slice(&1u32.to_le_bytes());
-        bytes.extend_from_slice(&36u32.to_le_bytes());
-        bytes.extend_from_slice(b"DXIL");
-        bytes.extend_from_slice(&8u32.to_le_bytes());
-        bytes.extend_from_slice(&((kind << 16) | (6 << 4) | 6).to_le_bytes());
-        bytes.extend_from_slice(&0u32.to_le_bytes());
-        let size = u32::try_from(bytes.len()).expect("a small container");
-        bytes[24..28].copy_from_slice(&size.to_le_bytes());
-        bytes
+        test_container(kind, None)
     }
 
     /// A well-formed container parses, and its shader kind comes out.

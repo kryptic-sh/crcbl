@@ -4515,6 +4515,27 @@ frame before, 2.61 ms after, 2.56 ms with timers off (means of three runs).
   covers two encoders writing disjoint queries of one set in one submission,
   which the resolve-by-run logic handles by design only.
 
+## dx12 register check at pipeline creation: what it left open (2026-09-22)
+
+`crcbl-dx12` now holds each stage's `PSV0` resource table to the pipeline
+layout's registers before `Create*PipelineState` (`crate::registers`,
+`Dxil::require_registers`), so EW-style game DXIL numbered per class is refused
+by name instead of with `E_INVALIDARG`. Open:
+
+- **Two derivations of one layout's registers.** `binding::ranges` builds the
+  root signature from `BindGroupLayoutRecord`'s range plans, and
+  `registers::place_set` builds the checked registers from the record's stored
+  `entries`. Both call `root::assign_registers`, and the GPU suites plus
+  `renderer_registers` pass, but nothing asserts the two lists are equal. The
+  same goes for `PipelineLayoutEntry::storage`, which could be derived from
+  `LayoutRegisters` (a storage binding's kind carries its stride). Folding them
+  into one is a refactor with no outward effect, left out of the fix.
+- **A container with no `PSV0` part is now refused at pipeline creation.** Every
+  `dxc`-signed container carries one; a hand-built or stripped container that
+  D3D12 might have accepted is not. Not seen in practice.
+- **The per-class hint lists every same-class binding of the set.** For the mesh
+  layout's many SRVs a refusal is long. Readable, not trimmed.
+
 ## Vulkan queries on AMD Windows: what the fix left open (2026-09-22)
 
 `resolve_query_set` carries an extra all-commands/any-write barrier after
@@ -8575,10 +8596,39 @@ this topic; it shares no vocabulary with it.
 
 ### Contact solver L2/L3 — `36-contact-solver.md` (2026-08-27)
 
-Rungs 0 and 1 are built (2026-09-17): rotation, dense body sets, and
-`crcbl_phys::contact`'s broadphase, analytic sphere and capsule manifolds and
-soft solver. Boxes against boxes, islands, sleep, sweeps and joints — rungs 2
-onward — are the work.
+Rungs 0 and 1 are built (2026-09-17), and rung 2 for boxes (2026-09-23): box-box
+SAT with a cached axis, clipping, four-point reduction and stable feature ids,
+analytic sphere and capsule against boxes, centroid and twist friction, and the
+Tower room in `apps/tumble`. Islands, sleep, sweeps and joints (rungs 3 onward)
+remain, and from rung 2:
+
+- **Hulls are not built.** There is no hull collider; finishing rung 2 means a
+  `ColliderComponent::Hull`, Gregorius's Minkowski-face edge test in place of
+  box-box's full support radii, and GJK with a SAT fallback for spheres and
+  capsules against hulls.
+- **Needs a decision: tall stacks need more substeps.** A soft contact's
+  stiffness does not grow with its load, so at the 30 Hz defaults a column
+  buckles past Greenhill's height (measured: 14 one-metre cubes stand, 17 fall).
+  `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
+  workaround; options are per-island or per-group substeps (decision 1's "more
+  substeps for its group") or stiffness scaled by load.
+- **Fast spinners tunnel into static capsules**: wall cubes at up to 80 rad/s
+  reach 6.9 cm deep in one tick. Rung 4's sweeps own it; until then the wall
+  test's penetration bounds are 2 cm (last tick) and 8 cm (any tick), loosened
+  from 1 and 4 cm when cubes joined the wall.
+- **`PINNED_HASH` was re-pinned on Windows** (`0x76aa_2acd_7b93_d586`); the
+  browser gate in `pages.yml` is what proves wasm matches it.
+- Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
+  room's browser cost (245 more boxes a tick in wasm).
+- **EW's dropped items need two more pieces before they can move onto
+  `crcbl-phys` (EW, 2026-09-23).** Each item is one rigid body made of several
+  local boxes (`ItemMotion::local_bounds`, one padded box per mesh instance —
+  the same parts slice EW hands `AabbCompound`), and a single bounding box would
+  lose rifle and backpack silhouettes. Needed: (1) a dynamic compound collider
+  of oriented local boxes, colliding with statics and with other compounds, mass
+  and inertia from the parts or a density default; (2) sleeping (rung 3),
+  because a raid floor holds dozens of resting items. EW waits for both rather
+  than downgrading.
 
 ### Ragdolls — `35-ragdolls.md` (2026-08-27)
 
@@ -8905,17 +8955,65 @@ browser-hosted single-player game with mods has no containment at all.
 
 **Not built**, all of it re-verified:
 
-- **Patterns other than `repeat`.** A button reports
-  `ButtonState::Held { duration }` for the game to interpret; there is no `tap`,
-  `double-tap` or `hold` evaluator. `ActionMap::set_repeat` is the only pattern.
+- **Pattern gaps after tap/hold/double-tap landed (2026-09-23).**
+  `ActionMap::set_tap`, `set_hold` and `set_double_tap` exist
+  (`crates/crcbl-input/src/patterns.rs`). Still missing: the plan's RON form
+  that emits a _named_ action; pattern edges in `InputTickState`, so a server
+  applying captured ticks sees values but no pattern edges; a public
+  `cancel_patterns(name)` (EW cancels its Z double tap when the wheel moves
+  while Z is held); a double tap that fires on the second _release_ (EW's Z
+  does). EW parked adopting them (2026-09-23): it does not route input through
+  `ActionMap`, the same reason it stays off `grid_drag`, so the migration is an
+  input-architecture call for EW's user; if it comes, a waiting single tap fires
+  at `>` the window against EW's `>=`, one tick apart at exact boundaries.
 - **RON binding assets.** Nothing parses one; a game declares actions in code.
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
   `crcbl-store` has no profile or binding type.
 - **Glyph hints.** No glyph anything in `crcbl-input`.
-- **Every gamepad backend.** No evdev, no XInput, no GameController, no Web
-  Gamepad API. `grep -i gamepad crates/crcbl-input/src crates/crcbl-shell/src`
-  returns only prose saying gamepad support is future work.
+- **Gamepad: the seam and XInput are built; the rest is owed (2026-09-23).**
+  `crates/crcbl-input/src/gamepad.rs` is the seam every backend emits
+  (`GamepadEvent`, `GamepadSnapshot`,
+  `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
+  optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
+  polls four XInput slots on Windows. Still owed:
+  - evdev (Linux), GameController (macOS) and the Web Gamepad API; other targets
+    have no pad module, so naming one fails to build.
+  - **XInput has met no real controller** — only a scripted `StateSource` and a
+    real `XInputGetState` answering 1167 on an empty slot. Button positions,
+    stick sign and reconnection are unverified.
+  - Empty slots are re-probed once per `xinput::REPROBE_INTERVAL` (one second),
+    connected slots every poll: about 28 µs a poll for four empty slots before,
+    about 0.03 µs between re-probes after (release, 2026-09-23). A pad plugged
+    in shows up up to one interval late; a replugged pad gets a new `GamepadId`.
+  - **The loop pumps pads now** (`engine::PadSource`, `Loop::set_pad_source`,
+    `HostedGame::gamepad_event`; XInput on a windowed Windows run, none
+    headless), and the ui context has a pad column. Left open:
+    - A d-pad held on one pad and its opposite on another cancel out, by the
+      every-pad-drives-every-binding rule, until device assignment lands.
+    - **Needs a decision: pad input is not withheld from the game while a menu
+      is up.** Every `GamepadEvent` reaches both the menu map and the game, so
+      South accepting a panel also reaches the game. Keys are claimed per key; a
+      snapshot covers the whole pad, so claiming means masking bound buttons out
+      of what the game sees. Options: mask ui-bound buttons while a panel has
+      input, or leave it to games (`FrameInfo::paused`).
+    - **Needs a decision: pads drive the loop while the window is unfocused.**
+      XInput reports regardless of focus and the loop tracks only the focus-lost
+      edge, so a pad can resume a background window. Options: stop delivering
+      while unfocused (tracking focus gained too), or accept it.
+    - A game that queues pad events for replay after its `begin_tick` can lose
+      the focus-loss release; games feeding the map from the hook are fine and
+      no sample queues pad events yet.
+    - `MenuPump::navigate` ignores `ui::NEXT`/`PREV`, so the shoulders do
+      nothing, as Tab does; the editor's `ui::MOVE` rebind drops the pad stick.
+    - Not verified: no real controller through the pump, and neither
+      `pads::for_run` branch's log line observed in a run.
+  - Not built: rumble, glyphs, the Guide button on XInput (only the undocumented
+    ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
+    (every pad drives every binding), a d-pad composite and pad rows in a RON
+    binding asset.
+  - The Steam plan's slice 7a is this seam; `docs/plan/42-steam.md` on
+    `steam-sdk` still lists 7a as its own until that branch merges main.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the
@@ -9711,24 +9809,23 @@ not exist and neither does the editor.
 **What it blocks:** the grid kit's entire interaction model, and outliner
 reparenting and VFX curve handles in an editor that does not exist yet.
 
-**Measured from a consumer, 2026-09-07.** `apps/shard/src/panel.rs` builds a
-working grid drag on `UiState::interact`'s press capture alone: read
-`UiState::active()` before the cells interact (the capture is cleared on the
-frame the button comes up), hit-test each cell, and the drag is the captured
-cell plus the hovered one. So a game can have a drag today; what it cannot have
-is a **typed** one — no payload, no `can_accept`, no drop-state feedback — that
-a second panel reuses without copying that hit test and its bookkeeping.
+**The mechanism shipped 2026-09-23 as `crcbl_ui::grid_drag`** (`CellGrid`,
+`GridDrag<P>`, a typed payload, `can_accept`, drop feedback as widget state,
+cross-grid drags and the grab offset), and `apps/shard` and `apps/breach` use it
+with their copies deleted. What remains:
 
-**The second consumer arrived 2026-09-07, so the moment is now.**
-`apps/breach/src/panel.rs` is that copy: the same `UiState::active()` read
-before the cells interact, the same per-cell rectangle hit test, the same
-`(captured, hovered)` pair filtered for a release that ended where it began —
-and `apps/breach/src/loadout.rs::dragged_origin` is a second copy of shard's
-grab-offset arithmetic (`apps/shard/src/loot.rs`). Neither sample could reuse
-the other's, and neither made an engine change to avoid copying it. What to
-hoist, from the two: a drag source over a cell grid answering `(from, to)`
-cells, a typed payload a target can `can_accept`, and drop-state feedback as
-widget state.
+- **No non-mutating fit check in the kit.** `crcbl_inventory::Grid` has nothing
+  that ignores an item's own cells, so both panels' `can_accept` clone the grid
+  each frame a drag hovers; a
+  `Grid::can_move_within(catalog, slot, at, rotation)` would remove the clone.
+- **EW will not migrate for now, by EW's decision.** Its inventory and hideout
+  draw with `DrawList` and route pointer events themselves across three drag
+  systems, and use none of `UiState`, `WidgetId` or `PointerInput`, so adopting
+  `GridDrag` is a UI-input architecture change for EW's user, not a port (EW
+  backlog `acf54c4`). Revisit if EW moves its UI input onto `UiState`.
+- **Cross-grid drags and rotation mid-drag (`Held::refit`, `payload_mut`) have
+  no in-tree consumer**; they are unit-tested only.
+- **Nothing is drawn under the pointer mid-drag**; no sample draws a ghost.
 
 ### A save's grid is rebuilt by placing, not by deserialising (2026-09-07)
 
@@ -16532,25 +16629,72 @@ under the same heading, and it binds any Windows test written from now on.
   parallel would interfere, which is why the e2e suite is `--test-threads 1`.
 - **No sample-level pass in CI.** The Linux suites run the sandbox and press F11
   at it, and `samples-windowed` runs every sample in a window; Windows has
-  neither. This entry used to say what blocked it was a missing job rather than
-  a missing renderer, and for Vulkan that was wrong: `crcbl-vk` refused
-  `SurfaceTarget::Win32` outright until 2026-09-15, so no sample could present
-  windowed on Vulkan at all, and nothing on the board could see it because every
-  Windows Vulkan step presented offscreen. That is fixed, and `windowed-e2e`'s
-  suite now runs on Windows too, as a step of `vk-e2e-windows` against lavapipe.
+  neither in CI. `tools/run-samples-windowed.ps1 -Backend vk|dx12` is the
+  Windows port of `tools/run-samples-windowed.sh`. It reads `SAMPLES`,
+  `SAMPLE_FRAMES`, `VIEWER_MODEL` and the `AUTOEXEC_*` constants out of the bash
+  script, so there is one table and `tools/check-windowed-samples.sh` guards
+  both scripts. It asserts exit 0, the frame count, the win32 shell, the
+  requested extent and `windowed`, and no teardown-leak line. It also runs the
+  autoexec pair. What is still open:
+  - **No CI step, by decision, on cost.** Measured on 2026-09-22 on the RX 7900
+    XTX desktop (32 logical processors). Against the lavapipe build
+    `vk-e2e-windows` pins (Mesa 26.1.5, `GALLIVM_PERF=nopt`, no validation
+    layer), the 23-sample loop took **196 s** and the whole script **240 s**.
+    Per sample it ranged from 0.2 s (`bare`) to 37.7 s (`tumble`); `lantern`
+    took 20.9 s, plus 21.8 s and 21.3 s for the two autoexec runs. Linux's
+    `samples-windowed` step took **640 s** on CI (run 35721821179). A Windows
+    runner is slower than this desktop and adds the layer and the self-test run,
+    so a lavapipe step is well past the five-minute budget. **WARP could not be
+    measured at all** (next point). Revisit if either number moves: a trial step
+    with `continue-on-error` on `dx12-e2e` would measure WARP in one round trip.
+  - **`CRCBL_ADAPTER` does not reach a windowed run.** Only
+    `crcbl::screenshot`'s offscreen setup calls `crcbl::adapter::select`. A
+    windowed (or `--headless`) sample opens the backend's first adapter, so on
+    this desktop `CRCBL_ADAPTER=cpu` with `--backend dx12` still opened the RX
+    7900 XTX. On `windows-latest` the first dx12 adapter should be the Microsoft
+    Basic Render Driver, but that has not been checked. Honouring the pin in the
+    windowed open is a Rust change and would make WARP measurable locally.
+  - **dx12 runs check no validation.** The D3D12 debug layer's messages are read
+    only by `crcbl-dx12`'s device tests (`debug::Validated`) and by
+    `debug::diagnosis` on a removed device. A sample that runs to the end never
+    writes them to its log, so the script warns and checks nothing. Grading them
+    needs `crcbl-dx12` to log the info queue's contents at teardown, as
+    `crcbl-vk`'s messenger already does.
+  - **The vk validation half has never run against a layer.** No layer is
+    installed on the desktop, so every local vk run used `-NoValidation`.
+    `crcbl_validation_saw_nothing` and `crcbl_validation_layer_checked` are
+    called through Git Bash, which is found through `git --exec-path`. That
+    plumbing was checked against fixture logs (clean, complaining, no layer,
+    provoked and unprovoked). With validation on and no layer, a run fails on
+    the first sample with "never loaded the layer". The self-test pass, which
+    must go red on an injected message, has not run anywhere.
+  - **The autoexec root moves through `USERPROFILE`, not `APPDATA`.** Measured
+    with `dirs` 7.0.0 on Windows 11 26200: `dirs::config_dir` is
+    `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, and `APPDATA` in the
+    child's environment moved nothing, alone or with `LOCALAPPDATA`. Setting
+    `USERPROFILE` does move it, because the known folder is stored as
+    `%USERPROFILE%\AppData\Roaming` under `HKCU\...\Explorer\User Shell Folders`
+    and is expanded against the process's environment. If that directory does
+    not exist, `config_dir()` answers `None`. The script reads the registry
+    value rather than assuming it, and fails on a machine whose AppData is not
+    under `%USERPROFILE%`. It builds every sample first and starts the binaries
+    directly, because `USERPROFILE` would also move `cargo`'s and `rustup`'s
+    homes. Fault injection confirmed both new refusals fire: a seed equal to the
+    default fails the seeded run, and a control profile with no `Roaming`
+    directory fails the control run. Considered and not built: a
+    `CRCBL_CONFIG_DIR` override in `NativeStorage::config_root`. It would be
+    platform-independent and would not depend on shell folder behaviour, but it
+    is a new public knob in `crcbl-store`, and `USERPROFILE` works without one.
+    Build it if the `USERPROFILE` route breaks, for example on a runner with
+    redirected folders.
 
-  **What has been run, once, by hand:** on 2026-09-15, on a Windows 11 desktop
-  with an AMD Radeon RX 9060 XT, every sample in
-  `tools/run-samples-windowed.sh`'s `SAMPLES` table ran windowed for 120 frames
-  on both `--backend vk` and `--backend dx12`, each exiting 0 with its summary
-  line naming the win32 shell, the requested extent and `windowed`, and no
-  teardown-leak line. **Neither validation layer was installed**, so those runs
-  say nothing about validation. The script itself still cannot run on Windows:
-  it sources `tools/x11-display.sh`, asserts `on the x11 shell`, and its
-  autoexec check moves the config root through `XDG_CONFIG_HOME`, which
-  `dirs::config_dir` does not read on Windows. Porting it is the job; the
-  autoexec half needs a different way to point `NativeStorage` at a scratch
-  directory.
+  **What has been run:** on 2026-09-15, on a Windows 11 desktop with an AMD
+  Radeon RX 9060 XT, every sample ran windowed for 120 frames on both backends,
+  by hand. On 2026-09-22 the script ran green on the RX 7900 XTX desktop (driver
+  32.0.21036.18): `-Backend dx12` in 33.2 s and 37.1 s for the 23-sample loop,
+  and `-Backend vk -NoValidation` in 60.8 s, the autoexec pair passing on both.
+  Neither validation layer was installed, so none of these runs says anything
+  about validation.
 
 ### The shell suites on a real desktop (2026-09-21)
 
@@ -16651,6 +16795,88 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   recorded in the entry above.
 
 ### Owed on the Win32 backend
+
+- **A long load on the loop thread: what `Shell::keep_alive` leaves open.** EW
+  reported the ghosting on 2026-09-22 (a 15 s asset load under contention, no
+  pump). The seam now has `Shell::keep_alive`, which lets the window system run
+  and keeps every event for the next pump, and `Booted`'s docs tell a loader to
+  call it. `a_load_that_keeps_the_window_alive_is_never_hung_and_loses_nothing`
+  in `win32_e2e.rs` checks it with `IsHungAppWindow`: the same load without the
+  calls is judged hung, and with them it is not. Still open:
+  - **EW has to call it.** The fix is a seam, not a behaviour change, so the
+    report closes only when EW's loader takes the turns.
+  - **What `ForwardRenderer::with_scene_serviced` leaves.** EW's scene start was
+    one `with_scene` call (821–906 ms measured by EW); the serviced variant now
+    calls back between uploads and before each pipeline batch, and `apps/viewer`
+    passes `keep_alive`. Measured on the RX 7900 XTX with the viewer on EW's
+    `heist-sandbox.gltf`: pipeline creation is the cost (about 90% of a 2.2–2.4
+    s cold-shader-cache build; about 0.1 s of uploads either way), and the
+    longest gap left is one forward colour pipeline, 313 ms on vk and 361 ms on
+    dx12 cold. Still open:
+    - `with_scene_on_path` has no serviced variant (lantern, alcove, quarry,
+      sundial and tide call it); add one when a caller needs it.
+    - `ForwardRenderer::add_view`, the viewer's reload path and the browser
+      start path pass a no-op, so they are not serviced.
+    - `DrawGen::new` builds its compute pipelines in one gap (167 ms cold);
+      splitting it changes a public signature nobody needs yet.
+    - The floor is one pipeline compile. Lower needs asynchronous or cached
+      pipeline compilation — considered and declined for now.
+    - Not measured: EW's own scenes, and any machine under real contention (the
+      8x EW saw is extrapolated). AMD caches compiled shaders per executable, so
+      a renamed exe is how a cold build is reproduced.
+  - **The engine's own start-up is not covered.** `wait_for_configure` pumps,
+    but a game's `Gpu::open` (device, swapchain, pipelines) gets the shell as
+    `&S` and cannot take a turn. Nobody has measured it past five seconds, even
+    under contention. If it is, that path needs `&mut S`, or a device open that
+    returns control between steps the way `PolledBoot` does.
+  - **A close request cannot stop the load.** `keep_alive` keeps the request for
+    the first frame, so the window stays open until the load finishes. A loader
+    that wants to abort has to pump and handle events itself. No helper offers
+    that yet.
+  - **No engine pattern for loading on a worker.** A game can already do it: put
+    the game in a loading state, spawn through `crcbl_jobs::Spawn`, and poll the
+    result from `HostedGame::tick`/`draw` while the loop presents a loading
+    frame. It is not written down as a sample. Declined for this slice:
+    `keep_alive` covers every native load, and one that needs the device the
+    loop owns cannot move to a worker at all.
+  - **Only the Win32 half is verified.** The Wayland, X11 and AppKit versions
+    are the steps each backend's `pump` already ran, split out. They were
+    checked with cross-target clippy only. The Wayland `pong` it relies on is in
+    `process_raw`. X11 advertises no `_NET_WM_PING`, so no window manager pings
+    it.
+  - `DisableProcessWindowsGhosting` would hide the symptom (the window stops
+    greying, but clicks still queue unanswered). Considered and declined as a
+    fix.
+- **The log file's loose ends** (`crcbl_store::enable_log_file`,
+  `crcbl_core::log::attach_file`). The file itself shipped; these did not:
+  - **A hook set after `attach_file` replaces the log file's panic hook** unless
+    it chains to `std::panic::take_hook`'s result. `attach_file` chains to
+    whatever was set before it, but a game setting its own hook later silently
+    drops the file line. Separately, `take_hook` and `set_hook` are not one
+    atomic step, so a hook set on another thread between the two is lost
+    (`std::panic::update_hook` would fix that; it is unstable). Not verified
+    beyond reading the std API. Opting out is
+    `crcbl_core::log::attach_file_without_panic_hook`.
+  - **No `--log-file` flag, only `CRCBL_LOG_FILE=1`.** `run_front_end` receives
+    an already-parsed, game-generic `Invocation<O>`, so a `Common` flag would
+    need every sample to act on it or `run_front_end` to see `Common`. A game
+    with its own parser maps its own flag onto `enable_log_file` in one line.
+  - **The size cap stops the file rather than rotating it**, keeping the start
+    of the run and losing the end. Deliberate for now (see `log::file` docs); a
+    runaway run past `LOG_FILE_MAX_BYTES` loses its final lines.
+  - **The macOS arm of `NativeStorage::log_root` (`~/Library/Logs/<app>`) has
+    only been through cross-target clippy**, and the Linux arm only through
+    Linux clippy; the test `the_log_root_is_named_per_platform_and_not_created`
+    ran on Windows alone.
+  - A second instance of the same game rotates the first's open file to
+    `<app>.1.log`, where the first keeps writing (std opens files with
+    `FILE_SHARE_DELETE` on Windows, and Unix renames open files freely). Not a
+    bug, but the two runs' files are then misnamed.
+- **An exe icon and version resource helper — declined for now.** EW asked
+  whether the engine should provide one; embedding a `.res` needs either
+  `rc.exe` from the Windows SDK at build time or a new build dependency
+  (`embed-resource`, `winres`), and a new dependency is the user's call. EW owns
+  it in its own `build.rs`; revisit if a second game wants the same.
 
 - **Drag feedback: there is only a drop, never a conversation.** `WM_DROPFILES`
   is a notification; `DragEnter`/`DragOver`, a drop cursor, non-file formats and
@@ -17348,24 +17574,26 @@ annotated.
   0.17 % of a frame to this sample. Keep it as the reason P7 exists for _other_
   scenes; it is not the reason it exists for this one.
 
-- **`crcbl-audio` has no voice limit, no priority and no stealing.** Still true
-  after the mixer-adoption slice, which deliberately left it there.
-  `apps/horde/src/audio.rs` caps itself at `MAX_VOICES` = 16 and refuses the
-  newest voice, counting refusals in `Audio::dropped()`. Refusing the newest is
-  the crudest answer that is honest and it is audibly wrong in one case: a
-  player's _death_ cue can be refused by sixteen kill cues raised on the same
-  tick. Wanted in the crate: a voice budget with a priority, so an important cue
-  steals the oldest cheap one. The refusal count is on the debug panel now (the
-  `audio` section's `dropped` row), so the pressure is visible while the
-  crate-level budget stays undecided.
-
-  One detail changed with the adoption and is worth knowing before anyone moves
-  the cap into the crate: horde now reads `Mixer::voice_count` and then calls
-  `Mixer::play`, two lock acquisitions where the hand-rolled queue held one
-  across both. Only the game thread adds and only the audio thread removes, so
-  the count can be stale **low** and never stale high — the cap can refuse a cue
-  that had just been made room for, and can never let the count past
-  `MAX_VOICES`. A cap inside the crate would not need the two-step at all.
+- **`crcbl-audio`'s voice budget does the minimum.** `Mixer::set_voice_budget`,
+  `Voice::with_priority` and `Mixer::try_play` landed 2026-09-23: a full mixer
+  steals the lowest-priority, oldest voice when the new priority is `>=` its own
+  (an equal cue takes the oldest's place), or refuses, all under the voice lock,
+  and a stolen voice fades over one block. `apps/horde` uses it (`MAX_VOICES`,
+  `priority`), with `dropped` and `stolen` rows on its debug panel. Still
+  missing, verified:
+  - **No distance term in stealing.** `docs/plan/13-audio.md` asks for priority
+    plus distance; only priority and age decide now.
+  - **Releasing voices sit outside the budget** for the one block they fade, so
+    per-block work is the budget plus steals per block.
+  - **A finished voice holds its slot until the next `fill`** reaps it.
+  - **The audio thread still frees memory**: `fill` drops finished voices and
+    may free the last `Arc` of their sample data. `tests/fill_allocation.rs`
+    counts allocations only, and the plan's lock-free audio thread is not built.
+  - **`docs/plan/13-audio.md` is stale**: its "Voices" bullet and "What of this
+    list actually runs" still say there is no priority or stealing.
+  - EW's `ClientAudio::play` still caps itself; migration is
+    `set_voice_budget(Some(32))` plus `try_play`, and its bound test's last
+    assertion must change because an equal-priority 33rd cue now steals.
 
 - **Nothing has listened to the five cues**, on any device. They are synthesised
   deterministically from a fixed seed, so a golden buffer is possible and there
@@ -21904,6 +22132,44 @@ miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
 
+## Session hand-off, 2026-09-22: work in flight
+
+- **Steamworks, on branch `steam-sdk` (not merged).** The user asked for a
+  four-step chain in one worktree — plan, plan review, implementation, final
+  review — then a merge into main by the coordinating session. Done: the plan
+  (`ec108d81`) and its review (`520ae563`), both on `origin/steam-sdk`, in
+  `docs/plan/42-steam.md`. Step 3 (implementation) stopped at the session's end
+  after slice 1: `cc422c7e` adds a `crcbl-steam` crate — on that branch only, so
+  the path is not written here; the citation gate reads every `crates/…` path
+  against **this** tree — (runtime loader, init with the version handshake,
+  manual-dispatch pump, `SteamId`, the fake library, the drift gate and smoke
+  test as `#[ignore]`d tests, a CI Miri job), green locally and pushed; its
+  status is in the plan's "Status by slice" section. Not run: the drift gate and
+  smoke test (no Steamworks SDK on this machine; someone with a partner login
+  has to download SDK 1.65), every manual Steam-client step, and CI itself — CI
+  runs only on `main` and pull requests, so dispatch it on the branch
+  (`gh workflow run CI --ref steam-sdk`) before trusting it. Owed: finish step 3
+  through the plan's build order (next 1b, then 3a, 3b, 4, 2, 6, 5, 7a–c, 8, 9,
+  10–15), then step 4 (an independent review on the same branch), then merge
+  into main and push. The worktree was
+  `.claude/worktrees/agent-a2d90b487b193d94c`; the branch is what matters, not
+  the directory. EW's hard requirements for Steam (listen-server co-op for four
+  with reconnect and host-left, raw voice PCM with game-controlled push-to-talk,
+  Steam Input as the shared gamepad events, whole-file cloud with surfaced
+  conflicts, the Steam ID as identity, no anti-cheat) are folded into the plan.
+- **CI has not been checked since `37901008`** (run 35716420973, green). The
+  pushes after it — the dx12 mesh-flag notes, the bare/editor idle fix, the
+  Win32 focus helper, the Windows windowed-samples script, `Shell::keep_alive`,
+  the dx12 register check at pipeline creation and the log file — were each
+  verified locally (Win32 harness, GPU suites on dx12 hardware, WARP and vk
+  where relevant, cross-target clippy), not on CI. Read the next main run before
+  building on them.
+- **The dx12 mesh flag waits on the user.** Options (a) withhold everywhere, the
+  current state, (b) report on hardware and accept empty frames on the RX 7900
+  XTX driver 32.0.21036.18, (c) gate by driver version after more measurement;
+  the evidence is in "DEFERRED — dx12 mesh shading: WARP needs a pixel shader,
+  one AMD driver culls everything".
+
 ## EW's engine-port audit: three gaps crcbl does not cover (2026-09-22)
 
 EW audited its reusable features against crcbl `c9b45000`'s public API (EW
@@ -21912,24 +22178,48 @@ commit `eccc3f6`). Not started; recorded for triage. EW's own list also named
 the `Mixer` voice budget and the typed grid drag/drop hoist, which this backlog
 already carries.
 
-- **Compound ray and closest-point queries (`crcbl-phys`).** `crcbl-phys` has
-  only world-axis-aligned primitives, no compound shape, and no
-  closest-point-on-box (only `closest_on_segment`). EW's
-  `asset_placement::interaction_ray_hit` moves the ray into local space, runs
-  `ray_vs_aabb` per part and keeps the nearest; `corpse_interaction_contact`
-  clamps to each local box and rotates back. Proposed shape: a compound of local
-  boxes plus a pose, with ray and closest-point queries. EW keeps loot reach,
-  visibility and ranking on its side.
-- **Two-bone IK and parent-space joint rotation (`crcbl-anim`).** Already listed
-  as absent in the animation plan. EW's `character_ik.rs` (`solve_two_bone`,
-  `rotate_joint` over `Skeleton`/`Pose`/`Palette`) has four callers: arm hand
-  placement, support-shoulder reach, upper-body aim and foot rotation. Before
-  porting, validate zero-length chains, pose/palette size mismatch, invalid
-  indices, non-finite inputs and non-uniform scale — EW's version does not.
-- **CPU bounds of a `SceneDesc` instance set under a root transform.** EW's
-  `asset_placement::bounds` / `collision_parts` reject non-finite values, where
-  `Aabb::from_points` skips NaN. This is what would produce the parts for the
-  compound query above.
+- **Compound queries shipped; EW's migration and two findings remain.**
+  `crcbl_phys::AabbCompound` (`ray_cast`, `closest_point`, `closest_points`) and
+  `Aabb::closest_point` landed 2026-09-23. EW still has to replace
+  `asset_placement::interaction_ray_hit` and the clamp loop in
+  `game_corpse_interactions::corpse_interaction_contact`; corpse contact must
+  use `closest_points`, because EW filters parts by reach and visibility before
+  choosing. EW's `item_motion::valid_compound_bounds` duplicates
+  `AabbCompound::new`'s validation (plus refusing an empty set). Found while
+  porting, read from the code and not run, and left alone because each changes
+  behaviour: `query::ray_vs_aabb` with a zero direction from inside a box yields
+  a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on a `NaN`
+  box corner (`f64::clamp` asserts), which rebuilding it on
+  `Aabb::closest_point` would turn into "no overlap". Not done: compound sweeps
+  and compound-vs-shape overlap, which EW did not ask for.
+- **Two-bone IK shipped; EW's migration remains.**
+  `crcbl_anim::{rotate_joint, solve_two_bone}` landed 2026-09-23 with EW's
+  argument order, returning `IkError` (the validation choices are in the `ik`
+  module docs). EW still has to move its 8 call sites (`ArmRig::apply_hand` and
+  `reach_support_shoulder`, `UpperBodyRig::apply`, `restore_foot_rotation`, one
+  medical test) and delete `character_ik.rs`. Behaviour change: `solve_two_bone`
+  extends fully to an unreachable target, where EW stopped `REACH_MARGIN_M`
+  short. Not done: look-at, per-call weights (the caller blends poses), and a
+  solve result reporting reached / clamped / folded, which EW's
+  `reach_support_shoulder` could use but has not asked for. Not verified: EW's
+  authored rigs under the port, and whether they carry non-uniform scale above a
+  turned joint, which is now refused with `NonConformalFrame`.
+- **Scene instance bounds shipped; EW's migration remains.**
+  `SceneDesc::instance_bounds(&instances, root)` and
+  `instance_parts(&instances)` landed 2026-09-23 in `crcbl-render`, folding the
+  placed vertices (not the looser abs-matrix box, which would float EW's surface
+  placement) into `f32` `crcbl_render::Aabb`, refusing a non-finite placed
+  vertex with `SceneBoundsError` naming the instance. `Aabb::from_points` still
+  skips `NaN`, deliberately, for culling. EW still has to move its 9 `bounds`
+  and 7 `collision_parts` call sites (counted by grep) and delete
+  `asset_placement::{bounds, collision_parts}`, widening parts with `as_dvec3()`
+  and keeping its own `MIN_HALF_EXTENT_M` padding. Behaviour change: a part
+  whose mesh has no vertices is `EmptyPart { instance }`. Seen and not
+  investigated:
+  `cargo clippy -p crcbl-render --all-targets --target wasm32-unknown-unknown`
+  fails on unused `Instance` imports in test code (`forward.rs` and
+  `mesh_pool.rs` tests, `tests/graph_compile.rs`); CI's wasm32 job lints without
+  `--all-targets`, so it does not see them.
 
 Not verified from the crcbl side beyond EW's report: the absence claims were
 EW's reading of the public API.
@@ -21941,20 +22231,41 @@ there: 17, 8 and 10 call sites). The rest:
 - **P2, already carried here:** the `Mixer` voice budget with priority and
   stealing under one lock (EW caps at 32 in `ClientAudio::play`, like
   `apps/horde`), and the typed grid drag/drop hoist.
-- **P2, new: a public non-moving ground/support probe on
-  `CharacterController`.** The settle probe is private and `ground()` reflects
-  only the last move; EW's `PlayerController::supports_grounded_action` sweeps
-  its own capsule for revival admission.
-- **P2, new: register a GPU-rendered image as a sprite sheet, plus an icon
-  cache.** `SpriteRenderer` takes CPU pixels only, so EW rasterises item icons
-  on the CPU. Overlaps `crcbl icon bake` above, which is the offline half; this
-  is the runtime half (a secondary view or offscreen target registered as a
-  sheet). Agreed with EW: the engine exposes only the runtime API and the game
-  keeps the cache (EW's is policy: `MAX_CACHED_ICONS`, keys that follow firearm
-  and ammunition state, invalidation on inspection results). The API must
-  document when a registered target may be released or overwritten while earlier
-  frames still sample it, and must fail boundedly, not abort, when the atlas or
-  target is full.
+- **P2: the non-moving ground probe shipped; EW's migration and one suspected EW
+  bug remain.** `CharacterController::probe_ground` / `probe_ground_at` (a
+  `GroundProbe` of contact, distance and walkable) landed 2026-09-23 on the same
+  sweep the settle step uses. EW should replace the hand-built sweep in
+  `PlayerController::supports_grounded_action` with
+  `probe_ground(world, skin_width * ACTION_SUPPORT_PROBE_SKINS)`, keeping its
+  airborne check. EW's foot probes (`probe_foot_contacts`) are vertical rays, a
+  different query that `PhysicsWorld::cast_ray_excluding` already serves, so no
+  controller API was added for them. They call `world.cast_ray`, which does not
+  skip the character's own collider; EW checked on 2026-09-23 that no character
+  capsule is resident when they run (`begin_character_collision` /
+  `end_character_collision` scope each capsule to its movement step), so this is
+  safe until EW keeps capsules across the tick, at which point the rays need
+  `cast_ray_excluding`.
+- **P2, runtime half landed: GPU-rendered images as sprites, through an atlas.**
+  `SpriteRenderer::create_atlas` / `allocate_slot` / `add_slot_copies` /
+  `free_slot` (2026-09-23): a rendered image is copied into a fixed-size cell;
+  `free_slot` destroys nothing and is safe while frames that sampled the cell
+  are in flight (the refill is queue-ordered after them); a full atlas is
+  `SheetError::AtlasFull`, a freed slot `StaleSlot`. The icon cache stays EW's,
+  as agreed. Still open:
+  - EW has to port its icon renderer and draw the model into a cell-sized
+    transient with its own mesh pass; the engine has no secondary-view API.
+  - Only same-queue ordering is claimed; a copy on another queue would need a
+    semaphore nothing records.
+  - A `Sprite` carries UVs, not a slot, so drawing a freed slot's UVs is not
+    detected.
+  - Considered and declined: sampling the target directly, which ties its
+    lifetime to the frame ring.
+  - The in-flight e2e reads back correct pixels but cannot force the GPU race;
+    its guard is the recorder test showing a free destroys no image.
+  - Not run on Metal or WebGPU.
+  - `write_slot` (host pixels straight into a cell, 2026-09-23) stages one
+    buffer and one copy pass per call; a batched `write_slots` would cut both if
+    EW fills many icons a frame. Nothing needs it yet.
 - **P3: gamepad backends** (evdev first for the Steam Deck, then XInput and
   GameController) and a tap/double-tap/hold evaluator — both already in "Input:
   patterns, RON bindings, rebind persistence and every gamepad backend". EW has

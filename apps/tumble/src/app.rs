@@ -87,7 +87,12 @@ impl DebugModule for Stats<'_> {
                 r.spin.flips, r.spin.momentum_drift, r.spin.box_height
             ),
         );
-        for (name, tally) in [("wall", r.wall.contacts), ("pit", r.pit.contacts)] {
+        for (name, tally) in [
+            ("wall", r.wall.contacts),
+            ("pit", r.pit.contacts),
+            ("pyramid", r.tower.pyramid),
+            ("column", r.tower.column),
+        ] {
             out.row(
                 name,
                 format_args!(
@@ -96,6 +101,15 @@ impl DebugModule for Stats<'_> {
                 ),
             );
         }
+        out.row(
+            "tower",
+            format_args!(
+                "pyramid top {:.2} mm, column top {:.2} mm, {} dominoes down",
+                r.tower.pyramid_drift * 1.0e3,
+                r.tower.column_drift * 1.0e3,
+                r.tower.dominoes_down
+            ),
+        );
         out.row("hash", format_args!("{:016x}", r.hash));
         out.row("commands", format_args!("{}", self.commands));
     }
@@ -224,13 +238,15 @@ impl Tumble {
             return;
         }
         let r = self.scenes.reading();
-        let (wall, pit) = (r.wall.contacts, r.pit.contacts);
+        let (wall, pit, tower) = (r.wall.contacts, r.pit.contacts, r.tower);
         let bounce = wall.bounce_ratio().unwrap_or(0.0);
         crcbl::log::info!(
             "[HUD] tick: {}  view: {}  flips: {}  momentum-drift: {:.1e}  box-y: {:.3}  \
              drops: {}  wall-bodies: {}  wall-pairs: {}  wall-begun: {}  wall-ended: {}  \
-             wall-pen-mm: {:.2}  wall-bounce: {:.2}  pit-balls: {}  pit-pairs: {}  \
-             pit-contacts: {}  pit-begun: {}  pit-ended: {}  pit-pen-mm: {:.2}  \
+             wall-pen-mm: {:.2}  wall-bounce: {:.2}  wall-persisted: {:.3}  pit-balls: {}  \
+             pit-pairs: {}  pit-contacts: {}  pit-begun: {}  pit-ended: {}  \
+             pit-pen-mm: {:.2}  pyramid-points: {:.2}  pyramid-persisted: {:.3}  \
+             pyramid-top-mm: {:.2}  column-top-mm: {:.2}  dominoes-down: {}  \
              hash: {:016x}  pinned-tick: {}  pinned: {:016x}",
             r.tick,
             r.view.name(),
@@ -244,12 +260,18 @@ impl Tumble {
             wall.ended,
             wall.worst_penetration * 1.0e3,
             bounce,
+            wall.persisted_ratio().unwrap_or(0.0),
             r.pit.balls,
             pit.pairs,
             pit.touching,
             pit.begun,
             pit.ended,
             pit.worst_penetration * 1.0e3,
+            tower.pyramid.points_per_manifold().unwrap_or(0.0),
+            tower.pyramid.persisted_ratio().unwrap_or(0.0),
+            tower.pyramid_drift * 1.0e3,
+            tower.column_drift * 1.0e3,
+            tower.dominoes_down,
             r.hash,
             CHECK_TICK,
             PINNED_HASH,
@@ -278,7 +300,7 @@ impl HostedGame for Tumble {
         self.log_heartbeat();
     }
 
-    /// `1`, `2` and `3` pick the room on screen. That is the only key, and it
+    /// `1` to `4` pick the room on screen. That is the only key, and it
     /// reaches the camera and the panel and not the simulation, so the hash
     /// the gate pins is the same whatever is pressed.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
@@ -333,6 +355,7 @@ impl HostedGame for Tumble {
         crcbl::log::info!(
             "tumble: {} frames, {} ticks, {} flips, momentum drift {:.1e}, box at {:.3} m, \
              wall {} bodies {}+ {}- contacts, pit {} balls {} pairs, \
+             pyramid top {:.2} mm, column top {:.2} mm, \
              hash {:016x}, {} page commands ({:?})",
             summary.run.frames,
             summary.run.ticks,
@@ -344,6 +367,8 @@ impl HostedGame for Tumble {
             r.wall.contacts.ended,
             r.pit.balls,
             r.pit.contacts.pairs,
+            r.tower.pyramid_drift * 1.0e3,
+            r.tower.column_drift * 1.0e3,
             r.hash,
             summary.commands,
             summary.run.exit,

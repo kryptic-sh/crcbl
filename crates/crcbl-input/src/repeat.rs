@@ -109,7 +109,7 @@ impl Cardinal {
 
 /// What an action is held as, for the schedule: a change is a new press.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Held {
+pub(crate) enum Held {
     Down,
     Positive,
     Negative,
@@ -117,7 +117,7 @@ enum Held {
 }
 
 impl Held {
-    fn of(value: &ActionValue) -> Option<Self> {
+    pub(crate) fn of(value: &ActionValue) -> Option<Self> {
         match value {
             ActionValue::Button(button) => matches!(
                 button.state,

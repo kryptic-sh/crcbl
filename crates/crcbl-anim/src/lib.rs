@@ -2,8 +2,10 @@
 //!
 //! The third and fourth slices of `docs/plan/17-animation.md` — its "Clip
 //! sampling" step, the palette the evaluation stack ends at, and the blending
-//! above them, and **nothing above that**. There is no GPU skinning here — the
-//! skinning dispatch is `crcbl-render`'s (`skinning.rs`), and it takes a
+//! above them; plus two-bone IK ([`ik`]), the one post op a caller has asked
+//! for, since EW's character rig places its hands with it; and **nothing above
+//! that**. There is no GPU skinning here — the skinning dispatch is
+//! `crcbl-render`'s (`skinning.rs`), and it takes a
 //! [`Palette`] this crate produced. A state machine and root motion are later
 //! slices with their own consumers, and building them now against no caller is
 //! the failure this project guards against. What is here is what
@@ -18,6 +20,9 @@
 //!
 //! blend_into      two poses mixed by weight, rotations along the shorter arc
 //! BlendSpace1d    clips on one axis — idle, walk, run — picked by speed
+//!
+//! rotate_joint    one joint turned by a rotation spelled in model space
+//! solve_two_bone  a limb's end put on a target, bent towards a pole
 //! ```
 //!
 //! # A frame
@@ -78,6 +83,7 @@
 
 pub mod blend;
 pub mod clip;
+pub mod ik;
 pub mod palette;
 pub mod sample;
 pub mod skeleton;
@@ -85,6 +91,7 @@ pub mod trs;
 
 pub use blend::{Blend, BlendSpace1d, BlendSpaceError, blend_into};
 pub use clip::{Channel, Clip, ClipError, Interpolation, Track};
+pub use ik::{FRAME_TOLERANCE, IkError, IkInput, PARALLEL_TOLERANCE, rotate_joint, solve_two_bone};
 pub use palette::Palette;
 pub use sample::Pose;
 pub use skeleton::{Joint, Skeleton, SkeletonError};

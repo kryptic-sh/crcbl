@@ -1,5 +1,5 @@
 //! Device-agnostic action system: gameplay and UI code consume **actions**,
-//! never raw devices. Keyboard, mouse, and future gamepad/touch are
+//! never raw devices. Keyboard, mouse, gamepad and on-screen controls are
 //! interchangeable binding sources behind one config layer.
 //!
 //! # Contexts
@@ -14,24 +14,53 @@
 //!
 //! # Patterns and devices
 //!
-//! [`ActionMap::set_repeat`] attaches a [`Repeat`] to an action, evaluated on
-//! the clock [`ActionMap::begin_tick`] advances (`repeat.rs`), and
+//! [`ActionMap::set_repeat`] attaches a [`Repeat`] to an action, and
+//! [`ActionMap::set_tap`], [`ActionMap::set_hold`] and
+//! [`ActionMap::set_double_tap`] attach a [`Tap`], a [`Hold`] and a
+//! [`DoubleTap`], all evaluated on the clock [`ActionMap::begin_tick`] advances
+//! (`repeat.rs`, and `patterns.rs` for how the last three share a press).
 //! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
+//!
+//! # Gamepads
+//!
+//! Every pad backend emits [`GamepadEvent`]s, by the conventions `gamepad.rs`
+//! states — positional buttons, sticks with +Y up, triggers 0…1, raw axes. A
+//! game reads them directly, or feeds [`ActionMap::gamepad_event`], where
+//! [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
+//! [`Binding::PadTrigger`] read them. The Windows backend is `xinput`,
+//! compiled on Windows only: no other target has a backend yet, and none has a
+//! stand-in that would report "no pads" as though it had looked.
 
 mod context;
 mod device;
+mod gamepad;
+mod patterns;
 mod repeat;
 pub mod text;
 pub mod ui;
+// Compiled into every target's tests too, so the mapping and the layouts are
+// checked on the Linux and macOS runners; only the loader is Windows-only.
+#[cfg(any(windows, test))]
+pub mod xinput;
 
 pub use context::GAMEPLAY_CONTEXT;
 pub use device::Device;
+pub use gamepad::{
+    GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
+    PadButtons, PadKind, Stick, Trigger,
+};
+pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
 
 use context::{Routes, Suppressed, View};
 use crcbl_core::input::{KeyCode, PointerButton};
+use patterns::PatternState;
 use repeat::RepeatState;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+/// Every connected pad and what it last reported, ordered by id so a sum over
+/// them runs in the same order every run.
+type Pads = BTreeMap<GamepadId, GamepadSnapshot>;
 
 // ---------------------------------------------------------------------------
 // Action primitives
@@ -190,13 +219,15 @@ impl Modifier {
 
 /// A binding source: what raw input triggers this action.
 ///
-/// Keyboard, mouse and on-screen controls today; gamepad lands at P10. A game
+/// Keyboard, mouse, gamepad and on-screen controls. A game
 /// played with **one** finger needs nothing touch-specific — the platforms
 /// deliver the primary contact as an ordinary pointer, so
 /// [`Binding::MouseButton`] and [`Binding::PointerPosition`] are what a phone
 /// plays it through. [`Binding::Virtual`] is what a game needs when one finger
 /// is not enough.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` and not `Eq`: a pad binding's dead zone is an `f32`.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
     /// A single key.
     Key(KeyCode),
@@ -312,6 +343,50 @@ pub enum Binding {
         /// Key for the +X direction (right).
         right: KeyCode,
     },
+    /// A pad button, by position — see [`PadButton`].
+    ///
+    /// Read like a [`Binding::Key`]: down on an [`ActionKind::Button`], +1.0 on
+    /// an [`ActionKind::Axis1`], nothing on an [`ActionKind::Axis2`] — the
+    /// d-pad's `Axis2` is [`Binding::PadDpad`]. Down while any connected pad
+    /// holds it.
+    PadButton(PadButton),
+    /// The d-pad as one 2-D axis: [`Binding::Wasd`] over
+    /// [`PadButton::DpadUp`], [`PadButton::DpadDown`], [`PadButton::DpadLeft`]
+    /// and [`PadButton::DpadRight`], +Y up.
+    ///
+    /// Resolved exactly as `Wasd` is: into the same unit disc as the keys and
+    /// the sticks on the action, so a diagonal is a unit vector and opposite
+    /// directions cancel; down on an [`ActionKind::Button`] while any of the
+    /// four is held; inert on an [`ActionKind::Axis1`]. It owns the four
+    /// buttons for routing, as `Wasd` owns its four keys.
+    PadDpad,
+    /// A pad stick's deflection, +Y up, through a **scaled radial** dead zone:
+    /// zero within `deadzone` of centre, rescaled so the zone's edge reads 0
+    /// and full throw reads 1.
+    ///
+    /// Drives an [`ActionKind::Axis2`], into the same unit disc as a
+    /// [`Binding::Wasd`] or a [`Binding::Virtual`] stick on the action, so a
+    /// stick and a key pushed together ask for one direction. Inert on the
+    /// other kinds, as a [`Binding::Virtual`] stick is on an `Axis1`.
+    PadStick {
+        /// Which stick.
+        stick: Stick,
+        /// The dead zone's radius, in `0.0..1.0`; anything else is refused
+        /// with [`ActionMapError::InvalidDeadzone`].
+        deadzone: f32,
+    },
+    /// A pad trigger past a threshold.
+    ///
+    /// On an [`ActionKind::Button`], down while the pull is past `threshold`;
+    /// on an [`ActionKind::Axis1`], the pull rescaled so the threshold reads 0
+    /// and full pull reads 1. Inert on an [`ActionKind::Axis2`].
+    PadTrigger {
+        /// Which trigger.
+        trigger: Trigger,
+        /// The threshold, in `0.0..1.0`; anything else is refused with
+        /// [`ActionMapError::InvalidDeadzone`].
+        threshold: f32,
+    },
 }
 
 impl Binding {
@@ -339,7 +414,29 @@ impl Binding {
             | Self::MouseMotion
             | Self::MouseScroll
             | Self::PointerPosition { .. }
-            | Self::Virtual(_) => {}
+            | Self::Virtual(_)
+            | Self::PadButton(_)
+            | Self::PadDpad
+            | Self::PadStick { .. }
+            | Self::PadTrigger { .. } => {}
+        }
+    }
+
+    /// Whether this binding reads a gamepad.
+    #[must_use]
+    pub const fn reads_gamepad(&self) -> bool {
+        matches!(
+            self,
+            Self::PadButton(_) | Self::PadDpad | Self::PadStick { .. } | Self::PadTrigger { .. }
+        )
+    }
+
+    /// Whether this binding's dead zone or threshold is usable, if it has one.
+    fn deadzone_is_valid(&self) -> bool {
+        match *self {
+            Self::PadStick { deadzone, .. } => gamepad::valid_deadzone(deadzone),
+            Self::PadTrigger { threshold, .. } => gamepad::valid_deadzone(threshold),
+            _ => true,
         }
     }
 
@@ -397,6 +494,8 @@ struct ActionSlot {
     context: usize,
     /// The repeat pattern, if one is attached — see [`ActionMap::set_repeat`].
     repeat: Option<RepeatState>,
+    /// The tap, hold and double-tap patterns — see [`ActionMap::set_tap`].
+    patterns: PatternState,
     /// The current resolved value.
     value: ActionValue,
     /// True when at least one binding for this action is "down" (key held,
@@ -424,6 +523,7 @@ impl ActionSlot {
             decl,
             context,
             repeat: None,
+            patterns: PatternState::default(),
             value,
             active: false,
             hold_start: None,
@@ -443,6 +543,7 @@ impl ActionSlot {
         if let Some(repeat) = &mut self.repeat {
             repeat.reset();
         }
+        self.patterns.reset();
         match &mut self.value {
             ActionValue::Button(a) => {
                 a.state = ButtonState::Released;
@@ -480,6 +581,9 @@ pub enum ActionMapError {
     /// [`ActionMap::pop_context`] was asked for a context that is not the
     /// topmost pushed one — [`GAMEPLAY_CONTEXT`] is never pushed.
     ContextNotOnTop(String),
+    /// A [`Binding::PadStick`]'s dead zone or a [`Binding::PadTrigger`]'s
+    /// threshold on the named action is not finite and in `0.0..1.0`.
+    InvalidDeadzone(String),
 }
 
 impl std::fmt::Display for ActionMapError {
@@ -491,6 +595,9 @@ impl std::fmt::Display for ActionMapError {
             Self::ContextAlreadyActive(name) => write!(f, "context already active: {name}"),
             Self::ContextNotOnTop(name) => {
                 write!(f, "context is not the topmost pushed one: {name}")
+            }
+            Self::InvalidDeadzone(name) => {
+                write!(f, "dead zone or threshold not in 0..1: {name}")
             }
         }
     }
@@ -541,6 +648,11 @@ pub struct ActionMap {
     /// move, so a value cleared by [`ActionMap::begin_tick`] would centre the
     /// stick under a finger that never let go.
     control_sticks: HashMap<String, (f32, f32)>,
+    /// Every connected pad's last snapshot — a level, like `control_sticks`.
+    /// See `gamepad.rs`.
+    pads: Pads,
+    /// Every button some pad holds, as one set for routing to read.
+    held_pad_buttons: PadButtons,
     mouse_delta: (f32, f32),
     scroll_delta: (f32, f32),
     /// Where the pointer is, normalised to the surface, or `None` until one has
@@ -577,6 +689,8 @@ impl ActionMap {
             held_buttons: HashSet::new(),
             held_controls: HashSet::new(),
             control_sticks: HashMap::new(),
+            pads: Pads::new(),
+            held_pad_buttons: PadButtons::EMPTY,
             mouse_delta: (0.0, 0.0),
             scroll_delta: (0.0, 0.0),
             pointer: None,
@@ -623,7 +737,9 @@ impl ActionMap {
     /// reports it at once, as [`ActionMap::rebind`] does.
     ///
     /// # Errors
-    /// [`ActionMapError::DuplicateName`] if the name is already declared.
+    /// [`ActionMapError::DuplicateName`] if the name is already declared,
+    /// [`ActionMapError::InvalidDeadzone`] if a pad binding's dead zone or
+    /// threshold is unusable.
     pub fn try_declare_in(
         &mut self,
         context: &str,
@@ -631,6 +747,9 @@ impl ActionMap {
     ) -> Result<(), ActionMapError> {
         if self.name_to_idx.contains_key(&decl.name) {
             return Err(ActionMapError::DuplicateName(decl.name));
+        }
+        if !decl.bindings.iter().all(Binding::deadzone_is_valid) {
+            return Err(ActionMapError::InvalidDeadzone(decl.name));
         }
         let context = match self.contexts.iter().position(|name| name == context) {
             Some(index) => index,
@@ -654,11 +773,16 @@ impl ActionMap {
     /// only option before, lost both.
     ///
     /// # Errors
-    /// [`ActionMapError::UnknownAction`] if nothing with that name is declared.
+    /// [`ActionMapError::UnknownAction`] if nothing with that name is declared,
+    /// [`ActionMapError::InvalidDeadzone`] if a pad binding's dead zone or
+    /// threshold is unusable — and then the old bindings stay.
     pub fn rebind(&mut self, name: &str, bindings: Vec<Binding>) -> Result<(), ActionMapError> {
         let Some(&idx) = self.name_to_idx.get(name) else {
             return Err(ActionMapError::UnknownAction(name.to_owned()));
         };
+        if !bindings.iter().all(Binding::deadzone_is_valid) {
+            return Err(ActionMapError::InvalidDeadzone(name.to_owned()));
+        }
         let slot = &mut self.slots[idx];
         slot.decl.bindings = bindings;
         slot.reset();
@@ -867,7 +991,8 @@ impl ActionMap {
     ///
     /// - Resets per-frame edge flags (`just_pressed`, `just_released` on every
     ///   button action, `pointer_moved` on every 1-D axis, and what
-    ///   [`ActionMap::repeated`] reads).
+    ///   [`ActionMap::repeated`], [`ActionMap::tapped`],
+    ///   [`ActionMap::hold_fired`] and [`ActionMap::double_tapped`] read).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
@@ -893,6 +1018,7 @@ impl ActionMap {
             if let Some(repeat) = &mut self.slots[i].repeat {
                 repeat.fired = false;
             }
+            self.slots[i].patterns.clear_fired();
             match &mut self.slots[i].value {
                 ActionValue::Button(a) => a.reset_edges(),
                 ActionValue::Axis1(a) => a.pointer_moved = false,
@@ -1019,6 +1145,7 @@ impl ActionMap {
     /// where consumption happens.
     fn resolve_one(&mut self, idx: usize) {
         let control_sticks = &self.control_sticks;
+        let pads = &self.pads;
         let mouse_delta = self.mouse_delta;
         let scroll_delta = self.scroll_delta;
         let pointer = self.pointer;
@@ -1032,6 +1159,7 @@ impl ActionMap {
             held_keys: &self.held_keys,
             held_buttons: &self.held_buttons,
             held_controls: &self.held_controls,
+            held_pad_buttons: self.held_pad_buttons,
         };
         let kind = slot.kind();
         let bindings = &slot.decl.bindings;
@@ -1043,9 +1171,15 @@ impl ActionMap {
                     Binding::Chord { modifier, key } => view.chord(*modifier, *key),
                     Binding::MouseButton(b) => view.button(*b),
                     Binding::Virtual(id) => view.control(id),
+                    Binding::PadButton(button) => view.pad_button(*button),
+                    Binding::PadDpad => PadButton::DPAD.iter().any(|&b| view.pad_button(b)),
+                    Binding::PadTrigger { trigger, threshold } => {
+                        view.trigger(*trigger) && gamepad::pad_trigger(pads, *trigger) > *threshold
+                    }
                     Binding::MouseMotion
                     | Binding::MouseScroll
-                    | Binding::PointerPosition { .. } => false,
+                    | Binding::PointerPosition { .. }
+                    | Binding::PadStick { .. } => false,
                     Binding::KeyAxis { negative, positive } => {
                         view.key(*negative) || view.key(*positive)
                     }
@@ -1114,6 +1248,17 @@ impl ActionMap {
                             Binding::Chord { modifier, key } if view.chord(*modifier, *key) => {
                                 value += 1.0;
                             }
+                            Binding::PadButton(button) if view.pad_button(*button) => {
+                                value += 1.0;
+                            }
+                            Binding::PadTrigger { trigger, threshold }
+                                if view.trigger(*trigger) =>
+                            {
+                                value += gamepad::trigger_past(
+                                    gamepad::pad_trigger(pads, *trigger),
+                                    *threshold,
+                                );
+                            }
                             Binding::KeyAxis { negative, positive } => {
                                 if view.key(*negative) {
                                     value -= 1.0;
@@ -1171,11 +1316,35 @@ impl ActionMap {
                                 dir_x += 1.0;
                             }
                         }
+                        Binding::PadDpad => {
+                            if view.pad_button(PadButton::DpadUp) {
+                                dir_y += 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadDown) {
+                                dir_y -= 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadLeft) {
+                                dir_x -= 1.0;
+                            }
+                            if view.pad_button(PadButton::DpadRight) {
+                                dir_x += 1.0;
+                            }
+                        }
                         // Into the same accumulator as the keys, so a player
                         // pushing a stick *and* holding a key asks for one
                         // direction rather than for twice the speed.
                         Binding::Virtual(id) if view.stick(id) => {
                             if let Some((sx, sy)) = control_sticks.get(id.as_str()) {
+                                dir_x += sx;
+                                dir_y += sy;
+                            }
+                        }
+                        // Each pad through its own dead zone, then into the
+                        // same accumulator as the keys.
+                        Binding::PadStick { stick, deadzone } if view.pad_stick(*stick) => {
+                            for pad in pads.values() {
+                                let (sx, sy) =
+                                    gamepad::radial_deadzone(pad.stick(*stick), *deadzone);
                                 dir_x += sx;
                                 dir_y += sy;
                             }
@@ -1208,6 +1377,7 @@ impl ActionMap {
         if let Some(repeat) = &mut slot.repeat {
             repeat.update(&slot.value, elapsed);
         }
+        slot.patterns.update(&slot.value, elapsed);
     }
 }
 
@@ -1228,6 +1398,7 @@ impl std::fmt::Debug for ActionMap {
             .field("held_buttons", &self.held_buttons.len())
             .field("held_controls", &self.held_controls)
             .field("control_sticks", &self.control_sticks)
+            .field("pads", &self.pads)
             .field("contexts", &self.active_contexts().collect::<Vec<_>>())
             .field("last_device", &self.last_device)
             .field("pointer", &self.pointer)

@@ -4892,6 +4892,25 @@ impl Shell for WaylandShell {
     /// that a repeat and the real events around it arrive in one batch and in
     /// timestamp order.
     fn pump(&mut self, sink: &mut dyn FnMut(ShellEvent)) {
+        self.keep_alive();
+        // Drain by count, not `while let`: a sink that creates a window must
+        // not be able to spin this loop, and whatever it queued belongs to the
+        // next frame — which is what the socket would have done anyway.
+        for _ in 0..self.queue.len() {
+            let Some(event) = self.queue.pop_front() else {
+                break;
+            };
+            sink(event);
+        }
+    }
+
+    /// Drains the socket, answers what the compositor asked, and keeps the
+    /// rest.
+    ///
+    /// The answer that matters for a long load is the `xdg_wm_base.pong` in
+    /// [`process_raw`](Self::process_raw): a compositor that pings and hears
+    /// nothing marks the client unresponsive.
+    fn keep_alive(&mut self) {
         if self.lost.is_none()
             && let Err(error) = self.conn.drain(0, &[])
         {
@@ -4909,15 +4928,6 @@ impl Shell for WaylandShell {
         // instant keyboard focus does.
         self.resolve_held_reads();
         self.drive_repeats();
-        // Drain by count, not `while let`: a sink that creates a window must
-        // not be able to spin this loop, and whatever it queued belongs to the
-        // next frame — which is what the socket would have done anyway.
-        for _ in 0..self.queue.len() {
-            let Some(event) = self.queue.pop_front() else {
-                break;
-            };
-            sink(event);
-        }
     }
 
     /// Blocks until an event arrives, `timeout` elapses, or a key repeat comes

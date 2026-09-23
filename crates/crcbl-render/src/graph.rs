@@ -691,6 +691,27 @@ impl<'a> RenderGraph<'a> {
         self.passes.len()
     }
 
+    /// What this graph knows about `image` before anything is realised: its
+    /// format, its extent, and — for a transient only — the usage it will be
+    /// created with. `None` for an id this graph never issued.
+    ///
+    /// For a pass that has to refuse a source *when it is declared* rather than
+    /// let the device refuse the copy at execution:
+    /// [`crate::sprite_pass`]'s atlas copies check a rendered image against the
+    /// slot it is copied into here. An import carries no usage, so the second
+    /// half of the answer is the importer's to have got right.
+    pub(crate) fn image_facts(
+        &self,
+        image: ImageId,
+    ) -> Option<(Format, (u32, u32), Option<ImageUsage>)> {
+        let node = self.images.get(image.index())?;
+        let usage = match node.source {
+            ImageSource::Imported(_) => None,
+            ImageSource::Transient(desc) => Some(desc.usage),
+        };
+        Some((node.format(), node.extent(), usage))
+    }
+
     /// Turns declarations into an ordered pass list with exact barriers.
     ///
     /// Pure: no device, no allocation of GPU memory, no side effects. See the

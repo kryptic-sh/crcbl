@@ -51,6 +51,13 @@
 //! panel can show what the terminal did not — `docs/plan/52-debug-console.md`
 //! decision 4.
 //!
+//! A log file is the fourth, and the only one that is opt-in: [`attach_file`]
+//! sends every line stderr gets to a rotated file as well, for the build that
+//! has no stderr — a `windows_subsystem = "windows"` exe — and chains a panic
+//! hook that writes the panic's own message there too. Nothing opens one
+//! unless a game calls that, or a player sets [`FILE_ENV_VAR`] for a front end
+//! that honours it.
+//!
 //! Filtering is `env_logger`-style, read from `CRCBL_LOG`:
 //!
 //! ```text
@@ -77,15 +84,18 @@
 //! terminal, per-target directives included.
 
 pub mod console;
+mod file;
+mod panic_hook;
 
 use std::cell::RefCell;
 use std::env;
 use std::fmt;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError, RwLock, RwLockReadGuard};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use ::log::{Log, Metadata, Record, SetLoggerError};
 use crcbl_console::Fault;
@@ -95,6 +105,9 @@ use crcbl_console::Fault;
 /// The functions do not — `console::push` and `console::snapshot` say which
 /// log they mean and `push` alone would not — so they stay in [`console`].
 pub use console::{CONSOLE_RING_LINES, CONSOLE_TARGET};
+
+use file::FileSink;
+pub use file::{FILE_ENV_VAR, LOG_FILE_MAX_BYTES, LOG_FILES_KEPT};
 
 /// The five levels, and the filter form of them.
 ///
@@ -349,9 +362,48 @@ fn parse_level(text: &str) -> Option<LevelFilter> {
 #[derive(Debug)]
 struct StderrLogger {
     start: Instant,
+    /// The log file, once [`attach_file`] has opened one.
+    ///
+    /// A `Mutex` because any thread may log: it is what keeps two threads'
+    /// lines from interleaving inside the file, the way stderr's own lock does
+    /// for stderr. It is only taken for a record that passed the filter, and
+    /// only while one `write_all` runs.
+    file: Mutex<Option<FileSink>>,
 }
 
 impl StderrLogger {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            file: Mutex::new(None),
+        }
+    }
+
+    /// Opens a rotated log file in `dir` and sends every later line there too.
+    ///
+    /// The file starts with the run's banner, written straight to it rather
+    /// than through the filter, so a file opened after start-up still says when
+    /// its run began — even under `CRCBL_LOG=off`.
+    fn attach(&self, dir: &Path, stem: &str, kept: usize, max_bytes: u64) -> io::Result<PathBuf> {
+        let mut slot = self.file.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(open) = slot.as_ref() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("this run already logs to {}", open.path().display()),
+            ));
+        }
+        let mut sink = FileSink::open(dir, stem, kept, max_bytes)?;
+        sink.write_line(&line(
+            self.start.elapsed(),
+            Level::Info,
+            "crcbl_core::log",
+            format_args!("run started {}", start_banner()),
+        ));
+        let path = sink.path().to_owned();
+        *slot = Some(sink);
+        Ok(path)
+    }
+
     /// Whether the filter admits `metadata`. This, and only this, decides what
     /// reaches stderr — [`Log::enabled`] below widens for capture, and a record
     /// let through on that account must still not be printed.
@@ -379,14 +431,20 @@ impl StderrLogger {
         if !self.permits(&Metadata::builder().level(level).target(target).build()) {
             return;
         }
-        let elapsed = elapsed.as_secs_f64();
-        let mut stderr = std::io::stderr().lock();
-        // A failed log write must never take the process down.
-        let _ = writeln!(
-            stderr,
-            "[{elapsed:9.4}s {level:<5} {target}] {args}",
-            level = level_name(level),
-        );
+        // Formatted once for both sinks and written with one call to each, so a
+        // line reaches the file whole and exactly as stderr printed it.
+        let line = line(elapsed, level, target, args);
+        // A failed log write must never take the process down — and a
+        // GUI-subsystem exe has no stderr, so this one fails on every line there.
+        let _ = std::io::stderr().lock().write_all(line.as_bytes());
+        if let Some(file) = self
+            .file
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_mut()
+        {
+            file.write_line(&line);
+        }
     }
 }
 
@@ -447,6 +505,15 @@ pub fn __emit(level: Level, target: &str, args: fmt::Arguments<'_>) {
 pub fn __enabled(level: Level, target: &str) -> bool {
     level <= ::log::max_level()
         && ::log::logger().enabled(&Metadata::builder().level(level).target(target).build())
+}
+
+/// One record as every sink writes it, newline included.
+fn line(elapsed: Duration, level: Level, target: &str, args: fmt::Arguments<'_>) -> String {
+    format!(
+        "[{elapsed:9.4}s {level:<5} {target}] {args}\n",
+        elapsed = elapsed.as_secs_f64(),
+        level = level_name(level),
+    )
 }
 
 const fn level_name(level: Level) -> &'static str {
@@ -645,9 +712,7 @@ pub fn init_logging() -> bool {
 /// If a logger is already installed for the process — including by an earlier
 /// call to this function, whose filter stays in force.
 pub fn try_init_logging(filter: Filter) -> Result<(), SetLoggerError> {
-    let logger = LOGGER.get_or_init(|| StderrLogger {
-        start: Instant::now(),
-    });
+    let logger = LOGGER.get_or_init(StderrLogger::new);
     ::log::set_logger(logger)?;
     INSTALLED.store(true, Ordering::Relaxed);
     // After the slot is won, so a second call's filter never displaces the
@@ -723,6 +788,100 @@ const fn civil_from_days(days: i64) -> (i64, u32, u32) {
         shifted_month - 9
     } as u32;
     (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
+/// Sends this run's log to `<dir>/<stem>.log` as well as stderr, rotating
+/// earlier runs' files first.
+///
+/// **The opt-in half of a log that survives a build with no console.** Call it
+/// after [`init_logging`]; nothing opens a file otherwise. Earlier runs shift to
+/// `<stem>.1.log`, `<stem>.2.log` and so on, keeping [`LOG_FILES_KEPT`] of them,
+/// and this run's file stops at [`LOG_FILE_MAX_BYTES`]. Every line is written
+/// through to the operating system before the logging call returns, so the last
+/// lines before a panic or a crash are in the file.
+///
+/// **It also installs a panic hook**, because the default one prints a panic's
+/// message and location to stderr alone, which is exactly what such a build
+/// lacks. The hook writes one `ERROR panic` line — the message, `file:line:col`
+/// and the panicking thread's name — to the file and then calls the hook it
+/// replaced, so stderr's report and any hook the game set earlier still run. A
+/// game that owns the process's hook and wants nothing chained in front of it
+/// calls [`attach_file_without_panic_hook`] instead. A hook set *after* this
+/// call replaces this one unless it chains, as this one does, to
+/// [`std::panic::take_hook`]'s result.
+///
+/// `crcbl_store::enable_log_file` is the usual way in: it picks the platform's
+/// directory for logs and turns a failure into a warning. This takes the
+/// directory explicitly, for a caller that has its own.
+///
+/// Returns the path of this run's file. A hook that could not be installed is
+/// a warning through the log, not an error: the file is open either way.
+///
+/// # Errors
+///
+/// When this module's logger is not the one installed (see [`is_installed`]),
+/// when a file is already attached, when `stem` is not a plain file name, and
+/// when the filesystem refuses the directory, the rotation or the file. Logging
+/// to stderr carries on in every case, and no panic hook is installed.
+pub fn attach_file(dir: &Path, stem: &str) -> io::Result<PathBuf> {
+    let logger = installed_logger()?;
+    let path = logger.attach(dir, stem, LOG_FILES_KEPT, LOG_FILE_MAX_BYTES)?;
+    // After a successful attach only, and `attach` refuses a second file for
+    // the run — which is what makes this at most once per process.
+    if let Err(error) = panic_hook::install(logger) {
+        warn!(
+            "log: panics will not be written to {} ({error})",
+            path.display()
+        );
+    }
+    Ok(path)
+}
+
+/// [`attach_file`] without the panic hook, for a game that manages the
+/// process's panic hook itself.
+///
+/// A panic's own message and location then reach only whatever that hook
+/// writes; every line logged before it is in the file as usual.
+///
+/// # Errors
+///
+/// As [`attach_file`].
+pub fn attach_file_without_panic_hook(dir: &Path, stem: &str) -> io::Result<PathBuf> {
+    installed_logger()?.attach(dir, stem, LOG_FILES_KEPT, LOG_FILE_MAX_BYTES)
+}
+
+/// [`LOGGER`], when it is the logger the process is calling.
+fn installed_logger() -> io::Result<&'static StderrLogger> {
+    match LOGGER.get() {
+        Some(logger) if is_installed() => Ok(logger),
+        _ => Err(io::Error::other(
+            "the engine's logger is not the process's, so there is no log to copy to a file",
+        )),
+    }
+}
+
+/// The file [`attach_file`] opened for this run, if it opened one.
+#[must_use]
+pub fn file_path() -> Option<PathBuf> {
+    let logger = LOGGER.get()?;
+    let slot = logger.file.lock().unwrap_or_else(PoisonError::into_inner);
+    slot.as_ref().map(|sink| sink.path().to_owned())
+}
+
+/// Whether the player asked for a log file, through [`FILE_ENV_VAR`].
+///
+/// `1`, `true`, `on` and `yes` ask; anything else, including nothing, does not.
+/// Reading it opens nothing: a front end honours it by calling
+/// `crcbl_store::enable_log_file`, as `crcbl::args::run_front_end` does.
+#[must_use]
+pub fn file_requested() -> bool {
+    file_requested_by(env::var(FILE_ENV_VAR).ok().as_deref())
+}
+
+/// The pure half of [`file_requested`], so the spellings are testable without
+/// an environment.
+fn file_requested_by(value: Option<&str>) -> bool {
+    value.and_then(crate::trace::parse_enabled) == Some(true)
 }
 
 /// Whether this module installed the process logger.
@@ -1247,9 +1406,7 @@ mod tests {
     fn the_ring_holds_records_the_filter_refused() {
         let quiet = "crcbl_core::log::tests::refused";
         let loud = "crcbl_core::log::tests::printed";
-        let logger = StderrLogger {
-            start: Instant::now(),
-        };
+        let logger = StderrLogger::new();
         with_filter(&format!("info,{quiet}=off"), || {
             assert!(
                 !logger.permits(
@@ -1289,9 +1446,7 @@ mod tests {
 
     #[test]
     fn logger_respects_the_filter_without_being_installed() {
-        let logger = StderrLogger {
-            start: Instant::now(),
-        };
+        let logger = StderrLogger::new();
         with_filter("warn,noisy=trace", || {
             assert!(
                 logger.enabled(
@@ -1425,6 +1580,11 @@ mod tests {
         assert!(!is_installed());
         assert!(try_init_logging(Filter::parse("trace")).is_ok());
         assert!(is_installed());
+        assert_eq!(
+            file_path(),
+            None,
+            "installing the logger opens no file: the file is opt-in"
+        );
         assert_eq!(::log::max_level(), LevelFilter::Trace);
 
         ::log::info!("crcbl-core log smoke test");
@@ -1438,6 +1598,24 @@ mod tests {
             LevelFilter::Trace,
             "the first filter stays in force"
         );
+    }
+
+    /// **The log file is off unless the player spelled it on.**
+    #[test]
+    fn only_a_yes_asks_for_the_log_file() {
+        for value in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("off"),
+            Some("no"),
+            Some("yse"),
+        ] {
+            assert!(!file_requested_by(value), "{value:?}");
+        }
+        for value in ["1", "true", " ON ", "yes"] {
+            assert!(file_requested_by(Some(value)), "{value:?}");
+        }
     }
 
     /// Nothing is captured until someone asks, and the sink must not pay for

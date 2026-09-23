@@ -81,7 +81,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crcbl::ecs::{ClientInputs, GameModule, World};
-use crcbl::inventory::{Cell, Grid};
+use crcbl::inventory::{Cell, Grid, SlotId};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{
@@ -1463,8 +1463,9 @@ impl Game {
         lock(&self.shared).loadout.clone()
     }
 
-    /// Moves whatever is under `from` so that the cell the pointer let go over
-    /// is `to`. Answers whether anything moved.
+    /// Moves the stack at `slot` so its origin is `at` — the cell a panel's
+    /// drag landed it on, grab offset already applied by
+    /// [`crcbl::ui::grid_drag`]. Answers whether anything moved.
     ///
     /// **This is the one mutation that does not cross the wire**, and the
     /// reason is that there is no wire command to carry it: `Intent` is a flag
@@ -1479,15 +1480,9 @@ impl Game {
     /// The move itself is [`crcbl::inventory::Grid::move_within`], which is
     /// atomic: a refused drag leaves the rig exactly as it was, down to the
     /// slot id the panel is holding.
-    pub fn drag(&mut self, from: Cell, to: Cell) -> bool {
+    pub fn drag(&mut self, slot: SlotId, at: Cell) -> bool {
         let mut stage = lock(&self.shared);
-        let Some(slot) = stage.loadout.at(from) else {
-            return false;
-        };
         let Some(placement) = stage.loadout.slot(slot) else {
-            return false;
-        };
-        let Some(at) = loadout::dragged_origin(placement.at(), from, to) else {
             return false;
         };
         stage
@@ -2187,7 +2182,7 @@ mod tests {
         // free: the rig is wider than the kit is tall.
         let to = Cell::new(from.x, loadout::GRID_H - 1);
         assert_ne!(from, to, "the stack already sits on the bottom row");
-        assert!(game.drag(from, to), "the drag was refused");
+        assert!(game.drag(slot, to), "the drag was refused");
         let moved = game.loadout();
         assert_eq!(
             moved.slot(slot).expect("the stack is still held").at(),
@@ -2214,7 +2209,7 @@ mod tests {
             .map(|(_, held)| held.at())
             .expect("the kit is more than one stack");
         assert!(
-            !game.drag(to, other),
+            !game.drag(slot, other),
             "a stack was dropped onto another one"
         );
         assert_eq!(game.loadout(), moved, "a refused drag moved something");

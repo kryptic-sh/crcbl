@@ -46,6 +46,16 @@
 //! point had before the tick; Rapier moved it out of the substeps because
 //! speculative contacts damped bounces there.
 //!
+//! **Friction acts at the manifold's centroid**, as decision 2 has it after
+//! Box3D and Rapier: one two-axis tangential impulse at the mean of the
+//! points, bounded by `μ` times their summed normal impulse, and one twist
+//! impulse about the normal, bounded by `μ Σ λᵢ rᵢ` — each point's share of
+//! the friction at its distance `rᵢ` from the centroid, the most torque the
+//! points' own friction could resist. Friction at the centroid alone would
+//! let a box spin freely on its face, since its centroid does not move; the
+//! twist is what stops it. A one-point manifold has no twist, and its
+//! friction is exactly the point friction rung 1 had.
+//!
 //! # The interior is scalar `f64`
 //!
 //! Decision 7 makes the interior `f32` and decision 8 makes it wide, at
@@ -59,7 +69,7 @@ use crcbl_core::Pool;
 use glam::{DMat3, DVec3};
 
 use super::manifold::{MAX_POINTS, orthonormal_basis};
-use super::{Bodies, ContactPipeline, KineticContact, KineticSource, WarmImpulse};
+use super::{Bodies, ContactPipeline, KineticContact, KineticSource, WarmImpulses};
 use crate::components::{RigidBody, Transform};
 use crate::integrator::{SemiImplicitEuler, SpinStep};
 use crate::system::{AwakeSet, BodyRecord, StaticSet};
@@ -153,9 +163,10 @@ struct Point {
     /// this plus the anchors' relative motion along the normal since.
     separation: f64,
     normal_mass: f64,
-    tangent_mass: [f64; 2],
     normal_impulse: f64,
-    tangent_impulse: [f64; 2],
+    /// How far it lies from the manifold's centroid: the lever its friction
+    /// has against a twist.
+    twist_radius: f64,
     max_normal_impulse: f64,
     /// Every normal impulse the tick delivered.
     total_normal_impulse: f64,
@@ -176,6 +187,15 @@ struct Constraint {
     softness: Softness,
     count: usize,
     points: [Point; MAX_POINTS],
+    /// The manifold's friction: one tangential impulse at the centroid of its
+    /// points, from each body's centre.
+    friction_anchor_a: DVec3,
+    friction_anchor_b: DVec3,
+    tangent_mass: [f64; 2],
+    tangent_impulse: [f64; 2],
+    /// And the twist: an angular impulse about the normal.
+    twist_mass: f64,
+    twist_impulse: f64,
     /// For the event: who, how heavy and how fast at the start.
     entity_a: Option<crcbl_ecs::Entity>,
     entity_b: Option<crcbl_ecs::Entity>,
@@ -215,11 +235,38 @@ fn apply(
     body.angular_velocity += s.inverse_inertia * anchor.cross(impulse);
 }
 
+/// Apply the angular impulse `impulse` to body `index`, a no-op for a side
+/// that does not step.
+fn apply_angular(bodies: &mut [RigidBody], solver: &[SolverBody], index: usize, impulse: DVec3) {
+    if index == NONE {
+        return;
+    }
+    bodies[index].angular_velocity += solver[index].inverse_inertia * impulse;
+}
+
 /// The velocity of `B`'s point less `A`'s.
 fn relative_velocity(bodies: &[RigidBody], c: &Constraint, p: &Point) -> DVec3 {
+    relative_velocity_at(bodies, c, p.anchor_a, p.anchor_b)
+}
+
+/// The velocity of `B` at `anchor_b` less `A`'s at `anchor_a`.
+fn relative_velocity_at(
+    bodies: &[RigidBody],
+    c: &Constraint,
+    anchor_a: DVec3,
+    anchor_b: DVec3,
+) -> DVec3 {
     let (va, wa) = velocity(bodies, c.a);
     let (vb, wb) = velocity(bodies, c.b);
-    vb + wb.cross(p.anchor_b) - va - wa.cross(p.anchor_a)
+    vb + wb.cross(anchor_b) - va - wa.cross(anchor_a)
+}
+
+/// One body's share of the twist's inverse effective mass: `n · I⁻¹ n`.
+fn inverse_twist_mass(solver: &[SolverBody], index: usize, normal: DVec3) -> f64 {
+    if index == NONE {
+        return 0.0;
+    }
+    normal.dot(solver[index].inverse_inertia * normal)
 }
 
 /// One body's share of a direction's effective mass: `m⁻¹ + d · (I⁻¹(r × d) × r)`.
@@ -368,6 +415,12 @@ impl ContactPipeline {
                 },
                 count: contact.manifold.points().len(),
                 points: [Point::default(); MAX_POINTS],
+                friction_anchor_a: DVec3::ZERO,
+                friction_anchor_b: DVec3::ZERO,
+                tangent_mass: [0.0; 2],
+                tangent_impulse: [0.0; 2],
+                twist_mass: 0.0,
+                twist_impulse: 0.0,
                 entity_a: a.entity,
                 entity_b: b.entity,
                 mass_a: a.mass,
@@ -377,39 +430,55 @@ impl ContactPipeline {
                 point_velocity: DVec3::ZERO,
             };
 
-            for (k, mp) in contact.manifold.points().iter().enumerate() {
+            let warm = if settings.warm_starting {
+                contact.impulses
+            } else {
+                WarmImpulses::default()
+            };
+            let effective = |anchor_a: DVec3, anchor_b: DVec3, direction: DVec3| {
+                let k = inverse_mass_along(&scratch.bodies, constraint.a, anchor_a, direction)
+                    + inverse_mass_along(&scratch.bodies, constraint.b, anchor_b, direction);
+                if k > 0.0 { 1.0 / k } else { 0.0 }
+            };
+            let points = contact.manifold.points();
+            let centroid = points.iter().map(|p| p.point).sum::<DVec3>() / points.len() as f64;
+            for (k, mp) in points.iter().enumerate() {
                 let anchor_a = mp.point - a.position;
                 let anchor_b = mp.point - b.position;
-                let effective = |direction: DVec3| {
-                    let k = inverse_mass_along(&scratch.bodies, constraint.a, anchor_a, direction)
-                        + inverse_mass_along(&scratch.bodies, constraint.b, anchor_b, direction);
-                    if k > 0.0 { 1.0 / k } else { 0.0 }
-                };
                 let dv = b.velocity + b.angular_velocity.cross(anchor_b)
                     - a.velocity
                     - a.angular_velocity.cross(anchor_a);
                 if k == 0 {
                     constraint.point_velocity = dv;
                 }
-                let warm = if settings.warm_starting {
-                    contact.impulses[k]
-                } else {
-                    WarmImpulse::default()
-                };
                 constraint.points[k] = Point {
                     position: mp.point,
                     anchor_a,
                     anchor_b,
                     separation: mp.separation,
-                    normal_mass: effective(normal),
-                    tangent_mass: [effective(tangents[0]), effective(tangents[1])],
-                    normal_impulse: warm.normal,
-                    tangent_impulse: [warm.tangent.dot(tangents[0]), warm.tangent.dot(tangents[1])],
+                    normal_mass: effective(anchor_a, anchor_b, normal),
+                    normal_impulse: warm.normal[k],
+                    twist_radius: (mp.point - centroid).length(),
                     max_normal_impulse: 0.0,
                     total_normal_impulse: 0.0,
                     relative_velocity: dv.dot(normal),
                 };
             }
+            let (anchor_a, anchor_b) = (centroid - a.position, centroid - b.position);
+            constraint.friction_anchor_a = anchor_a;
+            constraint.friction_anchor_b = anchor_b;
+            constraint.tangent_mass = [
+                effective(anchor_a, anchor_b, tangents[0]),
+                effective(anchor_a, anchor_b, tangents[1]),
+            ];
+            constraint.tangent_impulse = [
+                warm.friction.dot(tangents[0]),
+                warm.friction.dot(tangents[1]),
+            ];
+            let twist = inverse_twist_mass(&scratch.bodies, constraint.a, normal)
+                + inverse_twist_mass(&scratch.bodies, constraint.b, normal);
+            constraint.twist_mass = if twist > 0.0 { 1.0 / twist } else { 0.0 };
+            constraint.twist_impulse = warm.twist;
             scratch.constraints.push(constraint);
         }
     }
@@ -464,12 +533,11 @@ impl ContactPipeline {
         for c in &scratch.constraints {
             if let Some(Some(contact)) = self.contacts.get_mut(c.slot) {
                 for (k, p) in c.points[..c.count].iter().enumerate() {
-                    contact.impulses[k] = WarmImpulse {
-                        normal: p.normal_impulse,
-                        tangent: c.tangents[0] * p.tangent_impulse[0]
-                            + c.tangents[1] * p.tangent_impulse[1],
-                    };
+                    contact.impulses.normal[k] = p.normal_impulse;
                 }
+                contact.impulses.friction =
+                    c.tangents[0] * c.tangent_impulse[0] + c.tangents[1] * c.tangent_impulse[1];
+                contact.impulses.twist = c.twist_impulse;
             }
 
             let points = &c.points[..c.count];
@@ -535,16 +603,20 @@ impl ContactPipeline {
     }
 }
 
-/// Applies every point's carried impulses.
+/// Applies every contact's carried impulses: each point's normal impulse,
+/// the friction at the centroid and the twist.
 fn warm_start(constraints: &[Constraint], solver: &[SolverBody], bodies: &mut [RigidBody]) {
     for c in constraints {
         for p in &c.points[..c.count] {
-            let impulse = c.normal * p.normal_impulse
-                + c.tangents[0] * p.tangent_impulse[0]
-                + c.tangents[1] * p.tangent_impulse[1];
+            let impulse = c.normal * p.normal_impulse;
             apply(bodies, solver, c.a, p.anchor_a, -impulse);
             apply(bodies, solver, c.b, p.anchor_b, impulse);
         }
+        let friction = c.tangents[0] * c.tangent_impulse[0] + c.tangents[1] * c.tangent_impulse[1];
+        apply(bodies, solver, c.a, c.friction_anchor_a, -friction);
+        apply(bodies, solver, c.b, c.friction_anchor_b, friction);
+        apply_angular(bodies, solver, c.a, -c.normal * c.twist_impulse);
+        apply_angular(bodies, solver, c.b, c.normal * c.twist_impulse);
     }
 }
 
@@ -592,24 +664,41 @@ fn solve_pass(
             apply(bodies, solver, c.b, p.anchor_b, c.normal * delta);
         }
 
-        for k in 0..c.count {
-            let p = c.points[k];
-            let dv = relative_velocity(bodies, c, &p);
-            let limit = c.friction * p.normal_impulse;
-            let old = p.tangent_impulse;
-            let mut new = [
-                old[0] - p.tangent_mass[0] * dv.dot(c.tangents[0]),
-                old[1] - p.tangent_mass[1] * dv.dot(c.tangents[1]),
-            ];
-            let length_squared = new[0] * new[0] + new[1] * new[1];
-            if length_squared > limit * limit {
-                let scale = limit / length_squared.sqrt();
-                new = [new[0] * scale, new[1] * scale];
-            }
-            c.points[k].tangent_impulse = new;
-            let impulse = c.tangents[0] * (new[0] - old[0]) + c.tangents[1] * (new[1] - old[1]);
-            apply(bodies, solver, c.a, p.anchor_a, -impulse);
-            apply(bodies, solver, c.b, p.anchor_b, impulse);
+        // Friction at the centroid, bounded by the whole manifold's normal
+        // impulse, then the twist, bounded by each point's share of it at its
+        // distance from the centroid.
+        let points = &c.points[..c.count];
+        let dv = relative_velocity_at(bodies, c, c.friction_anchor_a, c.friction_anchor_b);
+        let limit = c.friction * points.iter().map(|p| p.normal_impulse).sum::<f64>();
+        let old = c.tangent_impulse;
+        let mut new = [
+            old[0] - c.tangent_mass[0] * dv.dot(c.tangents[0]),
+            old[1] - c.tangent_mass[1] * dv.dot(c.tangents[1]),
+        ];
+        let length_squared = new[0] * new[0] + new[1] * new[1];
+        if length_squared > limit * limit {
+            let scale = limit / length_squared.sqrt();
+            new = [new[0] * scale, new[1] * scale];
+        }
+        c.tangent_impulse = new;
+        let impulse = c.tangents[0] * (new[0] - old[0]) + c.tangents[1] * (new[1] - old[1]);
+        apply(bodies, solver, c.a, c.friction_anchor_a, -impulse);
+        apply(bodies, solver, c.b, c.friction_anchor_b, impulse);
+
+        if c.count > 1 {
+            let (_, wa) = velocity(bodies, c.a);
+            let (_, wb) = velocity(bodies, c.b);
+            let spin = (wb - wa).dot(c.normal);
+            let limit = c.friction
+                * points
+                    .iter()
+                    .map(|p| p.normal_impulse * p.twist_radius)
+                    .sum::<f64>();
+            let old = c.twist_impulse;
+            let new = (old - c.twist_mass * spin).clamp(-limit, limit);
+            c.twist_impulse = new;
+            apply_angular(bodies, solver, c.a, -c.normal * (new - old));
+            apply_angular(bodies, solver, c.b, c.normal * (new - old));
         }
     }
 }

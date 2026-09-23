@@ -1,5 +1,5 @@
 //! Audio for horde: six procedural cues through `crcbl-audio`'s spatial
-//! grammar and its mixer, and the first voice cap any sample has needed.
+//! grammar and its mixer, and the first voice budget any sample has needed.
 //!
 //! The gun, an enemy coming apart, a gem banked, a potion drunk, a level gained
 //! and the player dying, all synthesised at start-up — this sample has no sound
@@ -22,26 +22,28 @@
 //!
 //! [`compute_cue`]: crcbl::audio::spatial::compute_cue
 //!
-//! # This game emits cues faster than any earlier one, so it caps its voices
+//! # This game emits cues faster than any earlier one, so it budgets its voices
 //!
 //! The other games raise a handful of cues a second and never think
 //! about it. Here a kill is a cue, a gem is a cue, and the gun's cooldown floor
 //! is [`crate::game::FIRE_COOLDOWN_FLOOR`] — a twentieth of a second — so a
 //! late run raises up to about forty a second and every one of them is a voice
-//! that lives until it runs out. [`Mixer`] has **no voice limit, no priority and
-//! no stealing**: [`crcbl::audio::AudioSource::fill`] walks whatever is in the
-//! list, so a game that plays faster than its sounds finish pays for all of it
-//! on the audio thread.
+//! that lives until it runs out. [`crcbl::audio::AudioSource::fill`] walks
+//! whatever is in the mixer's list, so a game that plays faster than its sounds
+//! finish pays for all of it on the audio thread.
 //!
-//! [`MAX_VOICES`] is this sample's answer and it is deliberately the crudest
-//! one that is honest: refuse the new voice rather than steal an old one, and
-//! count the refusal. It still counts the cue as **emitted** — see
+//! [`MAX_VOICES`] is the [`Mixer`]'s voice budget, and every cue carries a
+//! priority: the routine cues at the bottom, the rare announcements above them
+//! and the player's death at the top — see [`priority`]. A cue played into a
+//! full mixer steals the lowest-priority voice, the oldest among equals, or is
+//! refused if everything playing outranks it. So a death raised on the same
+//! tick as sixteen kills is heard, which is the case refusing the newest voice
+//! got wrong.
+//!
+//! A cue still counts as **emitted** whatever the budget did with it — see
 //! [`Audio::plays`] — because "did this event happen" and "was there a speaker
 //! free" are different questions and a test asking the first must not be
 //! answered by the second.
-//!
-//! That the cap lives here rather than in the engine is a finding, not a
-//! preference: `docs/backlog.md` carries it.
 //!
 //! # What this file used to be
 //!
@@ -50,8 +52,8 @@
 //! `AudioStream::open` consumed its source, so nothing could hold both ends.
 //! `play` takes `&self` now and the stream takes an [`Arc`], so the playhead,
 //! the queue and the mixing loop are the engine's. What is still local is the
-//! sound design: the waveforms, the cue ids, the listener convention and the
-//! cap.
+//! sound design: the waveforms, the cue ids, the listener convention, the
+//! budget's size and the cues' priorities.
 
 use std::sync::Arc;
 
@@ -91,13 +93,29 @@ const MASTER_GAIN: f32 = 0.5;
 /// How far behind the play plane the listener stands. See breakout's.
 const LISTENER_STANDOFF: f32 = 1.0;
 
-/// How many voices may be sounding at once.
+/// How many voices may be sounding at once: the [`Mixer`]'s voice budget.
 ///
 /// See this module's header. Sixteen is about a third of a second of this
 /// game's worst-case emission rate, which is long enough that a burst of kills
 /// still reads as a burst and short enough that the audio thread's per-block
 /// work stays bounded no matter what the simulation does.
 pub const MAX_VOICES: usize = 16;
+
+/// How much cue `id` matters when the voice budget is full.
+///
+/// Three ranks. The shot, the kill and the gem are what a late run raises
+/// dozens of a second, and losing the oldest of them to a newer one is
+/// inaudible. The potion and the level are rare and each one means something,
+/// so a burst of the common cues must not take them. The death ends the run and
+/// outranks everything.
+#[must_use]
+pub const fn priority(id: u32) -> u8 {
+    match id {
+        SOUND_DEATH => 2,
+        SOUND_LEVEL | SOUND_HEAL => 1,
+        _ => 0,
+    }
+}
 
 /// Owns the cues and the output stream.
 #[derive(Debug)]
@@ -109,16 +127,9 @@ pub struct Audio {
     /// cannot answer "was this cue played?" — it counts the voices still
     /// sounding, and the audio thread reaps each one as it finishes, so the
     /// number falls again on a clock nothing here controls. It cannot answer it
-    /// here for a second reason too: [`MAX_VOICES`] refuses a voice on a busy
-    /// frame, and the cue still happened.
+    /// here for a second reason too: the budget refuses a voice on a busy
+    /// frame, or cuts one short to make room, and the cue still happened.
     plays: Vec<u64>,
-    /// Cues that were emitted with no free voice. See [`MAX_VOICES`].
-    ///
-    /// Instrumentation rather than mechanism — the debug overlay reads it and
-    /// nothing decides anything on it — but it is the number that says whether
-    /// the cap is being hit at all, which is the whole reason the cap is
-    /// interesting.
-    dropped: u64,
     /// Every `(id, x, y)` handed to [`Audio::play_at`], in order.
     ///
     /// **The only place a cue's world position still exists as a position.**
@@ -183,6 +194,7 @@ impl Audio {
         // The stream takes a handle, not the mixer: this copy is what stays
         // behind to play voices through.
         let mixer = Arc::new(Mixer::new());
+        mixer.set_voice_budget(Some(MAX_VOICES));
         // Before the first cue: a voice started against the default gains is
         // computed once and keeps them, so it would be the one sound in the run
         // the player's settings did not reach.
@@ -199,7 +211,6 @@ impl Audio {
         let audio = Self {
             bank,
             plays: vec![0; SOUND_COUNT],
-            dropped: 0,
             #[cfg(test)]
             played: Vec::new(),
             mixer,
@@ -250,9 +261,9 @@ impl Audio {
             crcbl::log::debug!("audio: no sound registered at id {id}");
             return;
         };
-        // Counted before the cap, not after: the cue happened either way, and a
-        // counter that only counted the audible ones could not tell a game that
-        // never fired from one that fired into a full mixer.
+        // Counted whatever the budget does with it: the cue happened either
+        // way, and a counter that only counted the audible ones could not tell
+        // a game that never fired from one that fired into a full mixer.
         if let Some(count) = id
             .checked_sub(1)
             .and_then(|i| self.plays.get_mut(i as usize))
@@ -262,21 +273,17 @@ impl Audio {
         #[cfg(test)]
         self.played.push((id, at.x, at.y));
 
-        // The cap, read and acted on in two separate locks rather than one. The
-        // game thread is the only one that adds and the audio thread only ever
-        // removes, so the count can be *stale low* by the time the voice goes
-        // in and never stale high: this refuses a cue that had just been made
-        // room for, and never exceeds `MAX_VOICES`.
-        if self.mixer.voice_count() >= MAX_VOICES {
-            self.dropped += 1;
-            return;
-        }
-
+        // The budget is the mixer's: it plays, steals or refuses under one
+        // lock, and counts what it refused and stole.
         let cue = self.mixer.cue([at.x as f32, at.y as f32, at.z as f32]);
-        self.mixer.play(voice.with_mix(VoiceMix {
-            volume: cue.volume * MASTER_GAIN,
-            ..VoiceMix::from(&cue)
-        }));
+        self.mixer.play(
+            voice
+                .with_mix(VoiceMix {
+                    volume: cue.volume * MASTER_GAIN,
+                    ..VoiceMix::from(&cue)
+                })
+                .with_priority(priority(id)),
+        );
     }
 
     /// Every cue played so far, with the world position it was played at.
@@ -303,8 +310,8 @@ impl Audio {
     ///
     /// Monotonic, so it answers the question [`Audio::voices`] cannot: whether
     /// a cue was ever emitted, however long ago it finished and whether or not
-    /// [`MAX_VOICES`] found it a voice. An id no sound answers to has never been
-    /// played and reports zero.
+    /// the voice budget found it a voice. An id no sound answers to has never
+    /// been played and reports zero.
     #[must_use]
     pub fn plays(&self, id: u32) -> u64 {
         id.checked_sub(1)
@@ -313,25 +320,36 @@ impl Audio {
             .unwrap_or(0)
     }
 
-    /// How many cues found no free voice. See [`MAX_VOICES`].
+    /// How many cues the voice budget refused: every voice playing outranked
+    /// them, so they were never heard. See [`priority`].
+    ///
+    /// The mixer's own count, [`Mixer::refused_count`].
     #[must_use]
-    pub const fn dropped(&self) -> u64 {
-        self.dropped
+    pub fn dropped(&self) -> u64 {
+        self.mixer.refused_count()
+    }
+
+    /// How many voices the budget cut short to make room for a newer cue of at
+    /// least their rank. The mixer's own count, [`Mixer::stolen_count`].
+    #[must_use]
+    pub fn stolen(&self) -> u64 {
+        self.mixer.stolen_count()
     }
 }
 
-/// The panel's audio section: how many cues [`MAX_VOICES`] refused.
+/// The panel's audio section: what the voice budget did under pressure.
 ///
-/// The cap refuses the **newest** voice and counts the refusal in
-/// [`Audio::dropped`], and nothing else shows that count — the number lives on
-/// [`Audio`] and no other system reads it. A player whose death cue is refused
-/// by a field of kill cues raised on the same tick hears nothing, and the panel
-/// is the only place the reason exists: one row, so the silence is attributable
-/// rather than a mystery to debug by ear.
+/// Two rows, because the budget gives way in two ways. `stolen` is the common
+/// one — a burst of kills cutting the oldest kill short, which nobody hears —
+/// and says the budget is being hit. `dropped` is the one that matters: a cue
+/// that was never heard, because every voice playing outranked it. Nothing
+/// else shows either number, so the panel is where a silence becomes
+/// attributable rather than a mystery to debug by ear.
 impl crcbl::ui::DebugModule for Audio {
     fn debug_section(&self, section: &mut crcbl::ui::DebugSection) {
         section.set_title("audio");
         section.row("dropped", format_args!("{}", self.dropped()));
+        section.row("stolen", format_args!("{}", self.stolen()));
     }
 }
 
@@ -446,83 +464,134 @@ mod tests {
         );
     }
 
-    /// **The cap refuses a voice and still counts the cue.**
+    /// The panel's rows, spelled as the section stores them.
+    fn rows(dropped: &str, stolen: &str) -> [crcbl::ui::DebugRow; 2] {
+        [
+            crcbl::ui::DebugRow {
+                label: "dropped".into(),
+                value: dropped.into(),
+            },
+            crcbl::ui::DebugRow {
+                label: "stolen".into(),
+                value: stolen.into(),
+            },
+        ]
+    }
+
+    /// Mixes `seconds` of audio, which is what the audio thread would have
+    /// done by then: every voice shorter than that has finished.
+    fn run_for(audio: &Audio, seconds: f32) {
+        let mut block = vec![0.0f32; (48_000.0 * seconds) as usize * 2];
+        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+    }
+
+    /// **The budget holds, and every cue is still counted.**
     ///
     /// The distinction the whole of `plays` rests on, and the one this sample
     /// is the first to need: a game that raised forty cues a second into a full
-    /// mixer must still be able to answer "did the kill happen".
+    /// mixer must still be able to answer "did the kill happen". Kills tie, so
+    /// the extra ones steal the oldest rather than being refused.
     #[test]
-    fn a_full_mixer_refuses_the_voice_and_still_counts_the_cue() {
+    fn a_full_mixer_holds_its_budget_and_still_counts_the_cue() {
         let mut audio = Audio::new(true);
         for _ in 0..MAX_VOICES {
             audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
         assert_eq!(audio.voices(), MAX_VOICES);
         assert_eq!(audio.plays(SOUND_KILL), MAX_VOICES as u64);
-        assert_eq!(audio.dropped(), 0, "the cap fired early");
+        assert_eq!(
+            (audio.dropped(), audio.stolen()),
+            (0, 0),
+            "the budget fired early"
+        );
 
         for _ in 0..7 {
             audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
-        assert_eq!(audio.voices(), MAX_VOICES, "the cap let a voice through");
+        assert_eq!(audio.voices(), MAX_VOICES, "the budget let a voice through");
         assert_eq!(
             audio.plays(SOUND_KILL),
             MAX_VOICES as u64 + 7,
-            "a refused voice stopped the cue being counted",
+            "a voice the budget took stopped the cue being counted",
         );
-        assert_eq!(audio.dropped(), 7);
+        assert_eq!((audio.dropped(), audio.stolen()), (0, 7));
 
-        // …and a voice that finishes makes room again, or the cap is a mute
-        // button rather than a limit.
-        let mut block = vec![0.0f32; 48_000 * 2];
-        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, 48_000);
+        // …and a voice that finishes makes room again, or the budget is a
+        // mute button rather than a limit.
+        run_for(&audio, 1.0);
         assert_eq!(audio.voices(), 0, "a whole second did not drain the queue");
         audio.play_at(SOUND_KILL, DVec3::ZERO);
         assert_eq!(audio.voices(), 1);
     }
 
-    /// **The debug section reports what [`Audio::dropped`] counts** — the
-    /// refusal number is on [`Audio`] and nowhere else, so this is the row that
-    /// tells a player why a cue (their death, say) was silent: sixteen kill cues
-    /// on one tick refuse the seventeenth, and the panel is the only place that
-    /// says so.
+    /// **The player's death is heard over sixteen kills raised on the same
+    /// tick**, in either order — the case refusing the newest voice got wrong.
+    ///
+    /// The death is the longest cue, so after the kills have run out the one
+    /// voice left is the death if and only if it survived. Death first is the
+    /// order that needs the priority: with every cue at one rank the sixteenth
+    /// kill would steal the oldest voice, which is the death.
     #[test]
-    fn the_debug_section_shows_the_refusal_count() {
+    fn the_death_cue_survives_sixteen_kills_on_the_same_tick() {
+        for death_first in [true, false] {
+            let mut audio = Audio::new(true);
+            if death_first {
+                audio.play_at(SOUND_DEATH, DVec3::ZERO);
+            }
+            for _ in 0..16 {
+                audio.play_at(SOUND_KILL, DVec3::ZERO);
+            }
+            if !death_first {
+                audio.play_at(SOUND_DEATH, DVec3::ZERO);
+            }
+            assert_eq!(audio.voices(), MAX_VOICES);
+            assert_eq!(audio.dropped(), 0, "death first: {death_first}");
+
+            // Past every kill (0.14 s), short of the death (0.55 s).
+            run_for(&audio, 0.3);
+            assert_eq!(
+                audio.voices(),
+                1,
+                "the death cue was not left sounding (death first: {death_first})",
+            );
+        }
+    }
+
+    /// **A routine cue into a mixer full of higher ones is refused**, and the
+    /// debug section reports what [`Audio::dropped`] and [`Audio::stolen`]
+    /// count — the numbers live in the mixer and nothing else shows them.
+    #[test]
+    fn the_debug_section_shows_the_budget_counts() {
         let mut audio = Audio::new(true);
-        for _ in 0..MAX_VOICES + 3 {
+        for _ in 0..MAX_VOICES + 2 {
+            audio.play_at(SOUND_LEVEL, DVec3::ZERO);
+        }
+        for _ in 0..3 {
             audio.play_at(SOUND_KILL, DVec3::ZERO);
         }
-        assert_eq!(audio.dropped(), 3, "the cap refused the wrong number");
+        assert_eq!(audio.dropped(), 3, "the budget refused the wrong number");
+        assert_eq!(audio.stolen(), 2, "the budget stole the wrong number");
 
         let mut section = crcbl::ui::DebugSection::new("audio");
         audio.debug_section(&mut section);
         assert_eq!(section.title(), "audio");
         assert_eq!(
             section.rows(),
-            &[crcbl::ui::DebugRow {
-                label: "dropped".into(),
-                value: "3".into(),
-            }],
-            "the section must contain exactly the dropped row",
+            &rows("3", "2"),
+            "the section must contain exactly the budget's rows",
         );
     }
 
-    /// A fresh [`Audio`] shows the row at zero — nothing refused must still be
-    /// reported, or the panel reads the same for "no cap pressure" and "not
+    /// A fresh [`Audio`] shows both rows at zero — no pressure must still be
+    /// reported, or the panel reads the same for "no budget pressure" and "not
     /// wired up".
     #[test]
-    fn a_fresh_audio_reports_zero_dropped() {
+    fn a_fresh_audio_reports_zero_dropped_and_stolen() {
         let audio = Audio::new(true);
         let mut section = crcbl::ui::DebugSection::new("audio");
         audio.debug_section(&mut section);
         assert_eq!(section.title(), "audio");
-        assert_eq!(
-            section.rows(),
-            &[crcbl::ui::DebugRow {
-                label: "dropped".into(),
-                value: "0".into(),
-            }],
-        );
+        assert_eq!(section.rows(), &rows("0", "0"));
     }
 
     /// **The listener is placed before anything can be played through it.** The

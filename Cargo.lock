@@ -517,6 +517,7 @@ dependencies = [
  "crcbl-console",
  "crcbl-core",
  "crcbl-hal",
+ "crcbl-phys",
  "crcbl-shaders",
  "crcbl-sprite",
  "crcbl-ui",

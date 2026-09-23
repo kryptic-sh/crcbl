@@ -58,6 +58,13 @@ thiserror = { workspace = true }
 ron = { workspace = true }
 serde = { workspace = true }
 
+# `scene`'s bounds tests build a `crcbl_phys::AabbCompound` from the parts they
+# produce, which is the use those parts exist for. Test-only: the renderer hands
+# out `f32` boxes and links nothing of physics. Already a workspace crate, so
+# the graph gains an edge and no package.
+[dev-dependencies]
+crcbl-phys = { workspace = true }
+
 # The other half, and the other feature. Cargo resolves build-dependency
 # features separately from normal ones, so `bake`'s PNG encoder reaches the
 # build script and not the renderer.

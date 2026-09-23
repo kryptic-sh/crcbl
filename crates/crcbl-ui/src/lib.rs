@@ -35,6 +35,10 @@
 //! samples put their own numbers in — a label and a right-aligned reading a
 //! row, sized and coloured by the page rather than by its contents.
 //!
+//! [`grid_drag`] is the typed drag-and-drop a grid of cells is rearranged with:
+//! a payload taken on the press, a drop target's `can_accept`, and the answer
+//! carried back as widget state, all on [`UiState`]'s press capture.
+//!
 //! [`tree`] is the element tree `docs/plan/07-ui-debug.md` builds the rest of
 //! the toolkit on: blocks and spans rebuilt every frame with identity that
 //! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
@@ -54,6 +58,7 @@ pub mod debug;
 pub mod draw_list;
 pub mod edit;
 pub mod font;
+pub mod grid_drag;
 pub mod hud;
 pub mod image;
 pub mod menu;
@@ -78,6 +83,10 @@ pub use debug::{
 pub use draw_list::{
     Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, Triangles,
     Vertex2d,
+};
+pub use grid_drag::{
+    CellGrid, CellResponse, DragFrame, DropFeedback, DropTarget, Dropped, GridCell, GridDrag,
+    GridResponse, Grip, Held,
 };
 pub use hud::Anchor;
 pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};

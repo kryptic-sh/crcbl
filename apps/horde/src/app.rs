@@ -470,9 +470,9 @@ impl HostedGame for Horde {
     /// half of the same claim and it is one line. The numbers are the ones this
     /// game's whole argument rests on — how much of the field survived the cull,
     /// and how many draw calls the survivors cost. The audio section is the
-    /// silence explained: [`crate::audio::MAX_VOICES`] refuses the newest voice
-    /// on a full mixer, and its refusal count is the only reason a cue that
-    /// happened (the player's death among sixteen kills) was not heard.
+    /// silence explained: [`crate::audio::MAX_VOICES`] is the mixer's voice
+    /// budget, and its refusal and steal counts are the only record of a cue
+    /// that happened and was not heard, or was cut short.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.scene);
         panel.add(&self.game.audio);

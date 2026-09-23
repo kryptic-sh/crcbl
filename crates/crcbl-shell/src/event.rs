@@ -45,9 +45,11 @@
 //! `SurfaceTarget` is deliberately exhaustive so a new platform breaks every
 //! HAL backend loudly. `ShellEvent` is the opposite: a consumer that ignores an
 //! event it has never heard of degrades gracefully (touch input does nothing,
-//! rather than doing something wrong), and gamepad hotplug and IME pre-edit are
-//! both scheduled to land later. Breaking every `match` in the engine for each
-//! is not a useful forcing function, it is churn.
+//! rather than doing something wrong), and IME pre-edit is scheduled to land
+//! later. Breaking every `match` in the engine for each new event is not a
+//! useful forcing function, it is churn. (Gamepads are not window events and do
+//! not come through here: their backends emit `crcbl_input::GamepadEvent`s from
+//! a poll of their own.)
 //!
 //! [`Touch`](ShellEvent::Touch) is what that promise looked like when it was
 //! collected: it landed without touching a single `match` outside the shell,

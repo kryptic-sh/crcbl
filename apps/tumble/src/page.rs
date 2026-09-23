@@ -14,13 +14,19 @@
 //!  │ SOLVER                 102 us │
 //!  │ PENETRATION           0.42 mm │
 //!  │ BOUNCE            0.53 / 0.55 │
+//!  │ PTS/MANIFOLD             1.42 │
+//!  │ PERSISTED               91.0% │
 //!  │ DROPPED                   232 │
 //!  │ STEP                   530 us │
 //!  │ HASH         20be321e0066f5de │
 //!  └───────────────────────────────┘
 //!
-//!   balls and pills bounce down the wall - no cubes: box on box is rung 2
+//!   balls, pills and cubes bounce down the wall - keys 1 to 4 pick a room
 //! ```
+//!
+//! The Tower room shows the pyramid's contact rows — its solver time is the
+//! benchmark — then how far the pyramid's and the column's top boxes have
+//! drifted, the column's own solver time and the dominoes down.
 //!
 //! `docs/plan/sample/24-tumble.md` asks that a scene the engine cannot produce
 //! yet ship labelled as the gap it is, and each room's hint line is that label.
@@ -49,15 +55,17 @@ const PANEL: ReadoutPanel = ReadoutPanel {
     label: LABEL,
 };
 
-/// The Spin room's line, and its gap.
+/// The Spin room's line.
 pub const SPIN_HINT: &str =
-    "handle flips in zero g - box lands flat; box on box is rung 2 - keys 1 2 3 pick a room";
-/// The wall's line, and its gap.
-pub const WALL_HINT: &str =
-    "balls and pills bounce down the wall - no cubes: box on box is rung 2 - keys 1 2 3";
+    "handle flips in zero g - box lands flat on its corners - keys 1 to 4 pick a room";
+/// The wall's line.
+pub const WALL_HINT: &str = "balls, pills and cubes bounce down the wall - keys 1 to 4 pick a room";
 /// The pit's line, and its gaps.
 pub const PIT_HINT: &str =
-    "1000 balls, nothing sleeps (rung 3), no overflow or despawn (rung 6) - keys 1 2 3";
+    "1000 balls, nothing sleeps (rung 3), no overflow or despawn (rung 6) - keys 1 to 4";
+/// The Tower room's line, and its gaps.
+pub const TOWER_HINT: &str =
+    "counters: the pyramid's; column at 8 substeps, 90 Hz; nothing sleeps (rung 3)";
 
 /// The hint for a room.
 #[must_use]
@@ -66,6 +74,7 @@ pub const fn hint(view: View) -> &'static str {
         View::Spin => SPIN_HINT,
         View::Wall => WALL_HINT,
         View::Pit => PIT_HINT,
+        View::Tower => TOWER_HINT,
     }
 }
 
@@ -84,7 +93,17 @@ fn micros(seconds: Option<f64>) -> String {
     )
 }
 
-/// Rung 1's row, for a room with contacts.
+/// A share as a percentage, or a dash where there is nothing to share.
+fn percent(share: Option<f64>) -> String {
+    share.map_or_else(|| "-".to_owned(), |share| format!("{:.1}%", share * 100.0))
+}
+
+/// A length in millimetres.
+fn millimetres(metres: f64) -> String {
+    format!("{:.2} mm", metres * 1.0e3)
+}
+
+/// Rung 1's row and rung 2's, for a room with contacts.
 fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
     rows.push(ReadoutRow::new("BODIES", tally.bodies.to_string(), VALUE));
     rows.push(ReadoutRow::new("PAIRS", tally.pairs.to_string(), VALUE));
@@ -113,7 +132,7 @@ fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
     ));
     rows.push(ReadoutRow::new(
         "PENETRATION",
-        format!("{:.2} mm", tally.worst_penetration * 1.0e3),
+        millimetres(tally.worst_penetration),
         VALUE,
     ));
     rows.push(ReadoutRow::new(
@@ -122,6 +141,18 @@ fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
             (Some(ratio), Some(asked)) => format!("{ratio:.2} / {asked:.2}"),
             _ => "none yet".to_owned(),
         },
+        VALUE,
+    ));
+    rows.push(ReadoutRow::new(
+        "PTS/MANIFOLD",
+        tally
+            .points_per_manifold()
+            .map_or_else(|| "-".to_owned(), |points| format!("{points:.2}")),
+        VALUE,
+    ));
+    rows.push(ReadoutRow::new(
+        "PERSISTED",
+        percent(tally.persisted_ratio()),
         VALUE,
     ));
 }
@@ -169,7 +200,31 @@ pub fn draw(
             rows.push(ReadoutRow::new("DROPS", spin.drops.to_string(), VALUE));
             rows.push(ReadoutRow::new(
                 "PENETRATION",
-                format!("{:.2} mm", spin.contacts.worst_penetration * 1.0e3),
+                millimetres(spin.contacts.worst_penetration),
+                VALUE,
+            ));
+        }
+        View::Tower => {
+            let tower = &reading.tower;
+            contact_rows(&mut rows, &tower.pyramid);
+            rows.push(ReadoutRow::new(
+                "PYRAMID TOP",
+                millimetres(tower.pyramid_drift),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "COLUMN TOP",
+                millimetres(tower.column_drift),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "COLUMN SOLVER",
+                micros(tower.column.stages.map(|s| s.solver)),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "DOMINOES",
+                format!("{} / {}", tower.dominoes_down, crate::tower::DOMINOES),
                 VALUE,
             ));
         }
@@ -215,6 +270,7 @@ mod tests {
     use crate::pit::PitReading;
     use crate::scene::View;
     use crate::spin::SpinReading;
+    use crate::tower::TowerReading;
     use crate::wall::WallReading;
     use crcbl::phys::StageTimes;
 
@@ -223,6 +279,8 @@ mod tests {
             bodies: 120,
             pairs: 431,
             touching: 164,
+            points: 233,
+            persisted: 212,
             begun: 5230,
             ended: 5066,
             worst_penetration: 4.2e-4,
@@ -255,6 +313,16 @@ mod tests {
                 balls: 1000,
                 contacts: tally,
             },
+            tower: TowerReading {
+                column_drift: 0.0118,
+                column_sway: 8.5e-4,
+                pyramid_drift: 0.0151,
+                pyramid_sway: 5.0e-5,
+                dominoes_down: 9,
+                runs: 2,
+                pyramid: tally,
+                column: tally,
+            },
             step_micros: Some(530.0),
             hash: 0x20be_321e_0066_f5de,
         }
@@ -270,8 +338,9 @@ mod tests {
             .collect()
     }
 
-    /// **Each room's page carries rung 1's counters, or rung 0's, and its
-    /// gap.**
+    /// **Each room's page carries its rung's counters and its gap**: rung 0's
+    /// in the Spin room, rungs 1 and 2's wherever there are contacts, and the
+    /// Tower room's drifts and dominoes.
     #[test]
     fn each_room_carries_its_counters_and_its_gap() {
         let atlas = FontAtlas::built_in();
@@ -281,10 +350,16 @@ mod tests {
                 View::Wall,
                 &[
                     "wall", "120", "431", "164", "5230", "5066", "21 us", "38 us", "102 us",
-                    "0.42 mm", "232",
+                    "0.42 mm", "1.42", "91.0%", "232",
                 ][..],
             ),
-            (View::Pit, &["pit", "1000", "431", "102 us"][..]),
+            (View::Pit, &["pit", "1000", "431", "102 us", "1.42"][..]),
+            (
+                View::Tower,
+                &[
+                    "tower", "431", "1.42", "91.0%", "15.10 mm", "11.80 mm", "102 us", "9 / 15",
+                ][..],
+            ),
         ] {
             let mut list = DrawList::new();
             let stats = draw(&mut list, &atlas, (960, 720), &reading(view));
@@ -301,15 +376,15 @@ mod tests {
                 "{view:?}: the gap is not labelled: {text:?}"
             );
         }
-        assert!(SPIN_HINT.contains("rung 2") && WALL_HINT.contains("rung 2"));
         assert!(PIT_HINT.contains("rung 3") && PIT_HINT.contains("rung 6"));
+        assert!(TOWER_HINT.contains("rung 3"));
     }
 
     /// Every hint fits across the default window, so no gap is cut off.
     #[test]
     fn every_hint_fits_the_default_window() {
         let atlas = FontAtlas::built_in();
-        for view in [View::Spin, View::Wall, View::Pit] {
+        for view in [View::Spin, View::Wall, View::Pit, View::Tower] {
             let width = atlas.text_width(hint(view), crcbl::ui::readout::NATURAL_SCALE);
             assert!(
                 width < 960.0 - 2.0 * PANEL.inset,

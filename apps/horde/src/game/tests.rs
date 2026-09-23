@@ -4125,9 +4125,9 @@ fn a_choice_outside_the_offer_takes_nothing() {
 ///
 /// Counted with [`crate::audio::Audio::plays`] rather than `voices()`: a
 /// voice is reaped by the audio thread on a clock nothing here controls, and
-/// this game's cap refuses a voice outright on a busy frame — so a test
-/// written against the live voice count would be a race *and* would report a
-/// cue that happened as one that did not. That is flappy's trap, and it is
+/// this game's voice budget refuses or steals a voice on a busy frame — so a
+/// test written against the live voice count would be a race *and* would
+/// report a cue that happened as one that did not. That is flappy's trap, and it is
 /// worse here.
 #[test]
 fn every_cue_fires_and_carries_the_position_of_what_raised_it() {

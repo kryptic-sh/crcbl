@@ -3281,12 +3281,64 @@ impl ForwardRenderer {
         target_format: Format,
         scene: &SceneDesc<'_>,
     ) -> Result<Self, HalError> {
-        Self::with_scene_on_path(
+        Self::with_scene_serviced(device, queue, target_format, scene, &mut || {})
+    }
+
+    /// [`ForwardRenderer::with_scene`], calling `service` between the steps of
+    /// the build so the thread running it can keep its window alive.
+    ///
+    /// # What it is for: a build on the thread that owns the window
+    ///
+    /// The build needs the device, so it runs on whichever thread holds it —
+    /// for a game that is the loop thread, which also owns the window, and a
+    /// desktop marks a window hung when its thread takes no message for a few
+    /// seconds (see `crcbl_shell::Shell::keep_alive`). A game passes
+    /// `&mut || shell.keep_alive()` here and the window keeps answering for the
+    /// whole build.
+    ///
+    /// # Where it is called
+    ///
+    /// Where the time is, which was measured rather than guessed. With a cold
+    /// driver shader cache — a player's first launch, or the first after a
+    /// driver update — **pipeline creation is most of the build**. Measured in
+    /// 2026-09 on an RX 7900 XTX, release, building one glTF scene: 2.2 to 2.4 s
+    /// on Vulkan and 1.9 to 2.2 s on D3D12 cold against 0.25 s warm, while the
+    /// mesh and page uploads took about 0.1 s either way. So `service` runs
+    /// after every mesh upload (each level of a DAG), after every page layer's
+    /// mip chain and each page's upload, after each of the camera's
+    /// post-processing subsystems, before every mesh-pass and grass pipeline,
+    /// and between the build's other phases.
+    ///
+    /// **The longest gap left is one pipeline**, and a pipeline cannot be
+    /// split: on that scene, cold, it was the forward pass's colour pipeline
+    /// at 0.31 s on Vulkan and 0.36 s on D3D12, where the build without calls
+    /// had been one gap of 2 s. Warm, the longest was about 0.04 s. A machine
+    /// eight times slower under contention still calls back inside the five
+    /// seconds Windows allows.
+    ///
+    /// `service` sees nothing of the build and cannot touch the renderer or the
+    /// scene. Whatever reaches the window meanwhile — input, a resize, a close
+    /// request — is the caller's to keep for later, as
+    /// `crcbl_shell::Shell::keep_alive` does.
+    ///
+    /// # Errors
+    ///
+    /// [`ForwardRenderer::with_scene`]'s, on its terms: a failure part-way
+    /// through releases everything already created.
+    pub fn with_scene_serviced(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        scene: &SceneDesc<'_>,
+        service: &mut dyn FnMut(),
+    ) -> Result<Self, HalError> {
+        Self::build_on_path(
             device,
             queue,
             target_format,
             scene,
             device.preferred_geometry_path(),
+            service,
         )
     }
 
@@ -3305,6 +3357,27 @@ impl ForwardRenderer {
         scene: &SceneDesc<'_>,
         geometry_path: GeometryPath,
     ) -> Result<Self, HalError> {
+        Self::build_on_path(
+            device,
+            queue,
+            target_format,
+            scene,
+            geometry_path,
+            &mut || {},
+        )
+    }
+
+    /// The body of [`Self::with_scene_on_path`] and
+    /// [`Self::with_scene_serviced`], calling `service` where the latter
+    /// documents.
+    fn build_on_path(
+        device: &dyn Device,
+        queue: QueueHandle,
+        target_format: Format,
+        scene: &SceneDesc<'_>,
+        geometry_path: GeometryPath,
+        service: &mut dyn FnMut(),
+    ) -> Result<Self, HalError> {
         let required = match geometry_path {
             GeometryPath::MeshShader => crcbl_hal::Features::MESH_SHADER,
             GeometryPath::IndirectCount => crcbl_hal::Features::DRAW_INDIRECT_COUNT,
@@ -3322,6 +3395,7 @@ impl ForwardRenderer {
             scene,
             geometry_path,
             &mut rollback,
+            service,
         ) {
             Ok(renderer) => Ok(renderer),
             Err(error) => {
@@ -3515,7 +3589,8 @@ impl ForwardRenderer {
     }
 
     /// The body of [`ForwardRenderer::with_scene`], recording what it has
-    /// created into `rollback` as it goes.
+    /// created into `rollback` as it goes and calling `service` where
+    /// [`ForwardRenderer::with_scene_serviced`] documents.
     fn build(
         device: &dyn Device,
         queue: QueueHandle,
@@ -3523,6 +3598,7 @@ impl ForwardRenderer {
         scene: &SceneDesc<'_>,
         geometry_path: GeometryPath,
         rollback: &mut Rollback,
+        service: &mut dyn FnMut(),
     ) -> Result<Self, HalError> {
         // Before anything exists, so a refused description leaks nothing — see
         // `check_scene`, which is where that placement is argued.
@@ -3548,7 +3624,7 @@ impl ForwardRenderer {
                 .features
                 .contains(crcbl_hal::Features::TASK_SHADER);
 
-        let (pool, residents) = Self::build_geometry(device, queue, scene)?;
+        let (pool, residents) = Self::build_geometry(device, queue, scene, service)?;
         // What an `InstanceDesc::mesh` index resolves through: one id per
         // description mesh, in description order, and each of them that mesh's
         // **level 0** whatever the path — because it is the entry the cull pass
@@ -3615,9 +3691,15 @@ impl ForwardRenderer {
         for kind in PageKind::ALL {
             let authored = scene.page.extent(kind);
             let layers = scene.page.layers(kind);
+            // A layer's chain is host work proportional to its texels, so a
+            // page of many large layers is serviced one layer at a time.
             let chains: Vec<Vec<Vec<u8>>> = layers
                 .iter()
-                .map(|texels| kind.chain(texels, authored))
+                .map(|texels| {
+                    let chain = kind.chain(texels, authored);
+                    service();
+                    chain
+                })
                 .collect();
             let levels: Vec<Vec<&[u8]>> = layers
                 .iter()
@@ -3646,6 +3728,7 @@ impl ForwardRenderer {
             rollback.textures.push(page);
             page_extents[kind.index()] = (extent, extent);
             pages[kind.index()] = Some(page);
+            service();
         }
         let [
             Some(base_color_page),
@@ -3712,6 +3795,7 @@ impl ForwardRenderer {
         };
         rollback.probe_gather = probe_gather;
         let probe_gather = rollback.probe_gather.take();
+        service();
 
         // **Empty.** Every object in the scene arrives through
         // [`ForwardRenderer::add_instance`], including the demo scene's cube: a
@@ -3965,6 +4049,7 @@ impl ForwardRenderer {
             }
 
             rollback.clusters = Some(clusters);
+            service();
         }
 
         // One ring per shadow view, indexed `[view][frame]`: `docs/plan/25-lod.md`'s
@@ -4781,6 +4866,7 @@ impl ForwardRenderer {
             &ltc::texels(),
         )?;
         rollback.textures.push(ltc_table);
+        service();
 
         // **A comparison sampler, and that is the PCF.** Each
         // `SampleCmpLevelZero` returns the filtered fraction of four texels that
@@ -4850,6 +4936,7 @@ impl ForwardRenderer {
                 contact_shadow: contact_shadow_placeholder.view,
                 probe_visibility: probe_visibility_placeholder.view,
             },
+            service,
         )?);
         let primary = rollback.primary.as_ref().expect("just stored");
 
@@ -4990,6 +5077,7 @@ impl ForwardRenderer {
                 },
             )?;
             rollback.shadow_draws.push(draws);
+            service();
         }
         // The handles are `Copy` and are read out here for the same reason the
         // camera's are above: the pool they came from is the rollback's now.
@@ -5116,6 +5204,7 @@ impl ForwardRenderer {
             shadow_groups.push(frame_shadow_groups);
             shadow_group_entries.push(frame_shadow_entries);
             shadow_selection.push(frame_shadow_selection);
+            service();
         }
 
         let mesh_set_layouts = [mesh_layout];
@@ -5141,8 +5230,13 @@ impl ForwardRenderer {
         // pipeline rather than a per-draw state live. The shadow tile clear is
         // the one exception: its triangle comes out of `SV_VertexID` and it
         // already culls nothing.
+        //
+        // **`service` before every one of them**: on a cold driver cache each is
+        // a shader compilation, and this batch is the build's longest run of
+        // them — see [`ForwardRenderer::with_scene_serviced`].
         let modules = MeshModules::new(device, emit, culls_clusters)?;
         let mesh_results = MeshModules::sided(|cull| {
+            service();
             modules.color_pipeline(
                 device,
                 mesh_pipeline_layout,
@@ -5151,16 +5245,20 @@ impl ForwardRenderer {
                 "forward",
             )
         });
-        let shadow_results =
-            MeshModules::sided(|cull| modules.depth_pipeline(device, mesh_pipeline_layout, cull));
+        let shadow_results = MeshModules::sided(|cull| {
+            service();
+            modules.depth_pipeline(device, mesh_pipeline_layout, cull)
+        });
         // And its cutout twin, which a frame whose material table masks alpha is
         // recorded with instead — see [`MeshModules::depth_masked_pipeline`].
         let depth_masked_results = MeshModules::sided(|cull| {
+            service();
             modules.depth_masked_pipeline(device, mesh_pipeline_layout, cull)
         });
         // And the one that resets a tile, which the cadence rung needs and the
         // attachment's load operation cannot express — see
         // [`MeshModules::depth_clear_pipeline`].
+        service();
         let shadow_clear_result = modules.depth_clear_pipeline(device, mesh_pipeline_layout);
         // And `docs/plan/50-irradiance-probes.md`'s reflective shadow map, built
         // from the same modules and the same layout — see
@@ -5168,8 +5266,10 @@ impl ForwardRenderer {
         // on one whose probes ask to be updated: the modules are released a line
         // below and a pipeline built later would need them back, which is a
         // second shader compilation for a field a `ProbeGrid` decides.
-        let rsm_results =
-            MeshModules::sided(|cull| modules.rsm_pipeline(device, mesh_pipeline_layout, cull));
+        let rsm_results = MeshModules::sided(|cull| {
+            service();
+            modules.rsm_pipeline(device, mesh_pipeline_layout, cull)
+        });
         modules.destroy(device);
         // Register every successful creation before propagating any error.
         // Results later in this batch may own pipelines even when the first
@@ -5303,6 +5403,7 @@ impl ForwardRenderer {
         device.destroy_shader_module(tonemap_module);
         let tonemap_pipeline = tonemap_pipeline?;
         rollback.pipelines.push(tonemap_pipeline);
+        service();
 
         // Nearest, not linear: see `tonemap.slang` on why a 1:1 blit must not
         // leave a golden image depending on two rasterisers agreeing about
@@ -5330,6 +5431,7 @@ impl ForwardRenderer {
             target_format,
             Self::build_fullscreen,
         )?);
+        service();
 
         Ok(Self {
             pool: rollback
@@ -5753,6 +5855,7 @@ impl ForwardRenderer {
         device: &dyn Device,
         queue: QueueHandle,
         scene: &SceneDesc<'_>,
+        service: &mut dyn FnMut(),
     ) -> Result<(MeshPool, Vec<ResidentMesh>), HalError> {
         let mut pool = MeshPool::new(
             device,
@@ -5763,7 +5866,7 @@ impl ForwardRenderer {
                 mesh_capacity: scene.capacities.meshes,
             },
         )?;
-        match Self::residents(device, queue, &mut pool, scene) {
+        match Self::residents(device, queue, &mut pool, scene, service) {
             Ok(residents) => Ok((pool, residents)),
             Err(error) => {
                 pool.destroy(device);
@@ -5854,6 +5957,7 @@ impl ForwardRenderer {
         queue: QueueHandle,
         pool: &mut MeshPool,
         scene: &SceneDesc<'_>,
+        service: &mut dyn FnMut(),
     ) -> Result<Vec<ResidentMesh>, HalError> {
         let mut uploaded: Vec<Vec<crate::mesh_pool::MeshHandle>> =
             Vec::with_capacity(scene.meshes.len());
@@ -5877,6 +5981,7 @@ impl ForwardRenderer {
                             flags: *flags,
                         },
                     )?]);
+                    service();
                 }
                 Geometry::Dag {
                     levels,
@@ -5904,6 +6009,7 @@ impl ForwardRenderer {
                                 flags: *flags,
                             },
                         )?);
+                        service();
                     }
                     uploaded.push(handles);
                 }
@@ -5911,6 +6017,7 @@ impl ForwardRenderer {
         }
 
         pool.flush(device)?;
+        service();
         // The table index is the only number that leaves here — where the
         // geometry actually is reaches the GPU through the mesh table, and the
         // draw arguments are built from that table by a shader. `MeshPool::mesh`
@@ -11004,7 +11111,7 @@ impl MeshModules {
     /// helper that unwrapped here would have to drop a handle it had already
     /// created when its twin failed, and nothing would ever destroy it.
     fn sided(
-        build: impl Fn(CullMode) -> Result<GraphicsPipelineHandle, HalError>,
+        mut build: impl FnMut(CullMode) -> Result<GraphicsPipelineHandle, HalError>,
     ) -> [Result<GraphicsPipelineHandle, HalError>; 2] {
         [build(CullMode::Back), build(CullMode::None)]
     }
@@ -11457,6 +11564,7 @@ fn rebuilt_with_sampler(
 #[cfg(test)]
 mod tests {
     mod instance_upload;
+    mod load_service;
 
     use super::*;
     use crate::effects::{Antialiasing, EffectOverride};

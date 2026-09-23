@@ -16,6 +16,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_input::Binding` has pad variants and is no longer `Eq`**:
+  `PadButton`, `PadDpad`, `PadStick { stick, deadzone }` and
+  `PadTrigger { trigger, threshold }` join it, so an exhaustive `match` on it
+  needs four more arms, and the `f32` dead zones leave it `PartialEq` only.
+  `ActionMapError` has `InvalidDeadzone`, returned by `try_declare`,
+  `try_declare_in` and `rebind` for a dead zone or threshold that is not finite
+  and in `0.0..1.0`.
+- **dx12: game-owned DXIL built without explicit registers must be rebuilt.** A
+  D3D12 register is now the binding number in the set's register space (see the
+  Fixed entry below), so a shader that declares no `register(…)` — which `dxc`
+  numbers per class from zero, `t0`, `s0`, `b0`, `t1` — no longer matches its
+  root signature, and its pipeline is refused. Declare every resource as
+  `register(<class><binding>, space<set>)` beside its `[[vk::binding]]`, and a
+  push-constant block as `register(b0, space64)`
+  (`crcbl_shaders::D3D12_PUSH_CONSTANT_SPACE`).
 - **Grass rows carry a blade shape and clumping, and the grass buffers grew
   again**: `crcbl_render::grass::BladeType` has `shape` and `clumping`,
   `BladeLook` has `Blades`, and `GrassError` has `BladeLod`. The instance buffer
@@ -321,6 +336,248 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   exactly as it answers the window losing focus: held keys, buttons and contacts
   released through the game's own paths, then paused. Not a toggle: a second
   report while paused leaves the game paused. The default is `false`.
+
+- **Boxes against boxes: rung 2 of the contact solver, up to hulls**
+  (`36-contact-solver.md`). A system made with `PhysicsSystem::with_contacts`
+  now collides box against box, static or dynamic, through a fifteen-axis
+  separating axis test whose last axis each contact caches
+  (`contact::manifold::SatCache`, `collide_cached`), Sutherland–Hodgman clipping
+  of the incident face, reduction to four points, and flip-invariant feature ids
+  naming a feature of each box. Friction now acts at each manifold's centroid
+  with a twist term about its normal, rather than at every point, so a box spun
+  flat on the floor stops. `ContactCounters` gains `points_per_manifold` and
+  `persisted_ratio`, and `ContactSettings::TALL_STACK` (eight substeps, 90 Hz)
+  holds up a column the 30 Hz defaults buckle past about fifteen one-metre
+  cubes. Sphere and capsule manifolds against a box now name the box's feature
+  in their ids, and a capsule lying along a box edge, or across a face and past
+  its end, rests on two points instead of one that wandered from tick to tick.
+  General convex hulls, and GJK against them, are not built. `apps/tumble` gains
+  the Tower room on key 4 — a 20-cube column, a base-20 pyramid and a domino
+  run, with points per manifold, the persisted-id ratio and both top boxes'
+  drift on the page — and cubes on the wall.
+
+- **A gamepad seam in `crcbl-input`**, the one vocabulary every pad backend
+  emits so a game binds a pad once: `GamepadEvent` (`Connected`, `Disconnected`,
+  `State`) carrying a `GamepadSnapshot` — a level, with a `PadButtons` set of
+  positional `PadButton`s (South is A, Cross or B), sticks −1…1 with +Y up,
+  triggers 0…1, all raw — plus `GamepadId::allocate`, `PadAxis`, `Stick`,
+  `Trigger` and `PadKind`. A game reads the events directly, or feeds
+  `ActionMap::gamepad_event`, which resolves `Binding::PadButton`, `PadStick` (a
+  scaled radial dead zone) and `PadTrigger` (a threshold) through contexts like
+  any other input, and makes `Device::Gamepad` the last device on a press or a
+  push past `PAD_ACTIVITY_THRESHOLD`, never on a release.
+  `ActionMap::release_gamepads` drops every pad to neutral and withholds a held
+  button until it is let go; the engine loop calls it on focus loss, on the map
+  `Game::actions` hands over. A disconnected pad's held state is released.
+- **XInput on Windows, `crcbl_input::xinput`**: `XInput::load` finds
+  `xinput1_4.dll` (or `xinput9_1_0.dll`) at runtime, and `XInput::poll` reads
+  the four slots and emits `GamepadEvent`s — connections, disconnections, and a
+  snapshot whenever one changes. A connected slot is read on every poll; a slot
+  found empty is asked again only once `xinput::REPROBE_INTERVAL` (one second)
+  has passed, as Microsoft advises, so a newly plugged pad is reported up to
+  that late and an idle poll no longer pays for four empty-slot probes (about 28
+  µs a poll on the machine it was measured on, now about 0.03 µs between
+  re-probes). A game on its own loop polls it; the engine loop polls it for
+  games on `crcbl::engine::Loop` (see below). Tested without a controller (a
+  scripted state source, and a real `XInputGetState` answering an empty slot);
+  no controller has been through it yet. Other targets have no pad backend and
+  no stand-in module.
+- **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
+  at `Loop::new` (logging once and running padless if it cannot); other targets
+  log once that they have no backend; a headless run polls nothing. Each frame,
+  after the shell's events and before the ticks, every `GamepadEvent` goes to
+  the loop's menu map and once to the new `HostedGame::gamepad_event` hook (a
+  no-op by default). The loop does not feed the map `HostedGame::actions` hands
+  over — a game feeds it from the hook, as it feeds keys — but still releases it
+  on focus loss, now after the frame's pads. `Loop::set_pad_source` swaps the
+  source for any `crcbl::engine::PadSource`, which is how a test or replay
+  scripts a pad. The loop's menus answer the pad: the left stick and the d-pad
+  move, South accepts, East backs out of the pause panel, and Start
+  (`crcbl::engine::PAUSE_BUTTON`) toggles the pause like Escape, closing an open
+  console first. Pad events are not withheld from the game while a menu is up.
+- **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
+  through `ui::STICK_DEADZONE` and on the d-pad, `ui::NEXT`/`ui::PREV` on the
+  right and left shoulders, `ui::ACCEPT` on South, `ui::BACK` on East.
+- **`Binding::PadDpad`, the d-pad as one `Axis2`** — the pad's `Binding::Wasd`
+  over `DpadUp`, `DpadDown`, `DpadLeft` and `DpadRight`, +Y up. It resolves as
+  `Wasd` does: into the same unit disc as the keys and the sticks on the action,
+  so a diagonal is a unit vector, opposite directions cancel, and a d-pad
+  pressed with a stick or a key the same way is not faster; on a button it is
+  down while any of the four is held. It owns the four buttons for context
+  routing. `Binding::reads_gamepad` is public, so a caller narrowing an action
+  to its keys can keep its pad bindings the way `crcbl::engine::menu_actions`
+  does — which now keeps the d-pad on `ui::MOVE`.
+- **Tap, hold and double-tap patterns on `crcbl_input::ActionMap`**, beside
+  `set_repeat` and on the same tick clock, so a scripted replay fires them on
+  the same ticks every run. `set_tap(name, Some(Tap::new(time)?))` fires
+  `tapped(name)` on the release of a press no longer than `time`;
+  `set_hold(name, Some(Hold::new(time)?))` fires `hold_fired(name)` once, on the
+  first tick the press has lasted `time`, with `hold_progress(name)` (`0.0` to
+  `1.0`) for a hold-to-interact ring;
+  `set_double_tap(name, Some(DoubleTap::new(tap_time, window)?))` fires
+  `double_tapped(name)` on a second press within `window` of a first no longer
+  than `tap_time`. Each reader is a one-tick edge, like `repeated`. The patterns
+  on one action share its presses: a press that fired its hold never taps, a
+  press that completed a double tap fires nothing more, and with a double tap
+  attached a single tap waits until the window passes without a second press. A
+  context push or pop, disabling or rebinding the action, or attaching a pattern
+  cancels everything in flight, and a press held across the change fires
+  nothing. Defaults are `TAP_TIME`, `HOLD_TIME` and `DOUBLE_TAP_WINDOW`
+  (`Tap::default()` and so on); a zero, negative or non-finite time is refused
+  by `new`.
+- **A GPU-rendered image can be drawn as a sprite, through an atlas.**
+  `SpriteRenderer::create_atlas(device, &AtlasDesc { label, cell, columns, rows, sample })`
+  creates a sheet of fixed-size cells, every texel transparent, with a one-texel
+  gutter round each cell. `allocate_slot(atlas)` hands out an `AtlasSlot` (its
+  `sheet()` and `uv()` are what a `Sprite` names), and
+  `add_slot_copies(&mut graph, &[SlotCopy { source, slot }])` adds a graph copy
+  pass writing a rendered image — a transient a render pass drew, or an import —
+  into the slot's cell. Call it before `add_pass` and this frame's sprites see
+  the new texels; `add_pass` now declares a read of every atlas it samples, so
+  the barrier back to `ShaderRead` is the graph's. `free_slot(slot)` destroys
+  nothing and is safe while frames that sampled the cell are in flight: a later
+  copy is queue-ordered after them. Every failure is a `SheetError` rather than
+  a panic: `AtlasFull` when every cell is in use, `StaleSlot` for a freed slot
+  (refused even after its cell is reused), `NotAnAtlas`, and `SourceMismatch`
+  for a source that is not exactly the cell's size in `ATLAS_FORMAT`
+  (`Rgba8UnormSrgb`) or is a transient without `TRANSFER_SRC`. The icon cache
+  and its eviction policy stay the game's.
+- **Host pixels can be written straight into an atlas slot.**
+  `SpriteRenderer::write_slot(device, &mut graph, slot, pixels)` stages exactly
+  one cell of tightly packed `ATLAS_FORMAT` bytes and adds a graph copy pass
+  from the staging buffer into the slot's cell, with no intermediate sampled
+  image. It follows `add_slot_copies`' rules: call it before `add_pass` for this
+  frame to see the texels, and it is safe while frames that sampled the old
+  texels are in flight. The staging buffer is released by a later `begin_frame`
+  once the frame ring has passed it, so the graph must be submitted by the frame
+  the next `begin_frame` starts. Pixels of any other length are refused with the
+  new `SheetError::PixelsMismatch` (never cropped), and a freed slot with
+  `StaleSlot`.
+- **A typed grid drag-and-drop in `crcbl_ui::grid_drag`.** `CellGrid` places a
+  grid of square cells on screen (`origin`, `cell`, `columns`, `rows`,
+  `id_base`) and owns its hit test (`cell_at`, `cell_bounds`) and cell widget
+  ids. `GridDrag<P>` is the drag, kept across frames beside the `UiState` whose
+  press capture it rides on: each frame `GridDrag::frame(ui, pointer)` opens a
+  `DragFrame`, `DragFrame::grid(grid, source, can_accept)` runs one grid, and
+  `DragFrame::finish` returns the `Dropped { payload, from, to }`, if any. The
+  source hands over a `Grip { payload, origin }` when a press latches, and the
+  grab offset (the pressed cell minus `origin`) is kept, so an item lands with
+  the cell it was taken by under the pointer. `can_accept(&payload, &target)` is
+  asked about the hovered cell only, and its answer comes back as a
+  `DropFeedback` (`None`, `Accepting`, `Refusing`) on that cell's
+  `CellResponse`, beside its `ButtonState`, for the panel to style. A release
+  where the drag began, over a refusing cell or over nothing drops nothing. One
+  drag spans any number of grids, so a press on one grid and a release on
+  another is one drop. `Held::payload_mut` and `Held::refit` let a game turn an
+  item mid-drag and keep the grip inside its new footprint. Shard's inventory
+  panel and breach's loadout panel now use it in place of their own copies,
+  report a drop as the stack's `SlotId` and the cell its origin lands on, and
+  tint a refusing cell while a drag is held over it.
+- **A non-moving ground probe on `crcbl_phys::CharacterController`.**
+  `probe_ground(world, distance)` and
+  `probe_ground_at(world, position, distance)` sweep the controller's capsule
+  straight down and return a `GroundProbe` (`contact: GroundContact`, `distance`
+  travelled to it, and `walkable` under the slope limit), or `None` when nothing
+  is within `distance`. They move nothing and leave `ground()` alone, and they
+  answer for the world as it is now, where `ground()` is what the last
+  `move_and_slide` found: take the floor away and `ground()` still names it
+  while the probe finds nothing. The sweep is the one `move_and_slide` settles
+  with, so a gameplay check (a revive or a vault that needs real support) and
+  the controller agree on what counts as ground. A negative or non-finite
+  `distance` panics.
+- **A voice budget with priority and stealing on `crcbl_audio::mixer::Mixer`.**
+  `Mixer::set_voice_budget(Some(n))` caps the voices sounding at once (`None`,
+  the default, is unlimited, as before). A voice carries a priority
+  (`Voice::with_priority(u8)`, default `0`, higher outranks lower), and a play
+  into a full mixer steals the lowest-priority voice, the oldest among equals,
+  when its own priority is at least that voice's (**equal priority steals**);
+  otherwise it is refused. The count check, the steal and the insert happen
+  under one lock, and a stolen voice fades out over one block as a stopped one
+  does. `Mixer::try_play` answers with a `PlayOutcome` (`Played(id)`,
+  `Stole { id, stolen }`, `Refused`); `Mixer::play` keeps its signature and
+  returns a handle that is stale from the start when the voice was refused.
+  `Mixer::refused_count` and `Mixer::stolen_count` are running totals for a
+  debug panel. Horde drops its own `voice_count`-then-`play` cap for the budget,
+  ranks its death cue above its level and potion cues and those above the
+  routine ones, and shows a `stolen` row beside `dropped` in its audio panel.
+- **CPU bounds of a scene's instances: `SceneDesc::instance_bounds` and
+  `instance_parts`.** `instance_bounds(&instances, root)` returns the box around
+  every vertex of the instances placed by `root * instance.transform`, folded
+  from the vertices (tight under rotation, unlike `Aabb::transformed`'s
+  conservative box); a DAG is bounded by its finest level. `instance_parts`
+  returns one local box per instance, which widened with `as_dvec3()` are the
+  parts `crcbl_phys::AabbCompound::new` takes. Both return
+  `crcbl_render::SceneBoundsError` naming the instance: a missing mesh, a DAG
+  with no levels, a partial vertex, an empty mesh as a part, no vertices at all,
+  or a placed vertex that is `NaN` or infinite — refused, where
+  `Aabb::from_points` (unchanged) skips a `NaN` for the cull's sake.
+- **Two-bone IK and model-space joint rotation: `crcbl_anim::ik`.**
+  `rotate_joint(skeleton, model, pose, palette, joint, model_rotation)` turns
+  one joint about its own origin by a rotation given in model space (the frame
+  of `model` times the palette's globals), writing only that joint's local
+  rotation.
+  `solve_two_bone(skeleton, model, pose, palette, [upper, middle, end], target, pole)`
+  puts the end joint on a model-space target with the middle joint bent towards
+  the pole, keeping bone lengths: a target out of reach extends the chain
+  straight towards it, one too close folds it to the nearest reachable distance,
+  and a pole along the target line keeps the current bend plane. Both recompute
+  the `Palette` before returning. Both return `IkError` — mismatched pose or
+  palette, a joint out of range, joints that are not an ancestor chain, a `NaN`
+  or infinite input, a zero rotation, a zero-length bone, or a parent frame with
+  non-uniform scale or shear (`FRAME_TOLERANCE`) — and write nothing when they
+  do. Mirrored frames and a joint's own non-uniform scale are handled.
+- **Rigid compound queries: `crcbl_phys::AabbCompound`.** A body made of several
+  local-space boxes, queried at a `Transform`. `AabbCompound::new(&parts)`
+  refuses a part with a `NaN` or infinite corner or with `min` past `max`
+  (`CompoundError`, naming the part); an empty set is allowed and answers
+  `None`. `ray_cast(&pose, &ray)` returns the nearest `CompoundHit` — part index
+  plus a world-space `ShapeHit` (`t`, point, normal, `started_inside`) — through
+  the existing `ray_vs_aabb`, so a ray starting inside a part reports its exit
+  face. `closest_point(&pose, point)` returns the nearest `CompoundPoint` (part,
+  world point, distance; the query point itself at distance zero when inside),
+  and `closest_points` yields one per part for a caller that filters parts
+  before choosing. A non-finite pose, ray or point, or a rotation that is not
+  unit length, answers `None` rather than being read as a miss. The single-box
+  primitive underneath is new too: `Aabb::closest_point`, `None` for an empty or
+  `NaN` box.
+
+- **`ForwardRenderer::with_scene_serviced` keeps a window alive while a renderer
+  builds.** It is `with_scene` with a `&mut dyn FnMut()` that is called between
+  the build's steps, so a game building on its loop thread passes
+  `&mut || shell.keep_alive()` and Windows does not mark its window "Not
+  Responding". On a cold driver shader cache pipeline creation is most of the
+  build (about 2 s against 0.25 s warm, on an RX 7900 XTX), so the calls come
+  after every mesh upload and page layer, after each post-processing subsystem,
+  and before every mesh-pass and grass pipeline. The longest gap left is one
+  pipeline, about 0.3 s cold. `with_scene` and `with_scene_on_path` are
+  unchanged, and the viewer sample now builds its renderer this way.
+- **An opt-in log file, for builds with no console.** A
+  `windows_subsystem = "windows"` exe has no stderr, so every log line was lost.
+  `crcbl_store::enable_log_file(app_name)`, called after `init_logging`, copies
+  every line stderr gets to `<app_name>.log` in the platform's log directory
+  (`NativeStorage::log_root`: `%LOCALAPPDATA%\<app>\logs` on Windows,
+  `$XDG_STATE_HOME/<app>/logs` on Linux, `~/Library/Logs/<app>` on macOS).
+  Earlier runs rotate to `<app>.1.log`… at start-up, keeping
+  `crcbl_core::log::LOG_FILES_KEPT`; a run stops writing at
+  `LOG_FILE_MAX_BYTES`. Each line is written through before the log call
+  returns, so a crash keeps its last lines. A failure to open the file is a
+  warning, never fatal. `crcbl_core::log::attach_file` takes an explicit
+  directory, and every `crcbl::args::run_front_end` sample opens the file when a
+  player sets `CRCBL_LOG_FILE=1` (`crcbl_core::log::file_requested`). Attaching
+  the file also installs a panic hook, once per process, that writes the panic's
+  message, `file:line:col` and thread name to the file as an `ERROR panic` line
+  and then calls the hook it replaced, so the default stderr report and any hook
+  the game set earlier still run. A game that manages the panic hook itself
+  attaches with `crcbl_core::log::attach_file_without_panic_hook` instead.
+- `Shell::keep_alive` lets the window system run without delivering anything: a
+  game loading assets on the loop thread before its first frame calls it a few
+  times a second, and Windows no longer ghosts the window as "Not Responding"
+  (nor does a Wayland compositor's ping go unanswered). What arrives meanwhile —
+  input, a resize, a close request — is kept for the first frame's pump rather
+  than dropped. Every backend's `pump` is now `keep_alive` plus delivery. It is
+  a required method, so a `Shell` implemented outside this workspace must add
+  it.
+
 - `PhysicsWorld::cast_ray_excluding` and its shared `OverlapQueries` form omit a
   live collider before selecting the closest exact ray hit. Character support
   and traversal probes can skip their own capsule while retaining geometry
@@ -1974,6 +2231,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Recorder::pipelines_created`) and holds every layout to every container it
   serves. A bind-group layout whose array would run into a later binding's
   register is now refused at creation on dx12.
+
+- **dx12: a pipeline whose shaders declare registers its layout does not hold is
+  refused by name, not with a bare `E_INVALIDARG`.** `create_graphics_pipeline`,
+  `create_mesh_pipeline` and `create_compute_pipeline` now hold each stage's
+  DXIL resource table (its `PSV0` part) to the registers the pipeline layout
+  assigns before calling D3D12, and fail with `HalError::ShaderCompilation`
+  naming the pipeline, the entry point, each resource the shader declares that
+  the layout lacks or holds as another kind (class, register, space), and what
+  the layout has at that binding — for example "`scope lens` fragmentMain
+  declares CBV b0 space0; layout set 0 binding 0 (SampledImage) is t0 space0;
+  layout set 0 binding 2 (UniformBuffer) is b2 space0; shaders must declare
+  register(<class><binding>, space<set>), …". A shader may still declare a
+  subset of the layout. The table is read once per container at
+  `create_shader_module`; nothing is added per draw. A container with no `PSV0`
+  part is now refused at pipeline creation.
 
 - **dx12: GPU pass timers no longer drain the queue every frame.**
   `Device::query_results` recorded a `ResolveQueryData` of its own and waited on

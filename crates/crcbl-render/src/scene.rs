@@ -69,6 +69,10 @@
 //! [`ForwardRenderer::new`]: crate::forward::ForwardRenderer::new
 //! [`ForwardRenderer::with_scene`]: crate::forward::ForwardRenderer::with_scene
 
+mod bounds;
+
+pub use bounds::SceneBoundsError;
+
 use std::borrow::Cow;
 
 use crcbl_hal::HalError;
