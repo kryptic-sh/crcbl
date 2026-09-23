@@ -8620,6 +8620,15 @@ remain, and from rung 2:
   browser gate in `pages.yml` is what proves wasm matches it.
 - Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
   room's browser cost (245 more boxes a tick in wasm).
+- **EW's dropped items need two more pieces before they can move onto
+  `crcbl-phys` (EW, 2026-09-23).** Each item is one rigid body made of several
+  local boxes (`ItemMotion::local_bounds`, one padded box per mesh instance —
+  the same parts slice EW hands `AabbCompound`), and a single bounding box would
+  lose rifle and backpack silhouettes. Needed: (1) a dynamic compound collider
+  of oriented local boxes, colliding with statics and with other compounds, mass
+  and inertia from the parts or a density default; (2) sleeping (rung 3),
+  because a raid floor holds dozens of resting items. EW waits for both rather
+  than downgrading.
 
 ### Ragdolls — `35-ragdolls.md` (2026-08-27)
 
