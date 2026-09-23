@@ -17,8 +17,8 @@ use crate::{
     ffi::{
         HSteamPipe, ISteamApps, ISteamFriends, ISteamInput, ISteamMatchmaking,
         ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemotePlay, ISteamRemoteStorage,
-        ISteamScreenshots, ISteamTimeline, ISteamUser, ISteamUserStats, ISteamUtils, Lib,
-        SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
+        ISteamScreenshots, ISteamTimeline, ISteamUgc, ISteamUser, ISteamUserStats, ISteamUtils,
+        Lib, SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
     },
     input::PadQueue,
     matchmaking::Tracked,
@@ -122,6 +122,8 @@ pub struct Client {
     pub(crate) screenshots: *mut ISteamScreenshots,
     /// `SteamAPI_SteamTimeline_v004()`; never null.
     pub(crate) timeline: *mut ISteamTimeline,
+    /// `SteamAPI_SteamUGC_v021()`; never null.
+    pub(crate) ugc: *mut ISteamUgc,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -292,6 +294,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         .cast::<ISteamScreenshots>();
     let timeline =
         interface(lib.fns.timeline.accessor, &versions::TIMELINE)?.cast::<ISteamTimeline>();
+    let ugc = interface(lib.fns.ugc.accessor, &versions::UGC)?.cast::<ISteamUgc>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -319,6 +322,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             remote_play,
             screenshots,
             timeline,
+            ugc,
             session,
         }),
         queue: VecDeque::new(),
@@ -411,7 +415,8 @@ mod tests {
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTEPLAY_INTERFACE_VERSION004\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
               STEAMUSERSTATS_INTERFACE_VERSION013\0SteamInput007\0\
-              STEAMSCREENSHOTS_INTERFACE_VERSION003\0SteamUtils011\0\0"
+              STEAMSCREENSHOTS_INTERFACE_VERSION003\0STEAMUGC_INTERFACE_VERSION021\0\
+              SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -425,6 +430,7 @@ mod tests {
         assert!(!steam.client.screenshots.is_null());
         assert!(!steam.client.remote_play.is_null());
         assert!(!steam.client.timeline.is_null());
+        assert!(!steam.client.ugc.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

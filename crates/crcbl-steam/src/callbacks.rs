@@ -17,10 +17,10 @@
 use crate::{
     AppId, EResult, SteamId,
     ffi::structs::{
-        AvatarImageLoaded, DlcInstalled, FloatingGamepadTextInputDismissed,
+        AvatarImageLoaded, DlcInstalled, DownloadItemResult, FloatingGamepadTextInputDismissed,
         FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
         GameRichPresenceJoinRequested, GamepadTextInputDismissed, GetAuthSessionTicketResponse,
-        GetTicketForWebApiResponse, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
+        GetTicketForWebApiResponse, ItemInstalled, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
         NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange, ScreenshotReady,
         ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
         SteamInputDeviceDisconnected, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
@@ -59,6 +59,8 @@ pub(crate) enum Base {
     Screenshots = 2300,
     /// `k_iSteamRemotePlayCallbacks`.
     RemotePlay = 5700,
+    /// `k_iSteamUGCCallbacks`.
+    Ugc = 3400,
     /// `k_iSteamControllerCallbacks` — Steam Input's callbacks, under the
     /// name of the interface it replaced.
     Controller = 2800,
@@ -82,6 +84,7 @@ impl Base {
         Self::Screenshots,
         Self::Controller,
         Self::RemotePlay,
+        Self::Ugc,
         Self::Timeline,
     ];
 
@@ -101,6 +104,7 @@ impl Base {
             Self::Screenshots => "k_iSteamScreenshotsCallbacks",
             Self::Controller => "k_iSteamControllerCallbacks",
             Self::RemotePlay => "k_iSteamRemotePlayCallbacks",
+            Self::Ugc => "k_iSteamUGCCallbacks",
             Self::Timeline => "k_iSteamTimelineCallbacks",
         }
     }
@@ -312,6 +316,24 @@ pub enum SteamEvent {
     RemotePlayDisconnected {
         /// The session.
         session: crate::RemotePlaySession,
+    },
+    /// A Workshop item was installed or updated (`ItemInstalled_t`): read
+    /// where with [`Workshop::install_info`](crate::Workshop::install_info).
+    WorkshopItemInstalled {
+        /// The app the item belongs to.
+        app: AppId,
+        /// The item.
+        item: crate::ItemId,
+    },
+    /// A download [`Workshop::download`](crate::Workshop::download) started
+    /// has finished (`DownloadItemResult_t`).
+    WorkshopItemDownloaded {
+        /// The app the item belongs to.
+        app: AppId,
+        /// The item.
+        item: crate::ItemId,
+        /// `EResult::OK`, or why not.
+        result: EResult,
     },
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
@@ -813,6 +835,37 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::Ugc,
+        offset: 5,
+        #[cfg(test)]
+        name: "ItemInstalled_t",
+        size: size_of::<ItemInstalled>(),
+        decode: |bytes| {
+            read::<ItemInstalled>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::WorkshopItemInstalled {
+                    app: AppId(payload.app),
+                    item: crate::ItemId(payload.item),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Ugc,
+        offset: 6,
+        #[cfg(test)]
+        name: "DownloadItemResult_t",
+        size: size_of::<DownloadItemResult>(),
+        decode: |bytes| {
+            read::<DownloadItemResult>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::WorkshopItemDownloaded {
+                    app: AppId(payload.app),
+                    item: crate::ItemId(payload.item),
+                    result: EResult(payload.result),
+                })
+            })
+        },
+    },
+    Row {
         base: Base::Screenshots,
         offset: 1,
         #[cfg(test)]
@@ -970,6 +1023,24 @@ unsafe impl Pod for FloatingGamepadTextInputDismissed {}
 unsafe impl Pod for SteamInputDeviceConnected {}
 // SAFETY: as above.
 unsafe impl Pod for SteamInputDeviceDisconnected {}
+// SAFETY: as above; `m_flScore` is kept as its bits, a `u32`.
+unsafe impl Pod for crate::ffi::structs::SteamUgcDetails {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SteamUgcQueryCompleted {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::CreateItemResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SubmitItemUpdateResult {}
+// SAFETY: as above.
+unsafe impl Pod for ItemInstalled {}
+// SAFETY: as above.
+unsafe impl Pod for DownloadItemResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::DeleteItemResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SubscribeResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::UnsubscribeResult {}
 
 /// Copies a `T` out of exactly `size_of::<T>()` bytes; `None` for any other
 /// length.

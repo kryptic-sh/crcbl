@@ -9092,9 +9092,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11 and 12 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12 and 14 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11 and 12 are built on
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12 and 14 are built on
 branch `steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
 `Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
 the last owner's drop, the local identity and machine basics,
@@ -9114,8 +9114,9 @@ seam) with the Steam-pad filter in `crcbl_input::xinput`, slice 7c's on-screen
 keyboards and glyphs, and slice 8's loop limb (`crcbl::engine::steam`: the loop
 pumps a lent `Steam`, takes its overlay as a focus loss, and polls Steam Input
 as its pad source), slice 10's screenshots and timeline, and slice 11's
-ownership, DLC, betas and Remote Play, and slice 12's tickets and `AuthGate`.
-The plan, `docs/plan/42-steam.md`, carries a status line per slice.
+ownership, DLC, betas and Remote Play, and slice 12's tickets and `AuthGate`,
+and slice 14's Workshop (`Workshop`, `UgcQuery`, `ItemUpdate`). The plan,
+`docs/plan/42-steam.md`, carries a status line per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9269,6 +9270,15 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   a wire-format change to design with topic 27), and server-side decryption of
   encrypted app tickets (Valve's `sdkencryptedappticket` on a backend the
   project does not run). EW needs neither.
+- **Slice 14's manual steps have not run, and nothing uses the Workshop**: under
+  480, a private test item created and uploaded (`create_item`, then an
+  `ItemUpdate` with a content folder, submitted), subscribed to from a second
+  account, `SteamEvent::WorkshopItemInstalled` seen there with `install_info`
+  naming the folder, and the item deleted afterwards — on every OS. Also
+  unverified: whether 480 lets any developer create items at all, and whether
+  the Workshop legal agreement (`needs_agreement`) blocks a new account's
+  upload. What it would take in-repo: a Workshop panel in the sandbox that lists
+  the player's subscribed items and their install folders.
 - **Needs a decision: `Apps::launch_command_line` can silently cut a line over
   1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
   buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's

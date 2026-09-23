@@ -117,6 +117,14 @@ pub(crate) const TIMELINE: Interface = Interface {
     in_init_ex: false,
 };
 
+/// `ISteamUGC`. Spelled like `ISteamRemoteStorage`'s.
+pub(crate) const UGC: Interface = Interface {
+    accessor: "SteamAPI_SteamUGC_v021",
+    version: "STEAMUGC_INTERFACE_VERSION021",
+    define: "STEAMUGC_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamUserStats`. Spelled like `ISteamRemoteStorage`'s.
 pub(crate) const USER_STATS: Interface = Interface {
     accessor: "SteamAPI_SteamUserStats_v013",

@@ -21,6 +21,8 @@
 //!        ├── leaderboards(): find_or_create() / upload() / download() ──▶ SteamCall<T>
 //!        ├── screenshots(): hook(), write() the game's own; tag_user(), set_location()
 //!        ├── timeline(): set_game_mode(), instant_event(), range_start() ──▶ TimelineRange, phases
+//!        ├── workshop(): query_all() ──▶ UgcQuery ──▶ send() ──▶ SteamCall<QueryPage> ──▶ results(),
+//!        │               subscribe(), install_info(), create_item(), start_update() ──▶ submit()
 //!        ├── voice(): capture() ──▶ VoiceCapture: set_transmitting(), poll() ──▶ packets
 //!        │            decompress(packet, VOICE_SAMPLE_RATE) ──▶ mono f32 PCM
 //!        ├── SteamCloudStorage::new(): crcbl_store::StorageSource
@@ -29,7 +31,7 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11 and 12: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11, 12 and 14: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -43,7 +45,8 @@
 //! reports, with their buttons' glyphs, the Deck's on-screen keyboards hand
 //! back typed text, screenshots are written to the player's library and
 //! moments marked on Steam's game recording, ownership, DLC, betas and Remote
-//! Play sessions are read, tickets prove a player to a peer or a service, and
+//! Play sessions are read, tickets prove a player to a peer or a service,
+//! Workshop items are found, subscribed to, installed, made and updated, and
 //! the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
@@ -217,6 +220,11 @@ mod utils;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod voice;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod workshop;
 
 #[cfg(all(
     target_pointer_width = "64",
@@ -272,5 +280,12 @@ pub use crate::{
     voice::{
         MAX_VOICE_SAMPLE_RATE, MIN_VOICE_SAMPLE_RATE, VOICE_SAMPLE_RATE, Voice, VoiceCapture,
         VoiceError,
+    },
+    workshop::{
+        DownloadProgress, FileType, InstallInfo, ItemCreated, ItemDeleted, ItemDetails, ItemId,
+        ItemState, ItemSubmitted, ItemUpdate, MAX_CHANGE_NOTE_LENGTH, MAX_ITEM_DESCRIPTION_LENGTH,
+        MAX_ITEM_METADATA_LENGTH, MAX_ITEM_TAG_LENGTH, MAX_ITEM_TITLE_LENGTH, MatchingType,
+        QueryOrder, QueryPage, Submission, Subscribed, UGC_RESULTS_PER_PAGE, UgcQuery,
+        Unsubscribed, UpdateProgress, UpdateStatus, UserList, UserListOrder, Visibility, Workshop,
     },
 };

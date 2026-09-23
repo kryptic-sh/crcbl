@@ -62,6 +62,15 @@ pub(crate) type InputAnalogActionHandle = u64;
 pub(crate) type ScreenshotHandle = u32;
 /// `TimelineEventHandle_t` — `typedef uint64 TimelineEventHandle_t;`.
 pub(crate) type TimelineEventHandle = u64;
+/// `PublishedFileId_t` — `typedef uint64 PublishedFileId_t;`, one Workshop
+/// item.
+pub(crate) type PublishedFileId = u64;
+/// `UGCQueryHandle_t` — `typedef uint64 UGCQueryHandle_t;`, all ones being
+/// `k_UGCQueryHandleInvalid`.
+pub(crate) type UgcQueryHandle = u64;
+/// `UGCUpdateHandle_t` — `typedef uint64 UGCUpdateHandle_t;`, all ones being
+/// `k_UGCUpdateHandleInvalid`.
+pub(crate) type UgcUpdateHandle = u64;
 /// `SteamErrMsg` — `typedef char SteamErrMsg[ 1024 ];`, the English message
 /// `SteamInternal_SteamAPI_Init` fills in on failure.
 pub(crate) type SteamErrMsg = [core::ffi::c_char; 1024];
@@ -112,6 +121,8 @@ opaque! {
     ISteamScreenshots;
     /// `class ISteamTimeline`.
     ISteamTimeline;
+    /// `class ISteamUGC`.
+    ISteamUgc;
     /// `class ISteamUser`.
     ISteamUser;
     /// `class ISteamUserStats`.

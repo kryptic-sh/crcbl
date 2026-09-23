@@ -45,7 +45,7 @@
 //! `VALVE_CALLBACK_PACK_LARGE`, so if `callback_packed!` picked the wrong
 //! arm on some target, that one table says so before any real struct is read.
 
-use super::{HSteamUser, SteamApiCall};
+use super::{HSteamUser, PublishedFileId, SteamApiCall, UgcQueryHandle};
 
 /// Declares a struct under Valve's callback packing: `pack(8)` on Windows,
 /// `pack(4)` on Linux and macOS.
@@ -417,6 +417,108 @@ pub(crate) const DECLS: &[StructDecl] = &[
             "static const int k_nCubTicketMaxLength = 2560",
             "uint8 m_rgubTicket[k_nCubTicketMaxLength]",
         ],
+    },
+    StructDecl {
+        name: "SteamParamStringArray_t",
+        pack: Pack::Callback,
+        fields: &["const char ** m_ppStrings", "int32 m_nNumStrings"],
+    },
+    StructDecl {
+        name: "SteamUGCDetails_t",
+        pack: Pack::Callback,
+        fields: &[
+            "PublishedFileId_t m_nPublishedFileId",
+            "EResult m_eResult",
+            "EWorkshopFileType m_eFileType",
+            "AppId_t m_nCreatorAppID",
+            "AppId_t m_nConsumerAppID",
+            "char m_rgchTitle[k_cchPublishedDocumentTitleMax]",
+            "char m_rgchDescription[k_cchPublishedDocumentDescriptionMax]",
+            "uint64 m_ulSteamIDOwner",
+            "uint32 m_rtimeCreated",
+            "uint32 m_rtimeUpdated",
+            "uint32 m_rtimeAddedToUserList",
+            "ERemoteStoragePublishedFileVisibility m_eVisibility",
+            "bool m_bBanned",
+            "bool m_bAcceptedForUse",
+            "bool m_bTagsTruncated",
+            "char m_rgchTags[k_cchTagListMax]",
+            "UGCHandle_t m_hFile",
+            "UGCHandle_t m_hPreviewFile",
+            "char m_pchFileName[k_cchFilenameMax]",
+            "int32 m_nFileSize",
+            "int32 m_nPreviewFileSize",
+            "char m_rgchURL[k_cchPublishedFileURLMax]",
+            "uint32 m_unVotesUp",
+            "uint32 m_unVotesDown",
+            "float m_flScore",
+            "uint32 m_unNumChildren",
+            "uint64 m_ulTotalFilesSize",
+        ],
+    },
+    StructDecl {
+        name: "SteamUGCQueryCompleted_t",
+        pack: Pack::Callback,
+        fields: &[
+            "UGCQueryHandle_t m_handle",
+            "EResult m_eResult",
+            "uint32 m_unNumResultsReturned",
+            "uint32 m_unTotalMatchingResults",
+            "bool m_bCachedData",
+            "char m_rgchNextCursor[k_cchPublishedFileURLMax]",
+        ],
+    },
+    StructDecl {
+        name: "CreateItemResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "EResult m_eResult",
+            "PublishedFileId_t m_nPublishedFileId",
+            "bool m_bUserNeedsToAcceptWorkshopLegalAgreement",
+        ],
+    },
+    StructDecl {
+        name: "SubmitItemUpdateResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "EResult m_eResult",
+            "bool m_bUserNeedsToAcceptWorkshopLegalAgreement",
+            "PublishedFileId_t m_nPublishedFileId",
+        ],
+    },
+    StructDecl {
+        name: "ItemInstalled_t",
+        pack: Pack::Callback,
+        fields: &[
+            "AppId_t m_unAppID",
+            "PublishedFileId_t m_nPublishedFileId",
+            "UGCHandle_t m_hLegacyContent",
+            "uint64 m_unManifestID",
+        ],
+    },
+    StructDecl {
+        name: "DownloadItemResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "AppId_t m_unAppID",
+            "PublishedFileId_t m_nPublishedFileId",
+            "EResult m_eResult",
+        ],
+    },
+    StructDecl {
+        name: "DeleteItemResult_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_eResult", "PublishedFileId_t m_nPublishedFileId"],
+    },
+    StructDecl {
+        name: "RemoteStorageSubscribePublishedFileResult_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_eResult", "PublishedFileId_t m_nPublishedFileId"],
+    },
+    StructDecl {
+        name: "RemoteStorageUnsubscribePublishedFileResult_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_eResult", "PublishedFileId_t m_nPublishedFileId"],
     },
     StructDecl {
         name: "LobbyCreated_t",
@@ -1104,6 +1206,189 @@ callback_packed! {
     }
 }
 
+callback_packed! {
+    /// `SteamParamStringArray_t` (`isteamremotestorage.h`): a list of strings
+    /// handed to Steam — `SetItemTags`' tags. Built by this crate, never read
+    /// from Steam.
+    pub(crate) struct SteamParamStringArray {
+        /// `const char ** m_ppStrings`.
+        pub(crate) strings: *const *const core::ffi::c_char,
+        /// `int32 m_nNumStrings`.
+        pub(crate) count: i32,
+    }
+}
+
+callback_packed! {
+    /// `SteamUGCDetails_t` (`isteamugc.h`): one Workshop item, as
+    /// `GetQueryUGCResult` fills it.
+    pub(crate) struct SteamUgcDetails {
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `EWorkshopFileType m_eFileType`.
+        pub(crate) file_type: i32,
+        /// `AppId_t m_nCreatorAppID`.
+        pub(crate) creator_app: u32,
+        /// `AppId_t m_nConsumerAppID`.
+        pub(crate) consumer_app: u32,
+        /// `char m_rgchTitle[k_cchPublishedDocumentTitleMax]`.
+        pub(crate) title: [u8; 129],
+        /// `char m_rgchDescription[k_cchPublishedDocumentDescriptionMax]`.
+        pub(crate) description: [u8; 8000],
+        /// `uint64 m_ulSteamIDOwner`.
+        pub(crate) owner: u64,
+        /// `uint32 m_rtimeCreated`.
+        pub(crate) created: u32,
+        /// `uint32 m_rtimeUpdated`.
+        pub(crate) updated: u32,
+        /// `uint32 m_rtimeAddedToUserList`.
+        pub(crate) added_to_user_list: u32,
+        /// `ERemoteStoragePublishedFileVisibility m_eVisibility`.
+        pub(crate) visibility: i32,
+        /// `bool m_bBanned`.
+        pub(crate) banned: u8,
+        /// `bool m_bAcceptedForUse`.
+        pub(crate) accepted: u8,
+        /// `bool m_bTagsTruncated`.
+        pub(crate) tags_truncated: u8,
+        /// `char m_rgchTags[k_cchTagListMax]` — comma-separated.
+        pub(crate) tags: [u8; 1025],
+        /// `UGCHandle_t m_hFile`.
+        pub(crate) file: u64,
+        /// `UGCHandle_t m_hPreviewFile`.
+        pub(crate) preview_file: u64,
+        /// `char m_pchFileName[k_cchFilenameMax]`.
+        pub(crate) file_name: [u8; 260],
+        /// `int32 m_nFileSize`.
+        pub(crate) file_size: i32,
+        /// `int32 m_nPreviewFileSize`.
+        pub(crate) preview_size: i32,
+        /// `char m_rgchURL[k_cchPublishedFileURLMax]`.
+        pub(crate) url: [u8; 256],
+        /// `uint32 m_unVotesUp`.
+        pub(crate) votes_up: u32,
+        /// `uint32 m_unVotesDown`.
+        pub(crate) votes_down: u32,
+        /// `float m_flScore`, as its bits: every field here is an integer
+        /// (see the module docs).
+        pub(crate) score: u32,
+        /// `uint32 m_unNumChildren`.
+        pub(crate) children: u32,
+        /// `uint64 m_ulTotalFilesSize`.
+        pub(crate) total_files_size: u64,
+    }
+}
+
+callback_packed! {
+    /// `SteamUGCQueryCompleted_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 1`):
+    /// the answer to `SendQueryUGCRequest`.
+    pub(crate) struct SteamUgcQueryCompleted {
+        /// `UGCQueryHandle_t m_handle`.
+        pub(crate) handle: UgcQueryHandle,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `uint32 m_unNumResultsReturned`.
+        pub(crate) returned: u32,
+        /// `uint32 m_unTotalMatchingResults`.
+        pub(crate) total: u32,
+        /// `bool m_bCachedData`.
+        pub(crate) cached: u8,
+        /// `char m_rgchNextCursor[k_cchPublishedFileURLMax]` — for cursor
+        /// queries, which this crate does not make.
+        pub(crate) next_cursor: [u8; 256],
+    }
+}
+
+callback_packed! {
+    /// `CreateItemResult_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 3`): the
+    /// answer to `CreateItem`.
+    pub(crate) struct CreateItemResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+        /// `bool m_bUserNeedsToAcceptWorkshopLegalAgreement`.
+        pub(crate) needs_agreement: u8,
+    }
+}
+
+callback_packed! {
+    /// `SubmitItemUpdateResult_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 4`):
+    /// the answer to `SubmitItemUpdate`.
+    pub(crate) struct SubmitItemUpdateResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `bool m_bUserNeedsToAcceptWorkshopLegalAgreement`.
+        pub(crate) needs_agreement: u8,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+    }
+}
+
+callback_packed! {
+    /// `ItemInstalled_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 5`): a
+    /// Workshop item was installed or updated.
+    pub(crate) struct ItemInstalled {
+        /// `AppId_t m_unAppID`.
+        pub(crate) app: u32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+        /// `UGCHandle_t m_hLegacyContent`.
+        pub(crate) legacy_content: u64,
+        /// `uint64 m_unManifestID`.
+        pub(crate) manifest: u64,
+    }
+}
+
+callback_packed! {
+    /// `DownloadItemResult_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 6`): a
+    /// download `DownloadItem` started has finished.
+    pub(crate) struct DownloadItemResult {
+        /// `AppId_t m_unAppID`.
+        pub(crate) app: u32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `DeleteItemResult_t` (`isteamugc.h`, `k_iSteamUGCCallbacks + 17`): the
+    /// answer to `DeleteItem`.
+    pub(crate) struct DeleteItemResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+    }
+}
+
+callback_packed! {
+    /// `RemoteStorageSubscribePublishedFileResult_t`
+    /// (`isteamremotestorage.h`, `k_iSteamRemoteStorageCallbacks + 13`): the
+    /// answer to `SubscribeItem`.
+    pub(crate) struct SubscribeResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+    }
+}
+
+callback_packed! {
+    /// `RemoteStorageUnsubscribePublishedFileResult_t`
+    /// (`isteamremotestorage.h`, `k_iSteamRemoteStorageCallbacks + 15`): the
+    /// answer to `UnsubscribeItem`.
+    pub(crate) struct UnsubscribeResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `PublishedFileId_t m_nPublishedFileId`.
+        pub(crate) item: PublishedFileId,
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -1334,6 +1619,21 @@ mod tests {
             size: 8, 4;
             bytes: 12, 2560;
         });
+        // The `uint64` leads, and the cursor array ends at 277: 280 either way.
+        assert_layout!(SteamUgcQueryCompleted, 280, {
+            handle: 0, 8;
+            result: 8, 4;
+            returned: 12, 4;
+            total: 16, 4;
+            cached: 20, 1;
+            next_cursor: 21, 256;
+        });
+        // The `bool` pads the `uint64` to 8 under either packing.
+        assert_layout!(SubmitItemUpdateResult, 16, {
+            result: 0, 4;
+            needs_agreement: 4, 1;
+            item: 8, 8;
+        });
         assert_layout!(DlcInstalled, 4, {
             app: 0, 4;
         });
@@ -1470,6 +1770,69 @@ mod tests {
             event: 0, 8;
             exists: 8, 1;
         });
+        // No tail padding after the `int32`: 12, not 16.
+        assert_layout!(SteamParamStringArray, 12, {
+            strings: 0, 8;
+            count: 8, 4;
+        });
+        // The `uint64` owner after the description sits at 8156, not 8160.
+        assert_layout!(SteamUgcDetails, 9772, {
+            item: 0, 8;
+            result: 8, 4;
+            file_type: 12, 4;
+            creator_app: 16, 4;
+            consumer_app: 20, 4;
+            title: 24, 129;
+            description: 153, 8000;
+            owner: 8156, 8;
+            created: 8164, 4;
+            updated: 8168, 4;
+            added_to_user_list: 8172, 4;
+            visibility: 8176, 4;
+            banned: 8180, 1;
+            accepted: 8181, 1;
+            tags_truncated: 8182, 1;
+            tags: 8183, 1025;
+            file: 9208, 8;
+            preview_file: 9216, 8;
+            file_name: 9224, 260;
+            file_size: 9484, 4;
+            preview_size: 9488, 4;
+            url: 9492, 256;
+            votes_up: 9748, 4;
+            votes_down: 9752, 4;
+            score: 9756, 4;
+            children: 9760, 4;
+            total_files_size: 9764, 8;
+        });
+        assert_layout!(CreateItemResult, 16, {
+            result: 0, 4;
+            item: 4, 8;
+            needs_agreement: 12, 1;
+        });
+        assert_layout!(ItemInstalled, 28, {
+            app: 0, 4;
+            item: 4, 8;
+            legacy_content: 12, 8;
+            manifest: 20, 8;
+        });
+        assert_layout!(DownloadItemResult, 16, {
+            app: 0, 4;
+            item: 4, 8;
+            result: 12, 4;
+        });
+        assert_layout!(DeleteItemResult, 12, {
+            result: 0, 4;
+            item: 4, 8;
+        });
+        assert_layout!(SubscribeResult, 12, {
+            result: 0, 4;
+            item: 4, 8;
+        });
+        assert_layout!(UnsubscribeResult, 12, {
+            result: 0, 4;
+            item: 4, 8;
+        });
         assert_layout!(LeaderboardEntry, 28, {
             user: 0, 8;
             rank: 8, 4;
@@ -1568,6 +1931,67 @@ mod tests {
         assert_layout!(SteamTimelineEventRecordingExists, 16, {
             event: 0, 8;
             exists: 8, 1;
+        });
+        assert_layout!(SteamParamStringArray, 16, {
+            strings: 0, 8;
+            count: 8, 4;
+        });
+        assert_layout!(SteamUgcDetails, 9784, {
+            item: 0, 8;
+            result: 8, 4;
+            file_type: 12, 4;
+            creator_app: 16, 4;
+            consumer_app: 20, 4;
+            title: 24, 129;
+            description: 153, 8000;
+            owner: 8160, 8;
+            created: 8168, 4;
+            updated: 8172, 4;
+            added_to_user_list: 8176, 4;
+            visibility: 8180, 4;
+            banned: 8184, 1;
+            accepted: 8185, 1;
+            tags_truncated: 8186, 1;
+            tags: 8187, 1025;
+            file: 9216, 8;
+            preview_file: 9224, 8;
+            file_name: 9232, 260;
+            file_size: 9492, 4;
+            preview_size: 9496, 4;
+            url: 9500, 256;
+            votes_up: 9756, 4;
+            votes_down: 9760, 4;
+            score: 9764, 4;
+            children: 9768, 4;
+            total_files_size: 9776, 8;
+        });
+        assert_layout!(CreateItemResult, 24, {
+            result: 0, 4;
+            item: 8, 8;
+            needs_agreement: 16, 1;
+        });
+        assert_layout!(ItemInstalled, 32, {
+            app: 0, 4;
+            item: 8, 8;
+            legacy_content: 16, 8;
+            manifest: 24, 8;
+        });
+        assert_layout!(DownloadItemResult, 24, {
+            app: 0, 4;
+            item: 8, 8;
+            result: 16, 4;
+        });
+        assert_layout!(DeleteItemResult, 16, {
+            result: 0, 4;
+            item: 8, 8;
+        });
+        assert_layout!(SubscribeResult, 16, {
+            result: 0, 4;
+            item: 8, 8;
+        });
+        assert_layout!(UnsubscribeResult, 16, {
+            result: 0, 4;
+            item: 8, 8;
         });
         assert_layout!(LeaderboardEntry, 32, {
             user: 0, 8;

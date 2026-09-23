@@ -1298,9 +1298,59 @@ On branch `steam-sdk`, not merged to `main`:
   its own handshake list), a second pipe the pump drains apart from the
   client's, its own one-live guard in `Lib`, and a fake library that tells two
   pipes apart (see the backlog).
-- Slices 14–15: not started. Neither needs a decision to begin: 14 (Workshop)
-  and 15's inventory half build over the fake like 9–12; 15's shipping half
-  needs an app id of our own.
+- **Slice 14: done** (2026-09-23). `Workshop` — queries (`UgcQuery`, released
+  once on drop, and its `QueryPage`), subscriptions, item state, installs and
+  downloads, and creating, updating (`ItemUpdate`, consumed by the submit into a
+  `Submission`) and deleting items — over the fake; every test in the slice's
+  list seen red against a deliberate break; Miri clean; the drift gate passes
+  against the mirror with the thirty declarations, ten structs, the new base and
+  five limits, after learning to read a constant written as a sum (`128 + 1`).
+  **Not run:** every step under "Needs a real client" below — a private item
+  uploaded under 480, subscribed from a second account, `ItemInstalled_t` seen,
+  the item deleted — on every OS. See "Slice 14 as built".
+- Slice 15: not started. Its inventory half builds over the fake like 9–12; its
+  shipping half needs an app id of our own.
+
+**Slice 14 as built, where it differs from the text below:**
+
+- **Files:** `crates/crcbl-steam/src/workshop.rs` (the surface and the call
+  answers), `crates/crcbl-steam/src/workshop/query.rs` (`UgcQuery`, `QueryPage`,
+  `ItemDetails`), `crates/crcbl-steam/src/workshop/update.rs` (`ItemUpdate`,
+  `Submission`), and the fake, `crates/crcbl-steam/src/testing/workshop.rs`.
+- **`steam.workshop()`**: `query_all(order, matching, page)`,
+  `query_user(user, list, matching, order, page)` and `query_details(&ids)` make
+  a `UgcQuery` (creator and consumer app are the running app; pages count from
+  1, page 0 refused before the call). Its filters — `require_tag`,
+  `exclude_tag`, `search_text`, `long_description` — apply until
+  `send(&mut query)`, which is allowed once and answers `SteamCall<QueryPage>`;
+  `results(&query, &page)` reads the page's items through the query that asked
+  for it, refusing a page of another query. The query, not the call, owns the
+  handle: dropping the token abandons the page, dropping the query releases the
+  handle, once, sent or not. `QueryPage::next_page(page)` names the next page
+  until the pages seen cover `total`.
+- **The update state machine is in the types**: `start_update(item)` opens an
+  `ItemUpdate` whose setters (`set_title`, `set_description`, `set_metadata`,
+  `set_visibility`, `set_tags`, `set_content`, `set_preview`) stage on its
+  handle; `submit(update, note)` consumes it and answers the call with a
+  `Submission` whose only method is `progress()`. Steam has no call to abandon
+  an update, so an `ItemUpdate` has no `Drop`.
+- **Limits checked before the call**: title, description, change note and
+  metadata against the header's `k_cch…` constants less the NUL (the drift gate
+  reads each); a tag against `MAX_ITEM_TAG_LENGTH` (255, from Valve's
+  documentation, not a header, so not gated) and refused with a comma, which
+  Steam's joined list cannot carry; content and preview paths must be absolute
+  and UTF-8.
+- **Events:** `SteamEvent::WorkshopItemInstalled { app, item }` and
+  `WorkshopItemDownloaded { app, item, result }`, carrying the app rather than
+  filtering on it.
+- **A created item whose token is dropped stays on the Workshop**, empty: the
+  call's effect is kept and its answer abandoned, as for every call here;
+  deleting it would be a destructive guess.
+- **Not bound**, each on demand: cursor queries, the other query filters and
+  per-item extras (previews, key-value tags, children, statistics, metadata),
+  votes, favourites, dependencies, playtime tracking, the Workshop EULA,
+  additional previews and key-value tags on update, and the game-server
+  `BInitWorkshopForGameServer` (slice 13).
 
 **Slice 12 as built, where it differs from the text below:**
 

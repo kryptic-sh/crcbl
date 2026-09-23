@@ -32,7 +32,10 @@
 //! `ESteamInputGlyphSize`, `EGamepadTextInputMode`,
 //! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`,
 //! `ETimelineGameMode`, `ETimelineEventClipPriority`, `ESteamDeviceFormFactor`,
-//! `EBeginAuthSessionResult`, `EUserHasLicenseForAppResult`) is taken to be
+//! `EBeginAuthSessionResult`, `EUserHasLicenseForAppResult`, `EUserUGCList`,
+//! `EUGCMatchingUGCType`, `EUserUGCListSortOrder`, `EUGCQuery`,
+//! `EWorkshopFileType`, `ERemoteStoragePublishedFileVisibility`,
+//! `EItemUpdateStatus`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -52,14 +55,14 @@ use core::ffi::{c_char, c_void};
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends, ISteamInput,
     ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemotePlay,
-    ISteamRemoteStorage, ISteamScreenshots, ISteamTimeline, ISteamUser, ISteamUserStats,
+    ISteamRemoteStorage, ISteamScreenshots, ISteamTimeline, ISteamUgc, ISteamUser, ISteamUserStats,
     ISteamUtils, InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle,
-    InputHandle, ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
-    SteamLeaderboardEntries, TimelineEventHandle,
+    InputHandle, PublishedFileId, ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
+    SteamLeaderboardEntries, TimelineEventHandle, UgcQueryHandle, UgcUpdateHandle,
     structs::{
         CallbackMsg, InputAnalogActionData, InputDigitalActionData, LeaderboardEntry,
         SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
-        SteamRelayNetworkStatus,
+        SteamParamStringArray, SteamRelayNetworkStatus, SteamUgcDetails,
     },
     versions::{self, Interface},
 };
@@ -778,6 +781,101 @@ bindings! {
         open_overlay_to_timeline_event: TimelineOpenOverlayToTimelineEvent = "SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent",
             "S_API void SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent( ISteamTimeline* self, const TimelineEventHandle_t ulEvent );",
             fn(*mut ISteamTimeline, TimelineEventHandle);
+    }
+
+    /// `ISteamUGC` (`steam_api_flat.h`): the Workshop — queries, items the
+    /// player subscribes to, and items the player makes.
+    ugc: UgcFns for versions::UGC {
+        create_query_user_ugc_request: UgcCreateQueryUserUgcRequest = "SteamAPI_ISteamUGC_CreateQueryUserUGCRequest",
+            "S_API UGCQueryHandle_t SteamAPI_ISteamUGC_CreateQueryUserUGCRequest( ISteamUGC* self, AccountID_t unAccountID, EUserUGCList eListType, EUGCMatchingUGCType eMatchingUGCType, EUserUGCListSortOrder eSortOrder, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage );",
+            fn(*mut ISteamUgc, u32, i32, i32, i32, u32, u32, u32) -> UgcQueryHandle;
+        create_query_all_ugc_request_page: UgcCreateQueryAllUgcRequestPage = "SteamAPI_ISteamUGC_CreateQueryAllUGCRequestPage",
+            "S_API UGCQueryHandle_t SteamAPI_ISteamUGC_CreateQueryAllUGCRequestPage( ISteamUGC* self, EUGCQuery eQueryType, EUGCMatchingUGCType eMatchingeMatchingUGCTypeFileType, AppId_t nCreatorAppID, AppId_t nConsumerAppID, uint32 unPage );",
+            fn(*mut ISteamUgc, i32, i32, u32, u32, u32) -> UgcQueryHandle;
+        create_query_ugc_details_request: UgcCreateQueryUgcDetailsRequest = "SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest",
+            "S_API UGCQueryHandle_t SteamAPI_ISteamUGC_CreateQueryUGCDetailsRequest( ISteamUGC* self, PublishedFileId_t * pvecPublishedFileID, uint32 unNumPublishedFileIDs );",
+            fn(*mut ISteamUgc, *mut PublishedFileId, u32) -> UgcQueryHandle;
+        send_query_ugc_request: UgcSendQueryUgcRequest = "SteamAPI_ISteamUGC_SendQueryUGCRequest",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_SendQueryUGCRequest( ISteamUGC* self, UGCQueryHandle_t handle );",
+            fn(*mut ISteamUgc, UgcQueryHandle) -> SteamApiCall;
+        get_query_ugc_result: UgcGetQueryUgcResult = "SteamAPI_ISteamUGC_GetQueryUGCResult",
+            "S_API bool SteamAPI_ISteamUGC_GetQueryUGCResult( ISteamUGC* self, UGCQueryHandle_t handle, uint32 index, SteamUGCDetails_t * pDetails );",
+            fn(*mut ISteamUgc, UgcQueryHandle, u32, *mut SteamUgcDetails) -> bool;
+        release_query_ugc_request: UgcReleaseQueryUgcRequest = "SteamAPI_ISteamUGC_ReleaseQueryUGCRequest",
+            "S_API bool SteamAPI_ISteamUGC_ReleaseQueryUGCRequest( ISteamUGC* self, UGCQueryHandle_t handle );",
+            fn(*mut ISteamUgc, UgcQueryHandle) -> bool;
+        add_required_tag: UgcAddRequiredTag = "SteamAPI_ISteamUGC_AddRequiredTag",
+            "S_API bool SteamAPI_ISteamUGC_AddRequiredTag( ISteamUGC* self, UGCQueryHandle_t handle, const char * pTagName );",
+            fn(*mut ISteamUgc, UgcQueryHandle, *const c_char) -> bool;
+        add_excluded_tag: UgcAddExcludedTag = "SteamAPI_ISteamUGC_AddExcludedTag",
+            "S_API bool SteamAPI_ISteamUGC_AddExcludedTag( ISteamUGC* self, UGCQueryHandle_t handle, const char * pTagName );",
+            fn(*mut ISteamUgc, UgcQueryHandle, *const c_char) -> bool;
+        set_search_text: UgcSetSearchText = "SteamAPI_ISteamUGC_SetSearchText",
+            "S_API bool SteamAPI_ISteamUGC_SetSearchText( ISteamUGC* self, UGCQueryHandle_t handle, const char * pSearchText );",
+            fn(*mut ISteamUgc, UgcQueryHandle, *const c_char) -> bool;
+        set_return_long_description: UgcSetReturnLongDescription = "SteamAPI_ISteamUGC_SetReturnLongDescription",
+            "S_API bool SteamAPI_ISteamUGC_SetReturnLongDescription( ISteamUGC* self, UGCQueryHandle_t handle, bool bReturnLongDescription );",
+            fn(*mut ISteamUgc, UgcQueryHandle, bool) -> bool;
+        create_item: UgcCreateItem = "SteamAPI_ISteamUGC_CreateItem",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_CreateItem( ISteamUGC* self, AppId_t nConsumerAppId, EWorkshopFileType eFileType );",
+            fn(*mut ISteamUgc, u32, i32) -> SteamApiCall;
+        start_item_update: UgcStartItemUpdate = "SteamAPI_ISteamUGC_StartItemUpdate",
+            "S_API UGCUpdateHandle_t SteamAPI_ISteamUGC_StartItemUpdate( ISteamUGC* self, AppId_t nConsumerAppId, PublishedFileId_t nPublishedFileID );",
+            fn(*mut ISteamUgc, u32, PublishedFileId) -> UgcUpdateHandle;
+        set_item_title: UgcSetItemTitle = "SteamAPI_ISteamUGC_SetItemTitle",
+            "S_API bool SteamAPI_ISteamUGC_SetItemTitle( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pchTitle );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> bool;
+        set_item_description: UgcSetItemDescription = "SteamAPI_ISteamUGC_SetItemDescription",
+            "S_API bool SteamAPI_ISteamUGC_SetItemDescription( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pchDescription );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> bool;
+        set_item_metadata: UgcSetItemMetadata = "SteamAPI_ISteamUGC_SetItemMetadata",
+            "S_API bool SteamAPI_ISteamUGC_SetItemMetadata( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pchMetaData );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> bool;
+        set_item_visibility: UgcSetItemVisibility = "SteamAPI_ISteamUGC_SetItemVisibility",
+            "S_API bool SteamAPI_ISteamUGC_SetItemVisibility( ISteamUGC* self, UGCUpdateHandle_t handle, ERemoteStoragePublishedFileVisibility eVisibility );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, i32) -> bool;
+        set_item_tags: UgcSetItemTags = "SteamAPI_ISteamUGC_SetItemTags",
+            "S_API bool SteamAPI_ISteamUGC_SetItemTags( ISteamUGC* self, UGCUpdateHandle_t updateHandle, const SteamParamStringArray_t * pTags, bool bAllowAdminTags );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const SteamParamStringArray, bool) -> bool;
+        set_item_content: UgcSetItemContent = "SteamAPI_ISteamUGC_SetItemContent",
+            "S_API bool SteamAPI_ISteamUGC_SetItemContent( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pszContentFolder );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> bool;
+        set_item_preview: UgcSetItemPreview = "SteamAPI_ISteamUGC_SetItemPreview",
+            "S_API bool SteamAPI_ISteamUGC_SetItemPreview( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pszPreviewFile );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> bool;
+        submit_item_update: UgcSubmitItemUpdate = "SteamAPI_ISteamUGC_SubmitItemUpdate",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_SubmitItemUpdate( ISteamUGC* self, UGCUpdateHandle_t handle, const char * pchChangeNote );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *const c_char) -> SteamApiCall;
+        get_item_update_progress: UgcGetItemUpdateProgress = "SteamAPI_ISteamUGC_GetItemUpdateProgress",
+            "S_API EItemUpdateStatus SteamAPI_ISteamUGC_GetItemUpdateProgress( ISteamUGC* self, UGCUpdateHandle_t handle, uint64 * punBytesProcessed, uint64 * punBytesTotal );",
+            fn(*mut ISteamUgc, UgcUpdateHandle, *mut u64, *mut u64) -> i32;
+        subscribe_item: UgcSubscribeItem = "SteamAPI_ISteamUGC_SubscribeItem",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_SubscribeItem( ISteamUGC* self, PublishedFileId_t nPublishedFileID );",
+            fn(*mut ISteamUgc, PublishedFileId) -> SteamApiCall;
+        unsubscribe_item: UgcUnsubscribeItem = "SteamAPI_ISteamUGC_UnsubscribeItem",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_UnsubscribeItem( ISteamUGC* self, PublishedFileId_t nPublishedFileID );",
+            fn(*mut ISteamUgc, PublishedFileId) -> SteamApiCall;
+        get_num_subscribed_items: UgcGetNumSubscribedItems = "SteamAPI_ISteamUGC_GetNumSubscribedItems",
+            "S_API uint32 SteamAPI_ISteamUGC_GetNumSubscribedItems( ISteamUGC* self, bool bIncludeLocallyDisabled );",
+            fn(*mut ISteamUgc, bool) -> u32;
+        get_subscribed_items: UgcGetSubscribedItems = "SteamAPI_ISteamUGC_GetSubscribedItems",
+            "S_API uint32 SteamAPI_ISteamUGC_GetSubscribedItems( ISteamUGC* self, PublishedFileId_t * pvecPublishedFileID, uint32 cMaxEntries, bool bIncludeLocallyDisabled );",
+            fn(*mut ISteamUgc, *mut PublishedFileId, u32, bool) -> u32;
+        get_item_state: UgcGetItemState = "SteamAPI_ISteamUGC_GetItemState",
+            "S_API uint32 SteamAPI_ISteamUGC_GetItemState( ISteamUGC* self, PublishedFileId_t nPublishedFileID );",
+            fn(*mut ISteamUgc, PublishedFileId) -> u32;
+        get_item_install_info: UgcGetItemInstallInfo = "SteamAPI_ISteamUGC_GetItemInstallInfo",
+            "S_API bool SteamAPI_ISteamUGC_GetItemInstallInfo( ISteamUGC* self, PublishedFileId_t nPublishedFileID, uint64 * punSizeOnDisk, char * pchFolder, uint32 cchFolderSize, uint32 * punTimeStamp );",
+            fn(*mut ISteamUgc, PublishedFileId, *mut u64, *mut c_char, u32, *mut u32) -> bool;
+        get_item_download_info: UgcGetItemDownloadInfo = "SteamAPI_ISteamUGC_GetItemDownloadInfo",
+            "S_API bool SteamAPI_ISteamUGC_GetItemDownloadInfo( ISteamUGC* self, PublishedFileId_t nPublishedFileID, uint64 * punBytesDownloaded, uint64 * punBytesTotal );",
+            fn(*mut ISteamUgc, PublishedFileId, *mut u64, *mut u64) -> bool;
+        download_item: UgcDownloadItem = "SteamAPI_ISteamUGC_DownloadItem",
+            "S_API bool SteamAPI_ISteamUGC_DownloadItem( ISteamUGC* self, PublishedFileId_t nPublishedFileID, bool bHighPriority );",
+            fn(*mut ISteamUgc, PublishedFileId, bool) -> bool;
+        delete_item: UgcDeleteItem = "SteamAPI_ISteamUGC_DeleteItem",
+            "S_API SteamAPICall_t SteamAPI_ISteamUGC_DeleteItem( ISteamUGC* self, PublishedFileId_t nPublishedFileID );",
+            fn(*mut ISteamUgc, PublishedFileId) -> SteamApiCall;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).

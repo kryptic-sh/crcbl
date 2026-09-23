@@ -7,6 +7,7 @@
 
 mod content;
 
+pub(crate) use content::grow;
 pub use content::{Beta, BetaCount, BetaFlags, Dlc, FileDetails, MAX_TEXT_BYTES};
 
 use core::ffi::c_char;

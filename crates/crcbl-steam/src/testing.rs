@@ -22,12 +22,14 @@ mod keyboard;
 mod ownership;
 mod recording;
 mod tickets;
+mod workshop;
 
 pub(crate) use input::{FakeInput, FakePad};
 pub(crate) use keyboard::FakeKeyboard;
 pub(crate) use ownership::{FakeApps, FakeBeta, FakeRemotePlay, FakeSession};
 pub(crate) use recording::{FakeScreenshots, FakeTimeline};
 pub(crate) use tickets::FakeTickets;
+pub(crate) use workshop::FakeWorkshop;
 
 use std::{
     cell::{Cell, RefCell},
@@ -215,6 +217,7 @@ pub(crate) struct Script {
     pub(crate) apps_extra: FakeApps,
     pub(crate) remote_play: FakeRemotePlay,
     pub(crate) tickets: FakeTickets,
+    pub(crate) workshop: FakeWorkshop,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -284,6 +287,7 @@ impl Default for Script {
             apps_extra: FakeApps::default(),
             remote_play: FakeRemotePlay::default(),
             tickets: FakeTickets::default(),
+            workshop: FakeWorkshop::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -467,6 +471,7 @@ pub(crate) fn fake_lib() -> &'static Lib {
         input: input::FNS,
         screenshots: recording::SCREENSHOTS,
         timeline: recording::TIMELINE,
+        ugc: workshop::UGC,
         apps: AppsFns {
             accessor: fake_apps_accessor,
             is_subscribed: fake_is_subscribed,

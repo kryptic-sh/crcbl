@@ -237,7 +237,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Added
 
 - **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
-  11 and 12** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the
+  11, 12 and 14** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the
   umbrella's new `steam` feature. A new crate over the SDK's flat C API with no
   link-time dependency and nothing from the SDK committed: `Steam::init(AppId)`
   finds `steam_api` beside the executable or under
@@ -329,9 +329,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   each cancelled when dropped, and validates a peer's ticket with
   `begin_session` (ended when dropped); an `AuthGate` turns Steam's verdicts
   into admission — provisional, admitted, rejected then or later, or timed out.
-  64-bit Linux, Windows and macOS; elsewhere the crate is empty.
-  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
-  client with a 1.65 library.
+  `steam.workshop()` is the Workshop: `query_all`, `query_user` and
+  `query_details` make a `UgcQuery` — narrowed by tags, search text and long
+  descriptions, released exactly once when dropped — whose `send` answers a
+  `QueryPage` read through `results` into `ItemDetails`, with `next_page` paging
+  by `UGC_RESULTS_PER_PAGE`; `subscribe`, `unsubscribe`, `subscribed_items`,
+  `state`, `install_info` (the folder read into a growing buffer),
+  `download_progress` and `download` manage installs, reported as
+  `SteamEvent::WorkshopItemInstalled` and `WorkshopItemDownloaded`; and
+  `create_item`, `start_update` (an `ItemUpdate` staging title, description,
+  metadata, visibility, tags, content folder and preview, each checked against
+  the header's limits first), `submit` (consuming the update, answering the call
+  and a `Submission` that reports the upload's progress) and `delete_item` make
+  and maintain the player's own items. 64-bit Linux, Windows and macOS;
+  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
+  Not yet run against a Steam client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

@@ -53,10 +53,12 @@ use super::{
     versions::Interface,
 };
 use crate::{
-    MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES, MAX_LEADERBOARD_DETAILS,
-    MAX_LEADERBOARD_NAME_LENGTH, MAX_LOBBY_KEY_LENGTH, MAX_PHASE_ID_LENGTH,
-    MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
-    MAX_STAT_NAME_LENGTH, MAX_TIMELINE_PRIORITY,
+    MAX_CHANGE_NOTE_LENGTH, MAX_CLOUD_FILE_BYTES, MAX_CLOUD_PATH_BYTES,
+    MAX_ITEM_DESCRIPTION_LENGTH, MAX_ITEM_METADATA_LENGTH, MAX_ITEM_TITLE_LENGTH,
+    MAX_LEADERBOARD_DETAILS, MAX_LEADERBOARD_NAME_LENGTH, MAX_LOBBY_KEY_LENGTH,
+    MAX_PHASE_ID_LENGTH, MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS,
+    MAX_RICH_PRESENCE_VALUE_LENGTH, MAX_STAT_NAME_LENGTH, MAX_TIMELINE_PRIORITY,
+    UGC_RESULTS_PER_PAGE,
     call::{CALL_ROWS, CallRow},
     callbacks::{Base, ROWS, Row},
     input::MAX_ORIGINS,
@@ -84,6 +86,17 @@ const LIMITS: &[(&str, usize)] = &[
     ("STEAM_INPUT_MAX_ORIGINS", MAX_ORIGINS),
     ("k_unMaxTimelinePriority", MAX_TIMELINE_PRIORITY as usize),
     ("k_cchMaxPhaseIDLength", MAX_PHASE_ID_LENGTH + 1),
+    ("kNumUGCResultsPerPage", UGC_RESULTS_PER_PAGE as usize),
+    ("k_cchPublishedDocumentTitleMax", MAX_ITEM_TITLE_LENGTH + 1),
+    (
+        "k_cchPublishedDocumentDescriptionMax",
+        MAX_ITEM_DESCRIPTION_LENGTH + 1,
+    ),
+    (
+        "k_cchPublishedDocumentChangeDescriptionMax",
+        MAX_CHANGE_NOTE_LENGTH + 1,
+    ),
+    ("k_cchDeveloperMetadataMax", MAX_ITEM_METADATA_LENGTH + 1),
 ];
 
 /// One header's name and text.
@@ -412,7 +425,8 @@ fn enum_value(headers: &[Header], name: &str) -> Option<i64> {
 }
 
 /// The value of `const type name = value;` in any header, where `value` is
-/// an integer or a product of integers (`100 * 1024 * 1024`).
+/// an integer, a product of integers (`100 * 1024 * 1024`), or a sum of
+/// those (`128 + 1`).
 fn const_value(headers: &[Header], name: &str) -> Option<i64> {
     let suffix = format!(" {name}");
     headers.iter().find_map(|header| {
@@ -425,8 +439,11 @@ fn const_value(headers: &[Header], name: &str) -> Option<i64> {
             if !declared.ends_with(&suffix) {
                 return None;
             }
-            value.split('*').try_fold(1_i64, |product, factor| {
-                product.checked_mul(factor.parse().ok()?)
+            value.split('+').try_fold(0_i64, |sum, term| {
+                let product = term.split('*').try_fold(1_i64, |product, factor| {
+                    product.checked_mul(factor.parse().ok()?)
+                })?;
+                sum.checked_add(product)
             })
         })
     })
@@ -963,15 +980,19 @@ STEAM_CALLBACK_END(0)
     }
 
     #[test]
-    fn a_const_limit_is_read_and_a_product_multiplied() {
+    fn a_const_limit_is_read_and_a_product_multiplied_and_a_sum_added() {
         let headers = [Header {
             name: "a.h".into(),
             text: "const uint32 k_cchFilenameMax = 260;\n\
-                   const uint32 k_unChunk = 100 * 1024 * 1024; // 100MB\n"
+                   const uint32 k_unChunk = 100 * 1024 * 1024; // 100MB\n\
+                   const uint32 k_cchTitle = 128 + 1;\n\
+                   const uint32 k_cchMixed = 2 * 3 + 4 * 5;\n"
                 .into(),
         }];
         assert_eq!(constant_value(&headers, "k_cchFilenameMax"), Some(260));
         assert_eq!(constant_value(&headers, "k_unChunk"), Some(104_857_600));
+        assert_eq!(constant_value(&headers, "k_cchTitle"), Some(129));
+        assert_eq!(constant_value(&headers, "k_cchMixed"), Some(26));
         assert_eq!(
             constant_value(&headers, "k_cchFilename"),
             None,
