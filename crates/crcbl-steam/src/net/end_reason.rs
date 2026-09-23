@@ -48,7 +48,7 @@ impl EndReason {
     /// The reason an `m_eEndReason` names.
     #[must_use]
     pub const fn from_code(code: i32) -> Self {
-        match code - APP_MIN {
+        match code.wrapping_sub(APP_MIN) {
             0 => Self::HostLeft,
             1 => Self::Kicked,
             2 => Self::ServerFull,
@@ -97,7 +97,17 @@ mod tests {
     fn steams_own_codes_and_unnamed_app_codes_are_lost() {
         // `k_ESteamNetConnectionEnd_Misc_Timeout` (5001), a remote problem
         // (4000), and an app code past the ones named.
-        for code in [0, 4000, 5001, 1005, 1999] {
+        // And the extremes, which `code - App_Min` would overflow on.
+        for code in [
+            0,
+            4000,
+            5001,
+            1005,
+            1999,
+            i32::MIN,
+            i32::MIN + 999,
+            i32::MAX,
+        ] {
             assert_eq!(EndReason::from_code(code), EndReason::Lost(code));
         }
     }
