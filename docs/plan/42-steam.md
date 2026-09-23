@@ -1290,14 +1290,14 @@ On branch `steam-sdk`, not merged to `main`:
   `Hello::session_token`, topic 27's design) and server-side decryption of
   encrypted tickets. **Not run:** every step under "Needs a real client" below,
   on every OS. See "Slice 12 as built".
-- **Slice 13: waiting on a decision, not started.** Its text makes "a module of
-  `crcbl-steam` or its own crate" this slice's call, "when a dedicated headless
-  build wants it", and nothing does: EW is a listen server, and no headless
-  server exists in the workspace. What building it now would change is not small
-  — a second init (`SteamInternal_GameServer_Init_V2`, with its own handshake
-  list), a second pipe the pump drains apart from the client's, its own one-live
-  guard in `Lib`, and a fake library that tells two pipes apart — so it waits
-  for the consumer and the decision (see the backlog).
+- **Slice 13: deferred** (decided 2026-09-23), until a dedicated headless build
+  wants the game-server API. EW is a listen server, and no headless server
+  exists in the workspace, so nothing would call it; the module-or-crate
+  question is answered with that consumer, not before. What building it would
+  take is not small — a second init (`SteamInternal_GameServer_Init_V2`, with
+  its own handshake list), a second pipe the pump drains apart from the
+  client's, its own one-live guard in `Lib`, and a fake library that tells two
+  pipes apart (see the backlog).
 - Slices 14–15: not started. Neither needs a decision to begin: 14 (Workshop)
   and 15's inventory half build over the fake like 9–12; 15's shipping half
   needs an app id of our own.
@@ -2456,6 +2456,9 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 
 ### Slice 13 — Game-server API
 
+**Deferred (2026-09-23)** until a dedicated headless build wants it; EW is a
+listen server. The text below is the slice as it will be built then.
+
 - **Scope:** `SteamInternal_GameServer_Init_V2` (anonymous logon for dedicated
   servers), `ISteamGameServer`, game-server networking sockets, server-side
   auth-session validation, `ISteamGameServerStats`, `ISteamMatchmakingServers`.
@@ -2657,6 +2660,8 @@ are listed first for completeness.
 | 32-bit and `aarch64-linux`                                              | 32-bit out of scope; `linuxarm64` path listed but unverified                                                                                                                                               | support 32-bit: a build and test matrix nothing else in the workspace has                                                                       |
 | Microtransactions                                                       | declined (needs a server holding a publisher key)                                                                                                                                                          | build it: hosted infrastructure the project does not run                                                                                        |
 | `Send` surfaces                                                         | `SteamTransport` and `SteamCloudStorage` are `Send` via a shared `Arc<Client>`, but call Steam only on the pump thread (checked; off-thread is a typed error); everything else `!Send`                     | all `!Send`: they could not implement `Transport`/`StorageSource`; or truly multi-threaded: rests on thread-safety Valve never states           |
+| Slice 13, the game-server API (**decided** 2026-09-23)                  | deferred until a dedicated headless build wants it; EW is a listen server                                                                                                                                  | build it now: a second init, pipe and one-live guard with no caller to prove them against                                                       |
+| The Steam-virtual-pad filter (**decided** 2026-09-23)                   | keep the vendor query — `xinput1_4.dll` ordinal 108, as SDL does — in `XInput::skip_steam_virtual_pads`                                                                                                    | `ISteamInput::GetGamepadIndexForController`, the fallback if a real run shows the vendor route failing: couples XInput to Steam's slot list     |
 
 ## Review (step 2)
 

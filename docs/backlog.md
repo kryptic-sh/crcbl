@@ -9246,17 +9246,17 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   the ownership, DLC, beta and install-directory calls answer at all; and a
   Remote Play Together session detected when a friend joins through Steam's
   invite. DLC semantics are untestable until an app id of our own has some.
-- **Needs a decision: slice 13 (the game-server API) — module or crate, and who
-  it is for.** The plan defers "a module of `crcbl-steam` or its own crate" to
-  "when a dedicated headless build wants it"; none does (EW is a listen server).
-  Options: (a) a `game_server` module sharing the loader and the `Lib` —
-  cheapest, but the crate's init, pump and fake all learn a second pipe; (b) a
-  `crcbl-steam-server` crate over a loader moved into a shared crate — a clean
-  split for a headless binary that must not pull in the client surface, at the
-  cost of that move. Either way the work is a second init with its own handshake
-  list (`SteamInternal_GameServer_Init_V2`, the `SteamGameServer_InitEx`
-  versions), the game-server pipe, a one-live guard of its own,
-  `ISteamGameServer` (logon, server info, auth sessions, advertising),
+- **Deferred: slice 13 (the game-server API)**, decided 2026-09-23 — built when
+  a dedicated headless build wants it, not before; EW is a listen server and
+  nothing in the workspace is a headless server. The module-or-crate choice is
+  made with that consumer: (a) a `game_server` module sharing the loader and the
+  `Lib` — cheapest, but the crate's init, pump and fake all learn a second pipe;
+  (b) a `crcbl-steam-server` crate over a loader moved into a shared crate — a
+  clean split for a headless binary that must not pull in the client surface, at
+  the cost of that move. Either way the work is a second init with its own
+  handshake list (`SteamInternal_GameServer_Init_V2`, the
+  `SteamGameServer_InitEx` versions), the game-server pipe, a one-live guard of
+  its own, `ISteamGameServer` (logon, server info, auth sessions, advertising),
   `ISteamGameServerStats` and `ISteamMatchmakingServers`, with the plan's
   pipe-separation test. Slice 12's `AuthGate` already serves a game server's
   verdicts unchanged.
@@ -9269,13 +9269,21 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   a wire-format change to design with topic 27), and server-side decryption of
   encrypted app tickets (Valve's `sdkencryptedappticket` on a backend the
   project does not run). EW needs neither.
-- **`Apps::launch_command_line` does not grow its buffer.** It refuses a line
-  with no NUL in its 1024 bytes as `Truncated`, but Steam's copies stop a byte
-  short to leave a NUL, so a longer line is more likely cut than refused. Slice
-  11's `apps::content::grow` is the rule the other string reads use (grow while
-  an answer reaches the last byte but one); moving the launch line onto it
-  changes what its test asserts — a 1024-byte line would then be read whole — so
-  it is left for a decision rather than folded in unasked.
+- **Needs a decision: `Apps::launch_command_line` can silently cut a line over
+  1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
+  buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's
+  copies stop a byte short to leave a NUL, so a longer line most likely arrives
+  cut, NUL-terminated, and is returned as if whole. **Proposed change:** read it
+  through slice 11's `apps::content::grow` (grow while an answer reaches the
+  last byte but one, `Truncated` past `MAX_TEXT_BYTES`), as every other string
+  read does. **The test it changes:**
+  `apps::tests::a_launch_command_line_that_fills_the_buffer_is_truncated_not_cut`
+  asserts that a 1024-byte line is `Err(Truncated("GetLaunchCommandLine"))` and
+  a 1023-byte one is read whole; after the change both would be read whole (the
+  buffer grows), the refusal would move to a line past `MAX_TEXT_BYTES`, and
+  `testing::fake_get_launch_command_line` would copy as Steam does (a byte
+  short, then the NUL) rather than strncpy-style. Left unchanged, since it
+  rewrites what an existing test asserts; the user's call.
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator
@@ -9291,11 +9299,12 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice.
   (`XInputGetCapabilitiesEx`, SDL's declaration) for a slot's vendor. It was
   called on the Windows machine with no pad connected (each empty slot answered
   as `XInputGetState` does); no Steam virtual pad has been through it, so that
-  Steam's reports Valve's vendor there is SDL's experience, not ours. The
-  documented alternative is `ISteamInput::GetGamepadIndexForController`, which
-  names the XInput slot Steam emulates for a controller, or -1 — needs a
-  decision only if the vendor route fails on a real run: it would couple the
-  XInput backend to a slot list the Steam backend supplies each frame.
+  Steam's reports Valve's vendor there is SDL's experience, not ours. **Decided
+  2026-09-23: keep the vendor query.** The fallback, if a real run shows it
+  failing, is `ISteamInput::GetGamepadIndexForController`, which names the
+  XInput slot Steam emulates for a controller, or -1; it would couple the XInput
+  backend to a slot list the Steam backend supplies each frame. What is left is
+  that real run, with a Steam virtual pad.
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.
