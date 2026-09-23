@@ -1,14 +1,21 @@
-//! Contact manifolds: the analytic pairs of rung 1 and the box pair of rung 2.
+//! Contact manifolds: the analytic pairs of rung 1, the box pair of rung 2
+//! and a mesh's triangles of rung 5.
 //!
 //! `docs/plan/36-contact-solver.md` decision 2 makes sphere, capsule and their
 //! pairs analytic, and boxes and hulls a cached separating axis test with
 //! clipping:
 //!
-//! | A \ B   | sphere | capsule | box      | plane |
-//! | ------- | ------ | ------- | -------- | ----- |
-//! | sphere  | 1 pt   | 1 pt    | 1 pt     | 1 pt  |
-//! | capsule |        | 1–2 pts | 1–2 pts  | 1–2   |
-//! | box     |        |         | 1–4 pts  | 1–4   |
+//! | A \ B   | sphere | capsule | box      | triangle | plane |
+//! | ------- | ------ | ------- | -------- | -------- | ----- |
+//! | sphere  | 1 pt   | 1 pt    | 1 pt     | 1 pt     | 1 pt  |
+//! | capsule |        | 1–2 pts | 1–2 pts  | 1–2 pts  | 1–2   |
+//! | box     |        |         | 1–4 pts  | 1–4 pts  | 1–4   |
+//!
+//! **Against a mesh's triangle**, in `triangle`: one-sided, as Box2D's chain
+//! segments are, with Jolt's active edges deciding which direction a contact
+//! on an edge or a vertex may push — see [`crate::TriangleMesh`]. A triangle
+//! meets nothing that does not move, so triangle against triangle or plane
+//! has no manifold.
 //!
 //! **Box against box** is rung 2's, in `box_box`: the fifteen-axis separating
 //! axis test with the pair's last axis cached in a [`SatCache`], the incident
@@ -39,12 +46,14 @@
 
 mod box_box;
 mod gap;
+mod triangle;
 
 use glam::{DQuat, DVec3};
 
 pub use self::box_box::SatCache;
 pub(crate) use self::gap::gap;
 use super::shape::ContactShape;
+use crate::mesh::geometry::segment_parameters;
 
 /// The most points a manifold holds.
 pub const MAX_POINTS: usize = 4;
@@ -152,7 +161,7 @@ pub fn collide_cached(
     cache: &mut SatCache,
 ) -> Manifold {
     debug_assert!(a.rank() <= b.rank(), "shape A ranks above shape B");
-    use ContactShape::{Box, Capsule, Plane, Sphere};
+    use ContactShape::{Box, Capsule, Plane, Sphere, Triangle};
     match (*a, *b) {
         (
             Sphere {
@@ -257,6 +266,48 @@ pub fn collide_cached(
                 half: hb,
             },
         ) => box_box::boxes(ca, ra, ha, cb, rb, hb, speculative, cache),
+        (
+            Sphere { centre, radius },
+            Triangle {
+                corners,
+                normal,
+                active_edges,
+            },
+        ) => triangle::sphere_triangle(centre, radius, &corners, normal, active_edges, speculative),
+        (
+            Capsule {
+                a: sa,
+                b: sb,
+                radius,
+            },
+            Triangle {
+                corners,
+                normal,
+                active_edges,
+            },
+        ) => {
+            triangle::capsule_triangle(sa, sb, radius, &corners, normal, active_edges, speculative)
+        }
+        (
+            Box {
+                centre,
+                rotation,
+                half,
+            },
+            Triangle {
+                corners,
+                normal,
+                active_edges,
+            },
+        ) => triangle::box_triangle(
+            centre,
+            rotation,
+            half,
+            &corners,
+            normal,
+            active_edges,
+            speculative,
+        ),
         _ => Manifold::EMPTY,
     }
 }
@@ -645,41 +696,10 @@ pub fn closest_on_segment(p: DVec3, a: DVec3, b: DVec3) -> (f64, DVec3) {
 }
 
 /// The nearest points of two segments — Ericson, *Real-Time Collision
-/// Detection*, §5.1.9.
+/// Detection*, §5.1.9, whose parameters [`segment_parameters`] finds.
 fn closest_between_segments(p1: DVec3, q1: DVec3, p2: DVec3, q2: DVec3) -> (DVec3, DVec3) {
-    let d1 = q1 - p1;
-    let d2 = q2 - p2;
-    let r = p1 - p2;
-    let a = d1.length_squared();
-    let e = d2.length_squared();
-    let f = d2.dot(r);
-    let (s, t) = if a == 0.0 && e == 0.0 {
-        (0.0, 0.0)
-    } else if a == 0.0 {
-        (0.0, (f / e).clamp(0.0, 1.0))
-    } else {
-        let c = d1.dot(r);
-        if e == 0.0 {
-            ((-c / a).clamp(0.0, 1.0), 0.0)
-        } else {
-            let b = d1.dot(d2);
-            let denominator = a * e - b * b;
-            let s = if denominator > 0.0 {
-                ((b * f - c * e) / denominator).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let t = (b * s + f) / e;
-            if t < 0.0 {
-                ((-c / a).clamp(0.0, 1.0), 0.0)
-            } else if t > 1.0 {
-                (((b - c) / a).clamp(0.0, 1.0), 1.0)
-            } else {
-                (s, t)
-            }
-        }
-    };
-    (p1 + d1 * s, p2 + d2 * t)
+    let (s, t) = segment_parameters(p1, q1, p2, q2);
+    (p1 + (q1 - p1) * s, p2 + (q2 - p2) * t)
 }
 
 /// The parameter along `p0 + along · t`, `t ∈ [0, 1]`, nearest a box of

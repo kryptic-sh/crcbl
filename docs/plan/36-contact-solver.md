@@ -7,19 +7,20 @@ in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
 **Status: rungs 0 and 1 built (2026-09-17); rung 2 built for boxes, not for
-general hulls (2026-09-23); rungs 3 and 4 built (2026-09-23).** Rung 0: rotation
-(inertia tensor, torque, the implicit-midpoint gyroscopic step), dense
-generational body sets, `SurfaceMaterial` per body and `crcbl_core::trig`. Rung
-1, opted into with `PhysicsSystem::with_contacts`: split fattened broadphase
-trees with a move buffer and pair set; analytic sphere and capsule manifolds
-against spheres, capsules, oriented boxes and planes, plus box against plane,
-with feature ids; and a substepped soft solver with warm starting, speculative
-contacts and a restitution pass, raising `KineticContact`. Two measured
-departures from the sections below: **the speculative distance grows with the
-pair's closing speed**, because decision 5's fixed four slops let a 30 m/s ball
-through a 2 cm plate, and **separation within a tick is tracked to first order**
-rather than through Box2D's turned anchors, which made a rolling ball slip.
-Sphere against sphere is in rung 1 because the ball pit needs it.
+general hulls (2026-09-23); rungs 3 and 4 built (2026-09-23); rung 5's static
+triangle mesh built, its joints not (2026-09-23).** Rung 0: rotation (inertia
+tensor, torque, the implicit-midpoint gyroscopic step), dense generational body
+sets, `SurfaceMaterial` per body and `crcbl_core::trig`. Rung 1, opted into with
+`PhysicsSystem::with_contacts`: split fattened broadphase trees with a move
+buffer and pair set; analytic sphere and capsule manifolds against spheres,
+capsules, oriented boxes and planes, plus box against plane, with feature ids;
+and a substepped soft solver with warm starting, speculative contacts and a
+restitution pass, raising `KineticContact`. Two measured departures from the
+sections below: **the speculative distance grows with the pair's closing
+speed**, because decision 5's fixed four slops let a 30 m/s ball through a 2 cm
+plate, and **separation within a tick is tracked to first order** rather than
+through Box2D's turned anchors, which made a rolling ball slip. Sphere against
+sphere is in rung 1 because the ball pit needs it.
 
 Rung 2, for boxes: box against box, static or dynamic, through Ericson's
 fifteen-axis separating axis test with the pair's last axis cached (`SatCache`),
@@ -124,7 +125,8 @@ last tick's is 0.43 cm, back under rung 1's centimetre, and the worst in any
 tick 4.29 cm, not under rung 1's 4 cm, because it is between two drops, which
 only a bullet sweeps. In a release build on the same Ryzen 9 9950X3D, the wall's
 sweep takes a mean 12.2 µs a tick against its solver's 152.2 µs, and the pit's
-15.8 µs against 1310 µs. Nothing from rung 5 on: joints.
+15.8 µs against 1310 µs. Of rung 5, only the static triangle mesh is built: see
+below.
 
 Compound bodies, built 2026-09-23 for EW's dropped items, and not a rung:
 `ColliderComponent::Compound` carries a `CompoundShape` of up to
@@ -143,6 +145,53 @@ density, counting an overlap once per part, as Box2D, Rapier and Jolt do. The
 query world holds one box around a compound's parts. Measured, EW's TOZ-34 boxed
 into six parts falls 30 cm tumbling onto a static slab, lands on its side and
 sleeps at tick 47; see `crates/crcbl-phys/tests/compounds.rs`.
+
+Rung 5's static triangle mesh, in `crates/crcbl-phys/src/mesh.rs` and
+`crates/crcbl-phys/src/contact/manifold/triangle.rs`: `TriangleMesh` validates
+its input and refuses rather than skips — a degenerate triangle is one whose
+height is under a millionth of its longest edge, and skipping it would renumber
+the triangles after it — welds vertices by exact position, and builds a BVH over
+its triangles. `ColliderComponent::Mesh` goes on static and kinematic bodies
+only; a dynamic one is refused, since a surface has no volume to weigh. **Each
+triangle is a broadphase proxy of its own**, the compounds' choice for the same
+reasons, so a contact is a body against one triangle with that triangle's
+manifold, feature ids and warm start, and sleep and islands are unchanged: the
+mesh joins no island. Spheres, capsules, boxes and compound parts collide with a
+triangle, one-sided — a shape whose centre is behind it is not collided, Box2D
+v3's rule for chain segments (`b2CollideChainSegmentAndPolygon`) — a box by
+Akenine-Möller's thirteen-axis triangle–box test with the box pair's Gregorius
+tolerances, clipping and reduction. **Active edges are Jolt's**
+(`ActiveEdges.h`: `IsEdgeActive` precomputed per shared edge, convex and bent
+past five degrees; `FixNormal` at contact), the precomputed form of Bullet's
+internal-edge fix: a contact on an inactive edge, or on a vertex both of whose
+edges are, pushes along the triangle's normal at its true distance. Measured on
+2026-09-23, a half-metre cube sliding at 3 m/s on ice across the diagonal seam
+of a two-triangle floor kept 3.0 m/s, moving vertically at 8×10⁻⁵ m/s and
+turning at 5×10⁻⁴ rad/s at most; with every edge active it slowed to 2.40 m/s,
+jumped at 0.33 m/s and tumbled at 5.1 rad/s. The sweeps measure a triangle's gap
+exactly for round shapes and by the best of the thirteen axes for a box, so a
+ball, a cube, a capsule and a compound launched at 60 m/s within one tick at a
+floor of no thickness all stop on it; with the sweeps off all four go through.
+The query world keeps a mesh as one entry and descends its tree: rays
+(Möller–Trumbore), sphere and capsule sweeps (the point entering the triangle,
+or the triangle swept along the capsule's axis, fattened by the radius), sphere
+and box overlaps and capsule penetrations hit the triangles exactly and two-
+sided, under the query layers; `MeshHit` names the triangle and the barycentric
+point. The proving scene is `crates/crcbl-phys/tests/meshes.rs`'s stairs and
+ramp — [sample/24-tumble.md](sample/24-tumble.md)'s stairs come with the
+ragdolls — where balls roll down five steps, and a ball, a box, a capsule and a
+compound down the ramp, sinking at most 5.3 mm. Measured in a release build on
+the same Ryzen 9 9950X3D: a 256 × 256 grid of 131 072 triangles builds in 65 ms
+and registers as proxies in 58 ms; a thousand balls on it cost a mean 555 µs a
+tick in the broadphase, 1127 µs in the narrow phase and 2432 µs in the solver
+over 300 ticks, at 3313 points; a ray down at it costs 0.64 µs. Three
+departures. **Jolt's movement hint is not transcribed**: `FixNormal` also keeps
+the found normal when it resists the pair's relative motion less than the
+triangle's, for a body grazing a triangle's inactive edge side-on. **There is no
+contact reduction across triangles**: a ball over a grid's vertex has a contact
+with each triangle within reach, 3.3 points a ball in the grid above, where Jolt
+merges manifolds of similar normals per body pair. **Queries are two-sided**
+where contacts are one-sided, so a ray from under a floor still hits it.
 
 ## Decisions from the engine research (2026-09-15)
 
@@ -389,7 +438,7 @@ arriving with parallel islands; SIMD and parallelism come last.
 | 2 Tower (built for boxes; no hulls) | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
 | 3 Settle (built)                    | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
 | 4 Bullets (built)                   | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
-| 5 Bridge                            | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
+| 5 Bridge (mesh built; no joints)    | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
 | 6 Pit                               | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
 | 7 Pool and gale                     | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |
 

@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::ColliderComponent` has a `Mesh` variant and
+  `crcbl_phys::contact::shape::ContactShape` a `Triangle` one**, so an
+  exhaustive `match` on either needs another arm, and `ContactShape::rank` of a
+  plane is now 4, the triangle taking 3.
 - **`crcbl_phys` structs gained public fields for continuous collision**, so a
   struct literal of any of them that names every field needs the new ones:
   `RigidBody::bullet`, `ContactSettings::continuous`, `ContactCounters::swept`,
@@ -410,6 +414,31 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `SteamPads` the loop's pad source, with XInput beside it on Windows skipping
   Steam's virtual pads. `apps/sandbox --features steam` now lends its session
   and opens Steam Input instead of pumping by hand.
+
+- **Static triangle meshes in `crcbl_phys`**:
+  `TriangleMesh::new(vertices, triangles)` validates a mesh — refusing, with the
+  first offender named in a `MeshError`, no triangles, a non-finite vertex, an
+  out-of-range index and a degenerate triangle (height under
+  `TriangleMesh::MIN_ASPECT` of its longest edge) — welds vertices by exact
+  position, builds a BVH over its triangles and marks each shared edge active or
+  not by Jolt's `IsEdgeActive` rule (convex and bent past five degrees).
+  `ColliderComponent::Mesh { mesh, is_trigger }` puts one on a static or
+  kinematic body; `set_collider` and `set_body` panic rather than put one on a
+  dynamic body, and `MassProperties::of_collider` panics on one. In a system
+  with contacts each triangle is its own broadphase proxy and a one-sided
+  `ContactShape::Triangle`: spheres, capsules, boxes and compound parts get
+  manifolds against it (a box by the thirteen-axis separating axis test with
+  clipping), a contact on an inactive edge or vertex pushes along the triangle's
+  normal (Jolt's `FixNormal`), so a box slides across a seam without catching,
+  and fast bodies and bullets are swept against the triangles. In the query
+  world, `PhysicsWorld::add_mesh` / `set_mesh` keep the mesh as one entry whose
+  rays, sphere and capsule sweeps, sphere and AABB overlaps and capsule
+  penetrations test the triangles exactly, two-sided, under the same
+  `QueryFilter` layers; `TriangleMesh::cast_ray`, `sweep_sphere`,
+  `sweep_capsule`, `overlaps_sphere`, `overlaps_aabb` and `capsule_penetration`
+  answer in the mesh's frame and `MeshHit` names the triangle and the
+  barycentric point. `TriangleMesh::collide_with_all_edges` turns the seam fix
+  off, for comparing against it. Joints, the rest of rung 5, are not built.
 - **Query layers in `crcbl_phys`**, so one world can hold a level, its
   characters and loose items that movement ignores and interaction rays still
   hit. Every collider has a `u32` layer bitset, `ALL_LAYERS` by default and

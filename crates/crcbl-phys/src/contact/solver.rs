@@ -108,13 +108,15 @@ const MIN_PATCH_RADIUS: f64 = 0.1 * LINEAR_SLOP;
 /// radius of curvature `1 / (1/R_a + 1/R_b)`, clamped between
 /// [`MIN_PATCH_RADIUS`] and `R` itself.
 ///
-/// A sphere and a capsule curve at their radius; a box face and a plane are
-/// flat and add no curvature. Two flat shapes meeting at one point meet at a
+/// A sphere and a capsule curve at their radius; a box face, a mesh's
+/// triangle and a plane are flat and add no curvature. Two flat shapes meeting at one point meet at a
 /// corner or an edge, whose patch is the smallest there is.
 fn patch_radius(a: &ContactShape, b: &ContactShape, separation: f64) -> f64 {
     let curvature = |shape: &ContactShape| match *shape {
         ContactShape::Sphere { radius, .. } | ContactShape::Capsule { radius, .. } => 1.0 / radius,
-        ContactShape::Box { .. } | ContactShape::Plane { .. } => 0.0,
+        ContactShape::Box { .. } | ContactShape::Triangle { .. } | ContactShape::Plane { .. } => {
+            0.0
+        }
     };
     let total = curvature(a) + curvature(b);
     if total <= 0.0 {

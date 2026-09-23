@@ -538,6 +538,10 @@ impl Room for Wall {
                     half: part.half_extents,
                     tint,
                 })),
+                // The page has no triangle shape to draw one with.
+                ColliderComponent::Mesh { .. } => {
+                    unreachable!("the wall builds no mesh fixtures")
+                }
             }
         }
     }

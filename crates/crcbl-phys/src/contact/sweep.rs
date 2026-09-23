@@ -226,7 +226,8 @@ impl Extent {
                     radius
                 }
                 ContactShape::Box { half, .. } => half.min_element(),
-                ContactShape::Plane { .. } => continue,
+                // A mesh is never on a dynamic body, and a plane is no body.
+                ContactShape::Triangle { .. } | ContactShape::Plane { .. } => continue,
             };
             let this = Self {
                 inner,
@@ -258,6 +259,7 @@ fn core_reach(shape: &ContactShape, centre: DVec3) -> f64 {
         ContactShape::Box {
             centre: c, half, ..
         } => (c - centre).length() + half.length(),
+        ContactShape::Triangle { .. } => shape.reach_from(centre),
         ContactShape::Plane { .. } => 0.0,
     }
 }

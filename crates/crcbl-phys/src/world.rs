@@ -9,12 +9,15 @@ use glam::DVec3;
 
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
+use crate::components::Transform;
+use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, Penetration, ShapeHit};
 
 /// Opaque identifier for a registered collider.
 ///
-/// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`], or
-/// [`PhysicsWorld::add_capsule`]. Use it to remove or update the collider.
+/// Created by [`PhysicsWorld::add_sphere`], [`PhysicsWorld::add_box`],
+/// [`PhysicsWorld::add_capsule`] or [`PhysicsWorld::add_mesh`]. Use it to
+/// remove or update the collider.
 ///
 /// This is a *generational* id — a storage slot plus the generation that slot
 /// was issued with — for the same reason [`crcbl_ecs::Entity`] is: removing a
@@ -230,6 +233,8 @@ enum ColliderEntry {
     Sphere(Sphere),
     Box(BoxCollider),
     Capsule(Capsule),
+    /// A triangle mesh at a transform: one entry, descending its own tree.
+    Mesh(PlacedMesh),
 }
 
 impl ColliderEntry {
@@ -238,6 +243,7 @@ impl ColliderEntry {
             ColliderEntry::Sphere(s) => s.aabb(),
             ColliderEntry::Box(b) => b.aabb(),
             ColliderEntry::Capsule(c) => c.aabb(),
+            ColliderEntry::Mesh(m) => m.bounds,
         }
     }
 }
@@ -319,8 +325,8 @@ struct BroadphaseCounters {
 
 /// A spatial world that stores colliders and supports ray/sweep queries.
 ///
-/// Colliders are added with `add_sphere`, `add_box`, or `add_capsule` and
-/// removed with `remove`. The internal BVH is rebuilt lazily — call
+/// Colliders are added with `add_sphere`, `add_box`, `add_capsule` or
+/// `add_mesh` and removed with `remove`. The internal BVH is rebuilt lazily — call
 /// [`PhysicsWorld::rebuild`] after batch mutations, or it auto-rebuilds on
 /// the next query.
 pub struct PhysicsWorld {
@@ -375,6 +381,9 @@ pub struct QueryScratch {
     /// to entities, which is why this is reachable from that module and from
     /// nowhere outside the crate.
     pub(crate) ids: Vec<ColliderId>,
+    /// The buffers a mesh's own tree is descended in, while the world's
+    /// candidates are still being walked.
+    mesh: MeshScratch,
 }
 
 impl QueryScratch {
@@ -721,6 +730,7 @@ fn overlap_sphere_core(
                 ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
                 ColliderEntry::Box(b) => query::sphere_overlaps_aabb(query_sphere, &b.aabb()),
                 ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
+                ColliderEntry::Mesh(m) => m.overlaps_sphere(query_sphere, &mut scratch.mesh),
             });
         if hit {
             out.push(ColliderId::new(idx, generations[slot]));
@@ -730,8 +740,10 @@ fn overlap_sphere_core(
 
 /// The one implementation of "which colliders' AABBs meet this AABB".
 ///
-/// Broadphase-only by design — the BVH's leaves *are* the collider AABBs, so
-/// there is nothing to refine beyond the filter. Both
+/// Broadphase-only by design for the parametric shapes — the BVH's leaves
+/// *are* their AABBs, so there is nothing to refine beyond the filter. A
+/// mesh's leaf is the bounds of a whole level, which would meet every query,
+/// so a mesh is refined against its triangles, exactly. Both
 /// [`PhysicsWorld::overlap_aabb`] and [`OverlapQueries::overlap_aabb_into`]
 /// come through here.
 fn overlap_aabb_core(
@@ -746,18 +758,21 @@ fn overlap_aabb_core(
     let filter = ResolvedFilter::overlap(colliders, generations, filter);
     bvh.traverse_aabb_into(aabb, &mut scratch.stack, &mut scratch.candidates);
     out.clear();
-    out.extend(
-        scratch
-            .candidates
-            .iter()
-            .filter(|&&slot| {
-                colliders
-                    .get(slot as usize)
-                    .and_then(|s| s.as_ref())
-                    .is_some_and(|data| filter.admits(slot as usize, data))
-            })
-            .map(|&slot| id_for_slot_in(generations, slot)),
-    );
+    for &slot in &scratch.candidates {
+        let admitted = colliders
+            .get(slot as usize)
+            .and_then(|s| s.as_ref())
+            .filter(|data| filter.admits(slot as usize, data))
+            .is_some_and(|data| match &data.entry {
+                ColliderEntry::Mesh(m) => m.overlaps_aabb(aabb, &mut scratch.mesh),
+                ColliderEntry::Sphere(_) | ColliderEntry::Box(_) | ColliderEntry::Capsule(_) => {
+                    true
+                }
+            });
+        if admitted {
+            out.push(id_for_slot_in(generations, slot));
+        }
+    }
 }
 
 /// The one implementation of "what does this ray hit first".
@@ -779,7 +794,14 @@ fn cast_ray_core(
     let mut hits = core::mem::take(&mut scratch.ray_hits);
     bvh.traverse_ray_into(ray, &mut scratch.stack, &mut hits);
     let filter = ResolvedFilter::solid(colliders, generations, filter);
-    let best = closest_hit_core(colliders, generations, ray, &hits, filter);
+    let best = closest_hit_core(
+        colliders,
+        generations,
+        ray,
+        &hits,
+        filter,
+        &mut scratch.mesh,
+    );
     scratch.ray_hits = hits;
     best
 }
@@ -814,6 +836,7 @@ fn sweep_sphere_core(
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+            ColliderEntry::Mesh(m) => m.sweep(segment, radius, DVec3::ZERO, &mut scratch.mesh),
         },
     )
 }
@@ -866,6 +889,9 @@ fn sweep_capsule_core(
             ColliderEntry::Capsule(c) => {
                 query::swept_capsule_vs_capsule(segment, radius, half_height, c)
             }
+            ColliderEntry::Mesh(m) => {
+                m.sweep(segment, radius, DVec3::Y * half_height, &mut scratch.mesh)
+            }
         },
     )
 }
@@ -906,6 +932,7 @@ fn capsule_penetrations_core(
             ColliderEntry::Sphere(s) => query::capsule_penetration_vs_sphere(capsule, s),
             ColliderEntry::Box(b) => query::capsule_penetration_vs_aabb(capsule, &b.aabb()),
             ColliderEntry::Capsule(c) => query::capsule_penetration_vs_capsule(capsule, c),
+            ColliderEntry::Mesh(m) => m.capsule_penetration(capsule, &mut scratch.mesh),
         };
         if let Some(penetration) = penetration {
             out.push((id_for_slot_in(generations, element), penetration));
@@ -932,6 +959,7 @@ fn closest_hit_core(
     ray: &Ray,
     bvh_hits: &[BvhHit],
     filter: ResolvedFilter,
+    mesh: &mut MeshScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for bvh_hit in bvh_hits {
@@ -946,6 +974,7 @@ fn closest_hit_core(
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
             ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
             ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
+            ColliderEntry::Mesh(m) => m.cast_ray(ray, mesh),
         };
         if let Some(hit) = hit
             && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
@@ -968,7 +997,7 @@ fn closest_swept_core(
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    narrow: impl Fn(&ColliderEntry) -> Option<ShapeHit>,
+    mut narrow: impl FnMut(&ColliderEntry) -> Option<ShapeHit>,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for &element in candidates {
@@ -1056,6 +1085,16 @@ impl PhysicsWorld {
         self.add(ColliderEntry::Capsule(capsule))
     }
 
+    /// Register a triangle mesh, its vertices in the frame of `transform`.
+    ///
+    /// It is one entry in this world's tree, and every query that reaches its
+    /// bounds descends the mesh's own tree and tests the triangles exactly:
+    /// see [`TriangleMesh`]'s module docs. To a query a triangle has two
+    /// sides, and a hit's normal faces the side the query came from.
+    pub fn add_mesh(&mut self, mesh: TriangleMesh, transform: Transform) -> ColliderId {
+        self.add(ColliderEntry::Mesh(PlacedMesh::new(mesh, transform)))
+    }
+
     /// Update an existing sphere collider. Returns `true` if the id was valid.
     ///
     /// If the BVH is built, this refits the tree in O(log n). Otherwise the
@@ -1072,6 +1111,11 @@ impl PhysicsWorld {
     /// Update an existing capsule collider.
     pub fn set_capsule(&mut self, id: ColliderId, capsule: Capsule) -> bool {
         self.set(id, ColliderEntry::Capsule(capsule))
+    }
+
+    /// Update an existing collider to be `mesh` at `transform`.
+    pub fn set_mesh(&mut self, id: ColliderId, mesh: TriangleMesh, transform: Transform) -> bool {
+        self.set(id, ColliderEntry::Mesh(PlacedMesh::new(mesh, transform)))
     }
 
     /// Mark a collider as a trigger.
@@ -2022,6 +2066,7 @@ mod tests {
             ColliderEntry::Sphere(s) => query::ray_vs_sphere(ray, s),
             ColliderEntry::Box(b) => query::ray_vs_aabb(ray, &b.aabb()),
             ColliderEntry::Capsule(c) => query::ray_vs_capsule(ray, c),
+            ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
         }
     }
 
@@ -2031,6 +2076,7 @@ mod tests {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
             ColliderEntry::Capsule(c) => query::swept_sphere_vs_capsule(segment, radius, c),
+            ColliderEntry::Mesh(_) => unreachable!("the fixture holds no meshes"),
         }
     }
 

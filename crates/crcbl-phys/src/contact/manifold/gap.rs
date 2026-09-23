@@ -11,6 +11,11 @@
 //! | sphere or capsule, anything | the core's distance, less the radii: exact    |
 //! | box and plane               | the lowest corner's height: exact             |
 //! | box and box                 | the best of the fifteen axes: a lower bound   |
+//! | box and triangle            | the best of the thirteen axes: a lower bound  |
+//!
+//! A mesh's triangle is one-sided here as in its manifolds: a shape whose
+//! centre is behind it is infinitely far from it, so a sweep never stops a
+//! body on the back of a floor.
 //!
 //! A lower bound is what makes advancement safe: stepping by less than the
 //! true distance never steps past a contact. In overlap the answer is minus a
@@ -20,7 +25,9 @@
 
 use glam::{DQuat, DVec3};
 
-use super::{box_box, closest_between_segments, closest_on_segment, closest_on_segment_to_box};
+use super::{
+    box_box, closest_between_segments, closest_on_segment, closest_on_segment_to_box, triangle,
+};
 use crate::contact::shape::ContactShape;
 
 /// The signed distance between `a` and `b` — positive apart, negative in
@@ -39,7 +46,7 @@ pub(crate) fn gap(a: &ContactShape, b: &ContactShape) -> (f64, DVec3) {
 
 /// [`gap`] for a pair whose `a` does not rank above `b`.
 fn ordered(a: &ContactShape, b: &ContactShape) -> (f64, DVec3) {
-    use ContactShape::{Box, Capsule, Plane, Sphere};
+    use ContactShape::{Box, Capsule, Plane, Sphere, Triangle};
     match (*a, *b) {
         (
             Sphere {
@@ -141,6 +148,32 @@ fn ordered(a: &ContactShape, b: &ContactShape) -> (f64, DVec3) {
                 half: hb,
             },
         ) => box_box::gap(ca, ra, ha, cb, rb, hb),
+        (
+            Sphere { centre, radius },
+            Triangle {
+                corners, normal, ..
+            },
+        ) => triangle::sphere_gap(centre, radius, &corners, normal),
+        (
+            Capsule {
+                a: sa,
+                b: sb,
+                radius,
+            },
+            Triangle {
+                corners, normal, ..
+            },
+        ) => triangle::capsule_gap(sa, sb, radius, &corners, normal),
+        (
+            Box {
+                centre,
+                rotation,
+                half,
+            },
+            Triangle {
+                corners, normal, ..
+            },
+        ) => triangle::box_gap(centre, rotation, half, &corners, normal),
         _ => (f64::INFINITY, DVec3::Y),
     }
 }

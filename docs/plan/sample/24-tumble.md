@@ -135,7 +135,11 @@ none of the forty shots or forty spins tunnelled, 364 bodies were stopped and
 stated speed limit is the one tested, 80 m/s at point blank.
 
 Milestone 1's wind tunnel and golden frame, milestone 4's Galton board, and
-every milestone after 6, are not built.
+every milestone after 6, are not built. Milestone 7's stairs stand on rung 5's
+static triangle mesh, which is built (2026-09-23), but its ragdolls, cradle and
+bridge need joints, which are not, so there is no Bridge room yet; the mesh's
+own proving scene — balls down stairs, and a ball, a box, a capsule and a
+compound down a ramp — is `crates/crcbl-phys/tests/meshes.rs`.
 
 Performance follow-up: the debug module borrows the scenes and constructs its
 reading only inside the visible panel's `debug_section`. Hidden panels avoid the

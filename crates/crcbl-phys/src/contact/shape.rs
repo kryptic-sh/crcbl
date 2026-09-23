@@ -13,6 +13,7 @@ use glam::{DMat3, DQuat, DVec3};
 use crate::collider::Aabb;
 use crate::components::{ColliderComponent, Transform};
 use crate::compound_shape::CompoundPart;
+use crate::mesh::triangle_bounds;
 
 /// A collider placed in the world, as the manifold functions take it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -41,6 +42,18 @@ pub enum ContactShape {
         rotation: DQuat,
         /// Its half-extents along its own axes.
         half: DVec3,
+    },
+    /// One triangle of a [`crate::TriangleMesh`], one-sided: a shape whose
+    /// centre is behind it is not collided with it.
+    Triangle {
+        /// Its corners, wound so `(c1 − c0) × (c2 − c0)` points along
+        /// `normal`.
+        corners: [DVec3; 3],
+        /// Its unit normal: the side it is solid from.
+        normal: DVec3,
+        /// Its active edges: bit `i` for edge `i`, from corner `i` to corner
+        /// `i + 1`. See [`crate::TriangleMesh::active_edges`].
+        active_edges: u8,
     },
     /// A static half-space: the points `x` with `normal · x ≤ offset` are
     /// solid.
@@ -83,6 +96,16 @@ impl ContactShape {
                 .get(part)
                 .filter(|_| !is_trigger)
                 .map(|part| Self::compound_part(part, offset, transform)),
+            ColliderComponent::Mesh {
+                ref mesh,
+                is_trigger,
+            } => (!is_trigger && part < mesh.triangle_count()).then(|| Self::Triangle {
+                corners: mesh
+                    .corners(part)
+                    .map(|corner| transform.position + rotation * corner),
+                normal: rotation * mesh.normal(part),
+                active_edges: mesh.active_edges(part),
+            }),
             _ if part != 0 => None,
             ColliderComponent::Sphere {
                 offset,
@@ -137,7 +160,8 @@ impl ContactShape {
             Self::Sphere { .. } => 0,
             Self::Capsule { .. } => 1,
             Self::Box { .. } => 2,
-            Self::Plane { .. } => 3,
+            Self::Triangle { .. } => 3,
+            Self::Plane { .. } => 4,
         }
     }
 
@@ -171,6 +195,7 @@ impl ContactShape {
                 );
                 Some(Aabb::from_centre_half(centre, reach))
             }
+            Self::Triangle { corners, .. } => Some(triangle_bounds(&corners)),
             Self::Plane { .. } => None,
         }
     }
@@ -189,6 +214,9 @@ impl ContactShape {
             Self::Box {
                 centre: c, half, ..
             } => (c - centre).length() + half.length(),
+            Self::Triangle { corners, .. } => corners.iter().fold(0.0, |reach: f64, corner| {
+                reach.max((*corner - centre).length())
+            }),
             Self::Plane { .. } => 0.0,
         }
     }

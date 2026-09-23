@@ -96,9 +96,20 @@ impl MassProperties {
     /// The mass properties of `collider` given `mass`, centred at its offset —
     /// for a compound, at its parts' centre of mass past its offset, `mass`
     /// shared among the parts by volume.
+    ///
+    /// # Panics
+    ///
+    /// Panics for a [`ColliderComponent::Mesh`]: a triangle mesh is a surface
+    /// with no volume to share a mass over, and is for static and kinematic
+    /// bodies, which have none.
     #[must_use]
     pub fn of_collider(collider: &ColliderComponent, mass: f64) -> Self {
         match *collider {
+            ColliderComponent::Mesh { .. } => {
+                panic!(
+                    "a triangle mesh has no volume to weigh: it is for static and kinematic bodies"
+                )
+            }
             ColliderComponent::Compound {
                 offset, ref shape, ..
             } => {

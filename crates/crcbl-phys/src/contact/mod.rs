@@ -1,4 +1,5 @@
-//! Contacts: rungs 1 to 4 of `docs/plan/36-contact-solver.md`.
+//! Contacts: rungs 1 to 4 of `docs/plan/36-contact-solver.md`, and rung 5's
+//! static triangle mesh.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
@@ -96,10 +97,23 @@
 //! touching pair of parts. One [`KineticContact`] is raised per contact, so a
 //! compound landing flat on two parts raises two.
 //!
+//! # Meshes: rung 5's static triangle mesh
+//!
+//! A [`crate::ColliderComponent::Mesh`] on a static or kinematic body is
+//! collided **triangle by triangle, each a broadphase proxy**, for the reasons
+//! a compound's parts are: a contact is one body against one triangle, with
+//! that triangle's manifold, ids and warm start, and the mesh itself joins no
+//! island. A triangle is one-sided, and a contact on one of its inactive edges
+//! pushes along its normal, so a body slides across a seam without catching;
+//! the sweeps measure their gap to each triangle too. See
+//! [`crate::TriangleMesh`] and [`manifold`].
+//!
 //! # What is not done yet
 //!
-//! General convex hulls, and GJK for spheres and capsules against them: the
-//! collider set has no hull, and against a box the analytic pairs are exact.
+//! Joints, the rest of rung 5. General convex hulls, and GJK for spheres and
+//! capsules against them: the collider set has no hull, and against a box the
+//! analytic pairs are exact. A body over a mesh has a contact per triangle it
+//! is near, with no reduction across them.
 //! Two dynamic bodies that are not bullets are never swept against each
 //! other, so a spinning cube can still turn a corner into a ball. The solver
 //! is scalar `f64` (rung 6 makes it wide). A
@@ -621,20 +635,49 @@ impl ContactPipeline {
         PlaneId(index)
     }
 
-    /// Removes a proxy and ends every contact it is part of, counting the
-    /// touching ones as ended in the next step's counters.
-    pub(crate) fn destroy_proxy(&mut self, proxy: ProxyId) {
-        for slot in 0..self.contacts.len() {
-            if let Some(contact) = self.contacts[slot]
-                && (contact.a == proxy || contact.b == proxy)
-                && self.destroy_contact(slot)
-            {
+    /// Removes one body's proxies and ends every contact any of them is part
+    /// of, counting the touching ones as ended in the next step's counters.
+    ///
+    /// One walk over the pool finds them all, so a mesh of many triangles
+    /// costs a walk and not a walk per triangle. The contacts are ended in the
+    /// order ending each proxy's in turn would: by the proxy's place in
+    /// `proxies`, then by slot, which is the order their slots are freed and
+    /// so reused in. No contact joins two of them, since two proxies of one
+    /// body never pair.
+    pub(crate) fn destroy_proxies(&mut self, proxies: &[ProxyId]) {
+        let mut rank: Vec<(ProxyId, usize)> = proxies
+            .iter()
+            .enumerate()
+            .map(|(place, &proxy)| (proxy, place))
+            .collect();
+        rank.sort_unstable();
+        let place = |proxy: ProxyId| {
+            rank.binary_search_by_key(&proxy, |&(p, _)| p)
+                .ok()
+                .map(|k| rank[k].1)
+        };
+        let mut doomed: Vec<(usize, usize)> = self
+            .contacts
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, contact)| {
+                let contact = contact.as_ref()?;
+                place(contact.a)
+                    .or_else(|| place(contact.b))
+                    .map(|place| (place, slot))
+            })
+            .collect();
+        doomed.sort_unstable();
+        for (_, slot) in doomed {
+            if self.destroy_contact(slot) {
                 self.ended_between_steps += 1;
             }
         }
-        self.broadphase.destroy(proxy);
-        if let Some(owner) = self.owners.get_mut(proxy as usize) {
-            *owner = None;
+        for &proxy in proxies {
+            self.broadphase.destroy(proxy);
+            if let Some(owner) = self.owners.get_mut(proxy as usize) {
+                *owner = None;
+            }
         }
     }
 
@@ -898,13 +941,18 @@ impl ContactPipeline {
 
     /// Every body touching the body whose proxies are `proxies`, into `out`.
     pub(crate) fn touching_bodies(&self, proxies: &[ProxyId], out: &mut Vec<BodyId>) {
+        // Sorted, so a mesh's thousands of proxies cost a search per contact
+        // and not a scan.
+        let mut sorted = proxies.to_vec();
+        sorted.sort_unstable();
+        let owns = |proxy: &ProxyId| sorted.binary_search(proxy).is_ok();
         for contact in self.contacts.iter().flatten() {
             if !contact.touching {
                 continue;
             }
-            let other = if proxies.contains(&contact.a) {
+            let other = if owns(&contact.a) {
                 contact.b
-            } else if proxies.contains(&contact.b) {
+            } else if owns(&contact.b) {
                 contact.a
             } else {
                 continue;

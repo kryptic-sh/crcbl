@@ -75,19 +75,19 @@ use glam::{DMat3, DQuat, DVec3};
 use super::{LINEAR_SLOP, MAX_POINTS, Manifold, closest_between_segments};
 
 /// Gregorius's absolute tolerance: half a linear slop.
-const ABSOLUTE_TOLERANCE: f64 = 0.5 * LINEAR_SLOP;
+pub(super) const ABSOLUTE_TOLERANCE: f64 = 0.5 * LINEAR_SLOP;
 
 /// The share of its separation's magnitude by which an edge pair must beat
 /// both faces: Gregorius's `1 − 0.90`.
-const EDGE_RELATIVE_TOLERANCE: f64 = 0.10;
+pub(super) const EDGE_RELATIVE_TOLERANCE: f64 = 0.10;
 
 /// The share by which box `B`'s face must beat box `A`'s: Gregorius's
 /// `1 − 0.98`.
-const FACE_RELATIVE_TOLERANCE: f64 = 0.02;
+pub(super) const FACE_RELATIVE_TOLERANCE: f64 = 0.02;
 
 /// How far the reference face's side planes are pushed out before clipping, in
 /// metres; see the module docs.
-const CLIP_TOLERANCE: f64 = 0.1 * LINEAR_SLOP;
+pub(super) const CLIP_TOLERANCE: f64 = 0.1 * LINEAR_SLOP;
 
 /// The sine of the angle below which two edges count as parallel and their
 /// cross product is not tested as an axis.
@@ -95,7 +95,7 @@ const EDGE_SINE: f64 = 1.0e-3;
 
 /// The most points clipping a quadrilateral against four planes can leave: one
 /// more for each plane.
-const MAX_CLIPPED: usize = 8;
+pub(super) const MAX_CLIPPED: usize = 8;
 
 /// One of the fifteen axes of a box pair.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -161,12 +161,12 @@ impl Obb {
     }
 }
 
-fn sign_of_bit(c: usize, k: usize) -> f64 {
+pub(super) fn sign_of_bit(c: usize, k: usize) -> f64 {
     if c & (1 << k) == 0 { -1.0 } else { 1.0 }
 }
 
 /// The two axes other than `k`, in ascending order.
-const fn others(k: usize) -> (usize, usize) {
+pub(super) const fn others(k: usize) -> (usize, usize) {
     match k {
         0 => (1, 2),
         1 => (0, 2),
@@ -175,30 +175,30 @@ const fn others(k: usize) -> (usize, usize) {
 }
 
 /// The edge along `axis` whose other two coordinates are those of corner `c`.
-fn edge_index(axis: usize, c: usize) -> usize {
+pub(super) fn edge_index(axis: usize, c: usize) -> usize {
     let (lo, hi) = others(axis);
     axis * 4 + ((c >> lo) & 1) + 2 * ((c >> hi) & 1)
 }
 
 /// The face on `axis` at its positive end if `positive`.
-fn face_index(axis: usize, positive: bool) -> usize {
+pub(super) fn face_index(axis: usize, positive: bool) -> usize {
     axis * 2 + usize::from(positive)
 }
 
-const fn corner_code(c: usize) -> u32 {
+pub(super) const fn corner_code(c: usize) -> u32 {
     1 + c as u32
 }
 
-const fn edge_code(e: usize) -> u32 {
+pub(super) const fn edge_code(e: usize) -> u32 {
     9 + e as u32
 }
 
-const fn face_code(f: usize) -> u32 {
+pub(super) const fn face_code(f: usize) -> u32 {
     21 + f as u32
 }
 
 /// A feature id from box `A`'s feature code and box `B`'s.
-const fn pack(a: u32, b: u32) -> u32 {
+pub(super) const fn pack(a: u32, b: u32) -> u32 {
     a | (b << 8)
 }
 
@@ -388,7 +388,7 @@ fn clip(input: &Polygon, normal: DVec3, offset: f64, face: usize, faces: Faces) 
 /// Naming it by the corner rather than by the edge the two sides share is what
 /// keeps it the same point whichever box is the reference: a small box's
 /// corner on a big box's face is its corner against that face either way.
-fn reference_corner_code(f1: usize, f2: usize, face: usize) -> u32 {
+pub(super) fn reference_corner_code(f1: usize, f2: usize, face: usize) -> u32 {
     let (a1, a2) = (f1 / 2, f2 / 2);
     if a1 == a2 {
         // Parallel sides never meet; a segment on one cannot cross the other
@@ -426,10 +426,10 @@ pub(super) fn gap(
 
 /// A point of the manifold before reduction.
 #[derive(Clone, Copy, Debug, Default)]
-struct Candidate {
-    point: DVec3,
-    separation: f64,
-    id: u32,
+pub(super) struct Candidate {
+    pub(super) point: DVec3,
+    pub(super) separation: f64,
+    pub(super) id: u32,
 }
 
 /// The manifold between two boxes, trying and refreshing `cache`.
@@ -645,7 +645,7 @@ fn face_contact(
 /// Gregorius, GDC 2015: the deepest, the furthest from it, the largest
 /// triangle with those two, and the most area added outside that triangle.
 /// Ties go to the earlier point, so the choice is the same on every run.
-fn reduce(points: &[Candidate], normal: DVec3) -> ([usize; MAX_POINTS], usize) {
+pub(super) fn reduce(points: &[Candidate], normal: DVec3) -> ([usize; MAX_POINTS], usize) {
     let mut kept = [0; MAX_POINTS];
     if points.len() <= MAX_POINTS {
         for (k, slot) in kept.iter_mut().enumerate().take(points.len()) {

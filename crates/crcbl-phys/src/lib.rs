@@ -49,6 +49,12 @@
 //! displacement and knows nothing about any camera, which is what lets one
 //! controller serve a first-person and a third-person game.
 //!
+//! [`TriangleMesh`] is level geometry — floors, ramps, stairs — for static and
+//! kinematic bodies: the contact solver collides it triangle by triangle, one
+//! side of each, with Jolt's active edges so a body slides across a seam
+//! without catching, and [`PhysicsWorld::add_mesh`] puts it in the query world,
+//! whose rays, sweeps and overlaps hit its triangles exactly.
+//!
 //! [`AabbCompound`] is L0's query surface for a rigid body made of several
 //! boxes: a ray cast and a closest-point query against local-space parts at a
 //! [`Transform`], naming the part each answer came from. [`CompoundShape`] is
@@ -73,6 +79,7 @@ pub mod frames;
 pub mod integrator;
 pub mod mass;
 pub mod material;
+pub mod mesh;
 pub mod orbit;
 pub mod query;
 pub mod system;
@@ -100,6 +107,7 @@ pub use integrator::{
 };
 pub use mass::MassProperties;
 pub use material::{CombineRule, ContactMaterial, SurfaceMaterial};
+pub use mesh::{MeshError, MeshHit, TriangleMesh};
 pub use orbit::{Orbit, propagate};
 pub use query::{
     Penetration, ShapeHit, capsule_penetration_vs_aabb, capsule_penetration_vs_capsule,

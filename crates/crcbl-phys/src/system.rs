@@ -539,10 +539,20 @@ impl PhysicsSystem {
     /// Replaces any existing body. The entity will participate in the
     /// integration loop, from the transform it already has or from
     /// [`Transform::IDENTITY`] if it has none. A sleeping body's island wakes.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `body` is dynamic and `entity`'s collider is a
+    /// [`ColliderComponent::Mesh`]: a mesh is for static and kinematic bodies.
     pub fn set_body(&mut self, entity: Entity, body: RigidBody) {
         let id = self.record_for(entity, Transform::IDENTITY);
         self.wake(id);
         let record = self.records.get(id).expect("a live record");
+        assert!(
+            !body.is_dynamic()
+                || !matches!(record.collider, Some((_, ColliderComponent::Mesh { .. }))),
+            "a triangle mesh is for static and kinematic bodies, not dynamic ones"
+        );
         let index = record.index;
         match record.set {
             BodySet::Awake => self.awake.bodies[index] = body,
@@ -733,6 +743,11 @@ impl PhysicsSystem {
     ///
     /// Replacing a collider wakes on [`remove_collider`](Self::remove_collider)'s
     /// terms.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `component` is a [`ColliderComponent::Mesh`] and `entity`
+    /// has a dynamic body: a mesh is for static and kinematic bodies.
     pub fn set_collider(
         &mut self,
         entity: Entity,
@@ -741,6 +756,13 @@ impl PhysicsSystem {
     ) {
         let id = self.record_for(entity, *transform);
         self.wake(id);
+        if matches!(component, ColliderComponent::Mesh { .. }) {
+            let record = self.records.get(id).expect("a live record");
+            assert!(
+                record.set != BodySet::Awake || !self.awake.bodies[record.index].is_dynamic(),
+                "a triangle mesh is for static and kinematic bodies, not dynamic ones"
+            );
+        }
         *self.transform_slot(id) = *transform;
         self.remove_collider(entity);
 
@@ -787,6 +809,11 @@ impl PhysicsSystem {
                 let collider = self
                     .world
                     .add_box(compound_query_box(shape, *offset, transform));
+                self.world.set_trigger(collider, *is_trigger);
+                collider
+            }
+            ColliderComponent::Mesh { mesh, is_trigger } => {
+                let collider = self.world.add_mesh(mesh.clone(), *transform);
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
@@ -860,9 +887,7 @@ impl PhysicsSystem {
         if let Some(pipeline) = self.contacts.as_mut()
             && !proxies.is_empty()
         {
-            for proxy in proxies {
-                pipeline.destroy_proxy(proxy);
-            }
+            pipeline.destroy_proxies(&proxies);
             // Its contacts with the rest of its island are gone, so the
             // island may be in pieces.
             if let Some(island) = record.island {
@@ -1522,6 +1547,9 @@ fn place_collider(
         }
         ColliderComponent::Compound { offset, shape, .. } => {
             world.set_box(collider, compound_query_box(shape, *offset, transform));
+        }
+        ColliderComponent::Mesh { mesh, .. } => {
+            world.set_mesh(collider, mesh.clone(), *transform);
         }
     }
 }

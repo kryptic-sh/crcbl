@@ -7,6 +7,7 @@
 use glam::{DMat3, DQuat, DVec3};
 
 use crate::compound_shape::CompoundShape;
+use crate::mesh::TriangleMesh;
 
 // ---------------------------------------------------------------------------
 // RigidBody
@@ -429,15 +430,31 @@ pub enum ColliderComponent {
         /// Whether this collider is a trigger.
         is_trigger: bool,
     },
+    /// A static triangle mesh, its vertices in the body's frame, turning with
+    /// it: see [`TriangleMesh`].
+    ///
+    /// **For static and kinematic bodies only**: a mesh has no volume to
+    /// weigh, so [`crate::PhysicsSystem::set_collider`] and
+    /// [`crate::PhysicsSystem::set_body`] refuse to put one on a dynamic body.
+    /// In a system with contacts each triangle collides on its own, one-sided;
+    /// the query world ([`crate::PhysicsSystem::world`]) holds the mesh
+    /// itself, and its rays, sweeps and overlaps hit the triangles exactly.
+    Mesh {
+        /// The mesh.
+        mesh: TriangleMesh,
+        /// Whether this collider is a trigger.
+        is_trigger: bool,
+    },
 }
 
 impl ColliderComponent {
     /// How many shapes it is to the contact pipeline: its parts for a
-    /// compound, one for anything else.
+    /// compound, its triangles for a mesh, one for anything else.
     #[must_use]
     pub fn part_count(&self) -> usize {
         match self {
             Self::Compound { shape, .. } => shape.parts().len(),
+            Self::Mesh { mesh, .. } => mesh.triangle_count(),
             Self::Sphere { .. } | Self::Box { .. } | Self::Capsule { .. } => 1,
         }
     }
