@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys` structs gained public fields for continuous collision**, so a
+  struct literal of any of them that names every field needs the new ones:
+  `RigidBody::bullet`, `ContactSettings::continuous`, `ContactCounters::swept`,
+  `sweep_candidates`, `sweep_hits` and `dropped_time`, and
+  `StageTimes::continuous`. Literals built with `..` from a constructor or a
+  constant are unaffected.
+- **`crcbl_phys::ColliderComponent` has a `Compound` variant**, so an exhaustive
+  `match` on it needs another arm; `CompoundError` has `NoParts`,
+  `TooManyParts`, `NonUnitRotation` and `NoVolume`, which only
+  `CompoundShape::new` returns; and `ContactReport` has `part_a` and `part_b`,
+  so a struct literal of it needs both.
 - **`crcbl_input::Binding` has pad variants and is no longer `Eq`**:
   `PadButton`, `PadDpad`, `PadStick { stick, deadzone }` and
   `PadTrigger { trigger, threshold }` join it, so an exhaustive `match` on it
@@ -399,6 +410,100 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `SteamPads` the loop's pad source, with XInput beside it on Windows skipping
   Steam's virtual pads. `apps/sandbox --features steam` now lends its session
   and opens Steam Input instead of pumping by hand.
+- **GameController.framework on macOS, `crcbl_input::game_controller`**: a
+  windowed macOS run now sees gamepads. `GameController::poll` reads
+  `[GCController controllers]` once a frame and emits the same `GamepadEvent`s
+  as XInput, evdev and the browser backend, a snapshot only when one changes,
+  and `crcbl::engine::Loop` polls it on macOS. Every controller with an
+  `extendedGamepad` profile is read: `buttonA`/`B`/`X`/`Y` are `South`, `East`,
+  `West` and `North` (GameController names them by Xbox position on every
+  device), `buttonMenu`/`buttonOptions`/`buttonHome` are `Start`/`Select`/
+  `Guide`, triggers come from their `value` (0…1), and the sticks pass through
+  unflipped, GameController's +Y being up already. A controller's family comes
+  from its `productCategory`, or else its `vendorName`. Pads are discovered from
+  the main run loop, which the AppKit shell turns every frame; a process that
+  never turns it sees no pads. The browser backend's value clamp and name match
+  moved to shared modules, so the two backends apply the same ones;
+  `web_gamepad::stick_axis` and `trigger_axis` are unchanged. The mapping and
+  the connect/disconnect transitions are tested on every host, and the framework
+  calls only on CI's macOS job; no controller has been through it.
+- **Web Gamepad API in the browser, `crcbl_input::web_gamepad`**: every browser
+  demo now sees gamepads. The page reads `navigator.getGamepads()` once a frame
+  (the new `web/engine/gamepad.js`, called from `web/engine/demo.js`) and hands
+  each pad to wasm through six new `__crcbl_web_pad_*` exports, so the module
+  still imports nothing. `WebGamepads::poll` emits the same `GamepadEvent`s as
+  XInput and evdev, a snapshot only when one changes, and `crcbl::engine::Loop`
+  polls it on `wasm32`, logging each connect and disconnect. Only pads with the
+  W3C standard mapping are read: buttons 0–3 are the face buttons by position, 6
+  and 7 are the triggers (by `value`, 0…1), 16 is `Guide`, and stick axes 1 and
+  3 are flipped to +Y up. A pad without that mapping is not connected, and
+  `poll` returns it once as an `Unmapped` for the loop to log. The pad's family
+  comes from the USB ids in `Gamepad.id` (Chrome's and Firefox's forms) or else
+  its name. A browser shows no pad until one of its buttons is pressed on the
+  page. Tested with scripted reports, through the real exports, and in Chrome by
+  the browser e2e with a stand-in `getGamepads`; no controller has been through
+  it yet.
+- **Continuous collision for fast bodies and bullets in `crcbl_phys`** — rung 4
+  of `docs/plan/36-contact-solver.md`. In a system made with
+  `PhysicsSystem::with_contacts`, after the solve every awake dynamic body that
+  went at least half its inner radius over the tick (its turning counted) is
+  swept along its path against static bodies and planes, and stopped where it
+  met one, keeping its velocity, with the rest of its tick dropped. The new
+  `RigidBody::bullet` flag (and `RigidBody::with_bullet`) sweeps a body every
+  tick it moves at all, and against dynamic, kinematic and sleeping bodies too.
+  So a body launched within a tick at a thin plate, which speculative contacts
+  cannot see coming, stops at it, and a spinning plank or cube no longer sinks
+  its corner into a static pillar or peg: on `apps/tumble`'s obstacle wall the
+  deepest overlap with a fixture fell from 8.16 cm to 1.36 cm. Sleeping bodies
+  are never swept; compounds are swept part by part.
+  `ContactSettings::continuous` (on by default) turns it off, `ContactCounters`
+  gains `swept`, `sweep_candidates`, `sweep_hits` and `dropped_time`, and
+  `StageTimes` gains `continuous`. `apps/tumble` has a fifth room on key `5`,
+  Bullets: a point-blank cannon at a centimetre plate and a dynamic brick wall
+  and a plank spinning at a pillar, with a tunnel sensor behind each. The sweeps
+  change the wall's history, so tumble's pinned hash is re-pinned; the bullet
+  flag enters a body's hash only when it is set.
+- **Compound bodies in the contact solver: `crcbl_phys::CompoundShape`.** A
+  rigid body made of several boxes fixed in its frame — a rifle's receiver,
+  magazine and stock — collides part by part, so it lies on the parts that are
+  there rather than on one box around them, and a thin part passes through
+  another body's real gap. `CompoundShape::from_aabbs` takes the local
+  axis-aligned boxes `AabbCompound` does (`CompoundShape::new` takes
+  `CompoundPart`s, which may each be turned), up to `CompoundShape::MAX_PARTS`;
+  `CompoundShape::dynamic_body(density)` returns the `RigidBody`, the
+  `ColliderComponent::Compound` collider and the centre of mass the body's
+  origin sits at, with mass and inertia summed from the parts by the
+  parallel-axis theorem, an overlap counted once per part
+  (`CompoundShape::DEFAULT_DENSITY` for items with no authored mass). Each part
+  is its own broadphase proxy and every contact a part pair's, so feature ids,
+  warm starting, islands and sleep work for compounds unchanged; a compound
+  resting on two parts has two contacts, and raises a `KineticContact` for each.
+  `ContactReport::part_a` and `part_b` name the parts, and
+  `ColliderComponent::part_count` counts them. The query world
+  (`PhysicsSystem::world`) holds one box around a compound's parts. A state with
+  no compound in it hashes as before: `apps/tumble`'s pinned hash is unchanged.
+
+- **Islands and sleep: rung 3 of the contact solver** (`36-contact-solver.md`).
+  In a system made with `PhysicsSystem::with_contacts`, dynamic bodies joined by
+  touching contacts form persistent islands, merged as contacts begin and split
+  lazily, and an island sleeps once every body in it has stayed under
+  `ContactSettings::sleep_speed` (0.05 m/s) and `sleep_angular_speed` (0.1
+  rad/s) for `time_to_sleep` (0.5 s). A sleeping body leaves the awake set: it
+  is not integrated or solved, keeps its transform bit for bit, and its contacts
+  keep their warm-start impulses for when it wakes. It wakes when a moving body
+  begins touching it, when `apply_force`, `apply_torque`, `body_mut`,
+  `set_body`, `set_transform`, `set_collider` or `set_material` touches it or a
+  body it rests on, when its support is removed, and when a static body is
+  placed onto it; queries and reads wake nothing. `ContactSettings::sleep` turns
+  it off. New: `PhysicsSystem::is_sleeping`; `ContactCounters::sleeping`,
+  `islands` and `sleeping_islands`; `StageTimes::islands`.
+  `ContactCounters::touching` and `points` now count only the contacts a step
+  collided, so a sleeping island's count nothing, and `body_count` includes
+  sleeping bodies. A system with contacts now hashes each body's sleep state,
+  and applies its force providers after the narrow phase, so an island woken by
+  a contact feels them the same tick. `apps/tumble` shows awake and sleeping
+  bodies, islands and the solver's time at rest in every room with contacts; its
+  pinned hash is re-taken.
 
 - **Boxes against boxes: rung 2 of the contact solver, up to hulls**
   (`36-contact-solver.md`). A system made with `PhysicsSystem::with_contacts`
@@ -443,25 +548,43 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   re-probes). A game on its own loop polls it; the engine loop polls it for
   games on `crcbl::engine::Loop` (see below). Tested without a controller (a
   scripted state source, and a real `XInputGetState` answering an empty slot);
-  no controller has been through it yet. Other targets have no pad backend and
-  no stand-in module. `XInput::skip_steam_virtual_pads(true)` keeps a pad from
-  arriving twice while Steam Input reports it: slots whose USB vendor is Valve's
+  no controller has been through it yet. Targets other than Windows and Linux
+  have no pad backend and no stand-in module.
+  `XInput::skip_steam_virtual_pads(true)` keeps a pad from arriving twice while
+  Steam Input reports it: slots whose USB vendor is Valve's
   (`xinput::VALVE_VENDOR_ID`, read through `xinput1_4.dll`'s undocumented
   `XInputGetCapabilitiesEx`) are skipped, and it refuses with
   `XInputError::NoVendorQuery` on a library that cannot report vendors.
+- **evdev on Linux, `crcbl_input::evdev`**, the Steam Deck's backend:
+  `Evdev::poll` opens every `/dev/input/event*` node non-blocking, keeps the
+  ones whose `EVIOCGBIT` capabilities make them a pad (`BTN_GAMEPAD` with
+  `ABS_X` and `ABS_Y`), and emits the same `GamepadEvent`s as XInput, a snapshot
+  only when one changes. Sticks and triggers are scaled from each axis's own
+  `EVIOCGABS` range with stick Y flipped to +up and no dead zone applied (the
+  driver's `flat` is ignored, as the seam requires raw axes); the d-pad comes
+  from `BTN_DPAD_*` or the hat, triggers from `ABS_Z`/`ABS_RZ`,
+  `ABS_BRAKE`/`ABS_GAS`, `hid-steam`'s `ABS_HAT2Y`/`ABS_HAT2X` or digital
+  `BTN_TL2`/`BTN_TR2`, and `BTN_MODE` is `Guide`. Xbox-style drivers' swapped
+  `BTN_X`/`BTN_Y` are mapped by position, split by USB vendor. `/dev/input` is
+  re-scanned once per `evdev::RESCAN_INTERVAL` (one second) for new pads,
+  `ENODEV` is a disconnect, and `SYN_DROPPED` resynchronises from the device.
+  Steam Input's virtual pad (vendor 0x28DE) is read like any other. A node the
+  user cannot open is skipped, so a pad needs udev's `uaccess` grant. Tested
+  against scripted devices; no controller has been through it yet.
 - **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
-  at `Loop::new` (logging once and running padless if it cannot); other targets
-  log once that they have no backend; a headless run polls nothing. Each frame,
-  after the shell's events and before the ticks, every `GamepadEvent` goes to
-  the loop's menu map and once to the new `HostedGame::gamepad_event` hook (a
-  no-op by default). The loop does not feed the map `HostedGame::actions` hands
-  over — a game feeds it from the hook, as it feeds keys — but still releases it
-  on focus loss, now after the frame's pads. `Loop::set_pad_source` swaps the
-  source for any `crcbl::engine::PadSource`, which is how a test or replay
-  scripts a pad. The loop's menus answer the pad: the left stick and the d-pad
-  move, South accepts, East backs out of the pause panel, and Start
-  (`crcbl::engine::PAUSE_BUTTON`) toggles the pause like Escape, closing an open
-  console first. Pad events are not withheld from the game while a menu is up.
+  at `Loop::new` (logging once and running padless if it cannot), and one on
+  Linux polls evdev; other targets log once that they have no backend; a
+  headless run polls nothing. Each frame, after the shell's events and before
+  the ticks, every `GamepadEvent` goes to the loop's menu map and once to the
+  new `HostedGame::gamepad_event` hook (a no-op by default). The loop does not
+  feed the map `HostedGame::actions` hands over — a game feeds it from the hook,
+  as it feeds keys — but still releases it on focus loss, now after the frame's
+  pads. `Loop::set_pad_source` swaps the source for any
+  `crcbl::engine::PadSource`, which is how a test or replay scripts a pad. The
+  loop's menus answer the pad: the left stick and the d-pad move, South accepts,
+  East backs out of the pause panel, and Start (`crcbl::engine::PAUSE_BUTTON`)
+  toggles the pause like Escape, closing an open console first. Pad events are
+  not withheld from the game while a menu is up.
 - **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
   through `ui::STICK_DEADZONE` and on the d-pad, `ui::NEXT`/`ui::PREV` on the
   right and left shoulders, `ui::ACCEPT` on South, `ui::BACK` on East.
@@ -2275,6 +2398,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **A ball spinning about its contact normal on a single contact point now slows
+  and stops**, where it spun for ever and never slept. The contact solver's
+  twist friction acted only in manifolds of two points or more; a one-point
+  contact now twists against a contact patch of Hertz radius `√(R δ)` (the
+  pair's effective curvature radius and the point's depth), clamped between half
+  a millimetre and `R`, up to `μ` times the normal impulse times that radius.
+  Manifolds of two points or more are unchanged. Found on `apps/tumble`'s
+  obstacle wall, where a ball on a bin floor kept the wall from ever settling;
+  the wall, the pit and the Bullets room step differently, and tumble's pinned
+  hash is re-pinned.
 
 - **dx12: a D3D12 register is now the binding number, in the set's register
   space, so the mesh pipeline's root signature matches all three of its

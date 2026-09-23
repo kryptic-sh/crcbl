@@ -95,20 +95,47 @@ Gameplay. Reduced-coordinate articulations, which
 collision math" is kept**: the first cut draws no bounce the engine does not
 compute.
 
-## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17, milestone 4 (Tower) 2026-09-23 but for the Galton board
+## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17, milestone 4 (Tower) 2026-09-23 but for the Galton board, milestones 5 (Settle) and 6 (Bullets) 2026-09-23
 
-`apps/tumble` has four rooms on keys 1–4: Spin (the zero-g T-handle, and a box
+`apps/tumble` has five rooms on keys 1–5: Spin (the zero-g T-handle, and a box
 that lands flat on its corners), the obstacle wall (balls, pills and, since rung
-2, cubes), the thousand-ball pit (no sleep until rung 3, no overflow or despawn
-until rung 6) and the Tower room — the stacking scene: a 20-cube column, a
-base-20 pyramid and a domino run toppled again every eight seconds, with points
-per manifold, the persisted-id ratio and both top boxes' drift on the page. Each
-gap is labelled on screen. The pyramid runs alone in a system at the default
-contact settings, so the room's solver time is the pyramid's; the column and the
-dominoes run in a second system at `ContactSettings::TALL_STACK`, because at 30
-Hz twenty cubes buckle — see [36-contact-solver.md](../36-contact-solver.md)'s
-status. Milestone 1's bullet scene, wind tunnel and golden frame, milestone 4's
-Galton board, and every milestone after 4, are not built.
+2, cubes), the thousand-ball pit (no overflow or despawn until rung 6), the
+Tower room — the stacking scene: a 20-cube column, a base-20 pyramid and a
+domino run toppled again every eight seconds, with points per manifold, the
+persisted-id ratio and both top boxes' drift on the page — and the Bullets room.
+Each gap is labelled on screen. The pyramid runs alone in a system at the
+default contact settings, so the room's solver time is the pyramid's; the column
+and the dominoes run in a second system at `ContactSettings::TALL_STACK`,
+because at 30 Hz twenty cubes buckle — see
+[36-contact-solver.md](../36-contact-solver.md)'s status.
+
+Milestone 5, Settle, has no room of its own: every room with contacts shows
+awake and sleeping bodies, islands awake and asleep, and the solver's time on
+the last tick nothing was awake. Measured on 2026-09-23: the pit asleep at tick
+1000, the Tower room's pyramid at 58 and its column and dominoes at 276, until
+the next flick wakes them, and the wall 326 ticks after its spawner is stopped —
+it never is on the page, so the wall is only ever partly asleep there. Rung 4
+changed the wall's history, and in the new one a ball rested spinning about the
+vertical for ever until one-point contacts were given twist friction the same
+day; since then the wall sleeps 367 ticks after its spawner stops and the pit at
+tick 966. "A dropped ball wakes exactly the island it lands on" is a
+`crcbl-phys` test, `crates/crcbl-phys/tests/settling.rs`, not a scene; the debug
+view that dims sleeping bodies is not built.
+
+Milestone 6, Bullets, is the fifth room: a cannon firing at point blank — its
+charge a force held for one tick, so the tick's speculative contacts know
+nothing of the shot's speed — alternately at a centimetre static plate and, with
+its shots as bullets, at a wall of dynamic bricks; and a two-metre plank set
+spinning at 60 rad/s on ice beside a two-centimetre pillar. A sensor behind the
+plate, one behind the wall and one on the plank count tunnels, and every room
+with contacts shows the bodies swept, the sweep candidates, the hits and the
+time dropped. Measured on 2026-09-23 over twenty seconds: with rung 4's sweeps
+none of the forty shots or forty spins tunnelled, 364 bodies were stopped and
+2.92 s of their motion dropped; with the sweeps off every one tunnelled. The
+stated speed limit is the one tested, 80 m/s at point blank.
+
+Milestone 1's wind tunnel and golden frame, milestone 4's Galton board, and
+every milestone after 6, are not built.
 
 Performance follow-up: the debug module borrows the scenes and constructs its
 reading only inside the visible panel's `debug_section`. Hidden panels avoid the

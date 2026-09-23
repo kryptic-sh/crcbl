@@ -78,13 +78,14 @@
 //!
 //! # The ABIs a page has to drive
 //!
-//! Five, and a sample's own `web.rs` is one of them. The other four are
+//! These, and a sample's own `web.rs` is one of them. The others are
 //! specified, symbol by symbol, by the crates that own them, and the shim in
 //! `web/` calls them directly:
 //!
 //! | Prefix | Owner | What it is |
 //! | --- | --- | --- |
 //! | `__crcbl_web_` (input/frame) | [`crate::shell`]'s `web` backend | canvas size, focus, keys, pointer |
+//! | `__crcbl_web_pad_` | `crcbl_input::web_gamepad` (`wasm32` only) | `navigator.getGamepads()`, once a frame |
 //! | `__crcbl_web_audio_` | [`crate::audio::web`] | the AudioWorklet pull |
 //! | `__crcbl_web_fetch_` | [`crate::store::web::fetch`] | assets over `fetch()` |
 //! | `__crcbl_web_opfs_` | [`crate::store::web::opfs`] | saves in the Origin Private File System |

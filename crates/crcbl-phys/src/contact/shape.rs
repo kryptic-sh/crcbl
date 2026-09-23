@@ -12,6 +12,7 @@ use glam::{DMat3, DQuat, DVec3};
 
 use crate::collider::Aabb;
 use crate::components::{ColliderComponent, Transform};
+use crate::compound_shape::CompoundPart;
 
 /// A collider placed in the world, as the manifold functions take it.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -54,10 +55,35 @@ pub enum ContactShape {
 impl ContactShape {
     /// `component` on a body at `transform`, or `None` for a trigger, which
     /// the solver never collides.
+    ///
+    /// A compound is several shapes, and this is its first part;
+    /// [`placed_part`](Self::placed_part) places each.
     #[must_use]
     pub fn placed(component: &ColliderComponent, transform: &Transform) -> Option<Self> {
+        Self::placed_part(component, 0, transform)
+    }
+
+    /// Part `part` of `component` on a body at `transform`: the whole collider
+    /// as part 0 of anything but a compound. `None` for a trigger, and for a
+    /// part the collider does not have.
+    #[must_use]
+    pub fn placed_part(
+        component: &ColliderComponent,
+        part: usize,
+        transform: &Transform,
+    ) -> Option<Self> {
         let rotation = transform.rotation;
         match *component {
+            ColliderComponent::Compound {
+                offset,
+                ref shape,
+                is_trigger,
+            } => shape
+                .parts()
+                .get(part)
+                .filter(|_| !is_trigger)
+                .map(|part| Self::compound_part(part, offset, transform)),
+            _ if part != 0 => None,
             ColliderComponent::Sphere {
                 offset,
                 radius,
@@ -89,6 +115,17 @@ impl ContactShape {
                 rotation,
                 half: half_extents,
             }),
+        }
+    }
+
+    /// A compound's `part`, its shape `offset` from a body at `transform`:
+    /// the offset and the part's centre and faces all turned by the body.
+    #[must_use]
+    pub(crate) fn compound_part(part: &CompoundPart, offset: DVec3, transform: &Transform) -> Self {
+        Self::Box {
+            centre: transform.position + transform.rotation * (offset + part.centre),
+            rotation: transform.rotation * part.rotation,
+            half: part.half_extents,
         }
     }
 

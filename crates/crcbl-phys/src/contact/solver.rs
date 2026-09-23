@@ -53,8 +53,20 @@
 //! the friction at its distance `rᵢ` from the centroid, the most torque the
 //! points' own friction could resist. Friction at the centroid alone would
 //! let a box spin freely on its face, since its centroid does not move; the
-//! twist is what stops it. A one-point manifold has no twist, and its
-//! friction is exactly the point friction rung 1 had.
+//! twist is what stops it. A one-point manifold's tangential friction is
+//! exactly the point friction rung 1 had.
+//!
+//! **A one-point manifold twists against its contact patch.** Its one point is
+//! at the centroid, so `Σ λᵢ rᵢ` would be zero, and a ball spinning about its
+//! contact normal would spin for ever — measured on 2026-09-23, one did on a
+//! bin floor of the obstacle wall at 1.22 rad/s, and never slept. A real
+//! contact is a patch, not a point, and uniform pressure over a disc of radius
+//! `a` resists twist with a torque of up to `⅔ μ N a`; here that bound is
+//! `μ λ a` with `a` the patch radius [`patch_radius`] gives — Hertz's `√(R δ)`
+//! for the pair's curvature `R` and the point's depth `δ`, no smaller than
+//! [`MIN_PATCH_RADIUS`]. Taking `a` for `⅔ a` is a rounding well inside how
+//! little the soft contact's depth says about a real patch. A manifold of two
+//! points or more twists exactly as before.
 //!
 //! # The interior is scalar `f64`
 //!
@@ -68,7 +80,9 @@ use core::f64::consts::TAU;
 use crcbl_core::Pool;
 use glam::{DMat3, DVec3};
 
-use super::manifold::{MAX_POINTS, orthonormal_basis};
+use super::island::Islands;
+use super::manifold::{LINEAR_SLOP, MAX_POINTS, orthonormal_basis};
+use super::shape::ContactShape;
 use super::{Bodies, ContactPipeline, KineticContact, KineticSource, WarmImpulses};
 use crate::components::{RigidBody, Transform};
 use crate::integrator::{SemiImplicitEuler, SpinStep};
@@ -76,6 +90,41 @@ use crate::system::{AwakeSet, BodyRecord, StaticSet};
 
 /// The index a constraint uses for a side that does not step.
 const NONE: usize = usize::MAX;
+
+/// The smallest contact patch a one-point manifold twists against, in
+/// metres: a tenth of Box2D's linear slop, half a millimetre.
+///
+/// The soft contact rests almost at zero depth, where Hertz's `√(R δ)` would
+/// give no patch and the spin would never stop. Half a millimetre is about
+/// the patch real Hertz contact gives the props this solver is tuned for: a
+/// 0.2 kg ball of 7 cm radius in hard plastic resting on a floor of the same
+/// (`E ≈ 2 GPa` each, so `E* ≈ 1.1 GPa`) has `a = (3 F R / 4 E*)^⅓ ≈ 0.45 mm`.
+/// So the floor never claims much more grip than such a patch has; it only
+/// makes a spin stop in finite time.
+const MIN_PATCH_RADIUS: f64 = 0.1 * LINEAR_SLOP;
+
+/// The radius of the patch a one-point contact between `a` and `b` presses
+/// over, `separation` deep: Hertz's `√(R δ)`, with `R` the pair's effective
+/// radius of curvature `1 / (1/R_a + 1/R_b)`, clamped between
+/// [`MIN_PATCH_RADIUS`] and `R` itself.
+///
+/// A sphere and a capsule curve at their radius; a box face and a plane are
+/// flat and add no curvature. Two flat shapes meeting at one point meet at a
+/// corner or an edge, whose patch is the smallest there is.
+fn patch_radius(a: &ContactShape, b: &ContactShape, separation: f64) -> f64 {
+    let curvature = |shape: &ContactShape| match *shape {
+        ContactShape::Sphere { radius, .. } | ContactShape::Capsule { radius, .. } => 1.0 / radius,
+        ContactShape::Box { .. } | ContactShape::Plane { .. } => 0.0,
+    };
+    let total = curvature(a) + curvature(b);
+    if total <= 0.0 {
+        return MIN_PATCH_RADIUS;
+    }
+    let radius = 1.0 / total;
+    (radius * separation.min(0.0).abs())
+        .sqrt()
+        .clamp(MIN_PATCH_RADIUS.min(radius), radius)
+}
 
 /// The buffers a solve works in, kept between ticks.
 #[derive(Debug, Default)]
@@ -165,7 +214,8 @@ struct Point {
     normal_mass: f64,
     normal_impulse: f64,
     /// How far it lies from the manifold's centroid: the lever its friction
-    /// has against a twist.
+    /// has against a twist — or, for a manifold of one point, the radius of
+    /// its contact patch.
     twist_radius: f64,
     max_normal_impulse: f64,
     /// Every normal impulse the tick delivered.
@@ -288,6 +338,7 @@ impl ContactPipeline {
         records: &Pool<BodyRecord>,
         statics: &StaticSet,
         awake: &mut AwakeSet,
+        islands: &Islands,
         dt: f64,
     ) {
         let settings = self.settings;
@@ -312,6 +363,7 @@ impl ContactPipeline {
                 records,
                 statics,
                 awake,
+                islands,
             },
             &mut scratch,
             dt,
@@ -370,7 +422,9 @@ impl ContactPipeline {
         self.solver = scratch;
     }
 
-    /// Builds the constraints for every touching contact with a dynamic side.
+    /// Builds the constraints for every touching contact with an awake
+    /// dynamic side. A sleeping island's contacts are passed over on a look
+    /// at their records, before either side is placed.
     fn prepare(&self, world: Bodies<'_>, scratch: &mut Scratch, dt: f64, h: f64) {
         let settings = &self.settings;
         let hertz = settings
@@ -384,16 +438,13 @@ impl ContactPipeline {
             let Some(contact) = contact else {
                 continue;
             };
-            if !contact.touching {
+            if !contact.touching || !self.solvable(contact.a, contact.b, world) {
                 continue;
             }
             let (Some(a), Some(b)) = (self.side(contact.a, world), self.side(contact.b, world))
             else {
                 continue;
             };
-            if a.inverse_mass == 0.0 && b.inverse_mass == 0.0 {
-                continue;
-            }
             let material = a.material.combine(&b.material);
             let normal = contact.manifold.normal;
             let tangents = {
@@ -458,7 +509,11 @@ impl ContactPipeline {
                     separation: mp.separation,
                     normal_mass: effective(anchor_a, anchor_b, normal),
                     normal_impulse: warm.normal[k],
-                    twist_radius: (mp.point - centroid).length(),
+                    twist_radius: if points.len() == 1 {
+                        patch_radius(&a.shape, &b.shape, mp.separation)
+                    } else {
+                        (mp.point - centroid).length()
+                    },
                     max_normal_impulse: 0.0,
                     total_normal_impulse: 0.0,
                     relative_velocity: dv.dot(normal),
@@ -685,21 +740,21 @@ fn solve_pass(
         apply(bodies, solver, c.a, c.friction_anchor_a, -impulse);
         apply(bodies, solver, c.b, c.friction_anchor_b, impulse);
 
-        if c.count > 1 {
-            let (_, wa) = velocity(bodies, c.a);
-            let (_, wb) = velocity(bodies, c.b);
-            let spin = (wb - wa).dot(c.normal);
-            let limit = c.friction
-                * points
-                    .iter()
-                    .map(|p| p.normal_impulse * p.twist_radius)
-                    .sum::<f64>();
-            let old = c.twist_impulse;
-            let new = (old - c.twist_mass * spin).clamp(-limit, limit);
-            c.twist_impulse = new;
-            apply_angular(bodies, solver, c.a, -c.normal * (new - old));
-            apply_angular(bodies, solver, c.b, c.normal * (new - old));
-        }
+        // A one-point manifold's point stands for its patch: see the module
+        // docs.
+        let (_, wa) = velocity(bodies, c.a);
+        let (_, wb) = velocity(bodies, c.b);
+        let spin = (wb - wa).dot(c.normal);
+        let limit = c.friction
+            * points
+                .iter()
+                .map(|p| p.normal_impulse * p.twist_radius)
+                .sum::<f64>();
+        let old = c.twist_impulse;
+        let new = (old - c.twist_mass * spin).clamp(-limit, limit);
+        c.twist_impulse = new;
+        apply_angular(bodies, solver, c.a, -c.normal * (new - old));
+        apply_angular(bodies, solver, c.b, c.normal * (new - old));
     }
 }
 

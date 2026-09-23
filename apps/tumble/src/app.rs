@@ -92,12 +92,18 @@ impl DebugModule for Stats<'_> {
             ("pit", r.pit.contacts),
             ("pyramid", r.tower.pyramid),
             ("column", r.tower.column),
+            ("bullets", r.bullets.contacts),
         ] {
             out.row(
                 name,
                 format_args!(
-                    "{} bodies, {} pairs, {} contacts, {}+ {}-",
-                    tally.bodies, tally.pairs, tally.touching, tally.begun, tally.ended
+                    "{} awake, {} asleep, {} pairs, {} contacts, {}+ {}-",
+                    tally.bodies,
+                    tally.sleeping,
+                    tally.pairs,
+                    tally.touching,
+                    tally.begun,
+                    tally.ended
                 ),
             );
         }
@@ -108,6 +114,18 @@ impl DebugModule for Stats<'_> {
                 r.tower.pyramid_drift * 1.0e3,
                 r.tower.column_drift * 1.0e3,
                 r.tower.dominoes_down
+            ),
+        );
+        out.row(
+            "bullets",
+            format_args!(
+                "{} shots, tunnels {} / {} / {}, {} swept, {} hits",
+                r.bullets.shots,
+                r.bullets.plate_tunnels,
+                r.bullets.wall_tunnels,
+                r.bullets.plank_tunnels,
+                r.bullets.contacts.swept,
+                r.bullets.contacts.sweep_hits
             ),
         );
         out.row("hash", format_args!("{:016x}", r.hash));
@@ -245,8 +263,12 @@ impl Tumble {
              drops: {}  wall-bodies: {}  wall-pairs: {}  wall-begun: {}  wall-ended: {}  \
              wall-pen-mm: {:.2}  wall-bounce: {:.2}  wall-persisted: {:.3}  pit-balls: {}  \
              pit-pairs: {}  pit-contacts: {}  pit-begun: {}  pit-ended: {}  \
-             pit-pen-mm: {:.2}  pyramid-points: {:.2}  pyramid-persisted: {:.3}  \
+             pit-pen-mm: {:.2}  pit-awake: {}  pit-sleeping: {}  pit-islands: {}  \
+             pyramid-awake: {}  pyramid-sleeping: {}  \
+             pyramid-points: {:.2}  pyramid-persisted: {:.3}  \
              pyramid-top-mm: {:.2}  column-top-mm: {:.2}  dominoes-down: {}  \
+             wall-sweep-hits: {}  bullets-shots: {}  bullets-tunnels: {}  \
+             bullets-swept: {}  bullets-sweep-hits: {}  \
              hash: {:016x}  pinned-tick: {}  pinned: {:016x}",
             r.tick,
             r.view.name(),
@@ -267,11 +289,21 @@ impl Tumble {
             pit.begun,
             pit.ended,
             pit.worst_penetration * 1.0e3,
+            pit.bodies,
+            pit.sleeping,
+            pit.islands + pit.sleeping_islands,
+            tower.pyramid.bodies,
+            tower.pyramid.sleeping,
             tower.pyramid.points_per_manifold().unwrap_or(0.0),
             tower.pyramid.persisted_ratio().unwrap_or(0.0),
             tower.pyramid_drift * 1.0e3,
             tower.column_drift * 1.0e3,
             tower.dominoes_down,
+            wall.sweep_hits,
+            r.bullets.shots,
+            r.bullets.plate_tunnels + r.bullets.wall_tunnels + r.bullets.plank_tunnels,
+            r.bullets.contacts.swept,
+            r.bullets.contacts.sweep_hits,
             r.hash,
             CHECK_TICK,
             PINNED_HASH,
@@ -300,7 +332,7 @@ impl HostedGame for Tumble {
         self.log_heartbeat();
     }
 
-    /// `1` to `4` pick the room on screen. That is the only key, and it
+    /// `1` to `5` pick the room on screen. That is the only key, and it
     /// reaches the camera and the panel and not the simulation, so the hash
     /// the gate pins is the same whatever is pressed.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
@@ -354,8 +386,9 @@ impl HostedGame for Tumble {
         let r = &summary.reading;
         crcbl::log::info!(
             "tumble: {} frames, {} ticks, {} flips, momentum drift {:.1e}, box at {:.3} m, \
-             wall {} bodies {}+ {}- contacts, pit {} balls {} pairs, \
+             wall {} bodies {}+ {}- contacts, pit {} balls {} pairs {} asleep, \
              pyramid top {:.2} mm, column top {:.2} mm, \
+             bullets {} shots {} tunnels, \
              hash {:016x}, {} page commands ({:?})",
             summary.run.frames,
             summary.run.ticks,
@@ -367,8 +400,11 @@ impl HostedGame for Tumble {
             r.wall.contacts.ended,
             r.pit.balls,
             r.pit.contacts.pairs,
+            r.pit.contacts.sleeping,
             r.tower.pyramid_drift * 1.0e3,
             r.tower.column_drift * 1.0e3,
+            r.bullets.shots,
+            r.bullets.plate_tunnels + r.bullets.wall_tunnels + r.bullets.plank_tunnels,
             r.hash,
             summary.commands,
             summary.run.exit,

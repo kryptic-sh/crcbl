@@ -8612,215 +8612,83 @@ remain, and from rung 2:
   `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
   workaround; options are per-island or per-group substeps (decision 1's "more
   substeps for its group") or stiffness scaled by load.
-- **Fast spinners tunnel into static capsules**: wall cubes at up to 80 rad/s
-  reach 6.9 cm deep in one tick. Rung 4's sweeps own it; until then the wall
-  test's penetration bounds are 2 cm (last tick) and 8 cm (any tick), loosened
-  from 1 and 4 cm when cubes joined the wall.
+- **Rung 4 (continuous collision) shipped 2026-09-23**: conservative advancement
+  for fast bodies against statics, bullets against everything but bullets, and
+  one-point twist friction from a Hertz patch radius. Left open: dynamic pairs
+  are swept only when one side is a bullet; advancement that runs out of steps
+  (`MAX_ADVANCES`, 32) stops the body where it got to; the sweep follows the
+  start-to-end chord, not the substeps' path; the one-point twist model takes
+  `a` for the exact ⅔ a and gives box corners a 0.5 mm minimum patch; the new
+  `PINNED_HASH` (`0x810e_2250_7c7a_fc8f`) awaits the `pages.yml` browser gate;
+  no golden frame for the Bullets room.
 - **`PINNED_HASH` was re-pinned on Windows** (`0x76aa_2acd_7b93_d586`); the
   browser gate in `pages.yml` is what proves wasm matches it.
 - Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
   room's browser cost (245 more boxes a tick in wasm).
-- **EW's dropped items need two more pieces before they can move onto
-  `crcbl-phys` (EW, 2026-09-23).** Each item is one rigid body made of several
-  local boxes (`ItemMotion::local_bounds`, one padded box per mesh instance —
-  the same parts slice EW hands `AabbCompound`), and a single bounding box would
-  lose rifle and backpack silhouettes. Needed: (1) a dynamic compound collider
-  of oriented local boxes, colliding with statics and with other compounds, mass
-  and inertia from the parts or a density default; (2) sleeping (rung 3),
-  because a raid floor holds dozens of resting items. EW waits for both rather
-  than downgrading.
-
-### Ragdolls — `35-ragdolls.md` (2026-08-27)
-
-Nothing built, and most dependencies are also missing: the contact solver (36),
-L3 joints, and `KineticContact` (28) which the death handoff reads the killing
-impulse from. This is the deepest item in the slice.
-
-### Player kit — `30-player-kit.md` (2026-08-27)
-
-No `crcbl-player` crate. **The seam under it is proven, though, and that is
-worth recording:** `crcbl_phys::CharacterController` takes a world-space
-displacement and holds no camera, and three samples drive that one controller
-from three rigs that share no code — `apps/puppet` (third-person orbit),
-`apps/breach` (first-person, measuring yaw the other way round), `apps/shard`
-(fixed isometric bearing, quarter-turn yaw).
-
-**Consequence for delivery step 1:** there are now **three** hand-rolled
-controllers to replace when the kit lands, not one. The 3P GTA rig (spring-arm
-boom resolved by a phys capsule sweep, damped follow, auto-recenter, zoom tiers,
-aim mode, player fade) is entirely unwritten; `apps/puppet`'s camera is an
-`OrbitCamera` with no boom sweep at all.
-
-### Weapon kit — `38-weapons.md` (2026-08-27)
-
-No `crcbl-weapons` crate, no weapon asset schema, no resolved stat block, no
-attachment algebra, no recoil pattern, no state machine, no
-`crcbl weapon stats`/`ttk`. Blocked on ballistics (28) for rounds and on the
-inventory kit (34) for magazines-as-containers — neither exists.
-
-`apps/breach`'s pistol has no round, no penetration, no spread, no RPM: its rate
-limit is the trigger arriving as an input **edge** (one press, one shot,
-documented in `apps/breach/src/game.rs`'s `Controls::fire`). The "three classic
-exploits, closed" section describes work not started.
-
-## Samples touched in passing
-
-### `apps/orbit` is a demo, not yet the acceptance test (2026-08-27)
-
-`apps/orbit` is built and published and carries `06-orbit.md`'s milestones 1 and
-2 — ascent through the atmosphere, stable orbit, timewarp with auto-drop — drawn
-as a map view over flight instruments. Its own header says the moon's frame
-exists and a ship reaching it would be handed over, **but nothing flies there
-yet**, and the bodies are drawn as a map rather than in 3D. So `05-physics.md`'s
-exit criterion ("deorbit + land, across at least one sector boundary with no
-visible seam") is not met by it.
-
-## Tooling and infrastructure — what the ten plans still owe
-
-The ten documents `docs/plan/06-assets-scenes.md`, `07-ui-debug.md`,
-`08-editor.md`, `11-cli-headless.md`, `12-testing.md`, `16-wasm-modules.md`,
-`19-input.md`, `22-replay.md`, `40-profiling.md` and `42-steam.md` were audited
-against the tree on 2026-08-27. What follows is what they still describe and the
-tree does not have.
-
-### `tools/check-wrapped-strings.sh` misses a literal whose continuation resumes with a capital (2026-09-10)
-
-**Found by the formatter, not by an author.** A control hint in
-`apps/towers/src/page.rs` outgrew `rustfmt.toml`'s `max_width`, and rustfmt
-joined the continued literal back onto one line **keeping the continuation's
-indentation inside the string** — exactly the defect that guard exists to catch,
-arriving from the formatter rather than from someone forgetting a `\`. The guard
-stayed green: its pattern requires a lowercase letter or a brace after the run
-of spaces, and the next word was capitalised. The hint is a `concat!` of two
-literals now, which the formatter lays out normally and cannot collapse, so the
-tree is clean — but the hole is not.
-
-**What it would take:** widen the character class after the space run to accept
-a capital and re-run the guard over every tracked Rust file to see what else it
-then finds, which is why this is its own change rather than a line in the slice
-that found it: a widened guard needs its own red-then-green and whatever it
-turns up needs fixing in the same commit.
-
-### Asset hot reload is still entirely future tense (2026-08-27)
-
-**Not built.** No file watcher exists: `notify` appears in no `Cargo.toml`.
-There is no asset reimport path, no in-place GPU pool update, no shader
-recompile keyed by hash, and no per-chunk scene reload. `crcbl-assets`' own
-module docs describe hot reload as the thing that would reintroduce the
-`Unloaded` state, which the registry deliberately does not have because nothing
-can reach it today.
-
-**What it would take:** a `notify` dependency (user decision), the reimport
-path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
-of.
-
-**What it blocks:** `07-ui-debug.md`'s stylesheet hot reload (the whole "styles
-hot-reload like web dev" claim), the editor's revert path, and
-`06-assets-scenes.md`'s "editing a texture/shader/scene chunk reflects without
-restart" exit criterion.
-
-### No vendored glTF corpus; the fixture is synthesized in code (2026-08-27)
-
-**Corrected 2026-09-02: `git ls-files` finds
-`apps/viewer/assets/shelf/Suzanne/glTF/Suzanne.gltf`**, a real Khronos CC0
-document, and `apps/viewer/src/shelf.rs`'s
-`the_default_model_loads_from_the_committed_shelf` puts it through the importer
-on every machine. The rest of the Khronos subset is fetched at a pinned upstream
-commit against a per-file sha256 (`tools/fetch-shelf.sh`), and CI runs the fetch
-in `test (linux)`. What is still true is the narrow half: `crates/crcbl-scene`
-has no `tests/` directory. What exists is
-`crates/crcbl-scene/src/gltf_fixture.rs` behind the `gltf-fixture` feature: a
-triangle document and its `.glb` container built in code, with the rationale in
-that crate's `Cargo.toml` — a binary container is a fixture nobody reviewing a
-change can read.
-
-**Considered and kept:** the synthesized fixture is the right shape for importer
-unit tests and should stay. The Khronos sample subset `12-testing.md`'s anchor
-list asks for — real documents with sparse accessors, extensions, odd component
-types — is now on disk after a fetch. **It is walked now**:
-`every_shelf_model_imports_as_this_manifest_says` parses every fetched model and
-asserts its outcome against `apps/viewer/assets/shelf.expect`. What is still
-missing is a _picture_: the manifest sees a model that stops importing and a
-model that gains a required extension, and cannot see one that still imports and
-looks worse — a dropped normal map, a coarser LOD. That wants a golden over a
-real document, and `crates/crcbl/tests/gltf_e2e.rs` is still one synthetic
-textured quad.
-
-### Coverage gates one workspace floor, not per-crate thresholds (2026-08-27)
-
-**Partially built.** `cargo llvm-cov` runs in `ci.yml`'s `coverage (linux)` job,
-pinned to lavapipe so the number is not runner-dependent, and gates
-`COVERAGE_FLOOR` through `cargo llvm-cov report --fail-under-lines`. That is a
-**single workspace floor**. The per-crate split `12-testing.md` used to promise
-(core/phys/net high, backend crates looser because e2e covers them) does not
-exist, and `ci.yml`'s own comment says why: it waits for tooling that can
-express it. Doc corrected; the gap is real and stays.
-
-### The `crcbl-ui` in the tree is not the CSS/DOM system `07-ui-debug.md` designs (2026-08-27)
-
-**Not built:** the element tree (block/span builder), the CSS-subset parser,
-cascade and specificity, `default.css`, the flex layout engine, stylesheet hot
-reload, the UI inspector, the entity inspector, the debug-draw controls panel,
-focus/`:focus`/`:engaged`, spatial navigation and the reserved
-`ui_move`/`ui_accept`/`ui_back` action set. **The console is built** — it landed
-2026-08-30/31 as `crcbl-console` with `crcbl_ui`'s panel, and "What the debug
-console left as limits" in `docs/notes/tooling.md` is what still stands about
-it.
-
-**What is built:** `crates/crcbl-ui`'s `draw_list` (`DrawList`, `DrawCommand`,
-`Vertex2d`, and since 2026-09-15 the image atlas, rounded rectangle and clip
-rectangles of the plan's rung 1), `text` (`FontAtlas` — a built-in **monospace
-bitmap** ASCII font, not a `fontdue`/`swash` rasterizer and not the
-shelf/skyline+LRU atlas the doc's 2026-07-27 correction specifies), `widget`
-(`Label`, `Button`, `Style`, `SkinInsets`, `PointerInput`, `UiState`,
-`WidgetId`), `menu`, `touch`, `debug` and `budget`. `Style` is a struct of five
-colours — the pre-CSS model.
-
-**Evidence:** no `.css` file is read by any engine crate (`web/style.css` is the
-demo site's); `grep flex crates/` hits only shader code; no `block`/`span`
-builder exists.
-
-### `crcbl_ui::hud`'s two panel types have no consumer (2026-08-27)
-
-**Re-verified with one correction.** `Hud` and `HudPanel` are named by
-`crates/crcbl-ui/src/lib.rs`'s re-export and by nothing else in the workspace —
-no crate, no app. `Anchor` is not in that set: it shares the module and
-`crates/crcbl-ui/src/debug.rs` imports it, so **the unit to delete is the two
-types, not the file**, and `Anchor` needs a home first. The audit's first pass
-said the whole module had no consumer; it does. `07-ui-debug.md`'s 2026-08-09
-correction says to delete it when the widget set lands, because it is built on
-the pre-CSS model (`Label` has no per-label colour; `HudPanel` auto-sizes where
-a measured constant is wanted). Every sample hand-rolls its own HUD instead.
-
-**Not deleted here** because deleting it is a code change outside this audit's
-write scope, and the correction's condition (the widget set landing) has not
-happened.
-
-### The netgraph is the last `DebugModule` nobody wrote (2026-08-27)
-
-**This entry was headed "No system outside `crcbl-render` contributes a
-`DebugModule`" until 2026-09-02, and its own evidence never supported that: both
-implementers it named were inside `crcbl-render`.** `DebugModule` is implemented
-in `crcbl-ui` and across the `apps/` crates now — `crcbl-ui`'s `BudgetStats` and
-`FrameStats` and `apps/options`'s `FileView` among them — against two inside
-`crcbl-render`, so composition across crates is demonstrated many times over.
-
-**Still open:** the netgraph. `crcbl-client` does not depend on `crcbl-ui` and
-there is no `NetGraph` anything in the tree — `grep -ri netgraph` over `crates/`
-and `apps/` returns nothing. `07-ui-debug.md`'s correction settles the
-dependency question (a simulation crate may depend on `crcbl-ui`; there is no
-cycle, since `crcbl-ui` depends only on `glam`, `bytemuck` and `crcbl-core`), so
-what is left is the work, not the decision. This file's "The debug overlay, and
-what is left of it" entry has been updated to say so.
-
-### The editor is not started, and blocks two sample plans (2026-08-27)
-
-**Slice 1 landed 2026-09-16.** `apps/editor` loads breakout's board, picks by
-ray, edits through `EditCommand`/`UndoLog` and saves byte-stably;
-`docs/plan/08-editor.md`'s status section says what that cleared and what it did
-not. The allow-list entry in `tools/check-doc-citations.sh` is gone and the
-binary is in `tools/run-samples-windowed.sh`'s `SAMPLES`. What slice 1 leaves:
-
+- **Needs the user's review: test bounds widened across rungs 2 and 3
+  (2026-09-23).** Each was measured and explained, but the rule is that a
+  tolerance is not widened to make a change pass, so they wait for an OK:
+  - `apps/tumble` wall penetration. Rung 2 widened the any-tick bound 4 → 8 cm
+    and rung 3 to 10 cm, both from fast-spinning cubes tunnelling into pegs.
+    Rung 4's sweeps (2026-09-23) brought the last-tick bound back to rung 1's 1
+    cm (0.43 cm measured) and the any-tick bound down to 5 cm (4.29 cm measured,
+    between two dropped bodies, which only a bullet sweeps), and added
+    fixture-only bounds of 1 cm and 2 cm (0.40 / 1.36 cm). So one bound remains
+    wider than rung 1's: any tick, 5 cm against 4 cm. Options: accept it, make
+    the wall's drops bullets, or sweep every dynamic pair.
+  - Tower pyramid sideways drift in the tumble test, 1 mm → 3 mm (rung 3): with
+    sleep on, the top cube freezes 2.4 mm aside at tick 58 (awake it creeps back
+    to 0.39 mm). The 1 mm claim stands in `a_base_twenty_pyramid_holds` with
+    sleep off.
+  - Sleep turned off in four solver tests that measure the awake solver over a
+    long run (a sleeping stack "holds" without being solved).
+- **Rung 3 (sleep) shipped; what it left.** Islands, lazy splitting, island
+  sleep (0.05 m/s and 0.1 rad/s for 0.5 s) and the wake rules landed 2026-09-23;
+  a base-20 pyramid asleep costs 1.6 µs of solver time against 850 µs awake.
+  Open:
+  - Sleeping contacts are still visited by `ContactPipeline::collide` and
+    `prepare` (the pit at rest spends about 96 µs a tick in the narrow phase);
+    awake and sleeping contact sets, as Box2D keeps, pair with rung 6.
+  - `PhysicsSystem::disturb` walks every contact; per-body contact lists
+    (decision 8) would bound it.
+  - Per-body sleep thresholds are not built (system-wide in `ContactSettings`).
+  - **Needs a decision: the angular threshold.** Plain angular speed lets a body
+    reaching well past a metre sleep while its rim moves faster than 5 cm/s;
+    options are keep it, add Box2D's farthest-point check, or make it per body.
+  - A stack sleeps before it is still (the 2.4 mm above); a longer
+    `time_to_sleep` or a lower speed threshold trades that against later sleep.
+  - The island structure is not hashed, only each body's sleep state.
+  - Recheck determinism across sleep and wake at rung 6, once colouring follows
+    the awake set's order.
+  - Not built: a tumble view dimming sleepers. Not verified: the wasm hash
+    (`0xa939_6834_c4e0_0788`, the `pages.yml` gate's job), `set_material` on a
+    sleeping body itself, a kinematic teleported onto a sleeper.
+- **Compound bodies shipped; EW's item migration and these gaps remain.**
+  `CompoundShape::from_aabbs` / `dynamic_body` (2026-09-23) make one body of
+  local boxes, each part its own broadphase proxy, colliding part by part,
+  sleeping, with mass summed per part (overlaps counted once per part, by
+  choice). EW still has to move `ItemMotion` onto it. Open:
+  - No contact reduction across a body pair: points are bounded only by 4 per
+    touching part pair and `CompoundShape::MAX_PARTS` (32). Not timed.
+  - One `KineticContact` per part-pair contact, so an item landing on two parts
+    raises two events; EW's impact audio may want one per body pair.
+  - The query world holds one box per compound; exact queries go through
+    `AabbCompound`.
+  - No API to restore a body asleep: EW's `ItemMotionSnapshot` has `sleeping`,
+    and a restored body wakes and re-sleeps half a second later.
+  - The TOZ-34 fixture is read from its glTF, not from EW's `collision_parts`
+    output. Untested: compound triggers, turned parts in the contact pipeline,
+    compounds against spheres and capsules, waking neighbours on
+    `set_transform`/`remove_collider`. No tumble scene; the sample doc names
+    none.
+  - **Waiting on EW's user: query layers.** `PhysicsSystem` owns its own
+    `PhysicsWorld`, so EW either moves its statics and controllers onto it (and
+    dropped items' query boxes then block player and AI sweeps) or keeps two
+    worlds (statics registered twice). A per-collider `u32` layer set plus a
+    query mask (`QueryFilter { exclude, mask }`, default all bits) would let
+    controllers ignore items while rays still hit them: about one slice, one AND
+    per broadphase candidate. EW recorded it as its option (a+) (EW `07459fe`)
+    and asked that it not be built until its user picks it.
 - **A tool is built against the vocabularies it can open.** `crcbl::registry`
   (slice 2) replaced the hand-written list, so a component is registered once
   and the codec, the system, the `&mut dyn Reflect` accessor and the `Placement`
@@ -8977,8 +8845,43 @@ browser-hosted single-player game with mods has no containment at all.
   `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
   optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
   polls four XInput slots on Windows. Still owed:
-  - evdev (Linux), GameController (macOS) and the Web Gamepad API; other targets
-    have no pad module, so naming one fails to build.
+  - **GameController (macOS, 2026-09-23): the framework path is unverified off
+    CI.** Its objc calls and smoke tests have only compiled on Windows via
+    cross-clippy and run solely on CI's `macos-latest` job; no controller has
+    been through it. Open: whether `every_path_names_real_getters` holds (Apple
+    could implement getters on private subclasses), whether the strong-linked
+    `GCProductCategory*` test statics link on the runner's macOS, whether macOS
+    claims `buttonHome` for a system gesture, and whether polling beside the
+    AppKit pump sees hotplug promptly. `shouldMonitorBackgroundEvents` is left
+    at the framework default (pads stop while another app is frontmost; SDL sets
+    it to YES), declined as a product decision. `microGamepad`-only controllers
+    (the Siri Remote) are ignored without a log.
+  - **Web Gamepad API (2026-09-23) has met no real controller.** Covered: the
+    standard mapping, id parsing and index transitions with scripted reports
+    through the real `__crcbl_web_pad_*` exports, and a stand-in DualSense
+    connecting, pausing and resuming a demo in Chrome (`browser-e2e.mjs` group
+    E, run locally on breakout and puppet). Not covered: a physical pad in any
+    browser, Firefox's and Safari's real `Gamepad.id` formats (the Firefox parse
+    is from memory), whether Chrome on Windows reports XInput pads without
+    vendor ids. Pads without the standard mapping are skipped by decision
+    (driver-order indices would put South on a different button per pad) and
+    logged once. A pad re-plugged between two frames at the same index with the
+    same id is not seen to leave. Only the web source logs pad connects; whether
+    XInput and evdev should is open. `crcbl::web`'s ABI table still lacks the
+    entropy and GPU rows.
+  - **evdev (Linux, 2026-09-23) has met no real controller or Deck**: only
+    scripted devices, plus a regular file answering `ENOTTY` and a real `read`
+    in CI's Linux jobs. Unverified: the lettered-versus-positional face split by
+    vendor (`xpad` and Steam lettered; Sony and Nintendo positional),
+    `hid-steam`'s `ABS_HAT2Y`/`HAT2X` triggers, the claim that `hid-steam` hides
+    its node while Steam holds hidraw (no double pad on a Deck under Steam), and
+    Switch Pro via `hid-nintendo`. A node that will not open is skipped silently
+    and retried each scan, so a desktop without udev's `uaccess` on the pad
+    finds nothing and logs nothing. Declined for now: inotify hotplug (a 1 s
+    re-scan is enough), applying `input_absinfo.flat` (the seam requires raw
+    axes), filtering vendor 0x28DE (the Steam branch owns it). Generic HID pads
+    that put the right stick on `ABS_Z`/`ABS_RZ` read it as triggers. No uinput
+    end-to-end test (needs `/dev/uinput` on CI).
   - **XInput has met no real controller** — only a scripted `StateSource` and a
     real `XInputGetState` answering 1167 on an empty slot. Button positions,
     stick sign and reconnection are unverified.

@@ -20,7 +20,9 @@ use crate::query::{ShapeHit, ray_vs_aabb};
 use glam::DVec3;
 use std::fmt;
 
-/// Why [`AabbCompound::new`] refused a set of parts.
+/// Why [`AabbCompound::new`] or [`crate::CompoundShape::new`] refused a set
+/// of parts. The query compound refuses only the first two;
+/// the rest are the collision shape's, which must also be a body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompoundError {
     /// A corner of the part at `index` holds a `NaN` or an infinity. A
@@ -37,6 +39,22 @@ pub enum CompoundError {
         /// The part's index in the slice given to [`AabbCompound::new`].
         index: usize,
     },
+    /// A collision shape with no parts: nothing to collide or weigh.
+    NoParts,
+    /// A collision shape with more than [`crate::CompoundShape::MAX_PARTS`]
+    /// parts.
+    TooManyParts {
+        /// How many parts it was given.
+        count: usize,
+    },
+    /// The part at `index` of a collision shape has a rotation that is not a
+    /// unit quaternion, which would scale the box as it turned it.
+    NonUnitRotation {
+        /// The part's index in the parts given.
+        index: usize,
+    },
+    /// Every part of a collision shape is flat, so a density weighs nothing.
+    NoVolume,
 }
 
 impl fmt::Display for CompoundError {
@@ -48,6 +66,19 @@ impl fmt::Display for CompoundError {
             Self::InvertedPart { index } => {
                 write!(f, "compound part {index} has min past max on an axis")
             }
+            Self::NoParts => write!(f, "a compound shape needs at least one part"),
+            Self::TooManyParts { count } => write!(
+                f,
+                "a compound shape has at most {} parts, not {count}",
+                crate::CompoundShape::MAX_PARTS
+            ),
+            Self::NonUnitRotation { index } => {
+                write!(
+                    f,
+                    "compound part {index} has a rotation of other than unit length"
+                )
+            }
+            Self::NoVolume => write!(f, "every part of a compound shape is flat"),
         }
     }
 }

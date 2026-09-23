@@ -527,6 +527,17 @@ impl Room for Wall {
                     radius,
                     tint,
                 }),
+                // Every part is a piece of the one fixture, so each carries
+                // its key.
+                ColliderComponent::Compound {
+                    offset, ref shape, ..
+                } => out.extend(shape.parts().iter().map(|part| Shape::Box {
+                    key: index,
+                    centre: t.position + t.rotation * (offset + part.centre),
+                    rotation: t.rotation * part.rotation,
+                    half: part.half_extents,
+                    tint,
+                })),
             }
         }
     }
@@ -536,30 +547,59 @@ impl Room for Wall {
 mod tests {
     use super::*;
     use crate::scene::tests::tick_dt;
+    use crcbl::phys::ContactBody;
 
     /// **The wall's claims over twenty seconds**: it fills to its cap and
     /// turns over, contacts begin and end, balls bounce at about the
-    /// restitution they were given, nothing leaves the board, and nothing
-    /// sinks into anything by more than a few centimetres even for a tick.
+    /// restitution they were given, nothing leaves the board, nothing sinks
+    /// into a fixture by more than a centimetre at the end or two even for a
+    /// tick, and nothing into anything by more than a centimetre at the end
+    /// or five for a tick.
     ///
-    /// Measured on 2026-09-23, with cubes, at tick 1200: 120 live of 155
-    /// dropped, the fastest body at 6.5 m/s, nothing out of the wall, and the
-    /// mean bounce 0.490 against 0.487 asked for. The worst overlap was 1.4 cm
-    /// in the last tick and 6.9 cm in any tick: a cube spinning at up to
-    /// 80 rad/s — over a radian a tick — turning a corner into a peg that was
-    /// not its nearest feature when the tick's manifold was built. That is
-    /// rotation outrunning a once-a-tick manifold, which rung 4's sweeps for
-    /// fast bodies are for; on 2026-09-17, with balls and pills only, the same
-    /// effect from a spinning pill peaked at 2.6 cm.
+    /// **Rung 4 brought the bounds back down.** Rung 1 held every overlap to
+    /// 1 cm in the last tick and 4 cm in any; rungs 2 and 3 widened those to
+    /// 2 cm and 10 cm, because a cube spinning at up to 80 rad/s — over a
+    /// radian a tick — turned a corner into a peg that was not its nearest
+    /// feature when the tick's manifold was built. Before rung 4, on
+    /// 2026-09-23, a cube spinning at 43 rad/s turned a corner 8.16 cm into
+    /// peg 68 at tick 912, and the last tick's worst overlap was 1.69 cm, both
+    /// against the fixtures. Rung 4's sweeps stop that corner: measured with
+    /// them on the same day, at tick 1200, the worst overlap against a fixture
+    /// was 0.40 cm in the last tick and 1.36 cm in any. Over everything, the
+    /// last tick's was 0.43 cm — rung 1's bound again — and the worst in any
+    /// tick 4.29 cm, which is not under rung 1's 4 cm: it is between two
+    /// dropped bodies, which no sweep looks at, since a fast body is swept
+    /// against static bodies only and none of the wall's drops is a bullet.
+    /// So the bound over everything is 5 cm, the fixtures' is 2 cm, and a
+    /// change that moves the wall's history can move the overlap between two
+    /// spinning drops, which is where the thinnest margin is.
+    ///
+    /// Measured the same day with the sweeps: 120 live of 154 dropped, the
+    /// fastest body at 6.49 m/s, nothing out of the wall and the mean bounce
+    /// 0.489 against 0.488 asked for. These are with one-point contacts
+    /// twisting against their patch, which came in the same day.
     #[test]
     fn the_wall_fills_turns_over_bounces_and_holds_everything() {
         let mut wall = Wall::new();
         let mut fastest = 0.0f64;
         let mut worst_escape = 0.0f64;
+        let (mut fixture_now, mut fixture_peak) = (0.0f64, 0.0f64);
+        let fixture = |side: ContactBody| match side {
+            ContactBody::Entity(e) => (e.to_bits() & 0xffff_ffff) < u64::from(FIRST_DROP),
+            ContactBody::Plane(_) => true,
+        };
         for _ in 0..1200 {
             wall.step(tick_dt(), None);
             fastest = fastest.max(wall.fastest());
             worst_escape = worst_escape.max(wall.worst_escape());
+            fixture_now = wall
+                .phys
+                .contacts()
+                .iter()
+                .filter(|c| fixture(c.a) || fixture(c.b))
+                .flat_map(|c| c.manifold.points().iter().map(|p| -p.separation))
+                .fold(0.0, f64::max);
+            fixture_peak = fixture_peak.max(fixture_now);
         }
         let reading = wall.reading();
         let tally = reading.contacts;
@@ -577,7 +617,48 @@ mod tests {
             "a body got {worst_escape} m out of the wall"
         );
         assert!(fastest < 12.0, "a body reached {fastest} m/s");
-        assert!(tally.worst_penetration < 0.02, "{tally:?}");
-        assert!(tally.peak_penetration < 0.08, "{tally:?}");
+        assert!(
+            fixture_now < 0.01 && fixture_peak < 0.02,
+            "into a fixture: {fixture_now} m in the last tick, {fixture_peak} m at worst"
+        );
+        assert!(tally.worst_penetration < 0.01, "{tally:?}");
+        assert!(tally.peak_penetration < 0.05, "{tally:?}");
+    }
+
+    /// **The wall settles to zero awake bodies once the spawner stops** —
+    /// rung 3's claim for the obstacle wall, whose spawner otherwise never
+    /// lets it rest: filled to its cap and left alone, everything on it comes
+    /// to rest in the bins and sleeps, and none of it has left the wall.
+    ///
+    /// Measured on 2026-09-23: after twenty seconds of drops, the 120 bodies
+    /// left alone were all asleep 326 ticks later, in eleven islands.
+    ///
+    /// **Rung 4's sweeps changed the wall's history**, and in the new one a
+    /// ball came to rest on a bin's floor spinning at 1.22 rad/s about the
+    /// vertical, and never slept: its only contact was one point on the
+    /// floor, and twist friction then acted only in a manifold of two points
+    /// or more. One-point contacts now twist against their contact patch —
+    /// see `crcbl-phys`'s `solver.rs` — and, measured the same day, all 120
+    /// bodies are asleep 367 ticks after the spawner stops, in ten islands.
+    /// Without the patch this fails again.
+    #[test]
+    fn the_wall_settles_to_zero_awake_bodies_once_the_spawner_stops() {
+        let mut wall = Wall::new();
+        for _ in 0..1200 {
+            wall.step(tick_dt(), None);
+        }
+        let mut asleep_at = None;
+        for tick in 0..1200u32 {
+            wall.phys.step(tick_dt());
+            if wall.phys.contact_counters().bodies == 0 {
+                asleep_at = Some(tick);
+                break;
+            }
+        }
+        let counters = wall.phys.contact_counters();
+        let tick = asleep_at.unwrap_or_else(|| panic!("never settled: {counters:?}"));
+        assert_eq!(counters.sleeping, MAX_LIVE, "{counters:?}");
+        assert!(wall.worst_escape() < 0.01);
+        assert!(tick < 900, "the wall settled only after {tick} ticks");
     }
 }

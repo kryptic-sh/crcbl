@@ -36,7 +36,9 @@
 //   D  it renders — no WebGPU device errors, the canvas is not one flat colour,
 //      and the canvas changes from frame to frame while the ball is in flight
 //   E  focus and pause — a blurred canvas pauses and runs no ticks, focus
-//      coming back does not resume on its own, and Escape does
+//      coming back does not resume on its own, and Escape does. Then a pad,
+//      reported through a replaced `navigator.getGamepads`, connects, pauses
+//      and resumes the demo with Start, and disconnects
 //   F  a finger — real touch contacts, which a dispatched mouse is not
 //   G  the frame is sRGB-encoded — the demo's own flat clear colour, read off
 //      the canvas as the browser composited it and compared against the byte an
@@ -9857,6 +9859,110 @@ try {
     'the simulation runs again after resuming',
     afterResume > 0,
     `${afterResume} HUD line(s) in ${windowMs} ms`
+  );
+
+  // **A PAD, SHOWN TO THE PAGE THROUGH ITS OWN `navigator.getGamepads`.** CDP
+  // has no gamepad to dispatch, and a browser hides a real one until a button
+  // is pressed on it anyway, so the page's own API is replaced for the length
+  // of this block by one answering a single standard-mapped pad this script
+  // owns. Everything past that function is the real path: `pumpGamepads` in
+  // `web/engine/gamepad.js` copies it into wasm once a frame, the engine's
+  // `web_gamepad` poller maps it, and the loop pauses on Start exactly as it
+  // pauses on Escape. The id carries Sony's USB vendor, so the connect line
+  // naming PlayStation is the proof the id crossed, and the pause is the proof
+  // a button did.
+  const padId =
+    'crcbl-e2e DualSense (STANDARD GAMEPAD Vendor: 054c Product: 0ce6)';
+  const padsBefore = consoleLines.length;
+  const padLine = (/** @type {string} */ needle) =>
+    consoleLines
+      .slice(padsBefore)
+      .find((line) => line.includes('gamepads: pad') && line.includes(needle));
+  await evaluate(
+    page,
+    `(() => {
+       const buttons = Array.from({ length: 17 }, () => ({
+         pressed: false, touched: false, value: 0,
+       }));
+       const pad = {
+         id: ${JSON.stringify(padId)}, index: 0, connected: true,
+         mapping: 'standard', timestamp: 0, axes: [0, 0, 0, 0], buttons,
+       };
+       globalThis.__crcblE2ePads = [pad];
+       Object.defineProperty(navigator, 'getGamepads', {
+         configurable: true,
+         value: () => globalThis.__crcblE2ePads,
+       });
+       return true;
+     })()`
+  );
+  const padConnected = await until(async () =>
+    padLine('connected (PlayStation)') ? true : null
+  );
+  check(
+    'E',
+    'a pad the page reports is connected with the family its id names',
+    padConnected === true,
+    padLine('connected') ??
+      'no "gamepads: pad … connected (PlayStation)" line — the shim did not ' +
+        'pump the pad, or the engine did not poll it'
+  );
+
+  // Start is `buttons[9]` in the standard mapping. Held until the status
+  // answers, then let go, because the pause toggles on the press and a second
+  // press has to be a second edge.
+  const holdStart = (/** @type {boolean} */ held) =>
+    evaluate(
+      page,
+      `(globalThis.__crcblE2ePads[0].buttons[9] = {
+         pressed: ${held}, touched: ${held}, value: ${held ? 1 : 0},
+       }, true)`
+    );
+  const statusBecomes = (/** @type {number} */ wanted) =>
+    until(async () => {
+      const status = await evaluate(page, `crcbl.status()`);
+      return status === wanted ? status : null;
+    });
+  const beforePad = await evaluate(page, `crcbl.status()`);
+  await holdStart(true);
+  const padPaused = beforePad === 3 && (await statusBecomes(6));
+  await holdStart(false);
+  await loopFrames(page);
+  check(
+    'E',
+    "the pad's Start pauses the demo",
+    padPaused === 6,
+    beforePad === 3
+      ? `status ${await evaluate(page, `crcbl.status()`)}`
+      : `the demo was not running going in (status ${beforePad}), so a pause ` +
+          'is not something Start could be seen to do'
+  );
+  await holdStart(true);
+  const padResumed = padPaused === 6 && (await statusBecomes(3));
+  await holdStart(false);
+  check(
+    'E',
+    "the pad's Start resumes it",
+    padResumed === 3,
+    padPaused === 6
+      ? `status ${await evaluate(page, `crcbl.status()`)}`
+      : 'the pad never paused the demo, so there was nothing to resume'
+  );
+
+  await evaluate(page, `(globalThis.__crcblE2ePads = [], true)`);
+  const padGone = await until(async () =>
+    padLine('disconnected') ? true : null
+  );
+  // The page's own API back, so nothing after this block is steered by a pad.
+  await evaluate(
+    page,
+    `(delete navigator.getGamepads, delete globalThis.__crcblE2ePads, true)`
+  );
+  check(
+    'E',
+    'a pad that leaves the list is disconnected',
+    padGone === true,
+    padLine('disconnected') ?? 'no "gamepads: pad … disconnected" line'
   );
 
   group('F — a finger');

@@ -28,16 +28,48 @@
 //! game reads them directly, or feeds [`ActionMap::gamepad_event`], where
 //! [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
 //! [`Binding::PadTrigger`] read them. The Windows backend is `xinput`,
-//! compiled on Windows only: no other target has a backend yet, and none has a
-//! stand-in that would report "no pads" as though it had looked.
+//! compiled on Windows only, the Linux one is `evdev`, compiled on Linux only,
+//! the macOS one is `game_controller`, compiled on macOS only, and the browser
+//! one is `web_gamepad`, compiled on `wasm32` only: no other target has a
+//! backend yet, and none has a stand-in that would report "no pads" as though
+//! it had looked.
 
 mod context;
 mod device;
+// Linux-only: the `evdev` backend. Compiled into every target's tests too, so
+// its mapping, normalisation, layouts and poller run on the Windows and macOS
+// runners; only the device access is Linux-only.
+#[cfg(any(target_os = "linux", test))]
+pub mod evdev;
+#[cfg(test)]
+mod ffi_layout;
+// The clamp for pad values that arrive as floats, which the browser and
+// GameController backends share.
+#[cfg(any(target_arch = "wasm32", target_os = "macos", test))]
+mod float_axis;
+// macOS-only: the GameController.framework backend. Compiled into every
+// target's tests too, so its mapping, classification and poller run on the
+// Windows and Linux runners; only the framework access is macOS-only.
+#[cfg(any(target_os = "macos", test))]
+pub mod game_controller;
 mod gamepad;
 mod patterns;
+// The name match the browser and GameController backends name a pad's family
+// from when they have no USB ids.
+#[cfg(any(target_arch = "wasm32", target_os = "macos", test))]
+mod product_name;
 mod repeat;
 pub mod text;
 pub mod ui;
+// The vendor and product ids the evdev and browser backends name a pad's
+// family from; only those two read them.
+#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+mod usb;
+// wasm32-only: the Web Gamepad API backend. Compiled into every target's tests
+// too, so its mapping, poller and shim entry points run on the native runners;
+// only the symbols a page calls are exported, and only from a wasm32 build.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod web_gamepad;
 // Compiled into every target's tests too, so the mapping and the layouts are
 // checked on the Linux and macOS runners; only the loader is Windows-only.
 #[cfg(any(windows, test))]

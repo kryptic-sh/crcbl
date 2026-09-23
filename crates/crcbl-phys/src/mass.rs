@@ -8,7 +8,8 @@
 //! that make it tumble.
 //!
 //! The shapes are the ones [`ColliderComponent`] can hold, oriented the way it
-//! holds them: a box's axes and a capsule's Y axis are the body's own.
+//! holds them: a box's axes and a capsule's Y axis are the body's own, and a
+//! compound's parts are turned as its shape turns them.
 
 use glam::{DMat3, DVec3};
 
@@ -92,10 +93,23 @@ impl MassProperties {
         }
     }
 
-    /// The mass properties of `collider` given `mass`, centred at its offset.
+    /// The mass properties of `collider` given `mass`, centred at its offset —
+    /// for a compound, at its parts' centre of mass past its offset, `mass`
+    /// shared among the parts by volume.
     #[must_use]
     pub fn of_collider(collider: &ColliderComponent, mass: f64) -> Self {
         match *collider {
+            ColliderComponent::Compound {
+                offset, ref shape, ..
+            } => {
+                let unit = shape.mass_properties(1.0);
+                let scale = mass / unit.mass;
+                Self {
+                    mass,
+                    centre_of_mass: offset + unit.centre_of_mass,
+                    inertia: unit.inertia * scale,
+                }
+            }
             ColliderComponent::Sphere { offset, radius, .. } => Self::sphere(mass, radius, offset),
             ColliderComponent::Box {
                 offset,
