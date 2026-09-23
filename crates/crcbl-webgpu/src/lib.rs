@@ -2,8 +2,8 @@
 //!
 //! Wasm serialises HAL calls into a buffer it owns; JS decodes that buffer and
 //! replays it against WebGPU, and answers back through a second buffer wasm also
-//! owns. `docs/plan/41-webgpu-stream.md` is the specification, and this crate is
-//! its first slices — **the encoding, the transport that carries it, the reply
+//! owns. `docs/notes/browser.md` records its conventions, and this crate is its
+//! first slices — **the encoding, the transport that carries it, the reply
 //! channel that carries answers home, and the calls that make the round trip**:
 //! adapter enumeration, answered with the whole of
 //! [`AdapterInfo`](crcbl_hal::AdapterInfo); the device request, answered with

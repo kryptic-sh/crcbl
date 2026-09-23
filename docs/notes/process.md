@@ -223,10 +223,10 @@ Stated plainly. "Not reviewed" is the honest line.
   and the whole Rust gate — I edited no Rust.
 - **Relative Markdown links and crate-relative backtick paths** are the citation
   gate's two blind spots. I checked by hand the ones I introduced:
-  `[41-webgpu-stream.md]`, `[42-steam.md]` (from `00-overview.md`),
-  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from `23-netcode.md`) —
-  all resolve relative to `docs/plan/`. I did **not** re-check the pre-existing
-  relative links in these files.
+  `[41-webgpu-stream]` (since folded into `docs/notes/browser.md`),
+  `[42-steam.md]` (from `00-overview.md`), `[13-audio.md]` (from `32-voip.md`),
+  `[27-auth.md]` (from `23-netcode.md`) — all resolve relative to `docs/plan/`.
+  I did **not** re-check the pre-existing relative links in these files.
 - **Carried forward on trust, not re-checked:** the `13-audio.md` claim that
   `05-physics.md`'s correction requires the `libm` crate; the `23-netcode.md`
   assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
@@ -372,9 +372,10 @@ Stated plainly, so the next session does not mistake silence for coverage.
 - **Only seven docs were read against the tree**: `01-foundations` (since folded
   into `docs/notes/backends.md`), `02-vulkan-backend.md`,
   `09-backends-metal-dx12.md`, `10-wasm-webgpu.md`, `15-windowing.md`,
-  `39-capabilities.md`, `41-webgpu-stream.md`. Everything else in `docs/plan/`
-  was untouched and unverified.
-- **`41-webgpu-stream.md` was verified only at its two stale points** (the reply
+  `39-capabilities.md`, `41-webgpu-stream` (since folded into
+  `docs/notes/browser.md`). Everything else in `docs/plan/` was untouched and
+  unverified.
+- **`41-webgpu-stream` was verified only at its two stale points** (the reply
   set, the offscreen surface command). Its wire conventions, handle rules and
   "cases easy to get wrong" were read but not checked call-by-call against
   `crcbl-webgpu`'s `writer`, `reply` and `tag` modules — a spec that large would

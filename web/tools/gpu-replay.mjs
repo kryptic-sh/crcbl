@@ -3523,7 +3523,7 @@ async function main() {
   // There is no reply for `create_buffer` — identity is positional — so a
   // failure has one place to go: the queue `Device::take_error` drains, which
   // `crcbl_hal` documents as existing for WebGPU and which
-  // `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` reading every frame.
+  // `crcbl::engine`'s `GpuContext::acquire` reads every frame.
   // Every way of failing is driven here, because an error that goes nowhere is
   // the same bug as a dropped reply one seam over.
   {
@@ -3686,7 +3686,7 @@ async function main() {
   }
   {
     // **A RANGE IS WHAT PER-FLUSH BUYS, AND THE RANGE IS THE WHOLE FLUSH.**
-    // `docs/plan/41-webgpu-stream.md` leaves the granularity open;
+    // The stream's design left the granularity open;
     // `web/tools/error-scope-bench.mjs` measured it and per-flush is what was
     // built, so what a browser's own refusal can say is "one of these commands",
     // not "this one". A flush of two names both.
@@ -5629,7 +5629,7 @@ async function main() {
   }
   {
     // **THE ENTRIES KEEP THE SLICE'S ORDER AND ARE NOT KEYED BY BINDING
-    // NUMBER.** `docs/plan/41-webgpu-stream.md` requires it because a
+    // NUMBER.** `docs/notes/browser.md` requires it because a
     // `VARIABLE_COUNT` entry must be *last in the slice* as well as
     // highest-numbered, and the fixture's storage-image layout is what makes it
     // checkable from this side: its two entries share binding 11 and differ in

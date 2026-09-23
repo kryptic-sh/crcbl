@@ -373,7 +373,7 @@
 //! The pair is also what puts [`ImageSubresourceRange::ALL`](crcbl_hal::ImageSubresourceRange::ALL)
 //! in front of a real browser. Both counts in
 //! [`PROBE_IMAGE_VIEW_DESC`] are the sentinel, they cross verbatim by the rule
-//! `docs/plan/41-webgpu-stream.md` sets, and WebGPU spells "the rest" as an
+//! `docs/notes/browser.md` sets, and WebGPU spells "the rest" as an
 //! **absent** descriptor member rather than as a number — so a replayer that
 //! passed `4294967295` on builds a view the browser refuses, and only a browser
 //! can say so.
@@ -470,7 +470,7 @@
 //! visible, and in the one place it can be.
 //!
 //! `i32` pairs rather than one `i64` because the whole of this ABI is
-//! `(i32, …) -> i32`, which `docs/plan/41-webgpu-stream.md` sets as the
+//! `(i32, …) -> i32`, which `docs/notes/browser.md` sets as the
 //! convention and which needs no `BigInt` on the JS side.
 //!
 //! # Why the preferred format, and not the whole of `SurfaceCaps`
@@ -1624,7 +1624,7 @@ pub const fn probe_image_desc(width: u32, height: u32, mip_levels: u32) -> Image
 /// **THAT FIELD IS THE RANGE, AND IT IS [`ImageSubresourceRange::all`].** Both
 /// counts are therefore [`ImageSubresourceRange::ALL`] — `u32::MAX`, which
 /// crosses the wire verbatim by the sentinel rule in
-/// `docs/plan/41-webgpu-stream.md` and which **only the replayer can resolve**.
+/// `docs/notes/browser.md` and which **only the replayer can resolve**.
 /// WebGPU spells "the rest" as an absent descriptor member and refuses
 /// `4294967295` outright, so a replayer that passed the number on produces a
 /// view the browser rejects — and this probe is what puts that path in front of
@@ -1662,7 +1662,7 @@ pub const PROBE_SAMPLER: SamplerHandle = match SamplerHandle::from_bits(1 << 32)
 ///
 /// **`lod_max` is [`f32::MAX`], which is the sentinel.** It is
 /// [`SamplerDesc::default`]'s "no limit"; it crosses the wire verbatim by the
-/// rule `docs/plan/41-webgpu-stream.md` sets, and the replayer has to hand it to
+/// rule `docs/notes/browser.md` sets, and the replayer has to hand it to
 /// WebGPU as an explicit `lodMaxClamp` — omitting the member substitutes
 /// WebGPU's own default, which is a number rather than "the rest". This probe is
 /// what puts that in front of a real `createSampler`.

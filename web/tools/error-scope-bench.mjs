@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Measures what `pushErrorScope`/`popErrorScope` around replay would cost, in a
 // real browser on a real device, so that the granularity
-// `docs/plan/41-webgpu-stream.md` leaves open can be decided from numbers
+// the stream's design left open could be decided from numbers
 // instead of from taste.
 //
 //   node web/tools/error-scope-bench.mjs <site-dir> [--adapter hardware]
@@ -138,7 +138,7 @@ const ARMS = ['none', 'flush', 'command'];
  *
  * Zero is the baseline for the same reason `none` is: the fixed submit each
  * frame costs what it costs, and only the difference is the scope's. The top of
- * the range is past `docs/plan/41-webgpu-stream.md`'s "a few thousand commands a
+ * the range is past the stream design's "a few thousand commands a
  * frame", so per-command attribution at a realistic volume is inside the
  * measured range rather than extrapolated to.
  */

@@ -119,9 +119,9 @@ browser's own gate and the demo site's deploy.
 - **`crcbl-webgpu`** — the browser backend, and our own: wasm serialises HAL
   calls into a buffer it owns, JS decodes that buffer and replays it against
   WebGPU, and answers back through a second buffer wasm also owns.
-  [41-webgpu-stream.md](41-webgpu-stream.md) is the specification. It replaced
-  `crcbl-wgpu`, which is deleted; `wgpu` and `gpu-allocator` are at zero
-  occurrences in `Cargo.lock`; no build step runs `wasm-bindgen` any more
+  [`docs/notes/browser.md`](../notes/browser.md) records its conventions. It
+  replaced `crcbl-wgpu`, which is deleted; `wgpu` and `gpu-allocator` are at
+  zero occurrences in `Cargo.lock`; no build step runs `wasm-bindgen` any more
   (`web/build.sh`'s "no wasm-bindgen" note says why), and the one `wasm-bindgen`
   in the lock arrives transitively through `cpal`'s `js-sys`.
 - **`crcbl-mtl` and `crcbl-dx12`** — the Metal and D3D12 backends, each with its
@@ -658,14 +658,14 @@ tables):
 - **Pixel art** ([specs/crcbl/pix.md](../specs/crcbl/pix.md)) — `.crpix` text
   baked at build time and drawn through `SpriteRenderer`. Every sample that
   should have pixel art uses it; see the standing requirements above.
-- **Our own WebGPU** ([41-webgpu-stream.md](41-webgpu-stream.md)) — done, and
-  out of the browser: a wasm build links `crcbl-webgpu` and nothing else, which
-  took `wasm-bindgen` out of the toolchain with it. `crcbl-wgpu` was the last
-  place the engine drew through someone else's abstraction, and it is gone, so
-  there is no `CRCBL_GPU=wgpu` any more. The one rule out of that work which
-  still binds lives in `crates/crcbl/tests/render_e2e.rs`'s module docs, beside
-  the code it constrains: **do not split the golden references per backend**,
-  and why `max_channel_delta` rather than a mean-error budget.
+- **Our own WebGPU** ([rules in `docs/notes/browser.md`](../notes/browser.md)) —
+  done, and out of the browser: a wasm build links `crcbl-webgpu` and nothing
+  else, which took `wasm-bindgen` out of the toolchain with it. `crcbl-wgpu` was
+  the last place the engine drew through someone else's abstraction, and it is
+  gone, so there is no `CRCBL_GPU=wgpu` any more. The one rule out of that work
+  which still binds lives in `crates/crcbl/tests/render_e2e.rs`'s module docs,
+  beside the code it constrains: **do not split the golden references per
+  backend**, and why `max_channel_delta` rather than a mean-error budget.
 - **Sample→engine seams** (`docs/backlog.md` carries what is left) — a standing
   sweep rather than a phase. When two samples carry the same machinery, it
   belongs behind an engine seam; when they carry the same _content_, it does

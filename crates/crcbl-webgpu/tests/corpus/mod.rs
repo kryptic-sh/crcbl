@@ -441,7 +441,7 @@ pub fn every_command() -> Vec<Command> {
         // `u32::MAX` count — "as many as this device can", not four billion
         // descriptors — beside all three `BindingFlags`, on the entry that is
         // both last in the slice and highest-numbered. It crosses verbatim by
-        // the sentinel rule in `docs/plan/41-webgpu-stream.md`, and **WebGPU has
+        // the sentinel rule in `docs/notes/browser.md`, and **WebGPU has
         // no binding arrays at all**, so this is the layout the replayer has to
         // refuse rather than quietly build one descriptor for.
         Command::CreateBindGroupLayout {
@@ -538,7 +538,7 @@ pub fn every_command() -> Vec<Command> {
         // number.** Both halves are deliberate. The single differing field is
         // `read_only`, so a decoder that read the kind's payload once and copied
         // it fails here and nowhere else. The shared binding number is what pins
-        // the rule `docs/plan/41-webgpu-stream.md` states about this command: a
+        // the rule `docs/notes/browser.md` states about this command: a
         // decoder must preserve slice order rather than rebuild the list from
         // binding numbers, and one that keyed entries by binding would collapse
         // these two into one.
@@ -1324,7 +1324,7 @@ pub fn every_command() -> Vec<Command> {
             queue: handle(140, 141),
         },
         // The copy the readback reads: its buffer and image side, and the many
-        // numbers `docs/plan/41-webgpu-stream.md` warns a transposition would
+        // numbers a transposition would
         // hide. `buffer_row_length` is texels and non-zero here (an explicit
         // pitch), `image_height` a different non-zero, and the offset's three
         // signed components are all distinct with a negative among them.

@@ -307,7 +307,7 @@ impl<'a> ByteReader<'a> {
     /// crosses on, and the one that meets the house style's "pad nothing" rule
     /// against SPIR-V's own four-byte alignment. The words are decoded one at a
     /// time through [`read_u32`](Self::read_u32) — the deliberate alignment
-    /// exception `docs/plan/41-webgpu-stream.md` calls for, taken over a hidden
+    /// exception `docs/notes/browser.md` records, taken over a hidden
     /// realignment copy: the buffer is byte-addressed and packed, so the words do
     /// not start on a four-byte boundary, and reading them word by word from
     /// little-endian bytes is exact wherever they land. Absence is the empty

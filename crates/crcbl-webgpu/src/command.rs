@@ -173,7 +173,7 @@ pub enum Command {
     /// **[`lod_max`](Self::CreateSampler::lod_max) crosses verbatim, sentinel
     /// included.** [`SamplerDesc::default`](crcbl_hal::SamplerDesc) sets it to
     /// [`f32::MAX`], meaning "no limit", and that is the sentinel rule
-    /// `docs/plan/41-webgpu-stream.md` states for `WHOLE_BUFFER` and
+    /// `docs/notes/browser.md` states for `WHOLE_BUFFER` and
     /// [`ImageSubresourceRange::ALL`]: a sentinel is a value the seam defines,
     /// and an encoder that resolved one would be answering a question only the
     /// replayer has the information to answer. Here the replayer's answer is
@@ -228,7 +228,7 @@ pub enum Command {
     /// shape rather than the encoding's convenience.
     ///
     /// **Slice order is preserved exactly, and is not rebuilt from binding
-    /// numbers.** `docs/plan/41-webgpu-stream.md` says why:
+    /// numbers.** `docs/notes/browser.md` says why:
     /// [`BindGroupLayoutDesc::entries`](crcbl_hal::BindGroupLayoutDesc::entries)
     /// is order-sensitive, because a
     /// [`BindingFlags::VARIABLE_COUNT`](crcbl_hal::BindingFlags::VARIABLE_COUNT)
@@ -464,7 +464,7 @@ pub enum Command {
     ///
     /// The whole of [`GraphicsPipelineDesc`](crcbl_hal::GraphicsPipelineDesc),
     /// flattened as every other descriptor here is — and **the largest descriptor
-    /// on the seam**, the one `docs/plan/41-webgpu-stream.md` singles out for its
+    /// on the seam**, the one `docs/notes/browser.md` singles out for its
     /// depth-stencil chain: an `Option<DepthStencilState>` holding an
     /// `Option<StencilState>` of two `StencilFaceState`s of leaf enums, three
     /// levels of nesting where a decoder written to a shallower assumption is

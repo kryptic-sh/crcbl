@@ -564,7 +564,7 @@ pub enum Reply {
     /// device implicitly — [`Command::CreateBuffer`](crate::Command::CreateBuffer)
     /// carries no device id either. The side table that stamps object ownership
     /// arrives with the second device, as
-    /// `docs/plan/41-webgpu-stream.md` says it must.
+    /// `docs/notes/browser.md` says it must.
     Device {
         /// What the device the browser opened can do.
         caps: DeviceCaps,

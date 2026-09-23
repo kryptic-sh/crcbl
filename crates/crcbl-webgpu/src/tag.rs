@@ -1,9 +1,8 @@
 //! The opcode table, the enum code tables, and the caps the reader enforces.
 //!
 //! Everything the two halves of the stream have to agree on byte-for-byte lives
-//! here, so adding a command touches one file — which is the condition
-//! `docs/plan/41-webgpu-stream.md` sets for leaving the numbers with the encoder
-//! rather than in the document.
+//! here, so adding a command touches one file — which is the condition for
+//! leaving the numbers with the encoder rather than in a document.
 //!
 //! # The tags are ours, not the compiler's
 //!
@@ -254,8 +253,8 @@ pub const MAX_WAITING_REPLIES: usize = 1024;
 // family rather than inside a neighbouring command, which is the difference
 // between an `UnknownTag` and a plausible-looking wrong decode.
 //
-// **The ranges are sized to the seam, not to a nibble.** An earlier draft of
-// `docs/plan/41-webgpu-stream.md` gave each family one nibble, and that never
+// **The ranges are sized to the seam, not to a nibble.** The plan that first
+// specified this stream gave each family one nibble, and that never
 // fitted: `crcbl-hal`'s `Device` declares seventeen `create_*` methods and
 // sixteen `destroy_*`, and `CommandEncoder`'s state commands come to sixteen
 // again. Creation was over capacity before a single command was written. The

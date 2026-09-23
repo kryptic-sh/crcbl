@@ -84,7 +84,7 @@ fn sequence_numbers_count_from_the_header_and_carry_across_a_clear() {
     );
 }
 
-/// The argument `docs/plan/41-webgpu-stream.md` calls the one most easily
+/// The argument `docs/notes/browser.md` calls the one most easily
 /// dropped: `bind_group` and `push_constants` both take the pipeline layout
 /// *last*, after a variable-length field.
 #[test]
@@ -451,7 +451,7 @@ fn a_samplers_floats_survive_bit_for_bit_including_one_no_short_decimal_names() 
 /// **`lod_max`'s `f32::MAX` crosses as itself and is not resolved here.**
 ///
 /// It is [`SamplerDesc::default`]'s "no limit", and the sentinel rule in
-/// `docs/plan/41-webgpu-stream.md` is that a sentinel is a value the seam
+/// `docs/notes/browser.md` is that a sentinel is a value the seam
 /// defines and that an encoder resolving one is answering a question only the
 /// replayer has the information to answer. So this asserts the four bytes on the
 /// wire rather than the decoded value alone: a writer that turned the sentinel
@@ -686,7 +686,7 @@ const LAYOUT_KIND_AT: usize = LAYOUT_ENTRY_AT + 4 + 4;
 /// `BindingKind` payload read once and copied — the two `StorageBuffer`s differ
 /// in both bools. A list rebuilt from binding numbers rather than kept in slice
 /// order — the third assertion is about exactly that, and
-/// `docs/plan/41-webgpu-stream.md` requires it because a `VARIABLE_COUNT` entry
+/// `docs/notes/browser.md` requires it because a `VARIABLE_COUNT` entry
 /// must be *last in the slice* and not merely highest-numbered.
 #[test]
 fn a_bind_group_layout_carries_a_multi_entry_list_in_the_descriptors_own_order() {

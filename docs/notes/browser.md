@@ -582,6 +582,153 @@ last green lantern were **cancelled by my own pushes**, so there are no
 observations in between and "it first failed here" is not evidence it started
 here.
 
+## What the deleted 41-webgpu-stream plan left behind (2026-09-24)
+
+Record; the plan was fully built, and the coverage it left is in
+`docs/backlog.md` under _What the reply channel still owes_, _Error-scope
+granularity was measured and adopted_ and _Smaller things the WebGPU work
+surfaced and did not fix_. It specified the encoding `crcbl-webgpu` speaks: wasm
+serialises HAL calls into a buffer it owns, `web/engine/gpu-replay.js` replays
+them against WebGPU, and answers come back through a second buffer wasm also
+owns. It mattered because this encoding is the one part of the WebGPU track with
+no external specification — every bug in it is ours alone. The canvas-sizing
+ordering is recorded separately in the next section, and the two contract
+findings declined after the second decoder was written are in
+`docs/notes/backends.md` under _The command stream's contract, read from the
+other side_.
+
+- **Nothing but integers crosses, and wasm owns every buffer.** Every export is
+  `(i32, …) -> i32`, JS reads and writes wasm memory in place and never passes a
+  pointer in — the convention `crcbl-store`'s fetch ABI, the OPFS entry points
+  and `crcbl-shell`'s key scratch already used, so there is one convention, not
+  two. That is what let `check-exports.mjs`'s allowed-import set go empty. The
+  HAL's trait objects are ids and nothing more (the `GPUDevice` lives in JS for
+  its whole life), and no seam method takes a callback.
+- **A pointer never goes on the wire; the `Instance` impl refuses it.**
+  `StreamWriter::create_surface` takes the `u32` canvas key and
+  `create_offscreen_surface` takes nothing, so a pointer-carrying
+  `SurfaceTarget` has nothing to be encoded into and the refusal lives in
+  `crcbl_webgpu::hal::WebGpuInstance::create_surface`, where the target is still
+  whole. `Offscreen` has its own command rather than a reserved canvas id both
+  decoders would have to agree on. Neither configures anything: configure takes
+  a `GPUDevice`, so it belongs to swapchain creation.
+- **Two channels, one byte format.** The command stream (wasm → JS, `writer` /
+  `reader`, `gpu-stream.js`) and the reply stream (JS → wasm, `reply`,
+  `gpu-reply.js`) share one bounds-checked reader, one writer and one error type
+  in `crcbl-webgpu`'s `bytes` module, because two near-identical readers are two
+  places for a bound to be wrong. Their magics differ (`CRCBLGPU` against
+  `CRCBLRPL`) so a channel wired backwards fails on the first eight bytes rather
+  than on whichever reused tag number is unclaimed. **The transport is what
+  defers an answer**: `surface_caps` is answered inside the replayed call and is
+  still a reply, because a frame boundary sits between the two halves of every
+  call on this seam.
+- **A reply for a sequence nothing awaits refuses the whole buffer.**
+  `expect_reply` keeps a bounded set and `drain_replies` answers
+  `DecodeError::UnexpectedSequence` for an unknown or already-answered number: a
+  replayer answering the wrong command looks exactly like an answer otherwise.
+- **The reply set is one reply per encoding shape, not per HAL method.** A new
+  shape is what deserves review, because it is where a decoder gains a way to be
+  wrong. **An optional fixed-width field takes a presence byte, never a
+  sentinel** — `SurfaceCaps::current_extent`'s `(0, 0)` is a minimised window
+  and `0xFFFF_FFFF` is Vulkan's "no opinion", so there is no value to spare.
+- **Only the reply-buffer export can grow wasm memory.**
+  `__crcbl_web_gpu_reply_buffer` allocates, so the `Uint8Array` is built after
+  it from the pointer it returned and never stored. A committed buffer the
+  engine has not drained is not overwritten: `reply_buffer` answers `0` and the
+  shim keeps its replies, because a dropped reply is a command that waits for
+  ever.
+- **Replay happens once per frame, at the `requestAnimationFrame` boundary**;
+  anything answered is read the next frame. The HAL's polled shapes
+  (`PendingDevice::poll`, `request_readback` + `poll_readback`) are what survive
+  that.
+- **The end of the stream is its own export, and the leak line's words are
+  load-bearing.** A zero length cannot mean "ended" because it is also what a
+  page sees before boot, so `__crcbl_web_gpu_stream_ended` exists and the shim
+  reads it after `__crcbl_web_gpu_stream_release`. `Replayer#replay` then writes
+  `N object(s) still alive at device teardown (…)` — after the frame's own
+  destroys — in the exact wording `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` use,
+  since one grep in every e2e runner covers all four backends and a rewording
+  silently stops matching.
+- **Wire conventions are `crcbl-net`'s `codec.rs`'s.** Little-endian; a tag byte
+  first so a decoder dispatches instead of trial-decoding; tags in contiguous
+  ranges per family, sized to what each family must hold (a nibble per family
+  never fit) and walked by `tag.rs`'s range tests; a `u32` length prefix before
+  every variable-length field with a cap per prefix and no padding; a version
+  word in the header, because the Rust and JS halves cache independently. A
+  presence byte for every optional field that is not a handle, with any value
+  but the two canonical ones refused. Bitflags go over as `bits()` and decode
+  through `from_bits`, never `from_bits_truncate`, so an unclaimed bit is an
+  error. The writer asserts the caps the reader enforces.
+- **Enum tags are ours, never `as u8`.** No HAL enum has explicit discriminants
+  and `Format` may gain a variant mid-list, so a cast silently renumbers
+  everything after it on the far side of a language boundary. The explicit table
+  in `tag.rs` is the defence, and the opcode numbers live there too, so adding a
+  command touches one file.
+- **The encoding refuses a malformed stream, never an invalid descriptor.** An
+  unclaimed code or bit is a decode error; a zero `mip_levels` is a value the
+  wire claims, and refusing it would have to happen mid-frame in a call that
+  returns `Ok(handle)` before anything replayed. A bad descriptor is a creation
+  failure and leaves through `take_error`.
+- **`Option<Handle>` is a bare `u64`, and absence is a zero _generation_**, not
+  a zero word: `Handle::from_bits` rejects any zero-generation value, so a
+  decoder testing the whole word is wrong on a corrupt stream. The packing lives
+  in `crcbl-core`'s `handle.rs`; read it there. **The opcode, not the handle,
+  says which table an id indexes** — handles carry no kind, so one flat table
+  per resource kind is correct and one table keyed on bits is not. **A slot
+  remembers its generation** (`HandleTable` in `gpu-replay.js`), or a destroy of
+  a reused index releases the current occupant. A second device will need the
+  owner side table and `HalError::ForeignObject`, as every backend does.
+- **Wasm allocates creation handles itself** and returns `Ok(handle)` at once;
+  failure arrives through `Device::take_error`, drained by `crcbl::engine`'s
+  `GpuContext::acquire`. `crcbl-render`'s `cached_group` therefore returns
+  `Some` on this backend and the error stops the frame instead of skipping a
+  pass — louder, and right for a bind group this code built wrongly.
+- **A destroy naming an empty slot is a no-op, not corruption.** `crcbl-render`
+  destroys pre-allocated siblings before `?` and on `Err`, including for handles
+  whose creation will turn out to have failed. `Instance::destroy_surface` obeys
+  the same rule.
+- **Sequence numbers are positional on the command stream and a field on
+  replies.** The header carries the first command's sequence and the nth command
+  is `base + n`: a per-command field would cost four bytes a command, be a
+  second source of truth, and a `u32` wraps within hours, while an off-wire
+  counter can be `u64` and carries across buffer resets. A reply's position
+  implies nothing, so it carries the `u64`, relying on the counter being
+  monotonic across frames.
+- **Browser errors are attributed per flush, by error scopes.** The plan settled
+  on one `uncapturederror` listener feeding the device's queue unattributed;
+  commit `7a0d6ee` replaced that. `Replayer#replay` wraps every flush that
+  carries commands in one `pushErrorScope` per `GPUErrorFilter`
+  (`ERROR_SCOPE_FILTERS` in `web/engine/gpu-replay.js` — all three, because a
+  scope is exclusive with `uncapturederror` and covering one filter would hand
+  the others back unattributed), pops them in a `finally` so a thrown
+  `ReplayError` cannot leak the scope stack, and files what they catch into the
+  same log as `during commands A–B`. Empty flushes are not scoped. The listener
+  stays for errors raised with no flush open (a `mapAsync` continuation, device
+  opening) and names no command, since a number there would be a guess.
+  Per-command scopes were measured with `web/tools/error-scope-bench.mjs` and
+  declined: settle time is superlinear (the figures are in `7a0d6ee`'s message)
+  and no granularity makes the answer synchronous anyway. The replayer's own
+  refusals are attributed exactly, to the command.
+- **Cases that are easy to get wrong:** `ShaderModuleDesc` absence differs per
+  field (an empty `spirv` is absent, `Some("")` WGSL is present and empty);
+  `dxil` must be skipped correctly, two variable-length leaves under one slice;
+  `spirv` is the one deliberate four-byte alignment exception; `BindGroupEntry`
+  is a counted list of tagged variable-length entries, because the discriminant
+  is the only thing saying which of three tables to resolve against;
+  `BindGroupLayoutDesc` entries keep slice order; the depth-stencil chain is the
+  deepest descriptor; `poll_readback`'s exact length is the caller's check,
+  since nothing in a reply says what the descriptor asked; `bind_group` and
+  `push_constants` both take the pipeline layout last.
+- **Sentinels pass through for the replayer to resolve.** `WHOLE_BUFFER` and
+  `ImageSubresourceRange::ALL` cross verbatim; the encoder never decides.
+  Resolving does not always mean omitting the member: `SamplerDesc::lod_max`'s
+  `f32::MAX` must become an explicit clamp, because WebGPU's absent
+  `lodMaxClamp` means 32 and nothing reports a mip clamp.
+- **`crcbl-hal`'s null backend `record::Command` was the precedent**
+  (deep-copied capture, flattened pass fields, copy direction in the variant
+  name, stable `name()`), except that its `PushConstants` keeps only a length —
+  a replayer needs the bytes.
+
 ## What the deleted WebGPU plan left behind (2026-08-22)
 
 Record; what the deletion left open is in docs/backlog.md under the same

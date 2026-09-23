@@ -10,7 +10,7 @@
 //! Every export is a plain integer in and a plain integer out, wasm owns the
 //! memory, and JS never passes a pointer in. That is the convention
 //! `crcbl-store`'s fetch ABI, the OPFS entry points and `crcbl-shell`'s key
-//! scratch already use; see `docs/plan/41-webgpu-stream.md` for why the stream
+//! scratch already use; see `docs/notes/browser.md` for why the stream
 //! follows it rather than inventing a second one.
 //!
 //! # Exports

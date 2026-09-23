@@ -1342,7 +1342,7 @@ class ByteReader {
    * "as many descriptors as this device can" and is resolved against a device's
    * own `max_bindless_descriptors`, which is a number this decoder does not have
    * — and `gpu-replay.js` has no binding arrays to resolve it into, so it
-   * refuses. Both are the sentinel rule in `docs/plan/41-webgpu-stream.md`: the
+   * refuses. Both are the sentinel rule in `docs/notes/browser.md`: the
    * encoder never decides, and what the resolution is remains the replayer's to
    * work out per field.
    *
@@ -1828,7 +1828,7 @@ function decodeCommand(r) {
       // different lengths.
       //
       // The entries are pushed in wire order and NEVER SORTED OR KEYED BY
-      // `binding`. `docs/plan/41-webgpu-stream.md` says why: the slice is
+      // `binding`. `docs/notes/browser.md` says why: the slice is
       // order-sensitive, because a `VARIABLE_COUNT` entry must be both last in
       // it and highest-numbered, and the first half of that rule is a property
       // of the *list* rather than of its contents. The fixture carries a layout

@@ -75,8 +75,8 @@
 //! that flush covered — `during commands 4180–4200` rather than nothing at all.
 //! Narrowing that to the one command would take a scope pair per command;
 //! `web/tools/error-scope-bench.mjs` is what measured the price of doing so, and
-//! `docs/plan/41-webgpu-stream.md`'s error-attribution section is where the
-//! granularity is argued. The attribution is asynchronous either way:
+//! `docs/notes/browser.md` records why per flush was
+//! adopted instead. The attribution is asynchronous either way:
 //! `popErrorScope` answers a microtask later at the earliest, so no granularity
 //! makes it synchronous with the failing call.
 //!

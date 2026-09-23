@@ -88,8 +88,8 @@
 //
 // SO A BUFFER THAT CANNOT BE MADE HAS NOWHERE TO BE REPORTED, and the answer is
 // the seam's own: `Device::take_error`, which `crcbl_hal` documents as existing
-// *for WebGPU* and which `docs/plan/41-webgpu-stream.md` has `Gpu::acquire`
-// draining at the top of every frame. This replayer keeps that queue — see
+// *for WebGPU* and which `crcbl::engine`'s `GpuContext::acquire`
+// drains at the top of every frame. This replayer keeps that queue — see
 // {@link DeviceErrorLog} — and everything that can go wrong with a buffer goes
 // into it: the refusals this file makes before asking the browser, a
 // `createBuffer` that throws, and the errors the device reports asynchronously
@@ -1173,7 +1173,7 @@ const VIEW_DIMENSION = Object.freeze({
 /**
  * `ImageSubresourceRange::ALL`, which is `u32::MAX` on the wire.
  *
- * `docs/plan/41-webgpu-stream.md` fixes the rule this is half of: a sentinel
+ * `docs/notes/browser.md` fixes the rule this is half of: a sentinel
  * meaning "all of it" crosses verbatim, because resolving one is answering a
  * question only the replayer has the information to answer.
  */
@@ -1724,7 +1724,7 @@ const BINDING_COUNT_DEVICE_MAX = 0xffff_ffff;
  *
  * **THE SENTINEL BECOMES AN ABSENCE, AND THIS TIME THAT IS THE RIGHT
  * RESOLUTION** — the opposite of `lod_max`, which is why the rule
- * `docs/plan/41-webgpu-stream.md` sets is that the *encoder* never resolves and
+ * `docs/notes/browser.md` sets is that the *encoder* never resolves and
  * the replayer works it out per field. WebGPU's absent `GPUBufferBinding.size`
  * means "to the end of the buffer", which is exactly what `WHOLE_BUFFER` means,
  * so omitting the member is the faithful translation. `lodMaxClamp` absent means
@@ -2473,7 +2473,7 @@ function adapterName(adapter) {
  * One resource kind's live objects, keyed the way a `crcbl_core::Handle` is.
  *
  * ONE OF THESE PER KIND, NEVER ONE FOR ALL OF THEM. `crcbl-webgpu`'s crate docs
- * and `docs/plan/41-webgpu-stream.md` both say why: a handle carries no kind, so
+ * and `docs/notes/browser.md` both say why: a handle carries no kind, so
  * a buffer and a surface can hold the same eight bytes, and the opcode is the
  * only thing that says which table an id indexes. A single table keyed on handle
  * bits would let two kinds stand on each other.
@@ -3436,7 +3436,7 @@ export class Replayer {
    *
    * `crcbl_hal::Device::take_error` seen from this side, and named for it: each
    * error is reported once to each reader — taking it clears it for that reader
-   * — and `docs/plan/41-webgpu-stream.md` has `Gpu::acquire` draining it at the
+   * — and `crcbl::engine`'s `GpuContext::acquire` drains it at the
    * top of every frame. That draining now happens: a `TakeError` command carries
    * the same messages to wasm through {@link Replayer#takeErrorCommand}, on a
    * cursor of its own, so `web/tools/gpu-replay.mjs` and the browser gate go on
@@ -4833,7 +4833,7 @@ export class Replayer {
    *
    * **`lod_max`'s SENTINEL RESOLVES HERE, AND IT RESOLVES TO ITSELF.**
    * `SamplerDesc::default` sets it to `f32::MAX` meaning "no limit", and the
-   * rule `docs/plan/41-webgpu-stream.md` sets is that a sentinel crosses
+   * rule `docs/notes/browser.md` sets is that a sentinel crosses
    * verbatim and the replayer resolves it. What it must **not** resolve to is an
    * absent member, which is how {@link subresourceCount} spells
    * `ImageSubresourceRange::ALL` and which is exactly wrong here: WebGPU's
@@ -7174,7 +7174,7 @@ export class Replayer {
    * single queue and inserts hazard barriers itself, so it has no semaphores at
    * all — dropping a wait would be a silent synchronisation bug, and the engine's
    * real frame will carry them, so this is the loud refusal
-   * `docs/plan/41-webgpu-stream.md`'s reasoning asks for rather than a quiet
+   * the stream's conventions ask for rather than a quiet
    * omission. An unresolvable command buffer is refused too. Both are the far
    * side's bug, so both go to the error queue rather than throwing.
    *

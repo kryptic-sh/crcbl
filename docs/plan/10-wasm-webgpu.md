@@ -1,7 +1,7 @@
 # Stage 10 — Wasm + WebGPU
 
 > **Two corrections at the bottom of this file supersede parts of the body, and
-> the body is read first — so, up front: the *networking* half of this stage is
+> the body is read first — so, up front: the _networking_ half of this stage is
 > **removed** (browsers have no network transport; see
 > [23-netcode.md](23-netcode.md)'s LAN correction), and the **"Tier B"
 > vocabulary throughout is superseded\*\* by
@@ -38,10 +38,10 @@ earlier stage, not a wasm special case.
 > 2026-08-21 in `6b5e17a`, along with the whole `wgpu` dependency family, both
 > its CI jobs and `CRCBL_GPU=wgpu`. The backend is `crcbl-webgpu` — wasm
 > serialises HAL calls into a buffer it owns and JS decodes and replays them
-> against WebGPU, which is `docs/plan/41-webgpu-stream.md`'s subject. The native
-> portability fallback the argument below rests on does not exist; there is no
-> triage backend, and `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` are the native
-> set.
+> against WebGPU, whose conventions are recorded in `docs/notes/browser.md`. The
+> native portability fallback the argument below rests on does not exist; there
+> is no triage backend, and `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` are the
+> native set.
 
 The original reasoning — implement the HAL on the **`wgpu` crate**, not raw
 `web-sys` WebGPU:
@@ -162,7 +162,7 @@ because WebGPU reports creation failures to the device error callback — a run
 submitted invalid command buffers by the hundred while reporting a healthy
 status. Both are fixed, the second by `Device::take_error`, which `Gpu::acquire`
 drains before it records anything; see
-[41-webgpu-stream.md](41-webgpu-stream.md)'s error-attribution section for the
+[the stream's rules in `docs/notes/browser.md`](../notes/browser.md) for the
 shape that gives it.
 
 **A readback trap worth keeping.** Three of the four obvious ways to read a

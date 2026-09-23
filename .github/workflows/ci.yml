@@ -374,7 +374,7 @@ jobs:
   # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
   #
   # `crcbl-shell` (the Web/canvas backend, P5), `crcbl-webgpu` (the WebGPU
-  # command stream, `docs/plan/41-webgpu-stream.md`) and `crcbl-hal` all carry
+  # command stream) and `crcbl-hal` all carry
   # wasm-gated code that was added deliberately and then compiled by nothing:
   # every other job in this file runs on a host target, so a
   # `#[cfg(target_arch = "wasm32")]` block could stop compiling and no gate would

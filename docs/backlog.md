@@ -8132,15 +8132,15 @@ highlights and nothing can draw a drop cursor until the button comes up.
 position and whether the payload is acceptable, then a use of it in each backend
 — X11's is already computed and thrown away.
 
-### Error-scope granularity was measured and adopted; the plan still says otherwise (2026-08-27)
+### Error-scope granularity was measured and adopted; the bench runs nowhere (2026-08-27)
 
 **Per flush, decided by measurement** — commit `7a0d6ee` (2026-08-22) carries
 the figures, and `Replayer#openErrorScopes` with `ERROR_SCOPE_FILTERS` in
 `web/engine/gpu-replay.js` attribute a browser error to the flush that caused
-it, and `docs/plan/41-webgpu-stream.md` no longer lists it as unsettled; what
-this entry still records is that nothing in CI runs
-`web/tools/error-scope-bench.mjs`, so the figures in `7a0d6ee` are the only
-ones.
+it; the rule is recorded in `docs/notes/browser.md` (_What the deleted
+41-webgpu-stream plan left behind_). What this entry still records is that
+nothing in CI runs `web/tools/error-scope-bench.mjs`, so the figures in
+`7a0d6ee` are the only ones.
 
 **Evidence:** `grep -rn 'error-scope-bench' .github/ web/README.md` finds no
 caller.
@@ -8713,8 +8713,15 @@ remain, and from rung 2:
     raises two events; EW's impact audio may want one per body pair.
   - The query world holds one box per compound; exact queries go through
     `AabbCompound`.
-  - No API to restore a body asleep: EW's `ItemMotionSnapshot` has `sleeping`,
-    and a restored body wakes and re-sleeps half a second later.
+  - `PhysicsSystem::put_to_sleep` restores a body asleep (2026-09-24), but each
+    restored body sleeps as an island of its own: a restored stack is three
+    sleeping islands where the saved one was one, joining only when something
+    wakes one of them, so `ContactCounters::sleeping_islands` differs from the
+    saved system's. Only the entity passed is exempt from the new-pair wake on
+    the next step; the rest of an island it drags to sleep is not (in practice
+    those are already paired). Compounds restored asleep are covered only by
+    EW's bunker round-trip test (4c8bd1a), not by one here. Untested: restoring
+    a static in the same tick as a sleeper (neither wakes it, by the rule).
   - The TOZ-34 fixture is read from its glTF, not from EW's `collision_parts`
     output. Untested: compound triggers, turned parts in the contact pipeline,
     compounds against spheres and capsules, waking neighbours on
@@ -14908,12 +14915,16 @@ What the deferral left behind, stated as gaps rather than footnotes:
 
 ### Smaller things the WebGPU work surfaced and did not fix
 
-- **A device error names no command.** `Reply::DeviceErrors` carries the
-  browser's prose, but `uncapturederror` arrives with no sequence, so nothing
-  says _which_ encoded command caused it — which is why the errors ride a
-  command that asks rather than being pushed. `docs/plan/41-webgpu-stream.md`'s
-  attribution section is still open. It is the difference between "the device
-  reported an invalid bind group" and "command 4,182 did".
+- **A device error names a flush, not a command.** `Reply::DeviceErrors` carries
+  the browser's prose, and WebGPU raises it with no sequence — which is why the
+  errors ride a command that asks rather than being pushed. Per-flush error
+  scopes (`Replayer#openErrorScopes`) now stamp every error a flush issued with
+  that flush's sequence range, `during commands A–B`; errors raised with no
+  flush open still reach the `uncapturederror` listener and name nothing. The
+  remaining gap is the difference between "commands 4,100–4,300 reported an
+  invalid bind group" and "command 4,182 did": per-command scopes would close it
+  and were declined on cost, as `docs/notes/browser.md` (_What the deleted
+  41-webgpu-stream plan left behind_) records.
 - **`take_error` answers a frame late, by construction.** Nothing here may block
   on a browser, so the reply to this frame's ask lands in the next one:
   `Gpu::acquire` refuses to record a frame when it answers `Some`, so the frame
@@ -21700,16 +21711,6 @@ wiring.
   `check-exports.mjs` lists it as informational and does not fail on it. It is
   the diagnostic for "the engine stopped draining"; keep it when a shim reads
   it, drop it if the HAL work arrives without one.
-- **`poll_readback`'s exact-length contract cannot be enforced at decode time.**
-  Nothing in a reply buffer says what size the descriptor asked for, so the
-  payload's own length prefix is all the decoder has. Whoever implements the HAL
-  call owes the comparison against the descriptor it kept — the plan doc used to
-  claim the reply buffer was sized from the descriptor, which is not how a reply
-  stream works, and has been corrected.
-- **Not covered by any reply shape yet:** the device-request poll, the rest of
-  `AdapterInfo` and `DeviceCaps`, surface capabilities, and any reply carrying a
-  `HalError`. The set that exists is deliberately representative, not complete,
-  and the crate docs say so.
 
 ## `webgpu` is a refusal on native, and the browser's only backend
 

@@ -190,7 +190,7 @@ impl ByteWriter {
     /// [`u32::MAX`] means "as many as this device can" and is resolved through
     /// [`BindGroupLayoutEntry::resolved_count`](crcbl_hal::BindGroupLayoutEntry::resolved_count)
     /// against a device's own limits — which is the far side's, not this one's,
-    /// exactly as `docs/plan/41-webgpu-stream.md` requires of every sentinel.
+    /// exactly as `docs/notes/browser.md` requires of every sentinel.
     fn put_bind_group_layout_entry(&mut self, entry: &BindGroupLayoutEntry) {
         self.put_u32(entry.binding);
         self.put_u32(entry.visibility.bits());
@@ -617,7 +617,7 @@ impl StreamWriter {
     /// **Nothing is resolved and nothing is validated.**
     /// [`SamplerDesc::lod_max`](crcbl_hal::SamplerDesc::lod_max) is
     /// [`f32::MAX`] by default and that is a *sentinel*, so it crosses as
-    /// itself — the rule `docs/plan/41-webgpu-stream.md` sets for
+    /// itself — the rule `docs/notes/browser.md` sets for
     /// `WHOLE_BUFFER`. [`anisotropy`](crcbl_hal::SamplerDesc::anisotropy) is
     /// whatever the caller passed, fractional values and values past the
     /// device's cap included: WebGPU's `maxAnisotropy` is an integer and the
@@ -709,7 +709,7 @@ impl StreamWriter {
     /// [`BindingResource::Buffer`] whose `size` is
     /// [`BindingResource::WHOLE_BUFFER`] (`u64::MAX`) is a *sentinel* and crosses
     /// as itself — the rule
-    /// `docs/plan/41-webgpu-stream.md` sets — because only the replayer can turn
+    /// `docs/notes/browser.md` sets — because only the replayer can turn
     /// it into WebGPU's absent `GPUBufferBinding.size`. A non-zero `array_index`,
     /// and a `Some` [`variable_count`](crcbl_hal::BindGroupDesc::variable_count),
     /// are both values a `u32` legitimately holds, so refusing them is the
@@ -781,7 +781,7 @@ impl StreamWriter {
     /// [`create_image`](Self::create_image)'s.
     ///
     /// **The bind-group layouts go over as a counted list of bare handles, in
-    /// set order and not sorted.** `docs/plan/41-webgpu-stream.md` states the
+    /// set order and not sorted.** That is the
     /// shape — a `u32` count then that many `to_bits` words — and set order is
     /// part of the value: it is what a shader's `@group(n)` indexes, so a
     /// decoder that reordered it would build a layout binding the wrong set to
@@ -884,7 +884,7 @@ impl StreamWriter {
     /// reason, and fields follow the descriptor's declaration order for
     /// [`create_image`](Self::create_image)'s. **The largest descriptor on the
     /// seam**, and the one whose depth-stencil chain
-    /// `docs/plan/41-webgpu-stream.md` names as the deepest: the whole tree is
+    /// `docs/notes/browser.md` names as the deepest: the whole tree is
     /// written out through the field writers above, so a stride wrong by a byte
     /// anywhere in it lands the cursor inside the next field rather than
     /// truncating.
