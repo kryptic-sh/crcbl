@@ -3,8 +3,9 @@
 //!
 //! # Why this is in `crcbl-core` and not in `crcbl-shell`
 //!
-//! `docs/plan/01-foundations.md` §1.4 puts "input event normalization into
-//! engine types" in `crcbl-core::input`, and `docs/plan/19-input.md` explains
+//! The shell-boundary rule in `docs/notes/backends.md` puts "input event
+//! normalisation into engine types" in `crcbl-core::input`, and
+//! `docs/plan/19-input.md` explains
 //! why: the action layer (`crcbl-input`, P2), the profile store (topic 14, where
 //! user rebinds are serialized), the UI (glyph hints), and the editor all have
 //! to *name* a key. If [`KeyCode`] lived in the windowing crate, the save-game

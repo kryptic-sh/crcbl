@@ -67,9 +67,9 @@
 //!
 //! # What the join revealed
 //!
-//! P0.7 was the first time anything drove both seams at once, and
-//! `docs/plan/01-foundations.md` freezes neither at P0. The findings are kept
-//! here because this is where they were found.
+//! P0.7 was the first time anything drove both seams at once, and neither seam
+//! was frozen at P0 (`docs/notes/backends.md` records when each froze). The
+//! findings are kept here because this is where they were found.
 //!
 //! 1. **Two sources of truth for the swapchain extent, with no stated
 //!    precedence** — *fixed in the seam.*

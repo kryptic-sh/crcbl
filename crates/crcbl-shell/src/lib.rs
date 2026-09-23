@@ -168,7 +168,7 @@
 //!
 //! # Decision: where the input vocabulary lives
 //!
-//! `docs/plan/01-foundations.md` §1.4 puts input normalization in
+//! The shell-boundary rule in `docs/notes/backends.md` puts input normalization in
 //! `crcbl-core::input`, and [`ShellEvent`] is naturally a `crcbl-shell` type.
 //! Both are true, and the split is:
 //!

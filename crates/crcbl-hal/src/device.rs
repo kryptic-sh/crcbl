@@ -69,7 +69,7 @@
 //!
 //! # Queues are handles, not a trait
 //!
-//! `docs/plan/01-foundations.md` asks for "`Device` + `Queue`". A `Queue` here
+//! The seam's original design asked for "`Device` + `Queue`". A `Queue` here
 //! is a [`QueueHandle`] and submission is [`Device::submit`], rather than a
 //! third trait object. Queues carry no state a caller can usefully hold, and
 //! `Device::submit(queue, …)` keeps the number of trait objects in the engine at
@@ -212,9 +212,9 @@ pub type QueueHandle = Handle<Queue>;
 /// "Queue family" is a Vulkan noun and nothing else's: Metal has one
 /// `MTLCommandQueue` type and no families at all, and DX12 has *command list
 /// types* (`D3D12_COMMAND_LIST_TYPE_DIRECT` / `_COMPUTE` / `_COPY`), which is
-/// exactly this enum's three variants under a different name. Since
-/// `docs/plan/01-foundations.md`'s P0 exit criterion is "no obviously vk-only
-/// concept in the trait names", the noun that maps onto all three APIs is the
+/// exactly this enum's three variants under a different name. Since the HAL
+/// rule in `docs/notes/backends.md` is "no obviously vk-only concept in the
+/// trait names", the noun that maps onto all three APIs is the
 /// one the seam uses, and `Kind` is already this crate's word for it
 /// ([`SemaphoreKind`](crate::SemaphoreKind), [`QueryKind`](crate::QueryKind),
 /// [`BindingKind`](crate::BindingKind), [`BackendKind`]).

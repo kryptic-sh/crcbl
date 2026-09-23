@@ -2,7 +2,7 @@
 //!
 //! # The sync model, and where the line is
 //!
-//! `docs/plan/01-foundations.md` says "explicit sync **at the graph level**".
+//! The HAL rule in `docs/notes/backends.md` says "explicit sync **at the graph level**".
 //! That splits into two halves, and this crate owns only the lower one:
 //!
 //! | Concern | Owner |

@@ -38,7 +38,7 @@
 //! for [`ui_pass`]'s draw list and `crcbl-sprite` for [`sprite_pass`]'s sample
 //! modes, neither of which depends on a backend or on this crate.
 //! It contains no `ash`, no `crcbl-vk`, and no `#[cfg(target_os = …)]`, per
-//! `docs/plan/01-foundations.md` §1.3 — which also names the render graph
+//! the HAL rules in `docs/notes/backends.md` — which also name the render graph
 //! specifically as living above the seam rather than in it. The graph compiles
 //! identically against [`NullBackend`](crcbl_hal::null), which is what makes the
 //! graph-compile suite `docs/plan/12-testing.md` calls a non-negotiable anchor

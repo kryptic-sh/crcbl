@@ -369,10 +369,11 @@ Stated plainly, so the next session does not mistake silence for coverage.
 
 ## Coverage gaps in this audit
 
-- **Only seven docs were read against the tree**: `01-foundations.md`,
-  `02-vulkan-backend.md`, `09-backends-metal-dx12.md`, `10-wasm-webgpu.md`,
-  `15-windowing.md`, `39-capabilities.md`, `41-webgpu-stream.md`. Everything
-  else in `docs/plan/` was untouched and unverified.
+- **Only seven docs were read against the tree**: `01-foundations` (since folded
+  into `docs/notes/backends.md`), `02-vulkan-backend.md`,
+  `09-backends-metal-dx12.md`, `10-wasm-webgpu.md`, `15-windowing.md`,
+  `39-capabilities.md`, `41-webgpu-stream.md`. Everything else in `docs/plan/`
+  was untouched and unverified.
 - **`41-webgpu-stream.md` was verified only at its two stale points** (the reply
   set, the offscreen surface command). Its wire conventions, handle rules and
   "cases easy to get wrong" were read but not checked call-by-call against

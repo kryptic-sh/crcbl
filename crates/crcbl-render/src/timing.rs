@@ -3,8 +3,8 @@
 //! `docs/plan/02-vulkan-backend.md` §2.4's last bullet: "GPU timestamp per pass,
 //! exposed as a frame-timing report (feeds the stage 7 profiler HUD)". This is
 //! that, and it is wired into [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute)
-//! rather than bolted on, which is `docs/plan/01-foundations.md` §1.3's stated
-//! reason for putting timestamp queries in the seam at P0: "a profiler bolted on
+//! rather than bolted on, which is the stated reason (`docs/notes/backends.md`)
+//! for putting timestamp queries in the seam at P0: "a profiler bolted on
 //! afterwards is one that never covers the passes written before it".
 //!
 //! # The report is frames latent, on purpose

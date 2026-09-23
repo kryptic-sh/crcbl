@@ -82,7 +82,8 @@ if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
 fi
 echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against headless sway"
 
-# `docs/plan/01-foundations.md`'s sandbox exit criterion is about the *sample*,
+# The foundations stage's sandbox exit criterion (kept in
+# `docs/notes/backends.md`) is about the *sample*,
 # not about the shell crate's tests: "sandbox opens a window on Linux/Wayland
 # and X11". So the sandbox runs here too, against this compositor, with a frame
 # budget so it terminates. It is the only thing in CI that drives the whole

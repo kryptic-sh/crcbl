@@ -3,8 +3,8 @@
 //! `apps/sandbox/src/app.rs` unit-tests the loop directly. This file tests the
 //! *deliverable* — the compiled binary, its arguments and its exit codes —
 //! because that is what `.github/workflows/ci.yml` and a developer both
-//! actually invoke, and because `docs/plan/01-foundations.md`'s exit criterion
-//! is about the sandbox, not about a function inside it.
+//! actually invoke, and because the foundations stage's exit criterion (kept in
+//! `docs/notes/backends.md`) is about the sandbox, not a function inside it.
 //!
 //! Everything here runs on Linux, macOS and Windows with no window system
 //! present, which is what makes the cross-platform CI leg meaningful rather

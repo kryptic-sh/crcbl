@@ -3,6 +3,73 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 01-foundations plan left behind (2026-09-24)
+
+Record; the plan was fully built, so it left nothing open in the backlog.
+
+- **The platform matrix (canonical, settled 2026-08-05).** This is the one place
+  it is stated; everything else links here rather than restating it, because it
+  had drifted into three half-versions across the plan and the backlog.
+
+  | Backend | Platforms               | Crate          |
+  | ------- | ----------------------- | -------------- |
+  | Vulkan  | Linux, Windows, Android | `crcbl-vk`     |
+  | Metal   | macOS, iOS              | `crcbl-mtl`    |
+  | DX12    | Windows                 | `crcbl-dx12`   |
+  | WebGPU  | Browser                 | `crcbl-webgpu` |
+
+  Windows deliberately carries **two** backends; DX12 never replaces Vulkan
+  there. `crcbl-vk` exists for Linux and Android regardless, so Windows support
+  falls out of it at no marginal cost, and running both against one GPU is the
+  differential debugging the seam's dynamic dispatch was chosen for. Decided
+  against, each with its reasoning further down this file: **OpenGL/GLES** (GLES
+  3.0 cannot reach even Tier B, and a Tier C is a renderer change); **Vulkan on
+  Apple** via MoltenVK (Metal is the only Apple path); **consoles for now**.
+
+- **The HAL is shaped like Vulkan.** The lowest common denominator of
+  vk/mtl/dx12 is Vulkan-flavoured: explicit passes, explicit sync **at the graph
+  level**, a bindless-capable descriptor model, resources created from POD
+  descriptor structs. Indirect draws and dispatches (`draw_indirect`,
+  `draw_indexed_indirect`, `dispatch_indirect`) were in the seam from day one
+  because GPU-driven rendering is the point, not an afterthought; timestamp
+  queries are in the seam because profiling hooks belong in the seam itself: a
+  profiler bolted on afterwards is one that never covers the passes written
+  before it. The seam carries **no obviously vk-only concept in the trait
+  names**, and nothing leaks backend types — the deliverable check was
+  `crcbl-hal`'s `NullBackend`, whose tests prove the seam compiles as a trait
+  object.
+- **No render graph, frame pacing or materials in the HAL.** Those live in
+  `crcbl-render`, above the seam. A backend crate implements the HAL and nothing
+  above the seam may learn which backend it is talking to: `ash` is the one
+  sanctioned GPU binding and `crcbl-vk` is the only crate that may name it.
+- **Bindings, not frameworks.** No windowing framework owns policy — winit, SDL
+  and GLFW are rejected. `libwayland-client` and `libxcb` are linked only for
+  the connection and proxy objects, because Vulkan WSI requires a real
+  `wl_display*` / `xcb_connection_t*` by ABI; protocol selection, the event
+  loop, window lifecycle, DPI, input and display modes are all the engine's own.
+  Shell backend types stop at the shell boundary: **input event normalisation
+  into engine types** happens in `crcbl-core::input`.
+- **Every simulation position is a `WorldPos`.** `crcbl_core::world::WorldPos`
+  is `{ sector: I64Vec3, local: DVec3 }`: a sparse 3D sector grid with an f64
+  local offset and an exact rebase on sector crossing. The sector edge is 2^20 m
+  (`SECTOR_SIZE_LOG2`), sized to be a usable streaming and broadphase cell
+  rather than merely a precision trick, and the index is 64-bit because a cell
+  that small needs one to stay galaxy-addressable. A plain `Vec3` is only ever
+  camera-relative render space. It landed in stage 1, long before physics,
+  because retrofitting galaxy-scale coordinates is a rewrite.
+- **The frame loop was split from the start.** `crcbl_core::time::FrameClock`
+  runs a fixed-timestep accumulator (the server tick) beside a variable render
+  dt, and the loop is a `tick` driven by an outer loop rather than a `loop {}`
+  that owns the thread, so the browser's rAF can drive it.
+- **The umbrella holds no logic.** The `crcbl` crate is re-exports plus
+  engine-setup helpers and nothing else, so a game names one dependency.
+- **The sandbox is the stage's deliverable.** Its exit criterion was that the
+  sandbox opens a window on Linux/Wayland and X11 and handles resize and close —
+  about the binary, not a function inside it; the shell e2e scripts still run it
+  against a real compositor for that reason.
+- **Neither seam froze at stage 1.** The HAL was provisional at stage-2 exit and
+  frozen at P5 exit; the shell seam was not frozen there either.
+
 ## Metal binds by reflection (2026-09-07)
 
 `crcbl-mtl` now creates every raster and compute pipeline with
@@ -2333,7 +2400,8 @@ coverage win available and needs no new HAL backend at all.
 
 **Decided 2026-08-05. No console support now; open to it if someone asks for
 it.** Nothing is being built speculatively, and nothing in the engine forecloses
-it. The canonical platform matrix is in `docs/plan/01-foundations.md`.
+it. The canonical platform matrix is at the top of this file, under _What the
+deleted 01-foundations plan left behind_.
 
 ### What each console would actually need
 

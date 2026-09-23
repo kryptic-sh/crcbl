@@ -218,9 +218,9 @@ impl Projection {
 ///
 /// Positions are plain [`Vec3`] in **camera-relative render space**, not
 /// [`WorldPos`](crcbl_core::WorldPos). That is deliberate and is
-/// `docs/plan/01-foundations.md` §1.2's rule: "all simulation positions use
-/// `WorldPos` from day one; plain `Vec3` is only ever camera-relative render
-/// space". Converting one to the other is the renderer's job at P2, when
+/// the `WorldPos` rule recorded in `docs/notes/backends.md`: every simulation
+/// position is a `WorldPos`, and plain `Vec3` is only ever camera-relative
+/// render space. Converting one to the other is the renderer's job at P2, when
 /// something other than a hardcoded cube has a position at all.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Camera {

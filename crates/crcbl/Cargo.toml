@@ -8,8 +8,8 @@ repository.workspace = true
 
 # The umbrella exists so a *game* names one dependency, not four. It therefore
 # depends on every crate a game needs at the current phase and re-exports them;
-# it must never grow logic of its own beyond the engine-setup helpers
-# `docs/plan/01-foundations.md`'s workspace layout allows it.
+# it must never grow logic of its own beyond engine-setup helpers (the rule is
+# recorded in `docs/notes/backends.md`).
 #
 # `crcbl-vk` IS a dependency, and is deliberately **not** re-exported. P1.1
 # added `src/backend.rs`, the GPU equivalent of `crcbl_shell::backend::open`:

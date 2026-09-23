@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 # `ash` is the only binding in the engine and this is the only crate allowed to
-# name it (`docs/plan/01-foundations.md` §1.3). Nothing above the seam may learn
+# name it (the HAL rules in `docs/notes/backends.md`). Nothing above the seam may learn
 # a Vulkan type, which is why `crcbl-hal` has no `ash` entry and never will.
 [dependencies]
 ash = { workspace = true }

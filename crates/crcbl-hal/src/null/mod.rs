@@ -5,8 +5,8 @@
 //!
 //! 1. **Prove the seam compiles and leaks nothing.** If a trait method could
 //!    not be implemented without naming a backend type, this module would not
-//!    build. `docs/plan/01-foundations.md` calls exactly this out as the slice's
-//!    deliverable check.
+//!    build. The foundations stage named exactly this as its deliverable
+//!    check (`docs/notes/backends.md`).
 //! 2. **Be the substrate for the graph-compile suite.** `docs/plan/12-testing.md`
 //!    assigns `crcbl-hal`/`crcbl-vk`/`crcbl-webgpu` a "graph-compile unit suite on
 //!    NullBackend"; the render graph that lands at P1 compiles its pass list

@@ -12,8 +12,8 @@ best-tested path in the workspace."_ The same note ranks it "the largest
 coverage win available", below finishing Metal.
 
 That framing is the whole reason this document is short where a new backend
-would be long. [01-foundations.md](01-foundations.md)'s platform matrix already
-puts Vulkan on Android, and `crcbl::backend`'s registry already registers
+would be long. The [platform matrix](../notes/backends.md) already puts Vulkan
+on Android, and `crcbl::backend`'s registry already registers
 `GpuBackend::Vulkan` on every target that is not `wasm32` — so on an Android
 build the GPU half is present, auto-selectable and untouched. What is absent is
 a window to give it.

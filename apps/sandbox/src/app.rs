@@ -1,9 +1,9 @@
 //! The sandbox as the engine hosts it: shell events in, fixed ticks and
 //! presented frames out.
 //!
-//! `docs/plan/01-foundations.md` §1.4 asks for exactly this — "shell window,
-//! event loop, raw surface handle plumbed to where the HAL surface will be
-//! created" — and the shape is the one `crcbl-shell`'s crate docs fix:
+//! The foundations stage asked for exactly this — "shell window, event loop,
+//! raw surface handle plumbed to where the HAL surface will be created" — and
+//! the shape is the one `crcbl-shell`'s crate docs fix:
 //!
 //! ```text
 //! loop {                                  // the outer loop is *ours*

@@ -6,11 +6,11 @@ rows that make a slowdown visible while you play rather than after you export.
 
 **The tooling lands before the perf work, not with it.** A profiler bolted on
 afterwards is one that never covers the code written before it —
-[01-foundations.md](01-foundations.md) §1.3 already makes that argument for
-putting timestamp queries in the seam at P0, and it applies to every other span
-this topic adds. The optimisation phase this feeds is deliberately later; what
-this topic delivers is the ability to know what to optimise, and to prove
-afterwards that it worked.
+[the HAL rules](../notes/backends.md) already make that argument for putting
+timestamp queries in the seam at P0, and it applies to every other span this
+topic adds. The optimisation phase this feeds is deliberately later; what this
+topic delivers is the ability to know what to optimise, and to prove afterwards
+that it worked.
 
 ## What already exists (do not rebuild it)
 

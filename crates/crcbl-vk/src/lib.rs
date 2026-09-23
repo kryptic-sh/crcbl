@@ -17,7 +17,7 @@
 //! `crcbl-vk` is spelled at all is the backend registry in the `crcbl` umbrella
 //! — exactly as `crcbl-shell`'s registry is the only place `WaylandShell` is
 //! spelled. `ash` is a dependency of this crate and of no other, per
-//! `docs/plan/01-foundations.md` §1.3.
+//! the HAL rules recorded in `docs/notes/backends.md`.
 //!
 //! # Decision: the Vulkan loader is `dlopen`ed, not linked
 //!

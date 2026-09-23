@@ -9,7 +9,7 @@
 //!
 //! # Shape: Vulkan-flavoured on purpose
 //!
-//! Per `docs/plan/01-foundations.md` §1.3, the lowest common denominator of
+//! Per the HAL rules in `docs/notes/backends.md`, the lowest common denominator of
 //! Vulkan / Metal / DX12 is "Vulkan-flavoured", so the seam is explicit about
 //! the things those APIs are explicit about:
 //!

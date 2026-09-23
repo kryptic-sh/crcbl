@@ -8,8 +8,8 @@ repository.workspace = true
 
 # Everything here is **above the seam**: `crcbl-hal` and nothing below it. There
 # is no `ash`, no `crcbl-vk` and no `#[cfg(target_os = …)]` in this crate, which
-# is `docs/plan/01-foundations.md` §1.3's rule — the render graph is named there
-# as living above the seam rather than in it.
+# is the HAL rule recorded in `docs/notes/backends.md` — the render graph is
+# named there as living above the seam rather than in it.
 [dependencies]
 crcbl-core = { workspace = true }
 # The debug draw layer's `r_debug_draw`, declared beside the pass it switches on

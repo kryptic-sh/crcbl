@@ -112,7 +112,7 @@ if ! crcbl_nextest_summary "$PLAIN" "crcbl e2e" \
 fi
 echo "crcbl e2e: $CRCBL_NEXTEST_TESTS_RUN tests ran against Xvfb on ${DISPLAY}"
 
-# The X11 half of `docs/plan/01-foundations.md`'s sandbox exit criterion — see
+# The X11 half of the foundations stage's sandbox exit criterion — see
 # the same block in `run-wayland-e2e.sh`. `CRCBL_SHELL=x11` because Wayland is
 # tried first by the registry and a silent fallback would report success for
 # the wrong backend; here it would in fact fail (nothing is listening), but

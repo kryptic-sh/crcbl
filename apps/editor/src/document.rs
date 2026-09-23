@@ -625,8 +625,8 @@ fn widen(value: Vec3) -> DVec3 {
 /// Render space's `f32`, from simulation space's `f64`.
 ///
 /// The lossy direction, and the safe one to be lossy in: this is what a picture
-/// is drawn from, and `docs/plan/01-foundations.md` §1.2's rule is that plain
-/// `Vec3` is only ever camera-relative render space.
+/// is drawn from, and the engine's `WorldPos` rule (`docs/notes/backends.md`) is
+/// that plain `Vec3` is only ever camera-relative render space.
 #[allow(clippy::cast_possible_truncation)]
 fn narrow(value: DVec3) -> Vec3 {
     Vec3::new(value.x as f32, value.y as f32, value.z as f32)

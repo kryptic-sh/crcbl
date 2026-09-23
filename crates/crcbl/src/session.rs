@@ -11,7 +11,7 @@
 //! # Why a game does not build this itself
 //!
 //! Because "single-player is a loopback server" is an *engine* decision, not a
-//! game's. `docs/plan/01-foundations.md` splits the simulation into an
+//! game's. The engine splits the simulation into an
 //! authoritative half and a predicting half so that a game written for one
 //! player is already written for several, and so the determinism harness has a
 //! server to hash. A game that agreed to that split then had to implement it:

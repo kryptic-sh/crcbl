@@ -2,7 +2,7 @@
 //!
 //! Timestamp queries are in the seam from P0 on purpose. The engine's debug
 //! principle is that **profiling hooks live in the seam itself**
-//! (`docs/plan/01-foundations.md` §1.3): per-pass GPU timers feed the render
+//! (`docs/notes/backends.md`'s HAL rules): per-pass GPU timers feed the render
 //! graph's frame-timing report at P1 and the profiler HUD at P10, and a
 //! profiler bolted on afterwards is one that never covers the passes written
 //! before it.
