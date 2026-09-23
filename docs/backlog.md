@@ -9092,10 +9092,10 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5 and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5 and 9 are built on branch `steam-sdk`** (not
-merged): `crates/crcbl-steam` — the runtime loader, `Steam::init` with the
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 are built on branch `steam-sdk`**
+(not merged): `crates/crcbl-steam` — the runtime loader, `Steam::init` with the
 version handshake, the manual-dispatch pump, shutdown on the last owner's drop,
 the local identity and machine basics, `relaunch_via_steam`, the fake-library
 rig, the drift gate and the CI steps (clippy and rustdoc for macOS and Windows,
@@ -9106,10 +9106,12 @@ slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
 and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
 `crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
 and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
-`SteamCloudStorage`, slice 5's voice capture and decoding, and slice 9's stats,
+`SteamCloudStorage`, slice 5's voice capture and decoding, slice 9's stats,
 achievements and leaderboards (built ahead of 7b–8, which waited on slice 7a's
-seam; `steam-sdk` has since merged `main`, which carries it). The plan,
-`docs/plan/42-steam.md`, carries a status line per slice.
+seam; `steam-sdk` has since merged `main`, which carries it), and slice 7b's
+`SteamPads` (Steam Input onto the gamepad seam) with the Steam-pad filter in
+`crcbl_input::xinput`. The plan, `docs/plan/42-steam.md`, carries a status line
+per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9139,8 +9141,8 @@ seam; `steam-sdk` has since merged `main`, which carries it). The plan,
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 151 lib tests after slice
-  9, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 166 lib tests after slice
+  7b, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9203,6 +9205,41 @@ seam; `steam-sdk` has since merged `main`, which carries it). The plan,
   defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
   maps to its app codes (touches the trait every backend implements), or leave
   it and document the session end as the signal. Needs a decision; not done.
+- **Slice 7b's manual steps have not run, and nothing opens `SteamPads` yet**:
+  whether app 480 honours `SetInputActionManifestFilePath` at all (R3); the Deck
+  run, which is also the check of the stick's Y sign (passed through on the
+  belief that `joystick_move` reports +Y up) and of the by-value returns of
+  `GetDigitalActionData`/`GetAnalogActionData` on x86-64 SysV (R10); Windows and
+  macOS (arm64) with a DualSense and an Xbox pad, each that target's by-value
+  check; a remap in Steam's configurator arriving as the remapped button; and no
+  double input with XInput polling beside it. Also unverified: that Steam
+  answers `0` for action handles before a configuration loads (the backend
+  retries either way). What it would take: slice 8's loop limb (or the sandbox)
+  opening `SteamPads` with `PAD_MANIFEST` written beside the executable, and the
+  run recorded per OS.
+- **The manifest has no default controller layouts.**
+  `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
+  so until one is added a player binds every action in Steam's configurator
+  before the pad does anything. Valve's route is to bind once with Steam Input
+  Layout Dev Mode on, export, and dump the layout with
+  `steam://dumpcontrollerconfig?appid=<app>` — a client step. What it would
+  take: one exported layout per controller type EW targets (at least
+  `controller_neptune` for the Deck, `controller_ps5`, `controller_xboxone`),
+  added under `configurations` beside the manifest, with the manifest test
+  extended to check each listed file exists.
+- **The Steam-pad filter reads an undocumented export.**
+  `XInput::skip_steam_virtual_pads` asks `xinput1_4.dll`'s ordinal 108
+  (`XInputGetCapabilitiesEx`, SDL's declaration) for a slot's vendor. It was
+  called on the Windows machine with no pad connected (each empty slot answered
+  as `XInputGetState` does); no Steam virtual pad has been through it, so that
+  Steam's reports Valve's vendor there is SDL's experience, not ours. The
+  documented alternative is `ISteamInput::GetGamepadIndexForController`, which
+  names the XInput slot Steam emulates for a controller, or -1 — needs a
+  decision only if the vendor route fails on a real run: it would couple the
+  XInput backend to a slot list the Steam backend supplies each frame.
+- **Nothing turns the filter on yet.** It is `XInput::skip_steam_virtual_pads`'s
+  caller's job while `SteamPads` is open; slice 8's loop limb, which will own
+  both sources, is where that call belongs.
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.
@@ -9219,10 +9256,10 @@ surfaced to the game, and the local `SteamId` as its identity. EW's build order
 **An engine piece EW needs whatever the transport, scheduled inside the Steam
 plan:**
 
-- **A gamepad seam in `crcbl-input` (slice 7a).** There is none yet (see "Input:
-  patterns, RON bindings, rebind persistence and every gamepad backend"). EW
-  accepted a minimal seam landed by the Steam plan; topic 19's
-  evdev/XInput/GameController backends adopt it.
+- **A gamepad seam in `crcbl-input` (slice 7a).** Landed on `main` as
+  `crates/crcbl-input/src/gamepad.rs` with the XInput backend, and merged into
+  `steam-sdk`; `SteamPads` reports through it. Topic 19's evdev and
+  GameController backends, when built, adopt it.
 
 **Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
 cloud quota or honours a Steam Input manifest path; whether SpaceWar's

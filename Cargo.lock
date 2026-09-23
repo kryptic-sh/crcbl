@@ -599,6 +599,7 @@ dependencies = [
 name = "crcbl-steam"
 version = "0.1.0"
 dependencies = [
+ "crcbl-input",
  "crcbl-net",
  "crcbl-store",
  "log",

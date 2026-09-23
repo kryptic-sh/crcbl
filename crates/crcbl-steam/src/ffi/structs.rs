@@ -302,6 +302,26 @@ pub(crate) const DECLS: &[StructDecl] = &[
         ],
     },
     StructDecl {
+        name: "InputAnalogActionData_t",
+        pack: Pack::One,
+        fields: &["EInputSourceMode eMode", "float x, y", "bool bActive"],
+    },
+    StructDecl {
+        name: "InputDigitalActionData_t",
+        pack: Pack::One,
+        fields: &["bool bState", "bool bActive"],
+    },
+    StructDecl {
+        name: "SteamInputDeviceConnected_t",
+        pack: Pack::Callback,
+        fields: &["InputHandle_t m_ulConnectedDeviceHandle"],
+    },
+    StructDecl {
+        name: "SteamInputDeviceDisconnected_t",
+        pack: Pack::Callback,
+        fields: &["InputHandle_t m_ulDisconnectedDeviceHandle"],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -762,6 +782,58 @@ callback_packed! {
     }
 }
 
+/// `InputAnalogActionData_t` (`isteaminput.h`, under `#pragma pack( push, 1
+/// )`): one analog action's state, as `GetAnalogActionData` **returns it by
+/// value**. 13 bytes, aligned to 1; the fields happen to sit at their natural
+/// offsets.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C, packed)]
+pub(crate) struct InputAnalogActionData {
+    /// `EInputSourceMode eMode` — `k_EInputSourceMode_JoystickMove` for a
+    /// stick action, `…_Trigger` for a trigger one. Not read: the manifest
+    /// fixes each action's mode.
+    pub(crate) mode: i32,
+    /// `float x` — a stick's X, or a trigger's pull.
+    pub(crate) x: f32,
+    /// `float y` — a stick's Y; unused for a trigger.
+    pub(crate) y: f32,
+    /// `bool bActive` — whether the action is bound in the active set.
+    pub(crate) active: u8,
+}
+
+/// `InputDigitalActionData_t` (`isteaminput.h`, under `#pragma pack( push, 1
+/// )`): one digital action's state, as `GetDigitalActionData` **returns it
+/// by value**.
+#[derive(Debug, Clone, Copy, Default)]
+#[repr(C, packed)]
+pub(crate) struct InputDigitalActionData {
+    /// `bool bState` — held.
+    pub(crate) state: u8,
+    /// `bool bActive` — whether the action is bound in the active set.
+    pub(crate) active: u8,
+}
+
+callback_packed! {
+    /// `SteamInputDeviceConnected_t` (`isteaminput.h`,
+    /// `k_iSteamControllerCallbacks + 1`): a Steam Input controller
+    /// connected — or was already connected when device callbacks were
+    /// enabled.
+    pub(crate) struct SteamInputDeviceConnected {
+        /// `InputHandle_t m_ulConnectedDeviceHandle`.
+        pub(crate) handle: u64,
+    }
+}
+
+callback_packed! {
+    /// `SteamInputDeviceDisconnected_t` (`isteaminput.h`,
+    /// `k_iSteamControllerCallbacks + 2`): a Steam Input controller
+    /// disconnected.
+    pub(crate) struct SteamInputDeviceDisconnected {
+        /// `InputHandle_t m_ulDisconnectedDeviceHandle`.
+        pub(crate) handle: u64,
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -949,6 +1021,27 @@ mod tests {
         });
         assert_layout!(RemoteStorageLocalFileChange, 1, {
             unused: 0, 1;
+        });
+        // `pack(1)`, and returned by value: the size and alignment are what
+        // the by-value return depends on.
+        assert_layout!(InputAnalogActionData, 13, {
+            mode: 0, 4;
+            x: 4, 4;
+            y: 8, 4;
+            active: 12, 1;
+        });
+        assert_eq!(align_of::<InputAnalogActionData>(), 1);
+        assert_layout!(InputDigitalActionData, 2, {
+            state: 0, 1;
+            active: 1, 1;
+        });
+        assert_eq!(align_of::<InputDigitalActionData>(), 1);
+        // One `uint64`: 8 bytes under either packing, aligned 4 or 8.
+        assert_layout!(SteamInputDeviceConnected, 8, {
+            handle: 0, 8;
+        });
+        assert_layout!(SteamInputDeviceDisconnected, 8, {
+            handle: 0, 8;
         });
         // The `uint32` after the `uint8` is 4-aligned under either packing.
         assert_layout!(LobbyChatMsg, 24, {

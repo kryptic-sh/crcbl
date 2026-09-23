@@ -1,0 +1,86 @@
+// The Steam Input action manifest `crcbl_steam::SteamPads` reads: one action
+// set, "pad", whose actions are a neutral gamepad — a digital action per
+// positional button and an analog action per stick and trigger — so Steam's
+// configurator maps any controller onto the layout every crcbl pad backend
+// reports (docs/plan/42-steam.md, "Input").
+//
+// The action names are the ones `crates/crcbl-steam/src/input.rs` looks up,
+// and a test there reads this file and fails if the two disagree.
+//
+// "configurations" is empty: Valve's default per-controller layouts are
+// exported from Steam's own configurator (Steam Input Layout Dev Mode, then
+// steam://dumpcontrollerconfig), which needs a running client, so they are
+// added by the slice's manual step rather than written by hand.
+"Action Manifest"
+{
+	"configurations"
+	{
+	}
+	"actions"
+	{
+		"pad"
+		{
+			"title"		"#Set_Pad"
+			"StickPadGyro"
+			{
+				"left_stick"
+				{
+					"title"		"#Action_LeftStick"
+					"input_mode"		"joystick_move"
+				}
+				"right_stick"
+				{
+					"title"		"#Action_RightStick"
+					"input_mode"		"joystick_move"
+				}
+			}
+			"AnalogTrigger"
+			{
+				"left_trigger"		"#Action_LeftTrigger"
+				"right_trigger"		"#Action_RightTrigger"
+			}
+			"Button"
+			{
+				"south"		"#Action_South"
+				"east"		"#Action_East"
+				"west"		"#Action_West"
+				"north"		"#Action_North"
+				"left_shoulder"		"#Action_LeftShoulder"
+				"right_shoulder"		"#Action_RightShoulder"
+				"left_stick_click"		"#Action_LeftStickClick"
+				"right_stick_click"		"#Action_RightStickClick"
+				"start"		"#Action_Start"
+				"select"		"#Action_Select"
+				"dpad_up"		"#Action_DpadUp"
+				"dpad_down"		"#Action_DpadDown"
+				"dpad_left"		"#Action_DpadLeft"
+				"dpad_right"		"#Action_DpadRight"
+			}
+		}
+	}
+	"localization"
+	{
+		"english"
+		{
+			"Set_Pad"		"Gamepad"
+			"Action_LeftStick"		"Left stick"
+			"Action_RightStick"		"Right stick"
+			"Action_LeftTrigger"		"Left trigger"
+			"Action_RightTrigger"		"Right trigger"
+			"Action_South"		"Bottom face button"
+			"Action_East"		"Right face button"
+			"Action_West"		"Left face button"
+			"Action_North"		"Top face button"
+			"Action_LeftShoulder"		"Left bumper"
+			"Action_RightShoulder"		"Right bumper"
+			"Action_LeftStickClick"		"Left stick press"
+			"Action_RightStickClick"		"Right stick press"
+			"Action_Start"		"Start"
+			"Action_Select"		"Select"
+			"Action_DpadUp"		"D-pad up"
+			"Action_DpadDown"		"D-pad down"
+			"Action_DpadLeft"		"D-pad left"
+			"Action_DpadRight"		"D-pad right"
+		}
+	}
+}

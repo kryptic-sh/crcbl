@@ -47,6 +47,16 @@ pub(crate) type HSteamListenSocket = u32;
 pub(crate) type SteamLeaderboard = u64;
 /// `SteamLeaderboardEntries_t` — `typedef uint64 SteamLeaderboardEntries_t;`.
 pub(crate) type SteamLeaderboardEntries = u64;
+/// `InputHandle_t` — `typedef uint64 InputHandle_t;`, one controller, the
+/// same across a disconnect and reconnect.
+pub(crate) type InputHandle = u64;
+/// `InputActionSetHandle_t` — `typedef uint64 InputActionSetHandle_t;`.
+pub(crate) type InputActionSetHandle = u64;
+/// `InputDigitalActionHandle_t` — `typedef uint64
+/// InputDigitalActionHandle_t;`.
+pub(crate) type InputDigitalActionHandle = u64;
+/// `InputAnalogActionHandle_t` — `typedef uint64 InputAnalogActionHandle_t;`.
+pub(crate) type InputAnalogActionHandle = u64;
 /// `SteamErrMsg` — `typedef char SteamErrMsg[ 1024 ];`, the English message
 /// `SteamInternal_SteamAPI_Init` fills in on failure.
 pub(crate) type SteamErrMsg = [core::ffi::c_char; 1024];
@@ -81,6 +91,8 @@ opaque! {
     ISteamApps;
     /// `class ISteamFriends`.
     ISteamFriends;
+    /// `class ISteamInput`.
+    ISteamInput;
     /// `class ISteamMatchmaking`.
     ISteamMatchmaking;
     /// `class ISteamNetworkingSockets`.

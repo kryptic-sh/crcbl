@@ -236,7 +236,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6 and 9**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b and 9**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -292,10 +292,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and stats and `store()`s them — each call `SteamError::StatsNotReady` until
   `SteamEvent::StatsReceived` — with `StatsStored` and `AchievementStored`
   after; `steam.leaderboards()` finds or creates a board, uploads a score with
-  details and downloads a `Range` of entries, each a `SteamCall`. 64-bit Linux,
-  Windows and macOS; elsewhere the crate is empty.
-  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
-  client with a 1.65 library.
+  details and downloads a `Range` of entries, each a `SteamCall`.
+  `SteamPads::open(steam, manifest)` is Steam Input on the gamepad seam: the
+  action manifest it ships (`PAD_MANIFEST`, `crcbl_pad.vdf`) declares a neutral
+  pad for Steam's configurator to map any controller onto, and `SteamPads::poll`
+  reports each controller as the same `crcbl_input` `GamepadEvent`s XInput does
+  — positional buttons, raw sticks with +Y up, triggers 0…1 — with a controller
+  that comes back keeping its `GamepadId`; `Steam::pump` runs Steam Input's
+  frame while it is open. 64-bit Linux, Windows and macOS; elsewhere the crate
+  is empty. `apps/sandbox --features steam` exercises it. Not yet run against a
+  Steam client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

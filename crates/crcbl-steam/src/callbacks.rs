@@ -20,9 +20,9 @@ use crate::{
         AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
         GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
         NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
-        SteamApiCallCompleted, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
-        SteamRelayNetworkStatus, UserAchievementStored, UserStatsReceived, UserStatsStored,
-        steam_id,
+        SteamApiCallCompleted, SteamInputDeviceConnected, SteamInputDeviceDisconnected,
+        SteamNetConnectionInfo, SteamNetConnectionStatusChanged, SteamRelayNetworkStatus,
+        UserAchievementStored, UserStatsReceived, UserStatsStored, steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -49,6 +49,9 @@ pub(crate) enum Base {
     NetworkingUtils = 1280,
     /// `k_iSteamRemoteStorageCallbacks`.
     RemoteStorage = 1300,
+    /// `k_iSteamControllerCallbacks` — Steam Input's callbacks, under the
+    /// name of the interface it replaced.
+    Controller = 2800,
 }
 
 impl Base {
@@ -63,6 +66,7 @@ impl Base {
         Self::NetworkingSockets,
         Self::NetworkingUtils,
         Self::RemoteStorage,
+        Self::Controller,
     ];
 
     /// Valve's name for the base, as the headers spell it.
@@ -77,6 +81,7 @@ impl Base {
             Self::RemoteStorage => "k_iSteamRemoteStorageCallbacks",
             Self::NetworkingSockets => "k_iSteamNetworkingSocketsCallbacks",
             Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
+            Self::Controller => "k_iSteamControllerCallbacks",
         }
     }
 }
@@ -264,6 +269,14 @@ pub(crate) enum Decoded {
         event: SteamEvent,
         /// Whether the event's text was read lossily.
         lossy: bool,
+    },
+    /// `SteamInputDeviceConnected_t` or `SteamInputDeviceDisconnected_t`: the
+    /// pump hands it to the open `SteamPads`, if any.
+    InputDevice {
+        /// The controller's `InputHandle_t`.
+        handle: u64,
+        /// Whether it connected, rather than disconnected.
+        connected: bool,
     },
     /// `LobbyChatMsg_t`: the pump reads the entry with `GetLobbyChatEntry`
     /// and queues [`SteamEvent::LobbyChatMessage`].
@@ -577,6 +590,32 @@ pub(crate) const ROWS: &[Row] = &[
             })
         },
     },
+    Row {
+        base: Base::Controller,
+        offset: 1,
+        #[cfg(test)]
+        name: "SteamInputDeviceConnected_t",
+        size: size_of::<SteamInputDeviceConnected>(),
+        decode: |bytes| {
+            read::<SteamInputDeviceConnected>(bytes).map(|payload| Decoded::InputDevice {
+                handle: payload.handle,
+                connected: true,
+            })
+        },
+    },
+    Row {
+        base: Base::Controller,
+        offset: 2,
+        #[cfg(test)]
+        name: "SteamInputDeviceDisconnected_t",
+        size: size_of::<SteamInputDeviceDisconnected>(),
+        decode: |bytes| {
+            read::<SteamInputDeviceDisconnected>(bytes).map(|payload| Decoded::InputDevice {
+                handle: payload.handle,
+                connected: false,
+            })
+        },
+    },
 ];
 
 /// The row claiming `id`, if any.
@@ -651,6 +690,10 @@ unsafe impl Pod for LobbyChatMsg {}
 unsafe impl Pod for crate::ffi::structs::LobbyCreated {}
 // SAFETY: as above.
 unsafe impl Pod for crate::ffi::structs::LobbyEnter {}
+// SAFETY: as above.
+unsafe impl Pod for SteamInputDeviceConnected {}
+// SAFETY: as above.
+unsafe impl Pod for SteamInputDeviceDisconnected {}
 
 /// Copies a `T` out of exactly `size_of::<T>()` bytes; `None` for any other
 /// length.

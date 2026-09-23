@@ -15,10 +15,12 @@ use crate::{
     call::CallRegistry,
     error::InitError,
     ffi::{
-        HSteamPipe, ISteamApps, ISteamFriends, ISteamMatchmaking, ISteamNetworkingSockets,
-        ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser, ISteamUserStats, ISteamUtils, Lib,
-        SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
+        HSteamPipe, ISteamApps, ISteamFriends, ISteamInput, ISteamMatchmaking,
+        ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser,
+        ISteamUserStats, ISteamUtils, Lib, SteamErrMsg, init_result, load, manifest,
+        manifest::Accessor, versions,
     },
+    input::PadQueue,
     matchmaking::Tracked,
     net::IncomingQueues,
     presence::PresenceKeys,
@@ -112,6 +114,8 @@ pub struct Client {
     pub(crate) remote_storage: *mut ISteamRemoteStorage,
     /// `SteamAPI_SteamUserStats_v013()`; never null.
     pub(crate) user_stats: *mut ISteamUserStats,
+    /// `SteamAPI_SteamInput_v007()`; never null.
+    pub(crate) input: *mut ISteamInput,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -165,6 +169,10 @@ pub struct Steam {
     /// The live `VoiceCapture`'s token, if one is open. A `RefCell` because
     /// a capture is opened through `&Steam`.
     pub(crate) voice_capture: RefCell<Weak<()>>,
+    /// The open `SteamPads`' queue of device changes, if one is open: the
+    /// pump runs `ISteamInput::RunFrame` while it is, and hands it every
+    /// device callback.
+    pub(crate) pads: Weak<PadQueue>,
     /// `Steam` stays on the thread that made it, whatever its fields allow.
     pub(crate) _not_send: PhantomData<*const ()>,
 }
@@ -271,6 +279,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         .cast::<ISteamRemoteStorage>();
     let user_stats =
         interface(lib.fns.user_stats.accessor, &versions::USER_STATS)?.cast::<ISteamUserStats>();
+    let input = interface(lib.fns.input.accessor, &versions::INPUT)?.cast::<ISteamInput>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -294,6 +303,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             net_utils,
             remote_storage,
             user_stats,
+            input,
             session,
         }),
         queue: VecDeque::new(),
@@ -307,6 +317,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         app: running,
         stats_ready: false,
         voice_capture: RefCell::new(Weak::new()),
+        pads: Weak::new(),
         _not_send: PhantomData,
     })
 }
@@ -384,7 +395,7 @@ mod tests {
             b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
-              STEAMUSERSTATS_INTERFACE_VERSION013\0SteamUtils011\0\0"
+              STEAMUSERSTATS_INTERFACE_VERSION013\0SteamInput007\0SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -394,6 +405,7 @@ mod tests {
         assert!(!steam.client.apps.is_null());
         assert!(!steam.client.remote_storage.is_null());
         assert!(!steam.client.user_stats.is_null());
+        assert!(!steam.client.input.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

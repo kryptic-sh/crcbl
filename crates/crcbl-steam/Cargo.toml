@@ -9,10 +9,10 @@ repository.workspace = true
 # No binding crate. `docs/plan/42-steam.md` rules out every one — the SDK
 # cannot be vendored, and a link-time dependency on `steam_api` kills the
 # process in the dynamic loader on a machine without Steam — so the declarations
-# are hand-written and the library is opened at runtime. `crcbl-input` arrives
-# with the slice that calls it; a dependency nothing reads is one
-# `cargo machete` refuses.
+# are hand-written and the library is opened at runtime.
 [dependencies]
+# `SteamPads` reports Steam Input as `crcbl_input::GamepadEvent`s (slice 7b).
+crcbl-input = { workspace = true }
 # `SteamTransport` implements `crcbl_net::Transport` (slice 4).
 crcbl-net = { workspace = true }
 # `SteamCloudStorage` implements `crcbl_store::StorageSource` (slice 6).

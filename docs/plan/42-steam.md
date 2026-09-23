@@ -16,15 +16,16 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5 and 9 built on branch
-`steam-sdk`, slice 7a landed on `main` and merged in, the rest planned** — see
-"Status by slice" under "Slice order". The four decisions the earlier draft
-asked for were ratified 2026-09-06 (see "Decisions" below), and "the full Steam
-API" is now in scope, which reverses two earlier "not now" calls — Steam Input
-and `SteamTransport` — and pulls the first consumer's requirements (the game EW,
-below) forward in the slice order. The plan was reviewed the same day against
-the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists what that
-changed, including EW's answers to the questions the first draft left open.
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 built on
+branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest planned**
+— see "Status by slice" under "Slice order". The four decisions the earlier
+draft asked for were ratified 2026-09-06 (see "Decisions" below), and "the full
+Steam API" is now in scope, which reverses two earlier "not now" calls — Steam
+Input and `SteamTransport` — and pulls the first consumer's requirements (the
+game EW, below) forward in the slice order. The plan was reviewed the same day
+against the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists
+what that changed, including EW's answers to the questions the first draft left
+open.
 
 Two findings shape everything below, so they come first:
 
@@ -1226,7 +1227,17 @@ On branch `steam-sdk`, not merged to `main`:
   (`crates/crcbl/src/engine/pads.rs`). `steam-sdk` merged `main` in (`82a594ca`)
   to build 7b on it. See "Slice 7a as built" for where it differs from the text
   below.
-- **Slice 7b: next.**
+- **Slice 7b: done** (2026-09-23). `SteamPads` and its manifest over the fake,
+  and the one-owner filter in `crcbl_input::xinput`; every test in the slice's
+  list seen red against a deliberate break; Miri clean; the drift gate passes
+  against the mirror with the twelve declarations, four structs and the new
+  base. The real `XInputGetCapabilitiesEx` was called on the Windows machine (no
+  pad connected: it answered each empty slot as `XInputGetState` does). **Not
+  run:** every step under "Needs a real client" below — whether 480 honours the
+  manifest path, the Deck run (and with it the stick's Y sign and the by-value
+  return on x86-64 SysV), Windows and macOS with a DualSense and an Xbox pad,
+  and the filter against a real Steam virtual pad — on every OS. See "Slice 7b
+  as built".
 - **Slice 9: done, out of order** (2026-09-23). With 7b waiting on the merge
   decision, and 7c's glyphs and slice 8's pad release both building on 7a/7b,
   slice 9 — which depends on none of them — was built next. `Stats`,
@@ -1238,6 +1249,49 @@ On branch `steam-sdk`, not merged to `main`:
   achievements, stats and board is still a belief — on every OS. The breakout
   consumer is not built (see "Slice 9 as built").
 - Slices 7c, 8, 10–15: not started.
+
+**Slice 7b as built, where it differs from the text below:**
+
+- **`SteamPads::open(&mut steam, manifest)`**, not `steam.input().init(…)`,
+  beside `SteamListener::open`; and **`pads.poll(|event| …)`** with a closure,
+  as `crcbl_input::xinput::XInput::poll` takes one, rather than an iterator
+  borrowing `&Steam`. The pump hands device callbacks to the open `SteamPads`
+  through a shared queue, and runs `ISteamInput::RunFrame(true)` only while one
+  is open; a device callback with none open counts as unknown. One open at a
+  time (`InputError::AlreadyOpen`); `Drop` is `Shutdown`.
+- **The manifest ships as `crates/crcbl-steam/assets/crcbl_pad.vdf`**, also
+  exported as `PAD_MANIFEST`, with action set `pad`: fourteen `Button` actions
+  (the Guide button has none — Steam keeps it), `left_stick`/`right_stick` as
+  `joystick_move`, and `left_trigger`/`right_trigger`. A test reads the file and
+  fails if an action the backend looks up is missing, in the wrong category, or
+  unlocalised, or if the file declares one it does not read. **Its
+  `configurations` block is empty**: Valve's per-controller default layouts are
+  exported from Steam's configurator (Steam Input Layout Dev Mode, then
+  `steam://dumpcontrollerconfig`), which needs a client — so they are the manual
+  step's product, not hand-written here.
+- **Connections come from the device callbacks alone**, not from
+  `GetConnectedControllers`, which is not bound: `EnableDeviceCallbacks` replays
+  one per controller already connected. A controller's `GamepadId` is kept
+  across a disconnect, since Steam's handle names the controller.
+- **Handles are looked up again every poll while Steam answers `0`**, the set
+  first and then each action, in case Steam answers `0` before a configuration
+  loads; an action it never answers reads released. `ActivateActionSet` runs per
+  controller per poll, which `isteaminput.h` calls cheap.
+- **Values Steam hands back are checked**: sticks clamped to −1…1, triggers to
+  0…1, an inactive action released or centred, and a non-finite value read as
+  centred and counted in `SteamPads::rejected_axes` — the seam requires finite
+  axes. Stick Y is passed through unflipped, on the belief that `joystick_move`
+  reports +Y up as XInput does; the Deck run pins it.
+- **Not bound in 7b:** vibration, LEDs, `ShowBindingPanel`,
+  `GetGamepadIndexForController`, action-set layers and motion data — each on
+  demand.
+- **The one-owner filter is `XInput::skip_steam_virtual_pads(bool)`**, reading
+  the vendor through `xinput1_4.dll`'s **undocumented** ordinal 108
+  (`XInputGetCapabilitiesEx`, declared as SDL declares it), once per pad; it
+  refuses with `XInputError::NoVendorQuery` on `xinput9_1_0.dll`, which lacks
+  it. Nothing turns it on yet: that is slice 8's wiring, where the loop owns
+  both sources. `GetGamepadIndexForController` — Steam naming the XInput slot it
+  emulates — is the documented alternative, in the backlog.
 
 **Slice 7a as built (on `main`), where it differs from the text below:**
 
@@ -2039,10 +2093,12 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 - **Scope:** `ISteamInput` init/run-frame/shutdown, the manifest, action-set
   activation, per-handle digital/analog reads into `GamepadSnapshot`, device
   callbacks, and the one-owner-per-pad filter. EW requirement 4.
-- **Files:** `crcbl-steam/src/input.rs`, `crcbl-steam/assets/crcbl_pad.vdf` and
-  the default controller configs; the vendor filter in whichever native backend
-  exists (if none does yet, the filter's test lands with the first one, and this
-  slice records that).
+- **Files:** `crates/crcbl-steam/src/input.rs` (and, as built,
+  `crates/crcbl-steam/src/input/tests.rs` and
+  `crates/crcbl-steam/src/testing/input.rs`),
+  `crates/crcbl-steam/assets/crcbl_pad.vdf` and the default controller configs
+  (as built, left to the manual step); the vendor filter in whichever native
+  backend exists (as built, `crates/crcbl-input/src/xinput.rs`).
 - **API:**
 
   ```rust

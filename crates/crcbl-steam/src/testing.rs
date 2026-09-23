@@ -17,6 +17,10 @@
 //! from [`Script::default`]. Each test also leaks its own [`Lib`], so the
 //! one-live-`Steam` guard is per test.
 
+mod input;
+
+pub(crate) use input::{FakeInput, FakePad};
+
 use std::{
     cell::{Cell, RefCell},
     collections::VecDeque,
@@ -195,6 +199,7 @@ pub(crate) struct Script {
     pub(crate) cloud: FakeCloud,
     pub(crate) voice: FakeVoice,
     pub(crate) stats: FakeStats,
+    pub(crate) input: FakeInput,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -257,6 +262,7 @@ impl Default for Script {
             cloud: FakeCloud::default(),
             voice: FakeVoice::default(),
             stats: FakeStats::default(),
+            input: FakeInput::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -429,6 +435,7 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_downloaded_leaderboard_entry: fake_get_downloaded_leaderboard_entry,
             upload_leaderboard_score: fake_upload_leaderboard_score,
         },
+        input: input::FNS,
         apps: AppsFns {
             accessor: fake_apps_accessor,
             is_subscribed: fake_is_subscribed,

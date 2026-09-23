@@ -42,7 +42,9 @@ pub struct PumpDiagnostics {
 
 impl Steam {
     /// Drains Steam's callback pipe: `SteamAPI_ManualDispatch_RunFrame`, then
-    /// each message between `GetNextCallback` and `FreeLastCallback`, then
+    /// `ISteamInput::RunFrame` while a `SteamPads` is open (so its device
+    /// callbacks arrive in this drain), then each message between
+    /// `GetNextCallback` and `FreeLastCallback`, then
     /// `SteamAPI_ReleaseCurrentThreadMemory` (which `SteamAPI_RunCallbacks`
     /// used to call, and manual dispatch does not). First, answers whose
     /// tokens were dropped untaken are released (see `SteamCall`).
@@ -56,6 +58,12 @@ impl Steam {
         // SAFETY: Steam is initialised with manual dispatch, and `pipe` is its
         // pipe.
         unsafe { (lib.fns.dispatch.run_frame)(pipe) };
+        if self.pads.strong_count() > 0 {
+            // SAFETY: `client.input` is the non-null interface init resolved,
+            // `Init`ed by the open `SteamPads`; this is the pump thread.
+            // `bReservedValue` is `true`, the C++ default.
+            unsafe { (lib.fns.input.run_frame)(client.input, true) };
+        }
         let mut msg = CallbackMsg::EMPTY;
         // SAFETY: as above; `msg` is a writable `CallbackMsg_t`.
         while unsafe { (lib.fns.dispatch.get_next_callback)(pipe, &raw mut msg) } {
@@ -114,6 +122,12 @@ impl Steam {
             Some(Decoded::CallCompleted(done)) => self.complete(done),
             Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
             Some(Decoded::LocalFileChange) => self.read_file_changes(),
+            Some(Decoded::InputDevice { handle, connected }) => match self.pads.upgrade() {
+                Some(pads) => pads.push(handle, connected),
+                // Device callbacks are enabled only by an open `SteamPads`;
+                // one arriving after it closed has no one to tell.
+                None => self.diagnostics.unknown += 1,
+            },
             Some(Decoded::Stats {
                 game_id,
                 event,

@@ -28,7 +28,7 @@
 //! `ESteamNetworkingAvailability`, `ERemoteStorageLocalFileChange`,
 //! `ERemoteStorageFilePathType`, `EVoiceResult`, `ELeaderboardSortMethod`,
 //! `ELeaderboardDisplayType`, `ELeaderboardDataRequest`,
-//! `ELeaderboardUploadScoreMethod`) is taken to be
+//! `ELeaderboardUploadScoreMethod`, `ESteamInputType`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -36,18 +36,25 @@
 //! aligns. A C++ reference parameter (`ConnectP2P`'s
 //! `const SteamNetworkingIdentity &`) is a pointer at the ABI and is declared
 //! `*const`. A `const char *` return is Steam's buffer, copied before anything
-//! else runs (`crate::strings`).
+//! else runs (`crate::strings`). Steam Input's `GetDigitalActionData` and
+//! `GetAnalogActionData` **return a `pack(1)` struct by value**, declared
+//! here as returning the `repr(C, packed)` struct of the same size and
+//! alignment; whether rustc returns it as each target's C compiler does is
+//! reasoned, not tested, and only a real controller on each target confirms
+//! it (`docs/plan/42-steam.md`, "The cases that are easy to get wrong").
 
 use core::ffi::{c_char, c_void};
 
 use super::{
-    HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends,
+    HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends, ISteamInput,
     ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
-    ISteamUser, ISteamUserStats, ISteamUtils, SteamApiCall, SteamErrMsg, SteamLeaderboard,
+    ISteamUser, ISteamUserStats, ISteamUtils, InputActionSetHandle, InputAnalogActionHandle,
+    InputDigitalActionHandle, InputHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
     SteamLeaderboardEntries,
     structs::{
-        CallbackMsg, LeaderboardEntry, SteamNetConnectionInfo, SteamNetworkingIdentity,
-        SteamNetworkingMessage, SteamRelayNetworkStatus,
+        CallbackMsg, InputAnalogActionData, InputDigitalActionData, LeaderboardEntry,
+        SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
+        SteamRelayNetworkStatus,
     },
     versions::{self, Interface},
 };
@@ -512,6 +519,49 @@ bindings! {
         upload_leaderboard_score: UserStatsUploadLeaderboardScore = "SteamAPI_ISteamUserStats_UploadLeaderboardScore",
             "S_API SteamAPICall_t SteamAPI_ISteamUserStats_UploadLeaderboardScore( ISteamUserStats* self, SteamLeaderboard_t hSteamLeaderboard, ELeaderboardUploadScoreMethod eLeaderboardUploadScoreMethod, int32 nScore, const int32 * pScoreDetails, int cScoreDetailsCount );",
             fn(*mut ISteamUserStats, SteamLeaderboard, i32, i32, *const i32, i32) -> SteamApiCall;
+    }
+
+    /// `ISteamInput` (`steam_api_flat.h`): controllers through Steam Input,
+    /// read as the neutral pad the action manifest declares.
+    /// `EnableActionEventCallbacks` is never bound: it takes a function
+    /// pointer, and action data is polled instead.
+    input: InputFns for versions::INPUT {
+        init: InputInit = "SteamAPI_ISteamInput_Init",
+            "S_API bool SteamAPI_ISteamInput_Init( ISteamInput* self, bool bExplicitlyCallRunFrame );",
+            fn(*mut ISteamInput, bool) -> bool;
+        shutdown: InputShutdown = "SteamAPI_ISteamInput_Shutdown",
+            "S_API bool SteamAPI_ISteamInput_Shutdown( ISteamInput* self );",
+            fn(*mut ISteamInput) -> bool;
+        set_input_action_manifest_file_path: InputSetInputActionManifestFilePath = "SteamAPI_ISteamInput_SetInputActionManifestFilePath",
+            "S_API bool SteamAPI_ISteamInput_SetInputActionManifestFilePath( ISteamInput* self, const char * pchInputActionManifestAbsolutePath );",
+            fn(*mut ISteamInput, *const c_char) -> bool;
+        run_frame: InputRunFrame = "SteamAPI_ISteamInput_RunFrame",
+            "S_API void SteamAPI_ISteamInput_RunFrame( ISteamInput* self, bool bReservedValue );",
+            fn(*mut ISteamInput, bool);
+        enable_device_callbacks: InputEnableDeviceCallbacks = "SteamAPI_ISteamInput_EnableDeviceCallbacks",
+            "S_API void SteamAPI_ISteamInput_EnableDeviceCallbacks( ISteamInput* self );",
+            fn(*mut ISteamInput);
+        get_action_set_handle: InputGetActionSetHandle = "SteamAPI_ISteamInput_GetActionSetHandle",
+            "S_API InputActionSetHandle_t SteamAPI_ISteamInput_GetActionSetHandle( ISteamInput* self, const char * pszActionSetName );",
+            fn(*mut ISteamInput, *const c_char) -> InputActionSetHandle;
+        activate_action_set: InputActivateActionSet = "SteamAPI_ISteamInput_ActivateActionSet",
+            "S_API void SteamAPI_ISteamInput_ActivateActionSet( ISteamInput* self, InputHandle_t inputHandle, InputActionSetHandle_t actionSetHandle );",
+            fn(*mut ISteamInput, InputHandle, InputActionSetHandle);
+        get_digital_action_handle: InputGetDigitalActionHandle = "SteamAPI_ISteamInput_GetDigitalActionHandle",
+            "S_API InputDigitalActionHandle_t SteamAPI_ISteamInput_GetDigitalActionHandle( ISteamInput* self, const char * pszActionName );",
+            fn(*mut ISteamInput, *const c_char) -> InputDigitalActionHandle;
+        get_digital_action_data: InputGetDigitalActionData = "SteamAPI_ISteamInput_GetDigitalActionData",
+            "S_API InputDigitalActionData_t SteamAPI_ISteamInput_GetDigitalActionData( ISteamInput* self, InputHandle_t inputHandle, InputDigitalActionHandle_t digitalActionHandle );",
+            fn(*mut ISteamInput, InputHandle, InputDigitalActionHandle) -> InputDigitalActionData;
+        get_analog_action_handle: InputGetAnalogActionHandle = "SteamAPI_ISteamInput_GetAnalogActionHandle",
+            "S_API InputAnalogActionHandle_t SteamAPI_ISteamInput_GetAnalogActionHandle( ISteamInput* self, const char * pszActionName );",
+            fn(*mut ISteamInput, *const c_char) -> InputAnalogActionHandle;
+        get_analog_action_data: InputGetAnalogActionData = "SteamAPI_ISteamInput_GetAnalogActionData",
+            "S_API InputAnalogActionData_t SteamAPI_ISteamInput_GetAnalogActionData( ISteamInput* self, InputHandle_t inputHandle, InputAnalogActionHandle_t analogActionHandle );",
+            fn(*mut ISteamInput, InputHandle, InputAnalogActionHandle) -> InputAnalogActionData;
+        get_input_type_for_handle: InputGetInputTypeForHandle = "SteamAPI_ISteamInput_GetInputTypeForHandle",
+            "S_API ESteamInputType SteamAPI_ISteamInput_GetInputTypeForHandle( ISteamInput* self, InputHandle_t inputHandle );",
+            fn(*mut ISteamInput, InputHandle) -> i32;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).
