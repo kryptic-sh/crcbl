@@ -8672,6 +8672,14 @@ remain, and from rung 2:
     compounds against spheres and capsules, waking neighbours on
     `set_transform`/`remove_collider`. No tumble scene; the sample doc names
     none.
+  - **Waiting on EW's user: query layers.** `PhysicsSystem` owns its own
+    `PhysicsWorld`, so EW either moves its statics and controllers onto it (and
+    dropped items' query boxes then block player and AI sweeps) or keeps two
+    worlds (statics registered twice). A per-collider `u32` layer set plus a
+    query mask (`QueryFilter { exclude, mask }`, default all bits) would let
+    controllers ignore items while rays still hit them: about one slice, one AND
+    per broadphase candidate. EW recorded it as its option (a+) (EW `07459fe`)
+    and asked that it not be built until its user picks it.
 - **A tool is built against the vocabularies it can open.** `crcbl::registry`
   (slice 2) replaced the hand-written list, so a component is registered once
   and the codec, the system, the `&mut dyn Reflect` accessor and the `Placement`
