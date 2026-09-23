@@ -563,6 +563,10 @@ pub(crate) struct ContactPipeline {
     contacts: Vec<Option<Contact>>,
     free_contacts: Vec<u32>,
     new_pairs: Vec<(ProxyId, ProxyId)>,
+    /// Bodies put to sleep by hand since the last step: a pair a restored
+    /// sleeper finds with something still is its surroundings being rebuilt,
+    /// not something dropped on it, and wakes nothing.
+    restored: Vec<BodyId>,
     /// Touching contacts ended between steps — by a body or a collider taken
     /// out — for the next step's counters.
     ended_between_steps: u64,
@@ -587,6 +591,7 @@ impl ContactPipeline {
             contacts: Vec::new(),
             free_contacts: Vec::new(),
             new_pairs: Vec::new(),
+            restored: Vec::new(),
             ended_between_steps: 0,
             counters: ContactCounters::default(),
             kinetic: Vec::new(),
@@ -800,7 +805,11 @@ impl ContactPipeline {
             };
             match (self.presence(p, bodies), self.presence(q, bodies)) {
                 (Some(Presence::Asleep(id)), Some(Presence::Still))
-                | (Some(Presence::Still), Some(Presence::Asleep(id))) => self.events.wake.push(id),
+                | (Some(Presence::Still), Some(Presence::Asleep(id)))
+                    if !self.restored.contains(&id) =>
+                {
+                    self.events.wake.push(id);
+                }
                 _ => {}
             }
             let (a, b) = if sq.shape.rank() < sp.shape.rank() {
@@ -821,6 +830,13 @@ impl ContactPipeline {
                 None => self.contacts.push(Some(contact)),
             }
         }
+        self.restored.clear();
+    }
+
+    /// Notes that body `id` was put to sleep by hand, so the pairs it finds on
+    /// the next step do not wake it.
+    pub(crate) fn body_restored_asleep(&mut self, id: BodyId) {
+        self.restored.push(id);
     }
 
     /// Every contact's manifold for a tick of `dt`, with last tick's impulses

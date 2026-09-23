@@ -537,6 +537,56 @@ impl PhysicsSystem {
             .is_some_and(|record| record.set == BodySet::Sleeping)
     }
 
+    /// Puts `entity`'s island to sleep now, without stepping: its bodies stop
+    /// where they are, with their velocities zeroed and their forces cleared,
+    /// exactly as an island that fell asleep on its own does. Returns whether
+    /// the entity's body sleeps afterwards.
+    ///
+    /// This is for restoring a snapshot taken while a body slept: stepping it
+    /// awake instead would re-settle it for [`ContactSettings::time_to_sleep`]
+    /// and leave it a hair from where it was saved. Register the body first
+    /// ([`set_body`](Self::set_body), [`set_transform`](Self::set_transform),
+    /// [`set_collider`](Self::set_collider)), then call this. A body registered
+    /// since the last step is an island of its own, so each restored body
+    /// sleeps alone; one already linked to others by touching contacts takes
+    /// its whole island with it, as sleep never splits an island.
+    ///
+    /// It wakes by every rule a sleeping island wakes by — a contact from an
+    /// awake body, [`set_transform`](Self::set_transform),
+    /// [`body_mut`](Self::body_mut), a force. What a snapshot does not restore
+    /// is the contacts' warm-start impulses: they are rebuilt cold when it
+    /// wakes.
+    ///
+    /// `false`, and nothing changes, for an entity with no dynamic body, in a
+    /// system without contacts, or with [`ContactSettings::sleep`] off.
+    pub fn put_to_sleep(&mut self, entity: Entity) -> bool {
+        let sleeps = self
+            .contacts
+            .as_ref()
+            .is_some_and(|pipeline| pipeline.settings.sleep);
+        let Some(&id) = self.entity_to_body.get(&entity) else {
+            return false;
+        };
+        if !sleeps {
+            return false;
+        }
+        self.islands.reconcile(&mut self.records, &self.awake);
+        let Some(record) = self.records.get(id) else {
+            return false;
+        };
+        if record.set == BodySet::Awake
+            && let Some(island) = record.island
+        {
+            self.islands
+                .sleep(&mut self.records, &mut self.awake, island);
+        }
+        let asleep = self.is_sleeping(entity);
+        if asleep && let Some(pipeline) = self.contacts.as_mut() {
+            pipeline.body_restored_asleep(id);
+        }
+        asleep
+    }
+
     // ── Dynamics setup ───────────────────────────────────────────────────
 
     /// Register a rigid body for `entity`.

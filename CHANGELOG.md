@@ -255,6 +255,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Restoring a body asleep** — `PhysicsSystem::put_to_sleep(entity)` puts a
+  registered dynamic body's island to sleep at once, without stepping, with its
+  velocities zeroed and forces cleared as an island that fell asleep on its own.
+  A save game that stored a sleeping body restores it exactly where it slept
+  rather than re-settling it for `ContactSettings::time_to_sleep`. It wakes by
+  every existing rule (a contact from an awake body, `set_transform`,
+  `body_mut`, a force); the pairs it finds on its first step with statics or
+  other restored sleepers wake nothing, and contact warm starts are rebuilt cold
+  when it wakes. `false` for an entity with no dynamic body, in a system without
+  contacts, or with `ContactSettings::sleep` off.
 - **Joints in the contact solver, and extra substeps per group** — the rest of
   rung 5 of `docs/plan/36-contact-solver.md`. `PhysicsSystem::add_joint` takes a
   `crcbl_phys::Joint` between two registered entities (a static one is a fixed

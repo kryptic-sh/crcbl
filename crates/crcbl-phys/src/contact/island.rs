@@ -268,7 +268,12 @@ impl Islands {
 
     /// Puts an awake island to sleep: each body leaves the awake set with its
     /// velocities zeroed and its forces cleared, as Box2D's does.
-    fn sleep(&mut self, records: &mut Pool<BodyRecord>, awake: &mut AwakeSet, island: IslandId) {
+    pub(crate) fn sleep(
+        &mut self,
+        records: &mut Pool<BodyRecord>,
+        awake: &mut AwakeSet,
+        island: IslandId,
+    ) {
         let Some(Some(entry)) = self.slots.get_mut(island as usize) else {
             return;
         };

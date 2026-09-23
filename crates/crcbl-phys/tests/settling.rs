@@ -702,3 +702,127 @@ fn a_woken_column_holds_and_sleeps_again() {
     assert!(moved < 1e-3, "a box moved {moved} m while awake");
     assert!(ticks <= 31, "slept again only after {ticks} ticks");
 }
+
+// ---------------------------------------------------------------------------
+// Restoring asleep
+// ---------------------------------------------------------------------------
+
+/// A settled, sleeping column of `count` cubes: the system, the boxes, and
+/// each box's transform as it slept — what a snapshot saves.
+fn saved_column(count: u32) -> (PhysicsSystem, Vec<Entity>, Vec<Transform>) {
+    let mut phys = system();
+    let boxes = column(&mut phys, 0, 0.0, count);
+    settle(&mut phys, 120).expect("the column sleeps");
+    let saved = boxes
+        .iter()
+        .map(|&e| *phys.transform(e).expect("placed"))
+        .collect();
+    (phys, boxes, saved)
+}
+
+/// A fresh system holding the column `saved` describes, each box registered at
+/// its saved transform and put to sleep there, without a step.
+fn restored_column(saved: &[Transform]) -> (PhysicsSystem, Vec<Entity>) {
+    let mut phys = system();
+    let boxes: Vec<Entity> = saved
+        .iter()
+        .enumerate()
+        .map(|(i, at)| {
+            let index = u32::try_from(i).expect("a few boxes");
+            let e = crate_(&mut phys, index, at.position, DVec3::splat(0.25));
+            phys.set_transform(e, *at);
+            e
+        })
+        .collect();
+    for &e in &boxes {
+        assert!(phys.put_to_sleep(e), "{e:?} did not sleep");
+    }
+    (phys, boxes)
+}
+
+/// **A sleeping column restored asleep is the column that was saved, and stays
+/// it**: every float of every box is bit for bit what the saved system holds,
+/// straight after the restore and after two seconds of steps, and nothing
+/// wakes — the round trip a save game makes, which restoring awake misses by
+/// the re-settle before the island sleeps again.
+#[test]
+fn a_column_restored_asleep_stays_exactly_where_it_slept() {
+    let (original, saved_boxes, saved) = saved_column(3);
+    let (mut phys, boxes) = restored_column(&saved);
+    let expected: Vec<Vec<u64>> = saved_boxes.iter().map(|&e| bits(&original, e)).collect();
+    let now = |phys: &PhysicsSystem| boxes.iter().map(|&e| bits(phys, e)).collect::<Vec<_>>();
+    assert_eq!(now(&phys), expected, "restored");
+    for tick in 0..120 {
+        phys.step(DT);
+        assert!(
+            boxes.iter().all(|&e| phys.is_sleeping(e)),
+            "woke at tick {tick}"
+        );
+        assert_eq!(now(&phys), expected, "tick {tick}");
+    }
+    let counters = phys.contact_counters();
+    assert_eq!(counters.bodies, 0, "{counters:?}");
+    assert_eq!(counters.sleeping, 3, "{counters:?}");
+}
+
+/// **A body restored asleep wakes by the rules a sleeping body wakes by**, and
+/// a ball dropped on a restored column wakes the whole column once it lands on
+/// it: the islands it was restored as join on contact, as any others do.
+#[test]
+fn a_body_restored_asleep_wakes_as_a_sleeping_one_does() {
+    let (_, _, saved) = saved_column(1);
+    type Rule = fn(&mut PhysicsSystem, Entity);
+    let rules: [(&str, Rule); 3] = [
+        ("apply_force", |phys, e| {
+            phys.apply_force(e, DVec3::X);
+        }),
+        ("body_mut", |phys, e| {
+            let _ = phys.body_mut(e);
+        }),
+        ("set_transform", |phys, e| {
+            let at = *phys.transform(e).expect("placed");
+            phys.set_transform(e, at);
+        }),
+    ];
+    for (name, rule) in rules {
+        let (mut phys, boxes) = restored_column(&saved);
+        rule(&mut phys, boxes[0]);
+        assert!(!phys.is_sleeping(boxes[0]), "{name} left the box asleep");
+    }
+
+    let (_, _, saved) = saved_column(3);
+    let (mut phys, boxes) = restored_column(&saved);
+    let top = saved[2].position.y + 0.25;
+    ball(&mut phys, 99, DVec3::new(0.0, top + 0.3, 0.0), DVec3::ZERO);
+    let mut woke = None;
+    for tick in 1..=60 {
+        phys.step(DT);
+        if boxes.iter().all(|&e| !phys.is_sleeping(e)) {
+            woke = Some(tick);
+            break;
+        }
+    }
+    assert!(woke.is_some(), "the ball left the column asleep");
+}
+
+/// **Nothing is put to sleep that cannot sleep**: an entity with no body, a
+/// system without contacts, and one with sleep turned off all say `false`
+/// and leave the body awake.
+#[test]
+fn put_to_sleep_refuses_what_cannot_sleep() {
+    let mut phys = system();
+    assert!(!phys.put_to_sleep(entity(7)), "an entity with no body");
+
+    let mut plain = PhysicsSystem::new();
+    plain.set_body(entity(0), RigidBody::new_dynamic(1.0));
+    assert!(!plain.put_to_sleep(entity(0)), "a system without contacts");
+    assert!(!plain.is_sleeping(entity(0)));
+
+    let mut off = PhysicsSystem::with_contacts(ContactSettings {
+        sleep: false,
+        ..ContactSettings::DEFAULT
+    });
+    off.set_body(entity(0), RigidBody::new_dynamic(1.0));
+    assert!(!off.put_to_sleep(entity(0)), "sleep off");
+    assert!(!off.is_sleeping(entity(0)));
+}
