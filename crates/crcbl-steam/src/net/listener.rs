@@ -21,11 +21,15 @@ use crate::{
 /// connection is considered, not remembered.
 ///
 /// `!Send`: it lives with the [`Steam`] that pumps its arrivals. Dropping it
-/// closes the socket; connections already accepted stay open.
+/// stops admitting — later arrivals are closed with
+/// [`EndReason::ShuttingDown`] — and connections already accepted stay open.
+/// The socket itself closes once the last of them is dropped too, because
+/// `CloseListenSocket` closes every connection accepted on it, ungracefully;
+/// until then its virtual port stays taken, and a new listener on that port
+/// is refused.
 #[derive(Debug)]
 pub struct SteamListener {
-    client: Arc<Client>,
-    socket: u32,
+    socket: Arc<ListenSocket>,
     lobby: LobbyId,
     allowed: BTreeSet<SteamId>,
     /// Filled by the pump; the `Weak` side is in `Steam::incoming`.
@@ -50,6 +54,7 @@ impl SteamListener {
         if socket == 0 {
             return Err(SteamError::Refused("CreateListenSocketP2P"));
         }
+        let socket = Arc::new(ListenSocket { client, socket });
         let arrivals = Rc::new(IncomingQueue::new(VecDeque::new()));
         steam
             .incoming
@@ -58,9 +63,8 @@ impl SteamListener {
         steam
             .incoming
             .sockets
-            .push((socket, Rc::downgrade(&arrivals)));
+            .push((socket.socket, Rc::downgrade(&arrivals)));
         Ok(Self {
-            client,
             socket,
             lobby: lobby.id(),
             allowed: BTreeSet::new(),
@@ -106,11 +110,39 @@ impl SteamListener {
             close(client, arrival.connection, EndReason::Lost(0));
             return None;
         }
-        Some(SteamTransport::over(
-            Arc::clone(client),
-            arrival.connection,
-            remote,
-        ))
+        Some(
+            SteamTransport::over(Arc::clone(client), arrival.connection, remote)
+                .accepted_on(Arc::clone(&self.socket)),
+        )
+    }
+}
+
+/// An open listen socket, shared by its [`SteamListener`] and every
+/// connection accepted on it, and closed when the last of them is dropped.
+///
+/// `Send`, because an accepted [`SteamTransport`] is: a drop off the pump
+/// thread skips `CloseListenSocket` and logs, as the transport's own drop
+/// does, and the socket then stays open until Steam shuts down.
+#[derive(Debug)]
+pub(crate) struct ListenSocket {
+    client: Arc<Client>,
+    socket: u32,
+}
+
+impl Drop for ListenSocket {
+    fn drop(&mut self) {
+        let client = &self.client;
+        if !client.on_pump_thread() {
+            log::warn!(
+                "steam: the last user of listen socket {} was dropped off the pump thread; \
+                 the socket stays open until Steam shuts down",
+                self.socket
+            );
+            return;
+        }
+        // SAFETY: `client.net` is the non-null interface; this is the pump
+        // thread; the socket is this value's, closed once.
+        unsafe { (client.lib.fns.net.close_listen_socket)(client.net, self.socket) };
     }
 }
 
@@ -126,16 +158,6 @@ fn close(client: &Client, connection: u32, reason: EndReason) {
             reason.debug_text().as_ptr(),
             false,
         );
-    }
-}
-
-impl Drop for SteamListener {
-    fn drop(&mut self) {
-        let client = &self.client;
-        // `!Send`, so this is the pump thread.
-        // SAFETY: `client.net` is the non-null interface; the socket is this
-        // listener's, closed once.
-        unsafe { (client.lib.fns.net.close_listen_socket)(client.net, self.socket) };
     }
 }
 
@@ -250,6 +272,30 @@ mod tests {
             script(|s| s.net.closed.clone()),
             [(connection, EndReason::ShuttingDown.code(), false)]
         );
+    }
+
+    /// `CloseListenSocket` closes every connection accepted on the socket,
+    /// ungracefully (`isteamnetworkingsockets.h`), so the socket stays open
+    /// while any of them does.
+    #[test]
+    fn accepted_connections_outlive_their_listener() {
+        let (mut steam, _lobby, mut listener) = host();
+        let socket = script(|s| s.net.listen_sockets[0].0);
+        arrive(&mut steam, MEMBER);
+        let peer = listener.accept(&steam).expect("a member is admitted");
+        drop(listener);
+        assert!(
+            script(|s| s.net.closed_listen_sockets.is_empty()),
+            "closing the socket would drop the accepted peer"
+        );
+        // It no longer admits anyone.
+        let late = arrive(&mut steam, MEMBER);
+        assert_eq!(
+            script(|s| s.net.closed.clone()),
+            [(late, EndReason::ShuttingDown.code(), false)]
+        );
+        drop(peer);
+        assert_eq!(script(|s| s.net.closed_listen_sockets.clone()), [socket]);
     }
 
     #[test]

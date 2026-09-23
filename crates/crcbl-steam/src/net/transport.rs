@@ -4,7 +4,7 @@ use std::{collections::VecDeque, sync::Arc};
 
 use crcbl_net::{Message, MessageKind, Transport, TransportError};
 
-use super::{EndReason, identity, state};
+use super::{EndReason, identity, listener::ListenSocket, state};
 use crate::{
     EResult, Steam, SteamId,
     client::Client,
@@ -58,6 +58,10 @@ pub struct SteamTransport {
     unreliable: VecDeque<Vec<u8>>,
     /// Why it ended, once it has.
     end: Option<EndReason>,
+    /// The listen socket it was accepted on, kept open while this is: closing
+    /// the socket closes every connection accepted on it. Declared last, so
+    /// it is released after `Drop` has closed the connection.
+    _listen_socket: Option<Arc<ListenSocket>>,
 }
 
 impl SteamTransport {
@@ -101,7 +105,15 @@ impl SteamTransport {
             reliable: VecDeque::new(),
             unreliable: VecDeque::new(),
             end: None,
+            _listen_socket: None,
         }
+    }
+
+    /// The same transport, keeping `socket` — the listen socket it was
+    /// accepted on — open while it lives.
+    pub(crate) fn accepted_on(mut self, socket: Arc<ListenSocket>) -> Self {
+        self._listen_socket = Some(socket);
+        self
     }
 
     /// Who is on the other end — certified by Steam's relay, so a host can
