@@ -23,6 +23,145 @@ pixel over tolerance, max channel delta 3**. Anyone reaching for a per-scene
 tolerance again should first check whether the fixture's own edges are on the
 pixel grid.
 
+## What the deleted 46-ambient-occlusion plan left behind (2026-09-24)
+
+Record; the plan was built, and what it left open is in `docs/backlog.md` under
+_What GTAO left owed_, _What the bent-normal slice left owed_, _What the
+occlusion view left owed_, _What screen-space AO left owed_ and the raster
+lighting stack's bullet on the low tier's scalar pass. It specified the
+occlusion chain: a depth prepass, a gather at half resolution (GTAO in
+`ssao.slang`, or the eight-tap hemisphere in `ssao_hemisphere.slang`, chosen by
+`crcbl_render::ssao`'s `r_ssao_technique`), a depth-weighted blur, a depth-aware
+upsample and a consumer in `mesh.slang`. The shader headers describe the pass as
+it stands; what follows is the rules and their reasons, which live nowhere else.
+
+- **The prepass is the shadow pipeline, and the forward pass trusts its depth.**
+  `shadow_pipeline` is already the depth-only twin of the colour pipeline, so
+  driven with the camera's group and draws it is the scene depth prepass
+  (`prepass_groups`) with no new pipeline, shader or bind group. The colour pass
+  then tests `GreaterOrEqual` read-only (`MeshModules::color_depth_stencil`).
+  `LoadOp::Load` with `Greater` **cannot work**: the prepass wrote the identical
+  depth and `Greater` rejects equality, so the frame goes black. The overdraw
+  win rests on `SV_Position.z` being bit-identical between the two pipelines,
+  which nothing decorates for; a rasteriser that breaks it draws **holes**, and
+  the fallback (clear and write depth again) is taken by saying so in the code,
+  never by re-blessing a golden around it.
+- **AO scales `frame.ambient` alone.** It is produced before the forward pass
+  and read inside it as an integer `Load` at `SV_Position.xy`: no sampler, no
+  UV, no filtering for four backends to disagree about. **Multiplying the
+  tonemap's input is refused**, because it darkens direct light and highlights
+  too.
+- **Normals are reconstructed from depth, with the four-tap closest-neighbour
+  rule.** The two-tap `ddx`/`ddy` form straddles the depth discontinuity at
+  every silhouette and draws a dark rim round every object. **A normal
+  attachment is refused for AO**: the prepass has no colour target, so it would
+  cost a third geometry pipeline per `GeometryPath` and a new fragment entry
+  point for a buffer one pass reads, and a wrong reconstructed normal costs a
+  pixel only an eighth of its occlusion. The attachment is reserved as the
+  remedy for the SSR escalation clause in `docs/plan/47-reflections.md`, whose
+  trigger is a one-pixel fringe of unrelated colour at silhouettes. Escalating
+  is contained to the prepass pipeline and the gather's first lines.
+- **The determinism rule.** Rotation comes from an integer-indexed constant
+  table (`pixel.xy & 3` into sixteen entries), never a float hash, and **the
+  blur is not optional**. One binary depth comparison landing on its threshold
+  resolves differently on two drivers and swings a pixel by an eighth, far past
+  `Tolerance::RASTERISER`; interleaved-gradient noise and `frac(sin(…))` hashes
+  amplify float differences by construction, and an integer index is
+  bit-identical by inspection. The blur's footprint is the noise tile, so it
+  removes the radial banding and divides an isolated flipped sample by as many
+  taps as count. It does not remove the tangential banding alone: that takes
+  more slice orientations _and_ the wider footprint of a second blur together,
+  which is why `r_ssao_slices` and `r_ssao_blur_passes` default to four and two.
+- **Continuity is why GTAO replaced the hemisphere, not quality.** A horizon
+  integral moves by a hair when a driver disagrees in the last bit, where a sum
+  of binary comparisons cliffs, so the technique that looked riskier for the
+  goldens is the safer one. **Every angle goes through
+  `crcbl_shaders::ssao::acos_approx`** (Abramowitz and Stegun 4.4.45), never the
+  target's `acos`, whose accuracy no shading language specifies; the sweep
+  against `f64::acos` bounds `MAX_ACOS_ERROR` from below as well, so the
+  intrinsic cannot pass it.
+- **The trap: the slice tilt is signed against the view-orthogonal tangent, not
+  the view axis.** The two coincide only at the frame's centre. Signed against
+  the axis, every off-centre pixel puts both horizon clamps on the wrong sides
+  and a flat floor picks up a smooth wash growing towards the edges — a
+  vignette, which looks like a thing renderers have and would have been blessed.
+  `probes`' flatness assertion caught it (three levels against a half-level
+  allowance); `the_slice_tilt_is_signed_against_the_view_orthogonal_tangent` is
+  the guard.
+- **The two bodies are two shaders, not a branch.** The hemisphere is a
+  threshold comparison and needs a depth bias (`DEPTH_BIAS_RADII`, a share of
+  the sampling radius because the radius is a console variable); a horizon
+  integral must not have one, since a sample in the surface's own plane lands on
+  the tangent where the integral is stationary. And `Shader::entry_point`
+  answers `None` for a stage with two entry points, so two fragment entries in
+  one module is a shader nothing can build a pipeline from. They share
+  everything else — block, bindings, layout, ring, cache, blur, upsample — which
+  is why `r_ssao_technique` reaches a pipeline where every other knob reaches a
+  uniform lane. The hemisphere writes no bent direction.
+- **The blur weights on view-space Z, as a ramp, never a cut.** A reversed-Z
+  delta is not a distance — the same metre is enormous near the eye and nothing
+  near the far plane — so the blur unprojects as the gather does, and binds the
+  same `SsaoParams` block rather than one of its own. `if (abs(dz) < t)` would
+  put a binary decision on the output pixel, which is what the rotation table
+  keeps off the input. The tolerance derives from the AO radius, the only length
+  the pair has, rather than a uniform nobody adjusts. **The far-plane test is
+  the one comparison that stays**, because it compares against an exact
+  constant, so two drivers both take it or neither does. The upsample likewise
+  keeps a floor on the nearest tap (`NEAREST_TAP_FLOOR`) so a pixel whose every
+  tap is rejected still has a divisor.
+- **The off-switch is data, not a branch, and the fetch is clamped.** AO has no
+  device fact to gate on, and inventing a capability that is really a
+  performance opinion is what `docs/plan/39-capabilities.md` exists to prevent.
+  With the pass off, `ForwardRenderer::ambient_occlusion_placeholder` binds an
+  uploaded 1×1 holding `AMBIENT_OCCLUSION_NONE` (a clear cannot carry the
+  direction sentinel), and no occlusion pass is recorded at all. A `Load`
+  outside an image's extent yields **zero**, not its one texel, so the consumer
+  clamps against `GetDimensions` — unclamped, the first AO-off frame was black
+  wherever ambient was all the light, with nothing reporting an error.
+  `forward_e2e::depth_probe` asks for the clamp on every backend.
+- **The golden is not the instrument; a structural ratio is.** A pass writing a
+  constant 1.0 draws a plausible frame. The check is a band inside a concave
+  corner measurably darker than a band on the same surface outside it — same
+  normal, distance and lights — in the shape of `SPOT_SHADOW_RATIO`. It survives
+  driver drift and fails a no-op pass, an inverted normal and a result that
+  never reaches the shading line.
+- **The multi-bounce tint is clamped at one on purpose.**
+  `multi_bounce_occlusion` is Jimenez et al. 2016's fit, unconditional on every
+  tier because it reads no second target. Its coefficients sum to a hair over
+  one above an albedo of 0.8, and with AO off every fragment arrives at full
+  visibility, so the top-end `min` is what keeps an AO-off frame identical to
+  the frame before the pass existed. It is the one departure from the paper.
+- **The bent direction sums turns of the normal, not bisectors.** Every slice
+  plane contains the eye, so summing bisectors pulls the answer towards the view
+  direction by an amount set by screen position — measured at seventeen degrees
+  off an unoccluded plane two thirds across a 1920-wide frame. Each slice
+  instead turns the normal by its `gamma`, so an unoccluded pixel gets its own
+  normal back exactly. **A zero-length direction is the sentinel** for "nothing
+  to measure" and for "no pass ran" alike (`BENT_NORMAL_NONE`,
+  `BENT_NORMAL_MIN_LENGTH`), and `bent_normal_at` answers it with the fragment's
+  own shading normal; nothing reconstructs a normal in the consumer. The
+  sentinel decodes to a short vector rather than zero, so `decode_bent` in both
+  filters resolves a tap to a unit vector or to exactly nothing. The flat
+  `FrameUniforms::ambient` term is not steered: a constant has no direction.
+- **One format on every tier; a tier turns off arithmetic, not bandwidth.** The
+  2026-08-30 split put scalar occlusion plus the tint on low and bent normals
+  plus specular occlusion on medium and high. A per-tier format would mean a
+  second pipeline, bind-group layout and `mesh.slang` binding type, so
+  `TransientImageDesc::ambient_occlusion` is `Rgba8Unorm` everywhere and
+  `[engine.video] ssao_bent_normals` (off on the Low preset) is the switch.
+  Which scalar body low runs is still a measurement. The direction costs the two
+  filters 0.002 ms and 0.004 ms at 1920×1080 on radv (2026-09-02); the format
+  itself has never been priced.
+- **Specular occlusion needs a cone angle the channel does not carry, and until
+  it exists `docs/plan/47-reflections.md`'s refusal of specular occlusion
+  stands.** A scalar AO is the wrong term for a reflection. The chosen encoding
+  (an octahedral direction in `.gb`, a cone angle in `.a`, and GTSO) is in
+  `docs/backlog.md`.
+- **Declined: HBAO and HBAO+.** They read the same depth and GTAO supersedes
+  them on it, so one is a step onto a rung already obsolete. **Declined: a
+  frame-sized transient cleared to 1.0** (`ssao-none`), which shipped first and
+  was correct but strictly dearer than the placeholder.
+
 ## What the alpha-mask and double-sided material modes shipped without (2026-09-05)
 
 Decision record; the decision is in `docs/backlog.md`.
@@ -285,7 +424,7 @@ Kept because `MAX_SPARSE_SHARP_EDGES` and `MAX_SHIPPED_SHARP_EDGES` are picked
 off it, and because it is re-taken whenever the pass changes rather than carried
 forward. It was carried once — across the half-resolution change — read
 `1 / 1 / 2 / 0` on radv for weeks, and produced a conclusion that was backwards
-in both this file and `docs/plan/46-ambient-occlusion.md`.
+in both this file and the ambient-occlusion plan of the time.
 
 ## The SSR visibility weight costs the software tier 11% of a frame (2026-09-04)
 
@@ -545,8 +684,8 @@ Decision record; the decision is in `docs/backlog.md`.
   `Rgba8Unorm` is spent, so the angle wants either a second image or a swap to
   an octahedral pair in `.gb` with the angle in `.a` — the encoding the slice
   turned down for a three-channel direction with no seam and no fold. Until it
-  exists, `docs/plan/46-ambient-occlusion.md`'s SSR refusal stands and is
-  correct.
+  exists, `docs/plan/47-reflections.md`'s refusal of specular occlusion stands
+  and is correct.
 
 - **The tier split the 2026-08-30 decision asked for.** The user's call was
   scalar-only on low and the widened target on medium and high. What landed is
@@ -556,9 +695,11 @@ Decision record; the decision is in `docs/backlog.md`.
   second `mesh.slang` binding type. `crcbl_render::ssao::r_ssao_bent_normals`
   turns off the _arithmetic_ and nothing turns off the bandwidth. Whether low
   should set it — and through what, since a console variable is not reachable
-  from a preset — is the same open question as the two knobs in this file's HIGH
-  PRIORITY entry and the contact-shadow entry: it wants an `[engine.video]` key
-  or a tier-table cell, and has neither.
+  from a preset — was the same open question as the two knobs in this file's
+  HIGH PRIORITY entry and the contact-shadow entry. **Answered since:**
+  `crcbl::settings`' `SSAO_BENT_NORMALS_KEY` is the `[engine.video]` key, and
+  `crcbl::settings::presets` writes it `false` for Low and `true` for Medium and
+  High, so low pays the bandwidth and not the arithmetic.
 
 - **The direction is written in world space, not the view space the brief asked
   for.** Every other part of the encoding decision is as specified. The reason
@@ -608,8 +749,8 @@ heading.
 
 ## The depth-aware upsample has one reader, not three (2026-09-02)
 
-`docs/plan/46-ambient-occlusion.md` planned the bilateral upsample as **one
-shader with three readers** — the AO pass, `47-reflections.md`'s march, and
+The ambient-occlusion plan designed the bilateral upsample as **one shader with
+three readers** — the AO pass, `47-reflections.md`'s march, and
 `51-volumetrics.md`'s composite, which already samples a froxel grid far below
 the frame's resolution and would trade its trilinear lookup for a depth-aware
 one. Only the AO reader was built, and that plan section has been deleted now
@@ -640,13 +781,13 @@ Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.
 
 **The number that did not reconcile has been measured, and the suspect was
-cleared.** This entry first recorded `docs/plan/46-ambient-occlusion.md`'s 0.255
-ms against the 582 µs in the sweep above — the same two-slice pass, same
-resolution, same driver, 2.3x apart — and named the tangential rung as the only
-AO change between the two dates. Re-measured 2026-09-01 on the same command,
-`lantern --headless --frames 400 --size 1920x1080` on radv: `ssao` is **0.488 ms
-p50 / 0.505 ms p95**, 22.8% of a 2.143 ms frame, and `forward` is ahead of it at
-0.531 ms.
+cleared.** This entry first recorded the 0.255 ms in `docs/backlog.md`'s _What
+GTAO left owed_ against the 582 µs in the sweep above — the same two-slice pass,
+same resolution, same driver, 2.3x apart — and named the tangential rung as the
+only AO change between the two dates. Re-measured 2026-09-01 on the same
+command, `lantern --headless --frames 400 --size 1920x1080` on radv: `ssao` is
+**0.488 ms p50 / 0.505 ms p95**, 22.8% of a 2.143 ms frame, and `forward` is
+ahead of it at 0.531 ms.
 
 The rung did not cause it. Compiling the pre-rung `ssao.slang` against today's
 tree and running the same command measures **0.518 ms** — _slower_ than the
@@ -927,7 +1068,8 @@ report lives outside the tree; this entry is its durable part):
   `47-reflections.md`'s SSR-history refusal and `50-irradiance-probes.md`'s DDGI
   refusal all say so.
 - **C3 — the budget.** The whole frame is 0.990 ms p50 at 1920×1080 on an RX
-  7900 XTX (`46-ambient-occlusion.md`, the 2026-08-28 distribution).
+  7900 XTX (`docs/backlog.md`'s _What GTAO left owed_, the 2026-08-28
+  distribution).
 - **C4 — the software and browser tiers pay for every pass** at ~40× the desktop
   cost.
 - **C5 — what exists.** L1 SH probes (`GpuProbe`, `probe_irradiance`), a Hi-Z

@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 1f4a69aaeae6c6f4245c4c297eaf0e11616ad00ec32b18e62507a7d4c72804b6
+source-sha256 = 9d901c7a49f69e176261656ce803042ce3e615e0101e62495c3ef62701ebd00e
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = d88920326671645292875898c1448c268d18ce0a6829ecf1c067bbdf3ecf9f0d
@@ -473,7 +473,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao]
 source = shaders/ssao.slang
-source-sha256 = ee6fdbb7db61861950b0c5a5d88f8a407a58dba0dec145f97232c2484348e246
+source-sha256 = a98112c17d69ac11ef9396151d96416a235a07a3516ff92b45fd752f27afc3b7
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao.spv
 spirv-sha256 = 17db5e7351ca2628ae0da05f3d8b288a64aac317d2262771c131684d369b8772
@@ -501,7 +501,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_hemisphere]
 source = shaders/ssao_hemisphere.slang
-source-sha256 = 11864a8632e5b73228fd6ea534fb7b3063ee5572d852e7f4cdfe8373fed9ca9d
+source-sha256 = 7c2c8775caf83bc33824f013eea9aff8ae50cd720b29d2994dd7371d31410267
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao_hemisphere.spv
 spirv-sha256 = c0cedc4d8c21204dab35a92c81b243a6716ca1f39ce81b2c62b61bb146697bad

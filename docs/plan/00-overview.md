@@ -107,57 +107,57 @@ is an orthographic projection with `z` as z-index.
 
 Cross-cutting topic docs (identity, no ordering implied):
 
-| Topic | Doc                                                                              | Theme                                                                      |
-| ----- | -------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| 11    | [11-cli-headless.md](11-cli-headless.md)                                         | `crcbl` CLI: headless engine/editor control, scripting                     |
-| 12    | [12-testing.md](12-testing.md)                                                   | Test infra: unit/property/e2e, golden images, determinism                  |
-| 13    | [13-audio.md](13-audio.md)                                                       | Spatial cue grammar, mixer, occlusion, audio testing                       |
-| 14    | [14-persistence.md](14-persistence.md)                                           | Save games (snapshot-based), settings layers, profiles                     |
-| 15    | [15-windowing.md](15-windowing.md)                                               | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |
-| 16    | [16-wasm-modules.md](16-wasm-modules.md)                                         | Game logic as wasm modules: FFI ABI, any language, modding                 |
-| 17    | [17-animation.md](17-animation.md)                                               | Skeletal animation: cooked clips, state machine, GPU skinning              |
-| 18    | [18-render-features.md](18-render-features.md)                                   | Render features index: how the techniques interact, deliver and risk       |
-| 19    | [19-input.md](19-input.md)                                                       | Device-agnostic action input: kb/mouse/pad/touch, one config               |
-| 20    | [20-particles.md](20-particles.md)                                               | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
-| 21    | [21-jobs.md](21-jobs.md)                                                         | Threading: pipeline threads + job pool, mailboxes, tick sync               |
-| 22    | [22-replay.md](22-replay.md)                                                     | State recording: replays, black-box debug, spectating                      |
-| 23    | [23-netcode.md](23-netcode.md)                                                   | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
-| 24    | [24-navigation.md](24-navigation.md)                                             | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds             |
-| 25    | [25-lod.md](25-lod.md)                                                           | LOD: hand-first + QEM auto fallback, GPU selection in cull pass            |
-| 26    | [26-prediction.md](26-prediction.md)                                             | Client prediction/rollback + query-only lag comp, fairness harness         |
-| 27    | [27-auth.md](27-auth.md)                                                         | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint           |
-| 28    | [28-ballistics.md](28-ballistics.md)                                             | Penetrating sweeps: material energy loss, ricochet, media drag             |
-| 29    | [29-fp-rendering.md](29-fp-rendering.md)                                         | First-person: viewmodel pass, ADS cameras, PiP optics, kill-cam POV        |
-| 30    | [30-player-kit.md](30-player-kit.md)                                             | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding      |
-| 31    | [31-vis-culling.md](31-vis-culling.md)                                           | Optional anti-wallhack: PVS + ray envelopes, leak auditor                  |
-| 32    | [32-voip.md](32-voip.md)                                                         | Voice: team/direct + proximity, Opus, gate-safe (no positions)             |
-| 33    | [33-decals.md](33-decals.md)                                                     | Decals: projected/parallax/carve-volume tiers, impact + decoration         |
-| 34    | [34-inventory.md](34-inventory.md)                                               | UI drag-drop + optional grid-inventory kit (looting, slots)                |
-| 35    | [35-ragdolls.md](35-ragdolls.md)                                                 | Ragdolls: server settles / client performs, anim→physics handoff           |
-| 36    | [36-contact-solver.md](36-contact-solver.md)                                     | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
-| 37    | [37-materials.md](37-materials.md)                                               | Material authoring: templates+instances, render↔surface link, lint         |
-| 38    | [38-weapons.md](38-weapons.md)                                                   | Weapon kit: attachments, server-authoritative fire, recoil patterns        |
-| 39    | [39-capabilities.md](39-capabilities.md)                                         | Device capabilities, graceful degradation, path selectors, feature matrix  |
-| 40    | [40-profiling.md](40-profiling.md)                                               | Profiling, benchmarking: CPU/GPU spans, counters, trace export, perf rows  |
-| 41    | ✅ 41-webgpu-stream — done, deleted 2026-09-24; rules in `docs/notes/browser.md` | The encoding `crcbl-webgpu` speaks — slice 2 of stage 10's WebGPU track    |
-| 42    | [42-steam.md](42-steam.md)                                                       | Steamworks (`crcbl-steam`): hand-written FFI over the SDK's flat C API     |
-| 43    | [43-render-standards.md](43-render-standards.md)                                 | What a current engine ships and where this one stands — the gap survey     |
-| 44    | [44-lighting.md](44-lighting.md)                                                 | Lighting: the two paths, the light list, clustered forward, the BRDF       |
-| 45    | [45-shadows.md](45-shadows.md)                                                   | Shadows: cascades, atlas tiles, bias, and the filter quality ladder        |
-| 46    | [46-ambient-occlusion.md](46-ambient-occlusion.md)                               | Ambient occlusion: SSAO, its depth-weighted blur, and GTAO next            |
-| 47    | [47-reflections.md](47-reflections.md)                                           | Screen-space reflections: the Hi-Z march, roughness, determinism           |
-| 48    | [48-post-processing.md](48-post-processing.md)                                   | The post stack: pipeline order, HDR, tonemap, bloom, where toggles live    |
-| 49    | [49-antialiasing.md](49-antialiasing.md)                                         | Antialiasing: FXAA, CMAA2, TAA's blocker, and MSAA repriced                |
-| 50    | [50-irradiance-probes.md](50-irradiance-probes.md)                               | Irradiance probes: the static L1 grid, the diffuse GI twin                 |
-| 51    | [51-volumetrics.md](51-volumetrics.md)                                           | Volumetrics: height fog and the froxel column                              |
-| 52    | [52-debug-console.md](52-debug-console.md)                                       | The debug console: variables and commands declared beside the code         |
-| 53    | [53-transparency.md](53-transparency.md)                                         | Blended transparency: the sorted pass, its keys, and what it blocks        |
-| 54    | [54-android.md](54-android.md)                                                   | Android: the shell backend the platform is missing, and its device floor   |
-| 55    | [55-water.md](55-water.md)                                                       | Water: bodies, the surface pass, waves, foam and buoyancy                  |
-| 56    | [56-wind.md](56-wind.md)                                                         | Wind: the two-layer field, gusts, motors and every consumer                |
-| 57    | [57-grass.md](57-grass.md)                                                       | Grass and vegetation wind: cards, blades, shells, swaying trees            |
-| 58    | [58-hair.md](58-hair.md)                                                         | Hair and fur: shells, cards on simulated chains, strands                   |
-| 59    | [59-tessellation.md](59-tessellation.md)                                         | Tessellation: displacement baked into clusters, patterns diced at run time |
+| Topic | Doc                                                                                    | Theme                                                                      |
+| ----- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| 11    | [11-cli-headless.md](11-cli-headless.md)                                               | `crcbl` CLI: headless engine/editor control, scripting                     |
+| 12    | [12-testing.md](12-testing.md)                                                         | Test infra: unit/property/e2e, golden images, determinism                  |
+| 13    | [13-audio.md](13-audio.md)                                                             | Spatial cue grammar, mixer, occlusion, audio testing                       |
+| 14    | [14-persistence.md](14-persistence.md)                                                 | Save games (snapshot-based), settings layers, profiles                     |
+| 15    | [15-windowing.md](15-windowing.md)                                                     | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |
+| 16    | [16-wasm-modules.md](16-wasm-modules.md)                                               | Game logic as wasm modules: FFI ABI, any language, modding                 |
+| 17    | [17-animation.md](17-animation.md)                                                     | Skeletal animation: cooked clips, state machine, GPU skinning              |
+| 18    | [18-render-features.md](18-render-features.md)                                         | Render features index: how the techniques interact, deliver and risk       |
+| 19    | [19-input.md](19-input.md)                                                             | Device-agnostic action input: kb/mouse/pad/touch, one config               |
+| 20    | [20-particles.md](20-particles.md)                                                     | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
+| 21    | [21-jobs.md](21-jobs.md)                                                               | Threading: pipeline threads + job pool, mailboxes, tick sync               |
+| 22    | [22-replay.md](22-replay.md)                                                           | State recording: replays, black-box debug, spectating                      |
+| 23    | [23-netcode.md](23-netcode.md)                                                         | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
+| 24    | [24-navigation.md](24-navigation.md)                                                   | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds             |
+| 25    | [25-lod.md](25-lod.md)                                                                 | LOD: hand-first + QEM auto fallback, GPU selection in cull pass            |
+| 26    | [26-prediction.md](26-prediction.md)                                                   | Client prediction/rollback + query-only lag comp, fairness harness         |
+| 27    | [27-auth.md](27-auth.md)                                                               | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint           |
+| 28    | [28-ballistics.md](28-ballistics.md)                                                   | Penetrating sweeps: material energy loss, ricochet, media drag             |
+| 29    | [29-fp-rendering.md](29-fp-rendering.md)                                               | First-person: viewmodel pass, ADS cameras, PiP optics, kill-cam POV        |
+| 30    | [30-player-kit.md](30-player-kit.md)                                                   | Optional player kit: predicted movement, GTA-style 3P cam, 1P binding      |
+| 31    | [31-vis-culling.md](31-vis-culling.md)                                                 | Optional anti-wallhack: PVS + ray envelopes, leak auditor                  |
+| 32    | [32-voip.md](32-voip.md)                                                               | Voice: team/direct + proximity, Opus, gate-safe (no positions)             |
+| 33    | [33-decals.md](33-decals.md)                                                           | Decals: projected/parallax/carve-volume tiers, impact + decoration         |
+| 34    | [34-inventory.md](34-inventory.md)                                                     | UI drag-drop + optional grid-inventory kit (looting, slots)                |
+| 35    | [35-ragdolls.md](35-ragdolls.md)                                                       | Ragdolls: server settles / client performs, anim→physics handoff           |
+| 36    | [36-contact-solver.md](36-contact-solver.md)                                           | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
+| 37    | [37-materials.md](37-materials.md)                                                     | Material authoring: templates+instances, render↔surface link, lint         |
+| 38    | [38-weapons.md](38-weapons.md)                                                         | Weapon kit: attachments, server-authoritative fire, recoil patterns        |
+| 39    | [39-capabilities.md](39-capabilities.md)                                               | Device capabilities, graceful degradation, path selectors, feature matrix  |
+| 40    | [40-profiling.md](40-profiling.md)                                                     | Profiling, benchmarking: CPU/GPU spans, counters, trace export, perf rows  |
+| 41    | ✅ 41-webgpu-stream — done, deleted 2026-09-24; rules in `docs/notes/browser.md`       | The encoding `crcbl-webgpu` speaks — slice 2 of stage 10's WebGPU track    |
+| 42    | [42-steam.md](42-steam.md)                                                             | Steamworks (`crcbl-steam`): hand-written FFI over the SDK's flat C API     |
+| 43    | [43-render-standards.md](43-render-standards.md)                                       | What a current engine ships and where this one stands — the gap survey     |
+| 44    | [44-lighting.md](44-lighting.md)                                                       | Lighting: the two paths, the light list, clustered forward, the BRDF       |
+| 45    | [45-shadows.md](45-shadows.md)                                                         | Shadows: cascades, atlas tiles, bias, and the filter quality ladder        |
+| 46    | ✅ 46-ambient-occlusion — done, deleted 2026-09-24; rules in `docs/notes/rendering.md` | Ambient occlusion: SSAO, its depth-weighted blur, and GTAO next            |
+| 47    | [47-reflections.md](47-reflections.md)                                                 | Screen-space reflections: the Hi-Z march, roughness, determinism           |
+| 48    | [48-post-processing.md](48-post-processing.md)                                         | The post stack: pipeline order, HDR, tonemap, bloom, where toggles live    |
+| 49    | [49-antialiasing.md](49-antialiasing.md)                                               | Antialiasing: FXAA, CMAA2, TAA's blocker, and MSAA repriced                |
+| 50    | [50-irradiance-probes.md](50-irradiance-probes.md)                                     | Irradiance probes: the static L1 grid, the diffuse GI twin                 |
+| 51    | [51-volumetrics.md](51-volumetrics.md)                                                 | Volumetrics: height fog and the froxel column                              |
+| 52    | [52-debug-console.md](52-debug-console.md)                                             | The debug console: variables and commands declared beside the code         |
+| 53    | [53-transparency.md](53-transparency.md)                                               | Blended transparency: the sorted pass, its keys, and what it blocks        |
+| 54    | [54-android.md](54-android.md)                                                         | Android: the shell backend the platform is missing, and its device floor   |
+| 55    | [55-water.md](55-water.md)                                                             | Water: bodies, the surface pass, waves, foam and buoyancy                  |
+| 56    | [56-wind.md](56-wind.md)                                                               | Wind: the two-layer field, gusts, motors and every consumer                |
+| 57    | [57-grass.md](57-grass.md)                                                             | Grass and vegetation wind: cards, blades, shells, swaying trees            |
+| 58    | [58-hair.md](58-hair.md)                                                               | Hair and fur: shells, cards on simulated chains, strands                   |
+| 59    | [59-tessellation.md](59-tessellation.md)                                               | Tessellation: displacement baked into clusters, patterns diced at run time |
 
 Sequencing is the [ROADMAP](ROADMAP.md)'s job: phases P0–P4A build the full
 engine base (window → render → sim → physics slice → UI slice → audio) before

@@ -622,7 +622,7 @@ entry this list also asked for shipped 2026-09-02, so it is gone from here —
   which is small next to any rung above; Unreal ships Lambert for the same
   trade. **Lambert stays**, and what improves it is everything that already does
   or is scheduled to: the multi-scatter energy compensation on the lobe (built),
-  the multi-bounce occlusion tint and bent-normal ambient
-  ([46-ambient-occlusion.md](46-ambient-occlusion.md)'s decision of the same
-  day), the LTC area lights and the probe volume's bounce. The diffuse lobe
-  itself is not where the picture is lacking.
+  the multi-bounce occlusion tint and bent-normal ambient (the ambient-occlusion
+  tier decision of the same day, recorded in
+  [rendering notes](../notes/rendering.md)), the LTC area lights and the probe
+  volume's bounce. The diffuse lobe itself is not where the picture is lacking.

@@ -5891,16 +5891,22 @@ form is declined.
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/rendering.md` under this heading.
 
-The direction ships and steers the ambient — `docs/plan/46-ambient-occlusion.md`
-records what is now true. What it did not do:
+The direction ships and steers the ambient; the rules it was built to are in
+`docs/notes/rendering.md` under _What the deleted 46-ambient-occlusion plan left
+behind_. What it did not do:
 
 **DECIDED 2026-09-06 —** specular occlusion swaps the channel to an octahedral
 direction (`.gb`) plus cone angle (`.a`) and adds GTSO (Jimenez et al. 2016,
 "Practical Real-Time Strategies for Accurate Indirect Occlusion"), which is what
 Unreal and Unity HDRP ship; the tier split is `[engine.video] ssao_bent_normals`
-with low off, the format staying one so low pays bandwidth only. It retires plan
-46's SSR refusal and schedules the channel change, the GTSO term and the tier
-key.
+with low off, the format staying one so low pays bandwidth only. It retires
+`docs/plan/47-reflections.md`'s refusal of specular occlusion once built. **The
+tier key is built** — `crcbl::settings`' `SSAO_BENT_NORMALS_KEY`, which
+`crcbl::settings::presets` writes `false` for Low and `true` for Medium and
+High. **The channel change and the GTSO term are still owed**: checked
+2026-09-24, neither `ssao.slang` nor `mesh.slang` carries a cone angle, an
+octahedral direction or a GTSO term, and the target is still the three-channel
+`xyz * 0.5 + 0.5` direction beside the visibility scalar.
 
 - **The widening's own bandwidth cost is unmeasured, and the switch cannot
   measure it.** Both arms of `r_ssao_bent_normals` write `Rgba8Unorm`, so the
@@ -7173,8 +7179,9 @@ built, deliberately out of that slice:
 
 ### What GTAO left owed (2026-08-28)
 
-`docs/plan/46-ambient-occlusion.md`'s delivery section holds what shipped and
-the evidence. What the slice deferred or turned up:
+What shipped is described by `ssao.slang`'s header, and the rules it was built
+to are in `docs/notes/rendering.md` under _What the deleted 46-ambient-occlusion
+plan left behind_. What the slice deferred or turned up:
 
 - **GTAO was the most expensive pass in lantern's frame when this was measured
   on 2026-08-28, and stopped being so on 2026-09-02.** It doubled the AO pass's
@@ -7186,13 +7193,20 @@ the evidence. What the slice deferred or turned up:
   2026-08-28 as a distribution once `crcbl_render::PassStats` existed: `ssao` at
   **0.258 ms p50 / 0.263 ms p95**, 26.0% of a 0.990 ms p50 total, summed across
   both views. What is **not** measured is GTAO against the eight-tap hemisphere
-  it replaced, because that code is gone; recovering it is the `git show` the
-  tier bullet above already describes, and it is what a quality seam would need
-  in order to offer the cheaper rung honestly. **Half-resolution AO retired the
-  headline on 2026-09-02**: the whole occlusion chain now measures 0.141 ms
-  against the forward pass's 0.254 ms at the same extent on the same card, so
-  the forward pass is the frame's most expensive. The 0.255 ms figures above
-  stay as the dated measurement of the pass this entry was written about.
+  it replaced. That no longer needs a `git show`: the hemisphere came back on
+  2026-09-04 as `shaders/ssao_hemisphere.slang`, and `crcbl_render::ssao`'s
+  `r_ssao_technique` (`gtao` or `hemisphere`) selects which body each side of
+  the split seam runs. Finishing it means running
+  `lantern --headless --frames 400 --size 1920x1080` under `RUST_LOG=info` with
+  each technique on radv, lavapipe and in the browser, and reading the `ssao`,
+  `ssao-blur` and `ssao-upsample` rows off `crcbl_render::PassStats`. It is what
+  a quality seam would need in order to offer the cheaper rung honestly, and it
+  is the input to the low tier's open technique choice (_The raster lighting
+  stack: what its twelve calls left_). **Half-resolution AO retired the headline
+  on 2026-09-02**: the whole occlusion chain now measures 0.141 ms against the
+  forward pass's 0.254 ms at the same extent on the same card, so the forward
+  pass is the frame's most expensive. The 0.255 ms figures above stay as the
+  dated measurement of the pass this entry was written about.
 - **GTAO made the depth buffer's last bits visible on a fourth scene.**
   `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
   `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on
@@ -7221,8 +7235,10 @@ the evidence. What the slice deferred or turned up:
 
 ### What the occlusion view left owed (2026-08-28)
 
-`docs/plan/46-ambient-occlusion.md`'s occlusion-view section holds what shipped.
-What it did not cover:
+The view shipped as `debug_view ambient occlusion` and `lantern`'s `AO VIEW`
+row; its rules (grey rather than a false-colour ramp, white when the pass is
+off) are on `ForwardRenderer::set_occlusion_view` and `mesh.slang`'s
+occlusion-view branch. What it did not cover:
 
 - **No cross-backend evidence.** The view is checked by
   `the_occlusion_view_draws_the_channel_and_not_a_constant` in `mesh_e2e`, which
@@ -7438,8 +7454,14 @@ they are not re-proposed, and the two answers that named a remainder:
   each of the three tiers.
 - **Which scalar occlusion pass the low tier runs is still a measurement.** That
   call put scalar occlusion plus the multi-bounce tint on low (the tint costs no
-  target) and bent normals plus specular occlusion on medium and high;
-  `46-ambient-occlusion.md` carries it.
+  target) and bent normals plus specular occlusion on medium and high. The
+  bent-normal half of that is wired (`ssao_bent_normals` off on the Low preset);
+  the scalar body is not: `r_ssao_technique` selects GTAO or the eight-tap
+  hemisphere, but it has no `[engine.video]` key and no preset writes it
+  (checked 2026-09-24 in `crcbl::settings` and `crcbl::settings::presets`). The
+  side-by-side cost in _What GTAO left owed_ is what would decide low's answer;
+  wiring it then needs a settings key the presets can write, as
+  `ssao_bent_normals` has.
 
 ### Specular IBL: what rung 3 left (2026-08-29)
 
@@ -15041,7 +15063,7 @@ Not a blocker for anything.
 ### Two `crcbl-render` modules are private and cited by crate path
 
 `crcbl-render/src/lib.rs` declares `mod ssao;` and `mod contact_shadows;`
-without `pub`, while `docs/plan/46-ambient-occlusion.md` and `45-shadows.md`
+without `pub`, while `docs/notes/rendering.md` and `docs/plan/45-shadows.md`
 name items by paths like `crcbl_render::ssao::bent_normals` and
 `crcbl_render::contact_shadows`. Every item exists at those paths inside the
 crate and the console variables are reachable by their console names, so nothing
@@ -20369,8 +20391,9 @@ submitting.
 
 ## What screen-space AO left owed
 
-`docs/plan/46-ambient-occlusion.md` holds the decisions and the reasons. What
-the first slice deferred or turned up:
+`docs/notes/rendering.md` holds the decisions and the reasons, under _What the
+deleted 46-ambient-occlusion plan left behind_. What the first slice deferred or
+turned up:
 
 - **The overdraw win is taken, and what is still owed on it is CI.** The colour
   pass loads the prepass's depth read-only and tests `GreaterOrEqual`

@@ -15,18 +15,18 @@ lobe is narrow enough for a screen-space ray.
 
 ### The AO section's refusal of an attachment does not transfer
 
-[46-ambient-occlusion.md](46-ambient-occlusion.md) refuses a normal attachment
-because "the prepass has no colour target at all, so it would mean a third
-geometry pipeline per `GeometryPath`, a new fragment entry point compiled to
-four targets, and a new `VertexOutput` consumer". **Every clause of that is a
-fact about the depth prepass**, which is built from the shadow pipeline with no
-fragment stage and no colour targets. On the **forward** pass none of it holds:
-both forward pipelines already take one `ColorTargetState` array and both name
-the same fragment entry, so a further target is one array element and no new
-pipeline, no new entry point and no new interpolant. (The fragment stage returns
-three today: `lit`, `reflectivity` and the `motion` target the temporal rung
-added.) Recorded here so the refusal is not applied by analogy to a pass it was
-never about.
+The AO chain refuses a normal attachment (the rule is in
+[rendering notes](../notes/rendering.md)) because the prepass has no colour
+target at all, so it would mean a third geometry pipeline per `GeometryPath`, a
+new fragment entry point compiled to four targets, and a new `VertexOutput`
+consumer. **Every clause of that is a fact about the depth prepass**, which is
+built from the shadow pipeline with no fragment stage and no colour targets. On
+the **forward** pass none of it holds: both forward pipelines already take one
+`ColorTargetState` array and both name the same fragment entry, so a further
+target is one array element and no new pipeline, no new entry point and no new
+interpolant. (The fragment stage returns three today: `lit`, `reflectivity` and
+the `motion` target the temporal rung added.) Recorded here so the refusal is
+not applied by analogy to a pass it was never about.
 
 ### The decision
 
@@ -303,9 +303,10 @@ measurement: on this tier the march is not where the frame goes.** Headless
 median of three runs, puts `ssr` at 6.3% of a 2.165 ms frame and `ssr-blur` at
 0.6%, with the five `hiz` levels adding 1.0% — against `shadow` at 15.6% and
 `forward` at 18.1%. Halving the march's extent could return about three and a
-half per cent of a frame, and it would spend the depth-aware upsample
-`46-ambient-occlusion.md` built for a single channel on a colour one, which that
-document's own backlog entry calls a rung rather than a binding.
+half per cent of a frame, and it would spend the depth-aware upsample the AO
+chain built for a single channel on a colour one, which
+`docs/notes/rendering.md`'s _The depth-aware upsample has one reader, not three_
+calls a rung rather than a binding.
 
 **`forward`'s share carries its attachment clears, and they are a twenty-fifth
 of it.** The pass opens by clearing scene colour, reflectivity and motion over

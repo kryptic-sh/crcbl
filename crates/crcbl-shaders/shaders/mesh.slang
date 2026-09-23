@@ -5313,9 +5313,9 @@ float contact_at(float2 position)
 /// **Every tier runs it.** It reads nothing the occlusion pass does not already
 /// write and adds no pass of its own, so there is no bandwidth for a quality
 /// knob to buy back and no `RenderEffects` bit selecting it.
-/// `docs/plan/46-ambient-occlusion.md`'s low tier is what asked for it, and the
-/// tier split there is about the *widened* target bent normals need — which this
-/// does not touch.
+/// The AO tier split's low tier is what asked for it, and that split is about
+/// the *widened* target bent normals need — which this does not touch; see
+/// `docs/notes/rendering.md`.
 float3 multi_bounce_occlusion(float visibility, float3 albedo)
 {
     float3 a = 2.0404 * albedo - 0.3324;
@@ -5436,7 +5436,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // **The occlusion view, outermost because its sentinel is.** The
     // ambient-occlusion channel drawn as grey and nothing else — one is white,
     // fully occluded is black — which is how the two techniques in
-    // `docs/plan/46-ambient-occlusion.md`'s ladder are actually compared. A
+    // the AO ladder are actually compared. A
     // composited frame shows occlusion times albedo times ambient, and a
     // difference in the first is not separable from a difference in the other
     // two by looking.
@@ -5948,7 +5948,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     //
     // **Unconditional, on every tier.** It is arithmetic in a pass every tier
     // already runs — no second target, no second pass — so there is nothing for
-    // a quality knob to buy back, and `docs/plan/46-ambient-occlusion.md`'s tier
+    // a quality knob to buy back, and the AO tier
     // split is about the widened target bent normals want rather than about
     // this.
     // **And the material's own occlusion multiplies the same terms**, which is

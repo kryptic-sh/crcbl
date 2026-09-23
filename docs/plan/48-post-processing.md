@@ -276,11 +276,12 @@ half that dispatches them cannot disagree.
 - **Device removes nothing**, and it is not wired to anything: `device_effects`
   is initialised to `RenderEffects::all()` and never assigned, so no
   `DeviceCaps` value reaches it. That is a fact about these three effects rather
-  than an unfinished clamp — [46-ambient-occlusion.md](46-ambient-occlusion.md)
-  says it of the occlusion pair in as many words, the reflection pair's module
-  says it of itself, and a device too small for the shadow atlas fails to build
-  the renderer rather than degrading past it. The first real rule arrives with
-  the ray-traced variants, which `LightingPath` selects.
+  than an unfinished clamp — the AO rules in
+  [rendering notes](../notes/rendering.md) say it of the occlusion pair in as
+  many words, the reflection pair's module says it of itself, and a device too
+  small for the shadow atlas fails to build the renderer rather than degrading
+  past it. The first real rule arrives with the ray-traced variants, which
+  `LightingPath` selects.
 - **Camera stack** is wired, and it is a file: `crcbl_render::stack` is the
   reader and the deterministic writer, `CameraStack::compile` is what makes
   `RenderEffects` the compiled form of that file, and

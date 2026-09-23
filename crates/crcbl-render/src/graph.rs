@@ -3134,8 +3134,8 @@ impl TransientImageDesc {
     /// encoding and why it is three channels rather than an octahedral pair.
     ///
     /// **It was `R8Unorm` until the bent direction arrived**, and the three
-    /// channels are the bandwidth `docs/plan/46-ambient-occlusion.md`'s tier
-    /// split is about.
+    /// channels are the bandwidth the AO tier split is about, which
+    /// `docs/notes/rendering.md` records.
     #[must_use]
     pub const fn ambient_occlusion(extent: (u32, u32)) -> Self {
         Self {

@@ -27,7 +27,7 @@ every gap below is easier to read against it.
 | ----------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------- |
 | Geometry and visibility | **ahead**                                              | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md) |
 | Shadows                 | behind, ladder written                                 | [45-shadows.md](45-shadows.md)                                                   |
-| Ambient occlusion       | behind, ladder written                                 | [46-ambient-occlusion.md](46-ambient-occlusion.md)                               |
+| Ambient occlusion       | behind, ladder written                                 | 46 (built; rules in [rendering notes](../notes/rendering.md))                    |
 | Reflections             | comparable for screen space                            | [47-reflections.md](47-reflections.md)                                           |
 | Antialiasing            | behind, ladder written                                 | [49-antialiasing.md](49-antialiasing.md)                                         |
 | Irradiance probes       | visibility maps and the clipmap built, updater owed    | [50-irradiance-probes.md](50-irradiance-probes.md)                               |

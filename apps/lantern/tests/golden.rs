@@ -172,7 +172,7 @@ const MIRROR_FRACTION_OF_PLASTER: f32 = 0.05;
 /// the surface the ray got on a finer basis — a lower confidence for the same
 /// hit, and a larger remainder. That took it to 10% against a measured 7.3%.
 ///
-/// `docs/plan/46-ambient-occlusion.md`'s bent-normal rung then widened the
+/// The AO chain's bent-normal rung then widened the
 /// remainder itself. What the surface behind this hit reflects is lit by the
 /// probe grid, and that grid is now sampled along the occlusion channel's bent
 /// direction rather than along the shading normal — so the reflected surface is

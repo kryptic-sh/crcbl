@@ -9901,7 +9901,7 @@ impl ForwardRenderer {
     ///
     /// One is white and fully occluded is black — the buffer the forward pass
     /// multiplies its ambient term by, shown as itself. **This is how the AO
-    /// ladder in `docs/plan/46-ambient-occlusion.md` is compared at all:** a
+    /// ladder — GTAO against the eight-tap hemisphere — is compared at all:** a
     /// composited frame shows occlusion times albedo times ambient, and a
     /// difference in the first is not separable from a difference in the other
     /// two by looking at the result.

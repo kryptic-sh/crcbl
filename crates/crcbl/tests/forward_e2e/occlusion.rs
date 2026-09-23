@@ -2075,9 +2075,8 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
 /// **The falloff is flatter than the shipped gather's, and that is the
 /// technique rather than a fault.** Eight binary comparisons at fixed kernel
 /// elevations resolve a shadow band in a handful of steps where a horizon
-/// integral resolves it continuously — which is the trade
-/// `docs/plan/46-ambient-occlusion.md` describes when it keeps this one as the
-/// cheap tier. Nothing here asserts a shape, for that reason: the terracing
+/// integral resolves it continuously — which is the trade that makes this the
+/// cheap tier rather than an equal. Nothing here asserts a shape, for that reason: the terracing
 /// tests above are about `ssao.slang`'s dither ladder and this one is about the
 /// gather being reachable, correct at both ends and different.
 #[test]
@@ -3220,7 +3219,7 @@ fn the_reconstruction_answers_a_sliver_with_its_nearest_sample() {
 /// **The bent direction leans out of the occluded band**, rather than being a
 /// constant the pass could have written without looking at the depth.
 ///
-/// `docs/plan/46-ambient-occlusion.md`'s second half of the AO rung: the same
+/// The second half of the GTAO rung: the same
 /// horizon sweep that measures how much of the room is hidden also reports which
 /// way what is left of it lies, and `mesh.slang` samples its ambient irradiance
 /// along that direction. What makes it worth having is that it *moves* — a

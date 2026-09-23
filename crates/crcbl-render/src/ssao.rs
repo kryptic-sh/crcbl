@@ -67,8 +67,8 @@
 //!
 //! # The bent direction is the switch that is on
 //!
-//! [`r_ssao_bent_normals`] is what `docs/plan/46-ambient-occlusion.md` calls
-//! the second half of the rung: the same horizon sweep that measures how much
+//! [`r_ssao_bent_normals`] is the second half of the GTAO rung: the same
+//! horizon sweep that measures how much
 //! of the room is hidden also reports which way what is left of it lies, and
 //! `mesh.slang` samples its ambient irradiance along that direction instead of
 //! along the shading normal. `shaders/ssao.slang`'s header is where the
@@ -108,7 +108,7 @@
 //! [`Ssao::add_passes`] picks which of them each side of the seam records.
 //!
 //! **`gtao` is the default and is what every golden was blessed at.**
-//! `docs/plan/46-ambient-occlusion.md` kept the hemisphere as the cheap tier on
+//! The hemisphere was kept as the cheap tier on
 //! the antialiasing ladder's FXAA-under-CMAA2 pattern — eight taps and a
 //! comparison is a real budget on a software rasteriser — and
 //! `docs/plan/sample/19-alcove.md`'s second milestone is the two of them either
@@ -247,8 +247,7 @@ pub(crate) fn intensity() -> f32 {
 /// [`r_ssao_bent_normals`] as the shader's uniform wants it.
 ///
 /// **On by default**, unlike the two switches above, which default to what
-/// ships: the direction is what `docs/plan/46-ambient-occlusion.md` calls the
-/// half of the AO rung worth having, so the frame a person gets without
+/// ships: the direction is the half of the AO rung worth having, so the frame a person gets without
 /// touching anything is the one with it. Turning it off leaves the gather
 /// writing the zero sentinel, and every consumer answers that with the shading
 /// normal it already had — see `shaders/ssao.slang`'s `bent_normals`.

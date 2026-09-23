@@ -6686,7 +6686,7 @@ fn compare_scene_frames(
 /// the assertion so that widening it stays a scene's decision with a measurement
 /// attached, the way the counts above already are.
 ///
-/// `Probes` is two, since `docs/plan/46-ambient-occlusion.md`'s bent-normal rung
+/// `Probes` is two, since the AO chain's bent-normal rung
 /// landed on 2026-09-02. Its entry above says a last-bit depth difference can
 /// flip which tap wins a horizon; until that rung the flip could only move the
 /// occlusion **scalar**, which scales the ambient and so moves a channel by a

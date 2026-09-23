@@ -800,8 +800,8 @@ For scale, the same frame's whole report on radv at 1920×1080 — frame 397, 53
 passes over both views, 0.986 ms of GPU time — puts `ssao` at 0.255 ms and 25.9%
 of it, `forward` at 0.199 ms, `ssr` at 0.099 ms, `shadow` at 0.070 ms and the
 five Hi-Z levels at 0.018 ms between them. GTAO was then the most expensive pass
-in the frame, which was a finding for
-[46-ambient-occlusion.md](46-ambient-occlusion.md) rather than for this page.
+in the frame, which was a finding for the ambient-occlusion work
+(`docs/backlog.md`'s _What GTAO left owed_) rather than for this page.
 
 **That last sentence stopped being true on 2026-09-02**, when the gather and its
 blurs moved to half resolution behind a reconstruction pass. Read off lantern's

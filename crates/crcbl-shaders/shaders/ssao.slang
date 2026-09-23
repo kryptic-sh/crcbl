@@ -46,8 +46,8 @@
 //
 // This file used to sum eight binary depth comparisons and its header used to
 // say GTAO was too expensive for quality nobody could resolve at the golden
-// suite's 256×192. `docs/plan/46-ambient-occlusion.md`'s 2026-08-27 decision is
-// what reopened it, and the argument that did so is **determinism**, not
+// suite's 256×192. It was reopened on 2026-08-27, and the argument that did
+// so is **determinism**, not
 // quality: a binary comparison landing on its threshold resolves differently on
 // two drivers and cliffs that pixel by an eighth, where a horizon angle
 // disagreeing in the last bit moves the integral by a hair. The technique that
@@ -447,7 +447,7 @@ static const float ACOS_KERNEL[4] = {
 ///
 /// **The same sixteen numbers this file has always carried**, read differently.
 /// They were a seed for a Gram-Schmidt tangent frame when the kernel was a
-/// hemisphere; `docs/plan/46-ambient-occlusion.md` predicted the table would
+/// hemisphere; the GTAO decision predicted the table would
 /// survive the technique change, and it did.
 static const float2 SLICE_DIRECTIONS[16] = {
     float2(2.0, 0.0),   float2(-2.0, 0.0),  float2(1.0, 1.0),   float2(-1.0, -1.0),

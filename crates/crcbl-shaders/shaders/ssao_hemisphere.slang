@@ -5,7 +5,7 @@
 //
 // # Why there are two files
 //
-// `docs/plan/46-ambient-occlusion.md` decided on 2026-08-13 that classic
+// When GTAO was taken on 2026-08-27 it was decided that classic
 // normal-oriented hemisphere SSAO would stay beside GTAO rather than be
 // deleted by it, on the antialiasing ladder's FXAA-under-CMAA2 pattern: eight
 // taps and a comparison is a real budget on a software rasteriser and on a
@@ -36,7 +36,7 @@
 // is the cheap tier rather than an equal.** Each sample is a *binary* depth
 // comparison, so one landing on the threshold resolves differently on two
 // drivers and swings that pixel by an eighth — which is the argument
-// `docs/plan/46-ambient-occlusion.md` used to reopen GTAO, and it has not
+// that reopened GTAO, and it has not
 // changed. `ssao_blur.slang` is what contains it: its footprint is exactly this
 // file's rotation tile, so it both removes the banding and divides an isolated
 // flipped sample by sixteen. Nothing here may be run without it.

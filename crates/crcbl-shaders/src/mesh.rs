@@ -2840,8 +2840,8 @@ mod tests {
         // beside it: the two are the same kind of environment and the sum is
         // what makes them add rather than one replacing the other.
         //
-        // **Along the bent normal and not the shading one**, which is
-        // `docs/plan/46-ambient-occlusion.md`'s rung: the direction the
+        // **Along the bent normal and not the shading one**, which is the
+        // bent-normal rung: the direction the
         // occlusion channel carries is the one an environment is sampled along,
         // and a sky evaluated at the shading normal instead is the frame this
         // file drew before the channel was widened.
