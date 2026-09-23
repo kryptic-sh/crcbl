@@ -91,6 +91,24 @@ pub(crate) const REMOTE_STORAGE: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamScreenshots`. Spelled like `ISteamRemoteStorage`'s.
+pub(crate) const SCREENSHOTS: Interface = Interface {
+    accessor: "SteamAPI_SteamScreenshots_v003",
+    version: "STEAMSCREENSHOTS_INTERFACE_VERSION003",
+    define: "STEAMSCREENSHOTS_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
+/// `ISteamTimeline`: `V004`, not `VERSION004`, and **not in Valve's `InitEx`
+/// list**, so outside the handshake and checked by its accessor's null test
+/// alone.
+pub(crate) const TIMELINE: Interface = Interface {
+    accessor: "SteamAPI_SteamTimeline_v004",
+    version: "STEAMTIMELINE_INTERFACE_V004",
+    define: "STEAMTIMELINE_INTERFACE_VERSION",
+    in_init_ex: false,
+};
+
 /// `ISteamUserStats`. Spelled like `ISteamRemoteStorage`'s.
 pub(crate) const USER_STATS: Interface = Interface {
     accessor: "SteamAPI_SteamUserStats_v013",

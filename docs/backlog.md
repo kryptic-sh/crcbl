@@ -9092,9 +9092,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9 and 10 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 are built on branch
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9 and 10 are built on branch
 `steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
 `Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
 the last owner's drop, the local identity and machine basics,
@@ -9113,8 +9113,8 @@ which carries it), and slice 7b's `SteamPads` (Steam Input onto the gamepad
 seam) with the Steam-pad filter in `crcbl_input::xinput`, slice 7c's on-screen
 keyboards and glyphs, and slice 8's loop limb (`crcbl::engine::steam`: the loop
 pumps a lent `Steam`, takes its overlay as a focus loss, and polls Steam Input
-as its pad source). The plan, `docs/plan/42-steam.md`, carries a status line per
-slice.
+as its pad source), and slice 10's screenshots and timeline. The plan,
+`docs/plan/42-steam.md`, carries a status line per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9144,8 +9144,8 @@ slice.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 180 lib tests after slice
-  7c, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 193 lib tests after slice
+  10, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9231,6 +9231,16 @@ slice.
   What it would take: a text field in the sandbox's Steam panel that opens the
   keyboard on a pad press and shows the answer, and the pad's South glyph drawn
   beside it.
+- **Slice 10's manual steps have not run, and nothing uses it**: F12 with
+  screenshots hooked reaching the Steam screenshot manager, and timeline events
+  and phases appearing on a recording with Steam's game recording on. Neither is
+  reachable from a sample: **the engine has no capture of a running game's
+  frame** to hand `Screenshots::write` — `crcbl::screenshot` renders a scene of
+  its own offscreen — so a hooked screenshot needs a swapchain readback the loop
+  does not offer (what it would take: a readback of the frame the loop just
+  presented, converted from the surface's channel order to RGB, on request), and
+  nothing marks the timeline yet (the sandbox could set its game mode from the
+  pause state as a first check).
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator

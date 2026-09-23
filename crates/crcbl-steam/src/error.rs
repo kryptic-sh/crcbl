@@ -175,6 +175,11 @@ pub enum SteamError {
     /// a misspelt name.
     #[error("the local user's stats have not arrived from Steam yet")]
     StatsNotReady,
+    /// A number outside what Steam accepts — a priority past its maximum, a
+    /// non-finite offset, a size that does not add up; refused before the
+    /// call. Names the argument.
+    #[error("{0} is outside what Steam accepts")]
+    OutOfRange(&'static str),
     /// What Steam returned filled the whole buffer, so it may have been cut
     /// short; the named call's answer is refused rather than guessed at.
     #[error("{0} filled its whole buffer and may be truncated")]

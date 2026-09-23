@@ -20,10 +20,11 @@ use crate::{
         AvatarImageLoaded, FloatingGamepadTextInputDismissed, FriendRichPresenceUpdate,
         GameLobbyJoinRequested, GameOverlayActivated, GameRichPresenceJoinRequested,
         GamepadTextInputDismissed, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
-        NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
-        SteamApiCallCompleted, SteamInputDeviceConnected, SteamInputDeviceDisconnected,
-        SteamNetConnectionInfo, SteamNetConnectionStatusChanged, SteamRelayNetworkStatus,
-        UserAchievementStored, UserStatsReceived, UserStatsStored, steam_id,
+        NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange, ScreenshotReady,
+        ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
+        SteamInputDeviceDisconnected, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
+        SteamRelayNetworkStatus, UserAchievementStored, UserStatsReceived, UserStatsStored,
+        steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -50,9 +51,13 @@ pub(crate) enum Base {
     NetworkingUtils = 1280,
     /// `k_iSteamRemoteStorageCallbacks`.
     RemoteStorage = 1300,
+    /// `k_iSteamScreenshotsCallbacks`.
+    Screenshots = 2300,
     /// `k_iSteamControllerCallbacks` — Steam Input's callbacks, under the
     /// name of the interface it replaced.
     Controller = 2800,
+    /// `k_iSteamTimelineCallbacks`.
+    Timeline = 6000,
 }
 
 impl Base {
@@ -67,7 +72,9 @@ impl Base {
         Self::NetworkingSockets,
         Self::NetworkingUtils,
         Self::RemoteStorage,
+        Self::Screenshots,
         Self::Controller,
+        Self::Timeline,
     ];
 
     /// Valve's name for the base, as the headers spell it.
@@ -82,7 +89,9 @@ impl Base {
             Self::RemoteStorage => "k_iSteamRemoteStorageCallbacks",
             Self::NetworkingSockets => "k_iSteamNetworkingSocketsCallbacks",
             Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
+            Self::Screenshots => "k_iSteamScreenshotsCallbacks",
             Self::Controller => "k_iSteamControllerCallbacks",
+            Self::Timeline => "k_iSteamTimelineCallbacks",
         }
     }
 }
@@ -234,6 +243,20 @@ pub enum SteamEvent {
     /// closed (`FloatingGamepadTextInputDismissed_t`). What it typed arrived
     /// as ordinary key and text events through the window.
     FloatingKeyboardDismissed,
+    /// The player asked for a screenshot while the game hooks them
+    /// ([`Screenshots::hook`](crate::Screenshots::hook);
+    /// `ScreenshotRequested_t`): capture the frame and hand it to
+    /// [`Screenshots::write`](crate::Screenshots::write). Steam takes none of
+    /// its own.
+    ScreenshotRequested,
+    /// A screenshot reached the library and can be tagged
+    /// (`ScreenshotReady_t`).
+    ScreenshotReady {
+        /// Which.
+        screenshot: crate::ScreenshotId,
+        /// `EResult::OK`, or why not.
+        result: EResult,
+    },
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
     LobbyChatMessage {
@@ -641,6 +664,32 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::Screenshots,
+        offset: 1,
+        #[cfg(test)]
+        name: "ScreenshotReady_t",
+        size: size_of::<ScreenshotReady>(),
+        decode: |bytes| {
+            read::<ScreenshotReady>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::ScreenshotReady {
+                    screenshot: crate::ScreenshotId(payload.screenshot),
+                    result: EResult(payload.result),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Screenshots,
+        offset: 2,
+        #[cfg(test)]
+        name: "ScreenshotRequested_t",
+        size: size_of::<ScreenshotRequested>(),
+        decode: |bytes| {
+            read::<ScreenshotRequested>(bytes)
+                .map(|_| Decoded::Event(SteamEvent::ScreenshotRequested))
+        },
+    },
+    Row {
         base: Base::Controller,
         offset: 1,
         #[cfg(test)]
@@ -740,6 +789,14 @@ unsafe impl Pod for LobbyChatMsg {}
 unsafe impl Pod for crate::ffi::structs::LobbyCreated {}
 // SAFETY: as above.
 unsafe impl Pod for crate::ffi::structs::LobbyEnter {}
+// SAFETY: as above.
+unsafe impl Pod for ScreenshotReady {}
+// SAFETY: as above.
+unsafe impl Pod for ScreenshotRequested {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SteamTimelineGamePhaseRecordingExists {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SteamTimelineEventRecordingExists {}
 // SAFETY: as above.
 unsafe impl Pod for GamepadTextInputDismissed {}
 // SAFETY: as above.

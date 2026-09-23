@@ -30,7 +30,8 @@
 //! `ELeaderboardDisplayType`, `ELeaderboardDataRequest`,
 //! `ELeaderboardUploadScoreMethod`, `ESteamInputType`, `EInputActionOrigin`,
 //! `ESteamInputGlyphSize`, `EGamepadTextInputMode`,
-//! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`) is taken to be
+//! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`,
+//! `ETimelineGameMode`, `ETimelineEventClipPriority`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -50,9 +51,10 @@ use core::ffi::{c_char, c_void};
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends, ISteamInput,
     ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
-    ISteamUser, ISteamUserStats, ISteamUtils, InputActionSetHandle, InputAnalogActionHandle,
-    InputDigitalActionHandle, InputHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
-    SteamLeaderboardEntries,
+    ISteamScreenshots, ISteamTimeline, ISteamUser, ISteamUserStats, ISteamUtils,
+    InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle, InputHandle,
+    ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard, SteamLeaderboardEntries,
+    TimelineEventHandle,
     structs::{
         CallbackMsg, InputAnalogActionData, InputDigitalActionData, LeaderboardEntry,
         SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
@@ -573,6 +575,87 @@ bindings! {
         get_glyph_png_for_action_origin: InputGetGlyphPngForActionOrigin = "SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin",
             "S_API const char * SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin( ISteamInput* self, EInputActionOrigin eOrigin, ESteamInputGlyphSize eSize, uint32 unFlags );",
             fn(*mut ISteamInput, i32, i32, u32) -> *const c_char;
+    }
+
+    /// `ISteamScreenshots` (`steam_api_flat.h`): the screenshot library.
+    screenshots: ScreenshotsFns for versions::SCREENSHOTS {
+        write_screenshot: ScreenshotsWriteScreenshot = "SteamAPI_ISteamScreenshots_WriteScreenshot",
+            "S_API ScreenshotHandle SteamAPI_ISteamScreenshots_WriteScreenshot( ISteamScreenshots* self, void * pubRGB, uint32 cubRGB, int nWidth, int nHeight );",
+            fn(*mut ISteamScreenshots, *mut c_void, u32, i32, i32) -> ScreenshotHandle;
+        trigger_screenshot: ScreenshotsTriggerScreenshot = "SteamAPI_ISteamScreenshots_TriggerScreenshot",
+            "S_API void SteamAPI_ISteamScreenshots_TriggerScreenshot( ISteamScreenshots* self );",
+            fn(*mut ISteamScreenshots);
+        hook_screenshots: ScreenshotsHookScreenshots = "SteamAPI_ISteamScreenshots_HookScreenshots",
+            "S_API void SteamAPI_ISteamScreenshots_HookScreenshots( ISteamScreenshots* self, bool bHook );",
+            fn(*mut ISteamScreenshots, bool);
+        is_screenshots_hooked: ScreenshotsIsScreenshotsHooked = "SteamAPI_ISteamScreenshots_IsScreenshotsHooked",
+            "S_API bool SteamAPI_ISteamScreenshots_IsScreenshotsHooked( ISteamScreenshots* self );",
+            fn(*mut ISteamScreenshots) -> bool;
+        set_location: ScreenshotsSetLocation = "SteamAPI_ISteamScreenshots_SetLocation",
+            "S_API bool SteamAPI_ISteamScreenshots_SetLocation( ISteamScreenshots* self, ScreenshotHandle hScreenshot, const char * pchLocation );",
+            fn(*mut ISteamScreenshots, ScreenshotHandle, *const c_char) -> bool;
+        tag_user: ScreenshotsTagUser = "SteamAPI_ISteamScreenshots_TagUser",
+            "S_API bool SteamAPI_ISteamScreenshots_TagUser( ISteamScreenshots* self, ScreenshotHandle hScreenshot, uint64_steamid steamID );",
+            fn(*mut ISteamScreenshots, ScreenshotHandle, u64) -> bool;
+    }
+
+    /// `ISteamTimeline` (`steam_api_flat.h`): marks on Steam's game
+    /// recording.
+    timeline: TimelineFns for versions::TIMELINE {
+        set_timeline_tooltip: TimelineSetTimelineTooltip = "SteamAPI_ISteamTimeline_SetTimelineTooltip",
+            "S_API void SteamAPI_ISteamTimeline_SetTimelineTooltip( ISteamTimeline* self, const char * pchDescription, float flTimeDelta );",
+            fn(*mut ISteamTimeline, *const c_char, f32);
+        clear_timeline_tooltip: TimelineClearTimelineTooltip = "SteamAPI_ISteamTimeline_ClearTimelineTooltip",
+            "S_API void SteamAPI_ISteamTimeline_ClearTimelineTooltip( ISteamTimeline* self, float flTimeDelta );",
+            fn(*mut ISteamTimeline, f32);
+        set_timeline_game_mode: TimelineSetTimelineGameMode = "SteamAPI_ISteamTimeline_SetTimelineGameMode",
+            "S_API void SteamAPI_ISteamTimeline_SetTimelineGameMode( ISteamTimeline* self, ETimelineGameMode eMode );",
+            fn(*mut ISteamTimeline, i32);
+        add_instantaneous_timeline_event: TimelineAddInstantaneousTimelineEvent = "SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent",
+            "S_API TimelineEventHandle_t SteamAPI_ISteamTimeline_AddInstantaneousTimelineEvent( ISteamTimeline* self, const char * pchTitle, const char * pchDescription, const char * pchIcon, uint32 unIconPriority, float flStartOffsetSeconds, ETimelineEventClipPriority ePossibleClip );",
+            fn(*mut ISteamTimeline, *const c_char, *const c_char, *const c_char, u32, f32, i32) -> TimelineEventHandle;
+        add_range_timeline_event: TimelineAddRangeTimelineEvent = "SteamAPI_ISteamTimeline_AddRangeTimelineEvent",
+            "S_API TimelineEventHandle_t SteamAPI_ISteamTimeline_AddRangeTimelineEvent( ISteamTimeline* self, const char * pchTitle, const char * pchDescription, const char * pchIcon, uint32 unIconPriority, float flStartOffsetSeconds, float flDuration, ETimelineEventClipPriority ePossibleClip );",
+            fn(*mut ISteamTimeline, *const c_char, *const c_char, *const c_char, u32, f32, f32, i32) -> TimelineEventHandle;
+        start_range_timeline_event: TimelineStartRangeTimelineEvent = "SteamAPI_ISteamTimeline_StartRangeTimelineEvent",
+            "S_API TimelineEventHandle_t SteamAPI_ISteamTimeline_StartRangeTimelineEvent( ISteamTimeline* self, const char * pchTitle, const char * pchDescription, const char * pchIcon, uint32 unPriority, float flStartOffsetSeconds, ETimelineEventClipPriority ePossibleClip );",
+            fn(*mut ISteamTimeline, *const c_char, *const c_char, *const c_char, u32, f32, i32) -> TimelineEventHandle;
+        update_range_timeline_event: TimelineUpdateRangeTimelineEvent = "SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent",
+            "S_API void SteamAPI_ISteamTimeline_UpdateRangeTimelineEvent( ISteamTimeline* self, TimelineEventHandle_t ulEvent, const char * pchTitle, const char * pchDescription, const char * pchIcon, uint32 unPriority, ETimelineEventClipPriority ePossibleClip );",
+            fn(*mut ISteamTimeline, TimelineEventHandle, *const c_char, *const c_char, *const c_char, u32, i32);
+        end_range_timeline_event: TimelineEndRangeTimelineEvent = "SteamAPI_ISteamTimeline_EndRangeTimelineEvent",
+            "S_API void SteamAPI_ISteamTimeline_EndRangeTimelineEvent( ISteamTimeline* self, TimelineEventHandle_t ulEvent, float flEndOffsetSeconds );",
+            fn(*mut ISteamTimeline, TimelineEventHandle, f32);
+        remove_timeline_event: TimelineRemoveTimelineEvent = "SteamAPI_ISteamTimeline_RemoveTimelineEvent",
+            "S_API void SteamAPI_ISteamTimeline_RemoveTimelineEvent( ISteamTimeline* self, TimelineEventHandle_t ulEvent );",
+            fn(*mut ISteamTimeline, TimelineEventHandle);
+        does_event_recording_exist: TimelineDoesEventRecordingExist = "SteamAPI_ISteamTimeline_DoesEventRecordingExist",
+            "S_API SteamAPICall_t SteamAPI_ISteamTimeline_DoesEventRecordingExist( ISteamTimeline* self, TimelineEventHandle_t ulEvent );",
+            fn(*mut ISteamTimeline, TimelineEventHandle) -> SteamApiCall;
+        start_game_phase: TimelineStartGamePhase = "SteamAPI_ISteamTimeline_StartGamePhase",
+            "S_API void SteamAPI_ISteamTimeline_StartGamePhase( ISteamTimeline* self );",
+            fn(*mut ISteamTimeline);
+        end_game_phase: TimelineEndGamePhase = "SteamAPI_ISteamTimeline_EndGamePhase",
+            "S_API void SteamAPI_ISteamTimeline_EndGamePhase( ISteamTimeline* self );",
+            fn(*mut ISteamTimeline);
+        set_game_phase_id: TimelineSetGamePhaseId = "SteamAPI_ISteamTimeline_SetGamePhaseID",
+            "S_API void SteamAPI_ISteamTimeline_SetGamePhaseID( ISteamTimeline* self, const char * pchPhaseID );",
+            fn(*mut ISteamTimeline, *const c_char);
+        does_game_phase_recording_exist: TimelineDoesGamePhaseRecordingExist = "SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist",
+            "S_API SteamAPICall_t SteamAPI_ISteamTimeline_DoesGamePhaseRecordingExist( ISteamTimeline* self, const char * pchPhaseID );",
+            fn(*mut ISteamTimeline, *const c_char) -> SteamApiCall;
+        add_game_phase_tag: TimelineAddGamePhaseTag = "SteamAPI_ISteamTimeline_AddGamePhaseTag",
+            "S_API void SteamAPI_ISteamTimeline_AddGamePhaseTag( ISteamTimeline* self, const char * pchTagName, const char * pchTagIcon, const char * pchTagGroup, uint32 unPriority );",
+            fn(*mut ISteamTimeline, *const c_char, *const c_char, *const c_char, u32);
+        set_game_phase_attribute: TimelineSetGamePhaseAttribute = "SteamAPI_ISteamTimeline_SetGamePhaseAttribute",
+            "S_API void SteamAPI_ISteamTimeline_SetGamePhaseAttribute( ISteamTimeline* self, const char * pchAttributeGroup, const char * pchAttributeValue, uint32 unPriority );",
+            fn(*mut ISteamTimeline, *const c_char, *const c_char, u32);
+        open_overlay_to_game_phase: TimelineOpenOverlayToGamePhase = "SteamAPI_ISteamTimeline_OpenOverlayToGamePhase",
+            "S_API void SteamAPI_ISteamTimeline_OpenOverlayToGamePhase( ISteamTimeline* self, const char * pchPhaseID );",
+            fn(*mut ISteamTimeline, *const c_char);
+        open_overlay_to_timeline_event: TimelineOpenOverlayToTimelineEvent = "SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent",
+            "S_API void SteamAPI_ISteamTimeline_OpenOverlayToTimelineEvent( ISteamTimeline* self, const TimelineEventHandle_t ulEvent );",
+            fn(*mut ISteamTimeline, TimelineEventHandle);
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).

@@ -236,8 +236,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8 and 9**
-  (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9 and
+  10** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
   `steam_api` beside the executable or under
@@ -306,9 +306,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   accepted text arrives as `SteamEvent::TextInputDismissed { text }` (`None`
   when cancelled), and `show_floating_keyboard(mode, field)` the floating one,
   which types through the window like a physical keyboard and reports
-  `SteamEvent::FloatingKeyboardDismissed`. 64-bit Linux, Windows and macOS;
-  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
-  Not yet run against a Steam client with a 1.65 library.
+  `SteamEvent::FloatingKeyboardDismissed`. `steam.screenshots()` hooks the
+  screenshot key (`SteamEvent::ScreenshotRequested`), writes a game's own RGB
+  pixels to the player's library — sized before the call — and tags them;
+  `steam.timeline()` marks Steam's game recording: a tooltip, the game mode,
+  instantaneous and range events (a `TimelineRange` ends once, on drop or
+  `end`), game phases with tags and attributes, the overlay opened at either,
+  and whether a recording of an event or phase exists, as `SteamCall`s — every
+  priority, offset, duration and phase id checked against the header's limits
+  first. 64-bit Linux, Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

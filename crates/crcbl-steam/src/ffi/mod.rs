@@ -57,6 +57,11 @@ pub(crate) type InputActionSetHandle = u64;
 pub(crate) type InputDigitalActionHandle = u64;
 /// `InputAnalogActionHandle_t` — `typedef uint64 InputAnalogActionHandle_t;`.
 pub(crate) type InputAnalogActionHandle = u64;
+/// `ScreenshotHandle` — `typedef uint32 ScreenshotHandle;`, `0` being
+/// `INVALID_SCREENSHOT_HANDLE`.
+pub(crate) type ScreenshotHandle = u32;
+/// `TimelineEventHandle_t` — `typedef uint64 TimelineEventHandle_t;`.
+pub(crate) type TimelineEventHandle = u64;
 /// `SteamErrMsg` — `typedef char SteamErrMsg[ 1024 ];`, the English message
 /// `SteamInternal_SteamAPI_Init` fills in on failure.
 pub(crate) type SteamErrMsg = [core::ffi::c_char; 1024];
@@ -101,6 +106,10 @@ opaque! {
     ISteamNetworkingUtils;
     /// `class ISteamRemoteStorage`.
     ISteamRemoteStorage;
+    /// `class ISteamScreenshots`.
+    ISteamScreenshots;
+    /// `class ISteamTimeline`.
+    ISteamTimeline;
     /// `class ISteamUser`.
     ISteamUser;
     /// `class ISteamUserStats`.

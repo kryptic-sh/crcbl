@@ -336,6 +336,32 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &[],
     },
     StructDecl {
+        name: "ScreenshotReady_t",
+        pack: Pack::Callback,
+        fields: &["ScreenshotHandle m_hLocal", "EResult m_eResult"],
+    },
+    StructDecl {
+        name: "ScreenshotRequested_t",
+        pack: Pack::Callback,
+        fields: &[],
+    },
+    StructDecl {
+        name: "SteamTimelineGamePhaseRecordingExists_t",
+        pack: Pack::Callback,
+        fields: &[
+            "char m_rgchPhaseID[ k_cchMaxPhaseIDLength ]",
+            "uint64 m_ulRecordingMS",
+            "uint64 m_ulLongestClipMS",
+            "uint32 m_unClipCount",
+            "uint32 m_unScreenshotCount",
+        ],
+    },
+    StructDecl {
+        name: "SteamTimelineEventRecordingExists_t",
+        pack: Pack::Callback,
+        fields: &["uint64 m_ulEventID", "bool m_bRecordingExists"],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -873,6 +899,59 @@ callback_packed! {
     }
 }
 
+callback_packed! {
+    /// `ScreenshotReady_t` (`isteamscreenshots.h`,
+    /// `k_iSteamScreenshotsCallbacks + 1`): a screenshot is in the library and
+    /// can be tagged.
+    pub(crate) struct ScreenshotReady {
+        /// `ScreenshotHandle m_hLocal`.
+        pub(crate) screenshot: u32,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `ScreenshotRequested_t` (`isteamscreenshots.h`,
+    /// `k_iSteamScreenshotsCallbacks + 2`): the player asked for a screenshot
+    /// while the game hooks them. No members, so one byte, as
+    /// [`NewUrlLaunchParameters`].
+    pub(crate) struct ScreenshotRequested {
+        /// The one byte an empty C++ struct occupies; never meaningful.
+        pub(crate) unused: u8,
+    }
+}
+
+callback_packed! {
+    /// `SteamTimelineGamePhaseRecordingExists_t` (`isteamtimeline.h`,
+    /// `k_iSteamTimelineCallbacks + 1`): the answer to
+    /// `DoesGamePhaseRecordingExist`.
+    pub(crate) struct SteamTimelineGamePhaseRecordingExists {
+        /// `char m_rgchPhaseID[ k_cchMaxPhaseIDLength ]`.
+        pub(crate) phase: [u8; 64],
+        /// `uint64 m_ulRecordingMS`.
+        pub(crate) recording_ms: u64,
+        /// `uint64 m_ulLongestClipMS`.
+        pub(crate) longest_clip_ms: u64,
+        /// `uint32 m_unClipCount`.
+        pub(crate) clips: u32,
+        /// `uint32 m_unScreenshotCount`.
+        pub(crate) screenshots: u32,
+    }
+}
+
+callback_packed! {
+    /// `SteamTimelineEventRecordingExists_t` (`isteamtimeline.h`,
+    /// `k_iSteamTimelineCallbacks + 2`): the answer to
+    /// `DoesEventRecordingExist`.
+    pub(crate) struct SteamTimelineEventRecordingExists {
+        /// `uint64 m_ulEventID`.
+        pub(crate) event: u64,
+        /// `bool m_bRecordingExists`.
+        pub(crate) exists: u8,
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -1084,6 +1163,21 @@ mod tests {
         assert_layout!(FloatingGamepadTextInputDismissed, 1, {
             unused: 0, 1;
         });
+        assert_layout!(ScreenshotReady, 8, {
+            screenshot: 0, 4;
+            result: 4, 4;
+        });
+        assert_layout!(ScreenshotRequested, 1, {
+            unused: 0, 1;
+        });
+        // 64 bytes of name put the `uint64`s 8-aligned under either packing.
+        assert_layout!(SteamTimelineGamePhaseRecordingExists, 88, {
+            phase: 0, 64;
+            recording_ms: 64, 8;
+            longest_clip_ms: 72, 8;
+            clips: 80, 4;
+            screenshots: 84, 4;
+        });
         // One `uint64`: 8 bytes under either packing, aligned 4 or 8.
         assert_layout!(SteamInputDeviceConnected, 8, {
             handle: 0, 8;
@@ -1184,6 +1278,11 @@ mod tests {
             rank_new: 20, 4;
             rank_previous: 24, 4;
         });
+        // No tail padding after the `bool`: 12, not 16.
+        assert_layout!(SteamTimelineEventRecordingExists, 12, {
+            event: 0, 8;
+            exists: 8, 1;
+        });
         assert_layout!(LeaderboardEntry, 28, {
             user: 0, 8;
             rank: 8, 4;
@@ -1272,6 +1371,10 @@ mod tests {
             changed: 20, 1;
             rank_new: 24, 4;
             rank_previous: 28, 4;
+        });
+        assert_layout!(SteamTimelineEventRecordingExists, 16, {
+            event: 0, 8;
+            exists: 8, 1;
         });
         assert_layout!(LeaderboardEntry, 32, {
             user: 0, 8;

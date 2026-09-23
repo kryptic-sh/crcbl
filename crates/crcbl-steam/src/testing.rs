@@ -19,9 +19,11 @@
 
 mod input;
 mod keyboard;
+mod recording;
 
 pub(crate) use input::{FakeInput, FakePad};
 pub(crate) use keyboard::FakeKeyboard;
+pub(crate) use recording::{FakeScreenshots, FakeTimeline};
 
 use std::{
     cell::{Cell, RefCell},
@@ -203,6 +205,8 @@ pub(crate) struct Script {
     pub(crate) stats: FakeStats,
     pub(crate) input: FakeInput,
     pub(crate) keyboard: FakeKeyboard,
+    pub(crate) screenshots: FakeScreenshots,
+    pub(crate) timeline: FakeTimeline,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -267,6 +271,8 @@ impl Default for Script {
             stats: FakeStats::default(),
             input: FakeInput::default(),
             keyboard: FakeKeyboard::default(),
+            screenshots: FakeScreenshots::default(),
+            timeline: FakeTimeline::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -440,6 +446,8 @@ pub(crate) fn fake_lib() -> &'static Lib {
             upload_leaderboard_score: fake_upload_leaderboard_score,
         },
         input: input::FNS,
+        screenshots: recording::SCREENSHOTS,
+        timeline: recording::TIMELINE,
         apps: AppsFns {
             accessor: fake_apps_accessor,
             is_subscribed: fake_is_subscribed,

@@ -16,9 +16,9 @@ use crate::{
     error::InitError,
     ffi::{
         HSteamPipe, ISteamApps, ISteamFriends, ISteamInput, ISteamMatchmaking,
-        ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage, ISteamUser,
-        ISteamUserStats, ISteamUtils, Lib, SteamErrMsg, init_result, load, manifest,
-        manifest::Accessor, versions,
+        ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage, ISteamScreenshots,
+        ISteamTimeline, ISteamUser, ISteamUserStats, ISteamUtils, Lib, SteamErrMsg, init_result,
+        load, manifest, manifest::Accessor, versions,
     },
     input::PadQueue,
     matchmaking::Tracked,
@@ -116,6 +116,10 @@ pub struct Client {
     pub(crate) user_stats: *mut ISteamUserStats,
     /// `SteamAPI_SteamInput_v007()`; never null.
     pub(crate) input: *mut ISteamInput,
+    /// `SteamAPI_SteamScreenshots_v003()`; never null.
+    pub(crate) screenshots: *mut ISteamScreenshots,
+    /// `SteamAPI_SteamTimeline_v004()`; never null.
+    pub(crate) timeline: *mut ISteamTimeline,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -280,6 +284,10 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     let user_stats =
         interface(lib.fns.user_stats.accessor, &versions::USER_STATS)?.cast::<ISteamUserStats>();
     let input = interface(lib.fns.input.accessor, &versions::INPUT)?.cast::<ISteamInput>();
+    let screenshots = interface(lib.fns.screenshots.accessor, &versions::SCREENSHOTS)?
+        .cast::<ISteamScreenshots>();
+    let timeline =
+        interface(lib.fns.timeline.accessor, &versions::TIMELINE)?.cast::<ISteamTimeline>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -304,6 +312,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             remote_storage,
             user_stats,
             input,
+            screenshots,
+            timeline,
             session,
         }),
         queue: VecDeque::new(),
@@ -395,7 +405,8 @@ mod tests {
             b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
-              STEAMUSERSTATS_INTERFACE_VERSION013\0SteamInput007\0SteamUtils011\0\0"
+              STEAMUSERSTATS_INTERFACE_VERSION013\0SteamInput007\0\
+              STEAMSCREENSHOTS_INTERFACE_VERSION003\0SteamUtils011\0\0"
         );
         assert_eq!(script(|s| s.calls.dispatch_init), 1);
         assert_eq!(steam.client.pipe, testing::PIPE);
@@ -406,6 +417,8 @@ mod tests {
         assert!(!steam.client.remote_storage.is_null());
         assert!(!steam.client.user_stats.is_null());
         assert!(!steam.client.input.is_null());
+        assert!(!steam.client.screenshots.is_null());
+        assert!(!steam.client.timeline.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

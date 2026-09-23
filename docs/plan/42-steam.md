@@ -16,8 +16,8 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 built
-on branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9 and 10
+built on branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest
 planned** — see "Status by slice" under "Slice order". The four decisions the
 earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
 "the full Steam API" is now in scope, which reverses two earlier "not now" calls
@@ -1265,7 +1265,48 @@ On branch `steam-sdk`, not merged to `main`:
   feature. **Not run:** Shift+Tab in the sandbox on any OS (with slice 1b's
   recorded launch — none recorded yet), and the sandbox's Steam Input on any
   controller. See "Slice 8 as built".
-- Slices 10–15: not started.
+- **Slice 10: done** (2026-09-23). `Screenshots` and `Timeline` (with
+  `TimelineRange` and the two recording call results), over the fake; every test
+  in the slice's list seen red against a deliberate break; Miri clean; the drift
+  gate passes against the mirror with the twenty-four declarations, four
+  structs, both bases and two limits. **Not run:** every step under "Needs a
+  real client" below — a hooked F12 reaching the Steam screenshot manager,
+  timeline events on a recording — on every OS; nothing in the sandbox hooks
+  screenshots or marks the timeline. See "Slice 10 as built".
+- Slices 11–15: not started.
+
+**Slice 10 as built, where it differs from the text below:**
+
+- **`screenshots.write(&rgb, width, height)` takes packed RGB**, sized before
+  the call to exactly `3 × width × height` bytes (a mismatch, a zero or an
+  overflowing dimension is the new `SteamError::OutOfRange`), and copies it,
+  since `WriteScreenshot` takes a mutable pointer. **The engine has no capture
+  of a running game's frame** — `crcbl::screenshot`'s readback renders a scene
+  of its own — so the plan's "the engine's own capture of the swapchain image"
+  is the game's to supply (see the backlog). `AddScreenshotToLibrary`,
+  `TagPublishedFile` (Workshop's) and the VR calls are not bound.
+- **Events:** `SteamEvent::ScreenshotRequested` and
+  `ScreenshotReady { screenshot, result }`. `trigger`, `hook` and `hooked` wrap
+  the rest.
+- **`steam.timeline()`** takes `&mut Steam`, for its two call results:
+  `event_recording(id) -> SteamCall<EventRecording>` and
+  `phase_recording(id) -> SteamCall<PhaseRecording>` (recorded time, longest
+  clip, clip and screenshot counts). Events are
+  `TimelineEvent { title, description, icon, priority, offset, clip }`;
+  `instant_event`, `range_event` (a finished stretch) and `range_start`, whose
+  `TimelineRange` ends once — `end(offset)`, or `Drop` at now — and can be
+  `update`d while open. Phases: `start_phase`, `end_phase`, `set_phase_id`,
+  `add_phase_tag`, `set_phase_attribute`; `open_overlay_to_phase` /
+  `…_to_event`.
+- **Every header limit is checked before the call**: priorities up to
+  `MAX_TIMELINE_PRIORITY` (1000), finite offsets, durations in
+  `0..=MAX_TIMELINE_EVENT_SECONDS` (600), phase ids up to `MAX_PHASE_ID_LENGTH`
+  (63, the 64-byte array less the NUL). The drift gate checks
+  `k_unMaxTimelinePriority` and `k_cchMaxPhaseIDLength`; it reads integer
+  constants only, so `k_flMaxTimelineEventDuration` is not in it.
+- **`ISteamTimeline` is outside the handshake**: Valve's `InitEx` list does not
+  carry it, so its accessor's null check is its only guard — the treatment the
+  plan named for it. `ISteamScreenshots` joined the handshake.
 
 **Slice 8 as built, where it differs from the text below:**
 

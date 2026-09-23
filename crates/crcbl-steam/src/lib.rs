@@ -16,6 +16,8 @@
 //!        ├── SteamListener::open(lobby) / SteamTransport::connect(owner): crcbl_net::Transport
 //!        ├── stats(): achievement(), set_achievement(), set_i32(), store()
 //!        ├── leaderboards(): find_or_create() / upload() / download() ──▶ SteamCall<T>
+//!        ├── screenshots(): hook(), write() the game's own; tag_user(), set_location()
+//!        ├── timeline(): set_game_mode(), instant_event(), range_start() ──▶ TimelineRange, phases
 //!        ├── voice(): capture() ──▶ VoiceCapture: set_transmitting(), poll() ──▶ packets
 //!        │            decompress(packet, VOICE_SAMPLE_RATE) ──▶ mono f32 PCM
 //!        ├── SteamCloudStorage::new(): crcbl_store::StorageSource
@@ -24,7 +26,7 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c and 9: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9 and 10: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -36,7 +38,8 @@
 //! achievements, stats and leaderboards are read and written, controllers
 //! arrive through Steam Input as the same gamepad events every pad backend
 //! reports, with their buttons' glyphs, the Deck's on-screen keyboards hand
-//! back typed text, and the
+//! back typed text, screenshots are written to the player's library and
+//! moments marked on Steam's game recording, and the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
@@ -162,6 +165,11 @@ mod pump;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod screenshots;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod stats;
 #[cfg(all(
     target_pointer_width = "64",
@@ -174,6 +182,11 @@ mod strings;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod testing;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod timeline;
 #[cfg(all(
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
@@ -224,7 +237,13 @@ pub use crate::{
         MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
     },
     pump::PumpDiagnostics,
+    screenshots::{ScreenshotId, Screenshots},
     stats::{Achieved, MAX_STAT_NAME_LENGTH, Stats},
+    timeline::{
+        ClipPriority, EventRecording, GameMode, MAX_PHASE_ID_LENGTH, MAX_TIMELINE_EVENT_SECONDS,
+        MAX_TIMELINE_PRIORITY, PhaseRecording, Timeline, TimelineEvent, TimelineEventId,
+        TimelineRange,
+    },
     user::{SteamId, User},
     utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},
     voice::{
