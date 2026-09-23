@@ -2809,6 +2809,105 @@ moves onto the growing buffer (it changes what an existing test asserts); what
 `SteamTransport` reports after `Host::shutdown` (`ShuttingDown` rather than
 `HostLeft`). The app id is settled (above): crcbl tests on 480 permanently.
 
+## Review (step 4)
+
+An adversarial review of everything `steam-sdk` adds over `main`, on 2026-09-23,
+after merging `main` into the branch (its evdev, GameController and browser
+gamepad backends; the conflicts were `CHANGELOG.md` and `docs/plan/19-input.md`,
+both sides kept). Two read-only sub-reviews covered the engine seams and every
+Steam call site against the SDK 1.65 headers; the FFI core was reviewed
+directly. **Verdict: ready to merge into `main`**, with the items under
+"Recorded, not fixed" in `docs/backlog.md` — none is a soundness problem, and
+each needs a decision, a real run, or work of its own. Nothing here changes what
+the plan says about real-client verification: none has happened.
+
+**Soundness of the hand-written FFI, checked and holding:**
+
+- **Declarations.** The drift gate passes against a fresh clone of the
+  Steamworks.NET mirror (`CodeGen/steam` at `ba71581`, byte-identical to the
+  copy step 3 used), and fails when one header prototype is doctored. **Found
+  and fixed:** it compared only the declaration text, while each function is
+  called through a Rust type written separately in the same `manifest` row;
+  nothing tied the two. `crates/crcbl-steam/src/ffi/signatures.rs` now
+  translates every declaration's C types through a closed table and compares
+  them with the stringified Rust type on every test run (all bindings agree;
+  seen red on a doctored declaration and on doctored Rust types).
+- **Layouts and packing.** Every size, offset and field width in the
+  pack-independent, `pack(4)` and `pack(8)` tables was re-derived from a C++
+  probe generated out of the Rust tables and compiled with MinGW GCC against the
+  mirror, as is and with the platform test forced to `VALVE_CALLBACK_PACK_SMALL`
+  — all agree, `ValvePackingSentinel_t` at 24 and 32. The `pack(4)` table passes
+  under Miri for `x86_64-unknown-linux-gnu`. `CSteamID` held as `[u8; 8]`
+  (1-aligned) is what makes `AvatarImageLoaded_t` 20 bytes under both packings;
+  that is right.
+- **`unsafe`.** Every payload is read by one `read_unaligned` of an exactly
+  sized slice into a `Pod` type (all fields integers, floats, byte arrays or raw
+  pointers — checked field by field); the drain frees exactly once per message
+  and decodes strictly between `GetNextCallback` and `FreeLastCallback`, which
+  the fake frees for Miri to catch a read after; returned C strings are copied
+  before the next call; `Client`'s `Send`/`Sync` rest on a runtime pump-thread
+  check that every `Send` surface makes before every Steam call, including in
+  `Drop`, and every other holder of `Arc<Client>` is `!Send`. The by-value
+  returns of `pack(1)` Steam Input structs remain reasoned, not tested (R10).
+- **Shutdown order.** `Client`'s session field drops last; a last owner dropped
+  off the pump thread skips `SteamAPI_Shutdown` and logs.
+
+**Found and fixed, each its own commit with a test seen red first:**
+
+- `SyncedFile::load` left an earlier load's permission to save standing when it
+  failed, so a save after a failed or corrupt load overwrote a version this
+  device never saw, and an unresolved conflict vanished.
+- `SteamListener`'s drop closed its listen socket, which closes every connection
+  accepted on it ungracefully — the doc said they stayed open. The socket is now
+  shared with each accepted transport and closes with the last.
+- An abandoned `Entries` answer never read its entries, so Steam kept the
+  download until shutdown.
+- `Steam::take` matched a token to its call by handle alone; a token from an
+  earlier session could redeem a new session's call that reused the handle.
+- A re-join of a lobby already held made a second `Lobby` owner; it now answers
+  `SteamError::AlreadyInLobby`.
+- `EndReason::from_code` overflowed on codes below `i32::MIN + 1000`.
+- `Voice::decompress` grew its buffer to any size Steam named for another
+  player's packet; it now has `VoiceCapture::poll`'s ceiling.
+- `crcbl_net::conformance` passed a transport whose `recv_reliable` never
+  returned anything, and never checked that reliable messages sent before a drop
+  arrive ahead of the disconnect — the order the sealed session end relies on.
+  Two checks now cover both, each shown failing against a broken wrapper, and
+  `SteamTransport` runs them.
+- Docs: `steam_input`'s claim that no target but Windows had a native pad
+  backend (false after the merge); `SessionEndReason`'s claim that a server
+  sends it (only `Host` does); the umbrella manifest's list of `crcbl-steam`'s
+  dependencies.
+
+**Recorded, not fixed** (each in `docs/backlog.md`, under the Steamworks entry):
+the `SyncedFile` lost update after a confirmed write (a design change that
+rewrites three existing tests); the repeated-hello livelock `Host` inherits from
+`Server`; the virtual-pad filter's reliance on Steam hiding a physical Xbox pad;
+evdev and GameController having no Steam-pad filter, so Steam Input replaces
+them; the listen socket's close possibly cutting its last connection's linger;
+the unauthenticated channel label; the one-tick lost-link delay; four nits.
+
+**House rules.** No new crates.io dependency (`Cargo.lock` adds only workspace
+crates); no stubs or TODOs in the diff; the CHANGELOG entries are under
+`[Unreleased]`; the one swallowed-looking `let _` in non-test code is a default
+hook body.
+
+**Checks on the merged tree** (Windows 11, RX 7900 XTX machine):
+`cargo fmt --all --check`; workspace clippy `-D warnings`, default and all
+features;
+`cargo nextest run --locked --workspace -E 'not test(/^win32::shell::tests::/)'`
+— 7794 passed, 143 skipped by default, and 7815 passed, 595 skipped with all
+features; `crcbl-steam` clippy for `x86_64-unknown-linux-gnu`,
+`aarch64-apple-darwin` and `wasm32-unknown-unknown`, and `crcbl-net`,
+`crcbl-store`, `crcbl-shell`, `crcbl-input`, `crcbl-server` and `crcbl-client`
+for the first two; rustdoc `-D warnings` for `crcbl-steam` with private items on
+the host, Linux and macOS targets, and CI's `wasm32` workspace rustdoc; Miri
+over `crcbl-steam`'s lib tests, 260 passed and 10 ignored, for the host and for
+`x86_64-unknown-linux-gnu`; the drift gate against the fresh mirror; and
+`tools/check-doc-citations.sh`. **Not run:** `crcbl` and `sandbox` clippy for
+Linux (their `alsa-sys` build script needs a Linux sysroot), every real-client
+step, and the drift gate against an SDK zip from Valve.
+
 ## Review (step 2)
 
 The first draft was reviewed on 2026-09-22 against the SDK 1.65 headers (every

@@ -9046,14 +9046,18 @@ slice.
   earlier, at `SteamAPI_SteamUtils_v011`) — the loader works on a real DLL; the
   1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
   and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
-- **The `pack(4)` layout tables** (Linux and macOS) run only in CI; the local
-  run was Windows (`pack(8)`). The numbers come from a C++ program compiled with
-  MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
-  platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
-  compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 220 lib tests after slice
-  12, clean, leak check on; the drift gate's scanner tests are kept out of it —
-  no `unsafe`, and minutes of interpretation); the CI job itself has not run,
+- **The `pack(4)` layout tables** (Linux and macOS) come from a C++ program
+  compiled with MinGW GCC against the mirror's headers, `pack(4)` obtained by
+  forcing the platform test in a copy of `steamclientpublic.h` — so the
+  arithmetic is the compiler's, but no Linux or macOS compiler has produced
+  them. The step 4 review re-derived every size, offset and width in both tables
+  from a probe generated out of the Rust tables and compiled the same way (all
+  agree), and ran the `pack(4)` table under Miri for `x86_64-unknown-linux-gnu`;
+  natively it still runs only in CI.
+- **Miri** ran locally (step 4 review, 2026-09-23: 260 lib tests passed, 10
+  ignored, clean, both for the Windows host and for `x86_64-unknown-linux-gnu`;
+  the drift gate's scanner tests and the signature check are kept out of it — no
+  `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
   `apps/sandbox --features steam` and pausing it, which launch injects the
@@ -9246,6 +9250,87 @@ slice.
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.
 - **`aarch64` Linux** (`linuxarm64`) has a loader path and no machine.
+
+**Found by the step 4 review (2026-09-23) and not fixed** — each needs a
+decision, a real run, or is work of its own. What the review fixed is in the
+plan's "Review (step 4)".
+
+- **Needs a decision: `SyncedFile` can lose a confirmed write silently.** A
+  `save` writes the cloud blind, and a device drops its kept copy once a load
+  sees the cloud hold its write (`SyncedFile::confirm`). So: A and B hold v1; A
+  saves v2 and loads (confirmed, copy dropped); B, which never loaded v2, saves
+  on v1 and overwrites v2; A's next load has no kept write and reads B's version
+  as `FastForwarded`, and B's reads `Clean` — v2 is gone and nobody is told,
+  though the module promises every such case surfaces. Under Steam Cloud this
+  needs B's cache to take v2 mid-session (Dynamic Cloud Sync) or Steam's own
+  launch dialog, so it is rarer there than over a shared `StorageSource`.
+  **Proposed:** `save` reads the cloud first and, unless it holds the save's
+  base (or nothing), keeps the new payload in the shadow, writes nothing to the
+  cloud and answers a new `SyncError::Stale`, so the next load reports the
+  `Conflict`. **What it changes:**
+  `equal_generations_with_different_payloads_conflict`,
+  `a_cloud_version_on_another_base_conflicts` and
+  `resolving_writes_above_both_sides_and_the_next_load_is_clean` in
+  `crates/crcbl-store/src/synced/tests.rs` all make a second device save over a
+  version it never loaded and assert the save succeeds and the cloud kept it;
+  they would assert `Stale` instead. Left for the user, since it rewrites what
+  existing tests assert. Related, lower: fast-forward is recognised one
+  generation deep only (`cloud.base == mine.version`), so a write taken up and
+  built on twice elsewhere reads as a `Conflict` whose `KeepLocal` discards the
+  newer versions; more ancestry in the header would fix it.
+- **Needs a decision: a repeated hello can livelock a client and hold a `Host`
+  slot.** A client that hears nothing for `HANDSHAKE_TIMEOUT` sends a second
+  token-less hello. `Host` admits the first and answers the second through
+  `rehello` with `INVALID_SESSION_TOKEN`; the client drops the first `Accept` as
+  a stale generation and retries on the reject forever, while the admitted peer
+  keeps one of `max_peers`. The single-peer `Server` on `main` answers the same
+  way, so this predates the branch; `Host` makes it cost a slot. **Proposed:**
+  answer a token-less hello on a connected peer's own link with an `Accept`
+  repeating its session and token for the new generation (the link is the
+  credential), and end a session whose client never sends an authenticated
+  message within a deadline.
+- **Needs a real run: the Steam-virtual-pad filter only skips Valve's vendor.**
+  With Steam Input on for an Xbox pad, Steam hides the physical pad from the
+  game's XInput through the overlay's hook. Launched outside Steam, or without
+  the overlay, the physical pad (vendor `0x045E`) may reach XInput beside
+  Steam's report of it, and every press arrives twice. Slice 7b's Windows run
+  should check it; the fallback is the one already named for the vendor query
+  (`GetGamepadIndexForController`), or skipping XInput whenever Steam Input
+  reports an Xbox-type handle.
+- **Not built: evdev and GameController cannot skip Steam's virtual pad.** Since
+  `main`'s evdev (Linux) and GameController (macOS) backends merged,
+  `crcbl::engine::steam::steam_input` replaces the loop's native pad source on
+  those targets rather than polling it beside Steam Input — both read Steam's
+  virtual pad like any other, so a pad Steam Input owns would arrive twice. A
+  pad Steam Input does not handle is therefore unheard there. What it would
+  take: a vendor filter in `crcbl_input::evdev` (it already reads the USB
+  vendor) and one in `crcbl_input::game_controller`, then `native_beside_steam`
+  returning them with it on.
+- **Closing the last user of a listen socket may cut its connection's linger.**
+  Since the review, a listen socket stays open while any connection accepted on
+  it lives (`crates/crcbl-steam/src/net/listener.rs`), because
+  `CloseListenSocket` closes them all ungracefully. When the last accepted
+  `SteamTransport` drops, it closes its connection lingering and then the socket
+  goes too, which may end that linger early; the sealed session end a `Host`
+  sends first is the message at risk. Unverified against a real client.
+- **Low: the session end is told apart from a snapshot by the channel label,
+  which the MAC does not cover.** An on-path attacker on a transport whose
+  labels are not authenticated could relabel it unreliable, so the client opens
+  it as a snapshot, fails, and reads `Ended::Lost` instead of `ByServer`. The
+  resume token is sent in the clear too, which the existing threat model already
+  accepts. Fix, if wanted: dispatch on the opened payload's tag.
+- **Low: `Host` reports a lost link a tick late.** `drain_peers` stops on
+  `Disconnected` but leaves the transport set, so a pending resume in the same
+  tick is refused as "connected on another link" and the client succeeds on its
+  next retry.
+- **Nits, recorded rather than changed:** an XInput slot keeps its Steam-pad
+  verdict if one pad is swapped for another between two polls; Steam Input's
+  `k_ESteamInputType_SteamOSHandheld` (15, SDK 1.65) maps to `PadKind::Generic`
+  (whether it should read as `SteamDeck` is a call for whoever draws glyphs);
+  `SteamCloudStorage` does not count a lossily read file name in
+  `lossy_strings`, having no `Steam` to count it on; and `SteamTransport`'s
+  private `info`/`fill`/`ended` rely on their callers' pump-thread check, which
+  every caller makes.
 
 **EW's requirements and priority set the order.** EW is the first consumer. Its
 six hard requirements are listen-server co-op over Steam networking with friend
