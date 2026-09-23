@@ -8,6 +8,8 @@
 //! - [`write_atomic`] — write-then-rename for crash-safe file writes
 //! - Settings (TOML layers, typed access) — module `settings`
 //! - Saves (binary save/load container) — module `save`
+//! - A file kept in a cloud, conflicts surfaced to the game — module [`synced`]
+//! - [`crc32`] — the workspace's one CRC-32
 //! - Browser storage ([`FetchSource`](web::FetchSource) for assets,
 //!   [`OpfsStorage`](web::OpfsStorage) for saves) — module [`web`]
 //!
@@ -24,10 +26,12 @@
 //! [`write_atomic`]'s guarantee becomes when there is no `rename`.
 
 pub mod crash_ring;
+pub mod crc32;
 pub mod record;
 pub mod replay;
 pub mod save;
 pub mod settings;
+pub mod synced;
 pub mod web;
 
 use std::io;

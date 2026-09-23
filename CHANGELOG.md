@@ -278,6 +278,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `PeerId`, and `host.events()` yields `PeerEvent::Joined`, `Lost`, `Resumed`
   and `Left`. `host.kick(peer)` and `host.shutdown(reason)` tell the client why
   before closing its link. `Server<T>` is unchanged for single-peer callers.
+- **`crcbl_store::synced`: a file kept in a cloud, with conflicts handed to the
+  game** (`docs/plan/42-steam.md` slice 6).
+  `SyncedFile::new(cloud, shadow, path)` over any two `StorageSource`s — the
+  cloud every device shares and a shadow only this device sees. Each version
+  carries a header naming its generation and the version it was written on;
+  `load()` answers `SyncOutcome::Clean`, `FastForwarded`, `Missing` or
+  `Conflict { local, remote }` when two devices each changed the file without
+  seeing the other's change, and `resolve(Resolution)` writes the game's choice
+  above both. A write the cloud never took is kept in the shadow and sent again;
+  a file that does not parse is `SyncError::Corrupt`, never read as empty;
+  `save` refuses before a `load` and while a conflict stands.
+  `crcbl_store::crc32` is the workspace's one CRC-32, now also behind
+  `crcbl-sprite`'s and `crcbl-golden`'s PNG test fixtures.
 - **A server can say why a session ended**: `crcbl_net::SessionEndReason`
   (`HOST_LEFT`, `KICKED`, `SHUTTING_DOWN`), sent sealed on the reliable channel
   (`encode_session_ended`, tag `0x50`), and `crcbl_client::Client::ended()`,

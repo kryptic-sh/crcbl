@@ -959,6 +959,7 @@ fn line_column(src: &[u8], offset: usize) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_store::crc32::crc32;
 
     /// A sidecar with everything in it: two frames, a looping clip and a
     /// nine-slice, written the way `bake` writes one.
@@ -1399,22 +1400,6 @@ mod tests {
         bytes
     }
 
-    /// CRC-32, the PNG chunk CRC, in the bitwise reflected form.
-    ///
-    /// Pinned by the standard check value below so a transcription slip cannot
-    /// silently produce a CRC the decoder rejects.
-    fn crc32(data: &[u8]) -> u32 {
-        let mut crc = 0xFFFF_FFFFu32;
-        for &byte in data {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                let mask = 0u32.wrapping_sub(crc & 1);
-                crc = (crc >> 1) ^ (0xEDB8_8320 & mask);
-            }
-        }
-        !crc
-    }
-
     /// `png_bytes`'s output with the IHDR's declared size rewritten and the
     /// chunk's CRC fixed up, so the decoder believes the hostile claim.
     fn png_with_declared_size(width: u32, height: u32) -> Vec<u8> {
@@ -1431,8 +1416,6 @@ mod tests {
     /// multi-gigabyte allocation (2²⁰×2²⁰ aborts the process).
     #[test]
     fn a_png_that_declares_a_huge_size_is_refused_before_allocating() {
-        // Pins the CRC implementation: the standard check value for "123456789".
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
         let hostile = png_with_declared_size(65_536, 65_536);
         let error = decode_png(&hostile).expect_err("a multi-gigabyte claim must be refused");
         assert!(

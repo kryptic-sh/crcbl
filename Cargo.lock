@@ -401,6 +401,7 @@ dependencies = [
 name = "crcbl-golden"
 version = "0.1.0"
 dependencies = [
+ "crcbl-store",
  "png",
 ]
 
@@ -589,6 +590,7 @@ dependencies = [
 name = "crcbl-sprite"
 version = "0.1.0"
 dependencies = [
+ "crcbl-store",
  "png",
 ]
 
