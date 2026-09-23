@@ -1,18 +1,20 @@
 //! Tumble — the physics gallery: each rung of the contact solver on the scene
 //! built to prove it.
 //!
-//! `docs/plan/sample/24-tumble.md`, **milestone 6, rung 4 "Bullets"**, from
-//! `docs/plan/36-contact-solver.md`'s rung table, over milestone 5's rung 3
-//! "Settle", milestone 4's rung 2 "Tower", milestone 3's rung 1 "Pachinko" and
-//! milestone 2's rung 0 "Spin": five rooms — the zero-g T-handle and a box
-//! that lands ([`spin`]), the obstacle wall with falling balls, pills and cubes
-//! ([`wall`]), a thousand-ball pit ([`pit`]), a column, a pyramid and dominoes
-//! ([`tower`]), and a point-blank cannon at a thin plate and a brick wall with
-//! a fast spinning plank beside a pillar ([`bullets`]) — with every counter of
-//! the five rungs on the page, rung 4's being the bodies swept, the sweep
-//! candidates, the hits, the time dropped and what each tunnel sensor counted.
-//! Settle has no room of its own: its claim is that every other room comes to
-//! rest and sleeps. See [`scene`] for how the rooms share a tick and a hash.
+//! `docs/plan/sample/24-tumble.md`, **milestone 7, rung 5 "Bridge"**, from
+//! `docs/plan/36-contact-solver.md`'s rung table, over milestone 6's rung 4
+//! "Bullets", milestone 5's rung 3 "Settle", milestone 4's rung 2 "Tower",
+//! milestone 3's rung 1 "Pachinko" and milestone 2's rung 0 "Spin": six
+//! rooms — the zero-g T-handle and a box that lands ([`spin`]), the obstacle
+//! wall with falling balls, pills and cubes ([`wall`]), a thousand-ball pit
+//! ([`pit`]), a column, a pyramid and dominoes ([`tower`]), a point-blank
+//! cannon at a thin plate and a brick wall with a fast spinning plank beside a
+//! pillar ([`bullets`]), and a gapped Newton's cradle, a plank bridge an anvil
+//! snaps, and capsule ragdolls down stairs ([`bridge`]) — with every counter
+//! of the six rungs on the page, rung 5's being the cradle's momentum in and
+//! out, the bridge's sag, the joint error and the joints broken. Settle has
+//! no room of its own: its claim is that every other room comes to rest and
+//! sleeps. See [`scene`] for how the rooms share a tick and a hash.
 //!
 //! # What is not here yet
 //!
@@ -24,7 +26,7 @@
 //!
 //! # It runs itself
 //!
-//! The one key it reads — `1` to `5` — picks the room on screen and never
+//! The one key it reads — `1` to `6` — picks the room on screen and never
 //! reaches the simulation. The rooms start the same way every run, which is
 //! what lets the browser gate hold the wasm build's hash to the constant the
 //! native test pins.
@@ -36,6 +38,7 @@
 
 pub mod app;
 mod args;
+pub mod bridge;
 pub mod bullets;
 mod gpu;
 pub mod menu;

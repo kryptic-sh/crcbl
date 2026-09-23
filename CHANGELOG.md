@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::ContactCounters` gained public fields for joints** — `joints`,
+  `joint_error`, `joint_angle_error` and `broken_joints` — so a struct literal
+  of it that names every field needs them. Literals built with `..` from
+  `Default` are unaffected.
 - **`crcbl_phys::ColliderComponent` has a `Mesh` variant and
   `crcbl_phys::contact::shape::ContactShape` a `Triangle` one**, so an
   exhaustive `match` on either needs another arm, and `ContactShape::rank` of a
@@ -251,6 +255,40 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Joints in the contact solver, and extra substeps per group** — the rest of
+  rung 5 of `docs/plan/36-contact-solver.md`. `PhysicsSystem::add_joint` takes a
+  `crcbl_phys::Joint` between two registered entities (a static one is a fixed
+  anchor) at frames in each body, built directly or from one world frame with
+  `Joint::at`, of a `JointKind`: `DistanceJoint` (rigid, a rope or a spring,
+  with minimum and maximum lengths and a motor), `RevoluteJoint` (a hinge about
+  the frames' z-axes, with angle limits, a motor and a spring), `PrismaticJoint`
+  (a slider along frame A's x-axis, likewise), `WeldJoint` (rigid or springy)
+  and `SphericalJoint` (a ball joint with a cone and a twist limit, and a motor)
+  — each transcribed from Box3D's solver of the same name. Joints are solved in
+  the same substeps as the contacts, before them, soft at
+  `Joint::constraint_hertz` (60 Hz, damping 2) and warm-started; a joint joins
+  its bodies' islands, a new one wakes them, and its bodies do not collide
+  unless `Joint::colliding(true)`. `Joint::breaking_at(force, torque)` makes one
+  break: it is taken out at the end of the step and reported in
+  `PhysicsSystem::broken_joints()` as a `JointBreak`. `remove_joint`,
+  `set_joint`, `joint`, `joints`, `joint_count`, `joint_reaction`,
+  `joint_anchors` and `joint_drift` (a `JointDrift`) read and change them;
+  `add_joint` refuses an unknown or repeated body or a setting out of range with
+  a `JointError`, and removing an entity removes its joints.
+  `PhysicsSystem::set_substeps(entity, n)` gives a body, and every body a
+  contact or a joint ties it to that tick, `n` substeps in a pass of their own,
+  their constraints stiffer in proportion: a loaded bridge's planks at twelve
+  substeps sag within 1.6 cm of a rigid chain's depth (8.8 cm at the default
+  four), and twenty one-metre cubes at twelve stand in a system at the default
+  settings, which `TALL_STACK` was for.
+  `SemiImplicitEuler::integrate_position_carrying` turns a body by the whole of
+  the angular velocity a joint gave it, where the midpoint rule took half and a
+  long hinged chain between two anchors gained energy until it flew apart.
+  Systems with no joints and no groups step and hash exactly as before.
+  `apps/tumble` has a sixth room on key `6`, Bridge: a gapped Newton's cradle
+  passing 99.6% of its momentum, a plank bridge that crates slide across and an
+  anvil snaps at its weak link, and capsule ragdolls pushed down stairs made of
+  one triangle mesh; its pinned hash is re-pinned for the new room.
 - **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
   11, 12, 14 and 15's inventory half** (`docs/plan/42-steam.md`), and
   `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the

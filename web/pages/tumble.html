@@ -46,6 +46,18 @@ meta-->
       <span>The ball pit</span>
       <span><kbd>3</kbd></span>
     </li>
+    <li class="key-row">
+      <span>The tower: a column, a pyramid, dominoes</span>
+      <span><kbd>4</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>Bullets: a cannon at thin plates, a spinning plank</span>
+      <span><kbd>5</kbd></span>
+    </li>
+    <li class="key-row">
+      <span>The bridge: a cradle, a plank bridge, ragdolls on stairs</span>
+      <span><kbd>6</kbd></span>
+    </li>
     <!--include demo-loop-keys-->
   </ul>
 </section>
@@ -73,8 +85,7 @@ meta-->
     The blue box is dropped with no spin and lands on its four lower corners,
     level to a trillionth, sunk a fraction of a millimetre into the floor: every
     contact is a stiff spring, and the box's weight compresses it. The box is
-    put back at the top every four seconds to land again. A box against another
-    box is the next rung, so nothing here asks for one.
+    put back at the top every four seconds to land again.
   </p>
   <h3>The obstacle wall.</h3>
   <p>
@@ -84,24 +95,23 @@ meta-->
     pairs the broadphase is tracking, contacts begun and ended, the time each
     stage took, the deepest overlap, and the mean bounce against the restitution
     the materials asked for. The wall holds a hundred and twenty bodies and
-    takes the oldest away as each new one drops. No cubes fall: a cube landing
-    in a bin is a box against a box.
+    takes the oldest away as each new one drops; every fifth drop is a cube.
   </p>
   <h3>A thousand balls in a pit.</h3>
   <p>
     Waves of five balls pour into a walled pit until there are a thousand, and
-    the pile comes to a stop. Nothing sleeps yet, so a still pile is solved in
-    full every tick — that is the rung after next — and the pit neither
-    overflows nor clears, which is a later rung's scene. The step times on the
-    panel read "no clock" here, because the page's physics reads none; the
-    browser's figure is the whole frame's, timed around the call from outside
-    and logged to the console as a <code>[TIMING]</code> line.
+    the pile comes to a stop and falls asleep: a resting island costs the solver
+    almost nothing, and the panel counts the awake and sleeping bodies. The pit
+    neither overflows nor clears, which is a later rung's scene. The step times
+    on the panel read "no clock" here, because the page's physics reads none;
+    the browser's figure is the whole frame's, timed around the call from
+    outside and logged to the console as a <code>[TIMING]</code> line.
   </p>
   <p>
     <strong>The hash is the same everywhere.</strong> Nothing in a physics step
     calls a platform's maths library: the operations it uses are ones every
     processor performs identically, and the sine and cosine it needs are built
-    inside the engine from them. So the state hash all three rooms reach ten
+    inside the engine from them. So the state hash all the rooms reach ten
     seconds in — whichever room is on screen — is the very number the native
     build's test pins, and the browser test checks the two agree.
   </p>

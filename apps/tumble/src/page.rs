@@ -27,14 +27,17 @@
 //!  │ HASH         20be321e0066f5de │
 //!  └───────────────────────────────┘
 //!
-//!   balls, pills and cubes bounce down the wall - keys 1 to 5 pick a room
+//!   balls, pills and cubes bounce down the wall - keys 1 to 6 pick a room
 //! ```
 //!
 //! The Tower room shows the pyramid's contact rows — its solver time is the
 //! benchmark — then how far the pyramid's and the column's top boxes have
 //! drifted, the column's own solver time and the dominoes down. The Bullets
 //! room adds the shots fired and the tunnels its three sensors counted — the
-//! plate's, the brick wall's and the plank's.
+//! plate's, the brick wall's and the plank's. The Bridge room adds the momentum
+//! the cradle's first ball arrived with and its last left with, the bridge's
+//! sag against the unloaded chain's, its hinges whole and the joints broken,
+//! and the worst joint error in the room.
 //!
 //! `docs/plan/sample/24-tumble.md` asks that a scene the engine cannot produce
 //! yet ship labelled as the gap it is, and each room's hint line is that label.
@@ -65,18 +68,21 @@ const PANEL: ReadoutPanel = ReadoutPanel {
 
 /// The Spin room's line.
 pub const SPIN_HINT: &str =
-    "handle flips in zero g - box lands flat on its corners - keys 1 to 5 pick a room";
+    "handle flips in zero g - box lands flat on its corners - keys 1 to 6 pick a room";
 /// The wall's line.
-pub const WALL_HINT: &str = "balls, pills and cubes bounce down the wall - keys 1 to 5 pick a room";
+pub const WALL_HINT: &str = "balls, pills and cubes bounce down the wall - keys 1 to 6 pick a room";
 /// The pit's line, and its gaps.
 pub const PIT_HINT: &str =
-    "1000 balls that sleep once still - no overflow or despawn (rung 6) - keys 1 to 5";
+    "1000 balls that sleep once still - no overflow or despawn (rung 6) - keys 1 to 6";
 /// The Tower room's line.
 pub const TOWER_HINT: &str =
     "counters: the pyramid's; column at 8 substeps, 90 Hz; all sleep once still";
 /// The Bullets room's line, and its gap.
 pub const BULLETS_HINT: &str =
     "point-blank cannon, spinning plank - dynamic pairs swept only for bullets";
+/// The Bridge room's line, and its gap.
+pub const BRIDGE_HINT: &str =
+    "cradle, plank bridge at 8 substeps an anvil snaps, ragdolls - no 6-DOF joint";
 
 /// The hint for a room.
 #[must_use]
@@ -87,6 +93,7 @@ pub const fn hint(view: View) -> &'static str {
         View::Pit => PIT_HINT,
         View::Tower => TOWER_HINT,
         View::Bullets => BULLETS_HINT,
+        View::Bridge => BRIDGE_HINT,
     }
 }
 
@@ -115,7 +122,8 @@ fn millimetres(metres: f64) -> String {
     format!("{:.2} mm", metres * 1.0e3)
 }
 
-/// Rung 1's row, rung 2's, rung 3's and rung 4's, for a room with contacts.
+/// Rung 1's row, rung 2's, rung 3's and rung 4's, for a room with contacts;
+/// rung 5's joint rows are the Bridge room's own.
 fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
     rows.push(ReadoutRow::new("AWAKE", tally.bodies.to_string(), VALUE));
     rows.push(ReadoutRow::new(
@@ -303,6 +311,41 @@ pub fn draw(
                 VALUE,
             ));
         }
+        View::Bridge => {
+            let bridge = &reading.bridge;
+            contact_rows(&mut rows, &bridge.contacts);
+            rows.push(ReadoutRow::new(
+                "CRADLE IN/OUT",
+                format!("{:.3} / {:.3}", bridge.cradle_in, bridge.cradle_out),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "SAG",
+                format!("{:.3} m / {:.3}", bridge.sag, bridge.chain_sag),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "HINGES",
+                format!("{} / {}", bridge.hinges, crate::bridge::PLANKS + 1),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new("BROKEN", bridge.broken.to_string(), VALUE));
+            rows.push(ReadoutRow::new(
+                "JOINTS",
+                bridge.contacts.joints.to_string(),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "JOINT ERROR",
+                millimetres(bridge.contacts.joint_error),
+                VALUE,
+            ));
+            rows.push(ReadoutRow::new(
+                "JOINT ANGLE",
+                format!("{:.2} mrad", bridge.contacts.joint_angle_error * 1.0e3),
+                VALUE,
+            ));
+        }
     }
     rows.push(ReadoutRow::new(
         "STEP",
@@ -326,6 +369,7 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::bridge::BridgeReading;
     use crate::bullets::BulletsReading;
     use crate::pit::PitReading;
     use crate::scene::View;
@@ -399,6 +443,24 @@ mod tests {
                 wall_tunnels: 1,
                 plank_tunnels: 2,
                 contacts: tally,
+            },
+            bridge: BridgeReading {
+                cradle_in: 1.981,
+                cradle_out: 1.973,
+                cradle_swings: 2,
+                sag: 2.211,
+                chain_sag: 1.953,
+                crates: 3,
+                hinges: 20,
+                builds: 1,
+                broken: 2,
+                ragdoll_drops: 2,
+                contacts: Tally {
+                    joints: 64,
+                    joint_error: 3.4e-3,
+                    joint_angle_error: 1.25e-3,
+                    ..tally
+                },
             },
             step_micros: Some(530.0),
             hash: 0x20be_321e_0066_f5de,
@@ -487,6 +549,20 @@ mod tests {
                     "0 / 1 / 2",
                 ][..],
             ),
+            (
+                View::Bridge,
+                &[
+                    "bridge",
+                    "37",
+                    "1.981 / 1.973",
+                    "2.211 m / 1.953",
+                    "20 / 22",
+                    "2",
+                    "64",
+                    "3.40 mm",
+                    "1.25 mrad",
+                ][..],
+            ),
         ] {
             let mut list = DrawList::new();
             let stats = draw(&mut list, &atlas, (960, 720), &reading(view));
@@ -505,6 +581,7 @@ mod tests {
         }
         assert!(PIT_HINT.contains("rung 6"));
         assert!(BULLETS_HINT.contains("bullets"));
+        assert!(BRIDGE_HINT.contains("6-DOF"));
         assert!(PIT_HINT.contains("sleep") && TOWER_HINT.contains("sleep"));
     }
 
@@ -530,6 +607,7 @@ mod tests {
             View::Pit,
             View::Tower,
             View::Bullets,
+            View::Bridge,
         ] {
             let width = atlas.text_width(hint(view), crcbl::ui::readout::NATURAL_SCALE);
             assert!(

@@ -46,18 +46,20 @@ const FLOOR_MATERIAL: usize = 0;
 const MATERIALS: usize = 7;
 
 /// Each room's floor: its centre on `y = 0`, and its width and depth.
-const FLOORS: [([f32; 3], f32, f32); 5] = [
+const FLOORS: [([f32; 3], f32, f32); 6] = [
     ([0.0, 0.0, 0.0], 12.0, 12.0),
     ([12.0, 0.0, 0.0], 6.0, 3.0),
     ([26.0, 0.0, 0.0], 7.0, 7.0),
     ([44.0, 0.0, 0.0], 20.0, 9.0),
     ([66.0, 0.0, 0.0], 10.0, 11.0),
+    ([92.0, 0.0, 1.5], 26.0, 14.0),
 ];
 
 /// What this stage reserves. The pit's thousand balls, the Tower room's boxes
 /// and the Bullets room's bricks and shots are one instance each, the wall's
 /// pills and pegs three, and the rest is headroom for the wall's bodies and
-/// the shots turning over within a frame.
+/// the shots turning over within a frame; the Bridge room's rods and
+/// ragdolls' limbs are three each, a pill's.
 const CAPACITIES: Capacities = Capacities {
     vertices: 2048,
     indices: 8192,
@@ -346,6 +348,7 @@ pub fn camera(view: View) -> Camera {
         View::Pit => (Vec3::new(26.0, 4.2, 5.2), Vec3::new(26.0, 0.4, 0.0)),
         View::Tower => (Vec3::new(44.0, 5.5, 21.0), Vec3::new(44.0, 4.5, 0.0)),
         View::Bullets => (Vec3::new(62.5, 3.2, 6.5), Vec3::new(66.0, 0.5, 0.0)),
+        View::Bridge => (Vec3::new(91.0, 5.0, 19.0), Vec3::new(91.0, 2.0, 1.5)),
     };
     Camera {
         eye,
@@ -385,7 +388,8 @@ mod tests {
     /// floors, every fixture, the pit's thousand balls, the Tower room's
     /// boxes, the wall's cap of bodies all as pills, with the wall's cap
     /// again for a frame in which every body turned over, and the Bullets
-    /// room's bricks, plank and cap of shots, twice over likewise.
+    /// room's bricks, plank and cap of shots, twice over likewise, and the
+    /// Bridge room's rods, balls, planks, ragdolls and cap of crates, twice.
     #[test]
     fn the_rooms_at_their_fullest_fit_the_instance_pool() {
         let scenes = Scenes::new();
@@ -398,7 +402,15 @@ mod tests {
         let mut tower = Vec::new();
         scenes.rooms()[3].bodies(&mut tower);
         let tower_bodies = tower.len();
-        let most = FLOORS.len()
+        // The Bridge room's bodies are fixed but for its crates: its rods,
+        // balls, planks and ragdolls as they start, its cap of crates, and all
+        // of it again for a frame in which every body turned over.
+        let mut bridge = Vec::new();
+        scenes.rooms()[5].bodies(&mut bridge);
+        let bridge_instances: usize =
+            bridge.iter().map(|s| instances(s).1).sum::<usize>() + crate::bridge::MAX_CRATES;
+        let most = 2 * bridge_instances
+            + FLOORS.len()
             + fixture_instances
             + 3
             + crate::pit::BALLS as usize

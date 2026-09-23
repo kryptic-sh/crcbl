@@ -12,7 +12,8 @@
 //! | **L0** | Queries + kinematics: ray/segment/sweep/overlap, trigger volumes, character controller | Current |
 //! | **L1** | Forces + ballistics + orbits: gravity, drag, thrust, integrators, Kepler propagation | Current |
 //! | **CCD** | Swept collision: TOI, motion-inflated broadphase | Current |
-//! | **L2** | Contact solver: sequential impulses, warm starting, islands | Rung 3 |
+//! | **L2** | Contact solver: sequential impulses, warm starting, islands, sleep, sweeps | Rungs 1–4 |
+//! | **L3** | Joints in the same solver: distance, revolute, prismatic, weld, spherical | Rung 5 |
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
@@ -35,7 +36,9 @@
 //! speculative contacts and a restitution pass, and raises a
 //! [`KineticContact`] for each hard impact. Still bodies gather into
 //! persistent islands that sleep, costing nothing until something wakes them.
-//! Convex hulls, sweeps and joints are later rungs.
+//! [`Joint`]s are rung 5: constraints in the same solver, with limits,
+//! motors and breaking, and a body can ask for more substeps for its group
+//! with [`PhysicsSystem::set_substeps`]. Convex hulls are a later rung.
 //!
 //! [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries
@@ -77,6 +80,7 @@ pub mod contact;
 pub mod forces;
 pub mod frames;
 pub mod integrator;
+pub mod joint;
 pub mod mass;
 pub mod material;
 pub mod mesh;
@@ -104,6 +108,10 @@ pub use frames::{FrameId, Frames, State, sphere_of_influence};
 pub use integrator::{
     GYROSCOPIC_ITERATIONS, Integrator, MAX_ROTATION_LENGTH_ERROR, SemiImplicitEuler, SpinStep,
     cayley_rotation, gyroscopic_step, integrate_rotation, rotation_from_scaled_axis,
+};
+pub use joint::{
+    DistanceJoint, Joint, JointBreak, JointDrift, JointError, JointId, JointKind, PrismaticJoint,
+    RevoluteJoint, SphericalJoint, Spring, WeldJoint,
 };
 pub use mass::MassProperties;
 pub use material::{CombineRule, ContactMaterial, SurfaceMaterial};

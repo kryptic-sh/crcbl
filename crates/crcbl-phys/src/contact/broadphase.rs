@@ -368,6 +368,13 @@ impl Broadphase {
         }
     }
 
+    /// Puts a proxy in the move buffer without moving it, so the next
+    /// [`find_new_pairs`](Self::find_new_pairs) looks for its pairs again —
+    /// one a filter refused while a joint kept two bodies apart.
+    pub(crate) fn touch(&mut self, id: ProxyId) {
+        self.mark_moved(id);
+    }
+
     fn mark_moved(&mut self, id: ProxyId) {
         if let Some(Some(proxy)) = self.proxies.get_mut(id as usize)
             && !proxy.moved

@@ -202,6 +202,35 @@ impl SemiImplicitEuler {
         spin: SpinStep,
         dt: f64,
     ) {
+        Self::integrate_position_carrying(body, transform, spin, DVec3::ZERO, dt);
+    }
+
+    /// [`integrate_position`](Self::integrate_position), turning the body by
+    /// the whole of `carried` — a change to its world-frame angular velocity
+    /// since [`integrate_velocity`](Self::integrate_velocity) — rather than
+    /// half of it, as the midpoint takes every other change.
+    ///
+    /// **Why a joint's impulses are carried whole.** The solver sets a joint's
+    /// velocity so that the step it takes next lands the joint where it
+    /// should be, and that holds only if the step turns by the velocity the
+    /// solver set. The midpoint turns by the mean of the velocity before and
+    /// after, so half of every joint's angular correction went missing each
+    /// substep, and the joint's spring put it back with energy: measured on
+    /// 2026-09-23, twenty-one hinged planks between two anchors (the bridge
+    /// in `crates/crcbl-phys/tests/joints.rs`) gained 3.4 kJ in three
+    /// seconds and flew apart, where carrying the joints' change whole keeps
+    /// them losing energy. Contacts keep the midpoint: carrying their change
+    /// whole as well, which is Box2D's form for everything, let the 14-cube
+    /// column in `stacking.rs` lean 4.9 cm in ten seconds where it holds to
+    /// 1.8 mm, the midpoint's halving acting as a damping on rocking that the
+    /// stacks were measured with.
+    pub fn integrate_position_carrying(
+        body: &mut RigidBody,
+        transform: &mut Transform,
+        spin: SpinStep,
+        carried: DVec3,
+        dt: f64,
+    ) {
         transform.position += body.velocity * dt;
 
         if body.has_rotational_inertia() {
@@ -211,7 +240,11 @@ impl SemiImplicitEuler {
             } else {
                 rotation.inverse() * body.angular_velocity
             };
-            let midpoint = rotation * ((spin.before + after) * 0.5);
+            let mut turn = (spin.before + after) * 0.5;
+            if carried != DVec3::ZERO {
+                turn += rotation.inverse() * carried * 0.5;
+            }
+            let midpoint = rotation * turn;
             if midpoint != DVec3::ZERO {
                 transform.rotation = (cayley_rotation(midpoint, dt) * rotation).normalize();
             }

@@ -44,6 +44,8 @@
 //! and swap-remove; the id, the record and the (set, index) addressing do not
 //! change shape.
 
+mod joints;
+
 use std::collections::HashMap;
 
 use crcbl_core::{Handle, Pool};
@@ -110,6 +112,9 @@ pub(crate) struct BodyRecord {
     /// Its island, for a dynamic body in a system with contacts that has
     /// stepped since it became one.
     pub(crate) island: Option<IslandId>,
+    /// The substeps it asks the solver for, or 0 for the system's own: see
+    /// [`PhysicsSystem::set_substeps`].
+    pub(crate) substeps: u32,
 }
 
 /// Transforms with no body: struct-of-arrays, dense, indexed alike.
@@ -847,6 +852,9 @@ impl PhysicsSystem {
     /// Its island wakes, and so does every sleeping island that touched it:
     /// see [`remove_collider`](Self::remove_collider).
     pub fn remove_entity(&mut self, entity: Entity) {
+        if let Some(&id) = self.entity_to_body.get(&entity) {
+            self.take_out_joints_of(id);
+        }
         self.remove_collider(entity);
         let Some(id) = self.entity_to_body.remove(&entity) else {
             return;
@@ -1049,6 +1057,7 @@ impl PhysicsSystem {
         pipeline.update_pairs(lent, dt);
         let paired = read();
         pipeline.collide(lent, dt);
+        pipeline.joints.island_events(lent, &mut pipeline.events);
         let collided = read();
 
         // Wake before linking, so every island a link merges is awake.
@@ -1089,6 +1098,21 @@ impl PhysicsSystem {
         // Colliders follow before anything sleeps, so a body put to sleep
         // this tick leaves its collider where it stopped.
         sync_colliders(&mut self.world, &self.records, &self.awake);
+        pipeline.count_joints(Bodies {
+            records: &self.records,
+            statics: &self.statics,
+            awake: &self.awake,
+            islands: &self.islands,
+        });
+        let broken = std::mem::take(&mut pipeline.joints.broken);
+        pipeline.counters.broken_joints = broken.len();
+        for joint_break in &broken {
+            self.take_out_joint(joint_break.joint);
+        }
+        let Some(pipeline) = self.contacts.as_mut() else {
+            return;
+        };
+        pipeline.joints.broken = broken;
         let synced = read();
 
         if settings.sleep {
@@ -1420,6 +1444,7 @@ impl PhysicsSystem {
             material: SurfaceMaterial::DEFAULT,
             proxies: Vec::new(),
             island: None,
+            substeps: 0,
         });
         let index = self.statics.push(id, transform);
         self.records.get_mut(id).expect("just inserted").index = index;
@@ -1694,6 +1719,12 @@ impl SystemTrait for PhysicsSystem {
                     // hashes as it did before the flag existed.
                     if body.bullet {
                         hasher.write(&[3]);
+                    }
+                    // Only a body that asked for its own substeps writes
+                    // them, likewise.
+                    if record.substeps != 0 {
+                        hasher.write(&[5]);
+                        hasher.write(&record.substeps.to_le_bytes());
                     }
                     if self.contacts.is_some() {
                         match record.set {

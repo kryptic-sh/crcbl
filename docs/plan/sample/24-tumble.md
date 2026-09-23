@@ -95,9 +95,9 @@ Gameplay. Reduced-coordinate articulations, which
 collision math" is kept**: the first cut draws no bounce the engine does not
 compute.
 
-## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17, milestone 4 (Tower) 2026-09-23 but for the Galton board, milestones 5 (Settle) and 6 (Bullets) 2026-09-23
+## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17, milestone 4 (Tower) 2026-09-23 but for the Galton board, milestones 5 (Settle), 6 (Bullets) and 7 (Bridge) 2026-09-23
 
-`apps/tumble` has five rooms on keys 1–5: Spin (the zero-g T-handle, and a box
+`apps/tumble` has six rooms on keys 1–6: Spin (the zero-g T-handle, and a box
 that lands flat on its corners), the obstacle wall (balls, pills and, since rung
 2, cubes), the thousand-ball pit (no overflow or despawn until rung 6), the
 Tower room — the stacking scene: a 20-cube column, a base-20 pyramid and a
@@ -134,12 +134,31 @@ none of the forty shots or forty spins tunnelled, 364 bodies were stopped and
 2.92 s of their motion dropped; with the sweeps off every one tunnelled. The
 stated speed limit is the one tested, 80 m/s at point blank.
 
+Milestone 7, Bridge, is the sixth room, on key 6, one system at the default
+settings: a gapped Newton's cradle — five steel balls 2.5 cm apart, each on two
+rigid distance joints, the first drawn back 20 cm every eight seconds; a bridge
+of twenty-one planks hinged between two posts, laid in the hanging chain's
+equilibrium, its planks asking for eight substeps, with a crate set down near
+its left end every 2.5 s to slide to the middle and, twelve seconds into each
+sixteen-second cycle, an 800 kg anvil dropped on it that snaps its one weak
+hinge; and two capsule ragdolls — ball joints with cones and twist limits,
+hinges with limits at the elbows and knees, their parts at eight substeps —
+pushed off the landing of six stairs that are one static triangle mesh every six
+seconds. The panel shows the cradle's momentum in and out, the bridge's sag
+against the unloaded chain's, its hinges whole, the joints broken over the run,
+the joints solved and the worst joint error and angle. Measured on 2026-09-23:
+1.981 kg·m/s in and 1.973 out; before the anvil the bridge's hinges held to 3.8
+mm with crates on it, with a crate putting at most 2.5 kN on a hinge; the anvil
+put 20 kN on every hinge — a chain carries its tension end to end, so a
+threshold on every hinge snapped all twenty-two in two ticks, and the room
+breaks one weak link at 15 kN instead, which goes at tick 758; the ragdolls'
+joints held to 5.3 mm and 69 mrad on the way down. The pinned hash is re-pinned
+for the new room; the five rooms before it still reach the old value.
+
 Milestone 1's wind tunnel and golden frame, milestone 4's Galton board, and
-every milestone after 6, are not built. Milestone 7's stairs stand on rung 5's
-static triangle mesh, which is built (2026-09-23), but its ragdolls, cradle and
-bridge need joints, which are not, so there is no Bridge room yet; the mesh's
-own proving scene — balls down stairs, and a ball, a box, a capsule and a
-compound down a ramp — is `crates/crcbl-phys/tests/meshes.rs`.
+every milestone after 7, are not built. The mesh's own proving scene — balls
+down stairs, and a ball, a box, a capsule and a compound down a ramp — is
+`crates/crcbl-phys/tests/meshes.rs`.
 
 Performance follow-up: the debug module borrows the scenes and constructs its
 reading only inside the visible panel's `debug_section`. Hidden panels avoid the

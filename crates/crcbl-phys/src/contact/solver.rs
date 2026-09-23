@@ -78,18 +78,22 @@
 use core::f64::consts::TAU;
 
 use crcbl_core::Pool;
-use glam::{DMat3, DVec3};
+use glam::{DMat3, DQuat, DVec3};
 
+use super::group::{Pass, Plan};
 use super::island::Islands;
+use super::joint::{self, Prepared};
 use super::manifold::{LINEAR_SLOP, MAX_POINTS, orthonormal_basis};
 use super::shape::ContactShape;
-use super::{Bodies, ContactPipeline, KineticContact, KineticSource, WarmImpulses};
+use super::{
+    Bodies, ContactPipeline, ContactSettings, KineticContact, KineticSource, WarmImpulses,
+};
 use crate::components::{RigidBody, Transform};
-use crate::integrator::{SemiImplicitEuler, SpinStep};
+use crate::integrator::{SemiImplicitEuler, SpinStep, rotation_from_scaled_axis};
 use crate::system::{AwakeSet, BodyRecord, StaticSet};
 
 /// The index a constraint uses for a side that does not step.
-const NONE: usize = usize::MAX;
+pub(super) const NONE: usize = usize::MAX;
 
 /// The smallest contact patch a one-point manifold twists against, in
 /// metres: a tenth of Box2D's linear slop, half a millimetre.
@@ -135,20 +139,30 @@ pub(crate) struct Scratch {
     constraints: Vec<Constraint>,
     /// The points the restitution pass bounced, as (constraint, point).
     bounced: Vec<(usize, usize)>,
+    /// Each awake body's angular velocity change from joints this substep,
+    /// which its step carries whole: see `run_pass`.
+    carried: Vec<DVec3>,
 }
 
 /// What the solver keeps for one awake body over a tick.
 #[derive(Clone, Copy, Debug)]
-struct SolverBody {
-    inverse_mass: f64,
+pub(super) struct SolverBody {
+    pub(super) inverse_mass: f64,
     /// The inverse inertia in the world, at the tick's start orientation.
-    inverse_inertia: DMat3,
+    pub(super) inverse_inertia: DMat3,
     start: DVec3,
     /// How far it has moved since the manifolds were built.
-    delta_position: DVec3,
+    pub(super) delta_position: DVec3,
     /// How far it has turned since, as the sum of each substep's angular
-    /// velocity times the substep: a rotation vector to first order.
+    /// velocity times the substep: a rotation vector to first order. The
+    /// contacts read this.
     delta_angle: DVec3,
+    /// Its orientation when the tick began.
+    start_rotation: DQuat,
+    /// How far it has turned since, exactly: Box3D's `deltaRotation`, the
+    /// rotation that takes the start orientation to the current one. The
+    /// joints read this; see `joint/mod.rs`.
+    pub(super) delta_rotation: DQuat,
     spin: SpinStep,
 }
 
@@ -166,23 +180,47 @@ impl SolverBody {
             start: transform.position,
             delta_position: DVec3::ZERO,
             delta_angle: DVec3::ZERO,
+            start_rotation: transform.rotation,
+            delta_rotation: DQuat::IDENTITY,
             spin: SpinStep::default(),
         }
+    }
+
+    /// Records where the body is after a substep's positions.
+    fn moved(&mut self, transform: &Transform, angular_velocity: DVec3, h: f64) {
+        self.delta_position = transform.position - self.start;
+        self.delta_angle += angular_velocity * h;
+        self.delta_rotation = transform.rotation * self.start_rotation.conjugate();
+    }
+
+    /// Sets the motion of a body that steps in another pass — a kinematic
+    /// one, moving at constant velocity — to where it is `t` into the tick.
+    fn coast(&mut self, velocity: DVec3, angular_velocity: DVec3, t: f64) {
+        self.delta_position = velocity * t;
+        self.delta_angle = angular_velocity * t;
+        self.delta_rotation = rotation_from_scaled_axis(angular_velocity * t);
+    }
+
+    /// Back to the tick's start, for the pass that steps it.
+    fn rewind(&mut self) {
+        self.delta_position = DVec3::ZERO;
+        self.delta_angle = DVec3::ZERO;
+        self.delta_rotation = DQuat::IDENTITY;
     }
 }
 
 /// A soft constraint's coefficients for one substep length — Box2D's
 /// `b2MakeSoft`.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Softness {
-    bias_rate: f64,
-    mass_scale: f64,
-    impulse_scale: f64,
+pub(crate) struct Softness {
+    pub(crate) bias_rate: f64,
+    pub(crate) mass_scale: f64,
+    pub(crate) impulse_scale: f64,
 }
 
 impl Softness {
     /// A spring of `hertz` with damping ratio `zeta`, stepped by `h`.
-    fn new(hertz: f64, zeta: f64, h: f64) -> Self {
+    pub(crate) fn new(hertz: f64, zeta: f64, h: f64) -> Self {
         if hertz == 0.0 {
             return Self {
                 bias_rate: 0.0,
@@ -237,6 +275,9 @@ struct Constraint {
     friction: f64,
     restitution: f64,
     softness: Softness,
+    /// Whether a side has infinite mass, which makes the contact twice as
+    /// stiff.
+    stiff: bool,
     count: usize,
     points: [Point; MAX_POINTS],
     /// The manifold's friction: one tangential impulse at the centroid of its
@@ -360,68 +401,108 @@ impl ContactPipeline {
                 .zip(&awake.transforms)
                 .map(|(body, transform)| SolverBody::new(body, transform)),
         );
-        self.prepare(
-            Bodies {
-                records,
-                statics,
-                awake,
-                islands,
-            },
-            &mut scratch,
-            dt,
-            h,
-        );
+        let world = Bodies {
+            records,
+            statics,
+            awake,
+            islands,
+        };
+        self.prepare(world, &mut scratch, dt, h);
+        self.joints
+            .prepare(world, &scratch.bodies, h, settings.warm_starting);
+        let mut joints = std::mem::take(&mut self.joints.prepared);
+        let passes = self.plan_passes(records, awake, &mut scratch, &mut joints, dt);
 
         let AwakeSet {
             transforms, bodies, ..
         } = awake;
-        let max_angular_speed = settings.max_rotation / h;
-        for _ in 0..substeps {
-            for (index, body) in bodies.iter_mut().enumerate() {
-                let spin =
-                    SemiImplicitEuler::integrate_velocity(body, transforms[index].rotation, h);
-                let speed_squared = body.velocity.length_squared();
-                if speed_squared > settings.max_linear_speed * settings.max_linear_speed {
-                    body.velocity *= settings.max_linear_speed / speed_squared.sqrt();
-                }
-                let turn_squared = body.angular_velocity.length_squared();
-                if turn_squared > max_angular_speed * max_angular_speed {
-                    body.angular_velocity *= max_angular_speed / turn_squared.sqrt();
-                }
-                scratch.bodies[index].spin = spin;
-            }
-
-            warm_start(&scratch.constraints, &scratch.bodies, bodies);
-            solve_pass(
-                &mut scratch.constraints,
-                &scratch.bodies,
+        for pass in &passes {
+            run_pass(
+                pass,
+                &settings,
+                &mut scratch,
+                &mut joints[pass.joints.clone()],
                 bodies,
-                h,
-                Some(settings.push_out_speed),
+                transforms,
+                dt,
             );
-
-            for (index, body) in bodies.iter_mut().enumerate() {
-                let transform = &mut transforms[index];
-                let s = &mut scratch.bodies[index];
-                SemiImplicitEuler::integrate_position(body, transform, s.spin, h);
-                s.delta_position = transform.position - s.start;
-                s.delta_angle += body.angular_velocity * h;
-            }
-
-            solve_pass(&mut scratch.constraints, &scratch.bodies, bodies, h, None);
-            for constraint in &mut scratch.constraints {
-                for point in &mut constraint.points[..constraint.count] {
-                    point.total_normal_impulse += point.normal_impulse;
-                }
-            }
         }
 
         self.restitution(&mut scratch, bodies);
         self.store(&scratch, bodies);
+        self.joints.prepared = joints;
+        self.joints.store(records);
         for body in bodies.iter_mut() {
             body.clear_forces();
         }
+
         self.solver = scratch;
+    }
+
+    /// Sorts the contacts and joints into the passes the groups ask for, and
+    /// softens each for its pass's substep: see `group.rs`. With no group,
+    /// one pass of everything, in the order it was prepared.
+    fn plan_passes(
+        &self,
+        records: &Pool<BodyRecord>,
+        awake: &AwakeSet,
+        scratch: &mut Scratch,
+        joints: &mut [Prepared],
+        dt: f64,
+    ) -> Vec<Pass> {
+        let settings = &self.settings;
+        let default = settings.substeps.max(1);
+        let everything = || Pass {
+            substeps: default,
+            bodies: (0..awake.ids.len()).collect(),
+            contacts: 0..scratch.constraints.len(),
+            joints: 0..joints.len(),
+            outside: Vec::new(),
+        };
+        let requested: Vec<u32> = awake
+            .ids
+            .iter()
+            .map(|&id| records.get(id).map_or(0, |r| r.substeps).max(default))
+            .collect();
+        if requested.iter().all(|&n| n == default) {
+            return vec![everything()];
+        }
+        let dynamic: Vec<bool> = awake.bodies.iter().map(RigidBody::is_dynamic).collect();
+        let edges = scratch
+            .constraints
+            .iter()
+            .map(|c| (c.a, c.b))
+            .chain(joints.iter().map(Prepared::sides));
+        let Some(plan) = Plan::new(&requested, &dynamic, default, edges) else {
+            return vec![everything()];
+        };
+        scratch
+            .constraints
+            .sort_by_key(|c| plan.rank(c.a, c.b, &dynamic));
+        joints.sort_by_key(|j| {
+            let (a, b) = j.sides();
+            plan.rank(a, b, &dynamic)
+        });
+        let contact_sides: Vec<(usize, usize)> =
+            scratch.constraints.iter().map(|c| (c.a, c.b)).collect();
+        let joint_sides: Vec<(usize, usize)> = joints.iter().map(Prepared::sides).collect();
+        let passes = plan.passes(&contact_sides, &joint_sides, &dynamic);
+
+        for pass in passes.iter().filter(|pass| pass.substeps != default) {
+            let n = f64::from(pass.substeps);
+            let h = dt / n;
+            let scale = n / f64::from(default);
+            let hertz = (settings.contact_hertz * scale).min(0.25 * n / dt);
+            let soft = Softness::new(hertz, settings.damping_ratio, h);
+            let stiff = Softness::new(2.0 * hertz, settings.damping_ratio, h);
+            for constraint in &mut scratch.constraints[pass.contacts.clone()] {
+                constraint.softness = if constraint.stiff { stiff } else { soft };
+            }
+            for joint in &mut joints[pass.joints.clone()] {
+                joint.soften(h, scale);
+            }
+        }
+        passes
     }
 
     /// Builds the constraints for every touching contact with an awake
@@ -461,6 +542,7 @@ impl ContactPipeline {
                 tangents,
                 friction: material.friction,
                 restitution: material.restitution,
+                stiff: a.inverse_mass == 0.0 || b.inverse_mass == 0.0,
                 softness: if a.inverse_mass == 0.0 || b.inverse_mass == 0.0 {
                     stiff
                 } else {
@@ -657,6 +739,103 @@ impl ContactPipeline {
                 impulse,
             });
         }
+    }
+}
+
+/// One pass of the solve: its substeps over the whole tick, each integrating
+/// the pass's bodies' velocities, warm-starting and solving its joints and
+/// then its contacts, integrating the positions, and relaxing joints and
+/// contacts in the same order — Box2D v3's `b2SolverStage` sequence, with
+/// the joints first as its overflow solve has them.
+fn run_pass(
+    pass: &Pass,
+    settings: &ContactSettings,
+    scratch: &mut Scratch,
+    joints: &mut [Prepared],
+    bodies: &mut [RigidBody],
+    transforms: &mut [Transform],
+    dt: f64,
+) {
+    let h = dt / f64::from(pass.substeps);
+    let max_angular_speed = settings.max_rotation / h;
+    let contacts = pass.contacts.clone();
+    scratch.carried.clear();
+    for k in 0..pass.substeps {
+        for &index in &pass.bodies {
+            let body = &mut bodies[index];
+            let spin = SemiImplicitEuler::integrate_velocity(body, transforms[index].rotation, h);
+            let speed_squared = body.velocity.length_squared();
+            if speed_squared > settings.max_linear_speed * settings.max_linear_speed {
+                body.velocity *= settings.max_linear_speed / speed_squared.sqrt();
+            }
+            let turn_squared = body.angular_velocity.length_squared();
+            if turn_squared > max_angular_speed * max_angular_speed {
+                body.angular_velocity *= max_angular_speed / turn_squared.sqrt();
+            }
+            scratch.bodies[index].spin = spin;
+        }
+        coast(scratch, bodies, &pass.outside, f64::from(k) * h);
+        if !joints.is_empty() {
+            scratch.carried.clear();
+            scratch.carried.resize(bodies.len(), DVec3::ZERO);
+        }
+
+        joint::warm_start(joints, &scratch.bodies, bodies, &mut scratch.carried);
+        warm_start(
+            &scratch.constraints[contacts.clone()],
+            &scratch.bodies,
+            bodies,
+        );
+        joint::solve(
+            joints,
+            &scratch.bodies,
+            bodies,
+            h,
+            Some(&mut scratch.carried),
+        );
+        solve_pass(
+            &mut scratch.constraints[contacts.clone()],
+            &scratch.bodies,
+            bodies,
+            h,
+            Some(settings.push_out_speed),
+        );
+
+        for &index in &pass.bodies {
+            let body = &mut bodies[index];
+            let transform = &mut transforms[index];
+            let s = &mut scratch.bodies[index];
+            let carried = scratch.carried.get(index).copied().unwrap_or(DVec3::ZERO);
+            SemiImplicitEuler::integrate_position_carrying(body, transform, s.spin, carried, h);
+            s.moved(transform, body.angular_velocity, h);
+        }
+        coast(scratch, bodies, &pass.outside, f64::from(k + 1) * h);
+
+        joint::solve(joints, &scratch.bodies, bodies, h, None);
+        solve_pass(
+            &mut scratch.constraints[contacts.clone()],
+            &scratch.bodies,
+            bodies,
+            h,
+            None,
+        );
+        for constraint in &mut scratch.constraints[contacts.clone()] {
+            for point in &mut constraint.points[..constraint.count] {
+                point.total_normal_impulse += point.normal_impulse;
+            }
+        }
+    }
+    for &index in &pass.outside {
+        scratch.bodies[index].rewind();
+    }
+}
+
+/// Puts each of `outside` — bodies another pass integrates — where it is `t`
+/// into the tick, coasting at its velocity.
+fn coast(scratch: &mut Scratch, bodies: &[RigidBody], outside: &[usize], t: f64) {
+    for &index in outside {
+        let body = &bodies[index];
+        scratch.bodies[index].coast(body.velocity, body.angular_velocity, t);
     }
 }
 

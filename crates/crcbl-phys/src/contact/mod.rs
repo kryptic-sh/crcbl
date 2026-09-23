@@ -1,5 +1,4 @@
-//! Contacts: rungs 1 to 4 of `docs/plan/36-contact-solver.md`, and rung 5's
-//! static triangle mesh.
+//! Contacts and joints: rungs 1 to 5 of `docs/plan/36-contact-solver.md`.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
@@ -108,20 +107,36 @@
 //! the sweeps measure their gap to each triangle too. See
 //! [`crate::TriangleMesh`] and [`manifold`].
 //!
+//! # Joints: the rest of rung 5
+//!
+//! A [`crate::Joint`] is a constraint in the same Soft Step: prepared with the
+//! contacts, warm-started and solved **before them** in every substep, soft in
+//! the biased solve and rigid in the relax, and its bodies joined into one
+//! island, which a new joint wakes. Distance, revolute, prismatic, weld and
+//! spherical joints are Box3D's, with its limits, motors and springs; a joint
+//! breaks at a force or torque threshold and is reported. See `joint/mod.rs`.
+//!
+//! **Extra substeps per group**, decision 1's: a body can ask for more
+//! substeps with [`crate::PhysicsSystem::set_substeps`], and every body joined
+//! to it this tick, by a contact or a joint, runs them — in a pass of their
+//! own, before the rest, the rest of the system paying nothing. See
+//! `group.rs`.
+//!
 //! # What is not done yet
 //!
-//! Joints, the rest of rung 5. General convex hulls, and GJK for spheres and
-//! capsules against them: the collider set has no hull, and against a box the
-//! analytic pairs are exact. A body over a mesh has a contact per triangle it
-//! is near, with no reduction across them.
-//! Two dynamic bodies that are not bullets are never swept against each
-//! other, so a spinning cube can still turn a corner into a ball. The solver
-//! is scalar `f64` (rung 6 makes it wide). A
-//! tall stack needs [`ContactSettings::TALL_STACK`] for its whole system,
-//! since substeps are not yet per group.
+//! Plan L3's six-degree-of-freedom joint with a lock, limit and motor per
+//! axis, and a spring on the spherical joint. General convex hulls, and GJK
+//! for spheres and capsules against them: the collider set has no hull, and
+//! against a box the analytic pairs are exact. A body over a mesh has a
+//! contact per triangle it is near, with no reduction across them. Two
+//! dynamic bodies that are not bullets are never swept against each other,
+//! so a spinning cube can still turn a corner into a ball. The solver is
+//! scalar `f64` (rung 6 makes it wide).
 
 pub(crate) mod broadphase;
+mod group;
 pub(crate) mod island;
+pub(crate) mod joint;
 pub mod manifold;
 pub mod shape;
 pub(crate) mod solver;
@@ -319,6 +334,15 @@ pub struct ContactCounters {
     /// the tick: each stopped body's share of the tick after its time of
     /// impact, which is dropped rather than solved again.
     pub dropped_time: f64,
+    /// Joints the step solved: those with an awake dynamic body.
+    pub joints: usize,
+    /// The worst positional drift of any of them once the step was done, in
+    /// metres — rung 5's "joint error": see [`crate::JointDrift`].
+    pub joint_error: f64,
+    /// The worst angular drift of any of them, in radians.
+    pub joint_angle_error: f64,
+    /// Joints the step broke and took out.
+    pub broken_joints: usize,
     /// Each stage's time, if the step was timed.
     pub stages: Option<StageTimes>,
 }
@@ -571,6 +595,8 @@ pub(crate) struct ContactPipeline {
     edges: Vec<(BodyId, BodyId)>,
     solver: solver::Scratch,
     continuous: sweep::Scratch,
+    /// The joints: see `joint/mod.rs`.
+    pub(crate) joints: joint::Joints,
 }
 
 impl ContactPipeline {
@@ -590,6 +616,7 @@ impl ContactPipeline {
             edges: Vec::new(),
             solver: solver::Scratch::default(),
             continuous: sweep::Scratch::default(),
+            joints: joint::Joints::default(),
         }
     }
 
@@ -758,6 +785,7 @@ impl ContactPipeline {
             owners,
             planes,
             new_pairs,
+            joints,
             ..
         } = self;
         new_pairs.clear();
@@ -770,6 +798,12 @@ impl ContactPipeline {
                     _ => None,
                 };
                 if body(a).is_some() && body(a) == body(b) {
+                    return false;
+                }
+                // Nor do two bodies a joint keeps apart.
+                if let (Some(ba), Some(bb)) = (body(a), body(b))
+                    && joints.keeps_apart(ba, bb)
+                {
                     return false;
                 }
                 let dynamic = |proxy: ProxyId| {
@@ -964,7 +998,8 @@ impl ContactPipeline {
     }
 
     /// Every touching contact between two bodies of island `island`, in pool
-    /// order: what [`Islands::split`] needs.
+    /// order, then every joint between two of them: what [`Islands::split`]
+    /// needs.
     pub(crate) fn island_edges(
         &mut self,
         records: &Pool<BodyRecord>,
@@ -986,7 +1021,61 @@ impl ContactPipeline {
                 self.edges.push((a, b));
             }
         }
+        self.joints.island_edges(records, island, &mut self.edges);
         &self.edges
+    }
+
+    /// Ends every contact between bodies `a` and `b`, counting the touching
+    /// ones as ended in the next step's counters: what a joint that keeps
+    /// them apart does when it is added.
+    pub(crate) fn destroy_contacts_between(&mut self, a: BodyId, b: BodyId) {
+        let body = |owners: &[Option<Owner>], proxy: ProxyId| match owners.get(proxy as usize) {
+            Some(Some(Owner::Body(id, _))) => Some(*id),
+            _ => None,
+        };
+        for slot in 0..self.contacts.len() {
+            let Some(contact) = self.contacts[slot] else {
+                continue;
+            };
+            let (p, q) = (body(&self.owners, contact.a), body(&self.owners, contact.b));
+            if (p == Some(a) && q == Some(b)) || (p == Some(b) && q == Some(a)) {
+                self.ended_between_steps += u64::from(self.destroy_contact(slot));
+            }
+        }
+    }
+
+    /// Puts every proxy in `proxies` in the move buffer, so the next step
+    /// looks for its pairs again: what a joint that kept two bodies apart
+    /// does when it goes.
+    pub(crate) fn rediscover(&mut self, proxies: &[ProxyId]) {
+        for &proxy in proxies {
+            self.broadphase.touch(proxy);
+        }
+    }
+
+    /// The joints' part of the counters, once the step is done: how many
+    /// were solved and how far the worst of them drifted.
+    pub(crate) fn count_joints(&mut self, bodies: Bodies<'_>) {
+        let counters = &mut self.counters;
+        counters.joints = self.joints.prepared.len();
+        counters.joint_error = 0.0;
+        counters.joint_angle_error = 0.0;
+        for (_, record) in self.joints.iter() {
+            let (Some(a), Some(b)) = (bodies.records.get(record.a), bodies.records.get(record.b))
+            else {
+                continue;
+            };
+            if a.set != BodySet::Awake && b.set != BodySet::Awake {
+                continue;
+            }
+            let drift = joint::drift(
+                &record.joint,
+                transform_of(a, bodies),
+                transform_of(b, bodies),
+            );
+            counters.joint_error = counters.joint_error.max(drift.linear);
+            counters.joint_angle_error = counters.joint_angle_error.max(drift.angular);
+        }
     }
 
     /// Every live contact, in pool order.
@@ -1079,6 +1168,7 @@ impl ContactPipeline {
             }
             write(hasher, contact.impulses.twist);
         }
+        self.joints.hash_state(records, hasher);
     }
 
     fn contact_body(&self, proxy: ProxyId, records: &Pool<BodyRecord>) -> Option<ContactBody> {
@@ -1117,25 +1207,7 @@ impl ContactPipeline {
     fn presence(&self, proxy: ProxyId, bodies: Bodies<'_>) -> Option<Presence> {
         match (*self.owners.get(proxy as usize)?)? {
             Owner::Plane(_) => Some(Presence::Still),
-            Owner::Body(id, _) => {
-                let record = bodies.records.get(id)?;
-                Some(match record.set {
-                    BodySet::Static => Presence::Still,
-                    BodySet::Sleeping => Presence::Asleep(id),
-                    BodySet::Awake => {
-                        let body = &bodies.awake.bodies[record.index];
-                        if body.is_dynamic() {
-                            Presence::Dynamic(id)
-                        } else if body.velocity != DVec3::ZERO
-                            || body.angular_velocity != DVec3::ZERO
-                        {
-                            Presence::Moving
-                        } else {
-                            Presence::Still
-                        }
-                    }
-                })
-            }
+            Owner::Body(id, _) => body_presence(bodies, id),
         }
     }
 
@@ -1154,6 +1226,25 @@ const fn proxy_kind(set: BodySet) -> ProxyKind {
         BodySet::Static => ProxyKind::Static,
         BodySet::Awake | BodySet::Sleeping => ProxyKind::Moving,
     }
+}
+
+/// How body `id` takes part in a tick, read from its record.
+fn body_presence(bodies: Bodies<'_>, id: BodyId) -> Option<Presence> {
+    let record = bodies.records.get(id)?;
+    Some(match record.set {
+        BodySet::Static => Presence::Still,
+        BodySet::Sleeping => Presence::Asleep(id),
+        BodySet::Awake => {
+            let body = &bodies.awake.bodies[record.index];
+            if body.is_dynamic() {
+                Presence::Dynamic(id)
+            } else if body.velocity != DVec3::ZERO || body.angular_velocity != DVec3::ZERO {
+                Presence::Moving
+            } else {
+                Presence::Still
+            }
+        }
+    })
 }
 
 /// A proxy's side of a contact, resolved against `bodies`.

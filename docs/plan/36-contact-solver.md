@@ -7,8 +7,8 @@ in the MVP demanded it. Ragdolls (35), grenades, dropped loot, and vehicles do,
 so it gets a real design here.
 
 **Status: rungs 0 and 1 built (2026-09-17); rung 2 built for boxes, not for
-general hulls (2026-09-23); rungs 3 and 4 built (2026-09-23); rung 5's static
-triangle mesh built, its joints not (2026-09-23).** Rung 0: rotation (inertia
+general hulls (2026-09-23); rungs 3 and 4 built (2026-09-23); rung 5 built but
+for the six-degree-of-freedom joint (2026-09-23).** Rung 0: rotation (inertia
 tensor, torque, the implicit-midpoint gyroscopic step), dense generational body
 sets, `SurfaceMaterial` per body and `crcbl_core::trig`. Rung 1, opted into with
 `PhysicsSystem::with_contacts`: split fattened broadphase trees with a move
@@ -41,11 +41,11 @@ feature in those pairs' ids. **The 20-box column does not stand at decision 1's
 buckles under its own weight past Greenhill's height, `(1.96 ω² w / g)^⅓` cubes
 of half-extent `w` — fifteen one-metre cubes at 30 Hz, and measured, fourteen
 stood and seventeen fell. The column runs `ContactSettings::TALL_STACK`, eight
-substeps at 90 Hz, for its whole system until substeps are per group. **Fast
-spinners still sink** — a 5 cm cube at 80 rad/s turned a corner 6.9 cm into a
-peg on the wall — because rotation outruns a once-a-tick manifold, which is rung
-4's. **Not built: general convex hulls** (there is no hull collider) and GJK for
-spheres and capsules against them.
+substeps at 90 Hz, for its whole system; since rung 5 a group can ask for the
+substeps instead (see below). **Fast spinners still sink** — a 5 cm cube at 80
+rad/s turned a corner 6.9 cm into a peg on the wall — because rotation outruns a
+once-a-tick manifold, which is rung 4's. **Not built: general convex hulls**
+(there is no hull collider) and GJK for spheres and capsules against them.
 
 Rung 3, in `crates/crcbl-phys/src/contact/island.rs`: persistent islands of
 dynamic bodies, merged when a contact between two of them begins touching and
@@ -75,7 +75,7 @@ moved out, which costs the pit at rest a mean 96 µs a tick in the narrow phase,
 measured the same way. **A stack sleeps before it is still**: under 5 cm/s is
 not stopped, so the Tower room's pyramid sleeps with its top cube 2.4 mm aside,
 where ten seconds awake would have crept it back to 0.39 mm. Decision 4's "a new
-joint" waits for joints.
+joint" came with joints, in rung 5.
 
 Rung 4, in `crates/crcbl-phys/src/contact/sweep.rs`, on by default and turned
 off with `ContactSettings::continuous`: after the solve, every awake dynamic
@@ -125,7 +125,7 @@ last tick's is 0.43 cm, back under rung 1's centimetre, and the worst in any
 tick 4.29 cm, not under rung 1's 4 cm, because it is between two drops, which
 only a bullet sweeps. In a release build on the same Ryzen 9 9950X3D, the wall's
 sweep takes a mean 12.2 µs a tick against its solver's 152.2 µs, and the pit's
-15.8 µs against 1310 µs. Of rung 5, only the static triangle mesh is built: see
+15.8 µs against 1310 µs. Rung 5, the static triangle mesh and the joints, is
 below.
 
 Compound bodies, built 2026-09-23 for EW's dropped items, and not a rung:
@@ -192,6 +192,54 @@ contact reduction across triangles**: a ball over a grid's vertex has a contact
 with each triangle within reach, 3.3 points a ball in the grid above, where Jolt
 merges manifolds of similar normals per body pair. **Queries are two-sided**
 where contacts are one-sided, so a ray from under a floor still hits it.
+
+Rung 5's joints, in `crates/crcbl-phys/src/contact/joint/` and
+`crates/crcbl-phys/src/contact/group.rs`, built 2026-09-23: `Joint`s of five
+kinds, each a transcription of Box3D's solver of the same name
+(github.com/erincatto/box3d, commit `9e5a4cde`, the three-dimensional sibling of
+the Box2D v3 solver decision 1 chose) — distance (rigid, rope, spring; minimum
+and maximum length; motor), revolute (angle limits, motor, spring), prismatic
+(translation limits, motor, spring), weld (rigid or springy) and spherical (cone
+and twist limits, motor) — which is decision 6's list, fixed, hinge, swing-twist
+cone, slider and distance of L3's. They are prepared with the contacts,
+warm-started, and solved before them in each substep, soft in the biased pass at
+decision 1's 60 Hz and damping 2 and rigid in the relax; limits are speculative,
+as contacts are. A joint joins its bodies' islands, and decision 4's "a new
+joint" wakes them; its bodies do not collide unless asked. A force or torque
+threshold breaks a joint: it is taken out at the end of the step and reported as
+a `JointBreak`. **Extra substeps per group** are decision 1's: a body asks with
+`PhysicsSystem::set_substeps`, every body a contact or a joint ties it to that
+tick runs them, by union-find over the prepared constraints, in a pass of its
+own before the rest, and a system where nothing asks solves exactly as before.
+Measured on 2026-09-23 (`crates/crcbl-phys/tests/joints.rs`): a one-metre rigid
+pendulum strayed 0.08 mm from its length and swung with a period of 2.01117 s
+against the large-amplitude series' 2.01109; a hinge's pivot drifted 0.57 mm and
+its axis 0.58 mrad while kicked off-axis; a motor spun up at `τ t / I` and held
+its speed to rounding, and every limit held to a few milliradians or tenths of a
+millimetre; a rod breaking at 95% of its load broke on the first tick, one at
+105% carried 98.100 N; a gapped cradle of five balls passed 99.6% of its
+momentum; twenty-one hinged planks with a 40 kg crate sagged 2.188 m against the
+2.100 m a chain of rigid links would, 2.116 m with the planks at twelve
+substeps; and twenty one-metre cubes whose group asks for twelve substeps stand
+in a system at the default settings, moving 0.22 mm in ten seconds and sinking
+1.18 cm, `TALL_STACK`'s own sink, where at the defaults they lay 3.32 m out — so
+`TALL_STACK` can go once the Tower room's column asks for its substeps instead.
+Tumble's five earlier rooms hash exactly as before. Five departures. **A joint's
+angular impulses turn the body in full**: rung 0's midpoint rule turned it by
+the mean of the velocity before and after the solve, so half of every joint's
+rotational correction went missing each substep, and twenty-one hinged planks
+between two anchors gained 3.4 kJ in three seconds and flew apart
+(`SemiImplicitEuler::integrate_position_carrying`); contacts keep the midpoint,
+because carrying their change whole too, Box2D's form, let the 14-cube column
+lean 4.9 cm where it holds to 1.8 mm. **A group's constraints stiffen in
+proportion to its substeps**, contacts' and joints' rigid rows alike, still
+capped at a quarter of the substep rate: more substeps at the same stiffness
+cannot stand a column, which buckles by its contacts' softness. **A broken joint
+is taken out**, where Box3D only reports it. **Joint angles use Box3D's own arc
+tangent**, `b3Atan2`, a minimax polynomial good to 3·10⁻⁵ rad, since the crate
+calls no platform transcendental. **The spherical joint has no spring**, and
+there is no six-degree-of-freedom joint. The proving room is tumble's Bridge
+room (see [sample/24-tumble.md](sample/24-tumble.md)).
 
 ## Decisions from the engine research (2026-09-15)
 
@@ -438,7 +486,7 @@ arriving with parallel islands; SIMD and parallelism come last.
 | 2 Tower (built for boxes; no hulls) | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK with SAT fallback for spheres and capsules against hulls; centroid and twist friction                                                                                | a 20-box column, a base-20 pyramid, dominoes, cubes on the wall                           | points per manifold, persisted-id ratio, top-box drift                                                                                          |
 | 3 Settle (built)                    | Persistent islands, lazy splitting, island sleep, the wake rules                                                                                                                                                                                   | every earlier scene settles to zero awake bodies                                          | islands, awake and sleeping bodies, solver time at rest                                                                                         |
 | 4 Bullets (built)                   | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                                                                                                                    | a cannon at thin plates and a brick wall; a fast spinning plank                           | sweep candidates, hits, tunnels through a sensor behind the wall                                                                                |
-| 5 Bridge (mesh built; no joints)    | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
+| 5 Bridge (built; no 6-DOF joint)    | The joint framework and types, limits, motors, breaking, extra substeps per group; a static triangle mesh with active-edge handling before the stairs                                                                                              | a gapped Newton's cradle, a rope and chain bridge with crates, capsule ragdolls on stairs | joint error, bridge sag, cradle momentum in and out, broken joints                                                                              |
 | 6 Pit                               | Persistent colouring with overflow, the wide solver kernel with its scalar twin, staged `crcbl-jobs` execution, contact recycling                                                                                                                  | the overflowing ball pit with its despawn radius, and cube rain                           | spawns and despawns per second, colours, overflow, stage times, threads, the hash across threads and targets, most bodies inside a 16.7 ms tick |
 | 7 Pool and gale                     | Buoyancy ([55-water.md](55-water.md)) and wind ([56-wind.md](56-wind.md)) force providers                                                                                                                                                          | crates and balls in a pool under gusts                                                    | submerged fraction, depth against Archimedes, drag                                                                                              |
 

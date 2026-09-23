@@ -1,16 +1,16 @@
-//! The gallery: five rooms, each with its own physics, all stepped every tick
+//! The gallery: six rooms, each with its own physics, all stepped every tick
 //! whichever one the camera is looking at.
 //!
 //! ```text
-//!   x = 0          x = 12              x = 26             x = 44        x = 66
-//!   Spin           Wall                Pit                Tower         Bullets
-//!   rung 0         rungs 1 and 2       rung 1             rung 2        rung 4
-//!   T-handle,      the obstacle wall   a thousand balls   a column, a   a cannon at a
-//!   a box landing  with balls, pills   poured into a pit  pyramid and   plate and a
-//!                  and cubes                              dominoes      wall; a plank
+//!   x = 0          x = 12              x = 26             x = 44        x = 66          x = 92
+//!   Spin           Wall                Pit                Tower         Bullets         Bridge
+//!   rung 0         rungs 1 and 2       rung 1             rung 2        rung 4          rung 5
+//!   T-handle,      the obstacle wall   a thousand balls   a column, a   a cannon at a   a cradle, a
+//!   a box landing  with balls, pills   poured into a pit  pyramid and   plate and a     plank bridge,
+//!                  and cubes                              dominoes      wall; a plank   ragdolls
 //! ```
 //!
-//! **The view never reaches the simulation.** Keys `1` to `5` move the
+//! **The view never reaches the simulation.** Keys `1` to `6` move the
 //! camera and change which room's counters the panel shows, and nothing else:
 //! every room steps every tick from the same start, so the hash at
 //! [`CHECK_TICK`] is a constant whatever was pressed. [`PINNED_HASH`] is it,
@@ -23,8 +23,9 @@
 //! also makes every counter — pairs, contacts, each stage's time — the room's
 //! own rather than the gallery's.
 //!
-//! See [`crate::spin`], [`crate::wall`], [`crate::pit`], [`crate::tower`] and
-//! [`crate::bullets`] for what each room shows and what it cannot yet.
+//! See [`crate::spin`], [`crate::wall`], [`crate::pit`], [`crate::tower`],
+//! [`crate::bullets`] and [`crate::bridge`] for what each room shows and what
+//! it cannot yet.
 
 use std::hash::Hasher;
 
@@ -33,6 +34,7 @@ use crcbl::ecs::Entity;
 use crcbl::math::{DQuat, DVec3};
 use crcbl::phys::{ContactCounters, StageTimes};
 
+use crate::bridge::{Bridge, BridgeReading};
 use crate::bullets::{Bullets, BulletsReading};
 use crate::pit::{Pit, PitReading};
 use crate::spin::{Spin, SpinReading};
@@ -51,13 +53,17 @@ pub const TICK_HZ: u32 = 60;
 /// that the handle has flipped, the box has landed three times, the wall has
 /// most of its bodies, the pit three quarters of its balls, the dominoes
 /// have all fallen once and are falling again, and the cannon has fired
-/// twenty shots.
+/// twenty shots; and in the Bridge room the cradle has passed its momentum,
+/// four crates have slid down the bridge and the ragdolls have been pushed
+/// off the landing twice.
 pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
-/// after rung 4 swept fast bodies — which changes the wall's history — added
-/// the Bullets room, and gave one-point contacts twist friction.
-pub const PINNED_HASH: u64 = 0x810e_2250_7c7a_fc8f;
+/// after rung 5's joints added the Bridge room. The five rooms before it
+/// still hash to the value pinned before it (`0x810e_2250_7c7a_fc8f`), taken
+/// without the Bridge room's share: joints and solver groups left every
+/// scene without them bit for bit as it was.
+pub const PINNED_HASH: u64 = 0x32a0_2fb4_6966_7d55;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;
@@ -141,7 +147,7 @@ pub trait Room {
 }
 
 /// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
-/// rung 1's row, rung 2's, rung 3's and rung 4's.
+/// rung 1's row, rung 2's, rung 3's, rung 4's and rung 5's.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tally {
     /// Bodies that step: the awake ones.
@@ -184,6 +190,16 @@ pub struct Tally {
     pub sweep_hits: u64,
     /// The motion those stops dropped, in seconds, over the run.
     pub dropped_time: f64,
+    /// Joints solved in the last tick — rung 5's row.
+    pub joints: usize,
+    /// The worst positional drift of any joint in the last tick, in metres.
+    pub joint_error: f64,
+    /// The worst angular drift, in radians.
+    pub joint_angle_error: f64,
+    /// The worst positional drift of any joint in any tick, in metres.
+    pub peak_joint_error: f64,
+    /// Joints broken, over the run.
+    pub broken_joints: u64,
     /// The last tick's stage times, where the build had a clock.
     pub stages: Option<StageTimes>,
 }
@@ -216,6 +232,11 @@ impl Tally {
         self.sweep_candidates = counters.sweep_candidates;
         self.sweep_hits += counters.sweep_hits as u64;
         self.dropped_time += counters.dropped_time;
+        self.joints = counters.joints;
+        self.joint_error = counters.joint_error;
+        self.joint_angle_error = counters.joint_angle_error;
+        self.peak_joint_error = self.peak_joint_error.max(counters.joint_error);
+        self.broken_joints += counters.broken_joints as u64;
         self.stages = counters.stages;
     }
 
@@ -265,6 +286,8 @@ pub enum View {
     Tower,
     /// Rung 4's room: the cannon, the plate, the brick wall and the plank.
     Bullets,
+    /// Rung 5's room: the cradle, the bridge and the ragdolls on the stairs.
+    Bridge,
 }
 
 impl View {
@@ -277,6 +300,7 @@ impl View {
             KeyCode::Digit3 => Some(Self::Pit),
             KeyCode::Digit4 => Some(Self::Tower),
             KeyCode::Digit5 => Some(Self::Bullets),
+            KeyCode::Digit6 => Some(Self::Bridge),
             _ => None,
         }
     }
@@ -290,6 +314,7 @@ impl View {
             Self::Pit => "pit",
             Self::Tower => "tower",
             Self::Bullets => "bullets",
+            Self::Bridge => "bridge",
         }
     }
 }
@@ -311,6 +336,8 @@ pub struct Reading {
     pub tower: TowerReading,
     /// The Bullets room.
     pub bullets: BulletsReading,
+    /// The Bridge room.
+    pub bridge: BridgeReading,
     /// The last tick's physics over every room, in microseconds, where
     /// this build has a clock to measure it with.
     pub step_micros: Option<f64>,
@@ -326,6 +353,7 @@ pub struct Scenes {
     pit: Pit,
     tower: Tower,
     bullets: Bullets,
+    bridge: Bridge,
     view: View,
     tick: u64,
     step_micros: Option<f64>,
@@ -349,6 +377,7 @@ impl Scenes {
             self.pit.step(tick_dt, Some(&mut clock));
             self.tower.step(tick_dt, Some(&mut clock));
             self.bullets.step(tick_dt, Some(&mut clock));
+            self.bridge.step(tick_dt, Some(&mut clock));
             self.step_micros = Some(clock() * 1.0e6);
         }
         // The browser build has no clock a module can read —
@@ -361,6 +390,7 @@ impl Scenes {
             self.pit.step(tick_dt, None);
             self.tower.step(tick_dt, None);
             self.bullets.step(tick_dt, None);
+            self.bridge.step(tick_dt, None);
         }
         self.tick += 1;
     }
@@ -389,6 +419,7 @@ impl Scenes {
         self.pit.hash(&mut hasher);
         self.tower.hash(&mut hasher);
         self.bullets.hash(&mut hasher);
+        self.bridge.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -400,13 +431,14 @@ impl Scenes {
 
     /// Every room, for drawing, in a fixed order.
     #[must_use]
-    pub fn rooms(&self) -> [&dyn Room; 5] {
+    pub fn rooms(&self) -> [&dyn Room; 6] {
         [
             &self.spin,
             &self.wall,
             &self.pit,
             &self.tower,
             &self.bullets,
+            &self.bridge,
         ]
     }
 
@@ -421,6 +453,7 @@ impl Scenes {
             pit: self.pit.reading(),
             tower: self.tower.reading(),
             bullets: self.bullets.reading(),
+            bridge: self.bridge.reading(),
             step_micros: self.step_micros,
             hash: self.hash(),
         }
@@ -493,6 +526,7 @@ pub(crate) mod tests {
         assert_eq!(View::for_key(KeyCode::Digit3), Some(View::Pit));
         assert_eq!(View::for_key(KeyCode::Digit4), Some(View::Tower));
         assert_eq!(View::for_key(KeyCode::Digit5), Some(View::Bullets));
+        assert_eq!(View::for_key(KeyCode::Digit6), Some(View::Bridge));
         assert_eq!(View::for_key(KeyCode::Space), None);
         assert_eq!(Scenes::new().view(), View::Wall);
     }
@@ -521,6 +555,7 @@ pub(crate) mod tests {
             reading.pit.contacts,
             reading.tower.pyramid,
             reading.tower.column,
+            reading.bridge.contacts,
         ] {
             assert!(tally.stages.is_some(), "{tally:?}");
         }

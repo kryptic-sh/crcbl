@@ -8612,18 +8612,35 @@ remain, and from rung 2:
   `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
   workaround; options are per-island or per-group substeps (decision 1's "more
   substeps for its group") or stiffness scaled by load.
-- **Rung 5's static triangle meshes shipped 2026-09-23; joints remain.**
-  `TriangleMesh` with Jolt-style active edges, one-sided triangle contacts for
-  every shape, exact mesh queries and sweeps (proving scene
-  `crates/crcbl-phys/tests/meshes.rs`). Open: the joint framework and types,
-  limits, motors, breaking and per-group substeps (tumble's Bridge room waits on
-  them); no contact reduction across a body's triangles (3.3 points per ball and
-  a 2.43 ms solver for 1000 balls on 131k triangles); Jolt's movement hint in
-  `FixNormal` is not transcribed; `PhysicsWorld` hits do not name the triangle
-  (call `TriangleMesh::cast_ray` in the mesh's frame); kinematic meshes update
-  every triangle's proxy each tick and are untested; triangles are one-sided by
-  design. Not verified: the character controller on a mesh end to end, the wasm
-  hash for mesh scenes.
+- **Rung 5 shipped 2026-09-23: static triangle meshes, and joints.**
+  `TriangleMesh` (Jolt-style active edges; proving scene
+  `crates/crcbl-phys/tests/meshes.rs`) and five joint types from Box3D
+  (distance, revolute, prismatic, weld, spherical) with limits, motors, breaking
+  and per-group substeps (`PhysicsSystem::set_substeps`); tumble's Bridge room
+  on key 6. Open:
+  - **Remove `ContactSettings::TALL_STACK`.** Twenty one-metre cubes stand in a
+    default system with `set_substeps(12)` (0.22 mm drift in 10 s; see
+    `joints.rs`'s `a_group_with_more_substeps_stands_a_tall_column`). Move the
+    Tower column onto a group and drop the constant; it re-pins tumble's hash.
+  - **Needs a decision: the rotation rule is split.** Joint impulses turn bodies
+    in full (fixing a 21-plank bridge that gained 3.4 kJ and flew apart);
+    contact impulses keep the midpoint rule, because the full rule leaned the
+    14-cube column 4.9 cm where it holds to 1.8 mm. Unify if stacking is
+    retuned.
+  - **Needs a decision: a group's stiffness scales with its substeps** (our
+    choice, not Box2D's); the alternative is an explicit per-group stiffness.
+  - Heavy loads on light chains (an 800 kg anvil on 5 kg planks, 160:1) stretch
+    unbreakable hinges up to 8 cm for a few ticks: the sequential solver's
+    mass-ratio limit, helped only partly by substeps.
+  - Not built: the six-degree-of-freedom joint, the spherical joint's spring,
+    the distance joint's spring force range. From the mesh half: no contact
+    reduction across a body's triangles (2.43 ms solver for 1000 balls on 131k
+    triangles), Jolt's `FixNormal` movement hint, triangle indices in
+    `PhysicsWorld` hits, and kinematic meshes are costly and untested.
+  - Not tested: bodies colliding again once a joint that kept them apart breaks;
+    a kinematic body touching a group with extra substeps; release timing of the
+    joint solve; the character controller on a mesh end to end; the wasm hash
+    for mesh and joint scenes.
 - **Rung 4 (continuous collision) shipped 2026-09-23**: conservative advancement
   for fast bodies against statics, bullets against everything but bullets, and
   one-point twist friction from a Hertz patch radius. Left open: dynamic pairs

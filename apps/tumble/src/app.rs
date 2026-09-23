@@ -93,6 +93,7 @@ impl DebugModule for Stats<'_> {
             ("pyramid", r.tower.pyramid),
             ("column", r.tower.column),
             ("bullets", r.bullets.contacts),
+            ("bridge", r.bridge.contacts),
         ] {
             out.row(
                 name,
@@ -126,6 +127,19 @@ impl DebugModule for Stats<'_> {
                 r.bullets.plank_tunnels,
                 r.bullets.contacts.swept,
                 r.bullets.contacts.sweep_hits
+            ),
+        );
+        out.row(
+            "bridge",
+            format_args!(
+                "cradle {:.3} in {:.3} out, sag {:.3} m, {} hinges, {} broken, \
+                 joint error {:.2} mm",
+                r.bridge.cradle_in,
+                r.bridge.cradle_out,
+                r.bridge.sag,
+                r.bridge.hinges,
+                r.bridge.broken,
+                r.bridge.contacts.joint_error * 1.0e3
             ),
         );
         out.row("hash", format_args!("{:016x}", r.hash));
@@ -269,6 +283,8 @@ impl Tumble {
              pyramid-top-mm: {:.2}  column-top-mm: {:.2}  dominoes-down: {}  \
              wall-sweep-hits: {}  bullets-shots: {}  bullets-tunnels: {}  \
              bullets-swept: {}  bullets-sweep-hits: {}  \
+             bridge-cradle-in: {:.3}  bridge-cradle-out: {:.3}  bridge-sag-mm: {:.1}  \
+             bridge-broken: {}  bridge-joints: {}  bridge-joint-err-mm: {:.2}  \
              hash: {:016x}  pinned-tick: {}  pinned: {:016x}",
             r.tick,
             r.view.name(),
@@ -304,6 +320,12 @@ impl Tumble {
             r.bullets.plate_tunnels + r.bullets.wall_tunnels + r.bullets.plank_tunnels,
             r.bullets.contacts.swept,
             r.bullets.contacts.sweep_hits,
+            r.bridge.cradle_in,
+            r.bridge.cradle_out,
+            r.bridge.sag * 1.0e3,
+            r.bridge.broken,
+            r.bridge.contacts.joints,
+            r.bridge.contacts.joint_error * 1.0e3,
             r.hash,
             CHECK_TICK,
             PINNED_HASH,
@@ -332,7 +354,7 @@ impl HostedGame for Tumble {
         self.log_heartbeat();
     }
 
-    /// `1` to `5` pick the room on screen. That is the only key, and it
+    /// `1` to `6` pick the room on screen. That is the only key, and it
     /// reaches the camera and the panel and not the simulation, so the hash
     /// the gate pins is the same whatever is pressed.
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
@@ -389,6 +411,7 @@ impl HostedGame for Tumble {
              wall {} bodies {}+ {}- contacts, pit {} balls {} pairs {} asleep, \
              pyramid top {:.2} mm, column top {:.2} mm, \
              bullets {} shots {} tunnels, \
+             bridge sag {:.3} m, {} joints broken, cradle {:.3} in {:.3} out, \
              hash {:016x}, {} page commands ({:?})",
             summary.run.frames,
             summary.run.ticks,
@@ -405,6 +428,10 @@ impl HostedGame for Tumble {
             r.tower.column_drift * 1.0e3,
             r.bullets.shots,
             r.bullets.plate_tunnels + r.bullets.wall_tunnels + r.bullets.plank_tunnels,
+            r.bridge.sag,
+            r.bridge.broken,
+            r.bridge.cradle_in,
+            r.bridge.cradle_out,
             r.hash,
             summary.commands,
             summary.run.exit,
