@@ -8926,9 +8926,15 @@ browser-hosted single-player game with mods has no containment at all.
 
 **Not built**, all of it re-verified:
 
-- **Patterns other than `repeat`.** A button reports
-  `ButtonState::Held { duration }` for the game to interpret; there is no `tap`,
-  `double-tap` or `hold` evaluator. `ActionMap::set_repeat` is the only pattern.
+- **Pattern gaps after tap/hold/double-tap landed (2026-09-23).**
+  `ActionMap::set_tap`, `set_hold` and `set_double_tap` exist
+  (`crates/crcbl-input/src/patterns.rs`). Still missing: the plan's RON form
+  that emits a _named_ action; pattern edges in `InputTickState`, so a server
+  applying captured ticks sees values but no pattern edges; a public
+  `cancel_patterns(name)` (EW cancels its Z double tap when the wheel moves
+  while Z is held); a double tap that fires on the second _release_ (EW's Z
+  does); and EW's migration, where a waiting single tap fires at `>` the window
+  against EW's `>=` — one tick apart at exact boundaries.
 - **RON binding assets.** Nothing parses one; a game declares actions in code.
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and

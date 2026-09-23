@@ -14,22 +14,28 @@
 //!
 //! # Patterns and devices
 //!
-//! [`ActionMap::set_repeat`] attaches a [`Repeat`] to an action, evaluated on
-//! the clock [`ActionMap::begin_tick`] advances (`repeat.rs`), and
+//! [`ActionMap::set_repeat`] attaches a [`Repeat`] to an action, and
+//! [`ActionMap::set_tap`], [`ActionMap::set_hold`] and
+//! [`ActionMap::set_double_tap`] attach a [`Tap`], a [`Hold`] and a
+//! [`DoubleTap`], all evaluated on the clock [`ActionMap::begin_tick`] advances
+//! (`repeat.rs`, and `patterns.rs` for how the last three share a press).
 //! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
 
 mod context;
 mod device;
+mod patterns;
 mod repeat;
 pub mod text;
 pub mod ui;
 
 pub use context::GAMEPLAY_CONTEXT;
 pub use device::Device;
+pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
 
 use context::{Routes, Suppressed, View};
 use crcbl_core::input::{KeyCode, PointerButton};
+use patterns::PatternState;
 use repeat::RepeatState;
 use std::collections::{HashMap, HashSet};
 
@@ -397,6 +403,8 @@ struct ActionSlot {
     context: usize,
     /// The repeat pattern, if one is attached — see [`ActionMap::set_repeat`].
     repeat: Option<RepeatState>,
+    /// The tap, hold and double-tap patterns — see [`ActionMap::set_tap`].
+    patterns: PatternState,
     /// The current resolved value.
     value: ActionValue,
     /// True when at least one binding for this action is "down" (key held,
@@ -424,6 +432,7 @@ impl ActionSlot {
             decl,
             context,
             repeat: None,
+            patterns: PatternState::default(),
             value,
             active: false,
             hold_start: None,
@@ -443,6 +452,7 @@ impl ActionSlot {
         if let Some(repeat) = &mut self.repeat {
             repeat.reset();
         }
+        self.patterns.reset();
         match &mut self.value {
             ActionValue::Button(a) => {
                 a.state = ButtonState::Released;
@@ -867,7 +877,8 @@ impl ActionMap {
     ///
     /// - Resets per-frame edge flags (`just_pressed`, `just_released` on every
     ///   button action, `pointer_moved` on every 1-D axis, and what
-    ///   [`ActionMap::repeated`] reads).
+    ///   [`ActionMap::repeated`], [`ActionMap::tapped`],
+    ///   [`ActionMap::hold_fired`] and [`ActionMap::double_tapped`] read).
     /// - Zeroes accumulated mouse-motion and scroll deltas.
     /// - Advances the internal clock by `dt` seconds so that [`ButtonState::Held`]
     ///   durations are up-to-date next time a button action is resolved.
@@ -893,6 +904,7 @@ impl ActionMap {
             if let Some(repeat) = &mut self.slots[i].repeat {
                 repeat.fired = false;
             }
+            self.slots[i].patterns.clear_fired();
             match &mut self.slots[i].value {
                 ActionValue::Button(a) => a.reset_edges(),
                 ActionValue::Axis1(a) => a.pointer_moved = false,
@@ -1208,6 +1220,7 @@ impl ActionMap {
         if let Some(repeat) = &mut slot.repeat {
             repeat.update(&slot.value, elapsed);
         }
+        slot.patterns.update(&slot.value, elapsed);
     }
 }
 

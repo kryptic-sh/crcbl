@@ -229,6 +229,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Tap, hold and double-tap patterns on `crcbl_input::ActionMap`**, beside
+  `set_repeat` and on the same tick clock, so a scripted replay fires them on
+  the same ticks every run. `set_tap(name, Some(Tap::new(time)?))` fires
+  `tapped(name)` on the release of a press no longer than `time`;
+  `set_hold(name, Some(Hold::new(time)?))` fires `hold_fired(name)` once, on the
+  first tick the press has lasted `time`, with `hold_progress(name)` (`0.0` to
+  `1.0`) for a hold-to-interact ring;
+  `set_double_tap(name, Some(DoubleTap::new(tap_time, window)?))` fires
+  `double_tapped(name)` on a second press within `window` of a first no longer
+  than `tap_time`. Each reader is a one-tick edge, like `repeated`. The patterns
+  on one action share its presses: a press that fired its hold never taps, a
+  press that completed a double tap fires nothing more, and with a double tap
+  attached a single tap waits until the window passes without a second press. A
+  context push or pop, disabling or rebinding the action, or attaching a pattern
+  cancels everything in flight, and a press held across the change fires
+  nothing. Defaults are `TAP_TIME`, `HOLD_TIME` and `DOUBLE_TAP_WINDOW`
+  (`Tap::default()` and so on); a zero, negative or non-finite time is refused
+  by `new`.
 - **A GPU-rendered image can be drawn as a sprite, through an atlas.**
   `SpriteRenderer::create_atlas(device, &AtlasDesc { label, cell, columns, rows, sample })`
   creates a sheet of fixed-size cells, every texel transparent, with a one-texel

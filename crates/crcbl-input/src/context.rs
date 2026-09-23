@@ -301,6 +301,10 @@ impl ActionMap {
             }
         }
         for idx in 0..self.slots.len() {
+            // Before resolving, so a press the new stack takes away is not
+            // read as a release that taps: a stack change cancels every
+            // pattern in flight — see `patterns.rs`.
+            self.slots[idx].patterns.cancel();
             if self.stack.contains(&self.slots[idx].context) {
                 if self.slots[idx].enabled {
                     self.resolve_one(idx);
