@@ -8845,8 +8845,21 @@ browser-hosted single-player game with mods has no containment at all.
   `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
   optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
   polls four XInput slots on Windows. Still owed:
-  - GameController (macOS) and the Web Gamepad API; those targets have no pad
-    module, so naming one fails to build.
+  - GameController (macOS); that target has no pad module, so naming one fails
+    to build.
+  - **Web Gamepad API (2026-09-23) has met no real controller.** Covered: the
+    standard mapping, id parsing and index transitions with scripted reports
+    through the real `__crcbl_web_pad_*` exports, and a stand-in DualSense
+    connecting, pausing and resuming a demo in Chrome (`browser-e2e.mjs` group
+    E, run locally on breakout and puppet). Not covered: a physical pad in any
+    browser, Firefox's and Safari's real `Gamepad.id` formats (the Firefox parse
+    is from memory), whether Chrome on Windows reports XInput pads without
+    vendor ids. Pads without the standard mapping are skipped by decision
+    (driver-order indices would put South on a different button per pad) and
+    logged once. A pad re-plugged between two frames at the same index with the
+    same id is not seen to leave. Only the web source logs pad connects; whether
+    XInput and evdev should is open. `crcbl::web`'s ABI table still lacks the
+    entropy and GPU rows.
   - **evdev (Linux, 2026-09-23) has met no real controller or Deck**: only
     scripted devices, plus a regular file answering `ENOTTY` and a real `read`
     in CI's Linux jobs. Unverified: the lettered-versus-positional face split by

@@ -28,9 +28,10 @@
 //! game reads them directly, or feeds [`ActionMap::gamepad_event`], where
 //! [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
 //! [`Binding::PadTrigger`] read them. The Windows backend is `xinput`,
-//! compiled on Windows only, and the Linux one is `evdev`, compiled on Linux
-//! only: no other target has a backend yet, and none has a stand-in that would
-//! report "no pads" as though it had looked.
+//! compiled on Windows only, the Linux one is `evdev`, compiled on Linux only,
+//! and the browser one is `web_gamepad`, compiled on `wasm32` only: no other
+//! target has a backend yet, and none has a stand-in that would report "no
+//! pads" as though it had looked.
 
 mod context;
 mod device;
@@ -46,6 +47,15 @@ mod patterns;
 mod repeat;
 pub mod text;
 pub mod ui;
+// The vendor and product ids the evdev and browser backends name a pad's
+// family from; only those two read them.
+#[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
+mod usb;
+// wasm32-only: the Web Gamepad API backend. Compiled into every target's tests
+// too, so its mapping, poller and shim entry points run on the native runners;
+// only the symbols a page calls are exported, and only from a wasm32 build.
+#[cfg(any(target_arch = "wasm32", test))]
+pub mod web_gamepad;
 // Compiled into every target's tests too, so the mapping and the layouts are
 // checked on the Linux and macOS runners; only the loader is Windows-only.
 #[cfg(any(windows, test))]

@@ -10,6 +10,7 @@ use super::ffi::{
     BTN_DPAD_UP, BTN_EAST, BTN_GAMEPAD, BTN_MODE, BTN_NORTH, BTN_SELECT, BTN_SOUTH, BTN_START,
     BTN_THUMBL, BTN_THUMBR, BTN_TL, BTN_TL2, BTN_TR, BTN_TR2, BTN_WEST, InputId, KeyBits,
 };
+use crate::usb::{self, VENDOR_NINTENDO, VENDOR_SONY};
 use crate::{GamepadSnapshot, PadAxis, PadButton, PadKind};
 
 /// A stick axis from its `input_absinfo` range to −1…1, before any Y flip.
@@ -79,30 +80,9 @@ pub(crate) fn is_gamepad(keys: &KeyBits, abs: &AbsBits) -> bool {
     keys.has(BTN_GAMEPAD) && abs.has(ABS_X) && abs.has(ABS_Y)
 }
 
-/// Microsoft's USB vendor id.
-const VENDOR_MICROSOFT: u16 = 0x045e;
-/// Sony's.
-const VENDOR_SONY: u16 = 0x054c;
-/// Nintendo's.
-const VENDOR_NINTENDO: u16 = 0x057e;
-/// Valve's: the Deck's built-in controls, and Steam Input's virtual pad.
-const VENDOR_VALVE: u16 = 0x28de;
-/// The Steam Deck's built-in controller (`USB_DEVICE_ID_STEAM_DECK`).
-const PRODUCT_STEAM_DECK: u16 = 0x1205;
-
-/// A device's family, from its vendor and product ids.
-///
-/// Valve's other products are Steam Input's virtual pad, which presents
-/// itself as an Xbox 360 controller, and the Steam Controller; both are laid
-/// out like an Xbox pad.
+/// A device's family, from its vendor and product ids — see `usb::kind_of`.
 pub(crate) fn kind_of(id: InputId) -> PadKind {
-    match (id.vendor, id.product) {
-        (VENDOR_VALVE, PRODUCT_STEAM_DECK) => PadKind::SteamDeck,
-        (VENDOR_MICROSOFT | VENDOR_VALVE, _) => PadKind::Xbox,
-        (VENDOR_SONY, _) => PadKind::PlayStation,
-        (VENDOR_NINTENDO, _) => PadKind::Switch,
-        _ => PadKind::Generic,
-    }
+    usb::kind_of(id.vendor, id.product)
 }
 
 /// The buttons every pad maps the same way.
@@ -282,6 +262,7 @@ impl Layout {
 pub(crate) mod tests {
     use super::*;
     use crate::PadButtons;
+    use crate::usb::{PRODUCT_STEAM_DECK, VENDOR_MICROSOFT, VENDOR_VALVE};
 
     pub(crate) const XBOX: InputId = InputId {
         bustype: 3,

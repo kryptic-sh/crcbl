@@ -15,6 +15,13 @@
 //! - **Linux**: evdev, through `crcbl_input::evdev` (Linux-only, likewise). It
 //!   cannot fail to start: `/dev/input` is listed at the first poll, and a
 //!   failure there or on a pad is logged when it starts and when it stops.
+//! - **A browser** (`wasm32`): the Web Gamepad API, through
+//!   `crcbl_input::web_gamepad` (`wasm32`-only, likewise), which reads what
+//!   `web/engine/gamepad.js` reported from `navigator.getGamepads()` this
+//!   frame. It cannot fail to start either. A pad connects on its first button
+//!   press on the page, not when the page opens — the browser hides it until
+//!   then — so each connection and disconnection is logged, and a pad the
+//!   browser cannot standard-map is logged once and ignored.
 //! - **Everywhere else**: no backend exists yet, and a windowed run logs that
 //!   once and runs with no pads.
 //! - **A headless run, on every target**, gets no source at all: a scripted or
@@ -71,8 +78,20 @@ fn platform() -> Option<Box<dyn PadSource>> {
     }))
 }
 
+/// The Web Gamepad API, which has nothing to load: the shim reports the pads
+/// every frame.
+#[cfg(target_arch = "wasm32")]
+fn platform() -> Option<Box<dyn PadSource>> {
+    log::info!(
+        "gamepads: polling navigator.getGamepads(); a pad appears once one of its buttons is pressed on this page"
+    );
+    Some(Box::new(WebPads(
+        crcbl_input::web_gamepad::WebGamepads::new(),
+    )))
+}
+
 /// No backend on this target: said once, at start-up.
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(not(any(windows, target_os = "linux", target_arch = "wasm32")))]
 fn platform() -> Option<Box<dyn PadSource>> {
     log::info!("gamepads: no pad backend exists for this target yet; running with no pads");
     None
@@ -122,6 +141,35 @@ impl PadSource for EvdevPads {
             failing,
             "evdev is reading every pad again",
         );
+    }
+}
+
+/// [`crcbl_input::web_gamepad::WebGamepads`] as a [`PadSource`].
+#[cfg(target_arch = "wasm32")]
+struct WebPads(crcbl_input::web_gamepad::WebGamepads);
+
+#[cfg(target_arch = "wasm32")]
+impl PadSource for WebPads {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        // Connections are logged here and not on the desktop sources: a
+        // browser pad appears on its first press rather than when the page
+        // opens, and "is the page seeing my pad" is the first question a
+        // player with one asks.
+        let unmapped = self.0.poll(|event| {
+            match event {
+                GamepadEvent::Connected { id, kind } => {
+                    log::info!("gamepads: pad {} connected ({kind:?})", id.0);
+                }
+                GamepadEvent::Disconnected { id } => {
+                    log::info!("gamepads: pad {} disconnected", id.0);
+                }
+                GamepadEvent::State { .. } => {}
+            }
+            emit(event);
+        });
+        for pad in unmapped {
+            log::warn!("gamepads: {pad}");
+        }
     }
 }
 

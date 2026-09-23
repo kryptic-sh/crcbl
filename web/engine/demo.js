@@ -37,6 +37,7 @@
 
 import { attachShell } from './shell.js';
 import { startAudio } from './audio.js';
+import { pumpGamepads } from './gamepad.js';
 import { Replayer } from './gpu-replay.js';
 import {
   putReplyStream,
@@ -314,6 +315,8 @@ export function bootDemo(spec) {
     // call and nothing else — a fresh `{ exports, memory }` per frame would be
     // an allocation per frame for a poll that answers "nothing" every time.
     const gpuStream = { exports, memory };
+    // The pad pump's, built once for the same reason.
+    const padPump = { exports, memory };
 
     // THE PAGE'S CANVAS REGISTRY, AND THE ONE REPLAYER THAT READS IT.
     // `SurfaceTarget::Web` is an integer key into this map and nothing else —
@@ -428,6 +431,9 @@ export function bootDemo(spec) {
       // The shell's event-clock reference for this frame, before anything reads
       // an event timestamp.
       exports.__crcbl_web_frame(now);
+      // The pads, read now so the frame's pad poll sees this tick's state: the
+      // Gamepad API is a snapshot the page has to ask for, never an event.
+      pumpGamepads(padPump);
       const status = api.frame(now);
       log();
       drainFetch({ exports, memory });

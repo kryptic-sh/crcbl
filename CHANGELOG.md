@@ -247,6 +247,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Web Gamepad API in the browser, `crcbl_input::web_gamepad`**: every browser
+  demo now sees gamepads. The page reads `navigator.getGamepads()` once a frame
+  (the new `web/engine/gamepad.js`, called from `web/engine/demo.js`) and hands
+  each pad to wasm through six new `__crcbl_web_pad_*` exports, so the module
+  still imports nothing. `WebGamepads::poll` emits the same `GamepadEvent`s as
+  XInput and evdev, a snapshot only when one changes, and `crcbl::engine::Loop`
+  polls it on `wasm32`, logging each connect and disconnect. Only pads with the
+  W3C standard mapping are read: buttons 0–3 are the face buttons by position, 6
+  and 7 are the triggers (by `value`, 0…1), 16 is `Guide`, and stick axes 1 and
+  3 are flipped to +Y up. A pad without that mapping is not connected, and
+  `poll` returns it once as an `Unmapped` for the loop to log. The pad's family
+  comes from the USB ids in `Gamepad.id` (Chrome's and Firefox's forms) or else
+  its name. A browser shows no pad until one of its buttons is pressed on the
+  page. Tested with scripted reports, through the real exports, and in Chrome by
+  the browser e2e with a stand-in `getGamepads`; no controller has been through
+  it yet.
 - **Continuous collision for fast bodies and bullets in `crcbl_phys`** — rung 4
   of `docs/plan/36-contact-solver.md`. In a system made with
   `PhysicsSystem::with_contacts`, after the solve every awake dynamic body that
