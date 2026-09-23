@@ -493,9 +493,16 @@ fn an_action_map_cannot_tell_steam_input_from_a_hand_built_event() {
         from_steam.just_pressed("jump"),
         by_hand.just_pressed("jump")
     );
-    assert_eq!(from_steam.axis2("move"), by_hand.axis2("move"));
-    assert_eq!(from_steam.axis1("fire"), by_hand.axis1("fire"));
-    assert_ne!(from_steam.axis2("move"), (0.0, 0.0));
+    // Equal, to within the noise Miri deliberately adds to `hypot` on each
+    // call; a natively built run computes the two bit for bit alike.
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-6;
+    let (steam_move, hand_move) = (from_steam.axis2("move"), by_hand.axis2("move"));
+    assert!(
+        close(steam_move.0, hand_move.0) && close(steam_move.1, hand_move.1),
+        "{steam_move:?} {hand_move:?}"
+    );
+    assert!(close(from_steam.axis1("fire"), by_hand.axis1("fire")));
+    assert_ne!(steam_move, (0.0, 0.0));
 }
 
 /// A small reader for Valve's KeyValues text — quoted strings, braces and
@@ -634,5 +641,99 @@ fn the_keyvalues_reader_reads_nesting_and_skips_comments() {
                 ("e".to_owned(), Kv::Block(Vec::new())),
             ])
         )]
+    );
+}
+
+/// Opens pads with [`PAD`] connected and its handles resolved.
+fn connected(steam: &mut Steam) -> (SteamPads, GamepadId) {
+    let mut pads = open(steam);
+    script_pad(&[], &[]);
+    device(PAD, true);
+    let events = frame(steam, &mut pads);
+    let [GamepadEvent::Connected { id, .. }] = events[..] else {
+        panic!("{events:?}");
+    };
+    (pads, id)
+}
+
+/// **A glyph is the first origin's PNG, copied before it returns**: the
+/// buffer Steam answered from is overwritten after the call, and the path
+/// survives.
+#[test]
+fn a_buttons_glyph_is_its_first_origins_png_copied_out() {
+    let mut steam = steam();
+    let (pads, id) = connected(&mut steam);
+    input(|input| {
+        input.origins.insert("south", vec![5, 9]);
+    });
+    testing::script(|s| s.set_string(b"/glyphs/ps5_cross.png"));
+    let path = pads.glyph(
+        &steam,
+        id,
+        PadControl::Button(PadButton::South),
+        GlyphSize::Medium,
+    );
+    testing::script(|s| s.set_string(b"/glyphs/overwritten"));
+    assert_eq!(path, Some(PathBuf::from("/glyphs/ps5_cross.png")));
+    assert_eq!(input(|input| input.glyphs.clone()), [(5, 1, 0)]);
+}
+
+#[test]
+fn sticks_and_triggers_take_their_analog_origins() {
+    let mut steam = steam();
+    let (pads, id) = connected(&mut steam);
+    input(|input| {
+        input.origins.insert("right_stick", vec![40]);
+        input.origins.insert("left_trigger", vec![41]);
+    });
+    testing::script(|s| s.set_string(b"/glyphs/any.png"));
+    for (control, origin, size, raw) in [
+        (PadControl::Stick(Stick::Right), 40, GlyphSize::Small, 0),
+        (PadControl::Trigger(Trigger::Left), 41, GlyphSize::Large, 2),
+    ] {
+        assert!(
+            pads.glyph(&steam, id, control, size).is_some(),
+            "{control:?}"
+        );
+        assert_eq!(
+            input(|input| input.glyphs.last().copied()),
+            Some((origin, raw, 0))
+        );
+    }
+}
+
+/// Nothing bound, bound to `k_EInputActionOrigin_None`, no image from
+/// Steam, an empty path, or a pad that is not connected here: `None`, and no
+/// glyph asked for when there is no origin to ask about.
+#[test]
+fn no_binding_no_image_or_no_such_pad_is_none() {
+    let mut steam = steam();
+    let (pads, id) = connected(&mut steam);
+    let south = PadControl::Button(PadButton::South);
+    assert_eq!(pads.glyph(&steam, id, south, GlyphSize::Small), None);
+    input(|input| {
+        input.origins.insert("south", vec![0]);
+    });
+    assert_eq!(pads.glyph(&steam, id, south, GlyphSize::Small), None);
+    assert!(input(|input| input.glyphs.is_empty()));
+
+    input(|input| {
+        input.origins.insert("south", vec![5]);
+        input.no_glyph = true;
+    });
+    assert_eq!(pads.glyph(&steam, id, south, GlyphSize::Small), None);
+    input(|input| input.no_glyph = false);
+    testing::script(|s| s.set_string(b""));
+    assert_eq!(pads.glyph(&steam, id, south, GlyphSize::Small), None);
+    assert_eq!(
+        steam.diagnostics().lossy_strings,
+        0,
+        "a null is not lossy here"
+    );
+
+    testing::script(|s| s.set_string(b"/glyphs/a.png"));
+    assert_eq!(
+        pads.glyph(&steam, GamepadId(id.0 + 1), south, GlyphSize::Small),
+        None
     );
 }

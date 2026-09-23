@@ -116,7 +116,7 @@ impl NotificationCorner {
 /// `ISteamUtils`, borrowed from a [`Steam`]; from [`Steam::utils`].
 #[derive(Debug, Clone, Copy)]
 pub struct Utils<'a> {
-    steam: &'a Steam,
+    pub(crate) steam: &'a Steam,
 }
 
 impl Steam {

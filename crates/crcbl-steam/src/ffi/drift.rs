@@ -58,6 +58,7 @@ use crate::{
     MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH, MAX_STAT_NAME_LENGTH,
     call::{CALL_ROWS, CallRow},
     callbacks::{Base, ROWS, Row},
+    input::MAX_ORIGINS,
 };
 
 /// Each SDK constant a limit in this crate comes from, and the value the
@@ -79,6 +80,7 @@ const LIMITS: &[(&str, usize)] = &[
     ("k_cchStatNameMax", MAX_STAT_NAME_LENGTH + 1),
     ("k_cchLeaderboardNameMax", MAX_LEADERBOARD_NAME_LENGTH + 1),
     ("k_cLeaderboardDetailsMax", MAX_LEADERBOARD_DETAILS),
+    ("STEAM_INPUT_MAX_ORIGINS", MAX_ORIGINS),
 ];
 
 /// One header's name and text.

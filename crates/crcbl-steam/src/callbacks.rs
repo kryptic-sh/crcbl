@@ -17,8 +17,9 @@
 use crate::{
     AppId, EResult, SteamId,
     ffi::structs::{
-        AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
-        GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
+        AvatarImageLoaded, FloatingGamepadTextInputDismissed, FriendRichPresenceUpdate,
+        GameLobbyJoinRequested, GameOverlayActivated, GameRichPresenceJoinRequested,
+        GamepadTextInputDismissed, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
         NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
         SteamApiCallCompleted, SteamInputDeviceConnected, SteamInputDeviceDisconnected,
         SteamNetConnectionInfo, SteamNetConnectionStatusChanged, SteamRelayNetworkStatus,
@@ -217,6 +218,22 @@ pub enum SteamEvent {
         /// `(current, max)` for a progress notice; `None` when it unlocked.
         progress: Option<(u32, u32)>,
     },
+    /// The full-screen on-screen keyboard
+    /// ([`Utils::show_text_input`](crate::Utils::show_text_input)) closed
+    /// (`GamepadTextInputDismissed_t`). `text` is what the player accepted —
+    /// committed text, like a physical keyboard's — or `None` when they
+    /// cancelled, or when Steam would not hand over the text it reported
+    /// (counted in
+    /// [`PumpDiagnostics::decode_mismatches`](crate::PumpDiagnostics::decode_mismatches)).
+    TextInputDismissed {
+        /// The accepted text.
+        text: Option<String>,
+    },
+    /// The floating keyboard
+    /// ([`Utils::show_floating_keyboard`](crate::Utils::show_floating_keyboard))
+    /// closed (`FloatingGamepadTextInputDismissed_t`). What it typed arrived
+    /// as ordinary key and text events through the window.
+    FloatingKeyboardDismissed,
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
     LobbyChatMessage {
@@ -269,6 +286,15 @@ pub(crate) enum Decoded {
         event: SteamEvent,
         /// Whether the event's text was read lossily.
         lossy: bool,
+    },
+    /// `GamepadTextInputDismissed_t`: the pump reads the accepted text with
+    /// `GetEnteredGamepadTextInput` and queues
+    /// [`SteamEvent::TextInputDismissed`].
+    TextInput {
+        /// Whether the player accepted the text.
+        submitted: bool,
+        /// `m_unAppID`.
+        app: u32,
     },
     /// `SteamInputDeviceConnected_t` or `SteamInputDeviceDisconnected_t`: the
     /// pump hands it to the open `SteamPads`, if any.
@@ -591,6 +617,30 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::Utils,
+        offset: 14,
+        #[cfg(test)]
+        name: "GamepadTextInputDismissed_t",
+        size: size_of::<GamepadTextInputDismissed>(),
+        decode: |bytes| {
+            read::<GamepadTextInputDismissed>(bytes).map(|payload| Decoded::TextInput {
+                submitted: payload.submitted != 0,
+                app: payload.app,
+            })
+        },
+    },
+    Row {
+        base: Base::Utils,
+        offset: 38,
+        #[cfg(test)]
+        name: "FloatingGamepadTextInputDismissed_t",
+        size: size_of::<FloatingGamepadTextInputDismissed>(),
+        decode: |bytes| {
+            read::<FloatingGamepadTextInputDismissed>(bytes)
+                .map(|_| Decoded::Event(SteamEvent::FloatingKeyboardDismissed))
+        },
+    },
+    Row {
         base: Base::Controller,
         offset: 1,
         #[cfg(test)]
@@ -690,6 +740,10 @@ unsafe impl Pod for LobbyChatMsg {}
 unsafe impl Pod for crate::ffi::structs::LobbyCreated {}
 // SAFETY: as above.
 unsafe impl Pod for crate::ffi::structs::LobbyEnter {}
+// SAFETY: as above.
+unsafe impl Pod for GamepadTextInputDismissed {}
+// SAFETY: as above.
+unsafe impl Pod for FloatingGamepadTextInputDismissed {}
 // SAFETY: as above.
 unsafe impl Pod for SteamInputDeviceConnected {}
 // SAFETY: as above.

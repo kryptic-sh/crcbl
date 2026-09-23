@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 built on
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 built on
 branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest planned**
 — see "Status by slice" under "Slice order". The four decisions the earlier
 draft asked for were ratified 2026-09-06 (see "Decisions" below), and "the full
@@ -1248,7 +1248,42 @@ On branch `steam-sdk`, not merged to `main`:
   under "Needs a real client" below — so whether 480 has SpaceWar's
   achievements, stats and board is still a belief — on every OS. The breakout
   consumer is not built (see "Slice 9 as built").
-- Slices 7c, 8, 10–15: not started.
+- **Slice 7c: done** (2026-09-23). The two on-screen keyboards and their
+  dismissals, and `SteamPads::glyph`, over the fake; every test in the slice's
+  list seen red against a deliberate break; Miri clean; the drift gate passes
+  against the mirror with the nine declarations, both structs and
+  `STEAM_INPUT_MAX_ORIGINS`. **Not run:** every step under "Needs a real client"
+  below — the Deck keyboard filling a text field, glyphs for a Deck and a
+  DualSense, desktop Big Picture — on every OS; nothing in the sandbox opens a
+  keyboard or shows a glyph yet. See "Slice 7c as built".
+- Slices 8, 10–15: not started.
+
+**Slice 7c as built, where it differs from the text below:**
+
+- **Two keyboards, two paths for their text.** The full-screen one
+  (`Utils::show_text_input(&TextInputRequest)`, `dismiss_text_input`) hands its
+  accepted text back once, as `SteamEvent::TextInputDismissed { text }`:
+  committed text, as `ShellEvent::TextCommit` carries, which a game hands its
+  field the same way. The floating one
+  (`Utils::show_floating_keyboard(mode, TextField)`,
+  `dismiss_floating_keyboard`) types into the window as the operating system's
+  own key events — `isteamutils.h` says so — so its text already arrives through
+  the shell, and `SteamEvent::FloatingKeyboardDismissed` carries nothing.
+  Nothing in the engine routes `TextInputDismissed` into a text field for a
+  hosted game yet: that is the loop's, in slice 8, or the game's.
+- **The text buffer is the reported length plus one**, so the text fits whether
+  or not Steam's length counts the NUL, and is read up to the first NUL. `None`
+  is a cancel — or text Steam would not hand over (a refused read, or a length
+  past `MAX_ENTERED_TEXT_BYTES`, 64 KiB, in
+  `crates/crcbl-steam/src/keyboard.rs`), which also counts in
+  `PumpDiagnostics::decode_mismatches`. Another app's dismissal counts as
+  unknown.
+- **`SteamPads::glyph(&steam, id, PadControl, GlyphSize)`** takes a `PadControl`
+  — a button, a stick or a trigger — rather than only a `PadButton`, since a
+  hint shows sticks too. It answers the first origin's PNG path in Steam's
+  default knockout style, copied out; `None` for a control bound to nothing, an
+  origin Steam has no image for, or a pad not connected here. The SVG and legacy
+  glyph calls are not bound.
 
 **Slice 7b as built, where it differs from the text below:**
 
@@ -2137,8 +2172,9 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   dismissed callbacks, the entered text delivered as the same committed text
   `ShellEvent::TextCommit` carries; glyphs via `GetGlyphPNGForActionOrigin`,
   exposed as a path.
-- **Files:** additions to `crcbl-steam/src/{utils,input}.rs`, `ffi/`,
-  `callbacks.rs`.
+- **Files:** additions to `crates/crcbl-steam/src/input.rs`, `ffi/` and
+  `callbacks.rs` (as built, the keyboards in their own
+  `crates/crcbl-steam/src/keyboard.rs`, with its tests and fake beside it).
 - **API:** `steam.utils().show_text_input(TextInputRequest { … })?` →
   `SteamEvent::TextInputDismissed { text: Option<String> }`;
   `pads.glyph(&steam, id, PadButton::South) -> Option<PathBuf>`.

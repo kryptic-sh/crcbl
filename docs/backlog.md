@@ -9092,26 +9092,27 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b and 9 are built on branch `steam-sdk`**
-(not merged): `crates/crcbl-steam` — the runtime loader, `Steam::init` with the
-version handshake, the manual-dispatch pump, shutdown on the last owner's drop,
-the local identity and machine basics, `relaunch_via_steam`, the fake-library
-rig, the drift gate and the CI steps (clippy and rustdoc for macOS and Windows,
-a `miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
-`HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
-slice 3a's async call registry, lobbies, invites, rich presence and join paths,
-slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
-and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
-`crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
-and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
-`SteamCloudStorage`, slice 5's voice capture and decoding, slice 9's stats,
-achievements and leaderboards (built ahead of 7b–8, which waited on slice 7a's
-seam; `steam-sdk` has since merged `main`, which carries it), and slice 7b's
-`SteamPads` (Steam Input onto the gamepad seam) with the Steam-pad filter in
-`crcbl_input::xinput`. The plan, `docs/plan/42-steam.md`, carries a status line
-per slice.
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 are built on branch
+`steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
+`Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
+the last owner's drop, the local identity and machine basics,
+`relaunch_via_steam`, the fake-library rig, the drift gate and the CI steps
+(clippy and rustdoc for macOS and Windows, a `miri (crcbl-steam)` job) — plus
+the umbrella's `steam` feature, `HostedGame::take_pending_focus_loss`,
+`apps/sandbox --features steam`, and slice 3a's async call registry, lobbies,
+invites, rich presence and join paths, slice 3b's friends list, personas and
+avatars, and slice 4's `SteamTransport` and `SteamListener` (with
+`crcbl_net::conformance`), and slice 2's `crcbl_server::Host` (the multi-session
+host) with `crcbl_net::SessionEndReason` and `crcbl_client::Client::ended`, and
+slice 6's `crcbl_store::synced` and `SteamCloudStorage`, slice 5's voice capture
+and decoding, slice 9's stats, achievements and leaderboards (built ahead of
+7b–8, which waited on slice 7a's seam; `steam-sdk` has since merged `main`,
+which carries it), and slice 7b's `SteamPads` (Steam Input onto the gamepad
+seam) with the Steam-pad filter in `crcbl_input::xinput`, and slice 7c's
+on-screen keyboards and glyphs. The plan, `docs/plan/42-steam.md`, carries a
+status line per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9141,8 +9142,8 @@ per slice.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 166 lib tests after slice
-  7b, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 180 lib tests after slice
+  7c, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9217,6 +9218,16 @@ per slice.
   retries either way). What it would take: slice 8's loop limb (or the sandbox)
   opening `SteamPads` with `PAD_MANIFEST` written beside the executable, and the
   run recorded per OS.
+- **Slice 7c's manual steps have not run, and nothing uses the keyboards or
+  glyphs yet**: the Deck's full-screen keyboard filling a sandbox text field
+  (and whether `GetEnteredGamepadTextLength` counts the NUL — the buffer is
+  sized to work either way), the floating keyboard typing through the shell on
+  each backend, glyphs for a Deck and a DualSense, and desktop Big Picture.
+  `SteamEvent::TextInputDismissed` reaches no text field on its own: a hosted
+  game hands the text to its field itself until slice 8 decides whether the loop
+  does. What it would take: a text field in the sandbox's Steam panel that opens
+  the keyboard on a pad press and shows the answer, and the pad's South glyph
+  drawn beside it.
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator

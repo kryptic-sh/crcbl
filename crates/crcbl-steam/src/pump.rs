@@ -122,6 +122,9 @@ impl Steam {
             Some(Decoded::CallCompleted(done)) => self.complete(done),
             Some(Decoded::ChatMessage { lobby, chat_id }) => self.read_chat(lobby, chat_id),
             Some(Decoded::LocalFileChange) => self.read_file_changes(),
+            Some(Decoded::TextInput { submitted, app }) => {
+                self.text_input_dismissed(submitted, app);
+            }
             Some(Decoded::InputDevice { handle, connected }) => match self.pads.upgrade() {
                 Some(pads) => pads.push(handle, connected),
                 // Device callbacks are enabled only by an open `SteamPads`;

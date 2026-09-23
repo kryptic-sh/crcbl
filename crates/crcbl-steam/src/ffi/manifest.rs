@@ -28,7 +28,9 @@
 //! `ESteamNetworkingAvailability`, `ERemoteStorageLocalFileChange`,
 //! `ERemoteStorageFilePathType`, `EVoiceResult`, `ELeaderboardSortMethod`,
 //! `ELeaderboardDisplayType`, `ELeaderboardDataRequest`,
-//! `ELeaderboardUploadScoreMethod`, `ESteamInputType`) is taken to be
+//! `ELeaderboardUploadScoreMethod`, `ESteamInputType`, `EInputActionOrigin`,
+//! `ESteamInputGlyphSize`, `EGamepadTextInputMode`,
+//! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -562,6 +564,15 @@ bindings! {
         get_input_type_for_handle: InputGetInputTypeForHandle = "SteamAPI_ISteamInput_GetInputTypeForHandle",
             "S_API ESteamInputType SteamAPI_ISteamInput_GetInputTypeForHandle( ISteamInput* self, InputHandle_t inputHandle );",
             fn(*mut ISteamInput, InputHandle) -> i32;
+        get_digital_action_origins: InputGetDigitalActionOrigins = "SteamAPI_ISteamInput_GetDigitalActionOrigins",
+            "S_API int SteamAPI_ISteamInput_GetDigitalActionOrigins( ISteamInput* self, InputHandle_t inputHandle, InputActionSetHandle_t actionSetHandle, InputDigitalActionHandle_t digitalActionHandle, EInputActionOrigin * originsOut );",
+            fn(*mut ISteamInput, InputHandle, InputActionSetHandle, InputDigitalActionHandle, *mut i32) -> i32;
+        get_analog_action_origins: InputGetAnalogActionOrigins = "SteamAPI_ISteamInput_GetAnalogActionOrigins",
+            "S_API int SteamAPI_ISteamInput_GetAnalogActionOrigins( ISteamInput* self, InputHandle_t inputHandle, InputActionSetHandle_t actionSetHandle, InputAnalogActionHandle_t analogActionHandle, EInputActionOrigin * originsOut );",
+            fn(*mut ISteamInput, InputHandle, InputActionSetHandle, InputAnalogActionHandle, *mut i32) -> i32;
+        get_glyph_png_for_action_origin: InputGetGlyphPngForActionOrigin = "SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin",
+            "S_API const char * SteamAPI_ISteamInput_GetGlyphPNGForActionOrigin( ISteamInput* self, EInputActionOrigin eOrigin, ESteamInputGlyphSize eSize, uint32 unFlags );",
+            fn(*mut ISteamInput, i32, i32, u32) -> *const c_char;
     }
 
     /// `ISteamUtils` (`steam_api_flat.h`).
@@ -605,6 +616,24 @@ bindings! {
         get_image_rgba: UtilsGetImageRgba = "SteamAPI_ISteamUtils_GetImageRGBA",
             "S_API bool SteamAPI_ISteamUtils_GetImageRGBA( ISteamUtils* self, int iImage, uint8 * pubDest, int nDestBufferSize );",
             fn(*mut ISteamUtils, i32, *mut u8, i32) -> bool;
+        show_gamepad_text_input: UtilsShowGamepadTextInput = "SteamAPI_ISteamUtils_ShowGamepadTextInput",
+            "S_API bool SteamAPI_ISteamUtils_ShowGamepadTextInput( ISteamUtils* self, EGamepadTextInputMode eInputMode, EGamepadTextInputLineMode eLineInputMode, const char * pchDescription, uint32 unCharMax, const char * pchExistingText );",
+            fn(*mut ISteamUtils, i32, i32, *const c_char, u32, *const c_char) -> bool;
+        get_entered_gamepad_text_length: UtilsGetEnteredGamepadTextLength = "SteamAPI_ISteamUtils_GetEnteredGamepadTextLength",
+            "S_API uint32 SteamAPI_ISteamUtils_GetEnteredGamepadTextLength( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> u32;
+        get_entered_gamepad_text_input: UtilsGetEnteredGamepadTextInput = "SteamAPI_ISteamUtils_GetEnteredGamepadTextInput",
+            "S_API bool SteamAPI_ISteamUtils_GetEnteredGamepadTextInput( ISteamUtils* self, char * pchText, uint32 cchText );",
+            fn(*mut ISteamUtils, *mut c_char, u32) -> bool;
+        dismiss_gamepad_text_input: UtilsDismissGamepadTextInput = "SteamAPI_ISteamUtils_DismissGamepadTextInput",
+            "S_API bool SteamAPI_ISteamUtils_DismissGamepadTextInput( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> bool;
+        show_floating_gamepad_text_input: UtilsShowFloatingGamepadTextInput = "SteamAPI_ISteamUtils_ShowFloatingGamepadTextInput",
+            "S_API bool SteamAPI_ISteamUtils_ShowFloatingGamepadTextInput( ISteamUtils* self, EFloatingGamepadTextInputMode eKeyboardMode, int nTextFieldXPosition, int nTextFieldYPosition, int nTextFieldWidth, int nTextFieldHeight );",
+            fn(*mut ISteamUtils, i32, i32, i32, i32, i32) -> bool;
+        dismiss_floating_gamepad_text_input: UtilsDismissFloatingGamepadTextInput = "SteamAPI_ISteamUtils_DismissFloatingGamepadTextInput",
+            "S_API bool SteamAPI_ISteamUtils_DismissFloatingGamepadTextInput( ISteamUtils* self );",
+            fn(*mut ISteamUtils) -> bool;
     }
 }
 

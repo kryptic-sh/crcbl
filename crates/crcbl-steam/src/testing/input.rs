@@ -6,7 +6,7 @@ use std::{
     ffi::{CStr, c_char, c_void},
 };
 
-use super::{accessor, script};
+use super::{accessor, fake_string, script};
 use crate::ffi::{
     ISteamInput, InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle,
     InputHandle,
@@ -55,6 +55,14 @@ pub(crate) struct FakeInput {
     pub(crate) explicit_run_frame: Option<bool>,
     /// Every `(controller, set)` `ActivateActionSet` was given.
     pub(crate) activated: Vec<(InputHandle, InputActionSetHandle)>,
+    /// The origins each action is bound to, by name; the origin calls
+    /// answer these, and one not listed is bound to nothing.
+    pub(crate) origins: HashMap<&'static str, Vec<i32>>,
+    /// `GetGlyphPNGForActionOrigin` answers null instead of the fake's string
+    /// buffer.
+    pub(crate) no_glyph: bool,
+    /// Every `(origin, size, flags)` `GetGlyphPNGForActionOrigin` was given.
+    pub(crate) glyphs: Vec<(i32, i32, u32)>,
 }
 
 /// The input group of the fake library.
@@ -72,6 +80,9 @@ pub(super) const FNS: InputFns = InputFns {
     get_analog_action_handle: fake_handle,
     get_analog_action_data: fake_analog,
     get_input_type_for_handle: fake_input_type,
+    get_digital_action_origins: fake_origins,
+    get_analog_action_origins: fake_origins,
+    get_glyph_png_for_action_origin: fake_glyph,
 };
 
 unsafe extern "C" fn fake_input_accessor() -> *mut c_void {
@@ -182,6 +193,47 @@ unsafe extern "C" fn fake_analog(
             active: u8::from(!pad.inactive.contains(&name.as_str())),
         }
     })
+}
+
+/// Both origin calls: the action's scripted origins, as many as
+/// `STEAM_INPUT_MAX_ORIGINS` allows, and how many there were.
+unsafe extern "C" fn fake_origins(
+    _: *mut ISteamInput,
+    _: InputHandle,
+    _: InputActionSetHandle,
+    action: u64,
+    out: *mut i32,
+) -> i32 {
+    script(|s| {
+        let name = name_of(&s.input, action);
+        let origins = s
+            .input
+            .origins
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or_default();
+        let n = origins.len().min(crate::input::MAX_ORIGINS);
+        // SAFETY: the caller passes room for `STEAM_INPUT_MAX_ORIGINS` origins.
+        unsafe { core::ptr::copy_nonoverlapping(origins.as_ptr(), out, n) };
+        i32::try_from(origins.len()).unwrap()
+    })
+}
+
+unsafe extern "C" fn fake_glyph(
+    _: *mut ISteamInput,
+    origin: i32,
+    size: i32,
+    flags: u32,
+) -> *const c_char {
+    let null = script(|s| {
+        s.input.glyphs.push((origin, size, flags));
+        s.input.no_glyph
+    });
+    if null {
+        core::ptr::null()
+    } else {
+        fake_string()
+    }
 }
 
 unsafe extern "C" fn fake_input_type(_: *mut ISteamInput, controller: InputHandle) -> i32 {

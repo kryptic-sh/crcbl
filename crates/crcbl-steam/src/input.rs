@@ -25,6 +25,12 @@
 //! also polls `crcbl_input::xinput` turns its Steam-pad filter on
 //! (`XInput::skip_steam_virtual_pads`), so every press arrives once.
 //!
+//! # Glyphs
+//!
+//! [`SteamPads::glyph`] answers the path of the PNG Steam draws for whatever
+//! the player's configuration binds a pad control to — a Deck's `A`, a
+//! DualSense's cross, or the key a remap moved it to — for a hint to show.
+//!
 //! # What is believed rather than checked
 //!
 //! - **The by-value returns.** `GetDigitalActionData` and
@@ -98,6 +104,32 @@ const TRIGGERS: [(&CStr, Trigger); 2] = [
     (c"left_trigger", Trigger::Left),
     (c"right_trigger", Trigger::Right),
 ];
+
+/// `STEAM_INPUT_MAX_ORIGINS` (`isteaminput.h`): the size of the buffer
+/// `GetDigitalActionOrigins` and `GetAnalogActionOrigins` fill.
+pub(crate) const MAX_ORIGINS: usize = 8;
+
+/// A control on the neutral pad, for [`SteamPads::glyph`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PadControl {
+    /// A button.
+    Button(PadButton),
+    /// A stick.
+    Stick(Stick),
+    /// A trigger.
+    Trigger(Trigger),
+}
+
+/// How big a glyph is (`ESteamInputGlyphSize`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GlyphSize {
+    /// 32 × 32 pixels (`k_ESteamInputGlyphSize_Small`).
+    Small,
+    /// 128 × 128 pixels (`k_ESteamInputGlyphSize_Medium`).
+    Medium,
+    /// 256 × 256 pixels (`k_ESteamInputGlyphSize_Large`).
+    Large,
+}
 
 /// `ESteamInputType`'s values (`isteaminput.h`) that name a family.
 mod input_type {
@@ -369,6 +401,95 @@ impl SteamPads {
         self.rejected_axes
     }
 
+    /// The path of the PNG Steam draws for what pad `id`'s configuration binds
+    /// `control` to (`GetDigitalActionOrigins` or `GetAnalogActionOrigins`,
+    /// then `GetGlyphPNGForActionOrigin` for the first origin), in Steam's
+    /// default knockout style. `None` when `id` is not a connected pad here,
+    /// the control is bound to nothing, or Steam has no image for it.
+    ///
+    /// The path is copied before this returns. `steam` is where a path that
+    /// was not UTF-8 is counted, in
+    /// [`PumpDiagnostics::lossy_strings`](crate::PumpDiagnostics::lossy_strings).
+    #[must_use]
+    pub fn glyph(
+        &self,
+        steam: &Steam,
+        id: GamepadId,
+        control: PadControl,
+        size: GlyphSize,
+    ) -> Option<PathBuf> {
+        let pad = self.pads.iter().find(|pad| pad.id == id && pad.connected)?;
+        let handles = &self.handles;
+        if handles.set == 0 {
+            return None;
+        }
+        let client = &self.client;
+        let input = &client.lib.fns.input;
+        let mut origins = [0_i32; MAX_ORIGINS];
+        let out = origins.as_mut_ptr();
+        let count = match control {
+            PadControl::Button(button) => {
+                let action = handle_for(&BUTTONS, &handles.buttons, button)?;
+                // SAFETY: `client.input` is live, this is the pump thread, and
+                // `out` has room for `STEAM_INPUT_MAX_ORIGINS` origins.
+                unsafe {
+                    (input.get_digital_action_origins)(
+                        client.input,
+                        pad.handle,
+                        handles.set,
+                        action,
+                        out,
+                    )
+                }
+            }
+            PadControl::Stick(stick) => {
+                let action = handle_for(&STICKS, &handles.sticks, stick)?;
+                // SAFETY: as above.
+                unsafe {
+                    (input.get_analog_action_origins)(
+                        client.input,
+                        pad.handle,
+                        handles.set,
+                        action,
+                        out,
+                    )
+                }
+            }
+            PadControl::Trigger(trigger) => {
+                let action = handle_for(&TRIGGERS, &handles.triggers, trigger)?;
+                // SAFETY: as above.
+                unsafe {
+                    (input.get_analog_action_origins)(
+                        client.input,
+                        pad.handle,
+                        handles.set,
+                        action,
+                        out,
+                    )
+                }
+            }
+        };
+        // `k_EInputActionOrigin_None` is zero: bound to nothing.
+        let origin = origins[0];
+        if count < 1 || origin == 0 {
+            return None;
+        }
+        let size = match size {
+            GlyphSize::Small => 0,
+            GlyphSize::Medium => 1,
+            GlyphSize::Large => 2,
+        };
+        // SAFETY: as above; `0` is `ESteamInputGlyphStyle_Knockout`.
+        let path =
+            unsafe { (input.get_glyph_png_for_action_origin)(client.input, origin, size, 0) };
+        if path.is_null() {
+            return None;
+        }
+        // SAFETY: straight out of the call, before any other Steam call.
+        let path = unsafe { steam.copy_string(path) };
+        (!path.is_empty()).then(|| PathBuf::from(path))
+    }
+
     /// Looks up every handle Steam has not yet answered: the action set
     /// first, and the actions once it has one.
     fn resolve(&mut self) {
@@ -494,6 +615,17 @@ impl Drop for SteamPads {
             log::warn!("steam: ISteamInput::Shutdown answered false");
         }
     }
+}
+
+/// The resolved handle of `control` in a table of actions, if Steam has
+/// answered one.
+fn handle_for<T: PartialEq>(table: &[(&CStr, T)], handles: &[u64], control: T) -> Option<u64> {
+    table
+        .iter()
+        .zip(handles)
+        .find(|((_, known), _)| *known == control)
+        .map(|(_, &handle)| handle)
+        .filter(|&handle| handle != 0)
 }
 
 /// `manifest` as the C string `SetInputActionManifestFilePath` takes.

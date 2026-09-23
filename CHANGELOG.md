@@ -236,7 +236,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b and 9**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c and 9**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -299,9 +299,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reports each controller as the same `crcbl_input` `GamepadEvent`s XInput does
   — positional buttons, raw sticks with +Y up, triggers 0…1 — with a controller
   that comes back keeping its `GamepadId`; `Steam::pump` runs Steam Input's
-  frame while it is open. 64-bit Linux, Windows and macOS; elsewhere the crate
-  is empty. `apps/sandbox --features steam` exercises it. Not yet run against a
-  Steam client with a 1.65 library.
+  frame while it is open. `SteamPads::glyph(steam, id, control, size)` answers
+  the PNG Steam draws for whatever the player's configuration binds a button,
+  stick or trigger to. The Deck's on-screen keyboards:
+  `steam.utils().show_text_input(&request)` opens the full-screen one, whose
+  accepted text arrives as `SteamEvent::TextInputDismissed { text }` (`None`
+  when cancelled), and `show_floating_keyboard(mode, field)` the floating one,
+  which types through the window like a physical keyboard and reports
+  `SteamEvent::FloatingKeyboardDismissed`. 64-bit Linux, Windows and macOS;
+  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
+  Not yet run against a Steam client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

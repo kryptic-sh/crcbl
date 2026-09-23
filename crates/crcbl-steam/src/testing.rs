@@ -18,8 +18,10 @@
 //! one-live-`Steam` guard is per test.
 
 mod input;
+mod keyboard;
 
 pub(crate) use input::{FakeInput, FakePad};
+pub(crate) use keyboard::FakeKeyboard;
 
 use std::{
     cell::{Cell, RefCell},
@@ -200,6 +202,7 @@ pub(crate) struct Script {
     pub(crate) voice: FakeVoice,
     pub(crate) stats: FakeStats,
     pub(crate) input: FakeInput,
+    pub(crate) keyboard: FakeKeyboard,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -263,6 +266,7 @@ impl Default for Script {
             voice: FakeVoice::default(),
             stats: FakeStats::default(),
             input: FakeInput::default(),
+            keyboard: FakeKeyboard::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -457,6 +461,12 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_ip_country: fake_get_ip_country,
             get_image_size: fake_get_image_size,
             get_image_rgba: fake_get_image_rgba,
+            show_gamepad_text_input: keyboard::fake_show_gamepad_text_input,
+            get_entered_gamepad_text_length: keyboard::fake_get_entered_gamepad_text_length,
+            get_entered_gamepad_text_input: keyboard::fake_get_entered_gamepad_text_input,
+            dismiss_gamepad_text_input: keyboard::fake_dismiss_gamepad_text_input,
+            show_floating_gamepad_text_input: keyboard::fake_show_floating_gamepad_text_input,
+            dismiss_floating_gamepad_text_input: keyboard::fake_dismiss_floating_gamepad_text_input,
         },
     })));
     FAKES.lock().unwrap().push(lib);

@@ -8,7 +8,8 @@
 //!        ├── friends(): persona_name(), list(), name(), avatar(), set_rich_presence(),
 //!        │              open_invite_dialog(), open_overlay(), …
 //!        ├── apps(): subscribed(), game_language(), launch_command_line()
-//!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …
+//!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …,
+//!        │            show_text_input() / show_floating_keyboard() (the Deck's keyboards)
 //!        ├── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
 //!        │                         └──▶ a later frame: steam.take(call) ──▶ Lobby
 //!        ├── networking(): start_relay(), relay_status()
@@ -19,10 +20,11 @@
 //!        │            decompress(packet, VOICE_SAMPLE_RATE) ──▶ mono f32 PCM
 //!        ├── SteamCloudStorage::new(): crcbl_store::StorageSource
 //!        └── SteamPads::open(manifest) ──▶ after each pump: poll() ──▶ crcbl_input::GamepadEvent
+//!                                          glyph(id, control) ──▶ the button's PNG
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b and 9: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c and 9: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -33,7 +35,8 @@
 //! `crcbl_store::StorageSource`, voice is captured and decoded to PCM,
 //! achievements, stats and leaderboards are read and written, controllers
 //! arrive through Steam Input as the same gamepad events every pad backend
-//! reports, and the
+//! reports, with their buttons' glyphs, the Deck's on-screen keyboards hand
+//! back typed text, and the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
@@ -129,6 +132,11 @@ mod input;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod keyboard;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod leaderboard;
 #[cfg(all(
     target_pointer_width = "64",
@@ -197,7 +205,8 @@ pub use crate::{
     friends::{
         FriendFlags, Friends, OverlayDialog, PersonaChange, PersonaState, UserDialog, WebPageMode,
     },
-    input::{InputError, PAD_MANIFEST, PAD_MANIFEST_FILE, SteamPads},
+    input::{GlyphSize, InputError, PAD_MANIFEST, PAD_MANIFEST_FILE, PadControl, SteamPads},
+    keyboard::{FloatingKeyboardMode, TextField, TextInputLines, TextInputMode, TextInputRequest},
     leaderboard::{
         Entries, Entry, Leaderboard, LeaderboardDisplay, LeaderboardFound, LeaderboardSort,
         Leaderboards, MAX_LEADERBOARD_DETAILS, MAX_LEADERBOARD_NAME_LENGTH, Range, ScoreUploaded,

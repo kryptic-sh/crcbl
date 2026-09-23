@@ -322,6 +322,20 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &["InputHandle_t m_ulDisconnectedDeviceHandle"],
     },
     StructDecl {
+        name: "GamepadTextInputDismissed_t",
+        pack: Pack::Callback,
+        fields: &[
+            "bool m_bSubmitted",
+            "uint32 m_unSubmittedText",
+            "AppId_t m_unAppID",
+        ],
+    },
+    StructDecl {
+        name: "FloatingGamepadTextInputDismissed_t",
+        pack: Pack::Callback,
+        fields: &[],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -834,6 +848,31 @@ callback_packed! {
     }
 }
 
+callback_packed! {
+    /// `GamepadTextInputDismissed_t` (`isteamutils.h`, `k_iSteamUtilsCallbacks
+    /// + 14`): the full-screen on-screen keyboard closed.
+    pub(crate) struct GamepadTextInputDismissed {
+        /// `bool m_bSubmitted` — non-zero when the player accepted the text.
+        pub(crate) submitted: u8,
+        /// `uint32 m_unSubmittedText` — the text's length. Not read: the pump
+        /// asks `GetEnteredGamepadTextLength`, the call the text is then read
+        /// against.
+        pub(crate) length: u32,
+        /// `AppId_t m_unAppID`.
+        pub(crate) app: u32,
+    }
+}
+
+callback_packed! {
+    /// `FloatingGamepadTextInputDismissed_t` (`isteamutils.h`,
+    /// `k_iSteamUtilsCallbacks + 38`): the floating keyboard closed. No
+    /// members, so one byte, as [`NewUrlLaunchParameters`].
+    pub(crate) struct FloatingGamepadTextInputDismissed {
+        /// The one byte an empty C++ struct occupies; never meaningful.
+        pub(crate) unused: u8,
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -1036,6 +1075,15 @@ mod tests {
             active: 1, 1;
         });
         assert_eq!(align_of::<InputDigitalActionData>(), 1);
+        // The `uint32` after the `bool` is 4-aligned under either packing.
+        assert_layout!(GamepadTextInputDismissed, 12, {
+            submitted: 0, 1;
+            length: 4, 4;
+            app: 8, 4;
+        });
+        assert_layout!(FloatingGamepadTextInputDismissed, 1, {
+            unused: 0, 1;
+        });
         // One `uint64`: 8 bytes under either packing, aligned 4 or 8.
         assert_layout!(SteamInputDeviceConnected, 8, {
             handle: 0, 8;
