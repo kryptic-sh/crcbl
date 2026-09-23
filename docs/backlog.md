@@ -22311,43 +22311,41 @@ commit `eccc3f6`). Not started; recorded for triage. EW's own list also named
 the `Mixer` voice budget and the typed grid drag/drop hoist, which this backlog
 already carries.
 
-- **Compound queries shipped; EW's migration and two findings remain.**
-  `crcbl_phys::AabbCompound` (`ray_cast`, `closest_point`, `closest_points`) and
-  `Aabb::closest_point` landed 2026-09-23. EW still has to replace
-  `asset_placement::interaction_ray_hit` and the clamp loop in
-  `game_corpse_interactions::corpse_interaction_contact`; corpse contact must
-  use `closest_points`, because EW filters parts by reach and visibility before
-  choosing. EW's `item_motion::valid_compound_bounds` duplicates
-  `AabbCompound::new`'s validation (plus refusing an empty set). Found while
-  porting, read from the code and not run, and left alone because each changes
-  behaviour: `query::ray_vs_aabb` with a zero direction from inside a box yields
-  a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on a `NaN`
-  box corner (`f64::clamp` asserts), which rebuilding it on
+- **Compound queries shipped and EW migrated (EW `9008a65`); two findings
+  remain.** `crcbl_phys::AabbCompound` (`ray_cast`, `closest_point`,
+  `closest_points`) and `Aabb::closest_point` landed 2026-09-23; EW's
+  interaction ray, corpse contact (on `closest_points`) and item validation (on
+  `CompoundShape::from_aabbs`) use them, per EW's report of 2026-09-24. Found
+  while porting, read from the code and not run, and left alone because each
+  changes behaviour: `query::ray_vs_aabb` with a zero direction from inside a
+  box yields a `NaN` point (`t = +inf`); `query::sphere_overlaps_aabb` panics on
+  a `NaN` box corner (`f64::clamp` asserts), which rebuilding it on
   `Aabb::closest_point` would turn into "no overlap". Not done: compound sweeps
   and compound-vs-shape overlap, which EW did not ask for.
-- **Two-bone IK shipped; EW's migration remains.**
+- **Two-bone IK shipped; EW's migration is parked on EW's side.**
   `crcbl_anim::{rotate_joint, solve_two_bone}` landed 2026-09-23 with EW's
   argument order, returning `IkError` (the validation choices are in the `ik`
-  module docs). EW still has to move its 8 call sites (`ArmRig::apply_hand` and
-  `reach_support_shoulder`, `UpperBodyRig::apply`, `restore_foot_rotation`, one
-  medical test) and delete `character_ik.rs`. Behaviour change: `solve_two_bone`
-  extends fully to an unreachable target, where EW stopped `REACH_MARGIN_M`
-  short. Not done: look-at, per-call weights (the caller blends poses), and a
-  solve result reporting reached / clamped / folded, which EW's
-  `reach_support_shoulder` could use but has not asked for. Not verified: EW's
-  authored rigs under the port, and whether they carry non-uniform scale above a
-  turned joint, which is now refused with `NonConformalFrame`.
+  module docs). EW's port sits on EW branch `ik-migration`, waiting on EW's
+  owner to accept one test tolerance
+  (`ai_case_inherits_the_shared_controllers_world_velocity`, 4.6e-6 against 2e-6
+  after the float-rounding change); nothing is owed from crcbl. Behaviour
+  change: `solve_two_bone` extends fully to an unreachable target, where EW
+  stopped `REACH_MARGIN_M` short. Not done: look-at, per-call weights (the
+  caller blends poses), and a solve result reporting reached / clamped / folded,
+  which EW's `reach_support_shoulder` could use but has not asked for. Not
+  verified: EW's authored rigs under the port, and whether they carry
+  non-uniform scale above a turned joint, which is now refused with
+  `NonConformalFrame`.
 - **Scene instance bounds shipped; EW's migration remains.**
   `SceneDesc::instance_bounds(&instances, root)` and
   `instance_parts(&instances)` landed 2026-09-23 in `crcbl-render`, folding the
   placed vertices (not the looser abs-matrix box, which would float EW's surface
   placement) into `f32` `crcbl_render::Aabb`, refusing a non-finite placed
   vertex with `SceneBoundsError` naming the instance. `Aabb::from_points` still
-  skips `NaN`, deliberately, for culling. EW still has to move its 9 `bounds`
-  and 7 `collision_parts` call sites (counted by grep) and delete
-  `asset_placement::{bounds, collision_parts}`, widening parts with `as_dvec3()`
-  and keeping its own `MIN_HALF_EXTENT_M` padding. Behaviour change: a part
-  whose mesh has no vertices is `EmptyPart { instance }`. Found since:
+  skips `NaN`, deliberately, for culling. EW migrated (its `bounds` and
+  `collision_parts` adapt them, keeping `MIN_HALF_EXTENT_M`), per EW's report of
+  2026-09-24. Behaviour change: a part whose mesh has no vertices is
+  `EmptyPart { instance }`. Found since:
   `cargo clippy -p crcbl-render --all-targets --target wasm32-unknown-unknown`
   fails with 50 errors because the crate's tests call `Instance::create_device`,
   which is native-only by design (the unused-`Instance` warnings follow from
@@ -22385,8 +22383,15 @@ there: 17, 8 and 10 call sites). The rest:
   are in flight (the refill is queue-ordered after them); a full atlas is
   `SheetError::AtlasFull`, a freed slot `StaleSlot`. The icon cache stays EW's,
   as agreed. Still open:
-  - EW has to port its icon renderer and draw the model into a cell-sized
-    transient with its own mesh pass; the engine has no secondary-view API.
+  - The render half exists as secondary views (`ForwardRenderer::create_view`,
+    `begin_view`, `add_passes_with_views` into a cell-sized transient, then
+    `add_slot_copies`), but three gaps keep it from making icons, all queued as
+    EW asks (2026-09-24): a view always renders opaque (tonemap writes alpha 1,
+    the scene clear is opaque, the sky draws); the view renders in the
+    renderer-wide `target_format()`, so a `Bgra8UnormSrgb` swapchain's copy is
+    refused with `SheetError::SourceMismatch` by the `Rgba8UnormSrgb`-only
+    atlas; and an instance hidden from the primary view still casts into the
+    sun's cascades.
   - Only same-queue ordering is claimed; a copy on another queue would need a
     semaphore nothing records.
   - A `Sprite` carries UVs, not a slot, so drawing a freed slot's UVs is not
