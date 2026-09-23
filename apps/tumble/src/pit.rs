@@ -11,14 +11,16 @@
 //! ```
 //!
 //! Its counters are the rung's cost: pairs, contacts begun and ended, and the
-//! broadphase, narrow-phase and solver time of every tick.
+//! broadphase, narrow-phase and solver time of every tick. And rung 3's: once
+//! the last wave has landed and the pile is still, it **sleeps** — awake
+//! bodies fall to zero, and the solver's time at rest is what a settled
+//! thousand balls cost.
 //!
 //! # What it cannot show yet
 //!
 //! `docs/plan/sample/24-tumble.md`'s pit spawns **without end**, overflows and
 //! despawns what rolls past a radius; that is rung 6's, with the most bodies
-//! held inside a tick. This one stops at [`BALLS`]. And **nothing sleeps**:
-//! a settled pile is solved in full every tick, which is rung 3.
+//! held inside a tick. This one stops at [`BALLS`].
 
 use crcbl::core::rand::hash_unit;
 use crcbl::ecs::{Entity, SystemTrait as _};
@@ -286,6 +288,31 @@ mod tests {
         assert!(fastest < 1e-3, "the pile is still moving at {fastest} m/s");
     }
 
+    /// **The full pit settles to zero awake bodies**, rung 3's claim for the
+    /// ball pit: every ball asleep within a bound of the last wave landing,
+    /// and the pile still in the pit.
+    ///
+    /// Measured on 2026-09-23: the last wave spawns at tick 796, and every
+    /// ball is asleep at tick 1000, the whole pile one island.
+    #[test]
+    fn the_full_pit_settles_to_zero_awake_bodies() {
+        let mut pit = Pit::new();
+        let mut asleep_at = None;
+        for tick in 0..1400u32 {
+            pit.step(tick_dt(), None);
+            let reading = pit.reading();
+            if reading.balls == BALLS && reading.contacts.bodies == 0 {
+                asleep_at = Some(tick);
+                break;
+            }
+        }
+        let reading = pit.reading();
+        let tick = asleep_at.unwrap_or_else(|| panic!("never settled: {:?}", reading.contacts));
+        assert_eq!(reading.contacts.sleeping, BALLS as usize);
+        assert!(pit.worst_escape() < 0.02);
+        assert!(tick < 1200, "the pit settled only at tick {tick}");
+    }
+
     /// **The pit's cost, stage by stage, once it is full and at rest** — the
     /// benchmark `docs/plan/36-contact-solver.md` rung 1 asks for. Ignored,
     /// because a timing means nothing in a debug build or on a loaded machine:
@@ -295,7 +322,8 @@ mod tests {
     /// ```
     ///
     /// It fills the pit, lets it settle, then prints the mean and the worst of
-    /// each stage over the next ten seconds of ticks.
+    /// each stage over the next ten seconds of ticks. Since rung 3 a settled
+    /// pit sleeps, so these are its costs at rest.
     #[test]
     #[ignore = "a timing: run it in a release build"]
     fn pit_benchmark() {

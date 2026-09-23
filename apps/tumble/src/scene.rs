@@ -53,9 +53,9 @@ pub const TICK_HZ: u32 = 60;
 pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
-/// after rung 2 changed the friction every room's contacts solve and added
-/// the Tower room and the wall's cubes.
-pub const PINNED_HASH: u64 = 0x76aa_2acd_7b93_d586;
+/// after rung 3 put still islands to sleep and added each body's sleep to
+/// every room's hash.
+pub const PINNED_HASH: u64 = 0xa939_6834_c4e0_0788;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;
@@ -139,11 +139,21 @@ pub trait Room {
 }
 
 /// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
-/// rung 1's row and rung 2's.
+/// rung 1's row, rung 2's and rung 3's.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tally {
-    /// Bodies that step.
+    /// Bodies that step: the awake ones.
     pub bodies: usize,
+    /// Bodies asleep.
+    pub sleeping: usize,
+    /// Islands awake.
+    pub islands: usize,
+    /// Islands asleep.
+    pub sleeping_islands: usize,
+    /// The solver's time on the last timed tick with every body asleep, in
+    /// seconds — rung 3's "solver time at rest" — or `None` if no timed tick
+    /// has been at rest yet.
+    pub solver_at_rest: Option<f64>,
     /// Pairs in the pair set.
     pub pairs: usize,
     /// Contacts with a point.
@@ -172,6 +182,15 @@ impl Tally {
     /// Folds one tick's counters in.
     pub fn add(&mut self, counters: &ContactCounters) {
         self.bodies = counters.bodies;
+        self.sleeping = counters.sleeping;
+        self.islands = counters.islands;
+        self.sleeping_islands = counters.sleeping_islands;
+        if counters.bodies == 0
+            && counters.sleeping > 0
+            && let Some(stages) = counters.stages
+        {
+            self.solver_at_rest = Some(stages.solver);
+        }
         self.pairs = counters.pairs;
         self.touching = counters.touching;
         self.points = counters.points;
@@ -444,6 +463,19 @@ pub(crate) mod tests {
         assert_eq!(View::for_key(KeyCode::Digit4), Some(View::Tower));
         assert_eq!(View::for_key(KeyCode::Space), None);
         assert_eq!(Scenes::new().view(), View::Wall);
+    }
+
+    /// **Once the pyramid sleeps, its solver time at rest is on the reading**,
+    /// taken from a timed tick with nothing awake, and before then it is not.
+    #[test]
+    fn the_pyramid_reads_its_solver_time_at_rest_once_it_sleeps() {
+        let early = run(10, View::Tower).reading();
+        assert_eq!(early.tower.pyramid.solver_at_rest, None, "{early:?}");
+        let settled = run(120, View::Tower).reading();
+        let pyramid = settled.tower.pyramid;
+        assert_eq!(pyramid.bodies, 0, "{pyramid:?}");
+        let rest = pyramid.solver_at_rest.expect("a time at rest");
+        assert!(rest >= 0.0, "{pyramid:?}");
     }
 
     /// A native step is timed, stage by stage, in every room with contacts.

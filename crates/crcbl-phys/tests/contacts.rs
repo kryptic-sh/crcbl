@@ -101,10 +101,17 @@ const PLAIN: SurfaceMaterial = SurfaceMaterial::new(0.0, 0.0);
 /// 142 kN/m`, and 9.81 N sinks it 0.069 mm. Measured on 2026-09-17: a 10 cm,
 /// 1 kg ball dropped a metre is sunk by exactly that from its second second
 /// on, and not moving at all.
+///
+/// Sleep is off: the counter is checked against the ball on the last tick,
+/// and a sleeping ball's contact is not collided, so counts nothing.
 #[test]
 fn a_ball_dropped_on_a_plane_comes_to_rest_sunk_under_a_tenth_of_a_millimetre() {
     const RADIUS: f64 = 0.1;
-    let mut phys = system(true);
+    let mut phys = PhysicsSystem::with_contacts(ContactSettings {
+        sleep: false,
+        ..ContactSettings::DEFAULT
+    });
+    phys.add_force_provider(Box::new(GravityForce::EARTH));
     phys.add_plane(DVec3::Y, 0.0, PLAIN);
     let b = ball(
         &mut phys,

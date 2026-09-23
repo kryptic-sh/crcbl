@@ -33,10 +33,12 @@
 //! substeps for its group; groups are not built, so the column's system takes
 //! them whole.
 //!
-//! # What it cannot show yet
+//! # Sleep
 //!
-//! **Nothing sleeps** (rung 3): the pyramid is solved in full every tick long
-//! after it has settled.
+//! Rung 3's claim is that every scene here settles to zero awake bodies: the
+//! pyramid and the column sleep once they have stopped squeezing, and the
+//! dominoes once they have all fallen, until the next flick teleports them
+//! upright and wakes them.
 
 use crcbl::ecs::{Entity, SystemTrait as _};
 use crcbl::math::DVec3;
@@ -351,15 +353,29 @@ mod tests {
     /// moved sideways; the dominoes all went down on the first run; and the
     /// feature ids persisted.
     ///
-    /// Measured on 2026-09-23 at tick 600: the column's top cube 1.19 cm from
-    /// where it started, 1.7 mm of it sideways; the pyramid's 2.76 cm, 0.39 mm
-    /// sideways, and no pyramid cube further; all fifteen dominoes down by
-    /// tick 238; the pyramid's 590 contacts at 4 points each, every one of
-    /// them persisted.
+    /// Measured on 2026-09-23 at tick 600, before rung 3: the column's top
+    /// cube 1.19 cm from where it started, 1.7 mm of it sideways; the
+    /// pyramid's 2.76 cm, 0.39 mm sideways, and no pyramid cube further; all
+    /// fifteen dominoes down by tick 238; the pyramid's 590 contacts at 4
+    /// points each, every one of them persisted. With rung 3's sleep, the
+    /// column's top cube 1.24 cm off, 3.8 mm of it sideways, and the
+    /// pyramid's 2.73 cm, 2.40 mm sideways.
+    ///
+    /// The points are read on every tick the pyramid is awake, and the
+    /// persisted ids on the last of them, where it settled: asleep, its
+    /// contacts are not collided and count nothing.
+    ///
+    /// **Since rung 3 the pyramid sleeps at tick 58, with its top cube 2.40 mm
+    /// aside**, and stays there. Awake, the same cube had crept back to
+    /// 0.39 mm by tick 600, at a fraction of a millimetre a second — far
+    /// slower than the sleep threshold — so the sideways bound is now the
+    /// sway it sleeps with. `stacking.rs`'s `a_base_twenty_pyramid_holds`,
+    /// with sleep off, is where the solver's own sway is held to a millimetre.
     #[test]
     fn the_column_and_the_pyramid_stand_and_the_dominoes_fall() {
         let mut tower = Tower::new();
         let mut all_down_by = None;
+        let mut last_persisted = None;
         for tick in 0..600u64 {
             tower.step(tick_dt(), None);
             if all_down_by.is_none()
@@ -367,6 +383,11 @@ mod tests {
                 && tower.reading().dominoes_down == DOMINOES
             {
                 all_down_by = Some(tick);
+            }
+            let pyramid = tower.reading().pyramid;
+            if let Some(ratio) = pyramid.persisted_ratio() {
+                last_persisted = Some(ratio);
+                assert_eq!(pyramid.points_per_manifold(), Some(4.0), "{pyramid:?}");
             }
         }
         let r = tower.reading();
@@ -376,7 +397,7 @@ mod tests {
         );
         assert!(r.column_sway < 5e-3, "{r:?}");
         assert!(r.column_drift < 0.02, "{r:?}");
-        assert!(r.pyramid_sway < 1e-3, "{r:?}");
+        assert!(r.pyramid_sway < 3e-3, "{r:?}");
         let worst = Tower::new()
             .pyramid_positions()
             .iter()
@@ -384,9 +405,53 @@ mod tests {
             .map(|(start, now)| (now - *start).length())
             .fold(0.0, f64::max);
         assert!(worst < 0.04, "a pyramid cube moved {worst} m");
-        let persisted = r.pyramid.persisted_ratio().expect("the pyramid touches");
-        assert!(persisted > 0.99, "{r:?}");
-        assert_eq!(r.pyramid.points_per_manifold(), Some(4.0), "{r:?}");
+        let persisted = last_persisted.expect("the pyramid was never awake");
+        assert!(persisted > 0.99, "{persisted}: {r:?}");
         assert_eq!(r.runs, 2, "{r:?}");
+    }
+
+    /// **Every scene in the room settles to zero awake bodies** — rung 3's
+    /// claim for the Tower room: the pyramid, and the column with the
+    /// dominoes once they have all fallen, well before the next flick.
+    ///
+    /// Measured on 2026-09-23: the pyramid asleep from tick 58, the column
+    /// and the dominoes from tick 276; the next flick is at tick 480.
+    #[test]
+    fn every_scene_in_the_room_settles_to_zero_awake_bodies() {
+        let mut tower = Tower::new();
+        let (mut pyramid_at, mut tall_at) = (None, None);
+        for tick in 0..DOMINO_EVERY_TICKS - 1 {
+            tower.step(tick_dt(), None);
+            let r = tower.reading();
+            if pyramid_at.is_none() && r.pyramid.bodies == 0 {
+                pyramid_at = Some(tick);
+            }
+            if tall_at.is_none() && r.column.bodies == 0 {
+                tall_at = Some(tick);
+            }
+        }
+        let r = tower.reading();
+        let pyramid_at = pyramid_at.unwrap_or_else(|| panic!("the pyramid never slept: {r:?}"));
+        let tall_at = tall_at.unwrap_or_else(|| panic!("the column never slept: {r:?}"));
+        assert_eq!(
+            (r.pyramid.bodies, r.pyramid.sleeping),
+            (0, 210),
+            "the pyramid woke: {r:?}"
+        );
+        assert_eq!(
+            (r.column.bodies, r.column.sleeping),
+            (0, (COLUMN + DOMINOES) as usize),
+            "the column or a domino woke: {r:?}"
+        );
+        assert_eq!(r.dominoes_down, DOMINOES, "{r:?}");
+        assert!(pyramid_at < 120, "the pyramid slept at tick {pyramid_at}");
+        assert!(
+            tall_at < 400,
+            "the column and dominoes slept at tick {tall_at}"
+        );
+        assert!(
+            r.pyramid.solver_at_rest.is_none(),
+            "untimed steps have no time"
+        );
     }
 }

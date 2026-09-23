@@ -16,11 +16,14 @@
 //! touches a hash map or sorts anything. The entity-to-id map is consulted only
 //! where an entity crosses in: the methods that take an [`Entity`].
 //!
-//! There are two sets today. **Static** holds an entity that has a transform
-//! and no [`RigidBody`] — a wall's collider, a replicated prop — and nothing
-//! steps it. **Awake** holds every entity with a body, dynamic or kinematic.
-//! Sleeping bodies, which the plan moves into a set per island, arrive with
-//! rung 3.
+//! There are three sets. **Static** holds an entity that has a transform and
+//! no [`RigidBody`] — a wall's collider, a replicated prop — and nothing steps
+//! it. **Awake** holds every entity with a body, dynamic or kinematic, that
+//! steps. **Sleeping** is a set per sleeping island, held by the island, in a
+//! system with contacts: see [`crate::contact`]. Whatever changes a sleeping
+//! body — [`PhysicsSystem::body_mut`], [`PhysicsSystem::set_transform`] and
+//! the rest — wakes its island first, so only the awake and static sets are
+//! ever written to from outside a step.
 //!
 //! **Removal swaps.** Taking a body out of a set moves the set's last body into
 //! the hole and rewrites that one record's index, so a set stays dense and its
@@ -50,6 +53,7 @@ use glam::DVec3;
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
 use crate::contact::broadphase::ProxyId;
+use crate::contact::island::{self, IslandId, Islands};
 use crate::contact::{
     Bodies, ContactCounters, ContactPipeline, ContactReport, ContactSettings, KineticContact,
     PlaneId, StageTimes,
@@ -75,6 +79,9 @@ pub(crate) enum BodySet {
     Static,
     /// A body, dynamic or kinematic: stepped every [`PhysicsSystem::step`].
     Awake,
+    /// A dynamic body whose island sleeps: held by the island, and never
+    /// stepped.
+    Sleeping,
 }
 
 /// The cold half of a body: what names it and what the step never reads.
@@ -93,6 +100,9 @@ pub(crate) struct BodyRecord {
     /// Its collider's proxy in the contact broadphase, in a system with
     /// contacts and for a collider that is not a trigger.
     pub(crate) proxy: Option<ProxyId>,
+    /// Its island, for a dynamic body in a system with contacts that has
+    /// stepped since it became one.
+    pub(crate) island: Option<IslandId>,
 }
 
 /// Transforms with no body: struct-of-arrays, dense, indexed alike.
@@ -108,6 +118,8 @@ pub(crate) struct AwakeSet {
     pub(crate) ids: Vec<BodyId>,
     pub(crate) transforms: Vec<Transform>,
     pub(crate) bodies: Vec<RigidBody>,
+    /// How long each body has been slow enough to sleep, in seconds.
+    pub(crate) sleep_times: Vec<f64>,
 }
 
 impl StaticSet {
@@ -127,19 +139,22 @@ impl StaticSet {
 }
 
 impl AwakeSet {
-    fn push(&mut self, id: BodyId, transform: Transform, body: RigidBody) -> usize {
+    /// Adds a body, its sleep timer at zero, and returns its index.
+    pub(crate) fn push(&mut self, id: BodyId, transform: Transform, body: RigidBody) -> usize {
         self.ids.push(id);
         self.transforms.push(transform);
         self.bodies.push(body);
+        self.sleep_times.push(0.0);
         self.ids.len() - 1
     }
 
     /// Removes `index`, returning its transform and body and the id now at
     /// `index`, if one moved there.
-    fn swap_remove(&mut self, index: usize) -> (Transform, RigidBody, Option<BodyId>) {
+    pub(crate) fn swap_remove(&mut self, index: usize) -> (Transform, RigidBody, Option<BodyId>) {
         self.ids.swap_remove(index);
         let transform = self.transforms.swap_remove(index);
         let body = self.bodies.swap_remove(index);
+        self.sleep_times.swap_remove(index);
         (transform, body, self.ids.get(index).copied())
     }
 }
@@ -173,6 +188,8 @@ pub struct PhysicsSystem {
     statics: StaticSet,
     /// Bodies that step.
     awake: AwakeSet,
+    /// The islands, and the sleeping ones' bodies. Empty without contacts.
+    islands: Islands,
     /// How many records hold a collider.
     collider_count: usize,
     /// ColliderId → Entity reverse mapping.
@@ -324,6 +341,7 @@ impl PhysicsSystem {
             entity_to_body: HashMap::new(),
             statics: StaticSet::default(),
             awake: AwakeSet::default(),
+            islands: Islands::default(),
             collider_count: 0,
             collider_to_entity: Vec::new(),
             force_providers: Vec::new(),
@@ -416,10 +434,21 @@ impl PhysicsSystem {
         self.collider_count
     }
 
-    /// Number of entities with rigid bodies registered.
+    /// Number of entities with rigid bodies registered, sleeping ones
+    /// included.
     #[must_use]
     pub fn body_count(&self) -> usize {
-        self.awake.bodies.len()
+        self.awake.bodies.len() + self.islands.sleeping_bodies()
+    }
+
+    /// Whether `entity`'s body sleeps: its island has been still long enough
+    /// that nothing steps it until something wakes it — see
+    /// [`crate::contact`]. `false` for an entity with no body, and always in a
+    /// system without contacts.
+    #[must_use]
+    pub fn is_sleeping(&self, entity: Entity) -> bool {
+        self.record(entity)
+            .is_some_and(|record| record.set == BodySet::Sleeping)
     }
 
     // ── Dynamics setup ───────────────────────────────────────────────────
@@ -428,13 +457,15 @@ impl PhysicsSystem {
     ///
     /// Replaces any existing body. The entity will participate in the
     /// integration loop, from the transform it already has or from
-    /// [`Transform::IDENTITY`] if it has none.
+    /// [`Transform::IDENTITY`] if it has none. A sleeping body's island wakes.
     pub fn set_body(&mut self, entity: Entity, body: RigidBody) {
         let id = self.record_for(entity, Transform::IDENTITY);
+        self.wake(id);
         let record = self.records.get(id).expect("a live record");
         let index = record.index;
         match record.set {
             BodySet::Awake => self.awake.bodies[index] = body,
+            BodySet::Sleeping => unreachable!("woken above"),
             BodySet::Static => {
                 let (transform, moved) = self.statics.swap_remove(index);
                 self.reindex_to(moved, index);
@@ -451,9 +482,13 @@ impl PhysicsSystem {
 
     /// Set the world-space transform for `entity`.
     ///
-    /// If the entity has a collider, it is repositioned immediately.
+    /// If the entity has a collider, it is repositioned immediately. A
+    /// teleport wakes the entity's island and every sleeping island touching
+    /// it where it was; one that lands a static body on a sleeping one wakes
+    /// that too, on the next step.
     pub fn set_transform(&mut self, entity: Entity, transform: Transform) {
         let id = self.record_for(entity, transform);
+        self.disturb(id);
         *self.transform_slot(id) = transform;
         self.sync_collider(id);
         if let Some(pipeline) = self.contacts.as_mut()
@@ -466,17 +501,20 @@ impl PhysicsSystem {
                     records: &self.records,
                     statics: &self.statics,
                     awake: &self.awake,
+                    islands: &self.islands,
                 },
             );
         }
     }
 
-    /// Get a reference to an entity's rigid body.
+    /// Get a reference to an entity's rigid body. Reading a sleeping body
+    /// does not wake it.
     #[must_use]
     pub fn body(&self, entity: Entity) -> Option<&RigidBody> {
         let record = self.record(entity)?;
         match record.set {
             BodySet::Awake => Some(&self.awake.bodies[record.index]),
+            BodySet::Sleeping => Some(self.islands.body(record.island, record.index)),
             BodySet::Static => None,
         }
     }
@@ -493,13 +531,18 @@ impl PhysicsSystem {
     /// It hands back the body and nothing else, so it cannot move a collider:
     /// position lives in the transform, and changing that still goes through
     /// [`set_transform`](Self::set_transform), which repositions the broadphase.
+    ///
+    /// A sleeping body's island wakes: whatever is written — a velocity, a
+    /// force — must be stepped. Read with [`body`](Self::body) to leave it
+    /// asleep.
     #[must_use]
     pub fn body_mut(&mut self, entity: Entity) -> Option<&mut RigidBody> {
         let &id = self.entity_to_body.get(&entity)?;
+        self.wake(id);
         let record = self.records.get(id)?;
         match record.set {
             BodySet::Awake => Some(&mut self.awake.bodies[record.index]),
-            BodySet::Static => None,
+            BodySet::Static | BodySet::Sleeping => None,
         }
     }
 
@@ -510,6 +553,7 @@ impl PhysicsSystem {
         Some(match record.set {
             BodySet::Awake => &self.awake.transforms[record.index],
             BodySet::Static => &self.statics.transforms[record.index],
+            BodySet::Sleeping => self.islands.transform(record.island, record.index),
         })
     }
 
@@ -519,11 +563,14 @@ impl PhysicsSystem {
     /// Every registered entity starts with [`SurfaceMaterial::DEFAULT`]. In a
     /// system with contacts, each contact combines its two surfaces' materials
     /// every tick, so a change takes effect on the next
-    /// [`step`](Self::step); see [`crate::material`].
+    /// [`step`](Self::step); see [`crate::material`]. It wakes the entity's
+    /// island and every sleeping island touching it, whose friction may no
+    /// longer hold them.
     pub fn set_material(&mut self, entity: Entity, material: SurfaceMaterial) -> bool {
         let Some(&id) = self.entity_to_body.get(&entity) else {
             return false;
         };
+        self.disturb(id);
         match self.records.get_mut(id) {
             Some(record) => {
                 record.material = material;
@@ -562,6 +609,10 @@ impl PhysicsSystem {
     /// [`crate::ThrustForce::world_force`] computes the thrust vector to pass
     /// here from a body's orientation, so a per-entity thrust and a pipeline
     /// one are the same model either way.
+    ///
+    /// A sleeping body's island wakes, as it does for
+    /// [`apply_torque`](Self::apply_torque): a force applied every tick keeps
+    /// a body awake.
     pub fn apply_force(&mut self, entity: Entity, force: DVec3) -> bool {
         match self.body_mut(entity) {
             Some(body) => {
@@ -595,6 +646,9 @@ impl PhysicsSystem {
     /// The world-space position is `transform.position + component.offset`.
     /// The component is cached so [`PhysicsSystem::step`] can reposition the
     /// collider after integration.
+    ///
+    /// Replacing a collider wakes on [`remove_collider`](Self::remove_collider)'s
+    /// terms.
     pub fn set_collider(
         &mut self,
         entity: Entity,
@@ -602,6 +656,7 @@ impl PhysicsSystem {
         transform: &Transform,
     ) {
         let id = self.record_for(entity, *transform);
+        self.wake(id);
         *self.transform_slot(id) = *transform;
         self.remove_collider(entity);
 
@@ -651,6 +706,7 @@ impl PhysicsSystem {
                     records: &self.records,
                     statics: &self.statics,
                     awake: &self.awake,
+                    islands: &self.islands,
                 },
             );
             self.records.get_mut(id).expect("a live record").proxy = proxy;
@@ -664,6 +720,9 @@ impl PhysicsSystem {
     }
 
     /// Remove the collider and dynamics data for `entity`.
+    ///
+    /// Its island wakes, and so does every sleeping island that touched it:
+    /// see [`remove_collider`](Self::remove_collider).
     pub fn remove_entity(&mut self, entity: Entity) {
         self.remove_collider(entity);
         let Some(id) = self.entity_to_body.remove(&entity) else {
@@ -672,6 +731,9 @@ impl PhysicsSystem {
         let Some(record) = self.records.remove(id) else {
             return;
         };
+        if let Some(island) = record.island {
+            self.islands.remove_member(island, id);
+        }
         match record.set {
             BodySet::Static => {
                 let (_, moved) = self.statics.swap_remove(record.index);
@@ -681,19 +743,30 @@ impl PhysicsSystem {
                 let (_, _, moved) = self.awake.swap_remove(record.index);
                 self.reindex_to(moved, record.index);
             }
+            BodySet::Sleeping => unreachable!("remove_collider woke it"),
         }
     }
 
     /// Remove only the collider (no-op if none).
+    ///
+    /// A body losing its collider is a support taken away: its island wakes,
+    /// and so does every sleeping island touching it — a crate pulled out
+    /// from under a sleeping stack drops the stack.
     pub fn remove_collider(&mut self, entity: Entity) {
         let Some(&id) = self.entity_to_body.get(&entity) else {
             return;
         };
+        self.disturb(id);
         let Some(record) = self.records.get_mut(id) else {
             return;
         };
         if let (Some(proxy), Some(pipeline)) = (record.proxy.take(), self.contacts.as_mut()) {
             pipeline.destroy_proxy(proxy);
+            // Its contacts with the rest of its island are gone, so the
+            // island may be in pieces.
+            if let Some(island) = record.island {
+                self.islands.mark_removed(island);
+            }
         }
         if let Some((collider, _)) = record.collider.take() {
             self.world.remove(collider);
@@ -721,7 +794,9 @@ impl PhysicsSystem {
     /// [`SemiImplicitEuler`] split around the contact impulses. A force applied
     /// before the call is held for the whole tick. A body that touches nothing
     /// integrates exactly as the same number of contact-free substeps would,
-    /// short of the speed and rotation caps. See [`crate::contact`].
+    /// short of the speed and rotation caps. An island that has been still
+    /// long enough sleeps, and a sleeping body is not stepped at all. See
+    /// [`crate::contact`].
     ///
     /// Either way, collider positions are synced to the new transforms, and
     /// bodies are visited in the awake set's own order, which is the order of
@@ -742,62 +817,133 @@ impl PhysicsSystem {
         self.step_with_clock(dt, Some(clock));
     }
 
-    fn step_with_clock(&mut self, dt: f64, mut clock: Option<&mut dyn FnMut() -> f64>) {
-        let AwakeSet {
-            transforms, bodies, ..
-        } = &mut self.awake;
+    fn step_with_clock(&mut self, dt: f64, clock: Option<&mut dyn FnMut() -> f64>) {
+        if self.contacts.is_some() {
+            self.step_contacts(dt, clock);
+        } else {
+            apply_forces(&mut self.awake, &self.force_providers, dt);
+            let AwakeSet {
+                transforms, bodies, ..
+            } = &mut self.awake;
+            for (body, transform) in bodies.iter_mut().zip(transforms.iter_mut()) {
+                SemiImplicitEuler.step(body, transform, dt);
+            }
+            sync_colliders(&mut self.world, &self.records, &self.awake);
+        }
+    }
 
-        for (body, transform) in bodies.iter_mut().zip(transforms.iter()) {
-            for provider in &self.force_providers {
-                provider.apply(body, transform, dt);
+    /// One tick of a system with contacts: see [`crate::contact`].
+    ///
+    /// The forces go on after the narrow phase rather than before it, so an
+    /// island woken by a contact this tick feels them this tick; nothing
+    /// before the solver reads a force.
+    fn step_contacts(&mut self, dt: f64, mut clock: Option<&mut dyn FnMut() -> f64>) {
+        let Some(pipeline) = self.contacts.as_mut() else {
+            return;
+        };
+        let settings = pipeline.settings;
+        let mut read = || clock.as_mut().map(|clock| clock());
+        let start = read();
+        if !settings.sleep && self.islands.sleeping_bodies() > 0 {
+            self.islands.wake_all(&mut self.records, &mut self.awake);
+        }
+        self.islands.reconcile(&mut self.records, &self.awake);
+        let reconciled = read();
+
+        let lent = Bodies {
+            records: &self.records,
+            statics: &self.statics,
+            awake: &self.awake,
+            islands: &self.islands,
+        };
+        pipeline.update_pairs(lent, dt);
+        let paired = read();
+        pipeline.collide(lent, dt);
+        let collided = read();
+
+        // Wake before linking, so every island a link merges is awake.
+        let events = std::mem::take(&mut pipeline.events);
+        for &id in &events.wake {
+            self.islands
+                .wake_body(&mut self.records, &mut self.awake, id);
+        }
+        for &(a, b) in &events.links {
+            self.islands.link(&mut self.records, &mut self.awake, a, b);
+        }
+        for &id in &events.unlinks {
+            if let Some(island) = self.records.get(id).and_then(|record| record.island) {
+                self.islands.mark_removed(island);
             }
         }
+        let linked = read();
 
-        match self.contacts.as_mut() {
-            None => {
-                let AwakeSet {
-                    transforms, bodies, ..
-                } = &mut self.awake;
-                for (body, transform) in bodies.iter_mut().zip(transforms.iter_mut()) {
-                    SemiImplicitEuler.step(body, transform, dt);
+        apply_forces(&mut self.awake, &self.force_providers, dt);
+        pipeline.solve(
+            &self.records,
+            &self.statics,
+            &mut self.awake,
+            &self.islands,
+            dt,
+        );
+        let solved = read();
+
+        // Colliders follow before anything sleeps, so a body put to sleep
+        // this tick leaves its collider where it stopped.
+        sync_colliders(&mut self.world, &self.records, &self.awake);
+        let synced = read();
+
+        if settings.sleep {
+            island::update_timers(
+                &mut self.awake,
+                settings.sleep_speed,
+                settings.sleep_angular_speed,
+                dt,
+            );
+            for &id in &events.stirred {
+                if let Some(record) = self.records.get(id)
+                    && record.set == BodySet::Awake
+                {
+                    self.awake.sleep_times[record.index] = 0.0;
                 }
             }
-            Some(pipeline) => {
-                let mut read = || clock.as_mut().map(|clock| clock());
-                let start = read();
-                let lent = Bodies {
-                    records: &self.records,
-                    statics: &self.statics,
-                    awake: &self.awake,
-                };
-                pipeline.update_pairs(lent, dt);
-                let paired = read();
-                pipeline.collide(lent, dt);
-                let collided = read();
-                pipeline.solve(&self.records, &self.statics, &mut self.awake, dt);
-                let solved = read();
-                pipeline.counters.stages = match (start, paired, collided, solved) {
-                    (Some(start), Some(paired), Some(collided), Some(solved)) => Some(StageTimes {
-                        broadphase: paired - start,
-                        narrow_phase: collided - paired,
-                        solver: solved - collided,
-                    }),
-                    _ => None,
-                };
+            if let Some(island) =
+                self.islands
+                    .split_candidate(&self.records, &self.awake, settings.time_to_sleep)
+            {
+                let edges = pipeline.island_edges(&self.records, island);
+                self.islands.split(&mut self.records, island, edges);
             }
+            self.islands
+                .sleep_ready(&mut self.records, &mut self.awake, settings.time_to_sleep);
         }
+        let settled = read();
+        pipeline.events = events;
 
-        let AwakeSet {
-            ids, transforms, ..
-        } = &self.awake;
-        for (id, transform) in ids.iter().zip(transforms.iter()) {
-            let Some(record) = self.records.get(*id) else {
-                continue;
-            };
-            if let Some((collider, component)) = &record.collider {
-                place_collider(&mut self.world, *collider, component, transform);
-            }
-        }
+        let counters = &mut pipeline.counters;
+        counters.bodies = self.awake.ids.len();
+        counters.sleeping = self.islands.sleeping_bodies();
+        counters.islands = self.islands.awake_islands();
+        counters.sleeping_islands = self.islands.sleeping_islands();
+        counters.stages = match (
+            start, reconciled, paired, collided, linked, solved, synced, settled,
+        ) {
+            (
+                Some(start),
+                Some(reconciled),
+                Some(paired),
+                Some(collided),
+                Some(linked),
+                Some(solved),
+                Some(synced),
+                Some(settled),
+            ) => Some(StageTimes {
+                broadphase: paired - reconciled,
+                narrow_phase: collided - paired,
+                solver: solved - linked,
+                islands: (reconciled - start) + (linked - collided) + (settled - synced),
+            }),
+            _ => None,
+        };
     }
 
     // ── Queries ────────────────────────────────────────────────────────
@@ -995,6 +1141,7 @@ impl PhysicsSystem {
             collider: None,
             material: SurfaceMaterial::DEFAULT,
             proxy: None,
+            island: None,
         });
         let index = self.statics.push(id, transform);
         self.records.get_mut(id).expect("just inserted").index = index;
@@ -1002,12 +1149,44 @@ impl PhysicsSystem {
         id
     }
 
-    /// The transform of the body `id` names, wherever it lives.
+    /// The transform of the body `id` names, waking it first if it sleeps.
     fn transform_slot(&mut self, id: BodyId) -> &mut Transform {
+        self.wake(id);
         let record = self.records.get(id).expect("a live record");
         match record.set {
             BodySet::Awake => &mut self.awake.transforms[record.index],
             BodySet::Static => &mut self.statics.transforms[record.index],
+            BodySet::Sleeping => unreachable!("woken above"),
+        }
+    }
+
+    /// Wakes the island of the body `id` names, if it sleeps.
+    fn wake(&mut self, id: BodyId) {
+        self.islands
+            .wake_body(&mut self.records, &mut self.awake, id);
+    }
+
+    /// Wakes the island of the body `id` names and, while anything sleeps,
+    /// every island touching it: what a change to a body that others may rest
+    /// on — a teleport, a new material, a collider taken away — must do.
+    ///
+    /// Finding what touches a body is a walk over every contact, so it is
+    /// skipped when nothing sleeps and there is nothing to wake.
+    fn disturb(&mut self, id: BodyId) {
+        self.wake(id);
+        if self.islands.sleeping_bodies() == 0 {
+            return;
+        }
+        let (Some(pipeline), Some(proxy)) = (
+            self.contacts.as_ref(),
+            self.records.get(id).and_then(|record| record.proxy),
+        ) else {
+            return;
+        };
+        let mut touching = Vec::new();
+        pipeline.touching_bodies(proxy, &mut touching);
+        for other in touching {
+            self.wake(other);
         }
     }
 
@@ -1031,8 +1210,30 @@ impl PhysicsSystem {
         let transform = match record.set {
             BodySet::Awake => &self.awake.transforms[record.index],
             BodySet::Static => &self.statics.transforms[record.index],
+            BodySet::Sleeping => self.islands.transform(record.island, record.index),
         };
         place_collider(&mut self.world, *collider, component, transform);
+    }
+}
+
+/// Every force provider onto every awake body.
+fn apply_forces(awake: &mut AwakeSet, providers: &[Box<dyn ForceProvider>], dt: f64) {
+    let AwakeSet {
+        transforms, bodies, ..
+    } = awake;
+    for (body, transform) in bodies.iter_mut().zip(transforms.iter()) {
+        for provider in providers {
+            provider.apply(body, transform, dt);
+        }
+    }
+}
+
+/// Every awake body's collider moved to where its body is.
+fn sync_colliders(world: &mut PhysicsWorld, records: &Pool<BodyRecord>, awake: &AwakeSet) {
+    for (id, transform) in awake.ids.iter().zip(awake.transforms.iter()) {
+        if let Some((collider, component)) = records.get(*id).and_then(|r| r.collider.as_ref()) {
+            place_collider(world, *collider, component, transform);
+        }
     }
 }
 
@@ -1092,7 +1293,7 @@ impl std::fmt::Debug for PhysicsSystem {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PhysicsSystem")
             .field("collider_count", &self.collider_count)
-            .field("body_count", &self.awake.bodies.len())
+            .field("body_count", &self.body_count())
             .field("force_provider_count", &self.force_providers.len())
             .finish()
     }
@@ -1135,6 +1336,10 @@ impl SystemTrait for PhysicsSystem {
     /// sets' order, which depends on the history of calls that built them, and
     /// every float goes in canonicalised — `-0.0` as `+0.0`, every `NaN` as one — so the hash
     /// is a function of the simulation state and nothing else.
+    ///
+    /// In a system with contacts each body's sleep goes in too — whether it
+    /// sleeps, and if not how long it has been still — since two states that
+    /// differ only there step differently.
     fn hash_state(&self, hasher: &mut dyn std::hash::Hasher) {
         let mut entities: Vec<(u64, &BodyRecord)> = self
             .records
@@ -1149,6 +1354,10 @@ impl SystemTrait for PhysicsSystem {
                 BodySet::Awake => (
                     &self.awake.transforms[record.index],
                     Some(&self.awake.bodies[record.index]),
+                ),
+                BodySet::Sleeping => (
+                    self.islands.transform(record.island, record.index),
+                    Some(self.islands.body(record.island, record.index)),
                 ),
                 BodySet::Static => (&self.statics.transforms[record.index], None),
             };
@@ -1190,6 +1399,16 @@ impl SystemTrait for PhysicsSystem {
                     {
                         hasher.write(&canonical_bits(value).to_le_bytes());
                     }
+                    if self.contacts.is_some() {
+                        match record.set {
+                            BodySet::Awake => {
+                                hasher.write(&[0]);
+                                let still = self.awake.sleep_times[record.index];
+                                hasher.write(&canonical_bits(still).to_le_bytes());
+                            }
+                            BodySet::Sleeping | BodySet::Static => hasher.write(&[1]),
+                        }
+                    }
                 }
                 None => hasher.write(&[0]),
             }
@@ -1216,6 +1435,7 @@ impl SystemTrait for PhysicsSystem {
                 let transform = match record.set {
                     BodySet::Awake => &self.awake.transforms[record.index],
                     BodySet::Static => &self.statics.transforms[record.index],
+                    BodySet::Sleeping => self.islands.transform(record.island, record.index),
                 };
                 (record.entity.to_bits(), transform)
             })

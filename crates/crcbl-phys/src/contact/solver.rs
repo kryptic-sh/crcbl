@@ -68,6 +68,7 @@ use core::f64::consts::TAU;
 use crcbl_core::Pool;
 use glam::{DMat3, DVec3};
 
+use super::island::Islands;
 use super::manifold::{MAX_POINTS, orthonormal_basis};
 use super::{Bodies, ContactPipeline, KineticContact, KineticSource, WarmImpulses};
 use crate::components::{RigidBody, Transform};
@@ -288,6 +289,7 @@ impl ContactPipeline {
         records: &Pool<BodyRecord>,
         statics: &StaticSet,
         awake: &mut AwakeSet,
+        islands: &Islands,
         dt: f64,
     ) {
         let settings = self.settings;
@@ -312,6 +314,7 @@ impl ContactPipeline {
                 records,
                 statics,
                 awake,
+                islands,
             },
             &mut scratch,
             dt,
@@ -370,7 +373,9 @@ impl ContactPipeline {
         self.solver = scratch;
     }
 
-    /// Builds the constraints for every touching contact with a dynamic side.
+    /// Builds the constraints for every touching contact with an awake
+    /// dynamic side. A sleeping island's contacts are passed over on a look
+    /// at their records, before either side is placed.
     fn prepare(&self, world: Bodies<'_>, scratch: &mut Scratch, dt: f64, h: f64) {
         let settings = &self.settings;
         let hertz = settings
@@ -384,16 +389,13 @@ impl ContactPipeline {
             let Some(contact) = contact else {
                 continue;
             };
-            if !contact.touching {
+            if !contact.touching || !self.solvable(contact.a, contact.b, world) {
                 continue;
             }
             let (Some(a), Some(b)) = (self.side(contact.a, world), self.side(contact.b, world))
             else {
                 continue;
             };
-            if a.inverse_mass == 0.0 && b.inverse_mass == 0.0 {
-                continue;
-            }
             let material = a.material.combine(&b.material);
             let normal = contact.manifold.normal;
             let tangents = {

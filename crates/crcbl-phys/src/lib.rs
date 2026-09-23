@@ -12,7 +12,7 @@
 //! | **L0** | Queries + kinematics: ray/segment/sweep/overlap, trigger volumes, character controller | Current |
 //! | **L1** | Forces + ballistics + orbits: gravity, drag, thrust, integrators, Kepler propagation | Current |
 //! | **CCD** | Swept collision: TOI, motion-inflated broadphase | Current |
-//! | **L2** | Contact solver: sequential impulses, warm starting, islands | Rung 1 |
+//! | **L2** | Contact solver: sequential impulses, warm starting, islands | Rung 3 |
 //!
 //! L1 today is the force pipeline and one integrator: [`GravityForce`],
 //! [`DragForce`], [`DampingForce`] and [`ThrustForce`] feed
@@ -27,14 +27,15 @@
 //! are made.
 //! [`SurfaceMaterial`] carries each body's friction and restitution.
 //!
-//! L2 is rungs 1 and 2 of `docs/plan/36-contact-solver.md`, in [`contact`]: a
+//! L2 is rungs 1 to 3 of `docs/plan/36-contact-solver.md`, in [`contact`]: a
 //! system made with [`PhysicsSystem::with_contacts`] collides spheres,
 //! capsules and boxes through split broadphase trees, analytic manifolds, a
 //! cached separating axis test with clipping for box pairs, and a substepped
 //! soft solver with warm starting by feature id, centroid and twist friction,
 //! speculative contacts and a restitution pass, and raises a
-//! [`KineticContact`] for each hard impact. Convex hulls, islands and sleep
-//! are later rungs.
+//! [`KineticContact`] for each hard impact. Still bodies gather into
+//! persistent islands that sleep, costing nothing until something wakes them.
+//! Convex hulls, sweeps and joints are later rungs.
 //!
 //! [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries

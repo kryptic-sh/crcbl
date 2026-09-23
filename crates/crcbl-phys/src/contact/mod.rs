@@ -1,23 +1,23 @@
-//! Contacts: rungs 1 and 2 of `docs/plan/36-contact-solver.md`.
+//! Contacts: rungs 1 to 3 of `docs/plan/36-contact-solver.md`.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
 //!
-//!   forces ─▶ broadphase ─▶ narrow phase ─▶ solver ×substeps ─▶ restitution
-//!             split trees    one manifold    integrate velocities
-//!             move buffer    per pair,       warm start
-//!             pair set       feature ids     solve (soft, biased)
-//!                            matched to      integrate positions
-//!                            last tick's     relax (rigid)
-//!                            impulses
+//!   broadphase ─▶ narrow phase ─▶ islands ─▶ forces ─▶ solver ×substeps ─▶ sleep
+//!   split trees   one manifold    wake what            integrate velocities  timers,
+//!   move buffer   per pair,       was touched,         warm start            split one
+//!   pair set      feature ids     merge what           solve (soft, biased)  island,
+//!                 matched to      began touching       integrate positions   sleep the
+//!                 last tick's                          relax (rigid)         still ones
+//!                 impulses                             then restitution
 //! ```
 //!
 //! Collision runs **once a tick** and the solver runs
 //! [`ContactSettings::substeps`] substeps, each with one biased and one relaxed
 //! pass, warm-started from the tick before: the Soft Step of decision 1.
 //! Restitution is its own pass after the substeps. See `broadphase.rs` in this
-//! directory for the pairs, [`manifold`] for the shapes and `solver.rs` for the
-//! arithmetic.
+//! directory for the pairs, [`manifold`] for the shapes, `solver.rs` for the
+//! arithmetic and `island.rs` for islands and sleep.
 //!
 //! # Opt in, per system
 //!
@@ -37,17 +37,43 @@
 //! with a twist term about its normal, in place of friction at every point —
 //! see `solver.rs`.
 //!
+//! # What rung 3 added
+//!
+//! Persistent islands of dynamic bodies joined by touching contacts, merged as
+//! contacts begin and split lazily, and **sleep**: an island all of whose
+//! bodies have moved slower than [`ContactSettings::sleep_speed`] and turned
+//! slower than [`ContactSettings::sleep_angular_speed`] for
+//! [`ContactSettings::time_to_sleep`] leaves the awake set, and costs the
+//! step, the broadphase update and the solver nothing until it wakes. A
+//! sleeping island wakes when
+//!
+//! - a contact with one of its bodies begins touching a body that moves: an
+//!   awake dynamic body, or a kinematic one with a velocity;
+//! - one of its bodies is given a force, a torque, a velocity or a whole new
+//!   body — [`crate::PhysicsSystem::apply_force`],
+//!   [`crate::PhysicsSystem::apply_torque`],
+//!   [`crate::PhysicsSystem::body_mut`], [`crate::PhysicsSystem::set_body`];
+//! - one of its bodies, or a body touching one, is teleported with
+//!   [`crate::PhysicsSystem::set_transform`], given a new collider or
+//!   material, or loses its collider or its entity — a support taken away;
+//! - a body that does not move is placed or created overlapping one of its
+//!   bodies, which a teleported or new static collider is.
+//!
+//! A query wakes nothing, and neither does reading a body or a transform. See
+//! `island.rs`.
+//!
 //! # What is not done yet
 //!
 //! General convex hulls, and GJK for spheres and capsules against them: the
 //! collider set has no hull, and against a box the analytic pairs are exact.
-//! Nothing sleeps (rung 3). Nothing sweeps (rung 4): speculative contacts are
+//! Nothing sweeps (rung 4): speculative contacts are
 //! what stop a fast body, and the speculative distance grows with the pair's
 //! speed so they can. The solver is scalar `f64` (rung 6 makes it wide). A
 //! tall stack needs [`ContactSettings::TALL_STACK`] for its whole system,
 //! since substeps are not yet per group.
 
 pub(crate) mod broadphase;
+pub(crate) mod island;
 pub mod manifold;
 pub mod shape;
 pub(crate) mod solver;
@@ -59,6 +85,7 @@ use crcbl_ecs::Entity;
 use glam::DVec3;
 
 use self::broadphase::{Broadphase, PlaneBounds, ProxyId, ProxyKind};
+use self::island::{IslandId, Islands};
 use self::manifold::{MAX_POINTS, Manifold, SatCache};
 use self::shape::ContactShape;
 use crate::collider::Aabb;
@@ -99,13 +126,32 @@ pub struct ContactSettings {
     /// The smallest normal impulse over a tick, in N·s, that raises a
     /// [`KineticContact`].
     pub kinetic_impulse: f64,
+    /// Whether islands sleep. Turned off, every sleeping island wakes on the
+    /// next step.
+    pub sleep: bool,
+    /// How slow a dynamic body must move to count as still, in m/s.
+    pub sleep_speed: f64,
+    /// How slow a dynamic body must turn to count as still, in rad/s.
+    pub sleep_angular_speed: f64,
+    /// How long every body of an island must stay still before the island
+    /// sleeps, in seconds.
+    pub time_to_sleep: f64,
 }
 
 impl ContactSettings {
     /// Four substeps, 30 Hz contacts at damping ratio 10 pushing out at up to
     /// 3 m/s, a 2 cm speculative distance, bounces above 1 m/s,
-    /// 400 m/s and a quarter turn a substep, warm starting on, and any impulse
-    /// of a newton-second raising an event.
+    /// 400 m/s and a quarter turn a substep, warm starting on, any impulse
+    /// of a newton-second raising an event, and an island sleeping once its
+    /// bodies have stayed under 5 cm/s and 0.1 rad/s for half a second.
+    ///
+    /// **The sleep thresholds.** Half a second under 5 cm/s is decision 4's,
+    /// and Box2D v3's `B2_TIME_TO_SLEEP` and default sleep threshold. Box2D
+    /// judges turning by the speed it gives the body's farthest point; this
+    /// judges it by angular speed, at 0.1 rad/s — the turn that moves a point
+    /// half a metre out at 5 cm/s, so for the half-metre props it is tuned for
+    /// the two agree. Angular speed has the merit that a body with no
+    /// collider, which has no farthest point, cannot sleep while it spins.
     pub const DEFAULT: Self = Self {
         substeps: 4,
         contact_hertz: 30.0,
@@ -117,6 +163,10 @@ impl ContactSettings {
         max_rotation: 0.25 * core::f64::consts::PI,
         warm_starting: true,
         kinetic_impulse: 1.0,
+        sleep: true,
+        sleep_speed: 0.05,
+        sleep_angular_speed: 0.1,
+        time_to_sleep: 0.5,
     };
 
     /// [`DEFAULT`](Self::DEFAULT) with twice the substeps and three times the
@@ -156,18 +206,31 @@ pub struct StageTimes {
     pub broadphase: f64,
     /// Every pair's manifold.
     pub narrow_phase: f64,
-    /// Every substep, the restitution pass and storing the impulses.
+    /// The forces, every substep, the restitution pass and storing the
+    /// impulses.
     pub solver: f64,
+    /// Keeping the islands: giving new bodies theirs, waking and merging
+    /// them, the sleep timers, a split and putting still islands to sleep.
+    pub islands: f64,
 }
 
 /// What the last step of a system with contacts did.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct ContactCounters {
-    /// Bodies that step.
+    /// Bodies that step: the awake ones, dynamic and kinematic.
     pub bodies: usize,
-    /// Pairs in the pair set: contacts that exist, touching or not.
+    /// Bodies whose island sleeps: nothing steps them or solves them.
+    pub sleeping: usize,
+    /// Islands awake.
+    pub islands: usize,
+    /// Islands asleep.
+    pub sleeping_islands: usize,
+    /// Pairs in the pair set: contacts that exist, touching or not, asleep
+    /// or not.
     pub pairs: usize,
-    /// Contacts whose manifold has a point, speculative ones included.
+    /// Contacts the step collided whose manifold has a point, speculative
+    /// ones included. A sleeping island's contacts are not collided, so they
+    /// are not counted here, nor their points below.
     pub touching: usize,
     /// Manifold points over every contact.
     pub points: usize,
@@ -352,6 +415,64 @@ pub(crate) struct Bodies<'a> {
     pub(crate) records: &'a Pool<BodyRecord>,
     pub(crate) statics: &'a StaticSet,
     pub(crate) awake: &'a AwakeSet,
+    pub(crate) islands: &'a Islands,
+}
+
+/// How one side of a contact takes part in a tick: what the narrow phase and
+/// the solver need to know before they resolve the side in full, and what the
+/// islands need to know about it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Presence {
+    /// An awake dynamic body.
+    Dynamic(BodyId),
+    /// A kinematic body with a velocity.
+    Moving,
+    /// A static body, a kinematic one at rest, or a plane.
+    Still,
+    /// A body whose island sleeps.
+    Asleep(BodyId),
+}
+
+impl Presence {
+    /// Whether it moves this tick, so a contact with it must be collided.
+    const fn moves(self) -> bool {
+        matches!(self, Self::Dynamic(_) | Self::Moving)
+    }
+
+    /// The body, if it belongs to an island.
+    const fn island_body(self) -> Option<BodyId> {
+        match self {
+            Self::Dynamic(id) | Self::Asleep(id) => Some(id),
+            Self::Moving | Self::Still => None,
+        }
+    }
+}
+
+/// What a step's broadphase and narrow phase found that the islands must act
+/// on, for the system to apply before it solves.
+#[derive(Debug, Default)]
+pub(crate) struct IslandEvents {
+    /// Sleeping bodies to wake: touched by something that moves, or found
+    /// overlapping something placed.
+    pub(crate) wake: Vec<BodyId>,
+    /// Pairs of island bodies whose contact began touching: their islands
+    /// merge.
+    pub(crate) links: Vec<(BodyId, BodyId)>,
+    /// An island body of each contact between two island bodies that stopped
+    /// touching: its island may be in pieces.
+    pub(crate) unlinks: Vec<BodyId>,
+    /// Awake dynamic bodies touching a moving kinematic body: they are not
+    /// still, whatever their own speed.
+    pub(crate) stirred: Vec<BodyId>,
+}
+
+impl IslandEvents {
+    fn clear(&mut self) {
+        self.wake.clear();
+        self.links.clear();
+        self.unlinks.clear();
+        self.stirred.clear();
+    }
 }
 
 /// The contact pipeline a system with contacts owns.
@@ -370,6 +491,9 @@ pub(crate) struct ContactPipeline {
     ended_between_steps: u64,
     pub(crate) counters: ContactCounters,
     pub(crate) kinetic: Vec<KineticContact>,
+    pub(crate) events: IslandEvents,
+    /// The contacts inside an island being split.
+    edges: Vec<(BodyId, BodyId)>,
     solver: solver::Scratch,
 }
 
@@ -386,6 +510,8 @@ impl ContactPipeline {
             ended_between_steps: 0,
             counters: ContactCounters::default(),
             kinetic: Vec::new(),
+            events: IslandEvents::default(),
+            edges: Vec::new(),
             solver: solver::Scratch::default(),
         }
     }
@@ -399,10 +525,7 @@ impl ContactPipeline {
         let (_, component) = record.collider.as_ref()?;
         let transform = transform_of(record, bodies);
         let shape = ContactShape::placed(component, transform)?;
-        let kind = match record.set {
-            BodySet::Static => ProxyKind::Static,
-            BodySet::Awake => ProxyKind::Moving,
-        };
+        let kind = proxy_kind(record.set);
         let proxy = self
             .broadphase
             .create(kind, shape.aabb().expect("a body's shape is bounded"));
@@ -444,13 +567,7 @@ impl ContactPipeline {
 
     /// Moves a proxy to the tree its body's set belongs in.
     pub(crate) fn body_changed_set(&mut self, proxy: ProxyId, set: BodySet) {
-        self.broadphase.set_kind(
-            proxy,
-            match set {
-                BodySet::Static => ProxyKind::Static,
-                BodySet::Awake => ProxyKind::Moving,
-            },
-        );
+        self.broadphase.set_kind(proxy, proxy_kind(set));
     }
 
     /// Tells the broadphase a body was placed by hand.
@@ -480,7 +597,13 @@ impl ContactPipeline {
 
     /// Brings every moving proxy's bounds up to date for a tick of `dt` and
     /// turns the pairs that are new into contacts.
+    ///
+    /// A sleeping body's proxy is not updated — it has not moved — and a new
+    /// pair between a sleeping body and one that does not move either is a
+    /// static or resting kinematic body placed or created where the sleeper
+    /// is, which wakes it: the narrow phase never collides such a pair.
     pub(crate) fn update_pairs(&mut self, bodies: Bodies<'_>, dt: f64) {
+        self.events.clear();
         let awake = bodies.awake;
         for index in 0..awake.ids.len() {
             let Some(record) = bodies.records.get(awake.ids[index]) else {
@@ -533,6 +656,11 @@ impl ContactPipeline {
                 self.broadphase.remove_pair(p, q);
                 continue;
             };
+            match (self.presence(p, bodies), self.presence(q, bodies)) {
+                (Some(Presence::Asleep(id)), Some(Presence::Still))
+                | (Some(Presence::Still), Some(Presence::Asleep(id))) => self.events.wake.push(id),
+                _ => {}
+            }
             let (a, b) = if sq.shape.rank() < sp.shape.rank() {
                 (q, p)
             } else {
@@ -556,6 +684,12 @@ impl ContactPipeline {
     /// Every contact's manifold for a tick of `dt`, with last tick's impulses
     /// matched onto the points by feature id, and the pairs whose fat bounds
     /// parted ended.
+    ///
+    /// A contact neither of whose sides moves, and one of which sleeps, is
+    /// left exactly as it was: that is a sleeping island's contact, with
+    /// nothing to change it. A sleeping body touched by one that moves is
+    /// woken, and contacts beginning or ending between two island bodies are
+    /// reported for their islands to merge or be split.
     pub(crate) fn collide(&mut self, bodies: Bodies<'_>, dt: f64) {
         let counters = &mut self.counters;
         counters.touching = 0;
@@ -569,13 +703,29 @@ impl ContactPipeline {
             let Some(mut contact) = self.contacts[slot] else {
                 continue;
             };
+            let (pa, pb) = (
+                self.presence(contact.a, bodies),
+                self.presence(contact.b, bodies),
+            );
+            if let (Some(pa), Some(pb)) = (pa, pb)
+                && !pa.moves()
+                && !pb.moves()
+                && (matches!(pa, Presence::Asleep(_)) || matches!(pb, Presence::Asleep(_)))
+            {
+                continue;
+            }
             let sides = (self.side(contact.a, bodies), self.side(contact.b, bodies));
-            let (Some(a), Some(b)) = sides else {
+            let (Some(a), Some(b), Some(pa), Some(pb)) = (sides.0, sides.1, pa, pb) else {
                 self.counters.ended += u64::from(self.destroy_contact(slot));
                 continue;
             };
+            let island_pair = pa.island_body().zip(pb.island_body());
             if !self.broadphase.overlaps(contact.a, contact.b) {
-                self.counters.ended += u64::from(self.destroy_contact(slot));
+                let was_touching = self.destroy_contact(slot);
+                self.counters.ended += u64::from(was_touching);
+                if was_touching && let Some((a, _)) = island_pair {
+                    self.events.unlinks.push(a);
+                }
                 continue;
             }
 
@@ -617,12 +767,37 @@ impl ContactPipeline {
             let touching = !manifold.points().is_empty();
             if touching && !contact.touching {
                 self.counters.begun += 1;
+                if let Some(pair) = island_pair {
+                    self.events.links.push(pair);
+                }
             } else if !touching && contact.touching {
                 self.counters.ended += 1;
+                if let Some((a, _)) = island_pair {
+                    self.events.unlinks.push(a);
+                }
             }
             if touching {
                 self.counters.touching += 1;
                 self.counters.points += manifold.points().len();
+                for (this, other) in [(pa, pb), (pb, pa)] {
+                    match (this, other) {
+                        // Linked as well as woken even when the contact did
+                        // not just begin: a body that became dynamic while
+                        // touching begins nothing, and this is where its
+                        // island finds the one it touches.
+                        (Presence::Asleep(id), Presence::Dynamic(other)) => {
+                            self.events.wake.push(id);
+                            self.events.links.push((id, other));
+                        }
+                        (Presence::Asleep(id), other) if other.moves() => {
+                            self.events.wake.push(id);
+                        }
+                        (Presence::Dynamic(id), Presence::Moving) => {
+                            self.events.stirred.push(id);
+                        }
+                        _ => {}
+                    }
+                }
             }
             self.contacts[slot] = Some(Contact {
                 manifold,
@@ -632,7 +807,51 @@ impl ContactPipeline {
             });
         }
         self.counters.pairs = self.broadphase.pair_count();
-        self.counters.bodies = bodies.awake.ids.len();
+    }
+
+    /// Every body touching the body whose proxy is `proxy`, into `out`.
+    pub(crate) fn touching_bodies(&self, proxy: ProxyId, out: &mut Vec<BodyId>) {
+        for contact in self.contacts.iter().flatten() {
+            if !contact.touching {
+                continue;
+            }
+            let other = if contact.a == proxy {
+                contact.b
+            } else if contact.b == proxy {
+                contact.a
+            } else {
+                continue;
+            };
+            if let Some(Some(Owner::Body(id))) = self.owners.get(other as usize) {
+                out.push(*id);
+            }
+        }
+    }
+
+    /// Every touching contact between two bodies of island `island`, in pool
+    /// order: what [`Islands::split`] needs.
+    pub(crate) fn island_edges(
+        &mut self,
+        records: &Pool<BodyRecord>,
+        island: IslandId,
+    ) -> &[(BodyId, BodyId)] {
+        self.edges.clear();
+        let in_island = |proxy: ProxyId| match self.owners.get(proxy as usize) {
+            Some(Some(Owner::Body(id)))
+                if records.get(*id).and_then(|record| record.island) == Some(island) =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        };
+        for contact in self.contacts.iter().flatten() {
+            if contact.touching
+                && let (Some(a), Some(b)) = (in_island(contact.a), in_island(contact.b))
+            {
+                self.edges.push((a, b));
+            }
+        }
+        &self.edges
     }
 
     /// Every live contact, in pool order.
@@ -729,6 +948,50 @@ impl ContactPipeline {
     fn side(&self, proxy: ProxyId, bodies: Bodies<'_>) -> Option<Side> {
         owner_side(&self.owners, &self.planes, proxy, bodies)
     }
+
+    /// How a proxy's owner takes part this tick, read from its record without
+    /// placing its shape: cheap enough to ask of every contact, asleep ones
+    /// included.
+    fn presence(&self, proxy: ProxyId, bodies: Bodies<'_>) -> Option<Presence> {
+        match (*self.owners.get(proxy as usize)?)? {
+            Owner::Plane(_) => Some(Presence::Still),
+            Owner::Body(id) => {
+                let record = bodies.records.get(id)?;
+                Some(match record.set {
+                    BodySet::Static => Presence::Still,
+                    BodySet::Sleeping => Presence::Asleep(id),
+                    BodySet::Awake => {
+                        let body = &bodies.awake.bodies[record.index];
+                        if body.is_dynamic() {
+                            Presence::Dynamic(id)
+                        } else if body.velocity != DVec3::ZERO
+                            || body.angular_velocity != DVec3::ZERO
+                        {
+                            Presence::Moving
+                        } else {
+                            Presence::Still
+                        }
+                    }
+                })
+            }
+        }
+    }
+
+    /// Whether the contact between `a` and `b` has a side the solver moves:
+    /// an awake dynamic body.
+    fn solvable(&self, a: ProxyId, b: ProxyId, bodies: Bodies<'_>) -> bool {
+        let dynamic = |proxy| matches!(self.presence(proxy, bodies), Some(Presence::Dynamic(_)));
+        dynamic(a) || dynamic(b)
+    }
+}
+
+/// The broadphase tree a body in `set` belongs in: a sleeping body stays in the
+/// moving tree, so waking it moves nothing.
+const fn proxy_kind(set: BodySet) -> ProxyKind {
+    match set {
+        BodySet::Static => ProxyKind::Static,
+        BodySet::Awake | BodySet::Sleeping => ProxyKind::Moving,
+    }
 }
 
 /// A proxy's side of a contact, resolved against `bodies`.
@@ -763,6 +1026,10 @@ fn owner_side(
             let shape = ContactShape::placed(component, transform)?;
             let (awake, velocity, angular_velocity, inverse_mass, mass) = match record.set {
                 BodySet::Static => (None, DVec3::ZERO, DVec3::ZERO, 0.0, f64::INFINITY),
+                BodySet::Sleeping => {
+                    let body = bodies.islands.body(record.island, record.index);
+                    (None, DVec3::ZERO, DVec3::ZERO, body.inverse_mass, body.mass)
+                }
                 BodySet::Awake => {
                     let body = &bodies.awake.bodies[record.index];
                     (
@@ -794,5 +1061,6 @@ fn transform_of<'a>(record: &BodyRecord, bodies: Bodies<'a>) -> &'a crate::compo
     match record.set {
         BodySet::Static => &bodies.statics.transforms[record.index],
         BodySet::Awake => &bodies.awake.transforms[record.index],
+        BodySet::Sleeping => bodies.islands.transform(record.island, record.index),
     }
 }

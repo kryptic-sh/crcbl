@@ -27,12 +27,26 @@ fn entity(index: u32) -> Entity {
     Entity::from_bits((1u64 << 32) | u64::from(index)).expect("generation 1 is never zero")
 }
 
-/// A system with contacts, Earth gravity and a floor at `y = 0` of `floor`.
-fn system(floor: SurfaceMaterial) -> PhysicsSystem {
-    let mut phys = PhysicsSystem::with_contacts(ContactSettings::DEFAULT);
+/// The default settings with sleep off, for a test that measures the solver
+/// holding a stack up over a long run: asleep, a stack holds by not being
+/// solved at all.
+const AWAKE: ContactSettings = ContactSettings {
+    sleep: false,
+    ..ContactSettings::DEFAULT
+};
+
+/// A system with contacts at `settings`, Earth gravity and a floor at `y = 0`
+/// of `floor`.
+fn system_with(settings: ContactSettings, floor: SurfaceMaterial) -> PhysicsSystem {
+    let mut phys = PhysicsSystem::with_contacts(settings);
     phys.add_force_provider(Box::new(GravityForce::EARTH));
     phys.add_plane(DVec3::Y, 0.0, floor);
     phys
+}
+
+/// [`system_with`] at the default settings.
+fn system(floor: SurfaceMaterial) -> PhysicsSystem {
+    system_with(ContactSettings::DEFAULT, floor)
 }
 
 /// A dynamic box of `mass` and half-extents `half`, at `at` turned by
@@ -97,9 +111,11 @@ fn position(phys: &PhysicsSystem, e: Entity) -> DVec3 {
 /// A flickering id is the bug decision 2's ids exist to prevent: each flicker
 /// throws away that point's warm start, and a stack shivers. Measured on
 /// 2026-09-23: from the second tick on, 4 points and 4 persisted every tick.
+///
+/// Sleep is off, since the ids are only rebuilt while the box is awake.
 #[test]
 fn a_box_resting_on_a_box_keeps_its_feature_ids() {
-    let mut phys = PhysicsSystem::with_contacts(ContactSettings::DEFAULT);
+    let mut phys = PhysicsSystem::with_contacts(AWAKE);
     phys.add_force_provider(Box::new(GravityForce::EARTH));
     slab(
         &mut phys,
@@ -259,9 +275,13 @@ fn pyramid(phys: &mut PhysicsSystem, base: u32, half: f64) -> (Vec<Entity>, Enti
 /// 2.76 cm — the top box, sinking by the squeeze of the twenty rows under it —
 /// and it moved 0.05 mm sideways; 4 points a manifold, and after the first
 /// second no tick persisted fewer than 99.7% of its ids.
+///
+/// Sleep is off: this is the solver's regression test, and a sleeping pyramid
+/// is not solved. `a_pyramid_settles_to_sleep` in `settling.rs` is the same
+/// pyramid with sleep on.
 #[test]
 fn a_base_twenty_pyramid_holds() {
-    let mut phys = system(CRATE);
+    let mut phys = system_with(AWAKE, CRATE);
     let (boxes, top) = pyramid(&mut phys, 20, 0.5);
     assert_eq!(boxes.len(), 210);
     let starts: Vec<DVec3> = boxes.iter().map(|&e| position(&phys, e)).collect();
@@ -441,7 +461,8 @@ fn a_box_spun_flat_is_stopped_by_twist_friction() {
 // Determinism
 // ---------------------------------------------------------------------------
 
-/// A base-20 pyramid after `ticks`, hashed.
+/// A base-20 pyramid after `ticks`, hashed, with sleep off so it is still
+/// being solved at every tick asked about.
 fn pyramid_hash(ticks: u32) -> u64 {
     use std::hash::Hasher;
     struct Fnv(u64);
@@ -455,7 +476,7 @@ fn pyramid_hash(ticks: u32) -> u64 {
             }
         }
     }
-    let mut phys = system(CRATE);
+    let mut phys = system_with(AWAKE, CRATE);
     pyramid(&mut phys, 20, 0.5);
     for _ in 0..ticks {
         phys.step(DT);

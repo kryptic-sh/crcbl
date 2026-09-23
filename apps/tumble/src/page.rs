@@ -4,7 +4,9 @@
 //!  ┌ tumble ───────────────────────┐
 //!  │ ROOM                     wall │
 //!  │ TICK                      612 │
-//!  │ BODIES                    120 │
+//!  │ AWAKE                     120 │
+//!  │ SLEEPING                   37 │
+//!  │ ISLANDS            22 + 9 zzz │
 //!  │ PAIRS                     431 │
 //!  │ CONTACTS                  164 │
 //!  │ BEGUN                    5230 │
@@ -12,6 +14,7 @@
 //!  │ BROADPHASE              21 us │
 //!  │ NARROW                  38 us │
 //!  │ SOLVER                 102 us │
+//!  │ AT REST                  3 us │
 //!  │ PENETRATION           0.42 mm │
 //!  │ BOUNCE            0.53 / 0.55 │
 //!  │ PTS/MANIFOLD             1.42 │
@@ -62,10 +65,10 @@ pub const SPIN_HINT: &str =
 pub const WALL_HINT: &str = "balls, pills and cubes bounce down the wall - keys 1 to 4 pick a room";
 /// The pit's line, and its gaps.
 pub const PIT_HINT: &str =
-    "1000 balls, nothing sleeps (rung 3), no overflow or despawn (rung 6) - keys 1 to 4";
-/// The Tower room's line, and its gaps.
+    "1000 balls that sleep once still - no overflow or despawn (rung 6) - keys 1 to 4";
+/// The Tower room's line.
 pub const TOWER_HINT: &str =
-    "counters: the pyramid's; column at 8 substeps, 90 Hz; nothing sleeps (rung 3)";
+    "counters: the pyramid's; column at 8 substeps, 90 Hz; all sleep once still";
 
 /// The hint for a room.
 #[must_use]
@@ -103,9 +106,19 @@ fn millimetres(metres: f64) -> String {
     format!("{:.2} mm", metres * 1.0e3)
 }
 
-/// Rung 1's row and rung 2's, for a room with contacts.
+/// Rung 1's row, rung 2's and rung 3's, for a room with contacts.
 fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
-    rows.push(ReadoutRow::new("BODIES", tally.bodies.to_string(), VALUE));
+    rows.push(ReadoutRow::new("AWAKE", tally.bodies.to_string(), VALUE));
+    rows.push(ReadoutRow::new(
+        "SLEEPING",
+        tally.sleeping.to_string(),
+        VALUE,
+    ));
+    rows.push(ReadoutRow::new(
+        "ISLANDS",
+        format!("{} + {} zzz", tally.islands, tally.sleeping_islands),
+        VALUE,
+    ));
     rows.push(ReadoutRow::new("PAIRS", tally.pairs.to_string(), VALUE));
     rows.push(ReadoutRow::new(
         "CONTACTS",
@@ -128,6 +141,15 @@ fn contact_rows(rows: &mut Vec<ReadoutRow>, tally: &Tally) {
     rows.push(ReadoutRow::new(
         "SOLVER",
         micros(stages.map(|s| s.solver)),
+        VALUE,
+    ));
+    rows.push(ReadoutRow::new(
+        "AT REST",
+        match (stages, tally.solver_at_rest) {
+            (None, _) => micros(None),
+            (Some(_), None) => "not yet".to_owned(),
+            (Some(_), rest) => micros(rest),
+        },
         VALUE,
     ));
     rows.push(ReadoutRow::new(
@@ -277,6 +299,10 @@ mod tests {
     fn reading(view: View) -> Reading {
         let tally = Tally {
             bodies: 120,
+            sleeping: 37,
+            islands: 22,
+            sleeping_islands: 9,
+            solver_at_rest: Some(3e-6),
             pairs: 431,
             touching: 164,
             points: 233,
@@ -288,6 +314,7 @@ mod tests {
                 broadphase: 21e-6,
                 narrow_phase: 38e-6,
                 solver: 102e-6,
+                islands: 5e-6,
             }),
             ..Tally::default()
         };
@@ -339,7 +366,7 @@ mod tests {
     }
 
     /// **Each room's page carries its rung's counters and its gap**: rung 0's
-    /// in the Spin room, rungs 1 and 2's wherever there are contacts, and the
+    /// in the Spin room, rungs 1 to 3's wherever there are contacts, and the
     /// Tower room's drifts and dominoes.
     #[test]
     fn each_room_carries_its_counters_and_its_gap() {
@@ -349,15 +376,51 @@ mod tests {
             (
                 View::Wall,
                 &[
-                    "wall", "120", "431", "164", "5230", "5066", "21 us", "38 us", "102 us",
-                    "0.42 mm", "1.42", "91.0%", "232",
+                    "wall",
+                    "120",
+                    "37",
+                    "22 + 9 zzz",
+                    "431",
+                    "164",
+                    "5230",
+                    "5066",
+                    "21 us",
+                    "38 us",
+                    "102 us",
+                    "3 us",
+                    "0.42 mm",
+                    "1.42",
+                    "91.0%",
+                    "232",
                 ][..],
             ),
-            (View::Pit, &["pit", "1000", "431", "102 us", "1.42"][..]),
+            (
+                View::Pit,
+                &[
+                    "pit",
+                    "1000",
+                    "37",
+                    "22 + 9 zzz",
+                    "431",
+                    "102 us",
+                    "3 us",
+                    "1.42",
+                ][..],
+            ),
             (
                 View::Tower,
                 &[
-                    "tower", "431", "1.42", "91.0%", "15.10 mm", "11.80 mm", "102 us", "9 / 15",
+                    "tower",
+                    "37",
+                    "22 + 9 zzz",
+                    "431",
+                    "3 us",
+                    "1.42",
+                    "91.0%",
+                    "15.10 mm",
+                    "11.80 mm",
+                    "102 us",
+                    "9 / 15",
                 ][..],
             ),
         ] {
@@ -376,8 +439,20 @@ mod tests {
                 "{view:?}: the gap is not labelled: {text:?}"
             );
         }
-        assert!(PIT_HINT.contains("rung 3") && PIT_HINT.contains("rung 6"));
-        assert!(TOWER_HINT.contains("rung 3"));
+        assert!(PIT_HINT.contains("rung 6"));
+        assert!(PIT_HINT.contains("sleep") && TOWER_HINT.contains("sleep"));
+    }
+
+    /// Before anything has been at rest the solver's time at rest says so,
+    /// rather than showing a time.
+    #[test]
+    fn no_time_at_rest_until_everything_has_slept() {
+        let atlas = FontAtlas::built_in();
+        let mut list = DrawList::new();
+        let mut restless = reading(View::Pit);
+        restless.pit.contacts.solver_at_rest = None;
+        draw(&mut list, &atlas, (960, 720), &restless);
+        assert!(text(&list).iter().any(|t| t == "not yet"));
     }
 
     /// Every hint fits across the default window, so no gap is cut off.

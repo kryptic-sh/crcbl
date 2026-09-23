@@ -1,14 +1,16 @@
 //! Tumble — the physics gallery: each rung of the contact solver on the scene
 //! built to prove it.
 //!
-//! `docs/plan/sample/24-tumble.md`, **milestone 4, rung 2 "Tower"**, from
-//! `docs/plan/36-contact-solver.md`'s rung table, beside milestone 3's rung 1
-//! "Pachinko" and milestone 2's rung 0 "Spin": four rooms — the zero-g
-//! T-handle and a box that lands ([`spin`]), the obstacle wall with falling
-//! balls, pills and cubes ([`wall`]), a thousand-ball pit ([`pit`]), and a
-//! column, a pyramid and dominoes ([`tower`]) — with every counter of the
-//! three rungs on the page. See [`scene`] for how the rooms share a tick and a
-//! hash.
+//! `docs/plan/sample/24-tumble.md`, **milestone 5, rung 3 "Settle"**, from
+//! `docs/plan/36-contact-solver.md`'s rung table, over milestone 4's rung 2
+//! "Tower", milestone 3's rung 1 "Pachinko" and milestone 2's rung 0 "Spin":
+//! four rooms — the zero-g T-handle and a box that lands ([`spin`]), the
+//! obstacle wall with falling balls, pills and cubes ([`wall`]), a
+//! thousand-ball pit ([`pit`]), and a column, a pyramid and dominoes
+//! ([`tower`]) — with every counter of the four rungs on the page, rung 3's
+//! being awake and sleeping bodies, islands and the solver's time at rest.
+//! Settle has no room of its own: its claim is that every other room comes to
+//! rest and sleeps. See [`scene`] for how the rooms share a tick and a hash.
 //!
 //! # What is not here yet
 //!

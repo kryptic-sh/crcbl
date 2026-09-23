@@ -236,6 +236,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Islands and sleep: rung 3 of the contact solver** (`36-contact-solver.md`).
+  In a system made with `PhysicsSystem::with_contacts`, dynamic bodies joined by
+  touching contacts form persistent islands, merged as contacts begin and split
+  lazily, and an island sleeps once every body in it has stayed under
+  `ContactSettings::sleep_speed` (0.05 m/s) and `sleep_angular_speed` (0.1
+  rad/s) for `time_to_sleep` (0.5 s). A sleeping body leaves the awake set: it
+  is not integrated or solved, keeps its transform bit for bit, and its contacts
+  keep their warm-start impulses for when it wakes. It wakes when a moving body
+  begins touching it, when `apply_force`, `apply_torque`, `body_mut`,
+  `set_body`, `set_transform`, `set_collider` or `set_material` touches it or a
+  body it rests on, when its support is removed, and when a static body is
+  placed onto it; queries and reads wake nothing. `ContactSettings::sleep` turns
+  it off. New: `PhysicsSystem::is_sleeping`; `ContactCounters::sleeping`,
+  `islands` and `sleeping_islands`; `StageTimes::islands`.
+  `ContactCounters::touching` and `points` now count only the contacts a step
+  collided, so a sleeping island's count nothing, and `body_count` includes
+  sleeping bodies. A system with contacts now hashes each body's sleep state,
+  and applies its force providers after the narrow phase, so an island woken by
+  a contact feels them the same tick. `apps/tumble` shows awake and sleeping
+  bodies, islands and the solver's time at rest in every room with contacts; its
+  pinned hash is re-taken.
+
 - **Boxes against boxes: rung 2 of the contact solver, up to hulls**
   (`36-contact-solver.md`). A system made with `PhysicsSystem::with_contacts`
   now collides box against box, static or dynamic, through a fifteen-axis
