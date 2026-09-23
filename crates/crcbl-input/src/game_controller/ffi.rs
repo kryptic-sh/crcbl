@@ -54,7 +54,11 @@ unsafe extern "C" {
 // `objc_getClass`, and this is the declaration that puts the framework in the
 // image for that lookup to find. Its statics are declared for the smoke test
 // alone, which checks the category names `kind_of` matches against the
-// framework's own constants.
+// framework's own constants. The two Switch categories are not declared: the
+// macOS SDK on CI's `macos-latest` runner exports no
+// `GCProductCategorySwitchPro` or `GCProductCategorySwitchJoyConPair` symbol, so
+// strong-linking them failed the test binary's link (run 35825587945). Their
+// strings are pinned by `game_controller`'s pure tests instead.
 #[link(name = "GameController", kind = "framework")]
 unsafe extern "C" {
     #[cfg(test)]
@@ -63,10 +67,6 @@ unsafe extern "C" {
     pub(super) static GCProductCategoryDualSense: Id;
     #[cfg(test)]
     pub(super) static GCProductCategoryXboxOne: Id;
-    #[cfg(test)]
-    pub(super) static GCProductCategorySwitchPro: Id;
-    #[cfg(test)]
-    pub(super) static GCProductCategorySwitchJoyConPair: Id;
     #[cfg(test)]
     pub(super) static GCProductCategoryMFi: Id;
 }

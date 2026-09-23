@@ -8681,14 +8681,19 @@ remain, and from rung 2:
     compounds against spheres and capsules, waking neighbours on
     `set_transform`/`remove_collider`. No tumble scene; the sample doc names
     none.
-  - **Waiting on EW's user: query layers.** `PhysicsSystem` owns its own
-    `PhysicsWorld`, so EW either moves its statics and controllers onto it (and
-    dropped items' query boxes then block player and AI sweeps) or keeps two
-    worlds (statics registered twice). A per-collider `u32` layer set plus a
-    query mask (`QueryFilter { exclude, mask }`, default all bits) would let
-    controllers ignore items while rays still hit them: about one slice, one AND
-    per broadphase candidate. EW recorded it as its option (a+) (EW `07459fe`)
-    and asked that it not be built until its user picks it.
+  - **Query layers shipped for EW's one-world migration (2026-09-23).**
+    `PhysicsWorld::set_layers`, `QueryFilter { exclude, mask }` with `_filtered`
+    variants of every query family, `PhysicsSystem::set_collider_layers`,
+    `collider_of` / `entity_of`, and `CharacterController::with_query_mask`.
+    Open: layers filter queries only, so a dynamic item still collides with
+    other bodies in the contact solver (contact filtering is not designed; EW
+    confirmed on 2026-09-23 it wants items to collide with each other, so
+    nothing needs it); layers are not in `hash_state` or `replicate`, so a
+    client rebuilt from replication must re-tag (unchecked against EW's
+    replication path); `EntityOverlapQueries` has no capsule sweep or
+    penetration query, so AI capsule sweeps go through `world_mut()` plus
+    `entity_of`. A callback filter was declined: plain data keeps
+    `OverlapQueries` `Copy + Sync`.
 - **A tool is built against the vocabularies it can open.** `crcbl::registry`
   (slice 2) replaced the hand-written list, so a component is registered once
   and the codec, the system, the `&mut dyn Reflect` accessor and the `Placement`

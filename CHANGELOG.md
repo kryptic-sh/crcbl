@@ -410,6 +410,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `SteamPads` the loop's pad source, with XInput beside it on Windows skipping
   Steam's virtual pads. `apps/sandbox --features steam` now lends its session
   and opens Steam Input instead of pumping by hand.
+- **Query layers in `crcbl_phys`**, so one world can hold a level, its
+  characters and loose items that movement ignores and interaction rays still
+  hit. Every collider has a `u32` layer bitset, `ALL_LAYERS` by default and
+  again when its slot is reused (`PhysicsWorld::set_layers` / `layers`), and the
+  new `QueryFilter { exclude, mask }` admits a collider that is not `exclude`
+  and shares a bit with `mask`. Every ray, sweep, overlap and penetration query
+  has a `_filtered` form on `PhysicsWorld`, `OverlapQueries`, `PhysicsSystem`
+  and `EntityOverlapQueries` (plus `PhysicsSystem::sweep_body_filtered`, which
+  takes a mask); the plain and `_excluding` forms now call them with the default
+  filter, so their answers are unchanged. Solid queries still skip triggers and
+  overlaps still report them. `CharacterController::with_query_mask` /
+  `set_query_mask` apply a mask to every sweep, the step-up, the ground probe
+  and depenetration, beside its self-collider exclusion.
+  `PhysicsSystem::set_collider_layers` tags an entity's query collider (a
+  compound's one box); the layers survive steps and are kept when `set_collider`
+  replaces the collider, until `remove_entity`. `PhysicsSystem::collider_of` and
+  `entity_of` map between an entity and its query collider, and give `None` for
+  a removed or replaced id. Layers filter queries only; the contact solver does
+  not read them.
+
 - **GameController.framework on macOS, `crcbl_input::game_controller`**: a
   windowed macOS run now sees gamepads. `GameController::poll` reads
   `[GCController controllers]` once a frame and emits the same `GamepadEvent`s

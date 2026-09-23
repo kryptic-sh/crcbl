@@ -110,4 +110,7 @@ pub use query::{
 };
 pub use system::{EntityOverlapQueries, PhysicsSystem};
 pub use wind::WindQuery;
-pub use world::{BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryScratch};
+pub use world::{
+    ALL_LAYERS, BroadphaseStats, ColliderId, OverlapQueries, PhysicsWorld, QueryFilter,
+    QueryScratch,
+};

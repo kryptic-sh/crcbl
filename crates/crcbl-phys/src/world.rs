@@ -70,6 +70,11 @@ impl ColliderId {
 /// `bvh_slot_to_elem` entry for a collider slot with no element in the tree.
 const NO_ELEMENT: u32 = u32::MAX;
 
+/// The layer bits a collider starts with: every one, so a query with any
+/// non-zero mask sees it and a world that never touches layers behaves as if
+/// they did not exist.
+pub const ALL_LAYERS: u32 = u32::MAX;
+
 /// A collider stored in the [`PhysicsWorld`], with an optional trigger flag.
 #[derive(Debug, Clone)]
 struct ColliderSlot {
@@ -77,6 +82,146 @@ struct ColliderSlot {
     /// When true, this collider is a trigger (generates overlap events rather
     /// than collision response).
     is_trigger: bool,
+    /// The query layers this collider is on; see [`PhysicsWorld::set_layers`].
+    layers: u32,
+}
+
+/// Which colliders a query may report: one collider left out, and a mask of
+/// the layers it looks at.
+///
+/// A collider passes when it is not [`exclude`](Self::exclude) and its
+/// [layers](PhysicsWorld::set_layers) share at least one bit with
+/// [`mask`](Self::mask). The solid queries — rays, sweeps and capsule
+/// penetrations — also skip triggers, exactly as their unfiltered forms do;
+/// the overlap queries report triggers, as theirs do. A filter never makes a
+/// query see something its unfiltered form would not.
+///
+/// The [`Default`] excludes nothing and looks at every layer, which is what
+/// every unfiltered query passes: `cast_ray(ray)` is
+/// `cast_ray_filtered(ray, QueryFilter::default())`.
+///
+/// ```
+/// use crcbl_phys::{BoxCollider, PhysicsWorld, QueryFilter, Ray};
+/// use glam::DVec3;
+///
+/// const ITEMS: u32 = 1 << 1;
+///
+/// let mut world = PhysicsWorld::new();
+/// let item = world.add_box(BoxCollider::new(DVec3::new(2.0, 0.0, 0.0), DVec3::splat(0.5)));
+/// world.set_layers(item, ITEMS);
+/// let ray = Ray::new(DVec3::ZERO, DVec3::X);
+///
+/// // A movement query looks past items; an interaction ray looks only at them.
+/// assert!(world.cast_ray_filtered(&ray, QueryFilter::masked(!ITEMS)).is_none());
+/// assert_eq!(
+///     world.cast_ray_filtered(&ray, QueryFilter::masked(ITEMS)).map(|(id, _)| id),
+///     Some(item),
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueryFilter {
+    /// A collider to leave out of the answer, or `None`. A stale or invalid id
+    /// excludes nothing, which is the same answer as `None`.
+    pub exclude: Option<ColliderId>,
+    /// The layers the query looks at. A collider on none of them is skipped,
+    /// so a mask of `0` sees nothing.
+    pub mask: u32,
+}
+
+impl QueryFilter {
+    /// Excludes nothing and looks at every layer: the [`Default`].
+    pub const ALL: Self = Self {
+        exclude: None,
+        mask: ALL_LAYERS,
+    };
+
+    /// Every layer, with `exclude` left out — what the `_excluding` queries
+    /// pass.
+    #[must_use]
+    pub const fn excluding(exclude: Option<ColliderId>) -> Self {
+        Self {
+            exclude,
+            mask: ALL_LAYERS,
+        }
+    }
+
+    /// Only the layers in `mask`, excluding nothing.
+    #[must_use]
+    pub const fn masked(mask: u32) -> Self {
+        Self {
+            exclude: None,
+            mask,
+        }
+    }
+
+    /// This filter with its mask replaced by `mask`.
+    #[must_use]
+    pub const fn with_mask(self, mask: u32) -> Self {
+        Self { mask, ..self }
+    }
+
+    /// This filter with its exclusion replaced by `exclude`.
+    #[must_use]
+    pub const fn with_exclude(self, exclude: Option<ColliderId>) -> Self {
+        Self { exclude, ..self }
+    }
+}
+
+impl Default for QueryFilter {
+    fn default() -> Self {
+        Self::ALL
+    }
+}
+
+/// A [`QueryFilter`] resolved against one world for one query: the excluded
+/// id turned into its storage slot, and whether triggers count.
+///
+/// Every candidate loop asks [`admits`](Self::admits) and nothing else, so
+/// what a trigger, an excluded collider and a layer mask mean is one rule
+/// shared by every query family, not a copy per loop.
+#[derive(Debug, Clone, Copy)]
+struct ResolvedFilter {
+    /// The storage slot of the excluded collider, if it is live.
+    skip: Option<usize>,
+    mask: u32,
+    /// Whether triggers are skipped — true for the solid queries.
+    solid: bool,
+}
+
+impl ResolvedFilter {
+    /// For a ray, sweep or penetration query: triggers are skipped.
+    fn solid(colliders: &[Option<ColliderSlot>], generations: &[u32], filter: QueryFilter) -> Self {
+        Self::resolve(colliders, generations, filter, true)
+    }
+
+    /// For an overlap query: triggers are reported.
+    fn overlap(
+        colliders: &[Option<ColliderSlot>],
+        generations: &[u32],
+        filter: QueryFilter,
+    ) -> Self {
+        Self::resolve(colliders, generations, filter, false)
+    }
+
+    fn resolve(
+        colliders: &[Option<ColliderSlot>],
+        generations: &[u32],
+        filter: QueryFilter,
+        solid: bool,
+    ) -> Self {
+        Self {
+            skip: filter
+                .exclude
+                .and_then(|id| slot_of_in(colliders, generations, id)),
+            mask: filter.mask,
+            solid,
+        }
+    }
+
+    /// Whether the collider at storage slot `idx` may be reported.
+    fn admits(&self, idx: usize, slot: &ColliderSlot) -> bool {
+        Some(idx) != self.skip && slot.layers & self.mask != 0 && !(self.solid && slot.is_trigger)
+    }
 }
 
 /// A collider instance stored in the [`PhysicsWorld`].
@@ -277,12 +422,25 @@ impl OverlapQueries<'_> {
         scratch: &mut QueryScratch,
         out: &mut Vec<ColliderId>,
     ) {
+        self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, scratch, out);
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) reporting only the
+    /// colliders `filter` admits. Triggers are still reported.
+    pub fn overlap_sphere_filtered_into(
+        &self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<ColliderId>,
+    ) {
         overlap_sphere_core(
             self.bvh,
             self.colliders,
             self.generations,
-            centre,
-            radius,
+            &Sphere::new(centre, radius),
+            filter,
             scratch,
             out,
         );
@@ -300,7 +458,27 @@ impl OverlapQueries<'_> {
         scratch: &mut QueryScratch,
         out: &mut Vec<ColliderId>,
     ) {
-        overlap_aabb_core(self.bvh, self.generations, aabb, scratch, out);
+        self.overlap_aabb_filtered_into(aabb, QueryFilter::ALL, scratch, out);
+    }
+
+    /// [`overlap_aabb_into`](Self::overlap_aabb_into) reporting only the
+    /// colliders `filter` admits. Triggers are still reported.
+    pub fn overlap_aabb_filtered_into(
+        &self,
+        aabb: &Aabb,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<ColliderId>,
+    ) {
+        overlap_aabb_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            aabb,
+            filter,
+            scratch,
+            out,
+        );
     }
 
     /// [`PhysicsWorld::cast_ray`] under a shared borrow, working in `scratch`
@@ -330,12 +508,24 @@ impl OverlapQueries<'_> {
         exclude: Option<ColliderId>,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.cast_ray_filtered(ray, QueryFilter::excluding(exclude), scratch)
+    }
+
+    /// [`PhysicsWorld::cast_ray_filtered`] under a shared borrow, working in
+    /// `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn cast_ray_filtered(
+        &self,
+        ray: &Ray,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
         cast_ray_core(
             self.bvh,
             self.colliders,
             self.generations,
             ray,
-            exclude,
+            filter,
             scratch,
         )
     }
@@ -366,13 +556,26 @@ impl OverlapQueries<'_> {
         exclude: Option<ColliderId>,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_sphere_filtered(segment, radius, QueryFilter::excluding(exclude), scratch)
+    }
+
+    /// [`PhysicsWorld::sweep_sphere_filtered`] under a shared borrow, working
+    /// in `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn sweep_sphere_filtered(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
         sweep_sphere_core(
             self.bvh,
             self.colliders,
             self.generations,
             segment,
             radius,
-            exclude,
+            filter,
             scratch,
         )
     }
@@ -405,13 +608,33 @@ impl OverlapQueries<'_> {
         exclude: Option<ColliderId>,
         scratch: &mut QueryScratch,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_capsule_filtered(
+            segment,
+            radius,
+            half_height,
+            QueryFilter::excluding(exclude),
+            scratch,
+        )
+    }
+
+    /// [`PhysicsWorld::sweep_capsule_filtered`] under a shared borrow, working
+    /// in `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn sweep_capsule_filtered(
+        &self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<(ColliderId, ShapeHit)> {
         sweep_capsule_core(
             self.bvh,
             self.colliders,
             self.generations,
             &Capsule::new(segment.start, radius, half_height),
             segment.end,
-            exclude,
+            filter,
             scratch,
         )
     }
@@ -425,12 +648,29 @@ impl OverlapQueries<'_> {
         scratch: &mut QueryScratch,
         out: &mut Vec<(ColliderId, Penetration)>,
     ) {
+        self.capsule_penetrations_filtered_into(
+            capsule,
+            QueryFilter::excluding(exclude),
+            scratch,
+            out,
+        );
+    }
+
+    /// [`PhysicsWorld::capsule_penetrations_filtered_into`] under a shared
+    /// borrow, working in `scratch` instead of the world's own buffers.
+    pub fn capsule_penetrations_filtered_into(
+        &self,
+        capsule: &Capsule,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+        out: &mut Vec<(ColliderId, Penetration)>,
+    ) {
         capsule_penetrations_core(
             self.bvh,
             self.colliders,
             self.generations,
             capsule,
-            exclude,
+            filter,
             scratch,
             out,
         );
@@ -453,18 +693,21 @@ impl OverlapQueries<'_> {
 /// `separation_query_radius` correct without adding the neighbour's radius to
 /// the query. `tests::a_sphere_overlap_is_expanded_by_the_colliders_own_radius`
 /// pins the boundary.
+///
+/// The query is one [`Sphere`] argument rather than a centre and a radius, as
+/// the capsule sweep's is one [`Capsule`].
 fn overlap_sphere_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
-    centre: DVec3,
-    radius: f64,
+    query_sphere: &Sphere,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
     out: &mut Vec<ColliderId>,
 ) {
     out.clear();
-    let query_aabb = Aabb::from_centre_half(centre, DVec3::splat(radius));
-    let query_sphere = Sphere::new(centre, radius);
+    let filter = ResolvedFilter::overlap(colliders, generations, filter);
+    let query_aabb = Aabb::from_centre_half(query_sphere.centre, DVec3::splat(query_sphere.radius));
 
     bvh.traverse_aabb_into(&query_aabb, &mut scratch.stack, &mut scratch.candidates);
 
@@ -473,10 +716,11 @@ fn overlap_sphere_core(
         let hit = colliders
             .get(slot)
             .and_then(|s| s.as_ref())
-            .is_some_and(|slot| match &slot.entry {
-                ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(&query_sphere, s),
-                ColliderEntry::Box(b) => query::sphere_overlaps_aabb(&query_sphere, &b.aabb()),
-                ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(&query_sphere, c),
+            .filter(|data| filter.admits(slot, data))
+            .is_some_and(|data| match &data.entry {
+                ColliderEntry::Sphere(s) => query::sphere_overlaps_sphere(query_sphere, s),
+                ColliderEntry::Box(b) => query::sphere_overlaps_aabb(query_sphere, &b.aabb()),
+                ColliderEntry::Capsule(c) => query::sphere_overlaps_capsule(query_sphere, c),
             });
         if hit {
             out.push(ColliderId::new(idx, generations[slot]));
@@ -487,54 +731,65 @@ fn overlap_sphere_core(
 /// The one implementation of "which colliders' AABBs meet this AABB".
 ///
 /// Broadphase-only by design — the BVH's leaves *are* the collider AABBs, so
-/// there is nothing to refine. Both [`PhysicsWorld::overlap_aabb`] and
-/// [`OverlapQueries::overlap_aabb_into`] come through here.
+/// there is nothing to refine beyond the filter. Both
+/// [`PhysicsWorld::overlap_aabb`] and [`OverlapQueries::overlap_aabb_into`]
+/// come through here.
 fn overlap_aabb_core(
     bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     aabb: &Aabb,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
     out: &mut Vec<ColliderId>,
 ) {
+    let filter = ResolvedFilter::overlap(colliders, generations, filter);
     bvh.traverse_aabb_into(aabb, &mut scratch.stack, &mut scratch.candidates);
     out.clear();
     out.extend(
         scratch
             .candidates
             .iter()
+            .filter(|&&slot| {
+                colliders
+                    .get(slot as usize)
+                    .and_then(|s| s.as_ref())
+                    .is_some_and(|data| filter.admits(slot as usize, data))
+            })
             .map(|&slot| id_for_slot_in(generations, slot)),
     );
 }
 
 /// The one implementation of "what does this ray hit first".
 ///
-/// Both [`PhysicsWorld::cast_ray_excluding`] and
-/// [`OverlapQueries::cast_ray_excluding`] come through here — and so do the
-/// two `cast_ray` forms, which are this with no exclusion. Triggers are
-/// non-solid and are skipped by `closest_hit_core`.
+/// Both [`PhysicsWorld::cast_ray_filtered`] and
+/// [`OverlapQueries::cast_ray_filtered`] come through here — and so do the
+/// `cast_ray` and `cast_ray_excluding` forms, which are this with a narrower
+/// filter. Triggers are non-solid and are skipped by `closest_hit_core`.
 fn cast_ray_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     ray: &Ray,
-    exclude: Option<ColliderId>,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
     // Out of the scratch and back into it, because the descent borrows the
     // stack at the same time and the two are fields of one struct.
     let mut hits = core::mem::take(&mut scratch.ray_hits);
     bvh.traverse_ray_into(ray, &mut scratch.stack, &mut hits);
-    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
-    let best = closest_hit_core(colliders, generations, ray, &hits, skip);
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
+    let best = closest_hit_core(colliders, generations, ray, &hits, filter);
     scratch.ray_hits = hits;
     best
 }
 
 /// The one implementation of "what does this swept sphere hit first".
 ///
-/// Both [`PhysicsWorld::sweep_sphere_excluding`] and
-/// [`OverlapQueries::sweep_sphere_excluding`] come through here — and so do
-/// the two `sweep_sphere` forms, which are this with no exclusion.
+/// Both [`PhysicsWorld::sweep_sphere_filtered`] and
+/// [`OverlapQueries::sweep_sphere_filtered`] come through here — and so do
+/// the `sweep_sphere` and `sweep_sphere_excluding` forms, which are this with
+/// a narrower filter.
 ///
 /// The broadphase query is the swept *volume* and not the centre line; see
 /// [`PhysicsWorld::sweep_sphere`] for what that costs and what it fixes.
@@ -544,17 +799,17 @@ fn sweep_sphere_core(
     generations: &[u32],
     segment: &Segment,
     radius: f64,
-    exclude: Option<ColliderId>,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
-    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
     let bounds = swept_bounds(segment, DVec3::splat(radius));
     bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
     closest_swept_core(
         colliders,
         generations,
         &scratch.candidates,
-        skip,
+        filter,
         |entry| match entry {
             ColliderEntry::Sphere(s) => query::swept_sphere_vs_sphere(segment, radius, s),
             ColliderEntry::Box(b) => query::swept_sphere_vs_aabb(segment, radius, &b.aabb()),
@@ -567,9 +822,10 @@ fn sweep_sphere_core(
 /// first": `capsule` sits at the start of the sweep and its centre travels to
 /// `end`.
 ///
-/// Both [`PhysicsWorld::sweep_capsule_excluding`] and
-/// [`OverlapQueries::sweep_capsule_excluding`] come through here — and so do
-/// the two `sweep_capsule` forms, which are this with no exclusion. They take a
+/// Both [`PhysicsWorld::sweep_capsule_filtered`] and
+/// [`OverlapQueries::sweep_capsule_filtered`] come through here — and so do
+/// the `sweep_capsule` and `sweep_capsule_excluding` forms, which are this
+/// with a narrower filter. They take a
 /// [`Segment`] and a radius the way the sphere sweeps do; the shape is one
 /// argument here so that the swept capsule's two dimensions travel together.
 ///
@@ -583,7 +839,7 @@ fn sweep_capsule_core(
     generations: &[u32],
     capsule: &Capsule,
     end: DVec3,
-    exclude: Option<ColliderId>,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
 ) -> Option<(ColliderId, ShapeHit)> {
     let Capsule {
@@ -592,14 +848,14 @@ fn sweep_capsule_core(
         ..
     } = *capsule;
     let segment = &Segment::new(capsule.centre, end);
-    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
     let bounds = swept_bounds(segment, DVec3::new(radius, radius + half_height, radius));
     bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
     closest_swept_core(
         colliders,
         generations,
         &scratch.candidates,
-        skip,
+        filter,
         |entry| match entry {
             ColliderEntry::Sphere(s) => {
                 query::swept_capsule_vs_sphere(segment, radius, half_height, s)
@@ -617,34 +873,33 @@ fn sweep_capsule_core(
 /// The one implementation of "what is this capsule inside, and how far out does
 /// each one need it pushed".
 ///
-/// Both [`PhysicsWorld::capsule_penetrations_into`] and
-/// [`OverlapQueries::capsule_penetrations_into`] come through here.
+/// Both [`PhysicsWorld::capsule_penetrations_filtered_into`] and
+/// [`OverlapQueries::capsule_penetrations_filtered_into`] come through here,
+/// and so do the two unfiltered forms.
 ///
-/// Triggers are non-solid and are skipped, and so is `exclude` — a character
-/// whose own capsule is registered in the world is inside itself by the whole
-/// of its own radius, which is the deepest contact it would ever find.
+/// Triggers are non-solid and are skipped, and so is the filter's exclusion —
+/// a character whose own capsule is registered in the world is inside itself
+/// by the whole of its own radius, which is the deepest contact it would ever
+/// find.
 fn capsule_penetrations_core(
     bvh: &Bvh,
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     capsule: &Capsule,
-    exclude: Option<ColliderId>,
+    filter: QueryFilter,
     scratch: &mut QueryScratch,
     out: &mut Vec<(ColliderId, Penetration)>,
 ) {
     out.clear();
-    let skip = exclude.and_then(|id| slot_of_in(colliders, generations, id));
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
     bvh.traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
 
     for &element in scratch.candidates.iter() {
         let idx = element as usize;
-        if Some(idx) == skip {
-            continue;
-        }
         let Some(Some(slot)) = colliders.get(idx) else {
             continue;
         };
-        if slot.is_trigger {
+        if !filter.admits(idx, slot) {
             continue;
         }
         let penetration = match &slot.entry {
@@ -670,25 +925,21 @@ fn swept_bounds(segment: &Segment, half_extents: DVec3) -> Aabb {
 }
 
 /// Given BVH hits (AABB-level), find the closest exact hit using shape-level
-/// intersection. Triggers are non-solid and are skipped, as is `skip` — the
-/// storage slot of the collider the caller excluded, if any.
+/// intersection, over the colliders `filter` admits — which skips triggers.
 fn closest_hit_core(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     ray: &Ray,
     bvh_hits: &[BvhHit],
-    skip: Option<usize>,
+    filter: ResolvedFilter,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for bvh_hit in bvh_hits {
         let idx = bvh_hit.element_id as usize;
-        if Some(idx) == skip {
-            continue;
-        }
         let Some(Some(slot)) = colliders.get(idx) else {
             continue;
         };
-        if slot.is_trigger {
+        if !filter.admits(idx, slot) {
             continue;
         }
         let hit = match &slot.entry {
@@ -706,30 +957,26 @@ fn closest_hit_core(
 }
 
 /// Given broadphase candidates, find the closest exact swept hit, with `narrow`
-/// supplying the shape-level TOI for whichever shape is being swept.
-/// Triggers are non-solid and are skipped, and so is `skip` — the storage slot
-/// of the collider the caller excluded, if any.
+/// supplying the shape-level TOI for whichever shape is being swept, over the
+/// colliders `filter` admits — which skips triggers.
 ///
 /// The sphere and capsule sweeps share this rather than each carrying a copy:
-/// what a trigger, a dead slot and an excluded collider mean is one rule, and a
-/// second copy of it is where the two would drift.
+/// what a trigger, a dead slot, an excluded collider and a layer mask mean is
+/// one rule, and a second copy of it is where the two would drift.
 fn closest_swept_core(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     candidates: &[u32],
-    skip: Option<usize>,
+    filter: ResolvedFilter,
     narrow: impl Fn(&ColliderEntry) -> Option<ShapeHit>,
 ) -> Option<(ColliderId, ShapeHit)> {
     let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
     for &element in candidates {
         let idx = element as usize;
-        if Some(idx) == skip {
-            continue;
-        }
         let Some(Some(slot)) = colliders.get(idx) else {
             continue;
         };
-        if slot.is_trigger {
+        if !filter.admits(idx, slot) {
             continue;
         }
         if let Some(hit) = narrow(&slot.entry)
@@ -745,8 +992,7 @@ fn closest_swept_core(
 /// (generation mismatch) or names an empty slot.
 ///
 /// The free form of [`PhysicsWorld::slot_of`], which is what
-/// `sweep_sphere_core` needs: a shared view has the two arrays but not the
-/// world.
+/// `ResolvedFilter` needs: a shared view has the two arrays but not the world.
 fn slot_of_in(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
@@ -853,6 +1099,37 @@ impl PhysicsWorld {
             .is_some_and(|slot| self.colliders[slot].as_ref().is_some_and(|s| s.is_trigger))
     }
 
+    /// Put a collider on the query layers in `bits`, replacing whatever it was
+    /// on. Returns `false` if the id is invalid.
+    ///
+    /// A layer is a bit, and a [`QueryFilter`]'s mask is the set of layers a
+    /// query looks at: a collider is reported only when `bits & mask != 0`.
+    /// Every collider starts on [`ALL_LAYERS`], so a world that never calls
+    /// this answers every query exactly as before. Layers survive
+    /// [`set_sphere`](Self::set_sphere) and its siblings, as the trigger flag
+    /// does; removing the collider drops them, and a new collider landing in
+    /// the recycled slot starts on [`ALL_LAYERS`] again.
+    ///
+    /// Layers filter **queries** only — the ones on this world and the
+    /// character controller's. They do not touch the contact solver, which
+    /// never reads this world.
+    pub fn set_layers(&mut self, id: ColliderId, bits: u32) -> bool {
+        let Some(slot) = self.slot_of(id) else {
+            return false;
+        };
+        if let Some(slot_data) = self.colliders[slot].as_mut() {
+            slot_data.layers = bits;
+        }
+        true
+    }
+
+    /// The query layers a collider is on, or `None` if the id is invalid.
+    #[must_use]
+    pub fn layers(&self, id: ColliderId) -> Option<u32> {
+        let slot = self.slot_of(id)?;
+        self.colliders[slot].as_ref().map(|s| s.layers)
+    }
+
     /// Remove a collider by its id. Returns `true` if the id was valid.
     ///
     /// The slot is recycled, but its generation is bumped first, so `id` (and
@@ -941,12 +1218,43 @@ impl PhysicsWorld {
     /// reused between calls, so a caller that hoists one `out` out of its loop
     /// runs the whole pass without allocating.
     pub fn overlap_sphere_into(&mut self, centre: DVec3, radius: f64, out: &mut Vec<ColliderId>) {
+        self.overlap_sphere_filtered_into(centre, radius, QueryFilter::ALL, out);
+    }
+
+    /// [`overlap_sphere`](Self::overlap_sphere) reporting only the colliders
+    /// `filter` admits. Triggers are still reported.
+    #[must_use]
+    pub fn overlap_sphere_filtered(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+    ) -> Vec<ColliderId> {
+        let mut out = Vec::new();
+        self.overlap_sphere_filtered_into(centre, radius, filter, &mut out);
+        out
+    }
+
+    /// [`overlap_sphere_into`](Self::overlap_sphere_into) reporting only the
+    /// colliders `filter` admits. Triggers are still reported.
+    pub fn overlap_sphere_filtered_into(
+        &mut self,
+        centre: DVec3,
+        radius: f64,
+        filter: QueryFilter,
+        out: &mut Vec<ColliderId>,
+    ) {
         // Lent to the view and put straight back, which is what lets one
         // implementation serve both borrow shapes: the view cannot reach a
         // field of the world it is only sharing.
         let mut scratch = core::mem::take(&mut self.scratch);
-        self.overlap_queries()
-            .overlap_sphere_into(centre, radius, &mut scratch, out);
+        self.overlap_queries().overlap_sphere_filtered_into(
+            centre,
+            radius,
+            filter,
+            &mut scratch,
+            out,
+        );
         self.scratch = scratch;
     }
 
@@ -972,10 +1280,17 @@ impl PhysicsWorld {
     /// shape-aware overlap. Triggers are included.
     #[must_use]
     pub fn overlap_aabb(&mut self, aabb: &Aabb) -> Vec<ColliderId> {
+        self.overlap_aabb_filtered(aabb, QueryFilter::ALL)
+    }
+
+    /// [`overlap_aabb`](Self::overlap_aabb) reporting only the colliders
+    /// `filter` admits. Triggers are still reported.
+    #[must_use]
+    pub fn overlap_aabb_filtered(&mut self, aabb: &Aabb, filter: QueryFilter) -> Vec<ColliderId> {
         let mut scratch = core::mem::take(&mut self.scratch);
         let mut out = Vec::new();
         self.overlap_queries()
-            .overlap_aabb_into(aabb, &mut scratch, &mut out);
+            .overlap_aabb_filtered_into(aabb, filter, &mut scratch, &mut out);
         self.scratch = scratch;
         out
     }
@@ -1006,10 +1321,23 @@ impl PhysicsWorld {
         ray: &Ray,
         exclude: Option<ColliderId>,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.cast_ray_filtered(ray, QueryFilter::excluding(exclude))
+    }
+
+    /// [`cast_ray`](Self::cast_ray) over only the colliders `filter` admits:
+    /// its exclusion is left out and so is every collider on none of its
+    /// mask's layers, in the narrow phase, so the closest hit behind them
+    /// survives. Triggers remain non-solid and are skipped.
+    #[must_use]
+    pub fn cast_ray_filtered(
+        &mut self,
+        ray: &Ray,
+        filter: QueryFilter,
+    ) -> Option<(ColliderId, ShapeHit)> {
         let mut scratch = core::mem::take(&mut self.scratch);
         let hit = self
             .overlap_queries()
-            .cast_ray_excluding(ray, exclude, &mut scratch);
+            .cast_ray_filtered(ray, filter, &mut scratch);
         self.scratch = scratch;
         hit
     }
@@ -1055,7 +1383,7 @@ impl PhysicsWorld {
     /// A stale or invalid `exclude` excludes nothing, which is the same answer
     /// as `None`.
     ///
-    /// # One id, not a filter object
+    /// # One id, and a mask — not a callback
     ///
     /// The field's general form is a filter the query calls back into — PhysX's
     /// `PxQueryFilterData`/`PxQueryFilterCallback`, Jolt's `BodyFilter`,
@@ -1063,8 +1391,21 @@ impl PhysicsWorld {
     /// ships the degenerate case as its own thing, because it is the case that
     /// actually comes up: Jolt has `IgnoreSingleBodyFilter`, and Bullet's
     /// character controller carries a `ClosestNotMeConvexResultCallback`. That
-    /// degenerate case is the whole of what this crate's consumers ask for, so
-    /// it is the whole of what this takes.
+    /// degenerate case was the whole of what this crate's consumers asked for,
+    /// so for a while it was the whole of what this took.
+    ///
+    /// Then a consumer needed the mask as well. EW keeps its level, its
+    /// characters and its dropped items in one world, and an item must not
+    /// block a player's or an AI's sweep while an interaction ray still hits
+    /// it — "skip everything of this kind", which no single excluded id can
+    /// say. So [`QueryFilter`] exists, and carries exactly the two things asked
+    /// for: the excluded id, and a layer mask tested against each collider's
+    /// [layers](Self::set_layers) — Bullet's group/mask and PhysX's
+    /// `PxFilterData` words, cut down to one word. It is still plain data and
+    /// not a callback: tested in the narrow phase with no indirection, `Copy`
+    /// into a shared [`OverlapQueries`] view, and the same answer on every
+    /// thread. This method is [`sweep_sphere_filtered`](Self::sweep_sphere_filtered)
+    /// with [`QueryFilter::excluding`].
     #[must_use]
     pub fn sweep_sphere_excluding(
         &mut self,
@@ -1072,10 +1413,23 @@ impl PhysicsWorld {
         radius: f64,
         exclude: Option<ColliderId>,
     ) -> Option<(ColliderId, ShapeHit)> {
+        self.sweep_sphere_filtered(segment, radius, QueryFilter::excluding(exclude))
+    }
+
+    /// [`sweep_sphere`](Self::sweep_sphere) over only the colliders `filter`
+    /// admits, left out in the narrow phase so the closest hit behind them
+    /// survives. Triggers remain non-solid and are skipped.
+    #[must_use]
+    pub fn sweep_sphere_filtered(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        filter: QueryFilter,
+    ) -> Option<(ColliderId, ShapeHit)> {
         let mut scratch = core::mem::take(&mut self.scratch);
         let hit =
             self.overlap_queries()
-                .sweep_sphere_excluding(segment, radius, exclude, &mut scratch);
+                .sweep_sphere_filtered(segment, radius, filter, &mut scratch);
         self.scratch = scratch;
         hit
     }
@@ -1128,12 +1482,33 @@ impl PhysicsWorld {
         half_height: f64,
         exclude: Option<ColliderId>,
     ) -> Option<(ColliderId, ShapeHit)> {
-        let mut scratch = core::mem::take(&mut self.scratch);
-        let hit = self.overlap_queries().sweep_capsule_excluding(
+        self.sweep_capsule_filtered(
             segment,
             radius,
             half_height,
-            exclude,
+            QueryFilter::excluding(exclude),
+        )
+    }
+
+    /// [`sweep_capsule`](Self::sweep_capsule) over only the colliders `filter`
+    /// admits, left out in the narrow phase so the closest hit behind them
+    /// survives. Triggers remain non-solid and are skipped. This is the sweep
+    /// [`CharacterController`](crate::CharacterController) runs, with its
+    /// self collider and its query mask.
+    #[must_use]
+    pub fn sweep_capsule_filtered(
+        &mut self,
+        segment: &Segment,
+        radius: f64,
+        half_height: f64,
+        filter: QueryFilter,
+    ) -> Option<(ColliderId, ShapeHit)> {
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let hit = self.overlap_queries().sweep_capsule_filtered(
+            segment,
+            radius,
+            half_height,
+            filter,
             &mut scratch,
         );
         self.scratch = scratch;
@@ -1161,9 +1536,24 @@ impl PhysicsWorld {
         exclude: Option<ColliderId>,
         out: &mut Vec<(ColliderId, Penetration)>,
     ) {
+        self.capsule_penetrations_filtered_into(capsule, QueryFilter::excluding(exclude), out);
+    }
+
+    /// [`capsule_penetrations_into`](Self::capsule_penetrations_into) over
+    /// only the colliders `filter` admits. Triggers are still skipped.
+    pub fn capsule_penetrations_filtered_into(
+        &mut self,
+        capsule: &Capsule,
+        filter: QueryFilter,
+        out: &mut Vec<(ColliderId, Penetration)>,
+    ) {
         let mut scratch = core::mem::take(&mut self.scratch);
-        self.overlap_queries()
-            .capsule_penetrations_into(capsule, exclude, &mut scratch, out);
+        self.overlap_queries().capsule_penetrations_filtered_into(
+            capsule,
+            filter,
+            &mut scratch,
+            out,
+        );
         self.scratch = scratch;
     }
 
@@ -1222,6 +1612,7 @@ impl PhysicsWorld {
         let slot_data = ColliderSlot {
             entry,
             is_trigger: false,
+            layers: ALL_LAYERS,
         };
         let index = if let Some(slot) = self.free_slots.pop() {
             self.colliders[slot as usize] = Some(slot_data);
@@ -1258,9 +1649,11 @@ impl PhysicsWorld {
         let Some(slot) = self.slot_of(id) else {
             return false;
         };
-        let is_trigger = self.colliders[slot].as_ref().is_some_and(|s| s.is_trigger);
         let new_aabb = entry.aabb();
-        self.colliders[slot] = Some(ColliderSlot { entry, is_trigger });
+        if let Some(slot_data) = self.colliders[slot].as_mut() {
+            // Only the shape changes: the trigger flag and the layers stay.
+            slot_data.entry = entry;
+        }
 
         // Try incremental refit.  A refit that reports failure leaves the tree
         // holding the old bounds, so the BVH must be dropped rather than
@@ -2728,3 +3121,7 @@ mod tests {
 #[cfg(test)]
 #[path = "world/ray_exclusion_tests.rs"]
 mod ray_exclusion_tests;
+
+#[cfg(test)]
+#[path = "world/query_filter_tests.rs"]
+mod query_filter_tests;
