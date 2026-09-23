@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_phys::ColliderComponent` has a `Compound` variant**, so an exhaustive
+  `match` on it needs another arm; `CompoundError` has `NoParts`,
+  `TooManyParts`, `NonUnitRotation` and `NoVolume`, which only
+  `CompoundShape::new` returns; and `ContactReport` has `part_a` and `part_b`,
+  so a struct literal of it needs both.
 - **`crcbl_input::Binding` has pad variants and is no longer `Eq`**:
   `PadButton`, `PadDpad`, `PadStick { stick, deadzone }` and
   `PadTrigger { trigger, threshold }` join it, so an exhaustive `match` on it
@@ -235,6 +240,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Compound bodies in the contact solver: `crcbl_phys::CompoundShape`.** A
+  rigid body made of several boxes fixed in its frame — a rifle's receiver,
+  magazine and stock — collides part by part, so it lies on the parts that are
+  there rather than on one box around them, and a thin part passes through
+  another body's real gap. `CompoundShape::from_aabbs` takes the local
+  axis-aligned boxes `AabbCompound` does (`CompoundShape::new` takes
+  `CompoundPart`s, which may each be turned), up to `CompoundShape::MAX_PARTS`;
+  `CompoundShape::dynamic_body(density)` returns the `RigidBody`, the
+  `ColliderComponent::Compound` collider and the centre of mass the body's
+  origin sits at, with mass and inertia summed from the parts by the
+  parallel-axis theorem, an overlap counted once per part
+  (`CompoundShape::DEFAULT_DENSITY` for items with no authored mass). Each part
+  is its own broadphase proxy and every contact a part pair's, so feature ids,
+  warm starting, islands and sleep work for compounds unchanged; a compound
+  resting on two parts has two contacts, and raises a `KineticContact` for each.
+  `ContactReport::part_a` and `part_b` name the parts, and
+  `ColliderComponent::part_count` counts them. The query world
+  (`PhysicsSystem::world`) holds one box around a compound's parts. A state with
+  no compound in it hashes as before: `apps/tumble`'s pinned hash is unchanged.
 
 - **Islands and sleep: rung 3 of the contact solver** (`36-contact-solver.md`).
   In a system made with `PhysicsSystem::with_contacts`, dynamic bodies joined by

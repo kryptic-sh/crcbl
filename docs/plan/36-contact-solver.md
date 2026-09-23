@@ -76,6 +76,24 @@ not stopped, so the Tower room's pyramid sleeps with its top cube 2.4 mm aside,
 where ten seconds awake would have crept it back to 0.39 mm. Decision 4's "a new
 joint" waits for joints. Nothing from rung 4 on: sweeps or joints.
 
+Compound bodies, built 2026-09-23 for EW's dropped items, and not a rung:
+`ColliderComponent::Compound` carries a `CompoundShape` of up to
+`CompoundShape::MAX_PARTS` boxes fixed in the body's frame, each optionally
+turned, and "Bodies"'s "compound bodies supported" is met this way. **Each part
+is a broadphase proxy of its own**, as each shape of a Box2D v3 body is: two
+parts of one body never pair, and every contact is a part pair's, so the
+separating axis cache, feature ids and warm starting apply per part pair
+unchanged, and islands and sleep see only bodies. The declined alternative, one
+proxy per body and a narrow phase walking part pairs with ids widened by part,
+would repeat the broadphase's cull every tick and give a contact several
+normals. A body pair's points are bounded by four per touching part pair, and
+the part cap bounds the pairs; there is no reduction across a body pair's
+contacts. Mass and inertia sum the parts by the parallel-axis theorem at one
+density, counting an overlap once per part, as Box2D, Rapier and Jolt do. The
+query world holds one box around a compound's parts. Measured, EW's TOZ-34 boxed
+into six parts falls 30 cm tumbling onto a static slab, lands on its side and
+sleeps at tick 47; see `crates/crcbl-phys/tests/compounds.rs`.
+
 ## Decisions from the engine research (2026-09-15)
 
 The user delegated the solver family to research — "do some deep research on the

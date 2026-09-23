@@ -52,6 +52,7 @@ use glam::DVec3;
 
 use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
 use crate::components::{ColliderComponent, RigidBody, Transform};
+use crate::compound_shape::CompoundShape;
 use crate::contact::broadphase::ProxyId;
 use crate::contact::island::{self, IslandId, Islands};
 use crate::contact::{
@@ -97,9 +98,10 @@ pub(crate) struct BodyRecord {
     pub(crate) collider: Option<(ColliderId, ColliderComponent)>,
     /// Its surface's friction and restitution.
     pub(crate) material: SurfaceMaterial,
-    /// Its collider's proxy in the contact broadphase, in a system with
-    /// contacts and for a collider that is not a trigger.
-    pub(crate) proxy: Option<ProxyId>,
+    /// Its collider's proxies in the contact broadphase, one per part in part
+    /// order — one for anything but a compound — in a system with contacts
+    /// and for a collider that is not a trigger. Empty otherwise.
+    pub(crate) proxies: Vec<ProxyId>,
     /// Its island, for a dynamic body in a system with contacts that has
     /// stepped since it became one.
     pub(crate) island: Option<IslandId>,
@@ -473,8 +475,10 @@ impl PhysicsSystem {
                 let record = self.records.get_mut(id).expect("a live record");
                 record.set = BodySet::Awake;
                 record.index = awake_index;
-                if let (Some(pipeline), Some(proxy)) = (self.contacts.as_mut(), record.proxy) {
-                    pipeline.body_changed_set(proxy, BodySet::Awake);
+                if let Some(pipeline) = self.contacts.as_mut() {
+                    for &proxy in &record.proxies {
+                        pipeline.body_changed_set(proxy, BodySet::Awake);
+                    }
                 }
             }
         }
@@ -491,11 +495,8 @@ impl PhysicsSystem {
         self.disturb(id);
         *self.transform_slot(id) = transform;
         self.sync_collider(id);
-        if let Some(pipeline) = self.contacts.as_mut()
-            && let Some(proxy) = self.records.get(id).and_then(|record| record.proxy)
-        {
+        if let Some(pipeline) = self.contacts.as_mut() {
             pipeline.body_placed(
-                proxy,
                 id,
                 Bodies {
                     records: &self.records,
@@ -695,12 +696,23 @@ impl PhysicsSystem {
                 self.world.set_trigger(collider, *is_trigger);
                 collider
             }
+            ColliderComponent::Compound {
+                offset,
+                shape,
+                is_trigger,
+            } => {
+                let collider = self
+                    .world
+                    .add_box(compound_query_box(shape, *offset, transform));
+                self.world.set_trigger(collider, *is_trigger);
+                collider
+            }
         };
 
         self.records.get_mut(id).expect("a live record").collider =
             Some((collider, component.clone()));
         if let Some(pipeline) = self.contacts.as_mut() {
-            let proxy = pipeline.create_body_proxy(
+            let proxies = pipeline.create_body_proxies(
                 id,
                 Bodies {
                     records: &self.records,
@@ -709,7 +721,7 @@ impl PhysicsSystem {
                     islands: &self.islands,
                 },
             );
-            self.records.get_mut(id).expect("a live record").proxy = proxy;
+            self.records.get_mut(id).expect("a live record").proxies = proxies;
         }
         self.collider_count += 1;
         let slot = collider.index() as usize;
@@ -760,8 +772,13 @@ impl PhysicsSystem {
         let Some(record) = self.records.get_mut(id) else {
             return;
         };
-        if let (Some(proxy), Some(pipeline)) = (record.proxy.take(), self.contacts.as_mut()) {
-            pipeline.destroy_proxy(proxy);
+        let proxies = std::mem::take(&mut record.proxies);
+        if let Some(pipeline) = self.contacts.as_mut()
+            && !proxies.is_empty()
+        {
+            for proxy in proxies {
+                pipeline.destroy_proxy(proxy);
+            }
             // Its contacts with the rest of its island are gone, so the
             // island may be in pieces.
             if let Some(island) = record.island {
@@ -1140,7 +1157,7 @@ impl PhysicsSystem {
             index: 0,
             collider: None,
             material: SurfaceMaterial::DEFAULT,
-            proxy: None,
+            proxies: Vec::new(),
             island: None,
         });
         let index = self.statics.push(id, transform);
@@ -1177,14 +1194,14 @@ impl PhysicsSystem {
         if self.islands.sleeping_bodies() == 0 {
             return;
         }
-        let (Some(pipeline), Some(proxy)) = (
-            self.contacts.as_ref(),
-            self.records.get(id).and_then(|record| record.proxy),
-        ) else {
+        let (Some(pipeline), Some(record)) = (self.contacts.as_ref(), self.records.get(id)) else {
             return;
         };
+        if record.proxies.is_empty() {
+            return;
+        }
         let mut touching = Vec::new();
-        pipeline.touching_bodies(proxy, &mut touching);
+        pipeline.touching_bodies(&record.proxies, &mut touching);
         for other in touching {
             self.wake(other);
         }
@@ -1267,7 +1284,17 @@ fn place_collider(
                 Capsule::new(centre + *offset, *radius, *half_height),
             );
         }
+        ColliderComponent::Compound { offset, shape, .. } => {
+            world.set_box(collider, compound_query_box(shape, *offset, transform));
+        }
     }
+}
+
+/// What the query world holds for a compound: one box around every part as
+/// the body has them turned — see [`ColliderComponent::Compound`].
+fn compound_query_box(shape: &CompoundShape, offset: DVec3, transform: &Transform) -> BoxCollider {
+    let bounds = shape.world_bounds(offset, transform);
+    BoxCollider::new(bounds.centre(), bounds.extents() * 0.5)
 }
 
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as

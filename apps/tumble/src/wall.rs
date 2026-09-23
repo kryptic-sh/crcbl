@@ -527,6 +527,17 @@ impl Room for Wall {
                     radius,
                     tint,
                 }),
+                // Every part is a piece of the one fixture, so each carries
+                // its key.
+                ColliderComponent::Compound {
+                    offset, ref shape, ..
+                } => out.extend(shape.parts().iter().map(|part| Shape::Box {
+                    key: index,
+                    centre: t.position + t.rotation * (offset + part.centre),
+                    rotation: t.rotation * part.rotation,
+                    half: part.half_extents,
+                    tint,
+                })),
             }
         }
     }

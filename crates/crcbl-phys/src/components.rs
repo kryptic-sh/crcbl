@@ -6,6 +6,8 @@
 
 use glam::{DMat3, DQuat, DVec3};
 
+use crate::compound_shape::CompoundShape;
+
 // ---------------------------------------------------------------------------
 // RigidBody
 // ---------------------------------------------------------------------------
@@ -395,6 +397,37 @@ pub enum ColliderComponent {
         /// Whether this collider is a trigger.
         is_trigger: bool,
     },
+    /// Several boxes fixed in the body's frame, turning with it: see
+    /// [`CompoundShape`].
+    ///
+    /// Unlike the shapes above, the offset and every part are turned by the
+    /// body's rotation wherever they are placed. In a system with contacts
+    /// each part collides on its own; the query world
+    /// ([`crate::PhysicsSystem::world`]) holds one box around all of them, so
+    /// a ray or an overlap there answers for the bounds, and
+    /// [`crate::AabbCompound`] is the per-part query.
+    Compound {
+        /// Offset of the shape's frame from the entity's
+        /// [`Transform::position`], in the body's frame: minus the centre of
+        /// mass for a body [`CompoundShape::dynamic_body`] builds.
+        offset: DVec3,
+        /// The parts.
+        shape: CompoundShape,
+        /// Whether this collider is a trigger.
+        is_trigger: bool,
+    },
+}
+
+impl ColliderComponent {
+    /// How many shapes it is to the contact pipeline: its parts for a
+    /// compound, one for anything else.
+    #[must_use]
+    pub fn part_count(&self) -> usize {
+        match self {
+            Self::Compound { shape, .. } => shape.parts().len(),
+            Self::Sphere { .. } | Self::Box { .. } | Self::Capsule { .. } => 1,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -51,7 +51,9 @@
 //!
 //! [`AabbCompound`] is L0's query surface for a rigid body made of several
 //! boxes: a ray cast and a closest-point query against local-space parts at a
-//! [`Transform`], naming the part each answer came from.
+//! [`Transform`], naming the part each answer came from. [`CompoundShape`] is
+//! the same kind of body to the contact solver: boxes fixed in its frame, each
+//! colliding on its own, with mass and inertia summed from the parts.
 //!
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
@@ -64,6 +66,7 @@ pub mod character;
 pub mod collider;
 pub mod components;
 pub mod compound;
+pub mod compound_shape;
 pub mod contact;
 pub mod forces;
 pub mod frames;
@@ -84,6 +87,7 @@ pub use character::{
 pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
 pub use compound::{AabbCompound, CompoundError, CompoundHit, CompoundPoint};
+pub use compound_shape::{CompoundBody, CompoundPart, CompoundShape};
 pub use contact::{
     ContactBody, ContactCounters, ContactReport, ContactSettings, KineticContact, KineticSource,
     PlaneId, StageTimes,

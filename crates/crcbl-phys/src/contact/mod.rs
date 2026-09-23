@@ -62,6 +62,27 @@
 //! A query wakes nothing, and neither does reading a body or a transform. See
 //! `island.rs`.
 //!
+//! # Compounds
+//!
+//! A [`crate::ColliderComponent::Compound`] body is several boxes. **Each part
+//! is a broadphase proxy of its own**, as each shape of a Box2D v3 body is:
+//! the owner of a proxy is a body and a part, two parts of one body never
+//! pair, and every contact is between two parts — so a compound resting on
+//! the floor on two parts has two contacts with it, each a box manifold of up
+//! to four points. Everything downstream is unchanged by that: a contact's
+//! cached separating axis, its feature ids and its warm-start impulses are
+//! the part pair's, and persist exactly as a lone box's do, because the pair
+//! is the contact; islands, sleep and the wake rules work on bodies, which
+//! own every part's contacts. The alternative — one proxy per body and a
+//! narrow phase that walks part pairs, with feature ids widened by the part
+//! indices — would put a part-against-part cull in every tick that the
+//! broadphase's fat bounds and pair set already do once, and make a contact
+//! hold several manifolds with different normals. The cost of the choice is
+//! a proxy per part, which [`crate::CompoundShape::MAX_PARTS`] bounds, and
+//! with it the points a pair of bodies can put in the solver: four per
+//! touching pair of parts. One [`KineticContact`] is raised per contact, so a
+//! compound landing flat on two parts raises two.
+//!
 //! # What is not done yet
 //!
 //! General convex hulls, and GJK for spheres and capsules against them: the
@@ -348,16 +369,22 @@ pub struct ContactReport {
     pub a: ContactBody,
     /// Shape `B`.
     pub b: ContactBody,
+    /// Which part of `a`'s collider: an index into its
+    /// [`crate::CompoundShape::parts`] for a compound, and 0 for anything else.
+    pub part_a: usize,
+    /// Which part of `b`'s collider, likewise.
+    pub part_b: usize,
     /// The manifold the last step built.
     pub manifold: Manifold,
     /// Each point's normal impulse as the last step left it, in manifold order.
     pub normal_impulses: [f64; MAX_POINTS],
 }
 
-/// What owns a proxy.
+/// What owns a proxy: a body's collider — which part of it, for a compound,
+/// and part 0 of anything else — or a plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Owner {
-    Body(BodyId),
+    Body(BodyId, usize),
     Plane(u32),
 }
 
@@ -518,19 +545,29 @@ impl ContactPipeline {
 
     // ── Proxies ──────────────────────────────────────────────────────────
 
-    /// Gives body `id` a proxy for its collider, or nothing if the collider is
-    /// a trigger.
-    pub(crate) fn create_body_proxy(&mut self, id: BodyId, bodies: Bodies<'_>) -> Option<ProxyId> {
-        let record = bodies.records.get(id)?;
-        let (_, component) = record.collider.as_ref()?;
+    /// Gives body `id` a proxy for each part of its collider, in part order,
+    /// or none if the collider is a trigger.
+    pub(crate) fn create_body_proxies(&mut self, id: BodyId, bodies: Bodies<'_>) -> Vec<ProxyId> {
+        let Some(record) = bodies.records.get(id) else {
+            return Vec::new();
+        };
+        let Some((_, component)) = record.collider.as_ref() else {
+            return Vec::new();
+        };
         let transform = transform_of(record, bodies);
-        let shape = ContactShape::placed(component, transform)?;
         let kind = proxy_kind(record.set);
-        let proxy = self
-            .broadphase
-            .create(kind, shape.aabb().expect("a body's shape is bounded"));
-        self.set_owner(proxy, Owner::Body(id));
-        Some(proxy)
+        let mut proxies = Vec::new();
+        for part in 0..component.part_count() {
+            let Some(shape) = ContactShape::placed_part(component, part, transform) else {
+                continue;
+            };
+            let proxy = self
+                .broadphase
+                .create(kind, shape.aabb().expect("a body's shape is bounded"));
+            self.set_owner(proxy, Owner::Body(id, part));
+            proxies.push(proxy);
+        }
+        proxies
     }
 
     /// Adds a plane.
@@ -571,17 +608,20 @@ impl ContactPipeline {
     }
 
     /// Tells the broadphase a body was placed by hand.
-    pub(crate) fn body_placed(&mut self, proxy: ProxyId, id: BodyId, bodies: Bodies<'_>) {
+    pub(crate) fn body_placed(&mut self, id: BodyId, bodies: Bodies<'_>) {
         let Some(record) = bodies.records.get(id) else {
             return;
         };
         let Some((_, component)) = record.collider.as_ref() else {
             return;
         };
-        if let Some(bounds) = ContactShape::placed(component, transform_of(record, bodies))
-            .and_then(|shape| shape.aabb())
-        {
-            self.broadphase.update(proxy, bounds);
+        let transform = transform_of(record, bodies);
+        for (part, &proxy) in record.proxies.iter().enumerate() {
+            if let Some(bounds) =
+                ContactShape::placed_part(component, part, transform).and_then(|shape| shape.aabb())
+            {
+                self.broadphase.update(proxy, bounds);
+            }
         }
     }
 
@@ -609,27 +649,29 @@ impl ContactPipeline {
             let Some(record) = bodies.records.get(awake.ids[index]) else {
                 continue;
             };
-            let (Some(proxy), Some((_, component))) = (record.proxy, record.collider.as_ref())
-            else {
+            let Some((_, component)) = record.collider.as_ref() else {
                 continue;
             };
             let transform = &awake.transforms[index];
             let body = &awake.bodies[index];
-            let Some(shape) = ContactShape::placed(component, transform) else {
-                continue;
-            };
-            let Some(tight) = shape.aabb() else {
-                continue;
-            };
-            // Where it could be by the end of the tick, and a speculative
-            // distance past that, turning included.
-            let travel = body.velocity * dt;
-            let swept = tight.union(Aabb::new(tight.min + travel, tight.max + travel));
-            let turn = body.angular_velocity.length() * dt * shape.reach_from(transform.position);
-            self.broadphase.update(
-                proxy,
-                swept.inflated(self.settings.speculative_distance + turn),
-            );
+            for (part, &proxy) in record.proxies.iter().enumerate() {
+                let Some(shape) = ContactShape::placed_part(component, part, transform) else {
+                    continue;
+                };
+                let Some(tight) = shape.aabb() else {
+                    continue;
+                };
+                // Where it could be by the end of the tick, and a speculative
+                // distance past that, turning included.
+                let travel = body.velocity * dt;
+                let swept = tight.union(Aabb::new(tight.min + travel, tight.max + travel));
+                let turn =
+                    body.angular_velocity.length() * dt * shape.reach_from(transform.position);
+                self.broadphase.update(
+                    proxy,
+                    swept.inflated(self.settings.speculative_distance + turn),
+                );
+            }
         }
 
         let Self {
@@ -642,6 +684,15 @@ impl ContactPipeline {
         new_pairs.clear();
         broadphase.find_new_pairs(
             |a, b| {
+                // Two parts of one compound are one rigid body: they never
+                // collide.
+                let body = |proxy: ProxyId| match owners.get(proxy as usize) {
+                    Some(Some(Owner::Body(id, _))) => Some(*id),
+                    _ => None,
+                };
+                if body(a).is_some() && body(a) == body(b) {
+                    return false;
+                }
                 let dynamic = |proxy: ProxyId| {
                     owner_side(owners, planes, proxy, bodies).is_some_and(|s| s.inverse_mass > 0.0)
                 };
@@ -809,20 +860,20 @@ impl ContactPipeline {
         self.counters.pairs = self.broadphase.pair_count();
     }
 
-    /// Every body touching the body whose proxy is `proxy`, into `out`.
-    pub(crate) fn touching_bodies(&self, proxy: ProxyId, out: &mut Vec<BodyId>) {
+    /// Every body touching the body whose proxies are `proxies`, into `out`.
+    pub(crate) fn touching_bodies(&self, proxies: &[ProxyId], out: &mut Vec<BodyId>) {
         for contact in self.contacts.iter().flatten() {
             if !contact.touching {
                 continue;
             }
-            let other = if contact.a == proxy {
+            let other = if proxies.contains(&contact.a) {
                 contact.b
-            } else if contact.b == proxy {
+            } else if proxies.contains(&contact.b) {
                 contact.a
             } else {
                 continue;
             };
-            if let Some(Some(Owner::Body(id))) = self.owners.get(other as usize) {
+            if let Some(Some(Owner::Body(id, _))) = self.owners.get(other as usize) {
                 out.push(*id);
             }
         }
@@ -837,7 +888,7 @@ impl ContactPipeline {
     ) -> &[(BodyId, BodyId)] {
         self.edges.clear();
         let in_island = |proxy: ProxyId| match self.owners.get(proxy as usize) {
-            Some(Some(Owner::Body(id)))
+            Some(Some(Owner::Body(id, _)))
                 if records.get(*id).and_then(|record| record.island) == Some(island) =>
             {
                 Some(*id)
@@ -865,6 +916,8 @@ impl ContactPipeline {
                     slot: slot as u32,
                     a: self.contact_body(contact.a, records)?,
                     b: self.contact_body(contact.b, records)?,
+                    part_a: self.part(contact.a),
+                    part_b: self.part(contact.b),
                     manifold: contact.manifold,
                     normal_impulses: contact.impulses.normal,
                 })
@@ -888,13 +941,24 @@ impl ContactPipeline {
             }
             write(hasher, plane.bounds.offset);
         }
-        /// A contact side as the sort sees it: entities first, then planes.
-        type Key = (u8, u64);
+        /// A contact side as the sort sees it: an entity's first part, a
+        /// plane, a side with no owner, then an entity's later parts — the
+        /// tag, the entity or plane, and the part.
+        ///
+        /// A compound body has one contact per touching pair of parts, so the
+        /// part is what keeps two contacts between the same two bodies apart
+        /// and in one order. It goes in under a tag of its own, and only for a
+        /// part past the first, so a state with no compound in it hashes as it
+        /// did before compounds.
+        type Key = (u8, u64, u64);
         let key = |proxy: ProxyId| -> Key {
             match self.contact_body(proxy, records) {
-                Some(ContactBody::Entity(entity)) => (0, entity.to_bits()),
-                Some(ContactBody::Plane(PlaneId(index))) => (1, u64::from(index)),
-                None => (2, 0),
+                Some(ContactBody::Entity(entity)) => match self.part(proxy) {
+                    0 => (0, entity.to_bits(), 0),
+                    part => (3, entity.to_bits(), part as u64),
+                },
+                Some(ContactBody::Plane(PlaneId(index))) => (1, u64::from(index), 0),
+                None => (2, 0, 0),
             }
         };
         let mut live: Vec<(Key, Key, &Contact)> = self
@@ -908,6 +972,11 @@ impl ContactPipeline {
             hasher.write(&[a.0, b.0]);
             hasher.write(&a.1.to_le_bytes());
             hasher.write(&b.1.to_le_bytes());
+            for side in [a, b] {
+                if side.0 == 3 {
+                    hasher.write(&side.2.to_le_bytes());
+                }
+            }
             let points = contact.manifold.points();
             hasher.write(&(points.len() as u32).to_le_bytes());
             for value in contact.manifold.normal.to_array() {
@@ -930,8 +999,17 @@ impl ContactPipeline {
 
     fn contact_body(&self, proxy: ProxyId, records: &Pool<BodyRecord>) -> Option<ContactBody> {
         match (*self.owners.get(proxy as usize)?)? {
-            Owner::Body(id) => Some(ContactBody::Entity(records.get(id)?.entity)),
+            Owner::Body(id, _) => Some(ContactBody::Entity(records.get(id)?.entity)),
             Owner::Plane(index) => Some(ContactBody::Plane(PlaneId(index))),
+        }
+    }
+
+    /// Which part of its collider a proxy is: 0 for anything but a
+    /// compound's later parts, planes included.
+    fn part(&self, proxy: ProxyId) -> usize {
+        match self.owners.get(proxy as usize) {
+            Some(Some(Owner::Body(_, part))) => *part,
+            _ => 0,
         }
     }
 
@@ -955,7 +1033,7 @@ impl ContactPipeline {
     fn presence(&self, proxy: ProxyId, bodies: Bodies<'_>) -> Option<Presence> {
         match (*self.owners.get(proxy as usize)?)? {
             Owner::Plane(_) => Some(Presence::Still),
-            Owner::Body(id) => {
+            Owner::Body(id, _) => {
                 let record = bodies.records.get(id)?;
                 Some(match record.set {
                     BodySet::Static => Presence::Still,
@@ -1019,11 +1097,11 @@ fn owner_side(
                 mass: f64::INFINITY,
             })
         }
-        Owner::Body(id) => {
+        Owner::Body(id, part) => {
             let record = bodies.records.get(id)?;
             let (_, component) = record.collider.as_ref()?;
             let transform = transform_of(record, bodies);
-            let shape = ContactShape::placed(component, transform)?;
+            let shape = ContactShape::placed_part(component, part, transform)?;
             let (awake, velocity, angular_velocity, inverse_mass, mass) = match record.set {
                 BodySet::Static => (None, DVec3::ZERO, DVec3::ZERO, 0.0, f64::INFINITY),
                 BodySet::Sleeping => {
