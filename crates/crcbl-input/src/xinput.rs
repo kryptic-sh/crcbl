@@ -56,6 +56,26 @@
 //! zone**: the seam's bindings own it. XInput's Y is already +up. The Guide
 //! button is never reported: `XInputGetState` does not expose it.
 //!
+//! # Steam's virtual pads
+//!
+//! With Steam Input active for a game, Steam can also present a pad of its own
+//! through XInput — a virtual one, under Valve's USB vendor id
+//! [`VALVE_VENDOR_ID`] — for a controller the Steam Input backend
+//! (`crcbl-steam`) already reports. A pad must have one owner, or every press
+//! arrives twice. So while that backend is live,
+//! `XInput::skip_steam_virtual_pads` makes this one skip every slot whose
+//! vendor is Valve's: it is read for its presence and never reported, and a
+//! pad already reported when the filter goes on is reported disconnected.
+//! Without Steam Input the filter stays off and XInput reports whatever it
+//! sees.
+//!
+//! XInput documents no way to read a vendor id. The filter asks the
+//! **undocumented** `XInputGetCapabilitiesEx` (export ordinal 108 of
+//! `xinput1_4.dll`, declared as SDL declares it and reads it for the same
+//! purpose), once per pad when it connects or when the filter goes on. It is
+//! not in `xinput9_1_0.dll`, and with that library the filter refuses to turn
+//! on rather than run as though it had checked.
+//!
 //! # Not on other targets
 //!
 //! This module is compiled on Windows (and into every target's tests, which
@@ -68,6 +88,10 @@ mod ffi;
 
 use crate::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadButton, PadKind};
 use ffi::{ERROR_DEVICE_NOT_CONNECTED, XInputGamepad, XInputState, XUSER_MAX_COUNT};
+
+/// Valve's USB vendor id, which Steam's virtual pads carry — see "Steam's
+/// virtual pads" in the module docs.
+pub const VALVE_VENDOR_ID: u16 = 0x28DE;
 use std::time::{Duration, Instant};
 
 /// What went wrong reaching XInput.
@@ -88,6 +112,20 @@ pub enum XInputError {
         /// The Win32 error code it returned.
         code: u32,
     },
+    /// The Steam-pad filter was asked to turn on, and the library that
+    /// loaded has no `XInputGetCapabilitiesEx` to read vendor ids with
+    /// (`xinput9_1_0.dll` lacks it), so no slot could be told apart.
+    NoVendorQuery,
+    /// `XInputGetCapabilitiesEx` failed for a connected slot while the
+    /// Steam-pad filter is on. The pad was reported, since it could not be
+    /// shown to be Steam's, and is not asked about again while it stays
+    /// connected.
+    GetVendor {
+        /// The user slot, 0…3.
+        user: u32,
+        /// The Win32 error code it returned.
+        code: u32,
+    },
 }
 
 impl std::fmt::Display for XInputError {
@@ -99,6 +137,16 @@ impl std::fmt::Display for XInputError {
             Self::GetState { user, code } => {
                 write!(f, "XInputGetState failed for user {user} (error {code})")
             }
+            Self::NoVendorQuery => write!(
+                f,
+                "this XInput library cannot report vendor ids, so Steam's virtual pads \
+                 cannot be skipped"
+            ),
+            Self::GetVendor { user, code } => write!(
+                f,
+                "XInputGetCapabilitiesEx failed for user {user} (error {code}); \
+                 the pad is reported"
+            ),
         }
     }
 }
@@ -163,13 +211,26 @@ fn snapshot_of(pad: &XInputGamepad) -> GamepadSnapshot {
 trait StateSource {
     /// The slot's state, or the Win32 error code `XInputGetState` returned.
     fn get_state(&mut self, user: u32) -> Result<XInputState, u32>;
+
+    /// The USB vendor id of the pad in the slot, or the Win32 error code the
+    /// query returned; `None` when this source has no way to ask.
+    fn vendor(&mut self, user: u32) -> Option<Result<u16, u32>>;
 }
 
-/// A connected slot: its id, and the snapshot last reported for it.
+/// A slot with a pad in it.
 #[derive(Clone, Copy, Debug)]
-struct Slot {
-    id: GamepadId,
-    last: GamepadSnapshot,
+enum Slot {
+    /// Reported to the game: its id, the snapshot last reported for it, and
+    /// whether its vendor has been checked since the Steam-pad filter last
+    /// went on.
+    Reported {
+        id: GamepadId,
+        last: GamepadSnapshot,
+        vendor_checked: bool,
+    },
+    /// One of Steam's virtual pads while the filter is on: read for its
+    /// presence, never reported.
+    Skipped,
 }
 
 /// How long a slot that answered "not connected" goes unasked.
@@ -187,9 +248,25 @@ struct Poller {
     /// that is an interval old, so the stale time a slot keeps after it
     /// connects never skips a read.
     found_empty: [Option<Instant>; XUSER_MAX_COUNT as usize],
+    /// Whether slots holding one of Steam's virtual pads are skipped.
+    skip_valve: bool,
 }
 
 impl Poller {
+    /// Turns the Steam-pad filter on or off. On, every reported pad has its
+    /// vendor checked at the next poll; off, every skipped pad is forgotten,
+    /// so the next poll reports it as newly connected.
+    fn set_skip_valve(&mut self, skip: bool) {
+        self.skip_valve = skip;
+        for slot in &mut self.slots {
+            match slot {
+                Some(Slot::Reported { vendor_checked, .. }) => *vendor_checked = false,
+                Some(Slot::Skipped) if !skip => *slot = None,
+                _ => {}
+            }
+        }
+    }
+
     /// Reads every slot due a read at `now` and emits what changed — see the
     /// module docs. `now` is the caller's, so a test can step it.
     fn poll(
@@ -199,6 +276,7 @@ impl Poller {
         emit: &mut impl FnMut(GamepadEvent),
     ) -> Result<(), XInputError> {
         let mut failure = None;
+        let skip_valve = self.skip_valve;
         let slots = self.slots.iter_mut().zip(&mut self.found_empty);
         for (user, (slot, found_empty)) in (0..XUSER_MAX_COUNT).zip(slots) {
             if found_empty.is_some_and(|at| now.duration_since(at) < REPROBE_INTERVAL) {
@@ -206,29 +284,36 @@ impl Poller {
             }
             match source.get_state(user) {
                 Ok(state) => {
-                    let snapshot = snapshot_of(&state.gamepad);
-                    let connected = slot.get_or_insert_with(|| {
-                        let id = GamepadId::allocate();
-                        emit(GamepadEvent::Connected {
-                            id,
-                            kind: PadKind::Xbox,
-                        });
-                        Slot {
-                            id,
-                            last: GamepadSnapshot::neutral(PadKind::Xbox),
+                    let unchecked = !matches!(
+                        slot,
+                        Some(
+                            Slot::Skipped
+                                | Slot::Reported {
+                                    vendor_checked: true,
+                                    ..
+                                }
+                        )
+                    );
+                    if skip_valve && unchecked {
+                        match source.vendor(user) {
+                            Some(Ok(VALVE_VENDOR_ID)) => {
+                                if let Some(Slot::Reported { id, .. }) = slot.take() {
+                                    emit(GamepadEvent::Disconnected { id });
+                                }
+                                *slot = Some(Slot::Skipped);
+                                continue;
+                            }
+                            Some(Err(code)) => {
+                                failure = Some(XInputError::GetVendor { user, code });
+                            }
+                            Some(Ok(_)) | None => {}
                         }
-                    });
-                    if connected.last != snapshot {
-                        connected.last = snapshot;
-                        emit(GamepadEvent::State {
-                            id: connected.id,
-                            snapshot,
-                        });
                     }
+                    report(slot, snapshot_of(&state.gamepad), skip_valve, emit);
                 }
                 Err(code) => {
-                    if let Some(gone) = slot.take() {
-                        emit(GamepadEvent::Disconnected { id: gone.id });
+                    if let Some(Slot::Reported { id, .. }) = slot.take() {
+                        emit(GamepadEvent::Disconnected { id });
                     }
                     if code == ERROR_DEVICE_NOT_CONNECTED {
                         *found_empty = Some(now);
@@ -242,14 +327,51 @@ impl Poller {
     }
 }
 
+/// Reports a slot that answered with `snapshot`: a connection if it was
+/// empty, then the snapshot if it differs from the last one reported. A
+/// skipped slot reports nothing. `checked` is whether the filter is on, in
+/// which case the caller has just made the vendor check it wants.
+fn report(
+    slot: &mut Option<Slot>,
+    snapshot: GamepadSnapshot,
+    checked: bool,
+    emit: &mut impl FnMut(GamepadEvent),
+) {
+    let reported = slot.get_or_insert_with(|| {
+        let id = GamepadId::allocate();
+        emit(GamepadEvent::Connected {
+            id,
+            kind: PadKind::Xbox,
+        });
+        Slot::Reported {
+            id,
+            last: GamepadSnapshot::neutral(PadKind::Xbox),
+            vendor_checked: checked,
+        }
+    });
+    if let Slot::Reported {
+        id,
+        last,
+        vendor_checked,
+    } = reported
+    {
+        *vendor_checked |= checked;
+        if *last != snapshot {
+            *last = snapshot;
+            emit(GamepadEvent::State { id: *id, snapshot });
+        }
+    }
+}
+
 #[cfg(windows)]
 pub use loaded::XInput;
 
 #[cfg(windows)]
 mod loaded {
     use super::ffi::{
-        ERROR_SUCCESS, FreeLibrary, GetLastError, GetProcAddress, LoadLibraryW, Module,
-        XInputGetStateFn, XInputState,
+        ERROR_SUCCESS, FreeLibrary, GET_CAPABILITIES_EX_ORDINAL, GetLastError, GetProcAddress,
+        LoadLibraryW, Module, XInputCapabilitiesEx, XInputGetCapabilitiesExFn, XInputGetStateFn,
+        XInputState,
     };
     use super::{Poller, StateSource, XInputError};
     use crate::GamepadEvent;
@@ -263,6 +385,8 @@ mod loaded {
     pub(super) struct Library {
         module: Module,
         get_state: XInputGetStateFn,
+        /// `XInputGetCapabilitiesEx`, where the library exports it.
+        get_capabilities_ex: Option<XInputGetCapabilitiesExFn>,
         name: &'static str,
     }
 
@@ -297,9 +421,24 @@ mod loaded {
                 let get_state = unsafe {
                     core::mem::transmute::<*mut core::ffi::c_void, XInputGetStateFn>(proc)
                 };
+                // SAFETY: `module` is live; an ordinal in the low word of the
+                // name pointer is `GetProcAddress`'s documented
+                // `MAKEINTRESOURCE` form.
+                let ex = unsafe {
+                    GetProcAddress(
+                        module,
+                        core::ptr::without_provenance(GET_CAPABILITIES_EX_ORDINAL),
+                    )
+                };
+                // SAFETY: ordinal 108 is `XInputGetCapabilitiesEx` with SDL's
+                // signature (see `ffi`), kept only while `module` is.
+                let get_capabilities_ex = (!ex.is_null()).then(|| unsafe {
+                    core::mem::transmute::<*mut core::ffi::c_void, XInputGetCapabilitiesExFn>(ex)
+                });
                 return Ok(Self {
                     module,
                     get_state,
+                    get_capabilities_ex,
                     name,
                 });
             }
@@ -318,6 +457,21 @@ mod loaded {
             } else {
                 Err(code)
             }
+        }
+
+        fn vendor(&mut self, user: u32) -> Option<Result<u16, u32>> {
+            let get_capabilities_ex = self.get_capabilities_ex?;
+            let mut capabilities = XInputCapabilitiesEx::default();
+            // SAFETY: the pointer is live while `self` is (see `load`), and
+            // `capabilities` is a writable structure of the layout SDL
+            // declares for the call's duration. `1` and `0` are the reserved
+            // argument and flags SDL passes.
+            let code = unsafe { get_capabilities_ex(1, user, 0, &raw mut capabilities) };
+            Some(if code == ERROR_SUCCESS {
+                Ok(capabilities.vendor_id)
+            } else {
+                Err(code)
+            })
         }
     }
 
@@ -359,6 +513,27 @@ mod loaded {
         #[must_use]
         pub fn library_name(&self) -> &'static str {
             self.library.name
+        }
+
+        /// Skips Steam's virtual pads (`skip`), or stops skipping them — see
+        /// "Steam's virtual pads" in the module docs. Turn it on while the
+        /// Steam Input backend is live, so a pad Steam reports is not reported
+        /// here too.
+        ///
+        /// On, every pad already reported has its vendor checked at the next
+        /// poll, and one of Steam's is reported disconnected there. Off, a
+        /// pad that was skipped is reported as newly connected at the next
+        /// poll.
+        ///
+        /// # Errors
+        /// [`XInputError::NoVendorQuery`] if `skip` is asked of a library
+        /// that cannot report vendor ids; the filter stays off.
+        pub fn skip_steam_virtual_pads(&mut self, skip: bool) -> Result<(), XInputError> {
+            if skip && self.library.get_capabilities_ex.is_none() {
+                return Err(XInputError::NoVendorQuery);
+            }
+            self.poller.set_skip_valve(skip);
+            Ok(())
         }
 
         /// Reads the four slots and calls `emit` with what changed:
@@ -433,6 +608,9 @@ mod tests {
     struct Fake {
         slots: [Result<XInputState, u32>; 4],
         reads: [u32; 4],
+        /// What each slot's vendor query answers; a Microsoft pad by default.
+        vendors: [Option<Result<u16, u32>>; 4],
+        vendor_reads: [u32; 4],
         now: Instant,
     }
 
@@ -441,6 +619,8 @@ mod tests {
             Self {
                 slots,
                 reads: [0; 4],
+                vendors: [Some(Ok(MICROSOFT)); 4],
+                vendor_reads: [0; 4],
                 now: Instant::now(),
             }
         }
@@ -451,7 +631,15 @@ mod tests {
             self.reads[user as usize] += 1;
             self.slots[user as usize]
         }
+
+        fn vendor(&mut self, user: u32) -> Option<Result<u16, u32>> {
+            self.vendor_reads[user as usize] += 1;
+            self.vendors[user as usize]
+        }
     }
+
+    /// Microsoft's USB vendor id, which a real Xbox pad carries.
+    const MICROSOFT: u16 = 0x045E;
 
     const EMPTY: Result<XInputState, u32> = Err(ERROR_DEVICE_NOT_CONNECTED);
 
@@ -719,6 +907,101 @@ mod tests {
             })
             .expect("scripted");
         assert!(map.just_released("jump"), "unplugging releases");
+    }
+
+    /// **One owner per pad**: with the Steam-pad filter on, a slot holding
+    /// Steam's virtual pad reports nothing, however it changes, while a real
+    /// pad beside it is reported as ever.
+    #[test]
+    fn with_the_filter_on_steams_virtual_pad_is_never_reported() {
+        let mut poller = Poller::default();
+        poller.set_skip_valve(true);
+        let mut fake = Fake::new([pad(0), pad(ffi::XINPUT_GAMEPAD_A), EMPTY, EMPTY]);
+        fake.vendors[1] = Some(Ok(VALVE_VENDOR_ID));
+
+        let (events, result) = poll(&mut poller, &mut fake);
+        assert_eq!(result, Ok(()));
+        assert!(
+            matches!(events[..], [GamepadEvent::Connected { .. }]),
+            "only slot 0, at rest: {events:?}"
+        );
+
+        fake.slots[1] = pad(ffi::XINPUT_GAMEPAD_B);
+        assert_eq!(poll(&mut poller, &mut fake), (vec![], Ok(())));
+        fake.slots[1] = EMPTY;
+        assert_eq!(
+            poll(&mut poller, &mut fake),
+            (vec![], Ok(())),
+            "and leaves unannounced"
+        );
+        assert_eq!(fake.vendor_reads, [1, 1, 0, 0], "asked once per pad");
+    }
+
+    /// Turning the filter on reports an already-reported Steam pad
+    /// disconnected; turning it off reports it connected again, under a new
+    /// id. A real pad is untouched either way.
+    #[test]
+    fn toggling_the_filter_hands_a_steam_pad_over_and_back() {
+        let mut poller = Poller::default();
+        let mut fake = Fake::new([pad(0), EMPTY, EMPTY, pad(0)]);
+        fake.vendors[3] = Some(Ok(VALVE_VENDOR_ID));
+        let (events, _) = poll(&mut poller, &mut fake);
+        let [
+            GamepadEvent::Connected { .. },
+            GamepadEvent::Connected { id: steam, .. },
+        ] = events[..]
+        else {
+            panic!("both reported with the filter off: {events:?}");
+        };
+        assert_eq!(fake.vendor_reads, [0; 4], "no filter, no query");
+
+        poller.set_skip_valve(true);
+        let (events, _) = poll(&mut poller, &mut fake);
+        assert_eq!(events, [GamepadEvent::Disconnected { id: steam }]);
+        assert_eq!(poll(&mut poller, &mut fake), (vec![], Ok(())));
+
+        poller.set_skip_valve(false);
+        let (events, _) = poll(&mut poller, &mut fake);
+        let [GamepadEvent::Connected { id: again, .. }] = events[..] else {
+            panic!("the Steam pad comes back: {events:?}");
+        };
+        assert_ne!(again, steam);
+    }
+
+    /// A vendor query that fails reports the pad — it could not be shown to
+    /// be Steam's — returns the error once, and is not repeated every poll.
+    #[test]
+    fn a_failed_vendor_query_reports_the_pad_and_the_error_once() {
+        let mut poller = Poller::default();
+        poller.set_skip_valve(true);
+        let mut fake = Fake::new([EMPTY, EMPTY, pad(0), EMPTY]);
+        fake.vendors[2] = Some(Err(5));
+        let (events, result) = poll(&mut poller, &mut fake);
+        assert_eq!(result, Err(XInputError::GetVendor { user: 2, code: 5 }));
+        assert!(matches!(events[..], [GamepadEvent::Connected { .. }]));
+        assert_eq!(poll(&mut poller, &mut fake), (vec![], Ok(())));
+        assert_eq!(fake.vendor_reads, [0, 0, 1, 0]);
+    }
+
+    /// **The real `XInputGetCapabilitiesEx`** is exported by
+    /// `xinput1_4.dll` at ordinal 108, and answers a slot as `XInputGetState`
+    /// does: a vendor id for a pad, `ERROR_DEVICE_NOT_CONNECTED` for an empty
+    /// slot — so the declaration SDL uses at least has the shape Windows
+    /// answers to.
+    #[cfg(windows)]
+    #[test]
+    fn the_real_library_answers_the_vendor_query_like_the_state_query() {
+        let mut library = loaded::Library::load().expect("XInput ships with Windows");
+        for user in 0..XUSER_MAX_COUNT {
+            let state = library.get_state(user).map(|_| ());
+            let vendor = library
+                .vendor(user)
+                .expect("xinput1_4.dll exports ordinal 108");
+            match state {
+                Ok(()) => assert!(vendor.is_ok(), "user {user}: {vendor:?}"),
+                Err(code) => assert_eq!(vendor, Err(code), "user {user}"),
+            }
+        }
     }
 
     /// **The real `XInputGetState`, on a host with no pad in some slot**,

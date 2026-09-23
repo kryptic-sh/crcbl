@@ -381,7 +381,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   games on `crcbl::engine::Loop` (see below). Tested without a controller (a
   scripted state source, and a real `XInputGetState` answering an empty slot);
   no controller has been through it yet. Other targets have no pad backend and
-  no stand-in module.
+  no stand-in module. `XInput::skip_steam_virtual_pads(true)` keeps a pad from
+  arriving twice while Steam Input reports it: slots whose USB vendor is Valve's
+  (`xinput::VALVE_VENDOR_ID`, read through `xinput1_4.dll`'s undocumented
+  `XInputGetCapabilitiesEx`) are skipped, and it refuses with
+  `XInputError::NoVendorQuery` on a library that cannot report vendors.
 - **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
   at `Loop::new` (logging once and running padless if it cannot); other targets
   log once that they have no backend; a headless run polls nothing. Each frame,
