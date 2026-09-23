@@ -22021,6 +22021,13 @@ there: 17, 8 and 10 call sites). The rest:
   - The in-flight e2e reads back correct pixels but cannot force the GPU race;
     its guard is the recorder test showing a free destroys no image.
   - Not run on Metal or WebGPU.
+  - `write_slot` (host pixels straight into a cell, 2026-09-23) stages one
+    buffer and one copy pass per call; a batched `write_slots` would cut both if
+    EW fills many icons a frame. Nothing needs it yet.
+  - `SceneState::Sprite` in `crates/crcbl/src/screenshot.rs` sits near clippy's
+    `large_enum_variant` limit: +48 bytes on `SpriteRenderer` tripped it while
+    `write_slot` was built, +32 did not. Box the renderer in that variant, as
+    `Ui` and `Forward` are, before the next field lands.
 - **P3: gamepad backends** (evdev first for the Steam Deck, then XInput and
   GameController) and a tap/double-tap/hold evaluator — both already in "Input:
   patterns, RON bindings, rebind persistence and every gamepad backend". EW has

@@ -7,6 +7,8 @@
 //!                                                    SheetError::AtlasFull
 //!   add_slot_copies(graph, [SlotCopy { source, slot }])  ── a copy pass in
 //!                     the caller's graph: source ─▶ the slot's cell
+//!   write_slot(device, graph, slot, pixels)  ── host pixels staged now, and
+//!                     a copy pass in the caller's graph: staging ─▶ the cell
 //!   add_pass ──▶ sprites naming the atlas sample it, after those copies
 //!   free_slot ──▶ the cell is free for the next allocate; nothing is destroyed
 //! ```
@@ -52,10 +54,10 @@
 //!   `tests/sprite_e2e/sprite/atlas.rs` frees and refills a slot with the
 //!   frame that drew it still unread and reads both frames back.
 //! * A freed slot's [`AtlasSlot`] is refused from then on
-//!   ([`SheetError::StaleSlot`]) by [`SpriteRenderer::free_slot`] and
-//!   [`SpriteRenderer::add_slot_copies`], so a cache that frees twice or copies
-//!   into a slot it gave back is told so rather than overwriting whoever holds
-//!   the cell now.
+//!   ([`SheetError::StaleSlot`]) by [`SpriteRenderer::free_slot`],
+//!   [`SpriteRenderer::add_slot_copies`] and [`SpriteRenderer::write_slot`], so
+//!   a cache that frees twice or copies into a slot it gave back is told so
+//!   rather than overwriting whoever holds the cell now.
 //!
 //! What **cannot** be enforced here: a [`Sprite`](super::Sprite) carries a
 //! sheet and UVs, not a slot, so a sprite built from a slot that was since freed
@@ -72,6 +74,33 @@
 //! that ran the copy and the sprite pass on different queues would need a
 //! semaphore between them, which nothing here records.
 //!
+//! # Host pixels are a graph copy too
+//!
+//! [`SpriteRenderer::write_slot`] fills a cell from bytes the game already has
+//! — an icon decoded on the host — with no intermediate sampled image. It is
+//! the same copy pass as [`SpriteRenderer::add_slot_copies`] with a buffer for
+//! its source, and **not** an immediate upload on the queue the way
+//! [`register_sheet`](SpriteRenderer::register_sheet) is, for one reason: the
+//! barriers stay the graph's. An upload submitted on its own would have to
+//! hand-write the `ShaderRead` → `TransferDst` → `ShaderRead` pair around its
+//! copy, and would be a second writer of the atlas the graph's ledger never
+//! hears of. Recorded into the graph instead, the atlas is the same import
+//! `add_slot_copies` and `add_pass` declare, every rule above holds unchanged
+//! — the queue order, the in-frame order against
+//! [`SpriteRenderer::add_pass`], the `StaleSlot` refusal — and the ledger sees
+//! `ShaderRead` in and out like any other frame.
+//!
+//! What the graph cannot own is the staging buffer: its transients are
+//! device-local, and the host has to write this one. So the renderer keeps
+//! it, on the ring its instance buffers already follow: a buffer staged
+//! between two [`SpriteRenderer::begin_frame`] calls is destroyed by the
+//! `begin_frame` that re-enters the second one's ring slot, by which point the
+//! frame that slot carried has retired — the promise the instance buffers are
+//! rewritten on. The graph that records the copy must therefore be submitted
+//! no later than the frame the next `begin_frame` starts; one dropped
+//! unexecuted copies nothing, and its buffer is released on the same
+//! schedule.
+//!
 //! # The gutter
 //!
 //! Cells sit [`GUTTER`] texel apart and that far from the atlas's edge, and no
@@ -81,14 +110,14 @@
 
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
-    Extent3d, Format, HalError, ImageAspect, ImageCopy, ImageHandle, ImageSubresourceLayers,
-    ImageUsage, Offset3d, ResourceState,
+    BufferHandle, BufferImageCopy, Device, Extent3d, Format, HalError, ImageAspect, ImageCopy,
+    ImageHandle, ImageSubresourceLayers, ImageUsage, Offset3d, ResourceState,
 };
 use crcbl_sprite::SampleMode;
 
 use super::{SheetId, SpriteRenderer};
 use crate::graph::{ImageId, ImportedImage, InitialClaim, RenderGraph};
-use crate::texture::UploadedTexture;
+use crate::texture::{UploadedTexture, stage_region};
 
 /// Texels between two cells, and between a cell and the atlas's edge.
 ///
@@ -105,6 +134,13 @@ pub const GUTTER: u32 = 1;
 /// format would arrive reinterpreted — which is why the copy refuses one
 /// rather than converting it.
 pub const ATLAS_FORMAT: Format = Format::Rgba8UnormSrgb;
+
+/// Bytes one [`ATLAS_FORMAT`] texel occupies, and so the stride of the pixels
+/// [`SpriteRenderer::write_slot`] takes.
+const TEXEL_BYTES: u32 = match ATLAS_FORMAT.texel_size(ImageAspect::COLOR) {
+    Some(bytes) => bytes,
+    None => panic!("the atlas format is a single colour plane"),
+};
 
 /// An atlas to create: the size of one cell, how many of them, and how the
 /// sheet is sampled.
@@ -224,6 +260,25 @@ pub enum SheetError {
         cell: (u32, u32),
         /// What the source actually is.
         found: String,
+    },
+    /// The pixels handed to [`SpriteRenderer::write_slot`] are not exactly
+    /// one cell: `width * height` [`ATLAS_FORMAT`] texels, tightly packed.
+    /// Nothing is cropped or padded to make them fit.
+    #[error(
+        "write into slot {index} of atlas {sheet:?}: a {cell:?} cell is {expected} bytes of \
+         tightly packed {ATLAS_FORMAT:?}, and {found} were given"
+    )]
+    PixelsMismatch {
+        /// The atlas.
+        sheet: SheetId,
+        /// The slot's cell.
+        index: u32,
+        /// The cell's extent.
+        cell: (u32, u32),
+        /// The bytes the cell holds.
+        expected: u64,
+        /// The bytes given.
+        found: u64,
     },
     /// Creating the atlas failed at the seam.
     #[error(transparent)]
@@ -413,6 +468,72 @@ impl Atlas {
         }
         Ok(())
     }
+
+    /// Refuses `pixels` that are not exactly `slot`'s cell, tightly packed.
+    fn check_pixels(&self, slot: AtlasSlot, pixels: &[u8]) -> Result<(), SheetError> {
+        let expected = u64::from(self.cell.0) * u64::from(self.cell.1) * u64::from(TEXEL_BYTES);
+        let found = pixels.len() as u64;
+        if found == expected {
+            Ok(())
+        } else {
+            Err(SheetError::PixelsMismatch {
+                sheet: self.sheet,
+                index: slot.cell.index(),
+                cell: self.cell,
+                expected,
+                found,
+            })
+        }
+    }
+}
+
+/// The staging buffers [`SpriteRenderer::write_slot`] copies from, held until
+/// the frames that copy from them have retired — see the
+/// [module docs](self#host-pixels-are-a-graph-copy-too) for the schedule.
+///
+/// [`crate::grass`]'s retirement list, for the same reason: each buffer is
+/// tagged with the frames begun when it was staged, and released once the ring
+/// has turned past it.
+#[derive(Debug, Default)]
+pub(super) struct WriteStaging {
+    /// Each buffer, with [`begun`](Self::begun) as it was when staged.
+    staged: Vec<(u64, BufferHandle)>,
+    /// [`SpriteRenderer::begin_frame`] calls so far.
+    begun: u64,
+}
+
+impl WriteStaging {
+    /// Keeps `buffer` until the frame that copies from it has retired.
+    fn push(&mut self, buffer: BufferHandle) {
+        self.staged.push((self.begun, buffer));
+    }
+
+    /// Called by each [`SpriteRenderer::begin_frame`]: destroys every buffer
+    /// staged more than the ring's depth of frames ago.
+    ///
+    /// Staged at count `at`, a buffer is copied from by the frame begun at
+    /// `at` or, if the write came before its `begin_frame`, at `at + 1`. The
+    /// `begin_frame` that brings the count to `at + 1 + depth` re-enters that
+    /// frame's slot of the ring, which it only does once that frame has
+    /// retired — the promise the instance buffers are rewritten on.
+    pub(super) fn advance(&mut self, device: &dyn Device) {
+        self.begun += 1;
+        let (now, depth) = (self.begun, super::FRAMES_IN_FLIGHT as u64);
+        self.staged.retain(|&(at, buffer)| {
+            let retired = now.saturating_sub(at) > depth;
+            if retired {
+                device.destroy_buffer(buffer);
+            }
+            !retired
+        });
+    }
+
+    /// Destroys every buffer still held. The device must be idle.
+    pub(super) fn destroy(&mut self, device: &dyn Device) {
+        for (_, buffer) in self.staged.drain(..) {
+            device.destroy_buffer(buffer);
+        }
+    }
 }
 
 impl SpriteRenderer {
@@ -545,6 +666,72 @@ impl SpriteRenderer {
         Ok(())
     }
 
+    /// Writes `pixels` into `slot`'s cell: stages them now, and adds one copy
+    /// pass to `graph` that copies the staging buffer into the cell.
+    ///
+    /// `pixels` are exactly the cell, `width * height` [`ATLAS_FORMAT`]
+    /// texels tightly packed, rows top to bottom; the row padding the device's
+    /// copy wants is added here. The atlas moves from `ShaderRead` into
+    /// `TransferDst` and back through the graph's own barriers, exactly as
+    /// for [`add_slot_copies`](Self::add_slot_copies), so the same rules hold:
+    /// safe while frames that sampled the old texels are in flight, and
+    /// visible to this frame's sprites when called before
+    /// [`add_pass`](Self::add_pass) — which the borrow `add_pass` takes on the
+    /// renderer already enforces.
+    ///
+    /// The staging buffer is released by a later
+    /// [`begin_frame`](Self::begin_frame), so `graph` must be submitted no
+    /// later than the frame the next `begin_frame` starts. See the
+    /// [atlas module](self#host-pixels-are-a-graph-copy-too) for why this is
+    /// a graph pass and not an upload of its own.
+    ///
+    /// A refused call stages nothing and adds no pass.
+    ///
+    /// # Errors
+    ///
+    /// [`SheetError::StaleSlot`] or [`SheetError::NotAnAtlas`] for a slot this
+    /// renderer does not currently own, [`SheetError::PixelsMismatch`] for
+    /// `pixels` that are not exactly one cell, and [`SheetError::Hal`] when the
+    /// staging buffer cannot be created or written.
+    pub fn write_slot(
+        &mut self,
+        device: &dyn Device,
+        graph: &mut RenderGraph<'_>,
+        slot: AtlasSlot,
+        pixels: &[u8],
+    ) -> Result<(), SheetError> {
+        let atlas = self.atlas(slot.sheet)?;
+        atlas.check(slot)?;
+        atlas.check_pixels(slot, pixels)?;
+        let (image, origin, cell) = atlas.destination(slot);
+        let (staging, row_texels) = stage_region(
+            device,
+            "sprite atlas write staging",
+            ATLAS_FORMAT,
+            cell,
+            pixels,
+        )?;
+        let target = atlas.import(graph);
+        self.atlas_staging.push(staging);
+
+        graph
+            .add_copy_pass("sprite atlas write")
+            .use_image(target, ResourceState::TransferDst)
+            .execute(move |ctx| {
+                ctx.encoder().copy_buffer_to_image(&BufferImageCopy {
+                    buffer: staging,
+                    buffer_offset: 0,
+                    buffer_row_length: row_texels,
+                    buffer_image_height: cell.1,
+                    image,
+                    image_subresource: COLOR_LAYER,
+                    image_offset: offset(origin),
+                    image_extent: Extent3d::d2(cell.0, cell.1),
+                });
+            });
+        Ok(())
+    }
+
     /// The atlas behind `sheet`, or why there is none.
     fn atlas(&self, sheet: SheetId) -> Result<&Atlas, SheetError> {
         self.atlases
@@ -562,6 +749,23 @@ impl SpriteRenderer {
     }
 }
 
+/// The one subresource an atlas, and every copy source, has.
+const COLOR_LAYER: ImageSubresourceLayers = ImageSubresourceLayers {
+    aspect: ImageAspect::COLOR,
+    mip: 0,
+    base_layer: 0,
+    layer_count: 1,
+};
+
+/// A cell's top-left texel as a copy offset.
+const fn offset(origin: (u32, u32)) -> Offset3d {
+    Offset3d {
+        x: origin.0 as i32,
+        y: origin.1 as i32,
+        z: 0,
+    }
+}
+
 /// A whole-cell copy from the top-left of `source` to `origin` in `atlas`.
 fn cell_copy(
     source: ImageHandle,
@@ -569,23 +773,13 @@ fn cell_copy(
     origin: (u32, u32),
     cell: (u32, u32),
 ) -> ImageCopy {
-    let layers = ImageSubresourceLayers {
-        aspect: ImageAspect::COLOR,
-        mip: 0,
-        base_layer: 0,
-        layer_count: 1,
-    };
     ImageCopy {
         src: source,
-        src_subresource: layers,
+        src_subresource: COLOR_LAYER,
         src_offset: Offset3d::default(),
         dst: atlas,
-        dst_subresource: layers,
-        dst_offset: Offset3d {
-            x: origin.0 as i32,
-            y: origin.1 as i32,
-            z: 0,
-        },
+        dst_subresource: COLOR_LAYER,
+        dst_offset: offset(origin),
         extent: Extent3d::d2(cell.0, cell.1),
     }
 }
@@ -593,8 +787,8 @@ fn cell_copy(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sprite_pass::Sprite;
     use crate::sprite_pass::tests::{open, target};
+    use crate::sprite_pass::{FRAMES_IN_FLIGHT, Sprite};
     use crate::transient::{TransientImageDesc, TransientPool};
     use crcbl_hal::null::{Command, ObjectKind, Recorder};
     use crcbl_hal::{CommandEncoderDesc, Device, QueueHandle};
@@ -635,24 +829,59 @@ mod tests {
         renderer: &mut SpriteRenderer,
         slot: AtlasSlot,
     ) -> Vec<Command> {
+        run_frame(
+            device,
+            queue,
+            recorder,
+            renderer,
+            slot,
+            Staged::AfterBegin,
+            |renderer, graph| {
+                let icon = source(graph, CELL, SOURCE_USAGE);
+                graph
+                    .add_render_pass("icon")
+                    .clear_color(icon, [1.0, 0.0, 0.0, 1.0])
+                    .execute(|_| {});
+                renderer
+                    .add_slot_copies(graph, &[SlotCopy { source: icon, slot }])
+                    .expect("a cell-sized source copies");
+            },
+        )
+    }
+
+    /// Runs one frame — `fill`, then a sprite drawing `slot` — and returns
+    /// what it recorded.
+    fn run_frame(
+        device: &dyn Device,
+        queue: QueueHandle,
+        recorder: &Recorder,
+        renderer: &mut SpriteRenderer,
+        slot: AtlasSlot,
+        staged: Staged,
+        fill: impl FnOnce(&mut SpriteRenderer, &mut RenderGraph<'_>),
+    ) -> Vec<Command> {
         let sprites = [Sprite::new(slot.sheet(), [0.0, 0.0, 1.0, 1.0], slot.uv())];
-        renderer
-            .begin_frame(device, &sprites, glam::Mat4::IDENTITY, (256, 192))
-            .expect("the ring is writable");
+        let begin = |renderer: &mut SpriteRenderer| {
+            renderer
+                .begin_frame(device, &sprites, glam::Mat4::IDENTITY, (256, 192))
+                .expect("the ring is writable");
+        };
         let before = recorder.commands().len();
         let imported = target(device);
         let mut pool = TransientPool::new();
         {
             let mut graph = RenderGraph::new(queue);
             let swap = graph.import_image("swapchain", imported);
-            let icon = source(&mut graph, CELL, SOURCE_USAGE);
-            graph
-                .add_render_pass("icon")
-                .clear_color(icon, [1.0, 0.0, 0.0, 1.0])
-                .execute(|_| {});
-            renderer
-                .add_slot_copies(&mut graph, &[SlotCopy { source: icon, slot }])
-                .expect("a cell-sized source copies");
+            match staged {
+                Staged::AfterBegin => {
+                    begin(renderer);
+                    fill(renderer, &mut graph);
+                }
+                Staged::BeforeBegin => {
+                    fill(renderer, &mut graph);
+                    begin(renderer);
+                }
+            }
             renderer.add_pass(&mut graph, swap);
             let compiled = graph.compile(&pool).expect("a legal frame");
             let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
@@ -669,6 +898,58 @@ mod tests {
         device.destroy_image_view(imported.view);
         device.destroy_image(imported.image);
         recorder.commands().split_off(before)
+    }
+
+    /// Whether a frame's fill is recorded after its `begin_frame` — the usual
+    /// order — or into a graph built before it.
+    #[derive(Clone, Copy, Debug)]
+    enum Staged {
+        AfterBegin,
+        BeforeBegin,
+    }
+
+    /// Runs one frame that writes `pixels` into `slot` and draws it.
+    fn write_frame(
+        device: &dyn Device,
+        queue: QueueHandle,
+        recorder: &Recorder,
+        renderer: &mut SpriteRenderer,
+        slot: AtlasSlot,
+        staged: Staged,
+        pixels: &[u8],
+    ) -> Vec<Command> {
+        run_frame(
+            device,
+            queue,
+            recorder,
+            renderer,
+            slot,
+            staged,
+            |renderer, graph| {
+                renderer
+                    .write_slot(device, graph, slot, pixels)
+                    .expect("a cell of pixels writes");
+            },
+        )
+    }
+
+    /// One cell of pixels, every texel different, so a copy that reads the
+    /// staged rows at the wrong pitch lands different bytes.
+    fn cell_pixels(seed: u8) -> Vec<u8> {
+        (0..CELL.0 * CELL.1 * TEXEL_BYTES)
+            .map(|byte| seed.wrapping_add(byte as u8))
+            .collect()
+    }
+
+    /// The staging buffer each buffer-to-image copy in `commands` reads.
+    fn staged_buffers(commands: &[Command]) -> Vec<BufferHandle> {
+        commands
+            .iter()
+            .filter_map(|command| match command {
+                Command::CopyBufferToImage(copy) => Some(copy.buffer),
+                _ => None,
+            })
+            .collect()
     }
 
     /// **A full atlas is an error the caller gets back, not a panic**, and it
@@ -743,9 +1024,222 @@ mod tests {
             renderer.add_slot_copies(&mut graph, &[copy]),
             Err(SheetError::StaleSlot { .. })
         ));
-        assert_eq!(graph.pass_count(), 0, "a refused copy adds no pass");
+        let buffers = recorder.live_objects(ObjectKind::Buffer);
+        assert!(matches!(
+            renderer.write_slot(device.as_ref(), &mut graph, old, &cell_pixels(0)),
+            Err(SheetError::StaleSlot { index: 0, .. })
+        ));
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Buffer),
+            buffers,
+            "a refused write stages nothing"
+        );
+        assert_eq!(
+            graph.pass_count(),
+            0,
+            "a refused copy or write adds no pass"
+        );
         drop(graph);
         renderer.destroy(device.as_ref());
+    }
+
+    /// Pixels that are not exactly one cell are refused by size — too few,
+    /// too many, none — before anything is staged or added; never cropped.
+    #[test]
+    fn a_write_that_is_not_one_cell_of_pixels_is_refused() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        let atlas = renderer
+            .create_atlas(device.as_ref(), &desc(1, 1))
+            .expect("the atlas is created");
+        let slot = renderer.allocate_slot(atlas).expect("a free cell");
+        let cell_bytes = (CELL.0 * CELL.1 * TEXEL_BYTES) as usize;
+        let buffers = recorder.live_objects(ObjectKind::Buffer);
+        let mut graph = RenderGraph::new(queue);
+        for len in [cell_bytes - 1, cell_bytes + 4, 0] {
+            let refused = renderer.write_slot(device.as_ref(), &mut graph, slot, &vec![7; len]);
+            match refused {
+                Err(SheetError::PixelsMismatch {
+                    sheet,
+                    index,
+                    cell,
+                    expected,
+                    found,
+                }) => {
+                    assert_eq!((sheet, index, cell), (atlas, slot.index(), CELL));
+                    assert_eq!((expected, found), (cell_bytes as u64, len as u64));
+                }
+                other => panic!("{len} bytes must be PixelsMismatch, got {other:?}"),
+            }
+        }
+        assert_eq!(graph.pass_count(), 0, "a refused write adds no pass");
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Buffer),
+            buffers,
+            "a refused write stages nothing"
+        );
+        drop(graph);
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **A write stages the cell's rows and copies them into the cell before
+    /// the draw samples it**, through the graph's barrier back to
+    /// `ShaderRead` — the same order a copied cell gets.
+    #[test]
+    fn a_written_cell_is_staged_and_barriered_back_to_sampled_before_the_draw() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        let atlas = renderer
+            .create_atlas(device.as_ref(), &desc(2, 1))
+            .expect("the atlas is created");
+        let image = renderer.atlases[0].texture.image;
+        let _first = renderer.allocate_slot(atlas).expect("cell 0");
+        let second = renderer.allocate_slot(atlas).expect("cell 1");
+        let pixels = cell_pixels(3);
+
+        let commands = write_frame(
+            device.as_ref(),
+            queue,
+            &recorder,
+            &mut renderer,
+            second,
+            Staged::AfterBegin,
+            &pixels,
+        );
+        let position = |wanted: &dyn Fn(&Command) -> bool| {
+            commands
+                .iter()
+                .position(wanted)
+                .unwrap_or_else(|| panic!("missing from {commands:#?}"))
+        };
+        let origin = Offset3d {
+            x: (GUTTER + CELL.0 + GUTTER) as i32,
+            y: GUTTER as i32,
+            z: 0,
+        };
+        let copy = position(&|command| {
+            matches!(command, Command::CopyBufferToImage(copy)
+                if copy.image == image
+                    && copy.image_offset == origin
+                    && copy.image_extent == Extent3d::d2(CELL.0, CELL.1))
+        });
+        let Command::CopyBufferToImage(region) = &commands[copy] else {
+            unreachable!("`position` matched a buffer-to-image copy");
+        };
+        // The staged rows, read at the pitch the copy names, are the pixels.
+        let staged = recorder
+            .buffer_bytes(region.buffer)
+            .expect("the staging buffer is live while its frame may be in flight");
+        let row = (CELL.0 * TEXEL_BYTES) as usize;
+        let pitch = (region.buffer_row_length * TEXEL_BYTES) as usize;
+        for y in 0..CELL.1 as usize {
+            assert_eq!(
+                &staged[y * pitch..y * pitch + row],
+                &pixels[y * row..(y + 1) * row],
+                "staged row {y}"
+            );
+        }
+        let sampled = position(&|command| {
+            matches!(command, Command::Barrier { images, .. }
+                if images.iter().any(|barrier| barrier.image == image
+                    && barrier.from == ResourceState::TransferDst
+                    && barrier.to == ResourceState::ShaderRead))
+        });
+        let draw = position(&|command| matches!(command, Command::Draw { .. }));
+        assert!(
+            copy < sampled && sampled < draw,
+            "copy at {copy}, back to ShaderRead at {sampled}, draw at {draw}"
+        );
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **Every staging buffer a write makes is released, and none before the
+    /// frame that copies from it can have retired.**
+    ///
+    /// The buffer outlives the next `begin_frame`, whose ring slot says
+    /// nothing about the frame that copied from it — that frame may still be
+    /// running. That holds for a write recorded before its frame's
+    /// `begin_frame` too, which is one frame later to release than a write
+    /// after it. It is gone once the ring has come round past it, a frame
+    /// that writes every time holds a bounded number, and `destroy` gives
+    /// back the rest.
+    #[test]
+    fn write_staging_is_released_by_the_ring_and_by_destroy() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        let atlas = renderer
+            .create_atlas(device.as_ref(), &desc(1, 1))
+            .expect("the atlas is created");
+        let slot = renderer.allocate_slot(atlas).expect("a free cell");
+        let draw_only = |renderer: &mut SpriteRenderer| {
+            run_frame(
+                device.as_ref(),
+                queue,
+                &recorder,
+                renderer,
+                slot,
+                Staged::AfterBegin,
+                |_, _| {},
+            )
+        };
+
+        for staged in [Staged::AfterBegin, Staged::BeforeBegin] {
+            let written = write_frame(
+                device.as_ref(),
+                queue,
+                &recorder,
+                &mut renderer,
+                slot,
+                staged,
+                &cell_pixels(0),
+            );
+            let &[staging] = staged_buffers(&written).as_slice() else {
+                panic!("one write, one staging buffer: {written:#?}");
+            };
+            draw_only(&mut renderer);
+            assert!(
+                recorder.buffer_size(staging).is_some(),
+                "{staged:?}: the next begin_frame must not release a buffer the frame before \
+                 it may still be copying from"
+            );
+            for _ in 0..FRAMES_IN_FLIGHT {
+                draw_only(&mut renderer);
+            }
+            assert_eq!(
+                recorder.buffer_size(staging),
+                None,
+                "{staged:?}: the ring has come round past the frame that copied from it"
+            );
+        }
+
+        // A write every frame holds the ring's slots plus what is pending,
+        // and no more however long it runs.
+        let steady = recorder.live_objects(ObjectKind::Buffer);
+        let bound = FRAMES_IN_FLIGHT + 1;
+        for round in 0..FRAMES_IN_FLIGHT * 4 {
+            write_frame(
+                device.as_ref(),
+                queue,
+                &recorder,
+                &mut renderer,
+                slot,
+                Staged::AfterBegin,
+                &cell_pixels(round as u8),
+            );
+            let held = recorder.live_objects(ObjectKind::Buffer) - steady;
+            assert!(held <= bound, "round {round} holds {held} staging buffers");
+        }
+        renderer.destroy(device.as_ref());
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Buffer),
+            0,
+            "destroy releases the staging still held"
+        );
+        recorder.assert_valid();
     }
 
     /// An uploaded sheet has no cells, and a source that is not the cell's

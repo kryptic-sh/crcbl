@@ -264,6 +264,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   for a source that is not exactly the cell's size in `ATLAS_FORMAT`
   (`Rgba8UnormSrgb`) or is a transient without `TRANSFER_SRC`. The icon cache
   and its eviction policy stay the game's.
+- **Host pixels can be written straight into an atlas slot.**
+  `SpriteRenderer::write_slot(device, &mut graph, slot, pixels)` stages exactly
+  one cell of tightly packed `ATLAS_FORMAT` bytes and adds a graph copy pass
+  from the staging buffer into the slot's cell, with no intermediate sampled
+  image. It follows `add_slot_copies`' rules: call it before `add_pass` for this
+  frame to see the texels, and it is safe while frames that sampled the old
+  texels are in flight. The staging buffer is released by a later `begin_frame`
+  once the frame ring has passed it, so the graph must be submitted by the frame
+  the next `begin_frame` starts. Pixels of any other length are refused with the
+  new `SheetError::PixelsMismatch` (never cropped), and a freed slot with
+  `StaleSlot`.
 - **A typed grid drag-and-drop in `crcbl_ui::grid_drag`.** `CellGrid` places a
   grid of square cells on screen (`origin`, `cell`, `columns`, `rows`,
   `id_base`) and owns its hit test (`cell_at`, `cell_bounds`) and cell widget

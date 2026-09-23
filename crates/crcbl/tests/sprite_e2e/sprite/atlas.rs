@@ -1,12 +1,14 @@
 //! A rendered image registered as a sprite: an offscreen target a render pass
 //! filled, copied into an atlas slot, and drawn by the sprite pass — on a real
-//! device, read back.
+//! device, read back. And the same for host pixels written straight into a
+//! slot.
 //!
 //! `crcbl_render::sprite_pass::atlas`'s unit tests pin the copy's destination
 //! and the barrier order against the recorder; these are the claims only a
-//! driver can settle: that the texels a render pass wrote are the texels the
-//! sprite samples, and that freeing and refilling a slot while the frame that
-//! drew it is still unread leaves that frame its old picture.
+//! driver can settle: that the texels a render pass wrote — or the bytes the
+//! host staged — are the texels the sprite samples, and that refilling a slot
+//! while the frame that drew it is still unread leaves that frame its old
+//! picture.
 //!
 //! The "render" is a clear. That is the one render-pass write whose output is a
 //! known colour at every texel, so the sampled value is a direct read-out of
@@ -15,8 +17,8 @@
 use crate::harness::Headless;
 use crate::sprite::{
     FrameStaging, SPRITE_CLEAR, SPRITE_EXTENT, assert_background,
-    assert_the_camera_maps_a_world_unit_to_a_pixel, close, rgb, sprite_camera, srgb_byte,
-    world_to_pixel,
+    assert_the_camera_maps_a_world_unit_to_a_pixel, background_rgb, close, rgb, sprite_camera,
+    srgb_byte, world_to_pixel,
 };
 use crcbl::hal::{CommandEncoderDesc, ImageUsage, PresentInfo, ResourceState, SubmitInfo};
 use crcbl::render::{AtlasDesc, AtlasSlot, RenderGraph, SlotCopy, Sprite, TransientImageDesc};
@@ -30,6 +32,54 @@ const CELL: (u32, u32) = (16, 16);
 /// cell showing the other's texels fails on all three.
 const RED: [f32; 4] = [0.80, 0.05, 0.10, 1.0];
 const GREEN: [f32; 4] = [0.05, 0.60, 0.25, 1.0];
+
+/// Four sRGB-encoded colours written into a cell's quadrants, in
+/// `[top-left, top-right, bottom-left, bottom-right]` order. Every channel
+/// differs between every pair, so a flipped, transposed or mis-pitched copy
+/// swaps colours rather than repeating one. The atlas decodes them and the
+/// sRGB frame encodes them again, so each lands on its own bytes.
+const WRITTEN: [[u8; 3]; 4] = [[200, 40, 60], [30, 180, 90], [70, 110, 220], [240, 210, 20]];
+
+/// How a slot is filled this frame.
+#[derive(Clone, Copy)]
+enum Fill<'a> {
+    /// A linear colour cleared into a cell-sized transient and copied in.
+    Rendered([f32; 4]),
+    /// Host pixels, exactly one cell, written in.
+    Written(&'a [u8]),
+}
+
+/// One cell of opaque pixels whose four quadrants are `colours`, in
+/// [`WRITTEN`]'s order.
+fn quadrant_cell(colours: [[u8; 3]; 4]) -> Vec<u8> {
+    let (width, height) = CELL;
+    let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            let quadrant = usize::from(y >= height / 2) * 2 + usize::from(x >= width / 2);
+            pixels.extend(colours[quadrant]);
+            pixels.push(255);
+        }
+    }
+    pixels
+}
+
+/// The device pixel at the centre of each quadrant of `rect`, in
+/// [`WRITTEN`]'s order.
+fn quadrant_centres(rect: [f32; 4]) -> [(u32, u32); 4] {
+    let low = world_to_pixel([rect[0], rect[1]]);
+    let quarter = rect[2] / 4.0;
+    let (left, right) = (low[0] + quarter, low[0] + 3.0 * quarter);
+    // `low` is the world *minimum* corner, which is the **bottom** of the
+    // quad, so it is the larger screen row.
+    let (top, bottom) = (low[1] - 3.0 * quarter, low[1] - quarter);
+    [
+        (left as u32, top as u32),
+        (right as u32, top as u32),
+        (left as u32, bottom as u32),
+        (right as u32, bottom as u32),
+    ]
+}
 
 /// The byte triple a linear colour lands on in the sRGB frame.
 fn stored(linear: [f32; 4]) -> [u8; 3] {
@@ -51,15 +101,15 @@ fn centre(rect: [f32; 4]) -> (u32, u32) {
     (pixel[0] as u32, pixel[1] as u32)
 }
 
-/// Records and submits one frame — each `fills` colour cleared into its own
-/// cell-sized transient and copied into its slot, then `sprites` drawn over the
-/// suite's clear — and returns the readback **without waiting for it**, so a
-/// caller can put a second frame in flight behind it.
+/// Records and submits one frame — each `fills` entry rendered and copied, or
+/// written, into its slot, then `sprites` drawn over the suite's clear — and
+/// returns the readback **without waiting for it**, so a caller can put a
+/// second frame in flight behind it.
 fn submit_frame(
     headless: &Headless,
     renderer: &mut crcbl::render::SpriteRenderer,
     pool: &mut crcbl::render::TransientPool,
-    fills: &[(AtlasSlot, [f32; 4])],
+    fills: &[(AtlasSlot, Fill<'_>)],
     sprites: &[Sprite],
 ) -> (FrameStaging, crcbl::hal::CommandBufferHandle) {
     let device = headless.device.as_ref();
@@ -96,7 +146,16 @@ fn submit_frame(
             },
         );
         let mut copies = Vec::with_capacity(fills.len());
-        for &(slot, colour) in fills {
+        for &(slot, fill) in fills {
+            let colour = match fill {
+                Fill::Rendered(colour) => colour,
+                Fill::Written(pixels) => {
+                    renderer
+                        .write_slot(device, &mut graph, slot, pixels)
+                        .expect("one cell of pixels writes");
+                    continue;
+                }
+            };
             let rendered = graph.create_image(
                 "rendered icon",
                 TransientImageDesc::new(
@@ -188,7 +247,7 @@ fn a_rendered_target_copied_into_a_slot_draws_as_a_sprite() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[(red, RED), (green, GREEN)],
+        &[(red, Fill::Rendered(RED)), (green, Fill::Rendered(GREEN))],
         &[
             Sprite::new(red.sheet(), left, red.uv()),
             Sprite::new(green.sheet(), right, green.uv()),
@@ -240,7 +299,7 @@ fn a_slot_refilled_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[(first_slot, RED)],
+        &[(first_slot, Fill::Rendered(RED))],
         &[Sprite::new(atlas, square, first_slot.uv())],
     );
 
@@ -257,7 +316,7 @@ fn a_slot_refilled_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
-        &[(second_slot, GREEN)],
+        &[(second_slot, Fill::Rendered(GREEN))],
         &[Sprite::new(atlas, square, second_slot.uv())],
     );
 
@@ -273,6 +332,129 @@ fn a_slot_refilled_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
             close(actual, stored(colour), 2),
             "the {which} frame's sprite at ({x}, {y}) should be {:?}, got {actual:?}",
             stored(colour)
+        );
+    }
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **Host pixels written into a slot draw as a sprite**, the right way up and
+/// in the cell the slot names.
+///
+/// Four quadrant colours go into the atlas's *second* cell, and a sprite of
+/// each cell is drawn. The written one must show every quadrant where the
+/// pixels put it — a flipped, transposed or mis-pitched copy swaps them — and
+/// the first cell, which nothing wrote, must stay transparent, so a write that
+/// landed at the atlas's origin rather than the slot's shows up there. A
+/// [`CELL`] row is 64 bytes, short of D3D12's 256-byte copy pitch, so on dx12
+/// the staged rows are padded and the pitch is exercised.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
+fn host_pixels_written_into_a_slot_draw_as_a_sprite() {
+    assert_the_camera_maps_a_world_unit_to_a_pixel();
+
+    let headless = Headless::open_for_sprites();
+    let mut pool = crcbl::render::TransientPool::new();
+    let (mut renderer, atlas) = atlas_renderer(&headless);
+    let empty = renderer.allocate_slot(atlas).expect("cell 0");
+    let written = renderer.allocate_slot(atlas).expect("cell 1");
+    let pixels = quadrant_cell(WRITTEN);
+
+    let left = rect([-80.0, -16.0]);
+    let right = rect([40.0, -16.0]);
+    let (staging, commands) = submit_frame(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &[(written, Fill::Written(&pixels))],
+        &[
+            Sprite::new(atlas, left, empty.uv()),
+            Sprite::new(atlas, right, written.uv()),
+        ],
+    );
+    let image = staging.read(&headless);
+    headless.device.destroy_command_buffer(commands);
+
+    for ((x, y), expected) in quadrant_centres(right).into_iter().zip(WRITTEN) {
+        let actual = rgb(&image, x, y);
+        assert!(
+            close(actual, expected, 2),
+            "the written slot at ({x}, {y}) should be {expected:?}, got {actual:?} — another \
+             quadrant's colour is a flipped or mis-pitched copy, and the clear colour is a \
+             write that never reached the cell"
+        );
+    }
+    let (x, y) = centre(left);
+    let actual = rgb(&image, x, y);
+    assert!(
+        close(actual, background_rgb(), 2),
+        "the unwritten slot at ({x}, {y}) should be transparent over the clear {:?}, got \
+         {actual:?} — the write landed in the wrong cell",
+        background_rgb()
+    );
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **A slot written while the frame that drew it is still in flight leaves
+/// that frame its old texels.**
+///
+/// Frame one writes the quadrant pixels into the slot and draws it, and is
+/// submitted with its readback unread. Frame two writes a single colour into
+/// the same live slot — no free, no reallocation — and draws it. Only then are
+/// both read: the first must still show its quadrants, the second the new
+/// colour everywhere. The second write's staging copy is a pass in the later
+/// submission, which the graph's barrier out of `ShaderRead` orders after the
+/// first frame's sampling.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
+fn a_slot_written_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
+    let headless = Headless::open_for_sprites();
+    let mut pool = crcbl::render::TransientPool::new();
+    let (mut renderer, atlas) = atlas_renderer(&headless);
+    let square = rect([-16.0, -16.0]);
+    let slot = renderer.allocate_slot(atlas).expect("a free cell");
+    let sprites = [Sprite::new(atlas, square, slot.uv())];
+
+    let quadrants = quadrant_cell(WRITTEN);
+    let (first, first_commands) = submit_frame(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &[(slot, Fill::Written(&quadrants))],
+        &sprites,
+    );
+    let solid_colour = [90, 20, 160];
+    let solid = quadrant_cell([solid_colour; 4]);
+    let (second, second_commands) = submit_frame(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        &[(slot, Fill::Written(&solid))],
+        &sprites,
+    );
+
+    let first = first.read(&headless);
+    let second = second.read(&headless);
+    headless.device.destroy_command_buffer(first_commands);
+    headless.device.destroy_command_buffer(second_commands);
+
+    for ((x, y), expected) in quadrant_centres(square).into_iter().zip(WRITTEN) {
+        let actual = rgb(&first, x, y);
+        assert!(
+            close(actual, expected, 2),
+            "the first frame at ({x}, {y}) should keep {expected:?}, got {actual:?} — \
+             {solid_colour:?} is the second write reaching a frame already submitted, and \
+             the clear colour a first write that never landed"
+        );
+        let actual = rgb(&second, x, y);
+        assert!(
+            close(actual, solid_colour, 2),
+            "the second frame at ({x}, {y}) should be {solid_colour:?}, got {actual:?}"
         );
     }
 

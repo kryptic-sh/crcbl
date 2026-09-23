@@ -3,8 +3,9 @@
 //! ```text
 //! SpriteRenderer ──register_sheet──▶ uploads a sheet, returns a SheetId
 //!      │
-//!      ├──create_atlas───▶ a sheet of cells a rendered image is copied into;
-//!      │                   see [`atlas`] for slots and when one may be freed
+//!      ├──create_atlas───▶ a sheet of cells a rendered image is copied into,
+//!      │                   or host pixels written into; see [`atlas`] for
+//!      │                   slots and when one may be freed
 //!      │
 //!      ├──begin_frame──▶ batches consecutive sprites sharing a sheet, uploads
 //!      │                 one instance per sprite and one constant block per
@@ -506,6 +507,9 @@ pub struct SpriteRenderer {
     /// one's image is also in [`sheets`](Self::sheets), which is what
     /// destroys it.
     atlases: Vec<atlas::Atlas>,
+    /// The staging buffers [`write_slot`](Self::write_slot) copies from, kept
+    /// until the frames that copy from them have retired.
+    atlas_staging: atlas::WriteStaging,
     /// The queue every sheet upload is submitted to.
     ///
     /// Taken once at construction rather than per `register_sheet`, so two
@@ -769,6 +773,7 @@ impl SpriteRenderer {
             sampler,
             sheets: Vec::new(),
             atlases: Vec::new(),
+            atlas_staging: atlas::WriteStaging::default(),
             queue,
             frame_groups,
             instance_buffers,
@@ -1016,6 +1021,7 @@ impl SpriteRenderer {
 
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
         let idx = self.frame;
+        self.atlas_staging.advance(device);
 
         // The sheet's size and mode are stamped onto the instance here, from the
         // sheet the sprite named — the loop above has already established that
@@ -1202,6 +1208,7 @@ impl SpriteRenderer {
         for buffer in self.constant_buffers.drain(..) {
             device.destroy_buffer(buffer);
         }
+        self.atlas_staging.destroy(device);
         device.destroy_sampler(self.sampler);
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
