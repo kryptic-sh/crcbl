@@ -373,6 +373,7 @@ impl Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_store::crc32::{crc32, crc32_continue};
 
     /// The anti-vacuity measurement, on the three cases that matter: a cleared
     /// frame, a frame with something in it, and the early exit.
@@ -543,25 +544,7 @@ mod tests {
         file.extend_from_slice(&length.to_be_bytes());
         file.extend_from_slice(kind);
         file.extend_from_slice(data);
-        let crc = crc32(crc32(0, kind), data);
+        let crc = crc32_continue(crc32(kind), data);
         file.extend_from_slice(&crc.to_be_bytes());
-    }
-
-    /// The PNG CRC-32, computed bitwise so there is no table to get wrong, and
-    /// resumable so a chunk's type and its data are one run. `previous` is `0`
-    /// to start.
-    fn crc32(previous: u32, bytes: &[u8]) -> u32 {
-        let mut crc = previous ^ 0xffff_ffff;
-        for byte in bytes {
-            crc ^= u32::from(*byte);
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xedb8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        crc ^ 0xffff_ffff
     }
 }

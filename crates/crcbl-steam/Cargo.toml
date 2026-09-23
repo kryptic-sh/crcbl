@@ -1,0 +1,33 @@
+[package]
+name = "crcbl-steam"
+description = "Crucible Steamworks: the SDK's flat C API, loaded at runtime, behind an event queue drained once per frame"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# No binding crate. `docs/plan/42-steam.md` rules out every one — the SDK
+# cannot be vendored, and a link-time dependency on `steam_api` kills the
+# process in the dynamic loader on a machine without Steam — so the declarations
+# are hand-written and the library is opened at runtime.
+[dependencies]
+# `SteamPads` reports Steam Input as `crcbl_input::GamepadEvent`s (slice 7b).
+crcbl-input = { workspace = true }
+# `SteamTransport` implements `crcbl_net::Transport` (slice 4).
+crcbl-net = { workspace = true }
+# `SteamCloudStorage` implements `crcbl_store::StorageSource` (slice 6).
+crcbl-store = { workspace = true }
+# The one thing a `Send` surface does when it is used off the pump thread and
+# cannot return an error — a `Drop` — is skip its Steam call and say so.
+log = { workspace = true }
+# `InitError` is what `Steam::init` returns, so it needs `Display` and `Error`
+# without a macro of this crate's own.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The transport conformance suite, run against `SteamTransport` over the fake
+# library.
+crcbl-net = { workspace = true, features = ["conformance"] }
+
+[lints]
+workspace = true

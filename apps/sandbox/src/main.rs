@@ -19,6 +19,7 @@ mod app;
 mod args;
 mod gpu;
 mod menu;
+mod steam;
 
 use std::process::ExitCode;
 

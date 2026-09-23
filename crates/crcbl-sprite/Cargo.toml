@@ -27,4 +27,6 @@ workspace = true
 # The spec test decodes the PNG it just encoded, so it needs the codec whatever
 # the feature set — `dev-dependencies` cannot be optional.
 [dev-dependencies]
+# The workspace's one CRC-32 (`crcbl_store::crc32`), for the PNG fixtures.
+crcbl-store = { workspace = true }
 png = { workspace = true }

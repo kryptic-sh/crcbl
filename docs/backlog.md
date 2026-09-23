@@ -8920,8 +8920,6 @@ browser-hosted single-player game with mods has no containment at all.
     ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
     (every pad drives every binding), a d-pad composite and pad rows in a RON
     binding asset.
-  - The Steam plan's slice 7a is this seam; `docs/plan/42-steam.md` on
-    `steam-sdk` still lists 7a as its own until that branch merges main.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the
@@ -9002,17 +9000,375 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: nothing built (2026-08-27)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15 (inventory) built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Nothing exists** — no `crcbl-steam` crate, no `steamworks` dependency, no
-`CRCBL_STEAM_SDK` anywhere. `docs/plan/42-steam.md` is research and design only,
-and claims no roadmap phase. Its four open decisions are **not repeated here**:
-they are this file's own "Steamworks: four decisions the plan is waiting on"
-entry, which the doc now points at instead of carrying its own copy. Nothing was
-lost in that removal — the binding-route argument lives in the doc's "The
-binding route — presented, not decided" section, the cloud and Steam Input
-arguments in "Where Steam meets seams the engine already has", and the app-id
-decision only ever existed in the backlog's form.
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15's
+inventory half are built on branch `steam-sdk`** (not merged):
+`crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
+handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
+local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
+the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
+`miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
+`HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
+slice 3a's async call registry, lobbies, invites, rich presence and join paths,
+slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
+and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
+`crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
+and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
+`SteamCloudStorage`, slice 5's voice capture and decoding, slice 9's stats,
+achievements and leaderboards (built ahead of 7b–8, which waited on slice 7a's
+seam; `steam-sdk` has since merged `main`, which carries it), and slice 7b's
+`SteamPads` (Steam Input onto the gamepad seam) with the Steam-pad filter in
+`crcbl_input::xinput`, slice 7c's on-screen keyboards and glyphs, and slice 8's
+loop limb (`crcbl::engine::steam`: the loop pumps a lent `Steam`, takes its
+overlay as a focus loss, and polls Steam Input as its pad source), slice 10's
+screenshots and timeline, and slice 11's ownership, DLC, betas and Remote Play,
+and slice 12's tickets and `AuthGate`, slice 14's Workshop (`Workshop`,
+`UgcQuery`, `ItemUpdate`), and slice 15's inventory (`Inventory`,
+`InventoryResult`). The plan, `docs/plan/42-steam.md`, carries a status line per
+slice.
+
+**Not verified, and each is a gap rather than a pass:**
+
+- **The drift gate has run only against the Steamworks.NET mirror**
+  (`cargo test -p crcbl-steam -- --ignored drift`, 2026-09-23, with
+  `CRCBL_STEAM_SDK` pointing at a scratch directory holding the mirror's
+  `CodeGen/steam/*.h` as `public/steam/`, mirror commit `ba71581f`, "Update to
+  Steamworks 1.65[a]"). Its first run failed on a real transcription error —
+  `GetAppID` declared as returning `AppId_t` where the header says `uint32` —
+  and it passes since the fix. No machine has had an SDK zip from Valve, which
+  needs a partner login, so every declaration is still only as good as the
+  mirror's copy. How to reproduce: download `CodeGen/steam/` from
+  `rlabrecque/Steamworks.NET` into `<dir>/public/steam/` and set
+  `CRCBL_STEAM_SDK=<dir>`; the mirror is never committed or fetched by CI (see
+  the plan's "Defaulted decisions").
+- **`tests/smoke.rs` has never passed against a real client.** On the Windows
+  development machine (Steam running, no SDK), the only `steam_api64.dll` was
+  one bundled with an installed game, from an older SDK. Through it,
+  `Steam::init` opened the library with `LoadLibraryExW` and resolved every
+  lifecycle, dispatch, `ISteamUser` and `ISteamFriends` symbol bound so far,
+  then failed with `NoSymbol("SteamAPI_SteamApps_v009")` (slice 1 stopped
+  earlier, at `SteamAPI_SteamUtils_v011`) — the loader works on a real DLL; the
+  1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
+  and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
+- **The `pack(4)` layout tables** (Linux and macOS) come from a C++ program
+  compiled with MinGW GCC against the mirror's headers, `pack(4)` obtained by
+  forcing the platform test in a copy of `steamclientpublic.h` — so the
+  arithmetic is the compiler's, but no Linux or macOS compiler has produced
+  them. The step 4 review re-derived every size, offset and width in both tables
+  from a probe generated out of the Rust tables and compiled the same way (all
+  agree), and ran the `pack(4)` table under Miri for `x86_64-unknown-linux-gnu`;
+  natively it still runs only in CI.
+- **Miri** ran locally (step 4 review, 2026-09-23: 260 lib tests passed, 10
+  ignored, clean, both for the Windows host and for `x86_64-unknown-linux-gnu`;
+  the drift gate's scanner tests and the signature check are kept out of it — no
+  `unsafe`, and minutes of interpretation); the CI job itself has not run,
+  because CI runs on pull requests and `main` only.
+- **Slice 1b's manual steps have not run on any OS**: the overlay opening over
+  `apps/sandbox --features steam` and pausing it, which launch injects the
+  overlay per OS, and the `NoSteamClient` fall-through with Steam stopped. The
+  loop half is tested (since slice 8, `crcbl::engine`'s
+  `steam_limb::an_opened_overlay_releases_held_keys_and_pauses`, on the same
+  check the game-reported loss runs); the Steam half needs a 1.65 library and a
+  windowed run.
+- **Slice 3a's manual steps have not run on any OS**: two accounts creating,
+  inviting to and joining a lobby through all four join paths (invite accepted
+  running and closed, rich-presence join running and closed), and the owner
+  leaving. Everything Steam-side of them is exercised only over the fake; the
+  sandbox drives them from F5/F6/F7 and logs each event.
+- **Slice 3b's manual steps have not run on any OS**: the friends list and
+  avatars in the sandbox's F3 panel, and the overlay opening to a profile (F8)
+  and a web page (F9).
+- **Slice 4's manual steps have not run**: `tests/net_smoke.rs` (two accounts,
+  two machines, run once as `host` and once as `join`), ten minutes of traffic,
+  a network pull inside the grace period, a stranger refused, and the relay path
+  across NAT. The transport is exercised only over the fake loop, which cannot
+  show that the send flags, the message release or `ConnectP2P`'s identity
+  argument are right against a real client.
+- **Slice 6's manual steps have not run, and may be untestable under 480**:
+  `tests/cloud_smoke.rs` (whether app 480 has a cloud quota at all — unknown; if
+  it has none, the rest is recorded as not possible under 480, since crcbl tests
+  on 480 permanently and a game with its own app id is where it runs), a write
+  on one machine read on another as a fast-forward, an offline write on both
+  surfaced as a `Conflict` (and whether Steam's own dialog appeared first, and
+  what the game saw after each choice), and a Steam Deck suspended while another
+  machine changes the file, resumed into `CloudFileChanged`. The protocol is
+  exercised over `MemoryStorage` and the fake only.
+- **Slice 5's manual steps have not run, and nothing drives voice yet**: a
+  spoken round trip between two accounts, how long Steam's push-to-talk tail
+  lasts, that Steam itself plays nothing, and the `Restricted` path. Neither
+  `apps/sandbox` nor a smoke test captures, sends or plays voice; what it would
+  take is a push-to-talk key in the sandbox's Steam panel, the packets sent
+  unreliable over its existing links (framed apart from the greeting text), and
+  each decoded chunk played with `crcbl_audio`'s `Voice::new`.
+- **Slice 9's manual steps have not run, may be untestable under 480, and
+  breakout does not use it**: `tests/stats_smoke.rs` under 480 — whether
+  SpaceWar's `ACH_WIN_ONE_GAME`, `NumGames` and "Feet Traveled" exist there is a
+  belief; if they do not, the check is recorded as not possible under 480 — the
+  unlock toast on each OS, and an upload and around-user download. The plan's
+  first consumer, breakout's high score as a stat with an achievement, needs
+  stats defined for an app id of its own, which crcbl will not have (it tests on
+  480 permanently); under 480 its calls would all be `Refused`. So it stays
+  unbuilt unless breakout is wired to SpaceWar's names for the smoke value
+  alone, or a game with its own app id carries the consumer instead.
+- **Slice 2's exit run has not happened, and nothing can run it yet**: slice 4's
+  two-machine run repeated with three joiners, through a `Host`. Neither
+  `apps/sandbox` (which exchanges greetings over raw `SteamTransport`s) nor
+  `crates/crcbl-steam/tests/net_smoke.rs` (one host, one joiner) drives a
+  `Host`; the slice kept to its "nothing in `crcbl-steam`" boundary. What it
+  would take: a joiner-side `crcbl_client::Client` over `SteamTransport` and a
+  host-side `Host` fed by `SteamListener::accept`, in `net_smoke.rs` (a
+  dev-dependency on `crcbl-server` and `crcbl-client`) or the sandbox.
+- **After `Host::shutdown`, Steam's end code says `ShuttingDown`, not
+  `HostLeft`.** `crcbl_net::Transport` has no close-with-reason, so `Host`
+  closes a link by dropping it, and `SteamTransport`'s `Drop` closes with
+  `EndReason::ShuttingDown`. The sealed session end, which arrives first,
+  carries the real reason, so a joiner reading `Client::ended()` is right; one
+  reading only `SteamTransport::end_reason()` is told the wrong one. Options: a
+  defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
+  maps to its app codes (touches the trait every backend implements), or leave
+  it and document the session end as the signal. Needs a decision; not done.
+- **Slice 7b's manual steps have not run**: whether app 480 honours
+  `SetInputActionManifestFilePath` at all (R3); the Deck run, which is also the
+  check of the stick's Y sign (passed through on the belief that `joystick_move`
+  reports +Y up) and of the by-value returns of
+  `GetDigitalActionData`/`GetAnalogActionData` on x86-64 SysV (R10); Windows and
+  macOS (arm64) with a DualSense and an Xbox pad, each that target's by-value
+  check; a remap in Steam's configurator arriving as the remapped button; and no
+  double input with XInput polling beside it. Also unverified: that Steam
+  answers `0` for action handles before a configuration loads (the backend
+  retries either way). Since slice 8, `apps/sandbox --features steam` opens
+  `SteamPads` over `PAD_MANIFEST` written beside its executable and hands it to
+  the loop; what is left is that run, recorded per OS.
+- **Slice 7c's manual steps have not run, and nothing uses the keyboards or
+  glyphs yet**: the Deck's full-screen keyboard filling a sandbox text field
+  (and whether `GetEnteredGamepadTextLength` counts the NUL — the buffer is
+  sized to work either way), the floating keyboard typing through the shell on
+  each backend, glyphs for a Deck and a DualSense, and desktop Big Picture.
+  `SteamEvent::TextInputDismissed` reaches no text field on its own: the loop
+  hands it to the game (`HostedGame::steam_event`), whose fields are its own.
+  What it would take: a text field in the sandbox's Steam panel that opens the
+  keyboard on a pad press and shows the answer, and the pad's South glyph drawn
+  beside it.
+- **Slice 10's manual steps have not run, and nothing uses it**: F12 with
+  screenshots hooked reaching the Steam screenshot manager, and timeline events
+  and phases appearing on a recording with Steam's game recording on. Neither is
+  reachable from a sample: **the engine has no capture of a running game's
+  frame** to hand `Screenshots::write` — `crcbl::screenshot` renders a scene of
+  its own offscreen — so a hooked screenshot needs a swapchain readback the loop
+  does not offer (what it would take: a readback of the frame the loop just
+  presented, converted from the surface's channel order to RGB, on request), and
+  nothing marks the timeline yet (the sandbox could set its game mode from the
+  pause state as a first check).
+- **Slice 11's manual steps have not run**: under 480, which owns no DLC, that
+  the ownership, DLC, beta and install-directory calls answer at all; and a
+  Remote Play Together session detected when a friend joins through Steam's
+  invite. DLC semantics are untestable under 480, which owns none; crcbl tests
+  on 480 permanently.
+- **Deferred: slice 13 (the game-server API)**, decided 2026-09-23 — built when
+  a dedicated headless build wants it, not before; EW is a listen server and
+  nothing in the workspace is a headless server. The module-or-crate choice is
+  made with that consumer: (a) a `game_server` module sharing the loader and the
+  `Lib` — cheapest, but the crate's init, pump and fake all learn a second pipe;
+  (b) a `crcbl-steam-server` crate over a loader moved into a shared crate — a
+  clean split for a headless binary that must not pull in the client surface, at
+  the cost of that move. Either way the work is a second init with its own
+  handshake list (`SteamInternal_GameServer_Init_V2`, the
+  `SteamGameServer_InitEx` versions), the game-server pipe, a one-live guard of
+  its own, `ISteamGameServer` (logon, server info, auth sessions, advertising),
+  `ISteamGameServerStats` and `ISteamMatchmakingServers`, with the plan's
+  pipe-separation test. Slice 12's `AuthGate` already serves a game server's
+  verdicts unchanged.
+- **Slice 12's manual steps have not run, and two halves are not built**: one
+  account's ticket validating on another's machine, a tampered ticket rejected,
+  and a cancelled ticket ending the validator's session — on every OS. Not
+  built: the gate's wiring into the handshake (an `auth_ticket` in
+  `crcbl_net::Hello` beside `session_token`, carried to `crcbl_server::Host`,
+  which admits provisionally and drops on a `Verdict::Rejected` or `TimedOut` —
+  a wire-format change to design with topic 27), and server-side decryption of
+  encrypted app tickets (Valve's `sdkencryptedappticket` on a backend the
+  project does not run). EW needs neither.
+- **Slice 14's manual steps have not run, and nothing uses the Workshop**: under
+  480, a private test item created and uploaded (`create_item`, then an
+  `ItemUpdate` with a content folder, submitted), subscribed to from a second
+  account, `SteamEvent::WorkshopItemInstalled` seen there with `install_info`
+  naming the folder, and the item deleted afterwards — on every OS. Also
+  unverified: whether 480 lets any developer create items at all, and whether
+  the Workshop legal agreement (`needs_agreement`) blocks a new account's
+  upload. What it would take in-repo: a Workshop panel in the sandbox that lists
+  the player's subscribed items and their install folders.
+- **Slice 15's inventory has not run against Steam, and nothing uses it**: under
+  480, whether SpaceWar's example item definitions exist at all (the plan's R3),
+  `all_items` becoming ready with `InventoryResultReady`, a promo grant, a
+  consume and an exchange, and a `start_purchase` opening the checkout — on
+  every OS. Item semantics beyond "the calls answer" are untestable under 480
+  unless SpaceWar's item schema is there; crcbl tests on 480 permanently.
+- **Not started: the engine's side of slice 15's shipping half.** Decided
+  2026-09-23: shipping on Steam is a game's business, not crcbl's — crcbl will
+  most likely never be published on Steam, and a game that uses it supplies its
+  own app id, depots, build upload and store configuration. What crcbl owes a
+  game is what it needs to ship: per-OS packaging that places the
+  redistributable beside the executable (and in `Contents/Frameworks` for a
+  macOS bundle, re-signed), a check that a packaged build carries no
+  `steam_appid.txt`, Linux release builds in the Steam Runtime SDK container so
+  the glibc floor matches `sniper`, the `relaunch_via_steam` guard in release
+  builds, and the macOS overlay entitlement question answered. None of it waits
+  on an app id; the end-to-end launch from Steam is checked by a game with its
+  own, or under 480 as far as 480 allows.
+- **Needs a decision: `Apps::launch_command_line` can silently cut a line over
+  1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
+  buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's
+  copies stop a byte short to leave a NUL, so a longer line most likely arrives
+  cut, NUL-terminated, and is returned as if whole. **Proposed change:** read it
+  through slice 11's `apps::content::grow` (grow while an answer reaches the
+  last byte but one, `Truncated` past `MAX_TEXT_BYTES`), as every other string
+  read does. **The test it changes:**
+  `apps::tests::a_launch_command_line_that_fills_the_buffer_is_truncated_not_cut`
+  asserts that a 1024-byte line is `Err(Truncated("GetLaunchCommandLine"))` and
+  a 1023-byte one is read whole; after the change both would be read whole (the
+  buffer grows), the refusal would move to a line past `MAX_TEXT_BYTES`, and
+  `testing::fake_get_launch_command_line` would copy as Steam does (a byte
+  short, then the NUL) rather than strncpy-style. Left unchanged, since it
+  rewrites what an existing test asserts; the user's call.
+- **The manifest has no default controller layouts.**
+  `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
+  so until one is added a player binds every action in Steam's configurator
+  before the pad does anything. Valve's route is to bind once with Steam Input
+  Layout Dev Mode on, export, and dump the layout with
+  `steam://dumpcontrollerconfig?appid=<app>` — a client step. What it would
+  take: one exported layout per controller type EW targets (at least
+  `controller_neptune` for the Deck, `controller_ps5`, `controller_xboxone`),
+  added under `configurations` beside the manifest, with the manifest test
+  extended to check each listed file exists.
+- **The Steam-pad filter reads an undocumented export.**
+  `XInput::skip_steam_virtual_pads` asks `xinput1_4.dll`'s ordinal 108
+  (`XInputGetCapabilitiesEx`, SDL's declaration) for a slot's vendor. It was
+  called on the Windows machine with no pad connected (each empty slot answered
+  as `XInputGetState` does); no Steam virtual pad has been through it, so that
+  Steam's reports Valve's vendor there is SDL's experience, not ours. **Decided
+  2026-09-23: keep the vendor query.** The fallback, if a real run shows it
+  failing, is `ISteamInput::GetGamepadIndexForController`, which names the
+  XInput slot Steam emulates for a controller, or -1; it would couple the XInput
+  backend to a slot list the Steam backend supplies each frame. What is left is
+  that real run, with a Steam virtual pad.
+- **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
+  `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
+  1b changes are target-neutral; CI's Linux jobs are the check.
+- **`aarch64` Linux** (`linuxarm64`) has a loader path and no machine.
+
+**Found by the step 4 review (2026-09-23) and not fixed** — each needs a
+decision, a real run, or is work of its own. What the review fixed is in the
+plan's "Review (step 4)".
+
+- **Needs a decision: `SyncedFile` can lose a confirmed write silently.** A
+  `save` writes the cloud blind, and a device drops its kept copy once a load
+  sees the cloud hold its write (`SyncedFile::confirm`). So: A and B hold v1; A
+  saves v2 and loads (confirmed, copy dropped); B, which never loaded v2, saves
+  on v1 and overwrites v2; A's next load has no kept write and reads B's version
+  as `FastForwarded`, and B's reads `Clean` — v2 is gone and nobody is told,
+  though the module promises every such case surfaces. Under Steam Cloud this
+  needs B's cache to take v2 mid-session (Dynamic Cloud Sync) or Steam's own
+  launch dialog, so it is rarer there than over a shared `StorageSource`.
+  **Proposed:** `save` reads the cloud first and, unless it holds the save's
+  base (or nothing), keeps the new payload in the shadow, writes nothing to the
+  cloud and answers a new `SyncError::Stale`, so the next load reports the
+  `Conflict`. **What it changes:**
+  `equal_generations_with_different_payloads_conflict`,
+  `a_cloud_version_on_another_base_conflicts` and
+  `resolving_writes_above_both_sides_and_the_next_load_is_clean` in
+  `crates/crcbl-store/src/synced/tests.rs` all make a second device save over a
+  version it never loaded and assert the save succeeds and the cloud kept it;
+  they would assert `Stale` instead. Left for the user, since it rewrites what
+  existing tests assert. Related, lower: fast-forward is recognised one
+  generation deep only (`cloud.base == mine.version`), so a write taken up and
+  built on twice elsewhere reads as a `Conflict` whose `KeepLocal` discards the
+  newer versions; more ancestry in the header would fix it.
+- **Needs a decision: a repeated hello can livelock a client and hold a `Host`
+  slot.** A client that hears nothing for `HANDSHAKE_TIMEOUT` sends a second
+  token-less hello. `Host` admits the first and answers the second through
+  `rehello` with `INVALID_SESSION_TOKEN`; the client drops the first `Accept` as
+  a stale generation and retries on the reject forever, while the admitted peer
+  keeps one of `max_peers`. The single-peer `Server` on `main` answers the same
+  way, so this predates the branch; `Host` makes it cost a slot. **Proposed:**
+  answer a token-less hello on a connected peer's own link with an `Accept`
+  repeating its session and token for the new generation (the link is the
+  credential), and end a session whose client never sends an authenticated
+  message within a deadline.
+- **Needs a real run: the Steam-virtual-pad filter only skips Valve's vendor.**
+  With Steam Input on for an Xbox pad, Steam hides the physical pad from the
+  game's XInput through the overlay's hook. Launched outside Steam, or without
+  the overlay, the physical pad (vendor `0x045E`) may reach XInput beside
+  Steam's report of it, and every press arrives twice. Slice 7b's Windows run
+  should check it; the fallback is the one already named for the vendor query
+  (`GetGamepadIndexForController`), or skipping XInput whenever Steam Input
+  reports an Xbox-type handle.
+- **Not built: evdev and GameController cannot skip Steam's virtual pad.** Since
+  `main`'s evdev (Linux) and GameController (macOS) backends merged,
+  `crcbl::engine::steam::steam_input` replaces the loop's native pad source on
+  those targets rather than polling it beside Steam Input — both read Steam's
+  virtual pad like any other, so a pad Steam Input owns would arrive twice. A
+  pad Steam Input does not handle is therefore unheard there. What it would
+  take: a vendor filter in `crcbl_input::evdev` (it already reads the USB
+  vendor) and one in `crcbl_input::game_controller`, then `native_beside_steam`
+  returning them with it on.
+- **Closing the last user of a listen socket may cut its connection's linger.**
+  Since the review, a listen socket stays open while any connection accepted on
+  it lives (`crates/crcbl-steam/src/net/listener.rs`), because
+  `CloseListenSocket` closes them all ungracefully. When the last accepted
+  `SteamTransport` drops, it closes its connection lingering and then the socket
+  goes too, which may end that linger early; the sealed session end a `Host`
+  sends first is the message at risk. Unverified against a real client.
+- **Low: the session end is told apart from a snapshot by the channel label,
+  which the MAC does not cover.** An on-path attacker on a transport whose
+  labels are not authenticated could relabel it unreliable, so the client opens
+  it as a snapshot, fails, and reads `Ended::Lost` instead of `ByServer`. The
+  resume token is sent in the clear too, which the existing threat model already
+  accepts. Fix, if wanted: dispatch on the opened payload's tag.
+- **Low: `Host` reports a lost link a tick late.** `drain_peers` stops on
+  `Disconnected` but leaves the transport set, so a pending resume in the same
+  tick is refused as "connected on another link" and the client succeeds on its
+  next retry.
+- **Nits, recorded rather than changed:** an XInput slot keeps its Steam-pad
+  verdict if one pad is swapped for another between two polls; Steam Input's
+  `k_ESteamInputType_SteamOSHandheld` (15, SDK 1.65) maps to `PadKind::Generic`
+  (whether it should read as `SteamDeck` is a call for whoever draws glyphs);
+  `SteamCloudStorage` does not count a lossily read file name in
+  `lossy_strings`, having no `Steam` to count it on; and `SteamTransport`'s
+  private `info`/`fill`/`ended` rely on their callers' pump-thread check, which
+  every caller makes.
+
+**EW's requirements and priority set the order.** EW is the first consumer. Its
+six hard requirements are listen-server co-op over Steam networking with friend
+invites, no anti-cheat or encrypted tickets, voice as raw PCM into its own
+mixer, Steam Input as ordinary `crcbl-input` gamepad events, cloud conflicts
+surfaced to the game, and the local `SteamId` as its identity. EW's build order
+(2026-09-22): 1, 1b, 3a, 3b, 4, then the multi-session host (slice 2), then 6,
+5, 7a–7c; slice 9 optional; 10–15 after, for the full API.
+
+**An engine piece EW needs whatever the transport, scheduled inside the Steam
+plan:**
+
+- **A gamepad seam in `crcbl-input` (slice 7a).** Landed on `main` as
+  `crates/crcbl-input/src/gamepad.rs` with the XInput backend, and merged into
+  `steam-sdk`; `SteamPads` reports through it. Topic 19's evdev and
+  GameController backends, when built, adopt it.
+
+**Decided 2026-09-23 (the user): crcbl tests on app 480 (Spacewar) permanently**
+— its samples, smoke tests and manual real-client steps — and gets no app id of
+its own; what 480 cannot carry is recorded as untestable under 480. EW's user
+decided the same for EW (Steam testing on 480, no app id of EW's own for now).
+**Still undecided on EW's side: which Steamworks SDK EW's real-client runs
+use.**
+
+**Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
+cloud quota or honours a Steam Input manifest path; whether SpaceWar's
+achievements, leaderboard and inventory item definitions exist; whether the
+overlay injects into a terminal-launched process on Linux and macOS, and
+composites over our own windowing on each shell and GPU backend; the by-value
+struct-return ABI for Steam Input action data on each target; and the macOS
+signing and entitlement needs for the dylib. Valve documents no thread safety
+for `ISteamNetworkingSockets` or `ISteamRemoteStorage`, so the plan restricts
+their Steam calls to the pump thread by a runtime check.
 
 ### `check-doc-citations.sh` misses crate-relative paths too (2026-08-27)
 
@@ -9026,9 +9382,14 @@ by hand, not by the gate.
 **What it would take:** the same widening the relative-link entry proposes, plus
 a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
 The awkward part is that some such paths are deliberately external —
-`42-steam.md` cites `public/steam/steam_api.json` inside the Steam SDK and
+`42-steam.md` cites `public/steam/steam_api_flat.h` inside the Steam SDK and
 `steamworks-sys/build.rs` in a third-party repo — so widening needs an opt-out,
-which is a design question rather than a script change.
+which is a design question rather than a script change. Since 2026-09-22,
+`42-steam.md` also relies on this blind spot on purpose. It writes the files of
+the not-yet-created `crcbl-steam` crate crate-relative
+(`crcbl-steam/src/pump.rs`), and its "Conventions" section says so. Widening the
+gate would flag every one of those paths, so a widened gate needs an opt-out for
+them too, or the plan must switch to another marker.
 
 **Verified in this pass:** every relative `.md` link in `docs/plan/` and
 `docs/plan/sample/` resolves today, checked by a one-off script rather than by
@@ -15004,18 +15365,44 @@ is wanted; and Steam Input only if the Deck is targeted, returning then as a
 slice feeding `ActionMap` through `Binding::Virtual`. Precedent: Steamworks.NET
 has published its own flat-API declarations under MIT for a decade, and
 Auto-Cloud is the zero-code path Valve documents for a game with an atomic save
-layout. Work: none until Steam is in scope. The four option trees are in
-docs/notes/simulation.md under the same heading.
+layout. The four option trees are in docs/notes/simulation.md under the same
+heading.
 
-**Still the user's call, and a product decision rather than a technical one:**
+**IN SCOPE 2026-09-22 — "the full Steam API" is now asked for**, and
+`docs/plan/42-steam.md` was re-planned on that basis. Two of the ratified
+defaults changed as a result:
 
-- **An app id of our own.** Achievement definitions, stats schema, Auto-Cloud
-  config, rich presence and game-server logins are all configured per-app on the
-  partner site and 480 cannot carry them. Needs a partner account and the
-  app-credit fee, and names a product decision — _which sample, if any, is the
-  thing on Steam_. `towers` and `bracket` are what the ladder suggests. Until
-  then slices 2+ build against 480 with mechanism-only smoke tests that never
-  assert a value read back, since 480's data is shared with everyone.
+- **Cloud: the `ISteamRemoteStorage` backend is now required.** EW needs sync
+  conflicts surfaced to the game. Auto-Cloud cannot do that: the Steam client
+  resolves a conflict in its own dialog before launch and tells the game
+  nothing. That is exactly the ratification's own trigger ("only if per-file
+  control … is wanted"). Detecting the conflict is a backend-neutral synced-file
+  protocol in `crcbl-store`: a generation header plus a local shadow.
+- **Steam Input is in scope.** It feeds a shared gamepad seam, so it arrives as
+  the same `GamepadEvent`s a native backend would produce. It does not use
+  `Binding::Virtual`. EW requires the same events, and `Binding::Virtual` is the
+  on-screen-control path.
+
+The plan's "Defaulted decisions" table records every other call made while the
+user was away, each with its alternative. The ones most worth a look:
+
+- CI never fetches the SDK, so the drift gate runs locally only.
+- The drift gate reads the SDK headers as text with hand-written code. No JSON
+  dependency is added: an earlier draft proposed `serde_json`, and review found
+  `steam_api.json` lacks the lifecycle functions and struct sizes anyway.
+- `SteamTransport` and `SteamCloudStorage` are `Send` but call Steam only on the
+  pump thread, checked at runtime, because Valve states no thread safety for
+  either interface.
+- The crate never writes `steam_appid.txt` or sets `SteamAppId`.
+- 32-bit targets are out of scope.
+- Microtransactions are declined: they need a server that holds a publisher key.
+
+**DECIDED 2026-09-23 — no app id of crcbl's own.** crcbl is an engine and will
+most likely never be published on Steam, so it tests on 480 permanently, with
+mechanism-only smoke tests that never assert a value read back (480's data is
+shared with everyone). Per-app configuration — achievements, stats, Auto-Cloud,
+rich presence, depots — belongs to a game that ships with crcbl, under its own
+app id.
 
 **Two things the plan could not verify**, recorded so nobody reads them as
 settled: whether SDK **1.64** exists at all (`steamworks-rs` pins it; 1.63 of

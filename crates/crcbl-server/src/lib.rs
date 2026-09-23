@@ -7,7 +7,11 @@
 //! (see [`crcbl_net::auth`]) — an unauthenticated packet reaches nothing but
 //! the error counter.
 
+pub mod host;
+mod peer;
 pub mod sim_hash;
+
+pub use host::{Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
 
 pub use crcbl_net::rate_limit;
 pub use crcbl_net::rate_limit::InboundRateLimitConfig;
@@ -16,14 +20,13 @@ use std::fmt;
 use std::time::Duration;
 
 use crcbl_core::{FrameClock, TickId};
-use crcbl_ecs::{ClientInputs, GameModule, Inspector, World};
-use crcbl_net::auth::SessionCrypto;
-use crcbl_net::rate_limit::InboundRateLimiter;
+use crcbl_ecs::{ClientInputs, GameModule, World};
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeGate, HandshakeResult, Message, ProtocolCompatibility,
-    RejectReason, ResumeToken, SectorId, SessionConfig, SessionId, SessionManager, SessionState,
-    SnapshotWriter, Transport, Trust,
+    HandshakeGate, HandshakeResult, ProtocolCompatibility, SectorId, SessionConfig, SessionId,
+    SessionState, Transport,
 };
+
+use peer::{Counters, PeerSession};
 
 /// Ticks the server will keep delta-encoding against the same acked baseline
 /// before it gives up and sends a keyframe.
@@ -63,37 +66,15 @@ pub struct Server<T: Transport> {
     world: World,
     transport: T,
     clock: FrameClock,
-    session: SessionManager,
+    /// The one client's session, credential, channel, budgets and inputs.
+    peer: PeerSession,
     session_config: SessionConfig,
-    resume_token: ResumeToken,
-    /// Authenticated channel for this session; `None` until a handshake is
-    /// accepted, and replaced whenever the resume token rotates.
-    session_crypto: Option<SessionCrypto>,
     next_session_id: u64,
     session_terminated: bool,
     handshake_gate: HandshakeGate,
     rate_limit_config: InboundRateLimitConfig,
-    /// One limiter per delivery channel: a flood of unreliable state must not
-    /// consume the budget that reliable control traffic needs to be read at
-    /// all, which is the whole point of having two channels.
-    reliable_rate_limiter: InboundRateLimiter,
-    unreliable_rate_limiter: InboundRateLimiter,
     now: Duration,
-    /// Ticks since `last_acked_tick` last advanced; drives keyframe recovery.
-    ticks_since_ack_progress: u32,
-    last_ack_progress: Option<TickId>,
-    processing_error_count: u64,
-    auth_failure_count: u64,
-    rate_limited_message_count: u64,
-    rate_limited_byte_count: u64,
-    /// The client input frames that arrived since the current tick began, in
-    /// arrival order, handed to the module as [`ClientInputs`] and emptied at
-    /// the start of every tick. Bounded by [`MAX_CLIENT_INPUTS_PER_TICK`].
-    client_inputs: Vec<(TickId, Vec<u8>)>,
-    /// Frames the cap refused during the current tick.
-    dropped_inputs: u32,
-    /// Frames the cap has refused since this server was built.
-    dropped_input_count: u64,
+    counters: Counters,
     /// Optional game logic module (ticked after the ECS schedule).
     module: Option<Box<dyn GameModule>>,
 }
@@ -129,32 +110,26 @@ impl<T: Transport> Server<T> {
         world.set_tick_dt(clock.tick_dt_secs());
         let config = SessionConfig::default();
         let session_id = SessionId(1);
-        let resume_token = Self::generate_resume_token()?;
+        let resume_token = peer::generate_resume_token()?;
         let rate_limit_config = InboundRateLimitConfig::default();
         Ok(Self {
             world,
             transport,
             clock,
-            session: SessionManager::new(session_id, &config),
+            peer: PeerSession::new(
+                session_id,
+                &config,
+                resume_token,
+                rate_limit_config,
+                Duration::ZERO,
+            ),
             session_config: config,
-            resume_token,
-            session_crypto: None,
             next_session_id: session_id.0 + 1,
             session_terminated: false,
             handshake_gate: HandshakeGate::new(compatibility),
             rate_limit_config,
-            reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
-            unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             now: Duration::ZERO,
-            ticks_since_ack_progress: 0,
-            last_ack_progress: None,
-            processing_error_count: 0,
-            auth_failure_count: 0,
-            rate_limited_message_count: 0,
-            rate_limited_byte_count: 0,
-            client_inputs: Vec::new(),
-            dropped_inputs: 0,
-            dropped_input_count: 0,
+            counters: Counters::default(),
             module: None,
         })
     }
@@ -177,12 +152,8 @@ impl<T: Transport> Server<T> {
     /// world (ECS schedule), tick the game module (if any), sweep what the
     /// module destroyed, emit delta-encoded snapshot.
     fn tick(&mut self) {
-        let was_connected = self.session.state() == SessionState::Connected;
-        // Last tick's inputs go before this tick's are read: a frame is
-        // offered to exactly one `GameModule::tick`, and holding it for a
-        // later one is the jitter buffer this deliberately is not.
-        self.client_inputs.clear();
-        self.dropped_inputs = 0;
+        let was_connected = self.peer.session.state() == SessionState::Connected;
+        self.peer.begin_tick();
         self.drain_inputs();
         self.update_session_for_transport();
         self.world.tick();
@@ -192,7 +163,7 @@ impl<T: Transport> Server<T> {
             // and not something the module reaches back through `Server` for.
             module.tick(
                 &mut self.world,
-                ClientInputs::new(&self.client_inputs, self.dropped_inputs),
+                ClientInputs::new(&self.peer.client_inputs, self.peer.dropped_inputs),
             );
         }
         // `World::despawn` only marks: the entity stays in the pool and in
@@ -203,26 +174,27 @@ impl<T: Transport> Server<T> {
         // queue is almost always empty here and `sweep` returns immediately
         // when it is.
         self.world.sweep();
-        if was_connected && self.session.state() == SessionState::Connected {
+        if was_connected && self.peer.session.state() == SessionState::Connected {
             self.emit_snapshot();
         }
     }
 
     fn update_session_for_transport(&mut self) {
-        if !self.transport.is_connected() && self.session.state() == SessionState::Connected {
-            self.session.on_disconnect(self.now, &self.session_config);
+        if !self.transport.is_connected() && self.peer.session.state() == SessionState::Connected {
+            self.peer
+                .session
+                .on_disconnect(self.now, &self.session_config);
         }
-        let was_reconnecting = self.session.state() == SessionState::Reconnecting;
-        self.session.expire_if_timed_out(self.now);
-        if was_reconnecting && self.session.state() == SessionState::Disconnected {
+        let was_reconnecting = self.peer.session.state() == SessionState::Reconnecting;
+        self.peer.session.expire_if_timed_out(self.now);
+        if was_reconnecting && self.peer.session.state() == SessionState::Disconnected {
             self.session_terminated = true;
         }
     }
 
     /// Consume queued client messages: handshake, inputs, and acks.
     ///
-    /// Inputs are queued for this tick's [`GameModule::tick`] — see
-    /// [`Self::queue_input`].
+    /// Inputs are queued for this tick's [`GameModule::tick`].
     ///
     /// Each channel is drained under its own budget, so exhausting one leaves
     /// the other readable.
@@ -236,7 +208,12 @@ impl<T: Transport> Server<T> {
                 };
                 match received {
                     Ok(Some(msg)) => {
-                        if !self.charge_inbound_budget(reliable, msg.payload.len()) {
+                        if !self.peer.charge_inbound_budget(
+                            reliable,
+                            msg.payload.len(),
+                            self.now,
+                            &mut self.counters,
+                        ) {
                             break;
                         }
                         self.process_inbound_message(&msg.payload);
@@ -244,53 +221,12 @@ impl<T: Transport> Server<T> {
                     Ok(None) => break,
                     Err(crcbl_net::TransportError::Disconnected) => break,
                     Err(_) => {
-                        self.processing_error_count += 1;
+                        self.counters.processing_errors += 1;
                         break;
                     }
                 }
             }
         }
-    }
-
-    /// Charge one inbound message against its channel's budget, returning
-    /// whether the caller may keep reading that channel.
-    fn charge_inbound_budget(&mut self, reliable: bool, bytes: usize) -> bool {
-        let now = self.now;
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
-        let limiter = if reliable {
-            &mut self.reliable_rate_limiter
-        } else {
-            &mut self.unreliable_rate_limiter
-        };
-        match limiter.allow(now, bytes) {
-            Ok(()) => true,
-            Err((messages_limited, bytes_limited)) => {
-                self.rate_limited_message_count = self
-                    .rate_limited_message_count
-                    .saturating_add(u64::from(messages_limited));
-                self.rate_limited_byte_count = self
-                    .rate_limited_byte_count
-                    .saturating_add(u64::from(bytes_limited));
-                false
-            }
-        }
-    }
-
-    /// Queue one decoded input frame for this tick's [`GameModule::tick`],
-    /// or refuse it once the tick is holding [`MAX_CLIENT_INPUTS_PER_TICK`].
-    ///
-    /// The **newest** frame is refused rather than the oldest evicted: the
-    /// frames already queued are the ones the module is about to read in
-    /// arrival order, and dropping from the front would hand it a reordered
-    /// prefix of what the client said. Refusing costs nothing and keeps the
-    /// order the peer sent.
-    fn queue_input(&mut self, tick: TickId, data: Vec<u8>) {
-        if self.client_inputs.len() >= MAX_CLIENT_INPUTS_PER_TICK {
-            self.dropped_inputs = self.dropped_inputs.saturating_add(1);
-            self.dropped_input_count = self.dropped_input_count.saturating_add(1);
-            return;
-        }
-        self.client_inputs.push((tick, data));
     }
 
     /// Dispatch one inbound payload on its tag byte.
@@ -302,90 +238,46 @@ impl<T: Transport> Server<T> {
         match payload.first().copied() {
             Some(crcbl_net::codec::HELLO_TAG) => match crcbl_net::decode_hello(payload) {
                 Ok(hello) => self.handle_hello(hello),
-                Err(_) => self.processing_error_count += 1,
+                Err(_) => self.counters.processing_errors += 1,
             },
-            Some(crcbl_net::auth::AUTH_TAG) => self.process_authenticated_message(payload),
-            _ => self.processing_error_count += 1,
-        }
-    }
-
-    fn process_authenticated_message(&mut self, envelope: &[u8]) {
-        // Authenticated traffic only means anything for an established
-        // session; before and after that there is no key to check it against.
-        if self.session.state() != SessionState::Connected {
-            self.auth_failure_count += 1;
-            return;
-        }
-        let Some(crypto) = self.session_crypto.as_mut() else {
-            self.auth_failure_count += 1;
-            return;
-        };
-        let payload = match crypto.open(envelope) {
-            Ok(payload) => payload.to_vec(),
-            Err(_) => {
-                self.auth_failure_count += 1;
-                return;
-            }
-        };
-
-        match payload.first().copied() {
-            Some(crcbl_net::codec::ACK_TAG) => match crcbl_net::decode_ack(&payload) {
-                Ok(ack) => self.session.handle_ack(ack.sector, ack.tick),
-                Err(_) => self.processing_error_count += 1,
-            },
-            Some(crcbl_net::codec::INPUT_TAG | crcbl_net::codec::COMMAND_TAG) => {
-                match crcbl_net::decode_client_to_server(&payload) {
-                    Ok(crcbl_net::ClientToServer::Input { tick, data }) => {
-                        self.queue_input(tick, data);
-                    }
-                    // **A command is not this tick's state.** `Input` is a
-                    // sample of what the player was doing when the client
-                    // sampled it, which is why it is queued and cleared every
-                    // tick; a command ("ready up", a chat line) is a request
-                    // that has to be answered once and stay answered, and
-                    // nothing on this server consumes one yet. Decoding it
-                    // still charges a malformed frame against this session's
-                    // error budget, which is what stops a peer sending rubbish
-                    // cheaply — but a caller must not read this arm as a
-                    // command being acted on.
-                    Ok(crcbl_net::ClientToServer::Command { .. }) => {}
-                    Err(_) => self.processing_error_count += 1,
-                }
-            }
-            _ => self.processing_error_count += 1,
+            Some(crcbl_net::auth::AUTH_TAG) => self
+                .peer
+                .process_authenticated_message(payload, &mut self.counters),
+            _ => self.counters.processing_errors += 1,
         }
     }
 
     fn handle_hello(&mut self, hello: crcbl_net::Hello) {
         if self.session_terminated
-            && self.session.state() == SessionState::Disconnected
+            && self.peer.session.state() == SessionState::Disconnected
             && hello.session_token.is_none()
             && let Err(error) = self.rotate_session()
         {
-            self.processing_error_count += 1;
-            self.send_handshake_result(Self::entropy_failure(hello.generation, error));
+            self.counters.processing_errors += 1;
+            self.send_handshake_result(peer::entropy_failure(hello.generation, error));
             return;
         }
         let mut result = self.handshake_gate.validate(
             &hello,
-            self.session.session_id(),
-            self.resume_token,
+            self.peer.session.session_id(),
+            self.peer.resume_token,
             self.clock.tick(),
         );
         if matches!(result, HandshakeResult::Accept { .. }) {
-            let expected_token = self.resume_token;
-            match self.session.state() {
+            let expected_token = self.peer.resume_token;
+            match self.peer.session.state() {
                 SessionState::Disconnected => {
                     if hello.session_token.is_some() {
-                        result = Self::invalid_session_token(
+                        result = peer::invalid_session_token(
                             hello.generation,
                             "fresh handshake must not include a session token",
                         );
                     } else {
-                        self.session.begin_handshake();
-                        self.session
+                        self.peer.session.begin_handshake();
+                        self.peer
+                            .session
                             .on_connected(hello.engine_build_id, hello.schema_hash);
-                        self.adopt_session_key();
+                        self.peer.adopt_session_key();
                     }
                 }
                 SessionState::Reconnecting => {
@@ -393,14 +285,14 @@ impl<T: Transport> Server<T> {
                         .session_token
                         .is_some_and(|token| token == expected_token)
                     {
-                        result = Self::invalid_session_token(
+                        result = peer::invalid_session_token(
                             hello.generation,
                             "reconnect session token does not match",
                         );
                     } else {
-                        match Self::generate_resume_token() {
+                        match peer::generate_resume_token() {
                             Ok(resume_token) => {
-                                if self.session.can_reconnect(
+                                if self.peer.session.can_reconnect(
                                     self.now,
                                     hello.engine_build_id,
                                     hello.schema_hash,
@@ -413,7 +305,7 @@ impl<T: Transport> Server<T> {
                                         *accepted_token = resume_token;
                                     }
                                     if self.send_handshake_result(result)
-                                        && self.session.try_reconnect(
+                                        && self.peer.session.try_reconnect(
                                             self.now,
                                             hello.engine_build_id,
                                             hello.schema_hash,
@@ -422,29 +314,29 @@ impl<T: Transport> Server<T> {
                                         // Rotating the token rotates the MAC
                                         // key, which restarts the replay
                                         // counter space for the new session.
-                                        self.resume_token = resume_token;
-                                        self.adopt_session_key();
+                                        self.peer.resume_token = resume_token;
+                                        self.peer.adopt_session_key();
                                     }
                                     return;
                                 }
-                                self.session.expire_if_timed_out(self.now);
-                                if self.session.state() == SessionState::Disconnected {
+                                self.peer.session.expire_if_timed_out(self.now);
+                                if self.peer.session.state() == SessionState::Disconnected {
                                     self.session_terminated = true;
                                 }
-                                result = Self::invalid_session_token(
+                                result = peer::invalid_session_token(
                                     hello.generation,
                                     "reconnect grace period expired",
                                 );
                             }
                             Err(error) => {
-                                self.processing_error_count += 1;
-                                result = Self::entropy_failure(hello.generation, error);
+                                self.counters.processing_errors += 1;
+                                result = peer::entropy_failure(hello.generation, error);
                             }
                         }
                     }
                 }
                 SessionState::Handshaking => {
-                    result = Self::invalid_session_token(
+                    result = peer::invalid_session_token(
                         hello.generation,
                         "handshake is already in progress",
                     );
@@ -454,7 +346,7 @@ impl<T: Transport> Server<T> {
                         .session_token
                         .is_some_and(|token| token == expected_token)
                     {
-                        result = Self::invalid_session_token(
+                        result = peer::invalid_session_token(
                             hello.generation,
                             "session token does not match",
                         );
@@ -465,63 +357,18 @@ impl<T: Transport> Server<T> {
         self.send_handshake_result(result);
     }
 
-    /// Key this session's authenticated channel from the current resume token.
-    fn adopt_session_key(&mut self) {
-        self.session_crypto = Some(SessionCrypto::from_token(&self.resume_token));
-    }
-
-    fn generate_resume_token() -> Result<ResumeToken, crcbl_rand::Error> {
-        let mut bytes = [0; 32];
-        crcbl_rand::entropy(&mut bytes[..])?;
-        Ok(ResumeToken::from_bytes(bytes))
-    }
-
     fn rotate_session(&mut self) -> Result<(), crcbl_rand::Error> {
-        let resume_token = Self::generate_resume_token()?;
+        let resume_token = peer::generate_resume_token()?;
         let session_id = SessionId(self.next_session_id);
         self.next_session_id = self.next_session_id.wrapping_add(1);
-        self.session = SessionManager::new(session_id, &self.session_config);
-        self.resume_token = resume_token;
-        self.session_crypto = None;
+        self.peer
+            .replace_session(session_id, &self.session_config, resume_token);
         self.session_terminated = false;
-        self.ticks_since_ack_progress = 0;
-        self.last_ack_progress = None;
         Ok(())
     }
 
     fn send_handshake_result(&mut self, result: HandshakeResult) -> bool {
-        if self
-            .transport
-            .send_reliable(Message::reliable(crcbl_net::encode_handshake_result(
-                &result,
-            )))
-            .is_err()
-        {
-            self.processing_error_count += 1;
-            false
-        } else {
-            true
-        }
-    }
-
-    fn entropy_failure(generation: u64, error: crcbl_rand::Error) -> HandshakeResult {
-        HandshakeResult::Reject {
-            generation,
-            reason: RejectReason {
-                code: RejectReason::ENTROPY_FAILURE,
-                msg: format!("unable to generate resume credential: {error}"),
-            },
-        }
-    }
-
-    fn invalid_session_token(generation: u64, message: &str) -> HandshakeResult {
-        HandshakeResult::Reject {
-            generation,
-            reason: RejectReason {
-                code: RejectReason::INVALID_SESSION_TOKEN,
-                msg: message.into(),
-            },
-        }
+        peer::send_handshake_result(&mut self.transport, &result, &mut self.counters)
     }
 
     /// Build snapshots from the ECS schedule, delta-encode against the
@@ -529,135 +376,12 @@ impl<T: Transport> Server<T> {
     fn emit_snapshot(&mut self) {
         let tick = self.clock.tick();
         let sector = SectorId::ZERO;
-        let Some(systems) = self.collect_systems(sector, tick) else {
+        let Some(current) = peer::current_baseline(&self.world, sector, tick, &mut self.counters)
+        else {
             return;
         };
-
-        // Parse the freshly written blobs exactly once: the same decoded
-        // baseline is both what gets diffed and what gets retained.
-        let current = match Baseline::from_snapshot(tick, &systems, Trust::Authenticated) {
-            Ok(baseline) => baseline,
-            Err(_) => {
-                self.processing_error_count += 1;
-                return;
-            }
-        };
-
-        // Borrow the retained baseline rather than cloning it: the delta is
-        // finished with it before anything needs the store mutably again.
-        let previous_tick = self.delta_baseline_tick(sector);
-        let delta = {
-            let previous = previous_tick.and_then(|tick| {
-                self.session
-                    .baseline_store(sector)
-                    .and_then(|store| store.get(tick))
-            });
-            DeltaCodec::encode_from_baseline(sector, &current, previous)
-        };
-
-        let payload = match crcbl_net::encode_delta(&delta) {
-            Ok(payload) => payload,
-            Err(_) => {
-                self.processing_error_count += 1;
-                return;
-            }
-        };
-        let Some(crypto) = self.session_crypto.as_mut() else {
-            self.processing_error_count += 1;
-            return;
-        };
-        let payload = match crypto.seal(&payload) {
-            Ok(payload) => payload,
-            Err(_) => {
-                self.processing_error_count += 1;
-                return;
-            }
-        };
-
-        if self
-            .transport
-            .send_unreliable(Message::unreliable(payload))
-            .is_err()
-        {
-            self.processing_error_count += 1;
-            return;
-        }
-
-        // Store this full snapshot as a new baseline for future deltas — only
-        // once the transport accepted it. A baseline whose snapshot never left
-        // the server must not be the reference future deltas encode against:
-        // that is what evicts the client's real baseline and makes the desync
-        // permanent.
-        self.session.baseline_store_mut(sector).insert(current);
-    }
-
-    /// Serialise every replicated system into snapshot blobs.
-    ///
-    /// Returns `None` when two systems collide on a replicated id, which would
-    /// otherwise let one system's data land in another's baseline.
-    fn collect_systems(
-        &mut self,
-        sector: SectorId,
-        tick: TickId,
-    ) -> Option<Vec<crcbl_net::SystemSnapshot>> {
-        let mut writer = SnapshotWriter::new_with_sector(sector, tick);
-        let stats = Inspector::collect(&self.world);
-        let mut seen = std::collections::HashSet::new();
-
-        for (system, stat) in self.world.schedule().iter().zip(stats.iter()) {
-            let system_id = replicated_system_id(system.name());
-            if !seen.insert(system_id) {
-                // Two systems sharing a replicated id would silently overwrite
-                // each other in the client's baseline. Drop the whole snapshot
-                // rather than replicate a lie.
-                self.processing_error_count += 1;
-                return None;
-            }
-            // Systems with a replication impl emit their real per-entity
-            // component data; the rest fall back to one synthetic entity
-            // carrying only the entity count (4 bytes LE).
-            let mut data = Vec::new();
-            if !system.replicate(&mut data) {
-                crcbl_net::encode_entity_entry(
-                    &mut data,
-                    0,
-                    &(stat.entity_count as u32).to_le_bytes(),
-                );
-            }
-            writer.write_system(system_id, data);
-        }
-
-        match writer.finish() {
-            crcbl_net::ServerToClient::Snapshot { systems, .. } => Some(systems),
-            crcbl_net::ServerToClient::Event { .. } => None,
-        }
-    }
-
-    /// The tick this delta should be encoded against, or `None` for a keyframe.
-    ///
-    /// Returns `None` — forcing a keyframe — once the client's acks have
-    /// stopped advancing for [`KEYFRAME_RECOVERY_TICKS`], because at that
-    /// point the client is provably not applying what it is being sent.
-    fn delta_baseline_tick(&mut self, sector: SectorId) -> Option<TickId> {
-        let last_acked = self.session.last_acked_tick(sector);
-        if last_acked == self.last_ack_progress {
-            self.ticks_since_ack_progress = self.ticks_since_ack_progress.saturating_add(1);
-        } else {
-            self.last_ack_progress = last_acked;
-            self.ticks_since_ack_progress = 0;
-        }
-        if self.ticks_since_ack_progress >= KEYFRAME_RECOVERY_TICKS {
-            self.ticks_since_ack_progress = 0;
-            return None;
-        }
-
-        // Only a tick still in the ring can be delta-encoded against; an
-        // evicted one falls back to a keyframe.
-        last_acked.filter(|&tick| {
-            self.session
-                .baseline_store(sector)
-                .is_some_and(|store| store.get(tick).is_some())
-        })
+        self.peer
+            .send_snapshot(&mut self.transport, sector, current, &mut self.counters);
     }
 
     /// Replace the transport after a disconnect. The next valid resume handshake
@@ -677,8 +401,7 @@ impl<T: Transport> Server<T> {
     /// reconfiguration resets both buckets to one second of the new budget.
     pub fn set_inbound_rate_limit_config(&mut self, config: InboundRateLimitConfig) {
         self.rate_limit_config = config;
-        self.reliable_rate_limiter.reconfigure(config, self.now);
-        self.unreliable_rate_limiter.reconfigure(config, self.now);
+        self.peer.reconfigure_rate_limit(config, self.now);
     }
 
     /// Attach a [`GameModule`] to drive game-specific per-tick logic.
@@ -701,13 +424,13 @@ impl<T: Transport> Server<T> {
     /// Number of messages dropped because their message-rate budget was exhausted.
     #[must_use]
     pub fn rate_limited_message_count(&self) -> u64 {
-        self.rate_limited_message_count
+        self.counters.rate_limited_messages
     }
 
     /// Number of messages dropped because their byte-rate budget was exhausted.
     #[must_use]
     pub fn rate_limited_byte_count(&self) -> u64 {
-        self.rate_limited_byte_count
+        self.counters.rate_limited_bytes
     }
 
     /// Number of input frames refused because the tick they arrived in was
@@ -718,7 +441,7 @@ impl<T: Transport> Server<T> {
     /// this is what keeps their loss from being silent.
     #[must_use]
     pub fn dropped_input_count(&self) -> u64 {
-        self.dropped_input_count
+        self.counters.dropped_inputs
     }
 
     /// Number of messages rejected because they were unauthenticated, carried
@@ -728,19 +451,19 @@ impl<T: Transport> Server<T> {
     /// injecting packets.
     #[must_use]
     pub fn auth_failure_count(&self) -> u64 {
-        self.auth_failure_count
+        self.counters.auth_failures
     }
 
     /// Current session lifecycle state.
     #[must_use]
     pub fn session_state(&self) -> SessionState {
-        self.session.state()
+        self.peer.session.state()
     }
 
     /// Number of unrecoverable transport, encoding, decoding, or lifecycle errors.
     #[must_use]
     pub fn processing_error_count(&self) -> u64 {
-        self.processing_error_count
+        self.counters.processing_errors
     }
 
     /// Whether the transport is still connected.
@@ -793,7 +516,7 @@ impl<T: Transport> fmt::Debug for Server<T> {
             .field("world", &self.world)
             .field("clock", &self.clock)
             .field("connected", &self.transport.is_connected())
-            .field("session_state", &self.session.state())
+            .field("session_state", &self.peer.session.state())
             .finish()
     }
 }
@@ -805,9 +528,14 @@ impl<T: Transport> fmt::Debug for Server<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crcbl_ecs::Inspector;
     use crcbl_ecs::System;
+    use crcbl_net::auth::SessionCrypto;
     use crcbl_net::auth::{AUTH_OVERHEAD, AUTH_TAG};
-    use crcbl_net::{InMemoryTransport, MAX_IN_MEMORY_MESSAGE_BYTES, MessageKind};
+    use crcbl_net::{
+        Baseline, DeltaCodec, InMemoryTransport, MAX_IN_MEMORY_MESSAGE_BYTES, Message, MessageKind,
+        ResumeToken, Trust,
+    };
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
@@ -894,10 +622,14 @@ mod tests {
     ) {
         for tick in ticks {
             let tick = TickId::from_raw(tick);
-            server.session.baseline_store_mut(SectorId::ZERO).insert(
-                Baseline::from_snapshot(tick, &[], Trust::Authenticated)
-                    .expect("empty snapshot is valid"),
-            );
+            server
+                .peer
+                .session
+                .baseline_store_mut(SectorId::ZERO)
+                .insert(
+                    Baseline::from_snapshot(tick, &[], Trust::Authenticated)
+                        .expect("empty snapshot is valid"),
+                );
         }
     }
 
@@ -1113,14 +845,16 @@ mod tests {
     fn failed_reconnect_accept_keeps_previous_credential() {
         let (transport, peer) = InMemoryTransport::pair();
         let mut server = server(World::new(), transport);
-        server.session.begin_handshake();
+        server.peer.session.begin_handshake();
         server
+            .peer
             .session
             .on_connected(COMPATIBILITY.engine_build_id, COMPATIBILITY.schema_hash);
         server
+            .peer
             .session
             .on_disconnect(Duration::ZERO, &server.session_config);
-        let token = server.resume_token;
+        let token = server.peer.resume_token;
         drop(peer);
 
         server.handle_hello(crcbl_net::Hello {
@@ -1131,29 +865,29 @@ mod tests {
             session_token: Some(token),
         });
 
-        assert_eq!(server.session.state(), SessionState::Reconnecting);
-        assert_eq!(server.resume_token, token);
-        assert_eq!(server.processing_error_count, 1);
+        assert_eq!(server.peer.session.state(), SessionState::Reconnecting);
+        assert_eq!(server.peer.resume_token, token);
+        assert_eq!(server.counters.processing_errors, 1);
     }
 
     #[test]
     fn rotating_session_clears_baselines_acks_and_the_session_key() {
         let (transport, _peer) = InMemoryTransport::pair();
         let mut server = server(World::new(), transport);
-        let old_session_id = server.session.session_id();
-        let old_token = server.resume_token;
+        let old_session_id = server.peer.session.session_id();
+        let old_token = server.peer.resume_token;
         let tick = TickId::from_raw(1);
         retain_ack_baselines(&mut server, [1]);
-        server.session.handle_ack(SectorId::ZERO, tick);
-        server.adopt_session_key();
+        server.peer.session.handle_ack(SectorId::ZERO, tick);
+        server.peer.adopt_session_key();
 
         server.rotate_session().expect("OS CSPRNG available");
 
-        assert_ne!(server.session.session_id(), old_session_id);
-        assert_ne!(server.resume_token, old_token);
-        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
-        assert!(server.session.baseline_store(SectorId::ZERO).is_none());
-        assert!(server.session_crypto.is_none());
+        assert_ne!(server.peer.session.session_id(), old_session_id);
+        assert_ne!(server.peer.resume_token, old_token);
+        assert_eq!(server.peer.session.last_acked_tick(SectorId::ZERO), None);
+        assert!(server.peer.session.baseline_store(SectorId::ZERO).is_none());
+        assert!(server.peer.session_crypto.is_none());
     }
 
     // ── Tick loop ──────────────────────────────────────────────────────────
@@ -1602,7 +1336,7 @@ mod tests {
 
         assert_eq!(server.processing_error_count(), 1);
         let emitted_tick = server.tick_id();
-        let store = server.session.baseline_store(SectorId::ZERO).unwrap();
+        let store = server.peer.session.baseline_store(SectorId::ZERO).unwrap();
         assert!(
             store.get(emitted_tick).is_none(),
             "a snapshot the transport dropped must not become the next delta's \
@@ -1632,7 +1366,7 @@ mod tests {
         peer.send_unreliable(Message::unreliable(ack(3))).unwrap();
         server.update(2 * TICK);
 
-        assert_eq!(server.session.last_acked_tick(SectorId::ZERO), None);
+        assert_eq!(server.peer.session.last_acked_tick(SectorId::ZERO), None);
         assert_eq!(server.auth_failure_count(), 1);
         assert_eq!(server.processing_error_count(), 1);
     }
@@ -1649,7 +1383,7 @@ mod tests {
             .unwrap();
         server.update(2 * TICK);
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(1))
         );
         assert_eq!(server.auth_failure_count(), 0);
@@ -1660,7 +1394,7 @@ mod tests {
         send_sealed(&mut peer, &mut crypto, &ack(2));
         server.update(3 * TICK);
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(2))
         );
         assert_eq!(server.auth_failure_count(), 1);
@@ -1747,7 +1481,7 @@ mod tests {
         server.update(2 * TICK);
 
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(2))
         );
         assert_eq!(server.rate_limited_message_count(), 1);
@@ -1773,7 +1507,7 @@ mod tests {
         server.update(2 * TICK);
 
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(1))
         );
         assert_eq!(server.rate_limited_message_count(), 0);
@@ -1797,7 +1531,7 @@ mod tests {
         }
         server.update(2 * TICK);
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(1))
         );
         assert_eq!(server.rate_limited_message_count(), 1);
@@ -1806,7 +1540,7 @@ mod tests {
         send_sealed(&mut peer, &mut crypto, &ack(3));
         server.update(Duration::from_secs(1) + 2 * TICK);
         assert_eq!(
-            server.session.last_acked_tick(SectorId::ZERO),
+            server.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(3))
         );
         assert_eq!(server.rate_limited_message_count(), 1);
@@ -1878,11 +1612,11 @@ mod tests {
         server_b.update(2 * TICK);
 
         assert_eq!(
-            server_a.session.last_acked_tick(SectorId::ZERO),
+            server_a.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(1))
         );
         assert_eq!(
-            server_b.session.last_acked_tick(SectorId::ZERO),
+            server_b.peer.session.last_acked_tick(SectorId::ZERO),
             Some(TickId::from_raw(1))
         );
         assert_eq!(server_a.rate_limited_message_count(), 0);

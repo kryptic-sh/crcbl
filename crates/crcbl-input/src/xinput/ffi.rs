@@ -1,4 +1,5 @@
-//! Hand-written FFI to XInput, and the two structures `XInputGetState` fills.
+//! Hand-written FFI to XInput: the structures `XInputGetState` fills, and
+//! the ones the undocumented `XInputGetCapabilitiesEx` fills.
 //!
 //! **Loaded at runtime, not linked** — the opposite of the Win32 shell's
 //! `#[link]` decision, for the reason that module's docs give for when the
@@ -41,6 +42,73 @@ pub(crate) struct XInputState {
     /// `Gamepad`.
     pub(crate) gamepad: XInputGamepad,
 }
+
+/// `XINPUT_VIBRATION`. Only here as part of [`XInputCapabilities`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct XInputVibration {
+    /// `wLeftMotorSpeed`.
+    pub(crate) left_motor: u16,
+    /// `wRightMotorSpeed`.
+    pub(crate) right_motor: u16,
+}
+
+/// `XINPUT_CAPABILITIES`. Only here as the head of
+/// [`XInputCapabilitiesEx`]; none of it is read.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct XInputCapabilities {
+    /// `Type`.
+    pub(crate) kind: u8,
+    /// `SubType`.
+    pub(crate) sub_type: u8,
+    /// `Flags`.
+    pub(crate) flags: u16,
+    /// `Gamepad`.
+    pub(crate) gamepad: XInputGamepad,
+    /// `Vibration`.
+    pub(crate) vibration: XInputVibration,
+}
+
+/// What `xinput1_4.dll`'s **undocumented** export ordinal 108
+/// (`XInputGetCapabilitiesEx`) fills: the documented `XINPUT_CAPABILITIES`,
+/// then the device's USB vendor and product ids, which nothing documented in
+/// XInput exposes.
+///
+/// No Windows SDK header declares it. The layout is SDL's declaration
+/// (`SDL_XINPUT_CAPABILITIES_EX` in SDL's `src/core/windows/SDL_xinput.h`),
+/// which SDL has read vendor ids through for years — including to recognise
+/// Steam's virtual pad, which is what this backend reads it for.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct XInputCapabilitiesEx {
+    /// `Capabilities`.
+    pub(crate) capabilities: XInputCapabilities,
+    /// `VendorId`: the USB vendor id.
+    pub(crate) vendor_id: u16,
+    /// `ProductId`.
+    pub(crate) product_id: u16,
+    /// `ProductVersion`.
+    pub(crate) product_version: u16,
+    /// Unnamed in SDL's declaration.
+    pub(crate) unknown1: u16,
+    /// Unnamed in SDL's declaration.
+    pub(crate) unknown2: u32,
+}
+
+/// The export ordinal of `XInputGetCapabilitiesEx` in `xinput1_4.dll`
+/// (SDL's `SDL_xinput.c` resolves it the same way). `xinput9_1_0.dll` does
+/// not export it.
+#[cfg(windows)]
+pub(crate) const GET_CAPABILITIES_EX_ORDINAL: usize = 108;
+
+/// `XInputGetCapabilitiesEx(DWORD dwReserved, DWORD dwUserIndex, DWORD
+/// dwFlags, XINPUT_CAPABILITIES_EX *pCapabilities) -> DWORD`, as SDL declares
+/// it; SDL passes `1` for the reserved argument and `0` for the flags, and so
+/// does this backend.
+#[cfg(windows)]
+pub(crate) type XInputGetCapabilitiesExFn =
+    unsafe extern "system" fn(u32, u32, u32, *mut XInputCapabilitiesEx) -> u32;
 
 /// `XUSER_MAX_COUNT`: XInput's user slots, 0 through 3.
 pub(crate) const XUSER_MAX_COUNT: u32 = 4;
@@ -112,6 +180,34 @@ mod tests {
         assert_layout!(XInputState, 16, {
             packet_number: 0, 4;
             gamepad: 4, 12;
+        });
+    }
+
+    /// The structures behind ordinal 108. Every number is MinGW-w64 GCC
+    /// 16.2.0's `sizeof`/`offsetof` for x64, printed by a C++ program built
+    /// against MinGW's own `xinput.h` — for `XINPUT_CAPABILITIES_EX`, which no
+    /// SDK header declares, against SDL's declaration of it. As above, every
+    /// field is fixed-width, so the numbers hold on every target.
+    #[test]
+    fn the_capabilities_structures_match_the_c_layout() {
+        assert_layout!(XInputVibration, 4, {
+            left_motor: 0, 2;
+            right_motor: 2, 2;
+        });
+        assert_layout!(XInputCapabilities, 20, {
+            kind: 0, 1;
+            sub_type: 1, 1;
+            flags: 2, 2;
+            gamepad: 4, 12;
+            vibration: 16, 4;
+        });
+        assert_layout!(XInputCapabilitiesEx, 32, {
+            capabilities: 0, 20;
+            vendor_id: 20, 2;
+            product_id: 22, 2;
+            product_version: 24, 2;
+            unknown1: 26, 2;
+            unknown2: 28, 4;
         });
     }
 }

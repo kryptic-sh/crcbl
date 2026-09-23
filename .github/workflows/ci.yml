@@ -526,6 +526,38 @@ jobs:
       - name: Interpret the job system's concurrent unsafe
         run: cargo miri test --tests -p crcbl-jobs
 
+  # **`crcbl-steam`'s unsafe is foreign memory**: packed callback structs
+  # copied out of a buffer Steam owns, a drain loop that must read between
+  # `GetNextCallback` and `FreeLastCallback` and never after, and function
+  # pointers transmuted from symbol addresses. The fake library frees each
+  # payload at `FreeLastCallback`, so a read after the free is a use-after-free
+  # Miri reports. The loader test is `cfg_attr(miri, ignore)`: it calls the OS
+  # loader. Isolation is off for the one test that reads the working directory.
+  # The drift gate's scanner tests are `cfg(not(miri))`: text scanning with no
+  # unsafe, and most of the old run time. Measured locally 2026-09-23: 151 tests
+  # in about 49 seconds of interpretation.
+  miri-steam:
+    name: miri (crcbl-steam)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          components: miri
+          cache: false
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: miri-steam
+      # See `miri-jobs` for why the sysroot build relaxes `build.warnings`.
+      - run: CARGO_BUILD_WARNINGS=warn cargo miri setup
+      - name: Interpret the Steam FFI's decode, drain and init
+        run: cargo miri test -p crcbl-steam --lib
+
   # Two gates, one toolchain, one `-Z build-std` output — which is why they
   # share a job rather than having one each: rebuilding std for wasm32 is the
   # expensive half and a second job would pay it again.

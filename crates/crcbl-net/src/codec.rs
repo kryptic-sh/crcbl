@@ -6,7 +6,7 @@
 use std::collections::HashSet;
 
 use crate::handshake::{HandshakeResult, Hello, RejectReason};
-use crate::messages::{ClientToServer, ServerToClient, SystemSnapshot};
+use crate::messages::{ClientToServer, ServerToClient, SessionEndReason, SystemSnapshot};
 use crate::types::{ResumeToken, SectorId, SessionId};
 use crcbl_core::TickId;
 
@@ -54,6 +54,10 @@ pub const ACCEPT_TAG: u8 = 0x21;
 pub const REJECT_TAG: u8 = 0x22;
 /// [`Ack`].
 pub const ACK_TAG: u8 = 0x30;
+/// [`SessionEndReason`] — only ever sealed, and only on the reliable channel,
+/// which is how a client tells it from a snapshot: a sealed delta has no tag
+/// byte of its own and travels unreliable.
+pub const SESSION_ENDED_TAG: u8 = 0x50;
 
 /// Maximum accepted wire payload. Snapshots target a single UDP datagram.
 pub const MAX_WIRE_PAYLOAD_BYTES: usize = 64 * 1024;
@@ -475,6 +479,26 @@ pub fn decode_ack(payload: &[u8]) -> Result<Ack, DecodeError> {
     Ok(Ack { sector, tick })
 }
 
+// ── Session ended ─────────────────────────────────────────────────────────────
+
+/// Tag 0x50 = session ended { reason: u8 }
+#[must_use]
+pub fn encode_session_ended(reason: SessionEndReason) -> Vec<u8> {
+    vec![SESSION_ENDED_TAG, reason.0]
+}
+
+pub fn decode_session_ended(payload: &[u8]) -> Result<SessionEndReason, DecodeError> {
+    validate_payload_size(payload)?;
+    let mut r = ByteReader::new(payload);
+    let tag = r.read_u8()?;
+    if tag != SESSION_ENDED_TAG {
+        return Err(DecodeError::UnknownTag { tag });
+    }
+    let reason = SessionEndReason(r.read_u8()?);
+    r.assert_empty()?;
+    Ok(reason)
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -482,6 +506,36 @@ mod tests {
     use super::*;
 
     // ── Roundtrip tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn a_session_end_round_trips_every_reason_including_unknown_ones() {
+        for reason in [
+            SessionEndReason::HOST_LEFT,
+            SessionEndReason::KICKED,
+            SessionEndReason::SHUTTING_DOWN,
+            SessionEndReason(0xEE),
+        ] {
+            let encoded = encode_session_ended(reason);
+            assert_eq!(encoded, [0x50, reason.0], "tag then code, nothing else");
+            assert_eq!(decode_session_ended(&encoded).unwrap(), reason);
+        }
+    }
+
+    #[test]
+    fn a_session_end_is_refused_under_another_tag_short_or_with_trailing_bytes() {
+        assert!(matches!(
+            decode_session_ended(&[ACK_TAG, 0x01]),
+            Err(DecodeError::UnknownTag { tag: ACK_TAG })
+        ));
+        assert!(matches!(
+            decode_session_ended(&[SESSION_ENDED_TAG]),
+            Err(DecodeError::TooShort { .. })
+        ));
+        assert!(matches!(
+            decode_session_ended(&[SESSION_ENDED_TAG, 0x01, 0x00]),
+            Err(DecodeError::TrailingBytes(1))
+        ));
+    }
 
     #[test]
     fn roundtrip_client_to_server() {

@@ -19,7 +19,8 @@ use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
-    RejectReason, ResumeToken, SectorId, SessionId, Transport, TransportError, Trust,
+    RejectReason, ResumeToken, SectorId, SessionEndReason, SessionId, Transport, TransportError,
+    Trust,
 };
 use crcbl_phys::Transform;
 
@@ -73,6 +74,17 @@ fn frame_from_baseline(baseline: &Baseline) -> Frame {
         tick: baseline.tick,
         transforms,
     }
+}
+
+/// How a client's session ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ended {
+    /// The server said so, sealed with the session's key, before it closed
+    /// the link.
+    ByServer(SessionEndReason),
+    /// The transport disconnected without a word from the server: the link
+    /// died, or the server did.
+    Lost,
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +145,9 @@ pub struct Client<T: Transport> {
     unproven_sessions: u32,
     /// Set only by a rejection this build can never satisfy.
     handshake_blocked: bool,
+    /// Why the server ended this session, once it has said so; cleared by
+    /// [`Client::reconnect`].
+    session_ended: Option<SessionEndReason>,
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
     processing_error_count: u64,
@@ -190,6 +205,7 @@ impl<T: Transport> Client<T> {
             session_proof_deadline: None,
             unproven_sessions: 0,
             handshake_blocked: false,
+            session_ended: None,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             processing_error_count: 0,
@@ -401,10 +417,26 @@ impl<T: Transport> Client<T> {
         self.handshake_blocked
     }
 
+    /// How the session ended, or `None` while it has not.
+    ///
+    /// [`Ended::ByServer`] once the server's sealed session-end has arrived —
+    /// the host left, kicked this client, or shut down — whether or not the
+    /// transport has closed yet. [`Ended::Lost`] when the transport is
+    /// disconnected and no such message came first.
+    #[must_use]
+    pub fn ended(&self) -> Option<Ended> {
+        match self.session_ended {
+            Some(reason) => Some(Ended::ByServer(reason)),
+            None if !self.transport.is_connected() => Some(Ended::Lost),
+            None => None,
+        }
+    }
+
     /// Request a fresh handshake or resume the accepted session on a replacement
     /// transport. The caller must provide a newly connected transport.
     pub fn reconnect(&mut self, transport: T) {
         self.transport = transport;
+        self.session_ended = None;
         self.outstanding_handshake_generation = None;
         self.handshake_deadline = None;
         self.handshake_retry_at = None;
@@ -471,7 +503,7 @@ impl<T: Transport> Client<T> {
     /// rather than latching.
     fn drive_handshake(&mut self) {
         self.expire_unproven_session();
-        if self.handshake_complete || self.handshake_blocked {
+        if self.handshake_complete || self.handshake_blocked || self.session_ended.is_some() {
             return;
         }
         if let Some(deadline) = self.handshake_deadline
@@ -637,12 +669,24 @@ impl<T: Transport> Client<T> {
             if !self.charge_inbound_budget(msg.kind, msg.payload.len()) {
                 break;
             }
-            match msg.payload.first().copied() {
-                Some(crcbl_net::codec::ACCEPT_TAG | crcbl_net::codec::REJECT_TAG) => {
+            if self.session_ended.is_some() {
+                // The server ended this session and closes the link next;
+                // what it sent before that — snapshots overtaken by the
+                // reliable session-end — belongs to a session that is over.
+                // Not an error, so not counted.
+                continue;
+            }
+            match (msg.payload.first().copied(), msg.kind) {
+                (Some(crcbl_net::codec::ACCEPT_TAG | crcbl_net::codec::REJECT_TAG), _) => {
                     self.handle_handshake_result(&msg.payload);
                 }
-                Some(crcbl_net::auth::AUTH_TAG) => {
+                // A sealed delta has no tag byte of its own; the channel is
+                // what tells it from a sealed control message.
+                (Some(crcbl_net::auth::AUTH_TAG), MessageKind::Unreliable) => {
                     self.handle_sealed_snapshot(&msg.payload, &mut repairs);
+                }
+                (Some(crcbl_net::auth::AUTH_TAG), MessageKind::Reliable) => {
+                    self.handle_sealed_control(&msg.payload);
                 }
                 _ => self.processing_error_count += 1,
             }
@@ -720,6 +764,31 @@ impl<T: Transport> Client<T> {
                 }
             }
         }
+    }
+
+    /// Open a sealed control message: today, only the server ending the
+    /// session.
+    fn handle_sealed_control(&mut self, envelope: &[u8]) {
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            self.auth_failure_count += 1;
+            return;
+        };
+        let Ok(payload) = crypto.open(envelope) else {
+            self.auth_failure_count += 1;
+            return;
+        };
+        let Ok(reason) = crcbl_net::decode_session_ended(payload) else {
+            self.processing_error_count += 1;
+            return;
+        };
+        // The session is over and its credential with it: nothing is sent
+        // under its key again, and no hello offers its token to resume.
+        self.session_ended = Some(reason);
+        self.session_crypto = None;
+        self.session_proof_deadline = None;
+        self.resume_token = None;
+        self.session_id = None;
+        self.handshake_complete = false;
     }
 
     fn handle_sealed_snapshot(&mut self, envelope: &[u8], repairs: &mut HashMap<SectorId, TickId>) {
@@ -1033,6 +1102,108 @@ mod tests {
         peer.send_unreliable(Message::unreliable(sealed)).unwrap();
         client.update(2 * TICK);
         assert_eq!(client.auth_failure_count(), 1);
+    }
+
+    // ── Session end ────────────────────────────────────────────────────────
+
+    fn send_session_end(
+        peer: &mut InMemoryTransport,
+        crypto: &mut SessionCrypto,
+        reason: SessionEndReason,
+    ) {
+        let sealed = crypto
+            .seal(&crcbl_net::encode_session_ended(reason))
+            .expect("counter space available");
+        peer.send_reliable(Message::reliable(sealed)).unwrap();
+    }
+
+    #[test]
+    fn a_sealed_session_end_ends_the_session_and_the_handshaking() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        send_session_end(&mut peer, &mut crypto, SessionEndReason::KICKED);
+        client.update(TICK);
+        assert_eq!(
+            client.ended(),
+            Some(Ended::ByServer(SessionEndReason::KICKED)),
+            "told, and the link still up"
+        );
+        assert_eq!(client.session_id(), None);
+        assert_eq!(client.processing_error_count(), 0);
+
+        // Well past every handshake timeout and backoff: nothing is sent,
+        // neither a hello nor anything sealed under the ended key.
+        client.set_input(vec![1]);
+        client.update(Duration::from_secs(60));
+        assert!(peer.recv().unwrap().is_none());
+    }
+
+    #[test]
+    fn a_forged_session_end_is_an_auth_failure_and_ends_nothing() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        connect(&mut client, &mut peer, Duration::ZERO);
+
+        let mut forged = SessionCrypto::from_token(&ResumeToken::from_bytes([0x11; 32]));
+        send_session_end(&mut peer, &mut forged, SessionEndReason::HOST_LEFT);
+        client.update(TICK);
+
+        assert_eq!(client.ended(), None);
+        assert_eq!(client.auth_failure_count(), 1);
+        assert_eq!(client.session_id(), Some(SessionId(1)));
+    }
+
+    #[test]
+    fn what_the_server_sent_before_ending_is_dropped_without_an_error() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(1, &[]));
+        send_session_end(&mut peer, &mut crypto, SessionEndReason::HOST_LEFT);
+        client.update(TICK);
+
+        assert_eq!(
+            client.ended(),
+            Some(Ended::ByServer(SessionEndReason::HOST_LEFT))
+        );
+        assert_eq!(client.last_applied_tick(), TickId::ZERO);
+        assert_eq!(client.auth_failure_count(), 0);
+        assert_eq!(client.processing_error_count(), 0);
+    }
+
+    #[test]
+    fn a_link_that_dies_without_a_session_end_is_lost() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        connect(&mut client, &mut peer, Duration::ZERO);
+        assert_eq!(client.ended(), None);
+
+        drop(peer);
+        client.update(TICK);
+        assert_eq!(client.ended(), Some(Ended::Lost));
+    }
+
+    #[test]
+    fn reconnecting_after_an_end_joins_afresh() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+        send_session_end(&mut peer, &mut crypto, SessionEndReason::SHUTTING_DOWN);
+        client.update(TICK);
+
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        client.reconnect(client_transport);
+        assert_eq!(client.ended(), None);
+        client.update(2 * TICK);
+        let hello = crcbl_net::decode_hello(&peer.recv().unwrap().expect("a hello").payload)
+            .expect("hello decodes");
+        assert_eq!(
+            hello.session_token, None,
+            "the ended session is not resumed"
+        );
     }
 
     // ── Handshake recovery ─────────────────────────────────────────────────

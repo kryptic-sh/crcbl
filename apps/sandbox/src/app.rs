@@ -68,6 +68,8 @@ use crcbl::engine::{
     wait_for_configure,
 };
 use crcbl::prelude::*;
+
+use crate::steam::SteamLink;
 use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, open_backend};
 use crcbl::ui::draw_list::DrawList;
@@ -305,6 +307,9 @@ pub struct Sandbox {
     /// Every frame rather than once at start-up, so the field is about the
     /// frames rather than about a value copied before any of them ran.
     effects: RenderEffects,
+    /// Steam, when the `steam` feature is on and a windowed run started it;
+    /// inert otherwise. See [`crate::steam`].
+    steam: SteamLink,
 }
 
 impl Sandbox {
@@ -330,6 +335,7 @@ impl Sandbox {
             wait_unpresented,
             unpresented: None,
             effects,
+            steam: SteamLink::off(),
         }
     }
 }
@@ -427,7 +433,20 @@ pub fn with_shell<S: Shell + ?Sized>(
     // actually be drawn with.
     let effects = gpu.effects();
 
-    Ok(Loop::new(
+    let mut sandbox = Sandbox::new(
+        options.pacing,
+        options.limit,
+        options.wait_unpresented,
+        effects,
+    );
+    // Windowed runs only: a headless run is CI's, and must neither need nor
+    // touch a developer's Steam client.
+    if !options.headless {
+        sandbox.steam = SteamLink::start();
+    }
+    let steam_pads = sandbox.steam.pad_source();
+
+    let mut engine = Loop::new(
         Booted {
             shell,
             window,
@@ -435,12 +454,7 @@ pub fn with_shell<S: Shell + ?Sized>(
             clock_source,
             events,
         },
-        Sandbox::new(
-            options.pacing,
-            options.limit,
-            options.wait_unpresented,
-            effects,
-        ),
+        sandbox,
         LoopConfig {
             tick_hz: options.tick_hz,
             frames: options.frame_budget(),
@@ -448,7 +462,11 @@ pub fn with_shell<S: Shell + ?Sized>(
             windowed: !options.headless,
             limit: options.limit,
         },
-    ))
+    );
+    if steam_pads.is_some() {
+        engine.set_pad_source(steam_pads);
+    }
+    Ok(engine)
 }
 
 /// The sandbox's half of the frame, which is as little as a game can have.
@@ -520,7 +538,11 @@ impl HostedGame for Sandbox {
 
     /// The sandbox binds no keys of its own: the three the loop reserves are
     /// the three it has.
-    fn key_event(&mut self, _key: crcbl::core::input::KeyCode, _pressed: bool) {}
+    /// The Steam lobby keys, when the `steam` feature is live; see
+    /// [`crate::steam`].
+    fn key_event(&mut self, key: crcbl::core::input::KeyCode, pressed: bool) {
+        self.steam.key_event(key, pressed);
+    }
 
     /// The action a widget id of this game's names; the mapping lives in the
     /// menu module, which owns the ids.
@@ -559,8 +581,33 @@ impl HostedGame for Sandbox {
         paused
     }
 
+    /// The "steam" section, when the `steam` feature is live.
+    fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
+        self.steam.debug_sections(panel);
+    }
+
     fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
         self.pending_limit.take()
+    }
+
+    /// Steam, lent to the loop to pump; see [`crate::steam`].
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam(&mut self) -> Option<&mut dyn crcbl::engine::SteamSource> {
+        self.steam.source()
+    }
+
+    /// Every event the loop's pump decoded.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam_event(&mut self, event: &crcbl::steam::SteamEvent) {
+        self.steam.event(event);
     }
 
     fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
@@ -568,6 +615,10 @@ impl HostedGame for Sandbox {
         // accumulator may still hold whole ticks. `FrameInfo` is handed over
         // after `run_ticks` for exactly that reason.
         render(frame.alpha);
+        // Here because `draw` is the one hook that runs on every frame, paused
+        // or not, after the loop's Steam pump: a call answered while paused is
+        // still taken.
+        self.steam.frame();
         // Re-read rather than kept: the device clamps last, so what the summary
         // reports comes back off the renderer.
         self.effects = gpu.effects();

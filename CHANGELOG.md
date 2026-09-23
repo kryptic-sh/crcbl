@@ -247,6 +247,169 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
+  11, 12, 14 and 15's inventory half** (`docs/plan/42-steam.md`), and
+  `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the
+  SDK's flat C API with no link-time dependency and nothing from the SDK
+  committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
+  under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
+  path at runtime, initialises with an interface-version handshake and switches
+  to manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
+  ships-through-Steam guard (`SteamAPI_RestartAppIfNecessary`). `Steam::pump`
+  drains the pipe once per frame and `Steam::events` yields
+  `SteamEvent::OverlayActivated`. `steam.user()` reads `steam_id()`,
+  `logged_on()` and `steam_level()`; `steam.friends().persona_name()`;
+  `steam.apps()` reads `subscribed()` and `game_language()`; `steam.utils()`
+  reads the app id, the Steam hardware and its suggested settings preset,
+  Proton, the overlay's and Big Picture's state, the UI language, the IP country
+  and Steam's server time, and places overlay notifications. Every string is
+  copied out of Steam's buffer before the call returns, and any that was not
+  valid UTF-8 is counted in `PumpDiagnostics::lossy_strings`. Every failure is a
+  typed `InitError` — no library (listing each path tried), a missing symbol, an
+  interface the client cannot provide, Steam not running (saying whether
+  `steam_appid.txt` was present), the wrong app, or a second live `Steam` — so a
+  game without Steam runs on. Asynchronous calls are typed tokens:
+  `steam.matchmaking().create_lobby(kind, max)` and `join_lobby(id)` return a
+  `SteamCall<T>` redeemed after a later pump with `steam.take(call)`, which
+  answers `Pending` (the token back), `Ready` or `Failed(CallError)`; a dropped
+  token's lobby is left rather than leaked. A `Lobby` leaves on drop, reads its
+  owner, members and data, sets data, invites and sends chat. `SteamEvent` gains
+  the join requests (`LobbyJoinRequested`, `RichPresenceJoinRequested`,
+  `NewLaunchParameters`), `LobbyMemberChanged`, `LobbyOwnerChanged`,
+  `LobbyDataChanged` and `LobbyChatMessage`. `friends().set_rich_presence`,
+  `open_invite_dialog` and `invite_to_game` send invites, with Steam's limits
+  checked before the call; `friends()` also lists friends, reads their names,
+  states, avatars (`avatar(user, size)` as RGBA) and rich presence, and opens
+  the overlay's dialogs, profile pages and browser; and `connect_lobby(args)`
+  reads the `+connect_lobby <id>` a launch carries. `SteamTransport` is a Steam
+  P2P connection implementing `crcbl_net::Transport` —
+  `connect(steam, host, port)` on a joiner, `SteamListener::accept` on a host,
+  which admits only members of its lobby — with the peer's relay-certified
+  `SteamId` as `remote()` and `end_reason()` telling `HostLeft` from a lost
+  link; it is `Send`, but calls Steam only on the thread that initialised it and
+  answers a typed error off it. `steam.networking()` starts relay access and
+  reports its status. `SteamCloudStorage` is Steam Cloud as a
+  `crcbl_store::StorageSource` — `Unsupported` when cloud is off for the account
+  or the app, paths checked against Steam's limits before any call, a refused
+  `FileWrite` an error — and `SteamEvent::CloudFileChanged` names a file another
+  device changed mid-session; `crcbl_store::synced::SyncedFile` over it surfaces
+  conflicts. `steam.voice().capture()` is push-to-talk under the game's control
+  — `VoiceCapture::set_transmitting` starts and stops recording on edges, and
+  `poll()` hands out compressed packets, through Steam's tail after a release,
+  for the game's own transport — and
+  `voice().decompress(packet, VOICE_SAMPLE_RATE)` turns any player's packet into
+  mono `f32` PCM at `crcbl-audio`'s rate; `VoiceError` names a restricted
+  account and each other failure. `steam.stats()` reads and sets achievements
+  and stats and `store()`s them — each call `SteamError::StatsNotReady` until
+  `SteamEvent::StatsReceived` — with `StatsStored` and `AchievementStored`
+  after; `steam.leaderboards()` finds or creates a board, uploads a score with
+  details and downloads a `Range` of entries, each a `SteamCall`.
+  `SteamPads::open(steam, manifest)` is Steam Input on the gamepad seam: the
+  action manifest it ships (`PAD_MANIFEST`, `crcbl_pad.vdf`) declares a neutral
+  pad for Steam's configurator to map any controller onto, and `SteamPads::poll`
+  reports each controller as the same `crcbl_input` `GamepadEvent`s XInput does
+  — positional buttons, raw sticks with +Y up, triggers 0…1 — with a controller
+  that comes back keeping its `GamepadId`; `Steam::pump` runs Steam Input's
+  frame while it is open. `SteamPads::glyph(steam, id, control, size)` answers
+  the PNG Steam draws for whatever the player's configuration binds a button,
+  stick or trigger to. The Deck's on-screen keyboards:
+  `steam.utils().show_text_input(&request)` opens the full-screen one, whose
+  accepted text arrives as `SteamEvent::TextInputDismissed { text }` (`None`
+  when cancelled), and `show_floating_keyboard(mode, field)` the floating one,
+  which types through the window like a physical keyboard and reports
+  `SteamEvent::FloatingKeyboardDismissed`. `steam.screenshots()` hooks the
+  screenshot key (`SteamEvent::ScreenshotRequested`), writes a game's own RGB
+  pixels to the player's library — sized before the call — and tags them;
+  `steam.timeline()` marks Steam's game recording: a tooltip, the game mode,
+  instantaneous and range events (a `TimelineRange` ends once, on drop or
+  `end`), game phases with tags and attributes, the overlay opened at either,
+  and whether a recording of an event or phase exists, as `SteamCall`s — every
+  priority, offset, duration and phase id checked against the header's limits
+  first. `steam.apps()` also reads ownership (another app, low violence, VAC,
+  purchase time, free weekend, Family Sharing and the licence's owner), the
+  build, the install directory, each DLC and beta branch (`Dlc`, `Beta`,
+  `BetaFlags`), installs and uninstalls DLC, selects a branch and asks Steam to
+  verify the files, with every string read into a buffer grown until it fits and
+  `SteamError::Truncated` past 64 KiB; `SteamEvent::DlcInstalled` follows an
+  install. `Steam::file_details` asks for a depot file's size and SHA-1.
+  `steam.remote_play()` lists the Remote Play sessions — who, which device, what
+  resolution, whether a Remote Play Together guest — sends Remote Play Together
+  invites and opens its panel, and `SteamEvent::RemotePlayConnected` /
+  `…Disconnected` say when one comes and goes. `steam.auth()` issues session
+  tickets for a peer to validate, web-API tickets and encrypted app tickets,
+  each cancelled when dropped, and validates a peer's ticket with
+  `begin_session` (ended when dropped); an `AuthGate` turns Steam's verdicts
+  into admission — provisional, admitted, rejected then or later, or timed out.
+  `steam.workshop()` is the Workshop: `query_all`, `query_user` and
+  `query_details` make a `UgcQuery` — narrowed by tags, search text and long
+  descriptions, released exactly once when dropped — whose `send` answers a
+  `QueryPage` read through `results` into `ItemDetails`, with `next_page` paging
+  by `UGC_RESULTS_PER_PAGE`; `subscribe`, `unsubscribe`, `subscribed_items`,
+  `state`, `install_info` (the folder read into a growing buffer),
+  `download_progress` and `download` manage installs, reported as
+  `SteamEvent::WorkshopItemInstalled` and `WorkshopItemDownloaded`; and
+  `create_item`, `start_update` (an `ItemUpdate` staging title, description,
+  metadata, visibility, tags, content folder and preview, each checked against
+  the header's limits first), `submit` (consuming the update, answering the call
+  and a `Submission` that reports the upload's progress) and `delete_item` make
+  and maintain the player's own items. `steam.inventory()` reads and changes the
+  player's items: `all_items`, `items_by_id`, promo grants, `consume` and
+  `exchange` each answer an `InventoryResult` — destroyed exactly once when
+  dropped — that is ready when `SteamEvent::InventoryResultReady` names it and
+  then reads its items; `item_definitions` and `definition_property` read the
+  item schema; `start_purchase` and `request_prices` are `SteamCall`s, and
+  `prices` and `price` read the answer. `EResult::PENDING` is named. 64-bit
+  Linux, Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
+- **`crcbl_server::Host`: one world, several client sessions**
+  (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
+  `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a
+  connection of any kind, and the connection's hello admits a new peer, resumes
+  a lost one with its token inside `SessionConfig::reconnect_grace_period`, or
+  is refused — `RejectReason::SERVER_FULL` while every place is held (a lost
+  peer keeps its place), `INVALID_SESSION_TOKEN` for a token whose session is
+  still connected. Each peer has its own session, resume credential, MAC key,
+  budgets and delta baselines; the world is serialised once per tick and
+  delta-encoded per peer. A `HostModule` reads each peer's input under its
+  `PeerId`, and `host.events()` yields `PeerEvent::Joined`, `Lost`, `Resumed`
+  and `Left`. `host.kick(peer)` and `host.shutdown(reason)` tell the client why
+  before closing its link. `Server<T>` is unchanged for single-peer callers.
+- **`crcbl_store::synced`: a file kept in a cloud, with conflicts handed to the
+  game** (`docs/plan/42-steam.md` slice 6).
+  `SyncedFile::new(cloud, shadow, path)` over any two `StorageSource`s — the
+  cloud every device shares and a shadow only this device sees. Each version
+  carries a header naming its generation and the version it was written on;
+  `load()` answers `SyncOutcome::Clean`, `FastForwarded`, `Missing` or
+  `Conflict { local, remote }` when two devices each changed the file without
+  seeing the other's change, and `resolve(Resolution)` writes the game's choice
+  above both. A write the cloud never took is kept in the shadow and sent again;
+  a file that does not parse is `SyncError::Corrupt`, never read as empty;
+  `save` refuses before a `load`, after one that failed, and while a conflict
+  stands. `crcbl_store::crc32` is the workspace's one CRC-32, now also behind
+  `crcbl-sprite`'s and `crcbl-golden`'s PNG test fixtures.
+- **A server can say why a session ended**: `crcbl_net::SessionEndReason`
+  (`HOST_LEFT`, `KICKED`, `SHUTTING_DOWN`), sent sealed on the reliable channel
+  (`encode_session_ended`, tag `0x50`), and `crcbl_client::Client::ended()`,
+  which answers `Ended::ByServer(reason)` once that message arrives and
+  `Ended::Lost` when the link closed without one. A client told its session
+  ended stops handshaking and drops its resume token until `reconnect`.
+- `crcbl_net::conformance` (feature `conformance`): the behaviour `Transport`'s
+  documentation promises, as checks any implementation can be run through with a
+  `Link` that pairs and settles it.
+- `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
+  window never sees — an overlay the loop has no source for — and the loop
+  answers it exactly as it answers the window losing focus: held keys, buttons
+  and contacts released through the game's own paths, then paused. Not a toggle:
+  a second report while paused leaves the game paused. The default is `false`.
+- **The engine loop pumps Steam** (feature `steam`): a game lends its `Steam`
+  through `HostedGame::steam` and the loop pumps it once a frame, takes an
+  opened overlay as a focus loss — keys, buttons, contacts and pads released,
+  the game paused; closing it resumes nothing — and hands every event to
+  `HostedGame::steam_event`. `crcbl::engine::steam::steam_input(pads)` makes a
+  `SteamPads` the loop's pad source, with XInput beside it on Windows skipping
+  Steam's virtual pads. `apps/sandbox --features steam` now lends its session
+  and opens Steam Input instead of pumping by hand.
 - **Query layers in `crcbl_phys`**, so one world can hold a level, its
   characters and loose items that movement ignores and interaction rays still
   hit. Every collider has a `u32` layer bitset, `ALL_LAYERS` by default and
@@ -407,6 +570,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   scripted state source, and a real `XInputGetState` answering an empty slot);
   no controller has been through it yet. Targets other than Windows and Linux
   have no pad backend and no stand-in module.
+  `XInput::skip_steam_virtual_pads(true)` keeps a pad from arriving twice while
+  Steam Input reports it: slots whose USB vendor is Valve's
+  (`xinput::VALVE_VENDOR_ID`, read through `xinput1_4.dll`'s undocumented
+  `XInputGetCapabilitiesEx`) are skipped, and it refuses with
+  `XInputError::NoVendorQuery` on a library that cannot report vendors.
 - **evdev on Linux, `crcbl_input::evdev`**, the Steam Deck's backend:
   `Evdev::poll` opens every `/dev/input/event*` node non-blocking, keeps the
   ones whose `EVIOCGBIT` capabilities make them a pad (`BTN_GAMEPAD` with

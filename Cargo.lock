@@ -300,6 +300,7 @@ dependencies = [
  "crcbl-shaders",
  "crcbl-shell",
  "crcbl-sprite",
+ "crcbl-steam",
  "crcbl-store",
  "crcbl-ui",
  "crcbl-vfx",
@@ -400,6 +401,7 @@ dependencies = [
 name = "crcbl-golden"
 version = "0.1.0"
 dependencies = [
+ "crcbl-store",
  "png",
 ]
 
@@ -589,7 +591,19 @@ dependencies = [
 name = "crcbl-sprite"
 version = "0.1.0"
 dependencies = [
+ "crcbl-store",
  "png",
+]
+
+[[package]]
+name = "crcbl-steam"
+version = "0.1.0"
+dependencies = [
+ "crcbl-input",
+ "crcbl-net",
+ "crcbl-store",
+ "log",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

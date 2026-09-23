@@ -86,6 +86,14 @@ crcbl-vfx = { workspace = true, optional = true }
 # kit and is the slice that will. See the `inventory` feature and `src/lib.rs`'s
 # `inventory` re-export.
 crcbl-inventory = { workspace = true, optional = true }
+# Steamworks, over the SDK's flat C API opened at run time. **Optional**, on
+# `crcbl-inventory`'s terms above: a game not shipping on Steam links none of
+# it. It has no link-time dependency on Valve's library, and outside the
+# workspace depends on `thiserror` and `log` alone, so turning it on adds no
+# third-party crate; on a target Valve ships no 64-bit library for it compiles
+# to documentation. See the
+# `steam` feature and `src/lib.rs`'s `steam` re-export.
+crcbl-steam = { workspace = true, optional = true }
 # `load`, not `bake`: this is the half a shipped game links, and it reads the
 # baked pair rather than producing it. A build script wanting the encoder names
 # `crcbl-sprite` itself — see `src/lib.rs`'s `sprite` re-export.
@@ -404,6 +412,15 @@ vfx = ["dep:crcbl-vfx"]
 # are: rule 1 of `docs/plan/sample/00-samples-overview.md` is that a sample
 # names the engine and nothing else.
 inventory = ["dep:crcbl-inventory"]
+
+# `crcbl::steam` — `crcbl-steam`, Steamworks. **Off by default**, on the
+# `inventory` feature's terms: a game that does not ship on Steam links none of
+# it. `apps/sandbox`'s own `steam` feature is the sample that turns it on, and
+# this is a feature rather than a second workspace path in that manifest for
+# the reason the four above are: rule 1 of
+# `docs/plan/sample/00-samples-overview.md` is that a sample names the engine
+# and nothing else.
+steam = ["dep:crcbl-steam"]
 
 # THERE IS NO `webgpu` FEATURE ANY MORE, AND ITS ABSENCE IS THE POINT.
 #

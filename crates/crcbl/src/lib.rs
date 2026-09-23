@@ -26,6 +26,7 @@
 //! crcbl::input     → crcbl-input     action maps and bindings
 //! crcbl::audio     → crcbl-audio     the mixer, the sound bank, the cue grammar
 //! crcbl::store     → crcbl-store     platform storage and atomic writes
+//! crcbl::steam     → crcbl-steam     Steamworks, loaded at run time (feature `steam`)
 //! crcbl::sprite    → crcbl-sprite    sheets, clips and the baked-pair reader
 //! crcbl::webgpu    → crcbl-webgpu    the wasm → JS command stream (wasm32 only)
 //! crcbl::math      → glam            the maths the renderer's types are spelled in
@@ -263,6 +264,18 @@ pub use crcbl_shell as shell;
 /// build-dependency features separately from these, so the encoder never
 /// reaches a shipped binary.
 pub use crcbl_sprite as sprite;
+/// [`crcbl-steam`](crcbl_steam): Steamworks — init, the per-frame callback
+/// pump, the local player's identity, and the Steam features
+/// `docs/plan/42-steam.md` lands slice by slice.
+///
+/// Behind the non-default `steam` feature, on `inventory`'s terms: a game
+/// not shipping on Steam links none of it. With it on, a machine without Steam
+/// still runs the game — `Steam::init` answers an ordinary `Err` — and on a
+/// target Valve ships no 64-bit library for (`wasm32`, Android) the crate is
+/// its documentation and no items, which is why nothing in it is linked from
+/// here.
+#[cfg(feature = "steam")]
+pub use crcbl_steam as steam;
 /// [`crcbl-store`](crcbl_store): platform-standard storage roots, atomic
 /// writes, and the browser's `fetch` and OPFS backends.
 pub use crcbl_store as store;
@@ -444,6 +457,31 @@ pub mod prelude {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+
+    /// `crcbl-steam` decodes voice for `crcbl-audio` without depending on
+    /// it — that would put the audio device backend in every Steam build for a
+    /// type alias — so the two meet here: the rate is the mixer's and the
+    /// samples are its sample type.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    #[test]
+    fn steam_voice_decodes_at_the_mixers_rate_into_its_sample_type() {
+        assert_eq!(
+            crate::steam::VOICE_SAMPLE_RATE,
+            crate::audio::INTERNAL_SAMPLE_RATE
+        );
+        // Compiles only while `decompress` answers the mixer's sample type.
+        fn decode(
+            voice: crate::steam::Voice<'_>,
+            packet: &[u8],
+        ) -> Result<Vec<crate::audio::AudioSample>, crate::steam::VoiceError> {
+            voice.decompress(packet, crate::steam::VOICE_SAMPLE_RATE)
+        }
+        let _ = decode;
+    }
 
     /// A sample's whole dependency list, exercised through this crate.
     ///
