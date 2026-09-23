@@ -19,10 +19,12 @@
 
 mod input;
 mod keyboard;
+mod ownership;
 mod recording;
 
 pub(crate) use input::{FakeInput, FakePad};
 pub(crate) use keyboard::FakeKeyboard;
+pub(crate) use ownership::{FakeApps, FakeBeta, FakeRemotePlay, FakeSession};
 pub(crate) use recording::{FakeScreenshots, FakeTimeline};
 
 use std::{
@@ -207,6 +209,9 @@ pub(crate) struct Script {
     pub(crate) keyboard: FakeKeyboard,
     pub(crate) screenshots: FakeScreenshots,
     pub(crate) timeline: FakeTimeline,
+    /// Slice 11's half of `ISteamApps`.
+    pub(crate) apps_extra: FakeApps,
+    pub(crate) remote_play: FakeRemotePlay,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -273,6 +278,8 @@ impl Default for Script {
             keyboard: FakeKeyboard::default(),
             screenshots: FakeScreenshots::default(),
             timeline: FakeTimeline::default(),
+            apps_extra: FakeApps::default(),
+            remote_play: FakeRemotePlay::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -453,7 +460,29 @@ pub(crate) fn fake_lib() -> &'static Lib {
             is_subscribed: fake_is_subscribed,
             get_current_game_language: fake_get_current_game_language,
             get_launch_command_line: fake_get_launch_command_line,
+            is_low_violence: ownership::fake_is_low_violence,
+            is_vac_banned: ownership::fake_is_vac_banned,
+            is_subscribed_app: ownership::fake_is_subscribed_app,
+            is_dlc_installed: ownership::fake_is_dlc_installed,
+            get_earliest_purchase_unix_time: ownership::fake_get_earliest_purchase_unix_time,
+            is_subscribed_from_free_weekend: ownership::fake_is_subscribed_from_free_weekend,
+            get_dlc_count: ownership::fake_get_dlc_count,
+            get_dlc_data_by_index: ownership::fake_get_dlc_data_by_index,
+            install_dlc: ownership::fake_install_dlc,
+            uninstall_dlc: ownership::fake_uninstall_dlc,
+            get_current_beta_name: ownership::fake_get_current_beta_name,
+            mark_content_corrupt: ownership::fake_mark_content_corrupt,
+            get_app_install_dir: ownership::fake_get_app_install_dir,
+            is_app_installed: ownership::fake_is_app_installed,
+            get_app_owner: ownership::fake_get_app_owner,
+            get_app_build_id: ownership::fake_get_app_build_id,
+            get_file_details: ownership::fake_get_file_details,
+            is_subscribed_from_family_sharing: ownership::fake_is_subscribed_from_family_sharing,
+            get_num_betas: ownership::fake_get_num_betas,
+            get_beta_info: ownership::fake_get_beta_info,
+            set_active_beta: ownership::fake_set_active_beta,
         },
+        remote_play: ownership::REMOTE_PLAY,
         utils: UtilsFns {
             accessor: fake_utils_accessor,
             get_app_id: fake_get_app_id,

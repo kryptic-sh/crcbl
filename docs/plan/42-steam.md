@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9 and 10
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10 and 11
 built on branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest
 planned** — see "Status by slice" under "Slice order". The four decisions the
 earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
@@ -1273,7 +1273,47 @@ On branch `steam-sdk`, not merged to `main`:
   real client" below — a hooked F12 reaching the Steam screenshot manager,
   timeline events on a recording — on every OS; nothing in the sandbox hooks
   screenshots or marks the timeline. See "Slice 10 as built".
-- Slices 11–15: not started.
+- **Slice 11: done** (2026-09-23). The rest of `ISteamApps` — ownership, DLC,
+  betas, the install directory, content verification, file details — and
+  `RemotePlay`, over the fake; every test in the slice's list seen red against a
+  deliberate break; Miri clean; the drift gate passes against the mirror with
+  the thirty-one declarations, four structs and the new base. **Not run:** every
+  step under "Needs a real client" below — under 480, which owns no DLC, only
+  that the calls answer — and a Remote Play Together session, on every OS. See
+  "Slice 11 as built".
+- Slices 12–15: not started.
+
+**Slice 11 as built, where it differs from the text below:**
+
+- **One growth rule for every string written into a buffer of the crate's**
+  (`apps::content::grow`): 256 bytes first, doubled while an answer reaches its
+  buffer's last byte but one, up to `MAX_TEXT_BYTES` (64 KiB), then
+  `SteamError::Truncated`. The last-byte-but-one test, not "no NUL", because
+  Steam's copies stop a byte short to leave a NUL — a cut name still ends in
+  one. `GetAppInstallDir`, `BGetDLCDataByIndex`, `GetCurrentBetaName` and
+  `GetBetaInfo` (both buffers) read through it. `launch_command_line` (slice 3a)
+  still refuses on "no NUL" and never grows; see the backlog.
+- **Named where the catalogue left names open:** `subscribed_app`,
+  `low_violence`, `vac_banned`, `purchase_time`, `free_weekend`,
+  `family_shared`, `owner`, `build_id`, `installed`, `install_dir`, `dlc_count`
+  / `dlc(index) -> Dlc`, `dlc_installed`, `install_dlc` / `uninstall_dlc`,
+  `current_beta`, `beta_count() -> BetaCount`, `beta(index) -> Beta` with
+  `BetaFlags`, `set_active_beta`, `mark_content_corrupt`, and
+  `Steam::file_details(name) -> SteamCall<FileDetails>`. A DLC or beta index
+  Steam has nothing at is `Refused`; an install directory of length zero is
+  `None`.
+- **`SteamEvent::DlcInstalled { app }`**, `RemotePlayConnected { session }` and
+  `RemotePlayDisconnected { session }`.
+- **`steam.remote_play()`**: `sessions()`, `together`, `user`, `guest` (`None`
+  for a non-guest), `client_name` (`None` for Steam's null — not counted lossy,
+  being that call's documented answer), `form_factor` (`FormFactor`,
+  `Other(i32)` kept), `resolution` (`None` for `false` or zero by zero),
+  `invite(friend)` and `show_together_panel()`. The session avatars, direct
+  input, cursors and the guest-invite callback are not bound.
+- **Not bound either:** `BIsCybercafe`, `GetAvailableGameLanguages`,
+  `GetInstalledDepots`, `GetLaunchQueryParam`, `GetDlcDownloadProgress`,
+  `BIsTimedTrial`, `SetDlcContext`, the proof-of-purchase keys and the game
+  performance settings — each on demand.
 
 **Slice 10 as built, where it differs from the text below:**
 

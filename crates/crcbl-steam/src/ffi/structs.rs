@@ -362,6 +362,31 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &["uint64 m_ulEventID", "bool m_bRecordingExists"],
     },
     StructDecl {
+        name: "DlcInstalled_t",
+        pack: Pack::Callback,
+        fields: &["AppId_t m_nAppID"],
+    },
+    StructDecl {
+        name: "FileDetailsResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "EResult m_eResult",
+            "uint64 m_ulFileSize",
+            "uint8 m_FileSHA[20]",
+            "uint32 m_unFlags",
+        ],
+    },
+    StructDecl {
+        name: "SteamRemotePlaySessionConnected_t",
+        pack: Pack::Callback,
+        fields: &["RemotePlaySessionID_t m_unSessionID"],
+    },
+    StructDecl {
+        name: "SteamRemotePlaySessionDisconnected_t",
+        pack: Pack::Callback,
+        fields: &["RemotePlaySessionID_t m_unSessionID"],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -952,6 +977,50 @@ callback_packed! {
     }
 }
 
+callback_packed! {
+    /// `DlcInstalled_t` (`isteamapps.h`, `k_iSteamAppsCallbacks + 5`): a DLC
+    /// the player owns has been installed.
+    pub(crate) struct DlcInstalled {
+        /// `AppId_t m_nAppID`.
+        pub(crate) app: u32,
+    }
+}
+
+callback_packed! {
+    /// `FileDetailsResult_t` (`isteamapps.h`, `k_iSteamAppsCallbacks + 23`):
+    /// the answer to `GetFileDetails`.
+    pub(crate) struct FileDetailsResult {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `uint64 m_ulFileSize`.
+        pub(crate) size: u64,
+        /// `uint8 m_FileSHA[20]`.
+        pub(crate) sha1: [u8; 20],
+        /// `uint32 m_unFlags`.
+        pub(crate) flags: u32,
+    }
+}
+
+callback_packed! {
+    /// `SteamRemotePlaySessionConnected_t` (`isteamremoteplay.h`,
+    /// `k_iSteamRemotePlayCallbacks + 1`, declared with
+    /// `STEAM_CALLBACK_BEGIN`).
+    pub(crate) struct SteamRemotePlaySessionConnected {
+        /// `RemotePlaySessionID_t m_unSessionID`.
+        pub(crate) session: u32,
+    }
+}
+
+callback_packed! {
+    /// `SteamRemotePlaySessionDisconnected_t` (`isteamremoteplay.h`,
+    /// `k_iSteamRemotePlayCallbacks + 2`, declared with
+    /// `STEAM_CALLBACK_BEGIN`).
+    pub(crate) struct SteamRemotePlaySessionDisconnected {
+        /// `RemotePlaySessionID_t m_unSessionID`.
+        pub(crate) session: u32,
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -1163,6 +1232,15 @@ mod tests {
         assert_layout!(FloatingGamepadTextInputDismissed, 1, {
             unused: 0, 1;
         });
+        assert_layout!(DlcInstalled, 4, {
+            app: 0, 4;
+        });
+        assert_layout!(SteamRemotePlaySessionConnected, 4, {
+            session: 0, 4;
+        });
+        assert_layout!(SteamRemotePlaySessionDisconnected, 4, {
+            session: 0, 4;
+        });
         assert_layout!(ScreenshotReady, 8, {
             screenshot: 0, 4;
             result: 4, 4;
@@ -1278,6 +1356,13 @@ mod tests {
             rank_new: 20, 4;
             rank_previous: 24, 4;
         });
+        // The `uint64` after a 4-byte `EResult` sits at 4, not 8.
+        assert_layout!(FileDetailsResult, 36, {
+            result: 0, 4;
+            size: 4, 8;
+            sha1: 12, 20;
+            flags: 32, 4;
+        });
         // No tail padding after the `bool`: 12, not 16.
         assert_layout!(SteamTimelineEventRecordingExists, 12, {
             event: 0, 8;
@@ -1371,6 +1456,12 @@ mod tests {
             changed: 20, 1;
             rank_new: 24, 4;
             rank_previous: 28, 4;
+        });
+        assert_layout!(FileDetailsResult, 40, {
+            result: 0, 4;
+            size: 8, 8;
+            sha1: 16, 20;
+            flags: 36, 4;
         });
         assert_layout!(SteamTimelineEventRecordingExists, 16, {
             event: 0, 8;

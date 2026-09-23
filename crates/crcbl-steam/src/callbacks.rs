@@ -17,14 +17,15 @@
 use crate::{
     AppId, EResult, SteamId,
     ffi::structs::{
-        AvatarImageLoaded, FloatingGamepadTextInputDismissed, FriendRichPresenceUpdate,
-        GameLobbyJoinRequested, GameOverlayActivated, GameRichPresenceJoinRequested,
-        GamepadTextInputDismissed, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
-        NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange, ScreenshotReady,
-        ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
+        AvatarImageLoaded, DlcInstalled, FloatingGamepadTextInputDismissed,
+        FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
+        GameRichPresenceJoinRequested, GamepadTextInputDismissed, LobbyChatMsg, LobbyChatUpdate,
+        LobbyDataUpdate, NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
+        ScreenshotReady, ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
         SteamInputDeviceDisconnected, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
-        SteamRelayNetworkStatus, UserAchievementStored, UserStatsReceived, UserStatsStored,
-        steam_id,
+        SteamRelayNetworkStatus, SteamRemotePlaySessionConnected,
+        SteamRemotePlaySessionDisconnected, UserAchievementStored, UserStatsReceived,
+        UserStatsStored, steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -53,6 +54,8 @@ pub(crate) enum Base {
     RemoteStorage = 1300,
     /// `k_iSteamScreenshotsCallbacks`.
     Screenshots = 2300,
+    /// `k_iSteamRemotePlayCallbacks`.
+    RemotePlay = 5700,
     /// `k_iSteamControllerCallbacks` — Steam Input's callbacks, under the
     /// name of the interface it replaced.
     Controller = 2800,
@@ -74,6 +77,7 @@ impl Base {
         Self::RemoteStorage,
         Self::Screenshots,
         Self::Controller,
+        Self::RemotePlay,
         Self::Timeline,
     ];
 
@@ -91,6 +95,7 @@ impl Base {
             Self::NetworkingUtils => "k_iSteamNetworkingUtilsCallbacks",
             Self::Screenshots => "k_iSteamScreenshotsCallbacks",
             Self::Controller => "k_iSteamControllerCallbacks",
+            Self::RemotePlay => "k_iSteamRemotePlayCallbacks",
             Self::Timeline => "k_iSteamTimelineCallbacks",
         }
     }
@@ -256,6 +261,23 @@ pub enum SteamEvent {
         screenshot: crate::ScreenshotId,
         /// `EResult::OK`, or why not.
         result: EResult,
+    },
+    /// A DLC the player owns was installed (`DlcInstalled_t`).
+    DlcInstalled {
+        /// The DLC's app id.
+        app: AppId,
+    },
+    /// A Remote Play session connected (`SteamRemotePlaySessionConnected_t`);
+    /// read it through [`RemotePlay`](crate::RemotePlay).
+    RemotePlayConnected {
+        /// The session.
+        session: crate::RemotePlaySession,
+    },
+    /// A Remote Play session disconnected
+    /// (`SteamRemotePlaySessionDisconnected_t`).
+    RemotePlayDisconnected {
+        /// The session.
+        session: crate::RemotePlaySession,
     },
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
@@ -664,6 +686,48 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::Apps,
+        offset: 5,
+        #[cfg(test)]
+        name: "DlcInstalled_t",
+        size: size_of::<DlcInstalled>(),
+        decode: |bytes| {
+            read::<DlcInstalled>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::DlcInstalled {
+                    app: AppId(payload.app),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::RemotePlay,
+        offset: 1,
+        #[cfg(test)]
+        name: "SteamRemotePlaySessionConnected_t",
+        size: size_of::<SteamRemotePlaySessionConnected>(),
+        decode: |bytes| {
+            read::<SteamRemotePlaySessionConnected>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::RemotePlayConnected {
+                    session: crate::RemotePlaySession(payload.session),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::RemotePlay,
+        offset: 2,
+        #[cfg(test)]
+        name: "SteamRemotePlaySessionDisconnected_t",
+        size: size_of::<SteamRemotePlaySessionDisconnected>(),
+        decode: |bytes| {
+            read::<SteamRemotePlaySessionDisconnected>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::RemotePlayDisconnected {
+                    session: crate::RemotePlaySession(payload.session),
+                })
+            })
+        },
+    },
+    Row {
         base: Base::Screenshots,
         offset: 1,
         #[cfg(test)]
@@ -789,6 +853,14 @@ unsafe impl Pod for LobbyChatMsg {}
 unsafe impl Pod for crate::ffi::structs::LobbyCreated {}
 // SAFETY: as above.
 unsafe impl Pod for crate::ffi::structs::LobbyEnter {}
+// SAFETY: as above.
+unsafe impl Pod for DlcInstalled {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::FileDetailsResult {}
+// SAFETY: as above.
+unsafe impl Pod for SteamRemotePlaySessionConnected {}
+// SAFETY: as above.
+unsafe impl Pod for SteamRemotePlaySessionDisconnected {}
 // SAFETY: as above.
 unsafe impl Pod for ScreenshotReady {}
 // SAFETY: as above.

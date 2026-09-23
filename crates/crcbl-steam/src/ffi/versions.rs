@@ -82,6 +82,14 @@ pub(crate) const NETWORKING_UTILS: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamRemotePlay`. Spelled like `ISteamRemoteStorage`'s.
+pub(crate) const REMOTE_PLAY: Interface = Interface {
+    accessor: "SteamAPI_SteamRemotePlay_v004",
+    version: "STEAMREMOTEPLAY_INTERFACE_VERSION004",
+    define: "STEAMREMOTEPLAY_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamRemoteStorage`. The version string is the macro's own name with
 /// the revision on the end.
 pub(crate) const REMOTE_STORAGE: Interface = Interface {

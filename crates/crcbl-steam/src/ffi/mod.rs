@@ -104,6 +104,8 @@ opaque! {
     ISteamNetworkingSockets;
     /// `class ISteamNetworkingUtils`.
     ISteamNetworkingUtils;
+    /// `class ISteamRemotePlay`.
+    ISteamRemotePlay;
     /// `class ISteamRemoteStorage`.
     ISteamRemoteStorage;
     /// `class ISteamScreenshots`.

@@ -71,6 +71,7 @@ pub(crate) const CALL_ROWS: &[CallRow] = &[
     <crate::ScoreUploaded as private::Answer>::ROW,
     <crate::EventRecording as private::Answer>::ROW,
     <crate::PhaseRecording as private::Answer>::ROW,
+    <crate::FileDetails as private::Answer>::ROW,
 ];
 
 /// The crate-private half of [`CallResult`]: a sealed supertrait, so the
@@ -99,7 +100,8 @@ pub(crate) mod private {
 /// [`LobbyEntered`](crate::LobbyEntered), [`LeaderboardFound`](crate::LeaderboardFound),
 /// [`ScoreUploaded`](crate::ScoreUploaded), [`Entries`](crate::Entries),
 /// [`EventRecording`](crate::EventRecording),
-/// [`PhaseRecording`](crate::PhaseRecording).
+/// [`PhaseRecording`](crate::PhaseRecording),
+/// [`FileDetails`](crate::FileDetails).
 /// Sealed: the set is this crate's.
 pub trait CallResult: private::Answer {}
 

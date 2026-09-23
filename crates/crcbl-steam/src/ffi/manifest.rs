@@ -31,7 +31,8 @@
 //! `ELeaderboardUploadScoreMethod`, `ESteamInputType`, `EInputActionOrigin`,
 //! `ESteamInputGlyphSize`, `EGamepadTextInputMode`,
 //! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`,
-//! `ETimelineGameMode`, `ETimelineEventClipPriority`) is taken to be
+//! `ETimelineGameMode`, `ETimelineEventClipPriority`, `ESteamDeviceFormFactor`)
+//! is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -50,11 +51,11 @@ use core::ffi::{c_char, c_void};
 
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends, ISteamInput,
-    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemoteStorage,
-    ISteamScreenshots, ISteamTimeline, ISteamUser, ISteamUserStats, ISteamUtils,
-    InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle, InputHandle,
-    ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard, SteamLeaderboardEntries,
-    TimelineEventHandle,
+    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemotePlay,
+    ISteamRemoteStorage, ISteamScreenshots, ISteamTimeline, ISteamUser, ISteamUserStats,
+    ISteamUtils, InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle,
+    InputHandle, ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
+    SteamLeaderboardEntries, TimelineEventHandle,
     structs::{
         CallbackMsg, InputAnalogActionData, InputDigitalActionData, LeaderboardEntry,
         SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
@@ -433,6 +434,103 @@ bindings! {
         get_launch_command_line: AppsGetLaunchCommandLine = "SteamAPI_ISteamApps_GetLaunchCommandLine",
             "S_API int SteamAPI_ISteamApps_GetLaunchCommandLine( ISteamApps* self, char * pszCommandLine, int cubCommandLine );",
             fn(*mut ISteamApps, *mut c_char, i32) -> i32;
+        is_low_violence: AppsBIsLowViolence = "SteamAPI_ISteamApps_BIsLowViolence",
+            "S_API bool SteamAPI_ISteamApps_BIsLowViolence( ISteamApps* self );",
+            fn(*mut ISteamApps) -> bool;
+        is_vac_banned: AppsBIsVacBanned = "SteamAPI_ISteamApps_BIsVACBanned",
+            "S_API bool SteamAPI_ISteamApps_BIsVACBanned( ISteamApps* self );",
+            fn(*mut ISteamApps) -> bool;
+        is_subscribed_app: AppsBIsSubscribedApp = "SteamAPI_ISteamApps_BIsSubscribedApp",
+            "S_API bool SteamAPI_ISteamApps_BIsSubscribedApp( ISteamApps* self, AppId_t appID );",
+            fn(*mut ISteamApps, u32) -> bool;
+        is_dlc_installed: AppsBIsDlcInstalled = "SteamAPI_ISteamApps_BIsDlcInstalled",
+            "S_API bool SteamAPI_ISteamApps_BIsDlcInstalled( ISteamApps* self, AppId_t appID );",
+            fn(*mut ISteamApps, u32) -> bool;
+        get_earliest_purchase_unix_time: AppsGetEarliestPurchaseUnixTime = "SteamAPI_ISteamApps_GetEarliestPurchaseUnixTime",
+            "S_API uint32 SteamAPI_ISteamApps_GetEarliestPurchaseUnixTime( ISteamApps* self, AppId_t nAppID );",
+            fn(*mut ISteamApps, u32) -> u32;
+        is_subscribed_from_free_weekend: AppsBIsSubscribedFromFreeWeekend = "SteamAPI_ISteamApps_BIsSubscribedFromFreeWeekend",
+            "S_API bool SteamAPI_ISteamApps_BIsSubscribedFromFreeWeekend( ISteamApps* self );",
+            fn(*mut ISteamApps) -> bool;
+        get_dlc_count: AppsGetDlcCount = "SteamAPI_ISteamApps_GetDLCCount",
+            "S_API int SteamAPI_ISteamApps_GetDLCCount( ISteamApps* self );",
+            fn(*mut ISteamApps) -> i32;
+        get_dlc_data_by_index: AppsBGetDlcDataByIndex = "SteamAPI_ISteamApps_BGetDLCDataByIndex",
+            "S_API bool SteamAPI_ISteamApps_BGetDLCDataByIndex( ISteamApps* self, int iDLC, AppId_t * pAppID, bool * pbAvailable, char * pchName, int cchNameBufferSize );",
+            fn(*mut ISteamApps, i32, *mut u32, *mut bool, *mut c_char, i32) -> bool;
+        install_dlc: AppsInstallDlc = "SteamAPI_ISteamApps_InstallDLC",
+            "S_API void SteamAPI_ISteamApps_InstallDLC( ISteamApps* self, AppId_t nAppID );",
+            fn(*mut ISteamApps, u32);
+        uninstall_dlc: AppsUninstallDlc = "SteamAPI_ISteamApps_UninstallDLC",
+            "S_API void SteamAPI_ISteamApps_UninstallDLC( ISteamApps* self, AppId_t nAppID );",
+            fn(*mut ISteamApps, u32);
+        get_current_beta_name: AppsGetCurrentBetaName = "SteamAPI_ISteamApps_GetCurrentBetaName",
+            "S_API bool SteamAPI_ISteamApps_GetCurrentBetaName( ISteamApps* self, char * pchName, int cchNameBufferSize );",
+            fn(*mut ISteamApps, *mut c_char, i32) -> bool;
+        mark_content_corrupt: AppsMarkContentCorrupt = "SteamAPI_ISteamApps_MarkContentCorrupt",
+            "S_API bool SteamAPI_ISteamApps_MarkContentCorrupt( ISteamApps* self, bool bMissingFilesOnly );",
+            fn(*mut ISteamApps, bool) -> bool;
+        get_app_install_dir: AppsGetAppInstallDir = "SteamAPI_ISteamApps_GetAppInstallDir",
+            "S_API uint32 SteamAPI_ISteamApps_GetAppInstallDir( ISteamApps* self, AppId_t appID, char * pchFolder, uint32 cchFolderBufferSize );",
+            fn(*mut ISteamApps, u32, *mut c_char, u32) -> u32;
+        is_app_installed: AppsBIsAppInstalled = "SteamAPI_ISteamApps_BIsAppInstalled",
+            "S_API bool SteamAPI_ISteamApps_BIsAppInstalled( ISteamApps* self, AppId_t appID );",
+            fn(*mut ISteamApps, u32) -> bool;
+        get_app_owner: AppsGetAppOwner = "SteamAPI_ISteamApps_GetAppOwner",
+            "S_API uint64_steamid SteamAPI_ISteamApps_GetAppOwner( ISteamApps* self );",
+            fn(*mut ISteamApps) -> u64;
+        get_app_build_id: AppsGetAppBuildId = "SteamAPI_ISteamApps_GetAppBuildId",
+            "S_API int SteamAPI_ISteamApps_GetAppBuildId( ISteamApps* self );",
+            fn(*mut ISteamApps) -> i32;
+        get_file_details: AppsGetFileDetails = "SteamAPI_ISteamApps_GetFileDetails",
+            "S_API SteamAPICall_t SteamAPI_ISteamApps_GetFileDetails( ISteamApps* self, const char * pszFileName );",
+            fn(*mut ISteamApps, *const c_char) -> SteamApiCall;
+        is_subscribed_from_family_sharing: AppsBIsSubscribedFromFamilySharing = "SteamAPI_ISteamApps_BIsSubscribedFromFamilySharing",
+            "S_API bool SteamAPI_ISteamApps_BIsSubscribedFromFamilySharing( ISteamApps* self );",
+            fn(*mut ISteamApps) -> bool;
+        get_num_betas: AppsGetNumBetas = "SteamAPI_ISteamApps_GetNumBetas",
+            "S_API int SteamAPI_ISteamApps_GetNumBetas( ISteamApps* self, int * pnAvailable, int * pnPrivate );",
+            fn(*mut ISteamApps, *mut i32, *mut i32) -> i32;
+        get_beta_info: AppsGetBetaInfo = "SteamAPI_ISteamApps_GetBetaInfo",
+            "S_API bool SteamAPI_ISteamApps_GetBetaInfo( ISteamApps* self, int iBetaIndex, uint32 * punFlags, uint32 * punBuildID, char * pchBetaName, int cchBetaName, char * pchDescription, int cchDescription, uint32 * punLastUpdated );",
+            fn(*mut ISteamApps, i32, *mut u32, *mut u32, *mut c_char, i32, *mut c_char, i32, *mut u32) -> bool;
+        set_active_beta: AppsSetActiveBeta = "SteamAPI_ISteamApps_SetActiveBeta",
+            "S_API bool SteamAPI_ISteamApps_SetActiveBeta( ISteamApps* self, const char * pchBetaName );",
+            fn(*mut ISteamApps, *const c_char) -> bool;
+    }
+
+    /// `ISteamRemotePlay` (`steam_api_flat.h`): Remote Play sessions.
+    remote_play: RemotePlayFns for versions::REMOTE_PLAY {
+        get_session_count: RemotePlayGetSessionCount = "SteamAPI_ISteamRemotePlay_GetSessionCount",
+            "S_API uint32 SteamAPI_ISteamRemotePlay_GetSessionCount( ISteamRemotePlay* self );",
+            fn(*mut ISteamRemotePlay) -> u32;
+        get_session_id: RemotePlayGetSessionId = "SteamAPI_ISteamRemotePlay_GetSessionID",
+            "S_API RemotePlaySessionID_t SteamAPI_ISteamRemotePlay_GetSessionID( ISteamRemotePlay* self, int iSessionIndex );",
+            fn(*mut ISteamRemotePlay, i32) -> u32;
+        session_remote_play_together: RemotePlayBSessionRemotePlayTogether = "SteamAPI_ISteamRemotePlay_BSessionRemotePlayTogether",
+            "S_API bool SteamAPI_ISteamRemotePlay_BSessionRemotePlayTogether( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID );",
+            fn(*mut ISteamRemotePlay, u32) -> bool;
+        get_session_steam_id: RemotePlayGetSessionSteamId = "SteamAPI_ISteamRemotePlay_GetSessionSteamID",
+            "S_API uint64_steamid SteamAPI_ISteamRemotePlay_GetSessionSteamID( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID );",
+            fn(*mut ISteamRemotePlay, u32) -> u64;
+        get_session_guest_id: RemotePlayGetSessionGuestId = "SteamAPI_ISteamRemotePlay_GetSessionGuestID",
+            "S_API uint32 SteamAPI_ISteamRemotePlay_GetSessionGuestID( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID );",
+            fn(*mut ISteamRemotePlay, u32) -> u32;
+        get_session_client_name: RemotePlayGetSessionClientName = "SteamAPI_ISteamRemotePlay_GetSessionClientName",
+            "S_API const char * SteamAPI_ISteamRemotePlay_GetSessionClientName( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID );",
+            fn(*mut ISteamRemotePlay, u32) -> *const c_char;
+        get_session_client_form_factor: RemotePlayGetSessionClientFormFactor = "SteamAPI_ISteamRemotePlay_GetSessionClientFormFactor",
+            "S_API ESteamDeviceFormFactor SteamAPI_ISteamRemotePlay_GetSessionClientFormFactor( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID );",
+            fn(*mut ISteamRemotePlay, u32) -> i32;
+        get_session_client_resolution: RemotePlayBGetSessionClientResolution = "SteamAPI_ISteamRemotePlay_BGetSessionClientResolution",
+            "S_API bool SteamAPI_ISteamRemotePlay_BGetSessionClientResolution( ISteamRemotePlay* self, RemotePlaySessionID_t unSessionID, int * pnResolutionX, int * pnResolutionY );",
+            fn(*mut ISteamRemotePlay, u32, *mut i32, *mut i32) -> bool;
+        show_remote_play_together_ui: RemotePlayShowRemotePlayTogetherUi = "SteamAPI_ISteamRemotePlay_ShowRemotePlayTogetherUI",
+            "S_API bool SteamAPI_ISteamRemotePlay_ShowRemotePlayTogetherUI( ISteamRemotePlay* self );",
+            fn(*mut ISteamRemotePlay) -> bool;
+        send_remote_play_together_invite: RemotePlayBSendRemotePlayTogetherInvite = "SteamAPI_ISteamRemotePlay_BSendRemotePlayTogetherInvite",
+            "S_API bool SteamAPI_ISteamRemotePlay_BSendRemotePlayTogetherInvite( ISteamRemotePlay* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamRemotePlay, u64) -> bool;
     }
 
     /// `ISteamRemoteStorage` (`steam_api_flat.h`): Steam Cloud files.

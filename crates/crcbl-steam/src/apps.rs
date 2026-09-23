@@ -2,8 +2,12 @@
 //!
 //! Ownership, the game's language, and how the game was launched — including
 //! the `+connect_lobby <id>` argument Steam launches a game with when the
-//! player accepts a lobby invite while it is not running. DLC, betas and the
-//! rest of ownership arrive with `docs/plan/42-steam.md`'s slice 11.
+//! player accepts a lobby invite while it is not running; and, in
+//! [`content`]'s half, ownership, DLC, betas and the install directory.
+
+mod content;
+
+pub use content::{Beta, BetaCount, BetaFlags, Dlc, FileDetails, MAX_TEXT_BYTES};
 
 use core::ffi::c_char;
 

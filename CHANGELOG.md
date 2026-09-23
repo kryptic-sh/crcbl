@@ -236,9 +236,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9 and
-  10** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
-  `steam` feature. A new crate over the SDK's flat C API with no link-time
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10
+  and 11** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's
+  new `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
   `steam_api` beside the executable or under
   `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute path
@@ -314,9 +314,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `end`), game phases with tags and attributes, the overlay opened at either,
   and whether a recording of an event or phase exists, as `SteamCall`s — every
   priority, offset, duration and phase id checked against the header's limits
-  first. 64-bit Linux, Windows and macOS; elsewhere the crate is empty.
-  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
-  client with a 1.65 library.
+  first. `steam.apps()` also reads ownership (another app, low violence, VAC,
+  purchase time, free weekend, Family Sharing and the licence's owner), the
+  build, the install directory, each DLC and beta branch (`Dlc`, `Beta`,
+  `BetaFlags`), installs and uninstalls DLC, selects a branch and asks Steam to
+  verify the files, with every string read into a buffer grown until it fits and
+  `SteamError::Truncated` past 64 KiB; `SteamEvent::DlcInstalled` follows an
+  install. `Steam::file_details` asks for a depot file's size and SHA-1.
+  `steam.remote_play()` lists the Remote Play sessions — who, which device, what
+  resolution, whether a Remote Play Together guest — sends Remote Play Together
+  invites and opens its panel, and `SteamEvent::RemotePlayConnected` /
+  `…Disconnected` say when one comes and goes. 64-bit Linux, Windows and macOS;
+  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
+  Not yet run against a Steam client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

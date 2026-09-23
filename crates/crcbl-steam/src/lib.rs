@@ -7,7 +7,9 @@
 //!        ├── user(): steam_id(), logged_on(), steam_level()
 //!        ├── friends(): persona_name(), list(), name(), avatar(), set_rich_presence(),
 //!        │              open_invite_dialog(), open_overlay(), …
-//!        ├── apps(): subscribed(), game_language(), launch_command_line()
+//!        ├── apps(): subscribed(), game_language(), launch_command_line(), owner(),
+//!        │           dlc_count() / dlc(), beta_count() / beta(), install_dir(), …
+//!        ├── remote_play(): sessions(), user(), invite(), …
 //!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …,
 //!        │            show_text_input() / show_floating_keyboard() (the Deck's keyboards)
 //!        ├── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
@@ -26,7 +28,7 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9 and 10: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10 and 11: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -39,7 +41,8 @@
 //! arrive through Steam Input as the same gamepad events every pad backend
 //! reports, with their buttons' glyphs, the Deck's on-screen keyboards hand
 //! back typed text, screenshots are written to the player's library and
-//! moments marked on Steam's game recording, and the
+//! moments marked on Steam's game recording, ownership, DLC, betas and Remote
+//! Play sessions are read, and the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
@@ -165,6 +168,11 @@ mod pump;
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
+mod remote_play;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
 mod screenshots;
 #[cfg(all(
     target_pointer_width = "64",
@@ -208,7 +216,10 @@ mod voice;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 pub use crate::{
-    apps::{Apps, CONNECT_LOBBY, connect_lobby},
+    apps::{
+        Apps, Beta, BetaCount, BetaFlags, CONNECT_LOBBY, Dlc, FileDetails, MAX_TEXT_BYTES,
+        connect_lobby,
+    },
     avatar::{AvatarSize, Rgba},
     call::{CallError, CallResult, CallState, SteamCall},
     callbacks::SteamEvent,
@@ -237,6 +248,7 @@ pub use crate::{
         MAX_RICH_PRESENCE_KEY_LENGTH, MAX_RICH_PRESENCE_KEYS, MAX_RICH_PRESENCE_VALUE_LENGTH,
     },
     pump::PumpDiagnostics,
+    remote_play::{FormFactor, RemotePlay, RemotePlaySession},
     screenshots::{ScreenshotId, Screenshots},
     stats::{Achieved, MAX_STAT_NAME_LENGTH, Stats},
     timeline::{
