@@ -26,8 +26,21 @@
 //! substep rate — so every constraint keeps its stiffness per substep, and a
 //! group with more substeps both converges further and holds harder. More
 //! substeps at the same stiffness would not stand a tall column: a soft
-//! contact's stiffness, not its iterations, is what buckles one (see
-//! [`super::ContactSettings::TALL_STACK`]).
+//! contact's stiffness, not its iterations, is what buckles one.
+//!
+//! **Why a tall column needs it.** A soft contact is a spring of stiffness
+//! `m ω²` on the pair's effective mass, whatever it carries, so a column's
+//! joints resist rocking with a stiffness that does not grow with the weight
+//! above them. That is a heavy column on elastic joints, which buckles under
+//! its own weight past Greenhill's height `L³ = 7.837 EI / q`. For cubes of
+//! half-extent `w` — each corner's effective mass `m / 8`, four corners,
+//! `EI = 4 (m/8) ω² w² · 2w` and `q = m g / 2w` — that is
+//! `N = (1.96 ω² w / g)^⅓` cubes, whatever their mass: at the default 30 Hz,
+//! 15 one-metre cubes, and at 90 Hz, 32. Measured on 2026-09-23: at the
+//! defaults 14 one-metre cubes stood and 17 fell; a system at eight substeps
+//! and 90 Hz stood 20, and so does a group of twelve substeps, whose contacts
+//! run at 90 Hz, in a system at the defaults. Box2D's contacts default to the
+//! same 30 Hz, so the same arithmetic applies to it.
 //!
 //! **A kinematic body touching a group** steps in the last pass, with
 //! everything else, so while an earlier pass solves the group it is taken to

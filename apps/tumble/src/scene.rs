@@ -59,11 +59,13 @@ pub const TICK_HZ: u32 = 60;
 pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
-/// after rung 5's joints added the Bridge room. The five rooms before it
-/// still hash to the value pinned before it (`0x810e_2250_7c7a_fc8f`), taken
-/// without the Bridge room's share: joints and solver groups left every
-/// scene without them bit for bit as it was.
-pub const PINNED_HASH: u64 = 0x32a0_2fb4_6966_7d55;
+/// after the Tower room's column moved from a whole system at eight substeps
+/// and 90 Hz onto a group asking for its substeps in a system at the
+/// defaults. Before that, rung 5's joints added the Bridge room and left the
+/// five rooms before it hashing to the value pinned before it
+/// (`0x810e_2250_7c7a_fc8f`), taken without the Bridge room's share: joints
+/// and solver groups left every scene without them bit for bit as it was.
+pub const PINNED_HASH: u64 = 0xc0fd_27f2_94da_418b;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;

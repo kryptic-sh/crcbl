@@ -26,12 +26,14 @@
 //! contacts — alone in its system, so the room's solver time is the
 //! pyramid's, comparable with Box3D's benchmark at the same settings.
 //!
-//! **The column runs at [`ContactSettings::TALL_STACK`]**, with the dominoes:
-//! at 30 Hz a soft contact is too soft a joint for twenty cubes of this size,
-//! which buckle under their own weight past about twelve — Greenhill's height,
-//! worked out beside that constant. Decision 1 gives a long chain more
-//! substeps for its group; groups are not built, so the column's system takes
-//! them whole.
+//! **The column runs in a second system at the default settings**, with the
+//! dominoes, and its cubes ask for `COLUMN_SUBSTEPS` with
+//! [`PhysicsSystem::set_substeps`]: at 30 Hz a soft contact is too soft a
+//! joint for twenty cubes of this size, which buckle under their own weight
+//! past about twelve — Greenhill's height, worked out in `crcbl-phys`'s
+//! solver groups (`contact/group.rs`). Decision 1 gives a long chain more
+//! substeps for its group, its contacts stiffer in proportion, and the
+//! dominoes beside it keep the defaults.
 //!
 //! # Sleep
 //!
@@ -59,6 +61,10 @@ const CUBE_MASS: f64 = 10.0;
 pub const COLUMN: u32 = 20;
 /// Where the column stands, from the room's middle.
 const COLUMN_AT: DVec3 = DVec3::new(-7.5, 0.0, 0.0);
+/// The substeps the column's cubes ask for, where the system runs
+/// [`ContactSettings::DEFAULT`]'s: their group's contacts stiffen in
+/// proportion, which stands twenty cubes. Measured in the tests below.
+const COLUMN_SUBSTEPS: u32 = 12;
 /// Cubes along the pyramid's bottom row.
 pub const PYRAMID_BASE: u32 = 20;
 
@@ -112,7 +118,8 @@ pub struct TowerReading {
 pub struct Tower {
     /// The pyramid, at the default settings.
     stack: PhysicsSystem,
-    /// The column and the dominoes, at [`ContactSettings::TALL_STACK`].
+    /// The column and the dominoes, at the default settings, the column
+    /// asking for [`COLUMN_SUBSTEPS`].
     tall: PhysicsSystem,
     pyramid: Vec<Entity>,
     column: Vec<Entity>,
@@ -131,9 +138,10 @@ impl Default for Tower {
     }
 }
 
-/// A system with contacts, Earth gravity and the floor.
-fn system(settings: ContactSettings) -> PhysicsSystem {
-    let mut phys = PhysicsSystem::with_contacts(settings);
+/// A system with contacts at the default settings, Earth gravity and the
+/// floor.
+fn system() -> PhysicsSystem {
+    let mut phys = PhysicsSystem::with_contacts(ContactSettings::DEFAULT);
     phys.add_force_provider(Box::new(GravityForce::EARTH));
     phys.add_plane(DVec3::Y, 0.0, SURFACE);
     phys
@@ -167,7 +175,7 @@ impl Tower {
     #[must_use]
     pub fn new() -> Self {
         let cube = DVec3::splat(CUBE_HALF);
-        let mut stack = system(ContactSettings::DEFAULT);
+        let mut stack = system();
         let mut pyramid = Vec::new();
         for row in 0..PYRAMID_BASE {
             let across = PYRAMID_BASE - row;
@@ -186,7 +194,7 @@ impl Tower {
             }
         }
 
-        let mut tall = system(ContactSettings::TALL_STACK);
+        let mut tall = system();
         let column: Vec<Entity> = (0..COLUMN)
             .map(|i| {
                 let e = entity(i);
@@ -198,6 +206,7 @@ impl Tower {
                     cube,
                     CUBE_MASS,
                 );
+                tall.set_substeps(e, COLUMN_SUBSTEPS);
                 e
             })
             .collect();
@@ -361,6 +370,12 @@ mod tests {
     /// column's top cube 1.24 cm off, 3.8 mm of it sideways, and the
     /// pyramid's 2.73 cm, 2.40 mm sideways.
     ///
+    /// **Since rung 5 the column asks for its substeps** in a system at the
+    /// defaults, where before its whole system ran eight substeps at 90 Hz.
+    /// Measured on 2026-09-23: asking for twelve, its top cube 1.19 cm off,
+    /// 1.5 mm sideways; for ten, 1.71 cm and 2.0 mm; for eight, 2.67 cm, past
+    /// the bound; and asking for none, 10.6 cm and 11.8 mm, buckling.
+    ///
     /// The points are read on every tick the pyramid is awake, and the
     /// persisted ids on the last of them, where it settled: asleep, its
     /// contacts are not collided and count nothing.
@@ -415,7 +430,8 @@ mod tests {
     /// dominoes once they have all fallen, well before the next flick.
     ///
     /// Measured on 2026-09-23: the pyramid asleep from tick 58, the column
-    /// and the dominoes from tick 276; the next flick is at tick 480.
+    /// and the dominoes from tick 276 (277 since the column asks for its
+    /// substeps in a system at the defaults); the next flick is at tick 480.
     #[test]
     fn every_scene_in_the_room_settles_to_zero_awake_bodies() {
         let mut tower = Tower::new();

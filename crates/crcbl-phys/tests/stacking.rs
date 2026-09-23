@@ -183,14 +183,16 @@ fn column(phys: &mut PhysicsSystem, count: u32, half: f64) -> Vec<Entity> {
         .collect()
 }
 
-/// How far the top of a column of `count` one-metre cubes, stepped with
-/// `settings`, has sunk and moved sideways after `ticks`, and the most any
-/// box in it has tipped, as the sine of the angle.
-fn column_drift(settings: ContactSettings, count: u32, ticks: u32) -> (f64, f64, f64) {
-    let mut phys = PhysicsSystem::with_contacts(settings);
-    phys.add_force_provider(Box::new(GravityForce::EARTH));
-    phys.add_plane(DVec3::Y, 0.0, CRATE);
+/// How far the top of a column of `count` one-metre cubes, each asking for
+/// `substeps` in a system at the default settings, has sunk and moved
+/// sideways after `ticks`, and the most any box in it has tipped, as the sine
+/// of the angle.
+fn column_drift(count: u32, substeps: u32, ticks: u32) -> (f64, f64, f64) {
+    let mut phys = system(CRATE);
     let boxes = column(&mut phys, count, 0.5);
+    for &e in &boxes {
+        phys.set_substeps(e, substeps);
+    }
     let top = *boxes.last().expect("a column has a top");
     let start = position(&phys, top);
     for _ in 0..ticks {
@@ -207,19 +209,23 @@ fn column_drift(settings: ContactSettings, count: u32, ticks: u32) -> (f64, f64,
     (-drift.y, DVec3::new(drift.x, 0.0, drift.z).length(), tipped)
 }
 
-/// **A column of twenty one-metre cubes stands for ten seconds** with
-/// [`ContactSettings::TALL_STACK`], its top box sunk by the contact springs'
-/// squeeze and hardly moved sideways.
+/// **A column of twenty one-metre cubes stands for ten seconds** in a system
+/// at the default settings, its cubes asking for twelve substeps — their
+/// contacts at 90 Hz — its top box sunk by the contact springs' squeeze and
+/// hardly moved sideways.
 ///
 /// Twenty soft contacts in series each give under the weight above them, so
 /// the top settles lower by their sum and then stays: what the test bounds is
 /// that sum and any sideways creep. Twenty cubes are past the height the
-/// default settings hold up — see [`ContactSettings::TALL_STACK`] and the
-/// next test. Measured on 2026-09-23 over 600 ticks: the top box sank
-/// 1.18 cm and moved 0.85 mm sideways, and no box tipped more than 0.06 mrad.
+/// default settings hold up — see Greenhill's height in the solver's groups
+/// (`src/contact/group.rs`) and the next test. Measured on 2026-09-23 over
+/// 600 ticks: the top box sank 1.18 cm and moved 1.5 mm sideways, and no box
+/// tipped more than 0.11 mrad; the whole system at eight substeps and 90 Hz,
+/// before groups, sank it the same 1.18 cm, 3.6 mm sideways, 0.28 mrad.
+/// Asking for eight substeps (60 Hz), it sank 2.66 cm; for none, 10.6 cm.
 #[test]
 fn a_column_of_twenty_boxes_stands() {
-    let (sunk, sideways, tipped) = column_drift(ContactSettings::TALL_STACK, 20, 600);
+    let (sunk, sideways, tipped) = column_drift(20, 12, 600);
     assert!(sideways < 5e-3, "the top box moved {sideways} m sideways");
     assert!(sunk < 0.02, "the top box sank {sunk} m under the column");
     assert!(tipped < 2e-3, "a box tipped by {tipped}");
@@ -227,14 +233,15 @@ fn a_column_of_twenty_boxes_stands() {
 
 /// **At the default settings a column shorter than Greenhill's height
 /// stands**: fourteen one-metre cubes, where the soft contacts' arithmetic in
-/// [`ContactSettings::TALL_STACK`] puts the limit at fifteen.
+/// the solver's groups (`src/contact/group.rs`) puts the limit at fifteen.
 ///
-/// Measured on 2026-09-23 over 600 ticks: the top box sank 5.12 cm and moved
-/// 1.8 mm sideways, and no box tipped more than 0.2 mrad. Seventeen, over the
-/// limit, leaned 0.54 m by tick 600 and lay 6.2 m away by tick 900.
+/// Measured on 2026-09-23 over 600 ticks, at rung 2: the top box sank
+/// 5.12 cm and moved 1.8 mm sideways, and no box tipped more than 0.2 mrad.
+/// Seventeen, over the limit, leaned 0.54 m by tick 600 and lay 6.2 m away by
+/// tick 900. Measured again at rung 5: 5.03 cm, 8.5 mm sideways, 0.95 mrad.
 #[test]
 fn a_column_under_greenhills_height_stands_at_the_defaults() {
-    let (sunk, sideways, tipped) = column_drift(ContactSettings::DEFAULT, 14, 600);
+    let (sunk, sideways, tipped) = column_drift(14, 0, 600);
     assert!(sideways < 1e-2, "the top box moved {sideways} m sideways");
     assert!(sunk < 0.06, "the top box sank {sunk} m under the column");
     assert!(tipped < 5e-3, "a box tipped by {tipped}");

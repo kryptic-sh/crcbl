@@ -1328,15 +1328,15 @@ fn column_lean(count: u32, substeps: u32) -> f64 {
 /// **A group with extra substeps stands a column the defaults cannot.**
 /// Twenty one-metre cubes at the default settings fall (see `stacking.rs`:
 /// past Greenhill's height of fifteen at 30 Hz); the same column asking for
-/// twelve substeps — its contacts at 90 Hz, as
-/// [`ContactSettings::TALL_STACK`]'s are — stands, in a system whose
+/// twelve substeps — its contacts at 90 Hz, as a whole system's were at
+/// eight substeps and 90 Hz before groups — stands, in a system whose
 /// settings are the defaults.
 ///
 /// Measured on 2026-09-23 over ten seconds, sleep off: at the defaults the
 /// top cube was 3.32 m out; asking for twelve substeps it moved 0.22 mm and
-/// sank 1.18 cm — `TALL_STACK`'s own measured sink, since the sink is the
-/// stiffness's — and asking for eight (60 Hz, under Greenhill's 24 cubes)
-/// 2.3 mm.
+/// sank 1.18 cm — the whole 90 Hz system's own measured sink, since the sink
+/// is the stiffness's — and asking for eight (60 Hz, under Greenhill's 24
+/// cubes) 2.3 mm.
 #[test]
 fn a_group_with_more_substeps_stands_a_tall_column() {
     let fallen = column_lean(20, 0);

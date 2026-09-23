@@ -40,12 +40,13 @@ feature in those pairs' ids. **The 20-box column does not stand at decision 1's
 30 Hz**: a soft contact's stiffness is `m ω²` whatever it carries, so a column
 buckles under its own weight past Greenhill's height, `(1.96 ω² w / g)^⅓` cubes
 of half-extent `w` — fifteen one-metre cubes at 30 Hz, and measured, fourteen
-stood and seventeen fell. The column runs `ContactSettings::TALL_STACK`, eight
-substeps at 90 Hz, for its whole system; since rung 5 a group can ask for the
-substeps instead (see below). **Fast spinners still sink** — a 5 cm cube at 80
-rad/s turned a corner 6.9 cm into a peg on the wall — because rotation outruns a
-once-a-tick manifold, which is rung 4's. **Not built: general convex hulls**
-(there is no hull collider) and GJK for spheres and capsules against them.
+stood and seventeen fell. The column ran its whole system at eight substeps and
+90 Hz until rung 5; since then its cubes ask for twelve substeps as a group, in
+a system at the defaults (see below). **Fast spinners still sink** — a 5 cm cube
+at 80 rad/s turned a corner 6.9 cm into a peg on the wall — because rotation
+outruns a once-a-tick manifold, which is rung 4's. **Not built: general convex
+hulls** (there is no hull collider) and GJK for spheres and capsules against
+them.
 
 Rung 3, in `crates/crcbl-phys/src/contact/island.rs`: persistent islands of
 dynamic bodies, merged when a contact between two of them begins touching and
@@ -222,13 +223,17 @@ momentum; twenty-one hinged planks with a 40 kg crate sagged 2.188 m against the
 2.100 m a chain of rigid links would, 2.116 m with the planks at twelve
 substeps; and twenty one-metre cubes whose group asks for twelve substeps stand
 in a system at the default settings, moving 0.22 mm in ten seconds and sinking
-1.18 cm, `TALL_STACK`'s own sink, where at the defaults they lay 3.32 m out — so
-`TALL_STACK` can go once the Tower room's column asks for its substeps instead.
-Tumble's five earlier rooms hash exactly as before. Five departures. **A joint's
-angular impulses turn the body in full**: rung 0's midpoint rule turned it by
-the mean of the velocity before and after the solve, so half of every joint's
-rotational correction went missing each substep, and twenty-one hinged planks
-between two anchors gained 3.4 kJ in three seconds and flew apart
+1.18 cm, the whole 90 Hz system's own sink, where at the defaults they lay 3.32
+m out. The Tower room's column now asks for its substeps the same way, and the
+whole-system `ContactSettings::TALL_STACK` is gone: its top cube sits 1.19 cm
+from where it started after ten seconds, 1.5 mm of it sideways, where the whole
+system at eight substeps and 90 Hz left it 1.24 cm off, 3.8 mm sideways.
+Tumble's five earlier rooms hashed exactly as before, until the Tower room's
+column moved onto a group. Five departures. **A joint's angular impulses turn
+the body in full**: rung 0's midpoint rule turned it by the mean of the velocity
+before and after the solve, so half of every joint's rotational correction went
+missing each substep, and twenty-one hinged planks between two anchors gained
+3.4 kJ in three seconds and flew apart
 (`SemiImplicitEuler::integrate_position_carrying`); contacts keep the midpoint,
 because carrying their change whole too, Box2D's form, let the 14-cube column
 lean 4.9 cm where it holds to 1.8 mm. **A group's constraints stiffen in

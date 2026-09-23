@@ -280,7 +280,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   their constraints stiffer in proportion: a loaded bridge's planks at twelve
   substeps sag within 1.6 cm of a rigid chain's depth (8.8 cm at the default
   four), and twenty one-metre cubes at twelve stand in a system at the default
-  settings, which `TALL_STACK` was for.
+  settings. This is how a column taller than the 30 Hz defaults hold stands.
   `SemiImplicitEuler::integrate_position_carrying` turns a body by the whole of
   the angular velocity a joint gave it, where the midpoint rule took half and a
   long hinged chain between two anchors gained energy until it flew apart.
@@ -288,7 +288,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `apps/tumble` has a sixth room on key `6`, Bridge: a gapped Newton's cradle
   passing 99.6% of its momentum, a plank bridge that crates slide across and an
   anvil snaps at its weak link, and capsule ragdolls pushed down stairs made of
-  one triangle mesh; its pinned hash is re-pinned for the new room.
+  one triangle mesh; the Tower room's column asks for twelve substeps in a
+  system at the default settings; and its pinned hash is re-pinned for both.
 - **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
   11, 12, 14 and 15's inventory half** (`docs/plan/42-steam.md`), and
   `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the
@@ -601,15 +602,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   naming a feature of each box. Friction now acts at each manifold's centroid
   with a twist term about its normal, rather than at every point, so a box spun
   flat on the floor stops. `ContactCounters` gains `points_per_manifold` and
-  `persisted_ratio`, and `ContactSettings::TALL_STACK` (eight substeps, 90 Hz)
-  holds up a column the 30 Hz defaults buckle past about fifteen one-metre
-  cubes. Sphere and capsule manifolds against a box now name the box's feature
-  in their ids, and a capsule lying along a box edge, or across a face and past
-  its end, rests on two points instead of one that wandered from tick to tick.
-  General convex hulls, and GJK against them, are not built. `apps/tumble` gains
-  the Tower room on key 4 — a 20-cube column, a base-20 pyramid and a domino
-  run, with points per manifold, the persisted-id ratio and both top boxes'
-  drift on the page — and cubes on the wall.
+  `persisted_ratio`. The 30 Hz defaults buckle a column past about fifteen
+  one-metre cubes; a taller one asks for more substeps with
+  `PhysicsSystem::set_substeps` (rung 5, above). Sphere and capsule manifolds
+  against a box now name the box's feature in their ids, and a capsule lying
+  along a box edge, or across a face and past its end, rests on two points
+  instead of one that wandered from tick to tick. General convex hulls, and GJK
+  against them, are not built. `apps/tumble` gains the Tower room on key 4 — a
+  20-cube column, a base-20 pyramid and a domino run, with points per manifold,
+  the persisted-id ratio and both top boxes' drift on the page — and cubes on
+  the wall.
 
 - **A gamepad seam in `crcbl-input`**, the one vocabulary every pad backend
   emits so a game binds a pad once: `GamepadEvent` (`Connected`, `Disconnected`,

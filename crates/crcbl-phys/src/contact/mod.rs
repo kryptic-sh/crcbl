@@ -238,28 +238,6 @@ impl ContactSettings {
         time_to_sleep: 0.5,
         continuous: true,
     };
-
-    /// [`DEFAULT`](Self::DEFAULT) with twice the substeps and three times the
-    /// stiffness — 90 Hz, under the 120 Hz cap eight substeps allow — for a
-    /// tall stack, which is decision 1's "more substeps for its group".
-    ///
-    /// **Why a column needs it.** A soft contact is a spring of stiffness
-    /// `m ω²` on the pair's effective mass, whatever it carries, so a column's
-    /// joints resist rocking with a stiffness that does not grow with the
-    /// weight above them. That is a heavy column on elastic joints, which
-    /// buckles under its own weight past Greenhill's height `L³ = 7.837 EI / q`.
-    /// For cubes of half-extent `w` — each corner's effective mass `m / 8`,
-    /// four corners, `EI = 4 (m/8) ω² w² · 2w` and `q = m g / 2w` — that is
-    /// `N = (1.96 ω² w / g)^⅓` cubes, whatever their mass: at the default
-    /// 30 Hz, 15 one-metre cubes, and at 90 Hz, 32. Measured on 2026-09-23: at
-    /// the defaults 14 one-metre cubes stood and 17 fell; with these settings
-    /// 20 stood. Box2D's contacts default to the same 30 Hz, so the same
-    /// arithmetic applies to it.
-    pub const TALL_STACK: Self = Self {
-        substeps: 8,
-        contact_hertz: 90.0,
-        ..Self::DEFAULT
-    };
 }
 
 impl Default for ContactSettings {

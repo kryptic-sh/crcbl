@@ -8606,22 +8606,27 @@ remain, and from rung 2:
   `ColliderComponent::Hull`, Gregorius's Minkowski-face edge test in place of
   box-box's full support radii, and GJK with a SAT fallback for spheres and
   capsules against hulls.
-- **Needs a decision: tall stacks need more substeps.** A soft contact's
-  stiffness does not grow with its load, so at the 30 Hz defaults a column
-  buckles past Greenhill's height (measured: 14 one-metre cubes stand, 17 fall).
-  `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
-  workaround; options are per-island or per-group substeps (decision 1's "more
-  substeps for its group") or stiffness scaled by load.
+- **Tall stacks ask for substeps per group.** A soft contact's stiffness does
+  not grow with its load, so at the 30 Hz defaults a column buckles past
+  Greenhill's height (14 one-metre cubes stand, 17 fall; the arithmetic is in
+  `crates/crcbl-phys/src/contact/group.rs`). A column's bodies call
+  `PhysicsSystem::set_substeps` (twelve stands twenty cubes), as tumble's Tower
+  column does at the defaults; the whole-system `TALL_STACK` was removed before
+  it shipped. Declined for now: stiffness scaled by load.
+- **The Tower room keeps two systems**, both at the defaults: the pyramid alone
+  (solver time comparable with Box3D's benchmark, its own counters on the page)
+  and the column with the dominoes. One system would show per-group substeps
+  costing the rest nothing, but needs `page.rs` and `app.rs` to split one tally
+  per scene. Needs a decision.
+- `stacking.rs`'s `a_column_under_greenhills_height_stands_at_the_defaults`
+  sways 8.5 mm against its 1 cm bound (1.8 mm when written at rung 2; cause not
+  investigated).
 - **Rung 5 shipped 2026-09-23: static triangle meshes, and joints.**
   `TriangleMesh` (Jolt-style active edges; proving scene
   `crates/crcbl-phys/tests/meshes.rs`) and five joint types from Box3D
   (distance, revolute, prismatic, weld, spherical) with limits, motors, breaking
   and per-group substeps (`PhysicsSystem::set_substeps`); tumble's Bridge room
   on key 6. Open:
-  - **Remove `ContactSettings::TALL_STACK`.** Twenty one-metre cubes stand in a
-    default system with `set_substeps(12)` (0.22 mm drift in 10 s; see
-    `joints.rs`'s `a_group_with_more_substeps_stands_a_tall_column`). Move the
-    Tower column onto a group and drop the constant; it re-pins tumble's hash.
   - **Needs a decision: the rotation rule is split.** Joint impulses turn bodies
     in full (fixing a 21-plank bridge that gained 3.4 kJ and flew apart);
     contact impulses keep the midpoint rule, because the full rule leaned the

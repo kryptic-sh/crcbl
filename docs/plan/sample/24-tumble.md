@@ -105,7 +105,8 @@ domino run toppled again every eight seconds, with points per manifold, the
 persisted-id ratio and both top boxes' drift on the page — and the Bullets room.
 Each gap is labelled on screen. The pyramid runs alone in a system at the
 default contact settings, so the room's solver time is the pyramid's; the column
-and the dominoes run in a second system at `ContactSettings::TALL_STACK`,
+and the dominoes run in a second system at the same default settings, the
+column's cubes asking for twelve substeps with `PhysicsSystem::set_substeps`,
 because at 30 Hz twenty cubes buckle — see
 [36-contact-solver.md](../36-contact-solver.md)'s status.
 
