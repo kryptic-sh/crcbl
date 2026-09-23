@@ -8612,6 +8612,18 @@ remain, and from rung 2:
   `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
   workaround; options are per-island or per-group substeps (decision 1's "more
   substeps for its group") or stiffness scaled by load.
+- **Rung 5's static triangle meshes shipped 2026-09-23; joints remain.**
+  `TriangleMesh` with Jolt-style active edges, one-sided triangle contacts for
+  every shape, exact mesh queries and sweeps (proving scene
+  `crates/crcbl-phys/tests/meshes.rs`). Open: the joint framework and types,
+  limits, motors, breaking and per-group substeps (tumble's Bridge room waits on
+  them); no contact reduction across a body's triangles (3.3 points per ball and
+  a 2.43 ms solver for 1000 balls on 131k triangles); Jolt's movement hint in
+  `FixNormal` is not transcribed; `PhysicsWorld` hits do not name the triangle
+  (call `TriangleMesh::cast_ray` in the mesh's frame); kinematic meshes update
+  every triangle's proxy each tick and are untested; triangles are one-sided by
+  design. Not verified: the character controller on a mesh end to end, the wasm
+  hash for mesh scenes.
 - **Rung 4 (continuous collision) shipped 2026-09-23**: conservative advancement
   for fast bodies against statics, bullets against everything but bullets, and
   one-point twist friction from a Hertz patch radius. Left open: dynamic pairs
@@ -9279,7 +9291,10 @@ plan's "Review (step 4)".
   `crates/crcbl-store/src/synced/tests.rs` all make a second device save over a
   version it never loaded and assert the save succeeds and the cloud kept it;
   they would assert `Stale` instead. Left for the user, since it rewrites what
-  existing tests assert. Related, lower: fast-forward is recognised one
+  existing tests assert. **EW (2026-09-23): a must before EW puts `profile.ron`
+  on Steam Cloud** — its profile holds raid receipts, so a silently lost
+  confirmed write could lose extracted gear, the class of bug EW's no-merge
+  requirement exists to prevent. Related, lower: fast-forward is recognised one
   generation deep only (`cloud.base == mine.version`), so a write taken up and
   built on twice elsewhere reads as a `Conflict` whose `KeepLocal` discards the
   newer versions; more ancestry in the header would fix it.
