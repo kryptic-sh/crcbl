@@ -252,10 +252,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **XInput on Windows, `crcbl_input::xinput`**: `XInput::load` finds
   `xinput1_4.dll` (or `xinput9_1_0.dll`) at runtime, and `XInput::poll` reads
   the four slots and emits `GamepadEvent`s — connections, disconnections, and a
-  snapshot whenever one changes. The game polls it; the engine loop does not.
-  Tested without a controller (a scripted state source, and a real
-  `XInputGetState` answering an empty slot); no controller has been through it
-  yet. Other targets have no pad backend and no stand-in module.
+  snapshot whenever one changes. A game on its own loop polls it; the engine
+  loop polls it for games on `crcbl::engine::Loop` (see below). Tested without a
+  controller (a scripted state source, and a real `XInputGetState` answering an
+  empty slot); no controller has been through it yet. Other targets have no pad
+  backend and no stand-in module.
+- **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
+  at `Loop::new` (logging once and running padless if it cannot); other targets
+  log once that they have no backend; a headless run polls nothing. Each frame,
+  after the shell's events and before the ticks, every `GamepadEvent` goes to
+  the loop's menu map and once to the new `HostedGame::gamepad_event` hook (a
+  no-op by default). The loop does not feed the map `HostedGame::actions` hands
+  over — a game feeds it from the hook, as it feeds keys — but still releases it
+  on focus loss, now after the frame's pads. `Loop::set_pad_source` swaps the
+  source for any `crcbl::engine::PadSource`, which is how a test or replay
+  scripts a pad. The loop's menus answer the pad: the left stick moves, South
+  accepts, East backs out of the pause panel, and Start
+  (`crcbl::engine::PAUSE_BUTTON`) toggles the pause like Escape, closing an open
+  console first. Pad events are not withheld from the game while a menu is up.
+- **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
+  through `ui::STICK_DEADZONE`, `ui::NEXT`/`ui::PREV` on the right and left
+  shoulders, `ui::ACCEPT` on South, `ui::BACK` on East. The d-pad is not bound:
+  no binding lets pad buttons drive an `Axis2`.
 - **Tap, hold and double-tap patterns on `crcbl_input::ActionMap`**, beside
   `set_repeat` and on the same tick clock, so a scripted replay fires them on
   the same ticks every run. `set_tap(name, Some(Tap::new(time)?))` fires

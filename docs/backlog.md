@@ -8955,9 +8955,30 @@ browser-hosted single-player game with mods has no containment at all.
     stick sign and reconnection are unverified.
   - It re-probes empty slots every poll (about 54 µs for four, measured once);
     throttling is the usual fix. A replugged pad gets a new `GamepadId`.
-  - **The engine loop pumps no pads**: a game polls `XInput` itself, and
-    `ui::CONTEXT` declares no pad bindings. A game that keeps its map out of
-    `Game::actions` must call `release_gamepads` on focus loss itself.
+  - **The loop pumps pads now** (`engine::PadSource`, `Loop::set_pad_source`,
+    `HostedGame::gamepad_event`; XInput on a windowed Windows run, none
+    headless), and the ui context has a pad column. Left open:
+    - **No d-pad in menus.** `ui::MOVE` is an `Axis2` and the seam has no
+      four-button pad composite like `Binding::Wasd`; a `Binding::PadDpad` is
+      owed, then declared in `ui::declarations` and kept by
+      `engine::menu::menu_actions`.
+    - **Needs a decision: pad input is not withheld from the game while a menu
+      is up.** Every `GamepadEvent` reaches both the menu map and the game, so
+      South accepting a panel also reaches the game. Keys are claimed per key; a
+      snapshot covers the whole pad, so claiming means masking bound buttons out
+      of what the game sees. Options: mask ui-bound buttons while a panel has
+      input, or leave it to games (`FrameInfo::paused`).
+    - **Needs a decision: pads drive the loop while the window is unfocused.**
+      XInput reports regardless of focus and the loop tracks only the focus-lost
+      edge, so a pad can resume a background window. Options: stop delivering
+      while unfocused (tracking focus gained too), or accept it.
+    - A game that queues pad events for replay after its `begin_tick` can lose
+      the focus-loss release; games feeding the map from the hook are fine and
+      no sample queues pad events yet.
+    - `MenuPump::navigate` ignores `ui::NEXT`/`PREV`, so the shoulders do
+      nothing, as Tab does; the editor's `ui::MOVE` rebind drops the pad stick.
+    - Not verified: no real controller through the pump, and neither
+      `pads::for_run` branch's log line observed in a run.
   - Not built: rumble, glyphs, the Guide button on XInput (only the undocumented
     ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
     (every pad drives every binding), a d-pad composite and pad rows in a RON

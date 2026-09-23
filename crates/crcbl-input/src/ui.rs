@@ -2,13 +2,13 @@
 //! is driven by, as `docs/plan/07-ui-debug.md`'s "Navigation = reserved UI
 //! actions" table defines them.
 //!
-//! | Action     | Kind    | Keyboard                      | Repeat         |
-//! | ---------- | ------- | ----------------------------- | -------------- |
-//! | [`MOVE`]   | `Axis2` | the arrows, and W, A, S and D | [`Repeat::UI`] |
-//! | [`NEXT`]   | Button  | Tab                           | [`Repeat::UI`] |
-//! | [`PREV`]   | Button  | Shift+Tab                     | [`Repeat::UI`] |
-//! | [`ACCEPT`] | Button  | Enter, Space                  | none           |
-//! | [`BACK`]   | Button  | Escape                        | none           |
+//! | Action     | Kind    | Keyboard                      | Gamepad              | Repeat         |
+//! | ---------- | ------- | ----------------------------- | -------------------- | -------------- |
+//! | [`MOVE`]   | `Axis2` | the arrows, and W, A, S and D | the left stick       | [`Repeat::UI`] |
+//! | [`NEXT`]   | Button  | Tab                           | the right shoulder   | [`Repeat::UI`] |
+//! | [`PREV`]   | Button  | Shift+Tab                     | the left shoulder    | [`Repeat::UI`] |
+//! | [`ACCEPT`] | Button  | Enter, Space                  | [`PadButton::South`] | none           |
+//! | [`BACK`]   | Button  | Escape                        | [`PadButton::East`]  | none           |
 //!
 //! **Rebindable like every action** — they are ordinary actions in an ordinary
 //! context, so [`ActionMap::rebind`] moves them.
@@ -16,16 +16,26 @@
 //! **Pushed only while a UI has input.** Declaring the context leaves it off
 //! the stack; whoever owns a UI's input pushes [`CONTEXT`] while that UI has
 //! it and pops it after, and while it is pushed the arrows, WASD, Tab, Enter,
-//! Space and Escape are the UI's and not the game's beneath — the context stack
-//! is the disambiguator, not a list of special cases.
+//! Space and Escape — and the pad's left stick, shoulders, South and East — are
+//! the UI's and not the game's beneath: the context stack is the disambiguator,
+//! not a list of special cases.
 //!
-//! **The plan's gamepad column is not declared yet.** [`Binding::PadButton`]
-//! and [`Binding::PadStick`] can name the dpad, the left stick, the shoulders,
-//! South and East now, but the engine loop feeds no pad into the map this
-//! context is declared in, so a pad row here would be a binding nothing can
-//! press. It arrives with the loop's pad pump.
+//! **The stick reads through [`STICK_DEADZONE`]**, so a stick resting off
+//! centre does not walk a list.
+//!
+//! **The plan's d-pad row is not declared yet.** [`MOVE`] is an `Axis2`, and a
+//! [`Binding::PadButton`] drives nothing on an `Axis2`: the seam has no
+//! four-button composite for pads the way [`Binding::Wasd`] is one for keys, so
+//! a d-pad row here would be a binding nothing can move. It arrives with that
+//! binding.
+//!
+//! **Start is not in the table.** Like Escape's pause, it is the engine loop's,
+//! and the loop binds it outside this context.
 
-use super::{ActionDecl, ActionKind, ActionMap, ActionMapError, Binding, Modifier, Repeat};
+use super::{
+    ActionDecl, ActionKind, ActionMap, ActionMapError, Binding, Modifier, PAD_ACTIVITY_THRESHOLD,
+    PadButton, Repeat, Stick,
+};
 use crcbl_core::input::KeyCode;
 
 /// The reserved context's name.
@@ -40,6 +50,11 @@ pub const PREV: &str = "ui_prev";
 pub const ACCEPT: &str = "ui_accept";
 /// Cancel the engaged widget, or close the screen.
 pub const BACK: &str = "ui_back";
+
+/// The dead zone [`MOVE`]'s left stick reads through: the pad's own activity
+/// threshold, so the stick navigates exactly when it would also make the pad
+/// the last device.
+pub const STICK_DEADZONE: f32 = PAD_ACTIVITY_THRESHOLD;
 
 /// The reserved actions with their default bindings.
 fn declarations() -> [ActionDecl; 5] {
@@ -65,21 +80,44 @@ fn declarations() -> [ActionDecl; 5] {
                     left: KeyCode::KeyA,
                     right: KeyCode::KeyD,
                 },
+                Binding::PadStick {
+                    stick: Stick::Left,
+                    deadzone: STICK_DEADZONE,
+                },
             ],
         },
-        button(NEXT, vec![Binding::Key(KeyCode::Tab)]),
+        button(
+            NEXT,
+            vec![
+                Binding::Key(KeyCode::Tab),
+                Binding::PadButton(PadButton::RightShoulder),
+            ],
+        ),
         button(
             PREV,
-            vec![Binding::Chord {
-                modifier: Modifier::Shift,
-                key: KeyCode::Tab,
-            }],
+            vec![
+                Binding::Chord {
+                    modifier: Modifier::Shift,
+                    key: KeyCode::Tab,
+                },
+                Binding::PadButton(PadButton::LeftShoulder),
+            ],
         ),
         button(
             ACCEPT,
-            vec![Binding::Key(KeyCode::Enter), Binding::Key(KeyCode::Space)],
+            vec![
+                Binding::Key(KeyCode::Enter),
+                Binding::Key(KeyCode::Space),
+                Binding::PadButton(PadButton::South),
+            ],
         ),
-        button(BACK, vec![Binding::Key(KeyCode::Escape)]),
+        button(
+            BACK,
+            vec![
+                Binding::Key(KeyCode::Escape),
+                Binding::PadButton(PadButton::East),
+            ],
+        ),
     ]
 }
 
@@ -189,6 +227,47 @@ mod tests {
         map.key_event(KeyCode::Tab, true);
         assert!(map.repeated(PREV), "Shift+Tab is ui_prev");
         assert!(!map.button_held(NEXT), "and not ui_next as well");
+    }
+
+    /// **Pushed, it takes the table's pad column too**: the left stick past
+    /// the dead zone moves, drift inside it does not, the shoulders step
+    /// through tree order, South accepts and East backs out.
+    #[test]
+    fn pushed_it_drives_the_reserved_actions_from_a_pad() {
+        use crate::{GamepadEvent, GamepadId, GamepadSnapshot, PadAxis, PadKind};
+        let pad = GamepadId(3);
+        let at_rest = GamepadSnapshot::neutral(PadKind::Xbox);
+        let state = |snapshot| GamepadEvent::State { id: pad, snapshot };
+        let holding = |button: PadButton| GamepadSnapshot {
+            buttons: [button].into_iter().collect(),
+            ..at_rest
+        };
+        let mut map = declared();
+        map.push_context(CONTEXT).expect("declared");
+
+        map.begin_tick(TICK);
+        let mut drift = at_rest;
+        drift.axes[PadAxis::LeftY as usize] = -STICK_DEADZONE / 2.0;
+        map.gamepad_event(&state(drift));
+        assert_eq!(map.cardinal(MOVE), None, "drift inside the dead zone");
+        let mut down = at_rest;
+        down.axes[PadAxis::LeftY as usize] = -1.0;
+        map.gamepad_event(&state(down));
+        assert_eq!(map.cardinal(MOVE), Some(Cardinal::Down));
+        assert_eq!(map.axis2("walk"), (0.0, 0.0), "the game binds no stick");
+        map.gamepad_event(&state(at_rest));
+
+        for (button, action) in [
+            (PadButton::RightShoulder, NEXT),
+            (PadButton::LeftShoulder, PREV),
+            (PadButton::South, ACCEPT),
+            (PadButton::East, BACK),
+        ] {
+            map.begin_tick(TICK);
+            map.gamepad_event(&state(holding(button)));
+            assert!(map.just_pressed(action), "{button:?} is {action}");
+            map.gamepad_event(&state(at_rest));
+        }
     }
 
     /// The reserved actions rebind like any other.

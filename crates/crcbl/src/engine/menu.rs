@@ -33,12 +33,12 @@
 //! toolkit cannot see them, and giving it a "resume" would be the layer
 //! boundary this crate's split exists to hold.
 
-use crcbl_input::{ActionMap, Binding, text, ui};
+use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding, text, ui};
 use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
 
 use super::{
     DEBUG_OVERLAY_ID, FULLSCREEN_ID, MENU_ACTIVATE_KEY, MENU_DOWN_KEY, MENU_LEFT_KEY,
-    MENU_RIGHT_KEY, MENU_UP_KEY, RESUME_ID,
+    MENU_RIGHT_KEY, MENU_UP_KEY, PAUSE_BUTTON, RESUME_ID,
 };
 
 /// The panel's heading.
@@ -105,6 +105,19 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// [`ui::MOVE`], [`MENU_ACTIVATE_KEY`] as [`ui::ACCEPT`], and nothing for
 /// [`ui::NEXT`], [`ui::PREV`] and [`ui::BACK`].
 ///
+/// **Only the keys are narrowed.** The pad column of [`ui::declare`] stays as
+/// it is, so the left stick moves, South accepts and East backs out: the loop
+/// withholds no pad event from the game (see
+/// [`HostedGame::gamepad_event`](super::HostedGame::gamepad_event)), so there
+/// is no game binding for the narrowing to protect.
+///
+/// # The pad's pause
+///
+/// [`PAUSE_BUTTON`] is bound here too, to an action of
+/// the loop's own in the base context: [`PAUSE_KEY`](super::PAUSE_KEY)'s twin,
+/// which has to work with no panel up, so it cannot live in `ui`. Nothing in
+/// `ui` binds it, so a pushed context leaves it where it is.
+///
 /// # The `text` context rides on the same map
 ///
 /// [`text::declare`] puts the reserved `text` context here too, off the stack,
@@ -140,12 +153,37 @@ pub fn menu_actions() -> ActionMap {
         (ui::PREV, Vec::new()),
         (ui::BACK, Vec::new()),
     ];
-    for (name, bindings) in rebinds {
+    for (name, keys) in rebinds {
+        let pads = actions
+            .bindings(name)
+            .unwrap_or_default()
+            .iter()
+            .filter(|binding| reads_gamepad(binding))
+            .cloned();
+        let bindings = keys.into_iter().chain(pads).collect();
         actions
             .rebind(name, bindings)
             .expect("ui::declare declared every reserved action");
     }
+    actions.declare(ActionDecl {
+        name: PAUSE_ACTION.to_owned(),
+        kind: ActionKind::Button,
+        bindings: vec![Binding::PadButton(PAUSE_BUTTON)],
+    });
     actions
+}
+
+/// The loop's own action on [`PAUSE_BUTTON`], in the base context — see
+/// [`menu_actions`].
+pub(super) const PAUSE_ACTION: &str = "engine_pause";
+
+/// Whether `binding` reads a pad: what [`menu_actions`] keeps when it narrows
+/// the keys.
+const fn reads_gamepad(binding: &Binding) -> bool {
+    matches!(
+        binding,
+        Binding::PadButton(_) | Binding::PadStick { .. } | Binding::PadTrigger { .. }
+    )
 }
 
 /// Whether `actions`' `ui` context binds `key` at all: a key a menu may take.
