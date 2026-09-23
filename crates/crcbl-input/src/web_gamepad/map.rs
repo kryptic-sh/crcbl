@@ -4,8 +4,9 @@
 //! Pure, and compiled into every target's tests: nothing here touches a
 //! browser. The table itself is in the parent module's docs.
 
-use crate::usb;
+pub use crate::float_axis::{stick_axis, trigger_axis};
 use crate::{GamepadSnapshot, PadAxis, PadButton, PadKind};
+use crate::{product_name, usb};
 
 /// How many buttons the standard mapping names: `buttons[0]` to `buttons[16]`.
 pub const STANDARD_BUTTONS: usize = 17;
@@ -49,33 +50,6 @@ const BUTTONS: [(usize, PadButton); 15] = [
     (16, PadButton::Guide),
 ];
 
-/// A stick axis as the seam holds it: −1…1, and 0 for a value that is not a
-/// number at all.
-///
-/// The spec already bounds `Gamepad.axes` to −1…1, so the clamp only catches
-/// a browser, or a shim, that strays; the seam's promise that every axis is
-/// finite is not one to rest on someone else's. **No flip here** — which axes
-/// are +down is the mapping's business, and the snapshot does it.
-#[must_use]
-pub fn stick_axis(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(-1.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
-/// A trigger's `GamepadButton.value` as the seam holds it: 0…1, and 0 for a
-/// value that is not a number.
-#[must_use]
-pub fn trigger_axis(value: f32) -> f32 {
-    if value.is_finite() {
-        value.clamp(0.0, 1.0)
-    } else {
-        0.0
-    }
-}
-
 /// One standard-mapped report as the seam's snapshot.
 ///
 /// `pressed` holds `buttons[i].pressed` in bit `i`, and `values` is laid out as
@@ -115,19 +89,7 @@ pub(super) fn kind_of_id(id: &str) -> PadKind {
     if let Some((vendor, product)) = usb_ids(id) {
         return usb::kind_of(vendor, product);
     }
-    let name = id.to_ascii_lowercase();
-    let has = |needles: &[&str]| needles.iter().any(|needle| name.contains(needle));
-    if has(&["xinput", "xbox"]) {
-        PadKind::Xbox
-    } else if has(&["dualsense", "dualshock", "playstation"]) {
-        PadKind::PlayStation
-    } else if has(&["pro controller", "joy-con"]) {
-        PadKind::Switch
-    } else if has(&["steam deck"]) {
-        PadKind::SteamDeck
-    } else {
-        PadKind::Generic
-    }
+    product_name::kind_of_name(id)
 }
 
 /// The vendor and product ids in a `Gamepad.id`, in Chrome's or Firefox's
@@ -226,15 +188,12 @@ pub(super) mod tests {
     /// rest, so every snapshot is finite.
     #[test]
     fn values_are_clamped_and_finite() {
-        assert_eq!(stick_axis(1.5), 1.0);
-        assert_eq!(stick_axis(-7.0), -1.0);
-        assert_eq!(stick_axis(f32::NAN), 0.0);
-        assert_eq!(stick_axis(f32::NEG_INFINITY), 0.0);
-        assert_eq!(stick_axis(-0.5), -0.5);
-        assert_eq!(trigger_axis(-0.1), 0.0);
-        assert_eq!(trigger_axis(1.01), 1.0);
-        assert_eq!(trigger_axis(f32::INFINITY), 0.0);
-        assert_eq!(trigger_axis(0.5), 0.5);
+        let mut values = [f32::NAN; VALUES];
+        values[LEFT_TRIGGER] = 1.5;
+        values[LEFT_X] = -7.0;
+        let clamped = snapshot_of(0, &values, PadKind::Generic);
+        assert_eq!(clamped.axis(PadAxis::LeftTrigger), 1.0);
+        assert_eq!(clamped.axis(PadAxis::LeftX), -1.0);
         let snapshot = snapshot_of(0, &[f32::NAN; VALUES], PadKind::Generic);
         assert!(snapshot.is_finite());
         assert_eq!(snapshot, GamepadSnapshot::neutral(PadKind::Generic));

@@ -15,6 +15,11 @@
 //! - **Linux**: evdev, through `crcbl_input::evdev` (Linux-only, likewise). It
 //!   cannot fail to start: `/dev/input` is listed at the first poll, and a
 //!   failure there or on a pad is logged when it starts and when it stops.
+//! - **macOS**: GameController.framework, through
+//!   `crcbl_input::game_controller` (macOS-only, likewise). It discovers pads
+//!   from the main run loop, which the AppKit shell's pump turns every frame; a
+//!   windowed run that cannot find `GCController` logs why once and runs with no
+//!   pads.
 //! - **A browser** (`wasm32`): the Web Gamepad API, through
 //!   `crcbl_input::web_gamepad` (`wasm32`-only, likewise), which reads what
 //!   `web/engine/gamepad.js` reported from `navigator.getGamepads()` this
@@ -78,6 +83,21 @@ fn platform() -> Option<Box<dyn PadSource>> {
     }))
 }
 
+/// GameController.framework, or `None` with the reason logged.
+#[cfg(target_os = "macos")]
+fn platform() -> Option<Box<dyn PadSource>> {
+    match crcbl_input::game_controller::GameController::new() {
+        Ok(pads) => {
+            log::info!("gamepads: polling GameController.framework");
+            Some(Box::new(GameControllerPads(pads)))
+        }
+        Err(error) => {
+            log::warn!("gamepads: {error}; running with no pads");
+            None
+        }
+    }
+}
+
 /// The Web Gamepad API, which has nothing to load: the shim reports the pads
 /// every frame.
 #[cfg(target_arch = "wasm32")]
@@ -91,7 +111,12 @@ fn platform() -> Option<Box<dyn PadSource>> {
 }
 
 /// No backend on this target: said once, at start-up.
-#[cfg(not(any(windows, target_os = "linux", target_arch = "wasm32")))]
+#[cfg(not(any(
+    windows,
+    target_os = "linux",
+    target_os = "macos",
+    target_arch = "wasm32"
+)))]
 fn platform() -> Option<Box<dyn PadSource>> {
     log::info!("gamepads: no pad backend exists for this target yet; running with no pads");
     None
@@ -141,6 +166,18 @@ impl PadSource for EvdevPads {
             failing,
             "evdev is reading every pad again",
         );
+    }
+}
+
+/// [`crcbl_input::game_controller::GameController`] as a [`PadSource`]. Its
+/// poll cannot fail, so there is no error to keep.
+#[cfg(target_os = "macos")]
+struct GameControllerPads(crcbl_input::game_controller::GameController);
+
+#[cfg(target_os = "macos")]
+impl PadSource for GameControllerPads {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        self.0.poll(&mut *emit);
     }
 }
 

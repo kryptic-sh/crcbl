@@ -247,6 +247,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **GameController.framework on macOS, `crcbl_input::game_controller`**: a
+  windowed macOS run now sees gamepads. `GameController::poll` reads
+  `[GCController controllers]` once a frame and emits the same `GamepadEvent`s
+  as XInput, evdev and the browser backend, a snapshot only when one changes,
+  and `crcbl::engine::Loop` polls it on macOS. Every controller with an
+  `extendedGamepad` profile is read: `buttonA`/`B`/`X`/`Y` are `South`, `East`,
+  `West` and `North` (GameController names them by Xbox position on every
+  device), `buttonMenu`/`buttonOptions`/`buttonHome` are `Start`/`Select`/
+  `Guide`, triggers come from their `value` (0…1), and the sticks pass through
+  unflipped, GameController's +Y being up already. A controller's family comes
+  from its `productCategory`, or else its `vendorName`. Pads are discovered from
+  the main run loop, which the AppKit shell turns every frame; a process that
+  never turns it sees no pads. The browser backend's value clamp and name match
+  moved to shared modules, so the two backends apply the same ones;
+  `web_gamepad::stick_axis` and `trigger_axis` are unchanged. The mapping and
+  the connect/disconnect transitions are tested on every host, and the framework
+  calls only on CI's macOS job; no controller has been through it.
 - **Web Gamepad API in the browser, `crcbl_input::web_gamepad`**: every browser
   demo now sees gamepads. The page reads `navigator.getGamepads()` once a frame
   (the new `web/engine/gamepad.js`, called from `web/engine/demo.js`) and hands

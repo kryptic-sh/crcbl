@@ -8845,8 +8845,17 @@ browser-hosted single-player game with mods has no containment at all.
   `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
   optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
   polls four XInput slots on Windows. Still owed:
-  - GameController (macOS); that target has no pad module, so naming one fails
-    to build.
+  - **GameController (macOS, 2026-09-23): the framework path is unverified off
+    CI.** Its objc calls and smoke tests have only compiled on Windows via
+    cross-clippy and run solely on CI's `macos-latest` job; no controller has
+    been through it. Open: whether `every_path_names_real_getters` holds (Apple
+    could implement getters on private subclasses), whether the strong-linked
+    `GCProductCategory*` test statics link on the runner's macOS, whether macOS
+    claims `buttonHome` for a system gesture, and whether polling beside the
+    AppKit pump sees hotplug promptly. `shouldMonitorBackgroundEvents` is left
+    at the framework default (pads stop while another app is frontmost; SDL sets
+    it to YES), declined as a product decision. `microGamepad`-only controllers
+    (the Siri Remote) are ignored without a log.
   - **Web Gamepad API (2026-09-23) has met no real controller.** Covered: the
     standard mapping, id parsing and index transitions with scripted reports
     through the real `__crcbl_web_pad_*` exports, and a stand-in DualSense
