@@ -5,6 +5,7 @@
 //! Steam::init(AppId) ──▶ once per frame: pump() ──▶ events() ──▶ act
 //!        │
 //!        ├── user(): steam_id(), logged_on(), steam_level()
+//!        ├── auth(): session_ticket() / begin_session() ──▶ AuthGate, web_api_ticket(), …
 //!        ├── friends(): persona_name(), list(), name(), avatar(), set_rich_presence(),
 //!        │              open_invite_dialog(), open_overlay(), …
 //!        ├── apps(): subscribed(), game_language(), launch_command_line(), owner(),
@@ -28,7 +29,7 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10 and 11: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11 and 12: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -42,7 +43,8 @@
 //! reports, with their buttons' glyphs, the Deck's on-screen keyboards hand
 //! back typed text, screenshots are written to the player's library and
 //! moments marked on Steam's game recording, ownership, DLC, betas and Remote
-//! Play sessions are read, and the
+//! Play sessions are read, tickets prove a player to a peer or a service, and
+//! the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
@@ -89,6 +91,11 @@
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod apps;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod auth;
 #[cfg(all(
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
@@ -219,6 +226,10 @@ pub use crate::{
     apps::{
         Apps, Beta, BetaCount, BetaFlags, CONNECT_LOBBY, Dlc, FileDetails, MAX_TEXT_BYTES,
         connect_lobby,
+    },
+    auth::{
+        Auth, AuthGate, AuthResponse, AuthSession, AuthTicketId, BeginAuthError,
+        EncryptedTicketReady, License, SESSION_TICKET_BYTES, SessionTicket, Verdict, WebApiTicket,
     },
     avatar::{AvatarSize, Rgba},
     call::{CallError, CallResult, CallState, SteamCall},

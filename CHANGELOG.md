@@ -236,11 +236,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10
-  and 11** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's
-  new `steam` feature. A new crate over the SDK's flat C API with no link-time
-  dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
-  `steam_api` beside the executable or under
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
+  11 and 12** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the
+  umbrella's new `steam` feature. A new crate over the SDK's flat C API with no
+  link-time dependency and nothing from the SDK committed: `Steam::init(AppId)`
+  finds `steam_api` beside the executable or under
   `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute path
   at runtime, initialises with an interface-version handshake and switches to
   manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
@@ -324,9 +324,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `steam.remote_play()` lists the Remote Play sessions — who, which device, what
   resolution, whether a Remote Play Together guest — sends Remote Play Together
   invites and opens its panel, and `SteamEvent::RemotePlayConnected` /
-  `…Disconnected` say when one comes and goes. 64-bit Linux, Windows and macOS;
-  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
-  Not yet run against a Steam client with a 1.65 library.
+  `…Disconnected` say when one comes and goes. `steam.auth()` issues session
+  tickets for a peer to validate, web-API tickets and encrypted app tickets,
+  each cancelled when dropped, and validates a peer's ticket with
+  `begin_session` (ended when dropped); an `AuthGate` turns Steam's verdicts
+  into admission — provisional, admitted, rejected then or later, or timed out.
+  64-bit Linux, Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

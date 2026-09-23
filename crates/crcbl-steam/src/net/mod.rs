@@ -15,7 +15,7 @@
 //! is on the other end — no auth ticket needed.
 
 mod end_reason;
-mod identity;
+pub(crate) mod identity;
 mod listener;
 mod transport;
 

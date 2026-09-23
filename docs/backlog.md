@@ -9092,10 +9092,10 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10 and 11 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11 and 12 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10 and 11 are built on branch
-`steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11 and 12 are built on
+branch `steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
 `Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
 the last owner's drop, the local identity and machine basics,
 `relaunch_via_steam`, the fake-library rig, the drift gate and the CI steps
@@ -9114,8 +9114,8 @@ seam) with the Steam-pad filter in `crcbl_input::xinput`, slice 7c's on-screen
 keyboards and glyphs, and slice 8's loop limb (`crcbl::engine::steam`: the loop
 pumps a lent `Steam`, takes its overlay as a focus loss, and polls Steam Input
 as its pad source), slice 10's screenshots and timeline, and slice 11's
-ownership, DLC, betas and Remote Play. The plan, `docs/plan/42-steam.md`,
-carries a status line per slice.
+ownership, DLC, betas and Remote Play, and slice 12's tickets and `AuthGate`.
+The plan, `docs/plan/42-steam.md`, carries a status line per slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9145,8 +9145,8 @@ carries a status line per slice.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 207 lib tests after slice
-  11, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 220 lib tests after slice
+  12, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9246,6 +9246,15 @@ carries a status line per slice.
   the ownership, DLC, beta and install-directory calls answer at all; and a
   Remote Play Together session detected when a friend joins through Steam's
   invite. DLC semantics are untestable until an app id of our own has some.
+- **Slice 12's manual steps have not run, and two halves are not built**: one
+  account's ticket validating on another's machine, a tampered ticket rejected,
+  and a cancelled ticket ending the validator's session — on every OS. Not
+  built: the gate's wiring into the handshake (an `auth_ticket` in
+  `crcbl_net::Hello` beside `session_token`, carried to `crcbl_server::Host`,
+  which admits provisionally and drops on a `Verdict::Rejected` or `TimedOut` —
+  a wire-format change to design with topic 27), and server-side decryption of
+  encrypted app tickets (Valve's `sdkencryptedappticket` on a backend the
+  project does not run). EW needs neither.
 - **`Apps::launch_command_line` does not grow its buffer.** It refuses a line
   with no NUL in its 1024 bytes as `Truncated`, but Steam's copies stop a byte
   short to leave a NUL, so a longer line is more likely cut than refused. Slice

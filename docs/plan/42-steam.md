@@ -16,16 +16,16 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10 and 11
-built on branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest
-planned** — see "Status by slice" under "Slice order". The four decisions the
-earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
-"the full Steam API" is now in scope, which reverses two earlier "not now" calls
-— Steam Input and `SteamTransport` — and pulls the first consumer's requirements
-(the game EW, below) forward in the slice order. The plan was reviewed the same
-day against the SDK 1.65 headers and this tree; "Review (step 2)" at the end
-lists what that changed, including EW's answers to the questions the first draft
-left open.
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11
+and 12 built on branch `steam-sdk`, slice 7a landed on `main` and merged in, the
+rest planned** — see "Status by slice" under "Slice order". The four decisions
+the earlier draft asked for were ratified 2026-09-06 (see "Decisions" below),
+and "the full Steam API" is now in scope, which reverses two earlier "not now"
+calls — Steam Input and `SteamTransport` — and pulls the first consumer's
+requirements (the game EW, below) forward in the slice order. The plan was
+reviewed the same day against the SDK 1.65 headers and this tree; "Review (step
+2)" at the end lists what that changed, including EW's answers to the questions
+the first draft left open.
 
 Two findings shape everything below, so they come first:
 
@@ -1281,7 +1281,51 @@ On branch `steam-sdk`, not merged to `main`:
   step under "Needs a real client" below — under 480, which owns no DLC, only
   that the calls answer — and a Remote Play Together session, on every OS. See
   "Slice 11 as built".
-- Slices 12–15: not started.
+- **Slice 12: done, client half** (2026-09-23). Session, web-API and encrypted
+  app tickets, peer validation and the `AuthGate` provisional-admit state
+  machine, over the fake; every test in the slice's list seen red against a
+  deliberate break; Miri clean; the drift gate passes against the mirror with
+  the eight declarations, four structs and the new base. **Not built:** the
+  gate's wiring into `crcbl-net`'s handshake (an `auth_ticket` beside
+  `Hello::session_token`, topic 27's design) and server-side decryption of
+  encrypted tickets. **Not run:** every step under "Needs a real client" below,
+  on every OS. See "Slice 12 as built".
+- Slices 13–15: not started.
+
+**Slice 12 as built, where it differs from the text below:**
+
+- **`steam.auth()`**:
+  `session_ticket(verifier: Option<SteamId>) -> SessionTicket` (bytes and
+  handle; the identity argument `GetAuthSessionTicket` grew is the verifier's
+  Steam id, or null for anyone), `web_api_ticket(identity) -> WebApiTicket`
+  (bytes as `SteamEvent::WebApiTicket`),
+  `begin_session(ticket, user) -> AuthSession` (`BeginAuthError` for each
+  refusal), `user_has_license(user, app) -> License`,
+  `request_encrypted_ticket(data) -> SteamCall<EncryptedTicketReady>` and
+  `encrypted_ticket()`. Tickets cancel and sessions end in `Drop`, once each.
+- **Buffer sizing:** a session ticket reads into `SESSION_TICKET_BYTES` (1024,
+  the size Valve's documentation asks for), and a count past it cancels the
+  ticket and is `Truncated`; an encrypted ticket reads again at the size Steam
+  names, up to 8 KiB; a web-API ticket's count past its 2560-byte array is a
+  decode mismatch.
+- **The gate is state only**: `AuthGate::begin(user, now)` after an accepted
+  `begin_session`, `observe(&event) -> Option<Verdict>` for
+  `SteamEvent::AuthSessionVerdict`, `expire(now)` for the deadline, and
+  `forget(user)`. `Verdict::Admitted`, `Rejected(user, AuthResponse)` — on the
+  first answer or any later one, such as a cancelled ticket or a ban arriving
+  mid-session — and `TimedOut`. The host owns the clock, the sessions and what a
+  verdict does to a connection.
+- **Not wired into the handshake.** The plan's "an `auth_ticket` beside
+  `Hello::session_token`, validated by a gate the server configures" is a change
+  to `crcbl-net`'s wire format and `crcbl-server`'s admission, to be designed
+  with topic 27; EW needs none of it, so it waits (see the backlog).
+- **Server-side decryption is not built**: it needs Valve's
+  `sdkencryptedappticket` library on a backend holding the app's key, and the
+  project runs no backend.
+- **The drift gate reads `GetTicketForWebApiResponse_t`'s `static const` member
+  as a line of its body**, so its declaration lists it, and with it the array's
+  2560 — a constant the limit table's reader, which takes only `const` lines,
+  cannot reach.
 
 **Slice 11 as built, where it differs from the text below:**
 

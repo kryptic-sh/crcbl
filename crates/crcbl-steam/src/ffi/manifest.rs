@@ -31,8 +31,8 @@
 //! `ELeaderboardUploadScoreMethod`, `ESteamInputType`, `EInputActionOrigin`,
 //! `ESteamInputGlyphSize`, `EGamepadTextInputMode`,
 //! `EGamepadTextInputLineMode`, `EFloatingGamepadTextInputMode`,
-//! `ETimelineGameMode`, `ETimelineEventClipPriority`, `ESteamDeviceFormFactor`)
-//! is taken to be
+//! `ETimelineGameMode`, `ETimelineEventClipPriority`, `ESteamDeviceFormFactor`,
+//! `EBeginAuthSessionResult`, `EUserHasLicenseForAppResult`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -263,6 +263,30 @@ bindings! {
         get_voice_optimal_sample_rate: UserGetVoiceOptimalSampleRate = "SteamAPI_ISteamUser_GetVoiceOptimalSampleRate",
             "S_API uint32 SteamAPI_ISteamUser_GetVoiceOptimalSampleRate( ISteamUser* self );",
             fn(*mut ISteamUser) -> u32;
+        get_auth_session_ticket: UserGetAuthSessionTicket = "SteamAPI_ISteamUser_GetAuthSessionTicket",
+            "S_API HAuthTicket SteamAPI_ISteamUser_GetAuthSessionTicket( ISteamUser* self, void * pTicket, int cbMaxTicket, uint32 * pcbTicket, const SteamNetworkingIdentity * pSteamNetworkingIdentity );",
+            fn(*mut ISteamUser, *mut c_void, i32, *mut u32, *const SteamNetworkingIdentity) -> u32;
+        get_auth_ticket_for_web_api: UserGetAuthTicketForWebApi = "SteamAPI_ISteamUser_GetAuthTicketForWebApi",
+            "S_API HAuthTicket SteamAPI_ISteamUser_GetAuthTicketForWebApi( ISteamUser* self, const char * pchIdentity );",
+            fn(*mut ISteamUser, *const c_char) -> u32;
+        begin_auth_session: UserBeginAuthSession = "SteamAPI_ISteamUser_BeginAuthSession",
+            "S_API EBeginAuthSessionResult SteamAPI_ISteamUser_BeginAuthSession( ISteamUser* self, const void * pAuthTicket, int cbAuthTicket, uint64_steamid steamID );",
+            fn(*mut ISteamUser, *const c_void, i32, u64) -> i32;
+        end_auth_session: UserEndAuthSession = "SteamAPI_ISteamUser_EndAuthSession",
+            "S_API void SteamAPI_ISteamUser_EndAuthSession( ISteamUser* self, uint64_steamid steamID );",
+            fn(*mut ISteamUser, u64);
+        cancel_auth_ticket: UserCancelAuthTicket = "SteamAPI_ISteamUser_CancelAuthTicket",
+            "S_API void SteamAPI_ISteamUser_CancelAuthTicket( ISteamUser* self, HAuthTicket hAuthTicket );",
+            fn(*mut ISteamUser, u32);
+        user_has_license_for_app: UserUserHasLicenseForApp = "SteamAPI_ISteamUser_UserHasLicenseForApp",
+            "S_API EUserHasLicenseForAppResult SteamAPI_ISteamUser_UserHasLicenseForApp( ISteamUser* self, uint64_steamid steamID, AppId_t appID );",
+            fn(*mut ISteamUser, u64, u32) -> i32;
+        request_encrypted_app_ticket: UserRequestEncryptedAppTicket = "SteamAPI_ISteamUser_RequestEncryptedAppTicket",
+            "S_API SteamAPICall_t SteamAPI_ISteamUser_RequestEncryptedAppTicket( ISteamUser* self, void * pDataToInclude, int cbDataToInclude );",
+            fn(*mut ISteamUser, *mut c_void, i32) -> SteamApiCall;
+        get_encrypted_app_ticket: UserGetEncryptedAppTicket = "SteamAPI_ISteamUser_GetEncryptedAppTicket",
+            "S_API bool SteamAPI_ISteamUser_GetEncryptedAppTicket( ISteamUser* self, void * pTicket, int cbMaxTicket, uint32 * pcbTicket );",
+            fn(*mut ISteamUser, *mut c_void, i32, *mut u32) -> bool;
     }
 
     /// `ISteamFriends` (`steam_api_flat.h`).

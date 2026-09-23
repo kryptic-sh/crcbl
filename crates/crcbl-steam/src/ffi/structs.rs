@@ -387,6 +387,38 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &["RemotePlaySessionID_t m_unSessionID"],
     },
     StructDecl {
+        name: "ValidateAuthTicketResponse_t",
+        pack: Pack::Callback,
+        fields: &[
+            "CSteamID m_SteamID",
+            "EAuthSessionResponse m_eAuthSessionResponse",
+            "CSteamID m_OwnerSteamID",
+        ],
+    },
+    StructDecl {
+        name: "EncryptedAppTicketResponse_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_eResult"],
+    },
+    StructDecl {
+        name: "GetAuthSessionTicketResponse_t",
+        pack: Pack::Callback,
+        fields: &["HAuthTicket m_hAuthTicket", "EResult m_eResult"],
+    },
+    StructDecl {
+        name: "GetTicketForWebApiResponse_t",
+        pack: Pack::Callback,
+        // The `static const` member is a line of the body, so the gate reads
+        // it — and with it the array's length, which no limit row can reach.
+        fields: &[
+            "HAuthTicket m_hAuthTicket",
+            "EResult m_eResult",
+            "int m_cubTicket",
+            "static const int k_nCubTicketMaxLength = 2560",
+            "uint8 m_rgubTicket[k_nCubTicketMaxLength]",
+        ],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -1021,6 +1053,57 @@ callback_packed! {
     }
 }
 
+callback_packed! {
+    /// `ValidateAuthTicketResponse_t` (`isteamuser.h`,
+    /// `k_iSteamUserCallbacks + 43`): Steam's verdict on a ticket
+    /// `BeginAuthSession` took — and any later change to it.
+    pub(crate) struct ValidateAuthTicketResponse {
+        /// `CSteamID m_SteamID`.
+        pub(crate) user: CSteamId,
+        /// `EAuthSessionResponse m_eAuthSessionResponse`.
+        pub(crate) response: i32,
+        /// `CSteamID m_OwnerSteamID` — differs from `user` for a borrowed
+        /// licence.
+        pub(crate) owner: CSteamId,
+    }
+}
+
+callback_packed! {
+    /// `EncryptedAppTicketResponse_t` (`isteamuser.h`,
+    /// `k_iSteamUserCallbacks + 54`): the answer to
+    /// `RequestEncryptedAppTicket`.
+    pub(crate) struct EncryptedAppTicketResponse {
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `GetAuthSessionTicketResponse_t` (`isteamuser.h`,
+    /// `k_iSteamUserCallbacks + 63`): a session ticket is ready to be used.
+    pub(crate) struct GetAuthSessionTicketResponse {
+        /// `HAuthTicket m_hAuthTicket`.
+        pub(crate) ticket: u32,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `GetTicketForWebApiResponse_t` (`isteamuser.h`,
+    /// `k_iSteamUserCallbacks + 68`): a web-API ticket's bytes.
+    pub(crate) struct GetTicketForWebApiResponse {
+        /// `HAuthTicket m_hAuthTicket`.
+        pub(crate) ticket: u32,
+        /// `EResult m_eResult`.
+        pub(crate) result: i32,
+        /// `int m_cubTicket` — the bytes of `bytes` in use.
+        pub(crate) size: i32,
+        /// `uint8 m_rgubTicket[k_nCubTicketMaxLength]`.
+        pub(crate) bytes: [u8; 2560],
+    }
+}
+
 /// `SteamRelayNetworkStatus_t` (`isteamnetworkingutils.h`,
 /// `k_iSteamNetworkingUtilsCallbacks + 1`): relay availability, both as
 /// `GetRelayNetworkStatus` fills it and as a callback. Declared under no
@@ -1231,6 +1314,25 @@ mod tests {
         });
         assert_layout!(FloatingGamepadTextInputDismissed, 1, {
             unused: 0, 1;
+        });
+        // Two 1-aligned `CSteamID`s around an `int`: 20 either way.
+        assert_layout!(ValidateAuthTicketResponse, 20, {
+            user: 0, 8;
+            response: 8, 4;
+            owner: 12, 8;
+        });
+        assert_layout!(EncryptedAppTicketResponse, 4, {
+            result: 0, 4;
+        });
+        assert_layout!(GetAuthSessionTicketResponse, 8, {
+            ticket: 0, 4;
+            result: 4, 4;
+        });
+        assert_layout!(GetTicketForWebApiResponse, 2572, {
+            ticket: 0, 4;
+            result: 4, 4;
+            size: 8, 4;
+            bytes: 12, 2560;
         });
         assert_layout!(DlcInstalled, 4, {
             app: 0, 4;

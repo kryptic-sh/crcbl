@@ -21,11 +21,13 @@ mod input;
 mod keyboard;
 mod ownership;
 mod recording;
+mod tickets;
 
 pub(crate) use input::{FakeInput, FakePad};
 pub(crate) use keyboard::FakeKeyboard;
 pub(crate) use ownership::{FakeApps, FakeBeta, FakeRemotePlay, FakeSession};
 pub(crate) use recording::{FakeScreenshots, FakeTimeline};
+pub(crate) use tickets::FakeTickets;
 
 use std::{
     cell::{Cell, RefCell},
@@ -212,6 +214,7 @@ pub(crate) struct Script {
     /// Slice 11's half of `ISteamApps`.
     pub(crate) apps_extra: FakeApps,
     pub(crate) remote_play: FakeRemotePlay,
+    pub(crate) tickets: FakeTickets,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -280,6 +283,7 @@ impl Default for Script {
             timeline: FakeTimeline::default(),
             apps_extra: FakeApps::default(),
             remote_play: FakeRemotePlay::default(),
+            tickets: FakeTickets::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -359,6 +363,14 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_voice: fake_get_voice,
             decompress_voice: fake_decompress_voice,
             get_voice_optimal_sample_rate: fake_get_voice_optimal_sample_rate,
+            get_auth_session_ticket: tickets::fake_get_auth_session_ticket,
+            get_auth_ticket_for_web_api: tickets::fake_get_auth_ticket_for_web_api,
+            begin_auth_session: tickets::fake_begin_auth_session,
+            end_auth_session: tickets::fake_end_auth_session,
+            cancel_auth_ticket: tickets::fake_cancel_auth_ticket,
+            user_has_license_for_app: tickets::fake_user_has_license_for_app,
+            request_encrypted_app_ticket: tickets::fake_request_encrypted_app_ticket,
+            get_encrypted_app_ticket: tickets::fake_get_encrypted_app_ticket,
         },
         net: NetFns {
             accessor: fake_net_accessor,

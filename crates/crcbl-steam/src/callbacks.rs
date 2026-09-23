@@ -19,13 +19,14 @@ use crate::{
     ffi::structs::{
         AvatarImageLoaded, DlcInstalled, FloatingGamepadTextInputDismissed,
         FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
-        GameRichPresenceJoinRequested, GamepadTextInputDismissed, LobbyChatMsg, LobbyChatUpdate,
-        LobbyDataUpdate, NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange,
-        ScreenshotReady, ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
+        GameRichPresenceJoinRequested, GamepadTextInputDismissed, GetAuthSessionTicketResponse,
+        GetTicketForWebApiResponse, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
+        NewUrlLaunchParameters, PersonaStateChange, RemoteStorageLocalFileChange, ScreenshotReady,
+        ScreenshotRequested, SteamApiCallCompleted, SteamInputDeviceConnected,
         SteamInputDeviceDisconnected, SteamNetConnectionInfo, SteamNetConnectionStatusChanged,
         SteamRelayNetworkStatus, SteamRemotePlaySessionConnected,
         SteamRemotePlaySessionDisconnected, UserAchievementStored, UserStatsReceived,
-        UserStatsStored, steam_id,
+        UserStatsStored, ValidateAuthTicketResponse, steam_id,
     },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
@@ -36,6 +37,8 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 pub(crate) enum Base {
+    /// `k_iSteamUserCallbacks`.
+    User = 100,
     /// `k_iSteamFriendsCallbacks`.
     Friends = 300,
     /// `k_iSteamMatchmakingCallbacks`.
@@ -67,6 +70,7 @@ impl Base {
     /// Every base, for the drift gate.
     #[cfg(test)]
     pub(crate) const ALL: &[Self] = &[
+        Self::User,
         Self::Friends,
         Self::Matchmaking,
         Self::Utils,
@@ -85,6 +89,7 @@ impl Base {
     #[cfg(test)]
     pub(crate) const fn valve_name(self) -> &'static str {
         match self {
+            Self::User => "k_iSteamUserCallbacks",
             Self::Friends => "k_iSteamFriendsCallbacks",
             Self::Matchmaking => "k_iSteamMatchmakingCallbacks",
             Self::Utils => "k_iSteamUtilsCallbacks",
@@ -261,6 +266,35 @@ pub enum SteamEvent {
         screenshot: crate::ScreenshotId,
         /// `EResult::OK`, or why not.
         result: EResult,
+    },
+    /// A session ticket from [`Auth::session_ticket`](crate::Auth::session_ticket)
+    /// is ready to be sent (`GetAuthSessionTicketResponse_t`).
+    AuthTicketReady {
+        /// Which.
+        ticket: crate::AuthTicketId,
+        /// `EResult::OK`, or why the ticket is unusable.
+        result: EResult,
+    },
+    /// A web-API ticket from [`Auth::web_api_ticket`](crate::Auth::web_api_ticket)
+    /// arrived (`GetTicketForWebApiResponse_t`).
+    WebApiTicket {
+        /// Which.
+        ticket: crate::AuthTicketId,
+        /// `EResult::OK`, or why there is none.
+        result: EResult,
+        /// The ticket's bytes, for the web API; empty on failure.
+        bytes: Vec<u8>,
+    },
+    /// Steam's verdict on a ticket [`Auth::begin_session`](crate::Auth::begin_session)
+    /// took, or a later change to it (`ValidateAuthTicketResponse_t`) — feed
+    /// it to an [`AuthGate`](crate::AuthGate).
+    AuthSessionVerdict {
+        /// Whose ticket.
+        user: SteamId,
+        /// The verdict.
+        response: crate::AuthResponse,
+        /// Who owns the licence — another account for a borrowed game.
+        owner: SteamId,
     },
     /// A DLC the player owns was installed (`DlcInstalled_t`).
     DlcInstalled {
@@ -686,6 +720,57 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::User,
+        offset: 43,
+        #[cfg(test)]
+        name: "ValidateAuthTicketResponse_t",
+        size: size_of::<ValidateAuthTicketResponse>(),
+        decode: |bytes| {
+            read::<ValidateAuthTicketResponse>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::AuthSessionVerdict {
+                    user: SteamId(steam_id(payload.user)),
+                    response: crate::AuthResponse::from_raw(payload.response),
+                    owner: SteamId(steam_id(payload.owner)),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::User,
+        offset: 63,
+        #[cfg(test)]
+        name: "GetAuthSessionTicketResponse_t",
+        size: size_of::<GetAuthSessionTicketResponse>(),
+        decode: |bytes| {
+            read::<GetAuthSessionTicketResponse>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::AuthTicketReady {
+                    ticket: crate::AuthTicketId(payload.ticket),
+                    result: EResult(payload.result),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::User,
+        offset: 68,
+        #[cfg(test)]
+        name: "GetTicketForWebApiResponse_t",
+        size: size_of::<GetTicketForWebApiResponse>(),
+        decode: |bytes| {
+            let payload = read::<GetTicketForWebApiResponse>(bytes)?;
+            // A count past the array is a library that broke its own
+            // contract: refused, not read past.
+            let size = usize::try_from(payload.size)
+                .ok()
+                .filter(|&size| size <= payload.bytes.len())?;
+            Some(Decoded::Event(SteamEvent::WebApiTicket {
+                ticket: crate::AuthTicketId(payload.ticket),
+                result: EResult(payload.result),
+                bytes: payload.bytes[..size].to_vec(),
+            }))
+        },
+    },
+    Row {
         base: Base::Apps,
         offset: 5,
         #[cfg(test)]
@@ -853,6 +938,14 @@ unsafe impl Pod for LobbyChatMsg {}
 unsafe impl Pod for crate::ffi::structs::LobbyCreated {}
 // SAFETY: as above.
 unsafe impl Pod for crate::ffi::structs::LobbyEnter {}
+// SAFETY: as above.
+unsafe impl Pod for ValidateAuthTicketResponse {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::EncryptedAppTicketResponse {}
+// SAFETY: as above.
+unsafe impl Pod for GetAuthSessionTicketResponse {}
+// SAFETY: as above.
+unsafe impl Pod for GetTicketForWebApiResponse {}
 // SAFETY: as above.
 unsafe impl Pod for DlcInstalled {}
 // SAFETY: as above.
