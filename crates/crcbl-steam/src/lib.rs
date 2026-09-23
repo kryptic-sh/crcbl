@@ -5,7 +5,8 @@
 //! Steam::init(AppId) ──▶ once per frame: pump() ──▶ events() ──▶ act
 //!        │
 //!        ├── user(): steam_id(), logged_on(), steam_level()
-//!        ├── friends(): persona_name(), set_rich_presence(), open_invite_dialog()
+//!        ├── friends(): persona_name(), list(), name(), avatar(), set_rich_presence(),
+//!        │              open_invite_dialog(), open_overlay(), …
 //!        ├── apps(): subscribed(), game_language(), launch_command_line()
 //!        ├── utils(): app_id(), steam_hardware(), overlay_enabled(), …
 //!        └── matchmaking(): create_lobby() / join_lobby() ──▶ SteamCall<T>
@@ -13,10 +14,11 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b and 3a: the library is found and
+//! land. What exists now is slices 1, 1b, 3a and 3b: the library is found and
 //! opened at runtime, Steam is initialised with a version handshake, the
 //! callback pipe is drained by manual dispatch into a queue of `SteamEvent`s,
-//! the local player's identity and the machine's basics are read,
+//! the local player's identity, the machine's basics and the friends list —
+//! names, states, avatars, rich presence — are read,
 //! asynchronous calls are typed tokens redeemed after the pump, lobbies are
 //! created, joined, invited to and left, and the API is shut down exactly
 //! once, when the last owner of it is gone. Every string Steam returns is
@@ -64,6 +66,11 @@
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod apps;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod avatar;
 #[cfg(all(
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
@@ -137,11 +144,14 @@ mod utils;
 ))]
 pub use crate::{
     apps::{Apps, CONNECT_LOBBY, connect_lobby},
+    avatar::{AvatarSize, Rgba},
     call::{CallError, CallResult, CallState, SteamCall},
     callbacks::SteamEvent,
     client::{AppId, Steam},
     error::{EResult, InitError, SteamError},
-    friends::Friends,
+    friends::{
+        FriendFlags, Friends, OverlayDialog, PersonaChange, PersonaState, UserDialog, WebPageMode,
+    },
     matchmaking::{
         EnterResponse, Lobby, LobbyCreated, LobbyEntered, LobbyId, LobbyKind,
         MAX_LOBBY_CHAT_MESSAGE, MAX_LOBBY_KEY_LENGTH, Matchmaking, MemberChange,

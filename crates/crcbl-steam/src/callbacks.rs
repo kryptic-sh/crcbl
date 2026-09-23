@@ -15,11 +15,13 @@
 //! on the pipe (`LobbyEnter_t`) is skipped there like any other unclaimed id.
 
 use crate::{
-    SteamId,
+    AppId, SteamId,
     ffi::structs::{
-        GameLobbyJoinRequested, GameOverlayActivated, GameRichPresenceJoinRequested, LobbyChatMsg,
-        LobbyChatUpdate, LobbyDataUpdate, NewUrlLaunchParameters, SteamApiCallCompleted, steam_id,
+        AvatarImageLoaded, FriendRichPresenceUpdate, GameLobbyJoinRequested, GameOverlayActivated,
+        GameRichPresenceJoinRequested, LobbyChatMsg, LobbyChatUpdate, LobbyDataUpdate,
+        NewUrlLaunchParameters, PersonaStateChange, SteamApiCallCompleted, steam_id,
     },
+    friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
 };
 
@@ -85,6 +87,34 @@ pub enum SteamEvent {
         friend: Option<SteamId>,
         /// The connect string.
         connect: String,
+    },
+    /// Something about a user changed (`PersonaStateChange_t`): read the
+    /// new name, state or avatar through [`Friends`](crate::Friends). Steam
+    /// sends one per friend at start-up, as it learns about each.
+    PersonaStateChanged {
+        /// Who.
+        user: SteamId,
+        /// What changed.
+        change: PersonaChange,
+    },
+    /// An avatar that was still downloading has arrived
+    /// (`AvatarImageLoaded_t`): ask [`Friends::avatar`](crate::Friends::avatar)
+    /// again.
+    AvatarLoaded {
+        /// Whose avatar.
+        user: SteamId,
+        /// Its width in pixels.
+        width: u32,
+        /// Its height in pixels.
+        height: u32,
+    },
+    /// A friend's rich presence changed (`FriendRichPresenceUpdate_t`): read
+    /// it with [`Friends::rich_presence`](crate::Friends::rich_presence).
+    FriendRichPresenceChanged {
+        /// The friend.
+        friend: SteamId,
+        /// The app the presence belongs to.
+        app: AppId,
     },
     /// The game was launched again through a Steam URL while running
     /// (`NewUrlLaunchParameters_t`): re-read
@@ -223,6 +253,52 @@ pub(crate) const ROWS: &[Row] = &[
     },
     Row {
         base: Base::Friends,
+        offset: 4,
+        #[cfg(test)]
+        name: "PersonaStateChange_t",
+        size: size_of::<PersonaStateChange>(),
+        decode: |bytes| {
+            read::<PersonaStateChange>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::PersonaStateChanged {
+                    user: SteamId(payload.user),
+                    change: PersonaChange(payload.change.cast_unsigned()),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Friends,
+        offset: 34,
+        #[cfg(test)]
+        name: "AvatarImageLoaded_t",
+        size: size_of::<AvatarImageLoaded>(),
+        // A negative size is not an image; it decodes to nothing and is counted.
+        decode: |bytes| {
+            let payload = read::<AvatarImageLoaded>(bytes)?;
+            Some(Decoded::Event(SteamEvent::AvatarLoaded {
+                user: SteamId(steam_id(payload.user)),
+                width: u32::try_from(payload.width).ok()?,
+                height: u32::try_from(payload.height).ok()?,
+            }))
+        },
+    },
+    Row {
+        base: Base::Friends,
+        offset: 36,
+        #[cfg(test)]
+        name: "FriendRichPresenceUpdate_t",
+        size: size_of::<FriendRichPresenceUpdate>(),
+        decode: |bytes| {
+            read::<FriendRichPresenceUpdate>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::FriendRichPresenceChanged {
+                    friend: SteamId(steam_id(payload.friend)),
+                    app: AppId(payload.app),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Friends,
         offset: 33,
         #[cfg(test)]
         name: "GameLobbyJoinRequested_t",
@@ -353,6 +429,12 @@ unsafe impl Pod for GameLobbyJoinRequested {}
 unsafe impl Pod for GameRichPresenceJoinRequested {}
 // SAFETY: as above.
 unsafe impl Pod for NewUrlLaunchParameters {}
+// SAFETY: as above.
+unsafe impl Pod for PersonaStateChange {}
+// SAFETY: as above.
+unsafe impl Pod for AvatarImageLoaded {}
+// SAFETY: as above.
+unsafe impl Pod for FriendRichPresenceUpdate {}
 // SAFETY: as above.
 unsafe impl Pod for LobbyDataUpdate {}
 // SAFETY: as above.
@@ -603,6 +685,52 @@ mod tests {
                 lobby: LobbyId(1),
                 chat_id: 77,
             })
+        );
+    }
+
+    #[test]
+    fn persona_avatar_and_presence_changes_decode() {
+        let (row, bytes) = fixture(
+            304,
+            &[(0, &7u64.to_le_bytes()), (8, &0x4040_i32.to_le_bytes())],
+        );
+        assert_eq!(
+            (row.decode)(&bytes),
+            Some(Decoded::Event(SteamEvent::PersonaStateChanged {
+                user: SteamId(7),
+                change: PersonaChange(0x4040),
+            }))
+        );
+        let (row, bytes) = fixture(
+            334,
+            &[
+                (0, &7u64.to_le_bytes()),
+                (8, &3i32.to_le_bytes()),
+                (12, &64i32.to_le_bytes()),
+                (16, &32i32.to_le_bytes()),
+            ],
+        );
+        assert_eq!(
+            (row.decode)(&bytes),
+            Some(Decoded::Event(SteamEvent::AvatarLoaded {
+                user: SteamId(7),
+                width: 64,
+                height: 32,
+            }))
+        );
+        let (row, bytes) = fixture(334, &[(12, &(-1i32).to_le_bytes())]);
+        assert_eq!(
+            (row.decode)(&bytes),
+            None,
+            "a negative width is not an image"
+        );
+        let (row, bytes) = fixture(336, &[(0, &7u64.to_le_bytes()), (8, &480u32.to_le_bytes())]);
+        assert_eq!(
+            (row.decode)(&bytes),
+            Some(Decoded::Event(SteamEvent::FriendRichPresenceChanged {
+                friend: SteamId(7),
+                app: AppId(480),
+            }))
         );
     }
 }

@@ -8996,18 +8996,19 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b and 3a built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a and 3b built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b and 3a are built on branch `steam-sdk`** (not merged):
+**Slices 1, 1b, 3a and 3b are built on branch `steam-sdk`** (not merged):
 `crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
 handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
 local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
 the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
 `miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
 `HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
-slice 3a's async call registry, lobbies, invites, rich presence and join paths.
-The plan, `docs/plan/42-steam.md`, carries a status line per slice; slice 3b
-(persona, friends list, avatars) is next.
+slice 3a's async call registry, lobbies, invites, rich presence and join paths,
+and slice 3b's friends list, personas and avatars. The plan,
+`docs/plan/42-steam.md`, carries a status line per slice; slice 4
+(`SteamTransport`, `SteamListener`) is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9037,8 +9038,8 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice; slice 3b
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 80 lib tests after slice
-  3a, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 91 lib tests after slice
+  3b, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9052,6 +9053,9 @@ The plan, `docs/plan/42-steam.md`, carries a status line per slice; slice 3b
   running and closed, rich-presence join running and closed), and the owner
   leaving. Everything Steam-side of them is exercised only over the fake; the
   sandbox drives them from F5/F6/F7 and logs each event.
+- **Slice 3b's manual steps have not run on any OS**: the friends list and
+  avatars in the sandbox's F3 panel, and the overlay opening to a profile (F8)
+  and a web page (F9).
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.

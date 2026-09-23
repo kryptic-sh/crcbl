@@ -16,15 +16,15 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b and 3a built on branch `steam-sdk`, the rest
-planned** — see "Status by slice" under "Slice order". The four decisions the
-earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
-"the full Steam API" is now in scope, which reverses two earlier "not now" calls
-— Steam Input and `SteamTransport` — and pulls the first consumer's requirements
-(the game EW, below) forward in the slice order. The plan was reviewed the same
-day against the SDK 1.65 headers and this tree; "Review (step 2)" at the end
-lists what that changed, including EW's answers to the questions the first draft
-left open.
+**Status (2026-09-23): slices 1, 1b, 3a and 3b built on branch `steam-sdk`, the
+rest planned** — see "Status by slice" under "Slice order". The four decisions
+the earlier draft asked for were ratified 2026-09-06 (see "Decisions" below),
+and "the full Steam API" is now in scope, which reverses two earlier "not now"
+calls — Steam Input and `SteamTransport` — and pulls the first consumer's
+requirements (the game EW, below) forward in the slice order. The plan was
+reviewed the same day against the SDK 1.65 headers and this tree; "Review (step
+2)" at the end lists what that changed, including EW's answers to the questions
+the first draft left open.
 
 Two findings shape everything below, so they come first:
 
@@ -1183,8 +1183,13 @@ On branch `steam-sdk`, not merged to `main`:
   client" below (two accounts, four join paths), on every OS. Before it,
   `eb583ac0` made `cargo fmt` see the crate at all (see "The crate and its
   gating").
-- **Slice 3b: next.**
-- Slices 4, 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
+- **Slice 3b: done** (2026-09-23). Persona, friends list, avatars, friends' rich
+  presence and the overlay dialogs, over the fake; Miri clean (91 lib tests);
+  the drift gate passes against the mirror. **Not run:** the real-client steps
+  below (friends list and avatars in the sandbox panel, the overlay to a profile
+  and a web page), on every OS.
+- **Slice 4: next.**
+- Slices 2, 6, 5, 7a–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1336,6 +1341,27 @@ On branch `steam-sdk`, not merged to `main`:
   They are text scanning with no `unsafe`, and with 3a's tables their synthetic
   SDKs took longer to interpret than the `miri (crcbl-steam)` job's budget; the
   rest of the lib tests (80) interpret in about 20 seconds.
+
+**Slice 3b as built, where it differs from the text below:**
+
+- **One avatar call, fallible:**
+  `friends().avatar(user, AvatarSize) -> Result<Option<Rgba>, SteamError>`
+  rather than `small_avatar(id) -> Option<Rgba>`, because sizing and copying can
+  each be refused. `Ok(None)` is handle `0` (no avatar) or `-1` (the large one
+  still downloading), and neither reaches `ISteamUtils` (tested). A size whose
+  `4 × w × h` overflows a `usize` or the `int` `GetImageRGBA` takes is the new
+  `SteamError::ImageTooLarge`, refused before any copy.
+- **More of the row than the text named:** `persona_state()`/`state(user)`
+  (`PersonaState`, `Unknown(i32)` kept), `request_user_information`, and
+  `FriendRichPresenceUpdate_t` (336) as `SteamEvent::FriendRichPresenceChanged`
+  beside `rich_presence(friend, key)` and `request_rich_presence(friend)` —
+  reading a friend's presence needs the request and the answer.
+- **`AvatarImageLoaded_t` is the struct `CSteamID`'s alignment decides**: 20
+  bytes under both packings, which the `[u8; 8]` declaration reproduces and a
+  `u64` would not (24 under `pack(8)`); its table is pack-independent.
+- **The sandbox panel** gains the friends-list size and whether the player's own
+  medium avatar has loaded; F8 opens the overlay to the first friend's profile,
+  F9 to a web page.
 
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
@@ -1572,8 +1598,8 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   `ISteamUtils::GetImageSize`/`GetImageRGBA` and `AvatarImageLoaded_t`, reading
   friends' rich presence, `ActivateGameOverlay`/`…ToUser`/`…ToWebPage`. EW's
   "wanted" friends list.
-- **Files:** `crcbl-steam/src/{friends,avatar}.rs`, additions to `ffi/` and
-  `callbacks.rs`.
+- **Files:** `crates/crcbl-steam/src/friends.rs`,
+  `crates/crcbl-steam/src/avatar.rs`, additions to `ffi/` and `callbacks.rs`.
 - **API:** `steam.friends().list(FriendFlags::IMMEDIATE) -> Vec<SteamId>`,
   `steam.friends().name(id) -> String`,
   `steam.friends().small_avatar(id) -> Option<Rgba>` (`None` until

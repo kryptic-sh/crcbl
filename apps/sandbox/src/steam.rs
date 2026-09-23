@@ -1,6 +1,6 @@
 //! Steam in the sandbox, behind its `steam` feature.
 //!
-//! `docs/plan/42-steam.md` slices 1b and 3a: on a windowed run, initialise
+//! `docs/plan/42-steam.md` slices 1b, 3a and 3b: on a windowed run, initialise
 //! Steam under Valve's shared test app 480, log who is playing, pump once a
 //! frame, and hand an opened overlay to the loop as a focus loss — which
 //! pauses and releases held input exactly as alt-tab does. Without Steam, the
@@ -12,7 +12,13 @@
 //! - **F5** creates a friends-only lobby for four and sets the rich-presence
 //!   `connect` key, so friends can "Join game" from their list;
 //! - **F6** opens the overlay's invite dialog for it;
-//! - **F7** leaves it.
+//! - **F7** leaves it;
+//! - **F8** opens the overlay to the first friend's profile (or the player's
+//!   own, with no friends);
+//! - **F9** opens the overlay's browser at the Steamworks documentation.
+//!
+//! The panel also shows the friends-list size and whether the player's own
+//! medium avatar has loaded — slice 3b's friends list and avatars.
 //!
 //! Every join path joins by itself: an accepted invite or "Join game" while
 //! running (`LobbyJoinRequested`, `RichPresenceJoinRequested`), a launch
@@ -39,8 +45,8 @@ mod imp {
     use crcbl::{
         core::input::KeyCode,
         steam::{
-            AppId, CallState, Lobby, LobbyCreated, LobbyEntered, LobbyId, LobbyKind, Steam,
-            SteamCall, SteamEvent, connect_lobby,
+            AppId, AvatarSize, CallState, FriendFlags, Lobby, LobbyCreated, LobbyEntered, LobbyId,
+            LobbyKind, Steam, SteamCall, SteamEvent, UserDialog, WebPageMode, connect_lobby,
         },
         ui::{DebugModule, DebugPanel, DebugSection},
     };
@@ -52,6 +58,9 @@ mod imp {
 
     /// The squad size the F5 lobby admits: the host and three friends.
     const SQUAD: i32 = 4;
+
+    /// What F9 opens in the overlay's browser.
+    const STEAMWORKS_DOCS: &str = "https://partner.steamgames.com/doc/home";
 
     /// The sandbox's Steam session, or the lack of one.
     #[derive(Debug)]
@@ -136,7 +145,7 @@ mod imp {
             }
         }
 
-        /// The lobby keys: F5 create, F6 invite, F7 leave.
+        /// The keys: F5 create, F6 invite, F7 leave, F8 profile, F9 web page.
         pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
             let Some(steam) = &mut self.steam else {
                 return;
@@ -158,6 +167,23 @@ mod imp {
                     Some(lobby) => steam.friends().open_invite_dialog(lobby.id()),
                     None => crcbl::log::info!("steam: F5 creates a lobby to invite to first"),
                 },
+                KeyCode::F8 => {
+                    let friends = steam.friends();
+                    let whom = friends
+                        .list(FriendFlags::IMMEDIATE)
+                        .first()
+                        .copied()
+                        .unwrap_or_else(|| steam.user().steam_id());
+                    friends.open_overlay_to_user(UserDialog::Profile, whom);
+                }
+                KeyCode::F9 => {
+                    if let Err(error) = steam
+                        .friends()
+                        .open_overlay_to_web_page(STEAMWORKS_DOCS, WebPageMode::Default)
+                    {
+                        crcbl::log::warn!("steam: overlay web page: {error}");
+                    }
+                }
                 KeyCode::F7 => {
                     if let Some(lobby) = self.lobby.take() {
                         crcbl::log::info!("steam: left {:?}", lobby.id());
@@ -276,7 +302,19 @@ mod imp {
                 out.row_str("session", "none");
                 return;
             };
-            out.row("me", format_args!("{:?}", steam.user().steam_id()));
+            let me = steam.user().steam_id();
+            out.row("me", format_args!("{me:?}"));
+            out.row(
+                "friends",
+                format_args!("{}", steam.friends().list(FriendFlags::IMMEDIATE).len()),
+            );
+            match steam.friends().avatar(me, AvatarSize::Medium) {
+                Ok(Some(avatar)) => {
+                    out.row("avatar", format_args!("{}x{}", avatar.width, avatar.height))
+                }
+                Ok(None) => out.row_str("avatar", "none yet"),
+                Err(error) => out.row("avatar", format_args!("{error}")),
+            }
             match &self.lobby {
                 Some(lobby) => {
                     out.row("lobby", format_args!("{:?}", lobby.id()));

@@ -221,13 +221,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b and 3a** (`docs/plan/42-steam.md`),
-  and `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over
-  the SDK's flat C API with no link-time dependency and nothing from the SDK
-  committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
-  under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
-  path at runtime, initialises with an interface-version handshake and switches
-  to manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a and 3b**
+  (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
+  `steam` feature. A new crate over the SDK's flat C API with no link-time
+  dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
+  `steam_api` beside the executable or under
+  `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute path
+  at runtime, initialises with an interface-version handshake and switches to
+  manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
   ships-through-Steam guard (`SteamAPI_RestartAppIfNecessary`). `Steam::pump`
   drains the pipe once per frame and `Steam::events` yields
   `SteamEvent::OverlayActivated`. `steam.user()` reads `steam_id()`,
@@ -251,10 +252,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `NewLaunchParameters`), `LobbyMemberChanged`, `LobbyOwnerChanged`,
   `LobbyDataChanged` and `LobbyChatMessage`. `friends().set_rich_presence`,
   `open_invite_dialog` and `invite_to_game` send invites, with Steam's limits
-  checked before the call, and `connect_lobby(args)` reads the
-  `+connect_lobby <id>` a launch carries. 64-bit Linux, Windows and macOS;
-  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
-  Not yet run against a Steam client with a 1.65 library.
+  checked before the call; `friends()` also lists friends, reads their names,
+  states, avatars (`avatar(user, size)` as RGBA) and rich presence, and opens
+  the overlay's dialogs, profile pages and browser; and `connect_lobby(args)`
+  reads the `+connect_lobby <id>` a launch carries. 64-bit Linux, Windows and
+  macOS; elsewhere the crate is empty. `apps/sandbox --features steam` exercises
+  it. Not yet run against a Steam client with a 1.65 library.
 - `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
   window never sees — the Steam overlay opening — and the loop answers it
   exactly as it answers the window losing focus: held keys, buttons and contacts

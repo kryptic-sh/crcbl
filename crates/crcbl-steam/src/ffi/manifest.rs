@@ -23,7 +23,8 @@
 //! has, a declaration here is a claim about the mirror's fidelity as much as
 //! about the SDK. Some choices are worth naming. Every enum crossing here
 //! (`ESteamHardwareType`, `ESteamHardwareDefaultConfig`,
-//! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`) is taken to be
+//! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`,
+//! `EPersonaState`, `EActivateGameOverlayToWebPageMode`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -240,6 +241,48 @@ bindings! {
         invite_user_to_game: FriendsInviteUserToGame = "SteamAPI_ISteamFriends_InviteUserToGame",
             "S_API bool SteamAPI_ISteamFriends_InviteUserToGame( ISteamFriends* self, uint64_steamid steamIDFriend, const char * pchConnectString );",
             fn(*mut ISteamFriends, u64, *const c_char) -> bool;
+        get_persona_state: FriendsGetPersonaState = "SteamAPI_ISteamFriends_GetPersonaState",
+            "S_API EPersonaState SteamAPI_ISteamFriends_GetPersonaState( ISteamFriends* self );",
+            fn(*mut ISteamFriends) -> i32;
+        get_friend_count: FriendsGetFriendCount = "SteamAPI_ISteamFriends_GetFriendCount",
+            "S_API int SteamAPI_ISteamFriends_GetFriendCount( ISteamFriends* self, int iFriendFlags );",
+            fn(*mut ISteamFriends, i32) -> i32;
+        get_friend_by_index: FriendsGetFriendByIndex = "SteamAPI_ISteamFriends_GetFriendByIndex",
+            "S_API uint64_steamid SteamAPI_ISteamFriends_GetFriendByIndex( ISteamFriends* self, int iFriend, int iFriendFlags );",
+            fn(*mut ISteamFriends, i32, i32) -> u64;
+        get_friend_persona_state: FriendsGetFriendPersonaState = "SteamAPI_ISteamFriends_GetFriendPersonaState",
+            "S_API EPersonaState SteamAPI_ISteamFriends_GetFriendPersonaState( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64) -> i32;
+        get_friend_persona_name: FriendsGetFriendPersonaName = "SteamAPI_ISteamFriends_GetFriendPersonaName",
+            "S_API const char * SteamAPI_ISteamFriends_GetFriendPersonaName( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64) -> *const c_char;
+        activate_game_overlay: FriendsActivateGameOverlay = "SteamAPI_ISteamFriends_ActivateGameOverlay",
+            "S_API void SteamAPI_ISteamFriends_ActivateGameOverlay( ISteamFriends* self, const char * pchDialog );",
+            fn(*mut ISteamFriends, *const c_char);
+        activate_game_overlay_to_user: FriendsActivateGameOverlayToUser = "SteamAPI_ISteamFriends_ActivateGameOverlayToUser",
+            "S_API void SteamAPI_ISteamFriends_ActivateGameOverlayToUser( ISteamFriends* self, const char * pchDialog, uint64_steamid steamID );",
+            fn(*mut ISteamFriends, *const c_char, u64);
+        activate_game_overlay_to_web_page: FriendsActivateGameOverlayToWebPage = "SteamAPI_ISteamFriends_ActivateGameOverlayToWebPage",
+            "S_API void SteamAPI_ISteamFriends_ActivateGameOverlayToWebPage( ISteamFriends* self, const char * pchURL, EActivateGameOverlayToWebPageMode eMode );",
+            fn(*mut ISteamFriends, *const c_char, i32);
+        get_small_friend_avatar: FriendsGetSmallFriendAvatar = "SteamAPI_ISteamFriends_GetSmallFriendAvatar",
+            "S_API int SteamAPI_ISteamFriends_GetSmallFriendAvatar( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64) -> i32;
+        get_medium_friend_avatar: FriendsGetMediumFriendAvatar = "SteamAPI_ISteamFriends_GetMediumFriendAvatar",
+            "S_API int SteamAPI_ISteamFriends_GetMediumFriendAvatar( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64) -> i32;
+        get_large_friend_avatar: FriendsGetLargeFriendAvatar = "SteamAPI_ISteamFriends_GetLargeFriendAvatar",
+            "S_API int SteamAPI_ISteamFriends_GetLargeFriendAvatar( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64) -> i32;
+        request_user_information: FriendsRequestUserInformation = "SteamAPI_ISteamFriends_RequestUserInformation",
+            "S_API bool SteamAPI_ISteamFriends_RequestUserInformation( ISteamFriends* self, uint64_steamid steamIDUser, bool bRequireNameOnly );",
+            fn(*mut ISteamFriends, u64, bool) -> bool;
+        get_friend_rich_presence: FriendsGetFriendRichPresence = "SteamAPI_ISteamFriends_GetFriendRichPresence",
+            "S_API const char * SteamAPI_ISteamFriends_GetFriendRichPresence( ISteamFriends* self, uint64_steamid steamIDFriend, const char * pchKey );",
+            fn(*mut ISteamFriends, u64, *const c_char) -> *const c_char;
+        request_friend_rich_presence: FriendsRequestFriendRichPresence = "SteamAPI_ISteamFriends_RequestFriendRichPresence",
+            "S_API void SteamAPI_ISteamFriends_RequestFriendRichPresence( ISteamFriends* self, uint64_steamid steamIDFriend );",
+            fn(*mut ISteamFriends, u64);
     }
 
     /// `ISteamMatchmaking`, lobbies only (`steam_api_flat.h`).
@@ -345,6 +388,12 @@ bindings! {
         get_ip_country: UtilsGetIpCountry = "SteamAPI_ISteamUtils_GetIPCountry",
             "S_API const char * SteamAPI_ISteamUtils_GetIPCountry( ISteamUtils* self );",
             fn(*mut ISteamUtils) -> *const c_char;
+        get_image_size: UtilsGetImageSize = "SteamAPI_ISteamUtils_GetImageSize",
+            "S_API bool SteamAPI_ISteamUtils_GetImageSize( ISteamUtils* self, int iImage, uint32 * pnWidth, uint32 * pnHeight );",
+            fn(*mut ISteamUtils, i32, *mut u32, *mut u32) -> bool;
+        get_image_rgba: UtilsGetImageRgba = "SteamAPI_ISteamUtils_GetImageRGBA",
+            "S_API bool SteamAPI_ISteamUtils_GetImageRGBA( ISteamUtils* self, int iImage, uint8 * pubDest, int nDestBufferSize );",
+            fn(*mut ISteamUtils, i32, *mut u8, i32) -> bool;
     }
 }
 

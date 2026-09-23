@@ -165,6 +165,25 @@ pub(crate) struct Script {
     /// What `GetLobbyChatEntry` answers: sender, entry type, body, and the
     /// count it returns (normally the body's length).
     pub(crate) chat_entry: (u64, i32, Vec<u8>, i32),
+    /// What `GetPersonaState` and `GetFriendPersonaState` answer.
+    pub(crate) persona_state: i32,
+    /// The users `GetFriendByIndex` walks, and the flags each call passed.
+    pub(crate) friends: Vec<u64>,
+    pub(crate) friend_flags: Vec<i32>,
+    /// What `RequestUserInformation` answers, and each `(user, name only)`.
+    pub(crate) info_pending: bool,
+    pub(crate) info_requests: Vec<(u64, bool)>,
+    /// Every friend `RequestFriendRichPresence` asked about.
+    pub(crate) presence_requests: Vec<u64>,
+    /// Every overlay call: `(function, argument, user or mode)`.
+    pub(crate) overlays: Vec<(&'static str, String, u64)>,
+    /// The small, medium and large avatar handles.
+    pub(crate) avatar_handles: [i32; 3],
+    /// The one image every handle names: width, height, pixels. `None`
+    /// makes `GetImageSize` answer false.
+    pub(crate) image: Option<(u32, u32, Vec<u8>)>,
+    /// Every `(function, handle, buffer size)` the image calls received.
+    pub(crate) image_calls: Vec<(&'static str, i32, i32)>,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -213,6 +232,16 @@ impl Default for Script {
             lobby_writes: Vec::new(),
             chat_sent: Vec::new(),
             chat_entry: (0, 0, Vec::new(), 0),
+            persona_state: 0,
+            friends: Vec::new(),
+            friend_flags: Vec::new(),
+            info_pending: false,
+            info_requests: Vec::new(),
+            presence_requests: Vec::new(),
+            overlays: Vec::new(),
+            avatar_handles: [0; 3],
+            image: None,
+            image_calls: Vec::new(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -294,6 +323,20 @@ pub(crate) fn fake_lib() -> &'static Lib {
             set_rich_presence: fake_set_rich_presence,
             clear_rich_presence: fake_clear_rich_presence,
             invite_user_to_game: fake_invite_user_to_game,
+            get_persona_state: fake_get_persona_state,
+            get_friend_count: fake_get_friend_count,
+            get_friend_by_index: fake_get_friend_by_index,
+            get_friend_persona_state: fake_get_friend_persona_state,
+            get_friend_persona_name: fake_get_friend_persona_name,
+            activate_game_overlay: fake_activate_game_overlay,
+            activate_game_overlay_to_user: fake_activate_game_overlay_to_user,
+            activate_game_overlay_to_web_page: fake_activate_game_overlay_to_web_page,
+            get_small_friend_avatar: fake_get_small_friend_avatar,
+            get_medium_friend_avatar: fake_get_medium_friend_avatar,
+            get_large_friend_avatar: fake_get_large_friend_avatar,
+            request_user_information: fake_request_user_information,
+            get_friend_rich_presence: fake_get_friend_rich_presence,
+            request_friend_rich_presence: fake_request_friend_rich_presence,
         },
         matchmaking: MatchmakingFns {
             accessor: fake_matchmaking_accessor,
@@ -334,6 +377,8 @@ pub(crate) fn fake_lib() -> &'static Lib {
             set_overlay_notification_inset: fake_set_overlay_notification_inset,
             get_server_real_time: fake_get_server_real_time,
             get_ip_country: fake_get_ip_country,
+            get_image_size: fake_get_image_size,
+            get_image_rgba: fake_get_image_rgba,
         },
     })));
     FAKES.lock().unwrap().push(lib);
@@ -875,4 +920,137 @@ pub(crate) fn lobby_enter(lobby: u64, response: u32, locked: bool) -> Vec<u8> {
             &response.to_le_bytes(),
         ),
     ])
+}
+
+unsafe extern "C" fn fake_get_persona_state(_: *mut ISteamFriends) -> i32 {
+    script(|s| s.persona_state)
+}
+
+unsafe extern "C" fn fake_get_friend_count(_: *mut ISteamFriends, flags: i32) -> i32 {
+    script(|s| {
+        s.friend_flags.push(flags);
+        i32::try_from(s.friends.len()).unwrap()
+    })
+}
+
+unsafe extern "C" fn fake_get_friend_by_index(
+    _: *mut ISteamFriends,
+    index: i32,
+    flags: i32,
+) -> u64 {
+    script(|s| {
+        s.friend_flags.push(flags);
+        s.friends[usize::try_from(index).unwrap()]
+    })
+}
+
+unsafe extern "C" fn fake_get_friend_persona_state(_: *mut ISteamFriends, _: u64) -> i32 {
+    script(|s| s.persona_state)
+}
+
+unsafe extern "C" fn fake_get_friend_persona_name(_: *mut ISteamFriends, _: u64) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_activate_game_overlay(_: *mut ISteamFriends, dialog: *const c_char) {
+    // SAFETY: the caller passes a NUL-terminated string.
+    let dialog = unsafe { arg(dialog) };
+    script(|s| s.overlays.push(("ActivateGameOverlay", dialog, 0)));
+}
+
+unsafe extern "C" fn fake_activate_game_overlay_to_user(
+    _: *mut ISteamFriends,
+    dialog: *const c_char,
+    user: u64,
+) {
+    // SAFETY: the caller passes a NUL-terminated string.
+    let dialog = unsafe { arg(dialog) };
+    script(|s| s.overlays.push(("ActivateGameOverlayToUser", dialog, user)));
+}
+
+unsafe extern "C" fn fake_activate_game_overlay_to_web_page(
+    _: *mut ISteamFriends,
+    url: *const c_char,
+    mode: i32,
+) {
+    // SAFETY: the caller passes a NUL-terminated string.
+    let url = unsafe { arg(url) };
+    let mode = u64::try_from(mode).unwrap();
+    script(|s| s.overlays.push(("ActivateGameOverlayToWebPage", url, mode)));
+}
+
+unsafe extern "C" fn fake_get_small_friend_avatar(_: *mut ISteamFriends, _: u64) -> i32 {
+    script(|s| s.avatar_handles[0])
+}
+
+unsafe extern "C" fn fake_get_medium_friend_avatar(_: *mut ISteamFriends, _: u64) -> i32 {
+    script(|s| s.avatar_handles[1])
+}
+
+unsafe extern "C" fn fake_get_large_friend_avatar(_: *mut ISteamFriends, _: u64) -> i32 {
+    script(|s| s.avatar_handles[2])
+}
+
+unsafe extern "C" fn fake_request_user_information(
+    _: *mut ISteamFriends,
+    user: u64,
+    name_only: bool,
+) -> bool {
+    script(|s| {
+        s.info_requests.push((user, name_only));
+        s.info_pending
+    })
+}
+
+unsafe extern "C" fn fake_get_friend_rich_presence(
+    _: *mut ISteamFriends,
+    _: u64,
+    _: *const c_char,
+) -> *const c_char {
+    fake_string()
+}
+
+unsafe extern "C" fn fake_request_friend_rich_presence(_: *mut ISteamFriends, friend: u64) {
+    script(|s| s.presence_requests.push(friend));
+}
+
+unsafe extern "C" fn fake_get_image_size(
+    _: *mut ISteamUtils,
+    image: i32,
+    width: *mut u32,
+    height: *mut u32,
+) -> bool {
+    script(|s| {
+        s.image_calls.push(("GetImageSize", image, 0));
+        let Some((w, h, _)) = &s.image else {
+            return false;
+        };
+        // SAFETY: the caller passes two writable `uint32`s.
+        unsafe {
+            width.write(*w);
+            height.write(*h);
+        }
+        true
+    })
+}
+
+unsafe extern "C" fn fake_get_image_rgba(
+    _: *mut ISteamUtils,
+    image: i32,
+    out: *mut u8,
+    size: i32,
+) -> bool {
+    script(|s| {
+        s.image_calls.push(("GetImageRGBA", image, size));
+        if s.refuse {
+            return false;
+        }
+        let Some((_, _, pixels)) = &s.image else {
+            return false;
+        };
+        let len = pixels.len().min(usize::try_from(size).unwrap());
+        // SAFETY: the caller passes `size` writable bytes.
+        unsafe { core::ptr::copy_nonoverlapping(pixels.as_ptr(), out, len) };
+        true
+    })
 }

@@ -136,6 +136,26 @@ pub(crate) const DECLS: &[StructDecl] = &[
         fields: &[],
     },
     StructDecl {
+        name: "PersonaStateChange_t",
+        pack: Pack::Callback,
+        fields: &["uint64 m_ulSteamID", "int m_nChangeFlags"],
+    },
+    StructDecl {
+        name: "AvatarImageLoaded_t",
+        pack: Pack::Callback,
+        fields: &[
+            "CSteamID m_steamID",
+            "int m_iImage",
+            "int m_iWide",
+            "int m_iTall",
+        ],
+    },
+    StructDecl {
+        name: "FriendRichPresenceUpdate_t",
+        pack: Pack::Callback,
+        fields: &["CSteamID m_steamIDFriend", "AppId_t m_nAppID"],
+    },
+    StructDecl {
         name: "LobbyCreated_t",
         pack: Pack::Callback,
         fields: &["EResult m_eResult", "uint64 m_ulSteamIDLobby"],
@@ -294,6 +314,44 @@ callback_packed! {
 }
 
 callback_packed! {
+    /// `PersonaStateChange_t` (`isteamfriends.h`, `k_iSteamFriendsCallbacks +
+    /// 4`): something about a user changed — name, status, avatar, rich
+    /// presence; `m_nChangeFlags` says what.
+    pub(crate) struct PersonaStateChange {
+        /// `uint64 m_ulSteamID`.
+        pub(crate) user: u64,
+        /// `int m_nChangeFlags` — `EPersonaChange` bits.
+        pub(crate) change: i32,
+    }
+}
+
+callback_packed! {
+    /// `AvatarImageLoaded_t` (`isteamfriends.h`, `k_iSteamFriendsCallbacks +
+    /// 34`): an avatar that was still downloading has arrived.
+    pub(crate) struct AvatarImageLoaded {
+        /// `CSteamID m_steamID`.
+        pub(crate) user: CSteamId,
+        /// `int m_iImage` — the image handle.
+        pub(crate) image: i32,
+        /// `int m_iWide`.
+        pub(crate) width: i32,
+        /// `int m_iTall`.
+        pub(crate) height: i32,
+    }
+}
+
+callback_packed! {
+    /// `FriendRichPresenceUpdate_t` (`isteamfriends.h`,
+    /// `k_iSteamFriendsCallbacks + 36`): a friend's rich presence changed.
+    pub(crate) struct FriendRichPresenceUpdate {
+        /// `CSteamID m_steamIDFriend`.
+        pub(crate) friend: CSteamId,
+        /// `AppId_t m_nAppID`.
+        pub(crate) app: u32,
+    }
+}
+
+callback_packed! {
     /// `NewUrlLaunchParameters_t` (`isteamapps.h`, `k_iSteamAppsCallbacks +
     /// 14`): the game was launched again through a Steam URL while running.
     /// The C++ struct has no members; a C++ struct is never empty, so it is
@@ -436,6 +494,17 @@ mod tests {
             friend: 0, 8;
             connect: 8, 256;
         });
+        // 20 under both packings only because `CSteamID` is 1-aligned.
+        assert_layout!(AvatarImageLoaded, 20, {
+            user: 0, 8;
+            image: 8, 4;
+            width: 12, 4;
+            height: 16, 4;
+        });
+        assert_layout!(FriendRichPresenceUpdate, 12, {
+            friend: 0, 8;
+            app: 8, 4;
+        });
         // Made only of 1-aligned `CSteamID`s and bytes, so 1-aligned in C too;
         // a `u64` in place of `CSteamId` would make these 4 or 8.
         assert_eq!(align_of::<GameLobbyJoinRequested>(), 1);
@@ -469,6 +538,10 @@ mod tests {
             callback: 4, 4;
             param: 8, 8;
             param_size: 16, 4;
+        });
+        assert_layout!(PersonaStateChange, 12, {
+            user: 0, 8;
+            change: 8, 4;
         });
         // The `uint64` after a 4-byte `EResult` sits at 4, not 8.
         assert_layout!(LobbyCreated, 12, {
@@ -511,6 +584,10 @@ mod tests {
             callback: 4, 4;
             param: 8, 8;
             param_size: 16, 4;
+        });
+        assert_layout!(PersonaStateChange, 16, {
+            user: 0, 8;
+            change: 8, 4;
         });
         assert_layout!(LobbyCreated, 16, {
             result: 0, 4;

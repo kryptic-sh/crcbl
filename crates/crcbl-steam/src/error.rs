@@ -152,6 +152,15 @@ pub enum SteamError {
     /// Joining a lobby failed with this `EChatRoomEnterResponse`.
     #[error("could not enter the lobby: {0:?}")]
     LobbyEnter(crate::matchmaking::EnterResponse),
+    /// An image Steam reports is too large to allocate, or for its size to
+    /// be handed back through the `int` `GetImageRGBA` takes.
+    #[error("Steam reports a {width}x{height} image, too large to copy")]
+    ImageTooLarge {
+        /// The width Steam reported.
+        width: u32,
+        /// The height Steam reported.
+        height: u32,
+    },
     /// What Steam returned filled the whole buffer, so it may have been cut
     /// short; the named call's answer is refused rather than guessed at.
     #[error("{0} filled its whole buffer and may be truncated")]
