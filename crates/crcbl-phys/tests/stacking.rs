@@ -183,30 +183,52 @@ fn column(phys: &mut PhysicsSystem, count: u32, half: f64) -> Vec<Entity> {
         .collect()
 }
 
-/// How far the top of a column of `count` one-metre cubes, each asking for
-/// `substeps` in a system at the default settings, has sunk and moved
-/// sideways after `ticks`, and the most any box in it has tipped, as the sine
-/// of the angle.
-fn column_drift(count: u32, substeps: u32, ticks: u32) -> (f64, f64, f64) {
-    let mut phys = system(CRATE);
+/// Where a column stands after one tick: how far its top box has sunk and
+/// moved sideways, the most any box in it has tipped, as the sine of the
+/// angle, and whether every box in it sleeps.
+#[derive(Clone, Copy, Debug)]
+struct ColumnSample {
+    sunk: f64,
+    sideways: f64,
+    tipped: f64,
+    asleep: bool,
+}
+
+/// A column of `count` one-metre cubes, each asking for `substeps`, in a
+/// system at `settings`, sampled after each of `ticks` ticks: the sample after
+/// tick `n` is at index `n - 1`.
+fn column_trace(
+    settings: ContactSettings,
+    count: u32,
+    substeps: u32,
+    ticks: u32,
+) -> Vec<ColumnSample> {
+    let mut phys = system_with(settings, CRATE);
     let boxes = column(&mut phys, count, 0.5);
     for &e in &boxes {
         phys.set_substeps(e, substeps);
     }
     let top = *boxes.last().expect("a column has a top");
     let start = position(&phys, top);
-    for _ in 0..ticks {
-        phys.step(DT);
-    }
-    let drift = position(&phys, top) - start;
-    let tipped = boxes
-        .iter()
-        .map(|&e| {
-            let up = phys.transform(e).expect("a box").rotation * DVec3::Y;
-            (up.x * up.x + up.z * up.z).sqrt()
+    (0..ticks)
+        .map(|_| {
+            phys.step(DT);
+            let drift = position(&phys, top) - start;
+            let tipped = boxes
+                .iter()
+                .map(|&e| {
+                    let up = phys.transform(e).expect("a box").rotation * DVec3::Y;
+                    (up.x * up.x + up.z * up.z).sqrt()
+                })
+                .fold(0.0, f64::max);
+            ColumnSample {
+                sunk: -drift.y,
+                sideways: DVec3::new(drift.x, 0.0, drift.z).length(),
+                tipped,
+                asleep: boxes.iter().all(|&e| phys.is_sleeping(e)),
+            }
         })
-        .fold(0.0, f64::max);
-    (-drift.y, DVec3::new(drift.x, 0.0, drift.z).length(), tipped)
+        .collect()
 }
 
 /// **A column of twenty one-metre cubes stands for ten seconds** in a system
@@ -225,26 +247,102 @@ fn column_drift(count: u32, substeps: u32, ticks: u32) -> (f64, f64, f64) {
 /// Asking for eight substeps (60 Hz), it sank 2.66 cm; for none, 10.6 cm.
 #[test]
 fn a_column_of_twenty_boxes_stands() {
-    let (sunk, sideways, tipped) = column_drift(20, 12, 600);
+    let ColumnSample {
+        sunk,
+        sideways,
+        tipped,
+        ..
+    } = *column_trace(ContactSettings::DEFAULT, 20, 12, 600)
+        .last()
+        .expect("600 ticks");
     assert!(sideways < 5e-3, "the top box moved {sideways} m sideways");
     assert!(sunk < 0.02, "the top box sank {sunk} m under the column");
     assert!(tipped < 2e-3, "a box tipped by {tipped}");
 }
 
 /// **At the default settings a column shorter than Greenhill's height
-/// stands**: fourteen one-metre cubes, where the soft contacts' arithmetic in
-/// the solver's groups (`src/contact/group.rs`) puts the limit at fifteen.
+/// stands, and falls asleep standing**: fourteen one-metre cubes, where the
+/// soft contacts' arithmetic in the solver's groups (`src/contact/group.rs`)
+/// puts the limit at fifteen.
 ///
-/// Measured on 2026-09-23 over 600 ticks, at rung 2: the top box sank
-/// 5.12 cm and moved 1.8 mm sideways, and no box tipped more than 0.2 mrad.
-/// Seventeen, over the limit, leaned 0.54 m by tick 600 and lay 6.2 m away by
-/// tick 900. Measured again at rung 5: 5.03 cm, 8.5 mm sideways, 0.95 mrad.
+/// With sleep on, what a late reading measures is where the column fell
+/// asleep, not where the solver holds it: the column sways slowly — under the
+/// 5 cm/s of [`ContactSettings::sleep_speed`] — so the island goes still half
+/// a second after it settles and freezes mid-swing, and every later tick reads
+/// that one frozen pose. So this bounds that pose, and that it is the pose the
+/// column keeps. How the solver holds the column up while it keeps swinging is
+/// `a_column_under_greenhills_height_damps_its_sway`'s, with sleep off.
+///
+/// Measured on 2026-09-23 at rung 5: every box asleep from tick 49, the top
+/// box frozen 5.03 cm sunk and 8.52 mm sideways, no box tipped more than
+/// 0.95 mrad, and the same to the bit at tick 600. At rung 2, before sleep,
+/// the same test read 1.8 mm sideways at tick 600: where the swing happened
+/// to be then. Seventeen cubes, over the limit, leaned 0.54 m by tick 600 and
+/// lay 6.2 m away by tick 900.
 #[test]
 fn a_column_under_greenhills_height_stands_at_the_defaults() {
-    let (sunk, sideways, tipped) = column_drift(14, 0, 600);
-    assert!(sideways < 1e-2, "the top box moved {sideways} m sideways");
+    let trace = column_trace(ContactSettings::DEFAULT, 14, 0, 600);
+    let asleep_from = trace
+        .iter()
+        .position(|s| s.asleep)
+        .expect("the column falls asleep");
+    let tick = asleep_from + 1;
+    assert!(tick <= 60, "the column fell asleep at tick {tick}");
+    assert!(
+        trace[asleep_from..].iter().all(|s| s.asleep),
+        "the column woke after tick {tick}"
+    );
+    let frozen = trace[asleep_from];
+    let last = trace.last().expect("600 ticks");
+    assert_eq!(
+        (last.sunk, last.sideways, last.tipped),
+        (frozen.sunk, frozen.sideways, frozen.tipped),
+        "the column moved in its sleep"
+    );
+    let ColumnSample {
+        sunk,
+        sideways,
+        tipped,
+        ..
+    } = frozen;
+    assert!(sideways < 1e-2, "the top box slept {sideways} m sideways");
+    assert!(sunk < 0.06, "the top box slept {sunk} m sunk");
+    assert!(tipped < 2e-3, "a box slept tipped by {tipped}");
+}
+
+/// **Kept awake, a column under Greenhill's height sways and the sway dies
+/// away**: the fourteen cubes of the test above with sleep off, bounded over
+/// the whole run rather than at one tick, since a single tick reads wherever
+/// the swing happens to be.
+///
+/// Measured on 2026-09-23 at rung 5, over 600 ticks: the top box swings out
+/// to 13.67 mm sideways at tick 120, back to within a millimetre of the
+/// column's axis, out again to 6.96 mm at tick 395 — half the first swing —
+/// and is at 1.79 mm at tick 600; it sinks at most 5.12 cm, and no box tips
+/// more than 1.49 mrad. The first swing is the largest over the first 300 ticks and the
+/// second the largest over the last 300, and the bounds are those with room:
+/// 16 mm for the first, and the second under 0.6 of it.
+#[test]
+fn a_column_under_greenhills_height_damps_its_sway() {
+    let trace = column_trace(AWAKE, 14, 0, 600);
+    let most = |samples: &[ColumnSample], of: fn(&ColumnSample) -> f64| {
+        samples.iter().map(of).fold(0.0, f64::max)
+    };
+    let (first, second) = trace.split_at(300);
+    let first_swing = most(first, |s| s.sideways);
+    let second_swing = most(second, |s| s.sideways);
+    assert!(
+        first_swing < 0.016,
+        "the top box swung {first_swing} m sideways"
+    );
+    assert!(
+        second_swing < 0.6 * first_swing,
+        "the top box swung {first_swing} m and then {second_swing} m"
+    );
+    let sunk = most(&trace, |s| s.sunk);
+    let tipped = most(&trace, |s| s.tipped);
     assert!(sunk < 0.06, "the top box sank {sunk} m under the column");
-    assert!(tipped < 5e-3, "a box tipped by {tipped}");
+    assert!(tipped < 2e-3, "a box tipped by {tipped}");
 }
 
 /// A pyramid with `base` cubes of half-extent `half` along its bottom row,

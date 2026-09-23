@@ -8618,9 +8618,14 @@ remain, and from rung 2:
   and the column with the dominoes. One system would show per-group substeps
   costing the rest nothing, but needs `page.rs` and `app.rs` to split one tally
   per scene. Needs a decision.
-- `stacking.rs`'s `a_column_under_greenhills_height_stands_at_the_defaults`
-  sways 8.5 mm against its 1 cm bound (1.8 mm when written at rung 2; cause not
-  investigated).
+- **A sleeping stack freezes mid-sway, by the sleep thresholds (a surprise, not
+  a bug).** A tall column's slow sway sits under `ContactSettings::sleep_speed`,
+  so the 14-cube column in `stacking.rs` falls asleep at tick 49 leaning 8.52
+  mm; any late reading of a sleeping stack is the pose it fell asleep in. The
+  test bounds that frozen pose, and a sibling
+  (`a_column_under_greenhills_height_damps_its_sway`) bounds the awake swing and
+  its decay. Whether a stack may sleep while still visibly swaying is an open
+  design question for the thresholds.
 - **Rung 5 shipped 2026-09-23: static triangle meshes, and joints.**
   `TriangleMesh` (Jolt-style active edges; proving scene
   `crates/crcbl-phys/tests/meshes.rs`) and five joint types from Box3D
