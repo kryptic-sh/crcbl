@@ -189,6 +189,21 @@ fn decompress_asks_for_the_rate_and_retries_once_at_steams_size() {
     assert_eq!(voice(|v| v.decompressions.len()), 2);
 }
 
+/// A packet comes from another player, so the size Steam names for it is
+/// held to the same ceiling as a poll's before anything is allocated.
+#[test]
+fn decompress_refuses_a_size_past_the_packet_ceiling_without_allocating() {
+    let steam = steam();
+    voice(|v| v.pcm = vec![0; MAX_PACKET_BYTES + 2]);
+    assert_eq!(
+        steam.voice().decompress(&[1], VOICE_SAMPLE_RATE),
+        Err(VoiceError::BufferTooSmall {
+            needed: MAX_PACKET_BYTES + 2
+        })
+    );
+    assert_eq!(voice(|v| v.decompressions.len()), 1, "no second try");
+}
+
 #[test]
 fn decompress_refuses_a_rate_outside_the_decoder_before_any_call() {
     let steam = steam();

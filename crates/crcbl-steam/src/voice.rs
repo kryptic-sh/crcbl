@@ -26,10 +26,11 @@ pub const MAX_VOICE_SAMPLE_RATE: u32 = 48_000;
 /// starting "with a 20kb buffer".
 const DECOMPRESS_START_BYTES: usize = 20 * 1024;
 
-/// The most one compressed packet may grow [`VoiceCapture::poll`]'s buffer
-/// to — far past the buffer `isteamuser.h` suggests for a whole decoded
-/// packet. A library that asks for more is broken, and the poll says so
-/// rather than keep allocating.
+/// The most one packet may grow [`VoiceCapture::poll`]'s buffer, or
+/// [`Voice::decompress`]'s, to — far past the buffer `isteamuser.h` suggests
+/// for a whole decoded packet. A library that asks for more is broken, or was
+/// handed a packet built to make it ask, and the call says so rather than
+/// allocate.
 const MAX_PACKET_BYTES: usize = 1024 * 1024;
 
 /// `EVoiceResult`'s values (`steamclientpublic.h`).
@@ -159,7 +160,7 @@ impl Voice<'_> {
     /// [`VoiceError::SampleRate`] outside the decoder's range, before any
     /// call; otherwise what Steam answers — a corrupt packet, a codec this
     /// client lacks — or [`VoiceError::BufferTooSmall`] when the size Steam
-    /// asked for was still too small.
+    /// asked for was still too small, or past what one packet may decode to.
     pub fn decompress(&self, compressed: &[u8], sample_rate: u32) -> Result<Vec<f32>, VoiceError> {
         if !(MIN_VOICE_SAMPLE_RATE..=MAX_VOICE_SAMPLE_RATE).contains(&sample_rate) {
             return Err(VoiceError::SampleRate(sample_rate));
@@ -192,6 +193,9 @@ impl Voice<'_> {
             match answer {
                 result::OK if written <= out.len() => return samples(&out[..written]),
                 result::OK => return Err(VoiceError::BufferTooSmall { needed: written }),
+                result::BUFFER_TOO_SMALL if written > MAX_PACKET_BYTES => {
+                    return Err(VoiceError::BufferTooSmall { needed: written });
+                }
                 result::BUFFER_TOO_SMALL if written > out.len() => out.resize(written, 0),
                 result::BUFFER_TOO_SMALL => {
                     return Err(VoiceError::BufferTooSmall { needed: out.len() });
