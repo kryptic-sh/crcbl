@@ -9,7 +9,8 @@
 //! - reliable traffic is drained before unreliable
 //!   ([`reliable_is_received_before_unreliable`]);
 //! - [`Transport::recv_reliable`] never hands back unreliable traffic
-//!   ([`recv_reliable_never_returns_unreliable`]);
+//!   ([`recv_reliable_never_returns_unreliable`]), and does hand back reliable
+//!   traffic, in order ([`recv_reliable_returns_reliable_traffic_in_order`]);
 //! - [`Message::kind`] on a received message is set by the sending call, not
 //!   copied from the sender's field ([`the_send_method_sets_the_kind`]);
 //! - reliable messages arrive in the order sent, each end receives the
@@ -19,7 +20,10 @@
 //!   ([`an_oversized_message_names_its_size_and_the_limit`]);
 //! - an end whose peer is gone reports [`TransportError::Disconnected`] and
 //!   stops claiming to be connected
-//!   ([`a_dropped_peer_is_disconnected`]).
+//!   ([`a_dropped_peer_is_disconnected`]), but only after the reliable
+//!   messages the peer sent before it was dropped
+//!   ([`reliable_messages_sent_before_a_drop_arrive_first`]) — the order a
+//!   server's session-end message relies on.
 //!
 //! [`check_all`] runs every one. Behind the `conformance` feature, for the
 //! crates that implement a transport; `crcbl-net`'s own tests run it against
@@ -65,10 +69,12 @@ fn drain<T: Transport>(end: &mut T) -> Vec<Message> {
 pub fn check_all<L: Link>(link: &mut L) {
     reliable_is_received_before_unreliable(link);
     recv_reliable_never_returns_unreliable(link);
+    recv_reliable_returns_reliable_traffic_in_order(link);
     the_send_method_sets_the_kind(link);
     reliable_messages_arrive_in_order(link);
     an_oversized_message_names_its_size_and_the_limit(link);
     a_dropped_peer_is_disconnected(link);
+    reliable_messages_sent_before_a_drop_arrive_first(link);
 }
 
 /// Unreliable sent first, reliable second: `recv` yields the reliable one
@@ -102,6 +108,41 @@ pub fn recv_reliable_never_returns_unreliable<L: Link>(link: &mut L) {
         "recv_reliable returned unreliable traffic: {reliable:?}"
     );
     assert_eq!(drain(&mut b).len(), 1, "the unreliable message was lost");
+}
+
+/// With reliable and unreliable traffic queued, `recv_reliable` yields the
+/// reliable messages in order and then nothing, leaving the unreliable one to
+/// `recv`.
+pub fn recv_reliable_returns_reliable_traffic_in_order<L: Link>(link: &mut L) {
+    let (mut a, mut b) = link.pair();
+    a.send_unreliable(Message::unreliable(b"state".to_vec()))
+        .expect("send unreliable");
+    a.send_reliable(Message::reliable(b"first".to_vec()))
+        .expect("send reliable");
+    a.send_reliable(Message::reliable(b"second".to_vec()))
+        .expect("send reliable");
+    link.settle();
+    let mut reliable = Vec::new();
+    for _ in 0..DRAIN_LIMIT {
+        match b
+            .recv_reliable()
+            .expect("recv_reliable on a connected pair")
+        {
+            Some(message) => reliable.push(message.payload),
+            None => break,
+        }
+    }
+    assert_eq!(
+        reliable,
+        [b"first".to_vec(), b"second".to_vec()],
+        "recv_reliable must return the reliable traffic, in order"
+    );
+    let rest: Vec<Vec<u8>> = drain(&mut b).into_iter().map(|m| m.payload).collect();
+    assert_eq!(
+        rest,
+        [b"state".to_vec()],
+        "recv must still deliver the rest"
+    );
 }
 
 /// A message whose `kind` field disagrees with the send method arrives
@@ -204,6 +245,42 @@ pub fn a_dropped_peer_is_disconnected<L: Link>(link: &mut L) {
     assert!(!b.is_connected(), "is_connected after the peer dropped");
 }
 
+/// Reliable messages sent just before the sender is dropped reach the peer,
+/// in order, before it reports [`TransportError::Disconnected`].
+pub fn reliable_messages_sent_before_a_drop_arrive_first<L: Link>(link: &mut L) {
+    let (mut a, mut b) = link.pair();
+    a.send_reliable(Message::reliable(b"last words".to_vec()))
+        .expect("send reliable");
+    a.send_reliable(Message::reliable(b"goodbye".to_vec()))
+        .expect("send reliable");
+    drop(a);
+    link.settle();
+    let mut received = Vec::new();
+    let mut outcome = None;
+    for _ in 0..DRAIN_LIMIT {
+        match b.recv() {
+            Ok(Some(message)) => received.push(message.payload),
+            Ok(None) => {
+                outcome = Some(Ok(()));
+                break;
+            }
+            Err(error) => {
+                outcome = Some(Err(error));
+                break;
+            }
+        }
+    }
+    assert_eq!(
+        received,
+        [b"last words".to_vec(), b"goodbye".to_vec()],
+        "reliable messages sent before a drop must arrive before the disconnect"
+    );
+    assert!(
+        matches!(outcome, Some(Err(TransportError::Disconnected))),
+        "recv after the queued messages: {outcome:?}"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,7 +304,7 @@ mod tests {
     }
 
     // One test per check, so a transport that breaks one says which; the
-    // same six are what `check_all` runs for other crates.
+    // same checks are what `check_all` runs for other crates.
     #[test]
     fn in_memory_reliable_is_received_before_unreliable() {
         reliable_is_received_before_unreliable(&mut InMemory);
@@ -256,5 +333,102 @@ mod tests {
     #[test]
     fn in_memory_a_dropped_peer_is_disconnected() {
         a_dropped_peer_is_disconnected(&mut InMemory);
+    }
+
+    #[test]
+    fn in_memory_recv_reliable_returns_reliable_traffic_in_order() {
+        recv_reliable_returns_reliable_traffic_in_order(&mut InMemory);
+    }
+
+    #[test]
+    fn in_memory_reliable_messages_sent_before_a_drop_arrive_first() {
+        reliable_messages_sent_before_a_drop_arrive_first(&mut InMemory);
+    }
+
+    /// `InMemoryTransport` with one promise broken, to show the check for it
+    /// can fail.
+    struct Broken {
+        inner: InMemoryTransport,
+        /// `recv_reliable` always answers that nothing is queued.
+        deaf_reliable: bool,
+        /// `recv` reports the disconnect before draining what is queued.
+        disconnect_first: bool,
+    }
+
+    impl Transport for Broken {
+        fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.inner.send_reliable(msg)
+        }
+
+        fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.inner.send_unreliable(msg)
+        }
+
+        fn recv_reliable(&mut self) -> Result<Option<Message>, TransportError> {
+            if self.deaf_reliable {
+                return Ok(None);
+            }
+            self.inner.recv_reliable()
+        }
+
+        fn recv(&mut self) -> Result<Option<Message>, TransportError> {
+            if self.disconnect_first {
+                // Probe the link the way a transport that checks its state
+                // before its queue would, and report the drop first.
+                let probe = Message::reliable(Vec::new());
+                if let Err(TransportError::Disconnected) = self.inner.send_reliable(probe) {
+                    return Err(TransportError::Disconnected);
+                }
+            }
+            self.inner.recv()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+    }
+
+    /// Pairs of [`Broken`], each end breaking what the flags say.
+    struct BrokenLink {
+        deaf_reliable: bool,
+        disconnect_first: bool,
+    }
+
+    impl Link for BrokenLink {
+        type Transport = Broken;
+
+        fn pair(&mut self) -> (Broken, Broken) {
+            let (a, b) = InMemoryTransport::pair();
+            let wrap = |inner| Broken {
+                inner,
+                deaf_reliable: self.deaf_reliable,
+                disconnect_first: self.disconnect_first,
+            };
+            (wrap(a), wrap(b))
+        }
+
+        fn settle(&mut self) {}
+
+        fn max_message_bytes(&self) -> usize {
+            MAX_IN_MEMORY_MESSAGE_BYTES
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "recv_reliable must return the reliable traffic")]
+    fn a_recv_reliable_that_never_answers_fails() {
+        recv_reliable_returns_reliable_traffic_in_order(&mut BrokenLink {
+            deaf_reliable: true,
+            disconnect_first: false,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "must arrive before the disconnect")]
+    fn a_disconnect_that_overtakes_queued_messages_fails() {
+        reliable_messages_sent_before_a_drop_arrive_first(&mut BrokenLink {
+            deaf_reliable: false,
+            disconnect_first: true,
+        });
     }
 }

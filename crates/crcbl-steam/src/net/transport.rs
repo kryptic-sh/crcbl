@@ -439,6 +439,16 @@ mod tests {
     }
 
     #[test]
+    fn conformance_recv_reliable_returns_reliable_traffic_in_order() {
+        conformance::recv_reliable_returns_reliable_traffic_in_order(&mut Loop::new());
+    }
+
+    #[test]
+    fn conformance_reliable_messages_sent_before_a_drop_arrive_first() {
+        conformance::reliable_messages_sent_before_a_drop_arrive_first(&mut Loop::new());
+    }
+
+    #[test]
     fn a_transport_is_send() {
         fn send<T: Send>() {}
         send::<SteamTransport>();
