@@ -45,7 +45,10 @@
 //! `VALVE_CALLBACK_PACK_LARGE`, so if `callback_packed!` picked the wrong
 //! arm on some target, that one table says so before any real struct is read.
 
-use super::{HSteamUser, PublishedFileId, SteamApiCall, UgcQueryHandle};
+use super::{
+    HSteamUser, PublishedFileId, SteamApiCall, SteamInventoryResult, SteamItemDef,
+    SteamItemInstanceId, UgcQueryHandle,
+};
 
 /// Declares a struct under Valve's callback packing: `pack(8)` on Windows,
 /// `pack(4)` on Linux and macOS.
@@ -417,6 +420,45 @@ pub(crate) const DECLS: &[StructDecl] = &[
             "static const int k_nCubTicketMaxLength = 2560",
             "uint8 m_rgubTicket[k_nCubTicketMaxLength]",
         ],
+    },
+    StructDecl {
+        name: "SteamItemDetails_t",
+        pack: Pack::Callback,
+        fields: &[
+            "SteamItemInstanceID_t m_itemId",
+            "SteamItemDef_t m_iDefinition",
+            "uint16 m_unQuantity",
+            "uint16 m_unFlags",
+        ],
+    },
+    StructDecl {
+        name: "SteamInventoryResultReady_t",
+        pack: Pack::Callback,
+        fields: &["SteamInventoryResult_t m_handle", "EResult m_result"],
+    },
+    StructDecl {
+        name: "SteamInventoryFullUpdate_t",
+        pack: Pack::Callback,
+        fields: &["SteamInventoryResult_t m_handle"],
+    },
+    StructDecl {
+        name: "SteamInventoryDefinitionUpdate_t",
+        pack: Pack::Callback,
+        fields: &[],
+    },
+    StructDecl {
+        name: "SteamInventoryStartPurchaseResult_t",
+        pack: Pack::Callback,
+        fields: &[
+            "EResult m_result",
+            "uint64 m_ulOrderID",
+            "uint64 m_ulTransID",
+        ],
+    },
+    StructDecl {
+        name: "SteamInventoryRequestPricesResult_t",
+        pack: Pack::Callback,
+        fields: &["EResult m_result", "char m_rgchCurrency[4]"],
     },
     StructDecl {
         name: "SteamParamStringArray_t",
@@ -1207,6 +1249,77 @@ callback_packed! {
 }
 
 callback_packed! {
+    /// `SteamItemDetails_t` (`isteaminventory.h`): one item a result holds,
+    /// as `GetResultItems` fills it.
+    pub(crate) struct SteamItemDetails {
+        /// `SteamItemInstanceID_t m_itemId`.
+        pub(crate) item: SteamItemInstanceId,
+        /// `SteamItemDef_t m_iDefinition`.
+        pub(crate) definition: SteamItemDef,
+        /// `uint16 m_unQuantity`.
+        pub(crate) quantity: u16,
+        /// `uint16 m_unFlags` — `ESteamItemFlags`.
+        pub(crate) flags: u16,
+    }
+}
+
+callback_packed! {
+    /// `SteamInventoryResultReady_t` (`isteaminventory.h`,
+    /// `k_iSteamInventoryCallbacks + 0`): a result left the pending state —
+    /// exactly once per result.
+    pub(crate) struct SteamInventoryResultReady {
+        /// `SteamInventoryResult_t m_handle`.
+        pub(crate) handle: SteamInventoryResult,
+        /// `EResult m_result`.
+        pub(crate) result: i32,
+    }
+}
+
+callback_packed! {
+    /// `SteamInventoryFullUpdate_t` (`isteaminventory.h`,
+    /// `k_iSteamInventoryCallbacks + 1`): a `GetAllItems` result is newer
+    /// than the last one known.
+    pub(crate) struct SteamInventoryFullUpdate {
+        /// `SteamInventoryResult_t m_handle`.
+        pub(crate) handle: SteamInventoryResult,
+    }
+}
+
+callback_packed! {
+    /// `SteamInventoryDefinitionUpdate_t` (`isteaminventory.h`,
+    /// `k_iSteamInventoryCallbacks + 2`): the item definitions changed. No
+    /// members, so one byte, as [`NewUrlLaunchParameters`].
+    pub(crate) struct SteamInventoryDefinitionUpdate {
+        /// The one byte an empty C++ struct occupies; never meaningful.
+        pub(crate) unused: u8,
+    }
+}
+
+callback_packed! {
+    /// `SteamInventoryStartPurchaseResult_t` (`isteaminventory.h`,
+    /// `k_iSteamInventoryCallbacks + 4`): the answer to `StartPurchase`.
+    pub(crate) struct SteamInventoryStartPurchaseResult {
+        /// `EResult m_result`.
+        pub(crate) result: i32,
+        /// `uint64 m_ulOrderID`.
+        pub(crate) order: u64,
+        /// `uint64 m_ulTransID`.
+        pub(crate) transaction: u64,
+    }
+}
+
+callback_packed! {
+    /// `SteamInventoryRequestPricesResult_t` (`isteaminventory.h`,
+    /// `k_iSteamInventoryCallbacks + 5`): the answer to `RequestPrices`.
+    pub(crate) struct SteamInventoryRequestPricesResult {
+        /// `EResult m_result`.
+        pub(crate) result: i32,
+        /// `char m_rgchCurrency[4]` — the ISO 4217 code of every price.
+        pub(crate) currency: [u8; 4],
+    }
+}
+
+callback_packed! {
     /// `SteamParamStringArray_t` (`isteamremotestorage.h`): a list of strings
     /// handed to Steam — `SetItemTags`' tags. Built by this crate, never read
     /// from Steam.
@@ -1634,6 +1747,26 @@ mod tests {
             needs_agreement: 4, 1;
             item: 8, 8;
         });
+        assert_layout!(SteamItemDetails, 16, {
+            item: 0, 8;
+            definition: 8, 4;
+            quantity: 12, 2;
+            flags: 14, 2;
+        });
+        assert_layout!(SteamInventoryResultReady, 8, {
+            handle: 0, 4;
+            result: 4, 4;
+        });
+        assert_layout!(SteamInventoryFullUpdate, 4, {
+            handle: 0, 4;
+        });
+        assert_layout!(SteamInventoryDefinitionUpdate, 1, {
+            unused: 0, 1;
+        });
+        assert_layout!(SteamInventoryRequestPricesResult, 8, {
+            result: 0, 4;
+            currency: 4, 4;
+        });
         assert_layout!(DlcInstalled, 4, {
             app: 0, 4;
         });
@@ -1833,6 +1966,12 @@ mod tests {
             result: 0, 4;
             item: 4, 8;
         });
+        // The `uint64`s after a 4-byte `EResult` sit at 4, not 8.
+        assert_layout!(SteamInventoryStartPurchaseResult, 20, {
+            result: 0, 4;
+            order: 4, 8;
+            transaction: 12, 8;
+        });
         assert_layout!(LeaderboardEntry, 28, {
             user: 0, 8;
             rank: 8, 4;
@@ -1992,6 +2131,11 @@ mod tests {
         assert_layout!(UnsubscribeResult, 16, {
             result: 0, 4;
             item: 8, 8;
+        });
+        assert_layout!(SteamInventoryStartPurchaseResult, 24, {
+            result: 0, 4;
+            order: 8, 8;
+            transaction: 16, 8;
         });
         assert_layout!(LeaderboardEntry, 32, {
             user: 0, 8;

@@ -93,6 +93,9 @@ impl EResult {
     pub const NO_CONNECTION: Self = Self(3);
     /// `k_EResultInvalidParam`.
     pub const INVALID_PARAM: Self = Self(8);
+    /// `k_EResultPending` — not answered yet, as an inventory result is
+    /// until it is ready.
+    pub const PENDING: Self = Self(22);
     /// `k_EResultInvalidState`.
     pub const INVALID_STATE: Self = Self(11);
     /// `k_EResultAccessDenied`.
@@ -115,6 +118,7 @@ impl core::fmt::Display for EResult {
             Self::INVALID_STATE => "InvalidState",
             Self::ACCESS_DENIED => "AccessDenied",
             Self::TIMEOUT => "Timeout",
+            Self::PENDING => "Pending",
             Self::LIMIT_EXCEEDED => "LimitExceeded",
             Self::IGNORED => "Ignored",
             _ => return write!(f, "EResult {}", self.0),

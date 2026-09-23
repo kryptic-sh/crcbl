@@ -1308,8 +1308,44 @@ On branch `steam-sdk`, not merged to `main`:
   **Not run:** every step under "Needs a real client" below — a private item
   uploaded under 480, subscribed from a second account, `ItemInstalled_t` seen,
   the item deleted — on every OS. See "Slice 14 as built".
-- Slice 15: not started. Its inventory half builds over the fake like 9–12; its
-  shipping half needs an app id of our own.
+- **Slice 15: inventory half done** (2026-09-23); **shipping half blocked on an
+  app id of our own.** `Inventory` — result handles (`InventoryResult`,
+  destroyed once on drop, a refused operation's handle included), items, promo
+  grants, consume, exchange, item definitions and their properties,
+  `StartPurchase` and prices — over the fake; every test in the slice's list
+  seen red against a deliberate break; Miri clean; the drift gate passes against
+  the mirror with the nineteen declarations, six structs and the new base. **Not
+  run:** the inventory under 480 — whether SpaceWar's example item definitions
+  exist is still a belief (R3) — on every OS. **Not started:** the shipping
+  half, whose every step (depots, packaging, the Steam Runtime container build,
+  the release-build relaunch guard, macOS signing) means something only for an
+  app id of our own, which is the user's to get. See "Slice 15 as built".
+
+**Slice 15 as built (inventory), where it differs from the text below:**
+
+- **Files:** `crates/crcbl-steam/src/inventory.rs` and its fake,
+  `crates/crcbl-steam/src/testing/inventory.rs`.
+- **`steam.inventory()`**: `all_items`, `items_by_id`, `grant_promo_items`,
+  `add_promo_item`, `consume(item, quantity)` and `exchange(generate, destroy)`
+  each answer an `InventoryResult` at once — pending until
+  `SteamEvent::InventoryResultReady { result, status }` names its
+  `InventoryResultId` — whose `status`, `items`, `timestamp` and `belongs_to`
+  read it. The result owns the handle and destroys it once on drop; a handle
+  Steam wrote for an operation it then refused is owned first and destroyed on
+  the way out, so none leaks.
+- **Definitions:** `load_item_definitions`, `item_definitions` (refused while
+  none are loaded) and `definition_property(def, Some(name))` — or `None` for
+  the list of property names — read through the growing buffer every string read
+  uses. `SteamEvent::InventoryDefinitionsUpdated` and `InventoryFullUpdate`
+  report the other two callbacks.
+- **Purchases:** `start_purchase(&[(def, quantity)])` answers
+  `SteamCall<PurchaseStarted>` (order and transaction ids); `request_prices()`
+  answers `SteamCall<PricesReady>` (the currency), after which `prices()` and
+  `price(def)` read them.
+- **`EResult::PENDING`** is named, for a result not yet ready.
+- **Not bound**, each on demand: result serialisation for another player to
+  check, dev-only `GenerateItems`, quantity transfers, trades, timed drops,
+  eligible-promo queries, per-item dynamic properties, and `InspectItem`.
 
 **Slice 14 as built, where it differs from the text below:**
 
@@ -2712,6 +2748,47 @@ are listed first for completeness.
 | `Send` surfaces                                                         | `SteamTransport` and `SteamCloudStorage` are `Send` via a shared `Arc<Client>`, but call Steam only on the pump thread (checked; off-thread is a typed error); everything else `!Send`                     | all `!Send`: they could not implement `Transport`/`StorageSource`; or truly multi-threaded: rests on thread-safety Valve never states           |
 | Slice 13, the game-server API (**decided** 2026-09-23)                  | deferred until a dedicated headless build wants it; EW is a listen server                                                                                                                                  | build it now: a second init, pipe and one-live guard with no caller to prove them against                                                       |
 | The Steam-virtual-pad filter (**decided** 2026-09-23)                   | keep the vendor query — `xinput1_4.dll` ordinal 108, as SDL does — in `XInput::skip_steam_virtual_pads`                                                                                                    | `ISteamInput::GetGamepadIndexForController`, the fallback if a real run shows the vendor route failing: couples XInput to Steam's slot list     |
+
+## Implementation complete (step 3)
+
+Every slice's status on `steam-sdk` as of 2026-09-23, for the review that
+follows (step 4). "Built" means built and tested in CI's terms — over the fake
+library for the Steam slices, with the drift gate passing against the
+Steamworks.NET mirror of the 1.65 headers; each slice's own status line, above,
+says how its tests were proven (every slice built after slice 4 records its
+tests seen red against a deliberate break; slices 1, 1b, 3a, 3b and 4 do not
+claim it) and names what was not run. **No slice has run against a real Steam
+client**, and the drift gate has never run against an SDK zip from Valve.
+
+| Slice | Status                                                                                                                                                                                       |
+| ----- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | built                                                                                                                                                                                        |
+| 1b    | built                                                                                                                                                                                        |
+| 2     | built (`crcbl_server::Host`); its Steam exit run needs a `Host` driven over `SteamTransport`, which nothing does yet                                                                         |
+| 3a    | built                                                                                                                                                                                        |
+| 3b    | built                                                                                                                                                                                        |
+| 4     | built                                                                                                                                                                                        |
+| 5     | built                                                                                                                                                                                        |
+| 6     | built                                                                                                                                                                                        |
+| 7a    | built, on `main`                                                                                                                                                                             |
+| 7b    | built                                                                                                                                                                                        |
+| 7c    | built                                                                                                                                                                                        |
+| 8     | built                                                                                                                                                                                        |
+| 9     | built; its first in-repo consumer (breakout's high score) is not                                                                                                                             |
+| 10    | built; a hooked screenshot has no engine capture of the running frame to write                                                                                                               |
+| 11    | built                                                                                                                                                                                        |
+| 12    | built, client half; the `AuthGate`'s wiring into the `crcbl-net` handshake waits on topic 27's design, and server-side decryption of encrypted tickets on a backend the project does not run |
+| 13    | **deferred** (decided 2026-09-23) until a dedicated headless build wants the game-server API; EW is a listen server                                                                          |
+| 14    | built                                                                                                                                                                                        |
+| 15    | inventory half built; **shipping half blocked** on an app id of our own                                                                                                                      |
+
+Decided on 2026-09-23 and recorded under "Defaulted decisions": slice 13
+deferred; the Steam-virtual-pad filter keeps its vendor query. **Still open, for
+the user** (each in `docs/backlog.md`): whether `Apps::launch_command_line`
+moves onto the growing buffer (it changes what an existing test asserts); what
+`SteamTransport` reports after `Host::shutdown` (`ShuttingDown` rather than
+`HostLeft`); and the app id of our own that slice 15's shipping half, and every
+per-app capability (R3), wait on.
 
 ## Review (step 2)
 

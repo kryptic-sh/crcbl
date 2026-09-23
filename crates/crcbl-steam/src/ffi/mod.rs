@@ -71,6 +71,14 @@ pub(crate) type UgcQueryHandle = u64;
 /// `UGCUpdateHandle_t` — `typedef uint64 UGCUpdateHandle_t;`, all ones being
 /// `k_UGCUpdateHandleInvalid`.
 pub(crate) type UgcUpdateHandle = u64;
+/// `SteamInventoryResult_t` — `typedef int32 SteamInventoryResult_t;`, `-1`
+/// being `k_SteamInventoryResultInvalid`.
+pub(crate) type SteamInventoryResult = i32;
+/// `SteamItemInstanceID_t` — `typedef uint64 SteamItemInstanceID_t;`, one
+/// item a player holds.
+pub(crate) type SteamItemInstanceId = u64;
+/// `SteamItemDef_t` — `typedef int32 SteamItemDef_t;`, an item definition.
+pub(crate) type SteamItemDef = i32;
 /// `SteamErrMsg` — `typedef char SteamErrMsg[ 1024 ];`, the English message
 /// `SteamInternal_SteamAPI_Init` fills in on failure.
 pub(crate) type SteamErrMsg = [core::ffi::c_char; 1024];
@@ -107,6 +115,8 @@ opaque! {
     ISteamFriends;
     /// `class ISteamInput`.
     ISteamInput;
+    /// `class ISteamInventory`.
+    ISteamInventory;
     /// `class ISteamMatchmaking`.
     ISteamMatchmaking;
     /// `class ISteamNetworkingSockets`.

@@ -18,6 +18,7 @@
 //! one-live-`Steam` guard is per test.
 
 mod input;
+mod inventory;
 mod keyboard;
 mod ownership;
 mod recording;
@@ -25,6 +26,7 @@ mod tickets;
 mod workshop;
 
 pub(crate) use input::{FakeInput, FakePad};
+pub(crate) use inventory::FakeInventory;
 pub(crate) use keyboard::FakeKeyboard;
 pub(crate) use ownership::{FakeApps, FakeBeta, FakeRemotePlay, FakeSession};
 pub(crate) use recording::{FakeScreenshots, FakeTimeline};
@@ -218,6 +220,7 @@ pub(crate) struct Script {
     pub(crate) remote_play: FakeRemotePlay,
     pub(crate) tickets: FakeTickets,
     pub(crate) workshop: FakeWorkshop,
+    pub(crate) inventory: FakeInventory,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -288,6 +291,7 @@ impl Default for Script {
             remote_play: FakeRemotePlay::default(),
             tickets: FakeTickets::default(),
             workshop: FakeWorkshop::default(),
+            inventory: FakeInventory::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -472,6 +476,7 @@ pub(crate) fn fake_lib() -> &'static Lib {
         screenshots: recording::SCREENSHOTS,
         timeline: recording::TIMELINE,
         ugc: workshop::UGC,
+        inventory: inventory::INVENTORY,
         apps: AppsFns {
             accessor: fake_apps_accessor,
             is_subscribed: fake_is_subscribed,

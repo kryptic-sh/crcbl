@@ -28,6 +28,9 @@ use crate::{
         SteamRemotePlaySessionDisconnected, UserAchievementStored, UserStatsReceived,
         UserStatsStored, ValidateAuthTicketResponse, steam_id,
     },
+    ffi::structs::{
+        SteamInventoryDefinitionUpdate, SteamInventoryFullUpdate, SteamInventoryResultReady,
+    },
     friends::PersonaChange,
     matchmaking::{LobbyId, MemberChange},
 };
@@ -61,6 +64,8 @@ pub(crate) enum Base {
     RemotePlay = 5700,
     /// `k_iSteamUGCCallbacks`.
     Ugc = 3400,
+    /// `k_iSteamInventoryCallbacks`.
+    Inventory = 4700,
     /// `k_iSteamControllerCallbacks` — Steam Input's callbacks, under the
     /// name of the interface it replaced.
     Controller = 2800,
@@ -85,6 +90,7 @@ impl Base {
         Self::Controller,
         Self::RemotePlay,
         Self::Ugc,
+        Self::Inventory,
         Self::Timeline,
     ];
 
@@ -105,6 +111,7 @@ impl Base {
             Self::Controller => "k_iSteamControllerCallbacks",
             Self::RemotePlay => "k_iSteamRemotePlayCallbacks",
             Self::Ugc => "k_iSteamUGCCallbacks",
+            Self::Inventory => "k_iSteamInventoryCallbacks",
             Self::Timeline => "k_iSteamTimelineCallbacks",
         }
     }
@@ -335,6 +342,25 @@ pub enum SteamEvent {
         /// `EResult::OK`, or why not.
         result: EResult,
     },
+    /// An inventory result left the pending state
+    /// (`SteamInventoryResultReady_t`) — exactly once per result: read it
+    /// through its [`InventoryResult`](crate::InventoryResult).
+    InventoryResultReady {
+        /// Which result.
+        result: crate::InventoryResultId,
+        /// `EResult::OK`, or why it failed.
+        status: EResult,
+    },
+    /// A [`Inventory::all_items`](crate::Inventory::all_items) result is
+    /// newer than the last one Steam knew (`SteamInventoryFullUpdate_t`),
+    /// sent just before its [`InventoryResultReady`](Self::InventoryResultReady).
+    InventoryFullUpdate {
+        /// Which result.
+        result: crate::InventoryResultId,
+    },
+    /// The item definitions changed (`SteamInventoryDefinitionUpdate_t`):
+    /// read them again.
+    InventoryDefinitionsUpdated,
     /// A lobby chat message arrived (`LobbyChatMsg_t`, read with
     /// `GetLobbyChatEntry`). Every member receives its own too.
     LobbyChatMessage {
@@ -835,6 +861,46 @@ pub(crate) const ROWS: &[Row] = &[
         },
     },
     Row {
+        base: Base::Inventory,
+        offset: 0,
+        #[cfg(test)]
+        name: "SteamInventoryResultReady_t",
+        size: size_of::<SteamInventoryResultReady>(),
+        decode: |bytes| {
+            read::<SteamInventoryResultReady>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::InventoryResultReady {
+                    result: crate::InventoryResultId(payload.handle),
+                    status: EResult(payload.result),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Inventory,
+        offset: 1,
+        #[cfg(test)]
+        name: "SteamInventoryFullUpdate_t",
+        size: size_of::<SteamInventoryFullUpdate>(),
+        decode: |bytes| {
+            read::<SteamInventoryFullUpdate>(bytes).map(|payload| {
+                Decoded::Event(SteamEvent::InventoryFullUpdate {
+                    result: crate::InventoryResultId(payload.handle),
+                })
+            })
+        },
+    },
+    Row {
+        base: Base::Inventory,
+        offset: 2,
+        #[cfg(test)]
+        name: "SteamInventoryDefinitionUpdate_t",
+        size: size_of::<SteamInventoryDefinitionUpdate>(),
+        decode: |bytes| {
+            read::<SteamInventoryDefinitionUpdate>(bytes)
+                .map(|_| Decoded::Event(SteamEvent::InventoryDefinitionsUpdated))
+        },
+    },
+    Row {
         base: Base::Ugc,
         offset: 5,
         #[cfg(test)]
@@ -1023,6 +1089,16 @@ unsafe impl Pod for FloatingGamepadTextInputDismissed {}
 unsafe impl Pod for SteamInputDeviceConnected {}
 // SAFETY: as above.
 unsafe impl Pod for SteamInputDeviceDisconnected {}
+// SAFETY: as above.
+unsafe impl Pod for SteamInventoryResultReady {}
+// SAFETY: as above.
+unsafe impl Pod for SteamInventoryFullUpdate {}
+// SAFETY: as above.
+unsafe impl Pod for SteamInventoryDefinitionUpdate {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SteamInventoryStartPurchaseResult {}
+// SAFETY: as above.
+unsafe impl Pod for crate::ffi::structs::SteamInventoryRequestPricesResult {}
 // SAFETY: as above; `m_flScore` is kept as its bits, a `u32`.
 unsafe impl Pod for crate::ffi::structs::SteamUgcDetails {}
 // SAFETY: as above.

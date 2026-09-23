@@ -15,7 +15,7 @@ use crate::{
     call::CallRegistry,
     error::InitError,
     ffi::{
-        HSteamPipe, ISteamApps, ISteamFriends, ISteamInput, ISteamMatchmaking,
+        HSteamPipe, ISteamApps, ISteamFriends, ISteamInput, ISteamInventory, ISteamMatchmaking,
         ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemotePlay, ISteamRemoteStorage,
         ISteamScreenshots, ISteamTimeline, ISteamUgc, ISteamUser, ISteamUserStats, ISteamUtils,
         Lib, SteamErrMsg, init_result, load, manifest, manifest::Accessor, versions,
@@ -124,6 +124,8 @@ pub struct Client {
     pub(crate) timeline: *mut ISteamTimeline,
     /// `SteamAPI_SteamUGC_v021()`; never null.
     pub(crate) ugc: *mut ISteamUgc,
+    /// `SteamAPI_SteamInventory_v003()`; never null.
+    pub(crate) inventory: *mut ISteamInventory,
     /// Dropped last, after every other field: the shutdown.
     session: Session,
 }
@@ -295,6 +297,8 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
     let timeline =
         interface(lib.fns.timeline.accessor, &versions::TIMELINE)?.cast::<ISteamTimeline>();
     let ugc = interface(lib.fns.ugc.accessor, &versions::UGC)?.cast::<ISteamUgc>();
+    let inventory =
+        interface(lib.fns.inventory.accessor, &versions::INVENTORY)?.cast::<ISteamInventory>();
 
     // SAFETY: `utils` is a live, non-null `ISteamUtils`.
     let running = AppId(unsafe { (lib.fns.utils.get_app_id)(utils) });
@@ -323,6 +327,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
             screenshots,
             timeline,
             ugc,
+            inventory,
             session,
         }),
         queue: VecDeque::new(),
@@ -411,7 +416,8 @@ mod tests {
         // rather than vanishing from both sides of the comparison above.
         assert_eq!(
             versions::handshake(manifest::INTERFACES),
-            b"SteamUser023\0SteamFriends018\0SteamMatchMaking009\0\
+            b"SteamUser023\0SteamFriends018\0STEAMINVENTORY_INTERFACE_V003\0\
+              SteamMatchMaking009\0\
               SteamNetworkingSockets013\0SteamNetworkingUtils004\0\
               STEAMAPPS_INTERFACE_VERSION009\0STEAMREMOTEPLAY_INTERFACE_VERSION004\0STEAMREMOTESTORAGE_INTERFACE_VERSION016\0\
               STEAMUSERSTATS_INTERFACE_VERSION013\0SteamInput007\0\
@@ -431,6 +437,7 @@ mod tests {
         assert!(!steam.client.remote_play.is_null());
         assert!(!steam.client.timeline.is_null());
         assert!(!steam.client.ugc.is_null());
+        assert!(!steam.client.inventory.is_null());
         assert!(!steam.client.matchmaking.is_null());
     }
 

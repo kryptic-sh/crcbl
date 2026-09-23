@@ -21,6 +21,8 @@
 //!        ├── leaderboards(): find_or_create() / upload() / download() ──▶ SteamCall<T>
 //!        ├── screenshots(): hook(), write() the game's own; tag_user(), set_location()
 //!        ├── timeline(): set_game_mode(), instant_event(), range_start() ──▶ TimelineRange, phases
+//!        ├── inventory(): all_items() / consume() / exchange() ──▶ InventoryResult ──▶ items(),
+//!        │                item_definitions(), start_purchase() / request_prices() ──▶ SteamCall<T>
 //!        ├── workshop(): query_all() ──▶ UgcQuery ──▶ send() ──▶ SteamCall<QueryPage> ──▶ results(),
 //!        │               subscribe(), install_info(), create_item(), start_update() ──▶ submit()
 //!        ├── voice(): capture() ──▶ VoiceCapture: set_transmitting(), poll() ──▶ packets
@@ -31,7 +33,7 @@
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11, 12 and 14: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11, 12, 14 and 15's inventory half: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -46,8 +48,9 @@
 //! back typed text, screenshots are written to the player's library and
 //! moments marked on Steam's game recording, ownership, DLC, betas and Remote
 //! Play sessions are read, tickets prove a player to a peer or a service,
-//! Workshop items are found, subscribed to, installed, made and updated, and
-//! the
+//! Workshop items are found, subscribed to, installed, made and updated, the
+//! player's inventory items are read, granted, consumed, exchanged and bought,
+//! and the
 //! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
@@ -144,6 +147,11 @@ mod friends;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod input;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod inventory;
 #[cfg(all(
     target_pointer_width = "64",
     any(target_os = "linux", target_os = "windows", target_os = "macos")
@@ -249,6 +257,10 @@ pub use crate::{
         FriendFlags, Friends, OverlayDialog, PersonaChange, PersonaState, UserDialog, WebPageMode,
     },
     input::{GlyphSize, InputError, PAD_MANIFEST, PAD_MANIFEST_FILE, PadControl, SteamPads},
+    inventory::{
+        Inventory, InventoryItem, InventoryResult, InventoryResultId, ItemDef, ItemFlags,
+        ItemInstanceId, ItemPrice, PricesReady, PurchaseStarted,
+    },
     keyboard::{FloatingKeyboardMode, TextField, TextInputLines, TextInputMode, TextInputRequest},
     leaderboard::{
         Entries, Entry, Leaderboard, LeaderboardDisplay, LeaderboardFound, LeaderboardSort,

@@ -57,6 +57,15 @@ pub(crate) const INPUT: Interface = Interface {
     in_init_ex: true,
 };
 
+/// `ISteamInventory`: `V003`, as the timeline's is spelled — but in Valve's
+/// `InitEx` list.
+pub(crate) const INVENTORY: Interface = Interface {
+    accessor: "SteamAPI_SteamInventory_v003",
+    version: "STEAMINVENTORY_INTERFACE_V003",
+    define: "STEAMINVENTORY_INTERFACE_VERSION",
+    in_init_ex: true,
+};
+
 /// `ISteamMatchmaking`. The version string has a capital M the accessor
 /// lacks.
 pub(crate) const MATCHMAKING: Interface = Interface {

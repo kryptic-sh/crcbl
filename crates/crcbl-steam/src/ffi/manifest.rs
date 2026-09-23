@@ -35,7 +35,7 @@
 //! `EBeginAuthSessionResult`, `EUserHasLicenseForAppResult`, `EUserUGCList`,
 //! `EUGCMatchingUGCType`, `EUserUGCListSortOrder`, `EUGCQuery`,
 //! `EWorkshopFileType`, `ERemoteStoragePublishedFileVisibility`,
-//! `EItemUpdateStatus`) is taken to be
+//! `EItemUpdateStatus`, `EResult`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -54,14 +54,15 @@ use core::ffi::{c_char, c_void};
 
 use super::{
     HSteamListenSocket, HSteamNetConnection, HSteamPipe, ISteamApps, ISteamFriends, ISteamInput,
-    ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils, ISteamRemotePlay,
-    ISteamRemoteStorage, ISteamScreenshots, ISteamTimeline, ISteamUgc, ISteamUser, ISteamUserStats,
-    ISteamUtils, InputActionSetHandle, InputAnalogActionHandle, InputDigitalActionHandle,
-    InputHandle, PublishedFileId, ScreenshotHandle, SteamApiCall, SteamErrMsg, SteamLeaderboard,
+    ISteamInventory, ISteamMatchmaking, ISteamNetworkingSockets, ISteamNetworkingUtils,
+    ISteamRemotePlay, ISteamRemoteStorage, ISteamScreenshots, ISteamTimeline, ISteamUgc,
+    ISteamUser, ISteamUserStats, ISteamUtils, InputActionSetHandle, InputAnalogActionHandle,
+    InputDigitalActionHandle, InputHandle, PublishedFileId, ScreenshotHandle, SteamApiCall,
+    SteamErrMsg, SteamInventoryResult, SteamItemDef, SteamItemInstanceId, SteamLeaderboard,
     SteamLeaderboardEntries, TimelineEventHandle, UgcQueryHandle, UgcUpdateHandle,
     structs::{
         CallbackMsg, InputAnalogActionData, InputDigitalActionData, LeaderboardEntry,
-        SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
+        SteamItemDetails, SteamNetConnectionInfo, SteamNetworkingIdentity, SteamNetworkingMessage,
         SteamParamStringArray, SteamRelayNetworkStatus, SteamUgcDetails,
     },
     versions::{self, Interface},
@@ -351,6 +352,68 @@ bindings! {
         request_friend_rich_presence: FriendsRequestFriendRichPresence = "SteamAPI_ISteamFriends_RequestFriendRichPresence",
             "S_API void SteamAPI_ISteamFriends_RequestFriendRichPresence( ISteamFriends* self, uint64_steamid steamIDFriend );",
             fn(*mut ISteamFriends, u64);
+    }
+
+    /// `ISteamInventory` (`steam_api_flat.h`): the player's items, their
+    /// definitions and their prices.
+    inventory: InventoryFns for versions::INVENTORY {
+        get_result_status: InventoryGetResultStatus = "SteamAPI_ISteamInventory_GetResultStatus",
+            "S_API EResult SteamAPI_ISteamInventory_GetResultStatus( ISteamInventory* self, SteamInventoryResult_t resultHandle );",
+            fn(*mut ISteamInventory, SteamInventoryResult) -> i32;
+        get_result_items: InventoryGetResultItems = "SteamAPI_ISteamInventory_GetResultItems",
+            "S_API bool SteamAPI_ISteamInventory_GetResultItems( ISteamInventory* self, SteamInventoryResult_t resultHandle, SteamItemDetails_t * pOutItemsArray, uint32 * punOutItemsArraySize );",
+            fn(*mut ISteamInventory, SteamInventoryResult, *mut SteamItemDetails, *mut u32) -> bool;
+        get_result_timestamp: InventoryGetResultTimestamp = "SteamAPI_ISteamInventory_GetResultTimestamp",
+            "S_API uint32 SteamAPI_ISteamInventory_GetResultTimestamp( ISteamInventory* self, SteamInventoryResult_t resultHandle );",
+            fn(*mut ISteamInventory, SteamInventoryResult) -> u32;
+        check_result_steam_id: InventoryCheckResultSteamId = "SteamAPI_ISteamInventory_CheckResultSteamID",
+            "S_API bool SteamAPI_ISteamInventory_CheckResultSteamID( ISteamInventory* self, SteamInventoryResult_t resultHandle, uint64_steamid steamIDExpected );",
+            fn(*mut ISteamInventory, SteamInventoryResult, u64) -> bool;
+        destroy_result: InventoryDestroyResult = "SteamAPI_ISteamInventory_DestroyResult",
+            "S_API void SteamAPI_ISteamInventory_DestroyResult( ISteamInventory* self, SteamInventoryResult_t resultHandle );",
+            fn(*mut ISteamInventory, SteamInventoryResult);
+        get_all_items: InventoryGetAllItems = "SteamAPI_ISteamInventory_GetAllItems",
+            "S_API bool SteamAPI_ISteamInventory_GetAllItems( ISteamInventory* self, SteamInventoryResult_t * pResultHandle );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult) -> bool;
+        get_items_by_id: InventoryGetItemsById = "SteamAPI_ISteamInventory_GetItemsByID",
+            "S_API bool SteamAPI_ISteamInventory_GetItemsByID( ISteamInventory* self, SteamInventoryResult_t * pResultHandle, const SteamItemInstanceID_t * pInstanceIDs, uint32 unCountInstanceIDs );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult, *const SteamItemInstanceId, u32) -> bool;
+        grant_promo_items: InventoryGrantPromoItems = "SteamAPI_ISteamInventory_GrantPromoItems",
+            "S_API bool SteamAPI_ISteamInventory_GrantPromoItems( ISteamInventory* self, SteamInventoryResult_t * pResultHandle );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult) -> bool;
+        add_promo_item: InventoryAddPromoItem = "SteamAPI_ISteamInventory_AddPromoItem",
+            "S_API bool SteamAPI_ISteamInventory_AddPromoItem( ISteamInventory* self, SteamInventoryResult_t * pResultHandle, SteamItemDef_t itemDef );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult, SteamItemDef) -> bool;
+        consume_item: InventoryConsumeItem = "SteamAPI_ISteamInventory_ConsumeItem",
+            "S_API bool SteamAPI_ISteamInventory_ConsumeItem( ISteamInventory* self, SteamInventoryResult_t * pResultHandle, SteamItemInstanceID_t itemConsume, uint32 unQuantity );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult, SteamItemInstanceId, u32) -> bool;
+        exchange_items: InventoryExchangeItems = "SteamAPI_ISteamInventory_ExchangeItems",
+            "S_API bool SteamAPI_ISteamInventory_ExchangeItems( ISteamInventory* self, SteamInventoryResult_t * pResultHandle, const SteamItemDef_t * pArrayGenerate, const uint32 * punArrayGenerateQuantity, uint32 unArrayGenerateLength, const SteamItemInstanceID_t * pArrayDestroy, const uint32 * punArrayDestroyQuantity, uint32 unArrayDestroyLength );",
+            fn(*mut ISteamInventory, *mut SteamInventoryResult, *const SteamItemDef, *const u32, u32, *const SteamItemInstanceId, *const u32, u32) -> bool;
+        load_item_definitions: InventoryLoadItemDefinitions = "SteamAPI_ISteamInventory_LoadItemDefinitions",
+            "S_API bool SteamAPI_ISteamInventory_LoadItemDefinitions( ISteamInventory* self );",
+            fn(*mut ISteamInventory) -> bool;
+        get_item_definition_ids: InventoryGetItemDefinitionIds = "SteamAPI_ISteamInventory_GetItemDefinitionIDs",
+            "S_API bool SteamAPI_ISteamInventory_GetItemDefinitionIDs( ISteamInventory* self, SteamItemDef_t * pItemDefIDs, uint32 * punItemDefIDsArraySize );",
+            fn(*mut ISteamInventory, *mut SteamItemDef, *mut u32) -> bool;
+        get_item_definition_property: InventoryGetItemDefinitionProperty = "SteamAPI_ISteamInventory_GetItemDefinitionProperty",
+            "S_API bool SteamAPI_ISteamInventory_GetItemDefinitionProperty( ISteamInventory* self, SteamItemDef_t iDefinition, const char * pchPropertyName, char * pchValueBuffer, uint32 * punValueBufferSizeOut );",
+            fn(*mut ISteamInventory, SteamItemDef, *const c_char, *mut c_char, *mut u32) -> bool;
+        start_purchase: InventoryStartPurchase = "SteamAPI_ISteamInventory_StartPurchase",
+            "S_API SteamAPICall_t SteamAPI_ISteamInventory_StartPurchase( ISteamInventory* self, const SteamItemDef_t * pArrayItemDefs, const uint32 * punArrayQuantity, uint32 unArrayLength );",
+            fn(*mut ISteamInventory, *const SteamItemDef, *const u32, u32) -> SteamApiCall;
+        request_prices: InventoryRequestPrices = "SteamAPI_ISteamInventory_RequestPrices",
+            "S_API SteamAPICall_t SteamAPI_ISteamInventory_RequestPrices( ISteamInventory* self );",
+            fn(*mut ISteamInventory) -> SteamApiCall;
+        get_num_items_with_prices: InventoryGetNumItemsWithPrices = "SteamAPI_ISteamInventory_GetNumItemsWithPrices",
+            "S_API uint32 SteamAPI_ISteamInventory_GetNumItemsWithPrices( ISteamInventory* self );",
+            fn(*mut ISteamInventory) -> u32;
+        get_items_with_prices: InventoryGetItemsWithPrices = "SteamAPI_ISteamInventory_GetItemsWithPrices",
+            "S_API bool SteamAPI_ISteamInventory_GetItemsWithPrices( ISteamInventory* self, SteamItemDef_t * pArrayItemDefs, uint64 * pCurrentPrices, uint64 * pBasePrices, uint32 unArrayLength );",
+            fn(*mut ISteamInventory, *mut SteamItemDef, *mut u64, *mut u64, u32) -> bool;
+        get_item_price: InventoryGetItemPrice = "SteamAPI_ISteamInventory_GetItemPrice",
+            "S_API bool SteamAPI_ISteamInventory_GetItemPrice( ISteamInventory* self, SteamItemDef_t iDefinition, uint64 * pCurrentPrice, uint64 * pBasePrice );",
+            fn(*mut ISteamInventory, SteamItemDef, *mut u64, *mut u64) -> bool;
     }
 
     /// `ISteamMatchmaking`, lobbies only (`steam_api_flat.h`).

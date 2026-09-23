@@ -237,13 +237,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 ### Added
 
 - **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8, 9, 10,
-  11, 12 and 14** (`docs/plan/42-steam.md`), and `crcbl::steam` behind the
-  umbrella's new `steam` feature. A new crate over the SDK's flat C API with no
-  link-time dependency and nothing from the SDK committed: `Steam::init(AppId)`
-  finds `steam_api` beside the executable or under
-  `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute path
-  at runtime, initialises with an interface-version handshake and switches to
-  manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
+  11, 12, 14 and 15's inventory half** (`docs/plan/42-steam.md`), and
+  `crcbl::steam` behind the umbrella's new `steam` feature. A new crate over the
+  SDK's flat C API with no link-time dependency and nothing from the SDK
+  committed: `Steam::init(AppId)` finds `steam_api` beside the executable or
+  under `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, opens it by absolute
+  path at runtime, initialises with an interface-version handshake and switches
+  to manual callback dispatch. `Steam::relaunch_via_steam(AppId)` is the
   ships-through-Steam guard (`SteamAPI_RestartAppIfNecessary`). `Steam::pump`
   drains the pipe once per frame and `Steam::events` yields
   `SteamEvent::OverlayActivated`. `steam.user()` reads `steam_id()`,
@@ -341,9 +341,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   metadata, visibility, tags, content folder and preview, each checked against
   the header's limits first), `submit` (consuming the update, answering the call
   and a `Submission` that reports the upload's progress) and `delete_item` make
-  and maintain the player's own items. 64-bit Linux, Windows and macOS;
-  elsewhere the crate is empty. `apps/sandbox --features steam` exercises it.
-  Not yet run against a Steam client with a 1.65 library.
+  and maintain the player's own items. `steam.inventory()` reads and changes the
+  player's items: `all_items`, `items_by_id`, promo grants, `consume` and
+  `exchange` each answer an `InventoryResult` — destroyed exactly once when
+  dropped — that is ready when `SteamEvent::InventoryResultReady` names it and
+  then reads its items; `item_definitions` and `definition_property` read the
+  item schema; `start_purchase` and `request_prices` are `SteamCall`s, and
+  `prices` and `price` read the answer. `EResult::PENDING` is named. 64-bit
+  Linux, Windows and macOS; elsewhere the crate is empty.
+  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
+  client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

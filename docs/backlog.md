@@ -9092,31 +9092,33 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12 and 14 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15 (inventory) built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12 and 14 are built on
-branch `steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
-`Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
-the last owner's drop, the local identity and machine basics,
-`relaunch_via_steam`, the fake-library rig, the drift gate and the CI steps
-(clippy and rustdoc for macOS and Windows, a `miri (crcbl-steam)` job) — plus
-the umbrella's `steam` feature, `HostedGame::take_pending_focus_loss`,
-`apps/sandbox --features steam`, and slice 3a's async call registry, lobbies,
-invites, rich presence and join paths, slice 3b's friends list, personas and
-avatars, and slice 4's `SteamTransport` and `SteamListener` (with
-`crcbl_net::conformance`), and slice 2's `crcbl_server::Host` (the multi-session
-host) with `crcbl_net::SessionEndReason` and `crcbl_client::Client::ended`, and
-slice 6's `crcbl_store::synced` and `SteamCloudStorage`, slice 5's voice capture
-and decoding, slice 9's stats, achievements and leaderboards (built ahead of
-7b–8, which waited on slice 7a's seam; `steam-sdk` has since merged `main`,
-which carries it), and slice 7b's `SteamPads` (Steam Input onto the gamepad
-seam) with the Steam-pad filter in `crcbl_input::xinput`, slice 7c's on-screen
-keyboards and glyphs, and slice 8's loop limb (`crcbl::engine::steam`: the loop
-pumps a lent `Steam`, takes its overlay as a focus loss, and polls Steam Input
-as its pad source), slice 10's screenshots and timeline, and slice 11's
-ownership, DLC, betas and Remote Play, and slice 12's tickets and `AuthGate`,
-and slice 14's Workshop (`Workshop`, `UgcQuery`, `ItemUpdate`). The plan,
-`docs/plan/42-steam.md`, carries a status line per slice.
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15's
+inventory half are built on branch `steam-sdk`** (not merged):
+`crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
+handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
+local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
+the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
+`miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
+`HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
+slice 3a's async call registry, lobbies, invites, rich presence and join paths,
+slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
+and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
+`crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
+and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
+`SteamCloudStorage`, slice 5's voice capture and decoding, slice 9's stats,
+achievements and leaderboards (built ahead of 7b–8, which waited on slice 7a's
+seam; `steam-sdk` has since merged `main`, which carries it), and slice 7b's
+`SteamPads` (Steam Input onto the gamepad seam) with the Steam-pad filter in
+`crcbl_input::xinput`, slice 7c's on-screen keyboards and glyphs, and slice 8's
+loop limb (`crcbl::engine::steam`: the loop pumps a lent `Steam`, takes its
+overlay as a focus loss, and polls Steam Input as its pad source), slice 10's
+screenshots and timeline, and slice 11's ownership, DLC, betas and Remote Play,
+and slice 12's tickets and `AuthGate`, slice 14's Workshop (`Workshop`,
+`UgcQuery`, `ItemUpdate`), and slice 15's inventory (`Inventory`,
+`InventoryResult`). The plan, `docs/plan/42-steam.md`, carries a status line per
+slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9279,6 +9281,21 @@ and slice 14's Workshop (`Workshop`, `UgcQuery`, `ItemUpdate`). The plan,
   the Workshop legal agreement (`needs_agreement`) blocks a new account's
   upload. What it would take in-repo: a Workshop panel in the sandbox that lists
   the player's subscribed items and their install folders.
+- **Slice 15's inventory has not run against Steam, and nothing uses it**: under
+  480, whether SpaceWar's example item definitions exist at all (the plan's R3),
+  `all_items` becoming ready with `InventoryResultReady`, a promo grant, a
+  consume and an exchange, and a `start_purchase` opening the checkout — on
+  every OS. Item semantics beyond "the calls answer" wait for an app id of our
+  own with an item schema.
+- **Blocked on an app id of our own: slice 15's shipping half.** Per-OS
+  packaging that places the redistributable beside the executable (and in
+  `Contents/Frameworks` for a macOS bundle, re-signed), a CI check that a
+  packaged build carries no `steam_appid.txt`, Linux release builds in the Steam
+  Runtime SDK container so the glibc floor matches `sniper`, the
+  `relaunch_via_steam` guard in release builds, and the macOS overlay
+  entitlement question. Each means something only with depots and an app of our
+  own; getting one (a partner fee and a product decision) is the user's call.
+  Not started.
 - **Needs a decision: `Apps::launch_command_line` can silently cut a line over
   1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
   buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's
