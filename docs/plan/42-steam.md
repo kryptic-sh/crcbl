@@ -1131,15 +1131,16 @@ any file it creates to rooted ones.
 
 **Manual verification, common to every slice:** Steam client running and logged
 in; `CRCBL_STEAM_SDK` set; `steam_appid.txt` containing `480` in the working
-directory; run on **Windows 11, a Linux desktop (and the Deck where the slice
-says so), and macOS**; `cargo test -p crcbl-steam -- --ignored <slice-filter>`
-plus the sample's manual steps; record per OS, in the slice's commit or backlog
-entry, what was run and what was not. App 480 is shared by every Steamworks
-developer: **assert mechanisms (init, events arriving, calls completing), never
-values read back from 480.** Slices marked "two accounts" need two Steam
-accounts on two machines (one may be a Deck). Overlay checks on Linux and macOS
-use whatever launch slice 1b recorded as the one that injects the overlay (see
-"Platforms").
+directory — crcbl tests on 480 permanently (decided 2026-09-23), so a step 480
+cannot carry is recorded as untestable under 480; run on **Windows 11, a Linux
+desktop (and the Deck where the slice says so), and macOS**;
+`cargo test -p crcbl-steam -- --ignored <slice-filter>` plus the sample's manual
+steps; record per OS, in the slice's commit or backlog entry, what was run and
+what was not. App 480 is shared by every Steamworks developer: **assert
+mechanisms (init, events arriving, calls completing), never values read back
+from 480.** Slices marked "two accounts" need two Steam accounts on two machines
+(one may be a Deck). Overlay checks on Linux and macOS use whatever launch slice
+1b recorded as the one that injects the overlay (see "Platforms").
 
 ### Build order
 
@@ -1308,18 +1309,22 @@ On branch `steam-sdk`, not merged to `main`:
   **Not run:** every step under "Needs a real client" below — a private item
   uploaded under 480, subscribed from a second account, `ItemInstalled_t` seen,
   the item deleted — on every OS. See "Slice 14 as built".
-- **Slice 15: inventory half done** (2026-09-23); **shipping half blocked on an
-  app id of our own.** `Inventory` — result handles (`InventoryResult`,
-  destroyed once on drop, a refused operation's handle included), items, promo
-  grants, consume, exchange, item definitions and their properties,
-  `StartPurchase` and prices — over the fake; every test in the slice's list
-  seen red against a deliberate break; Miri clean; the drift gate passes against
-  the mirror with the nineteen declarations, six structs and the new base. **Not
-  run:** the inventory under 480 — whether SpaceWar's example item definitions
-  exist is still a belief (R3) — on every OS. **Not started:** the shipping
-  half, whose every step (depots, packaging, the Steam Runtime container build,
-  the release-build relaunch guard, macOS signing) means something only for an
-  app id of our own, which is the user's to get. See "Slice 15 as built".
+- **Slice 15: inventory half done** (2026-09-23); **shipping half a game's, not
+  crcbl's** (decided 2026-09-23, below). `Inventory` — result handles
+  (`InventoryResult`, destroyed once on drop, a refused operation's handle
+  included), items, promo grants, consume, exchange, item definitions and their
+  properties, `StartPurchase` and prices — over the fake; every test in the
+  slice's list seen red against a deliberate break; Miri clean; the drift gate
+  passes against the mirror with the nineteen declarations, six structs and the
+  new base. **Not run:** the inventory under 480 — whether SpaceWar's example
+  item definitions exist is still a belief (R3) — on every OS. **Not started:**
+  the engine side of shipping — what a game needs from crcbl to ship (the
+  redistributable placed beside the executable, a check that a package carries
+  no `steam_appid.txt`, the Steam Runtime container build, the release-build
+  relaunch guard, the macOS signing notes). Depots, build upload and store
+  configuration belong to a game that uses crcbl, under its own app id; crcbl
+  will most likely never be published on Steam itself, and none of this waits on
+  it getting an app id. See "Slice 15 as built".
 
 **Slice 15 as built (inventory), where it differs from the text below:**
 
@@ -1843,10 +1848,11 @@ On branch `steam-sdk`, not merged to `main`:
 **Slice 9 as built, where it differs from the text below:**
 
 - **No breakout consumer yet.** Breakout's high score as a stat needs stats
-  defined for an app of our own; under 480 only SpaceWar's exist, so a breakout
-  wired to them could not be checked, and one wired to its own names would
-  answer `Refused` on every call. `tests/stats_smoke.rs` (`#[ignore]`) is the
-  harness instead, on SpaceWar's names; the consumer is in the backlog.
+  defined for an app of its own, which crcbl will not have (it tests on 480
+  permanently, decided 2026-09-23); under 480 only SpaceWar's exist, so a
+  breakout wired to them could not be checked, and one wired to its own names
+  would answer `Refused` on every call. `tests/stats_smoke.rs` (`#[ignore]`) is
+  the harness instead, on SpaceWar's names; the consumer is in the backlog.
 - **Readiness is the pump's.** `UserStatsReceived_t` for the local user, this
   game (`m_nGameID` is the app id for a Steam game) and `EResult::OK` makes
   `Stats::ready()` true; before it every `Stats` call is
@@ -2358,13 +2364,15 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   the fake reports cloud disabled; `FileWrite` returning false → `StorageError`,
   never `Ok`; `RemoteStorageLocalFileChange_t` (1333) layout and decode; a call
   from a second thread returns `Unsupported` and makes no Steam call.
-- **Needs a real client:** does app 480 have a cloud quota? **Unverified** — the
-  first step is `GetQuota`; if 480 has none, this slice's manual check waits for
-  an app id of our own and says so. With quota: write on machine A, quit, launch
-  on machine B → fast-forward; write offline on both, reconnect → the game shows
-  `Conflict` (and record whether Steam's own dialog appeared first, and what the
-  game saw after each choice); on a Deck, suspend mid-game, change the file from
-  another machine, resume → `CloudFileChanged`.
+- **Needs a real client:** does app 480 have a cloud quota? **Unverified, and
+  possibly untestable under 480** — the first step is `GetQuota`; if 480 has
+  none, the check is recorded as not possible under 480 (crcbl tests on 480
+  permanently, so there is no app id of its own to wait for) and runs only in a
+  game with its own. With quota: write on machine A, quit, launch on machine B →
+  fast-forward; write offline on both, reconnect → the game shows `Conflict`
+  (and record whether Steam's own dialog appeared first, and what the game saw
+  after each choice); on a Deck, suspend mid-game, change the file from another
+  machine, resume → `CloudFileChanged`.
 - **Exit:** classification tests green; a real conflict surfaced to the game on
   at least one OS pair, or the 480-quota gap recorded.
 
@@ -2492,11 +2500,13 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   `GetDownloadedLeaderboardEntry` on a fake; details array length capped at
   `k_cLeaderboardDetailsMax` before the call; "store before stats received" is a
   typed error, not a silent false.
-- **Needs a real client:** under 480, SpaceWar's own achievements and stats (the
-  Steamworks example's `ACH_WIN_ONE_GAME`, `NumGames`, and its "Feet Traveled"
-  leaderboard — **believed present, verify**): unlock → overlay toast appears;
-  clear it again afterwards (480 is shared — leave it as found); upload a score
-  and download around-user.
+- **Needs a real client, possibly untestable under 480:** SpaceWar's own
+  achievements and stats (the Steamworks example's `ACH_WIN_ONE_GAME`,
+  `NumGames`, and its "Feet Traveled" leaderboard — **believed present,
+  verify**; if 480's stats definitions are not what the example says, the check
+  is recorded as not possible under 480): unlock → overlay toast appears; clear
+  it again afterwards (480 is shared — leave it as found); upload a score and
+  download around-user.
 - **Exit:** toast observed on each OS; nothing asserted about 480's values.
 
 ### Slice 10 — Screenshots and the timeline (game recording)
@@ -2572,14 +2582,16 @@ listen server. The text below is the slice as it will be built then.
 - **Inventory:** `ISteamInventory` result handles (RAII `DestroyResult`), item
   definitions, grant-promo/consume/exchange, purchase start. Under 480 the
   Steamworks example's item definitions — **believed present, verify**.
-- **Shipping** (last, needs an app id of our own to mean anything): per-OS
+- **Shipping** (last; the engine's side of it — a game that uses crcbl supplies
+  the app id, depots and store configuration, decided 2026-09-23): per-OS
   packaging that places the redistributable next to the executable (and in
   `Contents/Frameworks` for a macOS bundle, re-signed); a CI check that a
   packaged build contains no `steam_appid.txt`; Linux release builds in the
   Steam Runtime SDK container so the glibc floor matches `sniper`; the
   `relaunch_via_steam` guard in release builds; the overlay entitlement question
   on macOS answered.
-- **Exit:** a depot-shaped build per OS that launches from Steam.
+- **Exit:** a depot-shaped build per OS that launches from Steam — checked by a
+  game with an app id of its own, or under 480 as far as 480 allows.
 
 ## What CI proves, what it cannot, and how the gap stays honest
 
@@ -2695,7 +2707,8 @@ Each is labelled with what it blocks and whether it needs the user.
   Input manifest path honoured under 480, SpaceWar's achievements, leaderboard
   and item definitions, and rich-presence localisation under 480 are believed,
   not verified. Each slice's first manual step checks, and a missing capability
-  waits for our own app id rather than faking it.
+  is recorded as untestable under 480 rather than faked: crcbl tests on 480
+  permanently and has no app id of its own to wait for.
 - **R4 — Overlay over our own windowing (every slice).** Unverified on every
   shell backend × GPU backend; recorded per slice.
 - **R5 — Overlay injection outside a Steam launch (slice 1b, then every overlay
@@ -2715,9 +2728,15 @@ Each is labelled with what it blocks and whether it needs the user.
 - **R10 — By-value struct returns (slice 7b).** The ABI for
   `InputAnalogActionData_t` and friends is reasoned, not tested; only real
   controllers on each OS/architecture confirm it.
-- **Needs the user, not blocking any slice before 15: an app id of our own.**
-  Achievement schemas, cloud quota, rich-presence tokens, Steam Input default
-  configurations and depots are per-app. Until then 480.
+- **Decided 2026-09-23 (the user): crcbl tests on 480 permanently.** crcbl is an
+  engine and will most likely never be published on Steam, so it gets no app id
+  of its own: its samples, smoke tests and every manual real-client step target
+  app 480 (Spacewar). Achievement schemas, cloud quota, rich-presence tokens,
+  Steam Input default configurations and depots are per-app, so what 480 lacks
+  is recorded as untestable under 480, not waited for. A game that ships on
+  Steam supplies its own app id. EW's user decided the same for EW — Steam
+  testing on 480, no app id of EW's own for now — and **which Steamworks SDK
+  EW's real-client runs use is still undecided on EW's side**.
 
 Decided since the first draft, and no longer open: the multi-session server is
 scheduled with the Steam slices as slice 2 (EW, 2026-09-22); the
@@ -2735,7 +2754,8 @@ are listed first for completeness.
 | Binding route (ratified)                                                | hand-written flat-API declarations, drift gate                                                                                                                                                             | `steamworks-rs`: new dependency, link-time death without the library                                                                            |
 | Cloud (ratified, then **overridden by EW**, confirmed by EW 2026-09-22) | `ISteamRemoteStorage` backend required, because Auto-Cloud cannot surface a conflict                                                                                                                       | Auto-Cloud only: zero code, but EW requirement 5 unmet                                                                                          |
 | Steam Input (ratified "if Deck targeted" → now in scope)                | Steam Input onto a shared gamepad seam, one owner per pad                                                                                                                                                  | rely on Steam's XInput/evdev emulation only: no Steam code, but no Deck glyphs/remap awareness, and EW 4's "same events" only holds by accident |
-| First app id (ratified)                                                 | 480 for every slice until slice 15                                                                                                                                                                         | own app id: partner fee and a product decision                                                                                                  |
+| App id (**decided by the user** 2026-09-23)                             | crcbl tests on 480 (Spacewar) permanently: samples, smoke tests and every manual real-client step; what 480 lacks is recorded as untestable under 480. EW likewise tests on 480 with no app id of its own  | an app id of crcbl's own: a partner fee for an engine that will most likely never be published on Steam                                         |
+| Slice 15's shipping half (**decided by the user** 2026-09-23)           | a game's, not crcbl's: the engine provides what a game needs to ship; depots, build upload and store configuration belong to the game, under its own app id                                                | crcbl ships on Steam itself: nothing of crcbl's is a product to ship                                                                            |
 | Multi-session server (**decided by EW** 2026-09-22)                     | slice 2, built after slice 4 and before cloud; transport-generic (`Box<dyn Transport>` peers); N a parameter; the engine owns sessions, admission, resume and host-left, the game owns authority and state | EW's host fans out over several transports itself: every co-op game re-writes session management                                                |
 | Gamepad seam (**confirmed by EW** 2026-09-22)                           | slice 7a lands a minimal seam in `crcbl-input` unless topic 19 already has                                                                                                                                 | wait for topic 19: EW requirement 4 waits too                                                                                                   |
 | Slice order (**set by EW** 2026-09-22)                                  | 1 → 1b → 3a → 3b → 4 → 2 → 6 → 5 → 7a–c → 8 → 9 → 10–15                                                                                                                                                    | the earlier order (stats before networking): EW waits                                                                                           |
@@ -2780,15 +2800,14 @@ client**, and the drift gate has never run against an SDK zip from Valve.
 | 12    | built, client half; the `AuthGate`'s wiring into the `crcbl-net` handshake waits on topic 27's design, and server-side decryption of encrypted tickets on a backend the project does not run |
 | 13    | **deferred** (decided 2026-09-23) until a dedicated headless build wants the game-server API; EW is a listen server                                                                          |
 | 14    | built                                                                                                                                                                                        |
-| 15    | inventory half built; **shipping half blocked** on an app id of our own                                                                                                                      |
+| 15    | inventory half built; shipping half not started, and a game's rather than crcbl's (decided 2026-09-23)                                                                                       |
 
 Decided on 2026-09-23 and recorded under "Defaulted decisions": slice 13
 deferred; the Steam-virtual-pad filter keeps its vendor query. **Still open, for
 the user** (each in `docs/backlog.md`): whether `Apps::launch_command_line`
 moves onto the growing buffer (it changes what an existing test asserts); what
 `SteamTransport` reports after `Host::shutdown` (`ShuttingDown` rather than
-`HostLeft`); and the app id of our own that slice 15's shipping half, and every
-per-app capability (R3), wait on.
+`HostLeft`). The app id is settled (above): crcbl tests on 480 permanently.
 
 ## Review (step 2)
 

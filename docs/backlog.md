@@ -9076,14 +9076,15 @@ slice.
   across NAT. The transport is exercised only over the fake loop, which cannot
   show that the send flags, the message release or `ConnectP2P`'s identity
   argument are right against a real client.
-- **Slice 6's manual steps have not run**: `tests/cloud_smoke.rs` (whether app
-  480 has a cloud quota at all — unknown; if it has none, the rest waits for an
-  app id of our own), a write on one machine read on another as a fast-forward,
-  an offline write on both surfaced as a `Conflict` (and whether Steam's own
-  dialog appeared first, and what the game saw after each choice), and a Steam
-  Deck suspended while another machine changes the file, resumed into
-  `CloudFileChanged`. The protocol is exercised over `MemoryStorage` and the
-  fake only.
+- **Slice 6's manual steps have not run, and may be untestable under 480**:
+  `tests/cloud_smoke.rs` (whether app 480 has a cloud quota at all — unknown; if
+  it has none, the rest is recorded as not possible under 480, since crcbl tests
+  on 480 permanently and a game with its own app id is where it runs), a write
+  on one machine read on another as a fast-forward, an offline write on both
+  surfaced as a `Conflict` (and whether Steam's own dialog appeared first, and
+  what the game saw after each choice), and a Steam Deck suspended while another
+  machine changes the file, resumed into `CloudFileChanged`. The protocol is
+  exercised over `MemoryStorage` and the fake only.
 - **Slice 5's manual steps have not run, and nothing drives voice yet**: a
   spoken round trip between two accounts, how long Steam's push-to-talk tail
   lasts, that Steam itself plays nothing, and the `Restricted` path. Neither
@@ -9091,14 +9092,16 @@ slice.
   take is a push-to-talk key in the sandbox's Steam panel, the packets sent
   unreliable over its existing links (framed apart from the greeting text), and
   each decoded chunk played with `crcbl_audio`'s `Voice::new`.
-- **Slice 9's manual steps have not run, and breakout does not use it**:
-  `tests/stats_smoke.rs` under 480 — whether SpaceWar's `ACH_WIN_ONE_GAME`,
-  `NumGames` and "Feet Traveled" exist there is a belief — the unlock toast on
-  each OS, and an upload and around-user download. The plan's first consumer,
-  breakout's high score as a stat with an achievement, needs stats defined for
-  an app id of our own; under 480 its calls would all be `Refused`. What it
-  would take: an app id with a `HighScore` stat and an achievement, and
-  breakout's `steam` feature setting them at game over.
+- **Slice 9's manual steps have not run, may be untestable under 480, and
+  breakout does not use it**: `tests/stats_smoke.rs` under 480 — whether
+  SpaceWar's `ACH_WIN_ONE_GAME`, `NumGames` and "Feet Traveled" exist there is a
+  belief; if they do not, the check is recorded as not possible under 480 — the
+  unlock toast on each OS, and an upload and around-user download. The plan's
+  first consumer, breakout's high score as a stat with an achievement, needs
+  stats defined for an app id of its own, which crcbl will not have (it tests on
+  480 permanently); under 480 its calls would all be `Refused`. So it stays
+  unbuilt unless breakout is wired to SpaceWar's names for the smoke value
+  alone, or a game with its own app id carries the consumer instead.
 - **Slice 2's exit run has not happened, and nothing can run it yet**: slice 4's
   two-machine run repeated with three joiners, through a `Host`. Neither
   `apps/sandbox` (which exchanges greetings over raw `SteamTransport`s) nor
@@ -9151,7 +9154,8 @@ slice.
 - **Slice 11's manual steps have not run**: under 480, which owns no DLC, that
   the ownership, DLC, beta and install-directory calls answer at all; and a
   Remote Play Together session detected when a friend joins through Steam's
-  invite. DLC semantics are untestable until an app id of our own has some.
+  invite. DLC semantics are untestable under 480, which owns none; crcbl tests
+  on 480 permanently.
 - **Deferred: slice 13 (the game-server API)**, decided 2026-09-23 — built when
   a dedicated headless build wants it, not before; EW is a listen server and
   nothing in the workspace is a headless server. The module-or-crate choice is
@@ -9188,17 +9192,20 @@ slice.
   480, whether SpaceWar's example item definitions exist at all (the plan's R3),
   `all_items` becoming ready with `InventoryResultReady`, a promo grant, a
   consume and an exchange, and a `start_purchase` opening the checkout — on
-  every OS. Item semantics beyond "the calls answer" wait for an app id of our
-  own with an item schema.
-- **Blocked on an app id of our own: slice 15's shipping half.** Per-OS
-  packaging that places the redistributable beside the executable (and in
-  `Contents/Frameworks` for a macOS bundle, re-signed), a CI check that a
-  packaged build carries no `steam_appid.txt`, Linux release builds in the Steam
-  Runtime SDK container so the glibc floor matches `sniper`, the
-  `relaunch_via_steam` guard in release builds, and the macOS overlay
-  entitlement question. Each means something only with depots and an app of our
-  own; getting one (a partner fee and a product decision) is the user's call.
-  Not started.
+  every OS. Item semantics beyond "the calls answer" are untestable under 480
+  unless SpaceWar's item schema is there; crcbl tests on 480 permanently.
+- **Not started: the engine's side of slice 15's shipping half.** Decided
+  2026-09-23: shipping on Steam is a game's business, not crcbl's — crcbl will
+  most likely never be published on Steam, and a game that uses it supplies its
+  own app id, depots, build upload and store configuration. What crcbl owes a
+  game is what it needs to ship: per-OS packaging that places the
+  redistributable beside the executable (and in `Contents/Frameworks` for a
+  macOS bundle, re-signed), a check that a packaged build carries no
+  `steam_appid.txt`, Linux release builds in the Steam Runtime SDK container so
+  the glibc floor matches `sniper`, the `relaunch_via_steam` guard in release
+  builds, and the macOS overlay entitlement question answered. None of it waits
+  on an app id; the end-to-end launch from Steam is checked by a game with its
+  own, or under 480 as far as 480 allows.
 - **Needs a decision: `Apps::launch_command_line` can silently cut a line over
   1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
   buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's
@@ -9255,6 +9262,13 @@ plan:**
   `crates/crcbl-input/src/gamepad.rs` with the XInput backend, and merged into
   `steam-sdk`; `SteamPads` reports through it. Topic 19's evdev and
   GameController backends, when built, adopt it.
+
+**Decided 2026-09-23 (the user): crcbl tests on app 480 (Spacewar) permanently**
+— its samples, smoke tests and manual real-client steps — and gets no app id of
+its own; what 480 cannot carry is recorded as untestable under 480. EW's user
+decided the same for EW (Steam testing on 480, no app id of EW's own for now).
+**Still undecided on EW's side: which Steamworks SDK EW's real-client runs
+use.**
 
 **Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
 cloud quota or honours a Steam Input manifest path; whether SpaceWar's
@@ -15293,15 +15307,12 @@ user was away, each with its alternative. The ones most worth a look:
 - 32-bit targets are out of scope.
 - Microtransactions are declined: they need a server that holds a publisher key.
 
-**Still the user's call, and a product decision rather than a technical one:**
-
-- **An app id of our own.** Achievement definitions, stats schema, Auto-Cloud
-  config, rich presence and game-server logins are all configured per-app on the
-  partner site and 480 cannot carry them. Needs a partner account and the
-  app-credit fee, and names a product decision — _which sample, if any, is the
-  thing on Steam_. `towers` and `bracket` are what the ladder suggests. Until
-  then slices 2+ build against 480 with mechanism-only smoke tests that never
-  assert a value read back, since 480's data is shared with everyone.
+**DECIDED 2026-09-23 — no app id of crcbl's own.** crcbl is an engine and will
+most likely never be published on Steam, so it tests on 480 permanently, with
+mechanism-only smoke tests that never assert a value read back (480's data is
+shared with everyone). Per-app configuration — achievements, stats, Auto-Cloud,
+rich presence, depots — belongs to a game that ships with crcbl, under its own
+app id.
 
 **Two things the plan could not verify**, recorded so nobody reads them as
 settled: whether SDK **1.64** exists at all (`steamworks-rs` pins it; 1.63 of
