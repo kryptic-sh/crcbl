@@ -8596,10 +8596,30 @@ this topic; it shares no vocabulary with it.
 
 ### Contact solver L2/L3 — `36-contact-solver.md` (2026-08-27)
 
-Rungs 0 and 1 are built (2026-09-17): rotation, dense body sets, and
-`crcbl_phys::contact`'s broadphase, analytic sphere and capsule manifolds and
-soft solver. Boxes against boxes, islands, sleep, sweeps and joints — rungs 2
-onward — are the work.
+Rungs 0 and 1 are built (2026-09-17), and rung 2 for boxes (2026-09-23): box-box
+SAT with a cached axis, clipping, four-point reduction and stable feature ids,
+analytic sphere and capsule against boxes, centroid and twist friction, and the
+Tower room in `apps/tumble`. Islands, sleep, sweeps and joints (rungs 3 onward)
+remain, and from rung 2:
+
+- **Hulls are not built.** There is no hull collider; finishing rung 2 means a
+  `ColliderComponent::Hull`, Gregorius's Minkowski-face edge test in place of
+  box-box's full support radii, and GJK with a SAT fallback for spheres and
+  capsules against hulls.
+- **Needs a decision: tall stacks need more substeps.** A soft contact's
+  stiffness does not grow with its load, so at the 30 Hz defaults a column
+  buckles past Greenhill's height (measured: 14 one-metre cubes stand, 17 fall).
+  `ContactSettings::TALL_STACK` (8 substeps, 90 Hz) is a whole-system
+  workaround; options are per-island or per-group substeps (decision 1's "more
+  substeps for its group") or stiffness scaled by load.
+- **Fast spinners tunnel into static capsules**: wall cubes at up to 80 rad/s
+  reach 6.9 cm deep in one tick. Rung 4's sweeps own it; until then the wall
+  test's penetration bounds are 2 cm (last tick) and 8 cm (any tick), loosened
+  from 1 and 4 cm when cubes joined the wall.
+- **`PINNED_HASH` was re-pinned on Windows** (`0x76aa_2acd_7b93_d586`); the
+  browser gate in `pages.yml` is what proves wasm matches it.
+- Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
+  room's browser cost (245 more boxes a tick in wasm).
 
 ### Ragdolls — `35-ragdolls.md` (2026-08-27)
 

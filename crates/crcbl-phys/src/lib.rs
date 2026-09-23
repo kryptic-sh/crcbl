@@ -27,12 +27,14 @@
 //! are made.
 //! [`SurfaceMaterial`] carries each body's friction and restitution.
 //!
-//! L2 is rung 1 of `docs/plan/36-contact-solver.md`, in [`contact`]: a system
-//! made with [`PhysicsSystem::with_contacts`] collides spheres, capsules and
-//! (against planes) boxes through split broadphase trees, analytic manifolds
-//! and a substepped soft solver with warm starting, speculative contacts and a
-//! restitution pass, and raises a [`KineticContact`] for each hard impact.
-//! Box against box, islands and sleep are later rungs.
+//! L2 is rungs 1 and 2 of `docs/plan/36-contact-solver.md`, in [`contact`]: a
+//! system made with [`PhysicsSystem::with_contacts`] collides spheres,
+//! capsules and boxes through split broadphase trees, analytic manifolds, a
+//! cached separating axis test with clipping for box pairs, and a substepped
+//! soft solver with warm starting by feature id, centroid and twist friction,
+//! speculative contacts and a restitution pass, and raises a
+//! [`KineticContact`] for each hard impact. Convex hulls, islands and sleep
+//! are later rungs.
 //!
 //! [`Atmosphere`] and its
 //! quadratic [`AtmosphericDrag`] have landed, the [`Frames`] hierarchy carries

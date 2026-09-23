@@ -1,15 +1,16 @@
-//! The gallery: three rooms, each its own physics system, all stepped every
-//! tick whichever one the camera is looking at.
+//! The gallery: four rooms, each with its own physics, all stepped every tick
+//! whichever one the camera is looking at.
 //!
 //! ```text
-//!   x = 0          x = 12              x = 26
-//!   Spin           Wall                Pit
-//!   rung 0         rung 1              rung 1
-//!   T-handle,      the obstacle wall   a thousand balls
-//!   a box landing  with falling balls  poured into a pit
+//!   x = 0          x = 12              x = 26             x = 44
+//!   Spin           Wall                Pit                Tower
+//!   rung 0         rungs 1 and 2       rung 1             rung 2
+//!   T-handle,      the obstacle wall   a thousand balls   a column, a
+//!   a box landing  with balls, pills   poured into a pit  pyramid and
+//!                  and cubes                              dominoes
 //! ```
 //!
-//! **The view never reaches the simulation.** Keys `1`, `2` and `3` move the
+//! **The view never reaches the simulation.** Keys `1` to `4` move the
 //! camera and change which room's counters the panel shows, and nothing else:
 //! every room steps every tick from the same start, so the hash at
 //! [`CHECK_TICK`] is a constant whatever was pressed. [`PINNED_HASH`] is it,
@@ -22,8 +23,8 @@
 //! also makes every counter — pairs, contacts, each stage's time — the room's
 //! own rather than the gallery's.
 //!
-//! See [`crate::spin`], [`crate::wall`] and [`crate::pit`] for what each room
-//! shows and what it cannot yet.
+//! See [`crate::spin`], [`crate::wall`], [`crate::pit`] and [`crate::tower`]
+//! for what each room shows and what it cannot yet.
 
 use std::hash::Hasher;
 
@@ -34,6 +35,7 @@ use crcbl::phys::{ContactCounters, StageTimes};
 
 use crate::pit::{Pit, PitReading};
 use crate::spin::{Spin, SpinReading};
+use crate::tower::{Tower, TowerReading};
 use crate::wall::{Wall, WallReading};
 
 #[cfg(test)]
@@ -46,11 +48,14 @@ pub const TICK_HZ: u32 = 60;
 
 /// The tick whose hash [`PINNED_HASH`] is: ten simulated seconds in, far enough
 /// that the handle has flipped, the box has landed three times, the wall has
-/// most of its bodies and the pit three quarters of its balls.
+/// most of its bodies, the pit three quarters of its balls, and the dominoes
+/// have all fallen once and are falling again.
 pub const CHECK_TICK: u64 = 600;
 
-/// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Linux on 2026-09-17.
-pub const PINNED_HASH: u64 = 0x4e79_f780_ea08_8bcd;
+/// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
+/// after rung 2 changed the friction every room's contacts solve and added
+/// the Tower room and the wall's cubes.
+pub const PINNED_HASH: u64 = 0x76aa_2acd_7b93_d586;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;
@@ -134,7 +139,7 @@ pub trait Room {
 }
 
 /// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
-/// rung 1's row.
+/// rung 1's row and rung 2's.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tally {
     /// Bodies that step.
@@ -143,6 +148,10 @@ pub struct Tally {
     pub pairs: usize,
     /// Contacts with a point.
     pub touching: usize,
+    /// Manifold points in the last tick.
+    pub points: usize,
+    /// Of those, the ones whose feature id persisted from the tick before.
+    pub persisted: usize,
     /// Contacts begun, over the run.
     pub begun: u64,
     /// Contacts ended, over the run.
@@ -165,6 +174,8 @@ impl Tally {
         self.bodies = counters.bodies;
         self.pairs = counters.pairs;
         self.touching = counters.touching;
+        self.points = counters.points;
+        self.persisted = counters.persisted;
         self.begun += counters.begun;
         self.ended += counters.ended;
         self.worst_penetration = counters.worst_penetration;
@@ -189,6 +200,22 @@ impl Tally {
         #[allow(clippy::cast_precision_loss)]
         (self.bounces > 0).then(|| self.restitution_sum / self.bounces as f64)
     }
+
+    /// The last tick's points per touching contact, or `None` if nothing
+    /// touched.
+    #[must_use]
+    pub fn points_per_manifold(&self) -> Option<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        (self.touching > 0).then(|| self.points as f64 / self.touching as f64)
+    }
+
+    /// The share of the last tick's points whose feature id persisted, or
+    /// `None` if there were none. Flickering ids read below one.
+    #[must_use]
+    pub fn persisted_ratio(&self) -> Option<f64> {
+        #[allow(clippy::cast_precision_loss)]
+        (self.points > 0).then(|| self.persisted as f64 / self.points as f64)
+    }
 }
 
 /// Which room the camera and the panel are on.
@@ -201,6 +228,8 @@ pub enum View {
     Wall,
     /// The ball pit.
     Pit,
+    /// Rung 2's room: the column, the pyramid and the dominoes.
+    Tower,
 }
 
 impl View {
@@ -211,6 +240,7 @@ impl View {
             KeyCode::Digit1 => Some(Self::Spin),
             KeyCode::Digit2 => Some(Self::Wall),
             KeyCode::Digit3 => Some(Self::Pit),
+            KeyCode::Digit4 => Some(Self::Tower),
             _ => None,
         }
     }
@@ -222,6 +252,7 @@ impl View {
             Self::Spin => "spin",
             Self::Wall => "wall",
             Self::Pit => "pit",
+            Self::Tower => "tower",
         }
     }
 }
@@ -239,7 +270,9 @@ pub struct Reading {
     pub wall: WallReading,
     /// The pit.
     pub pit: PitReading,
-    /// The last tick's physics over all three rooms, in microseconds, where
+    /// The Tower room.
+    pub tower: TowerReading,
+    /// The last tick's physics over every room, in microseconds, where
     /// this build has a clock to measure it with.
     pub step_micros: Option<f64>,
     /// [`Scenes::hash`] now.
@@ -252,6 +285,7 @@ pub struct Scenes {
     spin: Spin,
     wall: Wall,
     pit: Pit,
+    tower: Tower,
     view: View,
     tick: u64,
     step_micros: Option<f64>,
@@ -273,6 +307,7 @@ impl Scenes {
             self.spin.step(tick_dt, Some(&mut clock));
             self.wall.step(tick_dt, Some(&mut clock));
             self.pit.step(tick_dt, Some(&mut clock));
+            self.tower.step(tick_dt, Some(&mut clock));
             self.step_micros = Some(clock() * 1.0e6);
         }
         // The browser build has no clock a module can read —
@@ -283,6 +318,7 @@ impl Scenes {
             self.spin.step(tick_dt, None);
             self.wall.step(tick_dt, None);
             self.pit.step(tick_dt, None);
+            self.tower.step(tick_dt, None);
         }
         self.tick += 1;
     }
@@ -309,6 +345,7 @@ impl Scenes {
         self.spin.hash(&mut hasher);
         self.wall.hash(&mut hasher);
         self.pit.hash(&mut hasher);
+        self.tower.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -320,8 +357,8 @@ impl Scenes {
 
     /// Every room, for drawing, in a fixed order.
     #[must_use]
-    pub fn rooms(&self) -> [&dyn Room; 3] {
-        [&self.spin, &self.wall, &self.pit]
+    pub fn rooms(&self) -> [&dyn Room; 4] {
+        [&self.spin, &self.wall, &self.pit, &self.tower]
     }
 
     /// Every counter, at this instant.
@@ -333,6 +370,7 @@ impl Scenes {
             spin: self.spin.reading(),
             wall: self.wall.reading(),
             pit: self.pit.reading(),
+            tower: self.tower.reading(),
             step_micros: self.step_micros,
             hash: self.hash(),
         }
@@ -403,6 +441,7 @@ pub(crate) mod tests {
         assert_eq!(View::for_key(KeyCode::Digit1), Some(View::Spin));
         assert_eq!(View::for_key(KeyCode::Digit2), Some(View::Wall));
         assert_eq!(View::for_key(KeyCode::Digit3), Some(View::Pit));
+        assert_eq!(View::for_key(KeyCode::Digit4), Some(View::Tower));
         assert_eq!(View::for_key(KeyCode::Space), None);
         assert_eq!(Scenes::new().view(), View::Wall);
     }
@@ -416,6 +455,8 @@ pub(crate) mod tests {
             reading.spin.contacts,
             reading.wall.contacts,
             reading.pit.contacts,
+            reading.tower.pyramid,
+            reading.tower.column,
         ] {
             assert!(tally.stages.is_some(), "{tally:?}");
         }

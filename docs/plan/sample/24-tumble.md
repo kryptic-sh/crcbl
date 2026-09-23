@@ -95,14 +95,20 @@ Gameplay. Reduced-coordinate articulations, which
 collision math" is kept**: the first cut draws no bounce the engine does not
 compute.
 
-## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17
+## Status: milestones 2 (Spin) and 3 (Pachinko) built 2026-09-17, milestone 4 (Tower) 2026-09-23 but for the Galton board
 
-`apps/tumble` has three rooms on keys 1–3, each its own physics system: Spin
-(the zero-g T-handle, and a box that lands flat on its corners), the obstacle
-wall (balls and pills, no cubes until rung 2) and the thousand-ball pit (no
-sleep until rung 3, no overflow or despawn until rung 6), each gap labelled on
-screen. Milestone 1's bullet scene, wind tunnel and golden frame, and every
-milestone after 3, are not built.
+`apps/tumble` has four rooms on keys 1–4: Spin (the zero-g T-handle, and a box
+that lands flat on its corners), the obstacle wall (balls, pills and, since rung
+2, cubes), the thousand-ball pit (no sleep until rung 3, no overflow or despawn
+until rung 6) and the Tower room — the stacking scene: a 20-cube column, a
+base-20 pyramid and a domino run toppled again every eight seconds, with points
+per manifold, the persisted-id ratio and both top boxes' drift on the page. Each
+gap is labelled on screen. The pyramid runs alone in a system at the default
+contact settings, so the room's solver time is the pyramid's; the column and the
+dominoes run in a second system at `ContactSettings::TALL_STACK`, because at 30
+Hz twenty cubes buckle — see [36-contact-solver.md](../36-contact-solver.md)'s
+status. Milestone 1's bullet scene, wind tunnel and golden frame, milestone 4's
+Galton board, and every milestone after 4, are not built.
 
 Performance follow-up: the debug module borrows the scenes and constructs its
 reading only inside the visible panel's `debug_section`. Hidden panels avoid the

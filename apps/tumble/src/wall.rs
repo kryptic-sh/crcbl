@@ -1,7 +1,9 @@
-//! The obstacle wall — the user's first scene, and rung 1's proving scene.
+//! The obstacle wall — the user's first scene, and rung 1's proving scene, with rung
+//! 2's cubes.
 //!
 //! ```text
-//!             ○   ◯        spawner: a ball, and every seventh a pill
+//!           ○  ◯  ▪        spawner: a ball; every seventh a pill and every
+//!                             fifth otherwise a cube
 //!        ╲▁▁▁▁▁▁      ▁▁▁▁▁▁╱   deflector bars, tilted capsules
 //!    │  •   •   •   •   •   •  │
 //!    │    •   •   ◇   •   •    │  pegs: capsules end-on through the board
@@ -13,22 +15,17 @@
 //! ```
 //!
 //! A board of static pegs, bars and wedges stands between a back board and an
-//! invisible front pane a ball's width apart, and balls and pills drop onto it
-//! and bounce down into the bins. Every rung 1 pair is in it: balls against
-//! pegs and bars (sphere against capsule), against wedges and bins (sphere
-//! against a turned box and an axis-aligned one), against the floor (a plane)
-//! and against each other; pills against all of those as capsules.
+//! invisible front pane a ball's width apart, and balls, pills and cubes drop
+//! onto it and bounce down into the bins. Every rung 1 pair is in it: balls
+//! against pegs and bars (sphere against capsule), against wedges and bins
+//! (sphere against a turned box and an axis-aligned one), against the floor (a
+//! plane) and against each other; pills against all of those as capsules.
+//! And rung 2's: a cube against a wedge, a bin, the boards and another cube is
+//! box against box.
 //!
 //! The wall holds [`MAX_LIVE`] bodies, and the oldest is taken out as each new
 //! one drops — which is the despawn half of the counters, contacts ended as
 //! well as begun.
-//!
-//! # What it cannot show yet
-//!
-//! **Cubes**: `docs/plan/sample/24-tumble.md` has the spawner drop cubes too,
-//! and a cube against a peg would work — but against a bin, a wedge or another
-//! cube it is box against box, which is rung 2. So no cube drops, and the page
-//! says so.
 
 use std::collections::VecDeque;
 
@@ -63,6 +60,19 @@ pub const PILL_HALF: f64 = 0.08;
 const PILL_MASS: f64 = 0.25;
 /// Every how many drops is a pill.
 const PILL_EVERY: u64 = 7;
+/// A cube's half-extent: small enough that turned any way it fits between the
+/// boards, whose gap is twice [`SLAB`].
+pub const CUBE_HALF: f64 = 0.05;
+/// A cube's mass.
+const CUBE_MASS: f64 = 0.3;
+/// Every how many drops is a cube, where it is not a pill.
+const CUBE_EVERY: u64 = 5;
+
+const _: () = assert!(
+    3.0 * CUBE_HALF * CUBE_HALF < SLAB * SLAB,
+    "a cube's long diagonal fits between the boards"
+);
+
 /// A peg's radius.
 pub const PEG_RADIUS: f64 = 0.05;
 
@@ -117,13 +127,34 @@ pub struct WallReading {
     pub contacts: Tally,
 }
 
+/// What a dropped body is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drop {
+    Ball,
+    Pill,
+    Cube,
+}
+
+impl Drop {
+    /// What drop `n` is.
+    const fn nth(n: u64) -> Self {
+        if n % PILL_EVERY == PILL_EVERY - 1 {
+            Self::Pill
+        } else if n % CUBE_EVERY == CUBE_EVERY - 1 {
+            Self::Cube
+        } else {
+            Self::Ball
+        }
+    }
+}
+
 /// The obstacle wall.
 #[derive(Debug)]
 pub struct Wall {
     phys: PhysicsSystem,
     fixtures: Vec<Fixture>,
-    /// The bodies on the wall, oldest first, and whether each is a pill.
-    live: VecDeque<(Entity, bool)>,
+    /// The bodies on the wall, oldest first, and what each is.
+    live: VecDeque<(Entity, Drop)>,
     dropped: u64,
     /// Whether a drop is due and waiting for its point to clear.
     due: bool,
@@ -313,39 +344,55 @@ impl Wall {
         if blocked {
             return false;
         }
-        let pill = n % PILL_EVERY == PILL_EVERY - 1;
-        let (body, component, rotation) = if pill {
-            let inertia =
-                MassProperties::capsule(PILL_MASS, PILL_RADIUS, PILL_HALF, DVec3::ZERO).inertia;
-            let turn = rotation_from_scaled_axis(DVec3::Z * (hash_unit(SEED, 2 * n + 1) * 3.0));
-            (
-                RigidBody::new_dynamic(PILL_MASS).with_inertia(inertia),
-                ColliderComponent::Capsule {
-                    offset: DVec3::ZERO,
-                    radius: PILL_RADIUS,
-                    half_height: PILL_HALF,
-                    is_trigger: false,
-                },
-                turn,
-            )
-        } else {
-            let inertia = MassProperties::sphere(BALL_MASS, BALL_RADIUS, DVec3::ZERO).inertia;
-            (
-                RigidBody::new_dynamic(BALL_MASS).with_inertia(inertia),
-                ColliderComponent::Sphere {
-                    offset: DVec3::ZERO,
-                    radius: BALL_RADIUS,
-                    is_trigger: false,
-                },
-                DQuat::IDENTITY,
-            )
+        let kind = Drop::nth(n);
+        let turn = || rotation_from_scaled_axis(DVec3::Z * (hash_unit(SEED, 2 * n + 1) * 3.0));
+        let (body, component, rotation) = match kind {
+            Drop::Pill => {
+                let inertia =
+                    MassProperties::capsule(PILL_MASS, PILL_RADIUS, PILL_HALF, DVec3::ZERO).inertia;
+                (
+                    RigidBody::new_dynamic(PILL_MASS).with_inertia(inertia),
+                    ColliderComponent::Capsule {
+                        offset: DVec3::ZERO,
+                        radius: PILL_RADIUS,
+                        half_height: PILL_HALF,
+                        is_trigger: false,
+                    },
+                    turn(),
+                )
+            }
+            Drop::Cube => {
+                let half = DVec3::splat(CUBE_HALF);
+                let inertia = MassProperties::cuboid(CUBE_MASS, half, DVec3::ZERO).inertia;
+                (
+                    RigidBody::new_dynamic(CUBE_MASS).with_inertia(inertia),
+                    ColliderComponent::Box {
+                        offset: DVec3::ZERO,
+                        half_extents: half,
+                        is_trigger: false,
+                    },
+                    turn(),
+                )
+            }
+            Drop::Ball => {
+                let inertia = MassProperties::sphere(BALL_MASS, BALL_RADIUS, DVec3::ZERO).inertia;
+                (
+                    RigidBody::new_dynamic(BALL_MASS).with_inertia(inertia),
+                    ColliderComponent::Sphere {
+                        offset: DVec3::ZERO,
+                        radius: BALL_RADIUS,
+                        is_trigger: false,
+                    },
+                    DQuat::IDENTITY,
+                )
+            }
         };
         let transform = Transform::new(at, rotation);
         self.phys.set_body(e, body);
         self.phys.set_transform(e, transform);
         self.phys.set_collider(e, &component, &transform);
         self.phys.set_material(e, BALL_SURFACE);
-        self.live.push_back((e, pill));
+        self.live.push_back((e, kind));
         self.dropped += 1;
 
         if self.live.len() > MAX_LIVE
@@ -413,28 +460,36 @@ impl Room for Wall {
     }
 
     fn bodies(&self, out: &mut Vec<Shape>) {
-        for &(e, pill) in &self.live {
+        for &(e, kind) in &self.live {
             let Some(transform) = self.phys.transform(e) else {
                 continue;
             };
             let key = e.to_bits();
-            if pill {
-                let axis = transform.rotation * DVec3::new(0.0, PILL_HALF, 0.0);
-                out.push(Shape::Capsule {
+            out.push(match kind {
+                Drop::Pill => {
+                    let axis = transform.rotation * DVec3::new(0.0, PILL_HALF, 0.0);
+                    Shape::Capsule {
+                        key,
+                        a: transform.position - axis,
+                        b: transform.position + axis,
+                        radius: PILL_RADIUS,
+                        tint: Tint::Pill,
+                    }
+                }
+                Drop::Cube => Shape::Box {
                     key,
-                    a: transform.position - axis,
-                    b: transform.position + axis,
-                    radius: PILL_RADIUS,
-                    tint: Tint::Pill,
-                });
-            } else {
-                out.push(Shape::Sphere {
+                    centre: transform.position,
+                    rotation: transform.rotation,
+                    half: DVec3::splat(CUBE_HALF),
+                    tint: Tint::Box,
+                },
+                Drop::Ball => Shape::Sphere {
                     key,
                     centre: transform.position,
                     radius: BALL_RADIUS,
                     tint: Tint::Ball,
-                });
-            }
+                },
+            });
         }
     }
 
@@ -487,12 +542,15 @@ mod tests {
     /// restitution they were given, nothing leaves the board, and nothing
     /// sinks into anything by more than a few centimetres even for a tick.
     ///
-    /// Measured on 2026-09-17 at tick 1200: 120 live of 154 dropped (46 drops
-    /// waited for their point to clear), the fastest body at 6.6 m/s, the worst
-    /// overlap in the last tick 6.5 mm and in any tick 2.6 cm — a pill spinning
-    /// into a peg, whose contact point moves along it faster within a tick than
-    /// the anchors the solver tracks — and the mean bounce 0.506 against 0.507
-    /// asked for.
+    /// Measured on 2026-09-23, with cubes, at tick 1200: 120 live of 155
+    /// dropped, the fastest body at 6.5 m/s, nothing out of the wall, and the
+    /// mean bounce 0.490 against 0.487 asked for. The worst overlap was 1.4 cm
+    /// in the last tick and 6.9 cm in any tick: a cube spinning at up to
+    /// 80 rad/s — over a radian a tick — turning a corner into a peg that was
+    /// not its nearest feature when the tick's manifold was built. That is
+    /// rotation outrunning a once-a-tick manifold, which rung 4's sweeps for
+    /// fast bodies are for; on 2026-09-17, with balls and pills only, the same
+    /// effect from a spinning pill peaked at 2.6 cm.
     #[test]
     fn the_wall_fills_turns_over_bounces_and_holds_everything() {
         let mut wall = Wall::new();
@@ -519,7 +577,7 @@ mod tests {
             "a body got {worst_escape} m out of the wall"
         );
         assert!(fastest < 12.0, "a body reached {fastest} m/s");
-        assert!(tally.worst_penetration < 0.01, "{tally:?}");
-        assert!(tally.peak_penetration < 0.04, "{tally:?}");
+        assert!(tally.worst_penetration < 0.02, "{tally:?}");
+        assert!(tally.peak_penetration < 0.08, "{tally:?}");
     }
 }
