@@ -15,10 +15,14 @@
 //!   for the server → client snapshot path.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
+//! * `conformance` (feature `conformance`) — the checks every [`Transport`]
+//!   must pass, for crates that implement one.
 
 pub mod auth;
 pub mod codec;
 pub mod condition;
+#[cfg(any(test, feature = "conformance"))]
+pub mod conformance;
 pub mod delta;
 pub mod handshake;
 pub mod messages;

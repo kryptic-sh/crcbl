@@ -20,3 +20,10 @@ thiserror = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+# `crcbl_net::conformance`: the checks `Transport`'s documentation promises,
+# as functions any implementation can be run through. Test support for crates
+# that implement a transport — `crcbl-steam` names it as a dev-dependency
+# feature — and never needed by a game.
+conformance = []
