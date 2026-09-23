@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_input::Binding` has pad variants and is no longer `Eq`**:
+  `PadButton`, `PadStick { stick, deadzone }` and
+  `PadTrigger { trigger, threshold }` join it, so an exhaustive `match` on it
+  needs three more arms, and the `f32` dead zones leave it `PartialEq` only.
+  `ActionMapError` has `InvalidDeadzone`, returned by `try_declare`,
+  `try_declare_in` and `rebind` for a dead zone or threshold that is not finite
+  and in `0.0..1.0`.
 - **dx12: game-owned DXIL built without explicit registers must be rebuilt.** A
   D3D12 register is now the binding number in the set's register space (see the
   Fixed entry below), so a shader that declares no `register(…)` — which `dxc`
@@ -229,6 +236,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A gamepad seam in `crcbl-input`**, the one vocabulary every pad backend
+  emits so a game binds a pad once: `GamepadEvent` (`Connected`, `Disconnected`,
+  `State`) carrying a `GamepadSnapshot` — a level, with a `PadButtons` set of
+  positional `PadButton`s (South is A, Cross or B), sticks −1…1 with +Y up,
+  triggers 0…1, all raw — plus `GamepadId::allocate`, `PadAxis`, `Stick`,
+  `Trigger` and `PadKind`. A game reads the events directly, or feeds
+  `ActionMap::gamepad_event`, which resolves `Binding::PadButton`, `PadStick` (a
+  scaled radial dead zone) and `PadTrigger` (a threshold) through contexts like
+  any other input, and makes `Device::Gamepad` the last device on a press or a
+  push past `PAD_ACTIVITY_THRESHOLD`, never on a release.
+  `ActionMap::release_gamepads` drops every pad to neutral and withholds a held
+  button until it is let go; the engine loop calls it on focus loss, on the map
+  `Game::actions` hands over. A disconnected pad's held state is released.
+- **XInput on Windows, `crcbl_input::xinput`**: `XInput::load` finds
+  `xinput1_4.dll` (or `xinput9_1_0.dll`) at runtime, and `XInput::poll` reads
+  the four slots and emits `GamepadEvent`s — connections, disconnections, and a
+  snapshot whenever one changes. The game polls it; the engine loop does not.
+  Tested without a controller (a scripted state source, and a real
+  `XInputGetState` answering an empty slot); no controller has been through it
+  yet. Other targets have no pad backend and no stand-in module.
 - **Tap, hold and double-tap patterns on `crcbl_input::ActionMap`**, beside
   `set_repeat` and on the same tick clock, so a scripted replay fires them on
   the same ticks every run. `set_tap(name, Some(Tap::new(time)?))` fires

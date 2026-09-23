@@ -379,6 +379,9 @@ fn binding_name(binding: &Binding) -> String {
         }
         Binding::Chord { modifier, key } => format!("{modifier:?}+{}", key.as_str()),
         Binding::Virtual(id) => format!("on-screen `{id}`"),
+        Binding::PadButton(button) => format!("pad {button:?}"),
+        Binding::PadStick { stick, .. } => format!("pad {stick:?} stick"),
+        Binding::PadTrigger { trigger, .. } => format!("pad {trigger:?} trigger"),
         Binding::Wasd {
             up,
             down,

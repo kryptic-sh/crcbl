@@ -20,8 +20,9 @@
 //! disabled action is silenced, and its keys stay its context's until
 //! [`ActionMap::rebind`] moves them. Inputs are keys (the keys a
 //! [`Binding::Chord`] owns, not its modifier), pointer buttons, on-screen
-//! controls by id, and the pointer's position, motion and wheel each as one
-//! input.
+//! controls by id, the pointer's position, motion and wheel each as one input,
+//! and pad buttons, sticks and triggers — every pad's South is one input, as
+//! every pad drives every pad binding.
 //!
 //! # A key held while the stack changes
 //!
@@ -35,7 +36,9 @@
 //! on by default; this is narrower, withholding only inputs whose owner
 //! actually changed, so a key the new context does not bind keeps working
 //! without a lift. Levels are not withheld — a pointer position or a stick
-//! deflection is a place, not a press — only routed. A rebind moves ownership
+//! deflection is a place, not a press — only routed; a pad button is a press
+//! and is withheld like a key, but a pad trigger is a level even when a button
+//! action reads it. A rebind moves ownership
 //! without withholding, because a rebind already resolves against the keys
 //! held at the time.
 
@@ -43,7 +46,7 @@ use std::collections::{HashMap, HashSet};
 
 use crcbl_core::input::{KeyCode, PointerButton};
 
-use super::{ActionMap, ActionMapError, Binding, Modifier};
+use super::{ActionMap, ActionMapError, Binding, Modifier, PadButton, PadButtons, Stick, Trigger};
 
 /// The base context: always active, and where [`ActionMap::declare`] puts an
 /// action.
@@ -62,6 +65,9 @@ pub(crate) struct Routes {
     motion: Option<usize>,
     scroll: Option<usize>,
     pub(crate) pointer: Option<usize>,
+    pad_buttons: HashMap<PadButton, usize>,
+    pad_sticks: HashMap<Stick, usize>,
+    pad_triggers: HashMap<Trigger, usize>,
 }
 
 /// Held inputs withheld from their owner until released — see the module docs.
@@ -70,6 +76,9 @@ pub(crate) struct Suppressed {
     pub(crate) keys: HashSet<KeyCode>,
     pub(crate) buttons: HashSet<PointerButton>,
     pub(crate) controls: HashSet<String>,
+    /// Pad buttons withheld — by a stack change, or by
+    /// [`ActionMap::release_gamepads`].
+    pub(crate) pad_buttons: PadButtons,
 }
 
 /// What one context can see of the raw input.
@@ -80,6 +89,8 @@ pub(crate) struct View<'a> {
     pub(crate) held_keys: &'a HashSet<KeyCode>,
     pub(crate) held_buttons: &'a HashSet<PointerButton>,
     pub(crate) held_controls: &'a HashSet<String>,
+    /// Every button some pad holds.
+    pub(crate) held_pad_buttons: PadButtons,
 }
 
 impl View<'_> {
@@ -131,6 +142,22 @@ impl View<'_> {
     pub(crate) fn pointer(&self) -> bool {
         self.routes.pointer == Some(self.context)
     }
+
+    pub(crate) fn pad_button(&self, button: PadButton) -> bool {
+        self.held_pad_buttons.contains(button)
+            && !self.suppressed.pad_buttons.contains(button)
+            && self.routes.pad_buttons.get(&button) == Some(&self.context)
+    }
+
+    /// Owner only: a stick is a level and is never withheld.
+    pub(crate) fn pad_stick(&self, stick: Stick) -> bool {
+        self.routes.pad_sticks.get(&stick) == Some(&self.context)
+    }
+
+    /// Owner only: a trigger is a level and is never withheld.
+    pub(crate) fn trigger(&self, trigger: Trigger) -> bool {
+        self.routes.pad_triggers.get(&trigger) == Some(&self.context)
+    }
 }
 
 impl Routes {
@@ -166,6 +193,15 @@ impl Routes {
                     }
                     Binding::PointerPosition { .. } => {
                         routes.pointer.get_or_insert(context);
+                    }
+                    Binding::PadButton(button) => {
+                        routes.pad_buttons.entry(*button).or_insert(context);
+                    }
+                    Binding::PadStick { stick, .. } => {
+                        routes.pad_sticks.entry(*stick).or_insert(context);
+                    }
+                    Binding::PadTrigger { trigger, .. } => {
+                        routes.pad_triggers.entry(*trigger).or_insert(context);
                     }
                     Binding::Key(_)
                     | Binding::KeyAxis { .. }
@@ -298,6 +334,13 @@ impl ActionMap {
         for control in &self.held_controls {
             if old.controls.get(control) != new.controls.get(control) {
                 self.suppressed.controls.insert(control.clone());
+            }
+        }
+        for button in PadButton::ALL {
+            if self.held_pad_buttons.contains(button)
+                && old.pad_buttons.get(&button) != new.pad_buttons.get(&button)
+            {
+                self.suppressed.pad_buttons.insert(button);
             }
         }
         for idx in 0..self.slots.len() {

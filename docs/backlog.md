@@ -8942,9 +8942,28 @@ browser-hosted single-player game with mods has no containment at all.
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
   `crcbl-store` has no profile or binding type.
 - **Glyph hints.** No glyph anything in `crcbl-input`.
-- **Every gamepad backend.** No evdev, no XInput, no GameController, no Web
-  Gamepad API. `grep -i gamepad crates/crcbl-input/src crates/crcbl-shell/src`
-  returns only prose saying gamepad support is future work.
+- **Gamepad: the seam and XInput are built; the rest is owed (2026-09-23).**
+  `crates/crcbl-input/src/gamepad.rs` is the seam every backend emits
+  (`GamepadEvent`, `GamepadSnapshot`,
+  `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
+  optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
+  polls four XInput slots on Windows. Still owed:
+  - evdev (Linux), GameController (macOS) and the Web Gamepad API; other targets
+    have no pad module, so naming one fails to build.
+  - **XInput has met no real controller** — only a scripted `StateSource` and a
+    real `XInputGetState` answering 1167 on an empty slot. Button positions,
+    stick sign and reconnection are unverified.
+  - It re-probes empty slots every poll (about 54 µs for four, measured once);
+    throttling is the usual fix. A replugged pad gets a new `GamepadId`.
+  - **The engine loop pumps no pads**: a game polls `XInput` itself, and
+    `ui::CONTEXT` declares no pad bindings. A game that keeps its map out of
+    `Game::actions` must call `release_gamepads` on focus loss itself.
+  - Not built: rumble, glyphs, the Guide button on XInput (only the undocumented
+    ordinal-100 `XInputGetStateEx` reports it), per-player device assignment
+    (every pad drives every binding), a d-pad composite and pad rows in a RON
+    binding asset.
+  - The Steam plan's slice 7a is this seam; `docs/plan/42-steam.md` on
+    `steam-sdk` still lists 7a as its own until that branch merges main.
 
 **Built:** `ActionMap`, `ActionDecl`, the three `ActionKind`s, `Binding::Key`,
 `MouseButton`, `Virtual`, `PointerPosition`, `KeyAxis`, `Wasd`, `Chord`, the

@@ -19,10 +19,11 @@
 //! Space and Escape are the UI's and not the game's beneath — the context stack
 //! is the disambiguator, not a list of special cases.
 //!
-//! **The plan's gamepad column is not declared.** [`Binding`] has no gamepad
-//! member to name the dpad, the left stick, the shoulders, South or East with,
-//! and there is no gamepad backend to feed one; those bindings arrive with that
-//! backend.
+//! **The plan's gamepad column is not declared yet.** [`Binding::PadButton`]
+//! and [`Binding::PadStick`] can name the dpad, the left stick, the shoulders,
+//! South and East now, but the engine loop feeds no pad into the map this
+//! context is declared in, so a pad row here would be a binding nothing can
+//! press. It arrives with the loop's pad pump.
 
 use super::{ActionDecl, ActionKind, ActionMap, ActionMapError, Binding, Modifier, Repeat};
 use crcbl_core::input::KeyCode;

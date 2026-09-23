@@ -6107,6 +6107,11 @@ pub trait HostedGame: Sized {
     /// terms: a game with no action map has nothing to rebind, and the loop's
     /// drain says so out loud rather than printing a binding it never made. A
     /// game that keeps one overrides this with a single line.
+    ///
+    /// The loop also reaches it on focus loss, to
+    /// [`release_gamepads`](crate::input::ActionMap::release_gamepads): a
+    /// game that feeds pads into a map it does not hand over here releases
+    /// them itself.
     fn actions(&mut self) -> Option<&mut crate::input::ActionMap> {
         None
     }
@@ -6879,6 +6884,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
             });
+            // The pads' half. The loop forwards no pad events — a game polls
+            // its backend into its own map — so it reaches the map the game
+            // hands over, and a pad button held through the alt-tab stays
+            // released until the player lets go of it.
+            if let Some(actions) = self.game.actions() {
+                actions.release_gamepads();
+            }
             menu::release_menu_keys(&mut self.menu_actions);
             // The same obligation for the button: no platform sends the release
             // for a pointer that was down when focus left, and a game still
@@ -14471,6 +14483,49 @@ mod tests {
                     at: glam::Vec2::ZERO,
                 },
             ],
+        );
+        engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A pad button held when the window loses focus is released**, on the
+    /// map the game hands over, and stays released while the pad keeps
+    /// reporting it held — the pad half of `lose_focus`.
+    #[test]
+    fn a_pad_button_held_when_focus_is_lost_is_released() {
+        use crate::input::{
+            ActionDecl, ActionKind, Binding, GamepadEvent, GamepadId, GamepadSnapshot, PadButton,
+            PadKind,
+        };
+        let mut engine = hosted(None);
+        let window = engine.window();
+        let pad = GamepadId(1);
+        let held = GamepadEvent::State {
+            id: pad,
+            snapshot: GamepadSnapshot {
+                buttons: [PadButton::South].into_iter().collect(),
+                ..GamepadSnapshot::neutral(PadKind::Xbox)
+            },
+        };
+        let actions = &mut engine.game_mut().actions.0;
+        actions.declare(ActionDecl {
+            name: "pad_jump".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::PadButton(PadButton::South)],
+        });
+        actions.gamepad_event(&held);
+        assert!(actions.button_held("pad_jump"));
+
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        let actions = &mut engine.game_mut().actions.0;
+        assert!(!actions.button_held("pad_jump"), "focus loss released it");
+        actions.gamepad_event(&held);
+        assert!(
+            !actions.button_held("pad_jump"),
+            "and a pad still holding it has not pressed it again",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
     }

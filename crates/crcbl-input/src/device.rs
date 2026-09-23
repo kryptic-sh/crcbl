@@ -3,8 +3,10 @@
 //! read to show `Space` or a pad button.
 //!
 //! **Only activity counts.** A key or button press, pointer movement, a wheel
-//! turn, and an on-screen control pressed or deflected each set it; a release
-//! does not, since letting go of a key after reaching for the mouse is not the
+//! turn, an on-screen control pressed or deflected, and a pad button pressed or
+//! a pad stick or trigger pushed out past
+//! [`PAD_ACTIVITY_THRESHOLD`](crate::PAD_ACTIVITY_THRESHOLD) each set it; a
+//! release does not, since letting go of a key after reaching for the mouse is not the
 //! keyboard speaking, and neither does a zero delta. It is tracked from every
 //! event the map receives, whether or not any binding reads that input.
 
@@ -21,9 +23,9 @@ pub enum Device {
     /// An on-screen control, reported through [`ActionMap::virtual_button`] or
     /// [`ActionMap::virtual_stick`].
     Touch,
-    /// A gamepad. **Nothing reports one yet**: there is no gamepad backend and
-    /// no gamepad binding, so no event this map receives sets it. It is named
-    /// so a consumer's match is written once, before the backend lands.
+    /// A gamepad. **Every backend reports through
+    /// [`ActionMap::gamepad_event`]**, so which one spoke — XInput, evdev,
+    /// Steam Input — is not something this can tell apart, by design.
     Gamepad,
 }
 
