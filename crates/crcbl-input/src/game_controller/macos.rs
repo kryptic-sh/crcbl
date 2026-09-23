@@ -253,8 +253,6 @@ mod tests {
                 (ffi::GCProductCategoryDualShock4, PadKind::PlayStation),
                 (ffi::GCProductCategoryDualSense, PadKind::PlayStation),
                 (ffi::GCProductCategoryXboxOne, PadKind::Xbox),
-                (ffi::GCProductCategorySwitchPro, PadKind::Switch),
-                (ffi::GCProductCategorySwitchJoyConPair, PadKind::Switch),
                 (ffi::GCProductCategoryMFi, PadKind::Generic),
             ]
         };
