@@ -142,8 +142,9 @@ pub enum SyncError {
         /// What was wrong with it.
         corruption: Corruption,
     },
-    /// [`SyncedFile::save`] before any [`SyncedFile::load`]: a save must
-    /// know what the cloud holds, or it overwrites a version it never saw.
+    /// [`SyncedFile::save`] before any [`SyncedFile::load`], or after one
+    /// that failed: a save must know what the cloud holds, or it overwrites a
+    /// version it never saw.
     #[error("a synced file must be loaded before it is saved")]
     NotLoaded,
     /// [`SyncedFile::save`] while a conflict from the last load is
@@ -292,7 +293,10 @@ impl SyncedFile {
     /// fails — a cloud read that is [`StorageError::NotFound`] is `Missing`
     /// or a re-sent write, not an error.
     pub fn load(&mut self) -> Result<SyncOutcome, SyncError> {
+        // Until this load succeeds, what the cloud holds is unknown: neither
+        // an earlier load's conflict nor its permission to save still stands.
         self.conflict = None;
+        self.loaded = false;
         let pending = self.read_pending()?;
         let seen = self.read_seen()?;
         let cloud = match self.cloud.read(&self.path) {
@@ -345,7 +349,8 @@ impl SyncedFile {
     ///
     /// # Errors
     ///
-    /// [`SyncError::NotLoaded`] before any [`load`](Self::load);
+    /// [`SyncError::NotLoaded`] unless the last [`load`](Self::load)
+    /// succeeded;
     /// [`SyncError::Unresolved`] while the last load's conflict stands;
     /// otherwise as [`load`](Self::load).
     pub fn save(&mut self, payload: &[u8]) -> Result<(), SyncError> {

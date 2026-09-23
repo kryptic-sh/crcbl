@@ -14,6 +14,7 @@ const FILE: &str = "profile.bin";
 struct Shared {
     storage: Arc<Mutex<MemoryStorage>>,
     refuse_writes: Arc<Mutex<bool>>,
+    refuse_reads: Arc<Mutex<bool>>,
 }
 
 impl Shared {
@@ -23,6 +24,10 @@ impl Shared {
 
     fn refuse_writes(&self, refuse: bool) {
         *self.refuse_writes.lock().expect("not poisoned") = refuse;
+    }
+
+    fn refuse_reads(&self, refuse: bool) {
+        *self.refuse_reads.lock().expect("not poisoned") = refuse;
     }
 
     fn raw(&self) -> Vec<u8> {
@@ -37,6 +42,9 @@ impl Shared {
 
 impl StorageSource for Shared {
     fn read(&self, path: &Path) -> Result<Vec<u8>, StorageError> {
+        if *self.refuse_reads.lock().expect("not poisoned") {
+            return Err(StorageError::Other("the cloud refused the read".into()));
+        }
         self.with(|s| s.read(path))
     }
 
@@ -199,6 +207,32 @@ fn a_save_needs_a_load_first() {
     let mut a = device(&cloud);
     assert!(matches!(a.save(b"blind"), Err(SyncError::NotLoaded)));
     assert!(!cloud.with(|s| s.exists(Path::new(FILE))));
+}
+
+#[test]
+fn a_failed_load_forgets_the_conflict_but_still_refuses_a_save() {
+    let (cloud, mut a, mut b) = two_devices_at_v1();
+    a.save(b"a").unwrap();
+    b.save(b"b").unwrap();
+    assert_eq!(a.load().unwrap(), conflict(b"a", b"b"));
+    cloud.refuse_reads(true);
+    assert!(matches!(a.load(), Err(SyncError::Storage(_))));
+    cloud.refuse_reads(false);
+    // The conflict is unresolved and the load that failed saw nothing: a
+    // save now would overwrite `b`'s version unseen.
+    assert!(matches!(a.save(b"over b"), Err(SyncError::NotLoaded)));
+    assert_eq!(cloud_version(&cloud).payload(), b"b");
+    assert_eq!(a.load().unwrap(), conflict(b"a", b"b"));
+}
+
+#[test]
+fn a_load_that_finds_the_cloud_corrupt_refuses_a_save_after_a_good_one() {
+    let (cloud, mut a, _b) = two_devices_at_v1();
+    let damaged = b"CRSF but not a synced file".to_vec();
+    cloud.put(&damaged);
+    assert!(matches!(a.load(), Err(SyncError::Corrupt { .. })));
+    assert!(matches!(a.save(b"over it"), Err(SyncError::NotLoaded)));
+    assert_eq!(cloud.raw(), damaged);
 }
 
 #[test]
