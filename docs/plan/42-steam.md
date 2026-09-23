@@ -16,11 +16,11 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b and 4 built on branch `steam-sdk`,
-the rest planned** — see "Status by slice" under "Slice order". The four
-decisions the earlier draft asked for were ratified 2026-09-06 (see "Decisions"
-below), and "the full Steam API" is now in scope, which reverses two earlier
-"not now" calls — Steam Input and `SteamTransport` — and pulls the first
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4 and 2 built on branch
+`steam-sdk`, the rest planned** — see "Status by slice" under "Slice order". The
+four decisions the earlier draft asked for were ratified 2026-09-06 (see
+"Decisions" below), and "the full Steam API" is now in scope, which reverses two
+earlier "not now" calls — Steam Input and `SteamTransport` — and pulls the first
 consumer's requirements (the game EW, below) forward in the slice order. The
 plan was reviewed the same day against the SDK 1.65 headers and this tree;
 "Review (step 2)" at the end lists what that changed, including EW's answers to
@@ -869,7 +869,9 @@ connects `SteamTransport` to. The flow EW needs:
    `lobby.owner()` → `SteamTransport::connect(owner)`.
 5. Host leaves: the joiner sees three signals, in decreasing order of authority
    — slice 2's transport-neutral "session ended: host left" control message if
-   the host quit cleanly, the transport end reason `HostLeft`, and
+   the host quit cleanly, the transport end reason (`HostLeft` from a host that
+   closes the link itself; `ShuttingDown` from a `crcbl_server::Host`, which
+   drops it — see "Slice 2 as built"), and
    `SteamEvent::LobbyMemberChanged { member: owner, change: Left }`. Steam
    passes lobby ownership on automatically; EW treats the session as over.
 
@@ -1194,13 +1196,22 @@ On branch `steam-sdk`, not merged to `main`:
   gate passes against the mirror (after catching one wrong pragma, below). **Not
   run:** `tests/net_smoke.rs` and every step under "Needs a real client" below —
   two accounts on two machines — on every OS.
-- **Slice 2: next.**
+- **Slice 2: done** (2026-09-23). `crcbl_server::Host`, the session-end message
+  and the client's reading of it, over `InMemoryTransport`, with real
+  `crcbl_client::Client`s on the far ends; every test in the slice's list, run
+  with N = 2 and N = 4 where the list asks, was seen red against a deliberate
+  break. Before it, `78399bce` moved `Server<T>`'s per-peer state into
+  `crates/crcbl-server/src/peer.rs` (move only), so both hosts share it. **Not
+  run:** the exit's Steam run — slice 4's two-machine run with three joiners —
+  on every OS; nothing drives a `Host` over `SteamTransport` yet (see the
+  backlog).
+- **Slice 6: next.**
 - **Slice 7a: not on this branch.** The coordinator reported (2026-09-23) that
   the gamepad seam is being built on `main` with an XInput backend, exactly as
   sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
   Bringing it here means merging `main` into `steam-sdk`, which is the user's
   call (see the backlog).
-- Slices 6, 5, 7b–7c, 8, 9, 10–15: not started.
+- Slices 5, 7b–7c, 8, 9, 10–15: not started.
 
 **Slice 1 as built, where it differs from the text below**, each for a reason:
 
@@ -1427,6 +1438,45 @@ On branch `steam-sdk`, not merged to `main`:
   owner listens, a joiner connects to the owner, and each logs the other's
   greeting and the `EndReason` a closed connection gives.
 
+**Slice 2 as built, where it differs from the text below:**
+
+- **"Full" is a handshake answer, not a session end.** A host with no place left
+  has no session to end: the newcomer's hello is refused with the existing
+  `RejectReason::SERVER_FULL`, which is transient, so the client retries with
+  backoff and is admitted once a place frees (the host keeps the connection
+  pending meanwhile). The control message's reasons are `HOST_LEFT`, `KICKED`
+  and `SHUTTING_DOWN`, as `crcbl_net::SessionEndReason` — a code newtype with
+  named constants, like `RejectReason`'s codes, so an unknown code from a newer
+  host still reads as "ended".
+- **The channel tells a session end from a snapshot.** A sealed delta has no tag
+  byte, so the session end (tag `0x50`, one reason byte) is only ever sent
+  sealed on the reliable channel, where the server sends nothing else sealed;
+  the client dispatches sealed payloads by channel. Its encoder sits in
+  `crates/crcbl-net/src/codec.rs` with the other tags, the type in
+  `messages.rs`. A client told its session ended drops its key and resume token,
+  stops handshaking, and discards what the host sent before the end;
+  `Client::ended()` answers `Ended::ByServer(reason)` or, for a link that closed
+  without one, `Ended::Lost`.
+- **A lost peer keeps its place.** `max_peers` counts every session the host
+  holds, lost ones included — counting only connected ones would let a newcomer
+  take the place and the resume make one more than allowed. A token whose
+  session is still connected is refused on any other link. A pending
+  connection's compatibility is checked before the count, so an incompatible
+  client hears the permanent reason, not "full"; one that never says hello is
+  closed after `PENDING_SILENCE_LIMIT` in `crates/crcbl-server/src/host.rs`.
+- **The game reads peers by `PeerId`.** `HostModule::tick(world, inputs)` gets
+  each peer's frames under its id, and `Host::events` yields
+  `PeerEvent::Joined`, `Lost`, `Resumed` and `Left` (grace expired). A kick or a
+  shutdown raises none — the game did it.
+- **Shared, not copied.** `Server<T>`'s per-peer state and logic moved (a
+  move-only commit) into `crates/crcbl-server/src/peer.rs`, which `Server` holds
+  once and `Host` once per peer; `Server`'s behaviour and API did not change.
+- **Steam's end code is not the host's reason.** `crcbl_net::Transport` has no
+  close with a reason, so `Host` closes a link by dropping it, and a dropped
+  `SteamTransport` closes with `EndReason::ShuttingDown` whatever the session
+  end said. The session end is the signal a joiner should read; aligning the
+  Steam code needs a close hook on `Transport` (see the backlog).
+
 ### Slice 1 — Loader, init, pump, local `SteamId`
 
 Deliberately small: the crate exists, loads the library on three OSes, inits
@@ -1583,12 +1633,15 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
   goodbye today (`ServerToClient` is `Snapshot | Event`), so a peer can tell a
   dead link from a host that quit only through a transport-specific end reason.
   This slice adds a reliable control message — session ended, with a reason:
-  host left, kicked, full, shutting down — sent before the host closes each
+  host left, kicked, shutting down (as built, "full" stays the handshake's
+  `SERVER_FULL`, since no session exists yet) — sent before the host closes each
   transport, so any transport distinguishes the cases; Steam's app-range end
   codes (slice 4) become a second, redundant signal rather than the only one.
-- **Files:** a new module in `crates/crcbl-server/src/` for the host (named in
-  the slice), `crates/crcbl-net/src/messages.rs` for the control message, and
-  their tests. Nothing in `crcbl-steam`.
+- **Files:** a new module in `crates/crcbl-server/src/` for the host (as built:
+  `host.rs`, with the per-peer state shared with `Server` in `peer.rs`),
+  `crates/crcbl-net/src/messages.rs` for the control message (and `codec.rs` for
+  its encoding), `crates/crcbl-client/src/lib.rs` for reading it, and their
+  tests. Nothing in `crcbl-steam`.
 - **Tests (CI), all over `InMemoryTransport`:** N peers connect and each gets
   its own snapshots; peer N+1 is refused with "full" and N=4 is not special (run
   with N = 2 and N = 4); one peer's link dropping puts only that session in

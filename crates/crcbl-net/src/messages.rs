@@ -51,6 +51,32 @@ pub struct SystemSnapshot {
     pub data: Vec<u8>,
 }
 
+// ── Session end ───────────────────────────────────────────────────────────────
+
+/// Why a server ended a session.
+///
+/// Sent sealed on the reliable channel just before the server closes the
+/// transport (see [`encode_session_ended`](crate::codec::encode_session_ended)),
+/// so a client can tell a host that ended its session from a link that died —
+/// a difference no transport reports the same way, and some not at all.
+///
+/// A server full at handshake time is not a reason here: no session exists
+/// yet, so that is [`RejectReason::SERVER_FULL`](crate::RejectReason::SERVER_FULL).
+///
+/// A code this build does not know is kept as it arrived rather than refused:
+/// the session is over whatever the reason, and that is what the client needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionEndReason(pub u8);
+
+impl SessionEndReason {
+    /// The host player left, taking the session with them.
+    pub const HOST_LEFT: Self = Self(0x01);
+    /// The host removed this one peer.
+    pub const KICKED: Self = Self(0x02);
+    /// The server is shutting down.
+    pub const SHUTTING_DOWN: Self = Self(0x03);
+}
+
 // ── Snapshot helpers ──────────────────────────────────────────────────────────
 
 /// Builds a [`ServerToClient::Snapshot`] incrementally, system by system.

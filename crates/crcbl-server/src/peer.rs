@@ -2,8 +2,9 @@
 //! its authenticated channel, its inbound budgets, its ack progress and the
 //! input it sent this tick — everything that exists once per connected peer.
 //!
-//! [`Server`](crate::Server) holds one. What is not per peer — the world, the
-//! clock, the handshake gate — stays with it.
+//! [`Server`](crate::Server) holds one; [`Host`](crate::Host) holds one per
+//! peer. What is not per peer — the world, the clock, the handshake gate —
+//! stays with them.
 
 use std::time::Duration;
 
@@ -13,7 +14,8 @@ use crcbl_net::auth::SessionCrypto;
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Message, RejectReason, ResumeToken, SectorId,
-    SessionConfig, SessionId, SessionManager, SessionState, SnapshotWriter, Transport, Trust,
+    SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState, SnapshotWriter,
+    Transport, Trust,
 };
 
 use crate::{KEYFRAME_RECOVERY_TICKS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
@@ -115,24 +117,12 @@ impl PeerSession {
         now: Duration,
         counters: &mut Counters,
     ) -> bool {
-        let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
         let limiter = if reliable {
             &mut self.reliable_rate_limiter
         } else {
             &mut self.unreliable_rate_limiter
         };
-        match limiter.allow(now, bytes) {
-            Ok(()) => true,
-            Err((messages_limited, bytes_limited)) => {
-                counters.rate_limited_messages = counters
-                    .rate_limited_messages
-                    .saturating_add(u64::from(messages_limited));
-                counters.rate_limited_bytes = counters
-                    .rate_limited_bytes
-                    .saturating_add(u64::from(bytes_limited));
-                false
-            }
-        }
+        charge(limiter, bytes, now, counters)
     }
 
     /// Queue one decoded input frame for this tick's `GameModule::tick`,
@@ -264,6 +254,29 @@ impl PeerSession {
         self.session.baseline_store_mut(sector).insert(current);
     }
 
+    /// Tell the client, sealed and on the reliable channel, why its session is
+    /// ending — sent before the transport is closed, so the client reads it
+    /// ahead of the disconnect. A failure is counted: the client then reads
+    /// the close as a lost link.
+    pub(crate) fn send_session_end<T: Transport + ?Sized>(
+        &mut self,
+        transport: &mut T,
+        reason: SessionEndReason,
+        counters: &mut Counters,
+    ) {
+        let Some(crypto) = self.session_crypto.as_mut() else {
+            // No key, so no session the client could be told about.
+            return;
+        };
+        let Ok(sealed) = crypto.seal(&crcbl_net::encode_session_ended(reason)) else {
+            counters.processing_errors += 1;
+            return;
+        };
+        if transport.send_reliable(Message::reliable(sealed)).is_err() {
+            counters.processing_errors += 1;
+        }
+    }
+
     /// The tick this delta should be encoded against, or `None` for a keyframe.
     ///
     /// Returns `None` — forcing a keyframe — once the client's acks have
@@ -289,6 +302,29 @@ impl PeerSession {
                 .baseline_store(sector)
                 .is_some_and(|store| store.get(tick).is_some())
         })
+    }
+}
+
+/// Charge one inbound message of `bytes` against `limiter`, counting what it
+/// refuses; returns whether the caller may keep reading.
+pub(crate) fn charge(
+    limiter: &mut InboundRateLimiter,
+    bytes: usize,
+    now: Duration,
+    counters: &mut Counters,
+) -> bool {
+    let bytes = u64::try_from(bytes).unwrap_or(u64::MAX);
+    match limiter.allow(now, bytes) {
+        Ok(()) => true,
+        Err((messages_limited, bytes_limited)) => {
+            counters.rate_limited_messages = counters
+                .rate_limited_messages
+                .saturating_add(u64::from(messages_limited));
+            counters.rate_limited_bytes = counters
+                .rate_limited_bytes
+                .saturating_add(u64::from(bytes_limited));
+            false
+        }
     }
 }
 

@@ -34,8 +34,8 @@ pub mod types;
 pub use auth::{AuthError, ReplayWindow, SessionCrypto, SessionKey};
 pub use codec::{
     Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
-    decode_server_to_client, encode_ack, encode_client_to_server, encode_handshake_result,
-    encode_hello, encode_server_to_client,
+    decode_server_to_client, decode_session_ended, encode_ack, encode_client_to_server,
+    encode_handshake_result, encode_hello, encode_server_to_client, encode_session_ended,
 };
 pub use condition::{Clock, ConditionSimulator, ManualClock, SimConditions, SystemClock};
 pub use delta::{
@@ -46,7 +46,8 @@ pub use delta::{
 };
 pub use handshake::{HandshakeGate, HandshakeResult, Hello, RejectReason};
 pub use messages::{
-    ClientToServer, ServerToClient, SnapshotReader, SnapshotWriter, SystemSnapshot,
+    ClientToServer, ServerToClient, SessionEndReason, SnapshotReader, SnapshotWriter,
+    SystemSnapshot,
 };
 pub use rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 pub use session::{SessionConfig, SessionManager, SessionState};

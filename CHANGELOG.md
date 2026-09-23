@@ -265,6 +265,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   reports its status. 64-bit Linux, Windows and macOS; elsewhere the crate is
   empty. `apps/sandbox --features steam` exercises it. Not yet run against a
   Steam client with a 1.65 library.
+- **`crcbl_server::Host`: one world, several client sessions**
+  (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
+  `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a
+  connection of any kind, and the connection's hello admits a new peer, resumes
+  a lost one with its token inside `SessionConfig::reconnect_grace_period`, or
+  is refused — `RejectReason::SERVER_FULL` while every place is held (a lost
+  peer keeps its place), `INVALID_SESSION_TOKEN` for a token whose session is
+  still connected. Each peer has its own session, resume credential, MAC key,
+  budgets and delta baselines; the world is serialised once per tick and
+  delta-encoded per peer. A `HostModule` reads each peer's input under its
+  `PeerId`, and `host.events()` yields `PeerEvent::Joined`, `Lost`, `Resumed`
+  and `Left`. `host.kick(peer)` and `host.shutdown(reason)` tell the client why
+  before closing its link. `Server<T>` is unchanged for single-peer callers.
+- **A server can say why a session ended**: `crcbl_net::SessionEndReason`
+  (`HOST_LEFT`, `KICKED`, `SHUTTING_DOWN`), sent sealed on the reliable channel
+  (`encode_session_ended`, tag `0x50`), and `crcbl_client::Client::ended()`,
+  which answers `Ended::ByServer(reason)` once that message arrives and
+  `Ended::Lost` when the link closed without one. A client told its session
+  ended stops handshaking and drops its resume token until `reconnect`.
 - `crcbl_net::conformance` (feature `conformance`): the behaviour `Transport`'s
   documentation promises, as checks any implementation can be run through with a
   `Link` that pairs and settles it.

@@ -8996,9 +8996,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b and 4 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4 and 2 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b and 4 are built on branch `steam-sdk`** (not merged):
+**Slices 1, 1b, 3a, 3b, 4 and 2 are built on branch `steam-sdk`** (not merged):
 `crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
 handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
 local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
@@ -9007,9 +9007,10 @@ the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
 `HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
 slice 3a's async call registry, lobbies, invites, rich presence and join paths,
 slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
-and `SteamListener` (with `crcbl_net::conformance`). The plan,
-`docs/plan/42-steam.md`, carries a status line per slice; slice 2 (the
-multi-session host) is next.
+and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
+`crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
+and `crcbl_client::Client::ended`. The plan, `docs/plan/42-steam.md`, carries a
+status line per slice; slice 6 is next.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9063,6 +9064,23 @@ multi-session host) is next.
   across NAT. The transport is exercised only over the fake loop, which cannot
   show that the send flags, the message release or `ConnectP2P`'s identity
   argument are right against a real client.
+- **Slice 2's exit run has not happened, and nothing can run it yet**: slice 4's
+  two-machine run repeated with three joiners, through a `Host`. Neither
+  `apps/sandbox` (which exchanges greetings over raw `SteamTransport`s) nor
+  `crates/crcbl-steam/tests/net_smoke.rs` (one host, one joiner) drives a
+  `Host`; the slice kept to its "nothing in `crcbl-steam`" boundary. What it
+  would take: a joiner-side `crcbl_client::Client` over `SteamTransport` and a
+  host-side `Host` fed by `SteamListener::accept`, in `net_smoke.rs` (a
+  dev-dependency on `crcbl-server` and `crcbl-client`) or the sandbox.
+- **After `Host::shutdown`, Steam's end code says `ShuttingDown`, not
+  `HostLeft`.** `crcbl_net::Transport` has no close-with-reason, so `Host`
+  closes a link by dropping it, and `SteamTransport`'s `Drop` closes with
+  `EndReason::ShuttingDown`. The sealed session end, which arrives first,
+  carries the real reason, so a joiner reading `Client::ended()` is right; one
+  reading only `SteamTransport::end_reason()` is told the wrong one. Options: a
+  defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
+  maps to its app codes (touches the trait every backend implements), or leave
+  it and document the session end as the signal. Needs a decision; not done.
 - **Needs the user's decision: bringing slice 7a in from `main`.** The
   coordinator reported the gamepad seam (slice 7a) being built on `main` with an
   XInput backend, and asked that 7b be built on it by merging `origin/main` into
@@ -9084,17 +9102,9 @@ surfaced to the game, and the local `SteamId` as its identity. EW's build order
 (2026-09-22): 1, 1b, 3a, 3b, 4, then the multi-session host (slice 2), then 6,
 5, 7a–7c; slice 9 optional; 10–15 after, for the full API.
 
-**Two engine pieces EW needs whatever the transport, now scheduled inside the
-Steam plan:**
+**An engine piece EW needs whatever the transport, scheduled inside the Steam
+plan:**
 
-- **A multi-session host (slice 2).** `Server<T: Transport>` in
-  `crates/crcbl-server/src/lib.rs` owns one transport and one `SessionManager`.
-  EW decided it is built with the Steam slices, right after slice 4:
-  transport-generic (`Box<dyn Transport>` peers, since a listen host mixes an
-  in-memory local client with remote transports), N a parameter, the engine
-  owning sessions, admission, per-peer resume and host-left, the game owning
-  authority. It adds a transport-neutral "session ended" control message,
-  because `crcbl-net`'s `ServerToClient` has no goodbye today.
 - **A gamepad seam in `crcbl-input` (slice 7a).** There is none yet (see "Input:
   patterns, RON bindings, rebind persistence and every gamepad backend"). EW
   accepted a minimal seam landed by the Steam plan; topic 19's
