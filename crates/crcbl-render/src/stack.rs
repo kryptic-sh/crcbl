@@ -362,7 +362,8 @@ impl StackError {
     }
 }
 
-#[cfg(test)]
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

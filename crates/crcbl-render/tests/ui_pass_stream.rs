@@ -16,6 +16,9 @@
 //! `NullInstance::gpu_driven` reports `Features::PUSH_CONSTANTS` and
 //! `NullInstance::portable` does not, so one process can build both renderers.
 
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#![cfg(not(target_arch = "wasm32"))]
+
 use crcbl_hal::null::{Command, NullInstance, Recorder};
 use crcbl_hal::{
     CommandEncoderDesc, Device, DeviceDesc, Features, Format, ImageUsage, Instance, QueueHandle,

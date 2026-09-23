@@ -809,7 +809,7 @@ impl Ssao {
     /// how far a check can follow the seam's far side. See
     /// `crate::forward`'s `the_comparison_seam_marches_twice_over_columns_that_tile_the_gather`
     /// for what that leaves uncovered.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn blocks(&self, frame: usize) -> (BufferHandle, BufferHandle) {
         (self.uniforms[frame], self.split_uniforms[frame])
     }
@@ -822,7 +822,7 @@ impl Ssao {
     /// reference backend does record which pipeline a pass bound where it does
     /// not record which buffer a group named. See `crate::forward`'s
     /// `the_occlusion_technique_picks_the_gathers_pipeline`.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) const fn gathers(&self) -> (GraphicsPipelineHandle, GraphicsPipelineHandle) {
         (self.pipeline, self.hemisphere_pipeline)
     }

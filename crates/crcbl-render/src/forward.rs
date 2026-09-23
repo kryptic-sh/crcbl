@@ -11561,7 +11561,8 @@ fn rebuilt_with_sampler(
     })
 }
 
-#[cfg(test)]
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     mod instance_upload;
     mod load_service;

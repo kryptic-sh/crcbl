@@ -678,7 +678,7 @@ impl InstancePool {
         Ok(())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(super) fn replace_test_buffer(
         &mut self,
         slot: usize,
@@ -859,7 +859,8 @@ impl DirtyRanges {
     }
 }
 
-#[cfg(test)]
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crcbl_hal::null::{Event, NullInstance, Recorder};

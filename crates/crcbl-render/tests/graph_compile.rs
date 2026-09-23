@@ -19,6 +19,9 @@
 //! The second is what makes the first evidence rather than a self-consistent
 //! model of itself.
 
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#![cfg(not(target_arch = "wasm32"))]
+
 use crcbl_hal::null::{Command, NullInstance, ObjectKind, Recorder};
 use crcbl_hal::{
     BufferHandle, CommandEncoderDesc, Device, DeviceDesc, Format, ImageAspect,

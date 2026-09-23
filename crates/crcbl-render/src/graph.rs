@@ -1095,7 +1095,7 @@ impl CompiledPass<'_> {
     /// so a pass that omits the declaration still runs after the barrier the
     /// first reader earned — the omission is invisible in the compiled
     /// barriers. This is what lets a test assert the declaration itself.
-    #[cfg(test)]
+    #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn reads_buffer(&self, buffer: BufferId) -> bool {
         self.buffers
             .iter()

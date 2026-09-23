@@ -3185,5 +3185,6 @@ impl ForwardRenderer {
     }
 }
 
-#[cfg(test)]
+// Uses `forward::tests`' fixtures, which are native-only with them.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;

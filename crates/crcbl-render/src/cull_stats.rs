@@ -690,7 +690,8 @@ fn word(bytes: &[u8; SLOT_BYTES as usize], index: u32) -> u32 {
     ])
 }
 
-#[cfg(test)]
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crcbl_hal::null::{Command, NullInstance, Recorder};

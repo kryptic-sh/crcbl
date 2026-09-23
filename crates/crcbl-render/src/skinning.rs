@@ -1063,7 +1063,8 @@ pub fn skin_vertex(palette: &[Mat4], binding: &SkinBinding, vertex: &MeshVertex)
     }
 }
 
-#[cfg(test)]
+// `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use crcbl_shaders::vertex::UvRange;
 

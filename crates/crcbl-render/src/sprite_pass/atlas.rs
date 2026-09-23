@@ -784,7 +784,8 @@ fn cell_copy(
     }
 }
 
-#[cfg(test)]
+// Uses `sprite_pass::tests`' fixtures, which are native-only with them.
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
     use crate::sprite_pass::tests::{open, target};
