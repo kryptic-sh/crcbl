@@ -84,8 +84,11 @@ pub(super) fn pump<G: HostedGame>(game: &mut G) -> bool {
 ///
 /// If XInput cannot skip them (`xinput9_1_0.dll` cannot read a pad's vendor),
 /// it is left out, with a warning: every press arriving twice is worse than a
-/// pad Steam Input does not handle going unheard. No other target has a
-/// native pad backend yet, so there `pads` is the whole source.
+/// pad Steam Input does not handle going unheard. Elsewhere `pads` is the
+/// whole source, and it **replaces** the loop's native one: evdev (Linux) and
+/// GameController (macOS) read Steam Input's virtual pad like any other and
+/// have no way yet to skip it, so polling either beside Steam Input would
+/// report every press twice.
 #[must_use]
 pub fn steam_input(pads: SteamPads) -> Box<dyn PadSource> {
     Box::new(Beside {
@@ -108,8 +111,8 @@ fn native_beside_steam() -> Option<Box<dyn PadSource>> {
     }
 }
 
-/// No native pad backend on this target, so nothing to poll beside Steam
-/// Input and nothing to filter.
+/// Nothing beside Steam Input on this target: its native backend, where it
+/// has one, cannot skip Steam's virtual pads (see [`steam_input`]).
 #[cfg(not(windows))]
 fn native_beside_steam() -> Option<Box<dyn PadSource>> {
     None
