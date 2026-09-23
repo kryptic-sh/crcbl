@@ -8996,9 +8996,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2 and 6 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6 and 5 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2 and 6 are built on branch `steam-sdk`** (not
+**Slices 1, 1b, 3a, 3b, 4, 2, 6 and 5 are built on branch `steam-sdk`** (not
 merged): `crates/crcbl-steam` — the runtime loader, `Steam::init` with the
 version handshake, the manual-dispatch pump, shutdown on the last owner's drop,
 the local identity and machine basics, `relaunch_via_steam`, the fake-library
@@ -9010,8 +9010,9 @@ slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
 and `SteamListener` (with `crcbl_net::conformance`), and slice 2's
 `crcbl_server::Host` (the multi-session host) with `crcbl_net::SessionEndReason`
 and `crcbl_client::Client::ended`, and slice 6's `crcbl_store::synced` and
-`SteamCloudStorage`. The plan, `docs/plan/42-steam.md`, carries a status line
-per slice; slice 5 is next.
+`SteamCloudStorage`, and slice 5's voice capture and decoding. The plan,
+`docs/plan/42-steam.md`, carries a status line per slice; slice 7b is next and
+waits on the decision below.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9041,8 +9042,8 @@ per slice; slice 5 is next.
   MinGW GCC against the mirror's headers, `pack(4)` obtained by forcing the
   platform test in a copy of `steamclientpublic.h` — so the arithmetic is the
   compiler's, but no Linux or macOS compiler has produced them.
-- **Miri** ran locally on Windows (nightly 2026-09-21; 126 lib tests after slice
-  6, clean, leak check on; the drift gate's scanner tests are kept out of it —
+- **Miri** ran locally on Windows (nightly 2026-09-21; 137 lib tests after slice
+  5, clean, leak check on; the drift gate's scanner tests are kept out of it —
   no `unsafe`, and minutes of interpretation); the CI job itself has not run,
   because CI runs on pull requests and `main` only.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
@@ -9073,6 +9074,13 @@ per slice; slice 5 is next.
   Deck suspended while another machine changes the file, resumed into
   `CloudFileChanged`. The protocol is exercised over `MemoryStorage` and the
   fake only.
+- **Slice 5's manual steps have not run, and nothing drives voice yet**: a
+  spoken round trip between two accounts, how long Steam's push-to-talk tail
+  lasts, that Steam itself plays nothing, and the `Restricted` path. Neither
+  `apps/sandbox` nor a smoke test captures, sends or plays voice; what it would
+  take is a push-to-talk key in the sandbox's Steam panel, the packets sent
+  unreliable over its existing links (framed apart from the greeting text), and
+  each decoded chunk played with `crcbl_audio`'s `Voice::new`.
 - **Slice 2's exit run has not happened, and nothing can run it yet**: slice 4's
   two-machine run repeated with three joiners, through a `Host`. Neither
   `apps/sandbox` (which exchanges greetings over raw `SteamTransport`s) nor

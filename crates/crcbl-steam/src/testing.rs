@@ -193,6 +193,7 @@ pub(crate) struct Script {
     /// The networking loop.
     pub(crate) net: FakeNet,
     pub(crate) cloud: FakeCloud,
+    pub(crate) voice: FakeVoice,
     /// What the pipe yields, in order.
     pub(crate) queue: VecDeque<FakeMsg>,
     /// The outstanding message's payload, alive until `FreeLastCallback` —
@@ -253,6 +254,7 @@ impl Default for Script {
             image_calls: Vec::new(),
             net: FakeNet::default(),
             cloud: FakeCloud::default(),
+            voice: FakeVoice::default(),
             queue: VecDeque::new(),
             current: None,
             calls: Calls::default(),
@@ -326,6 +328,12 @@ pub(crate) fn fake_lib() -> &'static Lib {
             get_steam_id: fake_get_steam_id,
             logged_on: fake_logged_on,
             get_player_steam_level: fake_get_player_steam_level,
+            start_voice_recording: fake_start_voice_recording,
+            stop_voice_recording: fake_stop_voice_recording,
+            get_available_voice: fake_get_available_voice,
+            get_voice: fake_get_voice,
+            decompress_voice: fake_decompress_voice,
+            get_voice_optimal_sample_rate: fake_get_voice_optimal_sample_rate,
         },
         net: NetFns {
             accessor: fake_net_accessor,
@@ -563,6 +571,176 @@ unsafe extern "C" fn fake_logged_on(_: *mut ISteamUser) -> bool {
 
 unsafe extern "C" fn fake_get_player_steam_level(_: *mut ISteamUser) -> i32 {
     script(|s| s.steam_level)
+}
+
+/// The fake microphone and decoder.
+#[derive(Debug, Default)]
+pub(crate) struct FakeVoice {
+    /// `start` and `stop`, in the order they were called.
+    pub(crate) log: Vec<&'static str>,
+    /// Between a start and the end of the tail after a stop.
+    pub(crate) recording: bool,
+    /// A stop was called: once `packets` is empty, recording ends.
+    pub(crate) stopping: bool,
+    /// Compressed packets the microphone has, oldest first.
+    pub(crate) packets: VecDeque<Vec<u8>>,
+    /// What `GetAvailableVoice` answers instead, when set.
+    pub(crate) available_result: Option<i32>,
+    /// `GetVoice` answers `BufferTooSmall` this many more times.
+    pub(crate) too_small: u32,
+    /// How many times `GetAvailableVoice` ran.
+    pub(crate) available_calls: u32,
+    /// Every buffer size `GetVoice` was offered.
+    pub(crate) offered: Vec<u32>,
+    /// Calls that passed a deprecated uncompressed argument that was not
+    /// false, null or zero, or asked for uncompressed data.
+    pub(crate) deprecated_misuse: u32,
+    /// The PCM bytes `DecompressVoice` produces.
+    pub(crate) pcm: Vec<u8>,
+    /// What `DecompressVoice` answers instead, when set.
+    pub(crate) decompress_result: Option<i32>,
+    /// `DecompressVoice` reports a size one byte larger than any buffer.
+    pub(crate) decompress_never_fits: bool,
+    /// Every `(buffer size, sample rate)` `DecompressVoice` was given.
+    pub(crate) decompressions: Vec<(u32, u32)>,
+    pub(crate) optimal_rate: u32,
+}
+
+unsafe extern "C" fn fake_start_voice_recording(_: *mut ISteamUser) {
+    script(|s| {
+        s.voice.log.push("start");
+        s.voice.recording = true;
+        s.voice.stopping = false;
+    });
+}
+
+unsafe extern "C" fn fake_stop_voice_recording(_: *mut ISteamUser) {
+    script(|s| {
+        s.voice.log.push("stop");
+        s.voice.stopping = true;
+    });
+}
+
+/// `k_EVoiceResultNotRecording`, `NoData`, `BufferTooSmall`.
+const VOICE_NOT_RECORDING: i32 = 2;
+const VOICE_NO_DATA: i32 = 3;
+const VOICE_BUFFER_TOO_SMALL: i32 = 4;
+
+unsafe extern "C" fn fake_get_available_voice(
+    _: *mut ISteamUser,
+    compressed: *mut u32,
+    uncompressed: *mut u32,
+    rate: u32,
+) -> i32 {
+    script(|s| {
+        s.voice.available_calls += 1;
+        if !uncompressed.is_null() || rate != 0 {
+            s.voice.deprecated_misuse += 1;
+        }
+        if let Some(result) = s.voice.available_result {
+            return result;
+        }
+        if !s.voice.recording {
+            return VOICE_NOT_RECORDING;
+        }
+        let Some(front) = s.voice.packets.front() else {
+            if s.voice.stopping {
+                s.voice.recording = false;
+                return VOICE_NOT_RECORDING;
+            }
+            return VOICE_NO_DATA;
+        };
+        // SAFETY: the caller passes a writable `uint32`.
+        unsafe { compressed.write(u32::try_from(front.len()).unwrap()) };
+        0
+    })
+}
+
+// The signature is `GetVoice`'s, ten parameters as the header has them.
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn fake_get_voice(
+    _: *mut ISteamUser,
+    want_compressed: bool,
+    out: *mut c_void,
+    capacity: u32,
+    written: *mut u32,
+    want_uncompressed: bool,
+    uncompressed: *mut c_void,
+    uncompressed_capacity: u32,
+    uncompressed_written: *mut u32,
+    rate: u32,
+) -> i32 {
+    script(|s| {
+        s.voice.offered.push(capacity);
+        if !want_compressed
+            || want_uncompressed
+            || !uncompressed.is_null()
+            || uncompressed_capacity != 0
+            || !uncompressed_written.is_null()
+            || rate != 0
+        {
+            s.voice.deprecated_misuse += 1;
+        }
+        if s.voice.too_small > 0 {
+            s.voice.too_small -= 1;
+            return VOICE_BUFFER_TOO_SMALL;
+        }
+        let Some(front) = s.voice.packets.front() else {
+            return VOICE_NO_DATA;
+        };
+        if front.len() > usize::try_from(capacity).unwrap() {
+            return VOICE_BUFFER_TOO_SMALL;
+        }
+        let packet = s.voice.packets.pop_front().unwrap();
+        // SAFETY: the caller passes `capacity` writable bytes, at least the
+        // packet's length, and a writable `uint32`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(packet.as_ptr(), out.cast::<u8>(), packet.len());
+            written.write(u32::try_from(packet.len()).unwrap());
+        }
+        0
+    })
+}
+
+unsafe extern "C" fn fake_decompress_voice(
+    _: *mut ISteamUser,
+    _: *const c_void,
+    _: u32,
+    out: *mut c_void,
+    capacity: u32,
+    written: *mut u32,
+    rate: u32,
+) -> i32 {
+    script(|s| {
+        s.voice.decompressions.push((capacity, rate));
+        if let Some(result) = s.voice.decompress_result {
+            return result;
+        }
+        let needed = if s.voice.decompress_never_fits {
+            capacity + 1
+        } else {
+            u32::try_from(s.voice.pcm.len()).unwrap()
+        };
+        // SAFETY: the caller passes a writable `uint32`.
+        unsafe { written.write(needed) };
+        if needed > capacity {
+            return VOICE_BUFFER_TOO_SMALL;
+        }
+        // SAFETY: the caller passes `capacity` writable bytes, at least
+        // `needed`.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                s.voice.pcm.as_ptr(),
+                out.cast::<u8>(),
+                s.voice.pcm.len(),
+            );
+        }
+        0
+    })
+}
+
+unsafe extern "C" fn fake_get_voice_optimal_sample_rate(_: *mut ISteamUser) -> u32 {
+    script(|s| s.voice.optimal_rate)
 }
 
 unsafe extern "C" fn fake_friends_accessor() -> *mut c_void {

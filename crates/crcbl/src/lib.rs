@@ -458,6 +458,31 @@ pub mod prelude {
 mod tests {
     use crate::prelude::*;
 
+    /// `crcbl-steam` decodes voice for `crcbl-audio` without depending on
+    /// it — that would put the audio device backend in every Steam build for a
+    /// type alias — so the two meet here: the rate is the mixer's and the
+    /// samples are its sample type.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    #[test]
+    fn steam_voice_decodes_at_the_mixers_rate_into_its_sample_type() {
+        assert_eq!(
+            crate::steam::VOICE_SAMPLE_RATE,
+            crate::audio::INTERNAL_SAMPLE_RATE
+        );
+        // Compiles only while `decompress` answers the mixer's sample type.
+        fn decode(
+            voice: crate::steam::Voice<'_>,
+            packet: &[u8],
+        ) -> Result<Vec<crate::audio::AudioSample>, crate::steam::VoiceError> {
+            voice.decompress(packet, crate::steam::VOICE_SAMPLE_RATE)
+        }
+        let _ = decode;
+    }
+
     /// A sample's whole dependency list, exercised through this crate.
     ///
     /// The nine simulation re-exports are what let `apps/*/Cargo.toml` name

@@ -221,7 +221,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4 and 6**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5 and 6**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -267,9 +267,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or the app, paths checked against Steam's limits before any call, a refused
   `FileWrite` an error — and `SteamEvent::CloudFileChanged` names a file another
   device changed mid-session; `crcbl_store::synced::SyncedFile` over it surfaces
-  conflicts. 64-bit Linux, Windows and macOS; elsewhere the crate is empty.
-  `apps/sandbox --features steam` exercises it. Not yet run against a Steam
-  client with a 1.65 library.
+  conflicts. `steam.voice().capture()` is push-to-talk under the game's control
+  — `VoiceCapture::set_transmitting` starts and stops recording on edges, and
+  `poll()` hands out compressed packets, through Steam's tail after a release,
+  for the game's own transport — and
+  `voice().decompress(packet, VOICE_SAMPLE_RATE)` turns any player's packet into
+  mono `f32` PCM at `crcbl-audio`'s rate; `VoiceError` names a restricted
+  account and each other failure. 64-bit Linux, Windows and macOS; elsewhere the
+  crate is empty. `apps/sandbox --features steam` exercises it. Not yet run
+  against a Steam client with a 1.65 library.
 - **`crcbl_server::Host`: one world, several client sessions**
   (`docs/plan/42-steam.md` slice 2). `Host::new(world, HostConfig)` takes
   `max_peers` as a parameter; `host.add(Box<dyn Transport>)` hands it a

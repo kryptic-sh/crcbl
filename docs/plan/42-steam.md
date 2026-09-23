@@ -16,7 +16,7 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2 and 6 built on branch
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6 and 5 built on branch
 `steam-sdk`, the rest planned** — see "Status by slice" under "Slice order". The
 four decisions the earlier draft asked for were ratified 2026-09-06 (see
 "Decisions" below), and "the full Steam API" is now in scope, which reverses two
@@ -1213,7 +1213,15 @@ On branch `steam-sdk`, not merged to `main`:
   `STEAM_CALLBACK_BEGIN` callbacks and `const` limits. **Not run:**
   `tests/cloud_smoke.rs` and every step under "Needs a real client" below — so
   whether app 480 has a cloud quota is still unknown — on every OS.
-- **Slice 5: next.**
+- **Slice 5: done** (2026-09-23). `Voice`, `VoiceCapture` and `VoiceError` over
+  the fake microphone and decoder; every test in the slice's list seen red
+  against a deliberate break; Miri clean; the drift gate passes against the
+  mirror with the six voice declarations. **Not run:** every step under "Needs a
+  real client" below — two accounts, a spoken round trip, the length of Steam's
+  push-to-talk tail, the `Restricted` path — on every OS; nothing in the sandbox
+  drives voice yet (see the backlog).
+- **Slice 7b: next, and blocked** on bringing slice 7a's seam in from `main`,
+  which is the user's call (see the backlog).
 - **Slice 7a: not on this branch.** The coordinator reported (2026-09-23) that
   the gamepad seam is being built on `main` with an XInput backend, exactly as
   sketched here, so 7a is skipped as its text allows and 7b adopts what landed.
@@ -1445,6 +1453,28 @@ On branch `steam-sdk`, not merged to `main`:
   handshake's server side is a session host, which is slice 2's; the sandbox's
   owner listens, a joiner connects to the owner, and each logs the other's
   greeting and the `EndReason` a closed connection gives.
+
+**Slice 5 as built, where it differs from the text below:**
+
+- **No `crcbl-audio` dependency.** `decompress` answers `Vec<f32>` and the rate
+  is `VOICE_SAMPLE_RATE` (48000): `crcbl-audio` pulls its native device backend
+  into every build that names it, which is a lot to take on for a type alias and
+  a constant. The umbrella crate's tests pin both — the rate equal to
+  `crcbl_audio::INTERNAL_SAMPLE_RATE`, and `decompress` returning
+  `Vec<AudioSample>` — so they cannot drift apart. The rate is a plain `u32`,
+  checked against the decoder's 11025–48000 before any call.
+- **Packets are `Vec<u8>`, and the capture needs no `&Steam`.** `VoiceCapture`
+  holds the session, as `Lobby` does, and is `!Send`, so `poll()` and
+  `set_transmitting()` take only `&mut self`. One capture at a time
+  (`VoiceError::AlreadyCapturing`): two would start and stop one microphone
+  against each other.
+- **An idle capture calls nothing**, and `NotRecording` while transmitting (the
+  start not yet in effect) keeps it polling; only after a release does
+  `NotRecording` end the tail. `recording()` says which.
+- **The buffer bound is explicit**: `poll` doubles its buffer on
+  `BufferTooSmall` up to a named ceiling and then errs; `decompress` tries
+  twice, the second at the size Steam named. `optimal_sample_rate()` wraps
+  `GetVoiceOptimalSampleRate`.
 
 **Slice 6 as built, where it differs from the text below:**
 
@@ -1842,7 +1872,9 @@ transport, and EW decided 2026-09-22 to schedule it with the Steam slices,
 
 - **Scope:** `ISteamUser` voice; push-to-talk under game control; PCM out. EW
   requirement 3.
-- **Files:** `crcbl-steam/src/voice.rs`.
+- **Files:** `crates/crcbl-steam/src/voice.rs` (and, as built, a test in
+  `crates/crcbl/src/lib.rs` pinning its rate and sample type to
+  `crcbl-audio`'s).
 - **API:**
 
   ```rust

@@ -13,11 +13,13 @@
 //!        │                         └──▶ a later frame: steam.take(call) ──▶ Lobby
 //!        ├── networking(): start_relay(), relay_status()
 //!        ├── SteamListener::open(lobby) / SteamTransport::connect(owner): crcbl_net::Transport
+//!        ├── voice(): capture() ──▶ VoiceCapture: set_transmitting(), poll() ──▶ packets
+//!        │            decompress(packet, VOICE_SAMPLE_RATE) ──▶ mono f32 PCM
 //!        └── SteamCloudStorage::new(): crcbl_store::StorageSource
 //! ```
 //!
 //! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4 and 6: the library is
+//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5 and 6: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the
@@ -25,7 +27,8 @@
 //! asynchronous calls are typed tokens redeemed after the pump, lobbies are
 //! created, joined, invited to and left, peers connect over Steam P2P as a
 //! `crcbl_net::Transport`, files are kept in Steam Cloud as a
-//! `crcbl_store::StorageSource`, and the API is shut down exactly once, when
+//! `crcbl_store::StorageSource`, voice is captured and decoded to PCM, and the
+//! API is shut down exactly once, when
 //! the last owner of it is gone. Every string Steam returns is
 //! copied before the call that got it returns.
 //!
@@ -152,6 +155,11 @@ mod user;
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 ))]
 mod utils;
+#[cfg(all(
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+mod voice;
 
 #[cfg(all(
     target_pointer_width = "64",
@@ -182,4 +190,8 @@ pub use crate::{
     pump::PumpDiagnostics,
     user::{SteamId, User},
     utils::{HardwareDefaultConfig, NotificationCorner, SteamHardware, Utils},
+    voice::{
+        MAX_VOICE_SAMPLE_RATE, MIN_VOICE_SAMPLE_RATE, VOICE_SAMPLE_RATE, Voice, VoiceCapture,
+        VoiceError,
+    },
 };

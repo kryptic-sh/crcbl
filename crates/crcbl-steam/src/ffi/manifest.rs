@@ -26,7 +26,7 @@
 //! `ENotificationPosition`, `ELobbyType`, `EChatEntryType`,
 //! `EPersonaState`, `EActivateGameOverlayToWebPageMode`,
 //! `ESteamNetworkingAvailability`, `ERemoteStorageLocalFileChange`,
-//! `ERemoteStorageFilePathType`) is taken to be
+//! `ERemoteStorageFilePathType`, `EVoiceResult`) is taken to be
 //! `int`-sized, as every Steamworks enum without an explicit base is. `bool` is
 //! C's one-byte `_Bool`, which Rust's `bool` matches across `extern "C"`. A
 //! `CSteamID *` out-parameter is declared `*mut u64`: `CSteamID` is exactly
@@ -230,6 +230,24 @@ bindings! {
         get_player_steam_level: UserGetPlayerSteamLevel = "SteamAPI_ISteamUser_GetPlayerSteamLevel",
             "S_API int SteamAPI_ISteamUser_GetPlayerSteamLevel( ISteamUser* self );",
             fn(*mut ISteamUser) -> i32;
+        start_voice_recording: UserStartVoiceRecording = "SteamAPI_ISteamUser_StartVoiceRecording",
+            "S_API void SteamAPI_ISteamUser_StartVoiceRecording( ISteamUser* self );",
+            fn(*mut ISteamUser);
+        stop_voice_recording: UserStopVoiceRecording = "SteamAPI_ISteamUser_StopVoiceRecording",
+            "S_API void SteamAPI_ISteamUser_StopVoiceRecording( ISteamUser* self );",
+            fn(*mut ISteamUser);
+        get_available_voice: UserGetAvailableVoice = "SteamAPI_ISteamUser_GetAvailableVoice",
+            "S_API EVoiceResult SteamAPI_ISteamUser_GetAvailableVoice( ISteamUser* self, uint32 * pcbCompressed, uint32 * pcbUncompressed_Deprecated, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated );",
+            fn(*mut ISteamUser, *mut u32, *mut u32, u32) -> i32;
+        get_voice: UserGetVoice = "SteamAPI_ISteamUser_GetVoice",
+            "S_API EVoiceResult SteamAPI_ISteamUser_GetVoice( ISteamUser* self, bool bWantCompressed, void * pDestBuffer, uint32 cbDestBufferSize, uint32 * nBytesWritten, bool bWantUncompressed_Deprecated, void * pUncompressedDestBuffer_Deprecated, uint32 cbUncompressedDestBufferSize_Deprecated, uint32 * nUncompressBytesWritten_Deprecated, uint32 nUncompressedVoiceDesiredSampleRate_Deprecated );",
+            fn(*mut ISteamUser, bool, *mut c_void, u32, *mut u32, bool, *mut c_void, u32, *mut u32, u32) -> i32;
+        decompress_voice: UserDecompressVoice = "SteamAPI_ISteamUser_DecompressVoice",
+            "S_API EVoiceResult SteamAPI_ISteamUser_DecompressVoice( ISteamUser* self, const void * pCompressed, uint32 cbCompressed, void * pDestBuffer, uint32 cbDestBufferSize, uint32 * nBytesWritten, uint32 nDesiredSampleRate );",
+            fn(*mut ISteamUser, *const c_void, u32, *mut c_void, u32, *mut u32, u32) -> i32;
+        get_voice_optimal_sample_rate: UserGetVoiceOptimalSampleRate = "SteamAPI_ISteamUser_GetVoiceOptimalSampleRate",
+            "S_API uint32 SteamAPI_ISteamUser_GetVoiceOptimalSampleRate( ISteamUser* self );",
+            fn(*mut ISteamUser) -> u32;
     }
 
     /// `ISteamFriends` (`steam_api_flat.h`).

@@ -1,10 +1,11 @@
 //! Bringing Steam up, and taking it down exactly once.
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     collections::VecDeque,
     fmt,
     marker::PhantomData,
+    rc::Weak,
     sync::{Arc, atomic::Ordering},
     thread::ThreadId,
 };
@@ -155,6 +156,9 @@ pub struct Steam {
     pub(crate) relay_started: Cell<bool>,
     /// Where each open `SteamListener` receives its incoming connections.
     pub(crate) incoming: IncomingQueues,
+    /// The live `VoiceCapture`'s token, if one is open. A `RefCell` because
+    /// a capture is opened through `&Steam`.
+    pub(crate) voice_capture: RefCell<Weak<()>>,
     /// `Steam` stays on the thread that made it, whatever its fields allow.
     pub(crate) _not_send: PhantomData<*const ()>,
 }
@@ -291,6 +295,7 @@ pub(crate) fn init_on(lib: &'static Lib, app: AppId) -> Result<Steam, InitError>
         presence_keys: PresenceKeys::default(),
         relay_started: Cell::new(false),
         incoming: IncomingQueues::default(),
+        voice_capture: RefCell::new(Weak::new()),
         _not_send: PhantomData,
     })
 }
