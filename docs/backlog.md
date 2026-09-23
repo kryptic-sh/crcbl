@@ -2942,11 +2942,6 @@ the gaps below.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.
-- **A value set from outside with a line break draws on two lines**:
-  `LineEdit::sync` copies the caller's string as it is, where HTML strips line
-  breaks from a text input's value. Stripping in `sync` alone would make every
-  frame see a change; the fix is sanitising the caller's `String` in
-  `Ui::text_input`.
 - **`PseudoClasses` is a `u8` and `:refused` took its last bit**; the next
   pseudo-class has to widen it.
 - **Not built**: Ctrl+Backspace word delete, Shift+click to extend,
@@ -3050,9 +3045,6 @@ the gaps below.
   `content_size` feature is enabled, which scroll views will need.
 - **Fixtures outside the corpus**: the four flex fixtures with `<text>` leaves
   and the two unrounded ones.
-- **`builtin_scene_build` refuses a geometry path for the `Sprite` and `Ui`
-  scenes but not for `UiPrimitives` or `UiTree`** — a gap that predates this
-  work.
 - **No sample golden draws a readout panel**: five apps call it and the only one
   with a golden script, shard, has no panel in its frame, so the move is held by
   a unit test that compares the tree's draw list with the old arithmetic float
@@ -19198,25 +19190,13 @@ same heading.
   left out rather than decided unilaterally. The double that reproduced the old
   `crcbl-wgpu` double-guard race lived in a scratchpad and went with that crate.
 
-- **Neither WebGPU-refusal branch in `web/engine/demo.js` calls `settle()`**, so
-  the Stop button stays enabled and does nothing. Pre-existing on the sibling
-  branch; the new branch matched it rather than fixing half.
-
-- **`web/engine/demo.js` has no way for a demo to say it saves nothing.** On
-  `STOPPED` it prints `` `${savedLabel} saved.` `` unconditionally, so hud
-  passes `savedLabel: 'Nothing'` and its status bar reads "Nothing saved." —
-  true, and a workaround. A falsy branch in `demo.js` is the honest fix.
+- **Demos still pass `savedLabel: 'Nothing'`** (sixteen of them), which reads
+  "Nothing saved."; `web/engine/demo.js` now shows nothing for an empty label
+  (2026-09-23), so switching them to `''` finishes it.
 - **`web/templates/demo-window.html` is one copy for every demo**, so hud's
   canvas is labelled `aria-label="HUD game"` and the page carries a note about
   browsers not starting audio until you interact. hud is neither a game nor
   audible.
-- **CI's shellcheck step covers `tools/*.sh`, `crates/*/tests/*.sh`,
-  `apps/*/tests/*.sh` and `web/*.sh` — not `crates/crcbl-shaders/tools/`.** Both
-  web scripts touched here were checked by hand and are clean, but nothing in CI
-  would have caught it. `shellcheck` over `git ls-files "*.sh"` on 2026-08-30
-  found one SC2140 in `crates/crcbl-shaders/tools/compile-shaders.sh` (a
-  `"$PREFIX"_"$DXIL_MODEL"` word in an `echo`), harmless and unfixed; the step's
-  globs are the gap.
 
 **Sample rule 8 (spatial audio through `crcbl-audio`) is not met, and this may
 be an honest exemption rather than a gap.** The rule is about _positional game
@@ -21860,11 +21840,6 @@ not fix:
 The settled `ssr`/`ui` excuse list is in `docs/notes/rendering.md` under this
 heading.
 
-- **`crcbl-dx12`'s register case list claims "every shader is listed" and omits
-  `clear_counters`.** Found while updating `draw_gen`'s row; pre-existing. The
-  table transcribes each shader's binding classes so the register assignment can
-  be asserted, so a missing shader is an unasserted one.
-
 ## The seam does not say whether an acquire is exclusive
 
 **DECIDED 2026-09-06 —** The seam says an acquire is **not** exclusive. Vulkan
@@ -22380,12 +22355,12 @@ already carries.
   and 7 `collision_parts` call sites (counted by grep) and delete
   `asset_placement::{bounds, collision_parts}`, widening parts with `as_dvec3()`
   and keeping its own `MIN_HALF_EXTENT_M` padding. Behaviour change: a part
-  whose mesh has no vertices is `EmptyPart { instance }`. Seen and not
-  investigated:
+  whose mesh has no vertices is `EmptyPart { instance }`. Found since:
   `cargo clippy -p crcbl-render --all-targets --target wasm32-unknown-unknown`
-  fails on unused `Instance` imports in test code (`forward.rs` and
-  `mesh_pool.rs` tests, `tests/graph_compile.rs`); CI's wasm32 job lints without
-  `--all-targets`, so it does not see them.
+  fails with 50 errors because the crate's tests call `Instance::create_device`,
+  which is native-only by design (the unused-`Instance` warnings follow from
+  that). Being fixed by gating those test modules `not(target_arch = "wasm32")`;
+  CI's wasm32 job lints without `--all-targets`, so CI never saw it.
 
 Not verified from the crcbl side beyond EW's report: the absence claims were
 EW's reading of the public API.

@@ -2488,6 +2488,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl::screenshot`: every UI scene now refuses a forward geometry path, as
+  `Sprite` and `Ui` already did.** `OffscreenSetup::request_on_path` with
+  `UiPrimitives`, `UiTree`, `UiStyle`, `UiText`, `UiFocus`, `UiWidgets`,
+  `UiTextInput`, `UiLayout` or `UiInspector` returned `Ok` and drew the same
+  frame as with no path, so asking for a path those scenes never use looked like
+  a path that had been tested. They now fail with `OffscreenError::Unusable`
+  before a backend opens.
+
+- **`crcbl-ui`: a text input's value set from outside no longer draws a line
+  break on a second line.** `Ui::text_input` and `Ui::text_input_with` now
+  remove control characters, line breaks among them, from the caller's `String`
+  each frame, as HTML strips line breaks from a text input's value. Typed and
+  pasted text was already filtered; only a value the caller changed between
+  frames got through. `Response::changed` reports the frame the value was
+  stripped.
+
+- **Web demos: Stop is disabled when the page stops before the demo runs.** A
+  browser with no WebGPU, no GPU adapter, an engine that refuses to start or no
+  window left the Stop button enabled, and clicking it did nothing. On stop, an
+  empty `savedLabel` in a demo's `bootDemo` spec now shows no saved line, where
+  every value used to print "`<savedLabel>` saved.".
+
 - **A ball spinning about its contact normal on a single contact point now slows
   and stops**, where it spun for ever and never slept. The contact solver's
   twist friction acted only in manifolds of two points or more; a one-point

@@ -787,3 +787,21 @@ fn an_outside_change_and_a_disabled_input() {
     assert_eq!(values[0], "keep");
     assert_eq!(ui.engaged(), None, "a disabled input engaged");
 }
+
+/// **A value set from outside loses its line breaks**, as HTML strips them
+/// from a text input's value: the input draws one line, hands the caller the
+/// stripped value and reports that change once — not on every later frame.
+#[test]
+fn an_outside_value_with_a_line_break_draws_on_one_line() {
+    let mut ui = Ui::new();
+    let mut values = [String::from("ab"), String::new()];
+    page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    values[0] = "ab\ncd\r\n".to_owned();
+    let stripped = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    let text = part(&ui, stripped.name.key, ".text-input-text").expect("text");
+    assert_eq!(shown(&ui, text), "abcd");
+    assert_eq!(values[0], "abcd");
+    assert!(stripped.name.changed, "the stripped value went unreported");
+    let steady = page(&mut ui, idle(), NavInput::default(), quiet(), &mut values);
+    assert!(!steady.name.changed, "a stripped value changed again");
+}

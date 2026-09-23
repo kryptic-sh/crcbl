@@ -102,7 +102,8 @@ const SEED_BYTES = 32;
  *   default export, which resolves to the instance's raw exports
  * @property {(exports: Record<string, any>) => SampleApi} bind
  * @property {string} hint what to press, shown beside "Playing."
- * @property {string} [savedLabel] what the demo persists, shown on stop
+ * @property {string} [savedLabel] what the demo persists, shown on stop; an
+ *   empty string for a demo that saves nothing, which shows nothing
  */
 
 /**
@@ -196,6 +197,7 @@ export function bootDemo(spec) {
         'Crucible renders through WebGPU in the browser. Chrome or Edge 113+, or Firefox with WebGPU enabled, will run it.',
         true
       );
+      settle();
       return;
     }
 
@@ -222,6 +224,7 @@ export function bootDemo(spec) {
           'navigator.gpu.requestAdapter() returned no adapter. The browser’s own GPU report — chrome://gpu, or about:support in Firefox — says why, but read past the WebGPU line: it can say “Hardware accelerated” while every adapter is still refused. On Linux, Chrome runs WebGPU on Vulkan, so a “Vulkan: Disabled” line there is the usual reason.',
         true
       );
+      settle();
       return;
     }
 
@@ -235,6 +238,7 @@ export function bootDemo(spec) {
     if (api.prepare() !== 1) {
       say('The engine refused to start.', lastError(api, memory), true);
       log();
+      settle();
       return;
     }
     api.logLevel(LOG_INFO);
@@ -275,6 +279,7 @@ export function bootDemo(spec) {
     if (api.boot() !== 1) {
       say('The engine could not open a window.', lastError(api, memory), true);
       log();
+      settle();
       return;
     }
     // The window exists now, so the size it needs can finally be delivered. The
@@ -468,10 +473,10 @@ export function bootDemo(spec) {
           );
           statusBar.classList.add('running');
         } else if (status === STATUS.STOPPED) {
-          say(
-            'Stopped.',
-            opfsSettled(exports) ? `${savedLabel} saved.` : 'Saving…'
-          );
+          let saved = '';
+          if (!opfsSettled(exports)) saved = 'Saving…';
+          else if (savedLabel) saved = `${savedLabel} saved.`;
+          say('Stopped.', saved);
           settle();
         } else if (status === STATUS.FAILED) {
           say('The demo stopped.', lastError(api, memory), true);

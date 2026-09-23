@@ -7034,7 +7034,22 @@ fn builtin_scene_build(
     scene: Scene,
     path: Option<crate::hal::GeometryPath>,
 ) -> Result<BuildScene<'static>, OffscreenError> {
-    if path.is_some() && matches!(scene, Scene::Sprite | Scene::Ui) {
+    if path.is_some()
+        && matches!(
+            scene,
+            Scene::Sprite
+                | Scene::Ui
+                | Scene::UiPrimitives
+                | Scene::UiTree
+                | Scene::UiStyle
+                | Scene::UiText
+                | Scene::UiFocus
+                | Scene::UiWidgets
+                | Scene::UiTextInput
+                | Scene::UiLayout
+                | Scene::UiInspector
+        )
+    {
         return Err(OffscreenError::Unusable(
             "sprite and UI scenes do not use a forward geometry path",
         ));
@@ -8950,18 +8965,33 @@ mod tests {
 
     #[test]
     fn builtin_geometry_selection_rejects_sprite_and_ui_before_backend_open() {
-        for scene in [Scene::Sprite, Scene::Ui] {
-            assert!(matches!(
-                OffscreenSetup::request_on_path(
-                    16,
-                    16,
-                    scene,
-                    crate::hal::GeometryPath::IndirectPerBatch
+        for scene in [
+            Scene::Sprite,
+            Scene::Ui,
+            Scene::UiPrimitives,
+            Scene::UiTree,
+            Scene::UiStyle,
+            Scene::UiText,
+            Scene::UiFocus,
+            Scene::UiWidgets,
+            Scene::UiTextInput,
+            Scene::UiLayout,
+            Scene::UiInspector,
+        ] {
+            assert!(
+                matches!(
+                    OffscreenSetup::request_on_path(
+                        16,
+                        16,
+                        scene,
+                        crate::hal::GeometryPath::IndirectPerBatch
+                    ),
+                    Err(OffscreenError::Unusable(
+                        "sprite and UI scenes do not use a forward geometry path"
+                    ))
                 ),
-                Err(OffscreenError::Unusable(
-                    "sprite and UI scenes do not use a forward geometry path"
-                ))
-            ));
+                "{scene:?} accepted a geometry path it never uses"
+            );
         }
     }
 

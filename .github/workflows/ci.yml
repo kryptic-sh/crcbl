@@ -108,10 +108,13 @@ jobs:
       # use a read loop now, checked byte-for-byte against the `sed` — the
       # obvious `printf '  %s\n' "$NEWER"` rewrite is wrong, and indents only the
       # first line.
+      #
+      # `crates/*/tools/` holds `compile-shaders.sh`, which writes the committed
+      # shader artifacts and sat outside every pattern here with an SC2140 in it.
       - name: Lint every harness and the helpers they share
         run:
-          shellcheck -x tools/*.sh crates/*/tests/*.sh apps/*/tests/*.sh
-          web/*.sh
+          shellcheck -x tools/*.sh crates/*/tests/*.sh crates/*/tools/*.sh
+          apps/*/tests/*.sh web/*.sh
       - name: The summary guard rejects the runs it is there to reject
         run: ./tools/nextest-summary-test.sh
       - name: The validation-log guard rejects the logs it is there to reject

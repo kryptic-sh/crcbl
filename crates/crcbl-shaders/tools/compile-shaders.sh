@@ -629,7 +629,7 @@ for SOURCE in "${SHADERS[@]}"; do
         FRESH_HLSL="$WORK/${NAME}.${ENTRY}.hlsl"
         FRESH_DXIL="$WORK/${NAME}.${ENTRY}.dxil"
 
-        echo "crcbl shaders: compiling $SOURCE:$ENTRY → HLSL → DXIL ($PREFIX"_"$DXIL_MODEL)"
+        echo "crcbl shaders: compiling $SOURCE:$ENTRY → HLSL → DXIL (${PREFIX}_${DXIL_MODEL})"
         "$SLANGC" "$SOURCE" \
             -target hlsl \
             -entry "$ENTRY" \

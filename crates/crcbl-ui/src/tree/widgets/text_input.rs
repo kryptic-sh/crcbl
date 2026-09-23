@@ -243,7 +243,8 @@ impl Ui {
     /// value changed — by an edit, a paste, or a cancel.
     ///
     /// `value` is the caller's: a change made to it between frames is taken as
-    /// it stands, the caret held inside it.
+    /// it stands, the caret held inside it, except that its control characters
+    /// — line breaks among them — are removed from it.
     #[track_caller]
     pub fn text_input_with(
         &mut self,
@@ -252,6 +253,11 @@ impl Ui {
         options: TextInputOptions<'_>,
     ) -> Response {
         let before = value.clone();
+        // The line holds no control characters, as `LineEdit::insert` drops
+        // them, and HTML strips a text input's line breaks the same way. The
+        // caller's value is held to that here rather than in `LineEdit::sync`,
+        // which would otherwise see it differ from the line every frame.
+        value.retain(|c| !c.is_control());
         let selector = typed("text-input", selector);
         let parsed = self.node_selector(&selector);
         let key = self.widget_key(parsed, Location::caller());
