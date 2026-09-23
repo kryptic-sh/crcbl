@@ -236,7 +236,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c and 9**
+- **`crcbl-steam`: Steamworks, slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 8 and 9**
   (`docs/plan/42-steam.md`), and `crcbl::steam` behind the umbrella's new
   `steam` feature. A new crate over the SDK's flat C API with no link-time
   dependency and nothing from the SDK committed: `Steam::init(AppId)` finds
@@ -345,10 +345,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   documentation promises, as checks any implementation can be run through with a
   `Link` that pairs and settles it.
 - `HostedGame::take_pending_focus_loss` lets a game report a focus loss the
-  window never sees — the Steam overlay opening — and the loop answers it
-  exactly as it answers the window losing focus: held keys, buttons and contacts
-  released through the game's own paths, then paused. Not a toggle: a second
-  report while paused leaves the game paused. The default is `false`.
+  window never sees — an overlay the loop has no source for — and the loop
+  answers it exactly as it answers the window losing focus: held keys, buttons
+  and contacts released through the game's own paths, then paused. Not a toggle:
+  a second report while paused leaves the game paused. The default is `false`.
+- **The engine loop pumps Steam** (feature `steam`): a game lends its `Steam`
+  through `HostedGame::steam` and the loop pumps it once a frame, takes an
+  opened overlay as a focus loss — keys, buttons, contacts and pads released,
+  the game paused; closing it resumes nothing — and hands every event to
+  `HostedGame::steam_event`. `crcbl::engine::steam::steam_input(pads)` makes a
+  `SteamPads` the loop's pad source, with XInput beside it on Windows skipping
+  Steam's virtual pads. `apps/sandbox --features steam` now lends its session
+  and opens Steam Input instead of pumping by hand.
 
 - **Boxes against boxes: rung 2 of the contact solver, up to hulls**
   (`36-contact-solver.md`). A system made with `PhysicsSystem::with_contacts`

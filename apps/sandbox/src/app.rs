@@ -444,8 +444,9 @@ pub fn with_shell<S: Shell + ?Sized>(
     if !options.headless {
         sandbox.steam = SteamLink::start();
     }
+    let steam_pads = sandbox.steam.pad_source();
 
-    Ok(Loop::new(
+    let mut engine = Loop::new(
         Booted {
             shell,
             window,
@@ -461,7 +462,11 @@ pub fn with_shell<S: Shell + ?Sized>(
             windowed: !options.headless,
             limit: options.limit,
         },
-    ))
+    );
+    if steam_pads.is_some() {
+        engine.set_pad_source(steam_pads);
+    }
+    Ok(engine)
 }
 
 /// The sandbox's half of the frame, which is as little as a game can have.
@@ -585,9 +590,24 @@ impl HostedGame for Sandbox {
         self.pending_limit.take()
     }
 
-    /// The Steam overlay opening is a focus loss the window never reports.
-    fn take_pending_focus_loss(&mut self) -> bool {
-        self.steam.take_overlay_opened()
+    /// Steam, lent to the loop to pump; see [`crate::steam`].
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam(&mut self) -> Option<&mut dyn crcbl::engine::SteamSource> {
+        self.steam.source()
+    }
+
+    /// Every event the loop's pump decoded.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam_event(&mut self, event: &crcbl::steam::SteamEvent) {
+        self.steam.event(event);
     }
 
     fn draw(&mut self, gpu: &mut Gpu, _draw_list: &mut DrawList, frame: FrameInfo) {
@@ -596,9 +616,9 @@ impl HostedGame for Sandbox {
         // after `run_ticks` for exactly that reason.
         render(frame.alpha);
         // Here because `draw` is the one hook that runs on every frame, paused
-        // or not, and an overlay opened over the pause menu still has to be
-        // seen; what it reports reaches the loop on the next frame.
-        self.steam.pump();
+        // or not, after the loop's Steam pump: a call answered while paused is
+        // still taken.
+        self.steam.frame();
         // Re-read rather than kept: the device clamps last, so what the summary
         // reports comes back off the renderer.
         self.effects = gpu.effects();

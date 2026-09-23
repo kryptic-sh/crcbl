@@ -1,10 +1,14 @@
 //! Steam in the sandbox, behind its `steam` feature.
 //!
-//! `docs/plan/42-steam.md` slices 1b, 3a, 3b and 4: on a windowed run, initialise
-//! Steam under Valve's shared test app 480, log who is playing, pump once a
-//! frame, and hand an opened overlay to the loop as a focus loss — which
-//! pauses and releases held input exactly as alt-tab does. Without Steam, the
-//! reason is logged once and the sandbox runs on.
+//! `docs/plan/42-steam.md` slices 1b, 3a, 3b, 4, 7b and 8: on a windowed run,
+//! initialise Steam under Valve's shared test app 480, log who is playing, and
+//! lend the session to the loop, which pumps it once a frame, takes an opened
+//! overlay as a focus loss — pausing and releasing held input exactly as
+//! alt-tab does — and hands every event back through `HostedGame::steam_event`.
+//! Steam Input is opened too, with the pad manifest written beside the
+//! executable, and becomes the loop's pad source (XInput beside it skipping
+//! Steam's virtual pads). Without Steam, the reason is logged once and the
+//! sandbox runs on.
 //!
 //! The lobby half is driven from the keyboard and shown in the F3 debug
 //! panel's "steam" section:
@@ -36,8 +40,9 @@
 //! never starts, pumps nothing and reports no overlay — so the rest of the
 //! sandbox names it without asking. The workspace's `wasm32` sweep builds this
 //! crate with every feature on, and there `crcbl-steam` is documentation alone,
-//! which is why the target is asked here at all; `docs/plan/42-steam.md` slice
-//! 8's loop limb is what takes the question away from games.
+//! which is why the target is asked here at all; the loop's two Steam hooks
+//! exist only where the question answers yes, so the game's overrides of them
+//! ask it too.
 
 pub use imp::SteamLink;
 
@@ -49,11 +54,13 @@ pub use imp::SteamLink;
 mod imp {
     use crcbl::{
         core::input::KeyCode,
+        engine::{PadSource, SteamSource},
         net::{Message, Transport, TransportError},
         steam::{
             AppId, AvatarSize, CallState, FriendFlags, Lobby, LobbyCreated, LobbyEntered, LobbyId,
-            LobbyKind, Steam, SteamCall, SteamEvent, SteamListener, SteamTransport, UserDialog,
-            VirtualPort, WebPageMode, connect_lobby,
+            LobbyKind, PAD_MANIFEST, PAD_MANIFEST_FILE, Steam, SteamCall, SteamEvent,
+            SteamListener, SteamPads, SteamTransport, UserDialog, VirtualPort, WebPageMode,
+            connect_lobby,
         },
         ui::{DebugModule, DebugPanel, DebugSection},
     };
@@ -74,8 +81,6 @@ mod imp {
     pub struct SteamLink {
         /// `None` on a headless run and whenever init failed.
         steam: Option<Steam>,
-        /// The overlay opened since the loop last asked.
-        overlay_opened: bool,
         /// The lobby this client is in.
         lobby: Option<Lobby>,
         /// A `CreateLobby` waiting on its answer.
@@ -94,7 +99,6 @@ mod imp {
         pub const fn off() -> Self {
             Self {
                 steam: None,
-                overlay_opened: false,
                 lobby: None,
                 creating: None,
                 joining: None,
@@ -213,16 +217,45 @@ mod imp {
             }
         }
 
-        /// Drains Steam's callbacks and redeems pending calls, once a frame.
-        pub fn pump(&mut self) {
-            let Some(steam) = &mut self.steam else {
-                return;
+        /// The session, lent to the loop to pump.
+        pub fn source(&mut self) -> Option<&mut dyn SteamSource> {
+            self.steam
+                .as_mut()
+                .map(|steam| steam as &mut dyn SteamSource)
+        }
+
+        /// Opens Steam Input over a pad manifest written beside the executable,
+        /// as a shipped build would carry it, and answers it as the loop's pad
+        /// source — or `None`, with the reason logged, and the loop keeps its
+        /// own.
+        pub fn pad_source(&mut self) -> Option<Box<dyn PadSource>> {
+            let steam = self.steam.as_mut()?;
+            let manifest = match std::env::current_exe() {
+                Ok(exe) => exe.with_file_name(PAD_MANIFEST_FILE),
+                Err(error) => {
+                    crcbl::log::warn!("steam: no pads: the executable's path: {error}");
+                    return None;
+                }
             };
-            steam.pump();
-            let events: Vec<SteamEvent> = steam.events().collect();
-            for event in events {
-                self.handle(event);
+            if let Err(error) = std::fs::write(&manifest, PAD_MANIFEST) {
+                crcbl::log::warn!("steam: no pads: writing {}: {error}", manifest.display());
+                return None;
             }
+            match SteamPads::open(steam, &manifest) {
+                Ok(pads) => {
+                    crcbl::log::info!("steam: Steam Input open over {}", manifest.display());
+                    Some(crcbl::engine::steam::steam_input(pads))
+                }
+                Err(error) => {
+                    crcbl::log::warn!("steam: no pads: {error}");
+                    None
+                }
+            }
+        }
+
+        /// Redeems pending calls and serves the connections, once a frame —
+        /// the loop has pumped by then.
+        pub fn frame(&mut self) {
             self.take_calls();
             self.serve_links();
         }
@@ -258,19 +291,19 @@ mod imp {
             });
         }
 
-        /// Acts on one event.
-        fn handle(&mut self, event: SteamEvent) {
+        /// Acts on one event the loop's pump handed over. An opened overlay
+        /// the loop has already taken as a focus loss; it is only logged here.
+        pub fn event(&mut self, event: &SteamEvent) {
             match event {
                 SteamEvent::OverlayActivated { active } => {
                     crcbl::log::info!(
                         "steam: overlay {}",
-                        if active { "opened" } else { "closed" }
+                        if *active { "opened" } else { "closed" }
                     );
-                    self.overlay_opened |= active;
                 }
                 SteamEvent::LobbyJoinRequested { lobby, friend } => {
                     crcbl::log::info!("steam: asked to join {lobby:?} through {friend:?}");
-                    self.join(lobby);
+                    self.join(*lobby);
                 }
                 SteamEvent::RichPresenceJoinRequested { connect, .. } => {
                     match connect_lobby(connect.split_whitespace()) {
@@ -340,11 +373,6 @@ mod imp {
                     CallState::Failed(error) => crcbl::log::warn!("steam: join: {error}"),
                 }
             }
-        }
-
-        /// Whether the overlay opened since the last call.
-        pub fn take_overlay_opened(&mut self) -> bool {
-            std::mem::take(&mut self.overlay_opened)
         }
 
         /// Adds the "steam" section to the F3 panel — only with a session, so
@@ -444,11 +472,10 @@ mod imp {
     any(target_os = "linux", target_os = "windows", target_os = "macos")
 )))]
 mod imp {
-    use crcbl::{core::input::KeyCode, ui::DebugPanel};
+    use crcbl::{core::input::KeyCode, engine::PadSource, ui::DebugPanel};
 
     /// No Steam: the feature is off, or `crcbl-steam` has no items on this
-    /// target. Never starts, pumps nothing, reports no overlay, adds no panel
-    /// section.
+    /// target. Never starts, opens no pads, adds no panel section.
     #[derive(Debug)]
     pub struct SteamLink;
 
@@ -466,13 +493,13 @@ mod imp {
         /// No lobby keys without Steam.
         pub fn key_event(&mut self, _key: KeyCode, _pressed: bool) {}
 
-        /// Nothing to pump.
-        pub fn pump(&mut self) {}
-
-        /// No overlay without Steam.
-        pub fn take_overlay_opened(&mut self) -> bool {
-            false
+        /// No Steam Input without Steam.
+        pub fn pad_source(&mut self) -> Option<Box<dyn PadSource>> {
+            None
         }
+
+        /// No calls to redeem or connections to serve.
+        pub fn frame(&mut self) {}
 
         /// No section without Steam.
         pub fn debug_sections(&self, _panel: &mut DebugPanel) {}

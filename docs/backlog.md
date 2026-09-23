@@ -9092,9 +9092,9 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 built on `steam-sdk`, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 are built on branch
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 are built on branch
 `steam-sdk`** (not merged): `crates/crcbl-steam` — the runtime loader,
 `Steam::init` with the version handshake, the manual-dispatch pump, shutdown on
 the last owner's drop, the local identity and machine basics,
@@ -9110,9 +9110,11 @@ slice 6's `crcbl_store::synced` and `SteamCloudStorage`, slice 5's voice capture
 and decoding, slice 9's stats, achievements and leaderboards (built ahead of
 7b–8, which waited on slice 7a's seam; `steam-sdk` has since merged `main`,
 which carries it), and slice 7b's `SteamPads` (Steam Input onto the gamepad
-seam) with the Steam-pad filter in `crcbl_input::xinput`, and slice 7c's
-on-screen keyboards and glyphs. The plan, `docs/plan/42-steam.md`, carries a
-status line per slice.
+seam) with the Steam-pad filter in `crcbl_input::xinput`, slice 7c's on-screen
+keyboards and glyphs, and slice 8's loop limb (`crcbl::engine::steam`: the loop
+pumps a lent `Steam`, takes its overlay as a focus loss, and polls Steam Input
+as its pad source). The plan, `docs/plan/42-steam.md`, carries a status line per
+slice.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9149,9 +9151,10 @@ status line per slice.
 - **Slice 1b's manual steps have not run on any OS**: the overlay opening over
   `apps/sandbox --features steam` and pausing it, which launch injects the
   overlay per OS, and the `NoSteamClient` fall-through with Steam stopped. The
-  loop half is tested (`crcbl::engine`'s
-  `a_focus_loss_the_game_reports_releases_held_keys_and_pauses`); the Steam half
-  needs a 1.65 library and a windowed run.
+  loop half is tested (since slice 8, `crcbl::engine`'s
+  `steam_limb::an_opened_overlay_releases_held_keys_and_pauses`, on the same
+  check the game-reported loss runs); the Steam half needs a 1.65 library and a
+  windowed run.
 - **Slice 3a's manual steps have not run on any OS**: two accounts creating,
   inviting to and joining a lobby through all four join paths (invite accepted
   running and closed, rich-presence join running and closed), and the owner
@@ -9206,28 +9209,28 @@ status line per slice.
   defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
   maps to its app codes (touches the trait every backend implements), or leave
   it and document the session end as the signal. Needs a decision; not done.
-- **Slice 7b's manual steps have not run, and nothing opens `SteamPads` yet**:
-  whether app 480 honours `SetInputActionManifestFilePath` at all (R3); the Deck
-  run, which is also the check of the stick's Y sign (passed through on the
-  belief that `joystick_move` reports +Y up) and of the by-value returns of
+- **Slice 7b's manual steps have not run**: whether app 480 honours
+  `SetInputActionManifestFilePath` at all (R3); the Deck run, which is also the
+  check of the stick's Y sign (passed through on the belief that `joystick_move`
+  reports +Y up) and of the by-value returns of
   `GetDigitalActionData`/`GetAnalogActionData` on x86-64 SysV (R10); Windows and
   macOS (arm64) with a DualSense and an Xbox pad, each that target's by-value
   check; a remap in Steam's configurator arriving as the remapped button; and no
   double input with XInput polling beside it. Also unverified: that Steam
   answers `0` for action handles before a configuration loads (the backend
-  retries either way). What it would take: slice 8's loop limb (or the sandbox)
-  opening `SteamPads` with `PAD_MANIFEST` written beside the executable, and the
-  run recorded per OS.
+  retries either way). Since slice 8, `apps/sandbox --features steam` opens
+  `SteamPads` over `PAD_MANIFEST` written beside its executable and hands it to
+  the loop; what is left is that run, recorded per OS.
 - **Slice 7c's manual steps have not run, and nothing uses the keyboards or
   glyphs yet**: the Deck's full-screen keyboard filling a sandbox text field
   (and whether `GetEnteredGamepadTextLength` counts the NUL — the buffer is
   sized to work either way), the floating keyboard typing through the shell on
   each backend, glyphs for a Deck and a DualSense, and desktop Big Picture.
-  `SteamEvent::TextInputDismissed` reaches no text field on its own: a hosted
-  game hands the text to its field itself until slice 8 decides whether the loop
-  does. What it would take: a text field in the sandbox's Steam panel that opens
-  the keyboard on a pad press and shows the answer, and the pad's South glyph
-  drawn beside it.
+  `SteamEvent::TextInputDismissed` reaches no text field on its own: the loop
+  hands it to the game (`HostedGame::steam_event`), whose fields are its own.
+  What it would take: a text field in the sandbox's Steam panel that opens the
+  keyboard on a pad press and shows the answer, and the pad's South glyph drawn
+  beside it.
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator
@@ -9248,9 +9251,6 @@ status line per slice.
   names the XInput slot Steam emulates for a controller, or -1 — needs a
   decision only if the vendor route fails on a real run: it would couple the
   XInput backend to a slot list the Steam backend supplies each frame.
-- **Nothing turns the filter on yet.** It is `XInput::skip_steam_virtual_pads`'s
-  caller's job while `SteamPads` is open; slice 8's loop limb, which will own
-  both sources, is where that call belongs.
 - **`crcbl` and `sandbox` were not clippy'd for Linux locally**: their
   `alsa-sys` build script needs a Linux sysroot the Windows machine lacks. Their
   1b changes are target-neutral; CI's Linux jobs are the check.

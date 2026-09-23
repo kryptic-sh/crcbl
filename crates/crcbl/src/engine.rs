@@ -129,12 +129,24 @@ pub mod menu;
 pub mod pads;
 pub mod page;
 pub mod pause;
+#[cfg(all(
+    feature = "steam",
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+pub mod steam;
 
 pub use console_button::ConsoleButton;
 pub use menu::{PAUSE_TITLE, menu_actions, pause_items, pause_menu, pause_only};
 pub use pads::PadSource;
 pub use page::PageBundle;
 pub use pause::PauseControl;
+#[cfg(all(
+    feature = "steam",
+    target_pointer_width = "64",
+    any(target_os = "linux", target_os = "windows", target_os = "macos")
+))]
+pub use steam::SteamSource;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -6133,8 +6145,43 @@ pub trait HostedGame: Sized {
         false
     }
 
+    /// Steam, lent to the loop to pump once a frame, or `None` — the default,
+    /// and every game without Steam. See [`steam`] for what the loop does with
+    /// it: the pump, the overlay as a focus loss, and every event handed to
+    /// [`steam_event`](Self::steam_event).
+    ///
+    /// Asked once a frame, so a game that brings Steam up after the first frame
+    /// is pumped from then on.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam(&mut self) -> Option<&mut dyn SteamSource> {
+        None
+    }
+
+    /// One Steam event, in the order the pump decoded them, once a frame after
+    /// the shell's events — the overlay's included, after the loop has taken
+    /// an opened one as a focus loss.
+    ///
+    /// The empty default carries [`touch_event`](Self::touch_event)'s
+    /// argument: nothing is verified by this method, and a game that lends no
+    /// Steam never hears it.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    fn steam_event(&mut self, event: &crate::steam::SteamEvent) {
+        let _ = event;
+    }
+
     /// Whether something only the game can see took the player's input away
-    /// since the loop last looked — the Steam overlay opening, say.
+    /// since the loop last looked — an overlay the loop has no source for.
+    /// (The Steam overlay is the loop's own, through `HostedGame::steam` —
+    /// named, not linked, since the hook exists only with the `steam`
+    /// feature.)
     ///
     /// The loop treats `true` exactly as it treats the window losing focus:
     /// every held key, button and contact is released through the path a
@@ -6694,6 +6741,21 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
                 game.key_event(code, pressed);
             }
         });
+        // Steam, between the two: after the shell, as its overlay is a focus
+        // loss like the window's, and before the pads, whose Steam Input
+        // devices arrive in this pump.
+        #[cfg(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        let overlay_opened = steam::pump(&mut *game);
+        #[cfg(not(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        )))]
+        let overlay_opened = false;
         // **The pads, after the shell's events and in the same pump**, so the
         // menu hears them on last frame's panel exactly as it heard the keys.
         // Each event goes to the menu's map and to the game once each, and
@@ -6979,7 +7041,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // reverse. Taken every frame, like the pause request below, and one
         // path for both causes: the obligations are the window's either way.
         let game_focus_lost = self.game.take_pending_focus_loss();
-        if pending.focus_lost || game_focus_lost {
+        if pending.focus_lost || game_focus_lost || overlay_opened {
             let game = &mut self.game;
             lose_focus(&mut self.held_keys, &mut self.paused, |key| {
                 game.key_event(key, false);
@@ -7903,6 +7965,14 @@ impl<S: Shell + ?Sized, G: HostedGame> GameLoop for Loop<S, G> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The Steam limb's checks, which run on this module's fixture.
+    #[cfg(all(
+        feature = "steam",
+        target_pointer_width = "64",
+        any(target_os = "linux", target_os = "windows", target_os = "macos")
+    ))]
+    mod steam_limb;
 
     /// **A headless run opens the headless backend by name**, rather than
     /// falling through to whatever the platform offers.
@@ -13080,6 +13150,20 @@ mod tests {
         pending_pause: bool,
         /// A focus loss only the game could see, taken by the loop.
         pending_focus_loss: bool,
+        /// The Steam this game lends the loop, when a test gives it one.
+        #[cfg(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        steam: Option<steam_limb::ScriptedSteam>,
+        /// Every Steam event the loop handed over, in order.
+        #[cfg(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        steam_events: Vec<crate::steam::SteamEvent>,
         /// What [`HostedGame::pointer_mode`] answers, so a test can change this
         /// game's mind between frames.
         wanted_pointer: PointerMode,
@@ -13306,6 +13390,26 @@ mod tests {
 
         fn take_pending_focus_loss(&mut self) -> bool {
             std::mem::take(&mut self.pending_focus_loss)
+        }
+
+        #[cfg(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        fn steam(&mut self) -> Option<&mut dyn SteamSource> {
+            self.steam
+                .as_mut()
+                .map(|steam| steam as &mut dyn SteamSource)
+        }
+
+        #[cfg(all(
+            feature = "steam",
+            target_pointer_width = "64",
+            any(target_os = "linux", target_os = "windows", target_os = "macos")
+        ))]
+        fn steam_event(&mut self, event: &crate::steam::SteamEvent) {
+            self.steam_events.push(event.clone());
         }
 
         fn summary(&self, run: RunSummary) -> FakeSummary {
@@ -14561,14 +14665,33 @@ mod tests {
 
     /// **A focus loss the game reports is the window's focus loss.**
     ///
-    /// The seam an overlay the loop cannot see comes through — the Steam
-    /// overlay, for `docs/plan/42-steam.md`. The held key comes up through the
-    /// game's own key path and the loop pauses; a second report while paused
-    /// leaves it paused, because this is a loss rather than a toggle and
-    /// resuming stays the player's.
+    /// The seam an overlay the loop cannot see comes through. The held key
+    /// comes up through the game's own key path and the loop pauses; a second
+    /// report while paused leaves it paused, because this is a loss rather than
+    /// a toggle and resuming stays the player's.
     #[test]
     fn a_focus_loss_the_game_reports_releases_held_keys_and_pauses() {
+        a_focus_loss_releases_held_keys_and_pauses(hosted(None), |engine| {
+            engine.game_mut().pending_focus_loss = true;
+        });
         let mut engine = hosted(None);
+        engine.game_mut().pending_focus_loss = true;
+        step(&mut engine);
+        assert!(
+            !engine.game().pending_focus_loss,
+            "the report was not taken"
+        );
+    }
+
+    /// The focus-loss check, for any `cause` that reports one before the next
+    /// frame: the held key comes up through the game's key path, the loop
+    /// pauses, and a second loss while paused leaves it paused. Shared with
+    /// the Steam overlay's check (`steam_limb`), which is the same loss from
+    /// another cause.
+    fn a_focus_loss_releases_held_keys_and_pauses(
+        mut engine: Loop<crcbl_shell::HeadlessShell, FakeGame>,
+        cause: impl Fn(&mut Loop<crcbl_shell::HeadlessShell, FakeGame>),
+    ) {
         let window = engine.window;
         engine
             .shell_mut()
@@ -14578,12 +14701,8 @@ mod tests {
         assert_eq!(engine.held_keys(), [SERVE_KEY]);
         assert!(!engine.is_paused());
 
-        engine.game_mut().pending_focus_loss = true;
+        cause(&mut engine);
         step(&mut engine);
-        assert!(
-            !engine.game().pending_focus_loss,
-            "the report was not taken"
-        );
         assert!(engine.is_paused(), "the reported focus loss did not pause");
         assert_eq!(
             engine.game.keys.last().copied(),
@@ -14593,7 +14712,7 @@ mod tests {
         );
         assert!(engine.held_keys().is_empty());
 
-        engine.game_mut().pending_focus_loss = true;
+        cause(&mut engine);
         step(&mut engine);
         assert!(engine.is_paused(), "a second report toggled the pause off");
     }

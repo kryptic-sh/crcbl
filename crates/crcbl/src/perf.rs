@@ -20,6 +20,7 @@
 //! ```text
 //! frame                       the whole of one Loop::frame
 //! ├── input                   pump the shell, route the pointer, apply menu actions
+//! │   └── steam               pump the Steam a game lends the loop (feature `steam`)
 //! ├── pace                    the frame limiter's sleep
 //! ├── tick                    the fixed-step ticks the clock owes
 //! ├── draw                    the game's draw, the menu, the overlay, the hand-over
@@ -66,6 +67,10 @@ pub const FRAME_SPAN: &str = "frame";
 
 /// Pumping the shell, routing the pointer and applying whatever the menu fired.
 pub const INPUT_SPAN: &str = "input";
+
+/// Pumping Steam, inside [`INPUT_SPAN`] — only on a frame whose game lends
+/// the loop Steam (`HostedGame::steam`, behind the `steam` feature).
+pub const STEAM_SPAN: &str = "steam";
 
 /// The frame limiter's sleep — [`Clock::advance`](crate::engine::Clock::advance).
 ///

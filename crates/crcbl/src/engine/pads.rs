@@ -43,19 +43,7 @@ pub(super) fn for_run(windowed: bool) -> Option<Box<dyn PadSource>> {
 /// XInput, or `None` with the reason logged.
 #[cfg(windows)]
 fn platform() -> Option<Box<dyn PadSource>> {
-    match crcbl_input::xinput::XInput::load() {
-        Ok(xinput) => {
-            log::info!("gamepads: polling XInput through {}", xinput.library_name());
-            Some(Box::new(XInputPads {
-                xinput,
-                failing: None,
-            }))
-        }
-        Err(error) => {
-            log::warn!("gamepads: {error}; running with no pads");
-            None
-        }
-    }
+    XInputPads::load().map(|pads| Box::new(pads) as Box<dyn PadSource>)
 }
 
 /// No backend on this target: said once, at start-up.
@@ -67,11 +55,40 @@ fn platform() -> Option<Box<dyn PadSource>> {
 
 /// [`crcbl_input::xinput::XInput`] as a [`PadSource`].
 #[cfg(windows)]
-struct XInputPads {
+pub(super) struct XInputPads {
     xinput: crcbl_input::xinput::XInput,
     /// The error the last poll returned, so a slot that keeps failing is
     /// logged when it starts and when it stops rather than once a frame.
     failing: Option<crcbl_input::xinput::XInputError>,
+}
+
+#[cfg(windows)]
+impl XInputPads {
+    /// XInput, or `None` with the reason logged.
+    pub(super) fn load() -> Option<Self> {
+        match crcbl_input::xinput::XInput::load() {
+            Ok(xinput) => {
+                log::info!("gamepads: polling XInput through {}", xinput.library_name());
+                Some(Self {
+                    xinput,
+                    failing: None,
+                })
+            }
+            Err(error) => {
+                log::warn!("gamepads: {error}; running with no pads");
+                None
+            }
+        }
+    }
+
+    /// Skips Steam's virtual pads from now on — see
+    /// `crcbl_input::xinput::XInput::skip_steam_virtual_pads`.
+    #[cfg(all(feature = "steam", target_pointer_width = "64"))]
+    pub(super) fn skip_steam_virtual_pads(
+        &mut self,
+    ) -> Result<(), crcbl_input::xinput::XInputError> {
+        self.xinput.skip_steam_virtual_pads(true)
+    }
 }
 
 #[cfg(windows)]

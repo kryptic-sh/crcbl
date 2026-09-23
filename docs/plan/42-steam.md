@@ -16,16 +16,16 @@ against a real Steam client.
 Like topics 11–41 its number is identity, not sequence. The topic row already
 exists in `00-overview.md`; claiming a phase in `ROADMAP.md` belongs to slice 1.
 
-**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c and 9 built on
-branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest planned**
-— see "Status by slice" under "Slice order". The four decisions the earlier
-draft asked for were ratified 2026-09-06 (see "Decisions" below), and "the full
-Steam API" is now in scope, which reverses two earlier "not now" calls — Steam
-Input and `SteamTransport` — and pulls the first consumer's requirements (the
-game EW, below) forward in the slice order. The plan was reviewed the same day
-against the SDK 1.65 headers and this tree; "Review (step 2)" at the end lists
-what that changed, including EW's answers to the questions the first draft left
-open.
+**Status (2026-09-23): slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8 and 9 built
+on branch `steam-sdk`, slice 7a landed on `main` and merged in, the rest
+planned** — see "Status by slice" under "Slice order". The four decisions the
+earlier draft asked for were ratified 2026-09-06 (see "Decisions" below), and
+"the full Steam API" is now in scope, which reverses two earlier "not now" calls
+— Steam Input and `SteamTransport` — and pulls the first consumer's requirements
+(the game EW, below) forward in the slice order. The plan was reviewed the same
+day against the SDK 1.65 headers and this tree; "Review (step 2)" at the end
+lists what that changed, including EW's answers to the questions the first draft
+left open.
 
 Two findings shape everything below, so they come first:
 
@@ -1256,7 +1256,52 @@ On branch `steam-sdk`, not merged to `main`:
   below — the Deck keyboard filling a text field, glyphs for a Deck and a
   DualSense, desktop Big Picture — on every OS; nothing in the sandbox opens a
   keyboard or shows a glyph yet. See "Slice 7c as built".
-- Slices 8, 10–15: not started.
+- **Slice 8: done** (2026-09-23). `crates/crcbl/src/engine/steam.rs`: the loop
+  pumps the Steam a game lends it, takes an opened overlay as its own focus
+  loss, hands every event back, and `steam_input` makes Steam Input its pad
+  source with XInput skipping Steam's pads beside it; `apps/sandbox` no longer
+  pumps or reports the overlay itself, and opens Steam Input. Every test in the
+  slice's list seen red against a deliberate break, run with the `steam`
+  feature. **Not run:** Shift+Tab in the sandbox on any OS (with slice 1b's
+  recorded launch — none recorded yet), and the sandbox's Steam Input on any
+  controller. See "Slice 8 as built".
+- Slices 10–15: not started.
+
+**Slice 8 as built, where it differs from the text below:**
+
+- **The game owns `Steam` and lends it**, rather than the loop owning an
+  `Option<Steam>`:
+  `HostedGame::steam(&mut self) -> Option<&mut dyn SteamSource>`, as
+  `HostedGame::actions` lends the game's map. A game calls Steam from every hook
+  — lobbies on a key press, transports in `tick`, achievements at game over —
+  and a `Steam` owned by the loop would reach it only inside one hook.
+  `SteamSource` is the "event source it pumps", which `crcbl_steam::Steam`
+  implements and the engine's tests script.
+- **What the loop takes over** is the per-frame part: the pump, under the new
+  `crate::perf::STEAM_SPAN` inside the input span, after the shell's events and
+  before the pads (so `SteamPads` reads this pump's device callbacks); an
+  `OverlayActivated { active: true }` through the window's own focus-loss path
+  the same frame — keys, buttons, contacts and pads released, the game paused —
+  and a closing through nothing; and every event, the overlay's included, to
+  `HostedGame::steam_event`. `take_pending_focus_loss` stays, for an overlay the
+  loop has no source for.
+- **Steam Input is a pad source**: `impl PadSource for SteamPads`, and
+  `crcbl::engine::steam::steam_input(pads)` pairs it with XInput on Windows,
+  filter on — or, where XInput cannot filter (`xinput9_1_0.dll`), leaves XInput
+  out with a warning, since a pad arriving twice is worse than one Steam Input
+  does not handle going unheard. A game hands it to `Loop::set_pad_source`.
+- **The target question stays with a game that overrides the hooks.** They, and
+  the types they name, exist only with the `steam` feature on the targets
+  `crcbl-steam` has items for, so the overrides carry that `cfg` too; what the
+  loop takes away is everything else the sandbox used to do by hand.
+- **`engine.rs` grew by the two hooks, the call site and its fixture's Steam
+  fields**, not the limb: the limb is `crates/crcbl/src/engine/steam.rs`, and
+  its loop checks are `crates/crcbl/src/engine/tests/steam_limb.rs`, a child of
+  the engine's test module so they run on its fixture. The existing focus-loss
+  check became a helper both causes run through.
+- **`SteamEvent::TextInputDismissed` is handed to the game, not to a text
+  field**: hosted games' fields are the game's, and nothing in the loop routes
+  committed text to them yet.
 
 **Slice 7c as built, where it differs from the text below:**
 
@@ -1324,9 +1369,9 @@ On branch `steam-sdk`, not merged to `main`:
   the vendor through `xinput1_4.dll`'s **undocumented** ordinal 108
   (`XInputGetCapabilitiesEx`, declared as SDL declares it), once per pad; it
   refuses with `XInputError::NoVendorQuery` on `xinput9_1_0.dll`, which lacks
-  it. Nothing turns it on yet: that is slice 8's wiring, where the loop owns
-  both sources. `GetGamepadIndexForController` — Steam naming the XInput slot it
-  emulates — is the documented alternative, in the backlog.
+  it. Slice 8's `crcbl::engine::steam::steam_input` is what turns it on.
+  `GetGamepadIndexForController` — Steam naming the XInput slot it emulates — is
+  the documented alternative, in the backlog.
 
 **Slice 7a as built (on `main`), where it differs from the text below:**
 
