@@ -27,7 +27,7 @@ pub(crate) mod versions;
 
 #[cfg(test)]
 mod drift;
-#[cfg(all(test, not(miri)))]
+#[cfg(test)]
 mod signatures;
 
 use core::sync::atomic::AtomicBool;

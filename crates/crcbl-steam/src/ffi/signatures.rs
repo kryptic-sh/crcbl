@@ -14,8 +14,8 @@
 //! fails the test rather than being guessed at, so a new typedef is mapped
 //! once, here, by someone who read its `typedef`.
 //!
-//! Not under Miri (see the module declaration), as the drift gate's own
-//! scanner tests are not: string handling with no `unsafe` in it.
+//! Its tests are ignored under Miri, as the drift gate's own scanner tests
+//! are left out: string handling with no `unsafe` in it.
 
 use super::manifest::{BINDINGS, BoundFn};
 
@@ -231,6 +231,7 @@ mod tests {
     };
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn every_bindings_rust_type_is_what_its_declaration_calls_for() {
         let failures = check(BINDINGS);
         assert!(failures.is_empty(), "{}", failures.join("\n"));
@@ -240,6 +241,7 @@ mod tests {
     /// The aliases [`TYPES`] maps typedefs to are the integers the SDK's
     /// `typedef`s name, so mapping to the alias is mapping to the integer.
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn every_alias_is_the_integer_its_typedef_names() {
         fn same<A: 'static, B: 'static>() -> bool {
             TypeId::of::<A>() == TypeId::of::<B>()
@@ -276,17 +278,20 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn a_wrong_return_type_fails() {
         assert_eq!(doctored("fn(*mut ISteamUtils) -> u64").len(), 1);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn a_missing_or_extra_parameter_fails() {
         assert_eq!(doctored("fn() -> u32").len(), 1);
         assert_eq!(doctored("fn(*mut ISteamUtils, i32) -> u32").len(), 1);
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn pointer_constness_is_compared() {
         let bound = BoundFn {
             symbol: "SteamAPI_ISteamFriends_SetRichPresence",
@@ -302,6 +307,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn references_and_pointers_to_pointers_translate() {
         assert_eq!(
             rust_type("const SteamNetworkingIdentity &").unwrap(),
@@ -314,6 +320,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "string handling with no unsafe")]
     fn an_unknown_c_type_fails_rather_than_being_guessed() {
         let bound = BoundFn {
             symbol: "SteamAPI_Made_Up",
