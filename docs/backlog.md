@@ -8845,8 +8845,21 @@ browser-hosted single-player game with mods has no containment at all.
   `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
   optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
   polls four XInput slots on Windows. Still owed:
-  - evdev (Linux), GameController (macOS) and the Web Gamepad API; other targets
-    have no pad module, so naming one fails to build.
+  - GameController (macOS) and the Web Gamepad API; those targets have no pad
+    module, so naming one fails to build.
+  - **evdev (Linux, 2026-09-23) has met no real controller or Deck**: only
+    scripted devices, plus a regular file answering `ENOTTY` and a real `read`
+    in CI's Linux jobs. Unverified: the lettered-versus-positional face split by
+    vendor (`xpad` and Steam lettered; Sony and Nintendo positional),
+    `hid-steam`'s `ABS_HAT2Y`/`HAT2X` triggers, the claim that `hid-steam` hides
+    its node while Steam holds hidraw (no double pad on a Deck under Steam), and
+    Switch Pro via `hid-nintendo`. A node that will not open is skipped silently
+    and retried each scan, so a desktop without udev's `uaccess` on the pad
+    finds nothing and logs nothing. Declined for now: inotify hotplug (a 1 s
+    re-scan is enough), applying `input_absinfo.flat` (the seam requires raw
+    axes), filtering vendor 0x28DE (the Steam branch owns it). Generic HID pads
+    that put the right stick on `ABS_Z`/`ABS_RZ` read it as triggers. No uinput
+    end-to-end test (needs `/dev/uinput` on CI).
   - **XInput has met no real controller** — only a scripted `StateSource` and a
     real `XInputGetState` answering 1167 on an empty slot. Button positions,
     stick sign and reconnection are unverified.

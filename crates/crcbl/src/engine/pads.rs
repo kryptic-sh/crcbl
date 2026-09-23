@@ -12,6 +12,9 @@
 //! - **Windows**: XInput, through `crcbl_input::xinput` (Windows-only, so it is
 //!   not a doc link here: rustdoc on other targets cannot resolve it). A windowed
 //!   run that cannot load it logs why once and runs with no pads.
+//! - **Linux**: evdev, through `crcbl_input::evdev` (Linux-only, likewise). It
+//!   cannot fail to start: `/dev/input` is listed at the first poll, and a
+//!   failure there or on a pad is logged when it starts and when it stops.
 //! - **Everywhere else**: no backend exists yet, and a windowed run logs that
 //!   once and runs with no pads.
 //! - **A headless run, on every target**, gets no source at all: a scripted or
@@ -58,8 +61,18 @@ fn platform() -> Option<Box<dyn PadSource>> {
     }
 }
 
+/// evdev, which has nothing to load: the first poll scans `/dev/input`.
+#[cfg(target_os = "linux")]
+fn platform() -> Option<Box<dyn PadSource>> {
+    log::info!("gamepads: polling evdev pads under /dev/input");
+    Some(Box::new(EvdevPads {
+        evdev: crcbl_input::evdev::Evdev::new(),
+        failing: None,
+    }))
+}
+
 /// No backend on this target: said once, at start-up.
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn platform() -> Option<Box<dyn PadSource>> {
     log::info!("gamepads: no pad backend exists for this target yet; running with no pads");
     None
@@ -81,13 +94,51 @@ impl PadSource for XInputPads {
         // other slot was still polled (see `XInput::poll`), so what is left of
         // the error is the log line.
         let failing = self.xinput.poll(&mut *emit).err();
-        if failing != self.failing {
-            match failing {
-                Some(error) => log::warn!("gamepads: {error}"),
-                None => log::info!("gamepads: XInput is answering every slot again"),
-            }
-            self.failing = failing;
+        note_failure(
+            &mut self.failing,
+            failing,
+            "XInput is answering every slot again",
+        );
+    }
+}
+
+/// [`crcbl_input::evdev::Evdev`] as a [`PadSource`].
+#[cfg(target_os = "linux")]
+struct EvdevPads {
+    evdev: crcbl_input::evdev::Evdev,
+    /// The error the last poll returned, as `XInputPads` keeps its own.
+    failing: Option<crcbl_input::evdev::EvdevError>,
+}
+
+#[cfg(target_os = "linux")]
+impl PadSource for EvdevPads {
+    fn poll(&mut self, emit: &mut dyn FnMut(GamepadEvent)) {
+        // A pad that failed a read has already been reported as disconnected,
+        // and everything else was still polled (see `Evdev::poll`), so what is
+        // left of the error is the log line.
+        let failing = self.evdev.poll(&mut *emit).err();
+        note_failure(
+            &mut self.failing,
+            failing,
+            "evdev is reading every pad again",
+        );
+    }
+}
+
+/// Logs a backend's poll error when it starts, changes or clears, rather than
+/// once a frame, and keeps it in `last` to compare the next poll's against.
+#[cfg(any(windows, target_os = "linux"))]
+fn note_failure<E: std::fmt::Display + PartialEq>(
+    last: &mut Option<E>,
+    now: Option<E>,
+    recovered: &str,
+) {
+    if now != *last {
+        match &now {
+            Some(error) => log::warn!("gamepads: {error}"),
+            None => log::info!("gamepads: {recovered}"),
         }
+        *last = now;
     }
 }
 

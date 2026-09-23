@@ -352,21 +352,38 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   re-probes). A game on its own loop polls it; the engine loop polls it for
   games on `crcbl::engine::Loop` (see below). Tested without a controller (a
   scripted state source, and a real `XInputGetState` answering an empty slot);
-  no controller has been through it yet. Other targets have no pad backend and
-  no stand-in module.
+  no controller has been through it yet. Targets other than Windows and Linux
+  have no pad backend and no stand-in module.
+- **evdev on Linux, `crcbl_input::evdev`**, the Steam Deck's backend:
+  `Evdev::poll` opens every `/dev/input/event*` node non-blocking, keeps the
+  ones whose `EVIOCGBIT` capabilities make them a pad (`BTN_GAMEPAD` with
+  `ABS_X` and `ABS_Y`), and emits the same `GamepadEvent`s as XInput, a snapshot
+  only when one changes. Sticks and triggers are scaled from each axis's own
+  `EVIOCGABS` range with stick Y flipped to +up and no dead zone applied (the
+  driver's `flat` is ignored, as the seam requires raw axes); the d-pad comes
+  from `BTN_DPAD_*` or the hat, triggers from `ABS_Z`/`ABS_RZ`,
+  `ABS_BRAKE`/`ABS_GAS`, `hid-steam`'s `ABS_HAT2Y`/`ABS_HAT2X` or digital
+  `BTN_TL2`/`BTN_TR2`, and `BTN_MODE` is `Guide`. Xbox-style drivers' swapped
+  `BTN_X`/`BTN_Y` are mapped by position, split by USB vendor. `/dev/input` is
+  re-scanned once per `evdev::RESCAN_INTERVAL` (one second) for new pads,
+  `ENODEV` is a disconnect, and `SYN_DROPPED` resynchronises from the device.
+  Steam Input's virtual pad (vendor 0x28DE) is read like any other. A node the
+  user cannot open is skipped, so a pad needs udev's `uaccess` grant. Tested
+  against scripted devices; no controller has been through it yet.
 - **`crcbl::engine::Loop` pumps pads.** A windowed run on Windows loads XInput
-  at `Loop::new` (logging once and running padless if it cannot); other targets
-  log once that they have no backend; a headless run polls nothing. Each frame,
-  after the shell's events and before the ticks, every `GamepadEvent` goes to
-  the loop's menu map and once to the new `HostedGame::gamepad_event` hook (a
-  no-op by default). The loop does not feed the map `HostedGame::actions` hands
-  over — a game feeds it from the hook, as it feeds keys — but still releases it
-  on focus loss, now after the frame's pads. `Loop::set_pad_source` swaps the
-  source for any `crcbl::engine::PadSource`, which is how a test or replay
-  scripts a pad. The loop's menus answer the pad: the left stick and the d-pad
-  move, South accepts, East backs out of the pause panel, and Start
-  (`crcbl::engine::PAUSE_BUTTON`) toggles the pause like Escape, closing an open
-  console first. Pad events are not withheld from the game while a menu is up.
+  at `Loop::new` (logging once and running padless if it cannot), and one on
+  Linux polls evdev; other targets log once that they have no backend; a
+  headless run polls nothing. Each frame, after the shell's events and before
+  the ticks, every `GamepadEvent` goes to the loop's menu map and once to the
+  new `HostedGame::gamepad_event` hook (a no-op by default). The loop does not
+  feed the map `HostedGame::actions` hands over — a game feeds it from the hook,
+  as it feeds keys — but still releases it on focus loss, now after the frame's
+  pads. `Loop::set_pad_source` swaps the source for any
+  `crcbl::engine::PadSource`, which is how a test or replay scripts a pad. The
+  loop's menus answer the pad: the left stick and the d-pad move, South accepts,
+  East backs out of the pause panel, and Start (`crcbl::engine::PAUSE_BUTTON`)
+  toggles the pause like Escape, closing an open console first. Pad events are
+  not withheld from the game while a menu is up.
 - **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
   through `ui::STICK_DEADZONE` and on the d-pad, `ui::NEXT`/`ui::PREV` on the
   right and left shoulders, `ui::ACCEPT` on South, `ui::BACK` on East.

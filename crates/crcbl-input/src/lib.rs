@@ -28,11 +28,19 @@
 //! game reads them directly, or feeds [`ActionMap::gamepad_event`], where
 //! [`Binding::PadButton`], [`Binding::PadDpad`], [`Binding::PadStick`] and
 //! [`Binding::PadTrigger`] read them. The Windows backend is `xinput`,
-//! compiled on Windows only: no other target has a backend yet, and none has a
-//! stand-in that would report "no pads" as though it had looked.
+//! compiled on Windows only, and the Linux one is `evdev`, compiled on Linux
+//! only: no other target has a backend yet, and none has a stand-in that would
+//! report "no pads" as though it had looked.
 
 mod context;
 mod device;
+// Linux-only: the `evdev` backend. Compiled into every target's tests too, so
+// its mapping, normalisation, layouts and poller run on the Windows and macOS
+// runners; only the device access is Linux-only.
+#[cfg(any(target_os = "linux", test))]
+pub mod evdev;
+#[cfg(test)]
+mod ffi_layout;
 mod gamepad;
 mod patterns;
 mod repeat;
