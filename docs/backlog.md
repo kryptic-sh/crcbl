@@ -8933,8 +8933,10 @@ browser-hosted single-player game with mods has no containment at all.
   applying captured ticks sees values but no pattern edges; a public
   `cancel_patterns(name)` (EW cancels its Z double tap when the wheel moves
   while Z is held); a double tap that fires on the second _release_ (EW's Z
-  does); and EW's migration, where a waiting single tap fires at `>` the window
-  against EW's `>=` — one tick apart at exact boundaries.
+  does). EW parked adopting them (2026-09-23): it does not route input through
+  `ActionMap`, the same reason it stays off `grid_drag`, so the migration is an
+  input-architecture call for EW's user; if it comes, a waiting single tap fires
+  at `>` the window against EW's `>=`, one tick apart at exact boundaries.
 - **RON binding assets.** Nothing parses one; a game declares actions in code.
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
