@@ -1,7 +1,7 @@
 # Stage 10 — Wasm + WebGPU
 
 > **Two corrections at the bottom of this file supersede parts of the body, and
-> the body is read first — so, up front: the _networking_ half of this stage is
+> the body is read first — so, up front: the *networking* half of this stage is
 > **removed** (browsers have no network transport; see
 > [23-netcode.md](23-netcode.md)'s LAN correction), and the **"Tier B"
 > vocabulary throughout is superseded\*\* by
