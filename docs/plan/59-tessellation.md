@@ -4,9 +4,9 @@ Written 2026-09-15, from a survey of the tree and a research brief on how
 shipped engines tessellate now that the hardware stage is on its way out.
 Nothing in this document is built. Its place in the set is
 [18-render-features.md](18-render-features.md)'s index; the geometry system it
-extends is [25-lod.md](25-lod.md) and
-[03-gpu-driven-rendering.md](03-gpu-driven-rendering.md); the fixture that
-proves it is [sample/25-relief.md](sample/25-relief.md).
+extends is [25-lod.md](25-lod.md) and stage 3's GPU-driven renderer (its rules
+in [rendering notes](../notes/rendering.md)); the fixture that proves it is
+[sample/25-relief.md](sample/25-relief.md).
 
 **Tessellation here is not a shader stage.** WebGPU has no hull, domain,
 geometry or mesh stage, and its vertex stage may bind only uniforms and
@@ -45,9 +45,7 @@ Absent, and the tree has most of what it needs:
   normal, metal/roughness/occlusion and emissive
   ([37-materials.md](37-materials.md)), and every layer of a page shares one
   size and format. Trilinear sampling has landed
-  (`crates/crcbl-render/src/material_table.rs`);
-  [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) §3.2 still says
-  "nearest" and is stale.
+  (`crates/crcbl-render/src/material_table.rs`).
 - **Parallax occlusion mapping is refused** in [44-lighting.md](44-lighting.md)
   and [43-render-standards.md](43-render-standards.md); the only planned height
   march is the decals' T1 tier ([33-decals.md](33-decals.md)).
@@ -115,7 +113,7 @@ those vertices will match". So:
 
 ### 3. One record producer for every geometry path
 
-[03-gpu-driven-rendering.md](03-gpu-driven-rendering.md)'s rule is that the
+Stage 3's rule (in the [rendering notes](../notes/rendering.md)) is that the
 lesser path is a constraint on data layout, not a separate renderer, so the
 patch records are produced once:
 

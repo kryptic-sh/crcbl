@@ -3,7 +3,7 @@
 //!
 //! # A render pass, not `vkCmdClearColorImage`
 //!
-//! `docs/plan/02-vulkan-backend.md`'s milestone ladder starts at "clear colour
+//! Stage 2's milestone ladder starts at "clear colour
 //! through the graph". A `vkCmdClearColorImage` would put the same pixels on the
 //! screen and prove almost nothing: it exercises no attachment, no load op, no
 //! layout transition into `COLOR_ATTACHMENT_OPTIMAL`, and none of the
@@ -19,7 +19,7 @@
 //! [`CommandEncoder`] is `Send` but not `Sync`, so a pool that belongs to
 //! exactly one encoder cannot be raced on by construction. It is also
 //! wasteful — a pool per frame is a driver allocation per frame — and
-//! `docs/plan/02-vulkan-backend.md` §2.2 asks for per-frame pools recycled by
+//! stage 2 §2.2 asks for per-frame pools recycled by
 //! the frame loop instead. That belongs with the render graph at P1.3, which is
 //! the thing that will own the frame ring; doing it here first would mean
 //! guessing the ring's shape.

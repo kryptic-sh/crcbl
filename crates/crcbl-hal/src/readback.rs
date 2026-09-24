@@ -3,7 +3,7 @@
 //! # Why this is not `read_buffer(&self, …) -> Result<(), HalError>`
 //!
 //! A synchronous read is unimplementable on the one backend
-//! `docs/plan/10-wasm-webgpu.md` makes a first-class target. WebGPU's readback
+//! the browser track makes a first-class target. WebGPU's readback
 //! is `GPUBuffer.mapAsync`, which resolves on a **later turn of the event
 //! loop**; on the browser main thread there is no way to block waiting for it,
 //! and the main thread is where the rAF loop runs. Native `wgpu` can fake
@@ -59,7 +59,7 @@
 //!
 //! # This is still the *one* permitted readback
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5 allows exactly one readback in
+//! Topic 03 (§3.6) allows exactly one readback in
 //! the frame loop: culling stats, N frames latent, debug builds only. Making
 //! readback poll-shaped is what makes "N frames latent" expressible at all — a
 //! blocking read has no way to be latent.

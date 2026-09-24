@@ -5,7 +5,7 @@
 //! [`GraphicsPipelineDesc`] has no vertex-buffer layout, and there is no
 //! `bind_vertex_buffer`. **Vertex pulling is the only geometry path**: position
 //! and attribute streams live in storage buffers and the vertex shader indexes
-//! them (`docs/plan/02-vulkan-backend.md` §2.5, `03-gpu-driven-rendering.md`
+//! them (stage 2 §2.5, topic 03
 //! §3.1). That is what makes a mesh three integers and lets 10 objects and
 //! 10 000 objects record the same commands.
 //!
@@ -1291,7 +1291,7 @@ pub struct GraphicsPipelineDesc<'a> {
 
 /// Creation parameters for a **mesh** pipeline — the primary geometry path.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shading the geometry
+/// Topic 03 §3.5 makes mesh shading the geometry
 /// path the engine reaches for first, with the indirect draws in
 /// [`GeometryPath`](crate::GeometryPath) as what a device without
 /// [`Features::MESH_SHADER`](crate::Features::MESH_SHADER) falls back to.
@@ -1549,7 +1549,7 @@ mod tests {
     use super::*;
     use crate::depth;
 
-    /// The locked decision from `docs/plan/02-vulkan-backend.md`. If this test
+    /// The locked decision from stage 2 (`docs/notes/backends.md`). If this test
     /// fails, someone changed the depth convention — that invalidates every
     /// golden image in the repo, so it needs a deliberate re-bless, not a
     /// test edit.

@@ -361,8 +361,8 @@ CLI clients without defining them). MVP rules:
   question for promised files ("where should a promised drop land?"). Owed
   before the asset browser wants OS drops; `docs/backlog.md` has the detail per
   backend.
-- **The editor is a native target.** `10-wasm-webgpu.md` lists editor-in-browser
-  as a stretch that "should mostly work by construction"; the asset browser, OS
+- **The editor is a native target.** Stage 10 listed editor-in-browser as a
+  stretch that "should mostly work by construction"; the asset browser, OS
   drag-drop import, `crcbl import` and hot reload's notify-based file watcher
   are all native-shaped, and nobody has examined what a browser would do with
   them. Treated as native-only until something makes the case; recorded so the

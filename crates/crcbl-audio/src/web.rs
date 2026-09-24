@@ -8,8 +8,8 @@
 //!
 //! # Why there is no `SharedArrayBuffer`
 //!
-//! `docs/plan/10-wasm-webgpu.md`'s *Correction (design review, 2026-07-27)*
-//! settles this: GitHub Pages cannot set the COOP/COEP headers that
+//! Stage 10's 2026-07-27 design review settled this (recorded in
+//! `docs/notes/browser.md`): GitHub Pages cannot set the COOP/COEP headers that
 //! `SharedArrayBuffer` requires, so the deploy target has none — and an
 //! AudioWorklet feed built on an SAB ring buffer would work on a dev server
 //! and be silent on the site the phase gate names.

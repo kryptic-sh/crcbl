@@ -1,6 +1,6 @@
 //! Per-pass GPU timestamps, and the frame-timing report they feed.
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4's last bullet: "GPU timestamp per pass,
+//! Stage 2 §2.4's last bullet: "GPU timestamp per pass,
 //! exposed as a frame-timing report (feeds the stage 7 profiler HUD)". This is
 //! that, and it is wired into [`CompiledGraph::execute`](crate::graph::CompiledGraph::execute)
 //! rather than bolted on, which is the stated reason (`docs/notes/backends.md`)
@@ -14,7 +14,7 @@
 //! keeps in flight — and resolve a slot only when it comes back round, by which
 //! point the submission that wrote it has certainly completed. The report is
 //! therefore about a frame a few frames ago, which is exactly what a profiler
-//! HUD wants and exactly the shape `docs/plan/03-gpu-driven-rendering.md` §3.5
+//! HUD wants and exactly the shape topic 03 §3.6
 //! calls for ("N frames latent").
 //!
 //! No fence, no wait, no `wait_idle`: the latency *is* the synchronisation.

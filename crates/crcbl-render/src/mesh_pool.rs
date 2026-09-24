@@ -11,7 +11,7 @@
 //!                └── Some({base_vertex, base_index, index_count}) after
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.1: "One large vertex pool + one
+//! Topic 03 §3.1: "One large vertex pool + one
 //! index pool (device-local, suballocated…). Meshes are
 //! `{base_vertex, base_index, count}` ranges — a mesh handle is three integers."
 //! Everything above this — instance data, GPU culling, indirect draws, meshlets

@@ -111,7 +111,7 @@ pub const PYRAMID_ROUGHNESS: f32 = 0.25;
 
 /// The base-colour page's extent, in texels — square, and **two**.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's
+/// Topic 03 §3.2's
 /// [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page is one image with a
 /// layer per material texture, and two texels a side is the smallest extent in
 /// which a layer can be something other than a flat colour. Small on purpose,
@@ -942,7 +942,7 @@ pub const DEMO_TEXTURED: usize = 2;
 ///
 /// # Why each mesh is here
 ///
-/// * The **cube** is `docs/plan/02-vulkan-backend.md`'s rung 3, and the first
+/// * The **cube** is stage 2's rung 3, and the first
 ///   resident of the pools.
 /// * The **pyramid** is second, so the pool's second resident is at a non-zero
 ///   base vertex — the one thing that can tell a working base vertex from one

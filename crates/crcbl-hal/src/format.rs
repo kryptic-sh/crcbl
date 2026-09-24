@@ -11,7 +11,7 @@
 //!
 //! [`Format::Rgba16Float`] and [`Format::R11g11b10Float`] exist from P0 because
 //! the renderer targets `RGBA16F` + tonemap from the first lit mesh
-//! (`docs/plan/02-vulkan-backend.md`), so P7's real HDR stack does not force a
+//! (a stage-2 rule), so P7's real HDR stack does not force a
 //! wholesale re-bless of the golden images.
 
 /// A texel format.

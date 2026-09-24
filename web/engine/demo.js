@@ -24,7 +24,7 @@
 //   rAF        polls that request for a few frames, then runs the game
 //
 // THE FRAME LOOP IS OUT HERE, in JS, and that is the whole point of the wasm
-// work in P5: `docs/plan/10-wasm-webgpu.md` requires the engine's frame to be a
+// work in P5: stage 10 required the engine's frame to be a
 // `fn tick(dt)` an outer loop drives rather than a `loop {}` that owns the
 // thread, because in a browser the outer loop belongs to the browser.
 //

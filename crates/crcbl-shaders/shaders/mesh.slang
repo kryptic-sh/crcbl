@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// Milestones 3 and 4 of `docs/plan/02-vulkan-backend.md`'s ladder: a
+// Milestones 3 and 4 of stage 2's ladder: a
 // depth-tested mesh with a perspective camera in a uniform buffer, lit by a
 // clustered light list.
 //
@@ -48,7 +48,7 @@
 //
 // # The model matrix moved into an instance array
 //
-// `docs/plan/03-gpu-driven-rendering.md` §3.2: the per-object transform is a
+// Topic 03 §3.2: the per-object transform is a
 // `GpuInstance` in a storage buffer written by delta upload, not a field of the
 // frame's uniform block. `FrameUniforms` below therefore holds only what is
 // genuinely per *frame*, and the vertex stage reads its transform out of
@@ -92,7 +92,7 @@
 //
 // # The base vertex comes from the mesh table, per instance
 //
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's cull pass has to emit draws for
+// Topic 03 §3.3's cull pass has to emit draws for
 // the instances it keeps, which means the GPU must be able to resolve an
 // instance's geometry with no CPU in the loop. So the pool's ranges are a
 // storage buffer of their own — `meshes` below — and `GpuInstance::mesh` is an
@@ -392,7 +392,7 @@ float2 atlas_uv(float4 rect, float2 tile_uv)
 /// absent on Tier B, and `crcbl-hal`'s `PushConstantRange` docs are explicit
 /// that the substitute is "a *data-layout* decision the renderer makes up front,
 /// not something a backend can paper over per draw". So the camera lives here
-/// from milestone 3, which is also what `docs/plan/02-vulkan-backend.md` §2.5
+/// from milestone 3, which is also what stage 2 §2.5
 /// asks for by name.
 struct FrameUniforms
 {
@@ -792,7 +792,7 @@ static const float MOTION_VIEW_SCALE = 8.0;
 
 /// One drawable object, matching `crcbl_shaders::mesh::GpuInstance`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's "transform, mesh id, material
+/// Topic 03 §3.2's "transform, mesh id, material
 /// id, flags", plus the sector id its 2026-07-27 correction adds. This shader
 /// reads the transform, the mesh id and the material id — see the Rust struct,
 /// which carries the full account of what each field is for and which slice
@@ -885,7 +885,7 @@ static const uint INSTANCE_BASE_VERTEX_OVERRIDE = 2;
 /// One resident mesh's range in the geometry pools **and its local-space
 /// bounds**, matching `crcbl_shaders::mesh::GpuMesh`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
+/// Topic 03 §3.1's three integers, in the buffer
 /// the GPU resolves them out of. Two of the three are `draw_indexed`'s own
 /// arguments and are read by nothing here yet; they are in the record because
 /// §3.3's cull pass builds its draws out of exactly these numbers, and a table
@@ -973,7 +973,7 @@ static const uint NO_PAGE = 0xffffu;
 /// One material's shading factors **and its base-colour texture**, matching
 /// `crcbl_shaders::mesh::GpuMaterial`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table, which "holds
+/// Topic 03 §3.2's material table, which "holds
 /// texture indices + factors". That section pairs it with "a bindless texture
 /// array (`BindingModel::Bindless`) or texture array pages (`ArrayPages`)", and
 /// the index below is an `ArrayPages` **page layer**: `base_color_textures` is

@@ -144,7 +144,7 @@
 //! ```
 //!
 //! There is no `Shell::run(closure)` and there never will be, because
-//! `docs/plan/10-wasm-webgpu.md` requires the engine loop to be "a `fn tick(dt)`
+//! the browser requires the engine loop to be "a `fn tick(dt)`
 //! driven by an outer loop, not a `loop {}` that owns the thread" — in a
 //! browser the outer loop is `requestAnimationFrame`, which *calls* the engine
 //! and cannot be called by it. A framework-shaped `run()` would compile on wasm

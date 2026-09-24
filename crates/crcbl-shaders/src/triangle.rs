@@ -16,9 +16,9 @@
 //! draws the first time one of them was edited.
 //!
 //! This is demo geometry, and the plan expects some:
-//! `docs/plan/02-vulkan-backend.md`'s ladder puts a "hardcoded cube/sphere" at
+//! stage 2's ladder puts a "hardcoded cube/sphere" at
 //! rung 3. Real meshes arrive from assets at P9 and are ranges in a global pool
-//! (`docs/plan/03-gpu-driven-rendering.md` §3.1), not constants.
+//! (topic 03 §3.1), not constants.
 
 /// Bytes per vertex under `std430`: two `float4`s.
 pub const VERTEX_STRIDE: usize = 32;

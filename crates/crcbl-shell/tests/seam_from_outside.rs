@@ -59,7 +59,7 @@ fn pump_names(shell: &mut dyn Shell) -> Vec<&'static str> {
     names
 }
 
-/// The engine loop, written the way `docs/plan/10-wasm-webgpu.md` requires:
+/// The engine loop, written the way the browser requires:
 /// `pump` then `tick(dt)`, with the outer loop owned by the caller so a
 /// browser's `requestAnimationFrame` can be that caller.
 ///

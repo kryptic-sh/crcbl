@@ -1,5 +1,5 @@
 //! [`Scene::Occluders`](super::Scene::Occluders)' content:
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull, with something
+//! topic 03 §3.3's occlusion cull, with something
 //! for it to cull.
 //!
 //! A module of its own on `still_pool`'s terms: the layout, the camera path and

@@ -915,8 +915,8 @@ jobs:
       # renderer even on a headless backend, and since P1.1 the sandbox runs
       # here on `crcbl-vk` — against lavapipe, since a CI runner has no GPU.
       # `vulkan-validationlayers` is not optional: the sandbox is launched with
-      # `CRCBL_VK_VALIDATION=1`, and `docs/plan/02-vulkan-backend.md`'s "zero
-      # validation errors" gate cannot be met by a job that never loaded the
+      # `CRCBL_VK_VALIDATION=1`, and stage 2's "zero validation
+      # errors" gate cannot be met by a job that never loaded the
       # layer.
       # `libasound2-dev`, and the reason is new: `crcbl` re-exports
       # `crcbl-audio` as of the umbrella slice, so **every** binary that links
@@ -2591,8 +2591,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
-      # **The MSL half of `docs/plan/02-vulkan-backend.md`'s fourth shader
-      # portability rule** — "validate all four artifacts, not one".
+      # **The MSL half of the fourth shader portability rule** (in
+      # `docs/notes/backends.md`) — "validate all four artifacts, not one".
       # `crates/crcbl-shaders/tools/compile-shaders.sh` runs `spirv-val` over the
       # SPIR-V and
       # `crates/crcbl-shaders/tests/wgsl_validation.rs` runs naga over the WGSL,

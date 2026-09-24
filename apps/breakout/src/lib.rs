@@ -14,7 +14,7 @@
 //! | native | `src/main.rs` → [`run`] | `while engine.frame()` inside [`run`] |
 //! | browser | `web` (`wasm32` only) | `requestAnimationFrame`, in JS |
 //!
-//! `docs/plan/10-wasm-webgpu.md`'s constraint table is the reason the split
+//! Stage 10's constraint table (in `docs/notes/browser.md`) is the reason the split
 //! exists at all: *"Stage 1 frame loop is a `fn tick(dt)` driven by an outer
 //! loop, not a `loop {}` that owns the thread"*. `app::Loop::frame` has always
 //! been that `tick`; until P5.8 nothing but [`run`] could call it, and a

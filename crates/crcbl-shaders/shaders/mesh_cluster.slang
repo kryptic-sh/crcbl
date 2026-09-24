@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, msl, dxil
 
-// `docs/plan/03-gpu-driven-rendering.md` §3.5's geometry path, in the forward
+// Topic 03 §3.5's geometry path, in the forward
 // pass: the same lit mesh `mesh.slang` draws, with a **mesh stage** in place of
 // its vertex stage and a cluster in place of an index range.
 //

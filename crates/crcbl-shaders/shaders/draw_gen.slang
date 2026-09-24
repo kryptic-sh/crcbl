@@ -3,7 +3,7 @@
 // Draw generation on the GPU: `cull.slang`'s compacted visible list in, one
 // indexed-indirect argument structure per draw bucket out.
 //
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's second half — "compacted visible
+// Topic 03 §3.3's second half — "compacted visible
 // instance list → `draw_indexed_indirect` records + count buffer" — and its
 // 2026-07-27 correction, which is the half that decides the shape here:
 // "**draw binning is a fixed bucket table**… the cull shader scatters compacted

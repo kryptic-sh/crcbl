@@ -582,6 +582,125 @@ last green lantern were **cancelled by my own pushes**, so there are no
 observations in between and "it first failed here" is not evidence it started
 here.
 
+## What the deleted 10-wasm-webgpu plan left behind (2026-09-24)
+
+Record; the built part of the plan is `crcbl-webgpu`, the `wasm32` build with no
+`wasm-bindgen`, the WGSL artifacts, `crcbl::web`, the audio worklet feed, OPFS
+storage, `web/run-browser-e2e.sh`, `web/run-cross-backend-e2e.sh` and the demos
+under `web/demos`. What it left open is in `docs/backlog.md`: the browser budget
+under _Horde has no browser budget of its own_ and _Quarry's two human
+judgements and its browser budget are untaken_, Firefox and WebKit in the P5B
+threads bullet under _P5B — the job system, and the two decisions in front of
+it_, the fetch wrapper under _`crcbl-assets` after stage 6 task 2_, and the
+editor under _Task 6 of stage 10 — editor-in-browser — was never examined_. It
+specified stage 10: games in the browser on WebGPU and `wasm32`, a track of its
+own that taxes every earlier stage with design constraints.
+
+Code cites the plan as "stage 10", "topic 10's risk list" or "the 2026-07-27
+correction". Its tasks were numbered 4 to 6, and those numbers are what the
+backlog still uses:
+
+| Citation                  | What it specified                                                                                                                                      |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The constraint table      | What wasm imposes on earlier stages — the table below                                                                                                  |
+| Task 4                    | WebTransport / WebSocket transport and a server listener, a browser client joining a native server. **Dropped** (see the networking rule)              |
+| Task 5                    | The perf pass: a browser scene budget, defined explicitly and smaller than native, with the gap documented honestly. Owed per sample in the backlog    |
+| Task 6                    | An editor-in-browser smoke test, a stretch. Never examined; the editor is treated as native                                                            |
+| Exit criteria             | A sample scene at target frame rate in Chrome and Firefox with WebGPU, the same debug overlay in the browser, and CI running a wasm build in a browser |
+| Risk list                 | WebGPU timestamp and feature availability varies by browser, so debug tooling **degrades feature by feature and never breaks the build**               |
+| The 2026-07-27 correction | GitHub Pages cannot set COOP/COEP — the rule below                                                                                                     |
+| The 2026-08-09 correction | Networking removed, threading superseded by P5B, the browser boundary made canonical, the editor native                                                |
+
+- **The constraints wasm imposes are the earlier stages' bugs, not wasm special
+  cases.** If one is violated, the fix belongs in the stage that violated it:
+
+  | Constraint                        | Where it is handled                                                                 |
+  | --------------------------------- | ----------------------------------------------------------------------------------- |
+  | No bindless, MDI or BDA in WebGPU | Stage 3's data-layout rule: the lesser path is a constraint on layout               |
+  | No blocking file IO               | `AssetSource` is async from day one; a fetch-backed source in the browser           |
+  | No UDP or QUIC sockets            | The transport trait is message-oriented, not socket-shaped                          |
+  | No blocking threads by default    | The core loop is single-thread-capable; the job system has a single-thread fallback |
+  | The browser owns the main loop    | The frame loop is a `fn tick(dt)` driven by an outer loop, not a `loop {}`          |
+  | Swapchain acquire is implicit     | The HAL surface API lets acquire be trivial (WebGPU's `getCurrentTexture`)          |
+
+- **The browser boundary, canonically.** This is the one list of what a browser
+  cannot do. Anything relying on a row needs a stated fallback or an honest
+  absence:
+
+  | Gap                                                 | Consequence                                                                  |
+  | --------------------------------------------------- | ---------------------------------------------------------------------------- |
+  | No bindless / binding arrays                        | `BindingModel::ArrayPages` — texture array pages + batching                  |
+  | No multi-draw-indirect or count                     | `GeometryPath::IndirectPerBatch` — compacted list, per-bucket draws          |
+  | No mesh shaders                                     | same; per-instance LOD instead of per-cluster                                |
+  | No ray tracing                                      | `LightingPath::Rasterised` — the raster twin is MVP for this reason          |
+  | No buffer device address                            | indexed SSBO lookups                                                         |
+  | No persistent mapped buffers                        | staging copies on every upload                                               |
+  | No pipeline cache                                   | every page load recompiles every shader — keep permutations low              |
+  | No threads without COOP/COEP                        | `Inline` spawner; sim on the main thread                                     |
+  | No listening socket, no LAN discovery, no HTTPS→LAN | no networking at all; web builds are single player                           |
+  | No NaN canonicalization, no fuel                    | module determinism unguarded; no hostile-module containment (topic 16)       |
+  | WebCodecs audio encode uneven                       | libopus compiled to wasm if VOIP ever ships to a browser (topic 32)          |
+  | `wasm32` address space                              | 4 GB architectural ceiling, browsers often lower — a wall, not a degradation |
+
+  Timestamp queries, compute, indirect draw, `INDIRECT_FIRST_INSTANCE`, f16,
+  dual-source blending and the BC/ETC2/ASTC families **are** available, so the
+  profiler, GPU culling and the post stack all work; the gap is narrower than
+  "Tier B" implied (`docs/plan/39-capabilities.md`).
+
+- **The backend is `crcbl-webgpu`; do not rebuild on `wgpu`.** The plan first
+  chose the `wgpu` crate for a native portability fallback and a "does it repro
+  on the other backend?" triage tool. That was overturned: `crcbl-wgpu`, the
+  whole `wgpu` dependency family, its CI jobs and `CRCBL_GPU=wgpu` were deleted
+  on 2026-08-21 in `6b5e17a`. Wasm serialises HAL calls into a buffer it owns
+  and JS replays them against WebGPU (the next section). There is no triage
+  backend; `crcbl-vk`, `crcbl-mtl` and `crcbl-dx12` are the native set.
+- **No `wasm-bindgen`, not even as a build tool.** No crate depends on it,
+  `#[wasm_bindgen]` appears nowhere, and every `__crcbl_*` symbol is
+  hand-written `extern "C"`. `web/build.sh` runs no `wasm-bindgen`, and
+  `web/tools/check-exports.mjs` asserts per demo that the single-threaded
+  artifact imports **nothing** — the threaded one only a shared `env.memory`,
+  which a module cannot own and be attached to from a worker.
+- **No `crcbl-web` crate: `crcbl::web` owns the protocol** — the status codes
+  the page polls, the log queue it drains, the asset base, and `web_exports!`,
+  which writes a sample's exports. A sample keeps its `WebPending` impl, because
+  its boot options and its failure are its own. The symbols stay per demo, since
+  two demos can be open in one browser and the shim finds each by name.
+- **The audio feed is shape B**: rendered on the main thread and sent to the
+  worklet as `postMessage`-transferred blocks. A second wasm instance in the
+  worklet would have its own linear memory and none of the voices the game
+  queued, and the audio ABI has no `play(id)` to tell it. The cost is the
+  buffered lead stated in `web/engine/audio-worklet.js`.
+- **GitHub Pages cannot set COOP/COEP** (the 2026-07-27 correction), so
+  `SharedArrayBuffer` is unavailable on the flagship deploy target. The Pages
+  demos stay single-threaded through the `Inline` spawner, the worklet feed must
+  not depend on an SAB ring, and `coi-serviceworker` is the workaround only if
+  adopted deliberately. Module memory is unaffected: an imported
+  `WebAssembly.Memory` needs no SAB unless it is shared across threads.
+  Threading itself is P5B's, which set wasm thread-topology parity as the
+  target; its canonical record is `docs/plan/21-jobs.md`'s wasm threading rules.
+- **The networking half is removed.** Native multiplayer is LAN and web builds
+  are single player, so no browser client has a server to reach;
+  `docs/plan/23-netcode.md`'s LAN correction has the reasoning and the WebRTC
+  route deferred rather than refused.
+- **The editor is a native target.** Its asset browser, OS drag-drop and
+  notify-based file watcher are native-shaped; see `docs/plan/08-editor.md`.
+- **The sequencing lesson.** The browser work finished the platform half (page,
+  shim, deploy, export checks) while the graphics half still had no shader a
+  browser would accept. A platform track can be finished and demonstrate
+  nothing.
+- **What the browser gate found that nothing else could.** Dawn enforces WGSL's
+  uniformity rule where naga does not, and rejected the UI shader for sampling
+  the glyph atlas under a branch on a varying — invalidating the frame's whole
+  command buffer and leaving the canvas black while the simulation ran on. And a
+  WebGPU backend cannot see a pipeline it failed to create, because creation
+  failures go to the device error callback; `Device::take_error`, which
+  `Gpu::acquire` drains before recording, is the fix.
+- **The readback trap.** Three of the four obvious ways to read a WebGPU canvas
+  back return transparent black whatever was drawn, varying by display and
+  adapter. The gate therefore runs a known-colour clear as a control in the same
+  browser with the same flags, and refuses to interpret the render checks unless
+  the control reads back.
+
 ## What the deleted 41-webgpu-stream plan left behind (2026-09-24)
 
 Record; the plan was fully built, and the coverage it left is in

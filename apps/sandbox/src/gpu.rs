@@ -27,7 +27,7 @@
 //! barrier ColorAttachment → Present
 //! ```
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4 says "**no manual barriers outside the
+//! Stage 2 §2.4 says "**no manual barriers outside the
 //! graph, ever**", and both of those are gone. What replaced them is a
 //! *declaration* — the swapchain image is imported into the graph saying "it
 //! arrives [`Undefined`](crcbl::hal::ResourceState::Undefined) and must leave

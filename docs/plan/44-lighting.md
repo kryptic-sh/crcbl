@@ -104,11 +104,11 @@ rung may one day want — because each is a by-product of the shading the forwar
 pass already did, read by one named consumer. What no rung may do is move the
 BRDF, the froxel walk or a light's evaluation _out_ of the forward pass into a
 pass that reads attachments: no G-buffer lighting, no deferred decals, no
-visibility-buffer shading (`03-gpu-driven-rendering.md`'s "visibility buffer
-slot" is an occlusion-cull input, not that). The test for a proposal is one
-question — after it lands, does `mesh.slang` still evaluate every light that
-reaches a fragment? — and `43-render-standards.md` §10 lists deferred and
-visibility buffers among what is refused on this section's authority.
+visibility-buffer shading (the "visibility buffer slot" stage 3 once named is an
+occlusion-cull input, not that). The test for a proposal is one question — after
+it lands, does `mesh.slang` still evaluate every light that reaches a fragment?
+— and `43-render-standards.md` §10 lists deferred and visibility buffers among
+what is refused on this section's authority.
 
 **And a budget on the attachments the rule allows (2026-08-30)**: the forward
 pass writes at most **16 bytes a pixel** on the software and browser tiers — and

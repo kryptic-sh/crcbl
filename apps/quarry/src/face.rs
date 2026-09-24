@@ -121,7 +121,7 @@ pub fn quarry_face(cells: u32) -> Face {
             let bottom_right = bottom_left + 1;
             // Counter-clockwise seen from +Y, which is the front face for
             // `crcbl`'s right-handed, +Y-up convention — see
-            // `docs/plan/03-gpu-driven-rendering.md`.
+            // `crcbl_render::camera`'s view matrix.
             indices.extend_from_slice(&[top_left, bottom_left, top_right]);
             indices.extend_from_slice(&[top_right, bottom_left, bottom_right]);
         }

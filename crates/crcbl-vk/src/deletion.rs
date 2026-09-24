@@ -3,7 +3,7 @@
 //!
 //! `crcbl-hal`'s [`device`](crcbl_hal::device) module states the contract and
 //! leaves the mechanism to the backend, and
-//! `docs/plan/02-vulkan-backend.md` §2.2 names it: "deletion queue (resources
+//! stage 2 §2.2 names it: "deletion queue (resources
 //! retire N frames later)". Destroying a `VkImageView` the GPU is still reading
 //! is undefined behaviour, so the handle dies immediately — the generational
 //! [`Handle`](crcbl_core::Handle) sees to that — while the driver object is

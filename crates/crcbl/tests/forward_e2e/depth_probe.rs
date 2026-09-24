@@ -4,8 +4,8 @@
 //! Three questions are asked here, and they share one fixture because they share
 //! one pipeline.
 //!
-//! **Reversed-Z, proved rather than asserted.** `docs/plan/02-vulkan-backend.md`
-//! locks it, which is the kind of decision a comment can claim and nothing
+//! **Reversed-Z, proved rather than asserted.** Stage 2
+//! locked it, which is the kind of decision a comment can claim and nothing
 //! checks. Two overlapping quads — the near one drawn first, so draw order
 //! cannot carry it — are rendered twice, through the same pipeline, the same
 //! `CompareOp::Greater` and the same clear of 0.0, changing only the projection
@@ -1725,7 +1725,7 @@ const PROBE_CENTRE: (u32, u32) = (MESH_EXTENT.0 / 2, MESH_EXTENT.1 / 2);
 
 /// **Reversed-Z, on the GPU, discriminated against the alternative.**
 ///
-/// `docs/plan/02-vulkan-backend.md` locks reversed-Z, and it is the kind of
+/// Stage 2 locked reversed-Z, and it is the kind of
 /// decision a comment can claim and nothing checks. This renders the *same*
 /// geometry through the *same* pipeline with the *same* `Greater` compare op and
 /// the *same* clear of 0.0, twice, changing one thing: the projection matrix.

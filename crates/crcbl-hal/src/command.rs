@@ -63,7 +63,7 @@ pub type CommandBufferHandle = Handle<CommandBuffer>;
 /// Reversed-Z depth constants.
 ///
 /// The engine's depth convention is **1.0 at the near plane, 0.0 at infinity,
-/// with an infinite far plane** (`docs/plan/02-vulkan-backend.md`, locked). A
+/// with an infinite far plane** (locked in stage 2; see `docs/notes/backends.md`). A
 /// sector-tiled world with 300 m+ sightlines z-fights immediately on a
 /// conventional `0..1` buffer, and retrofitting the convention after P1
 /// invalidates every blessed golden frame.
@@ -410,7 +410,7 @@ impl ResourceState {
 /// Queue-family ownership transfer attached to a barrier.
 ///
 /// MVP uploads share the graphics+compute queue, so this is `None` everywhere
-/// today. It exists from P0 because `docs/plan/02-vulkan-backend.md` requires
+/// today. It exists from P0 because stage 2's design review required
 /// that "the render graph's barrier model must nonetheless represent
 /// queue-family acquire/release from the start so a dedicated transfer queue is
 /// additive later rather than a barrier-model rewrite".

@@ -23,24 +23,24 @@ re-proposing it means arguing with that reason rather than with this table.
 ahead of two of the three comparands, and that is worth stating first because
 every gap below is easier to read against it.
 
-| Area                    | Here                                                                           | Owner                                                                                                        |
-| ----------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
-| Geometry and visibility | **ahead**                                                                      | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md)                             |
-| Shadows                 | behind, ladder written                                                         | [45-shadows.md](45-shadows.md)                                                                               |
-| Ambient occlusion       | behind, ladder written                                                         | 46 (built; rules in [rendering notes](../notes/rendering.md))                                                |
-| Reflections             | comparable for screen space                                                    | 47 (SSR built; rules in [rendering notes](../notes/rendering.md), upper rungs in `docs/backlog.md`)          |
-| Antialiasing            | behind, ladder written                                                         | 49 (FXAA, CMAA2 built; rules in [rendering notes](../notes/rendering.md), MSAA and TAA in `docs/backlog.md`) |
-| Irradiance probes       | visibility maps, clipmap, raster updater and scroll built; traced updater owed | rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`                             |
-| **Materials**           | **far behind**, ladder in §2                                                   | [37-materials.md](37-materials.md), and §2 below                                                             |
-| **Texture filtering**   | **a chain, trilinear, 8× anisotropic, uncompressed**                           | §2's filtering subsection                                                                                    |
-| **Transparency**        | **absent**, argued                                                             | §3 below                                                                                                     |
-| **Volumetrics**         | height fog and a froxel column                                                 | 51 (rungs 1–2 built; rules in [rendering notes](../notes/rendering.md)), and §4 below                        |
-| Global illumination     | behind                                                                         | §5 below                                                                                                     |
-| Post-processing         | behind                                                                         | 48 (stack built; rules in [rendering notes](../notes/rendering.md), grading in `docs/backlog.md`), §6        |
-| Upscaling               | spatial half built, temporal its own rung                                      | [15-windowing.md](15-windowing.md), §7                                                                       |
-| Decals                  | absent, planned                                                                | [33-decals.md](33-decals.md)                                                                                 |
-| Particles               | simulated and drawn as instances, no pass of their own                         | [20-particles.md](20-particles.md)                                                                           |
-| Sky and atmosphere      | a gradient and Hillaire's atmosphere                                           | §8 below                                                                                                     |
+| Area                    | Here                                                                           | Owner                                                                                                                           |
+| ----------------------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| Geometry and visibility | **ahead**                                                                      | 03 (built but for bindless and the transparent pass; rules in [rendering notes](../notes/rendering.md)), [25-lod.md](25-lod.md) |
+| Shadows                 | behind, ladder written                                                         | [45-shadows.md](45-shadows.md)                                                                                                  |
+| Ambient occlusion       | behind, ladder written                                                         | 46 (built; rules in [rendering notes](../notes/rendering.md))                                                                   |
+| Reflections             | comparable for screen space                                                    | 47 (SSR built; rules in [rendering notes](../notes/rendering.md), upper rungs in `docs/backlog.md`)                             |
+| Antialiasing            | behind, ladder written                                                         | 49 (FXAA, CMAA2 built; rules in [rendering notes](../notes/rendering.md), MSAA and TAA in `docs/backlog.md`)                    |
+| Irradiance probes       | visibility maps, clipmap, raster updater and scroll built; traced updater owed | rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`                                                |
+| **Materials**           | **far behind**, ladder in §2                                                   | [37-materials.md](37-materials.md), and §2 below                                                                                |
+| **Texture filtering**   | **a chain, trilinear, 8× anisotropic, uncompressed**                           | §2's filtering subsection                                                                                                       |
+| **Transparency**        | **absent**, argued                                                             | §3 below                                                                                                                        |
+| **Volumetrics**         | height fog and a froxel column                                                 | 51 (rungs 1–2 built; rules in [rendering notes](../notes/rendering.md)), and §4 below                                           |
+| Global illumination     | behind                                                                         | §5 below                                                                                                                        |
+| Post-processing         | behind                                                                         | 48 (stack built; rules in [rendering notes](../notes/rendering.md), grading in `docs/backlog.md`), §6                           |
+| Upscaling               | spatial half built, temporal its own rung                                      | [15-windowing.md](15-windowing.md), §7                                                                                          |
+| Decals                  | absent, planned                                                                | [33-decals.md](33-decals.md)                                                                                                    |
+| Particles               | simulated and drawn as instances, no pass of their own                         | [20-particles.md](20-particles.md)                                                                                              |
+| Sky and atmosphere      | a gradient and Hillaire's atmosphere                                           | §8 below                                                                                                                        |
 
 ## 1. What is already at or above the standard
 
@@ -593,24 +593,23 @@ unblocked rung on this page:
    `upload_texture_mip_layers` records one copy per level of every layer;
    `tests/forward_e2e/page.rs` reads the levels back on every backend and
    compares them with the host's bytes. **On the host, not in a compute pass** —
-   [06-assets-scenes.md](06-assets-scenes.md) and
-   [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) both named a compute
-   pass, and both are corrected (2026-08-29). Three reasons, each sufficient on
-   its own: a compute pass over an sRGB page needs a `UNORM` view alias over the
-   image, which is `ImageDesc::view_formats`, which does not exist, and
-   `docs/backlog.md` records that WebGPU refuses the reinterpretation without
-   it; a host filter is adds and one divide per texel, so the page's bytes are
-   identical on all four backends and the goldens hold, where a device-built
-   chain is four drivers' rounding; and offline is what every current engine
-   does anyway — the mips ship in the asset, and a compute pass is for a texture
-   the frame itself produced, of which this engine has none. Two rules the
-   filter keeps: average in linear light and re-encode, never average the
-   encodings (the importer's own comment says what that costs); and weight by
-   alpha so a transparent texel does not bleed. A non-colour page, when this
-   section lands one, averages its numbers plainly and **renormalises a normal
-   after averaging** — the mean of unit vectors is shorter than one, and the
-   length it lost is the roughness that [44-lighting.md](44-lighting.md)'s rung
-   4 exists to put back.
+   [06-assets-scenes.md](06-assets-scenes.md) and stage 3's plan both named a
+   compute pass, and both were corrected (2026-08-29). Three reasons, each
+   sufficient on its own: a compute pass over an sRGB page needs a `UNORM` view
+   alias over the image, which is `ImageDesc::view_formats`, which does not
+   exist, and `docs/backlog.md` records that WebGPU refuses the reinterpretation
+   without it; a host filter is adds and one divide per texel, so the page's
+   bytes are identical on all four backends and the goldens hold, where a
+   device-built chain is four drivers' rounding; and offline is what every
+   current engine does anyway — the mips ship in the asset, and a compute pass
+   is for a texture the frame itself produced, of which this engine has none.
+   Two rules the filter keeps: average in linear light and re-encode, never
+   average the encodings (the importer's own comment says what that costs); and
+   weight by alpha so a transparent texel does not bleed. A non-colour page,
+   when this section lands one, averages its numbers plainly and **renormalises
+   a normal after averaging** — the mean of unit vectors is shorter than one,
+   and the length it lost is the roughness that
+   [44-lighting.md](44-lighting.md)'s rung 4 exists to put back.
 2. **The sampler: trilinear and anisotropic, with the player's key and its row —
    built 2026-08-29.** `mag`, `min` and `mip` are `Linear` and `lod_max` covers
    the chain in `ForwardRenderer::with_scene`. Five goldens moved and were
@@ -936,11 +935,12 @@ three techniques, and only one of them answers GI:
 with ray-tracing hardware, Lumen's hardware path is both faster and more
 accurate than its software path; the march exists for **reach**. Reach is
 exactly what decides it here — WebGPU has no ray tracing at all and the browser
-is a first-class target in [10-wasm-webgpu.md](10-wasm-webgpu.md), so on that
-target a march is not the cheap option, it is the only one. The second reason is
-this workspace's own rule: a march is adds and compares, so it carries no
-transcendental into a colour and can be blessed on all four backends. That is
-the argument the Hi-Z SSR rung already landed on.
+is a first-class target (the browser boundary in
+[browser notes](../notes/browser.md)), so on that target a march is not the
+cheap option, it is the only one. The second reason is this workspace's own
+rule: a march is adds and compares, so it carries no transcendental into a
+colour and can be blessed on all four backends. That is the argument the Hi-Z
+SSR rung already landed on.
 
 So the ordering is cheapest real win first: **screen-space contact shadows**
 (one march on the depth prepass, and the contact gap no shadow bias can close),

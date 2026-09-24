@@ -15,8 +15,8 @@
 // would render silence.
 //
 // There is no `SharedArrayBuffer` in either shape: GitHub Pages cannot set the
-// COOP/COEP headers it needs, which `docs/plan/10-wasm-webgpu.md`'s 2026-07-27
-// correction settles. Blocks cross as transferred `ArrayBuffer`s instead.
+// COOP/COEP headers it needs, a rule `docs/notes/browser.md` records (the
+// wasm-webgpu section). Blocks cross as transferred `ArrayBuffer`s instead.
 //
 // THE UNDERRUN RULE, from the same module docs: when there is not enough audio,
 // zero-fill the remainder of the quantum. Never repeat the previous block (a

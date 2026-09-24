@@ -1,7 +1,7 @@
 //! Validation layers, the debug-utils messenger, and the thing that makes
 //! "zero validation errors" a **test result** rather than an aspiration.
 //!
-//! `docs/plan/02-vulkan-backend.md`'s P1 exit criteria say "zero validation
+//! Stage 2's P1 exit criteria say "zero validation
 //! errors/warnings". A messenger that only calls [`crcbl_core::log::error!`] cannot enforce
 //! that: CI captures stderr and nobody reads it, so the criterion quietly
 //! becomes a manual eyeball. So every message the layer emits is *also* counted
@@ -25,7 +25,7 @@
 //!
 //! # Synchronisation validation
 //!
-//! `docs/plan/02-vulkan-backend.md` lists sync bugs as the stage's headline risk
+//! Stage 2 listed sync bugs as the stage's headline risk
 //! and names "validation layers with sync-validation enabled in CI runs" as the
 //! mitigation. It is off by default because it is expensive and noisy on WSI
 //! paths, and on with `CRCBL_VK_SYNC_VALIDATION=1`, which is what the e2e

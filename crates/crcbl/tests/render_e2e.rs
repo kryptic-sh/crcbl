@@ -31,7 +31,7 @@
 //! * The golden is only trustworthy while something keeps re-deriving it, and
 //!   the Metal arm cannot (see `run-render-e2e.sh` and the `mtl-e2e` job). The
 //!   Vulkan arm is what stops it rotting.
-//! * `docs/plan/02-vulkan-backend.md`'s shader-portability rule 5 — a shader
+//! * Shader-portability rule 5 (`docs/notes/backends.md`) — a shader
 //!   compiles to all four targets and *means something different on each* — has
 //!   already cost this repo two real bugs (`SV_InstanceID`, `SV_VertexID`), and
 //!   both were caught only by rendering one scene through two targets. MSL is a
@@ -206,7 +206,7 @@ mod grass_shells;
 #[path = "render_e2e/grass_blades.rs"]
 mod grass_blades;
 
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion proving scene, in a
+// Topic 03 §3.3's occlusion proving scene, in a
 // file of its own because its claims walk a path in `tests/mesh_e2e/`.
 #[path = "render_e2e/occluders.rs"]
 mod occluders;

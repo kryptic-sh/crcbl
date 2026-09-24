@@ -62,7 +62,7 @@
 //!   `Box<dyn Instance>`. See [`backend`] for the full argument.
 //! * **No engine loop.** There is no `crcbl::run(game)`. The loop shape is
 //!   `fn tick(dt)` driven by an *outer* loop the host owns —
-//!   `docs/plan/10-wasm-webgpu.md` requires it, because on wasm that outer loop
+//!   the browser requires it, because on wasm that outer loop
 //!   is `requestAnimationFrame`, which calls the engine and cannot be called by
 //!   it. `crcbl-shell`'s crate docs spell out the consequence: a
 //!   framework-shaped `run()` would compile on wasm and deadlock on the first
@@ -205,7 +205,7 @@ pub use crcbl_reflect as reflect;
 ///
 /// Everything above the seam. A game builds a
 /// [`RenderGraph`](crcbl_render::RenderGraph) and never writes a barrier —
-/// `docs/plan/02-vulkan-backend.md` §2.4's rule is "no manual barriers outside
+/// stage 2 §2.4's rule is "no manual barriers outside
 /// the graph, ever", and this is the crate that makes it keepable.
 pub use crcbl_render as render;
 /// [`crcbl-scene`](crcbl_scene): glTF import, meshlet clustering, mesh

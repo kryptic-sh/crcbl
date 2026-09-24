@@ -16,7 +16,7 @@
 //! **The HAL is stateless with respect to resource states.** It never infers a
 //! barrier, never tracks a layout, and never reorders a command. If the graph
 //! forgets a transition, the backend's validation layer says so — that is the
-//! intended failure mode, and it is why `docs/plan/02-vulkan-backend.md` demands
+//! intended failure mode, and it is why stage 2 demanded
 //! zero validation warnings as a P1 exit criterion.
 //!
 //! # Timeline semaphores are the primitive

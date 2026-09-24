@@ -66,8 +66,8 @@
 #                             distinction, and hardcodes its answer because its
 #                             pin accepts exactly one value.
 #   CRCBL_VK_SYNC_VALIDATION  `1` adds synchronisation validation. CI sets it;
-#                             `docs/plan/02-vulkan-backend.md` names sync bugs
-#                             as this stage's headline risk and this as the
+#                             stage 2 named sync bugs
+#                             as its headline risk and this as the
 #                             mitigation.
 #   CRCBL_BLESS               `1` regenerates golden images instead of comparing
 #                             against them. `--bless` sets it; see below.
@@ -394,7 +394,7 @@ were in scope"
 esac
 
 # The sandbox's own frame, headless, against the same implementation. This is
-# the thing `docs/plan/02-vulkan-backend.md`'s milestone 1 is measured by — a
+# the thing stage 2's milestone 1 is measured by — a
 # clear reaching the screen through the whole shell→HAL→swapchain join — and it
 # is the only part of that path a windowless CI runner can exercise.
 echo "crcbl vk e2e: running the sandbox headless against Vulkan"
@@ -419,7 +419,7 @@ rm -f "$SANDBOX_LOG"
 echo "crcbl vk e2e: the sandbox presented 30 frames through the Vulkan backend"
 
 # And the null backend still works, on the same binary, selected at runtime.
-# `docs/plan/10-wasm-webgpu.md`'s "does it repro on the other backend?" triage
+# The "does it repro on the other backend?" triage
 # only exists if both are reachable without a rebuild.
 echo "crcbl vk e2e: running the sandbox headless against the null backend"
 if ! cargo run --locked --quiet --package sandbox -- \

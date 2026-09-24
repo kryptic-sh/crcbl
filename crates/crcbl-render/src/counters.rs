@@ -86,7 +86,7 @@ pub struct FrameCounters {
     ///
     /// Always known, on every geometry path: an indirect call is still a call
     /// the CPU wrote into the command buffer. On the GPU-driven path this is
-    /// the number `docs/plan/03-gpu-driven-rendering.md` §3.3 is about — one
+    /// the number topic 03 §3.3 is about — one
     /// per bucket, independent of what the scene holds.
     pub draws: u64,
     /// Instances the frame submitted to be drawn or culled.

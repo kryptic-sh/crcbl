@@ -11,7 +11,7 @@
 //! [`upload_texture`] uploads a single-layer `D2` image, which is what a sprite
 //! sheet and a glyph atlas are. [`upload_texture_layers`] uploads several layers
 //! of the same size into one `D2Array` image, which is
-//! `docs/plan/03-gpu-driven-rendering.md` §3.2's
+//! topic 03 §3.2's
 //! [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page: one image, one
 //! descriptor, and a layer index in the material row selecting between them.
 //! [`upload_texture_mip_layers`] is the same page with every layer's mip chain

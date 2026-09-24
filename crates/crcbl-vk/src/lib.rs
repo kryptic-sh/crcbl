@@ -62,7 +62,7 @@
 //!
 //! # Scope: the whole milestone ladder
 //!
-//! `docs/plan/02-vulkan-backend.md`'s ladder is (1) clear colour through the
+//! Stage 2's ladder is (1) clear colour through the
 //! graph, (2) triangle, (3) depth-tested mesh, (4) forward lit, (5) ortho. As of
 //! P1.3 this crate carries **all five**: device and queues, surfaces and
 //! swapchains (including the offscreen ring), command recording with `sync2`

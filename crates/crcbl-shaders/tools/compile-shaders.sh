@@ -8,7 +8,7 @@
 #
 # # Why the artifacts are committed
 #
-# `docs/plan/02-vulkan-backend.md` §2.3 chooses Slang, and its own risk list
+# Stage 2 §2.3 chose Slang, and its own risk list
 # names the escape hatch this script implements: "Slang toolchain friction in
 # build.rs. Fallback: check in compiled SPIR-V alongside sources until the
 # toolchain story is smooth."
@@ -62,8 +62,8 @@
 # with it, and a reviewer reading the first line of the file has already read
 # the answer.
 #
-# The rule it enforces is `docs/plan/02-vulkan-backend.md`'s first shader
-# portability rule — a required target that will not take the shader must
+# The rule it enforces is the first shader portability rule
+# (`docs/notes/backends.md`) — a required target that will not take the shader must
 # **fail** here rather than emit a broken artifact. Two failure modes, both
 # real:
 #

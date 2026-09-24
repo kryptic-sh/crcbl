@@ -8,7 +8,7 @@
 //!  remove(device, handle) ──▶ frees the slot ──▶ the row is cleared to black
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.2: "Material table (SSBO) …
+//! Topic 03 §3.2: "Material table (SSBO) …
 //! Material id indexes the table". [`crcbl_shaders::mesh::GpuInstance::material`]
 //! is that id and [`crcbl_shaders::mesh::GpuMaterial`] is that row — the layout
 //! lives in the crate that owns `mesh.slang`, because it is a contract with the
@@ -65,7 +65,7 @@
 //!
 //! The cost is stated rather than hidden: **rewriting a material while a frame
 //! is in flight is a read-after-write hazard across submissions**, the one
-//! `docs/plan/02-vulkan-backend.md` calls this stage's headline risk. So
+//! stage 2 called its headline risk. So
 //! [`MaterialTable::set`] is a start-up call, like [`crate::mesh_pool::MeshPool::upload`]
 //! and [`crate::texture::upload_texture`] beside it. An animated material is
 //! what makes this a ring, and on that day the coalescing in

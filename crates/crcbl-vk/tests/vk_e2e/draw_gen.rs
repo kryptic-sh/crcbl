@@ -61,7 +61,7 @@ fn teardown(headless: Headless, renderer: ForwardRenderer, mut pool: TransientPo
 
 /// **Every `GeometryPath` draws the same frame, byte for byte.**
 ///
-/// `docs/plan/03-gpu-driven-rendering.md`'s design rule is that "the lesser path
+/// Topic 03's design rule is that "the lesser path
 /// is a constraint on data layout, not a separate renderer", and the exit
 /// criterion is that every path renders the sandbox scene. This is that
 /// criterion, on real hardware, in one process: the same renderer, the same

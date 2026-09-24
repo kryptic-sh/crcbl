@@ -3,12 +3,13 @@
 Written 2026-09-07, from a survey of what an Android build would actually hit.
 Its place in the set is [15-windowing.md](15-windowing.md)'s backend table,
 which this adds a row to and nothing else; the precedent for how a platform port
-is shaped here is [10-wasm-webgpu.md](10-wasm-webgpu.md), whose deviations
-section is the honest account of what such a track costs. The decision that this
-is a windowing topic at all is `docs/notes/backends.md`'s, under "Considered and
-declined: an OpenGL / GLES backend": _"The Android gap is a `crcbl-shell`
-surface backend, not a HAL backend — `crcbl-vk` already exists and is the
-best-tested path in the workspace."_ The same note ranks it "the largest
+is shaped here is the wasm track, whose record in the
+[browser notes](../notes/browser.md) (_What the deleted 10-wasm-webgpu plan left
+behind_) is the honest account of what such a track costs. The decision that
+this is a windowing topic at all is `docs/notes/backends.md`'s, under
+"Considered and declined: an OpenGL / GLES backend": _"The Android gap is a
+`crcbl-shell` surface backend, not a HAL backend — `crcbl-vk` already exists and
+is the best-tested path in the workspace."_ The same note ranks it "the largest
 coverage win available", below finishing Metal.
 
 That framing is the whole reason this document is short where a new backend
@@ -176,12 +177,12 @@ taken off it.
 
 Above that floor, a phone that lacks bindless or `drawIndirectCount` is **not
 refused**. It selects the reduced `GeometryPath` and `BindingModel` that
-[39-capabilities.md](39-capabilities.md) owns and that
-[10-wasm-webgpu.md](10-wasm-webgpu.md)'s browser-boundary table already
-describes: `GeometryPath::IndirectPerBatch` draws and `BindingModel::ArrayPages`
-textures. That path is built, shipped, and gated in a real browser on every CI
-runner — so Android's weak-device story is a path this workspace already tests
-every push, not a new one.
+[39-capabilities.md](39-capabilities.md) owns and that the browser-boundary
+table in the [browser notes](../notes/browser.md) already describes:
+`GeometryPath::IndirectPerBatch` draws and `BindingModel::ArrayPages` textures.
+That path is built, shipped, and gated in a real browser on every CI runner — so
+Android's weak-device story is a path this workspace already tests every push,
+not a new one.
 
 **Refused: raising the floor to `GPU_DRIVEN` so the Android path is the good
 one.** It would refuse mid-range hardware outright to avoid testing a path that
@@ -244,10 +245,10 @@ already consumes.
 **Refused: Gradle.** It is a second build system with its own dependency
 resolution, its own cache and its own opinions about where output goes, adopted
 to wrap a library cargo already built. The wasm track is the precedent for
-declining exactly this: [10-wasm-webgpu.md](10-wasm-webgpu.md)'s deviations
-record `wasm-bindgen` going from mandatory tool to no tool at all, leaving
-`cargo` and `node` as the whole list. If the APK assembly genuinely cannot be
-done without it, that is a finding for this document, not a silent adoption.
+declining exactly this: the [browser notes](../notes/browser.md) record
+`wasm-bindgen` going from mandatory tool to no tool at all, leaving `cargo` and
+`node` as the whole list. If the APK assembly genuinely cannot be done without
+it, that is a finding for this document, not a silent adoption.
 
 ## What changes, crate by crate
 

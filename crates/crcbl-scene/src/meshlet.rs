@@ -1,6 +1,6 @@
 //! Meshlet clustering: a triangle list becomes bounded clusters.
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the primary
+//! Topic 03 §3.5 makes mesh shaders the primary
 //! geometry path and names this as its first piece — "a mesh becomes clusters
 //! of a bounded triangle count with per-cluster bounds and a normal cone.
 //! Deterministic — same input hash, same clusters."

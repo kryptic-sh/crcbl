@@ -5,7 +5,7 @@
 //!
 //! # Why there is more than one scene
 //!
-//! `docs/plan/02-vulkan-backend.md`'s shader-portability rule 5: a shader can
+//! Shader-portability rule 5 (`docs/notes/backends.md`): a shader can
 //! compile cleanly to SPIR-V, WGSL, MSL and DXIL and *mean something different*
 //! on each, and no lint can see it — `SV_InstanceID` lowers to
 //! `InstanceIndex - BaseInstance` on SPIR-V and to a bare
@@ -221,7 +221,7 @@ pub enum Scene {
     /// **There are three of it**, and they are the same mesh at the same
     /// orientation differing in nothing but their material id — which is what
     /// makes this frame the observable for
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table. The three
+    /// topic 03 §3.2's material table. The three
     /// are one row and two single-column edits of it: see `TINTED_PYRAMID_AT`,
     /// whose row differs in its base-colour *factor*, and
     /// `TEXTURED_PYRAMID_AT`, whose row differs in its base-colour *texture*.
@@ -852,7 +852,7 @@ pub enum Scene {
     /// wide, clumps a measured structure in the colours, and calm blades
     /// upright to the pixel.
     MeadowBlades,
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull, with
+    /// Topic 03 §3.3's occlusion cull, with
     /// something to cull: two walls across a floor, a field of crates between
     /// them, rows of pyramids behind the back one and a walker leaving the front
     /// one's shadow — frame [`OCCLUDERS_GOLDEN_FRAME`] of the camera path
@@ -7279,7 +7279,7 @@ impl OffscreenSetup {
     /// What [`Self::request`] asks the device for, optionally.
     ///
     /// [`Features::MESH_SHADER`] is in here because
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes the mesh path the
+    /// topic 03 §3.5 makes the mesh path the
     /// **primary** geometry path and a device is only on it if something asked:
     /// the flag is not part of [`Features::GPU_DRIVEN`] — that bundle is the
     /// data-layout axis, and folding a second selector into it would make it a

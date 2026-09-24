@@ -385,28 +385,28 @@ all runs here. What it cannot see, a black canvas included, is what
 
 - **No `SharedArrayBuffer` on Pages.** GitHub Pages cannot set COOP/COEP, so the
   published demos are single-threaded and the audio feed is `postMessage`-based
-  rather than a ring buffer. `docs/plan/10-wasm-webgpu.md`'s 2026-07-27
-  correction settles it. **Locally is different**: `web/tools/serve.mjs` sends
-  both headers, so a site served by `build.sh --serve` or by the browser gate
-  _is_ cross-origin isolated, and the gate asserts that rather than assuming it.
-  That is what makes a threaded wasm build testable at all. **The build is here
-  now**: `./web/build.sh --threads` produces worker-capable artifacts under
-  `target/wasm-threaded/`, and `tools/check-exports.mjs --threads` gates the
-  surface a worker needs — a shared `env.memory` import, `__wasm_init_tls`, and
-  the TLS and stack globals. **The backend behind `crcbl-jobs`'s `Spawn` seam
-  exists now too** — `default_spawner` yields `Workers` on wasm — and
-  `web/jobs/` is a page that drives it end to end in a real browser, gated by
-  `./web/run-jobs-e2e.sh`. **The demos are wired to it now as well**, on the
-  threaded site only: `./web/build.sh --threads` assembles
-  `target/site-threaded/` and `./web/run-horde-threads-e2e.sh` drives horde on
-  it and asserts its steering pass ran on a Web Worker. **The published site is
-  unchanged in behaviour**: its artifacts import nothing, so `engine/jobs.js`
-  refuses them, `Spawn::threaded()` answers `false`, and every demo runs exactly
-  as it did — which that gate's third red check asserts rather than assumes.
-  **The demo gate runs on that origin too now**: `run-browser-e2e.sh` drives
-  `hud` a second time behind `serve.mjs --no-isolation`, so "a demo boots, opens
-  a device and draws" is a claim about the published origin and not only about
-  the isolated one.
+  rather than a ring buffer. The rule is recorded in `docs/notes/browser.md`
+  (_What the deleted 10-wasm-webgpu plan left behind_). **Locally is
+  different**: `web/tools/serve.mjs` sends both headers, so a site served by
+  `build.sh --serve` or by the browser gate _is_ cross-origin isolated, and the
+  gate asserts that rather than assuming it. That is what makes a threaded wasm
+  build testable at all. **The build is here now**: `./web/build.sh --threads`
+  produces worker-capable artifacts under `target/wasm-threaded/`, and
+  `tools/check-exports.mjs --threads` gates the surface a worker needs — a
+  shared `env.memory` import, `__wasm_init_tls`, and the TLS and stack globals.
+  **The backend behind `crcbl-jobs`'s `Spawn` seam exists now too** —
+  `default_spawner` yields `Workers` on wasm — and `web/jobs/` is a page that
+  drives it end to end in a real browser, gated by `./web/run-jobs-e2e.sh`.
+  **The demos are wired to it now as well**, on the threaded site only:
+  `./web/build.sh --threads` assembles `target/site-threaded/` and
+  `./web/run-horde-threads-e2e.sh` drives horde on it and asserts its steering
+  pass ran on a Web Worker. **The published site is unchanged in behaviour**:
+  its artifacts import nothing, so `engine/jobs.js` refuses them,
+  `Spawn::threaded()` answers `false`, and every demo runs exactly as it did —
+  which that gate's third red check asserts rather than assumes. **The demo gate
+  runs on that origin too now**: `run-browser-e2e.sh` drives `hud` a second time
+  behind `serve.mjs --no-isolation`, so "a demo boots, opens a device and draws"
+  is a claim about the published origin and not only about the isolated one.
 - **No clipboard, no IME.** The Web shell backend clears those capability bits;
   there is nothing for a shim to wire. **Pointer lock is wired**, and
   `RAW_POINTER_MOTION` with it: the shim takes the lock from a gesture and asks

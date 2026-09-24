@@ -352,7 +352,7 @@ try {
     }
 
     # The sandbox's own frame, headless, against the same implementation — the
-    # thing `docs/plan/02-vulkan-backend.md`'s milestone 1 is measured by, a clear
+    # thing stage 2's milestone 1 is measured by, a clear
     # reaching the screen through the whole shell->HAL->swapchain join, and the
     # only part of that path a windowless runner can exercise. The Linux harness
     # runs it too; dropping it here would make this leg quietly the weaker twin.
@@ -376,7 +376,7 @@ try {
     Write-Host 'crcbl vk e2e: the sandbox presented 30 frames through the Vulkan backend'
 
     # And the null backend still works, on the same binary, selected at runtime.
-    # `docs/plan/10-wasm-webgpu.md`'s "does it repro on the other backend?" triage
+    # The "does it repro on the other backend?" triage
     # only exists if both are reachable without a rebuild.
     Write-Host 'crcbl vk e2e: running the sandbox headless against the null backend'
     Push-Location $repoRoot

@@ -1,4 +1,4 @@
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5's mesh-shading geometry path,
+//! Topic 03 §3.5's mesh-shading geometry path,
 //! at its smallest: one triangle emitted by a mesh stage, and the same triangle
 //! again through an amplification stage in front of it.
 //!

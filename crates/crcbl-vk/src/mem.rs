@@ -2,7 +2,7 @@
 //!
 //! # Why there is no suballocator yet
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.1 calls for `gpu-allocator` wrapped
+//! Stage 2 §2.1 calls for `gpu-allocator` wrapped
 //! behind the seam's three [`MemoryLocation`]s. That is the right answer and it
 //! is **not** this slice: P1.1 is "device bring-up through a cleared window",
 //! and the only allocations a clear needs are the handful of images an

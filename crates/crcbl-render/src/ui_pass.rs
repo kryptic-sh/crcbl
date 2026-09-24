@@ -70,7 +70,7 @@
 //! **That is a deliberate refusal of a tier split.** A push constant would
 //! deliver the same eight bytes with one indirection fewer, and **WebGPU has no
 //! push constants at all** — so it would have made this pass the smallest
-//! possible instance of `docs/plan/03-gpu-driven-rendering.md`'s Tier A / Tier B
+//! possible instance of stage 3's old Tier A / Tier B
 //! axis, chosen from
 //! [`Features::PUSH_CONSTANTS`](crcbl_hal::Features::PUSH_CONSTANTS). It did,
 //! until 2026-08: there was a `ConstantDelivery` enum here, two branches through

@@ -1,6 +1,6 @@
 //! Timestamp queries, and the per-pass GPU timers built on them.
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4 asks for a GPU timestamp per pass,
+//! Stage 2 §2.4 asks for a GPU timestamp per pass,
 //! exposed as a frame-timing report. `crcbl-render`'s own tests cover the
 //! report's *shape* with no device in the room; this module is the half that
 //! needs a driver — that the numbers are non-zero, ordered, and attached to the
@@ -276,7 +276,7 @@ fn a_read_is_ordered_after_the_submission_that_rewrites_the_set() {
 
 /// Per-pass GPU timers, against a real clock.
 ///
-/// `docs/plan/02-vulkan-backend.md` §2.4 asks for "GPU timestamp per pass,
+/// Stage 2 §2.4 asks for "GPU timestamp per pass,
 /// exposed as a frame-timing report". `crcbl-render`'s own tests cover the
 /// report's shape; this is the half that needs a driver — that the numbers are
 /// non-zero, ordered, and attached to the right pass names.

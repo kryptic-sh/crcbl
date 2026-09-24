@@ -2,7 +2,7 @@
 //!
 //! # The acquire shape, and why it is this one
 //!
-//! `docs/plan/10-wasm-webgpu.md` lists "swapchain acquire is implicit/async" as
+//! Stage 10 listed "swapchain acquire is implicit/async" as
 //! a constraint the HAL must already satisfy: *"HAL surface API shaped so
 //! 'acquire' can be trivial (WebGPU `getCurrentTexture`)"*. The two APIs to
 //! reconcile:
@@ -521,7 +521,7 @@ impl SurfaceCaps {
     /// [`PresentMode::Fifo`].
     ///
     /// The `[Mailbox, Fifo]` preference from
-    /// `docs/plan/02-vulkan-backend.md` §2.2, expressed once here instead of
+    /// stage 2 §2.2, expressed once here instead of
     /// re-derived in every backend.
     #[must_use]
     pub fn choose_present_mode(&self, preferences: &[PresentMode]) -> PresentMode {

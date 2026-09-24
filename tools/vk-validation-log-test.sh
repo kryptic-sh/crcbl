@@ -95,7 +95,7 @@ check_contains "and the complaint is quoted" "VUID-vkCmdCopyBuffer-size-00225" "
 
 # --- 4. a warning is a complaint too ----------------------------------------
 # Where `ValidationReport::assert_clean` draws the line, and what
-# `docs/plan/02-vulkan-backend.md`'s P1 exit criterion says.
+# stage 2's P1 exit criterion said.
 {
     echo "$ENABLED"
     echo '[   0.0500s WARN  crcbl_vk::debug] vk best practices: this pipeline is not cached'

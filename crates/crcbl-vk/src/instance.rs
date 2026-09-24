@@ -17,7 +17,7 @@ use crate::debug::{self, ValidationReport, ValidationSink};
 
 /// The Vulkan API version this backend targets.
 ///
-/// `docs/plan/02-vulkan-backend.md`: "Full HAL implementation on Vulkan 1.3
+/// Stage 2's first goal: "Full HAL implementation on Vulkan 1.3
 /// (dynamic rendering, sync2, no legacy render passes)". Asking for 1.3 in
 /// `VkApplicationInfo` is what makes `vkCmdBeginRendering`,
 /// `vkCmdPipelineBarrier2` and `vkQueueSubmit2` core entry points rather than
@@ -543,7 +543,7 @@ impl VkInstance {
         // the vacuous-gate failure `ValidationReport::assert_clean` exists to
         // prevent one level up.
         //
-        // Found at P1.2: `docs/plan/02-vulkan-backend.md` names sync bugs as
+        // Found at P1.2: stage 2 named sync bugs as
         // this stage's headline risk and sync validation as the mitigation, and
         // the mitigation had never run.
         let layer_extensions = if validation_enabled {

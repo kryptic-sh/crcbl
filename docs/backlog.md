@@ -2614,7 +2614,12 @@ default. Compact late-phase candidate lists and a fused pyramid build were not
 implemented or benchmarked.
 
 - **Per-cluster occlusion** inside `mesh_cluster.slang`'s amplification stage is
-  not built; the `MeshShader` path culls whole instances only.
+  not built; the `MeshShader` path occlusion-culls whole instances only. Stage 3
+  §3.5 scheduled it as the third per-cluster test beside frustum and normal
+  cone, against the same farthest-depth pyramid the instance cull reads, with
+  the instance cull still running first because instance rejection is cheaper.
+  The indirect paths would make the same test in the cull compute pass, where
+  they already select cluster LOD.
 - **CPU record and submit grow with the cull on**: the repeated original fixture
   measured 1.382 against 1.153 ms on radv with validation enabled.
 - **Draw-region layout VRAM**: in a 17,219-instance, 938-bucket scene a frame in
@@ -3196,8 +3201,6 @@ with [tumble](plan/sample/24-tumble.md), and
 - **The ~2 px triangle floor** [25-lod.md](plan/25-lod.md) specifies was not
   found implemented in the cull or draw-generation shaders, and tessellation
   rests on it.
-- **`03-gpu-driven-rendering.md` §3.2 says the material sampler is nearest**;
-  `crates/crcbl-render/src/material_table.rs` says trilinear.
 
 ## What tide's milestone 1 shipped without (2026-09-15)
 
@@ -8523,14 +8526,15 @@ work they name that the tree does not have.
 
 ### Camera-relative rendering: the f64 sector offset table (2026-08-27)
 
-**Half built.** `03-gpu-driven-rendering.md`'s 2026-07-27 correction resolved
-the contradiction between camera-relative rendering and delta-only instance
-upload by splitting it: sector-local `f32` transforms plus a sector id on the
-instance, and a per-frame f64 sector→camera offset table the vertex and cull
-shaders add. The first half is built — `GpuInstance::transform` is sector-local
-and `GpuInstance::sector` is the id. The table does not exist, nothing indexes
-`sector`, every instance is in sector 0, and `transform` is a plain model →
-world matrix.
+**Half built.** Stage 3's 2026-07-27 correction, recorded in
+`docs/notes/rendering.md` (_What the deleted 03-gpu-driven-rendering plan left
+behind_), resolved the contradiction between camera-relative rendering and
+delta-only instance upload by splitting it: sector-local `f32` transforms plus a
+sector id on the instance, and a per-frame f64 sector→camera offset table the
+vertex and cull shaders add. The first half is built — `GpuInstance::transform`
+is sector-local and `GpuInstance::sector` is the id. The table does not exist,
+nothing indexes `sector`, every instance is in sector 0, and `transform` is a
+plain model → world matrix.
 
 **What it would take.** A small uniform or storage array of f64-derived offsets
 (one per resident sector), an add in `mesh.slang`, `mesh_cluster.slang` and
@@ -8551,11 +8555,11 @@ not camera-relative rendering."
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/rendering.md` under this heading.
 
-**Not built.** `03-gpu-driven-rendering.md` §3.4 names a depth-sorted
-transparent pass, and its 2026-07-27 correction names the algorithm — a GPU
-radix sort over packed depth keys, bitonic for small counts — "so it isn't
-rediscovered at P7". `crcbl_render::forward` records no blended geometry pass;
-the only alpha blending in the renderer composites rather than shades —
+**Not built.** Stage 3 §3.4 named a depth-sorted transparent pass, and its
+2026-07-27 correction named the algorithm — a GPU radix sort over packed depth
+keys, bitonic for small counts — "so it isn't rediscovered at P7".
+`crcbl_render::forward` records no blended geometry pass; the only alpha
+blending in the renderer composites rather than shades —
 `crcbl_render::sprite_pass`, `crcbl_render::ui_pass`, `crcbl_render::grid`,
 `crcbl_render::debug_draw` and `crcbl_render::bloom`'s upsample — and none of
 them sorts.
@@ -8612,19 +8616,55 @@ blocking today because no skinned asset in the tree has a generated DAG.
 
 ### `Bindless` has no implementation (2026-08-27)
 
-**Deliberately so, and the reason is recorded.** `03-gpu-driven-rendering.md`
-§3.2 says the texture column landed as an `ArrayPages` layer and that
-`BindingModel::Bindless` was not built, because `crcbl-mtl` withdraws
-`DESCRIPTOR_INDEXING` and a bindless lookup would leave Metal with no texture
-path at all. That is a decision, not an omission — recorded here so §3's exit
-criterion "every `BindingModel` value renders the sandbox scene" is not read as
-an open bug.
+**Deliberately so, and the reason is recorded** in `docs/notes/rendering.md`
+(_What the deleted 03-gpu-driven-rendering plan left behind_): the texture
+column landed as an `ArrayPages` layer and `BindingModel::Bindless` was not
+built, because `crcbl-mtl` withdraws `DESCRIPTOR_INDEXING` and a bindless lookup
+would leave Metal with no texture path at all. That is a decision, not an
+omission — recorded here so stage 3's exit criterion "every `BindingModel` value
+renders the sandbox scene" is not read as an open bug. `apps/quarry` covers the
+`GeometryPath` half of that criterion; the `BindingModel` half stays open until
+`Bindless` exists to render.
 
 **What still binds future work.** A page is one image, so every layer shares an
 extent, a format and a mip count. Real imported content does not have one
 extent, which is the constraint `Bindless` exists to lift and the trigger for
 building it. Two prerequisites are already closed: `BindingKind::SampledImage`
 carries a `view_type`, and every backend honours `BindGroupEntry::array_index`.
+
+### The GPU-driven exit criteria have never been measured (2026-09-24)
+
+**Not measured.** Stage 3's exit criteria ask for three numbers and none has
+been recorded: 10k+ instanced meshes with CPU frame time flat against instance
+count, zero per-frame descriptor writes in steady state, and zero frame-loop
+readbacks other than the delayed cull-stats ring. The renderer is built to meet
+them — the cull, draw generation and bucket table are GPU-side and the ring is
+`crcbl_render::cull_stats` — but "built to" is not a measurement.
+
+**The fixture exists.** `apps/horde --prefill N` stages N enemies over the whole
+arena before the first frame and raises `--max-enemies` to fit them, so the 10k
+size is reachable without waiting on the spawner (its `--help` says that would
+take over ten minutes). Horde's own 10k-at-60 entry is a simulation tick
+criterion, not this render one.
+
+**What it would take:**
+
+- **CPU flatness:** record CPU frame time (encode + submit, excluding the GPU
+  wait) at several `--prefill` sizes, say 100, 1k, 5k and 10k, on one machine,
+  and report the slope. Flat means the per-frame command count does not grow
+  with instances.
+- **Descriptor writes and readbacks:** drive a steady-state frame loop on the
+  null backend and count its `crcbl_hal::null` recorder's events after warm-up:
+  `Event::Created { kind: ObjectKind::BindGroup, .. }` should be zero per frame
+  and `Event::ReadbackRequested` should be the ring's alone. The recorder has no
+  event for `Device::update_bind_group` today, so that one needs an event added
+  before it can be counted. This replaces the RenderDoc check the plan named; a
+  hand-taken capture stays the gap recorded under _Findings the roadmap carried
+  that nothing else did_.
+
+**Evidence:** searched the backlog and `docs/notes/` for a recorded CPU sweep or
+descriptor-write count and found none; the recorder's event list was read in
+`crates/crcbl-hal/src/null/record.rs`.
 
 ### Ray-traced lighting (P7C) is not built (2026-08-27)
 
@@ -8681,9 +8721,12 @@ point the engine allocates per mesh. Memory-type _selection_
 and tested.
 
 **What it would take:** wrap `gpu-allocator` behind the seam's three
-`MemoryLocation`s, per `docs/plan/02-vulkan-backend.md` §2.1 — which `mem.rs`
-cites and which the pruning pass deliberately left in place for that reason.
-Adding the dependency is the user's call.
+`MemoryLocation`s — device-local, host-visible upload and readback — so
+`crcbl-vk` suballocates from a few large `vkAllocateMemory` blocks instead of
+one per resource, which is what stage 2 §2.1 asked for rather than hand-rolling
+suballocation. `mem.rs`'s `find_memory_type` and `MemoryRequest::for_location`
+stay the selection half; the allocator replaces only the per-resource
+allocate/free. Adding the dependency is the user's call.
 
 **What it blocks:** real geometry and texture pools. Nothing today; the first
 scene that allocates per mesh is the trigger.
@@ -8695,9 +8738,34 @@ the deferral as a deferral rather than as working.
 foundation d — and is ratified rather than reopened. It schedules nothing on its
 own; the suballocator lands when that trigger fires.
 
+### The Vulkan pipeline cache is not persisted (2026-09-24)
+
+**Not built.** Stage 2 §2.3 asked for a pipeline cache persisted to disk.
+`crcbl-vk`'s `pipeline.rs` creates every compute and graphics pipeline against
+`vk::PipelineCache::null()`, so every run compiles every pipeline from SPIR-V
+again. Verified at both call sites (`create_compute_pipelines` and
+`create_graphics_pipelines`).
+
+**What it would take:** a `VkPipelineCache` owned by the device and passed to
+both creation calls; loaded at device creation from a per-adapter file and
+written back at shutdown through `crcbl-store`'s platform storage. Key the file
+by vendor id, device id and driver version, and treat a cache the driver
+refuses, or a truncated file, as empty rather than as an error — the header
+validation is the driver's (`VkPipelineCacheHeaderVersionOne` carries the
+vendor, device and `pipelineCacheUUID`). No other backend has a counterpart yet,
+and the browser has none at all (a row of the browser boundary in
+`docs/notes/browser.md`).
+
+**Price it first.** The related performance entry above ("passes a null Vulkan
+pipeline cache") already says to measure renderer construction and viewer
+reloads before considering a device pipeline cache, and that persistent driver
+caches need device/driver identity and corrupt-cache recovery. Nothing has
+measured what a warm cache would save; this is start-up cost, not frame cost.
+
 ### D3D12 is the one target still held against a golden alone (2026-08-27)
 
-**Not built.** `docs/plan/02-vulkan-backend.md`'s fifth shader-portability rule
+**Not built.** The fifth shader-portability rule, recorded in
+`docs/notes/backends.md` (_What the deleted 02-vulkan-backend plan left behind_)
 — semantic divergence between targets is caught by rendering, not by reading —
 is covered for Vulkan, Metal and WebGPU: `.github/workflows/pages.yml` runs
 `web/run-cross-backend-e2e.sh --reference vk` and `--reference mtl`, so the
@@ -8832,11 +8900,19 @@ caller.
 
 ### Task 6 of stage 10 — editor-in-browser — was never examined (2026-08-27)
 
-**Carried forward.** `docs/plan/10-wasm-webgpu.md` records it and the reason
-(asset browser, OS drag-drop, notify-based file watcher are all native-shaped);
-`apps/editor` does not exist at all, which `tools/check-doc-citations.sh`
-allow-lists on purpose. Nothing new found. Stated here so the pruning pass is
-not read as having closed it.
+**Carried forward.** Stage 10 listed an editor-in-browser smoke test as a
+stretch that "should mostly work by construction"; nobody examined it. The
+editor is treated as a native target (`docs/notes/browser.md`, _What the deleted
+10-wasm-webgpu plan left behind_) because its asset browser, OS drag-drop
+import, `crcbl import` and hot reload's notify-based file watcher are all
+native-shaped. `apps/editor` exists now, native only: it has no `web.rs` and no
+demo under `web/demos`.
+
+**What it would take:** decide what a browser editor does about those four — a
+browser file picker or OPFS in place of the asset browser's directory walk,
+`DataTransfer` drops, an import step that runs somewhere, and polling or no
+reload in place of `notify` — then a `web/demos` entry and a browser gate run.
+Stated here so the stretch is not read as closed.
 
 ## Simulation and gameplay — what the eleven plans still owe
 
@@ -19890,12 +19966,12 @@ Rename them if the churn is ever worth it.
 
 ## The material table has both halves; what is still missing from a material
 
-`crcbl_render::MaterialTable` is `docs/plan/03-gpu-driven-rendering.md` §3.2's
-material table SSBO, `crcbl_shaders::mesh::GpuMaterial` is a row, `mesh.slang`
-binding 6 is where the fragment stage reads one, and binding 7 is the
-`Texture2DArray` page a row's `base_color_texture` selects a layer of. The
-texture-indices half of this entry is done and has been deleted. What is still
-deliberately not there, and what it would take:
+`crcbl_render::MaterialTable` is stage 3 §3.2's material table SSBO,
+`crcbl_shaders::mesh::GpuMaterial` is a row, `mesh.slang` binding 6 is where the
+fragment stage reads one, and binding 7 is the `Texture2DArray` page a row's
+`base_color_texture` selects a layer of. The texture-indices half of this entry
+is done and has been deleted. What is still deliberately not there, and what it
+would take:
 
 **All four page slots are wired on the device since 2026-09-06.** A row has a
 factor and a page layer for each: `base_color_textures`, `normal_textures`,
@@ -20487,12 +20563,12 @@ nothing about older ones. Settle that and this entry goes.
 
 ## Bindless is a Vulkan-only path now, so what does P7 owe?
 
-`docs/plan/03-gpu-driven-rendering.md` §3.2's texture half is implemented as one
-`Texture2DArray` page — `crcbl_render::forward`'s `base_color_page`, bound at
-`mesh.slang` binding 7, with `GpuMaterial::base_color_texture` selecting a
-layer. `BindingModel::Bindless` — one runtime-sized array _of descriptors_,
-indexed per fragment — is not implemented, and `docs/plan/ROADMAP.md`'s P7 row
-still owes a bindless page.
+Stage 3 §3.2's texture half is implemented as one `Texture2DArray` page —
+`crcbl_render::forward`'s `base_color_page`, bound at `mesh.slang` binding 7,
+with `GpuMaterial::base_color_texture` selecting a layer.
+`BindingModel::Bindless` — one runtime-sized array _of descriptors_, indexed per
+fragment — is not implemented, and `docs/plan/ROADMAP.md`'s P7 row still owes a
+bindless page.
 
 **The reason it is owed has changed, and the change is what needs a decision.**
 When the row was written the blocker was a backend defect in `crcbl-wgpu`, which
@@ -21839,8 +21915,8 @@ through a `write` binding is rejected at pipeline creation naming the binding.
 `bool`, and `crcbl-webgpu` refuses `ReadWrite` for a format outside WebGPU's own
 read-write list. Precedent: wgpu's `StorageTextureAccess` is exactly this
 triple, so the seam adopts the shape the narrowest backend already models. Work:
-lands with the first storage-image consumer — a mip-generation pass,
-`docs/plan/03-gpu-driven-rendering.md` §3.2 — not before, since nothing in
+lands with the first storage-image consumer, not before — no longer a
+mip-generation pass, since page mip chains are built at import — and nothing in
 `crcbl-render` or the committed shaders declares a storage image today.
 
 ## What the sun shadow pass owes

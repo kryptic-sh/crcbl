@@ -9,7 +9,7 @@
 //!
 //! # Reversed-Z is produced *here*, and nowhere else
 //!
-//! `docs/plan/02-vulkan-backend.md` locks the convention — "`D32_SFLOAT`,
+//! Stage 2 locked the convention — "`D32_SFLOAT`,
 //! projection uses an **infinite far plane with reversed depth**, compare op
 //! `GREATER`, clear to 0.0" — and `crcbl-hal` bakes three of those four into its
 //! defaults: [`DepthStencilState::default`](crcbl_hal::DepthStencilState) is
@@ -25,7 +25,7 @@
 //!
 //! Not aesthetics: **precision**. A conventional `0..1` depth buffer spends most
 //! of a float's mantissa near the near plane, where nothing needs it, and runs
-//! out at distance. `docs/plan/02-vulkan-backend.md`'s stated case is "a
+//! out at distance. Stage 2's stated case is "a
 //! sector-tiled world with 300 m+ sightlines z-fights immediately on a
 //! conventional `0..1` buffer".
 //!
@@ -52,7 +52,7 @@ const RAY_DEPTH: f32 = 0.5;
 
 /// How a camera flattens the world into clip space.
 ///
-/// Two variants and one code path: `docs/plan/02-vulkan-backend.md`'s milestone
+/// Two variants and one code path: stage 2's milestone
 /// 5 is "orthographic camera mode proving the 2D story (z = z-index) is just a
 /// projection matrix swap", and this enum is that proof's shape. Nothing
 /// downstream of [`Camera::view_projection`] — not the shader, not the pipeline,
@@ -414,7 +414,7 @@ pub struct ViewRay {
 
 /// A directional light: the whole of milestone 4's lighting model.
 ///
-/// One light, no shadows, no attenuation. `docs/plan/02-vulkan-backend.md` rung
+/// One light, no shadows, no attenuation. Stage 2's rung
 /// 4 is "single directional light, Lambert+Blinn — enough to see geometry
 /// properly; real material model comes with stage 3/5", and cascaded shadow maps
 /// are explicitly P7 (topic 18). The real material model arrived: `mesh.slang`
@@ -820,7 +820,7 @@ mod tests {
 
     /// **The reason reversed-Z is locked**, measured rather than asserted.
     ///
-    /// `docs/plan/02-vulkan-backend.md`: "a sector-tiled world with 300 m+
+    /// Stage 2's design review: "a sector-tiled world with 300 m+
     /// sightlines z-fights immediately on a conventional 0..1 buffer". This test
     /// puts two surfaces one centimetre apart at 300 m and quantises both depths
     /// to `f32` — which is what a `D32_SFLOAT` attachment stores — under *both*

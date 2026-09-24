@@ -3,7 +3,7 @@
 // Frustum culling on the GPU: one thread per instance, a compacted list of the
 // survivors, and an atomic counter saying how many there are.
 //
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's first half — "Compute pass:
+// Topic 03 §3.3's first half — "Compute pass:
 // frustum cull against instance AABBs → compacted visible instance list". The
 // second half, the `draw_indexed_indirect` records that list turns into, is a
 // slice of its own and nothing here anticipates it beyond leaving the list in
@@ -66,7 +66,7 @@
 // `computeMain` is the frustum cull every generator runs — and under
 // `CULL_FACES`, a point light's, which also tags each survivor with the faces of
 // its cube the box reaches. `occlusionMain` and `lateMain` are
-// `docs/plan/03-gpu-driven-rendering.md` §3.3's two occlusion phases, which only
+// topic 03 §3.3's two occlusion phases, which only
 // the camera's generator runs: the first reprojects every frustum survivor into
 // the previous frame's farthest-depth pyramid and marks the ones it hides, the
 // second tests the marked ones against this frame's early depth and rescues what

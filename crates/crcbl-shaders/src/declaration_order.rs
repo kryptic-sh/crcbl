@@ -1,7 +1,7 @@
 //! **Declaration order must equal binding order**, checked over every
 //! `shaders/*.slang`.
 //!
-//! `docs/plan/02-vulkan-backend.md`'s third shader portability rule, and the
+//! The third shader portability rule (`docs/notes/backends.md`), and the
 //! only one of the five a lint can carry. Slang's Metal target **ignores
 //! `[[vk::binding]]`** and hands each resource the next index in its own flat
 //! per-stage argument table, in the order the declarations appear, while

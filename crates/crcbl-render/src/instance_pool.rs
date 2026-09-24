@@ -10,7 +10,7 @@
 //!                              └─▶ nothing dirty ⇒ nothing written at all
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.2: "`GpuInstance` array (SSBO):
+//! Topic 03 §3.2: "`GpuInstance` array (SSBO):
 //! transform, mesh id, material id, flags. Written by delta upload each frame
 //! (**changed instances only — dirty ranges, not full re-upload**)." The
 //! emphasis is the whole reason this type exists rather than a `Vec` re-uploaded
@@ -40,8 +40,8 @@
 //! There is one buffer **per frame in flight**, for the reason
 //! [`crate::forward`]'s uniform ring gives: an instance the CPU rewrites while
 //! the GPU is still drawing last frame is a read-after-write hazard across
-//! submissions, which is `docs/plan/02-vulkan-backend.md`'s headline risk for
-//! this stage.
+//! submissions, which is stage 2's headline risk for
+//! that stage.
 //!
 //! The consequence is that a write is dirty in **every** slot's range set, not
 //! one: each slot is a separate copy of the same logical array and each has to

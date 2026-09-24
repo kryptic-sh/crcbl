@@ -170,7 +170,7 @@ fn two_mesh_camera() -> crcbl::render::Camera {
     camera
 }
 
-/// `docs/plan/03-gpu-driven-rendering.md` §3.1's pool, drawn with **two**
+/// Topic 03 §3.1's pool, drawn with **two**
 /// residents in it — which is the first frame in which a base vertex means
 /// anything at all.
 ///
@@ -273,7 +273,7 @@ fn leading_channel_texels(image: &crcbl_golden::Image, channel: usize, margin: u
 /// **A mesh of several clusters draws one face per cluster**, on whichever path
 /// this adapter selects.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.5's unit of work is a cluster, and
+/// Topic 03 §3.5's unit of work is a cluster, and
 /// until this frame no rendered frame had more than one of them per mesh: the
 /// cube is 24 vertices and the pyramid 16, against a bound of 64. So a geometry
 /// path that ignored [`Meshlet::vertex_offset`] and [`Meshlet::triangle_offset`]

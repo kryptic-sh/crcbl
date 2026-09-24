@@ -1,6 +1,6 @@
 //! **Every committed `wgsl/*.wgsl` parses and validates with naga.**
 //!
-//! `docs/plan/02-vulkan-backend.md`'s fourth shader portability rule — "validate
+//! The fourth shader portability rule (`docs/notes/backends.md`) — "validate
 //! all four artifacts, not one". `tools/compile-shaders.sh` runs `spirv-val`
 //! over every fresh SPIR-V; until this file nothing looked at the WGSL at all,
 //! and `wgsl/ui.wgsl` shipped for months declaring `var<uniform>` with no

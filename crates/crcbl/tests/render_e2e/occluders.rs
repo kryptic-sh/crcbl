@@ -1,4 +1,4 @@
-//! [`Scene::Occluders`]: `docs/plan/03-gpu-driven-rendering.md` §3.3's proving
+//! [`Scene::Occluders`]: topic 03 §3.3's proving
 //! scene for the occlusion cull, held to its golden on every backend and every
 //! geometry path this machine reaches.
 //!

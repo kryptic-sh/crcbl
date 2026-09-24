@@ -14,7 +14,7 @@
 //!
 //! # It receives clusters; it does not build them
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5 makes the meshlet build a **bake
+//! Topic 03 §3.5 makes the meshlet build a **bake
 //! step**, and the layering makes it one whether or not it wants to be:
 //! `crcbl_scene::meshlet::build_meshlets` is the builder, `crcbl-scene` pulls in
 //! `gltf`, and a renderer that depended on the glTF importer to describe its own

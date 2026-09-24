@@ -991,7 +991,7 @@ jobs:
           # pixel of it differing by one level.
           #
           # **`occluders` joined them on 2026-09-17, measured the same way.**
-          # `docs/plan/03-gpu-driven-rendering.md` §3.3's proving scene is a
+          # The occlusion cull's proving scene (stage 3 §3.3) is a
           # lit wall, a floor and rows of small crates: the wall's shading bands
           # and the crates' shadowed edges move with a rasteriser's last bits.
           # On SwiftShader it reached 0.51% of the frame past the per-channel

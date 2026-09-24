@@ -12,12 +12,12 @@
 //!
 //! # This is demo geometry, and the plan expects some
 //!
-//! `docs/plan/02-vulkan-backend.md`'s ladder puts a "hardcoded cube/sphere" at
+//! Stage 2's ladder puts a "hardcoded cube/sphere" at
 //! rung 3, and a cube is the honest choice: six flat faces with distinct normals
 //! make a directional light *visible* in a way a sphere's smooth shading does
 //! not, and six distinct face colours make an orientation mistake a different
 //! picture rather than a plausible one. Real meshes arrive from assets at P9 and
-//! are ranges in a global pool (`docs/plan/03-gpu-driven-rendering.md` §3.1).
+//! are ranges in a global pool (topic 03 §3.1).
 //!
 //! # Indexed, unlike the triangle
 //!
@@ -1193,7 +1193,7 @@ pub const SPECULAR_AA_KAPPA: f32 = 0.18;
 
 /// One drawable object, matching `struct GpuInstance` in `shaders/mesh.slang`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's instance record: "transform,
+/// Topic 03 §3.2's instance record: "transform,
 /// mesh id, material id, flags", plus the sector id its 2026-07-27 correction
 /// adds. [`crcbl_render::InstancePool`] is what writes these, one storage buffer
 /// element per instance, by delta upload.
@@ -1544,7 +1544,7 @@ impl GpuInstance {
 /// One resident mesh's range in the geometry pools and its local-space bounds,
 /// matching `struct GpuMesh` in `shaders/mesh.slang`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.1's three integers, in the buffer
+/// Topic 03 §3.1's three integers, in the buffer
 /// the *GPU* resolves them out of: [`GpuInstance::mesh`] indexes an array of
 /// these, and the vertex stage adds [`GpuMesh::base_vertex`] to every index it
 /// reads. [`MeshPool`](https://docs.rs/crcbl-render) is what writes them.
@@ -1708,7 +1708,7 @@ impl GpuMesh {
 /// One material's shading factors and its base-colour texture, matching
 /// `struct GpuMaterial` in `shaders/mesh.slang`.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.2's material table:
+/// Topic 03 §3.2's material table:
 /// [`GpuInstance::material`] indexes an array of these and the fragment stage
 /// multiplies [`GpuMaterial::base_color`] and the texel
 /// [`GpuMaterial::base_color_texture`] selects into the vertex albedo, then

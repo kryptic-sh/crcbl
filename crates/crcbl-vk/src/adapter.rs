@@ -20,7 +20,7 @@
 //! happens: graphics+compute always, a compute-without-graphics family for
 //! [`Features::ASYNC_COMPUTE_QUEUE`], and a transfer-only family for
 //! [`Features::TRANSFER_QUEUE`]. The MVP submits everything to the first one
-//! (`docs/plan/02-vulkan-backend.md` §2.1), but the seam models queues plural
+//! (stage 2 §2.1), but the seam models queues plural
 //! from the start and reporting the other two honestly is what makes a later
 //! async-compute slice additive.
 
@@ -565,7 +565,7 @@ fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
 
 /// Enumerates every physical device the instance can see.
 ///
-/// Discrete devices are listed first (`docs/plan/02-vulkan-backend.md` §2.1:
+/// Discrete devices are listed first (stage 2 §2.1:
 /// "prefer discrete"), so a caller taking `adapters()[0]` gets the right answer
 /// without knowing the rule — which is what `apps/sandbox` does.
 pub(crate) fn enumerate(
@@ -798,7 +798,7 @@ fn describe(
     if !core_1_3.is_complete() {
         crcbl_core::log::warn!(
             "crcbl-vk: adapter {name} lacks {:?}; crcbl-vk cannot open it \
-             (docs/plan/02-vulkan-backend.md: no fallback paths in the MVP)",
+             (docs/notes/backends.md: no fallback paths in the MVP)",
             core_1_3.missing()
         );
     }

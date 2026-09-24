@@ -234,7 +234,7 @@ fn provoked_child() {
 ///
 /// `a_deliberate_violation_is_caught_by_the_layer` does this for ordinary
 /// validation. Sync validation is a separate opt-in with a separate failure
-/// mode, and `docs/plan/02-vulkan-backend.md` names sync bugs as this stage's
+/// mode, and stage 2 named sync bugs as that stage's
 /// headline risk and this layer as the mitigation — so "sync validation is on"
 /// has to be a test result rather than an environment variable somebody set.
 ///

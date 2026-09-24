@@ -18,7 +18,7 @@
 //!
 //! # Scope
 //!
-//! `docs/plan/02-vulkan-backend.md`'s ladder rungs 3–5, and nothing beyond:
+//! Stage 2's ladder rungs 3–5, and nothing beyond:
 //!
 //! * **3** — depth-tested spinning mesh, perspective camera in a uniform buffer.
 //! * **4** — one directional light (in `mesh.slang`). The rung's own wording is
@@ -59,7 +59,7 @@
 //!
 //! # The CPU records a fixed number of draws
 //!
-//! One per bucket, whatever the scene holds — `docs/plan/03-gpu-driven-rendering.md`'s
+//! One per bucket, whatever the scene holds — topic 03's
 //! headline goal, "10 objects and 10,000 objects record roughly the same
 //! commands". Adding an object is an instance in the pool and nothing else;
 //! removing one is [`InstancePool::remove`] and nothing else. Neither changes a
@@ -133,7 +133,7 @@
 //! previous frame may still be reading it. One buffer would be a
 //! read-after-write hazard *across* submissions, which is precisely what
 //! `CRCBL_VK_SYNC_VALIDATION=1` exists to find and precisely what
-//! `docs/plan/02-vulkan-backend.md` calls this stage's headline risk. So there
+//! stage 2 called its headline risk. So there
 //! is one uniform buffer and one bind group per frame in flight, and
 //! [`ForwardRenderer::begin_frame`] rotates them.
 
@@ -2444,7 +2444,7 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
     /// pipeline, one layout and a ring of blocks per level.
     hiz: Option<Hiz>,
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's farthest-depth pyramid,
+    /// Topic 03 §3.3's farthest-depth pyramid,
     /// which owns one pipeline, one layout and — once a frame culled — a chain
     /// of level images.
     occlusion_pyramid: Option<OcclusionPyramid>,
@@ -9412,7 +9412,7 @@ impl ForwardRenderer {
     }
 
     /// Asks every camera's cull to drop what is hidden or too small to see —
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull and its
+    /// topic 03 §3.3's occlusion cull and its
     /// small-feature test. See [`crate::occlusion_cull`].
     ///
     /// [`OcclusionCulling::occlusion`] **changes no pixel**: the first phase
@@ -14302,7 +14302,7 @@ mod tests {
     /// Metal, whose API has multi-draw-indirect and no count buffer — reads each
     /// bucket's one argument structure unconditionally. Same buckets, same
     /// arguments, same block: the tail is the only thing that moves, which is
-    /// what `docs/plan/03-gpu-driven-rendering.md` means by "the lesser path is
+    /// what topic 03 means by "the lesser path is
     /// a constraint on data layout, not a separate renderer".
     ///
     /// Both presets are run here rather than only the one this machine has,

@@ -411,7 +411,7 @@ pub(crate) fn swapchain_create_info<'a>(
         .image_array_layers(1)
         .image_usage(usage)
         // One queue family: the MVP submits everything to graphics
-        // (`docs/plan/02-vulkan-backend.md` §2.1, stated not assumed), so
+        // (stage 2 §2.1, stated not assumed), so
         // `EXCLUSIVE` is correct and is the faster of the two.
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .pre_transform(transform)

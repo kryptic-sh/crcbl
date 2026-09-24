@@ -3,7 +3,7 @@
 // The mesh-shading path's bring-up shader — one triangle, emitted by a mesh
 // stage, with an amplification stage in front of it.
 //
-// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the **primary**
+// Topic 03 §3.5 makes mesh shaders the **primary**
 // geometry path rather than an optimisation, and this is the smallest thing
 // that proves the whole path exists: `Features::MESH_SHADER` was reported by
 // `crcbl-vk` before anything could ask for it. What §3.5 actually wants —
@@ -15,7 +15,7 @@
 // **WGSL cannot express a mesh shader at all.** Slang 2026.14 refuses it by
 // name — "entrypoint 'meshMain' uses features that are not available in '_mesh'
 // stage for 'wgsl' compilation target", pointing at `SetMeshOutputCounts` — and
-// that refusal is the whole reason `docs/plan/02-vulkan-backend.md`'s first
+// that refusal is the whole reason stage 2's first
 // shader-portability rule exists. Without the `// crcbl-targets:` line above,
 // the compile script would have emitted a broken `.wgsl` and committed it.
 //

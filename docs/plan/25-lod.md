@@ -7,13 +7,13 @@ stage 3 discipline extended. Mechanism lands with the GPU-driven renderer (P7,
 hand LODs usable immediately).
 
 **QEM auto-generation is MVP, not wave 1** (moved 2026-08-09). Mesh shaders
-became the primary geometry path in
-[03-gpu-driven-rendering.md](03-gpu-driven-rendering.md) §3.5, and a
-meshlet-clustered pipeline selects detail **per cluster** rather than per
-instance — which needs a simplified cluster hierarchy to select between. A
-cluster hierarchy with no generated levels is the culling win without the detail
-win, i.e. most of the reason for the path. Hand-authored chains cannot fill that
-role: an artist supplies whole-mesh levels, not per-cluster ones.
+became the primary geometry path in stage 3 §3.5 (its rules are in the
+[rendering notes](../notes/rendering.md)), and a meshlet-clustered pipeline
+selects detail **per cluster** rather than per instance — which needs a
+simplified cluster hierarchy to select between. A cluster hierarchy with no
+generated levels is the culling win without the detail win, i.e. most of the
+reason for the path. Hand-authored chains cannot fill that role: an artist
+supplies whole-mesh levels, not per-cluster ones.
 
 Two consequences that follow from the same move:
 

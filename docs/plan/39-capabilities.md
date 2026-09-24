@@ -3,14 +3,14 @@
 How the engine decides what a device can do, what it does when the answer is
 "less than you asked for", and where a game or a player overrides either.
 
-**This topic supersedes the two-valued renderer tier.**
-`03-gpu-driven-rendering.md` introduced `Tier A` / `Tier B` as a shorthand for
-"native" versus "WebGPU", and that shorthand stopped describing reality: Metal
-has multi-draw-indirect and no GPU-side count, D3D12 has both in the API and
-neither written yet, `wgpu` on native reports very nearly the full native set,
-and WebGPU in a browser has none of it. Ray tracing and mesh shaders add two
-more independent axes. Two buckets cannot hold that, and forcing a device into
-the wrong one is a lie the renderer then acts on.
+**This topic supersedes the two-valued renderer tier.** Stage 3's GPU-driven
+rendering plan introduced `Tier A` / `Tier B` as a shorthand for "native" versus
+"WebGPU", and that shorthand stopped describing reality: Metal has
+multi-draw-indirect and no GPU-side count, D3D12 has both in the API and neither
+written yet, `wgpu` on native reports very nearly the full native set, and
+WebGPU in a browser has none of it. Ray tracing and mesh shaders add two more
+independent axes. Two buckets cannot hold that, and forcing a device into the
+wrong one is a lie the renderer then acts on.
 
 ## The rule
 

@@ -39,7 +39,7 @@
 //!
 //! # A chain, not a DAG — so this supports per-instance selection only
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5 and topic 25's "Runtime
+//! Topic 03 §3.5 and topic 25's "Runtime
 //! selection" both say detail is chosen **per cluster** on the `MeshShader`
 //! path and per instance elsewhere. A chain of independently clustered levels
 //! cannot do the per-cluster half, and this module does not pretend otherwise.

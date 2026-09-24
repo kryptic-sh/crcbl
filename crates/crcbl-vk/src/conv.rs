@@ -1390,7 +1390,7 @@ mod tests {
         ));
     }
     /// The locked decision, restated where it is actually consumed:
-    /// `docs/plan/02-vulkan-backend.md` fixes reversed-Z with compare op
+    /// stage 2 locked reversed-Z with compare op
     /// `GREATER`, and `crcbl-hal` makes it the default. If this mapping ever
     /// becomes anything else, every pipeline in the engine inverts its depth
     /// test at once and every golden image needs re-blessing.

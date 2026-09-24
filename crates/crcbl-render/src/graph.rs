@@ -14,7 +14,7 @@
 //!                         `CommandEncoder::pipeline_barrier`
 //! ```
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4 states the contract in one sentence:
+//! Stage 2 §2.4 states the contract in one sentence:
 //! "passes declare reads/writes of virtual resources; graph compiles to ordered
 //! passes + exact `sync2` barriers + image layout transitions. **No manual
 //! barriers outside the graph, ever.**" The sandbox used to hand-write two image
@@ -35,7 +35,7 @@
 //!   exchange for saving work a caller could have simply not declared.
 //! * **No multi-queue scheduling.** Every pass names a queue and the barrier
 //!   model carries [`QueueTransfer`], so a dedicated transfer queue is additive
-//!   later — which `docs/plan/02-vulkan-backend.md`'s corrections require "from
+//!   later — which stage 2's corrections require "from
 //!   the start so a dedicated transfer queue is additive later rather than a
 //!   barrier-model rewrite". Nothing *decides* to use a second queue.
 //!
@@ -126,7 +126,7 @@
 //!
 //! [`CompiledGraph::dump`] prints the pass order, every barrier with its from
 //! and to states, and which transients ended up sharing a physical resource.
-//! `docs/plan/02-vulkan-backend.md` §2.4 asks for exactly this ("the graph must
+//! Stage 2 §2.4 asks for exactly this ("the graph must
 //! be able to explain itself") and makes "graph dump readable and correct for
 //! the sandbox frame" a P1 exit criterion.
 
@@ -777,7 +777,7 @@ impl<'g, 'a> PassBuilder<'g, 'a> {
     /// Runs this pass on a queue other than the graph's default.
     ///
     /// Nothing in the MVP does — uploads share the graphics+compute queue, as
-    /// `docs/plan/02-vulkan-backend.md`'s corrections state rather than assume.
+    /// stage 2's corrections state rather than assume.
     /// It exists because the *barrier model* has to represent queue-family
     /// acquire/release from the start, and it does: a resource whose last user
     /// was on another queue gets a release/acquire pair rather than a plain
@@ -1077,7 +1077,7 @@ impl CompiledPass<'_> {
     /// Always the graph's default in the MVP — uploads share the
     /// graphics+compute queue — but the field is what makes a second queue
     /// additive rather than a barrier-model rewrite, which
-    /// `docs/plan/02-vulkan-backend.md`'s corrections require from the start.
+    /// stage 2's corrections require from the start.
     #[must_use]
     pub const fn queue(&self) -> QueueHandle {
         self.queue
@@ -1206,7 +1206,7 @@ impl<'a> CompiledGraph<'a> {
 
     /// The graph, as text a human reads.
     ///
-    /// `docs/plan/02-vulkan-backend.md` §2.4's debug-tools principle: "the graph
+    /// Stage 2 §2.4's debug-tools principle: "the graph
     /// must be able to explain itself", and its exit criteria require the dump
     /// to be "readable and correct for the sandbox frame". Every line is derived
     /// from the compiled form rather than re-walked from the declarations, so a

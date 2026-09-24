@@ -8,7 +8,7 @@
 //!  instance box ──▶ project_box(view_proj) ──▶ ScreenBounds ─┴─▶ occluded
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3's two-phase cull, on
+//! Topic 03 §3.3's two-phase cull, on
 //! [`crate::cull`]'s terms: ordinary Rust, called by nothing in a frame, and
 //! there so a test can state the answer the GPU has to reach. Every function
 //! here is the shader's arithmetic in the shader's order, so a readback that

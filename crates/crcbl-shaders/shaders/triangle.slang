@@ -1,7 +1,7 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
 // The engine's first drawing shader: milestone 2 of
-// `docs/plan/02-vulkan-backend.md`'s ladder — "Triangle (vertex pulling from a
+// stage 2's ladder — "Triangle (vertex pulling from a
 // storage buffer — no vertex input state; this is the pattern stage 3 scales
 // up)".
 //

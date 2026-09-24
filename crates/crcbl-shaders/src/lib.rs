@@ -40,12 +40,12 @@
 //!
 //! # Decision: Slang source, committed SPIR-V, no compiler in the build
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.3 chooses Slang and gives the reasons —
+//! Stage 2 §2.3 chose Slang and gave the reasons —
 //! "first-class SPIR-V target, HLSL-compatible syntax eases the DX12 stage,
 //! good buffer-device-address support" — and three other topics depend on that
 //! choice: `09-backends-metal-dx12.md` needs Slang's MSL and DXIL outputs,
-//! `10-wasm-webgpu.md` needs a WGSL artifact at P5, and
-//! `03-gpu-driven-rendering.md`'s design review says per-tier authoring is "one
+//! the browser track needs a WGSL artifact at P5, and
+//! stage 3's design review said per-tier authoring is "one
 //! source: Slang with a `TIER_B` capability specialization", **"Decided before
 //! any shader is written, because P1's shaders become P5's inputs."** So the
 //! sources here are Slang, from the first triangle.
@@ -98,7 +98,7 @@
 //! design exists to avoid. The cost is a compile at start-up per module, the
 //! same shape a browser's `createShaderModule` already has for WGSL.
 //!
-//! What is *not* here is `03-gpu-driven-rendering.md`'s tier permutation axis.
+//! What is *not* here is stage 3's tier permutation axis.
 //! The triangle does not vary by tier, and a permutation system with one
 //! permutation would be a guess at the shape `37-materials.md` owns.
 //!

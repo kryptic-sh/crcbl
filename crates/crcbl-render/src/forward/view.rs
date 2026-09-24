@@ -709,7 +709,7 @@ pub(super) struct View {
     /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
     /// march climbs — see [`crate::hiz`].
     pub(super) hiz: Hiz,
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.3's farthest-depth pyramid,
+    /// Topic 03 §3.3's farthest-depth pyramid,
     /// which the occlusion cull reads — see [`crate::occlusion_cull`].
     pub(super) occlusion_pyramid: OcclusionPyramid,
     /// `docs/plan/18-render-features.md`'s reflection march — see
@@ -2220,7 +2220,7 @@ impl View {
 
         // --- the occlusion cull's second phase ---
         //
-        // `docs/plan/03-gpu-driven-rendering.md` §3.3: this frame's farthest
+        // Topic 03 §3.3: this frame's farthest
         // pyramid out of the early depth, every survivor the first phase marked
         // tested against it, and the ones it rescues drawn into the same depth
         // before anything reads it. See [`crate::occlusion_cull`].

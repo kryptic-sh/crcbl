@@ -12,7 +12,7 @@
 //!                              ▼  latest() ──▶ ForwardRenderer::counters()
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.6's culling-stats readback, and
+//! Topic 03 §3.6's culling-stats readback, and
 //! `docs/plan/40-profiling.md`'s eighth missing piece: "the culling stats never
 //! leave the GPU … there is no staging buffer, no copy inside the frame graph,
 //! and no consumer". This is all three.

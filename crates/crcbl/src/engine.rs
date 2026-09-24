@@ -41,7 +41,7 @@
 //! barrier ColorAttachment → Present
 //! ```
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4 says "**no manual barriers outside the
+//! Stage 2 §2.4 says "**no manual barriers outside the
 //! graph, ever**", and both are gone. What replaced them is a *declaration* —
 //! the swapchain image is imported into the graph saying "it arrives
 //! [`Undefined`](crcbl_hal::ResourceState::Undefined) and must leave
@@ -744,7 +744,7 @@ impl Default for GpuContextDesc<'_> {
             // the rest — neither is in `GPU_DRIVEN`, and a device without them just
             // keeps the open-loop frame limiter and the `Unknown` cadence.
             // `MESH_SHADER` is named beside the bundle rather than inside it.
-            // `docs/plan/03-gpu-driven-rendering.md` §3.5 makes it the primary
+            // Topic 03 §3.5 makes it the primary
             // geometry path, so a capable device has to be *asked* — but it is a
             // selector axis of its own and `GPU_DRIVEN` is the data-layout one,
             // and a device that folded them together would refuse mesh-less
@@ -966,7 +966,7 @@ impl ForcedPaths {
     #[must_use]
     pub fn optional_features(self) -> Features {
         // `TASK_SHADER` is not in the default set and is added here: it is what
-        // `ForwardRenderer` builds `docs/plan/03-gpu-driven-rendering.md` §3.5's
+        // `ForwardRenderer` builds topic 03 §3.5's
         // amplification stage from, so a mesh device without it culls no
         // clusters — and a sample that takes this flag is a sample about what
         // the device did, which makes "the best path, completely" the right

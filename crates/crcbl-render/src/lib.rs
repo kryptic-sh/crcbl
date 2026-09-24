@@ -13,7 +13,7 @@
 //!
 //! # The one rule
 //!
-//! **No manual barriers outside the graph, ever** — `docs/plan/02-vulkan-backend.md`
+//! **No manual barriers outside the graph, ever** — stage 2
 //! §2.4, and it is the reason this crate exists rather than the frame loop
 //! living in each sample. Passes say what they read and write;
 //! [`graph::RenderGraph::compile`] works out the transitions, the layout
@@ -46,7 +46,7 @@
 //!
 //! # Two tiers, one renderer
 //!
-//! `docs/plan/03-gpu-driven-rendering.md`'s rule is that **Tier B is a
+//! Topic 03's rule is that **the lesser path (once "Tier B") is a
 //! constraint on data layout, not a separate renderer**, and no pass here reads
 //! a push constant. [`forward`]'s camera has been in a uniform buffer since P1
 //! for exactly that reason; [`sprite_pass`] followed it; and [`ui_pass`] — which

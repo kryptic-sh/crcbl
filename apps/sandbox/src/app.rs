@@ -79,7 +79,7 @@ use crate::menu::{self, Menus, SandboxAction};
 
 /// Which projection the camera uses.
 ///
-/// **Milestone 5, entire.** `docs/plan/02-vulkan-backend.md`'s rung 5 is
+/// **Milestone 5, entire.** Stage 2's rung 5 is
 /// "orthographic camera mode proving the 2D story (z = z-index) is just a
 /// projection matrix swap", and this enum is the proof's user-facing half:
 /// [`CameraMode::projection`] is the only place the two differ, and nothing

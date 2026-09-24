@@ -1,4 +1,4 @@
-//! **The occlusion cull, on a device** — `docs/plan/03-gpu-driven-rendering.md`
+//! **The occlusion cull, on a device** — topic 03
 //! §3.3's two-phase pass, where the only thing that can be wrong with it is a
 //! picture.
 //!

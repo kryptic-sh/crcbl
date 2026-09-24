@@ -109,7 +109,7 @@
 //! resolves on a later turn of the event loop and the browser main thread
 //! cannot block on it. A synchronous signature would be a trait method that
 //! returns [`HalError::Unsupported`] on the target
-//! `docs/plan/10-wasm-webgpu.md` most wants to ship to — the same mistake as a
+//! the browser track most wants to ship to — the same mistake as a
 //! literal `acquire_next_image(semaphore)`. Both are solved the same way: make
 //! the portable shape the only shape. See [`readback`] for the argument and the
 //! per-backend mapping, and note that poll-shaped is also what makes topic 03's
@@ -145,7 +145,7 @@
 //! # Reversed-Z is locked
 //!
 //! The engine uses reversed depth everywhere: **1.0 at the near plane, 0.0 at
-//! infinity, infinite far plane** (`docs/plan/02-vulkan-backend.md`). The seam
+//! infinity, infinite far plane** (locked in stage 2). The seam
 //! bakes that into its *defaults*, not into its vocabulary — [`CompareOp`] is
 //! named by comparison, so `Greater` means `Greater`. What changes is:
 //!

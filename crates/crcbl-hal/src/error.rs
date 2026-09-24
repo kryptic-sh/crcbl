@@ -3,7 +3,7 @@
 //! Two enums, split by who has to handle them:
 //!
 //! * [`HalError`] — something went wrong. Callers log it and usually give up;
-//!   `docs/plan/02-vulkan-backend.md` is explicit that the MVP has no fallback
+//!   stage 2 was explicit that the MVP has no fallback
 //!   paths ("error clearly and exit").
 //! * [`SurfaceError`] — presentation-specific, and *routinely non-fatal*.
 //!   [`SurfaceError::OutOfDate`] happens on every window resize and is part of

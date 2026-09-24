@@ -1,4 +1,4 @@
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3's GPU frustum cull pass, against
+//! Topic 03 §3.3's GPU frustum cull pass, against
 //! a real driver and against `crcbl::render::cull::visible_instances`.
 //!
 //! Separate from `draw_gen`, which consumes this pass's output, because the two

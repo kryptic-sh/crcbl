@@ -329,7 +329,7 @@ fn migrated_golden(name: &str) -> std::path::PathBuf {
 /// **The mesh-shader path draws the frame the indirect path's golden already
 /// pins** — the same reference file, not one of its own.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the primary
+/// Topic 03 §3.5 makes mesh shaders the primary
 /// geometry path and its own design rule is that "the lesser path is a
 /// constraint on data layout, not a separate renderer". A second golden for
 /// this path would pass whatever the path happened to draw, which is the check
@@ -509,7 +509,7 @@ const PATHS_AGREE: crcbl_golden::Tolerance = crcbl_golden::Tolerance {
 /// paths**, and the per-cluster cull in front of the mesh stage does not move
 /// it.
 ///
-/// `docs/plan/03-gpu-driven-rendering.md` §3.5's unit of work is a cluster, and
+/// Topic 03 §3.5's unit of work is a cluster, and
 /// the open box is the only mesh in the demo scene with more than one of them:
 /// the cube is 24 vertices and the pyramid 16, against a bound of 64. So a mesh
 /// stage that ignored [`Meshlet::vertex_offset`] and

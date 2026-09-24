@@ -345,8 +345,8 @@ Notes on the from-scratch protocol work:
   is why these landed at P5C instead.
 - **Web**: `wasm-bindgen` is avoided in the shell; a small hand-rolled JS glue
   file exports canvas/event/rAF hooks as plain wasm imports. Nothing else in a
-  browser build uses it either — see [10-wasm-webgpu.md](10-wasm-webgpu.md)'s
-  deviations.
+  browser build uses it either — see the no-`wasm-bindgen` rule in the
+  [browser notes](../notes/browser.md).
 
 ## Testing (topic 12)
 

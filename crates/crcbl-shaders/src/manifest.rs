@@ -507,7 +507,7 @@ fn refuse_second_artifact(
 
 /// Holds a record to the targets it declares.
 ///
-/// **This is the half of `docs/plan/02-vulkan-backend.md`'s first shader
+/// **This is the half of the first shader
 /// portability rule that runs without a shader compiler.**
 /// `tools/compile-shaders.sh` emits exactly the declared targets; this refuses
 /// a record where the declaration and the artifact columns have come apart —

@@ -22,7 +22,7 @@
 //!
 //! `a | b` is one buffer with regions; the passes below say which is which.
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3, both halves: "compute pass:
+//! Topic 03 §3.3, both halves: "compute pass:
 //! frustum cull against instance AABBs → compacted visible instance list →
 //! `draw_indexed_indirect` records + count buffer". The first dispatch is
 //! `cull.slang` and the second is `draw_gen.slang`, with `clear_counters.slang`

@@ -32,7 +32,7 @@
 # which turns the complaint scan into a green light wired to nothing.
 #
 # Errors **and** warnings, which is where `assert_clean` draws the line and what
-# `docs/plan/02-vulkan-backend.md`'s P1 exit criterion says. The messenger only
+# stage 2's P1 exit criterion said. The messenger only
 # ever subscribes to those two severities, so there is no informational chatter
 # to filter out. The pattern names the level, the module and the callback's own
 # `vk <kind>:` prefix — the teardown leak warning comes from `crcbl_vk::device`

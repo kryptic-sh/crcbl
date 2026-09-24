@@ -1,12 +1,12 @@
 //! Shader modules, descriptor layouts, bind groups, samplers and pipelines —
-//! milestone 2 of `docs/plan/02-vulkan-backend.md`'s ladder.
+//! milestone 2 of stage 2's ladder.
 //!
 //! # No vertex input state, anywhere
 //!
 //! [`vk::PipelineVertexInputStateCreateInfo`] is created empty and stays empty.
 //! That is not a simplification: `crcbl-hal`'s pipeline module has no
 //! vertex-buffer layout and there is no `bind_vertex_buffer`, because **vertex
-//! pulling is the only geometry path** (`docs/plan/03-gpu-driven-rendering.md`
+//! pulling is the only geometry path** (topic 03
 //! §3.1: "Vertex pulling everywhere (established in stage 2): position/attr
 //! streams as storage buffers, no pipeline vertex-input state to vary per
 //! mesh"). A pipeline that varied with the mesh is the thing that stops ten
@@ -25,7 +25,7 @@
 //!
 //! Coarse, and deliberately so for P1.2. A `VkDescriptorPool` sized exactly for
 //! one set cannot fragment, cannot run out, and cannot be recycled wrong — and
-//! recycling is what `docs/plan/02-vulkan-backend.md` §2.2 wants ("Per-frame:
+//! recycling is what stage 2 §2.2 wants ("Per-frame:
 //! … descriptor recycling"), which needs the frame ring the render graph will
 //! own at P1.3. Guessing that ring's shape here, to save a driver allocation on
 //! a path that runs a handful of times at startup, is the wrong trade. It is

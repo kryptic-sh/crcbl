@@ -3,6 +3,102 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 02-vulkan-backend plan left behind (2026-09-24)
+
+Record; the built part of the plan is `crcbl-vk` and the render graph in
+`crcbl-render`, and what it left open is in `docs/backlog.md` under _The Vulkan
+suballocator is still owed_, _The Vulkan pipeline cache is not persisted_,
+_D3D12 is the one target still held against a golden alone_ and the D3D12 bullet
+under _Owed by the shader guardrails_. It specified stage 2: the HAL implemented
+on Vulkan 1.3 with `ash`, the render graph above the seam that everything draws
+through, a frames-in-flight loop, and a milestone ladder ending at a lit mesh
+with GPU timers.
+
+Code cites the plan as "stage 2 §2.4", "the ladder's rung 3" or "shader rule 5".
+Those numbers resolve here:
+
+| Citation              | What it specified                                                                                                                                                                                                                     |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Baseline requirements | Vulkan 1.3 core plus dynamic rendering, `synchronization2`, timeline semaphores, descriptor indexing, buffer device address, `drawIndirectCount` and `maintenance4`, as hard requirements                                             |
+| §2.1                  | Instance, device and queues: validation layers in debug builds routed into `log`, `vkSetDebugUtilsObjectNameEXT` behind the HAL's debug names, discrete devices preferred, one graphics+compute queue, a `gpu-allocator` suballocator |
+| §2.2                  | Swapchain and frame loop: mailbox preferred with FIFO fallback, two frames in flight on a timeline semaphore, per-frame command pools and descriptor recycling, a deletion queue retiring resources N frames later                    |
+| §2.3                  | Pipelines and shaders: Slang compiled offline (the runtime recompile path is stage 6's hot reload), pipelines built from HAL POD descriptors, a pipeline cache persisted to disk                                                      |
+| §2.4                  | The render graph: passes declare reads and writes, the graph computes every `sync2` barrier and layout transition, transients are aliased, the graph dumps itself as text, and every pass gets a GPU timestamp                        |
+| §2.5, rungs 1–5       | The ladder: (1) a clear colour through the graph, (2) a triangle pulled from a storage buffer with no vertex input state, (3) a depth-tested spinning cube, (4) one directional light, Lambert plus Blinn, (5) an orthographic camera |
+| Exit criteria         | Zero validation errors or warnings, named objects and passes in a RenderDoc capture, a readable graph dump, CI unit tests and a lavapipe smoke test                                                                                   |
+| Risks                 | Sync bugs, the stage's headline risk (sync2 only through the graph, sync validation on); Slang toolchain friction (commit the compiled artifacts); graph over-engineering                                                             |
+| Shader rules 1–5      | The shader-portability rules below                                                                                                                                                                                                    |
+
+- **No manual barriers outside the graph, ever.** Passes declare what they read
+  and write; the graph orders them as declared and computes every barrier and
+  layout transition. The MVP graph is a linear pass list with computed barriers:
+  **no multi-queue scheduling and no reordering** — the over-engineering risk
+  the plan named, and resisted.
+- **The graph must be able to explain itself.** `dump()` writes the pass order
+  and the barriers as text: the debug-tools principle, applied to the one
+  component whose output is otherwise invisible.
+- **The graph models queue-family release and acquire from the start.** MVP
+  uploads share the graphics+compute queue, stated rather than assumed, but the
+  barrier model carries ownership transfer so a dedicated transfer queue is
+  additive later rather than a barrier-model rewrite.
+- **Reversed-Z is locked**: `D32_SFLOAT`, a projection with an **infinite far
+  plane and reversed depth**, compare op `GREATER`, clear to 0.0. A sector-tiled
+  world with 300 m+ sightlines z-fights at once on a conventional 0..1 buffer,
+  and retrofitting it after P1 invalidates every blessed golden. It binds
+  projection maths, the viewmodel depth-slice remap, soft particles and depth
+  collision, and every AA and post input.
+- **HDR from the first lit mesh**: the scene renders to `RGBA16F` through a
+  tonemap pass even with no HDR content, so the later HDR stack did not force a
+  re-bless of the early goldens and their web demos.
+- **No feature fallbacks in the MVP.** A device missing a required feature is
+  refused with a clear error; fallbacks were post-MVP scope.
+- **The HAL was provisional at stage-2 exit and froze at P5 exit**, when a
+  second backend (`crcbl-webgpu`) had implemented it. A change after that needs
+  an explicit justification.
+- **The lavapipe golden e2e is a hard gate**, not "if practical": a gate cannot
+  be optional.
+- **Slang stays; a home-grown shading language was declined.** The problems are
+  API gaps, not language gaps — Metal has no ray tracing in Slang, WebGPU has no
+  bindless — and a language of our own would fix neither. It would also buy only
+  the front half: DXIL still goes through `dxc` and is signed by `libdxil.so`,
+  and MSL is compiled by Metal at run time. **Reopen only** if Slang blocks the
+  project a second time with no workaround.
+- **One source, four targets, all committed.**
+  `crates/crcbl-shaders/tools/compile-shaders.sh` emits SPIR-V, WGSL, MSL and
+  DXIL from each `.slang` source with a SHA-256 manifest, so `cargo build` needs
+  no shader compiler and `--check` catches drift in CI.
+- **The five shader-portability rules**, by the number code cites:
+  1. **Every shader declares the targets it must support**
+     (`// crcbl-targets:`), and the compile script fails when a required target
+     will not take it. A ray-tracing or mesh shader has no WGSL form and says so
+     rather than emitting a broken artifact.
+  2. **Per-target `-D` defines** (`CRCBL_TARGET_*`), because Slang defines no
+     target macro of its own. **A forked shader is never the answer**: the
+     uniform-buffer form `sprite.slang` uses is preferred where it is free, and
+     the defines cover the rest. `ui_tier_b.slang` was the fork this rule
+     deleted.
+  3. **Declaration order equals binding order**, enforced by `crcbl-shaders`'s
+     `declaration_order` module. Slang's Metal target ignores `[[vk::binding]]`
+     and assigns indices in declaration order while `crcbl-mtl` binds by
+     ascending `(set, binding)`; when `ui.slang` disagreed with itself the UI
+     pass drew nothing on macOS.
+  4. **Validate all four artifacts**: `spirv-val`, the `wgsl_validation` test,
+     `xcrun metal -c` in `ci.yml`'s `mtl e2e` job, and a signed-container
+     assertion on every DXIL artifact. An artifact nothing reads is an artifact
+     nothing checks — and naga accepting WGSL is not Dawn accepting it.
+  5. **Semantic divergence is caught by rendering, not by reading.**
+     `SV_InstanceID` lowers to `InstanceIndex - BaseInstance` on SPIR-V and to a
+     bare `instance_index` on WGSL, so one source drew two pictures; no lint
+     finds that class. `web/run-cross-backend-e2e.sh` holds the browser against
+     live Vulkan and Metal renders; D3D12 is the backend still outside it.
+- **Considered, and reopenable: SPIR-V as the single native IR** (Godot's model:
+  SPIRV-Cross to MSL, Mesa NIR to DXIL), which makes rule 5's class structurally
+  impossible. Not adopted: it costs two vendored C/C++ translators, the WGSL leg
+  cannot use it — naga's SPIR-V frontend rejects the `DrawParameters` capability
+  every artifact declares — and neither route solves Metal ray tracing. **Reopen
+  when** a Metal shader disagrees with its Vulkan twin a second time, or the
+  differential gate proves too coarse to localise one.
+
 ## What the deleted 42-steam plan left behind (2026-09-24)
 
 Record; the plan designed `crates/crcbl-steam` — Steamworks over the SDK's flat

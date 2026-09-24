@@ -107,8 +107,8 @@ bitflags::bitflags! {
 /// Where a resource's memory lives, and who can touch it.
 ///
 /// Three locations rather than a full heap-property matrix: these are the three
-/// `crcbl-vk` wraps `gpu-allocator` around (`docs/plan/02-vulkan-backend.md`
-/// §2.1), and they are the three that map onto Metal's `private`/`shared` and
+/// `crcbl-vk` is to wrap `gpu-allocator` around (stage 2
+/// §2.1; still owed), and they are the three that map onto Metal's `private`/`shared` and
 /// DX12's `DEFAULT`/`UPLOAD`/`READBACK` without invention.
 ///
 /// # A buffer a shader writes must be [`DeviceLocal`](Self::DeviceLocal)

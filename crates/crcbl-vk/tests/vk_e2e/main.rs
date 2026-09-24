@@ -24,7 +24,7 @@
 //! [`ValidationReport::assert_clean`] fails on any error *or* warning, and also
 //! fails when the layer was never loaded — so a green run means the layer looked
 //! and found nothing, not that nobody looked. That is what makes
-//! `docs/plan/02-vulkan-backend.md`'s "zero validation errors/warnings" exit
+//! stage 2's "zero validation errors/warnings" exit
 //! criterion a test result.
 
 #![cfg(feature = "vk-e2e")]

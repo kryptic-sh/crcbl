@@ -24,7 +24,7 @@
 //! loop**, and the browser main thread — where the rAF loop runs — cannot block
 //! waiting for one. A synchronous-only `create_device` was a trait method that
 //! returned [`HalError::Unsupported`] on the target
-//! `docs/plan/10-wasm-webgpu.md` most wants to ship to, which is the exact
+//! the browser track most wants to ship to, which is the exact
 //! mistake [`crate::readback`] and [`crate::swapchain`] were shaped to avoid.
 //!
 //! | Step | Vulkan | WebGPU |
@@ -74,7 +74,7 @@
 //! third trait object. Queues carry no state a caller can usefully hold, and
 //! `Device::submit(queue, …)` keeps the number of trait objects in the engine at
 //! three. The plurality that matters — async compute and a dedicated transfer
-//! queue, which `docs/plan/02-vulkan-backend.md` says must be *modelled* even
+//! queue, which stage 2 said must be *modelled* even
 //! though the MVP uses one — is fully expressible: [`Device::queue`] returns a
 //! handle per [`QueueKind`], and [`QueueTransfer`](crate::QueueTransfer)
 //! already carries ownership transfers between them.
@@ -99,7 +99,7 @@
 //! `destroy_*` takes the handle by value and returns nothing. It means "this
 //! handle is dead now"; it does **not** promise the GPU is finished with the
 //! object. Deferring the real free until N frames later — the deletion queue
-//! from `docs/plan/02-vulkan-backend.md` §2.2 — is the backend's business.
+//! from stage 2 §2.2 — is the backend's business.
 //! Destroying a resource the GPU is still using is a caller bug that the graph's
 //! lifetime tracking is responsible for preventing, exactly as it is in Vulkan.
 //!
@@ -636,7 +636,7 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// **There is no synchronous read.** WebGPU's `mapAsync` completes on a
     /// later turn of the event loop and cannot be blocked on from the browser
     /// main thread, so a blocking signature would be unimplementable on the
-    /// target `docs/plan/10-wasm-webgpu.md` cares most about. See
+    /// target the browser track cares most about. See
     /// [`crate::readback`] for the full argument and the per-backend mapping.
     ///
     /// The result is observed with [`Device::poll_readback`] and released with
@@ -644,8 +644,8 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// when this is called, or the completion point named by
     /// [`ReadbackDesc::after`].
     ///
-    /// This is still the *one* readback `docs/plan/03-gpu-driven-rendering.md`
-    /// §3.5 permits in the frame loop — culling stats, N frames latent, debug
+    /// This is still the *one* readback topic 03 (§3.6)
+    /// permits in the frame loop — culling stats, N frames latent, debug
     /// builds only. Poll-shaped is what makes "N frames latent" expressible.
     ///
     /// # Errors
@@ -907,7 +907,7 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     ) -> Result<GraphicsPipelineHandle, HalError>;
 
     /// Creates a **mesh** pipeline — the primary geometry path, per
-    /// `docs/plan/03-gpu-driven-rendering.md` §3.5.
+    /// topic 03 §3.5.
     ///
     /// It produces a [`GraphicsPipelineHandle`], and is bound and destroyed
     /// exactly like one; [`MeshPipelineDesc`](crate::MeshPipelineDesc) explains

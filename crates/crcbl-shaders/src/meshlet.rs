@@ -1,7 +1,7 @@
 //! The cluster record a mesh shader indexes, in the byte layout
 //! `shaders/mesh_cluster.slang` declares.
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.5 makes mesh shaders the primary
+//! Topic 03 §3.5 makes mesh shaders the primary
 //! geometry path and a cluster its unit of work. The *builder* that partitions
 //! a triangle list into clusters is `crcbl_scene::meshlet::build_meshlets` — a
 //! bake-side producer over host arrays — and this module is the record it

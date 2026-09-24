@@ -1,7 +1,7 @@
 //! The transient resource pool: graph-owned images and buffers, reused across
 //! frames and aliased within one.
 //!
-//! `docs/plan/02-vulkan-backend.md` §2.4 asks for a "transient resource pool:
+//! Stage 2 §2.4 asks for a "transient resource pool:
 //! graph-owned images/buffers aliased across non-overlapping passes". Aliasing
 //! *within* a frame is [`crate::graph`]'s half — it decides which virtual
 //! resources can share a physical one, and it can decide that without a device.

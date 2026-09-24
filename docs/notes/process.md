@@ -375,8 +375,9 @@ Stated plainly, so the next session does not mistake silence for coverage.
 ## Coverage gaps in this audit
 
 - **Only seven docs were read against the tree**: `01-foundations` (since folded
-  into `docs/notes/backends.md`), `02-vulkan-backend.md`,
-  `09-backends-metal-dx12.md`, `10-wasm-webgpu.md`, `15-windowing.md`,
+  into `docs/notes/backends.md`), `02-vulkan-backend` (since folded into
+  `docs/notes/backends.md`), `09-backends-metal-dx12.md`, `10-wasm-webgpu`
+  (since folded into `docs/notes/browser.md`), `15-windowing.md`,
   `39-capabilities.md`, `41-webgpu-stream` (since folded into
   `docs/notes/browser.md`). Everything else in `docs/plan/` was untouched and
   unverified.
@@ -701,14 +702,13 @@ confirmed; the rest of this file assumes them.
   Godot's SPIR-V-as-single-IR model would make the `SV_InstanceID` class of
   divergence structurally impossible, but costs two vendored C/C++ translators
   and cannot serve the WGSL leg anyway (naga's SPIR-V frontend rejects
-  `DrawParameters`). Recorded as reopenable in `docs/plan/02-vulkan-backend.md`
-  with a named trigger. **To override:** adopt SPIRV-Cross and spirv-to-dxil for
-  the native targets.
-- **The editor is native-only.** `10-wasm-webgpu.md` called editor-in-browser a
-  stretch that "should mostly work by construction"; the asset browser, OS
-  drag-drop and the file watcher are all native-shaped and nobody examined it.
-  **To override:** scope what a browser editor would actually do about those
-  three.
+  `DrawParameters`). Recorded as reopenable in `docs/notes/backends.md` (_What
+  the deleted 02-vulkan-backend plan left behind_) with a named trigger. **To
+  override:** adopt SPIRV-Cross and spirv-to-dxil for the native targets.
+- **The editor is native-only.** Stage 10 called editor-in-browser a stretch
+  that "should mostly work by construction"; the asset browser, OS drag-drop and
+  the file watcher are all native-shaped and nobody examined it. **To
+  override:** scope what a browser editor would actually do about those three.
 - **`crcbl_ui::hud` gets deleted, not extended.** It has no consumer, and the
   obvious fix (a `color` on `Label`) builds on the model topic 7's CSS rewrite
   replaces. **To override:** add the field and have the samples adopt it,

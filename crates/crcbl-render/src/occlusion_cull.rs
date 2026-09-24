@@ -1,4 +1,4 @@
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3's occlusion cull: the
+//! Topic 03 §3.3's occlusion cull: the
 //! farthest-depth pyramid it reads, and the switches that turn it on.
 //!
 //! ```text
@@ -95,7 +95,7 @@ crcbl_console::convar! {
     ///
     /// **Pixel-identical either way** — the second phase is conservative — so
     /// what it changes is draws and time. Off by default until the price on
-    /// every tier says otherwise; `docs/plan/03-gpu-driven-rendering.md` §3.3.
+    /// every tier says otherwise; topic 03 §3.3.
     pub static r_occlusion_cull: bool = false;
 }
 

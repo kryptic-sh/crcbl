@@ -1309,7 +1309,7 @@ fn a_transient_buffers_state_carries_across_frames_too() {
 
 /// The graph's own dump, checked against the frame it describes.
 ///
-/// `docs/plan/02-vulkan-backend.md` §2.4's debug principle is that "the graph
+/// Stage 2 §2.4's debug principle is that "the graph
 /// must be able to explain itself", and its exit criteria require the dump to be
 /// "readable and correct". Correct is the checkable half: every barrier in the
 /// compiled plan appears in the text, with its states.
@@ -1783,7 +1783,7 @@ fn buffers_transition_and_return_to_their_final_state() {
 }
 
 /// The barrier model represents queue-family acquire/release from the start,
-/// which `docs/plan/02-vulkan-backend.md`'s corrections require so a dedicated
+/// which stage 2's corrections require so a dedicated
 /// transfer queue is additive later rather than a rewrite.
 ///
 /// Nothing in the MVP uses a second queue. This test does, to prove the model
@@ -2217,7 +2217,7 @@ fn an_import_left_in_its_final_state_gets_no_trailing_barrier() {
 }
 
 /// Declaration order is execution order, with no sorting and no surprises —
-/// which is the whole of `docs/plan/02-vulkan-backend.md`'s "no reordering".
+/// which is the whole of stage 2's "no reordering".
 #[test]
 fn passes_run_in_the_order_they_were_declared() {
     let harness = Harness::open();

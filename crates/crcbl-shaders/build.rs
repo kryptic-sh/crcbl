@@ -5,7 +5,7 @@
 //! with no `slangc` — a contributor's, the macOS and Windows CI legs, the plain
 //! `test (linux)` job — does the full check, because the check is SHA-256 over
 //! files that are already in the repository. That is the whole point of
-//! committing the SPIR-V: `docs/plan/02-vulkan-backend.md`'s risk list says
+//! committing the SPIR-V: stage 2's risk list said
 //! "check in compiled SPIR-V alongside sources until the toolchain story is
 //! smooth", and a build that needed the toolchain anyway would have taken the
 //! cost without the benefit.

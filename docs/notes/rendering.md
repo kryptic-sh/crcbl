@@ -23,6 +23,120 @@ pixel over tolerance, max channel delta 3**. Anyone reaching for a per-scene
 tolerance again should first check whether the fixture's own edges are on the
 pixel grid.
 
+## What the deleted 03-gpu-driven-rendering plan left behind (2026-09-24)
+
+Record; the built part of the plan is `crcbl_render`'s `mesh_pool`,
+`instance_pool`, `material_table`, `cull`, `draw_gen`, `cluster_pool`,
+`occlusion_cull`, `timing`, `cull_stats` and `debug_draw`, with `cull.slang`,
+`draw_gen.slang` and `mesh_cluster.slang`, and `apps/quarry` rendering each
+`GeometryPath` against a golden. What it left open is in `docs/backlog.md` under
+_`Bindless` has no implementation_, _No transparent pass, and therefore no depth
+sort_, _Camera-relative rendering: the f64 sector offset table_, the per-cluster
+occlusion bullet in _What occlusion culling shipped without_, _The GPU-driven
+exit criteria have never been measured_ and the RenderDoc bullet in _Findings
+the roadmap carried that nothing else did_. It specified stage 3: turning "draws
+a mesh" into a GPU-driven renderer where the CPU uploads deltas and records a
+near-constant command stream and the GPU decides what draws.
+
+Code cites the plan as "topic 03 §3.5", "§3.3's second half" or "the 2026-07-27
+correction". Those numbers resolve here:
+
+| Citation                     | What it specified                                                                                                                                                                          |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Goals                        | Scene size decoupled from CPU cost (10 objects and 10,000 record roughly the same commands); no per-object descriptor updates or buffer binds, and no readbacks in the frame loop          |
+| Paths, not tiers             | The two selectors, `GeometryPath` (`MeshShader`, `IndirectCount`, `IndirectPerBatch`) and `BindingModel` (`Bindless`, `ArrayPages`), replacing the old Tier A / Tier B pair                |
+| §3.1                         | Global geometry pools: one vertex pool and one index pool, a mesh is three integers (`base_vertex`, `base_index`, `count`), vertex pulling everywhere, uploads gated on a timeline value   |
+| §3.2                         | Instance and material data: the `GpuInstance` array written by delta upload, the material table, texture array pages or a bindless array, camera constants in one uniform buffer           |
+| §3.3                         | GPU culling and draw generation: a compute frustum cull into a compacted visible list, indirect arguments and a count buffer; two-phase occlusion against the depth pyramid                |
+| §3.4                         | Sorting and passes: opaque binning by material, a depth-sorted transparent pass, and 2D content through the same instance path with z as z-index                                           |
+| §3.5                         | Meshlet geometry, the primary path: the meshlet build as a bake step, per-cluster culling in the amplification stage, cluster LOD over a DAG, and the non-second-class fallback            |
+| §3.6                         | Debug instrumentation: per-pass GPU timestamps, the cull-stats readback on a delayed ring, and the debug draw layer                                                                        |
+| Exit criteria                | 10k+ instanced meshes with CPU frame time flat against instance count; zero per-frame descriptor writes and zero frame-loop readbacks bar the ring; a golden per selected path combination |
+| The 2026-07-27 correction(s) | Camera-relative instances, the fixed bucket table, GPU radix sort for transparency, and each path selector as a permutation axis — see the rules below                                     |
+
+- **The lesser path is a constraint on data layout, not a separate renderer.**
+  Pools, instance buffers and material tables are laid out so every path
+  consumes them; only the emit tail and the material lookup differ. **The cull
+  pass is identical on every `GeometryPath`**: `MeshShader` culls per cluster in
+  the amplification stage and builds no draw list, `IndirectCount` issues one
+  indirect-count call per bucket, and `IndirectPerBatch` issues one
+  `draw_indirect` per bucket over the compacted list. Buffer device address is
+  not a selector: without it the shaders use indexed storage-buffer lookups.
+- **Mesh shaders are the primary geometry path, not an optimisation.** Every
+  native backend has them (`VK_EXT_mesh_shader`, D3D12 SM6.5, Metal 3) and Slang
+  emits all three; the other paths are what a device without them falls back to.
+  **The fallback is not second-class**: the indirect paths draw the same
+  clusters as index ranges and select cluster LOD in the cull pass instead, so
+  the same geometry and pools give the same picture at a coarser granularity.
+- **The meshlet build is a bake step**, deterministic: same input hash, same
+  clusters, so the bake cache and the golden-mesh tests work as for every other
+  cooked artifact. **The instance cull runs first** and survives beside the
+  cluster cull: instance rejection is cheaper, and neither replaces the other.
+- **The cluster hierarchy is a DAG, not a chain of levels** (locked 2026-08-12).
+  A chain simplifies each level independently, so adjacent clusters at different
+  levels crack along their shared edge; the build groups neighbours, locks each
+  group's outer boundary while simplifying its interior, re-splits and repeats
+  with different groupings, so every cut is crack-free. Cluster LOD is the point
+  of the hierarchy — a hierarchy with nothing to select between is the culling
+  win without the detail win — which is why QEM simplification moved into the
+  MVP.
+- **Draw binning is a fixed bucket table**, not a sort. The cull scatters
+  compacted instances into per-bucket indirect draws with per-bucket counts,
+  capacity sized from scene stats with an overflow counter, and
+  `IndirectPerBatch` emits the same buckets. **The key today is
+  `(resident mesh, material mode)`** — the mesh because an argument structure's
+  index range is per draw, the mode because the depth prepass and the shadow
+  atlas bind a pipeline per bucket — and it grows to
+  `(material template, permutation, pass)` as the same table with a longer key.
+- **A page is one image**: every layer of the `ArrayPages` texture array shares
+  an extent, a format and a mip count. That is the constraint `Bindless` exists
+  to lift, and real imported content does not have one extent. `Bindless` was
+  not built because `crcbl-mtl` withdraws `DESCRIPTOR_INDEXING`, so a bindless
+  lookup would leave Metal with no texture path; a `Bindless` device runs the
+  `ArrayPages` layout, and what it would gain is capacity, not a second path.
+- **The material id is read in the fragment stage as a flat varying**, moved
+  there alone before any texture joined it, because the file's two worst bugs
+  (`SV_InstanceID`, `SV_VertexID`) were integers the four targets disagreed
+  about. All four emit the flat qualifier (SPIR-V `Flat`, WGSL
+  `@interpolate(flat)`, MSL `[[flat]]`, DXIL `nointerpolation`). The material
+  table has no ring: a row is written when it is created, and an animated
+  material is what would make it one.
+- **Instances store sector-local `f32` transforms plus a sector id**, static
+  while an object does not move, so delta upload survives camera motion. Per
+  frame the CPU computes a small **sector→camera offset table in f64** and the
+  vertex and cull shaders add it; that also defines the space cull AABBs live
+  in. Only the instance half is built.
+- **Transparency sorts with a GPU radix sort over packed depth keys**, bitonic
+  for small counts — named so it is not rediscovered; the design is now
+  `docs/plan/53-transparency.md`'s.
+- **Each path selector is a permutation axis in one Slang source**, through
+  per-target `-D` defines and a declared target list per shader, decided before
+  any shader was written because the first shaders became the later stages'
+  inputs.
+- **The cull-stats ring is the only permitted readback**: N frames latent, debug
+  builds only. Everything else the GPU decides stays on the GPU.
+- **Occlusion culling is two-phase and off by default.** The cull tests frustum
+  survivors against the previous frame's farthest-depth pyramid, draws what
+  passes, reduces this frame's depth and retests the rest before a late prepass;
+  frames with it on are pixel-identical to frames with it off on every path.
+  Measured at 1920×1080 in `Scene::Occluders`, it hid two thirds of the
+  survivors and took lavapipe's frame from 73.87 to 64.66 ms but cost an RX 7900
+  XTX 0.905 against 0.859 ms, where the saved draws are cheap. The later
+  measurements are in `docs/backlog.md` under _What occlusion culling shipped
+  without_. The "visibility buffer slot" the plan once named is this pass's
+  input, not a visibility-buffer renderer, which the forward rule refuses.
+- **`draw_gen.slang::lateFinishMain` finalizes buckets in parallel.** On a
+  Vulkan/radv fixture with 512 crate buckets it took the sum of GPU pass
+  durations from 4.769 to 4.579 ms and the finalizer from 0.181 to 0.002 ms
+  (repeated-run pass times, not frame time; the original bucket layout showed
+  negligible benefit). `mesh_e2e::occlusion_finish` is its check, and forcing a
+  single workgroup made it fail.
+- **Sprites are instances, not mesh ranges.** `crcbl_render::sprite_pass`
+  generates its quad from `SV_VertexID` and reads per-sprite data by
+  `SV_InstanceID`, outside `draw_gen`'s buckets. What the "no second 2D
+  renderer" decision protected still holds: one pass in the same graph with the
+  same computed barriers.
+
 ## What the deleted 46-ambient-occlusion plan left behind (2026-09-24)
 
 Record; the plan was built, and what it left open is in `docs/backlog.md` under

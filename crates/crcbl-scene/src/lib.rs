@@ -37,7 +37,7 @@
 //! # Why meshlet clustering and mesh simplification are here too
 //!
 //! [`meshlet`] and [`mod@simplify`] belong beside the other two for the same
-//! reason: `docs/plan/03-gpu-driven-rendering.md` §3.5's cluster build and
+//! reason: topic 03 §3.5's cluster build and
 //! `docs/plan/25-lod.md`'s QEM decimation are both bake steps over exactly the
 //! host arrays `import_gltf` produces — positions and indices — so they land
 //! in the crate that owns them rather than becoming further names for the same

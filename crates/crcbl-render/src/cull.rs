@@ -12,7 +12,7 @@
 //!                                     visible_instances
 //! ```
 //!
-//! `docs/plan/03-gpu-driven-rendering.md` §3.3: "Compute pass: frustum cull
+//! Topic 03 §3.3: "Compute pass: frustum cull
 //! against instance AABBs → compacted visible instance list". The compute pass
 //! is `crcbl-shaders`' `cull.slang`; **everything in this module is ordinary
 //! Rust**, and it exists for two reasons that are not the same reason:

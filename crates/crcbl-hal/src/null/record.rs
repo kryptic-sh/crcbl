@@ -1217,7 +1217,7 @@ impl Recorder {
     /// there for the same reason: the null backend opens a device instantly, so
     /// a request would otherwise be ready on its first poll and a caller's
     /// **poll loop** — the rAF-driven start-up path that
-    /// `docs/plan/10-wasm-webgpu.md` needs — would never be exercised. Setting a
+    /// the browser needs — would never be exercised. Setting a
     /// latency simulates WebGPU's deferred `requestDevice` promise on a machine
     /// with no browser and no GPU.
     ///

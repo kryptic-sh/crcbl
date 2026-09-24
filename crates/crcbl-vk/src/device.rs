@@ -679,7 +679,7 @@ impl VkDevice {
         present_surface: Option<vk::SurfaceKHR>,
     ) -> Result<Self, HalError> {
         if !record.core_1_3.is_complete() {
-            // `docs/plan/02-vulkan-backend.md`: "No fallback paths for missing
+            // Stage 2's rule: "No fallback paths for missing
             // features in MVP. If the device lacks them, error clearly and
             // exit."
             return Err(HalError::Backend(format!(
@@ -1077,7 +1077,7 @@ impl DeviceInner {
 
     /// Attaches a debug name, if the instance has `VK_EXT_debug_utils`.
     ///
-    /// `docs/plan/02-vulkan-backend.md` §2.1: "names show up in RenderDoc from
+    /// Stage 2 §2.1: "names show up in RenderDoc from
     /// the first triangle onward". Wiring it at every creation site now costs
     /// one line each and is invisible to add later only in the sense that
     /// nobody ever does.
