@@ -3022,8 +3022,12 @@ the gaps below.
   store.
 - **List rows are keyed by index**, so focus follows the index when the data
   reorders; there is no item-key variant and no scroll-to-index API.
-- **Nothing scrolls a list with a wheel**: `PointerInput` has no wheel, so a
-  list scrolls by focus or through the store only.
+- **The wheel is a separate call, not a `PointerInput` field.**
+  `Ui::scroll_wheel(delta)` (2026-09-25) scrolls the innermost block under the
+  pointer that can move and chains outward, but no sample feeds it yet, and
+  `crcbl::engine` does not route the shell's wheel into it: each app calls it
+  with its own wheel delta. A partial step stops at the block's end rather than
+  spilling the remainder outward within the same turn.
 - **A split position is pixels, not a fraction**, so it does not rescale with
   its parent; the divider is one extra navigation stop; `split { flex-grow: 1 }`
   in `default.css` assumes a split fills its parent.

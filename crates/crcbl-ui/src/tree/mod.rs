@@ -1062,6 +1062,47 @@ impl Ui {
         }
     }
 
+    /// Scrolls the `overflow: scroll` blocks under this frame's pointer by a
+    /// wheel's `delta`, in pixels, and says whether anything moved. Call it
+    /// after [`Ui::begin_frame`], with the frame's wheel movement; positive `y`
+    /// moves toward the end of the content, as a wheel turned toward the
+    /// player does in a browser.
+    ///
+    /// **Each axis goes to the innermost block that can still move along it.**
+    /// The pointer is hit-tested against last frame's rectangles, as
+    /// [`Ui::begin_frame`] resolves hover, and the chain of blocks holding it is
+    /// walked innermost first: a list scrolls until it is at its end, and only
+    /// then does the wheel reach the panel around it — a browser's scroll
+    /// chaining. Each block moves no further than the reach its last layout
+    /// gave it.
+    ///
+    /// `false` when nothing under the pointer could move — so the caller can
+    /// give the wheel to something else, such as a zoom bound to it.
+    pub fn scroll_wheel(&mut self, delta: Vec2) -> bool {
+        let chain = self.store.hit_chain(self.pointer.pos);
+        let mut moved = false;
+        for axis in 0..2 {
+            let step = delta[axis];
+            if step == 0.0 {
+                continue;
+            }
+            for &key in &chain {
+                let Some(slot) = self.store.find(key) else {
+                    continue;
+                };
+                let node = self.store.get_mut(slot);
+                let offset = node.scroll_offset[axis];
+                let next = (offset + step).clamp(0.0, node.scroll_max[axis]);
+                if next != offset {
+                    node.scroll_offset[axis] = next;
+                    moved = true;
+                    break;
+                }
+            }
+        }
+        moved
+    }
+
     /// Last layout's border box for `key`, in screen pixels.
     #[must_use]
     pub fn rect(&self, key: NodeKey) -> Option<(Vec2, Vec2)> {

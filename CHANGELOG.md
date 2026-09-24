@@ -283,6 +283,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_ui::tree::Ui::scroll_wheel(delta)`** scrolls the `overflow: scroll`
+  blocks under this frame's pointer by a wheel's movement, each axis going to
+  the innermost block that can still move along it and chaining outward once it
+  is at its end, as a browser does. It returns whether anything moved, so an
+  unused wheel can go to something else. `PointerInput` is unchanged.
 - **`crcbl_inventory::Grid::can_move_within`** — whether `move_within` would
   move a placement, its own cells counting as free, without moving anything and
   without allocating. A drag's `can_accept` asks it every frame it hovers a

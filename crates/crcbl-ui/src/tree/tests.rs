@@ -980,3 +980,89 @@ fn a_scroll_offset_moves_the_children_for_drawing_and_hitting() {
         "the hit test ignored the scroll"
     );
 }
+
+/// **The wheel scrolls the innermost block under the pointer that can still
+/// move, and chains outward once it is at its end.** An inner list of reach 30
+/// sits in a panel of reach 30: the wheel moves the list first, the list stops
+/// at its end without the excess spilling over, the next turn moves the panel,
+/// and a wheel over nothing that scrolls reports that nothing moved.
+#[test]
+fn the_wheel_scrolls_the_innermost_block_that_can_move() {
+    // Nothing shrinks, so the content overflows and each block has a reach.
+    let fixed = |height: f32| NodeStyle {
+        flex_shrink: 0.0,
+        ..sized(50.0, height)
+    };
+    let scroller = |height: f32| NodeStyle {
+        overflow: Overflow::Scroll,
+        flex_direction: FlexDirection::Column,
+        ..fixed(height)
+    };
+    let build = |ui: &mut Ui| {
+        let mut list = None;
+        let panel = ui.block("#panel", &scroller(50.0).declarations(), |ui| {
+            list = Some(ui.block("#list", &scroller(30.0).declarations(), |ui| {
+                for _ in 0..3 {
+                    ui.block("", &fixed(20.0).declarations(), |_| {});
+                }
+            }));
+            ui.block("", &fixed(50.0).declarations(), |_| {});
+        });
+        (panel.key, list.expect("built").key)
+    };
+    let mut ui = Ui::new();
+    let mut keys = None;
+    frame(&mut ui, idle(), |ui| keys = Some(build(ui)));
+    let (panel, list) = keys.expect("built");
+    let over_list = PointerInput::hovering(Vec2::new(10.0, 10.0));
+    let turn = |ui: &mut Ui, pointer, delta| {
+        ui.begin_frame(pointer);
+        let moved = ui.scroll_wheel(Vec2::new(0.0, delta));
+        build(ui);
+        ui.layout(
+            Vec2::ZERO,
+            AvailableSpace::MAX_CONTENT,
+            &FontAtlas::built_in(),
+        );
+        (
+            moved,
+            ui.scroll_offset_of(list).y,
+            ui.scroll_offset_of(panel).y,
+        )
+    };
+    assert_eq!(
+        turn(&mut ui, over_list, 25.0),
+        (true, 25.0, 0.0),
+        "the list first"
+    );
+    assert_eq!(
+        turn(&mut ui, over_list, 25.0),
+        (true, 30.0, 0.0),
+        "the list ends"
+    );
+    assert_eq!(
+        turn(&mut ui, over_list, 25.0),
+        (true, 30.0, 25.0),
+        "then the panel"
+    );
+    // The panel scrolled 25 up, so only the list's last 5 pixels still show
+    // inside the panel's clip: aim there, or the wheel goes to the panel (or,
+    // above the clip, to nothing).
+    let (_, max) = ui.rect(list).expect("laid out");
+    assert_eq!(max.y, 5.0, "the list's visible strip");
+    let over_moved_list = PointerInput::hovering(Vec2::new(10.0, max.y - 1.0));
+    assert_eq!(
+        turn(&mut ui, over_moved_list, -10.0),
+        (true, 20.0, 25.0),
+        "back up the list"
+    );
+    assert_eq!(
+        turn(
+            &mut ui,
+            PointerInput::hovering(Vec2::new(200.0, 200.0)),
+            25.0
+        ),
+        (false, 20.0, 25.0),
+        "nothing under the pointer scrolls"
+    );
+}
