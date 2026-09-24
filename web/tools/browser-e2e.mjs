@@ -265,7 +265,7 @@ const SLUG = DEMO.replace(/^demos\//, '').replace(/\/$/, '');
  * asserts on ought to be written out in this file.
  *
  * **It wears the rig because the page no longer opens on one.** The tab opens
- * the shelf's Suzanne — `docs/plan/sample/05-viewer.md` milestone 4 — and
+ * the shelf's Suzanne — the viewer's milestone 4 — and
  * Suzanne is one static mesh, so this is the only rigged document a browser run
  * ever sees and the `playing` and `deforming` checks read it after the drop.
  * The rig is `apps/viewer/src/demo_model.rs`'s, reduced to what those two
@@ -1418,7 +1418,7 @@ const EXPECTATIONS = {
     // closed one while the hand is holding it — which group C asserts mid-drag.
     cursor: 'grab',
     // **THE DOCUMENT IS THE SHELF'S SUZANNE NOW, NOT THE ONE THE MODULE
-    // GENERATES.** `docs/plan/sample/05-viewer.md` milestone 4 makes Suzanne
+    // GENERATES.** The viewer's milestone 4 makes Suzanne
     // what opens when nothing is asked for on both hosts, and
     // `web/demos/viewer/assets/manifest.json` names its four files so the shim
     // has them resident before `boot()`. So these numbers are that file's.
@@ -7509,7 +7509,7 @@ try {
   // that is never reloaded never has to answer for what it wrote. A browser has
   // no filesystem, `crates/crcbl-store/src/web/opfs.rs` is the only backend
   // there is, and the way it fails is silently: that is the half
-  // `docs/plan/sample/20-options.md` calls the easy one to get wrong.
+  // options' plan called the easy one to get wrong.
   //
   // Four claims, each with the control that stops it passing for the wrong
   // reason:
@@ -8433,8 +8433,8 @@ try {
   }
 
   // **A FILE THE VISITOR CHOSE, WHICH IS THE OTHER WAY INPUT REACHES THIS
-  // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target,
-  // `docs/plan/sample/05-viewer.md`'s V-F5 — and it belongs in this group for
+  // ENGINE.** Only viewer has one — `apps/viewer/src/web.rs`'s drop target
+  // — and it belongs in this group for
   // the group's own reason: everything above is a pointer or a key arriving
   // through the browser's input pipeline and changing what the engine says
   // about itself, and a dropped document is the same claim about a different

@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/sample/18-sundial.md`'s atlas viewer: the shadow atlas itself drawn
+// Sundial's atlas viewer: the shadow atlas itself drawn
 // over the frame, so which slot holds which map is a thing a reviewer can look
 // at rather than infer.
 //

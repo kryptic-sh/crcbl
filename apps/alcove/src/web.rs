@@ -42,7 +42,7 @@
 //! **The browser draws the court through [`crcbl::hal::LightingPath::Rasterised`]
 //! by construction.** WebGPU exposes no ray query, so the selector cannot
 //! resolve to anything else here — which is also the honest answer to milestone
-//! 4 of `docs/plan/sample/19-alcove.md`: the ray-traced rung cannot be looked at
+//! 4 of alcove (`docs/backlog.md`): the ray-traced rung cannot be looked at
 //! on this tier, and the panel's `ray tracing` row says `raster only` rather than
 //! implying a choice was made. Screen-space occlusion is the whole of what is
 //! being compared here, which is exactly what this fixture is for.
@@ -169,7 +169,7 @@ pub extern "C" fn __crcbl_alcove_view(on: i32) -> i32 {
 ///
 /// # What it is for
 ///
-/// `docs/plan/sample/19-alcove.md`'s milestone 3.
+/// Alcove's milestone 3.
 /// [`__crcbl_alcove_bent_normals`] is the switch that makes the gather report a
 /// direction; a scalar view of the frame says nothing about **which way** the
 /// ambient is being sampled from, and the charter is explicit that a term that

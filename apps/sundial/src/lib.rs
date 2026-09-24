@@ -2,9 +2,8 @@
 //!
 //! One open plaza, a sun on a scripted clock, and every shadow filter the engine
 //! ships drawn from the same frame. **Not a game**: the shadow is the content,
-//! and there is nothing to play.
-//! [`docs/plan/sample/18-sundial.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/18-sundial.md)
-//! is the charter, and its non-goals are a hard cap.
+//! and there is nothing to play. Its rules are in `docs/notes/samples.md`, and
+//! its non-goals are a hard cap.
 //!
 //! **No `World`, no system, no `GameModule`**, and their absence is the charter's
 //! answer rather than an oversight: sample rules 2 and 10 exist so a *game*'s

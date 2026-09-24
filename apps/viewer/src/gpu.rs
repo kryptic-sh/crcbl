@@ -7,7 +7,7 @@
 //!
 //! # The document, the menu, the grid and the panel
 //!
-//! `docs/plan/sample/05-viewer.md`'s milestone 1 is "load + orbit + grid", and
+//! The viewer's milestone 1 is "load + orbit + grid", and
 //! all three are here. The grid floor is
 //! [`crcbl::render::grid`]'s screen-space pass, switched on through
 //! [`ForwardRenderer::set_ground_grid`] — **not** a mesh in the scene. That
@@ -325,7 +325,7 @@ impl Gpu {
         // no upscale pass at all, so a run with no settings file draws what it
         // drew before this line existed.
         renderer.set_render_scale(ctx.render_scale());
-        // `docs/plan/sample/05-viewer.md` milestone 1's grid floor — see the
+        // The viewer's milestone 1 grid floor — see the
         // [module docs](self) for why it is a pass rather than a mesh.
         //
         // Scaled to the document rather than [`GridStyle::default`]'s metre
@@ -538,7 +538,7 @@ impl Gpu {
 
     /// Replaces the resident scene with a freshly converted document.
     ///
-    /// `docs/plan/sample/05-viewer.md` V-F4's GPU half: an artist re-exports and
+    /// The re-export loop's (V-F4's) GPU half: an artist re-exports and
     /// the frame becomes the new file, with no window reopened and no device
     /// lost.
     ///

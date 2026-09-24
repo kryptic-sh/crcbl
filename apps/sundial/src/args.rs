@@ -124,7 +124,7 @@ a colonnade whose shadow crosses a cascade boundary, a plinth resting on the
 pavement whose contact point peter-panning would light, and three counters
 hanging at graded heights so a contact-hardening penumbra is a thing you can
 look at. The sun runs on a scripted clock — tick-driven, never wall-clock — so
-any two runs draw the same frame. See docs/plan/sample/18-sundial.md.
+any two runs draw the same frame. See docs/notes/samples.md.
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)

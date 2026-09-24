@@ -9,7 +9,7 @@
 //!
 //! [`crcbl::engine::Loop`] calls the state "paused" because for a game that is
 //! what stopping the clock means. This sample steps no simulation at all — it is
-//! `docs/plan/sample/05-viewer.md`'s sanctioned exception to rule 2, see
+//! the sanctioned exception to rule 2, see
 //! [`crate`] — so the flag stops nothing here and the panel is the only thing it
 //! does.
 //!

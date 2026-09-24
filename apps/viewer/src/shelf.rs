@@ -11,9 +11,9 @@
 //!                                       └─ FetchSource + key `shelf/…`    (browser)
 //! ```
 //!
-//! `docs/plan/sample/05-viewer.md` milestone 4's second item. The models are
-//! the CC0 set that document's table names, in the `glTF/` form — a `.gltf`
-//! with its `.bin` and its images beside it — because that is the arrangement
+//! The viewer's milestone 4, second item. The models are the CC0 set the
+//! licence table in `docs/notes/samples.md` names, in the `glTF/` form — a
+//! `.gltf` with its `.bin` and its images beside it — because that is the arrangement
 //! every exporter produces and the one [`crate::model::load`] is written for.
 //! The alternative, a single `.glb`, would exercise none of the sibling-key
 //! resolution the asset seam exists to do.
@@ -162,7 +162,7 @@ impl ShelfModel {
 ///
 /// Every one is CC0-1.0, read on 2026-08-30 from each model's own `README.md`
 /// at [`UPSTREAM_COMMIT`]. `AntiqueCamera` is the one candidate from
-/// `docs/plan/sample/05-viewer.md`'s table that is **not** here: its geometry
+/// `docs/notes/samples.md`'s table that is **not** here: its geometry
 /// and textures are CC0, but a UX3D trademark is baked into one texture under a
 /// separate licence reference whose own text says UX3D "reserves the right to
 /// remove the Mark or unilaterally change the terms of use" — which is exactly
@@ -236,7 +236,7 @@ pub const SHELF: [ShelfModel; 9] = [
 /// The shelf entry the viewer opens when nothing is asked for.
 ///
 /// Suzanne, on both hosts, which is what
-/// `docs/plan/sample/05-viewer.md` milestone 4 says in as many words. It is
+/// the viewer's milestone 4 said in as many words. It is
 /// also the one model committed to this repository, so this index is the one
 /// the tests can rely on being on disk.
 pub const DEFAULT: usize = 0;

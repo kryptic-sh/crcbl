@@ -10,7 +10,7 @@ dxil-model = 6_6
 
 [atlas_view]
 source = shaders/atlas_view.slang
-source-sha256 = 0300a8b25541d1e20983b6f4e5bb1f32f21a6dd06aced57a99cf0439b920a676
+source-sha256 = 3c784a97b2a8c30dc4fe8646b52cdc2496b834928d0ac027c006371d94d2155c
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/atlas_view.spv
 spirv-sha256 = f99b2cdc9c4dd9af662876588172a97273008344319b2c2feae14b1d5eef440d
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 79212b9e4589a3f5fe5d8fd3de898d95e19ebe5dffdf81ce6df05fc8f586c2da
+source-sha256 = 741892198dee5e1c1f2e47bb5131bd4dc0978af0be6f6b249ac20cf0e1f28092
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -501,7 +501,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao_hemisphere]
 source = shaders/ssao_hemisphere.slang
-source-sha256 = 7c2c8775caf83bc33824f013eea9aff8ae50cd720b29d2994dd7371d31410267
+source-sha256 = d923e9e723f1440a3920dde7cb8e626db12aa6eb54285398983c1a5baaa5ab77
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao_hemisphere.spv
 spirv-sha256 = c0cedc4d8c21204dab35a92c81b243a6716ca1f39ce81b2c62b61bb146697bad

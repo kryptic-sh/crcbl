@@ -6,7 +6,7 @@
 //!            Viewer::draw ──▶ Listing::render ──▶ DrawList ──▶ UiRenderer
 //! ```
 //!
-//! `docs/plan/sample/05-viewer.md`'s milestone 2 opens with a
+//! The viewer's milestone 2 opens with a
 //! "mesh/material/texture listing". This is that listing, and it is the
 //! viewer's **own**: rule 4's debug panel is the engine's, reached with `F3`,
 //! and it answers a different question. `F3` says how the *frame* is going;
@@ -77,7 +77,7 @@
 //!   once at start-up and the conversion logs them; a user who has scrolled
 //!   past that, or who started the viewer from a file manager and has no
 //!   terminal at all, has no other way back to them. This is the line
-//!   `docs/plan/sample/05-viewer.md`'s exit criterion is about, so it is the
+//!   the viewer's exit criterion is about, so it is the
 //!   one thing here that is never reduced to a count — a document with nothing
 //!   skipped says so instead, because "nothing was lost" is an answer and a
 //!   missing section is not.
@@ -662,7 +662,7 @@ mod tests {
 
     /// **A skipped feature is named on the panel**, not counted on it.
     ///
-    /// The line `docs/plan/sample/05-viewer.md`'s exit criterion is about: the
+    /// The line the viewer's exit criterion is about: the
     /// file, the feature and the reason, in front of the person who opened it.
     /// The fixture's node scales its axes unequally, which the conversion
     /// reports and still draws — so this also holds the case where the model

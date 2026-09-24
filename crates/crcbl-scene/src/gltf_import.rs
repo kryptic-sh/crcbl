@@ -1088,7 +1088,7 @@ fn parse_without_animations(bytes: &[u8], key: &Path) -> Option<gltf::Gltf> {
     }
     let root: gltf::json::Root = gltf::json::deserialize::from_value(value).ok()?;
 
-    // The file, the feature and the reason — `docs/plan/sample/05-viewer.md`'s
+    // The file, the feature and the reason — the viewer's
     // exit criterion for a document that does not arrive whole. The count is
     // taken before the array is discarded, because afterwards nothing
     // downstream can say how many there were.
@@ -1526,7 +1526,7 @@ const IMPLEMENTED_EXTENSIONS: &[&str] = &["MSFT_lod"];
 /// required ones back for [`GltfScene::unsupported_required_extensions`].
 ///
 /// **The file, the feature and the reason**, which is what
-/// `docs/plan/sample/05-viewer.md`'s exit criteria ask of a document that did
+/// the viewer's exit criteria ask of a document that did
 /// not arrive whole. Before this, a `KHR_materials_sheen` sofa loaded and drew
 /// with no sheen and said nothing at all, and the only clue was that the
 /// picture looked wrong.
@@ -2146,7 +2146,7 @@ pub(crate) mod tests {
     /// **A required extension this importer cannot honour is named, not
     /// swallowed.**
     ///
-    /// `docs/plan/sample/05-viewer.md`'s exit criterion asks for the file, the
+    /// The viewer's exit criterion asks for the file, the
     /// feature and the reason. `SheenWoodLeatherSofa` and three others from the
     /// Khronos suite used to load and draw wrong in silence — the only clue was
     /// that the picture looked off.

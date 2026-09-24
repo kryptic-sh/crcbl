@@ -1,8 +1,8 @@
 //! options — the settings acceptance test.
 //!
 //! A settings screen with nothing behind it: the player moves a fader, presses
-//! `SAVE`, and the value is still there the next time the sample starts. See
-//! [`docs/plan/sample/20-options.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/20-options.md).
+//! `SAVE`, and the value is still there the next time the sample starts. Its
+//! rules are in `docs/notes/samples.md`.
 //!
 //! # Why it exists
 //!

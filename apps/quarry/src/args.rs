@@ -80,7 +80,7 @@ USAGE:
 Not a game. One quarry face receding 180 metres, drawn from a cluster DAG so
 that near and far parts of the *same* mesh are selected at different levels.
 The debug panel names the geometry path the frame took and how much of the
-reduction was cluster culling — see docs/plan/sample/14-quarry.md.
+reduction was cluster culling — see docs/notes/samples.md.
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)

@@ -7,7 +7,7 @@
 //! frame(bounds, aspect)┘
 //! ```
 //!
-//! `docs/plan/sample/05-viewer.md`'s orbit controls and the stage-8 editor's
+//! The viewer's orbit controls and the stage-8 editor's
 //! viewport are the same controller, which is why it is here beside [`Camera`]
 //! rather than in an app: it is arithmetic, it needs no device, and every one of
 //! its claims is a unit test.

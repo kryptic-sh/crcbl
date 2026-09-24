@@ -1,6 +1,6 @@
 //! The committed frames: one per [`GeometryPath`], at each end of the dolly.
 //!
-//! `docs/plan/sample/14-quarry.md`'s exit criteria ask for "golden frames per
+//! Quarry's exit criteria ask for "golden frames per
 //! `GeometryPath` from the fixed dolly". Everything else this suite asserts is a
 //! **count** — coverage, the cut, the triangle totals — and
 //! [`Frame::pixels_rgba`](crate::harness::Frame) exists because a face lit from

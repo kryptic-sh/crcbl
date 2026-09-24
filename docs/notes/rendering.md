@@ -899,7 +899,10 @@ Decision record; the decision is in `docs/backlog.md`.
 ## What sundial still owes (2026-09-04)
 
 Record; the work this entry still owes is in `docs/backlog.md` under this
-heading.
+heading. The fixture's own rules and the readings its deleted plan recorded for
+the bias pair, the cross-fade, the penumbra and the seam are in
+`docs/notes/samples.md` under _What the deleted sample plans 05, 14, 18, 19 and
+20 left behind_.
 
 - **Subdivision is the coverage ladder's doing, not the allocator running out.**
   Recorded because the entry this replaces said the opposite: a scene with more

@@ -110,8 +110,8 @@ those vertices will match". So:
   for crack-free displacement … UV seams, hard edge normals … will cause
   cracks"; this engine takes the dominant-UV rule from NVIDIA's DirectX 11 talks
   (McDonald, Dudash) instead of leaving it open, and it rests on the attribute
-  and seam handling in QEM that [sample/14-quarry.md](sample/14-quarry.md) still
-  owes.
+  and seam handling in QEM that quarry still owes (`docs/backlog.md`, _Three of
+  the four QEM properties quarry claims to prove are not implemented_).
 
 ### 3. One record producer for every geometry path
 

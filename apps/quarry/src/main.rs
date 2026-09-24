@@ -13,7 +13,7 @@
 //! One thing here is not a run. This binary used to be a *measuring tool* with
 //! no window at all, printing the face's counts, the meshlet total and the
 //! per-level DAG breakdown — and those numbers are what
-//! `docs/plan/sample/14-quarry.md`'s "triangle count per path" leans on, they
+//! quarry's "triangle count per path" leans on, they
 //! need no adapter, and they have to stay runnable in every job this repository
 //! has on a machine without one. So they are still here, behind `--report`, and
 //! answered before the front end opens anything. The counts that *do* need a

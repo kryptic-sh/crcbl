@@ -23,7 +23,7 @@
 //! Suzanne, steps through the rest of the shelf the site carries on the `ESC`
 //! panel's `SHELF` row — fetching each model the first time it is picked — and
 //! takes one the visitor drags onto the canvas — the drop target below, which
-//! is `docs/plan/sample/05-viewer.md`'s V-F5. A
+//! is the viewer's browser drop target. A
 //! dropped `.glb` or `.gltf` reaches exactly the loader a path does, so it
 //! either appears or says why not; see this module's `DropTarget` for the ABI
 //! and `crate::app::Viewer::poll_for_dropped_document` for the frame that opens
@@ -180,7 +180,7 @@ fn browser_options() -> Options {
 /// The document the page opens on.
 ///
 /// **The shelf's Suzanne, out of the page's own `fetch()` source.**
-/// `docs/plan/sample/05-viewer.md` milestone 4 makes Suzanne what opens when
+/// The viewer's milestone 4 makes Suzanne what opens when
 /// nothing is asked for on *both* hosts, and `web/demos/viewer/assets/`'s
 /// manifest names its files so the shim has pre-loaded them before `boot()`
 /// runs — which is why this can be a plain call rather than the retry loop the

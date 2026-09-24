@@ -126,7 +126,7 @@ flight of cantilevered treads, boxes resting on a floor, a deep slot the sun
 runs down, and a sphere against a far wall. Every vertical surface the fixed
 camera sees carries no direct light at all, so what models them is the ambient
 term — which is the term ambient occlusion scales, and the whole subject of
-this sample. See docs/plan/sample/19-alcove.md.
+this sample. See docs/notes/samples.md.
 
 OPTIONS:
     --headless           Run without a window (for CI / determinism tests)

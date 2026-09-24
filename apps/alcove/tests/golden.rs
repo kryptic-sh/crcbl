@@ -562,7 +562,7 @@ const CREASE_SUNLIT_FACTOR: f32 = 2.5;
 /// **The occlusion term multiplies the ambient light and leaves direct light
 /// alone.**
 ///
-/// `docs/plan/sample/19-alcove.md`'s first acceptance claim, and the one the
+/// Alcove's first acceptance claim, and the one the
 /// court's geometry was laid out for: [`court::crease_lit`] is floor at the
 /// bottom of a slot narrow enough to be almost closed to the sky, and in **full
 /// sun**, because the sun's azimuth and the slot's axis are one line.
@@ -1241,7 +1241,7 @@ const CONTACT_BENT_LEAN: f32 = 18.0;
 /// **The bent direction is the geometric normal where nothing occludes, and
 /// leans out towards the opening where something does.**
 ///
-/// `docs/plan/sample/19-alcove.md`'s milestone 3, and the reason the charter
+/// Alcove's milestone 3, and the reason the charter
 /// asked for a picture at all: the occlusion channel's scalar can only *dim* the
 /// ambient term, and the bent direction is what decides which part of the room
 /// the surviving ambient is sampled from — so a term steering that cannot be

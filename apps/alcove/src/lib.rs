@@ -2,9 +2,8 @@
 //!
 //! One walled court of nothing but occlusion geometry, rendered under whatever
 //! paths the device offers. **Not a game**: the occlusion is the content, and
-//! there is nothing to play.
-//! [`docs/plan/sample/19-alcove.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/19-alcove.md)
-//! is the charter, and its non-goals are a hard cap.
+//! there is nothing to play. Its rules are in `docs/notes/samples.md`, and its
+//! non-goals are a hard cap.
 //!
 //! **No `World`, no system, no `GameModule`**, and their absence is the
 //! charter's answer rather than an oversight: sample rules 2 and 10 exist so a

@@ -10,7 +10,7 @@
 //! A settings screen is measured in pixels against the surface, which is what
 //! the UI pass has always drawn in, so there is nothing here for a
 //! camera to project and nothing for a sprite to be —
-//! `docs/plan/sample/20-options.md` claims sample rule 11's exemption on the
+//! the sample claims rule 11's exemption on the
 //! same ground `apps/hud` does. What is behind the panel is one clear colour.
 //!
 //! # The frame is [`crcbl::engine::PageBundle`]'s

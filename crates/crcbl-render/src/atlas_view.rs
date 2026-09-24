@@ -1,4 +1,4 @@
-//! `docs/plan/sample/18-sundial.md`'s atlas viewer: the one full-screen pass
+//! Sundial's atlas viewer: the one full-screen pass
 //! that draws the shadow atlas over the finished frame.
 //!
 //! ```text

@@ -1,6 +1,6 @@
 //! Freezing the eye the cut is selected from —
-//! `docs/plan/sample/14-quarry.md`'s "freeze-selection-from-here camera", the
-//! third of the three that document's Proves section asks for.
+//! quarry's "freeze-selection-from-here camera", the
+//! third of the three overlays its charter asks for.
 //!
 //! # Why a cut has to be looked at from somewhere else
 //!

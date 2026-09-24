@@ -1,6 +1,6 @@
 //! The settings file as it stands, in the debug panel.
 //!
-//! `docs/plan/sample/20-options.md`'s scope asks for "a view of the settings
+//! Options' scope asks for "a view of the settings
 //! file as it stands", and `SettingsStack::dump` already produces one: the
 //! layers merged into TOML, every key reading as `get` would. The screen's rows
 //! show the keys they own, and the file may hold keys none of them do — a

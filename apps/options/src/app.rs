@@ -30,7 +30,7 @@
 //! Above all of those sits the quality row, which writes a whole column of
 //! `docs/plan/39-capabilities.md`'s tier table into the rows below it — see
 //! `Screen::set_quality`. The rest of
-//! `docs/plan/sample/20-options.md`'s video half — display mode, resolution,
+//! the sample's video half — display mode, resolution,
 //! present mode — is not here yet, and `docs/backlog.md` says what each of
 //! them is waiting on.
 //!
@@ -903,7 +903,7 @@ impl HostedGame for Screen {
 
     /// Nothing to simulate: a metronome, a counter and one line to log.
     ///
-    /// `docs/plan/sample/20-options.md` exempts this sample from rules 2 and 10
+    /// `docs/notes/samples.md` exempts this sample from rules 2 and 10
     /// by name — no game state, no `World`, no `GameModule`, because the
     /// settings are the content — so what the tick does is keep the two clocks
     /// a settings screen still needs.
@@ -1477,7 +1477,7 @@ mod tests {
 
     /// **A fader that moves nothing audible says so.**
     ///
-    /// `docs/plan/sample/20-options.md`'s exit criteria want a control with no
+    /// Options' exit criteria want a control with no
     /// implementation labelled as such, and two of the six buses have no cue —
     /// see [`crate::audio`]. Without the mark they are indistinguishable from
     /// audio that is broken.

@@ -17,7 +17,7 @@
 //! # Every shape here is here because a named shadow artefact needs somewhere to
 //! appear
 //!
-//! `docs/plan/sample/18-sundial.md`'s "Proves": "the scene is built so that
+//! Sundial's charter: "the scene is built so that
 //! acne, peter-panning and a cascade seam each have a surface that would show
 //! them". Each of those is one thing below, and the constants that place it say
 //! which claim it carries:
@@ -184,7 +184,7 @@ const CONTACT_CLEARANCE: f32 = 0.05;
 /// **The contact point**: pavement a hand's breadth from the plinth's near face,
 /// in the plinth's own shadow.
 ///
-/// `docs/plan/sample/18-sundial.md`'s peter-panning half. A shadow biased too far
+/// Sundial's peter-panning half. A shadow biased too far
 /// towards its light detaches from the object casting it, and the first thing
 /// that lights is the pavement immediately around the contact — so a reading here
 /// that is *not* dark is the artefact, and it is one no golden of the whole frame
@@ -1137,7 +1137,7 @@ mod tests {
     /// **The colonnade straddles the cascade split, and [`SEAM_COLUMN`]'s shadow
     /// crosses it inside the frame.**
     ///
-    /// `docs/plan/sample/18-sundial.md`'s "geometry crossing a cascade boundary",
+    /// Sundial's "geometry crossing a cascade boundary",
     /// measured rather than asserted in prose. Three halves, and each is worth
     /// having on its own:
     ///
@@ -1495,7 +1495,7 @@ mod tests {
     /// **Every light in the plaza is given a run of tiles**, off the engine's own
     /// allocator and with no GPU in the room.
     ///
-    /// `docs/plan/sample/18-sundial.md`'s Scope says "at least one spot and two
+    /// Sundial's scope said "at least one spot and two
     /// point lights, because two point lights is exactly what the 2026-08-26
     /// re-tiling bought and what a third would exceed". This reads that back: a
     /// point light's run is `POINT_FACES` tiles, two of them and a spot is

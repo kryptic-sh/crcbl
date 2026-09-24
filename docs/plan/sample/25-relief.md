@@ -16,8 +16,8 @@ here is built to make one of them visible.
 
 - **Every rung the engine ships is reachable**: flat, R0-baked displacement, R1
   Phong tessellation, R1 run-time displacement and PN triangles, on a selector,
-  with a seam putting any two side by side on [18-sundial.md](18-sundial.md)'s
-  split pattern.
+  with a seam putting any two side by side on sundial's split pattern
+  (`crcbl_render::split`).
 - **Density follows the screen**: a heatmap view colours each triangle by its
   tessellation factor or cluster level, and a dolly shows density rising as the
   camera closes and falling with it, with no swim.

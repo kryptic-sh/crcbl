@@ -204,7 +204,7 @@ impl Model {
 /// Why a file could not be opened.
 ///
 /// Every variant's [`Display`](fmt::Display) names the file, what was wrong and
-/// what to do about it — `docs/plan/sample/05-viewer.md`'s exit criterion is
+/// what to do about it — the viewer's exit criterion is
 /// that a file from a tool nobody curated either loads or says why not.
 #[derive(Debug)]
 pub enum LoadError {

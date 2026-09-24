@@ -431,7 +431,7 @@ pub fn percent(gain: f32) -> String {
 /// The whole hint on a bus's row: its gain, and a mark when the bus carries
 /// nothing to hear.
 ///
-/// `docs/plan/sample/20-options.md`'s exit criteria want a control with no
+/// Options' exit criteria want a control with no
 /// implementation to say so. Two of the six buses have no content — see
 /// [`crate::audio`] — and their faders write a key that nothing in this process
 /// reads back as sound, which without the mark is indistinguishable from broken

@@ -264,9 +264,9 @@ Stated plainly. "Not reviewed" is the honest line.
   fill margin, the simulation series, the `--workers` re-measurement, and the
   superseded 18a table — is **carried forward on trust**. I read them for
   internal consistency and left them untouched; none was re-measured.
-- **`docs/plan/sample/14-quarry.md`'s Measured section is likewise carried
-  forward.** The 233-pixel figure, the cluster counts, the cone-rejection
-  result: all read, none re-run.
+- **Quarry's Measured section (now in `docs/notes/samples.md`, _quarry (14):
+  measured_) is likewise carried forward.** The 233-pixel figure, the cluster
+  counts, the cone-rejection result: all read, none re-run.
 - **I did not read** `docs/plan/ROADMAP.md`, any of `docs/plan/*.md` outside the
   sample directory beyond spot checks (`08-editor.md` existence, `25-lod.md`
   named by `simplify.rs`, `26-prediction.md`, `24-navigation.md`,
@@ -797,17 +797,17 @@ earlier; `43-render-standards.md`'s delivery table still put contact shadows at
 the head of a queue they left on 2026-09-01. A delivery table is the worst place
 in the repository to be wrong, because it is read as the index of what exists.
 
-A second pass on 2026-09-02 took `sample/20-options.md`, horde's sample plan,
-the irradiance-probe plan (since folded into `docs/notes/rendering.md`) and
-`18-render-features.md`, and found seventeen more. **The plan for a shipped
-sample was the worst document audited anywhere** — `20-options.md` still carried
-the heading "the audio half is built, the video half is not" over a screen that
-has laid out the whole video catalogue since 2026-08-28, and two
-self-corrections whose referents no longer existed: one correcting a paragraph
-that had itself been corrected, and one warning about a claim below it that
-appears nowhere in the file. A plan written to describe work that does not exist
-yet is the highest-risk document there is, because every sentence in it is a
-candidate the day the work lands.
+A second pass on 2026-09-02 took options' sample plan, horde's sample plan (both
+since deleted), the irradiance-probe plan (since folded into
+`docs/notes/rendering.md`) and `18-render-features.md`, and found seventeen
+more. **The plan for a shipped sample was the worst document audited anywhere**
+— options' plan still carried the heading "the audio half is built, the video
+half is not" over a screen that has laid out the whole video catalogue since
+2026-08-28, and two self-corrections whose referents no longer existed: one
+correcting a paragraph that had itself been corrected, and one warning about a
+claim below it that appears nowhere in the file. A plan written to describe work
+that does not exist yet is the highest-risk document there is, because every
+sentence in it is a candidate the day the work lands.
 
 Still unaudited among the plans: `00`-`17`, `20`, `22`-`49`, `51`, `52`, and the
 seventeen remaining `docs/plan/sample/` files — over 18,000 lines. `19-input.md`

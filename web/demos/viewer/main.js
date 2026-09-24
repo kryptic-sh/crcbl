@@ -16,7 +16,7 @@
 // play, and the whole interaction is turning the document and looking at it.
 // The native viewer opens a file the user names; this one opens the document it
 // ships with and then takes whatever is dropped on the canvas, which is
-// `docs/plan/sample/05-viewer.md`'s V-F5.
+// the viewer's browser drop target.
 //
 // `savedLabel` is "Nothing" and that is literal: the status bar says "Nothing
 // saved." when the demo stops, which is the truth about a viewer with no score

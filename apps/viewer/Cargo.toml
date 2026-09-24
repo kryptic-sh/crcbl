@@ -13,8 +13,8 @@ publish = false
 # The browser half opens `src/shelf.rs`'s Suzanne over the page's own fetch
 # source and lists the rest of the shelf on its panel; the document
 # `src/demo_model.rs` generates is the fallback for a build whose site carries
-# no shelf. `docs/plan/sample/05-viewer.md`'s V-F5 — "path argument natively,
-# drop target in the browser" — is done on both hosts.
+# no shelf. The viewer's "path argument natively, drop target in the
+# browser" item is done on both hosts.
 #
 # The lib is not called `viewer`: a lib and a bin of the same name in one
 # package write the same file, which cargo calls an output filename collision.

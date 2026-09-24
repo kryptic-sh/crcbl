@@ -26,7 +26,7 @@
 //! It is also the one asset in this application that ships to a visitor, so it
 //! is deliberately small: two primitives, two materials, no textures, no
 //! external buffer. Nothing here is a demonstration of what the geometry
-//! pipeline can do — `docs/plan/sample/05-viewer.md`'s point is that the viewer
+//! pipeline can do — the sample's point is that the viewer
 //! opens *other people's* files, and the demo's job is only to be a correct one
 //! that is already here.
 //!

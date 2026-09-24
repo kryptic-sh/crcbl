@@ -6,7 +6,7 @@
 //!
 //! Not a game: a tool, and the asset pipeline's acceptance test. Every other
 //! sample draws content this workspace authored and knows to be good;
-//! `docs/plan/sample/05-viewer.md` exists because that proves nothing about a
+//! this sample exists because that proves nothing about a
 //! `.glb` out of Blender, Sketchfab or the Khronos sample suite, and the way to
 //! find out is to point something at one and see.
 //!
@@ -25,7 +25,7 @@
 //!
 //! **And it ships a shelf of models.** `viewer` with no path opens Suzanne;
 //! the `ESC` panel's `SHELF` row steps through the Khronos CC0 models
-//! `docs/plan/sample/05-viewer.md` milestone 4 names, and stepping onto one
+//! `docs/notes/samples.md` lists, and stepping onto one
 //! opens it. Only Suzanne is in this repository — `tools/fetch-shelf.sh`
 //! fetches the rest at a pinned commit, and `CRCBL_SHELF` moves the directory
 //! they are read from. See [`shelf`].
@@ -73,7 +73,7 @@
 //!
 //! # Two rules this sample is exempt from, and neither is an oversight
 //!
-//! **Rule 2, client/server authority.** `docs/plan/sample/05-viewer.md` names
+//! **Rule 2, client/server authority.** `docs/notes/samples.md` records
 //! this sample as the one sanctioned exception: the rule exists so that a
 //! *game*'s state is the server's, and this simulates nothing at all. There is
 //! no tick in [`app`] and no [`GameModule`](crcbl::ecs::GameModule) anywhere.

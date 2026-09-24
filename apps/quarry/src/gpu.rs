@@ -29,8 +29,8 @@
 //! # There is no sprite pass
 //!
 //! `apps/hud/src/gpu.rs`'s shape, and its argument: rule 11's `.crpix` art
-//! would be showing the wrong system. `docs/plan/sample/14-quarry.md` exempts
-//! this sample by name.
+//! would be showing the wrong system. `docs/notes/samples.md` records
+//! this sample's exemption by name.
 
 pub use crcbl::engine::{FrameOutcome, GpuError};
 
@@ -403,7 +403,7 @@ impl Gpu {
     ///
     /// The DAG's coarser levels hold fewer, so this is the count a cut is a
     /// reduction *of* rather than the count any one frame drew — which is what
-    /// `docs/plan/sample/14-quarry.md`'s "triangle count ... at a stated camera
+    /// quarry's "triangle count ... at a stated camera
     /// position" is measured against.
     #[must_use]
     pub const fn triangles(&self) -> usize {

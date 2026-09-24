@@ -383,7 +383,7 @@ impl Knobs {
     /// The same for the far side, which is only a side at all while the seam is
     /// up.
     ///
-    /// **This row is what `docs/plan/sample/18-sundial.md`'s Scope asks the
+    /// **This row is what sundial's scope asked the
     /// sample for.** The engine half puts a different filter on each side of the
     /// seam; the sample's half is saying which, because two shadowed pictures
     /// side by side name neither.

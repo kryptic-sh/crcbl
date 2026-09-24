@@ -161,10 +161,9 @@ shell event.
 
 ### The viewer
 
-`docs/plan/sample/05-viewer.md`'s sample, and the asset pipeline's acceptance
-test. Open a model from the command line, drop a `.glb`/`.gltf` on the window
-(the browser demo takes a drop on the canvas), or pick one off the shelf. Orbit
-with the mouse, and:
+Sample 05, and the asset pipeline's acceptance test. Open a model from the
+command line, drop a `.glb`/`.gltf` on the window (the browser demo takes a drop
+on the canvas), or pick one off the shelf. Orbit with the mouse, and:
 
 | Key     | What it does                                                      |
 | ------- | ----------------------------------------------------------------- |

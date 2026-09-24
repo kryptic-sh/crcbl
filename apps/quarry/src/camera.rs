@@ -1,7 +1,7 @@
 //! Quarry's two cameras: the fixed dolly, and the free-fly camera a reviewer
 //! walks the face with.
 //!
-//! `docs/plan/sample/14-quarry.md`'s Scope asks for "free-fly camera plus a
+//! Quarry's scope asks for "free-fly camera plus a
 //! fixed dolly for goldens and the hysteresis check". Both live here, in the
 //! library, rather than in the front end or in the device suite — because **the
 //! window and the goldens have to fly the same path**. A windowed run whose
@@ -40,7 +40,7 @@ pub const DOLLY_END: f32 = 1.0;
 /// [`DOLLY_END`].
 ///
 /// A straight run down the face's own axis, which is the shape
-/// `docs/plan/sample/14-quarry.md` asks for: "the fixed dolly". It stays the
+/// quarry's scope asks for: "the fixed dolly". It stays the
 /// same height throughout so that what changes between frames is distance and
 /// nothing else.
 #[must_use]

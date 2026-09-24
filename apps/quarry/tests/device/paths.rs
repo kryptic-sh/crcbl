@@ -1,6 +1,6 @@
 //! The same face on every [`GeometryPath`] — the sample's own subject.
 //!
-//! `docs/plan/sample/14-quarry.md`'s milestone 3 and its "three-way comparison"
+//! Quarry's milestone 3 and its "three-way comparison"
 //! exit criterion. The three paths are not one per backend: they are reached by
 //! **selecting exact renderer tails on one capable adapter**, which lets a
 //! machine with a mesh stage measure the two indirect paths as well — see

@@ -1,6 +1,6 @@
 //! Noticing that the document on disk has been written again.
 //!
-//! `docs/plan/sample/05-viewer.md` V-F4: re-export from Blender and the viewer
+//! The re-export loop (V-F4): re-export from Blender and the viewer
 //! picks it up. This is the *noticing* half — [`crate::app`] owns what happens
 //! next.
 //!

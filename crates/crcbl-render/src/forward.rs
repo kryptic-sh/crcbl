@@ -10128,7 +10128,7 @@ impl ForwardRenderer {
     /// each texel's stored depth as a grey and a border round every occupied
     /// slot.
     ///
-    /// `docs/plan/sample/18-sundial.md`'s atlas viewer, and the answer to a
+    /// Sundial's atlas viewer, and the answer to a
     /// question no other view can be asked: which slot holds which map, and
     /// which slots hold nothing. A tile that was never rendered into, or
     /// rendered at the wrong viewport, lights a scene *fully* — so the frame it
@@ -19005,7 +19005,7 @@ mod tests {
     /// **The comparison seam's two marches run two techniques**, which is what
     /// the seam was built for.
     ///
-    /// `docs/plan/sample/19-alcove.md`'s second milestone is SSAO and GTAO in
+    /// Alcove's second milestone is SSAO and GTAO in
     /// one frame, and this is that claim as a pair of pipeline handles: with the
     /// technique moved the near side runs the cheap tier and the far side the
     /// one that ships, and with it at its default both marches run the same

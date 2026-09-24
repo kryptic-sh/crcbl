@@ -17,7 +17,7 @@
 //
 // `crcbl_render::ssao::r_ssao_technique` is the selector and
 // `crcbl_render::split` is the seam a person puts the two either side of, which
-// is what `docs/plan/sample/19-alcove.md`'s second milestone asks for.
+// is what alcove's second milestone asks for.
 //
 // **A module of its own rather than a second entry point in `ssao.slang`.**
 // `crcbl_shaders::Shader::entry_point` answers `None` for a stage with two

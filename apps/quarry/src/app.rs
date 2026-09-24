@@ -150,7 +150,7 @@ pub struct Summary {
 /// The cut in one line:
 /// `12 instance(s), 431 of 900 cluster(s) (312 frustum, 157 cone), from frame 57`.
 ///
-/// `docs/plan/sample/14-quarry.md`'s exit criterion asks for "how much of the
+/// Quarry's exit criterion asks for "how much of the
 /// reduction is instance culling and how much is cluster culling, because a
 /// single total hides which one is working" — and then for "per-cluster frustum
 /// and normal-cone rejection counts on the debug panel", which is the same
@@ -688,7 +688,7 @@ impl HostedGame for Quarry {
     /// most in: three paths is the widest selector in the engine, and the mesh
     /// path's per-cluster cut and the indirect paths' per-instance one are not
     /// the same picture. The second is this sample's own subject —
-    /// `docs/plan/sample/14-quarry.md`'s "amplification-stage culling is doing
+    /// the sample's "amplification-stage culling is doing
     /// work", on the screen, beside the budget that decided the cut and the
     /// camera position it was decided from.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
@@ -734,7 +734,7 @@ impl HostedGame for Quarry {
 /// [`crcbl::ui::DebugModule`] states.
 ///
 /// **The cull rows are the sample's own claim.**
-/// `docs/plan/sample/14-quarry.md` asks for "per-cluster frustum and normal-cone
+/// Quarry's charter asks for "per-cluster frustum and normal-cone
 /// rejection counts on the debug panel". They are read out of
 /// `crcbl::render::CullStatsRing`, which is deliberately a few frames behind —
 /// topic 03 §3.6 permits exactly one readback and this is it — so the rows name
@@ -806,7 +806,7 @@ impl crcbl::ui::DebugModule for Quarry {
                                 stats.frame,
                             ),
                         );
-                        // The row `docs/plan/sample/14-quarry.md` asks for by
+                        // The row quarry's charter asks for by
                         // name. Two numbers rather than their sum: a total
                         // rejected is the survivor count again with the sign
                         // flipped, and says nothing about which test earned it.
@@ -978,7 +978,7 @@ mod tests {
 
     /// **The panel attributes each rejection to the test that made it.**
     ///
-    /// `docs/plan/sample/14-quarry.md` asks for "per-cluster frustum and
+    /// Quarry's charter asks for "per-cluster frustum and
     /// normal-cone rejection counts on the debug panel", and the row is only
     /// worth having if the two numbers are told apart: printed the other way
     /// round it reads as the normal cone doing the work the frustum did, which

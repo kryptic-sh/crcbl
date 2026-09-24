@@ -1,4 +1,4 @@
-//! The face as a cluster hierarchy — `docs/plan/sample/14-quarry.md`'s
+//! The face as a cluster hierarchy — quarry's
 //! milestone 2, and `docs/plan/25-lod.md`'s subject.
 //!
 //! [`crate::scene`] describes the face as one flat mesh: every cluster is drawn

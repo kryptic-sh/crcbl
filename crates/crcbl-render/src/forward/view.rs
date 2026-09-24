@@ -2857,7 +2857,7 @@ impl View {
         // --- the shadow atlas viewer ---
         //
         // **After the grid and before the resolve, and it replaces what both of
-        // them were about.** `docs/plan/sample/18-sundial.md`'s atlas viewer:
+        // them were about.** Sundial's atlas viewer:
         // the `D32Float` image the shadow pass filled, drawn over the finished
         // frame so that which slot holds which map is something a reviewer can
         // look at. [`crate::atlas_view`] carries why it draws here — in display

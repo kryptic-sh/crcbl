@@ -542,7 +542,7 @@ const CASTER_REACH: f32 = crcbl_shaders::mesh::SHADOW_CASTER_REACH;
 /// [`r_shadow_bias`] declares this value as its own default and
 /// [`Cascades::params`] reads that variable, so the count a frame is drawn with
 /// is whatever the console holds. It is there for
-/// `docs/plan/sample/18-sundial.md`'s milestone 2 — the comparison, not the
+/// `apps/sundial`'s milestone 2 — the comparison, not the
 /// rung: acne and peter-panning are pulled in opposite directions by this number
 /// and a fixture is the only place that trade can be looked at. The variable's
 /// range starts at zero, which is where the acne it covers is read, and stops

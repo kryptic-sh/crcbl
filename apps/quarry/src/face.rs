@@ -1,6 +1,6 @@
 //! The quarry face: one dense mesh whose depth range is the point.
 //!
-//! `docs/plan/sample/14-quarry.md`'s scope asks for "high-polygon rock ...
+//! Quarry's scope asks for "high-polygon rock ...
 //! content with a wide depth range, **chosen so that per-cluster selection has
 //! something to select differently across a single mesh**". That sentence is
 //! the whole specification for this module, and it rules out the obvious
@@ -23,7 +23,7 @@
 //! first time somebody parallelised the loop.
 //!
 //! `the_same_seed_and_size_give_identical_bytes` is the check, and
-//! `docs/plan/sample/14-quarry.md`'s exit criteria want golden meshes for
+//! quarry's exit criteria want golden meshes for
 //! exactly this reason.
 
 use crcbl::math::Vec3;

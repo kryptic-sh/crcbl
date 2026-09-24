@@ -3,8 +3,8 @@
 //!
 //! `docs/plan/sample/17-mirrors.md`'s exit criteria ask for a "split-screen
 //! comparison of any two rungs, **from one frame's data**", and
-//! `docs/plan/sample/18-sundial.md` and `docs/plan/sample/19-alcove.md` each ask
-//! for the same harness on that sample's pattern. This module is the half of it
+//! sundial and alcove each asked for the same harness on
+//! that sample's pattern. This module is the half of it
 //! that is the same for all three: where the seam falls, and which pixels each
 //! side owns.
 //!

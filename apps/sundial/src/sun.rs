@@ -10,7 +10,7 @@
 //!
 //! # Ticks, never a wall clock
 //!
-//! `docs/plan/sample/18-sundial.md` asks for "a sun on a scripted clock,
+//! Sundial's scope asks for "a sun on a scripted clock,
 //! pausable, scrubbable", and its exit criteria ask for a scripted sun sweep
 //! that "runs as a determinism check, not merely as a demo". Both of those want
 //! the same thing: the sun at tick `k` is the same sun on every machine, in
@@ -29,7 +29,7 @@
 //! follows a sine arc, high in the middle:
 //!
 //! * A linear azimuth is what makes the shadows *rotate* at a constant rate,
-//!   which is the motion `docs/plan/sample/18-sundial.md`'s "the edges do not
+//!   which is the motion sundial's "the edges do not
 //!   swim" claim is read against.
 //! * A sine elevation is what puts a grazing sun at both ends of the sweep and a
 //!   high one in the middle, so one pass of the clock visits the whole range of
@@ -556,7 +556,7 @@ mod tests {
     /// different tick.
     ///
     /// The host half of the determinism claim
-    /// `docs/plan/sample/18-sundial.md`'s exit criteria ask for; the GPU half is
+    /// sundial's exit criteria ask for; the GPU half is
     /// `tests/golden.rs`'s `the_scripted_sweep_redraws_byte_for_byte`, which
     /// checks that the frames follow. Without the second clause this passes for
     /// a clock that never moves.

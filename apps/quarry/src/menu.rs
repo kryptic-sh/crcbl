@@ -9,7 +9,7 @@
 //! wherever the reviewer flew to, the pose `tests/golden/` was blessed from, and
 //! the slow run down the face that shows detail arriving — and getting back to
 //! any of them should be a keypress. The two overlays, because
-//! `docs/plan/sample/14-quarry.md`'s "one mesh spanning several levels across
+//! quarry's "one mesh spanning several levels across
 //! its own surface" is a claim nobody can see in a shaded frame: the tint is
 //! what makes it a claim anyone can check, and holding it against the shaded
 //! picture is the comparison. And the freeze, because a cut looked at from the
@@ -36,7 +36,7 @@ pub enum CameraMode {
     Fixed,
     /// The same dolly, run down the face and back — [`crate::app::dolly_at`].
     ///
-    /// `docs/plan/sample/14-quarry.md`'s Proves section asks that "a slow dolly
+    /// Quarry's charter asks that "a slow dolly
     /// past the switch distance shows no boundary popping, on every path".
     /// `tests/device/dolly.rs` asserts that headlessly, frame by frame on one
     /// renderer; this is the same run made watchable, and it is what the

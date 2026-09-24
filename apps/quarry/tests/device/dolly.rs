@@ -1,4 +1,4 @@
-//! The fixed dolly — `docs/plan/sample/14-quarry.md`'s exit criterion.
+//! The fixed dolly — quarry's exit criterion.
 //!
 //! One straight run down the face's own axis, measured frame by frame on **one
 //! renderer**, which is what makes it a different measurement from the same
@@ -108,7 +108,7 @@ fn detail_arrives_as_the_dolly_closes_on_the_face() {
 
 /// **The uniform cut walks down the levels too, one rung at a time.**
 ///
-/// `docs/plan/sample/14-quarry.md`'s "no LOD popping on **any** path". The two
+/// Quarry's "no LOD popping on **any** path". The two
 /// indirect paths pick one level for the whole mesh rather than one per cluster,
 /// so their observable is the bucket that drew rather than a distribution — and
 /// popping there is a visible thing: the level jumping by more than one rung
@@ -266,7 +266,7 @@ const STANDING: usize = 6;
 /// **The three per-cluster counts partition the cut: survivors + frustum
 /// rejections + cone rejections is exactly the number of clusters tested.**
 ///
-/// `docs/plan/sample/14-quarry.md` asks for the two rejection counts on the
+/// Quarry's charter asks for the two rejection counts on the
 /// panel, and this is the assertion that says they are the counts they claim to
 /// be. It is the one thing that catches a word landing at the wrong index or a
 /// bucket being missed altogether: each of those leaves three plausible numbers

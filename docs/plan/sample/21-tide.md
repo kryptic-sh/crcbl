@@ -59,7 +59,7 @@ the surface it sits on is this sample's failure, however good the surface looks.
   summary, per [43-render-standards.md](../43-render-standards.md).
 - **Pages web demo** at `/demos/tide/`, with the scene, the sea state, the wind,
   the medium preset and the camera as page controls rather than keys, on
-  [19-alcove.md](19-alcove.md)'s pattern.
+  alcove's pattern (`apps/alcove/src/web.rs`).
 - **Spatial audio** on the ladder's rule: surf, the river and the fall as
   looping voices at points until line emitters exist.
 

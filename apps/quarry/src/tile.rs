@@ -1,6 +1,6 @@
 //! A modular wall tile, and the border locking that lets two of them meet.
 //!
-//! `docs/plan/sample/14-quarry.md`'s scope names "a tiling modular wall piece
+//! Quarry's scope names "a tiling modular wall piece
 //! for border locking", and its exit criteria ask that the QEM generator survive
 //! it: **"border locking on a tiling mesh"**. This is that piece.
 //!

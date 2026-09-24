@@ -1,4 +1,4 @@
-//! quarry on a device — `docs/plan/sample/14-quarry.md`'s milestones, asserted
+//! quarry on a device — the sample's milestones, asserted
 //! rather than looked at.
 //!
 //! ```text

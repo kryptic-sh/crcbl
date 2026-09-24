@@ -3,7 +3,7 @@
 //!
 //! # A positional argument, not a flag
 //!
-//! `docs/plan/sample/05-viewer.md`'s V-F5 is "path argument natively, drop
+//! The viewer's drop-target item is "path argument natively, drop
 //! target in the browser", and the natively half is `viewer model.glb` because
 //! that is what a file manager's "open with" and a shell's tab completion both
 //! produce. A `--model` flag would be a second spelling of the same fact and

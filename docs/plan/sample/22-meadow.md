@@ -14,9 +14,9 @@ wind or its own placement to look right is this sample's failure.
 ## Proves
 
 - **Every look is selectable live** — cards, blades and shells — and a seam puts
-  any two side by side on one frame, on [18-sundial.md](18-sundial.md)'s split
-  pattern, so realistic-billboard, realistic-mesh and stylised read as a
-  comparison rather than three screenshots.
+  any two side by side on one frame, on sundial's split pattern
+  (`crcbl_render::split`), so realistic-billboard, realistic-mesh and stylised
+  read as a comparison rather than three screenshots.
 - **The wind is one field.** Its two authored layers are visible as debug views
   — the intensity map with its calm patches and the direction map bending around
   the hill — and a gust visibly travels across grass, trees and a hanging banner

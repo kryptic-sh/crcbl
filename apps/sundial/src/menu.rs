@@ -4,7 +4,7 @@
 //! fixture, not a game — there is no run to start and nothing to win, so a
 //! `GAME OVER` panel would be a screen it could never show.
 //!
-//! What it does have is every control `docs/plan/sample/18-sundial.md`'s
+//! What it does have is every control sundial's
 //! milestone 1 asks to be *legible*: which filter is running, where the
 //! comparison seam stands and — because that is the whole of what the sample adds
 //! to the engine's half — **which filter each side of the seam is**, plus the sun
@@ -321,7 +321,7 @@ pub fn pause_menu(
             "ENTER",
         ),
         // Beside the cascade row: the two are the diagnostics
-        // `docs/plan/sample/18-sundial.md`'s milestone 1 asks for, and they are
+        // sundial's milestone 1 asks for, and they are
         // the two rows here that leave the shadow alone and change what is drawn.
         MenuItem::new(
             ATLAS_ID,
@@ -343,7 +343,7 @@ pub fn pause_menu(
             SEAM_KEYS,
         ),
         MenuItem::new(FAR_SIDE_ID, format!("FAR SIDE: {}", knobs.far_side()), ""),
-        // The two counts `docs/plan/sample/18-sundial.md`'s milestone 2 is
+        // The two counts sundial's milestone 2 is
         // about, under the seam's readings because they are the other pair a
         // reviewer walks rather than presses. **Readings and not pressed rows**,
         // on this module's header's rule: each moves in two directions, and one

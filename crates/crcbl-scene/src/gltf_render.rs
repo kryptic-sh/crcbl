@@ -147,7 +147,7 @@
 //!
 //! # Everything unsupported is skipped loudly
 //!
-//! `docs/plan/sample/05-viewer.md`'s exit criterion is that a file from a tool
+//! The viewer's exit criterion is that a file from a tool
 //! nobody curated either loads or says why not, naming the file, the feature and
 //! the reason. That is a property of this layer, not of an application: by the
 //! time a viewer holds a [`SceneDesc`] the evidence is gone. So every conversion

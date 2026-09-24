@@ -298,6 +298,397 @@ met by `par_for` alone, without a parallel ECS schedule.
   here is 0.7 % of the budget. The roadmap put horde behind P7 and P8; it needed
   neither to be built, and P8 was the phase it was waiting on.
 
+## What the deleted sample plans 05, 14, 18, 19 and 20 left behind (2026-09-24)
+
+The plans for viewer (05), quarry (14), sundial (18), alcove (19) and options
+(20) were deleted on 2026-09-24 with most of each one built. What they still owe
+is in `docs/backlog.md`: viewer's and quarry's under their own headings in _The
+sample plans — what they still owe_; sundial's under _What sundial still owes_;
+alcove's under _What alcove's bent-direction view did not cover_; options' under
+_`apps/options` — what the first slice left_. Sundial's and alcove's ray-traced
+rungs are one engine gap with lantern's, under _Ray tracing and the acceleration
+structures are unbuilt_. Each sample's gate and what it proves stay in the
+ladder table of `docs/plan/sample/00-samples-overview.md`. What follows is what
+still binds. **Every figure below was moved from the plans as written and was
+not re-measured on 2026-09-24**; each names the test that reproduces it.
+
+### viewer (05): the rules its plan set
+
+- **A tool, not a game — the one sanctioned exception to rule 2.** The viewer
+  simulates nothing, so it is client-only by charter; rule 2 exists for games.
+  **Rule 11 does not apply**: the point is to show _the user's_ asset unadorned,
+  and authored art in the viewport is exactly what it must not do. Rule 4's
+  debug panel applies as everywhere.
+- **The re-export watch is a poll, not a filesystem-notification dependency.**
+  `apps/viewer/src/watch.rs` `stat`s the document four times a second with a
+  settle delay, because an exporter writes a `.glb` progressively and every
+  platform API reports a re-export as a burst that has to be debounced back into
+  one anyway.
+- **The glTF → animation conversion is the application's**
+  (`apps/viewer/src/anim.rs`), deliberately, because `crcbl-anim` does not
+  depend on the glTF importer. The old "no animation playback" cap was withdrawn
+  once the engine feature landed; what it protected still holds — the viewer is
+  not an animation _tool_: no timeline, no clip selection, no retargeting.
+- **Still capped:** material editing, export, scene composition (that is the
+  editor), and environment lighting beyond the single directional light and
+  exposure.
+- **Three doors open a model.** The command line; a window drop, which opens
+  through `model::load` over a `DirSource` rooted at the file's own directory so
+  a `.gltf` with its buffers beside it works; and a drop on the browser canvas,
+  over a `MemorySource`. A page whose dropped file will not parse keeps the
+  frame on screen and puts the loader's own sentence on the status bar, because
+  a page has no exit code to fail with.
+- **The shelf: nine models, one committed.** The `ESC` panel's `SHELF` row lists
+  them and Suzanne opens when nothing is asked for, on both hosts. The whole
+  shelf is about 138 MB and the repository uses no LFS, so only Suzanne is
+  committed; `tools/fetch-shelf.sh` fetches the rest at a pinned upstream commit
+  with a sha256 per file (`apps/viewer/assets/shelf.sha256` is the one file
+  list, `apps/viewer/src/shelf.rs` the table). **The browser carries three** —
+  Suzanne pre-loaded, Avocado and WaterBottle fetched when picked — 18.9 MB
+  against a 25 MB budget for the demo's assets; the next-smallest model would
+  take it to 28 MB, so the other six are native-only.
+
+**The licence rule for shipped assets (decided 2026-08-30).** The repository is
+MIT and its demos are published, so every committed asset is redistributed under
+terms a downstream MIT user inherits:
+
+- **CC0 first.** No obligations, nothing a fork can get wrong.
+- **CC-BY 4.0 only with attribution** in an `ATTRIBUTION.md` beside the asset
+  naming author, source URL and licence, and the same line on the demo's page.
+  Not the default, because a fork that drops the file is in breach and nothing
+  in the tree would notice.
+- **No NC, no SA, no research-only.** A non-commercial clause is incompatible
+  with a permissive engine that ships a product; share-alike would relicense the
+  demo.
+- **Provenance is verified at the source, not remembered.** The verdicts below
+  were read on 2026-08-30 from the Khronos `glTF-Sample-Assets` model table and
+  each model's own `README.md` at the commit `tools/fetch-shelf.sh` pins, from
+  `polyhaven.com/license`, and from the Stanford scanning repository's terms
+  page. Re-read before committing a file; an asset's licence is the one on its
+  page that day.
+- **Decided 2026-08-30, the user: the model demos use the CC0 models from
+  Khronos' `glTF-Sample-Assets` and nothing else.** Not Poly Haven models, not
+  CC-BY sets with an attribution file. Poly Haven stays named only as the CC0
+  source for a PBR _texture_ or an HDRI if a rung ever needs one the Khronos
+  shelf lacks.
+
+| Model                                                                                     | Source                          | Licence                                                                 | Verdict                                                                                                                                                                                                               |
+| ----------------------------------------------------------------------------------------- | ------------------------------- | ----------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Suzanne** (the monkey)                                                                  | Khronos glTF-Sample-Assets      | CC0-1.0 (UX3D 2017)                                                     | **In.** The one-mesh material fixture; ~8k triangles subdivided, a normal-mapped variant is ours                                                                                                                      |
+| Stanford bunny (the rabbit)                                                               | Stanford 3D Scanning Repository | research-only, no commercial use without permission                     | **Out.** "Not to be used for commercial purposes, nor appear in a product for sale" — a redistributed MIT demo is exactly that. Any rabbit here is a different rabbit                                                 |
+| Avocado, BoomBox, Corset, Lantern, WaterBottle, BarramundiFish, FlightHelmet, SciFiHelmet | Khronos glTF-Sample-Assets      | CC0-1.0                                                                 | **In**, as the gallery's shelf: full metallic-roughness sets with normal, occlusion and emissive maps, sized for a browser tier                                                                                       |
+| AntiqueCamera                                                                             | Khronos glTF-Sample-Assets      | CC0-1.0 plus `LicenseRef-LegalMark-UX3D` on a logo baked into a texture | **Out.** The mark's own text says UX3D "reserves the right to remove the Mark or unilaterally change the terms of use" — the obligation-to-track the rule above exists to avoid. Read 2026-08-30 at the pinned commit |
+| DamagedHelmet                                                                             | Khronos glTF-Sample-Assets      | CC-BY 4.0 / CC-BY-NC 4.0 dual                                           | **Out.** The dual licence is a trap for a fork; SciFiHelmet is the same kind of model under CC0                                                                                                                       |
+| MetalRoughSpheres                                                                         | Khronos glTF-Sample-Assets      | CC-BY 4.0                                                               | Allowed by the licence rule with attribution — the BRDF ladder's calibration chart — but outside the user's CC0-only decision above                                                                                   |
+| Poly Haven models and textures                                                            | polyhaven.com                   | CC0                                                                     | Textures and HDRIs only, per the decision above                                                                                                                                                                       |
+| Duck, BrainStem, CesiumMan                                                                | Khronos glTF-Sample-Assets      | SCEA / Poser EULA / CC-BY                                               | Out, or not worth their terms                                                                                                                                                                                         |
+
+There is no rabbit on the Khronos CC0 shelf, and the Stanford scan is the one
+the user meant and the one that cannot ship — so the demos have no rabbit.
+Recorded so nobody re-derives it.
+
+### quarry (14): the rules its plan set
+
+- **The three geometry paths draw the same scene, not the same pixels.** The
+  paths differ in selection granularity — per cluster on `MeshShader`, per
+  instance on `IndirectCount` and `IndirectPerBatch` — so the claim is the same
+  scene at the same quality budget. Where lantern proves the two lighting paths
+  agree, quarry proves the three geometry paths do, and it is the only place the
+  QEM generator's output is _looked at_ rather than measured: an error metric
+  can be within budget while a seam is visibly wrong.
+- **What the QEM generator can be shown to hold today is border locking and
+  determinism, and nothing more.** `crcbl_scene::simplify`'s header is the
+  account: position borders are locked, not optionally; UV and normal seams,
+  material boundaries and skin weights are not constrained. The plan's "Proves"
+  once read as though all four were proven; they are a requirement until
+  `docs/plan/25-lod.md`'s attribute slice lands (backlog, _Three of the four QEM
+  properties quarry claims to prove are not implemented_).
+- **One instance of one mesh, on purpose** — so all of the reduction is cluster
+  culling, and a scene where both culls matter is horde's job (see _DECIDED —
+  quarry keeps one face_ below).
+- **The LOD tint and the heatmap are mesh-path only**, because a per-cluster
+  number exists only where selection is per cluster.
+- **The browser page runs `IndirectPerBatch` with per-instance LOD and opens on
+  the animated dolly**, because a page showing one held frame proves nothing
+  about a cut that follows the camera.
+- **Hard cap:** no gameplay, streaming, HLOD (topic 25 schedules those and this
+  sample must not smuggle them in), impostors, a second scene, or an authoring
+  tool for meshlet parameters.
+- **Exempt from rules 2, 10 and 11** — one face, one instance, a camera and a
+  debug view selector; nothing simulates, so no `World`, no system, no
+  `GameModule`, and no `.crpix` art because the subject is geometry density.
+  **Rules 4 and 12 apply in full**: three paths is the widest selector in the
+  engine, so path reporting matters most here.
+
+### quarry (14): measured (2026-08-20)
+
+Taken 2026-08-20 on an AMD Radeon RX 7900 XTX (RADV NAVI31, Mesa 26.1.7-arch1.1)
+by `apps/quarry/tests/device/`, which is where each number can be reproduced.
+Where an exit criterion asked for a **human** to look, this says so instead of
+standing in for one.
+
+**The face.** 8192 triangles at level 0, one instance of one mesh. The uniform
+cut at a 16 px budget draws level 1, 4096 triangles.
+
+**Where the reduction comes from — `all_of_the_reduction_is_cluster_culling`.**
+Over seven reported frames down the fixed dolly the camera's instance cull kept
+**1 of 1 every time**, and the amplification stage kept 26 to 34 clusters. All
+of the reduction is cluster culling, and the reason is the scene rather than the
+renderer: quarry places one instance, so the instance cull has one thing to
+decide about.
+
+**Which test does the rejecting —
+`the_three_cluster_counts_add_up_to_the_cut_they_were_taken_over`.** Standing at
+the dolly's far end at a 256 px budget, the descent chose a cut of **58**
+clusters (`[15, 31, 12, …]` finest level first), and the amplification stage
+answered: **30 kept, 28 rejected by the frustum, 0 by the normal cone.** The
+three partition the cut, which is what that test asserts.
+
+**The cone rejects nothing on this face, and that is the correct answer.**
+Measured separately by pinning the eye underneath the surface so every cluster
+faces away from its viewer: clusters kept moved from 44 to 42, and covered
+pixels not at all. A rough surface gives clusters cones wider than a hemisphere,
+which `crcbl_shaders::meshlet::ClusterBounds::cone_cutoff` records as a cutoff
+at or below zero and `cluster_survives` skips outright. The value of the split
+is that the panel can _say_ the cone did nothing; before it could only say 30 of
+58 survived, which is equally consistent with the cone doing all of the work.
+
+**The three paths against each other**, from the committed goldens rather than
+from a device, so any reader can reproduce it:
+
+| dolly stop            | mesh-shader against either indirect path     |
+| --------------------- | -------------------------------------------- |
+| start (standing back) | 233 px differ (0.47%), max channel delta 118 |
+| end (inside the face) | 0 px differ                                  |
+
+The two indirect paths are identical to each other at both stops, as expected:
+they run the same per-instance selection through different draw machinery. The
+difference is at the **far** stop — standing back, screen-space error varies
+most across a face that recedes 180 m, so per-cluster selection has the most to
+disagree with per-instance selection about; inside the quarry everything is at
+the finest level and all three draw the same triangles.
+
+**What no measurement can close:** whether those 233 pixels read as "the same
+scene at the same budget", and the seam review against `quarry_face(CELLS)` and
+`quarry_tile`, are judgements. Neither has been made (backlog, _Quarry's two
+human judgements and its browser budget are untaken_).
+
+### sundial (18): the rules its plan set
+
+The rendering records sundial produced after it was built are in
+`docs/notes/rendering.md` — _What sundial still owes_ (its surprises),
+_`apps/sundial` took the atmosphere_ and _The shadow filter selector leaves
+three things owed_. These are the fixture's own rules.
+
+- **The sample exists for the artefacts a still frame hides.** Acne,
+  peter-panning, cascade seams, swimming edges and a penumbra of one width at
+  every distance are each invisible in a screenshot or until the light moves, so
+  the plaza gives each a surface to appear on — a ground plane at a grazing sun,
+  a plinth resting _on_ it, a colonnade crossing the cascade split, casters at
+  graded heights — and the sun moves on a scripted, pausable, scrubbable clock.
+  A demo where an artefact cannot appear proves nothing about the bias.
+- **The ladder is `pcss`, `disc` and `box`**, selected by `r_shadow_filter`. The
+  rotated disc took the place of the Poisson set the plan first named
+  (`docs/plan/45-shadows.md`'s ninth decision); virtual shadow maps are refused
+  in topic 18 with a reason and this sample does not reopen them.
+- **The seam is per fragment, out of `FrameUniforms::shadow_filter`**, because a
+  scene pass cannot be recorded twice under a scissor; `crcbl_render::split`
+  counts the column.
+- **The atlas viewer is a full-screen pass in `crcbl-render`, drawn in display
+  space after the tonemap**, not a branch in `mesh.slang`: the atlas is one
+  image the whole frame shares rather than a function of any fragment, and its
+  greys must not move with the exposure.
+- **A diagnostic golden is read, not only compared.** `plaza-cascades` stands
+  beside two readings — inside cascade 0 clear of the band, and past the split
+  placed from `crcbl::render::Cascades`' own split — with the same two places
+  overlay-off as the control; `plaza-atlas` asserts the amber border round the
+  near cascade's cell and the black letterbox. A golden alone cannot say which
+  tint or which grey it is looking at.
+- **The page's controls are HTML, and each export answers with what the engine
+  holds after the write**, so the page keeps no copy. The clock is game state,
+  not a console cell, so its two controls go through `crate::sun`'s channel and
+  are adopted on the next fixed step.
+- **The first split depends on the near plane**, which is why
+  `apps/sundial/src/plaza.rs`'s `NEAR` is half a metre (recorded in
+  `docs/notes/rendering.md`, _What sundial still owes_).
+- **Exempt from rules 2, 10 and 11** — no game state, no `World`, no
+  `GameModule`, and the subject is shadows rather than pictures.
+
+### sundial (18): the readings behind milestones 2 to 4
+
+All from `apps/sundial/tests/golden.rs`, on radv and lavapipe, as the plan
+recorded them on 2026-09-05 and 2026-09-06.
+
+**The bias pair —
+`the_two_bias_counts_trade_acne_against_the_plinths_own_contact`.** The counts
+are console variables, `crcbl_render::shadow::r_shadow_bias` and
+`r_shadow_normal_offset`, floats in texels of the cascade a fragment landed in,
+each declaring the constant it replaced as its default; `Cascades::params` reads
+the cells rather than the constants. Five arms of one frame at
+`sun::GRAZING_TICK` — what ships, each count at zero, each count pushed — and
+two readings off each: what share of `ACNE_CENTRE`'s block of open pavement is a
+self-shadowing dot, and the **shadow term** at `plaza::PLINTH_CONTACT` and at
+five stations further along the plinth's shadow. Three claims:
+
+- **Zero either count and the pavement roughens; the contact does not move.**
+  The normal offset at zero takes the block to `41.53%` dots on radv and
+  `41.53%` on lavapipe, the constant bias at zero to `3.26%` and `3.23%`,
+  against `0.00%` on both as the sample ships — and the contact's term is
+  `70.73` on radv and `70.44` on lavapipe on all three arms, to a hundredth.
+- **Push the constant bias and the shadow comes off the plinth.** At 96 texels
+  the contact's term falls to `6.37` while the pavement past it still carries
+  `67.01` — peter-panning, a lit gap between a caster and its shadow, rather
+  than a shadow that has gone. Under 88 texels the contact keeps its shadow
+  outright and past 104 the shadow has left the whole visible strip.
+  Eighty-eight is large because the depth pass keeps front faces, so a bias has
+  to cross the block's whole 1.2 m depth; a thin caster loses its contact at a
+  small count.
+- **Push the normal offset twenty times as far and the contact does not move.**
+  At 40 texels its term is the shipped one to a hundredth, on both adapters,
+  though the shadow's far end has begun to go — the seventh decision's claim
+  that a sideways move keeps a contact, measured. At 44 the contact and the
+  pavement beyond it go together.
+
+Widened to four rows over three rungs, each read against its own control. The
+`disc` rung reads what the shipped rung reads to a hundredth on both adapters,
+except at the pushed bias, where its contact falls to `0.45` on radv and `0.37`
+on lavapipe against `6.37` and `6.36`; its peter-panning window runs from 92 to
+100 texels, so 96 sits inside it. The `box` rung reads every claim but one:
+under the narrowest kernel the shipped normal offset covers the acne block on
+its own, so zeroing the constant bias leaves `0.0000%` dots — that clause is
+read on a fourth row at 1.5 texels of normal offset, where `29.1737%` (radv) /
+`29.5090%` (lavapipe) trades against `4.6467%` / `4.9581%` at the shipped bias.
+`HELD_OFFSET` is read on `box` at a station of its own. Measured and **not**
+read: the top of the arc, `sun::NOON_TICK`, where zeroing the offset draws
+`0.0000%` dots and the bias sweep takes the contact and the pavement past it
+away together — `176.00`/`173.33` at 50 texels, `91.65`/`96.31` at 52,
+`0.00`/`0.00` at 56 — leaving no count with a gap to read; and
+`plaza::counter_camera`, which frames the acne block but has
+`plaza::PLINTH_CONTACT` behind its eye. `plaza::pavement_camera` — a metre back,
+half a metre off axis and 25 cm higher, looking across the colonnade — is the
+second pose that frames contact, stations and block at once inside cascade 0,
+and every constant reads on the far side of its bound from there too. The
+sabotage: `Cascades::params` handing the shader the constants again instead of
+the two cells makes every setup's four moved arms draw its own shipped frame
+byte for byte.
+
+**The cross-fade —
+`the_colonnades_shadow_crosses_the_cascade_split_without_a_step`.** It measures
+the **shadow term** (the frame with shadow passes off, less the frame with them
+on, so the pavement's Lambert falloff cancels), walks every column of the
+colonnade's shadow at offsets either side of its edge, and bins each walk into
+shells of **distance from the eye** — the quantity `sun_visibility` selects a
+cascade by. Each walk's step between the shells either side of the split is held
+to the steepest step the same walk shows clear of the band. With the band:
+`2.24` against `1.43` on radv, `2.33` against `1.16` on lavapipe; with
+`CASCADE_FADE_FRACTION` at zero and every artifact regenerated, `17.49` against
+`1.24` and `17.55` against `1.41` — the sabotage. The `disc` rung: `2.98`
+against `1.43` with the band, `39.24` against `4.02` collapsed. The grazing sun:
+`0.63` against `1.30` with the band, `3.32` against `0.09` without. Measured and
+**not** read: `box`, whose walk clear of the band is too flat (`0.12`/255 radv,
+`0.04` lavapipe) for the ratio to separate the two; and `counter_camera`, whose
+frame holds no sample of any walk in the shell window. The walk reads only
+pavement the arm's camera can see and no lamp reaches, which
+`plaza::hidden_from` and `plaza::lamplit` answer off the plaza's own geometry.
+
+**The penumbra —
+`the_penumbra_widens_with_its_casters_height_under_pcss_and_not_under_disc`.**
+Three cubes of one size at graded heights over one plane, widths walked in
+**metres of pavement**. Under `pcss`: 0.0400 / 0.0560 / 0.1000 m on radv and
+0.0400 / 0.0560 / 0.1040 on lavapipe, a ratio of 2.500 and 2.600; under `disc`
+0.0400 / 0.0440 / 0.0400 on both, a ratio of 1.000 — the half that says the
+widening came from the blocker search rather than the scene. Re-read on
+2026-09-06 with the atmosphere: only the tallest `pcss` counter moved, and only
+on lavapipe, by one step of the walk.
+
+**The side by side —
+`the_seam_runs_the_console_filter_on_the_left_and_the_shipped_one_on_the_right`.**
+It walks every rung the engine declares, because a rung wired to its neighbour's
+branch is the failure one pair cannot see: every column but the split's is exact
+on both adapters for each, with `disc` standing 9.234 and 228.562/255 from
+`pcss` down the two halves and `box` 27.387 and 258.306. Read with the
+antialiasing resolve out of the arm since 2026-09-06: the resolve walks an edge
+for up to `crcbl_shaders::cmaa2::MAX_LINE_LENGTH` texels and would carry the
+seam past its band (`SEAM_BLEED`'s doc carries the sweep).
+
+### alcove (19): the rules its plan set
+
+- **AO darkens the ambient term and nothing else, and the court is built to show
+  it.** The sun's azimuth, the fixed camera's eye ray and the slot's axis are
+  one line, so the floor at the bottom of the slot is in full sun at any depth
+  and the crease claim is about a directly lit surface.
+  `occlusion_scales_the_ambient_term_and_leaves_direct_light_alone` measures it
+  as a difference of differences with the sun switched off, not as a ratio.
+- **Flat, near-untextured surfaces by choice**, since texture detail is exactly
+  what hides an AO artefact — which is also why rule 11 does not apply.
+- **Every control drives an `r_ssao_*` variable by name through
+  `crcbl::render::console_table()`** — the seam a typed console line goes
+  through — so a pause-panel row, a page control and a typed line cannot
+  disagree, and the page keeps no second copy of the state.
+- **The bent-direction view is one `DebugView` cell**, written by `N`, the
+  `BENT VIEW` row, the page button, `--bent-view` and a typed `debug_view`, so
+  the last writer draws and the panel reports what is in force. A term that
+  steers where ambient is sampled from cannot be reviewed as a grey image, which
+  is why the view exists.
+- **The silhouette rim has its own golden from a second pose**
+  (`court::rim_camera`), because at the fixed camera the sphere is a few dozen
+  pixels across and a one-pixel halo is invisible to a person or a block
+  average.
+- **A cost for a technique the frame did not draw is not reported.**
+  `OcclusionCost` reads the frame's `ssao` and `ssao-shipped` timing rows, so
+  there is a per-technique cost only while the seam is up.
+- **HBAO is refused in topic 18, and there is no specular occlusion** until
+  topic 18 decides it is a term of its own; a scalar AO is the wrong quantity
+  for it and this sample must not imply otherwise.
+- **The page draws `LightingPath::Rasterised` by construction** — WebGPU exposes
+  no ray query — so it compares two screen-space gathers. Its controls are HTML
+  because the seam is walked with `,` and `.` natively, which a phone lacks.
+- **Exempt from rules 2 and 10**, on the viewer's ground.
+
+### options (20): the rules its plan set
+
+- **The only application that writes a player's setting.** Before it, the one
+  writer in the workspace was `crates/crcbl-cli/src/settings_cmd.rs`, so the
+  layer that stores a player's choices had been exercised by everything except a
+  player. The round trip it proves is its own restart.
+- **`[engine.video]` may only clamp downward, and an absent key clamps nothing**
+  (`docs/plan/39-capabilities.md`'s rule). A settings screen is the first thing
+  that can violate it, so **requested and resolved are shown separately**: the
+  _time_ half is `menu::NEXT_START_MARK` on a row that applies at the next
+  start; the _clamp_ half is `menu::HELD_MARK` — `frame_limit = 240` in a binary
+  launched at 60 reads `240 fps, held to 60 fps`, from `LoopConfig::limit`.
+- **Antialiasing is a replacement inside the resolve slot, not a clamp** — a
+  player picking CMAA2 where the camera asked for FXAA is asking for a different
+  filter (the antialiasing ladder's eighth decision, `docs/notes/rendering.md`).
+  The row is born on the rung `RenderEffects::DEFAULT_STACK` carries.
+- **Rows are derived from the engine's tables, never spelled twice.** One switch
+  per `crcbl::settings::VIDEO_KEYS` entry, so a new key gets a row with no
+  second spelling.
+- **No row for a setting that cannot be applied live and observed.** Display
+  mode, resolution and present mode wait for a window seam that applies them and
+  reports what the window system did; a control that does nothing is worse than
+  one that says so, and a key with no reader is labelled.
+- **A preset label is derived each frame, not stored.** Picking a tier writes
+  every key it owns; touching any one drops the label to custom. The tier row is
+  the first row, above every key it writes.
+- **Ladders step by rung.** A hand-written value between rungs goes to the rung
+  above on a step forward and the rung below on a step back. `RESET` writes what
+  an absent key means — `DEFAULT_ANISOTROPY` for anisotropy, every effect
+  allowed for the switches — rather than the bottom of a ladder.
+- **Three buses carry content** — a tone on `Bus::Music`, a noise tick on
+  `Bus::Sfx`, a click on `Bus::Ui` — and `Screen::set` is the one place a gain
+  changes, moving `Mixer::set_bus_gain` in the same call that writes the key.
+  `Bus::Voice` and `Bus::Ambience` have no content and their rows say
+  `(silent)`.
+- **A browser with no store must be told to the player, never swallowed.** OPFS
+  is the only browser backend (`crates/crcbl-store/src/lib.rs` records the
+  IndexedDB fallback as still to come); a settings screen that silently forgets
+  is the worst version of this bug.
+- **Non-goals:** input rebinding (`docs/plan/19-input.md`'s own screen),
+  accessibility settings beyond the catalogue, a migration format beyond topic
+  14's, and per-monitor or per-adapter profiles, which topic 15 refuses.
+- **Exempt from rules 2, 10 and 11** — the settings are the content.
+
 ## shard's doused zone was never lifted, and the numbers if it should be (2026-09-04)
 
 **Considered and declined, so it is not re-proposed.** When the no-bake rule
@@ -622,11 +1013,11 @@ above.
 Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.
 
-`docs/plan/sample/14-quarry.md`'s exit criteria ask for the reduction to be
-attributed: "how much of the reduction is instance culling and how much is
-cluster culling, because a single total hides which one is working". quarry now
-records both, and the answer is **all of it is cluster culling** — the instance
-cull keeps 1 of 1 on every frame, because the scene is one instance of one mesh.
+quarry's plan asked in its exit criteria for the reduction to be attributed:
+"how much of the reduction is instance culling and how much is cluster culling,
+because a single total hides which one is working". quarry now records both, and
+the answer is **all of it is cluster culling** — the instance cull keeps 1 of 1
+on every frame, because the scene is one instance of one mesh.
 
 That is a true answer and a degenerate one. The criterion exists because a real
 scene has many instances and the two culls can mask each other; with one

@@ -133,7 +133,7 @@ const POLL_DEADLINE: u64 = 120;
 /// Three numbers rather than one, because a survivor count alone cannot be read:
 /// "27 of 338 survived" is equally consistent with the normal cone rejecting
 /// every one of the other 311 and with it rejecting none of them, and
-/// `docs/plan/sample/14-quarry.md` asks the panel to say which.
+/// quarry's charter asks the panel to say which.
 ///
 /// **Every cluster the amplification stage *tested* is in exactly one of the
 /// three**, and a cluster it did not test is in none — see

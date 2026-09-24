@@ -1299,7 +1299,7 @@ fn the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from() {
 // The atlas viewer
 // ---------------------------------------------------------------------------
 //
-// `docs/plan/sample/18-sundial.md`'s milestone 1 owed one diagnostic after the
+// Sundial's milestone 1 owed one diagnostic after the
 // cascade overlay: the atlas *itself* on screen. Everything above this line
 // reads the atlas back on the CPU, which no reviewer can do while looking at a
 // live frame — so a tile that was never rendered into, or one a light was
@@ -1579,7 +1579,7 @@ const ATLAS_BORDER_LEVELS: f32 = 70.0;
 /// **The atlas viewer draws each atlas texel's stored depth, borders the slots
 /// that hold a map, and leaves the frame alone when it is off.**
 ///
-/// The claim `docs/plan/sample/18-sundial.md`'s milestone 1 has had no observer
+/// The claim sundial's milestone 1 has had no observer
 /// for. Four readings, each placed from the atlas's own geometry rather than
 /// found by looking:
 ///

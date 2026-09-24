@@ -6,7 +6,7 @@
 #
 # # What this is for
 #
-# `docs/plan/sample/18-sundial.md`'s milestone 1. The suite is
+# sundial's milestone 1. The suite is
 # `apps/sundial/tests/golden.rs`, and what it is about is not whether a frame
 # drew: a PCSS blocker search that never ran draws the same picture the
 # fixed-width disc does, a filter selector wired to one branch draws two

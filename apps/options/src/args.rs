@@ -16,8 +16,8 @@ use crcbl::args::{Common, Consumed};
 /// The fixed-timestep rate this application does not have.
 ///
 /// [`Common`] requires one because every other sample steps a simulation on it.
-/// This one steps nothing — the screen is the content, and `docs/plan/sample/
-/// 20-options.md` exempts it from rules 2 and 10 for that reason — so this is
+/// This one steps nothing — the screen is the content, and
+/// `docs/notes/samples.md` exempts it from rules 2 and 10 for that reason — so this is
 /// the engine's ordinary 60 and nothing reads it.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 

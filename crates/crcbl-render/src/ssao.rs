@@ -111,7 +111,7 @@
 //! The hemisphere was kept as the cheap tier on
 //! the antialiasing ladder's FXAA-under-CMAA2 pattern — eight taps and a
 //! comparison is a real budget on a software rasteriser — and
-//! `docs/plan/sample/19-alcove.md`'s second milestone is the two of them either
+//! alcove's second milestone is the two of them either
 //! side of [`r_ssao_split`]. What the cheap tier does not produce is a bent
 //! direction: it writes the zero sentinel on every pixel, and `mesh.slang`
 //! answers that with the shading normal, so [`r_ssao_bent_normals`] has nothing
@@ -121,7 +121,7 @@
 //!
 //! [`r_ssao_radius`] is the world-space disc the horizons are swept over, and
 //! it is the second of the two live controls
-//! `docs/plan/sample/19-alcove.md`'s first milestone asks for beside the AO
+//! alcove's first milestone asks for beside the AO
 //! view — [`r_ssao_intensity`] above is the first. `shaders/ssao.slang`'s
 //! `sampling_radius` is the whole of it: read once per gathered pixel and
 //! projected to a reach in pixels the march steps out along.
@@ -1042,7 +1042,7 @@ impl Ssao {
 /// `pipeline` is the technique this gather runs — see [`Technique`]. It is an
 /// argument rather than a field read here because the two sides of a comparison
 /// may run different ones, which is the whole of what
-/// `docs/plan/sample/19-alcove.md`'s second milestone asks for.
+/// alcove's second milestone asks for.
 ///
 /// **The viewport is not touched.** `ssao.slang` reads `SV_Position`, so a
 /// viewport narrowed to the half would squash the whole image into it; the

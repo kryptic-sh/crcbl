@@ -63,7 +63,7 @@ pub const KNOBS: [&str; 5] = [TECHNIQUE, RADIUS, INTENSITY, SPLIT, BENT_NORMALS]
 
 /// Where the seam stands when it is switched on.
 ///
-/// The middle of the frame, which is what `docs/plan/sample/19-alcove.md`'s
+/// The middle of the frame, which is what alcove's
 /// milestone 2 asks for: the two techniques over the same geometry, each with
 /// half the picture. `nudge_seam` is how it moves off centre.
 pub const SEAM_CENTRE: f32 = 0.5;
@@ -278,7 +278,7 @@ pub fn bent_normal_view() -> bool {
 /// Swaps between the shaded picture and that bent direction.
 ///
 /// What `N` and the panel's `BENT VIEW` row both do —
-/// `docs/plan/sample/19-alcove.md`'s milestone 3, and the charter's reason is
+/// Alcove's milestone 3, and the charter's reason is
 /// the whole of why it is a picture rather than a switch: a term that steers
 /// **where** the ambient is sampled from cannot be reviewed as a grey image, and
 /// [`BENT_NORMALS`] — the switch that makes the gather report a direction at all
@@ -349,7 +349,7 @@ impl Knobs {
     /// The same for the far side, which is only a side at all while the seam is
     /// up.
     ///
-    /// **`docs/plan/sample/19-alcove.md`'s milestone 2 is this line.** The engine
+    /// **Alcove's milestone 2 is this line.** The engine
     /// half puts a different technique on each side of the seam; the sample's
     /// half is saying which, because two grey pictures side by side name
     /// neither.
@@ -559,7 +559,7 @@ mod tests {
     /// **The panel says which technique each side of the seam is running**, and
     /// says there is no far side when there is no seam.
     ///
-    /// `docs/plan/sample/19-alcove.md`'s milestone 2 is this row and this row
+    /// Alcove's milestone 2 is this row and this row
     /// alone: the engine puts two techniques either side of a seam, and a
     /// picture of two greys names neither of them.
     #[test]

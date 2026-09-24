@@ -16,7 +16,7 @@
 //!
 //! # Every surface here is an occluder and nothing else
 //!
-//! `docs/plan/sample/19-alcove.md`'s Scope: "one interior scene of nothing but
+//! Alcove's scope: "one interior scene of nothing but
 //! occlusion geometry — an alcove, a stair underside, boxes resting on a floor
 //! for the contact-shadow claim, a deep crease lit directly, and a curved object
 //! silhouetted against distance". Each of those is one thing below, and the
@@ -175,7 +175,7 @@ const SLOT_SAMPLE_AT: f32 = 0.35;
 ///
 /// The floor at the middle of the slot: a wall `SLOT_GAP``/2` away on each
 /// side and the floor under it, and full sun on it because the sun's rays run
-/// down the slot. `docs/plan/sample/19-alcove.md`'s "AO darkens the ambient term
+/// down the slot. Alcove's "AO darkens the ambient term
 /// and nothing else" is read here — an implementation that scaled the direct
 /// term would take this point down with the rest of the crease, and this is the
 /// one place in the scene where those two are separable.
@@ -237,7 +237,7 @@ const STAIR_NOSING: f32 = 0.5;
 /// Enough that the flight climbs past [`fixed_eye`] and the **undersides** of
 /// its upper treads are in the frame: an underside seen from below, against the
 /// wall it is cantilevered from, is the crease
-/// `docs/plan/sample/19-alcove.md`'s Scope asks a stair for, and a flight whose
+/// alcove's scope asks a stair for, and a flight whose
 /// treads all sat below the eye would show none of them.
 /// `the_stair_climbs_past_the_eye` is what holds that rather than this
 /// sentence.
@@ -276,7 +276,7 @@ const LOW_BOX_MAX: Vec3 = Vec3::new(-1.3, 0.3, 1.6);
 /// In that box's own shadow — the sun is ahead of the camera, so a box shadows
 /// the floor between itself and the eye — so it carries no direct light, and a
 /// few centimetres from the box's face and of the floor's own plane.
-/// `docs/plan/sample/19-alcove.md`'s "boxes resting on a floor for the
+/// Alcove's "boxes resting on a floor for the
 /// contact-shadow claim" is read here.
 pub const CONTACT_BAND: Vec3 = Vec3::new(0.97, 0.0, BOX_MAX.z + 0.045);
 
@@ -572,7 +572,7 @@ impl MeshBuilder {
     /// The one thing a curved surface needs that a box does not: a sphere's
     /// facets share their corners' directions with their neighbours, and a face
     /// normal repeated four times would draw a polyhedron rather than the ball
-    /// `docs/plan/sample/19-alcove.md` asks for.
+    /// alcove's scope asks for.
     fn quad_shaded(&mut self, corners: [Vec3; 4], normals: [Vec3; 4]) {
         Self::facing_its_normals(&[corners[0], corners[1], corners[2]], &normals);
         let base = self.push_corners(&corners, &normals);

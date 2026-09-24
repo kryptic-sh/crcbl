@@ -6,7 +6,7 @@
 #
 # # What this is for
 #
-# `docs/plan/sample/19-alcove.md`'s milestones 1 and 2. The suite is
+# alcove's milestones 1 and 2. The suite is
 # `apps/alcove/tests/golden.rs`, and what it is about is not whether a frame
 # drew: an occlusion pass that never ran leaves a white channel, one whose
 # intensity is stuck at zero leaves the same, and a technique selector wired to

@@ -900,7 +900,7 @@ sweep on each tier's hardware.
 The ninth, tenth and eleventh decisions each **replaced** what came before them,
 so the ladder's lower rungs stopped being compiled: the 3x3 hardware-PCF box the
 ninth replaced lived only in git history from 2026-08-28, and there was no way
-to put two filters in one picture at all. `docs/plan/sample/18-sundial.md` is a
+to put two filters in one picture at all. `apps/sundial` (sample 18) is a
 comparison fixture that cannot be built without one, and the engine held exactly
 one filter.
 

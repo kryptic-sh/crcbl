@@ -2051,7 +2051,7 @@ fn the_blurred_occlusion_falloff_does_not_terrace() {
 ///   a `Passes::gather` whose arms were swapped, or a second pipeline built
 ///   from the same module, satisfies both assertions above and compares one
 ///   technique against itself — which is the thing
-///   `docs/plan/sample/19-alcove.md`'s second milestone exists to stop.
+///   alcove's second milestone exists to stop.
 /// * **Every bent channel is [`BENT_NORMAL_NONE`], on every pixel.** This
 ///   technique measures no direction, and `mesh.slang` answers that byte with
 ///   the shading normal; anything else steers a frame's ambient light by a

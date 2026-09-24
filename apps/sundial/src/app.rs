@@ -82,7 +82,7 @@ pub struct Summary {
     pub clock: Clock,
     /// **What the shadow work cost, per pass.**
     ///
-    /// `docs/plan/sample/18-sundial.md`'s "cost per technique, per frame", in the
+    /// Sundial's "cost per technique, per frame", in the
     /// headless summary as well as on the panel.
     pub shadow_cost: ShadowCost,
 }
@@ -281,7 +281,7 @@ pub(crate) const SEAM_KEYS: [(KeyCode, bool, &str); 2] =
 ///
 /// Not in [`KEYS`] for [`SEAM_KEYS`]' reason — an entry there is a bare `fn()`
 /// and these carry which cell they write, which way and how far — and **a pair
-/// each**, because the whole of `docs/plan/sample/18-sundial.md`'s milestone 2 is
+/// each**, because the whole of sundial's milestone 2 is
 /// the two counts moving against each other: a single key that cycled through
 /// presets could not put one at zero while the other stands where it ships.
 ///
@@ -363,7 +363,7 @@ pub fn toggle_cascade_view() {
 /// Swaps between the frame and the shadow atlas drawn over it.
 ///
 /// What `T` and the panel's `ATLAS` row both do —
-/// `docs/plan/sample/18-sundial.md`'s milestone 1 atlas viewer. The plaza's sun
+/// Sundial's milestone 1 atlas viewer. The plaza's sun
 /// and its two lamps compete for the tiles `crcbl::render::shadow` budgets, and
 /// which of them got one is the question this fixture had no way to ask: a light
 /// that was refused a tile still lights, so the frame looks the same either way.

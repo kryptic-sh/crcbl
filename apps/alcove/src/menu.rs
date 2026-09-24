@@ -5,7 +5,7 @@
 //! `GAME OVER` panel would be a screen it could never show.
 //!
 //! What it does have is every control
-//! `docs/plan/sample/19-alcove.md`'s milestones 1, 2 and 3 ask to be *legible*:
+//! alcove's milestones 1, 2 and 3 ask to be *legible*:
 //! the technique, the radius, the intensity, the bent-direction switch, the
 //! comparison seam — and, because that is the whole of what milestone 2 adds to
 //! the engine's half, **which technique each side of the seam is running**.
@@ -253,7 +253,7 @@ fn showing(view: DebugView, named: DebugView) -> &'static str {
 }
 
 /// The pause panel: the camera, the occlusion pass, and every knob
-/// `docs/plan/sample/19-alcove.md` asks to be shown.
+/// alcove's charter asks to be shown.
 #[must_use]
 pub fn pause_menu(
     camera: CameraMode,

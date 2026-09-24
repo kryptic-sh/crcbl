@@ -711,7 +711,7 @@ const DISC_FLATNESS: f32 = 1.25;
 
 /// **The penumbra widens with the gap under `pcss`, and does not under `disc`.**
 ///
-/// `docs/plan/sample/18-sundial.md`'s first acceptance claim, and the one the
+/// Sundial's first acceptance claim, and the one the
 /// counters were laid out for: three cubes of one size hanging at graded heights
 /// over one plane, so the only thing that differs between their three shadows is
 /// the distance from blocker to receiver.
@@ -809,7 +809,7 @@ fn the_penumbra_widens_with_its_casters_height_under_pcss_and_not_under_disc() {
 
 /// How much of the contact's light the shadow passes must take away.
 ///
-/// The peter-panning half of `docs/plan/sample/18-sundial.md`'s charter: a
+/// The peter-panning half of sundial's charter: a
 /// shadow biased far enough towards its light detaches from the object casting
 /// it, and the first pavement to light up is the strip against the block's face.
 ///
@@ -979,7 +979,7 @@ const SEAM_BLEED: u32 = 1;
 /// is not what the filter selector is being asked about.
 ///
 /// **Every rung the engine declares, and not the first one that is not the
-/// shipped rung**, which is `docs/plan/sample/18-sundial.md`'s milestone 4: the
+/// shipped rung**, which is sundial's milestone 4: the
 /// filter *ladder* side by side. One pair held would say the selector routes
 /// a filter to a side; the ladder held says it routes every filter there, and a
 /// rung wired to its neighbour's branch is exactly the failure a single pair
@@ -1101,7 +1101,7 @@ const REPLAYED_TICKS: [u64; 3] = [sun::FIXTURE_TICK, 200, sun::NOON_TICK];
 /// **The same tick of the clock draws the same frame, and different ticks draw
 /// different ones.**
 ///
-/// `docs/plan/sample/18-sundial.md` asks for a sun that is scripted rather than
+/// Sundial's scope asks for a sun that is scripted rather than
 /// wall-clock, and this is what that is worth having for: a fixture whose sun
 /// moved with the frame rate could not be blessed, and one whose sun did not move
 /// at all would pass every byte-identity check ever written.
@@ -1298,7 +1298,7 @@ const ATLAS_TILE_OVER_SURROUND: f32 = 32.0;
 /// **The atlas viewer draws the atlas, borders the slot the near cascade was
 /// rendered into, and letterboxes the rest of the frame to black.**
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, from the sample's
+/// Sundial's milestone 1 diagnostic, from the sample's
 /// side. `crates/crcbl/tests/forward_e2e/shadow.rs` holds the grey the viewer
 /// draws to the depth a CPU readback finds at the very texel the shader sampled;
 /// what is added here is that the picture reaches **this** fixture's frame — the
@@ -1445,7 +1445,7 @@ const CASCADE_PLAZA_FLATNESS: f32 = 4.0;
 /// **The cascade overlay tints the plaza by the cascade each fragment's sun
 /// shadow came from**, and it reaches this fixture's own frame.
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, the other half of
+/// Sundial's milestone 1 diagnostic, the other half of
 /// the pair the atlas viewer is one of. `crates/crcbl/tests/forward_e2e/
 /// shadow.rs` holds the overlay to the *band* on the engine's own pavement —
 /// three readings across one cross-fade, and the middle one strictly between its
@@ -2235,7 +2235,7 @@ fn speckle_percent(image: &Image, centre: (u32, u32), half: (u32, u32)) -> f32 {
 /// **The pavement under a grazing sun is as smooth as the same pavement under a
 /// steep one.**
 ///
-/// `docs/plan/sample/18-sundial.md`'s charter pairs acne with peter-panning, and
+/// Sundial's charter pairs acne with peter-panning, and
 /// the contact reading above is only the second of the two. Acne is what a bias
 /// too *small* draws: the shadow map quantises a receiver's own depth away
 /// across one texel, the receiver compares against a copy of itself and loses,
@@ -2877,7 +2877,7 @@ struct Setup {
 /// **The sun's two bias counts trade acne against the plinth's own contact, and
 /// they do not trade it the same way.**
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 2: the pair of artefacts moving
+/// Sundial's milestone 2: the pair of artefacts moving
 /// against each other as the two counts change, on the fixture the plaza was
 /// laid out for, where `docs/plan/45-shadows.md`'s seventh decision could only
 /// measure one room's wall-foot strip and one patch's dots.
@@ -3792,7 +3792,7 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 
 /// **The colonnade's shadow crosses the cascade split without a step in it.**
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 3, and
+/// Sundial's milestone 3, and
 /// `docs/plan/45-shadows.md`'s eighth decision from this sample's side: where two
 /// cascades meet, both are sampled and the answers are mixed by distance, so the
 /// switch is a **band** and not an edge. `crates/crcbl/tests/forward_e2e/

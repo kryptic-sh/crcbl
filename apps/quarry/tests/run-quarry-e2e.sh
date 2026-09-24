@@ -5,7 +5,7 @@
 #
 # # What this is for
 #
-# `apps/quarry/tests/device/` is `docs/plan/sample/14-quarry.md`'s milestones
+# `apps/quarry/tests/device/` is quarry's milestones
 # turned into assertions: the face is resident, it draws, its cut mixes levels,
 # the fixed dolly brings detail down the hierarchy without popping, all three
 # `GeometryPath` values draw it, the reduction is attributed between the two

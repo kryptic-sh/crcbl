@@ -290,7 +290,7 @@ pub extern "C" fn __crcbl_sundial_normal_offset_ceiling() -> f32 {
 ///
 /// # What it is for
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic. The plaza's sun
+/// Sundial's milestone 1 diagnostic. The plaza's sun
 /// and its three punctual lights all ask `crcbl::render::shadow` for a run of
 /// tiles, and a light that was refused one still lights — so the frame looks the
 /// same either way and the atlas is the only place the answer is written down.
@@ -315,7 +315,7 @@ pub extern "C" fn __crcbl_sundial_atlas_view(toggle: i32) -> i32 {
 ///
 /// # What it is for
 ///
-/// `docs/plan/sample/18-sundial.md`'s milestone 1 diagnostic, and the one
+/// Sundial's milestone 1 diagnostic, and the one
 /// `docs/plan/18-render-features.md` had been owed since P7. The sun's cascades
 /// are spheres about the eye and the switch between two of them is a band rather
 /// than an edge — `docs/plan/45-shadows.md`'s eighth decision — and neither the

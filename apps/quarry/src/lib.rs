@@ -1,6 +1,6 @@
 //! Quarry — the geometry acceptance fixture.
 //!
-//! `docs/plan/sample/14-quarry.md`, phase S4C. One dense scene drawn on every
+//! Sample 14, phase S4C. One dense scene drawn on every
 //! [`GeometryPath`](crcbl::hal::GeometryPath), with the cluster hierarchy made
 //! visible. Not a game: the geometry is the content.
 //!
@@ -8,7 +8,7 @@
 //! charter's answer rather than an oversight: sample rules 2 and 10 exist so a
 //! *game*'s state lives on the server and its logic in module code, and there
 //! is no game state here — one face, one instance, a camera and a debug view
-//! selector. `docs/plan/sample/14-quarry.md`'s non-goals say so, on the ground
+//! selector. Its rules in `docs/notes/samples.md` say so, on the ground
 //! `apps/viewer` is exempt on.
 //!
 //! Where `apps/lantern` proves the two lighting paths agree, this proves the
@@ -50,7 +50,7 @@
 //! asks for. A run with `--headless --frames N` prints which paths its frames
 //! took, where the camera is, the triangle count and how the cut split between
 //! instance and cluster culling, which is what
-//! `docs/plan/sample/14-quarry.md`'s exit criteria ask be recorded.
+//! quarry's exit criteria ask be recorded (`docs/notes/samples.md`).
 //!
 //! **And there is a browser page.** `src/web.rs` is the second front end, compiled
 //! only on `wasm32`; it opens on the animated dolly, because a page showing one

@@ -73,7 +73,7 @@ pub struct Summary {
     pub knobs: Knobs,
     /// **What the occlusion chain cost, per pass.**
     ///
-    /// `docs/plan/sample/19-alcove.md`'s "cost per technique, per frame", in the
+    /// Alcove's "cost per technique, per frame", in the
     /// headless summary as well as on the panel: a run with `--split` up carries
     /// an `ssao` row and an `ssao-shipped` row, which is the comparison the
     /// charter asks the sample to make legible.

@@ -3658,7 +3658,7 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
 ///
 /// `SHADOW_FILTER_BOX`'s kernel, and the rung `docs/plan/45-shadows.md`'s ninth
 /// decision replaced. It is in the tree rather than in history because
-/// `docs/plan/sample/18-sundial.md` is a comparison fixture: a ladder with only
+/// `apps/sundial` is a comparison fixture: a ladder with only
 /// its top rung compiled compares nothing, and the box is the rung a reader
 /// recognises.
 ///

@@ -1,7 +1,7 @@
 //! The fixture every quarry device test opens with, and the two readbacks
 //! they measure a frame by.
 //!
-//! `docs/plan/sample/14-quarry.md`'s milestone 1 is "meshlet bake +
+//! Quarry's milestone 1 is "meshlet bake +
 //! `MeshShader` path rendering the scene". Both halves are asserted here
 //! without a window, through [`GpuContext::open_offscreen`]:
 //!
@@ -157,7 +157,7 @@ pub(crate) struct Uniform {
     /// non-zero.
     pub(crate) level: usize,
     /// Triangles the draw actually asked for, which is what
-    /// `docs/plan/sample/14-quarry.md`'s "triangle count per path" means.
+    /// quarry's "triangle count per path" means.
     pub(crate) triangles: u32,
 }
 

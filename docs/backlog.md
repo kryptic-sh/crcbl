@@ -3309,10 +3309,6 @@ Seen while correcting other stale docs, and not fixed because each was outside
 that pass's list. Each claim below was read in the tree on that date; what is
 marked unverified was not checked further.
 
-- **`docs/plan/sample/00-samples-overview.md`'s "Where the ladder stands" is
-  stale.** It says towers is "not yet on the site", and `web/build.sh`'s `DEMOS`
-  lists it. It also says every sample but arena and mirrors has an `apps/`
-  crate, and meadow, mane and relief have none.
 - **`crates/crcbl/src/lib.rs`'s `pub use crcbl_webgpu` doc still says nothing
   encodes into the stream** and the exports answer `0` on every frame.
   `StreamChannel::encode_awaited` exists and `WebGpuInstanceOpen` installs a
@@ -5348,10 +5344,10 @@ The record behind this — the argument, the options and the measurements — is
   `VolumetricParams` a mode lane, giving that shader a `tile_box_pcf`, and
   reworking the drift guard so the two `tile_pcf` bodies may differ in the one
   branch. Not done, and deliberately: a shaft's filter is not what
-  `docs/plan/sample/18-sundial.md` compares, and `shaders/mesh.slang`'s header
-  says so where a reader of the seam will meet it. If it is ever wanted, the
-  drift guard is the piece to design first — it is the only thing keeping the
-  two atlas walks one body.
+  `apps/sundial` compares, and `shaders/mesh.slang`'s header says so where a
+  reader of the seam will meet it. If it is ever wanted, the drift guard is the
+  piece to design first — it is the only thing keeping the two atlas walks one
+  body.
 
 ## What sundial still owes (2026-09-04)
 
@@ -5495,9 +5491,9 @@ golden of their own and a button on the page. What is still **not** done:
 
 ## What alcove's bent-direction view did not cover (2026-09-05)
 
-`docs/plan/sample/19-alcove.md`'s milestone 3 is closed: `N`, the pause panel's
-`BENT VIEW` row, `__crcbl_alcove_bent_view` and a button on `/demos/alcove/` all
-put `crcbl_render::DebugView::BentNormal` up, and
+Alcove's milestone 3 is closed: `N`, the pause panel's `BENT VIEW` row,
+`__crcbl_alcove_bent_view` and a button on `/demos/alcove/` all put
+`crcbl_render::DebugView::BentNormal` up, and
 `the_bent_direction_is_the_normal_on_open_floor_and_leans_out_of_an_enclosure`
 in `apps/alcove/tests/golden.rs` holds a golden and four readings. What the
 slice did not do:
@@ -6762,19 +6758,19 @@ pump fails, and the failure names `true`.
 
 Antialiasing, ambient occlusion, reflections and shadows each grew a ladder of
 techniques in `docs/plan/18-render-features.md`, and four sample plans were
-written to compare the rungs — `docs/plan/sample/17-mirrors.md`,
-`docs/plan/sample/18-sundial.md`, `docs/plan/sample/19-alcove.md` and
-`docs/plan/sample/20-options.md`. Most of the ladders' first rungs are built —
-FXAA, the Hi-Z march, GTAO, the shadow ladder through PCSS and its early-out,
-the ACES curve, auto-exposure, the froxel column, render scale, the gradient sky
-and multi-scatter compensation — and `docs/plan/43-render-standards.md`'s
-delivery table is the record of which. `apps/options` is sample 20,
-`apps/sundial` sample 18 and `apps/alcove` sample 19;
-`docs/plan/sample/17-mirrors.md` is planned, not built. What follows is what the
-plans could not settle. The reflections and volumetrics plans were deleted on
-2026-09-24 with their built parts done; what they left is under _The reflection
-ladder's upper rungs are unbuilt_ and the entries after it, and under _The
-froxel column casts its shaft_ and the two entries after it.
+written to compare the rungs — `docs/plan/sample/17-mirrors.md` and the plans
+for sundial (18), alcove (19) and options (20), the last three deleted on
+2026-09-24 with their built parts done. Most of the ladders' first rungs are
+built — FXAA, the Hi-Z march, GTAO, the shadow ladder through PCSS and its
+early-out, the ACES curve, auto-exposure, the froxel column, render scale, the
+gradient sky and multi-scatter compensation — and
+`docs/plan/43-render-standards.md`'s delivery table is the record of which.
+`apps/options` is sample 20, `apps/sundial` sample 18 and `apps/alcove` sample
+19; `docs/plan/sample/17-mirrors.md` is planned, not built. What follows is what
+the plans could not settle. The reflections and volumetrics plans were deleted
+on 2026-09-24 with their built parts done; what they left is under _The
+reflection ladder's upper rungs are unbuilt_ and the entries after it, and under
+_The froxel column casts its shaft_ and the two entries after it.
 
 ### What the LTC area-light rung left (2026-08-31)
 
@@ -9543,9 +9539,9 @@ browser build, which exists.
 
 **A doc claim corrected while auditing:** `16-wasm-modules.md` said
 `apps/lantern` and `apps/quarry` "carry none and claim no exemption". They do
-claim one now — `docs/plan/sample/13-lantern.md` and
-`docs/plan/sample/14-quarry.md` both exempt themselves from sample rules 2 and
-10 on the ground that they open no `World`, and `docs/plan/sample/10-sparks.md`
+claim one now — `docs/plan/sample/13-lantern.md` and quarry's rules (in
+`docs/notes/samples.md`) both exempt the two samples from sample rules 2 and 10
+on the ground that they open no `World`, and `docs/plan/sample/10-sparks.md`
 exempts itself on topic 20's — visual-only VFX read no gameplay state.
 **`apps/bracket` is the one left**, and its own doc says so rather than being
 silent: `docs/plan/sample/16-bracket.md` records that it opens no `World` and
@@ -10935,6 +10931,16 @@ still asked for — flappy's asked for nothing more — and the rules and horde'
 scale measurement are in `docs/notes/samples.md` under _What the deleted sample
 plans 01, 02, 03 and 12 left behind_.
 
+The plans for viewer (05), quarry (14), sundial (18), alcove (19) and options
+(20) were deleted on the same day with their built parts done. Viewer's and
+quarry's leftovers are under their headings below; sundial's are under _What
+sundial still owes_, alcove's under _What alcove's bent-direction view did not
+cover_, and options' under _`apps/options` — what the first slice left_. The
+ray-traced rungs sundial and alcove still owe are one engine gap, recorded under
+lantern's _Ray tracing and the acceleration structures are unbuilt_. Their rules
+and recorded measurements are in `docs/notes/samples.md` under _What the deleted
+sample plans 05, 14, 18, 19 and 20 left behind_.
+
 ## breakout
 
 ### Breakout's 10-minute soak is unrun (2026-08-27)
@@ -11085,7 +11091,7 @@ to record the web build as deferred; that has been corrected.
 hud's exit criteria in full, and the wider claim that the engine's own UI —
 debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
 
-## viewer (`docs/plan/sample/05-viewer.md`)
+## viewer
 
 ### Viewer's hot-reload demo is built but not recorded (2026-08-27)
 
@@ -11106,13 +11112,27 @@ glTF-Sample-Models suite without crash; failures log actionable messages".
 `crates/crcbl-scene/src/gltf_check.rs` and `gltf_fixture.rs` exist and
 `apps/viewer/src/model.rs` turns every way a document can be wrong into a
 sentence. The **number** was taken on 2026-08-19 by a shell loop over a scratch
-download — "After the WebGPU migration" above records what it found — and
+download — "After the WebGPU migration" below records what it found — and
 nothing in the tree walks the suite, so the figure cannot go stale loudly.
 
-**What it would take:** a script that checks the suite out, runs it and fails on
-a regression, with the percentage and the failure reasons recorded in the doc.
-**What it blocks:** viewer's headline exit criterion, which is the asset
-pipeline's acceptance test.
+**What it would take:** a script that checks the suite out at a pinned commit,
+loads every model through `apps/viewer`'s own `model::load` and fails below the
+plan's bar of 90% loaded without a crash, and on any failure that does not name
+the file, the feature and the skip reason — with the percentage and the failure
+reasons recorded in `docs/notes/samples.md` beside viewer's rules. **What it
+blocks:** viewer's headline exit criterion, which is the asset pipeline's
+acceptance test.
+
+### Viewer's "usable with zero instructions" criterion has never been tried (2026-09-24)
+
+**Not done.** The last of the plan's exit criteria: a non-developer can open a
+file and look at a model with no instructions. Nobody has run that session, and
+no test can stand in for it. **What it would take:** one observed session, on a
+native build and on `/demos/viewer/`, with a person who has not seen the tool,
+and what confused them written down — the obvious suspects are that nothing on
+screen says a file can be dropped, and that the keys (`I`, `W`, `N`, `B`,
+`-`/`=`) are discoverable only from the `ESC` panel. **What it blocks:** nothing
+but the criterion.
 
 ## orbit (`docs/plan/sample/06-orbit.md`)
 
@@ -11510,6 +11530,23 @@ left with the RSM updater.
 sample's entire reason for existing — that a human has compared the two lighting
 paths on the same scene.
 
+**Sundial's and alcove's ray-traced rungs are the same gap (2026-09-24).**
+Sundial's milestone 5 (ray-traced shadows) and alcove's milestone 4 (ray-traced
+AO) were the last unbuilt milestones of their deleted plans, both gated on P7C,
+and both wait on exactly what lantern waits on: no BLAS or TLAS and no ray query
+in `crcbl-hal` — only the capability bit (verified 2026-09-24 by grepping
+`crates/crcbl-hal/src`: `Features::RAY_QUERY` in `caps.rs` and one doc mention
+in `device.rs`, nothing else). Each panel already names the missing rung through
+`crcbl::render::ray_tracing_note`. Finishing, per sample: the rung selectable on
+the existing seam beside the raster ones (`r_shadow_filter` and `r_shadow_split`
+for sundial; `r_ssao_technique` and `r_ssao_split` for alcove), a **device
+clamp** that removes it where unsupported and that the sample names on the panel
+and in the headless summary, a golden per rung, per-technique cost through the
+timing rows `ShadowCost` and `OcclusionCost` already read, and — for alcove —
+the ray-traced term as the **reference** the screen-space gathers are judged
+against, which is what that rung is for. The browser can never carry either:
+WebGPU has no ray query, so both pages stay on `LightingPath::Rasterised`.
+
 ### No device in the tree clamps a lantern effect (2026-08-27)
 
 **Coverage gap, not a defect.** The `UNAVAILABLE` arm of a pause-menu row — the
@@ -11527,7 +11564,7 @@ effects.
 an undeclared page read, one view per renderer and one view per offscreen run.
 The doc says all four are in `docs/backlog.md`; I did not confirm the entries.
 
-## quarry (`docs/plan/sample/14-quarry.md`)
+## quarry
 
 ### Three of the four QEM properties quarry claims to prove are not implemented (2026-08-27)
 
@@ -11549,7 +11586,9 @@ The doc says all four are in `docs/backlog.md`; I did not confirm the entries.
   assignment is per primitive and never reaches the function.
 - **Skinning weights are NOT carried through a collapse.**
 
-The doc's "Proves" bullet asserted all four. It now distinguishes them.
+The plan's "Proves" bullet once asserted all four. The rule that only border
+locking and determinism are provable today is in `docs/notes/samples.md` under
+_quarry (14): the rules its plan set_.
 
 **What it would take:** `docs/plan/25-lod.md`'s attribute slice. **What it
 blocks:** the exit criterion "the seam review is recorded with the content it
@@ -11563,14 +11602,31 @@ narrow blocker is the last bullet above — `crcbl_scene::simplify`'s quadric is
 over positions and a collapse has no rule for the weights of the vertex it
 removes. Nothing about quarry unblocks it.
 
+**What it would take:** the attribute slice in `docs/plan/25-lod.md` giving a
+collapse a rule for the removed vertex's joint indices and weights; then one
+skinned prop in quarry's scene — the plan asked for exactly one, beside the
+tiling wall piece — built into the cluster DAG, posed through
+`crcbl_render::skinning` and drawn on all three `GeometryPath` values, with a
+golden per path the way the six dolly goldens are. **What it blocks:** the last
+deliverable of quarry's milestone 4, and the "skinned weights carried through
+collapses" property.
+
 ### Quarry's two human judgements and its browser budget are untaken (2026-08-27)
 
-**Not done**, and the doc already states both as owed rather than met: whether
-the 233 differing pixels at the dolly's far stop read as "the same scene at the
-same budget" is a judgement, and the seam review against `quarry_face(CELLS)`
-and `quarry_tile` asks for a human to look. Neither has been. The browser budget
-milestone 4 asks for is also unrecorded, though the page exists
-(`apps/quarry/src/web.rs`, `web/demos/quarry/`).
+**Not done**, and the plan recorded both as owed rather than met (its
+measurements are in `docs/notes/samples.md` under _quarry (14): measured_):
+whether the 233 differing pixels at the dolly's far stop read as "the same scene
+at the same budget" is a judgement, and the seam review against
+`quarry_face(CELLS)` and `quarry_tile` asks for a human to look. Neither has
+been. The exit criteria want the three-way verdict and the seam review
+**recorded with the content they were done against** — so beside those
+measurements, naming the goldens and the two meshes.
+
+The browser budget milestone 4 asks for is also unrecorded, though the page
+exists (`apps/quarry/src/web.rs`, `web/demos/quarry/`). The criterion: the page
+renders the face on `IndirectPerBatch` with no missing geometry, at a recorded
+frame budget, and the summary line names the path it took. The budget wants a
+machine with a real browser GPU, the same gap as horde's.
 
 ## shard (`docs/plan/sample/15-shard.md`)
 
@@ -13282,10 +13338,10 @@ shown it alone.
 
 ### What `apps/viewer` still owes sample 05
 
-`apps/viewer` is `docs/plan/sample/05-viewer.md`'s **milestone 1**: a path
-argument, the load through `crcbl::assets::DirSource`, the conversion,
-frame-on-load, orbit/pan/zoom/`F`, one directional light, and the grid floor.
-Every module's docs name its own omission; this is the list in one place.
+`apps/viewer` is sample 05's **milestone 1**: a path argument, the load through
+`crcbl::assets::DirSource`, the conversion, frame-on-load, orbit/pan/zoom/`F`,
+one directional light, and the grid floor. Every module's docs name its own
+omission; this is the list in one place.
 
 - **The grid floor is drawn, and its scale is fixed.** `crcbl_render::grid` is
   wired into `ForwardRenderer` behind `set_ground_grid`, off by default, drawn
@@ -13743,10 +13799,10 @@ also owe is a bug in the split.
 ### After the WebGPU migration: features, then the sample that proves them
 
 The standing pattern from the roadmap — build the feature, then ship the sample
-that consumes it — put `docs/plan/sample/05-viewer.md`'s glTF model viewer next:
-open a file, orbit it, inspect it, as the asset pipeline's acceptance test and
-the editor viewport's warm-up act. `apps/viewer` is built, and these are the
-slices of it that are not:
+that consumes it — put sample 05's glTF model viewer next: open a file, orbit
+it, inspect it, as the asset pipeline's acceptance test and the editor
+viewport's warm-up act. `apps/viewer` is built, and these are the slices of it
+that are not:
 
 - **V-F3 — UI for tools, not just a debug overlay.** Node/mesh tree, material
   and texture listing with sizes and triangle counts, a stats panel. Audit what
@@ -14698,9 +14754,8 @@ it, forced by subtracting features from one adapter.
   What is still owed is the _review_: 233 pixels at a max delta of 118 is a real
   silhouette difference, and whether it reads as "the same scene at the same
   budget" is a judgement no tolerance makes. The images are
-  `apps/quarry/tests/golden/`. The table itself now lives in
-  `docs/plan/sample/14-quarry.md`'s Measured section, which is where that
-  document's own exit criteria ask for it.
+  `apps/quarry/tests/golden/`. The table itself lives in `docs/notes/samples.md`
+  under _quarry (14): measured_, moved there from the deleted plan.
 
 - **The LOD tint and the screen-error heatmap are both built.**
   `ForwardRenderer::set_lod_view` tints each cluster by the DAG level it was
@@ -14788,8 +14843,8 @@ it, forced by subtracting features from one adapter.
 
 - **The rejection split shipped, and the cone's value is pinned by no device
   number.** `CullStats::clusters` is a `ClusterCull` carrying `survivors`,
-  `frustum_rejects` and `cone_rejects`, the panel has the row
-  `docs/plan/sample/14-quarry.md` asked for, and
+  `frustum_rejects` and `cone_rejects`, the panel has the row quarry's plan
+  asked for, and
   `the_three_cluster_counts_add_up_to_the_cut_they_were_taken_over` asserts the
   three partition the cut on hardware.
 
@@ -16324,7 +16379,7 @@ What it does **not** reach, stated rather than left to be discovered:
   that crate's own tests import — no textures, no skins, no animations, no
   `MSFT_lod`, one material. So the gate proves `viewer` reaches a swapchain on
   X11 with a document loaded, and proves nothing about the Blender, Sketchfab
-  and Khronos files `docs/plan/sample/05-viewer.md` says the sample exists for.
+  and Khronos files the sample exists for.
 - **Nothing `viewer` is actually for is exercised.** No orbit, no `I` listing,
   no `W`/`N` views, no F11, no re-export watch: it runs the same fixed frame
   count every other sample in the gate does and exits.
@@ -16769,7 +16824,7 @@ every frame under it, which is the argument against it in one line.
 
 ## What the viewer's shelf slice left (2026-08-30, re-scoped 2026-09-06)
 
-`docs/plan/sample/05-viewer.md` milestone 4 is built: the native drop, the
+The viewer's milestone 4, the PBR showcase, is built: the native drop, the
 shelf, and — since 2026-09-06, with both halves of `43-render-standards.md` §2's
 rung 3 — the full metallic-roughness set, so a shelf model's
 `metallicRoughnessTexture`, `occlusionTexture` and `emissiveTexture` all reach a
@@ -22806,12 +22861,11 @@ with the flight instruments over it. What that leaves:
 
 ## `apps/options` — what the first slice left (2026-08-28)
 
-`docs/plan/sample/20-options.md`'s milestone 1 is built: six faders over the
-`[engine.audio]` buses, three of them on cues from `apps/options/src/audio.rs`,
-a `SAVE` that writes the user layer and says where it went, a `RESET` to unity,
-and a start that places the faders — and the mixer — from the player's own file.
-`menu::menus`, `app::Screen` and `audio::Audio` are the whole sample. What that
-leaves:
+Options' milestone 1 is built: six faders over the `[engine.audio]` buses, three
+of them on cues from `apps/options/src/audio.rs`, a `SAVE` that writes the user
+layer and says where it went, a `RESET` to unity, and a start that places the
+faders — and the mixer — from the player's own file. `menu::menus`,
+`app::Screen` and `audio::Audio` are the whole sample. What that leaves:
 
 - **Nobody has listened to it.** The gain stage is asserted rather than heard:
   `pulling_the_music_bus_down_makes_the_mix_quieter` in
@@ -22865,6 +22919,35 @@ leaves:
   `with_platform_storage`'s two platform arms, reached from the other side. A
   human running `cargo run -p options` twice is currently the only check that
   the native path writes where it reads.
+
+- **The eight catalogue keys nothing reads have no row, and the plan's exit
+  criterion wants them on the screen, labelled (2026-09-24).**
+  `crcbl::settings::catalogue` marks `NAMED_VIDEO_KEYS` — display mode, monitor,
+  resolution, present mode, brightness, HDR output, UI scale and field of view —
+  as `KeyStatus::Named`, and `apps/options` lays out no row for any of them
+  (verified 2026-09-24 against `NAMED_VIDEO_KEYS` in
+  `crates/crcbl/src/settings.rs` and `menu::menus`). The criterion reads "every
+  key in the settings catalogue appears on the screen, and any key with no
+  reader is labelled as such". **Needs a decision:** a read-only row per `Named`
+  key captioned as read by nothing — which satisfies the criterion and is
+  honest, but puts controls on the screen that do nothing — or holding each key
+  back until its reader lands, which is what the screen does today and what the
+  rule against rows that cannot be applied and observed argues for. The
+  display-mode bullet above is three of the eight either way.
+
+- **"Every key" is not enumerated end to end by a headless run.** The criterion
+  asks that a headless run can set every key and dump the resulting file.
+  `crcbl settings set` and `list` do it for any key a caller names, and
+  `crcbl::settings::catalogue` is the enumeration, but nothing walks the one
+  with the other: `list` dumps the player's file, not the catalogue. **What it
+  would take:** a test (or a `list --catalogue` mode) that sets each `Read` key
+  of `catalogue()` through the settings command, dumps the file and asserts
+  every key is there, with the `Named` keys refused as `crcbl::settings::apply`
+  already refuses them.
+
+- **Milestone 4's browser half is the `Nowhere` case above, and its audio half
+  the two listening bullets at the top of this list**; nothing else of the
+  plan's milestone 4 is open.
 
 ## bracket does not yet drive the transport (2026-08-24)
 

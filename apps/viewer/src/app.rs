@@ -39,7 +39,7 @@
 //! # It simulates nothing, and that is the charter exception
 //!
 //! `docs/plan/sample/00-samples-overview.md` rule 2 makes every sample
-//! client/server authoritative. `docs/plan/sample/05-viewer.md` names this
+//! client/server authoritative. `docs/notes/samples.md` records this
 //! sample as the one sanctioned exception: rule 2 exists so a *game*'s state
 //! lives on the server, and there is no state here — the file is on disk, the
 //! camera is the user's, and nothing else changes. So [`Viewer::tick`] is empty
@@ -359,7 +359,7 @@ pub struct Viewer {
     /// to be wider than one pixel of groove, which is a drag the player can see
     /// and the viewer would ignore.
     exposure_handle: f32,
-    /// `docs/plan/sample/05-viewer.md` milestone 2's listing — see
+    /// The viewer's milestone 2 listing — see
     /// [`crate::listing`]. Hidden until [`LISTING_KEY`] is pressed.
     listing: Listing,
     /// Milestone 3's re-export loop — see [`crate::watch`] and [`Viewer::tick`].
@@ -729,7 +729,7 @@ impl Viewer {
     /// **The re-export loop**: notices that the document has been written
     /// again, converts it, and swaps it into the frame.
     ///
-    /// `docs/plan/sample/05-viewer.md` V-F4. `dt` is wall-clock seconds — the
+    /// The re-export loop (V-F4). `dt` is wall-clock seconds — the
     /// frame's, not the tick's — and [`Watch::poll`] spends it against an
     /// interval of its own, so the rate a document is noticed at moves neither
     /// with `--tick-hz` nor with the frame rate. See [`crate::watch`] for what
@@ -841,7 +841,7 @@ impl Viewer {
     /// **The drop target on the window**: opens the documents dropped on it
     /// since the last frame.
     ///
-    /// `docs/plan/sample/05-viewer.md` milestone 4's first item, and the third
+    /// The viewer's milestone 4, first item, and the third
     /// door onto a document: the command line names a path, a page hands over
     /// bytes, and a window hands over a path. Called from [`Viewer::draw`]
     /// beside the re-export poll, for that poll's reason — a paused frame still
@@ -928,7 +928,7 @@ impl Viewer {
 
     /// **The shelf**: opens the model the panel's `SHELF` row was stepped onto.
     ///
-    /// `docs/plan/sample/05-viewer.md` milestone 4's second item, and the
+    /// The viewer's milestone 4, second item, and the
     /// fourth door onto a document — the command line names a path, a window
     /// hands over a path, a page hands over bytes, and this one is a row on a
     /// panel. Everything past the loading is [`Viewer::adopt`], as it is for
@@ -1011,7 +1011,7 @@ impl Viewer {
     /// **The drop target**: opens the document a visitor dropped on the canvas,
     /// if one has landed since the last frame.
     ///
-    /// `docs/plan/sample/05-viewer.md` V-F5's browser half, and the counterpart
+    /// The browser half of the drop-target item, and the counterpart
     /// of [`Viewer::poll_for_re_export`] — the native viewer is pointed at a
     /// path and this one is handed bytes, and past that they are the same
     /// event. [`crate::web`] owns the buffer the page writes into and the
@@ -1633,7 +1633,7 @@ impl DebugModule for Viewer {
 /// Loads the model and puts everything the conversion could not do in front of
 /// the user.
 ///
-/// **Skips are printed, not only logged.** `docs/plan/sample/05-viewer.md`'s
+/// **Skips are printed, not only logged.** The viewer's
 /// exit criterion is that a file nobody curated either loads or says why not,
 /// naming the file, the feature and the reason. The conversion already logs
 /// each one at warning level, which under the default `CRCBL_LOG` filter a user
@@ -1662,7 +1662,7 @@ fn load_and_report(options: &Options) -> Result<Model, ViewerError> {
 /// The document a run that named no path opens: [`crate::shelf`]'s default.
 ///
 /// **And the document this build generates, when the shelf is not there.**
-/// `docs/plan/sample/05-viewer.md` milestone 4 gives [`crate::demo_model`]
+/// The viewer's milestone 4 gives [`crate::demo_model`]
 /// exactly that job — "the fallback only for a build without the shelf" — and
 /// the case is real rather than theoretical: only Suzanne is committed, the
 /// rest is fetched, and a copied binary has no source tree under it. A viewer
@@ -1778,7 +1778,7 @@ mod tests {
 
     /// **Every skipped feature reaches the person who opened the file.**
     ///
-    /// `docs/plan/sample/05-viewer.md`'s exit criteria ask for an actionable
+    /// The viewer's exit criteria ask for an actionable
     /// message naming the file, the feature and the reason, and the conversion
     /// logs each one at a level the default `CRCBL_LOG` filter hides — so
     /// stderr is where a user actually sees them.
@@ -3394,7 +3394,7 @@ mod tests {
 
     /// **A document dropped on the window becomes the document on screen.**
     ///
-    /// `docs/plan/sample/05-viewer.md` milestone 4's first item, end to end: the
+    /// The viewer's milestone 4, first item, end to end: the
     /// compositor raises the drop, the loop hands the path to
     /// [`HostedGame::dropped_file`], and the frame after it the scene, the
     /// bounds, the listing panel and the camera are all the new document's.
@@ -3456,7 +3456,7 @@ mod tests {
     }
 
     /// **`viewer` with no path opens the shelf's Suzanne**, end to end:
-    /// `docs/plan/sample/05-viewer.md` milestone 4's second item, and the one
+    /// The viewer's milestone 4, second item, and the one
     /// half of it that is a claim about *this repository* rather than about a
     /// fetch — Suzanne is committed, so this runs on every machine with no
     /// network and no `tools/fetch-shelf.sh`.
@@ -3803,7 +3803,7 @@ mod tests {
     /// **The grid floor is in the frame this application records, and after the
     /// tonemap.**
     ///
-    /// `docs/plan/sample/05-viewer.md` milestone 1's third item. The graph dump
+    /// The viewer's milestone 1, third item. The graph dump
     /// is the observable rather than a field on the renderer, for the reason the
     /// UI pass's assertion above gives: "switched on" and "in the frame" are
     /// different claims, and only the second is the one milestone 1 makes.
@@ -3952,7 +3952,7 @@ mod tests {
     ///
     /// A viewer that opened a window on an empty scene would look exactly like
     /// one whose model failed to convert, which is the failure
-    /// `docs/plan/sample/05-viewer.md` exists to catch.
+    /// this sample exists to catch.
     #[test]
     fn a_document_with_nothing_in_it_never_reaches_a_window() {
         let _view = crcbl::debug_view::for_test();

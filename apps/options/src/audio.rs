@@ -7,7 +7,7 @@
 //!
 //! # Three buses, three kinds of content
 //!
-//! `docs/plan/sample/20-options.md`'s scope asks for "a music loop, a repeating
+//! Options' scope asks for "a music loop, a repeating
 //! effect, a UI click on the widgets themselves", on the ground that "three
 //! buses with obviously different content is the minimum that makes a mixer
 //! legible". They are:
