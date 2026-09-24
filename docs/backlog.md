@@ -12186,10 +12186,6 @@ and `grid_drag` below now serves it.
 cross-grid drags and the grab offset), and `apps/shard` and `apps/breach` use it
 with their copies deleted. What remains:
 
-- **No non-mutating fit check in the kit.** `crcbl_inventory::Grid` has nothing
-  that ignores an item's own cells, so both panels' `can_accept` clone the grid
-  each frame a drag hovers; a
-  `Grid::can_move_within(catalog, slot, at, rotation)` would remove the clone.
 - **EW will not migrate for now, by EW's decision.** Its inventory and hideout
   draw with `DrawList` and route pointer events themselves across three drag
   systems, and use none of `UiState`, `WidgetId` or `PointerInput`, so adopting

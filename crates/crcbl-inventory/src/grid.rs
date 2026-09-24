@@ -227,6 +227,31 @@ impl Grid {
         Ok(placement.stack)
     }
 
+    /// Whether [`move_within`](Self::move_within) would move the placement at
+    /// `slot` to `at`, turned `rotation`: the same check, cells the placement
+    /// itself covers counting as free, without moving anything.
+    ///
+    /// What a drag's `can_accept` asks every frame it hovers a cell — the
+    /// question used to be answered by cloning the grid and trying the move.
+    /// Allocates nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`move_within`](Self::move_within).
+    pub fn can_move_within(
+        &self,
+        catalog: &Catalog,
+        slot: SlotId,
+        at: Cell,
+        rotation: Rotation,
+    ) -> Result<(), InventoryError> {
+        let placement = self.slot(slot).ok_or(InventoryError::NoSuchSlot(slot))?;
+        let def = catalog
+            .get(placement.stack.item)
+            .ok_or(InventoryError::NoSuchItem(placement.stack.item))?;
+        self.check(def, at, rotation, Some(slot))
+    }
+
     /// Moves the placement at `slot` to `at`, turned `rotation`.
     ///
     /// **Atomic.** A refused move leaves the grid exactly as it was, down to
@@ -249,11 +274,11 @@ impl Grid {
         at: Cell,
         rotation: Rotation,
     ) -> Result<(), InventoryError> {
+        self.can_move_within(catalog, slot, at, rotation)?;
         let placement = self.slot(slot).ok_or(InventoryError::NoSuchSlot(slot))?;
         let def = catalog
             .get(placement.stack.item)
             .ok_or(InventoryError::NoSuchItem(placement.stack.item))?;
-        self.check(def, at, rotation, Some(slot))?;
 
         self.erase(slot.0);
         let moved = Placement {
@@ -988,6 +1013,60 @@ mod tests {
         );
         assert_eq!(grid.at(Cell::new(1, 1)), None);
         assert_eq!(grid.at(Cell::new(1, 3)), Some(mag));
+    }
+
+    /// **`can_move_within` answers without moving anything.** Each verdict is
+    /// asserted by value — a nudge over the item's own cells and a clear move
+    /// accepted, a collision, an edge and an unknown slot refused with their
+    /// reasons — and the grid compared whole afterwards. `move_within` runs this
+    /// same check, so the refused-move test above covers it too; this one pins
+    /// that asking is free of the move.
+    #[test]
+    fn can_move_within_answers_without_moving_anything() {
+        let catalog = items();
+        let mut grid = Grid::new(4, 4, None).expect("4x4 is a grid");
+        let mag = grid
+            .place(
+                &catalog,
+                stack(&catalog, "mag", 1, 1),
+                Cell::new(0, 0),
+                Rotation::Deg0,
+            )
+            .expect("an empty grid takes it");
+        grid.place(
+            &catalog,
+            stack(&catalog, "brace", 2, 1),
+            Cell::new(2, 0),
+            Rotation::Deg0,
+        )
+        .expect("the right half is free");
+        let before = grid.clone();
+
+        let ask =
+            |slot, x, y| grid.can_move_within(&catalog, slot, Cell::new(x, y), Rotation::Deg0);
+        assert_eq!(ask(mag, 0, 1), Ok(()), "a nudge over its own cell");
+        assert_eq!(ask(mag, 1, 1), Ok(()), "a clear move");
+        assert_eq!(
+            ask(mag, 2, 0),
+            Err(InventoryError::Occupied { x: 2, y: 0 }),
+            "onto the brace"
+        );
+        assert_eq!(
+            ask(mag, 4, 0),
+            Err(InventoryError::OutOfBounds {
+                x: 4,
+                y: 0,
+                w: 1,
+                h: 2
+            }),
+            "off the edge"
+        );
+        assert_eq!(
+            ask(SlotId(7), 0, 0),
+            Err(InventoryError::NoSuchSlot(SlotId(7))),
+            "an empty slot"
+        );
+        assert_eq!(grid, before, "asking moved something");
     }
 
     /// **A grid round-trips through serde with every placement where it was.**

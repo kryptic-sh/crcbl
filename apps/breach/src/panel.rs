@@ -44,7 +44,7 @@
 //! this module supplies is what only the game knows — what a cell holds when a
 //! press lands on it (the [`SlotId`] of the placement covering it, gripped at
 //! that placement's origin) and whether the rig would take it where the
-//! pointer is (a trial [`Grid::move_within`] on a copy). The answer comes back
+//! pointer is ([`Grid::can_move_within`]). The answer comes back
 //! as [`DropFeedback`], which is what a refusing cell is drawn from.
 //!
 //! # There are no icons
@@ -179,16 +179,14 @@ pub fn cell_at(extent: (u32, u32), pos: Vec2) -> Option<Cell> {
 /// Whether `grid` would take the stack at `slot` with its origin on `at`, in
 /// the rotation it already has.
 ///
-/// Asked of a copy, because [`Grid::move_within`] is the one check that does
-/// not count the stack's own cells as occupied — so a one-cell nudge of the
-/// `2×1` sidearm is a move rather than a collision with itself — and it only
-/// exists as the move.
+/// [`Grid::can_move_within`] does not count the stack's own cells as
+/// occupied, so a one-cell nudge of the `2×1` sidearm is a move rather than a
+/// collision with itself.
 fn accepts(grid: &Grid, slot: SlotId, at: Cell) -> bool {
     let Some(placement) = grid.slot(slot) else {
         return false;
     };
-    grid.clone()
-        .move_within(loadout::catalog(), slot, at, placement.rotation())
+    grid.can_move_within(loadout::catalog(), slot, at, placement.rotation())
         .is_ok()
 }
 

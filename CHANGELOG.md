@@ -283,6 +283,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_inventory::Grid::can_move_within`** — whether `move_within` would
+  move a placement, its own cells counting as free, without moving anything and
+  without allocating. A drag's `can_accept` asks it every frame it hovers a
+  cell; `apps/shard` and `apps/breach` answered by cloning the grid and trying
+  the move, and now call this.
 - **Fonts an app registers, in the UI tree and in menus** —
   `Ui::register_font(name, &'static Font)` makes a `font-family` list that names
   `name` ahead of its first built-in family (quoted or bare, ASCII case ignored)
