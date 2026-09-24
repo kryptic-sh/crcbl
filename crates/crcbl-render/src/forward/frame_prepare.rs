@@ -289,7 +289,7 @@ impl ForwardRenderer {
             // shadows rather than a side effect of where a light was placed — and it
             // is the same statement for a spot or a point light, whose maps are
             // looked at through the camera's pixels just as a cascade's is.
-            // `docs/plan/45-shadows.md`'s static-caching rung, and the whole of the
+            // Topic 45's static-caching rung, and the whole of the
             // decision it makes: everything below is assembled first and written
             // only if it differs from what the atlas was last *drawn* from. See
             // [`ForwardRenderer::shadow_atlas_record`] for what the comparison

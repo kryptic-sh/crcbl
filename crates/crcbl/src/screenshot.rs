@@ -309,7 +309,7 @@ pub enum Scene {
     /// stops distinguishing anything — and `POINT_CASTER_AT` for where the
     /// casters stand.
     PointShadow,
-    /// `docs/plan/44-lighting.md`'s **rectangular area light**: a dark glossy
+    /// Topic 44's **rectangular area light**: a dark glossy
     /// floor under two strip lights, looked straight down at.
     ///
     /// **The only frame in the tree that draws a polygon's highlight, and the
@@ -356,7 +356,7 @@ pub enum Scene {
     /// for where the strips hang, and `area_sun` for the sun that makes the
     /// mirror a control.
     AreaLight,
-    /// `docs/plan/44-lighting.md`'s **fill flag on the two punctual kinds**: the
+    /// Topic 44's **fill flag on the two punctual kinds**: the
     /// same dark glossy floor under four lights — a point pair and a spot pair,
     /// each mirrored across the frame's axis and each differing in `fill` alone.
     ///
@@ -507,7 +507,7 @@ pub enum Scene {
     /// [`Scene::SpecularAa`]'s `SPECULAR_STRIP_PITCH` argument at this
     /// fixture's own scale.
     DoubleSided,
-    /// `docs/plan/44-lighting.md`'s rung 4: **specular antialiasing by
+    /// Topic 44's rung 4: **specular antialiasing by
     /// roughness regularisation**, and the one frame in the tree whose normal
     /// field moves faster than the pixel grid samples it.
     ///
@@ -5537,7 +5537,7 @@ const SPECULAR_PLATE_TINT: [f32; 4] = [0.55, 0.58, 0.62, 1.0];
 /// **Swept rather than picked**, against the two things the frame has to do at
 /// once: a lobe narrow enough that the corrugation undersamples it, and a peak
 /// the `Rgba16Float` target can still separate from its neighbours after the
-/// tonemap. See `docs/plan/44-lighting.md`'s rung 4 for the measured numbers.
+/// tonemap. See topic 44's rung 4 for the measured numbers.
 const SPECULAR_ROUGHNESS: f32 = 0.18;
 
 /// How bright [`Scene::SpecularAa`]'s sun is, in every channel.

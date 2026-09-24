@@ -863,7 +863,7 @@ float2 dfg_at(float n_dot_v, float roughness)
 /// `W_far`, the opposite pole `W_opposite` and the horizon the rest. A mirror
 /// reads the gradient itself — the table's first column is the sky's own
 /// smoothstep — and the roughest lobe sees the horizon from every direction.
-/// No `pow` anywhere: `docs/plan/44-lighting.md`'s rule forbids a
+/// No `pow` anywhere: topic 44's rule forbids a
 /// transcendental reaching a colour, and the lobe was integrated at the cook.
 float3 sky_prefiltered(float3 direction, float roughness)
 {
@@ -1368,7 +1368,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     //
     // The sky at the surface's roughness rather than only along the mirror
     // direction: a rough lobe gathers a cone about the reflection, and
-    // `docs/plan/44-lighting.md`'s rung 3 cooked that gather into
+    // topic 44's rung 3 cooked that gather into
     // `sky_prefilter`. On an atmosphere frame the narrow end of that ramp reads
     // the sky-view LUT instead, which is the one thing three bands cannot say —
     // see [`sky_environment`], and `sharpness` is passed because it is already

@@ -16,7 +16,7 @@
 //!   everything that bounces again, so it returns less than it received and the
 //!   shortfall grows with roughness. [`directional_albedo`] is exactly how much
 //!   comes back, and [`energy_compensation`] is the factor that puts the rest
-//!   in. `docs/plan/44-lighting.md`'s rung 1.
+//!   in. Topic 44's rung 1.
 //! * **Specular image-based lighting**, whose second split-sum half is this
 //!   same table — rung 3 there. It is one table because it is one integral.
 //!
@@ -150,7 +150,7 @@ pub const PAIR_BYTES: usize = DFG_SIZE * DFG_SIZE * PAIR_TEXEL_BYTES;
 /// compensation adds the two channels, which is the table at `f0 = 1`. The
 /// compensation read a one-channel image of that sum until the area lights
 /// arrived and wanted the halves separately — one image is what
-/// `docs/plan/44-lighting.md`'s "one table serves both rungs" asked for, and it
+/// topic 44's "one table serves both rungs" asked for, and it
 /// costs the compensation one add.
 ///
 /// `decode_fixed_pair` in `ssr.slang` and `decode_dfg_pair` in `mesh.slang` are

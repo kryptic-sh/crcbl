@@ -941,7 +941,7 @@ impl DepthProbe {
                 flags: crcbl::hal::BindingFlags::empty(),
             },
             // The contact-shadow channel, on the two rows above's terms.
-            // `docs/plan/45-shadows.md`'s march writes it and
+            // Topic 45's march writes it and
             // `mesh.slang` multiplies the directional term by it; this probe
             // never runs that pass, but the module declares the global and a
             // layout that leaves a declared descriptor uncovered is refused —

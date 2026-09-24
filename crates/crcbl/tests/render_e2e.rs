@@ -1211,7 +1211,7 @@ fn each_caster_darkens_its_own_side_of_the_point_light(image: &Image) {
     }
 }
 
-/// `docs/plan/44-lighting.md`'s **rectangular area light**, drawn — and the
+/// Topic 44's **rectangular area light**, drawn — and the
 /// first frame in the tree with a fill light in it;
 /// [`the_fill_light_scene_draws_two_gleams_of_four_and_matches_its_golden`] is
 /// the same claim on the two punctual kinds.
@@ -1433,7 +1433,7 @@ const FILL_MIRROR_TOLERANCE: f32 = 1.08;
 /// by `20.6`, lavapipe by `10.6` and `20.7`. Half the smaller.
 const FILL_LIT_FLOOR: f32 = 5.0;
 
-/// `docs/plan/44-lighting.md`'s **fill flag on a point light and on a spot**,
+/// Topic 44's **fill flag on a point light and on a spot**,
 /// drawn.
 ///
 /// The golden is half of the evidence and cannot be the other half: four
@@ -2425,7 +2425,7 @@ fn specular_band(image: &Image, centre: (u32, u32), half: (u32, u32)) -> (f32, f
 /// [`Scene::SpecularAa`]'s claim: **the corrugated band's fireflies are gone,
 /// its energy is not, and the flat band beside it was not touched.**
 ///
-/// Three bands of one frame, one material, one lobe. `docs/plan/44-lighting.md`'s
+/// Three bands of one frame, one material, one lobe. Topic 44's
 /// rung 4 is the argument; `mesh.slang`'s `specular_aa_kernel` is the mechanism.
 ///
 /// * **The corrugated band.** Its maximum over its mean must be under
@@ -2574,7 +2574,7 @@ fn the_double_sided_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// `docs/plan/44-lighting.md`'s rung 4 — **specular antialiasing by roughness
+/// Topic 44's rung 4 — **specular antialiasing by roughness
 /// regularisation** — drawn.
 ///
 /// The golden is the picture that was reviewed;

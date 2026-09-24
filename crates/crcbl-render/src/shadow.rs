@@ -28,7 +28,7 @@
 //! rather than a correctness cliff — see [`Selection`].
 //!
 //! **Where a slot's map lives in the image is a separate question, and
-//! [`AtlasAllocator`] answers it.** `docs/plan/45-shadows.md`'s atlas rung: the
+//! [`AtlasAllocator`] answers it.** Topic 45's atlas rung: the
 //! image is a quadtree over [`ATLAS_COLUMNS`] by [`ATLAS_ROWS`] root cells of
 //! [`TILE`] texels, a map takes a whole cell or a halving of one down to
 //! [`MIN_TILE`], and the shader reads the rectangle it landed in — see
@@ -84,7 +84,7 @@
 //! # Which filter samples them, and the seam that shows two at once
 //!
 //! [`r_shadow_filter`] is the one knob here that reaches into `mesh.slang`'s
-//! sampling rather than into this module's arithmetic: `docs/plan/45-shadows.md`
+//! sampling rather than into this module's arithmetic: topic 45's ladder
 //! has three filter rungs and, until it existed, only the top one was in the
 //! tree. [`Filter`] is the set, [`filter`] is the near side of the comparison
 //! and [`shipped_filter`] is the far one.
@@ -149,7 +149,7 @@ crcbl_console::convar! {
     pub static r_shadow_split: f32 in 0.0 ..= 1.0 = 0.0;
 }
 
-/// The shadow filter a fragment runs — `docs/plan/45-shadows.md`'s ladder, with
+/// The shadow filter a fragment runs — topic 45's ladder, with
 /// every rung of it still in the tree.
 ///
 /// **A uniform lane and not a pipeline**, which is what separates this from
@@ -1056,8 +1056,8 @@ fn can_be_shadowed(light: &Light) -> bool {
         }
         // A rectangle radiates from a surface rather than from a point, so
         // there is no single centre of projection a shadow map could be
-        // rendered from. `docs/plan/45-shadows.md` is where an area light's
-        // shadow belongs, and `docs/backlog.md` records that it is not built.
+        // rendered from. An area light's shadow is a rung of its own, and
+        // `docs/backlog.md` records that it is not built.
         Light::Rect(_) => false,
     }
 }
@@ -1216,7 +1216,7 @@ fn level_threshold(level: usize) -> f32 {
 /// Which of [`TILE_LEVELS`] tile sizes a map of `coverage` earns, given the
 /// level it held last frame.
 ///
-/// `docs/plan/45-shadows.md`'s priority rung: a near, large light takes a whole
+/// Topic 45's priority rung: a near, large light takes a whole
 /// cell and a far or narrow one takes a halving of it. `previous` is the level
 /// this light held last frame, or [`None`] for a light that held none — and a
 /// light with no history starts at the coarsest level and climbs, which is
@@ -1252,7 +1252,7 @@ fn run_is_free(used: &[bool; LIGHT_TILES], base: usize, span: usize) -> bool {
 /// The triple rather than a light index alone, because a slot no longer decides
 /// a tile: a spot owns one tile and a point owns [`POINT_FACES`], so where a
 /// light's map lives is an allocation and not an index — and since
-/// `docs/plan/45-shadows.md`'s priority rung, how *large* it is is an allocation
+/// topic 45's priority rung, how *large* it is is an allocation
 /// too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Assignment {
@@ -1297,7 +1297,7 @@ pub struct Selection {
     /// once per [`Selection::update`].
     ///
     /// Kept here rather than rebuilt because it holds what every slot is
-    /// holding: since `docs/plan/45-shadows.md`'s static-caching rung a tile
+    /// holding: since topic 45's static-caching rung a tile
     /// outlives the frame it was allocated in, so an allocator built fresh each
     /// frame would be one that could not describe what the image contains.
     allocator: AtlasAllocator,
@@ -1453,7 +1453,7 @@ impl Selection {
     ///
     /// # Retention, which is what makes the image outlive the frame
     ///
-    /// `docs/plan/45-shadows.md`'s static-caching rung: a slot that wants the
+    /// Topic 45's static-caching rung: a slot that wants the
     /// size it already holds keeps the *same texels*, and only a slot whose map
     /// is gone or whose size changed hands its tile back to
     /// [`AtlasAllocator::release`]. A frame that changed nothing therefore

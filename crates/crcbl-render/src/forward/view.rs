@@ -703,7 +703,7 @@ pub(super) struct View {
     pub(super) previous_view_projection: Option<Mat4>,
     /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
     pub(super) ssao: Ssao,
-    /// `docs/plan/45-shadows.md`'s contact-shadow march — see
+    /// Topic 45's contact-shadow march — see
     /// [`crate::contact_shadows`].
     pub(super) contact_shadows: ContactShadows,
     /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
@@ -2293,7 +2293,7 @@ impl View {
                 .add_passes(graph, frame, extent, scene_depth, images),
             None => occlusion_placeholder,
         };
-        // `docs/plan/45-shadows.md`'s contact march, or the one texel that
+        // Topic 45's contact march, or the one texel that
         // stands for "the sun reaches this surface" where it is switched off.
         //
         // The occlusion pair's arms exactly, and the clamp the off-arm rests on

@@ -37,7 +37,7 @@
 //
 // # Nothing here calls a transcendental
 //
-// `docs/plan/44-lighting.md`'s shading rule. The exponential is
+// Topic 44's shading rule. The exponential is
 // `crcbl_shaders::fog`'s construction, copied here for the third time because
 // there is no `#include` in these shaders;
 // `crcbl_shaders::fog::the_shader_spells_the_same_constants` enumerates every
@@ -457,7 +457,7 @@ static const float VOLUMETRIC_MAX_ANISOTROPY = 0.99;
 ///
 /// The three-halves power is `d * sqrt(d)` and not `pow(d, 1.5)`: IEEE-754
 /// requires a correctly rounded `sqrt` and specifies nothing at all about
-/// `pow`, and this result reaches a colour. See `docs/plan/44-lighting.md`.
+/// `pow`, and this result reaches a colour. See topic 44's shading rule.
 float volumetric_phase(float g, float cos_theta)
 {
     float a = clamp(g, -VOLUMETRIC_MAX_ANISOTROPY, VOLUMETRIC_MAX_ANISOTROPY);

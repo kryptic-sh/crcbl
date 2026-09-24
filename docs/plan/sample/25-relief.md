@@ -49,8 +49,9 @@ here is built to make one of them visible.
 ## Non-goals (hard cap)
 
 Terrain authoring. Concurrent binary trees. Parallax occlusion mapping — it is
-refused in [44-lighting.md](../44-lighting.md), so there is no parallax column
-in the comparison unless that refusal is lifted. Hardware tessellation stages.
+refused by topic 44 (recorded in the
+[rendering notes](../../notes/rendering.md)), so there is no parallax column in
+the comparison unless that refusal is lifted. Hardware tessellation stages.
 Assets under anything but CC0 without a recorded decision: Khronos's
 `terrain_heightmap_r16.ktx` is Apache-2.0 and is not used.
 

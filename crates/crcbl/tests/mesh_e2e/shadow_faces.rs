@@ -1,6 +1,6 @@
 //! **A point light's faces cull separately, and the atlas does not change.**
 //!
-//! `docs/plan/45-shadows.md`'s fourth decision gave a point light one cull
+//! Topic 45's fourth decision gave a point light one cull
 //! against the box around its sphere and drew every caster in that box into all
 //! six faces, leaving the rasteriser to clip what lay outside each one. The cull
 //! now tags each caster with the faces whose side planes its box reaches, and

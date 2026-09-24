@@ -12,7 +12,7 @@
 //! So this module holds two things: the fit, which runs at cook time and is
 //! full of transcendentals; and the committed result, `tables/ltc.bin`, which
 //! is what the shader reads. That split is [`crate::dfg`]'s exactly, and for
-//! the same reason — `docs/plan/44-lighting.md`'s rule that no transcendental
+//! the same reason — topic 44's rule that no transcendental
 //! may reach a colour, with the cooked table as one of the two ways out of it.
 //!
 //! # The grid is `dfg`'s grid
@@ -320,7 +320,7 @@ pub fn inverse_transform(entry: [f32; 4]) -> [[f32; 3]; 3] {
 /// The `π` this engine's two lobes folded out of themselves, put back once at
 /// the end of a polygon integral.
 ///
-/// `docs/plan/44-lighting.md` records the convention: neither the Lambert term
+/// Topic 44 records the convention: neither the Lambert term
 /// nor the specular one carries its `1 / π`, because a light's intensity has
 /// absorbed it. The published edge fit below carries a `1 / (2π)` instead — it
 /// is written to hand a shader the Lambertian *response* `E / π` directly — so
@@ -334,7 +334,7 @@ pub const LOBE_PI: f32 = std::f32::consts::PI;
 ///
 /// Transcribed from Hill's `LTC_Evaluate`. It matters twice over here: the
 /// `acos` and `sin` it replaces are exactly the transcendentals
-/// `docs/plan/44-lighting.md` refuses in a term that reaches a colour, and the
+/// topic 44 refuses in a term that reaches a colour, and the
 /// replacement is multiplies, one divide and one reciprocal square root — every
 /// one of them an operation IEEE-754 specifies, which is the same ground
 /// [`crate::fog`]'s exponential stands on.

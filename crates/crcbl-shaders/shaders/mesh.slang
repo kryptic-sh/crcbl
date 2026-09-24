@@ -377,7 +377,7 @@ uint light_tile(uint tile)
 ///
 /// A scale and an offset, so this knows nothing about how the atlas is divided
 /// and a map of any size addresses through the same two instructions. That is
-/// `docs/plan/45-shadows.md`'s atlas rung: the cascades and the light maps share
+/// topic 45's atlas rung: the cascades and the light maps share
 /// one sampling path whatever size their tiles are, where a grid derived from an
 /// index could only ever produce one size.
 float2 atlas_uv(float4 rect, float2 tile_uv)
@@ -628,7 +628,7 @@ struct FrameUniforms
     /// space is at `zw + t * xy`. `atlas_rect` is what reads it.
     ///
     /// **What replaced a tile index into a fixed grid**,
-    /// `docs/plan/45-shadows.md`'s atlas rung: this file used to derive a cell
+    /// topic 45's atlas rung: this file used to derive a cell
     /// from the index, so every map was one size and could only be that size.
     /// Reading the rectangle the host allocated lets a far or small light take a
     /// halving of a cell with no second sampling path here.
@@ -1704,7 +1704,7 @@ StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t23, space0);
 /// specular is the polygon integral times `f0 · scale + bias`, which is the
 /// pair, so the slot now carries the pair and the compensation adds the two
 /// channels itself. One image and one set of four `Load`s serve both, which is
-/// `docs/plan/44-lighting.md`'s own "one table serves both rungs" holding by
+/// topic 44's own "one table serves both rungs" holding by
 /// construction rather than by two uploads of the same bytes agreeing.
 ///
 /// # Two bytes of fixed point per channel, not a half float
@@ -1748,7 +1748,7 @@ Texture2D<float4> specular_dfg D3D12_REGISTER(t25, space0);
 ///
 /// `crcbl_render::forward` creates this image as `Rgba8Unorm` where it creates
 /// the base-colour page as `Rgba8UnormSrgb`, and
-/// `docs/plan/44-lighting.md`'s rung 2 is where that is argued: a base-colour
+/// topic 44's rung 2 is where that is argued: a base-colour
 /// texel is a *colour* and glTF defines it as sRGB-encoded, where a normal texel
 /// is a *number* — three components of a direction — and pushing it through the
 /// sRGB decode is wrong by a gamma. The failure is quiet, which is why it
@@ -1768,7 +1768,7 @@ Texture2D<float4> specular_dfg D3D12_REGISTER(t25, space0);
 [[vk::binding(26, 0)]]
 Texture2DArray<float4> normal_textures D3D12_REGISTER(t26, space0);
 
-/// `docs/plan/44-lighting.md`'s rung 5: the linearly transformed cosine fit of
+/// Topic 44's rung 5: the linearly transformed cosine fit of
 /// the GGX lobe, four matrix entries per texel over the same `(N·V, roughness)`
 /// grid `specular_dfg` is on. `crcbl_shaders::ltc` is where it is fitted and
 /// committed, and `crcbl_shaders::ltc::texels` is the image
@@ -1798,7 +1798,7 @@ Texture2DArray<float4> normal_textures D3D12_REGISTER(t26, space0);
 [[vk::binding(27, 0)]]
 Texture2D<float4> ltc_matrix D3D12_REGISTER(t27, space0);
 
-/// `docs/plan/45-shadows.md`'s screen-space contact shadows, as
+/// Topic 45's screen-space contact shadows, as
 /// `contact_shadows.slang` left them: one `R8Unorm` channel the size of the
 /// frame, `1.0` where the sun reaches the surface unobstructed.
 ///
@@ -1822,7 +1822,7 @@ Texture2D<float4> ltc_matrix D3D12_REGISTER(t27, space0);
 ///
 /// It multiplies `sun_visibility` and nothing else. A punctual light's contact
 /// is a march of its own along a different direction, and this channel was
-/// marched towards the sun; `docs/plan/45-shadows.md` carries that as the rung
+/// marched towards the sun; topic 45 carries that as the rung
 /// above this one.
 ///
 /// **Appended past `ltc_matrix`, never inserted**, for the reason every binding
@@ -2318,7 +2318,7 @@ float4 depthVertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
 /// `SHADOW_ATLAS_CLEAR_DEPTH`, so a pass that keeps some tiles can still redraw
 /// others.
 ///
-/// `docs/plan/45-shadows.md`'s cadence rung needs a tile to be cleared on its
+/// Topic 45's cadence rung needs a tile to be cleared on its
 /// own, and the render-pass load operation cannot do it: a `LoadOp::Clear`
 /// covers the whole attachment, and the region-bounded forms are not portable —
 /// Metal's load action and WebGPU's `loadOp` have no render area, so a partial
@@ -2460,7 +2460,7 @@ static const float SPECULAR_AA_KAPPA = 0.18;
 /// How much variance the shading normal's screen-space spread adds to the
 /// specular lobe — Tokuyoshi and Kaplanyan's isotropic kernel, transcribed.
 ///
-/// `docs/plan/44-lighting.md`'s rung 4. The aliasing it removes is in the
+/// Topic 44's rung 4. The aliasing it removes is in the
 /// *shading* rather than in the geometry, so no pass in
 /// the antialiasing ladder can reach it: a normal field that
 /// moves faster than the pixel grid samples it puts the lobe's peak inside some
@@ -2686,7 +2686,7 @@ float3x3 ltc_transform(float4 entry)
 ///
 /// **The rational is the paper's own, and it is why this term is legal here.**
 /// The exact factor is an `acos` over a `sin`, and
-/// `docs/plan/44-lighting.md`'s rule is that no transcendental may reach a
+/// topic 44's rule is that no transcendental may reach a
 /// colour; Heitz, Dupuy, Hill and Neubelt's shader replaces it with two
 /// polynomials, a divide and a square root, every one of which IEEE-754
 /// specifies. That is the same ground `crcbl_shaders::fog`'s exponential stands
@@ -3170,7 +3170,7 @@ float shadow_normal_offset(float3 geometric_normal, float3 to_light)
 /// moved once it was measured is the *pass*, not the count. `crcbl_render`'s
 /// `PassTimers` prices the forward pass this filter runs in — 0.221 ms at
 /// 1920x1080 on an RX 7900 XTX against 0.303 ms without the probe below — and
-/// `docs/plan/45-shadows.md`'s eleventh decision has both adapters. Nothing
+/// topic 45's eleventh decision has both adapters. Nothing
 /// prices thirty-two taps against sixteen, which is what a graphics-quality
 /// tier would need, and this is still the first constant such a setting should
 /// reach for.
@@ -3206,7 +3206,7 @@ static const float SHADOW_FILTER_TEXELS = 2.0;
 /// re-derives every one of them rather than trusting the transcription.
 ///
 /// **It is not a Poisson disc**, which is what
-/// `docs/plan/45-shadows.md`'s ladder asked for, and the difference is
+/// topic 45's ladder asked for, and the difference is
 /// deliberate. A Poisson set has no closed form: it comes out of dart-throwing
 /// or best-candidate, so it arrives as two dozen constants whose provenance is a
 /// program nobody kept. A Vogel spiral has slightly worse spectral behaviour and
@@ -3256,7 +3256,7 @@ static const float2 SHADOW_DISC[SHADOW_TAPS] = {
 /// caster thinner than the gap between two probe taps that also misses the
 /// middle one — and there the filter answers a flat zero or one where it
 /// answered a fraction. That is a visual change rather than a free
-/// optimisation, and `docs/plan/45-shadows.md`'s eleventh decision is where the
+/// optimisation, and topic 45's eleventh decision is where the
 /// frames it moved are recorded.
 static const uint SHADOW_PROBE_TAPS = 5;
 
@@ -3458,7 +3458,7 @@ float2 shadow_rotation(float2 pixel)
 /// blocker search sizes the sun's disc and the punctual maps take it at
 /// [`SHADOW_FILTER_TEXELS`].
 ///
-/// `docs/plan/45-shadows.md`'s ninth, tenth and eleventh decisions together, and
+/// Topic 45's ninth, tenth and eleventh decisions together, and
 /// the default every golden in this workspace was blessed under. Zero, which is
 /// what makes an unwritten row this filter.
 static const uint SHADOW_FILTER_PCSS = 0u;
@@ -3527,7 +3527,7 @@ float2 atlas_step(float4 rect)
 /// ratio is the map's own side. Square, because a tile of the quadtree is.
 ///
 /// **Every shadow bias in this file is denominated in the texels of the map
-/// being sampled**, and until `docs/plan/45-shadows.md`'s priority rung that was
+/// being sampled**, and until topic 45's priority rung that was
 /// one number for every map — a whole root cell — declared here as
 /// `SHADOW_TILE`. A light demoted to a halving of a cell has half the texels
 /// across and twice the world footprint per texel, so biasing it by the cell's
@@ -3656,7 +3656,7 @@ float tile_pcf(uint tile, float2 tile_uv, float reference, float2 pixel, float r
 /// The 3×3 hardware-PCF box over tile `tile`, at `tile_uv` in that tile's own
 /// `0..1` space: nine taps one texel apart, unrotated, averaged.
 ///
-/// `SHADOW_FILTER_BOX`'s kernel, and the rung `docs/plan/45-shadows.md`'s ninth
+/// `SHADOW_FILTER_BOX`'s kernel, and the rung topic 45's ninth
 /// decision replaced. It is in the tree rather than in history because
 /// `apps/sundial` is a comparison fixture: a ladder with only
 /// its top rung compiled compares nothing, and the box is the rung a reader
@@ -3811,7 +3811,7 @@ float sun_penumbra_texels(uint cascade, float2 tile_uv, float reference, float2 
 /// **11.28** over the ring with no band, against **2.82** and **3.70** on
 /// control circles at 3.6 m and 4.5 m where no boundary falls, so the seam was
 /// four times the scene's own contrast at that scale. The sweep is in
-/// `docs/plan/45-shadows.md`'s eighth decision.
+/// topic 45's eighth decision.
 static const float CASCADE_FADE_FRACTION = 0.1;
 
 /// One cascade's answer about one fragment: `1.0` outside its box, and the PCF
@@ -5755,7 +5755,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
             // in that half at all. The specular one is the same integral over
             // the same rectangle seen through the fitted transform, scaled by
             // the energy the lobe returns, which is the pair already read
-            // above. `docs/plan/44-lighting.md`'s rung 5 is the argument and
+            // above. Topic 44's rung 5 is the argument and
             // `crcbl_shaders::ltc` is the fit.
             float3 corners[4];
             rect_corners(light, input.world_position, corners);
@@ -5860,7 +5860,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // — `f0`, `roughness`, `N·V` — and on nothing a light carries, so it is the
     // same number for every light in the froxel and one multiply outside the
     // loop is the whole of it. `specular_compensation` carries the derivation;
-    // `docs/plan/44-lighting.md`'s rung 1 is what asked for it.
+    // topic 44's rung 1 is what asked for it.
     //
     // **The diffuse term is left alone**, and that is the model rather than an
     // omission: what the lobe dropped is light that went on bouncing *within the

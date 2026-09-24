@@ -44,7 +44,7 @@
 //!
 //! # The shading rule
 //!
-//! `docs/plan/44-lighting.md`: **no transcendental function may reach a
+//! Topic 44: **no transcendental function may reach a
 //! colour.** Neither of these two calls one. The exponential is
 //! [`crate::fog::exp_neg`], built from operations IEEE-754 pins down; and
 //! [`phase`]'s three-halves power is written `d * sqrt(d)` rather than

@@ -43,7 +43,7 @@ pub const SPLIT: &str = "r_shadow_split";
 /// The sun's constant shadow bias, in texels of the cascade a fragment landed
 /// in.
 ///
-/// One of `docs/plan/45-shadows.md`'s seventh decision's pair, and the half that
+/// One of topic 45's seventh decision's pair, and the half that
 /// moves the compared depth **towards the light**: too little of it draws acne,
 /// too much lifts a shadow off the thing casting it.
 pub const BIAS: &str = "r_shadow_bias";

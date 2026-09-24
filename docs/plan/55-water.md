@@ -240,8 +240,9 @@ engine's own numbers replace these before the rung counts as built.
 
 ### 6. No transcendental reaches a pixel: constructed trigonometry and an integer phase
 
-The workspace rule ([44-lighting.md](44-lighting.md)) is that no platform `sin`,
-`cos`, `exp` or `pow` reaches a colour, because IEEE-754 specifies those to no
+The workspace rule (topic 44's shading rule, in the
+[rendering notes](../notes/rendering.md)) is that no platform `sin`, `cos`,
+`exp` or `pow` reaches a colour, because IEEE-754 specifies those to no
 precision and four backends' implementations differ in the last place. The math
 is not banned; the platform's library is. Every published water model is written
 in trigonometry, so the mapping is decided here rather than per shader:

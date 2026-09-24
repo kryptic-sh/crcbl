@@ -220,11 +220,11 @@ its tests rather than values recorded from its own output.
   level whose triangles fall below about two pixels across on screen, whatever
   the threshold a caller asks for. A forward renderer shades a full 2×2 quad for
   every triangle a pixel touches, so triangles under a pixel cost four fragments
-  each — the failure mode a visibility buffer exists to fix, and
-  [44-lighting.md](44-lighting.md) refuses that buffer, so the floor is what
-  stands in for it. The floor is a constant beside the threshold in
-  `crcbl_render::cull`'s reference and `cull.slang`, and a test that a cut at
-  the floor draws no smaller triangle than it names.
+  each — the failure mode a visibility buffer exists to fix, and the forward
+  rule in the [rendering notes](../notes/rendering.md) refuses that buffer, so
+  the floor is what stands in for it. The floor is a constant beside the
+  threshold in `crcbl_render::cull`'s reference and `cull.slang`, and a test
+  that a cut at the floor draws no smaller triangle than it names.
 - **Hysteresis** on the threshold (switch-up and switch-down differ) kills
   boundary flicker: a group starts expanding above the budget and keeps
   expanding until its error falls to a fraction of it. **The history is per
@@ -237,9 +237,9 @@ its tests rather than values recorded from its own output.
 - **The importance metric and its hysteresis are NOT one shared helper, and
   2026-08-31 is when that was tried.** The claim was that "projected screen size
   of a bounding sphere, with a switch-up and a switch-down band" is what this
-  descent, `45-shadows.md`'s shadow bit and its atlas priority, and the light
-  grid's per-light culling all compute. Built, the two that exist are not one
-  function: `GroupCost::projected_error` divides by the distance to the sphere's
+  descent, the shadow atlas's priority, and the light grid's per-light culling
+  all compute. Built, the two that exist are not one function:
+  `GroupCost::projected_error` divides by the distance to the sphere's
   **surface** and answers infinity inside it, because what it bounds is the
   worst error a viewer could see; `shadow::coverage` divides by the distance to
   the light's **centre**, because what it measures is an angular radius. A

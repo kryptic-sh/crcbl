@@ -1,7 +1,7 @@
 //! Which of the shadow atlas's maps a frame redraws, out of the ones whose
 //! contents have gone out of date.
 //!
-//! `docs/plan/45-shadows.md`'s cadence rung. [`super::Selection`] decides which
+//! Topic 45's cadence rung. [`super::Selection`] decides which
 //! lights hold tiles and how large each tile is; [`crate::forward`] decides
 //! which of those maps the image no longer holds. What is left is the question
 //! this module answers: **a frame that would have to redraw everything redraws

@@ -143,7 +143,7 @@ entry-points = computeMain:glcompute
 
 [contact_shadows]
 source = shaders/contact_shadows.slang
-source-sha256 = 2d3d0b4b22f26aa19b101cd49d4c7ce58b51be878616ddfc3d09912acc21fba4
+source-sha256 = fe7518cd2345905f713350bb178a390a9a82b52a09c93dd1dd921c6e903a49fb
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/contact_shadows.spv
 spirv-sha256 = 72ecc977744bc17a6f106a732d5824653788a6d80610030859a0991e51b45714
@@ -232,7 +232,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 1e96ce824b66301d3e1c97f99d019346a4440de59ad334f4494468019497e06d
+source-sha256 = 1847f6df573b7a39cbe0baf8a310fd3632c89a202d46a6ce8b11315f66267888
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
 spirv-sha256 = b4e42d109d885c12e4c19af7a1612dba9d0f79f26f6c1eb6af57e62baa480011
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 7cf5847fa9310f438cdf24aa518c1f7aedb12abac9b52e97b65ae8bd4c2c1c99
+source-sha256 = 031aa296560942f1ad02fbb13cc2b3ea5a9bab3bb96f90f05aca52281cb103ab
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -445,7 +445,7 @@ entry-points = computeMain:glcompute
 
 [sky]
 source = shaders/sky.slang
-source-sha256 = 1074ce6754660aeb2fbc16dac39c1f22fce01a2a16de16ea5dd543b5e1b6b70c
+source-sha256 = bc8351c399e97b7cdac16b8ce47a997f0a6bf2b99124c3a22d622dc20571e5b0
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/sky.spv
 spirv-sha256 = b04f59f5b55d2ecf5aa38c22ee7e6dd4270fd7f70fcd1223a3f96d0a4190dde2
@@ -529,7 +529,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = edaaca1578a750ca1c0728fc7af5c3350075348ae5df7e987848ea8f781a3367
+source-sha256 = 60871eac44126407a7a817154aa1acbb7b91ba011a3d9dda0d5d35c430a7a548
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
 spirv-sha256 = f15dfc0ec15c6bd55ba303d1eec499e787e53e928d6fd050d556b382010c8e07
@@ -625,7 +625,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]
 source = shaders/volumetric.slang
-source-sha256 = 7a3883dabbec4c223146e460e4125856cf9f075a18e2add7fdf54b352742825a
+source-sha256 = ed478ac16bed643ef733a7cac857c759ba27d5abed458f38a1e9d800024f8731
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric.spv
 spirv-sha256 = cdb1742b68346160688b86c511c0779c781664188ee1dd3e2753b72829a633ba
@@ -639,7 +639,7 @@ entry-points = scatterMain:glcompute, integrateMain:glcompute
 
 [volumetric_composite]
 source = shaders/volumetric_composite.slang
-source-sha256 = 820f6ac768fda830d58196ac0e2fdfc9c9f76cf2fa8b7c3a9230fbc470c34909
+source-sha256 = d00e14b19fd947d8262646a21feb6ddb5a909a8319daa1f1d633d50ee43dc8e1
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric_composite.spv
 spirv-sha256 = 1aa3d2c9386eda6ce01fa4cddfc7ac119d01aceb4e3766e47b25cb639021e57d
@@ -653,7 +653,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [water]
 source = shaders/water.slang
-source-sha256 = 4ce0de212095883bf6377abcf4ba80c0a1026e8d3caedd6875d03cb66a016795
+source-sha256 = 1e1f9dcdcea972e67f00013b6220cfc0871b16d9bdd1c5fd4703e02666fb6401
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/water.spv
 spirv-sha256 = f546b406bba367699121a871895d86544b2b9167f0be12f97c3dab81960bf9f7

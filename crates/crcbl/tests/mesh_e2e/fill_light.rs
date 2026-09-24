@@ -1,4 +1,4 @@
-//! `docs/plan/44-lighting.md`'s **fill flag on the two punctual kinds**: a point
+//! Topic 44's **fill flag on the two punctual kinds**: a point
 //! light and a spot over the slab, each rendered twice and differing in `fill`
 //! alone.
 //!

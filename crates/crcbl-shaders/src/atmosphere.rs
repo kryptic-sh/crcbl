@@ -30,7 +30,7 @@
 //!
 //! Hillaire's sky-view LUT is indexed by a view zenith **angle** and an azimuth
 //! **angle** relative to the sun, so both building it and reading it take a
-//! `sin`, a `cos` or an `acos`. `docs/plan/44-lighting.md`'s rule forbids a
+//! `sin`, a `cos` or an `acos`. Topic 44's rule forbids a
 //! transcendental that reaches a colour, and a sky is nothing but colour — so
 //! this module indexes the same field by two algebraic coordinates instead:
 //!
@@ -660,7 +660,7 @@ pub const SUN_LIMB_MEAN: [f32; 3] = [
 /// The limb-darkening fit's coefficients: ascending powers of
 /// `t = μ^{1/8}`, three channels per row.
 ///
-/// **`μ^a` is a `pow`, and `docs/plan/44-lighting.md` lets no transcendental
+/// **`μ^a` is a `pow`, and topic 44 lets no transcendental
 /// reach a colour**, so the paper's curve is spent at authoring time instead —
 /// the way [`crate::dfg`]'s split-sum table and [`crate::ltc`]'s fit are.
 ///

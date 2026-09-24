@@ -213,7 +213,7 @@ pub extern "C" fn __crcbl_sundial_seam_at(at: f32) -> f32 {
 /// A negative `texels` reads. This is `[` and `]` as something a finger can
 /// reach, through the same [`crate::filter::BIAS`] cell those keys, the pause
 /// panel's row and a typed `r_shadow_bias 3` all write — and the half of
-/// `docs/plan/45-shadows.md`'s seventh decision that moves the compared depth
+/// topic 45's seventh decision that moves the compared depth
 /// **towards the light**: too little draws acne on the open pavement, too much
 /// lifts the plinth's shadow off the plinth.
 ///
@@ -318,7 +318,7 @@ pub extern "C" fn __crcbl_sundial_atlas_view(toggle: i32) -> i32 {
 /// Sundial's milestone 1 diagnostic, and the one
 /// `docs/plan/18-render-features.md` had been owed since P7. The sun's cascades
 /// are spheres about the eye and the switch between two of them is a band rather
-/// than an edge — `docs/plan/45-shadows.md`'s eighth decision — and neither the
+/// than an edge — topic 45's eighth decision — and neither the
 /// spheres nor the band is visible in a shaded frame at all. This is the picture
 /// they are visible in: the shaded frame multiplied by a tint per cascade,
 /// blended across the band exactly as the shadow answer is.

@@ -3,7 +3,7 @@
 //! [`crate::timing::PassTimers`] hands back a single [`FrameTimings`] — the
 //! newest frame whose query slot has come back round — and
 //! `crcbl::engine`'s `finish` used to log exactly that as the run's report. One
-//! frame is a sample of one, and the numbers in `docs/plan/45-shadows.md`'s
+//! frame is a sample of one, and the numbers in topic 45's
 //! eleventh decision had to be taken as medians of five hand-run binaries
 //! because nothing in the tree would produce a median of anything. This is the
 //! accumulator that does: every distinct frame's timings go in, and what comes

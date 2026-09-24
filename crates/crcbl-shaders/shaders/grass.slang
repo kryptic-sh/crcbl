@@ -401,7 +401,7 @@ struct FrameUniforms
     /// space is at `zw + t * xy`. `atlas_rect` is what reads it.
     ///
     /// **What replaced a tile index into a fixed grid**,
-    /// `docs/plan/45-shadows.md`'s atlas rung: this file used to derive a cell
+    /// topic 45's atlas rung: this file used to derive a cell
     /// from the index, so every map was one size and could only be that size.
     /// Reading the rectangle the host allocated lets a far or small light take a
     /// halving of a cell with no second sampling path here.

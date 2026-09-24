@@ -1,4 +1,4 @@
-//! **A light the atlas demoted, rendered** — `docs/plan/45-shadows.md`'s
+//! **A light the atlas demoted, rendered** — topic 45's
 //! priority rung, on a device.
 //!
 //! Two spot lights stand over one floor. `crcbl_render::shadow`'s `coverage` is

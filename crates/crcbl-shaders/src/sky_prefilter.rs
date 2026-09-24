@@ -1,7 +1,7 @@
 //! The gradient sky convolved against the GGX lobe: the prefiltered-radiance
 //! half of specular image-based lighting, as one committed table.
 //!
-//! `docs/plan/44-lighting.md`'s rung 3 is Karis's split-sum, and [`crate::dfg`]
+//! Topic 44's rung 3 is Karis's split-sum, and [`crate::dfg`]
 //! is its BRDF half. The other half is the environment prefiltered against the
 //! lobe at every roughness, which an engine with a cubemap sky stores as a mip
 //! chain and bakes again for every sky. This engine's sky is

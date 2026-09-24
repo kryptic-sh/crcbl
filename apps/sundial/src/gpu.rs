@@ -35,7 +35,7 @@
 //! [`ShadowCost`] reads the two passes the shadow work is spread across —
 //! `shadow`, which draws the atlas, and `forward`, where the filter samples it —
 //! off [`PassTimers`]. **There is no per-side row**, and
-//! `docs/plan/45-shadows.md`'s fifteenth decision is why: the seam is resolved
+//! topic 45's fifteenth decision is why: the seam is resolved
 //! per fragment inside one scene draw, so a timer either side of it would be
 //! measuring half a scene rather than a filter. What prices a rung is the
 //! `forward` row across two runs at two settings of `r_shadow_filter`, and this

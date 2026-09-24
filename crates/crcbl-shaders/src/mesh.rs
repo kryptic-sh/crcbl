@@ -122,7 +122,7 @@ pub const SHADOW_POINT_FACES: usize = 6;
 ///
 /// The largest map `crcbl_render::shadow::AtlasAllocator` can hand out, and one
 /// cell of the grid its quadtrees are rooted on — not the side of every map,
-/// which since `docs/plan/45-shadows.md`'s priority rung is whatever level a
+/// which since topic 45's priority rung is whatever level a
 /// light's coverage earned it.
 ///
 /// **A host number, and no longer the shader's.** Every shadow bias
@@ -179,7 +179,7 @@ pub const SHADOW_ATLAS_TILES: usize = SHADOW_CASCADES + SHADOW_LIGHT_TILES;
 /// The shadow filters [`FrameUniforms::shadow_filter`] selects between, in the
 /// order the block's lanes number them: a mode is this array's index.
 ///
-/// * `pcss` — `docs/plan/45-shadows.md`'s ninth, tenth and eleventh decisions
+/// * `pcss` — topic 45's ninth, tenth and eleventh decisions
 ///   together: a blocker search sizes the sun's rotated disc per fragment, and
 ///   a punctual map takes that disc at its fixed reach. **What ships**, and
 ///   what every golden in this workspace was blessed under.
@@ -847,7 +847,7 @@ pub struct FrameUniforms {
     /// `0..1` space is at `zw + t * xy`.
     ///
     /// **This is what replaced a tile index into a fixed grid**, which is
-    /// `docs/plan/45-shadows.md`'s atlas rung: a slot's map used to be a cell of
+    /// topic 45's atlas rung: a slot's map used to be a cell of
     /// an [`SHADOW_ATLAS_COLUMNS`] by [`SHADOW_ATLAS_ROWS`] grid the shader
     /// derived from the index, so every map was one size and could only be that
     /// size. Reading the rectangle instead lets a far or small light take a
@@ -1161,7 +1161,7 @@ pub const CASCADE_TINT_NONE: [f32; 3] = [1.0, 1.0, 1.0];
 /// What fraction of a cascade's reach the fade into the next one takes up, and
 /// `static const float CASCADE_FADE_FRACTION` in `mesh.slang`.
 ///
-/// `docs/plan/45-shadows.md`'s eighth decision: the cascade switch is a band
+/// Topic 45's eighth decision: the cascade switch is a band
 /// rather than a step, so over the last of this much of a cascade's reach both
 /// cascades are sampled and their answers mixed by distance. The shader's copy
 /// carries the sweep the tenth came out of.
@@ -1178,7 +1178,7 @@ pub const CASCADE_FADE_FRACTION: f32 = 0.1;
 ///
 /// Tokuyoshi and Kaplanyan, "Improved Geometric Specular Antialiasing" (I3D
 /// 2019), and the paper's own value for the pixel filter's width.
-/// `docs/plan/44-lighting.md`'s rung 4 is the argument for the rung, and this
+/// Topic 44's rung 4 is the argument for the rung, and this
 /// module's `the_specular_antialiasing_kernel_is_spelled_the_same_way` is what
 /// holds this number and the shader's to each other.
 pub const SPECULAR_AA_SIGMA_PX: f32 = 0.5;
@@ -2898,7 +2898,7 @@ mod tests {
             }
         }
         // What is left of the atlas's geometry on the sampling side. The grid's
-        // two extents went with `docs/plan/45-shadows.md`'s allocator rung — a
+        // two extents went with topic 45's allocator rung — a
         // slot's place is a rectangle the host hands over in
         // `shadow_atlas_rect` — and the tile's own side went with the priority
         // rung, because a map is no longer always a whole root cell and the one
@@ -6113,7 +6113,7 @@ mod tests {
     /// **The shaded stage widens its lobe by the paper's kernel, and it is the
     /// only stage that does.**
     ///
-    /// `docs/plan/44-lighting.md`'s rung 4. The other two stages of this file
+    /// Topic 44's rung 4. The other two stages of this file
     /// that draw a material's own geometry write depth and an albedo patch; a
     /// specular lobe reaches neither, so a kernel that appeared in one of them
     /// would be arithmetic with nowhere to go.
@@ -6340,7 +6340,7 @@ mod tests {
     }
 
     /// **Every bias is denominated in the texels of the map it is about**, which
-    /// since `docs/plan/45-shadows.md`'s priority rung is not one number.
+    /// since topic 45's priority rung is not one number.
     ///
     /// A light whose coverage earned it a halving of a root cell has half the
     /// texels across its map and twice the world footprint per texel. Biasing it
@@ -6553,7 +6553,7 @@ mod tests {
     /// account — both are smooth, and a re-bless takes whichever it is given.
     ///
     /// What it does hold to account is the seam itself, and that is measured
-    /// rather than asserted: `docs/plan/45-shadows.md`'s eighth decision has the
+    /// rather than asserted: topic 45's eighth decision has the
     /// luma steps either side of lantern's cascade boundary, with and without
     /// the band, and the sweep that picked `CASCADE_FADE_FRACTION`'s tenth.
     #[test]
@@ -6601,7 +6601,7 @@ mod tests {
     ///
     /// A golden holds none of them to account: each is a smooth frame that a
     /// re-bless accepts. What is measured rather than asserted is the artefact
-    /// the rung exists to remove, and `docs/plan/45-shadows.md`'s tenth decision
+    /// the rung exists to remove, and topic 45's tenth decision
     /// carries the sweep — the edge wobble on `apps/lantern`'s far shadow
     /// boundary against `SHADOW_SUN_TAN_RADIUS`, with the acne and grain the
     /// same frames cost.

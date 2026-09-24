@@ -352,7 +352,7 @@ fn cycle_filter() {
 
 /// Swaps between the shaded picture and that picture tinted by cascade.
 ///
-/// What `C` and the panel's `CASCADES` row both do. `docs/plan/45-shadows.md`'s
+/// What `C` and the panel's `CASCADES` row both do. Topic 45's
 /// eighth decision made the cascade switch a band rather than a step, and this
 /// is the picture that band is looked at in — which is the one thing a shadow
 /// fixture could not show before the overlay existed.

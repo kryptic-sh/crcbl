@@ -46,7 +46,7 @@
 //
 // # No transcendental reaches the colour
 //
-// `docs/plan/44-lighting.md`'s rule, and this file needs no escape from it on
+// Topic 44's rule, and this file needs no escape from it on
 // either arm: the gradient is a smoothstep, which is a cubic, and the LUT read
 // is `sqrt`, `floor` and a blend — multiplies and adds, IEEE-exact on every
 // target. The sun's disc is where an atmosphere would normally reach for one —
@@ -149,7 +149,7 @@ static const uint SKY_VIEW_HEIGHT = 64;
 /// `crcbl_shaders::atmosphere::SUN_LIMB_FIT`: Hillaire 2020's centre-to-limb
 /// factor, in ascending powers of `t = mu^(1/8)`, one channel per lane.
 ///
-/// The paper's own factor is `mu^a`, and `docs/plan/44-lighting.md` lets no
+/// The paper's own factor is `mu^a`, and topic 44 lets no
 /// transcendental reach a colour — so the `pow` is spent at authoring time and
 /// what arrives here is a polynomial in four square roots of `mu²`. That host
 /// constant's doc carries the fit and the error it reaches, and

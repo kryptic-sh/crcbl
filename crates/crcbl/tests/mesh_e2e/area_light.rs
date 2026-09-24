@@ -1,4 +1,4 @@
-//! `docs/plan/44-lighting.md`'s rung 5, drawn: a rectangular area light over a
+//! Topic 44's rung 5, drawn: a rectangular area light over a
 //! smooth slab, its golden, and the two claims only a rectangle can make.
 //!
 //! ```text
@@ -387,8 +387,8 @@ fn a_fill_light_keeps_its_diffuse_and_loses_its_highlight() {
 /// tens of milliseconds and four hundred of them three times over would be
 /// minutes; at the suite's own extent and a window just past
 /// `crcbl_core::stats::MIN_PERCENTILE_SAMPLES` it costs a fraction of a second
-/// and still holds the ordering below. The numbers written into
-/// `docs/plan/44-lighting.md` came from the override:
+/// and still holds the ordering below. The numbers recorded in
+/// `docs/notes/rendering.md` came from the override:
 ///
 /// ```text
 /// CRCBL_PRICE_SIZE=1920x1080 CRCBL_PRICE_FRAMES=400 \

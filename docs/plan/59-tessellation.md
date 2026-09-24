@@ -46,8 +46,9 @@ Absent, and the tree has most of what it needs:
   ([37-materials.md](37-materials.md)), and every layer of a page shares one
   size and format. Trilinear sampling has landed
   (`crates/crcbl-render/src/material_table.rs`).
-- **Parallax occlusion mapping is refused** in [44-lighting.md](44-lighting.md)
-  and [43-render-standards.md](43-render-standards.md); the only planned height
+- **Parallax occlusion mapping is refused** by topic 44 (recorded in the
+  [rendering notes](../notes/rendering.md)) and
+  [43-render-standards.md](43-render-standards.md); the only planned height
   march is the decals' T1 tier ([33-decals.md](33-decals.md)).
 - **The ~2 px triangle floor** [25-lod.md](25-lod.md) specifies for the forward
   renderer was not found implemented in the cull and draw-generation shaders,
@@ -153,9 +154,9 @@ and the overflow count goes on the stats panel.
 
 Phong tessellation is a quadratic blend of three tangent-plane projections; PN
 triangles are a cubic patch; bilinear displacement is arithmetic. None needs a
-platform `sin`, `cos`, `exp` or `pow`, so R1 meets
-[44-lighting.md](44-lighting.md)'s rule as written, and its GPU result is equal
-across backends within the same bound every shading path already meets.
+platform `sin`, `cos`, `exp` or `pow`, so R1 meets topic 44's shading rule
+([rendering notes](../notes/rendering.md)) as written, and its GPU result is
+equal across backends within the same bound every shading path already meets.
 
 ### 6. Height enters materials as its own page
 

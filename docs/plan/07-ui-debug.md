@@ -471,10 +471,9 @@ Surfaces for instrumentation that already exists:
    pass beside a world-space one; it is its own slice and `docs/backlog.md` says
    what it needs.
 
-   The four owed views still wait on the _callers_, not on the layer:
-   `45-shadows.md`'s cascade overlay and atlas view, `25-lod.md`'s cluster
-   bounds and `44-lighting.md`'s light reach each now need only the system that
-   appends its own geometry.
+   The four owed views still wait on the _callers_, not on the layer: topic 45's
+   cascade overlay and atlas view, `25-lod.md`'s cluster bounds and the light
+   list's reach each now need only the system that appends its own geometry.
 
 ## Tasks
 

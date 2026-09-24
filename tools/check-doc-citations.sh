@@ -19,7 +19,7 @@
 # Markdown files get a second pass: the target of every relative link. The plan
 # documents under `docs/plan/` are indexes of each other, so a renamed or deleted
 # topic leaves dead links that the backtick pass cannot see — its patterns want a
-# top-level directory, and a sibling link is a bare `44-lighting.md`. A link
+# top-level directory, and a sibling link is a bare `53-transparency.md`. A link
 # target resolves against its own file's directory, which is what a Markdown
 # renderer does, so that is the only place this looks.
 #

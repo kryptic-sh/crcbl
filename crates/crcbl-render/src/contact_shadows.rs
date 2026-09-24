@@ -1,4 +1,4 @@
-//! `docs/plan/45-shadows.md`'s screen-space contact shadows: the one full-screen
+//! Topic 45's screen-space contact shadows: the one full-screen
 //! pass between the depth prepass and the forward pass.
 //!
 //! ```text

@@ -2353,7 +2353,7 @@ mod tests {
                 );
                 // **And every one of those tiles is a whole root cell**, which
                 // is what says this room's goldens are still evidence about the
-                // maps they were blessed under. `docs/plan/45-shadows.md`'s
+                // maps they were blessed under. Topic 45's
                 // priority rung sizes a map by how much of the frame it covers,
                 // and the downlight is the narrowest cone in the tree — the
                 // fixture `crcbl::render::shadow`'s `WHOLE_CELL_COVERAGE` is

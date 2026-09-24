@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/45-shadows.md`'s screen-space contact shadows: the pass that
+// Topic 45's screen-space contact shadows: the pass that
 // marches the depth prepass towards the sun and writes one `R8Unorm` channel
 // the forward pass multiplies its **directional shadow term** by.
 //
@@ -31,7 +31,7 @@
 // skip empty space over a ray that may cross the whole frame; this ray is
 // [`MAX_STEPS`] texels long, so every cell it would skip is a cell it was about
 // to leave anyway — the pyramid would cost a level descent per crossing and buy
-// nothing. `docs/plan/45-shadows.md` lists the pyramid among the things the tree
+// nothing. Topic 45 lists the pyramid among the things the tree
 // already has; that it is available is not a reason to climb it.
 //
 // # Determinism: `ssr.slang`'s argument, and it binds harder here
@@ -111,8 +111,8 @@ static const float LIT = 1.0;
 /// screen-space reach would grow the shadow as the camera closed on it, which is
 /// the artefact that makes a contact term read as dirt.
 ///
-/// Swept on `apps/lantern`'s room at 1920×1080 before it was fixed here; see
-/// `docs/plan/45-shadows.md`. Below a tenth of a metre the crate legs' contact
+/// Swept on `apps/lantern`'s room at 1920×1080 before it was fixed here.
+/// Below a tenth of a metre the crate legs' contact
 /// is still detached at the near cascade's bias; past half a metre the term
 /// stops being a contact and starts competing with the cascade it is meant to
 /// complete, darkening whole corners the atlas already answers for.

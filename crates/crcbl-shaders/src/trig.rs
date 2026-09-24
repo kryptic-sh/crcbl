@@ -2,7 +2,7 @@
 //!
 //! # Why this module exists, when `sin` is one instruction
 //!
-//! `docs/plan/44-lighting.md` states this workspace's shading rule: **no
+//! Topic 44 states this workspace's shading rule: **no
 //! transcendental function may reach a colour**, because the four backends'
 //! implementations of them differ in the last place and this engine blesses one
 //! set of golden images across all four. [`crate::fog::exp_neg`] answered that

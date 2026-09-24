@@ -297,11 +297,11 @@ pub use volumetric::FroxelBuffers;
 /// how long a map may be held and how many may be redrawn at once are different
 /// purchases — and the shadow filter's two, `shadow::r_shadow_filter` and
 /// `shadow::r_shadow_split`, which are that module's answer to the occlusion
-/// chain's technique pair: which rung of `docs/plan/45-shadows.md`'s filter
+/// chain's technique pair: which rung of topic 45's filter
 /// ladder runs, and the seam that puts it beside the one that ships — and the
 /// sun's two bias counts, `shadow::r_shadow_bias` and
 /// `shadow::r_shadow_normal_offset`, which are two variables for the reason
-/// `docs/plan/45-shadows.md`'s seventh decision gives: one moves the compared
+/// topic 45's seventh decision gives: one moves the compared
 /// depth towards the light and the other moves the receiver sideways along its
 /// own normal, so acne and peter-panning are pulled by different numbers and a
 /// single knob could not show the pair moving against each other.

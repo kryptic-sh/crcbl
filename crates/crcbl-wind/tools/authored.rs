@@ -15,7 +15,7 @@
 //!
 //! # No transcendental, for a reason that is not the shading rule
 //!
-//! Nothing here reaches a pixel, so `docs/plan/44-lighting.md`'s rule does not
+//! Nothing here reaches a pixel, so topic 44's rule does not
 //! bind a cook tool. What binds it is that the test comparing the committed
 //! bytes against this function runs on Linux, macOS and Windows, and `sin` on
 //! those three is three implementations that differ in the last place. A single

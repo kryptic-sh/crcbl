@@ -107,7 +107,7 @@ pub enum SundialAction {
     /// **The one row that changes the picture rather than the shadow.** Every
     /// other control here moves what the shadow *is*; this one leaves it alone
     /// and colours the frame by which cascade each sun-lit fragment read, which
-    /// is the only way the cross-fade band `docs/plan/45-shadows.md`'s eighth
+    /// is the only way the cross-fade band topic 45's eighth
     /// decision added is a thing a reviewer can look at.
     ToggleCascades,
     /// Draw the shadow atlas over the frame, or take it away —

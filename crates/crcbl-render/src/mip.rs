@@ -21,7 +21,7 @@
 //! [`normal_resample`] and [`normal_chain`] are the same pair for the **normal**
 //! page, and they are a second filter rather than a flag on the first because a
 //! normal texel is not a colour: no transfer curve, no alpha weighting, and a
-//! renormalise after the average. `docs/plan/44-lighting.md`'s rung 2 is where
+//! renormalise after the average. Topic 44's rung 2 is where
 //! that is argued.
 //!
 //! [`linear_resample`] and [`linear_chain`] are the third pair, for the
@@ -145,7 +145,7 @@ pub fn chain(level0: &[u8], extent: u32) -> Vec<Vec<u8>> {
 /// renormalise after the average.
 ///
 /// [`resample`]'s box filter over a different kind of value, and every one of
-/// the three differences is `docs/plan/44-lighting.md`'s rung 2:
+/// the three differences is topic 44's rung 2:
 ///
 /// * **No sRGB decode.** A normal texel is a direction stored as `n * 0.5 +
 ///   0.5`, not a colour, and pushing it through the IEC transfer function is

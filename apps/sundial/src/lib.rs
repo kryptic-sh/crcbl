@@ -23,7 +23,7 @@
 //! first four milestones ask to be *legible*:
 //!
 //! * **The filter selector and the comparison seam**, which
-//!   `docs/plan/45-shadows.md`'s fifteenth decision landed as
+//!   topic 45's fifteenth decision landed as
 //!   `r_shadow_filter` and `r_shadow_split` and which this sample binds to the
 //!   `F`, `X`, `,` and `.` keys and to the pause panel's `FILTER` and `SEAM` rows.
 //! * **Which filter each side of the seam is running**, on the panel's `NEAR

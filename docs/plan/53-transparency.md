@@ -241,9 +241,9 @@ does not change.
 - **`mesh.slang`** — the fragment stage gains the fog application of decision 4
   and writes only `SV_Target0` on the blended path. Nothing in the shading
   itself changes: a blended fragment shades through the same froxel grid and the
-  same BRDF as an opaque one, which is exactly the argument
-  [44-lighting.md](44-lighting.md) gives for clustered forward over deferred in
-  the first place.
+  same BRDF as an opaque one, which is exactly the argument topic 44 gave for
+  clustered forward (recorded in the [rendering notes](../notes/rendering.md))
+  over deferred in the first place.
 - **`draw_gen.slang`** — `instance_material_mode` reads the widened field.
 
 ## The fixture

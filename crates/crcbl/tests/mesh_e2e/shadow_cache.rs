@@ -1,4 +1,4 @@
-//! **A held shadow atlas, on a device** — `docs/plan/45-shadows.md`'s
+//! **A held shadow atlas, on a device** — topic 45's
 //! static-caching rung, where its failure would actually be seen.
 //!
 //! A frame whose lights and casters have not moved does not draw the shadow
@@ -370,7 +370,7 @@ const CADENCE_FRAMES: usize = 12;
 /// **A frame that kept a tile draws the map it redrew, and the tile it kept
 /// stays kept.**
 ///
-/// `docs/plan/45-shadows.md`'s cadence rung, on a device, and the half no host
+/// Topic 45's cadence rung, on a device, and the half no host
 /// test can reach. A frame that holds a map cannot clear the attachment — the
 /// only clear this seam has covers the whole image — so it **loads** it and
 /// resets each tile it redraws with a primitive of its own. Two ways that goes

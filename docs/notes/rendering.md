@@ -137,6 +137,506 @@ correction". Those numbers resolve here:
   renderer" decision protected still holds: one pass in the same graph with the
   same computed barriers.
 
+## What the deleted 44-lighting plan left behind (2026-09-24)
+
+Record; the built part of the plan is clustered forward (`light_cluster.slang`,
+`crcbl_render::light_grid`, `crcbl_render::light`), the GGX lobe in
+`mesh.slang`, and rungs 1 to 4 and part of 5 of its PBR ladder:
+`crcbl_shaders::dfg`, the linear page formats and
+`crcbl_render::mip::normal_resample`, `crcbl_shaders::sky_prefilter`,
+`specular_aa_kernel`, and `crcbl_shaders::ltc` with `Light::Rect` and
+`FLAG_FILL`. What it left open is in `docs/backlog.md` under _Ray-traced
+lighting (P7C) is not built_, _What the LTC area-light rung left_, the
+normal-length bullet of _Normal maps: what the tangent and page rungs left_,
+_Specular IBL: what rung 3 left_, _What specular antialiasing shipped without_
+and _What the light list left owed_. It was split out of
+`docs/plan/18-render-features.md` on 2026-08-27.
+
+Code cites the plan as "topic 44's rung 3", "topic 44's rule" or "topic 44's
+'Clustered forward' section". Those resolve here:
+
+| Citation                      | What it specified                                                                                                                  |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| The two paths                 | `LightingPath::RayTraced` and `Rasterised` as two complete lighting implementations sharing one material model                     |
+| Clustered forward             | Lights as rows in an SSBO, assigned by a compute pass to a froxel grid the fragment stage indexes; the forward rule and its budget |
+| The BRDF                      | One Cook-Torrance GGX lobe over glTF's `metallic` and `roughness`, with Lambert diffuse                                            |
+| The rule, the shading rule    | No platform transcendental reaches a colour, and the two ways out of it                                                            |
+| Rung 1                        | Multi-scatter energy compensation, Fdez-Agüera's form over the `DFG` table                                                         |
+| Rung 2                        | The inputs: non-colour pages linear, two-channel normal pages, normal mips renormalised and their lost length kept (unbuilt)       |
+| Rung 3                        | Specular IBL by the split-sum: the `DFG` pair and the prefiltered gradient sky                                                     |
+| Rung 4                        | Specular antialiasing by roughness regularisation (Tokuyoshi-Kaplanyan)                                                            |
+| Rung 5                        | LTC area lights (rectangle, sphere, tube and disc) and the fill flag; rectangles and the flag are built                            |
+| "One table serves both rungs" | Rung 1 took Fdez-Agüera so the table it reads is the one rung 3 reads                                                              |
+| What stays out                | The refusals under _Considered and declined_ below                                                                                 |
+
+**The two paths.**
+
+- **Ray-traced lighting and a complete rasterised twin are both MVP.**
+  `LightingPath` selects per device and degrades: a device without `RAY_QUERY`
+  and `ACCELERATION_STRUCTURE` gets `Rasterised` and a complete picture that
+  merely looks worse. Ray tracing is Vulkan and D3D12 only — WebGPU has none and
+  Slang cannot emit it for Metal — and since `crcbl-dx12` and `crcbl-mtl` were
+  deferred (2026-08-21) the raster twin is very nearly the only path anyone
+  sees, which makes it more clearly the right call, not less. Whether the
+  ray-traced implementation is worth building next is a scheduling question, and
+  it lives in `docs/backlog.md`.
+- **The paths differ in how visibility and radiance are gathered, never in how
+  they are shaded.** One material table, one BRDF, one set of inputs; one
+  tonemapped output target, with the post stack identical after either path so
+  nothing downstream branches on `LightingPath`.
+- **Golden images per path, and a human-reviewed pairwise comparison.** The two
+  are not expected to match pixel for pixel; a scene that reads correctly on one
+  and wrongly on the other is a defect in whichever is wrong. The comparison is
+  a reviewed reference, not an automatic tolerance.
+- **Acceleration structures are built regardless of who consumes them**, where
+  the device supports them: a BLAS per mesh asset at bake or load, a TLAS refit
+  per frame from the instance data the cull pass reads. Topics 13 and 24 are the
+  other potential consumers and neither may assume the structure exists.
+
+**Many lights (decided 2026-08-13).**
+
+- **Clustered forward, not tiled, deferred or a visibility buffer.** Tiled
+  (Forward+) degrades with depth range — a tile spanning a near wall and a far
+  sky gathers every light between, which is exactly lantern's and the towers'
+  shape. Deferred breaks "one BRDF, one set of inputs" with the ray-traced twin,
+  fights MSAA and transparency, and makes the raster path structurally unlike
+  the ray-traced one. Clustered forward needs only a compute pass and two
+  storage buffers, so it is the same code on all four backends.
+- **Shading happens in the forward pass and nowhere else** (restated 2026-08-30
+  at the user's request). A pass may write a second attachment beside the lit
+  colour — the reflectivity target, the motion target, one day an albedo or a
+  normal a screen-space GI rung wants — because each is a by-product of shading
+  the forward pass already did, read by one named consumer. No rung may move the
+  BRDF, the froxel walk or a light's evaluation into a pass that reads
+  attachments: no G-buffer lighting, no deferred decals, no visibility-buffer
+  shading. The test for a proposal: after it lands, does `mesh.slang` still
+  evaluate every light that reaches a fragment?
+- **The forward pass writes at most 16 bytes a pixel on the software and browser
+  tiers**, and is at that figure today with no headroom: the lit target's eight,
+  `TransientImageDesc::reflectivity`'s four (`Rgba8Unorm`) and
+  `TransientImageDesc::motion`'s four (`Rg16Float`). A fourth attachment lands
+  only by paying for itself with a measured lavapipe frame beside it; past that
+  the pass has bought a G-buffer's bandwidth without a G-buffer's savings.
+- **A light is a row, and so is the sun.** Position, radius, colour
+  premultiplied by intensity, type, and a spot's direction and cone angles; a
+  directional light is flagged as affecting every cluster, so the shader has no
+  special case for it. **A cluster holds a bounded number of indices and
+  overflow is counted, never silently dropped** —
+  `crcbl_shaders::light::CLUSTER_OVERFLOW_WORD` in the culling statistics.
+  **Shadowed lights are a small subset** chosen by `crcbl_render::shadow`'s
+  coverage ranking (topic 45, below); an unshadowed light still lights.
+
+**The BRDF (decided 2026-08-13).** `mesh.slang` had shaded with Lambert plus a
+Blinn-Phong lobe of two constants, so there was one material however many rows
+the table held. The row grew glTF's `metallic` and `roughness` and the lobe
+became Trowbridge-Reitz `D`, Smith height-correlated visibility, Schlick's
+Fresnel and Lambert diffuse, because a roughness-driven Blinn would be a second
+material model the ray-traced twin would have to rewrite, and glTF already
+speaks GGX. Two consequences:
+
+- **A metal has no ambient term, and that is the model.** Ambient scales the
+  diffuse albedo, and a conductor's is zero, so a fully metallic surface out of
+  every light's reach is black until SSR or the probes give it something to
+  reflect. `GpuMaterial::UNTINTED` is `metallic 0.0`, but `apps/lantern`'s
+  mirror slab and brass block are fully metallic and `crcbl_scene`'s glTF paths
+  default to metallic as glTF specifies.
+- **Neither lobe carries `1 / pi`.** The engine's diffuse is a bare
+  `albedo * N·L` — a light's intensity has absorbed the reciprocal — so the `pi`
+  is folded out of `D` too and the ratio between the lobes stays physical. The
+  textbook `D` against this diffuse would put every highlight a factor of `pi`
+  under its surface.
+
+**The shading rule: no platform transcendental reaches a colour.** A platform's
+`pow`, `exp`, `sin`, `cos` and the rest are specified to no accuracy and differ
+in the last place between the four targets, and the goldens have no tolerance
+for that. There are two ways out, both in use: **bake the function into a table
+at cook time and sample it** (the `dfg`, `sky_prefilter` and `ltc` tables,
+committed and compared as artifacts byte for byte, like the SPIR-V), or **build
+it from the permitted operations** — `crcbl_shaders::fog`'s range reduction and
+Taylor kernel, `crcbl_shaders::trig`. `sqrt` and divides are permitted: IEEE-754
+rounds them correctly. **A transcendental whose result is quantised is safe**:
+`froxel_of` calls `log2` three times and floors the result into a slice index,
+so a last-place disagreement changes nothing a boundary fragment was not already
+free to do.
+
+**Rung 1 — multi-scatter energy compensation (built 2026-08-27).** A
+single-scatter GGX lobe drops every multiply-bounced ray, more with roughness,
+so a rough conductor came back grey in a furnace test. **Fdez-Agüera's closed
+form over the split-sum `DFG` pair, not Kulla-Conty's second table**, because
+one table two features read is one somebody keeps correct. The table's filter is
+written out in the shader rather than asked of a sampler (fixed-function weights
+differ between rasterisers, and it keeps Metal's sampler table fixed); it is
+stored as 16-bit fixed point rather than `Rg16Float`, since a share in `[0, 1]`
+is finer at `1 / 65535` everywhere. `mesh.slang`'s `specular_compensation`
+scales the specular sum only — what the lobe dropped left as specular.
+
+**Rung 2 — the inputs.**
+
+- **Non-colour pages are linear.** A base-colour texel is sRGB-encoded; normal,
+  metallic, roughness and occlusion texels are numbers, and decoding them
+  through the sRGB curve is the classic PBR bug that reads as "shinier than
+  intended". `NORMAL_PAGE_FORMAT`, `MRO_PAGE_FORMAT` and `EMISSIVE_PAGE_FORMAT`
+  in `crcbl_render::forward` are the constants and
+  `the_page_formats_split_colour_from_number` is the whole guard.
+- **Normal pages are two-channel**, `z` rebuilt as `sqrt(1 - x² - y²)`, which
+  suits BC5; the neutral texel is `(0.5, 0.5)`.
+- **A normal page's mips are renormalised after averaging**
+  (`crcbl_render::mip::normal_resample`: no transfer curve, no alpha weight, a
+  single-texel cell copied byte for byte). The length the average loses is the
+  normal variance Toksvig turns into roughness; keeping it is unbuilt.
+
+**Rung 3 — specular IBL by the split-sum (built 2026-08-29).** The `DFG` pair is
+baked and committed, so no platform derives it. **The prefilter is a table, not
+a cube**: the gradient sky is linear in its three colours and reads only a
+direction's `y`, so its convolution against the lobe is two weights over
+`(|R.y|, roughness)` — `crcbl_shaders::sky_prefilter`,
+`tables/sky_prefilter.bin`, `cook-sky-prefilter --check` in CI — and the sky's
+colours stay run-time. **There is no ambient specular with `REFLECTIONS` off, by
+decision**: the pair and the prefiltered sky are read in the reflection pass,
+where metals take their ambient specular, and a term in `mesh.slang` too would
+count the sky twice. An atmosphere reaches the table through
+`crcbl_shaders::atmosphere::SkyView::gradient_fit` (its poles and azimuthal mean
+at the horizon); the sun's bright limb, which a gradient cannot hold, is lost
+there.
+
+**Rung 4 — specular antialiasing (built 2026-09-05).** `specular_aa_kernel` is
+Tokuyoshi and Kaplanyan's isotropic filter transcribed from their listing, with
+the paper's `SPECULAR_AA_SIGMA_PX` (half a pixel) and `SPECULAR_AA_KAPPA`
+(0.18), mirrored in `crcbl_shaders::mesh` beside a source-text test.
+
+- **Screen-space derivatives are not banned here.** `geometric_normal_of`
+  already takes `ddx`/`ddy` of the world position and drives the shadow bias
+  under cross-backend goldens. What is ruled out is a derivative-built tangent
+  frame, because mirrored UVs get the wrong handedness that way.
+- **It widens the direct lobe's `alpha2` alone.** The `dfg` and `ltc` reads
+  index a 64-square table in perceptual roughness and move a fraction of a
+  texel; the reflectivity attachment must describe the material, or SSR would
+  blur a mirror wherever geometry was dense; and regularising `roughness` itself
+  needs two square roots whose round trip is not the identity, which would move
+  every golden on fragments whose kernel is zero.
+- **A zero kernel changes nothing, to the bit** — checked as bytes; only the
+  dunes patch, the one curved surface in the tree, moved and was re-blessed.
+- **The fixture's strips sit on integer pixel columns** (`screenshot`'s
+  `SPECULAR_STRIP_PITCH`), because Vulkan guarantees only four
+  `subPixelPrecisionBits` and SwiftShader and radv snapped 1.49-pixel strips
+  differently (4788 pixels over tolerance; 1 after the fix).
+- **Priced**: `forward` 0.342 → 0.341 ms on an RX 7900 XTX under radv and 35.475
+  → 35.488 ms on lavapipe (lantern at 1920×1080, median of three runs' p50s) —
+  under what three runs separate from noise.
+
+**Rung 5 — LTC area lights and the fill flag (rectangles built 2026-08-31).**
+Decided by the user's "best-looking for the performance" (2026-08-30): point
+lights read as pinpricks, and a fixture reads as a fixture only when its
+highlight has its shape. Heitz, Dupuy, Hill and Neubelt's linearly transformed
+cosines give rectangles, spheres and tubes a plausible specular lobe from one
+cooked table — the transcendentals are in the cook. **All three shapes were
+chosen**, because sphere and tube are nearly free once the table exists (they
+integrate as silhouette quads); only the rectangle is built.
+
+- **The fill flag** — a light that casts no shadow and contributes no specular,
+  how a no-bake stack lights the far end of a room — is a flag on the row, not a
+  light type, because everything else about it is the ordinary light's.
+- **The paper's second table is not cooked.** Its magnitude and Fresnel are
+  Karis's scale and bias rearranged, so the `dfg` pair (binding 25, both
+  channels) serves; binding 27 is the transform, `tables/ltc.bin`, held by
+  `cook-ltc --check`. `GpuLight` grew to `LIGHT_STRIDE` 80 for a `tangent` and a
+  `flags` word, with `KIND_RECT` and `FLAG_FILL` the first values.
+- **Priced 2026-08-31, re-taken 2026-09-02**, `forward` p50 / p95 at 1920×1080
+  over 400 frames with a froxel full of lights (`CLUSTER_LIGHT_CAPACITY`, the
+  grid's worst case), the three rows interleaved on one device by `mesh_e2e`'s
+  `the_price_of_a_froxel_full_of_area_lights`:
+
+  | forward pass, 1920×1080      | radv (RX 7900 XTX, Mesa 26.2.1) | lavapipe (same Mesa) |
+  | ---------------------------- | ------------------------------- | -------------------- |
+  | sun alone                    | 0.087 / 0.090 ms                | 9.730 / 10.303 ms    |
+  | + a full froxel of point     | 0.225 / 0.231 ms                | 19.139 / 20.294 ms   |
+  | + a full froxel of rectangle | 0.559 / 0.578 ms                | 30.937 / 32.037 ms   |
+
+  **A rectangle costs 3.4× a point light on radv and 2.3× on lavapipe.**
+  Clustering is its own `light-cluster` pass at 0.31 µs per light,
+  kind-independent because `light_cluster.slang` bounds a rectangle by a sphere.
+  `forward` also carries two fused full-extent clears that cannot be split out
+  without adding a pass. The browser tier is an ALU count, not a measurement:
+  four extra `Load`s and two polygon integrals of up to five edges, roughly an
+  order of magnitude over a punctual light's arithmetic.
+
+**Considered and declined:**
+
+- **A second BRDF lobe** — anisotropic GGX, clearcoat, sheen, subsurface. Each
+  is a second material model, refused until an asset in the tree needs one; the
+  row has no room at `MATERIAL_STRIDE`, so the first arrives with a stride
+  widening and can bring the rest.
+- **Parallax occlusion mapping** — a per-pixel march with a dependent read for
+  what normal mapping already approximates; a rung above normal maps, not beside
+  them.
+- **Burley diffuse — the user's call, 2026-08-30.** Its fifth powers decompose
+  into multiplies, so determinism never ruled it out; what it buys is a
+  retroreflective rim on rough dielectrics, small beside every rung above, and
+  Unreal ships Lambert for the same trade. Lambert stays, improved by the
+  multi-scatter compensation, the AO tint and bent normals, the LTC lights and
+  the probe bounce.
+- **Tiled Forward+, deferred shading and a visibility buffer** — see the
+  clustered-forward rule above.
+
+## What the deleted 45-shadows plan left behind (2026-09-24)
+
+Record; the built part of the plan is `crcbl_render::shadow` — sphere-fitted,
+texel-snapped cascades, spot and point maps as atlas tiles, `AtlasAllocator` in
+`shadow/atlas.rs`, the cadence's `schedule` in `shadow/cadence.rs`, the
+`r_shadow_filter` selector — `mesh.slang`'s bias, cross-fade and filter ladder,
+`DebugView::Cascades` and `DebugView::ShadowAtlas`, and the contact-shadow pass
+(`crcbl_render::contact_shadows`, `contact_shadows.slang`), which is parked
+outside `RenderEffects::DEFAULT_STACK`. What it left open is in
+`docs/backlog.md` under _What the deleted 45-shadows plan left unbuilt_, which
+lists the entries that carry it. It was split out of
+`docs/plan/18-render-features.md` on 2026-08-27; `apps/sundial` is its
+comparison fixture.
+
+Code cites the plan's numbered **decisions** and its named **rungs** — "topic
+45's seventh decision", "topic 45's cadence rung". Those resolve here:
+
+| Citation                                          | What it decided                                                                                                                                           |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| First decision (2026-08-13)                       | A point light is `POINT_FACES` atlas tiles, not a cube map                                                                                                |
+| Second decision (2026-08-13)                      | Shadowed lights are chosen by projected screen influence, ties broken by light index, with hysteresis                                                     |
+| Third decision (2026-08-13)                       | The atlas's tiles: the sun's cascades first, then one per spot and `POINT_FACES` per point, until they run out; a light with none still lights            |
+| Fourth decision (2026-08-13)                      | One cull (`DrawGen`) per point light, not one per face; refined 2026-09-17 to per-face draw regions of the same generator                                 |
+| Fifth decision (2026-08-14)                       | The sun's bias is denominated in texels of the cascade the fragment landed in                                                                             |
+| Sixth decision (2026-08-14)                       | The slope is read off the rasterised facet (`geometric_normal_of`), not the shading normal                                                                |
+| Seventh decision (2026-08-28)                     | The slope moves the receiver sideways along its facet normal (a normal offset), not towards the light                                                     |
+| Eighth decision (2026-08-28)                      | The cascade switch is a band (`CASCADE_FADE_FRACTION`), both cascades sampled and mixed                                                                   |
+| Ninth decision (2026-08-28)                       | A 32-tap rotated Vogel disc replaces the 3×3 box                                                                                                          |
+| Tenth decision (2026-08-28)                       | PCSS: the sun's filter width comes from a blocker search                                                                                                  |
+| Eleventh decision (2026-08-28)                    | A five-tap probe takes the disc only at an edge                                                                                                           |
+| Twelfth decision (2026-08-31)                     | The coverage anchor `WHOLE_CELL_COVERAGE`, the conservative end of a measured sweep; biases follow the tile                                               |
+| Thirteenth decision (2026-08-31)                  | `LEVEL_HOLD_RATIO` is the same fifth `ForwardRenderer::lod_hold_ratio` opens                                                                              |
+| Fourteenth decision (2026-08-30, the user)        | The atlas is dynamic and cached; the unit is the cull group; a cached tile is not a bake                                                                  |
+| Fifteenth decision (2026-09-04)                   | The filter is selected at runtime (`pcss`, `disc`, `box`) and the comparison seam is resolved per fragment                                                |
+| The 2026-08-30 decision; the contact march        | Screen-space contact shadows, on for medium and high and off on low; built 2026-09-01 and parked                                                          |
+| The atlas rung, the allocator rung                | The grid became an allocator (2026-08-30 / 31): `AtlasAllocator`, a forest of per-cell quadtrees                                                          |
+| The priority rung                                 | `shadow::coverage` ranks lights and sizes their tiles (the twelfth and thirteenth decisions)                                                              |
+| The cadence rung                                  | Item 3 of the atlas rung: the near cascade every frame, each one out at twice the period, a moving light or a camera cut resetting it (`shadow::cadence`) |
+| The static-caching rung                           | A group's static casters rendered once and only dynamic ones redrawn — **unbuilt**; what is built caches a group's whole map                              |
+| The ladder, the filter ladder, the quality ladder | The order below, taken 2026-08-27                                                                                                                         |
+
+**What ships, and the frame of it.**
+
+- **Cascades are sphere-fitted and texel-snapped.** `shadow.rs` fits a sphere
+  about the eye rather than a box about the frustum, so turning the camera
+  cannot change a cascade's extent, and quantises the light-space origin to
+  whole texels.
+- **GPU-driven all the way.** One cull dispatch per cascade and per shadowed
+  light against the same pools, indirect draws into depth-only pipelines, no CPU
+  re-traversal; skinned casters come free through the skinned-output pool, and
+  nothing in the path depends on the `GeometryPath` or the binding model.
+- **What casts.** Every live resident instance, unless
+  `ForwardRenderer::set_instance_casts_shadow(handle, false)` sets
+  `GpuInstance::CASTS_NO_SHADOW` (2026-09-24): every cull that is no view's — a
+  cascade's and a shadowed light's — rejects on that bit through
+  `crcbl_shaders::cull::Params::hidden_view`, so the instance lands in no tile
+  and, since the reflective shadow maps draw the same survivors, bounces no
+  probe light. Every camera still draws it and it still receives. A camera's own
+  hidden-views bit does not stop an instance casting. Changing the flag moves
+  `InstancePool::revision`, so every cached map redraws.
+- **Under `LightingPath::RayTraced` the whole raster shadow path is bypassed,
+  not augmented** — ray queries against the TLAS for every light type, no
+  cascades and no atlas — which keeps the raster path free of ray-traced special
+  cases. Unbuilt, with the rest of that path.
+
+**Lights and the atlas (the first four decisions and the atlas rung).**
+
+- **Tiles, not cubes.** Six tiles reuse one allocator, image, sampler and
+  barrier story; a cube is a second image type, view type and sampling path. The
+  cost is no hardware filtering across a face seam, mitigated by a border of
+  padding per tile (unbuilt — see _What punctual-light shadows left owed_) and
+  by PCF sampling within a face. A cube map is the better answer only if seam
+  artefacts turn up in practice.
+- **Selection by screen influence, the same metric family as LOD**, so there is
+  one notion of "how much this matters on screen". Since 2026-08-31 it is
+  `shadow::coverage` with `HOLD_RATIO` on the ranking and `LEVEL_HOLD_RATIO` on
+  the tile size. It is deliberately **not** `docs/plan/25-lod.md`'s helper —
+  `GroupCost::projected_error` divides by the distance to a sphere's surface and
+  `coverage` by the distance to a light's centre —
+  `docs/plan/43-render-standards.md`'s row (f) says why; the two constants name
+  each other.
+- **A light that gets no tile still lights and does not occlude**, which makes
+  the budget a quality knob rather than a correctness cliff. Spot was built
+  before point because a point light is six of a spot plus face selection.
+- **One cull per point light** because a `DrawGen` is about five megabytes of
+  per-instance LOD hysteresis; six per point light would be thirty for one
+  light. The union of the faces is the light's sphere, which is what the cull
+  tests; the 2026-09-17 refinement tags each survivor with the faces its box
+  reaches and draws each face's own region, still one `DrawGen`.
+- **The allocator is a forest of per-cell quadtrees** (Doom 2016 and Unity HDRP
+  ship the shape), because the atlas is neither square nor a power of two in
+  cells; asking every root for its whole self reproduces the old grid texel for
+  texel. `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` cells of `SHADOW_TILE`
+  hold the sun's cascades, two point lights and two spots.
+- **The tile is the binding constraint on quality.** The 2026-08-26 re-tiling
+  bought a second point light by shrinking `SHADOW_TILE` from 1024 to 768 texels
+  rather than growing the image. Whether to grow it back is open — see the
+  backlog.
+
+**Bias (the fifth to seventh decisions).**
+
+- **Texels, not clip depth.** A clip-depth bias meant that number times the
+  cascade's whole depth range, `2 · radius + CASTER_REACH`: 0.83 m of world
+  slack on the outer cascade against 0.15 m walls. Offsetting by a multiple of
+  one texel's footprint (`2 · radius / TILE`) puts both light types in one unit
+  that scales with the map, and biases a near cascade proportionally less.
+- **The slope comes off the facet.** `geometric_normal_of` is
+  `cross(ddx(world_position), ddy(world_position))`, computed in `fragmentMain`
+  and passed in, because derivatives exist only in a fragment stage. **Its sign
+  is aligned to the shading normal, never hard-coded**: on radv the bare cross
+  product was measured anti-parallel to the authored normal, and the other three
+  targets were not measured. Both light types read the same facet, because acne
+  is a property of the rasterised triangle.
+- **The normal offset moves the receiver sideways.** A move towards the light
+  raises the compared depth, so enough to clear acne also lifts a shadow off its
+  caster; a move along the facet normal by `sin(acos(Ng·L))` changes which texel
+  is read and leaves the depth alone, and `sin` is bounded where `tan` needed a
+  clamp. Only the constant term still travels light-ward. On lantern it took the
+  wall-foot strip from 0.391 m to none and the cornice lift from 78.3 to 11.7
+  luma. `NORMAL_OFFSET_TEXELS` is 2 because two outer-cascade texels are 125 mm
+  against lantern's 150 mm shell and three would pass through it;
+  `DEPTH_BIAS_TEXELS` fell to one and rose to 1.5 with the ninth decision. **The
+  cost is a scalloped fringe** a couple of pixels deep at a silhouette's foot
+  (backlog: _The normal offset scallops one silhouette's foot_). Both counts are
+  console variables, `r_shadow_bias` and `r_shadow_normal_offset`, and
+  `apps/sundial` walks one against the other. `crcbl_shaders::mesh`'s
+  `both_shadow_lookups_offset_along_the_facet_normal` holds the direction.
+
+**The cascade band (the eighth decision).** Inside `CASCADE_FADE_FRACTION` (a
+tenth) of the selected cascade's reach, `sun_visibility` samples both cascades
+and mixes by distance, because the near texel is a sixth of the outer one's here
+and both biases and the maps change across the switch. On lantern's split circle
+the switch's own step fell from 33.70 to 5.76 mean; **a tenth is the knee** — a
+twentieth leaves the ramp steeper, a fifth and more give the step back. Only
+fragments in the band pay a second `tile_pcf`. **The cascade tint is reported by
+`sun_visibility` itself**, so `DebugView::Cascades` cannot draw a boundary the
+lighting does not have; its sentinel is negative so no existing debug threshold
+sees it. `DebugView::ShadowAtlas` is **a pass, not a branch**, drawn after the
+tonemap in display space, because the atlas is one image the whole frame shares
+and a readout that moves with exposure cannot be compared.
+
+**The filter (the ninth to eleventh and fifteenth decisions).**
+
+- **A 32-tap Vogel disc of two tile texels, turned by one of sixteen rotations
+  an ordered-dither matrix picks off the pixel.** Integer-indexed, because a
+  float hash and a platform `sin`/`cos` differ between drivers and a shadow
+  comparison is binary. **Vogel, not Poisson**: its radius `sqrt((i + 0.5) / n)`
+  and angle `i π (3 - sqrt 5)` are re-derived by
+  `the_shadow_discs_are_the_vogel_spirals_they_claim_to_be`, where a Poisson set
+  is constants from a program nobody kept. Thirty-two taps is where the dunes'
+  grain fell back to the box's (0.918 against 0.827; 24 taps 1.099), narrowing
+  the disc does not substitute for taps, and the dither matrix measured a fifth
+  less grainy than the `(3x + 4y) mod 16` lattice, whose constant difference
+  draws diagonal stripes.
+- **PCSS for the sun alone.** `sun_penumbra_texels` reads sixteen depths with
+  `Load` over eight texels — a comparison sampler cannot return a depth and a
+  filtering one would invent a blocker height — keeps those nearer the light
+  (reversed-Z: larger) and turns the height into a width by a similar triangle.
+  **Clamped at both ends**: below at `SHADOW_FILTER_TEXELS`, above at
+  `SHADOW_SEARCH_TEXELS`, and a search that finds no blocker takes the lower
+  clamp, not "lit", since a thin caster can fall between search taps. **The
+  physical sun is a no-op at this tile**: `tan` of its angular radius is
+  0.004634, a blocker needs 4.6 m of separation to reach two near-cascade texels
+  and 27 m on the outer one, and lantern differed in 36 bytes of 4,915,200. So
+  `SHADOW_SUN_TAN_RADIUS` is a softness knob; the shipped 0.02 won an
+  edge-wobble sweep on lantern's far boundary (0.58 px against 1.58 fixed), past
+  0.03 the estimate saturates. Punctual maps pass `SHADOW_FILTER_TEXELS` — their
+  depths are perspective and they have no angular radius — and so does
+  `volumetric.slang`, since a froxel has no surface below a caster.
+  `SHADOW_CASTER_REACH` has one declaration in `crcbl_shaders::mesh`, so the
+  host's box and the shader's inverse cannot drift.
+- **The probe.** `tile_pcf` takes `SHADOW_PROBE_TAPS` first — tap 0 at radius
+  0.125 and taps 23, 25, 27 and 29, a ring about a quarter turn apart — and
+  returns a flat answer when they agree. **Unanimity is exact**: wherever a 2×2
+  neighbourhood agrees the comparison sum is exactly 0 or 1, so the arms are
+  `probe <= 0.0` and `probe >= float(SHADOW_PROBE_TAPS)` with no margin. At an
+  edge the full disc re-reads the five, so an undecided fragment shades bit for
+  bit as before; no golden moved. It cut `forward` 27% on radv and 28% on
+  llvmpipe — **the cost of a rung is taps, not divergence**.
+  `the_shadow_probe_is_a_ring_about_a_centre` re-derives the index set.
+- **The selector.** `crcbl_render::shadow::r_shadow_filter` selects `pcss` (the
+  default, and what every golden is blessed under), `disc` (no blocker search)
+  or `box` (the 3×3 hardware PCF kernel recovered from before 713da9d, through
+  the same `tile_tap`). **A uniform branch, not three pipelines**: this is a
+  scene pass, and a pipeline switch would draw every triangle twice to put two
+  filters in one frame. **The seam is per fragment** —
+  `FrameUniforms::shadow_filter` carries both lanes' modes and the column,
+  `crcbl_render::split::halves` owns where it falls. Every bias decision applies
+  under all three. `volumetric.slang` always takes `disc`.
+
+  Priced 2026-09-04, `apps/sundial --headless --sun-paused` at the goldens'
+  pose, `forward` p50 median of five runs (Mesa 26.2.2):
+
+  | Filter | radv, 1920×1080 | llvmpipe, 960×720 |
+  | ------ | --------------- | ----------------- |
+  | `pcss` | 0.228 ms        | 8.586 ms          |
+  | `disc` | 0.199 ms        | 7.349 ms          |
+  | `box`  | 0.180 ms        | 6.914 ms          |
+
+  No two ranges overlap; the `shadow` pass is flat across all three (the filter
+  is on the sampling side), and the whole ladder is 0.068 ms of a 0.649 ms radv
+  frame. Which rung a tier takes is the user's call.
+
+**The priority and hold (the twelfth and thirteenth decisions).**
+`shadow::coverage` is how much of the frame's **height** a light's map covers —
+a fraction, so a 256×192 golden is evidence about 1080p, and the map's footprint
+rather than the light's sphere, so a narrow cone is not demoted for being
+narrow. **`WHOLE_CELL_COVERAGE` is a quarter of the frame's height**, the
+conservative end of a sweep bounded by fixtures that must not move:
+`Scene::PointShadow` 3.06, `Scene::SpotShadow` 1.41, lantern's lamp 1.06 at its
+worst phase and its corner downlight 0.37, which binds. **Every bias follows the
+tile**: `tile_texels(rect)` reads the map's side from the rectangle the shader
+is handed, so a demoted light is not biased by a footprint four times too small
+(`crates/crcbl/tests/mesh_e2e/shadow_tiles.rs` holds it). **`LEVEL_HOLD_RATIO`
+is deliberately the fifth `ForwardRenderer::lod_hold_ratio` opens** — moving one
+without the other makes a light and its mesh disagree about when a rung is worth
+taking. A light with no history starts coarsest and climbs, so a frame's first
+answer is reproducible.
+
+**The cache (the fourteenth decision, the user's).** A light re-renders its
+tiles when it or an instance it covers moves, and not otherwise. **A cached tile
+is not a bake** — nothing survives a load. **The unit is the cull group** (a
+cascade, or a light slot's run of tiles), because a point light's faces draw one
+visible set; per-face granularity was declined (see _Per-face granularity inside
+a point light's cube: declined_ below). `mesh.slang`'s `depthClearVertexMain`
+clears one group, since a pass-wide `LoadOp::Clear` is the only depth clear the
+seam offers.
+
+**Contact shadows (decided 2026-08-30, built 2026-09-01).** A short march along
+the light through the depth prepass closes the contact gap no bias or filter
+can. Decided as its own `RenderEffects` bit in `DEFAULT_STACK`, not a settings
+row, with the low preset clearing it — **which cannot both hold**:
+`crcbl::settings::presets` clears an effect through its `VIDEO_KEYS` row, so the
+build took "no row" and the low tier does not clear it. **The Hi-Z pyramid is
+deliberately not read**: this ray is `MAX_STEPS` texels long, so every cell a
+pyramid would skip is one the march was about to leave. The bit is parked
+outside `DEFAULT_STACK` until a flip that re-blesses every golden.
+
+**The ladder, in the order it should be climbed** (2026-08-27), named two things
+beyond what ships: the tile resolution, which is a question rather than a rung,
+and contact shadows. Static caching is the rung above the cadence.
+
+**Considered and declined:**
+
+- **VSM and EVSM.** Moments make a map filterable, and they light-leak through
+  thin geometry because two depths summarised into one distribution admit a
+  receiver between them. A leak is a correctness artefact — light where the
+  scene has none — where every rung above trades quality for cost.
+- **Virtual shadow maps.** A page table, a feedback buffer and a page cache — a
+  topic, not a rung, since it replaces the tile grid rather than improving it;
+  if ever wanted it gets its own document.
+- **A cube map per point light** — see the first decision; revisit only if seam
+  artefacts show. Dual-paraboloid point shadows are declined too, under _The
+  atlas re-tiling's leftovers_ below.
+- **One shared importance-and-hysteresis helper with LOD** — refused for the
+  reason under the second decision.
+- **Per-face cadence inside a point light's cube** — declined below under its
+  own heading.
+
 ## What the deleted 46-ambient-occlusion plan left behind (2026-09-24)
 
 Record; the plan was built, and what it left open is in `docs/backlog.md` under
@@ -467,9 +967,9 @@ Code cites the plan's decisions by number, so the numbering is kept:
 
 - **The seventh decision (2026-08-27) — MSAA reopened and priced.** The old
   rejection ("fights deferred-ish/HDR pipelines") is deferred-renderer
-  reasoning; this renderer is clustered forward, and `docs/plan/44-lighting.md`
-  rejected deferred partly _because_ it fights MSAA.
-  `crcbl_hal::MultisampleState` has always carried `samples` and
+  reasoning; this renderer is clustered forward, and topic 44 rejected deferred
+  partly _because_ it fights MSAA (see _What the deleted 44-lighting plan left
+  behind_ above). `crcbl_hal::MultisampleState` has always carried `samples` and
   `alpha_to_coverage`. The price is a multisampled depth prepass and one depth
   resolve before `ssao.slang`, `ssr.slang` and the Hi-Z pyramid. **MSAA is right
   for a forward renderer doing little screen-space work**; FXAA and CMAA2 are
@@ -986,19 +1486,19 @@ Decision record; the decision is in `docs/backlog.md`.
 Decision record; the decision is in `docs/backlog.md`.
 
 - **Decision needed: which rung each tier's shadow filter is.** The three are
-  priced now — measured 2026-09-04 and written into `docs/plan/45-shadows.md`'s
-  fifteenth decision, off five `apps/sundial` runs per filter per adapter at the
-  goldens' own pose with the seam off. Median `forward` p50: 0.228 / 0.199 /
-  0.180 ms for `pcss` / `disc` / `box` on an RX 7900 XTX (radv, Mesa 26.2.2) at
-  1920x1080, and 8.586 / 7.349 / 6.914 ms on that machine's llvmpipe (LLVM
-  22.1.8) at 960x720. The ladder's own order on both adapters, no two ranges
-  overlapping, and the ladder end to end is 0.068 ms of a 0.649 ms radv frame;
-  the `shadow` row is flat across all three, as the selector claims. What is
-  left is the assignment, and it is the user's: `r_shadow_filter` has no tier
-  row, so every tier runs the shipped `pcss`, and
-  `docs/plan/39-capabilities.md`'s tier table is where a row would go. Same
-  shape of question as the SSR visibility weight and the AO knobs below, and the
-  same missing route.
+  priced now — measured 2026-09-04 and recorded with topic 45's fifteenth
+  decision (_What the deleted 45-shadows plan left behind_), off five
+  `apps/sundial` runs per filter per adapter at the goldens' own pose with the
+  seam off. Median `forward` p50: 0.228 / 0.199 / 0.180 ms for `pcss` / `disc` /
+  `box` on an RX 7900 XTX (radv, Mesa 26.2.2) at 1920x1080, and 8.586 / 7.349 /
+  6.914 ms on that machine's llvmpipe (LLVM 22.1.8) at 960x720. The ladder's own
+  order on both adapters, no two ranges overlapping, and the ladder end to end
+  is 0.068 ms of a 0.649 ms radv frame; the `shadow` row is flat across all
+  three, as the selector claims. What is left is the assignment, and it is the
+  user's: `r_shadow_filter` has no tier row, so every tier runs the shipped
+  `pcss`, and `docs/plan/39-capabilities.md`'s tier table is where a row would
+  go. Same shape of question as the SSR visibility weight and the AO knobs
+  below, and the same missing route.
 - **Considered and declined: drawing the scene twice to compare.** The occlusion
   chain's seam records its gather twice under a scissor, and that shape is
   available to a full-screen pass because each recording pays for half a target
@@ -1053,12 +1553,12 @@ the bias pair, the cross-fade, the penumbra and the seam are in
   `PLINTH_CONTACT` to the sun is the plinth's _far_ face, and a bias towards the
   light has to cross the whole 1.2 m depth of the block before the contact
   compares as lit. A thin caster loses its contact at a small count, which is
-  what `apps/lantern`'s 0.15 m shell showed `docs/plan/45-shadows.md`'s seventh
-  decision. The consequence for this fixture is that its peter-panning reading
-  is a claim about a _thick_ caster, and a thin one in the plaza would make the
-  same claim at a count near the shipped value — which is the version worth
-  building if the pair is ever wanted as a regression guard rather than as a
-  comparison.
+  what `apps/lantern`'s 0.15 m shell showed topic 45's seventh decision (_What
+  the deleted 45-shadows plan left behind_). The consequence for this fixture is
+  that its peter-panning reading is a claim about a _thick_ caster, and a thin
+  one in the plaza would make the same claim at a count near the shipped value —
+  which is the version worth building if the pair is ever wanted as a regression
+  guard rather than as a comparison.
 
 **What surprised us, and is not a bug.** The first cascade's extent is a
 function of the camera's **near plane** — `Cascades::splits` blends a
@@ -1587,15 +2087,15 @@ Decision record; the decision is in `docs/backlog.md`.
 Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.
 
-`docs/plan/45-shadows.md`'s ninth decision replaced the 3×3 box filter with a
-32-tap rotated disc, in `tile_pcf` in both `mesh.slang` and `volumetric.slang`.
-The tenth put a 16-tap blocker search in front of it, in `sun_penumbra_texels`,
-on the fragment path and for the sun alone. So a sun-lit fragment reads 48
-texels of the atlas where it read 9, and a froxel reads 32; and **both counts
-were chosen entirely on the picture**. The grain table in the ninth decision
-says what 16, 24 and 32 filter taps leave on a smooth shadowed surface, and the
-wobble table in the tenth says what the search buys on a quantised edge. Neither
-says what any of it costs.
+Topic 45's ninth decision (_What the deleted 45-shadows plan left behind_)
+replaced the 3×3 box filter with a 32-tap rotated disc, in `tile_pcf` in both
+`mesh.slang` and `volumetric.slang`. The tenth put a 16-tap blocker search in
+front of it, in `sun_penumbra_texels`, on the fragment path and for the sun
+alone. So a sun-lit fragment reads 48 texels of the atlas where it read 9, and a
+froxel reads 32; and **both counts were chosen entirely on the picture**. The
+grain table in the ninth decision says what 16, 24 and 32 filter taps leave on a
+smooth shadowed surface, and the wobble table in the tenth says what the search
+buys on a quantised edge. Neither says what any of it costs.
 
 **That sentence used to continue "and there is no shadow-pass timing in the tree
 to measure it with", and it was wrong.** `crcbl_render::PassTimers` brackets
@@ -1626,14 +2126,14 @@ Two commits of main did not deploy on that; the caps for quarry and lantern were
 raised to 20 minutes on 2026-08-28 and the gate has run inside them since. The
 cap change bought the site back and priced nothing.
 
-**Two of the four answers below are now taken.** The first —
-`docs/plan/45-shadows.md`'s eleventh decision, 2026-08-28 — put a five-tap probe
-in front of the disc, so a fragment away from a shadow edge costs 5 taps rather
-than 32 and a sun-lit one 21 rather than 48, moving no golden on either adapter.
-The second was to run the timer that already existed, and it did:
-`lantern --headless --frames N --size WxH` under `RUST_LOG=info` prints the
-per-pass report, and the filter's cost is in the **`forward`** row rather than
-the `shadow` one — `shadow` is the atlas draw and did not move.
+**Two of the four answers below are now taken.** The first — topic 45's eleventh
+decision, 2026-08-28 — put a five-tap probe in front of the disc, so a fragment
+away from a shadow edge costs 5 taps rather than 32 and a sun-lit one 21 rather
+than 48, moving no golden on either adapter. The second was to run the timer
+that already existed, and it did: `lantern --headless --frames N --size WxH`
+under `RUST_LOG=info` prints the per-pass report, and the filter's cost is in
+the **`forward`** row rather than the `shadow` one — `shadow` is the atlas draw
+and did not move.
 
 | Adapter           | `forward`, disc only | `forward`, with the probe | Cut |
 | ----------------- | -------------------- | ------------------------- | --- |
@@ -1722,7 +2222,7 @@ heading.
   `43-render-standards.md` §7's ordering.
 - **Burley diffuse — DECLINED.** Lambert stays, improved by the terms around it
   (multi-scatter compensation, the AO tint and bent normals, LTC area lights,
-  the probe bounce). `44-lighting.md` records it.
+  the probe bounce). _What the deleted 44-lighting plan left behind_ records it.
 
 #### The survey (2026-08-30, superseded by the decision above)
 
@@ -1771,10 +2271,9 @@ rule. It also settles what the tracer is for: **not a bake tool — a runtime.**
 
 **And shadows must work with it (the user, the same day):** every dynamic light
 shadows — the sun through the cascades that exist, the scene lights through the
-shadow atlas [45-shadows.md](../plan/45-shadows.md) pulled forward — and the
-GI's hit shading reads those same maps, so a bounce is occluded by the same
-shadow the eye sees. A BVH shadow ray at the hit is the desktop-preset upgrade,
-not the baseline.
+shadow atlas topic 45 pulled forward — and the GI's hit shading reads those same
+maps, so a bounce is occluded by the same shadow the eye sees. A BVH shadow ray
+at the hit is the desktop-preset upgrade, not the baseline.
 
 **The candidate the rule points at — runtime-traced probes, no history.** The
 probe volume `GpuProbe` already is, filled every frame by a compute pass that
@@ -3330,13 +3829,14 @@ anti-vacuity clause.
 
 **The limb-darkening fit.** Hillaire 2020's `SunLimbDarkening` is
 `1 - u(1 - mu^a)` with `u = [1, 1, 1]`, so the factor collapses to `mu^a` with
-`a = [0.397, 0.503, 0.652]`. `docs/plan/44-lighting.md` lets no transcendental
-reach a colour, so the `pow` had to go. A polynomial in `mu` is hopeless — the
-function has an infinite derivative at `mu = 0`, and the best degree-seven
-polynomial in `mu` still misses `mu^0.397` by 3.8e-2. The substitution is what
-fixes it: under `t = mu^{1/2^k}` the target becomes `t^{2^k a}`, and each square
-root is IEEE-exact, so the substitution costs nothing in determinism. The sweep,
-Lawson-weighted least squares over a grid uniform in `t`, worst channel:
+`a = [0.397, 0.503, 0.652]`. The shading rule (_What the deleted 44-lighting
+plan left behind_) lets no transcendental reach a colour, so the `pow` had to
+go. A polynomial in `mu` is hopeless — the function has an infinite derivative
+at `mu = 0`, and the best degree-seven polynomial in `mu` still misses
+`mu^0.397` by 3.8e-2. The substitution is what fixes it: under `t = mu^{1/2^k}`
+the target becomes `t^{2^k a}`, and each square root is IEEE-exact, so the
+substitution costs nothing in determinism. The sweep, Lawson-weighted least
+squares over a grid uniform in `t`, worst channel:
 
 | `k` (square roots) | degree 4 | degree 5 | degree 6 | degree 7 |
 | ------------------ | -------- | -------- | -------- | -------- |

@@ -3192,8 +3192,9 @@ with [tumble](plan/sample/24-tumble.md), and
   extension** (KhronosGroup/glTF issue 948, open since 2017; NVIDIA's sample
   reads it), or take height from material instances only.
 - **Decision: parallax occlusion mapping stays refused**, so relief has no
-  parallax column unless the refusal in [44-lighting.md](plan/44-lighting.md) is
-  lifted.
+  parallax column unless topic 44's refusal, recorded in
+  `docs/notes/rendering.md` under _What the deleted 44-lighting plan left
+  behind_, is lifted.
 - **Asset sources for relief**: Poly Haven serves CC0 files individually but its
   terms ask for a User-Agent and forbid scraping; ambientCG serves CC0 zips from
   an unpinned CDN; Khronos's own height data (`terrain_heightmap_r16.ktx`) is
@@ -4829,8 +4830,9 @@ The record behind this — the argument, the options and the measurements — is
 
 `mesh.slang`'s `specular_aa_kernel`, the `SPECULAR_AA_SIGMA_PX` /
 `SPECULAR_AA_KAPPA` pair mirrored in `crcbl_shaders::mesh`, and
-`crcbl::screenshot::Scene::SpecularAa` landed with `docs/plan/44-lighting.md`'s
-rung 4. What they left:
+`crcbl::screenshot::Scene::SpecularAa` landed as topic 44's rung 4, whose rules
+and price are in `docs/notes/rendering.md` under _What the deleted 44-lighting
+plan left behind_. What they left:
 
 ### The mechanism's own gaps
 
@@ -4875,13 +4877,13 @@ rung 4. What they left:
 
 ### What was not measured
 
-- **The fixture's own frame has no price.** `docs/plan/44-lighting.md`'s rung 4
-  prices the rung through `apps/lantern`, whose room is flat-normalled, and
-  argues that the cost is unconditional because `specular_aa_kernel` is
-  straight-line code with no branch. That argument is sound but it is an
-  argument: there is no headless timing harness for a `screenshot::Scene`, so no
-  run in this tree has reported a `forward` p50 for a frame where the kernel is
-  non-zero. Building one is a small app or a `mesh_e2e` fixture on
+- **The fixture's own frame has no price.** Topic 44's rung 4 priced the rung
+  through `apps/lantern`, whose room is flat-normalled, and argues that the cost
+  is unconditional because `specular_aa_kernel` is straight-line code with no
+  branch. That argument is sound but it is an argument: there is no headless
+  timing harness for a `screenshot::Scene`, so no run in this tree has reported
+  a `forward` p50 for a frame where the kernel is non-zero. Building one is a
+  small app or a `mesh_e2e` fixture on
   `the_price_of_a_froxel_full_of_area_lights`' pattern.
 
 - **Metal, D3D12 and the browser are unpriced**, on the alpha-mask rung's terms:
@@ -6316,6 +6318,73 @@ summary line `run_text` prints carries the name. What is **not** covered:
   should not be public surface, both can be `pub(crate)` at no cost to any
   existing check.
 
+## What the deleted 45-shadows plan left unbuilt (2026-09-24)
+
+The shadow plan (topic 45) was deleted with its built part done; its rules,
+numbered decisions and measurements are in `docs/notes/rendering.md` under _What
+the deleted 45-shadows plan left behind_. Its unbuilt work is tracked here:
+
+- **Static caching within a group** — the first bullet of _The shadow atlas:
+  what the rung left_, with its two designs and the WebGPU depth-copy probe it
+  needs first.
+- **The contact-shadow flip into `DEFAULT_STACK`, and the low tier's clear** —
+  _Screen-space contact shadows: what the rung left_, whose preset contradiction
+  is the user's call.
+- **The cadence's tier row and settings route** — _The shadow cadence default
+  still has no tier to live in_, _Whether any tier should ship the shadow
+  cadence switched on_ and _The shadow cadence has no route from a settings file
+  or a preset_.
+- **The froxel volume ignoring the filter selector** — _The shadow filter
+  selector leaves one thing owed_.
+- **A pass-cost harness that fails on a regression** — _The shadow filter costs
+  48 taps and it timed out the browser gate_.
+- **Bias, punctual and sun-pass leftovers** — _What the sun's shadow bias still
+  leaves open_, _The normal offset scallops one silhouette's foot_, _What
+  punctual-light shadows left owed_ (the unpadded cube seams) and _What the sun
+  shadow pass owes_.
+- **Ray-traced shadows under `LightingPath::RayTraced`** — _Ray-traced lighting
+  (P7C) is not built_, and `apps/sundial`'s milestone 5.
+- **Area-light shadows** — the bullet in _What the LTC area-light rung left_.
+- **The tile resolution** — below; it had no entry.
+
+### The shadow tile's resolution is an open question (2026-09-24)
+
+**Not decided, and the tile is now what limits shadow quality.** The 2026-08-26
+re-tiling bought a second shadowed point light by shrinking
+`crcbl_shaders::mesh::SHADOW_TILE` from 1024 to 768 texels rather than growing
+the atlas, which is `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` (4 × 4) cells
+of it (verified 2026-09-24). The evidence that it binds: PCSS at the physical
+sun's angular radius (`tan` 0.004634) needs 4.6 m of blocker separation to reach
+two texels on lantern's near cascade and 27 m on the outer one, and rendered at
+that value lantern differed from a fixed filter in 36 bytes of 4,915,200 — so
+`SHADOW_SUN_TAN_RADIUS` ships at an artistic 0.02 instead.
+
+**The options:**
+
+- **Grow the atlas back to 1024-texel cells (4 × 4 at 1024)**: the same light
+  budget for +28 MiB of `D32Float`, a one-constant change. Blocked on nothing
+  but the unmeasured peak wasm memory — see the record under _The atlas
+  re-tiling's leftovers_ in `docs/notes/rendering.md`.
+- **Make the atlas size a tier knob**: `docs/plan/39-capabilities.md`'s tier
+  table drafts the shadow atlas row at 2048² with 4 shadowed local lights, 4096²
+  with 8 and 8192² with 16, and _Quality presets still owe their remaining rows_
+  records that it has no `[engine.video]` key and no renderer half.
+  `shadow::atlas_extent` and the allocator would take the extent at renderer
+  construction rather than from the constants.
+- **Keep 768 and spend the texels better**: the priority rung already demotes
+  small lights to smaller tiles (`WHOLE_CELL_COVERAGE`, `tile_level`), and _The
+  shadow atlas: what the rung left_ records that the anchor is conservative, so
+  a tighter anchor frees cells without growing anything.
+
+**What deciding it needs:** the tenth decision's edge-wobble metric (RMS
+departure of lantern's far shadow boundary from a line, rows smoothed by nine
+pixels) and the ninth's dunes acne and grain counts re-run at 768 and 1024, and
+PCSS re-swept at the larger tile to see whether a physical sun angle starts to
+buy a picture. Any change re-blesses every shadow golden
+(`crates/crcbl/tests/golden/`'s shadow scenes, `apps/lantern`'s and
+`apps/sundial`'s images) and moves the bias constants' world size, since every
+bias is denominated in texels.
+
 ## Screen-space contact shadows: what the rung left (2026-08-31)
 
 The pass is built and **parked outside `RenderEffects::DEFAULT_STACK`**, so
@@ -6337,12 +6406,13 @@ nothing draws it by default and no golden has moved. What that leaves:
   construction; until then the only evidence the march is correct is a manual
   pixel diff (2846 pixels changed at 1080p, peak delta 107/255).
 
-- **The low preset cannot clear it, and the plan is self-contradictory.**
-  `docs/plan/45-shadows.md` says "not a settings row of its own but a tier item"
-  and also that the low preset clears the bit; `crcbl::settings::presets` clears
-  an effect by writing that effect's `VIDEO_KEYS` row, so a bit with no row is a
-  bit no preset can reach. The build took the "no row" half and named the bit in
-  a `TIER_ONLY` exception inside
+- **The low preset cannot clear it, and the plan is self-contradictory.** The
+  2026-08-30 decision (`docs/notes/rendering.md` under _What the deleted
+  45-shadows plan left behind_) says "not a settings row of its own but a tier
+  item" and also that the low preset clears the bit; `crcbl::settings::presets`
+  clears an effect by writing that effect's `VIDEO_KEYS` row, so a bit with no
+  row is a bit no preset can reach. The build took the "no row" half and named
+  the bit in a `TIER_ONLY` exception inside
   `settings::tests::every_effect_has_a_key_and_no_two_share_one`. **The user's
   call**, and the options are: give it a `VIDEO_KEYS` row (which puts it in
   `apps/options`' menu and shifts `toFader` in `web/tools/browser-e2e.mjs`),
@@ -6386,17 +6456,18 @@ nothing draws it by default and no golden has moved. What that leaves:
 
 ## The shadow atlas: what the rung left (2026-08-31)
 
-All five items of `docs/plan/45-shadows.md`'s atlas rung have landed. This
-entry's first two paragraphs said otherwise until 2026-09-04 — that item 3, the
-budget in tiles and rendered faces, "has not been built", and that the cache is
-whole-atlas because the seam has no way to clear one tile. Both were checked and
-both are false: `crcbl_render::shadow::cadence`'s `schedule` is item 3,
-`mesh.slang`'s `depthClearVertexMain` is the depth-only clear quad this entry
-listed as an unbuilt candidate, and `ForwardRenderer::shadow_group_redrawn`
-answers per **group** — a cascade, or a light slot's whole run of tiles — so a
-lamp that swings costs its own tiles and not every tile. The group rather than
-the tile is the deliberate unit, because the cadence's unit is the cull;
-per-face inside a point light's cube is declined below.
+All five items of topic 45's atlas rung (`docs/notes/rendering.md` under _What
+the deleted 45-shadows plan left behind_) have landed. This entry's first two
+paragraphs said otherwise until 2026-09-04 — that item 3, the budget in tiles
+and rendered faces, "has not been built", and that the cache is whole-atlas
+because the seam has no way to clear one tile. Both were checked and both are
+false: `crcbl_render::shadow::cadence`'s `schedule` is item 3, `mesh.slang`'s
+`depthClearVertexMain` is the depth-only clear quad this entry listed as an
+unbuilt candidate, and `ForwardRenderer::shadow_group_redrawn` answers per
+**group** — a cascade, or a light slot's whole run of tiles — so a lamp that
+swings costs its own tiles and not every tile. The group rather than the tile is
+the deliberate unit, because the cadence's unit is the cull; per-face inside a
+point light's cube is declined below.
 
 What the rung did leave behind:
 
@@ -6406,14 +6477,21 @@ What the rung did leave behind:
   lacks, read that day:
   - **Invalidation is whole-pool.** `ForwardRenderer::shadow_group_record` folds
     `InstancePool::revision` in, and that counter moves on any instance write;
-    `GpuInstance::flags` defines `LIVE` and `BASE_VERTEX_OVERRIDE` and calls the
-    rest reserved, `InstanceDesc` has no mobility field, and `crcbl-scene`'s
-    glTF path reads none. A `STATIC` bit costs no record width.
-  - **The cull has no filter.** `crcbl_shaders::cull::Params` is planes, count
-    and capacity; survivors go to one `visible_instances` list through one
-    atomic. A second `DrawGen` per group is what the per-face declination below
-    refused on memory grounds, so the cheap shape is one list partitioned from
-    both ends by two counters.
+    `GpuInstance::flags` now carries `LIVE`, `BASE_VERTEX_OVERRIDE`, the
+    material mode, the hidden-views mask and `CASTS_NO_SHADOW` (bit 16), with
+    bits 4 to 7 kept for the material mode and bits 17 up free, but no mobility
+    bit; `InstanceDesc` has no mobility field, and `crcbl-scene`'s glTF path
+    reads none. A `STATIC` bit costs no record width. (Re-read 2026-09-24.)
+  - **The cull filters on one flag bit and nothing else.**
+    `crcbl_shaders::cull::Params::hidden_view` names the `GpuInstance::flags`
+    bit that removes an instance — a camera's own hidden-views bit, or
+    `CASTS_NO_SHADOW` for every shadow cull (2026-09-24, see
+    `ForwardRenderer::set_instance_casts_shadow`) — so a `STATIC` partition has
+    a precedent for where the test goes, but a reject bit is not a partition:
+    survivors still go to one `visible` list through one `visible_count` atomic.
+    A second `DrawGen` per group is what the per-face declination below refused
+    on memory grounds, so the cheap shape is one list partitioned from both ends
+    by two counters.
   - **A depth copy exists on every backend and is used nowhere.**
     `CommandEncoder::copy_image_to_image` is implemented on vk, mtl, dx12 and
     crcbl-webgpu, `Capability::ImageToImageCopy` is `Yes` on all four, and
@@ -6715,11 +6793,11 @@ for that slice, and the shape is already there when it is wanted.
 cadence no route from a key or a preset and this entry stands. What it does give
 is a **measurement** route: `r_shadow_cadence` and `r_shadow_faces` are
 `convar!`s like `r_ssao_slices`, and a console variable can now be set before
-the first frame in a browser. `docs/plan/45-shadows.md` calls the browser tier
-unmeasured in two places — the tile-size saving and the cadence's own — and
-those figures are now obtainable by the method the ambient occlusion entry above
-used and proved: seed the file into the demo's store, let a seeded boot be the
-one that reports, and read the pass timings rather than the frame total.
+the first frame in a browser. The browser tier is unmeasured in two places — the
+tile-size saving and the cadence's own — and those figures are now obtainable by
+the method the ambient occlusion entry above used and proved: seed the file into
+the demo's store, let a seeded boot be the one that reports, and read the pass
+timings rather than the frame total.
 
 Not done here, and not to be read as done: nothing has measured the shadow
 cadence in a browser. Only the obstacle is gone.
@@ -6780,33 +6858,32 @@ _The froxel column casts its shaft_ and the two entries after it.
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/rendering.md` under this heading.
 
-`docs/plan/44-lighting.md`'s rung 5 landed as rectangles: `crcbl_shaders::ltc`
-(the fit, the committed `tables/ltc.bin`, the polygon integral),
-`crcbl_render::RectLight`, `KIND_RECT` and `FLAG_FILL` on the widened
-`GpuLight`, and the shading in `mesh.slang`. The evidence is
-`crates/crcbl/tests/mesh_e2e/area_light.rs` — a golden, a turn that moves the
-highlight, the fill flag measured on the linear target, and the price — plus
-`crcbl_shaders::ltc`'s own tests against a brute-force hemisphere sweep and
-against the GGX lobe. What it did not do:
+Topic 44's rung 5 landed as rectangles: `crcbl_shaders::ltc` (the fit, the
+committed `tables/ltc.bin`, the polygon integral), `crcbl_render::RectLight`,
+`KIND_RECT` and `FLAG_FILL` on the widened `GpuLight`, and the shading in
+`mesh.slang`. The evidence is `crates/crcbl/tests/mesh_e2e/area_light.rs` — a
+golden, a turn that moves the highlight, the fill flag measured on the linear
+target, and the price — plus `crcbl_shaders::ltc`'s own tests against a
+brute-force hemisphere sweep and against the GGX lobe. What it did not do:
 
 - **Only radv and lavapipe have priced the rung.**
   `the_price_of_a_froxel_full_of_area_lights` needs GPU timestamps, and CI's
   Apple Paravirtual device reports none — it drew the three light sets and
   printed that the price went unmeasured (2026-08-31, after the `expect` on
   `TIMESTAMP_QUERY` reddened the Metal job on `b61ed52`). WARP and the wgpu
-  backend are untried. So the 3.4x and 2.3x ratios in `docs/plan/44-lighting.md`
-  are two drivers' numbers, and the browser tier's is still an ALU count rather
-  than a measurement. Those two were re-taken on 2026-09-02 after `b36be08` and
-  `38b2688` changed the passes they time — the desktop ratio moved from 3.7x,
-  lavapipe's did not move — so the pair is current and the browser's absence is
-  the only gap left in the row.
+  backend are untried. So the 3.4x and 2.3x ratios recorded in
+  `docs/notes/rendering.md` under _What the deleted 44-lighting plan left
+  behind_ are two drivers' numbers, and the browser tier's is still an ALU count
+  rather than a measurement. Those two were re-taken on 2026-09-02 after
+  `b36be08` and `38b2688` changed the passes they time — the desktop ratio moved
+  from 3.7x, lavapipe's did not move — so the pair is current and the browser's
+  absence is the only gap left in the row.
 - **The browser tier's price is still stated by tap count, not measured.** An
   area light now reaches `render_e2e` and the browser harness —
   `Scene::AreaLight` draws two mirrored strips differing only in `fill`, and it
   is compared on radv, lavapipe and SwiftShader. What that buys is a _frame_,
   not a _price_: nothing times the rectangle's shading against a punctual
-  light's on any tier, so `44-lighting.md`'s browser figure is still an ALU
-  count.
+  light's on any tier, so the recorded browser figure is still an ALU count.
 - **Metal and D3D12 have never drawn a rectangle; WGSL now has.**
   `Scene::AreaLight` reaches the browser harness, so SwiftShader draws one every
   run and matches the radv golden at a max channel delta of 1. What is left is
@@ -6838,7 +6915,8 @@ arm unexercised. It schedules the lantern change and its bless.
 - **No area light casts a shadow.** `shadow::tile_span` gives `Light::Rect` zero
   tiles. A rectangle's shadow is not a cube map or a single frustum, so this is
   its own rung — the industry answer is a shadow map from the rectangle's centre
-  plus a contact term, and `docs/plan/45-shadows.md` has neither.
+  plus a contact term, and the shadow atlas has neither:
+  `shadow::can_be_shadowed` refuses a rectangle before `Selection` sees it.
 
 - **What the rung costs a scene with _no_ area light was not measured against
   the tree before it.** The polygon integral, the frame and the transform's tap
@@ -7008,8 +7086,9 @@ did not do.
   multiplies every texel of the frame. What is lost is the shape of the last
   tenth of the roll — the linear form decelerates less smoothly as it arrives.
   If that ever reads badly, the escape this workspace permits is a baked table
-  of `1 - exp(-x)` indexed by the clamped blend, on `docs/plan/44-lighting.md`'s
-  terms.
+  of `1 - exp(-x)` indexed by the clamped blend, on the shading rule's terms
+  (`docs/notes/rendering.md` under _What the deleted 44-lighting plan left
+  behind_).
 
 - **`reduceMain` is one invocation over ninety-six bins**, on purpose: float
   addition is not associative and a tree reduction sums them in an order the
@@ -7466,14 +7545,15 @@ occlusion-view branch. What it did not cover:
 
 ### The normal offset scallops one silhouette's foot (2026-08-28)
 
-`docs/plan/45-shadows.md`'s seventh decision replaced the sun's and the punctual
-lights' slope-scaled depth bias with a normal offset, and the frames it bought
-are recorded there. What it cost is here, because it is a finding that was not
-fixed: `apps/lantern`'s brass block picks up a **scalloped fringe a couple of
-pixels deep along its foot**, on the period of the shadow texel, where the
-offset walks a receiver near a silhouette across the edge of its own caster. It
-is visible in `target/lantern/fixed-camera-1280x960.png` at roughly `(800, 745)`
-and it is absent from the frame before the change.
+Topic 45's seventh decision replaced the sun's and the punctual lights'
+slope-scaled depth bias with a normal offset, and the frames it bought are
+recorded in `docs/notes/rendering.md` under _What the deleted 45-shadows plan
+left behind_. What it cost is here, because it is a finding that was not fixed:
+`apps/lantern`'s brass block picks up a **scalloped fringe a couple of pixels
+deep along its foot**, on the period of the shadow texel, where the offset walks
+a receiver near a silhouette across the edge of its own caster. It is visible in
+`target/lantern/fixed-camera-1280x960.png` at roughly `(800, 745)` and it is
+absent from the frame before the change.
 
 **It is a bounded cost and it was taken deliberately**, against a 0.391 m lit
 strip at every wall's foot and a 78-luma cornice lift, both of which are gone.
@@ -7775,9 +7855,9 @@ they are not re-proposed, and the two answers that named a remainder:
 
 ### Specular IBL: what rung 3 left (2026-08-29)
 
-`44-lighting.md`'s rung 3 is built, both halves: `ssr.slang`'s miss fallback
-reads the gradient through `crcbl_shaders::sky_prefilter`'s table at the
-surface's roughness (`sky_prefiltered`), and scales its environment by
+Topic 44's rung 3 is built, both halves: `ssr.slang`'s miss fallback reads the
+gradient through `crcbl_shaders::sky_prefilter`'s table at the surface's
+roughness (`sky_prefiltered`), and scales its environment by
 `crcbl_shaders::dfg`'s pair — `dfg::pair_texels` as a second `Rgba8Unorm` image
 `crcbl_render::ssr::Ssr::new` uploads, `f0 · scale + bias` at `(N·V, roughness)`
 in place of Schlick. What it leaves:
@@ -8119,13 +8199,13 @@ behind_.
 
 ### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
 
-That topic was split into one document per technique — `44-lighting.md` through
-topic 50, the irradiance probes, with `18-render-features.md` kept as the index
-that holds the interactions, the delivery table and the risks. A hundred and
-twenty-eight citations in forty-eight files (re-counted 2026-09-06; 120 in 40 on
-2026-08-29, and it grows with each rung) — doc comments, shader headers and test
-headers across `crcbl-shaders`, `crcbl-render`, `crcbl`, `crcbl-vk`,
-`apps/lantern`, `apps/shard` and `apps/breach` name
+That topic was split into one document per technique — topic 44, lighting,
+through topic 50, the irradiance probes, with `18-render-features.md` kept as
+the index that holds the interactions, the delivery table and the risks. A
+hundred and twenty-eight citations in forty-eight files (re-counted 2026-09-06;
+120 in 40 on 2026-08-29, and it grows with each rung) — doc comments, shader
+headers and test headers across `crcbl-shaders`, `crcbl-render`, `crcbl`,
+`crcbl-vk`, `apps/lantern`, `apps/shard` and `apps/breach` name
 `docs/plan/18-render-features.md` and then name a section — "'s shadow section",
 "'s screen-space reflections", "'s irradiance grid" — that now lives elsewhere.
 
@@ -8167,7 +8247,7 @@ therefore no depth sort" below.
 rather than a design, and it has landed: `GpuInstance::previous_transform`, at a
 stride of 160. Two rows this entry named have since been argued as well — the
 froxel pass is built (`crcbl_render::volumetric`; see _The froxel column casts
-its shaft_), and specular IBL is `44-lighting.md`'s rung 3, whose `DFG` half
+its shaft_), and specular IBL is topic 44's rung 3, whose `DFG` half
 `crcbl_shaders::dfg` already cooks.
 
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
@@ -8198,11 +8278,12 @@ opening and this was a rendering change.
 
 The AA row rejected MSAA on the grounds that it "fights deferred-ish/HDR
 pipelines". That is deferred-renderer reasoning and this engine is clustered
-forward — `docs/plan/44-lighting.md`'s "Clustered forward" section rejects
-deferred **partly because deferred fights MSAA**. `MultisampleState` has been in
-`crates/crcbl-hal/src/pipeline.rs` the whole time, carrying `samples` and
-`alpha_to_coverage`. The seventh and eighth decisions that reopened it are in
-`docs/notes/rendering.md` under _What the deleted 49-antialiasing plan left
+forward — topic 44's "Clustered forward" rule, recorded in
+`docs/notes/rendering.md` under _What the deleted 44-lighting plan left behind_,
+rejects deferred **partly because deferred fights MSAA**. `MultisampleState` has
+been in `crates/crcbl-hal/src/pipeline.rs` the whole time, carrying `samples`
+and `alpha_to_coverage`. The seventh and eighth decisions that reopened it are
+in `docs/notes/rendering.md` under _What the deleted 49-antialiasing plan left
 behind_; this entry is the unbuilt rung, re-verified 2026-09-24: `Antialiasing`
 has `None`, `Fxaa` and `Cmaa2` only, every pipeline and transient in
 `crcbl-render` is single-sample (`TransientImageDesc::samples` exists and every
@@ -8674,12 +8755,42 @@ that is all: no BLAS bake, no TLAS refit, no `crcbl as stats`, no ray-tracing
 `.slang`, and no `LightingPath` consumer outside `Debug` impls, one log line and
 adapter tests. The renderer is raster only.
 
-**Standing scheduling question, already framed in the doc.** The 2026-08-23
-correction in `18-render-features.md` notes that of the two backends that can
-ray trace, `crcbl-dx12` is deferred alongside `crcbl-mtl` — so P7C would be a
-whole second lighting implementation reaching Vulkan hardware with `RAY_QUERY`
-and nothing else. That document says the decision belongs in the backlog rather
-than in it.
+**Standing scheduling question.** The deleted lighting plan's 2026-08-23
+correction noted that of the two backends that can ray trace, `crcbl-dx12` is
+deferred alongside `crcbl-mtl` — so P7C would be a whole second lighting
+implementation reaching Vulkan hardware with `RAY_QUERY` and nothing else, and
+whether that is worth building next is this entry's question, not a design one.
+The raster twin is not in question: it is very nearly the only path anyone sees.
+
+**The design, from topic 44 and topic 45** (the binding rules are in
+`docs/notes/rendering.md` under _What the deleted 44-lighting plan left behind_
+and _What the deleted 45-shadows plan left behind_):
+
+- **What it replaces.** `LightingPath::RayTraced` swaps four raster effects for
+  traced ones: ray-traced GI for the RSM-filled irradiance probes plus ambient,
+  ray-traced reflections for SSR with its probe fallback, ray-traced shadows for
+  every light type in place of the cascades and the atlas, and ray-traced AO for
+  GTAO. **The whole raster shadow path is bypassed, not augmented** — no
+  cascades, no atlas, no raster shadow special cases.
+- **What it may not change.** One material table, one BRDF (`mesh.slang`'s GGX
+  lobe and Lambert), one set of inputs and one tonemapped output: the paths
+  differ in how visibility and radiance are gathered, never in how they are
+  shaded, and nothing after the tonemap branches on `LightingPath`.
+- **Acceleration structures are built regardless of consumer** once they exist:
+  a BLAS per mesh asset at bake or load, a TLAS refit per frame from the same
+  instance data the cull pass reads. Topics 13 and 24 are the other potential
+  consumers and neither may assume them. Instances with
+  `GpuInstance::CASTS_NO_SHADOW` must be masked out of shadow rays to keep the
+  raster path's meaning. Nothing on the HAL seam builds an AS today.
+- **Tests owed.** A golden per path for every scene, and a documented pairwise
+  comparison reviewed by a human rather than a tolerance: a scene that reads
+  correctly on one path and wrongly on the other is a defect in whichever is
+  wrong. `apps/sundial`'s milestone 5 (ray-traced shadows beside the raster
+  ladder) and a ray-traced rung in `apps/alcove` and the mirrors sample are the
+  comparison fixtures waiting on it.
+- **Dependencies.** The seam's acceleration-structure and ray-query commands on
+  `crcbl-vk` first; the deferred `crcbl-dx12` is the only other backend that
+  could run it.
 
 ### Whole documents with nothing built, re-verified (2026-08-27)
 
@@ -15953,13 +16064,13 @@ Not a blocker for anything.
 ### Two `crcbl-render` modules are private and cited by crate path
 
 `crcbl-render/src/lib.rs` declares `mod ssao;` and `mod contact_shadows;`
-without `pub`, while `docs/notes/rendering.md` and `docs/plan/45-shadows.md`
-name items by paths like `crcbl_render::ssao::bent_normals` and
-`crcbl_render::contact_shadows`. Every item exists at those paths inside the
-crate and the console variables are reachable by their console names, so nothing
-is broken and `tools/check-doc-citations.sh` passes — but a reader following one
-of those paths from outside the crate finds nothing, and a rustdoc link to one
-would not resolve.
+without `pub`, while `docs/notes/rendering.md` names items by paths like
+`crcbl_render::ssao::bent_normals` and `crcbl_render::contact_shadows`. Every
+item exists at those paths inside the crate and the console variables are
+reachable by their console names, so nothing is broken and
+`tools/check-doc-citations.sh` passes — but a reader following one of those
+paths from outside the crate finds nothing, and a rustdoc link to one would not
+resolve.
 
 Two ways out and no decision yet: make the modules `pub` — they are peers of
 `hiz`, which already is, so the asymmetry looks accidental — or reword the
@@ -17104,13 +17215,12 @@ they left:
   renormalises, so a mip level over a busy region is a unit vector with no
   record of how much the normals disagreed. That disagreement is exactly the
   signal Toksvig and LEAN mapping turn into roughness, and without it a
-  normal-mapped surface sparkles as it minifies. `docs/plan/44-lighting.md` rung
-  4's specular AA was where it would have been spent, and that rung landed
-  without it: `mesh.slang`'s `specular_aa_kernel` takes the screen-space
-  derivatives of the shading normal, which says nothing about what the mip chain
-  averaged away. Keeping the pre-normalise length and folding it into the
-  roughness the MRO page will carry is still unspent, and now wants a home of
-  its own.
+  normal-mapped surface sparkles as it minifies. Topic 44's rung 4, specular AA,
+  was where it would have been spent, and that rung landed without it:
+  `mesh.slang`'s `specular_aa_kernel` takes the screen-space derivatives of the
+  shading normal, which says nothing about what the mip chain averaged away.
+  Keeping the pre-normalise length and folding it into the roughness the MRO
+  page will carry is still unspent, and now wants a home of its own.
 
   **DECIDED 2026-09-06 —** keep the pre-normalise length and fold it into the
   MRO page's roughness mips at bake time — Toksvig's
@@ -20621,10 +20731,10 @@ same heading.
   scene, which has no DAG, so the bias's effect on actual atlas depths is
   inferred from the cut readback plus bit-identical colour frames rather than
   measured on the atlas itself.
-- **`SHADOW_LOD_BIAS` is one constant for every cascade.** Topic 45 suggests
-  +1/+2 stepping by cascade, and a per-cascade factor would be sound — the
-  monotonicity argument only needs one constant per _pass_, and each cascade is
-  its own pass with its own `DrawGen` and its own history. Not done because
+- **`SHADOW_LOD_BIAS` is one constant for every cascade.** An early shadow plan
+  suggested +1/+2 stepping by cascade, and a per-cascade factor would be sound —
+  the monotonicity argument only needs one constant per _pass_, and each cascade
+  is its own pass with its own `DrawGen` and its own history. Not done because
   nothing yet shows the near cascade wants a different figure from the far one.
 
 ## Mobile input: what it decided, and the bugs it found
@@ -20845,8 +20955,9 @@ docs/notes/browser.md under the same heading.
 
 ## What the light list left owed
 
-The list, the froxel grid and the sun-as-a-row landed; the decision below it is
-recorded in `docs/plan/44-lighting.md`. What is left:
+The list, the froxel grid and the sun-as-a-row landed; the decisions behind them
+are recorded in `docs/notes/rendering.md` under _What the deleted 44-lighting
+plan left behind_. What is left:
 
 - **`spot_cone` is a linear ramp in cosine space, not a smoothstep** — worth
   knowing before someone "fixes" the falloff to match a description that was
@@ -21410,8 +21521,10 @@ What is left:
   the neighbour's: the shadow edge is **under-filtered** along the twelve cube
   edges rather than wrong. One texel at distance `d` covers `2d/SHADOW_TILE`
   world units, so at a metre from the light that is under three millimetres —
-  and the 2026-08-26 re-tiling made it a third wider. `docs/plan/45-shadows.md`
-  names a border of padding per tile as the fix; build it if a seam ever shows.
+  and the 2026-08-26 re-tiling made it a third wider. Topic 45's first decision
+  names a border of padding per tile as the fix (`docs/notes/rendering.md` under
+  _What the deleted 45-shadows plan left behind_); build it if a seam ever
+  shows.
 - **`Scene::Lights` changed shape without changing pixels.** Its three point
   lights are shadow-eligible, so the two most influential take runs and the
   frame records two more cull triples than the unshadowed scenes. `lights.png`
@@ -22314,15 +22427,15 @@ docs/notes/rendering.md under the same heading. What they leave takeable:
 Three slices ran at the sun's peter-panning in `apps/lantern`. The bias was
 re-denominated from cascade clip depth into cascade texels, its slope term was
 moved from the shading normal onto the rasterised facet (`geometric_normal_of`),
-and then `docs/plan/45-shadows.md`'s seventh decision replaced the slope-scaled
-depth move with a normal offset (`shadow_normal_offset`). The wall-foot strip
-went 0.601 m → 0.382 → 0.256 across the first two, and the seventh decision's
-own table records the strip and the cornice lift gone after the third. **This
-entry predicted twice and was wrong twice**: that the slope constant would fall
-to half a texel once it read the facet (it fell to three), and that nothing
-cheap would take the strip below 0.26 m (a sideways move for two derivatives
-did). The facet-seam account of why three texels were needed was inference from
-pictures, never instrumented, and the seventh decision made it moot.
+and then topic 45's seventh decision replaced the slope-scaled depth move with a
+normal offset (`shadow_normal_offset`). The wall-foot strip went 0.601 m → 0.382
+→ 0.256 across the first two, and the seventh decision's own table records the
+strip and the cornice lift gone after the third. **This entry predicted twice
+and was wrong twice**: that the slope constant would fall to half a texel once
+it read the facet (it fell to three), and that nothing cheap would take the
+strip below 0.26 m (a sideways move for two derivatives did). The facet-seam
+account of why three texels were needed was inference from pictures, never
+instrumented, and the seventh decision made it moot.
 
 What is still open — and none of it was re-measured after the normal offset:
 

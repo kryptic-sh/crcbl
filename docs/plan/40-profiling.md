@@ -27,12 +27,12 @@ that it worked.
   total for each label, over the last `DEFAULT_FRAME_WINDOW` frames. It replaces
   a line that printed the newest latent `FrameTimings` verbatim — one arbitrary
   frame of the run, which is the shape of measurement this topic's "percentiles,
-  not means" decision exists to refuse, and which forced
-  [45-shadows.md](45-shadows.md)'s eleventh decision to be medians of five
-  hand-run binaries. **A label is summed within the frame rather than tracked
-  per occurrence**: `lantern` renders two views, so `shadow`, `forward` and
-  `tonemap` each appear twice in its report and the cull passes once per
-  cascade, and the occurrence count is on the row.
+  not means" decision exists to refuse, and which forced the shadow plan's
+  eleventh decision (now in the [rendering notes](../notes/rendering.md)) to be
+  medians of five hand-run binaries. **A label is summed within the frame rather
+  than tracked per occurrence**: `lantern` renders two views, so `shadow`,
+  `forward` and `tonemap` each appear twice in its report and the cull passes
+  once per cascade, and the occurrence count is on the row.
 - **A pass's span includes its barriers**, because `crcbl-hal`'s encoder scope
   rules put query writes outside any pass. That is the more useful number: a
   pass whose barriers cost more than its draws is a real finding, and one that

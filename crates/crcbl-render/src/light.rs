@@ -56,7 +56,7 @@ pub struct PointLight {
     /// Whether this is a **fill** light: one that lights but casts no shadow and
     /// adds no specular.
     ///
-    /// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights.
+    /// Topic 44's rung 5 asked for it beside the area lights.
     /// It is how a stack with no baked bounce lights the far end of a room
     /// without paying for a shadow map or leaving a highlight where no fixture
     /// is. `crcbl_shaders::light::FLAG_FILL` is the row's bit;
@@ -99,7 +99,7 @@ pub struct SpotLight {
     pub fill: bool,
 }
 
-/// A rectangle that radiates from one of its faces — `docs/plan/44-lighting.md`'s
+/// A rectangle that radiates from one of its faces — topic 44's
 /// rung 5, shaded through the linearly transformed cosine fit in
 /// [`crcbl_shaders::ltc`].
 ///

@@ -488,9 +488,9 @@ three things owed_. These are the fixture's own rules.
   graded heights — and the sun moves on a scripted, pausable, scrubbable clock.
   A demo where an artefact cannot appear proves nothing about the bias.
 - **The ladder is `pcss`, `disc` and `box`**, selected by `r_shadow_filter`. The
-  rotated disc took the place of the Poisson set the plan first named
-  (`docs/plan/45-shadows.md`'s ninth decision); virtual shadow maps are refused
-  in topic 18 with a reason and this sample does not reopen them.
+  rotated disc took the place of the Poisson set the plan first named (topic
+  45's ninth decision, in `docs/notes/rendering.md`); virtual shadow maps are
+  refused there with a reason and this sample does not reopen them.
 - **The seam is per fragment, out of `FrameUniforms::shadow_filter`**, because a
   scene pass cannot be recorded twice under a scissor; `crcbl_render::split`
   counts the column.
@@ -1286,10 +1286,10 @@ docs/backlog.md under the same heading.
 
 - **The sun's shadow peter-panned at contacts, and it is closed.** A lit strip
   along the foot of every wall and a sawtoothed band at the head of the back
-  wall; two bias slices took the strip 0.60 m → 0.26 m and
-  `docs/plan/45-shadows.md`'s seventh decision — the normal offset, 2026-08-28 —
-  took the rest. What it left is "The normal offset scallops one silhouette's
-  foot" above, and "What the sun's shadow bias still leaves open" below.
+  wall; two bias slices took the strip 0.60 m → 0.26 m and topic 45's seventh
+  decision (`docs/notes/rendering.md`) — the normal offset, 2026-08-28 — took
+  the rest. What it left is "The normal offset scallops one silhouette's foot"
+  above, and "What the sun's shadow bias still leaves open" below.
 - **A single-quad wall casts no shadow at all.** Back faces are culled in the
   shadow pass as well as the colour one, so an inward-facing quad is invisible
   to the sun. lantern's first frame was an evenly lit floor with a window that

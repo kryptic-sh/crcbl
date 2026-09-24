@@ -699,7 +699,7 @@ fn difference_over(
 /// **The filter the console selects reaches the picture**, measured across the
 /// one part of the frame where two filters can disagree.
 ///
-/// `docs/plan/45-shadows.md`'s ladder has three rungs and until
+/// Topic 45's ladder has three rungs and until
 /// `r_shadow_filter` existed only the top one was compiled. A selector that
 /// wrote its mode into a lane nothing read, or a shader arm that fell through
 /// to the filter that ships, would leave every frame identical — and no golden
@@ -986,7 +986,7 @@ fn a_wall_darkens_the_floor_it_stands_on_and_the_sun_decides_which_half() {
 // The cascade debug overlay
 // ---------------------------------------------------------------------------
 //
-// `docs/plan/45-shadows.md`'s eighth decision made the cascade switch a **band**
+// Topic 45's eighth decision made the cascade switch a **band**
 // rather than a step, and until `DebugView::Cascades` existed nothing in this
 // workspace could show where that band falls. The overlay multiplies the shaded
 // picture by `crcbl::shaders::mesh::CASCADE_TINTS` of the cascade each sun-lit
@@ -1181,7 +1181,7 @@ const PAVEMENT_FLATNESS_LEVELS: f32 = 4.0;
 /// **The cascade view tints each pixel by the cascade its sun shadow came from,
 /// and the band between two cascades is the blend of their two tints.**
 ///
-/// The claim `docs/plan/45-shadows.md`'s eighth decision has had no observer
+/// The claim topic 45's eighth decision has had no observer
 /// for: the switch is a band, and a band is only a band if the picture across it
 /// is a mixture rather than a step. Three readings, placed from
 /// `Cascades::far[0]` rather than found by looking — well inside the near
@@ -1755,7 +1755,7 @@ fn the_atlas_view_draws_the_stored_depth_and_borders_the_slots_that_hold_a_map()
 // all, drawing the grid it can derive from `atlas_extent` and `TILE` alone,
 // would satisfy each of its readings unchanged.
 //
-// `docs/plan/45-shadows.md`'s atlas rung is what makes that a distinction: since
+// Topic 45's atlas rung is what makes that a distinction: since
 // it, a map takes a quarter of a cell or a sixteenth whenever
 // `shadow::tile_level` says its coverage does not earn a whole one, and
 // `atlas_view.slang`'s border loop reads each slot's own

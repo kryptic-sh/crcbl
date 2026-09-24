@@ -23,7 +23,7 @@
 ///
 /// **Four `float4` then four 4-byte scalars**, which is 80 exactly with no
 /// padding at all. It was 64 — three `float4` and two scalars, rounded up from
-/// 56 by the `float4`s' alignment — until `docs/plan/44-lighting.md`'s rung 5
+/// 56 by the `float4`s' alignment — until topic 44's rung 5
 /// spent the two spare words and added a fourth vector for the rectangle's
 /// orientation and extents. Spelled out in the shader struct rather than
 /// implied, exactly as [`GpuMaterial`](crate::mesh::GpuMaterial) spells its own.
@@ -66,7 +66,7 @@ pub const KIND_RECT: u32 = 3;
 /// [`GpuLight::flags`] for a **fill** light: one that lights but does not
 /// shadow and adds no specular.
 ///
-/// `docs/plan/44-lighting.md`'s rung 5 asked for it beside the area lights and
+/// Topic 44's rung 5 asked for it beside the area lights and
 /// said why it is a flag rather than a kind: everything else about such a light
 /// — its cluster, its falloff, its colour — is the ordinary light's, and what
 /// differs is only what it is allowed to contribute. It is how a stack with no
@@ -163,7 +163,7 @@ pub const CLUSTER_FAR: f32 = 1000.0;
 /// slice boundary is an integer index in `light_cluster.slang`, where a
 /// last-place disagreement changes nothing, and an endpoint of an optical-depth
 /// integral in the volumetric pair, where it reaches a colour and
-/// `docs/plan/44-lighting.md`'s shading rule applies. A multiply chain is exact
+/// topic 44's shading rule applies. A multiply chain is exact
 /// arithmetic on every target and has no add in it for a compiler to contract.
 ///
 /// `the_slice_ratio_is_the_split_it_claims` is what holds the constant to the

@@ -370,7 +370,7 @@ impl InstancePool {
     /// ones it drew last time it looked, and two that agree say they are. What
     /// wants that is a consumer whose output is a function of the array and can
     /// be kept instead of recomputed: `ForwardRenderer`'s shadow atlas is the
-    /// one there is, and `docs/plan/45-shadows.md`'s static-caching rung is why.
+    /// one there is, and topic 45's static-caching rung is why.
     ///
     /// It moves on **every** write, including ones no draw could see: a rewrite
     /// with identical bytes (which [`set`](Self::set) deliberately does not

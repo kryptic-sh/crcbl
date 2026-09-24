@@ -477,7 +477,7 @@ impl<'a> PageDesc<'a> {
     /// `n * 0.5 + 0.5` per channel, and glTF's packed occlusion, roughness and
     /// metallic in `r`, `g` and `b` — and their images are `Rgba8Unorm` so
     /// nothing decodes them at all. See each kind's own arm of `PageKind::format`
-    /// and `docs/plan/44-lighting.md`'s rung 2.
+    /// and topic 44's rung 2.
     ///
     /// # Panics
     ///

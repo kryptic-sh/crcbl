@@ -2424,7 +2424,7 @@ const BEYOND_CONTACT: [f32; 5] = [0.2, 0.4, 0.6, 0.8, 1.0];
 /// depth of the block stands between the contact and the depth it is compared
 /// against, and a bias has to cross all of it. A thin caster loses its contact
 /// at a small count, which is `apps/lantern`'s wall and
-/// `docs/plan/45-shadows.md`'s seventh decision's own fixture.
+/// topic 45's seventh decision's own fixture.
 ///
 /// **This count on the other arms**, as the pair of terms each shows at it:
 ///
@@ -2467,7 +2467,7 @@ const PETER_PAN_BIAS: f32 = 96.0;
 /// texels.
 ///
 /// **Twenty times what ships, and the contact does not move at all** — which is
-/// `docs/plan/45-shadows.md`'s seventh decision measured on a fixture rather
+/// topic 45's seventh decision measured on a fixture rather
 /// than argued: a move along the receiver's own normal leaves the depth it
 /// compares alone, so it cannot lift a shadow off its caster the way the count
 /// above does. What it costs instead is the shadow's *far* end, and this is the
@@ -2879,7 +2879,7 @@ struct Setup {
 ///
 /// Sundial's milestone 2: the pair of artefacts moving
 /// against each other as the two counts change, on the fixture the plaza was
-/// laid out for, where `docs/plan/45-shadows.md`'s seventh decision could only
+/// laid out for, where topic 45's seventh decision could only
 /// measure one room's wall-foot strip and one patch's dots.
 ///
 /// Five arms of one frame, all at [`sun::GRAZING_TICK`] — the most grazing sun
@@ -3085,7 +3085,7 @@ struct Setup {
 /// to the next station past that window, so the contact goes with the pavement:
 ///
 /// > on the box rung at 44 texels of normal offset the contact's shadow term
-/// > moved from 70.73 to 31.29. `docs/plan/45-shadows.md`'s seventh decision is
+/// > moved from 70.73 to 31.29. Topic 45's seventh decision is
 /// > that a move along the receiver's own normal leaves the depth it compares
 /// > alone and therefore keeps a contact; this is the fixture that says so
 ///
@@ -3312,7 +3312,7 @@ fn the_two_bias_counts_trade_acne_against_the_plinths_own_contact() {
             if (pushed_offset.contact - shipped_arm.contact).abs() >= CONTACT_HELD {
                 faults.push(format!(
                     "on {name} at {pushed_to} texels of normal offset the contact's shadow \
-                     term moved from {:.2} to {:.2}. `docs/plan/45-shadows.md`'s seventh \
+                     term moved from {:.2} to {:.2}. `docs/notes/rendering.md`'s seventh \
                      decision is that a move along the receiver's own normal leaves the depth it \
                      compares alone and therefore keeps a contact; this is the fixture that says \
                      so",
@@ -3793,7 +3793,7 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 /// **The colonnade's shadow crosses the cascade split without a step in it.**
 ///
 /// Sundial's milestone 3, and
-/// `docs/plan/45-shadows.md`'s eighth decision from this sample's side: where two
+/// topic 45's eighth decision from this sample's side: where two
 /// cascades meet, both are sampled and the answers are mixed by distance, so the
 /// switch is a **band** and not an edge. `crates/crcbl/tests/forward_e2e/
 /// shadow.rs` holds the cascade *overlay* to that band — the two tints blend
@@ -3886,7 +3886,7 @@ fn crossing(extent: (u32, u32), name: &str, arm: Arm) -> Crossing {
 ///
 /// **By collapsing the band to an edge** — `CASCADE_FADE_FRACTION` in
 /// `shaders/mesh.slang` set to zero and every artifact regenerated — which is
-/// the artefact this exists for and the thing `docs/plan/45-shadows.md`'s eighth
+/// the artefact this exists for and the thing topic 45's eighth
 /// decision removed. **Every arm went red, on both adapters**, and the run
 /// reports all three together because the arms are read into one list of faults
 /// rather than one assertion each. On radv:

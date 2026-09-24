@@ -1,6 +1,6 @@
 //! The shadow atlas's space, handed out a rectangle at a time.
 //!
-//! `docs/plan/45-shadows.md`'s atlas rung, first half: the image stops being a
+//! Topic 45's atlas rung, first half: the image stops being a
 //! fixed grid a light indexes into and becomes a **quadtree the renderer
 //! allocates from**, so a far or small light can take a quarter or a sixteenth
 //! of what a near one takes and the same image holds many more maps. The other
@@ -234,7 +234,7 @@ enum Node {
 /// and it holds its tiles **across frames**: a slot that wants the size it
 /// already has keeps the rectangle it has, and only a slot whose size changed
 /// or whose map is gone hands one back through [`release`](Self::release).
-/// `docs/plan/45-shadows.md`'s static-caching rung is why — an atlas re-laid
+/// Topic 45's static-caching rung is why — an atlas re-laid
 /// out from nothing every frame is one whose contents can never outlive the
 /// frame that drew them.
 #[derive(Clone, Debug, PartialEq, Eq)]

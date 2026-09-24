@@ -2647,7 +2647,7 @@ mod tests {
     ///
     /// # The second exception, and it is an open question rather than a design
     ///
-    /// `docs/plan/45-shadows.md`'s 2026-08-30 decision made
+    /// Topic 45's 2026-08-30 decision made
     /// [`RenderEffects::CONTACT_SHADOWS`] "not a settings row of its own but a
     /// tier item", so it is deliberately absent from [`VIDEO_KEYS`] and named in
     /// [`TIER_ONLY`] here. **What that leaves owed is real**: the same decision

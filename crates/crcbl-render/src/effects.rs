@@ -217,7 +217,7 @@ bitflags::bitflags! {
         /// direction through the depth prepass, whose `R8Unorm` channel scales
         /// the sun's shadow term.
         ///
-        /// `docs/plan/45-shadows.md`'s 2026-08-30 decision, and the rung the
+        /// Topic 45's 2026-08-30 decision, and the rung the
         /// shadow ladder reached after the rotated disc: the sliver where a foot
         /// meets the floor or a book meets a shelf is finer than any atlas
         /// texel, so no bias and no filter can close it — a bias large enough to
@@ -269,7 +269,7 @@ impl RenderEffects {
     /// player asks for by name when it wants the one pass instead of the
     /// three.
     /// [`CONTACT_SHADOWS`](Self::CONTACT_SHADOWS) is out for a fifth reason
-    /// that is not a reason at all: `docs/plan/45-shadows.md` decided it belongs
+    /// that is not a reason at all: topic 45 decided it belongs
     /// *here*, with the low preset clearing it, and it is parked outside only
     /// until the re-bless its first frame forces is taken on its own. It is the
     /// one member of this list that is expected to leave it.
@@ -288,7 +288,7 @@ impl RenderEffects {
             .union(Self::VOLUMETRIC_FOG)
             .union(Self::AUTO_EXPOSURE)
             .union(Self::ANTIALIASING)
-            // **Parked, not decided.** `docs/plan/45-shadows.md` puts
+            // **Parked, not decided.** Topic 45 puts
             // [`CONTACT_SHADOWS`](Self::CONTACT_SHADOWS) *in* this stack and has
             // the low preset clear it; it sits in this list because switching it
             // on moves every golden in the workspace at once, and that re-bless

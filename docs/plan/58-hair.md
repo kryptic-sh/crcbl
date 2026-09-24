@@ -35,9 +35,9 @@ Absent. What it builds on, and what constrains it:
   refused. Every strand renderer in the research that is not opaque relies on
   one or the other: Unreal's grooms on temporal AA, Horizon Zero Dawn's alpha on
   its two-sample temporal resolve.
-- **`mesh.slang` has one material model**, the GGX lobe
-  ([44-lighting.md](44-lighting.md)); hair's anisotropic lobes are a second
-  model and belong to their own pass.
+- **`mesh.slang` has one material model**, the GGX lobe (topic 44, in the
+  [rendering notes](../notes/rendering.md)); hair's anisotropic lobes are a
+  second model and belong to their own pass.
 
 ## The decisions
 

@@ -286,7 +286,7 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// created with.
 ///
 /// **`Rgba8Unorm`, and the missing `Srgb` is the whole decision.**
-/// [`docs/plan/44-lighting.md`]'s rung 2 argues it: a base-colour texel is a
+/// Topic 44's rung 2 argues it: a base-colour texel is a
 /// colour and glTF defines it as sRGB-encoded, so the format above is what makes
 /// the sampler decode it; a normal texel is a *number* — three components of a
 /// direction, stored as `n * 0.5 + 0.5` — and pushing it through the sRGB
@@ -297,8 +297,6 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// `the_page_formats_split_colour_from_number` is the whole guard, and it is
 /// worth having because the four constants sit a few lines apart and the wrong
 /// one compiles.
-///
-/// [`docs/plan/44-lighting.md`]: https://docs.rs/crcbl-render
 const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
 
 /// The format `docs/plan/43-render-standards.md` §2's **metallic-roughness-
@@ -599,7 +597,7 @@ const SPECULAR_DFG_BINDING: u32 = 25;
 /// be identical.
 const NORMAL_PAGE_BINDING: u32 = 26;
 
-/// The bind-group slot `docs/plan/44-lighting.md`'s rung 5 reads its linearly
+/// The bind-group slot topic 44's rung 5 reads its linearly
 /// transformed cosine table through.
 ///
 /// **Appended past [`NORMAL_PAGE_BINDING`], never inserted**, for that
@@ -615,7 +613,7 @@ const NORMAL_PAGE_BINDING: u32 = 26;
 /// goldens are compared across all four.
 const LTC_TABLE_BINDING: u32 = 27;
 
-/// The bind-group slot `docs/plan/45-shadows.md`'s contact-shadow channel is
+/// The bind-group slot topic 45's contact-shadow channel is
 /// read through.
 ///
 /// **Appended past [`LTC_TABLE_BINDING`], never inserted**, for that constant's
@@ -2438,7 +2436,7 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
     /// pipelines, two layouts and a ring of blocks.
     ssao: Option<Ssao>,
-    /// `docs/plan/45-shadows.md`'s contact-shadow march, which owns one
+    /// Topic 45's contact-shadow march, which owns one
     /// pipeline, one layout and a ring of blocks.
     contact_shadows: Option<ContactShadows>,
     /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
@@ -3669,7 +3667,7 @@ impl ForwardRenderer {
         // decode them — and `mesh.slang` then multiplies a linear texel by a
         // linear `base_color` and lights in linear, exactly as it did before
         // there was a texture. A normal texel is a *number* and nothing decodes
-        // it. See `PageKind::format`, and `docs/plan/44-lighting.md`'s rung 2.
+        // it. See `PageKind::format`, and topic 44's rung 2.
         //
         // Every layer's length against its kind's extent was settled by
         // `check_scene` above, before this device object existed.
@@ -4612,7 +4610,7 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
-        // `docs/plan/45-shadows.md`'s contact-shadow channel, last of the set —
+        // Topic 45's contact-shadow channel, last of the set —
         // see [`CONTACT_SHADOW_BINDING`] on why last is structural rather than
         // tidy.
         //
@@ -7942,7 +7940,7 @@ impl ForwardRenderer {
     ///
     /// # A cached atlas records nothing at all
     ///
-    /// `docs/plan/45-shadows.md`'s static-caching rung. When
+    /// Topic 45's static-caching rung. When
     /// [`ForwardRenderer::shadow_atlas_cached`] says the image already holds
     /// what this frame would draw, this adds **no cull and no pass**: the atlas
     /// is imported so the passes that sample it have an edge to the resource,
@@ -7953,7 +7951,7 @@ impl ForwardRenderer {
     ///
     /// # Per group, and what pays for the tiles it keeps
     ///
-    /// `docs/plan/45-shadows.md`'s cadence rung. A **group** — a cascade, or a
+    /// Topic 45's cadence rung. A **group** — a cascade, or a
     /// light slot's whole run of tiles — is redrawn or held on its own, and
     /// [`ForwardRenderer::shadow_group_redrawn`] is what says which. A frame
     /// that holds nothing clears the whole attachment, which is the recording
@@ -8540,7 +8538,7 @@ impl ForwardRenderer {
     /// Which lights hold the atlas's light tiles this frame, and where each
     /// map was laid out.
     ///
-    /// **The observable `docs/plan/45-shadows.md`'s priority rung otherwise has
+    /// **The observable topic 45's priority rung otherwise has
     /// none for.** A map's *size* leaves no trace in the picture that a golden
     /// can hold anyone to: a light demoted to a quarter of a cell draws a
     /// slightly softer shadow, which is a perfectly plausible frame and one a
@@ -8558,7 +8556,7 @@ impl ForwardRenderer {
     /// Whether this frame took the shadow atlas as an earlier frame left it,
     /// rather than drawing it again.
     ///
-    /// `docs/plan/45-shadows.md`'s static-caching rung, read back. True means
+    /// Topic 45's static-caching rung, read back. True means
     /// this frame recorded **no** shadow cull and no shadow pass, and every map
     /// sampled through [`Self::shadow_lights`]'s rectangles is the one the last
     /// frame that did draw put there — so a caller comparing two frames' pass
@@ -8581,7 +8579,7 @@ impl ForwardRenderer {
     /// Whether this frame redrew cascade `cascade`'s map, rather than keeping
     /// the one an earlier frame put there.
     ///
-    /// `docs/plan/45-shadows.md`'s cadence rung, read back. **The observable
+    /// Topic 45's cadence rung, read back. **The observable
     /// that rung otherwise has none for**: a held map draws a shadow lagging its
     /// caster by a frame or two, which is a perfectly plausible picture and one
     /// a golden accepts — so nothing but this distinguishes a cadence that is
@@ -8637,7 +8635,7 @@ impl ForwardRenderer {
     /// Whether this frame ignored the cadence for at least one map because the
     /// region that map covers had moved out from under it.
     ///
-    /// `docs/plan/45-shadows.md`'s "a moving light or camera cut resets it",
+    /// Topic 45's "a moving light or camera cut resets it",
     /// made precise: a map is *reset* rather than merely out of date when the
     /// centre it is projected from has moved further than the map's own reach —
     /// a light further than its own radius, or a cascade's eye further than the
@@ -8769,7 +8767,7 @@ impl ForwardRenderer {
     /// [`ImageUsage::TRANSFER_DST`](crcbl_hal::ImageUsage::TRANSFER_DST) so a
     /// per-frame copy into a layer needs no new usage flag. What it is *not* is
     /// the same format: it is `Rgba8Unorm`, where the base-colour page is
-    /// `Rgba8UnormSrgb`, and `docs/plan/44-lighting.md`'s rung 2 is where that
+    /// `Rgba8UnormSrgb`, and topic 44's rung 2 is where that
     /// is argued.
     #[must_use]
     pub const fn normal_page(&self) -> UploadedTexture {
@@ -10075,7 +10073,7 @@ impl ForwardRenderer {
     /// Tints the shaded picture by the **cascade** each sun-lit fragment's
     /// shadow was sampled from.
     ///
-    /// `docs/plan/45-shadows.md`'s eighth decision made the cascade switch a
+    /// Topic 45's eighth decision made the cascade switch a
     /// band rather than a step, and this is the picture that band is judged in:
     /// each fragment's shading multiplied by
     /// [`CASCADE_TINTS`](crcbl_shaders::mesh::CASCADE_TINTS) of the cascade it
@@ -10823,7 +10821,7 @@ impl ForwardRenderer {
 /// What the shadow pass a frame recorded would leave the image holding, held
 /// until the frame after can say whether its body ran.
 ///
-/// `docs/plan/45-shadows.md`'s static-caching rung, per group: recording a pass
+/// Topic 45's static-caching rung, per group: recording a pass
 /// is not drawing one, so nothing here is believed until
 /// [`ForwardRenderer::shadow_pass_ran`] carries this [`ShadowCommit::id`] back
 /// out of the graph.
@@ -11473,7 +11471,7 @@ impl MeshModules {
     /// The pipeline that resets one tile of the shadow atlas, so a pass can keep
     /// some tiles and redraw others.
     ///
-    /// `docs/plan/45-shadows.md`'s cadence rung needs a tile cleared on its own,
+    /// Topic 45's cadence rung needs a tile cleared on its own,
     /// and the attachment's [`LoadOp`] cannot do it — a clear there covers the
     /// whole image, and the region-bounded forms are not portable. This is the
     /// portable statement of the same thing: `mesh.slang`'s
@@ -14992,7 +14990,7 @@ mod tests {
     /// **The four material pages are created with the format their contents
     /// call for, and it is only a *colour* that is sRGB.**
     ///
-    /// `docs/plan/44-lighting.md`'s rung 2 calls this the classic PBR bug and
+    /// Topic 44's rung 2 calls this the classic PBR bug and
     /// says why it survives review: a base-colour texel and an emissive one are
     /// sRGB-encoded *colours*, which is what glTF defines them as, and a normal
     /// texel and a packed occlusion-roughness-metallic one are *numbers* — so
@@ -16260,7 +16258,7 @@ mod tests {
     /// **A frame over a scene nothing moved in does not draw the shadow atlas
     /// again**, and what it saves is the whole of the atlas's work.
     ///
-    /// `docs/plan/45-shadows.md`'s static-caching rung, and the observable it
+    /// Topic 45's static-caching rung, and the observable it
     /// otherwise has none for: the map a cached frame samples is byte for byte
     /// the map the frame before it sampled, so no golden image and no readback
     /// can tell the two frames apart. The recorded command stream can — and the
@@ -16417,7 +16415,7 @@ mod tests {
     /// **The far cascade is redrawn every second frame and the near one every
     /// frame**, on a scene where the eye moves and so every map is out of date.
     ///
-    /// `docs/plan/45-shadows.md`'s cadence rung, and the observable it otherwise
+    /// Topic 45's cadence rung, and the observable it otherwise
     /// has none for: a held map draws a shadow one frame behind its caster,
     /// which is a plausible picture and one a golden accepts.
     ///
@@ -16652,7 +16650,7 @@ mod tests {
     /// **A light that jumps further than its own radius resets the cadence**,
     /// and one that drifts inside it does not.
     ///
-    /// `docs/plan/45-shadows.md`'s "a moving light or camera cut resets it",
+    /// Topic 45's "a moving light or camera cut resets it",
     /// made precise: a map whose centre has moved past the map's own reach is
     /// not a frame out of date, it is about somewhere else — so it is redrawn on
     /// the frame that notices rather than when its turn comes round. Both arms,
@@ -21635,7 +21633,7 @@ mod tests {
 
     /// The default sun, turned a little further round for each `lap`.
     ///
-    /// `docs/plan/45-shadows.md`'s static-caching rung means a second frame over
+    /// Topic 45's static-caching rung means a second frame over
     /// a scene nothing moved in records **no shadow pass at all** — see
     /// [`ForwardRenderer::shadow_atlas_cached`]. That is the feature, and it is
     /// a difference that every A/B drawing two frames from one renderer would

@@ -7679,7 +7679,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // and hand the same report back until a slot resolves, so the newest
         // `FrameTimings` is one arbitrary frame of the run — which is what this
         // used to print, and what forced the shadow filter's measurement in
-        // `docs/plan/45-shadows.md` to be medians of five hand-run binaries.
+        // topic 45's eleventh decision to be medians of five hand-run binaries.
         // `PassStats` has been fed every distinct frame; this is its p50 and
         // p95 per pass.
         //

@@ -142,8 +142,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 41    | ✅ 41-webgpu-stream — done, deleted 2026-09-24; rules in `docs/notes/browser.md`            | The encoding `crcbl-webgpu` speaks — slice 2 of stage 10's WebGPU track    |
 | 42    | ◐ 42-steam — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Steamworks (`crcbl-steam`): hand-written FFI over the SDK's flat C API     |
 | 43    | [43-render-standards.md](43-render-standards.md)                                            | What a current engine ships and where this one stands — the gap survey     |
-| 44    | [44-lighting.md](44-lighting.md)                                                            | Lighting: the two paths, the light list, clustered forward, the BRDF       |
-| 45    | [45-shadows.md](45-shadows.md)                                                              | Shadows: cascades, atlas tiles, bias, and the filter quality ladder        |
+| 44    | ◐ 44-lighting — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`          | Lighting: the two paths, the light list, clustered forward, the BRDF       |
+| 45    | ◐ 45-shadows — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`           | Shadows: cascades, atlas tiles, bias, and the filter quality ladder        |
 | 46    | ✅ 46-ambient-occlusion — done, deleted 2026-09-24; rules in `docs/notes/rendering.md`      | Ambient occlusion: SSAO, its depth-weighted blur, and GTAO next            |
 | 47    | ◐ 47-reflections — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`       | Screen-space reflections: the Hi-Z march, roughness, determinism           |
 | 48    | ◐ 48-post-processing — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`   | The post stack: pipeline order, HDR, tonemap, bloom, where toggles live    |

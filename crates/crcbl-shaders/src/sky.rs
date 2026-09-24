@@ -18,7 +18,7 @@
 //! rather than a quadrature.
 //!
 //! The blend is deliberately not a `pow`, which is the shape a hand-tuned sky
-//! usually takes to tighten its horizon band. `docs/plan/44-lighting.md`'s
+//! usually takes to tighten its horizon band. Topic 44's
 //! shading rule forbids a transcendental that reaches a colour, and a sky is
 //! nothing but colour. A smoothstep is a cubic: multiplies and adds, identical
 //! on all four backends, and it needs neither [`crate::fog`]'s construction nor

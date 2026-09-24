@@ -28,7 +28,7 @@
 // out        = straight * (1 - fade) + water * fade,  fade = thickness / WATER_SHORE_FADE
 // ```
 //
-// **No transcendental reaches a colour** (`docs/plan/44-lighting.md`): the
+// **No transcendental reaches a colour** (topic 44): the
 // exponential is `fog_exp_neg`, Snell's law is a square root, and Schlick's
 // power is four multiplies.
 //
