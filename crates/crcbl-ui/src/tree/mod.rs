@@ -116,8 +116,10 @@
 //! clips neither. A block with `overflow: hidden` clips its children to its
 //! padding box, and so does `overflow: scroll`. A text span draws from its content box's top-left: in the
 //! bitmap font as one line per newline, or — when its `font-family` names a
-//! parsed font — as a [`crate::font::layout::TextLayout`] broken at the width
-//! layout measured it under and aligned by its `text-align`. An image span
+//! parsed font, the committed one or one [`Ui::register_font`] registered — as
+//! a [`crate::font::layout::TextLayout`] broken at the width layout measured it
+//! under, aligned by its `text-align` and pushed as one
+//! [`DrawList::glyphs`] run of that font. An image span
 //! stretches its picture over its content box. Outlines are drawn after the
 //! whole tree, in build order, each under the clip its node was drawn under,
 //! so a later sibling never covers a focus ring: a ring `outline-offset`
@@ -144,6 +146,8 @@
 
 mod emit;
 pub mod focus;
+#[cfg(test)]
+mod font_tests;
 mod layout;
 mod resolve;
 mod store;
@@ -164,6 +168,7 @@ use taffy::{NodeId, compute_root_layout, round_layout};
 use crate::draw_list::ClipRect;
 #[cfg(doc)]
 use crate::draw_list::DrawList;
+use crate::font::{Font, ReservedFamilyName, is_reserved_family};
 use crate::image::AtlasImage;
 use crate::style::{Declaration, InheritedId, NodeSelector, PseudoClasses, Styles};
 use crate::text::FontAtlas;
@@ -173,8 +178,8 @@ use focus::FocusState;
 use layout::{LayoutTree, MeasureCache};
 use store::{Interaction, NodeStore};
 
-pub use crate::font::FontFamily;
 pub use crate::font::layout::TextAlign;
+pub use crate::font::{FamilyName, FontFamily};
 pub use focus::{
     Behavior, Direction, Engagement, FOCUS_HISTORY, InputMode, NavInput, NavScore, NavStep, Role,
     Scope,
@@ -322,6 +327,10 @@ struct FrameNode {
     /// Its resolved style.
     style: NodeStyle,
     content: Content,
+    /// The parsed font a text span measures and draws in — a registered one,
+    /// else its built-in family's — or `None` for the bitmap font. Resolved
+    /// when the span is built.
+    font: Option<&'static Font>,
     content_hash: u64,
     /// Folded over each child's key as the child is built.
     child_hash: u64,
@@ -405,6 +414,11 @@ pub struct Ui {
     clipboard_requests: Vec<ClipboardRequest>,
     /// The pictures a stylesheet's `url()` names, from [`Ui::set_image`].
     images: HashMap<ImageName, AtlasImage>,
+    /// The fonts a `font-family` list names, from [`Ui::register_font`].
+    fonts: HashMap<FamilyName, &'static Font>,
+    /// Family names a text span was built in with no font registered under
+    /// them, already warned about, so each is reported once.
+    unregistered: HashSet<FamilyName>,
     /// The node this frame's pointer clicked, resolved when the frame began.
     clicked: Option<NodeKey>,
     /// The tree row [`Ui::tree_item_step`] opened or closed when this frame
@@ -738,14 +752,21 @@ impl Ui {
         let text = (start, self.selectors.len());
         let resolved = self.resolve_style(slot, fresh, parent, selector, span, inline);
 
+        let font = match content {
+            Content::Text { .. } => self.font_for(&resolved.style, selector.text()),
+            Content::Block | Content::Image(_) => None,
+        };
         let content_hash = match content {
             Content::Block => 0,
             Content::Text { start, end } => {
                 let style = &resolved.style;
+                // The resolved font's identity too: registering a font under
+                // the span's family name, or replacing it, re-measures it.
                 let hash = hash_of((
                     &self.text[start..end],
                     style.font_size.to_bits(),
                     style.font_family,
+                    font.map(Font::id),
                     style.line_height.bits(),
                 ));
                 self.live_text.insert(hash);
@@ -764,6 +785,7 @@ impl Ui {
             inherited: resolved.inherited,
             style: resolved.style,
             content,
+            font,
             content_hash,
             child_hash: 0,
             fresh,
@@ -1067,6 +1089,55 @@ impl Ui {
     /// nothing; see [`crate::style`]'s image notes.
     pub fn set_image(&mut self, name: &str, image: AtlasImage) {
         self.images.insert(ImageName::new(name), image);
+    }
+
+    /// Registers `font` under the family `name`, so a `font-family` list that
+    /// names it ahead of its first built-in family measures and draws in it.
+    ///
+    /// `name` is matched as [`FamilyName`] says: ASCII case ignored, and an
+    /// unquoted name's words joined by single spaces. **Registering a name
+    /// again replaces its font**, as [`Ui::set_image`] replaces a picture, and
+    /// every span in it is measured again. The registry is read when a span is
+    /// built, so a span built this frame before the call keeps the font it was
+    /// built in. See `crate::style`'s property notes for what a name nothing is
+    /// registered under does.
+    ///
+    /// # Errors
+    ///
+    /// [`ReservedFamilyName`] for an empty name, a built-in family's (`bitmap`,
+    /// `Atkinson Hyperlegible`), a generic family (`serif`, `sans-serif`,
+    /// `monospace`, …) or a CSS-wide keyword: no `font-family` list selects a
+    /// registered font by one of those, so the font would never draw.
+    pub fn register_font(
+        &mut self,
+        name: &str,
+        font: &'static Font,
+    ) -> Result<(), ReservedFamilyName> {
+        if is_reserved_family(name) {
+            return Err(ReservedFamilyName(name.to_owned()));
+        }
+        self.fonts.insert(FamilyName::new(name), font);
+        Ok(())
+    }
+
+    /// The parsed font a text span in `style` draws in: the one registered
+    /// under its family name, else its built-in family's, `None` for the
+    /// bitmap font. Warns once per name when the span names a family nothing is
+    /// registered under; `selector` says which span.
+    fn font_for(&mut self, style: &NodeStyle, selector: &str) -> Option<&'static Font> {
+        if let Some(name) = style.family_name {
+            if let Some(font) = self.fonts.get(&name) {
+                return Some(*font);
+            }
+            if self.unregistered.insert(name) {
+                crcbl_core::warn!(
+                    "tree: the text span `{selector}` names a font family no font is registered \
+                     under (Ui::register_font); it draws in {:?}",
+                    style.font_family
+                );
+            }
+        }
+        style.font_family.font()
     }
 
     /// The keys two nodes shared this frame, each once.

@@ -3057,15 +3057,30 @@ the gaps below.
   first decides is untested against a font where it matters.
 - **`ReadoutPanel` cannot take an application stylesheet**, so only
   `default.css` can move it onto the parsed font.
-- **`line-height` is ignored for bitmap-font spans** and takes no percentages;
-  only two families exist, and `Font::parse` wants `'static` bytes.
+- **`line-height` is ignored for bitmap-font spans** and takes no percentages,
+  and `Font::parse` wants `'static` bytes.
 - **A shelf emptied by eviction keeps its height**, so a fragmented page can
   refuse a glyph; it is counted as unplaced.
-- **Only the engine's fonts, and Latin text.** `FontFamily` is a closed enum
-  (`Bitmap`, `Sans`), so an application cannot register a font of its own; and
-  there is no shaping and no bidi. The design waits for non-Latin text before
-  adding `harfrust` shaping and UAX #9 bidi (`rustybuzz` is archived), and the
-  atlas is shaped so neither is precluded.
+- **Latin text only.** There is no shaping and no bidi. The design waits for
+  non-Latin text before adding `harfrust` shaping and UAX #9 bidi (`rustybuzz`
+  is archived), and the atlas is shaped so neither is precluded.
+- **What app-registered fonts (`Ui::register_font`) left open.** Only the
+  _first_ non-built-in name ahead of a list's first built-in family is kept
+  (`NodeStyle::family_name`), so in `font-family: Roboto, Inter, sans-serif`
+  `Inter` is never looked up; a list of names would need an interned list type,
+  since `NodeStyle` is `Copy`. A registered font must be `&'static` (as
+  `DrawList::glyphs` already requires). `Menu::layout_with_font` takes the
+  caller's `MenuStyle` — there is no scale fit in a font, because
+  `Menu::layout`'s fit assumes the bitmap font's advances scale exactly — and
+  there is no font counterpart of `Menu::panel_size`; a cycler's chevrons hold
+  its caption still only in a font whose `<`, `>` and space advance alike. The
+  warning for a name nothing is registered under names the span's selector, not
+  the family (`FamilyName` is a hash). **Untested**: a text input's caret stops
+  in a registered font (`text_input`'s `measure` takes the resolved font, but no
+  test drives it), and the pixels a registered real TTF rasterises to — the
+  tests use a synthetic fixed-pitch `Font` that has no outlines. EW's
+  `ui_font.rs` still rewrites `DrawCommand::Text` itself; moving it to
+  `register_font` is EW's change, not made.
 
 ## What UI rung 4 shipped without (2026-09-16)
 

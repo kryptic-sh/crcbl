@@ -6,9 +6,9 @@
 
 use crate::draw_list::CornerRadii;
 use crate::tree::{
-    Align, BorderImageWidth, Direction, Display, Edges, FlexDirection, FlexWrap, FontFamily,
-    ImageName, Justify, Length, LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle, Overflow,
-    Position, TextAlign,
+    Align, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection, FlexWrap,
+    FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle,
+    Overflow, Position, TextAlign,
 };
 
 /// Which sides of a box a declaration sets.
@@ -105,8 +105,11 @@ pub enum Declaration {
     Color([f32; 4]),
     /// `font-size`, in pixels. Inherited.
     FontSize(f32),
-    /// `font-family`. Inherited.
+    /// `font-family`'s first built-in family. Inherited.
     FontFamily(FontFamily),
+    /// The family `font-family` names ahead of its first built-in one, which
+    /// a registered font answers to; `None` when it names none. Inherited.
+    FamilyName(Option<FamilyName>),
     /// `line-height`. Inherited.
     LineHeight(LineHeight),
     /// `text-align`. Inherited.
@@ -185,6 +188,7 @@ impl Declaration {
             Self::Color(value) => style.color = value,
             Self::FontSize(value) => style.font_size = value,
             Self::FontFamily(value) => style.font_family = value,
+            Self::FamilyName(value) => style.family_name = value,
             Self::LineHeight(value) => style.line_height = value,
             Self::TextAlign(value) => style.text_align = value,
             Self::OutlineWidth(value) => style.outline_width = value,
@@ -241,6 +245,7 @@ impl NodeStyle {
             D::Color(self.color),
             D::FontSize(self.font_size),
             D::FontFamily(self.font_family),
+            D::FamilyName(self.family_name),
             D::LineHeight(self.line_height),
             D::TextAlign(self.text_align),
             D::OutlineWidth(self.outline_width),

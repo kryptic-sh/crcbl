@@ -32,6 +32,16 @@
 //! `crates/crcbl-ui/fonts/AtkinsonHyperlegible-Regular.ttf` and embedded into
 //! every binary that links this crate.
 //!
+//! # Fonts an application registers
+//!
+//! Beside the two, a tree draws in any [`Font`] an application registers with
+//! [`Ui::register_font`](crate::tree::Ui::register_font) under a
+//! [`FamilyName`]: a `font-family` list naming it before its first built-in
+//! family selects it, and a span in it is measured and emitted exactly as a
+//! [`FontFamily::Sans`] span is — [`layout::TextLayout`] and
+//! [`DrawList::glyphs`](crate::draw_list::DrawList::glyphs) — so its glyphs
+//! reach the screen through the same [`atlas`] as the committed font's.
+//!
 //! # Latin-1 first
 //!
 //! Every codepoint goes through the font's cmap, and one the font has no glyph
@@ -79,6 +89,80 @@ impl FontFamily {
         }
     }
 }
+
+/// A family name no built-in family answers to, hashed: what
+/// [`Ui::register_font`](crate::tree::Ui::register_font) registers a font under
+/// and a `font-family` list names it by.
+///
+/// **ASCII case is ignored, and nothing else is**: `Roboto`, `"roboto"` and
+/// `ROBOTO` are one name. An unquoted name of several words is its words joined
+/// by single spaces, so `Roboto  Mono` in a sheet is `"Roboto Mono"`, while a
+/// quoted one is taken as written, spaces and all.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FamilyName(u64);
+
+impl FamilyName {
+    /// The name `name`, in any ASCII case.
+    #[must_use]
+    pub fn new(name: &str) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&name.to_ascii_lowercase(), &mut hasher);
+        Self(std::hash::Hasher::finish(&hasher))
+    }
+}
+
+/// The names a `font-family` list never selects a registered font by, ASCII
+/// case aside: the built-in families' own, CSS's generic families and its
+/// CSS-wide keywords.
+const RESERVED_FAMILIES: &[&str] = &[
+    "bitmap",
+    "atkinson hyperlegible",
+    "serif",
+    "sans-serif",
+    "monospace",
+    "cursive",
+    "fantasy",
+    "system-ui",
+    "ui-serif",
+    "ui-sans-serif",
+    "ui-monospace",
+    "ui-rounded",
+    "math",
+    "emoji",
+    "fangsong",
+    "initial",
+    "inherit",
+    "unset",
+    "revert",
+    "revert-layer",
+    "default",
+];
+
+/// Whether `name` is one of [`RESERVED_FAMILIES`], or empty.
+pub(crate) fn is_reserved_family(name: &str) -> bool {
+    name.is_empty()
+        || RESERVED_FAMILIES
+            .iter()
+            .any(|reserved| reserved.eq_ignore_ascii_case(name))
+}
+
+/// Why [`Ui::register_font`](crate::tree::Ui::register_font) refused a name:
+/// it is empty, a built-in family's, a generic family or a CSS-wide keyword,
+/// so no `font-family` list could ever select a font registered under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReservedFamilyName(pub String);
+
+impl fmt::Display for ReservedFamilyName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "`{}` is reserved: no `font-family` list selects a registered font by it",
+            self.0
+        )
+    }
+}
+
+impl std::error::Error for ReservedFamilyName {}
 
 /// Names one parsed [`Font`] for as long as the process runs: what the glyph
 /// atlas keys a glyph's font by.
@@ -156,6 +240,8 @@ const LATIN1_END: u32 = 0x100;
 /// cmap, every advance and the kerning of every Latin-1 pair — so measuring
 /// and laying out text touches no table. Outlines are read when the atlas
 /// rasterises a glyph.
+///
+/// Two fonts are equal when they are one parse: equality is [`Font::id`].
 pub struct Font {
     id: FontId,
     data: &'static [u8],
@@ -182,6 +268,20 @@ impl fmt::Debug for Font {
     }
 }
 
+impl PartialEq for Font {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl Eq for Font {}
+
+/// The next parse's [`FontId`].
+fn next_id() -> FontId {
+    static NEXT_ID: AtomicU32 = AtomicU32::new(0);
+    FontId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
+}
+
 impl Font {
     /// The committed UI font, parsed once per process.
     ///
@@ -206,8 +306,6 @@ impl Font {
     /// [`FontError`] when the table directory cannot be read or the font has
     /// no units per em.
     pub fn parse(data: &'static [u8]) -> Result<Self, FontError> {
-        static NEXT_ID: AtomicU32 = AtomicU32::new(0);
-
         let font = FontRef::new(data).map_err(|error| FontError::Unreadable(error.to_string()))?;
         let unscaled = font.metrics(Size::unscaled(), LocationRef::default());
         if unscaled.units_per_em == 0 {
@@ -251,7 +349,7 @@ impl Font {
         };
 
         Ok(Self {
-            id: FontId(NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+            id: next_id(),
             data,
             metrics,
             latin1,
@@ -317,6 +415,21 @@ impl Font {
     #[must_use]
     pub fn kerning_pairs(&self) -> usize {
         self.kerning.len()
+    }
+
+    /// A font with `metrics` and no outlines, leaked for the process: every
+    /// Latin-1 codepoint is glyph 1, `advance` font units wide, and nothing
+    /// kerns. What a test measures known widths in; it cannot be rasterised.
+    #[cfg(test)]
+    pub(crate) fn fixed_pitch(metrics: FontMetrics, advance: f32) -> &'static Self {
+        Box::leak(Box::new(Self {
+            id: next_id(),
+            data: &[],
+            metrics,
+            latin1: [1; LATIN1_END as usize],
+            advances: Box::new([0.0, advance]),
+            kerning: HashMap::new(),
+        }))
     }
 }
 

@@ -63,7 +63,7 @@ impl Ui {
                 let (content_min, content_max) = content_box(min, &node.layout);
                 let text = &self.text[start..end];
                 let style = &node.style;
-                match style.font_family.font() {
+                match node.font {
                     None => list.text(content_min, text, style.color, style.font_size),
                     Some(font) => {
                         // Broken at the width the layout measured it under —

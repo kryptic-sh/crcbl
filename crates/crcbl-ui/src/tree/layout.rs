@@ -22,6 +22,7 @@ use taffy::{
 use super::store::NodeStore;
 use super::style::{Display, NodeStyle};
 use super::{Content, FrameNode};
+use crate::font::Font;
 use crate::font::layout::{TextLayout, wrap_width};
 use crate::text::{FontAtlas, LINE_HEIGHT};
 use crate::widget::NATURAL_FONT_SIZE;
@@ -65,10 +66,12 @@ pub(crate) struct MeasureCache {
 }
 
 impl MeasureCache {
-    /// `text`'s natural size in `style`, under a `width` constraint.
+    /// `text`'s natural size in `style`, under a `width` constraint: in
+    /// `font`, or in the bitmap font when that is `None`.
     fn text(
         &mut self,
         atlas: &FontAtlas,
+        font: Option<&Font>,
         text: &str,
         content_hash: u64,
         style: &NodeStyle,
@@ -89,7 +92,7 @@ impl MeasureCache {
             return *size;
         }
         self.misses += 1;
-        let size = match style.font_family.font() {
+        let size = match font {
             None => {
                 let scale = style.font_size / NATURAL_FONT_SIZE;
                 Size {
@@ -234,6 +237,7 @@ impl LayoutPartialTree for LayoutTree<'_> {
                                 // it may take: what a wrapped line breaks at.
                                 Content::Text { start, end } => measure.text(
                                     atlas,
+                                    frame.font,
                                     &text[start..end],
                                     frame.content_hash,
                                     &frame.style,

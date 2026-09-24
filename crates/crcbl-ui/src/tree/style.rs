@@ -26,7 +26,7 @@ use taffy::{
 use super::focus::Direction;
 use crate::draw_list::CornerRadii;
 use crate::font::layout::TextAlign;
-use crate::font::{Font, FontFamily};
+use crate::font::{FamilyName, Font, FontFamily};
 use crate::widget::NATURAL_FONT_SIZE;
 
 /// A length that cannot be `auto`: padding and gaps.
@@ -450,8 +450,14 @@ pub struct NodeStyle {
     /// A text span's size in pixels, on [`crate::draw_list::DrawCommand::Text`]'s
     /// terms.
     pub font_size: f32,
-    /// Which font a text span draws in. Inherited.
+    /// Which built-in font a text span draws in: the first built-in family its
+    /// `font-family` list names. Inherited.
     pub font_family: FontFamily,
+    /// The family its `font-family` list names ahead of its first built-in
+    /// one, if any: a span draws in the font
+    /// [`Ui::register_font`](crate::tree::Ui::register_font) registered under
+    /// it, and in `font_family` while none is. Inherited.
+    pub family_name: Option<FamilyName>,
     /// The pitch of a text span's lines in the parsed font; the bitmap font's
     /// is fixed. Inherited.
     pub line_height: LineHeight,
@@ -517,6 +523,7 @@ impl NodeStyle {
         color: [1.0; 4],
         font_size: NATURAL_FONT_SIZE,
         font_family: FontFamily::Bitmap,
+        family_name: None,
         line_height: LineHeight::Normal,
         text_align: TextAlign::Left,
         outline_width: 0.0,

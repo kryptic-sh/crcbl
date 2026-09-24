@@ -78,12 +78,13 @@
 use glam::Vec2;
 
 use crate::draw_list::{DrawCommand, DrawList};
+use crate::font::Font;
 use crate::image::{AtlasImage, NineSliceImage};
 use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::text::FontAtlas;
 #[cfg(test)]
 use crate::text::LINE_HEIGHT;
-use crate::tree::{AvailableSpace, Length, LengthAuto, NodeKey, Ui};
+use crate::tree::{AvailableSpace, FamilyName, Length, LengthAuto, NodeKey, Ui};
 use crate::widget::{
     ButtonSkin, ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, UiState, WidgetId,
 };
@@ -1037,19 +1038,51 @@ impl Menu {
         style: &MenuStyle,
     ) -> MenuLayout {
         let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
-        self.laid_out(Some(screen), style, None, atlas, |ui, built| {
-            Self::read_layout(ui, built, &self.items, screen, style)
+        self.laid_out(Some(screen), style, None, None, atlas, |ui, built| {
+            Self::read_layout(ui, built, &self.items, screen, style, None)
         })
     }
 
+    /// Lays this menu out centred at `style`, with every line of its text
+    /// measured in `font` rather than the built-in [`FontAtlas`] — and drawn in
+    /// it too, since [`Menu::render`] draws in the font the layout it is given
+    /// was measured in.
+    ///
+    /// The text is a registered font's in the menu's own tree, so it is
+    /// measured by the tree's one text path, as any span in a registered font
+    /// is: `font-size` is [`MenuStyle`]'s, and the line pitch is the font's
+    /// `line-height: normal`. [`Menu::layout`]'s scale fit has no counterpart
+    /// here — it counts on the bitmap font's advances growing exactly with the
+    /// scale, which a parsed font's do not — so `style` is the caller's. A
+    /// cycler's chevrons keep its caption still only in a font whose `<`, `>`
+    /// and space advance alike.
+    #[must_use]
+    pub fn layout_with_font(
+        &self,
+        extent: (u32, u32),
+        style: &MenuStyle,
+        font: &'static Font,
+    ) -> MenuLayout {
+        let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
+        self.laid_out(
+            Some(screen),
+            style,
+            None,
+            Some(font),
+            &FontAtlas::built_in(),
+            |ui, built| Self::read_layout(ui, built, &self.items, screen, style, Some(font)),
+        )
+    }
+
     /// Reads a [`MenuLayout`] back out of `ui`, which [`Menu::laid_out`] built
-    /// for `items` at `style` in `screen`.
+    /// for `items` at `style` in `screen`, its text in `font`.
     fn read_layout(
         ui: &Ui,
         built: &BuiltMenu,
         items: &[MenuItem],
         screen: Vec2,
         style: &MenuStyle,
+        font: Option<&'static Font>,
     ) -> MenuLayout {
         let rect = |key| ui.rect(key).expect("laid out this frame");
         let panel = rect(built.panel);
@@ -1086,6 +1119,7 @@ impl Menu {
 
         MenuLayout {
             style: *style,
+            font,
             screen,
             panel,
             title_pos,
@@ -1101,14 +1135,15 @@ impl Menu {
     /// not tell a menu that grew from one that moved.
     #[must_use]
     pub fn panel_size(&self, atlas: &FontAtlas, style: &MenuStyle) -> Vec2 {
-        self.laid_out(None, style, None, atlas, |ui, built| {
+        self.laid_out(None, style, None, None, atlas, |ui, built| {
             let (min, max) = ui.rect(built.panel).expect("laid out this frame");
             max - min
         })
     }
 
     /// Builds this menu with [`Menu::build`] and lays it out, in the calling
-    /// thread's one menu tree, then hands the tree to `read`.
+    /// thread's one menu tree, then hands the tree to `read`. Its text is in
+    /// `font`, registered in that tree, or in the bitmap font for `None`.
     ///
     /// **One tree per thread, rebuilt by every call** — two, one to measure
     /// in and one to place in — rather than a fresh
@@ -1125,6 +1160,7 @@ impl Menu {
         screen: Option<Vec2>,
         style: &MenuStyle,
         skin: Option<&MenuSkin>,
+        font: Option<&'static Font>,
         atlas: &FontAtlas,
         read: impl FnOnce(&Ui, &BuiltMenu) -> R,
     ) -> R {
@@ -1136,7 +1172,11 @@ impl Menu {
         tree.with(|tree| {
             let mut ui = tree.borrow_mut();
             ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
-            let built = self.build(&mut ui, screen, style, skin);
+            if let Some(font) = font {
+                ui.register_font(MENU_FONT, font)
+                    .expect("the menu's family name is not reserved");
+            }
+            let built = self.build(&mut ui, screen, style, skin, font.is_some());
             let available = screen.map_or(AvailableSpace::MAX_CONTENT, AvailableSpace::definite);
             ui.layout(Vec2::ZERO, available, atlas);
             read(&ui, &built)
@@ -1150,6 +1190,8 @@ impl Menu {
     /// root that is only as big as the panel. `skin` is `Some` only when the
     /// tree is to be drawn: it binds the frames `default.css` names and adds
     /// the scrim, which is positioned out of the flow and moves nothing.
+    /// `in_font` names [`MENU_FONT`] on the root, which every span inherits;
+    /// otherwise the text is `default.css`'s bitmap font.
     ///
     /// **What comes from where.** Every length is `style`'s, set inline, because
     /// it is the pixel-art scale times a base metric and a stylesheet has no
@@ -1163,6 +1205,7 @@ impl Menu {
         screen: Option<Vec2>,
         style: &MenuStyle,
         skin: Option<&MenuSkin>,
+        in_font: bool,
     ) -> BuiltMenu {
         use Declaration as D;
         if let Some(skin) = skin {
@@ -1172,9 +1215,12 @@ impl Menu {
             ui.set_image(PRESSED_IMAGE, skin.buttons.pressed.image);
         }
         let px = LengthAuto::Px;
-        let root = screen.map_or_else(Vec::new, |screen| {
+        let mut root = screen.map_or_else(Vec::new, |screen| {
             vec![D::Width(px(screen.x)), D::Height(px(screen.y))]
         });
+        if in_font {
+            root.push(D::FamilyName(Some(FamilyName::new(MENU_FONT))));
+        }
         let panel_corners = style.panel_corners();
         let panel = [
             D::BorderWidth(Sides::Top, panel_corners.top),
@@ -1317,8 +1363,9 @@ impl Menu {
 
     /// Emits the whole menu into `dl`: the tree [`Menu::layout_with`] measured
     /// at `layout`'s style and framebuffer, drawn with `skin`. Its text is
-    /// measured in the built-in [`FontAtlas`], the one atlas there is, so it
-    /// lands where `layout` says.
+    /// measured in the font `layout` was — the built-in [`FontAtlas`], or the
+    /// font [`Menu::layout_with_font`] was given — so it lands where `layout`
+    /// says.
     ///
     /// **The order is the tree's paint order**: the scrim first, then the
     /// window frame and the title, then each row — its frame, then what sits
@@ -1331,6 +1378,7 @@ impl Menu {
             Some(layout.screen),
             &layout.style,
             Some(skin),
+            layout.font,
             &FontAtlas::built_in(),
             |ui, _| ui.emit(dl),
         );
@@ -1350,6 +1398,10 @@ thread_local! {
 /// Where [`Menu::laid_out`]'s pointer is: above and left of every rectangle a
 /// menu lays out, which all start at the origin.
 const OFF_SCREEN: Vec2 = Vec2::splat(-1.0);
+
+/// The family a font [`Menu::layout_with_font`] is given is registered under
+/// in the menu trees, which are this module's own, so no app's name collides.
+const MENU_FONT: &str = "crcbl-menu";
 
 /// The names `default.css`'s menu rules give the [`MenuSkin`]'s frames, which
 /// [`Menu::render`] binds with [`Ui::set_image`].
@@ -1492,6 +1544,8 @@ impl MenuItemLayout {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuLayout {
     style: MenuStyle,
+    /// The font the text was measured in, `None` for the bitmap font.
+    font: Option<&'static Font>,
     screen: Vec2,
     panel: (Vec2, Vec2),
     title_pos: Vec2,
@@ -1896,6 +1950,80 @@ mod tests {
                 MenuItem::new(3, "DEBUG OVERLAY", "F3"),
             ],
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // In a font
+    // -----------------------------------------------------------------------
+
+    /// **A menu laid out in a font measures its text in it and draws it in
+    /// it**: a row is its label's advances in the font plus the button's frame
+    /// and padding, and one line of the font tall — where the same style in
+    /// the atlas measures the atlas's width — and [`Menu::render`] draws that
+    /// layout's label as a glyph run of the font. [`Menu::layout`] is what it
+    /// was before, the font registered in the shared trees notwithstanding.
+    #[test]
+    fn a_menu_laid_out_in_a_font_measures_and_draws_its_text_in_it() {
+        use crate::font::FontMetrics;
+
+        let font = Font::fixed_pitch(
+            FontMetrics {
+                units_per_em: 1000,
+                ascent: 800.0,
+                descent: -200.0,
+                line_gap: 0.0,
+            },
+            500.0,
+        );
+        let menu = Menu::new("", vec![MenuItem::new(1, "RESUME", "")]);
+        let style = MenuStyle::pixel_art(1);
+        let extent = (960, 720);
+        let before = menu.layout(extent, &atlas());
+
+        let in_font = menu.layout_with_font(extent, &style, font);
+        let in_atlas = menu.layout_with(extent, &atlas(), &style);
+        let corners = style.button_corners();
+        let chrome = Vec2::new(
+            corners.left + corners.right + 2.0 * style.button_padding.x,
+            corners.top + corners.bottom + 2.0 * style.button_padding.y,
+        );
+        let label = |layout: &MenuLayout| layout.items()[0].size() - chrome;
+        assert_eq!(
+            label(&in_font),
+            Vec2::new(6.0 * 0.5 * style.item_size, style.item_size),
+            "the row was not measured in the font"
+        );
+        assert_eq!(
+            label(&in_atlas),
+            Vec2::new(
+                text_width(&atlas(), "RESUME", style.item_size),
+                line_height(style.item_size)
+            )
+        );
+        assert_ne!(label(&in_font), label(&in_atlas));
+
+        let drawn = |layout: &MenuLayout| {
+            let mut list = DrawList::new();
+            menu.render(&mut list, layout, &skin());
+            let runs: Vec<_> = list
+                .commands()
+                .iter()
+                .filter_map(|command| match command {
+                    DrawCommand::Glyphs { font, .. } => Some(font.id()),
+                    _ => None,
+                })
+                .collect();
+            let texts = list
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, DrawCommand::Text { .. }))
+                .count();
+            (runs, texts)
+        };
+        assert_eq!(drawn(&in_font), (vec![font.id()], 0));
+        assert_eq!(drawn(&in_atlas), (Vec::new(), 1));
+
+        assert_eq!(menu.layout(extent, &atlas()), before);
     }
 
     // -----------------------------------------------------------------------

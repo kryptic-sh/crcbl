@@ -71,6 +71,7 @@ use glam::Vec2;
 use super::{Ui, WidgetState, typed};
 use crate::console::caret_shown;
 use crate::edit::{ClipboardOp, Edit, LineEdit, run_at};
+use crate::font::Font;
 use crate::style::{Declaration, PseudoClasses};
 use crate::text::FontAtlas;
 use crate::tree::emit::content_width;
@@ -195,14 +196,21 @@ pub(crate) struct TextFit {
     placeholder: bool,
 }
 
-/// Each caret stop of `text` in `style`'s font, from its left edge: every
-/// advance, and — in a parsed font — the kerning between every two
-/// neighbours, spaces included, as [`crate::font::layout::TextLayout`] places
-/// glyphs. The stop before a glyph is where that glyph is drawn.
-fn measure(atlas: &FontAtlas, text: &str, style: &NodeStyle, out: &mut Vec<f32>) {
+/// Each caret stop of `text` at `style`'s size in `font` — the bitmap font
+/// when that is `None` — from its left edge: every advance, and — in a parsed
+/// font — the kerning between every two neighbours, spaces included, as
+/// [`crate::font::layout::TextLayout`] places glyphs. The stop before a glyph
+/// is where that glyph is drawn.
+fn measure(
+    atlas: &FontAtlas,
+    font: Option<&Font>,
+    text: &str,
+    style: &NodeStyle,
+    out: &mut Vec<f32>,
+) {
     out.clear();
     out.push(0.0);
-    match style.font_family.font() {
+    match font {
         None => {
             let scale = style.font_size / NATURAL_FONT_SIZE;
             let mut buffer = [0; 4];
@@ -472,9 +480,14 @@ impl Ui {
                 &self.text[start..end]
             };
             let style = &span.style;
-            let hash = super::super::hash_of((shown, style.font_size.to_bits(), style.font_family));
+            let hash = super::super::hash_of((
+                shown,
+                style.font_size.to_bits(),
+                style.font_family,
+                span.font.map(Font::id),
+            ));
             if state.boundaries.is_empty() || state.measured != hash {
-                measure(atlas, shown, style, &mut state.boundaries);
+                measure(atlas, span.font, shown, style, &mut state.boundaries);
                 state.measured = hash;
             }
             let stops = &state.boundaries;

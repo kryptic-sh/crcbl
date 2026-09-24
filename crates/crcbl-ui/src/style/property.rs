@@ -24,7 +24,7 @@
 //! | `background` `background-color` `border-color` `color` | colour |
 //! | `border-radius` (1–4), `border-*-*-radius` | px |
 //! | `font-size` | px |
-//! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used |
+//! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used, after the first registered font named ahead of it |
 //! | `line-height` | `normal` \| number \| px |
 //! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
 //! | `outline-width` | px |
@@ -81,9 +81,29 @@
 //! width. `nav-*` names an id the way a selector does, `#` and all; the
 //! `nav-wrap` property is this engine's, not CSS's.
 //!
-//! A `font-family` list naming none of the three families this engine has is
-//! invalid rather than falling back to a default: the diagnostic is worth more
-//! than a silent bitmap font. `line-height` takes no percentage.
+//! # Registered fonts are found at layout, not here
+//!
+//! A sheet is parsed without knowing which fonts an application will register
+//! with [`Ui::register_font`](crate::tree::Ui::register_font), so a
+//! `font-family` list becomes two values: the first of the built-in families
+//! it names, and the first other name ahead of that one — case-folded, see
+//! [`FamilyName`]. The tree draws in the font registered under the name while
+//! there is one, and in the built-in family otherwise. So a name nothing
+//! registered draws exactly as an unknown name always did:
+//! `font-family: Roboto, sans-serif` draws in `sans-serif` until `Roboto` is
+//! registered.
+//!
+//! A list naming **no** built-in family — `font-family: Roboto` — is valid,
+//! and while nothing is registered under the name it leaves the span in the
+//! family it had without the declaration, as an invalid declaration would: the
+//! family it inherited, or an earlier rule's. What used to be a parse
+//! diagnostic for it is a warning instead: the first text span built in a name
+//! nothing is registered under warns, once per tree and name, with or without
+//! a built-in family after it. A list naming neither — only generic families
+//! such as `serif`, CSS-wide keywords, or unquoted names starting with one — is
+//! still invalid. Only the first non-built-in name is kept: in
+//! `font-family: Roboto, Inter, sans-serif`, `Inter` is never looked up.
+//! `line-height` takes no percentage.
 //!
 //! Not in the subset: `opacity` — the draw list has no group opacity to give
 //! it, and multiplying each command's alpha is not what `opacity` means where
@@ -93,10 +113,11 @@ use cssparser::color::{parse_hash_color, parse_named_color};
 use cssparser::{ParseError, Parser, Token, match_ignore_ascii_case};
 
 use super::value::{Corners, Declaration, Sides};
+use crate::font::is_reserved_family;
 use crate::tree::{
-    Align, BorderImage, BorderImageWidth, Direction, Display, Edges, FlexDirection, FlexWrap,
-    FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap,
-    NodeStyle, Overflow, Position, TextAlign,
+    Align, BorderImage, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection,
+    FlexWrap, FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavId, NavTarget,
+    NavWrap, NodeStyle, Overflow, Position, TextAlign,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -384,7 +405,11 @@ impl Property {
                 }
                 Self::Color => out.push(D::Color(color(input)?)),
                 Self::FontSize => out.push(D::FontSize(px(input, Sign::Positive)?)),
-                Self::FontFamily => out.push(D::FontFamily(font_family(input)?)),
+                Self::FontFamily => {
+                    let (family, name) = font_family(input)?;
+                    out.extend(family.map(D::FontFamily));
+                    out.push(D::FamilyName(name));
+                }
                 Self::LineHeight => out.push(D::LineHeight(line_height(input)?)),
                 Self::TextAlign => out.push(D::TextAlign(keyword(input, |name| {
                     Some(match_ignore_ascii_case! { name,
@@ -484,7 +509,10 @@ impl Property {
             },
             Self::Color => to.color = from.color,
             Self::FontSize => to.font_size = from.font_size,
-            Self::FontFamily => to.font_family = from.font_family,
+            Self::FontFamily => {
+                to.font_family = from.font_family;
+                to.family_name = from.family_name;
+            }
             Self::LineHeight => to.line_height = from.line_height,
             Self::TextAlign => to.text_align = from.text_align,
             Self::Outline => {
@@ -700,16 +728,28 @@ fn flex(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invali
     Ok(())
 }
 
-/// `font-family`: the first family in the list this engine has.
-fn font_family(input: &mut Parser<'_>) -> Result<FontFamily, Invalid> {
+/// `font-family`: the first built-in family in the list, and the first name
+/// ahead of it that a registered font could answer to.
+///
+/// A name that is not built-in is skipped as it always was, and the first one
+/// before any built-in family is kept besides, as the [`FamilyName`]
+/// [`crate::tree::Ui::register_font`] looks fonts up by. One that is reserved —
+/// a generic family, a CSS-wide keyword, or an unquoted run of words starting
+/// with one — is skipped and not kept. Invalid when the list yields neither.
+fn font_family(
+    input: &mut Parser<'_>,
+) -> Result<(Option<FontFamily>, Option<FamilyName>), Invalid> {
     let mut chosen = None;
+    let mut registered = None;
     loop {
-        let family = if let Ok(family) =
-            input.try_parse(|input| input.expect_string().map(|name| named_family(name)))
+        let (family, name) = if let Ok(name) =
+            input.try_parse(|input| input.expect_string().map(ToString::to_string))
         {
-            family
+            let registrable = !is_reserved_family(&name);
+            (named_family(&name), registrable.then_some(name))
         } else {
             let mut name = input.expect_ident()?.to_string();
+            let registrable = !is_reserved_family(&name);
             let mut words = 1;
             while let Ok(word) = input.try_parse(|input| input.expect_ident_cloned()) {
                 name.push(' ');
@@ -718,19 +758,28 @@ fn font_family(input: &mut Parser<'_>) -> Result<FontFamily, Invalid> {
             }
             // The generic family is one bare identifier; quoted, or followed by
             // another word, it is a family name like any other.
-            if words == 1 && name.eq_ignore_ascii_case("sans-serif") {
+            let family = if words == 1 && name.eq_ignore_ascii_case("sans-serif") {
                 Some(FontFamily::Sans)
             } else {
                 named_family(&name)
-            }
+            };
+            (family, registrable.then_some(name))
         };
-        chosen = chosen.or(family);
+        if chosen.is_none() {
+            match family {
+                Some(_) => chosen = family,
+                None => registered = registered.or(name.map(|name| FamilyName::new(&name))),
+            }
+        }
         if input.is_exhausted() {
             break;
         }
         input.expect_comma()?;
     }
-    chosen.map_or_else(invalid, Ok)
+    if chosen.is_none() && registered.is_none() {
+        return invalid();
+    }
+    Ok((chosen, registered))
 }
 
 /// The family a family name — quoted, or unquoted identifiers joined by
@@ -1290,6 +1339,50 @@ mod tests {
                 "`{property}: {css}` was accepted"
             );
         }
+    }
+
+    /// **`font-family` keeps the first name ahead of its built-in family** for
+    /// a registered font to answer to, quoted or bare and in any case; a name
+    /// after the built-in one, or a reserved one, is not kept, and a list of
+    /// such a name alone sets no built-in family.
+    #[test]
+    fn font_family_keeps_the_first_name_ahead_of_its_built_in_family() {
+        let roboto = Some(FamilyName::new("roboto"));
+        let cases = [
+            ("\"ROBOTO\", sans-serif", FontFamily::Sans, roboto),
+            ("Roboto, Inter, bitmap", FontFamily::Bitmap, roboto),
+            ("serif, roboto, sans-serif", FontFamily::Sans, roboto),
+            (
+                "\"sans-serif\", roboto, sans-serif",
+                FontFamily::Sans,
+                roboto,
+            ),
+            (
+                "sans-serif bold, roboto, sans-serif",
+                FontFamily::Sans,
+                roboto,
+            ),
+            ("sans-serif, roboto", FontFamily::Sans, None),
+            ("bitmap", FontFamily::Bitmap, None),
+            (
+                "Roboto Mono, sans-serif",
+                FontFamily::Sans,
+                Some(FamilyName::new("roboto mono")),
+            ),
+        ];
+        for (css, family, name) in cases {
+            let style = style_of(&[("font-family", css)]);
+            assert_eq!(
+                (style.font_family, style.family_name),
+                (family, name),
+                "{css}"
+            );
+        }
+        let alone = style_of(&[("font-family", "sans-serif"), ("font-family", "roboto")]);
+        assert_eq!(
+            (alone.font_family, alone.family_name),
+            (FontFamily::Sans, roboto)
+        );
     }
 
     /// **`font-family` takes the first family in its list this engine has**,

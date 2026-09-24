@@ -105,6 +105,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing else, pushed while a menu is showing. A menu key held from before a
   panel opened is now withheld from that panel, and a held step repeats on
   `Repeat::UI`'s schedule rather than the platform's key-repeat rate.
+- **`crcbl_ui::tree::NodeStyle` has a `family_name` field and
+  `crcbl_ui::style::Declaration` a `FamilyName` member**, for fonts an app
+  registers, so an exhaustive match, or a struct literal without
+  `..NodeStyle::DEFAULT`, needs them. `crcbl_ui::menu::MenuLayout` carries the
+  font it was measured in. A `font-family` list naming no built-in family —
+  `font-family: Roboto` — now parses, where it was an invalid declaration; while
+  nothing is registered under the name it draws exactly as before and warns at
+  the first span built in it rather than at parse.
 - **`crcbl_ui::tree::NodeStyle` has `background_image` and `border_image`, and
   `crcbl_ui::style::Declaration` five more members** (`BackgroundImage`,
   `BorderImageSource`, `BorderImageSlice`, `BorderImageFill`,
@@ -275,6 +283,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Fonts an app registers, in the UI tree and in menus** —
+  `Ui::register_font(name, &'static Font)` makes a `font-family` list that names
+  `name` ahead of its first built-in family (quoted or bare, ASCII case ignored)
+  measure and draw in that font: its spans are laid out by `TextLayout` and
+  emitted as `DrawList::glyphs` runs of it, the path the committed sans font
+  already takes, so its glyphs reach the screen through the same glyph atlas. A
+  name registered again replaces its font; `bitmap`, `Atkinson Hyperlegible`,
+  generic families and CSS-wide keywords are refused
+  (`crcbl_ui::font::ReservedFamilyName`). A name nothing is registered under
+  falls back to the list's built-in family, or to the family the span would have
+  had without the declaration. `Menu::layout_with_font(extent, style, font)`
+  lays a menu out in such a font, and `Menu::render` draws that layout in it;
+  `Menu::layout` is unchanged. `crcbl_ui::font::FamilyName` names a family, and
+  `Font` compares equal by identity.
 - **Transparent views, for rendering a model into an icon** —
   `ViewDesc::background: ViewBackground::Transparent` (or
   `ViewDesc::transparent()`) makes a secondary view clear to transparent black,
