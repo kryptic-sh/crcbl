@@ -4060,7 +4060,7 @@ pub(crate) mod tests {
     /// same reason: `--all-features` on a machine that cannot run it must stay
     /// green, and `tests/run-mtl-e2e.sh` is the only thing that turns it on —
     /// and that script fails when the suite reports zero tests run, because
-    /// `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap.
+    /// `docs/notes/process.md` calls a silently-skipped e2e job a known trap.
     ///
     /// **That gate used to say CI could never satisfy it, and that was wrong.**
     /// A paravirtual device was long assumed to execute nothing at all, which

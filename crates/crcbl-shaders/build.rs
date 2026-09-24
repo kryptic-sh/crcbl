@@ -293,7 +293,7 @@ fn check_hash(path: &Path, expected: &str, record: &ShaderRecord, what: &str) {
              being regenerated.\n  {path}\n  expected sha256 {expected}\n  actual   sha256 \
              {actual}\n\nRun crates/crcbl-shaders/tools/compile-shaders.sh and commit the \
              result. A rendering change that shifts output must also re-bless its golden \
-             image (docs/plan/12-testing.md).",
+             image (docs/notes/process.md).",
             name = record.name,
             path = path.display(),
         ));

@@ -318,7 +318,7 @@ fn render_triangle(headless: &Headless, resources: &TriangleResources) -> crcbl_
         })
         .expect("a readback request");
     let mut bytes = poisoned(byte_count as usize);
-    // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
+    // Poll with a deadline, never a fixed sleep — `docs/notes/process.md`.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     loop {
         match device
@@ -445,7 +445,7 @@ fn a_triangle_pulled_from_a_vulkan_storage_buffer_reaches_memory() {
 
 /// The golden-image gate: the rendered triangle against a checked-in reference.
 ///
-/// `docs/plan/12-testing.md` schedules this for P1 and specifies the shape —
+/// The testing plan (topic 12) scheduled this for P1 and specified the shape —
 /// "per-pixel tolerance + SSIM-style metric (rasterizers differ slightly);
 /// regenerate via `--bless` flag; diffs uploaded as CI artifacts on failure".
 ///

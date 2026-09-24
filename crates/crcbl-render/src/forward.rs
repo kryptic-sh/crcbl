@@ -8930,7 +8930,7 @@ impl ForwardRenderer {
 
     /// The debug draw layer's immediate-mode buffer, to append to.
     ///
-    /// `docs/plan/07-ui-debug.md` item 5: any system appends lines, boxes,
+    /// The UI's debug item 5 (`docs/notes/tooling.md`): any system appends lines, boxes,
     /// spheres and frusta during the frame, and
     /// [`begin_frame`](Self::begin_frame) uploads and clears what is there — so
     /// a segment lives exactly the frame it was appended in and nothing has to

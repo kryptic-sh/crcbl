@@ -1,7 +1,7 @@
 //! What a node is laid out and painted with.
 //!
 //! [`NodeStyle`] is a plain struct of the CSS subset
-//! `docs/plan/07-ui-debug.md` section 2 names, and it **is** the style Taffy
+//! UI section 2 (`docs/notes/tooling.md`) names, and it **is** the style Taffy
 //! reads: it implements `taffy`'s `CoreStyle`, `FlexboxContainerStyle` and
 //! `FlexboxItemStyle` itself, so layout never converts it into a
 //! `taffy::Style` and there is no second copy of any value to drift. The value
@@ -382,8 +382,8 @@ impl NavWrap {
 
 /// Everything one node is laid out and painted with.
 ///
-/// A plain struct for now: `docs/plan/07-ui-debug.md` rung 4's cascade is what
-/// will produce one from a stylesheet. [`NodeStyle::DEFAULT`] is CSS's initial
+/// A plain struct: UI rung 4's cascade is what produces one from a
+/// stylesheet. [`NodeStyle::DEFAULT`] is CSS's initial
 /// value for every layout field but `display`, which is `flex` here because the
 /// subset has no other layout mode.
 #[derive(Clone, Copy, Debug, PartialEq)]

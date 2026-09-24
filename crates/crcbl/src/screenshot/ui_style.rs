@@ -1,5 +1,5 @@
 //! [`Scene::UiStyle`](super::Scene::UiStyle)'s content: a themed panel styled
-//! entirely by a stylesheet — `docs/plan/07-ui-debug.md` rung 4 — with one of
+//! entirely by a stylesheet — UI rung 4 — with one of
 //! its buttons hovered by the scene's own pointer, so that what the cascade
 //! promises can be read back off the frame.
 //!

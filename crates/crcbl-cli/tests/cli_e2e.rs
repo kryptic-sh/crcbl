@@ -5,8 +5,8 @@
 //! that, which nothing but `tests/run-cli-e2e.sh` and the CI job it drives
 //! turns on. Same terms as `crcbl-shell`'s two display-dependent suites and for
 //! a related reason: this test compiles a whole engine into a fresh target
-//! directory, which is a minute of CI rather than a millisecond, and
-//! `docs/plan/12-testing.md` wants a plain `cargo nextest run` to stay fast.
+//! directory, which is a minute of CI rather than a millisecond, and a plain
+//! `cargo nextest run` should stay fast.
 //! The harness fails when the suite reports zero tests run, so gating it cannot
 //! quietly turn into skipping it.
 //!

@@ -182,7 +182,7 @@ impl FrameTimings {
 
 /// The renderer's contribution to the debug overlay.
 ///
-/// `docs/plan/07-ui-debug.md`'s first profiler surface is "stage 2/3 GPU pass
+/// The UI plan's first profiler surface (debug item 1 in `docs/notes/tooling.md`) was "stage 2/3 GPU pass
 /// timestamps"; this is the adapter that puts them there. It lives here, not in
 /// `crcbl-ui`, because the overlay is not allowed to know that a render pass
 /// exists — the module is contributed by the system it reports on. `crcbl-render`

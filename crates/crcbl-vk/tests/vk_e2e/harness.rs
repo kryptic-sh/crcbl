@@ -6,7 +6,7 @@
 //! `PRESENT_TIMING`) as *optional* and requires none of them, so the same
 //! fixture opens on radv and on lavapipe and the tests branch on what actually
 //! came back. [`Headless::readback`] polls against a deadline rather than
-//! sleeping, per `docs/plan/12-testing.md`.
+//! sleeping, per `docs/notes/process.md`.
 //!
 //! **Callers must end with [`Headless::finish`] rather than dropping the
 //! fixture.** It tears down in the order `crcbl-hal`'s obligation 2 requires
@@ -360,7 +360,7 @@ impl Headless {
                 after: None,
             })
             .expect("a readback request");
-        // Poll with a deadline, never a fixed sleep — `docs/plan/12-testing.md`.
+        // Poll with a deadline, never a fixed sleep — `docs/notes/process.md`.
         let started = Instant::now();
         let deadline = started + READBACK_DEADLINE;
         loop {

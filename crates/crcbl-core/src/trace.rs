@@ -122,7 +122,7 @@
 //! would make them not be.
 //!
 //! It is a real clock read from inside the engine, which
-//! `docs/plan/12-testing.md` otherwise forbids. That is sound here for one
+//! `docs/notes/process.md` otherwise forbids. That is sound here for one
 //! reason and only that one: **nothing the trace records is ever an input to
 //! simulation.** Nothing reads a span back into the world. The tests below
 //! assert structure — names, kinds, depths, counts — and the one that asserts on

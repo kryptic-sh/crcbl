@@ -39,8 +39,7 @@
 //! a payload taken on the press, a drop target's `can_accept`, and the answer
 //! carried back as widget state, all on [`UiState`]'s press capture.
 //!
-//! [`tree`] is the element tree `docs/plan/07-ui-debug.md` builds the rest of
-//! the toolkit on: blocks and spans rebuilt every frame with identity that
+//! [`tree`] is the element tree the rest of the toolkit is built on: blocks and spans rebuilt every frame with identity that
 //! survives the rebuild, laid out by Taffy's flexbox and emitted into the same
 //! [`DrawList`]. [`readout`] is its first consumer, and [`tree::widgets`] is
 //! the widget set built on it — the console's input line among them. [`edit`]
@@ -50,7 +49,8 @@
 //! The draw list is the only interface between the UI and the renderer. The
 //! render backend takes a [`DrawList`] and emits GPU draw calls.
 //!
-//! See `docs/plan/07-ui-debug.md` for the full design.
+//! The design's rules are in `docs/notes/tooling.md` (_What the deleted
+//! 07-ui-debug plan left behind_), and what is unbuilt in `docs/backlog.md`.
 
 pub mod budget;
 pub mod console;

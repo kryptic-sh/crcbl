@@ -18,7 +18,7 @@
 //! # The shape
 //!
 //! Three calls, matching the engine's existing poll discipline
-//! (`docs/plan/12-testing.md`: "poll for the condition with deadline, never
+//! (`docs/notes/process.md`: "poll for the condition with deadline, never
 //! fixed sleeps"):
 //!
 //! ```text

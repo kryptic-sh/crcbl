@@ -1,7 +1,7 @@
 //! The comparison: a per-pixel bound and a structural one, because either
 //! alone is wrong.
 //!
-//! `docs/plan/12-testing.md` specifies both — "compare with per-pixel
+//! `docs/notes/process.md` specifies both — "compare with per-pixel
 //! tolerance + SSIM-style metric (rasterizers differ slightly)" — and the
 //! pairing is the whole point:
 //!

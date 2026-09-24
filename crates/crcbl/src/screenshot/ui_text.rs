@@ -1,5 +1,5 @@
 //! [`Scene::UiText`](super::Scene::UiText)'s content: real text —
-//! `docs/plan/07-ui-debug.md` rung 5 — drawn in the committed font through the
+//! UI rung 5 — drawn in the committed font through the
 //! glyph atlas, laid out by the element tree and styled by a stylesheet, so
 //! that what wrapping, kerning and alignment promise can be read back off the
 //! frame.

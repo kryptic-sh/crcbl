@@ -10,7 +10,7 @@
 # rasteriser at all) and Vulkan (no loader on a bare machine) there is no Windows
 # machine where this backend's tests *cannot* run. Hiding them behind a feature
 # would remove working coverage from the ordinary Windows job in exchange for
-# nothing, which is why `docs/plan/12-testing.md` records the absence as argued
+# nothing, which is why `docs/notes/process.md` records the absence as argued
 # rather than overlooked.
 #
 # # Why `--run-ignored only`
@@ -19,7 +19,7 @@
 # them, but so that they can be named. Some of the tests here open a real
 # `ID3D12Device`; the rest are pure — the DXGI format tables, the root signature
 # layout arithmetic, the DXIL container parse, the adapter pin's decision table —
-# and pass on a machine with no GPU, which is what `docs/plan/12-testing.md`'s
+# and pass on a machine with no GPU, which is what `docs/notes/process.md`'s
 # placement rule turns on.
 #
 # This script used to run the whole crate, so the count the guard below reads was
@@ -46,7 +46,7 @@
 #     adapter line for exactly this reason: a pin the loader ignored and a pin
 #     that never reached the process both look like a pass from the outside.
 #   * **it fails on a run that tested nothing**, including the cut-short shape
-#     that reports a healthy-looking total. `docs/plan/12-testing.md` calls a
+#     that reports a healthy-looking total. `docs/notes/process.md` calls a
 #     silently-skipped e2e job a known trap.
 #
 # Exits non-zero if this is not Windows, if the suite fails, if it ran no tests,

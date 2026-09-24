@@ -1770,7 +1770,7 @@ impl Drop for Win32Shell {
 /// `build + test (windows-latest)` CI job.
 ///
 /// **Almost nothing here is `#[ignore]`d, and the exceptions are named where
-/// they sit.** `docs/plan/12-testing.md` calls a silently-skipped suite a known
+/// they sit.** `docs/notes/process.md` calls a silently-skipped suite a known
 /// trap, and this slice is deliberately how the project finds out whether a
 /// GitHub runner gives a process a usable window station: if it does not,
 /// [`Win32Shell::open`] fails and every one of these says so, which is an

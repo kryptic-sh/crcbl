@@ -14,17 +14,17 @@ bytemuck = { workspace = true }
 # invented its own copy would be a second answer to "which finger is this".
 crcbl-core = { workspace = true }
 # `Reflect`, `Value` and `get_path`/`set_path` for `tree::widgets::inspector` —
-# `docs/plan/07-ui-debug.md` rung 8's property panel. The arrow points this way
+# UI rung 8's property panel. The arrow points this way
 # because the panel is a widget and a widget needs `Ui`; the reverse would put
 # blocks, spans and a stylesheet inside a crate whose whole charter is that a
 # component can depend on it for free. It costs a browser build nothing new:
 # `crcbl-reflect` takes `glam` (already here), `thiserror`, and a proc-macro
 # crate built for the host. The exit criterion this crate is checked against is
-# that it names no **renderer** (`07-ui-debug.md`'s 2026-08-09 correction says
-# so in as many words), and `crcbl-reflect` sits below everything.
+# that it names no **renderer** (`docs/notes/tooling.md`'s UI rules say so in
+# as many words), and `crcbl-reflect` sits below everything.
 crcbl-reflect = { workspace = true }
 # Flexbox layout for `tree`, through Taffy's low-level traits rather than its
-# `TaffyTree` — `docs/plan/07-ui-debug.md` section 2, the user's decision of
+# `TaffyTree` — UI section 2 in `docs/notes/tooling.md`, the user's decision of
 # 2026-09-15. `flexbox` is the one layout mode the subset has; `taffy_tree` and
 # `grid` stay off. `std` is load-bearing: with neither it nor `alloc`, Taffy
 # swaps its vectors for fixed-capacity arrays (`util::sys`'s heapless fallback),
@@ -33,14 +33,14 @@ crcbl-reflect = { workspace = true }
 # an `overflow: scroll` container's offset (`Layout::scroll_height`); it adds a
 # field to the layout output and moves no box.
 taffy = { version = "0.14.0", default-features = false, features = ["content_size", "flexbox", "std"] }
-# CSS tokenizing and rule-block parsing for `style` — `docs/plan/07-ui-debug.md`
-# section 3, the user's decision of 2026-09-15; selectors, values and the cascade
+# CSS tokenizing and rule-block parsing for `style` — UI section 3 in
+# `docs/notes/tooling.md`, the user's decision of 2026-09-15; selectors, values and the cascade
 # are this crate's. Default features off: `fast_match_byte` and
 # `fast_match_color` pull in two proc-macro crates (`cssparser-macros` and
 # `phf_macros`, with `syn`) for speed-ups to a parser that runs once per sheet.
 cssparser = { version = "0.38.0", default-features = false }
-# Font parsing and hinted outlines for `font` — `docs/plan/07-ui-debug.md`'s
-# rendering section, the user's decision of 2026-09-15. Rasterisation and the
+# Font parsing and hinted outlines for `font` — the UI's font rule in
+# `docs/notes/tooling.md`, the user's decision of 2026-09-15. Rasterisation and the
 # glyph atlas are this crate's. `read-fonts` comes with it and is reached as
 # `skrifa::raw`, so the GPOS reader is always the version skrifa was built
 # against. Default features off: `autohint_shaping` feeds the automatic hinter,

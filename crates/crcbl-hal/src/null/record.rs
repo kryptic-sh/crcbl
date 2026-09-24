@@ -4,7 +4,8 @@
 //! a compile check. A no-op backend proves the seam has no leaks; a recording
 //! one lets a test assert "this frame emitted these passes in this order, with
 //! these barriers between them, and leaked nothing" — which is precisely the
-//! graph-compile suite `docs/plan/12-testing.md` schedules against NullBackend.
+//! graph-compile suite `docs/notes/process.md`'s anchor list asks for against
+//! NullBackend.
 //!
 //! # Getting at it
 //!

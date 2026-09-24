@@ -52,7 +52,7 @@
 
 # How long to wait for the display to answer. Generous, because a cold CI
 # runner starting an X server for the first time is slow — and bounded, because
-# `docs/plan/12-testing.md` requires a deadline rather than a sleep.
+# `docs/notes/process.md` requires a deadline rather than a sleep.
 DISPLAY_TIMEOUT_S="${CRCBL_E2E_DISPLAY_TIMEOUT_S:-20}"
 POLL_INTERVAL_S=0.1
 SCREEN="${CRCBL_E2E_X11_SCREEN:-1920x1080x24}"

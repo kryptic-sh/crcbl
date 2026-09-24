@@ -99,7 +99,8 @@ Two things sit behind it, in both directions:
   `crcbl_inventory::catalog::Catalog::from_ron` both predate it.) Feature 6, the
   asset browser, still waits on the rest of stage 6 — there is no watcher and no
   `crcbl bake`. Feature 3 landed in slice 3 on stage 7's inspector
-  (`Ui::inspector_with`, [07-ui-debug.md](07-ui-debug.md)).
+  (`Ui::inspector_with`; the UI's rules are in
+  [../notes/tooling.md](../notes/tooling.md)).
 - **Two sample plans wait on it.** [sample/07-towers.md](sample/07-towers.md)'s
   milestone 2 _is_ this document's dogfood pass — its exit criterion is "map
   authored 100% in the editor, zero hand-edited scene text" — and
@@ -109,10 +110,11 @@ Two things sit behind it, in both directions:
 
 ## Where the tree stands against this design (surveyed 2026-09-15)
 
-**Unparked 2026-09-15 by the user**, to be built after the UI system's rungs in
-[07-ui-debug.md](07-ui-debug.md), because every panel below is made of that
-system. A read-only survey of the tree found the editor further away than the
-rest of this document suggests; each line was checked in the source.
+**Unparked 2026-09-15 by the user**, to be built after the UI system's rungs
+(topic 7, since built; its rules are in
+[../notes/tooling.md](../notes/tooling.md)), because every panel below is made
+of that system. A read-only survey of the tree found the editor further away
+than the rest of this document suggests; each line was checked in the source.
 
 **What already exists and the editor can stand on:**
 
@@ -177,7 +179,7 @@ rest of this document suggests; each line was checked in the source.
 11. **The UI cannot host an editor yet**: no textured quad or clip rect in the
     draw list, no layout, no keyboard focus, text input without selection, an
     ASCII bitmap font, and a DPI scale passed as `1.0` everywhere — the rungs of
-    [07-ui-debug.md](07-ui-debug.md).
+    topic 7, all built since.
 12. **No `serve`, `scene` or `edit` CLI subcommands**, and no native file
     dialogs or menus.
 13. **Two statements in the 2026-08-09 corrections below are now out of date**:

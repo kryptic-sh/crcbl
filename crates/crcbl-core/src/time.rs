@@ -27,7 +27,7 @@
 //!
 //! [`FrameClock::update`] takes the current time as an argument. It never reads
 //! a clock itself, because a hidden `Instant::now()` is a nondeterminism source
-//! and `docs/plan/12-testing.md` requires every one of them to be injected.
+//! and `docs/notes/process.md` requires every one of them to be injected.
 //! [`MonotonicTime`] is the real driver; [`ManualTime`] is the test one.
 
 use core::fmt;

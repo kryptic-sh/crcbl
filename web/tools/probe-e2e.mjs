@@ -78,7 +78,7 @@
 //                                print; see EXIT STATUS.
 //
 // EXIT STATUS. Non-zero if any check fails *or* if zero checks ran. The second
-// half is not decoration: `docs/plan/12-testing.md` names a silently-skipped e2e
+// half is not decoration: `docs/notes/process.md` names a silently-skipped e2e
 // job as a known trap, and a gate whose browser never started would otherwise
 // print nothing and succeed.
 //
@@ -542,7 +542,7 @@ const failed = checks.filter((c) => !c.ok);
 
 console.log('');
 if (checks.length === 0) {
-  // The trap `docs/plan/12-testing.md` names: a harness that checked nothing and
+  // The trap `docs/notes/process.md` names: a harness that checked nothing and
   // said so quietly is worse than no harness.
   console.error('probe e2e: ZERO CHECKS RAN — the gate is not gating.');
   if (browser?.stderr.length)

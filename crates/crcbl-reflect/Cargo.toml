@@ -11,7 +11,7 @@ repository.workspace = true
 # sample, or from `apps/editor` — which reads a component through `get_path` and
 # `set_path` and is the reader this crate was written for — must cost a browser
 # build nothing beyond the description itself. So there is **no `crcbl-ui`**
-# here: the inspector widget of `docs/plan/07-ui-debug.md`'s rung 8 landed
+# here: the inspector widget of UI rung 8 landed
 # 2026-09-16 and depends on *this* crate, which is the only direction the arrow
 # can point — and **no `crcbl-scene`**: that crate writes a whole component to a
 # file and this one describes one field of it, which `src/lib.rs` argues at

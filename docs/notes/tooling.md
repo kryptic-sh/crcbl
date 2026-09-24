@@ -3,6 +3,239 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 07-ui-debug plan left behind (2026-09-24)
+
+Record; stage 7 designed `crcbl-ui`, the engine's one GUI — an immediate-mode
+builder over a DOM-like tree of blocks and spans, laid out by a flexbox subset
+and styled by `.css` stylesheets, drawn through the engine's own render graph —
+and the debug tools built on it. Built from it: every rung of its ladder (table
+below) in `crcbl_ui::{draw_list, image, tree, style, text, font, edit, menu}`,
+on `taffy`, `cssparser` and `skrifa`; the modular debug panel (`crcbl_ui::debug`
+and `crcbl_ui::budget`), to which `crcbl-render`'s `FrameTimings` and
+`FrameCounters` contribute their own sections; the console, whose rules are the
+52-debug-console section below; and the geometry half of debug draw
+(`crcbl_render::debug_draw`, behind `r_debug_draw`). `Hud` and `HudPanel` are
+deleted, and `crcbl_ui::hud` keeps only `Anchor`.
+
+What it left unbuilt is in `docs/backlog.md`: the per-rung sections _What UI
+rung 1 shipped without_ through _What UI rung 8b shipped without_, _What the
+deleted 07-ui-debug plan left unbuilt_ (the exit criteria), _The debug overlay,
+and what is left of it_, _Netgraph HUD, LAN discovery_, _Inspector stats carry
+no per-system tick time_, _World-anchored debug text is not built_ and _The
+debug draw layer's console switch is one bit, not a category set_.
+
+Code cites the plan as "stage 7" or "topic 7", and by rung, by architecture
+section and by debug-tool item. Those resolve here:
+
+| Citation              | What it specified                                                                                                      | Status                                                             |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| Section 1             | The element tree: block and span nodes, an immediate-mode builder over an identity-keyed node store                    | Built (`crcbl_ui::tree`)                                           |
+| Section 2             | Layout: the flexbox subset below, on Taffy's low-level traits, held to a fixture corpus                                | Built; `z-index` and block layout owed                             |
+| Section 3             | Styles: `.css` through `cssparser`, this crate's selectors and cascade, the rule index                                 | Built; some properties owed                                        |
+| Rung 1                | Draw-list primitives: textured quads, clip rects, the analytic rounded rectangle, the RGBA image atlas                 | Built (`DrawList`, `crcbl_ui::image`)                              |
+| Rungs 2 and 3         | Node tree, identity and pruning; layout on Taffy with scroll state and measure callbacks                               | Built (`Ui::block`, `Ui::span`)                                    |
+| Rung 4                | Selectors, typed values, cascade, `var()`, the rule index and definition cache, resolve counters, reload               | Built (`crcbl_ui::style`)                                          |
+| Rung 5                | Text: `skrifa` parsing, own rasteriser, shelf-packed LRU atlas, greedy wrap, pair kerning, the measure cache           | Built (`crcbl_ui::font`, `crcbl_ui::text`)                         |
+| Rung 6                | Focus: scopes, beam-first scoring, `nav-*`, per-scope memory, the engaged state, the scoring overlay                   | Built (`crcbl_ui::tree`'s `focus`)                                 |
+| Rung 7 (7b–7d2)       | Widgets (7b), single-line text input (7c), `Menu` on the tree (7d1), `DebugPanel` and `ConsolePanel` on the tree (7d2) | Built                                                              |
+| Rung 8 (8a, 8b)       | Outliner, tabs and dock (8a); the reflection-driven property inspector (8b)                                            | Built (`Ui::outliner`, `Ui::tabs`, `Ui::dock`, `Ui::inspector`)    |
+| Debug item 1          | Profiler HUD: GPU pass timestamps and CPU frame phases                                                                 | Frame and GPU rows built; the rules are the 40-profiling section's |
+| Debug item 2          | Inspector: per-system entity counts and tick times; select an entity, and each owning system draws its data            | Counts only (`Inspector::collect`)                                 |
+| Debug item 3          | Culling and render stats from the delayed-readback ring                                                                | Built (`FrameCounters`, `CullStatsRing`)                           |
+| Debug item 4          | Console: log view, command registry, server commands over the transport                                                | Built but for the transport half (`Flags::SIM`)                    |
+| Debug item 5          | Debug-draw controls, and the immediate-mode buffer they toggle                                                         | Geometry built; one switch rather than categories; world text owed |
+| Reserved `ui_*` table | The navigation actions below                                                                                           | Keyboard half built (`crcbl_input::ui`); no gamepad bindings       |
+
+The rules, each with its _why_:
+
+- **One GUI for editor and game.** No egui and no second draw path: the debug
+  overlay, the editor's chrome, sample HUDs and the hud demo are built from this
+  tree and its stylesheets, so changing engine UI is editing tree code and CSS,
+  as a game would. `apps/hud` (`docs/plan/sample/04-hud.md`) is the living
+  fixture and gallery. O3DE runs its editor on Qt and its game UI on a separate
+  system, which is the two-UI cost this rule exists to avoid.
+- **Immediate-mode authoring over an identity-keyed cache** (decided
+  2026-09-15). Callers rebuild the tree every frame; a persistent node store
+  keyed by `hash(parent key, #id or call site + sibling index)` keeps what must
+  survive a rebuild — hover, active, focus and engaged state, scroll offset, the
+  engaged widget's snapshot, the resolved-style handle, the layout cache and
+  last frame's rect — and prunes nodes a frame did not touch. Ryan Fleury's
+  "build it every frame" series, Dear ImGui's ID stack and React's
+  position-keyed state all arrive at this. **A loop's children need an explicit
+  key**, because a sibling index moves focus, scroll and engaged state onto the
+  wrong row when a list reorders; **a duplicate key is a debug warning**.
+- **Rebuilding is not relaying out.** A build is diffed against the store by
+  hashes of style inputs, child keys and content: only a changed node
+  re-resolves its style, only a changed node and its ancestors clear their
+  layout caches, and a paint-only change (colour, opacity, transform) touches
+  neither. GPUI's whole-tree relayout every frame is the fallback if the diff
+  ever proves not worth its complexity.
+- **Hit-testing reads the previous frame's layout.** One frame of interaction
+  latency, for classic imgui's simplicity with real layout. The frame is: build
+  the tree, resolve styles (cached), flex layout, emit the draw list, one graph
+  pass.
+- **Layout is Taffy's, through its low-level traits** (the user's decision of
+  2026-09-15, reversing "from scratch"). The reason is the correctness long
+  tail, not the size of the code: Yoga had to ship `YGErrata` flags because apps
+  came to depend on its non-spec behaviour, and `min-width: auto`, percentages
+  against indefinite sizes, stretch re-layout, absolute containing blocks and
+  pixel rounding are each documented pitfalls. The node store implements
+  `TraversePartialTree`, `LayoutPartialTree` and `CacheTree`, and the resolved
+  style implements Taffy's style traits, so there is no conversion into
+  `taffy::Style` and no second arena. `flexbox` is the one layout mode;
+  `block_layout` only when a consumer needs it, and not `taffy_tree` or `grid`
+  until something does.
+- **Text leaves measure through a cached callback**, keyed by string hash, font,
+  size and width bucket (Clay's measure cache), because re-measuring wrapped
+  text under min- and max-content is where layout time goes.
+- **Taffy is pinned, and an upgrade lands with the fixture corpus and the UI
+  goldens green**; so are the fontations crates, which bump minor versions about
+  monthly. Taffy's layout uses `floor`, `ceil` and basic arithmetic and no
+  `sqrt`, `powf` or `mul_add`, so its output does not vary with a platform's
+  libm — which is what keeps a UI golden portable. **Every divergence from the
+  browser is written into the fixture corpus the day it is made**
+  (`crates/crcbl-ui/tests/taffy_fixtures.rs`): Yoga's lesson is that a
+  divergence you ship becomes a contract.
+- **The layout subset is the contract**: `display: flex | none`,
+  `flex-direction`, `flex-wrap`, `justify-content`, `align-items`, `align-self`,
+  `flex-grow`/`-shrink`/`-basis`, `gap`; `width`, `height` and their minima and
+  maxima in px, % or `auto`; `padding`, `margin`, border widths,
+  `box-sizing: border-box`; `position: relative | absolute` with offsets;
+  `overflow: hidden | scroll`; `z-index` within a stacking context. No floats,
+  no tables, no animations or transitions.
+- **`cssparser` parses syntax; selectors, typed values, the cascade and matching
+  are this crate's** (the user's decision of 2026-09-15; MPL-2.0, which
+  `deny.toml` allows). The grammar: type (`block`, `span`, widget names), `#id`,
+  `.class`, descendant and child combinators, and pseudo-classes. **Specificity
+  is simplified** — inline over id over class over type, last wins within a tier
+  — predictable over spec-faithful, and a feature rather than a gap. **A parse
+  error reports its file and line and keeps the last good sheet.**
+- **Cascade sources**: the engine's `default.css`, then the application's
+  stylesheets, then inline overrides. Reload restyles a running app; the
+  editor's look is a stylesheet, and a game's HUD theme is a different
+  stylesheet. A reload bumps a stylesheet generation, which invalidates every
+  cached definition for one full re-resolve.
+- **Matching follows RmlUi's index and cache.** Rules are bucketed by the id,
+  class or type of their rightmost compound selector, a node matches its
+  candidates right to left, and the merged definition is cached by matched-rule
+  set and pseudo-state bitmask. **Each rule records the pseudo-classes it
+  depends on**, so a node none of whose candidates mention `:hover` never
+  re-resolves when the pointer moves — Unity's documentation names `:hover`
+  restyling whole subtrees "the main culprit". A changed property is diffed, so
+  a paint-only change dirties no layout, and resolve counts are shown so thrash
+  is visible early.
+- **CSS scope creep is the risk to hold against**: a property is added only when
+  the editor or a sample needs it, and "the browser does it" is not a
+  requirement.
+- **One UI uber shader with an analytic rounded rectangle**: per-corner radii,
+  border and optional shadow evaluated as a signed distance in the fragment
+  stage, as GPUI and Bevy do. Unity tessellates corners and RmlUi assumes MSAA
+  for smooth ones; MSAA is off by default here (`docs/notes/rendering.md`), so
+  the distance field is what looks right on the default view.
+- **A texture and a clip rectangle per command, and no stencil masks.**
+  Rectangular clips are applied in the shader or on the CPU so a batch survives
+  a scroll view, and GPU scissor only at a window or scroll-container boundary;
+  Unity's stencil masks break batches and nest at most seven deep.
+- **Two atlases, pages 2048² or smaller**: the single-channel glyph coverage
+  atlas and an RGBA image atlas, which is where the menu's nine-sliced frames
+  moved from a sprite pass of their own. WebGPU's compatibility mode caps a 2D
+  texture at 4096.
+- **Batching is by stacking context, then texture, keeping CSS paint order.**
+  RmlUi's lack of batching (thousands of draw calls) is its top performance
+  issue. Not built: there is one image page.
+- **Fonts: `skrifa` parses; rasterising and the atlas are this engine's** (the
+  user's decision of 2026-09-15, superseding the 2026-07-27 design review's
+  naming of `ttf-parser`, which is in maintenance mode and recommends the
+  fontations crates). Font parsing is a sanctioned exception, like cpal, Opus
+  and RustCrypto: font formats are a standards-compliance surface, not a
+  learning goal. The glyph atlas is **shelf-packed pages allocated on demand,
+  with least-recently-used eviction per page and a per-frame re-raster budget**,
+  a structure chosen so SDF and emoji are not precluded. **Grayscale
+  antialiasing only**: LCD subpixel rendering needs dual-source blending, which
+  WebGPU offers only as an optional feature. Latin-1 with pair kerning first;
+  `harfrust` shaping and UAX #9 bidi only when non-Latin text is needed
+  (`rustybuzz` is archived). Greedy line breaking. SDF text is post-MVP and for
+  world-space text only, since SDF and MSDF look worse than hinted bitmaps at
+  small UI sizes.
+- **Widgets are block and span compositions with behaviour, added on demand.**
+  Each ships default rules in `default.css` that a game overrides, and a widget
+  is added when the editor or a debug tool needs it, never speculatively.
+- **Focus is ordinary interaction state.** One focused element per context, so
+  `:focus` styles it and **focus rings are stylesheet-driven**. Interactive
+  widgets are focusable by default; containers form scopes — a modal traps
+  focus, a scroll container scrolls the focused element into view, windows and
+  panes are scope roots. **Mixed input**: pointer mode shows hover, pad or
+  keyboard mode shows the ring, a click also sets focus, and pad input after
+  mouse use resumes from the last focus or hover.
+- **Navigation is the reserved `ui_*` action set**, in the `ui` input context,
+  rebindable like everything else:
+
+  | Action              | Keyboard        | Gamepad          | Semantics                                               |
+  | ------------------- | --------------- | ---------------- | ------------------------------------------------------- |
+  | `ui_move` (Axis2)   | arrows and WASD | dpad, left stick | spatial focus movement; every screen drivable by either |
+  | `ui_next`/`ui_prev` | Tab, Shift+Tab  | LB/RB            | tree-order traversal, the always-works fallback         |
+  | `ui_accept`         | Enter, Space    | South            | the same event path as a click; a widget cannot tell    |
+  | `ui_back`           | Esc             | East             | close a modal or pop a screen                           |
+
+  WASD in a menu conflicts with nothing by construction: the `ui` context is
+  active while a menu has input and gameplay's WASD sits in the `gameplay`
+  context under it, so the context stack disambiguates, not special cases. The
+  table shadows more game keys than the samples assumed (2026-08-09): Space and
+  the WASD movement most 2D samples bind are both in it, so what changes when
+  menus push the context is that the samples stop handling menu keys directly.
+
+- **Focused versus engaged (LOCKED): focus never captures navigation.** Moving
+  focus onto any input widget — text, number, slider, dropdown, drag-value,
+  colour picker — is inert, and `ui_move` keeps navigating past it. A widget
+  consumes input only after **explicit engagement**: a click, Enter or
+  `ui_accept`. Engaged is a third state after hover and focus, styled by
+  `:engaged`. While engaged the widget owns the navigation actions (text types
+  and moves the caret, a slider adjusts, a dropdown traverses options, a list
+  traverses rows). **Exit is symmetric**: `ui_accept`, Enter or a click away
+  commits; `ui_back` or Esc cancels to the snapshot taken on engage. At most one
+  engaged widget per context, and engaging another commits the first; buttons
+  and checkboxes fire on `ui_accept` with no engaged state. Getting stuck on a
+  slider while arrowing down a settings list is the console-menu failure this
+  bans.
+- **Spatial navigation is beam first, distance second** (revised 2026-09-15).
+  Candidates overlapping the band the current rect projects in the move's
+  direction beat any outside it, and only then does distance decide. Godot 4.4's
+  regression — a plain gap-plus-misalignment score let a taller neighbour steal
+  `ui_down` — is why; Android's `FocusFinder`, Gameface, RmlUi and Godot 4.8 all
+  converge on the beam. No per-screen wiring: a menu is navigable the moment it
+  lays out. **Overrides are data**: `nav-up`, `nav-down`, `nav-left`,
+  `nav-right` and `nav-wrap` (Unity UI Toolkit's lack of explicit neighbours is
+  its most reported navigation complaint). Scope boundaries and scroll
+  containers clamp candidates. **Each scope remembers its last focused
+  element**, so returning to a pane resumes where the player left it. With
+  nothing in a direction, focus stays put or wraps under `nav-wrap`.
+- **One debug panel, assembled from modules, that every sample switches on** — a
+  standing requirement (sample rule 4 in
+  `docs/plan/sample/00-samples-overview.md`), not a feature a sample opts into.
+  What its perf rows measure is the 40-profiling section's; here they are
+  ordinary `DebugModule`/`DebugSection` rows. **Frame timing is unconditional**:
+  every sample has a frame, so the first module has no precondition. **Every
+  other module is contributed by the system it reports on**, and appears because
+  that system is present: the netgraph belongs in `crcbl-client`, so a
+  `crcbl-client` dependency on `crcbl-ui` is decided, with no cycle, and
+  `crcbl-render`'s `FrameTimings` and `FrameCounters` are the precedent.
+  Breakout and flappy, both on `InMemoryTransport`, are the check that the
+  composition is real — a panel that cannot render without a network module is
+  broken. **Switching it on is one thing**; a sample needing more is a finding
+  about the panel, the failure being a per-sample surface written once per game.
+- **The inspector is generic; systems describe themselves.** Selecting an entity
+  should have each system that owns it draw its data through that system's
+  debug-UI callback. Not built: `Inspector::collect` reports counts only.
+- **`crcbl-ui` names no renderer.** It produces draw lists and `crcbl-render`
+  owns the pass. Its dependencies are `glam`, `bytemuck`, `crcbl-core`,
+  `crcbl-reflect`, `taffy`, `cssparser` and `skrifa`, and `crcbl-reflect` sits
+  at the bottom of the graph. Nothing in CI checks it.
+- **Docking is splitters plus tabs.** Full docking is the classic time sink and
+  was declined for scope; Bevy archived its editor prototypes citing "ballooning
+  scope".
+- **A dependency arrives with the rung that reads it**, through `cargo add`,
+  never ahead of the code.
+
 ## What the deleted 40-profiling plan left behind (2026-09-24)
 
 Record; the built part is `crcbl_core::trace` (spans and counters, gated at

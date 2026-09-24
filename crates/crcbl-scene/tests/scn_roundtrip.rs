@@ -155,7 +155,7 @@ fn load(source: &dyn AssetSource, dir: &str) -> (Scene, IdMap, World) {
     (scene, ids, world)
 }
 
-/// The determinism hash `docs/plan/12-testing.md` asks the scene roundtrip to
+/// The determinism hash `docs/notes/process.md` asks the scene roundtrip to
 /// end at: every system's component state, independent of registration and
 /// attach order.
 fn state_hash(world: &World) -> u64 {

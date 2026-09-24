@@ -21,7 +21,7 @@
 //! # Panes
 //!
 //! Each pane is a `.dock-pane` block keyed by its name and made a focus scope
-//! root, as `07-ui-debug.md` says a pane is, so focus remembers where it was in
+//! root, as the UI's focus rules say a pane is, so focus remembers where it was in
 //! each pane and a directional move resumes there. A name appearing twice is a
 //! duplicate key: the tree warns and derives a key, and the layout's own
 //! editing methods refuse to make one.

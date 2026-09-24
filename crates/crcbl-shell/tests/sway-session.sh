@@ -23,7 +23,7 @@
 
 # How long to wait for sway to publish its sockets. Generous, because a cold CI
 # runner starting a compositor for the first time is slow — and bounded, because
-# `docs/plan/12-testing.md` requires a deadline rather than a sleep.
+# `docs/notes/process.md` requires a deadline rather than a sleep.
 SWAY_SESSION_TIMEOUT_S="${CRCBL_E2E_SOCKET_TIMEOUT_S:-20}"
 SWAY_SESSION_POLL_S=0.1
 

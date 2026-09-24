@@ -211,7 +211,7 @@ mod grass_blades;
 #[path = "render_e2e/occluders.rs"]
 mod occluders;
 
-// `docs/plan/07-ui-debug.md` rung 1's primitives, in a file of their own for the
+// UI rung 1's primitives, in a file of their own for the
 // same reason.
 #[path = "render_e2e/ui_primitives.rs"]
 mod ui_primitives;

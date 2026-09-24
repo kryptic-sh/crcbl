@@ -3,6 +3,225 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 12-testing plan left behind (2026-09-24)
+
+Record, and a standing rule set: topic 12 was the test-infrastructure plan, and
+most of it was convention read off the tree rather than invented for it. **Every
+test and harness written from here on follows this section.** Built from it:
+`cargo nextest` workspace-wide with per-crate e2e features; the
+`run-<suite>-e2e.sh` and `.ps1` harnesses over `tools/nextest-summary.sh` and
+`tools/nextest-summary.ps1`, held to their shapes by
+`tools/nextest-summary-test.sh`; `crcbl_golden` with its SSIM metric and
+`CRCBL_BLESS`; `ci.yml`'s `coverage (linux)` job; the NullBackend graph-compile
+suite (`crates/crcbl-render/tests/graph_compile.rs`); `seam_from_outside.rs` in
+`crcbl-hal` and `crcbl-shell`; the replication roundtrip
+(`crates/crcbl-net/tests/replication.rs`);
+`crates/crcbl-ecs/tests/churn_soak.rs`;
+`crates/crcbl-scene/tests/scn_roundtrip.rs`; the phys analytic, CCD and seeded
+property suites; and `crcbl-ui`'s draw-list snapshot hashes and hit-test grid.
+
+What it left unbuilt is in `docs/backlog.md`: _Coverage gates one workspace
+floor, not per-crate thresholds_; _What the deleted 12-testing plan left
+unbuilt_ (the churn soak's replication half); the undo property test under _The
+editor: slices 1 to 3 landed, and what they leave_; _The determinism smoke test
+has no input script_; _Coverage the testing plan asks for and nothing provides_
+(sample goldens); _Fixed sleeps left in tests the assert-nothing slice did not
+own_ (nothing enforces the frame-poll rule); and _Test-file names: what the
+rename slice left, and one rename declined_ (the terse-name crates).
+
+Other documents cite the plan as "topic 12", and code cites these rules by the
+phrases they are stated in here — "a silently-skipped e2e job is a known trap",
+the frame-poll rule, the placement rule, the anchor list, "diffs uploaded as CI
+artifacts on failure".
+
+**What each crate owes**, by level:
+
+| Level       | Scope                                                                                                     | Runner                             |
+| ----------- | --------------------------------------------------------------------------------------------------------- | ---------------------------------- |
+| Unit        | Pure logic in-crate: math, pools, rebase, graph compile, TOI solvers, replication encode and decode       | `cargo nextest`, per crate         |
+| Property    | Invariant-heavy code: `WorldPos` rebase, BVH after churn, undo inverses, snapshot roundtrip               | `proptest` or a seeded loop        |
+| Integration | Crate pairs through public APIs: ECS and net replication, scene to server, the HAL graph on NullBackend   | `tests/` directories               |
+| Sim e2e     | Full headless server and client, input scripts, N ticks, a state-hash assert (`crcbl sim`)                | nextest, headless, runs everywhere |
+| Render e2e  | Offscreen render, readback, golden-image compare (`crcbl screenshot`)                                     | a GPU or a software rasteriser     |
+| Editor e2e  | Command sequences against a headless editor: edit, save, reload, verify; random commands plus a full undo | nextest, headless                  |
+| Sample e2e  | Each sample's determinism script and golden frames: samples are test fixtures, not just demos             | CI per sample                      |
+
+**The CLI and headless pillar is the e2e substrate**: if it can't be tested
+without a GUI, it's built wrong. Test infrastructure is built with the thing it
+tests, never retrofitted.
+
+The harness rules:
+
+- **E2e suites are gated per crate, never workspace-wide.** `crcbl-vk` declares
+  `vk-e2e`, `crcbl-mtl` `mtl-e2e`, `crcbl-shell` `wayland-e2e`, `x11-e2e` and
+  `win32-e2e`, `crcbl-cli` `cli-e2e`, each sample `golden-e2e`, and
+  `crates/crcbl` one feature per render suite it owns — each declared by the
+  crate that owns the hardware or window system its suite needs. A workspace
+  `e2e` feature could only mean "all of it", which on every real machine is more
+  than is present; a per-crate name says which loader, compositor or GPU a run
+  claims, so a CI job selects exactly what its runner can honour. **`crcbl-dx12`
+  has no feature, on purpose**: D3D12 and WARP ship with Windows, so there is no
+  Windows machine where that suite cannot run
+  (`crates/crcbl-dx12/tests/run-dx12-e2e.sh` argues it).
+- **Nothing may skip silently: a silently-skipped e2e job is a known trap.**
+  Every gated suite is `#[ignore]`d on top of its feature
+  (`crates/crcbl-shell/tests/wayland_e2e.rs`'s header says why), so
+  `cargo nextest run --workspace --all-features` is precisely the run that does
+  not execute them — it has to stay green on a machine with no compositor and no
+  GPU. The counter-measure is each suite's own harness: it turns the ignored set
+  on, then parses nextest's own summary line out of a colour-stripped copy of
+  the log (CI sets `CARGO_TERM_COLOR: always`) and fails when the count is zero,
+  which is the gate having stopped gating. Read the **reported total**, never a
+  line count of the output, which silently picks up headers.
+- **A check that cannot fail is not a check.** The zero-count guard exists
+  because a gate whose feature or `#[ignore]` stopped matching its tests reports
+  green while testing nothing. Every guard is shown to go red before it is
+  trusted, and a harness that reports "not supported here" must not read as
+  "passed".
+- **A harness over a crate whose tests are mixed selects `--run-ignored only`,
+  not `all`.** In `crcbl-mtl` and `crcbl-dx12`, where device tests sit in `src/`
+  beside pure ones, `all` made the guarded count "unit tests plus device tests",
+  and a run in which every device test had vanished would still clear the zero
+  check. `only` selects exactly the tests that need the device, which is what
+  makes the number mean something — and it is only as good as the placement
+  rule's `#[ignore]`s.
+- **A cut-short run is the same trap wearing a healthy number.** nextest prints
+  `<n> tests run:` for a complete run and `<ran>/<total> tests run:` for a
+  cancelled one, so a guard matching the digits before the words reads
+  `2/15 tests run` as fifteen. `tools/nextest-summary.sh` owns the whole of it —
+  strip the colour, find the summary, name the cancelled shape, fail on zero —
+  and every bash harness that drives nextest sources it; the PowerShell
+  harnesses dot-source `tools/nextest-summary.ps1`.
+  `tools/nextest-summary-test.sh` feeds the guard each shape (complete,
+  cancelled, zero, absent, colour-wrapped, repeated), which an inline copy per
+  harness could not have had.
+- **A harness that drives no nextest guards on its own count.**
+  `web/run-cross-backend-e2e.sh` refuses an empty scene list and fails when a
+  scene produced no comparison: a run that silently did less work than it
+  claimed cannot pass.
+- **Software GPUs in CI**: lavapipe for Vulkan, headless Chromium's SwiftShader
+  for the browser arm, WARP for D3D12. `mtl e2e` runs per commit on
+  `macos-latest`'s real GPU. There is no GL path.
+- **Golden images: "compare with per-pixel tolerance + SSIM-style metric
+  (rasterizers differ slightly)"** — `crcbl_golden::ssim`, over non-overlapping
+  8x8 luma blocks rather than the original 11x11 Gaussian window. **Blessing is
+  an environment variable, not a flag**: a nextest-run binary has no argv of its
+  own, so `crcbl_golden::blessing()` reads `BLESS_ENV` (`CRCBL_BLESS`), and only
+  a harness that owns its command line spells it `--bless`
+  (`crates/crcbl-vk/tests/run-vk-e2e.sh`; the PowerShell sibling deliberately
+  does not, because it runs a different lavapipe build from the one the
+  references were blessed on). **A blessed run is not a pass**:
+  `Outcome::into_result` still returns an error, guarded by
+  `blessing_overwrites_and_is_still_not_a_pass`. And "diffs uploaded as CI
+  artifacts on failure". **A rendering change that shifts output must touch a
+  golden image (blessed intentionally) — unreviewed visual drift is
+  impossible.**
+- **Determinism**: the same input script gives the same state hash, across runs
+  and, same-binary, across CI jobs. Every nondeterminism source — time, RNG,
+  iteration order — is injected or seeded.
+- **Frame-poll discipline**: for anything asynchronous (swapchain warm-up, asset
+  loads, a compositor starting), "poll for the condition with deadline, never
+  fixed sleeps" — the slow-CI flake lesson.
+- **Coverage** is `cargo llvm-cov` in `coverage (linux)`, pinned to lavapipe so
+  the number does not move with the runner, gating one workspace
+  `COVERAGE_FLOOR`. The trend is tracked, not vanity-chased.
+- **Every e2e suite is drivable locally with one command**: its
+  `run-<suite>-e2e.sh` or `.ps1` for anything needing a device or window system,
+  plain `cargo nextest run --workspace --all-features` for everything else.
+- **Property tests may be seeded loops.** `proptest` is a dependency of
+  `crcbl-core` alone (`WorldPos` rebase, pool handle invalidation); elsewhere
+  property suites are hand-written loops over a seeded generator, checked
+  against a brute-force oracle (`crates/crcbl-phys/tests/broadphase_churn.rs`,
+  `dynamics.rs`). A property test owes a generator, a shrink story and a seed
+  you can replay. Reach for `proptest` when the interesting part is generating
+  one value; write the loop when it is the order of many.
+
+Naming and placement:
+
+- **A test's name is a prose sentence in `snake_case`, stating the claim** — not
+  `test_foo`, not the function under test, but what is true if it passes
+  (`a_pipeline_without_depth_state_binds_the_devices_default_rather_than_nil`).
+  A failing e2e run on a runner you cannot attach to gives you the name and a
+  diff, and a sentence has already said which half of the claim broke. Known to
+  have drifted terse: `crcbl-ecs`, `crcbl-net`, `crcbl-input`, `crcbl-phys`,
+  `crcbl-audio` and `crcbl-store`.
+- **A test that exists on more than one backend names its backend or API**
+  (`no_two_formats_share_a_metal_format` against
+  `no_two_formats_share_a_dxgi_format`). Names once verbatim identical across
+  backend crates were told apart only by nextest's crate prefix, which a grep, a
+  bug report or a CI annotation does not carry; differing by the backend word
+  alone lets a search for one find the other.
+- **A deliberately backend-agnostic test takes no prefix, and its file says
+  so.** `crates/crcbl/tests/render_e2e.rs` opens whatever `crcbl::backend::open`
+  selects, so `CRCBL_GPU` decides the backend, and its header argues it: one
+  shared suite keeps re-deriving a golden blessed on one backend on another.
+  `a_device_outlives_the_instance_that_made_it` in
+  `crates/crcbl-hal/tests/seam_from_outside.rs` is left bare because it asserts
+  the obligation against the null backend.
+- **Placement follows what a test needs: a test lives in `src/` if it can pass
+  on a machine with no GPU and no loader; a test that needs a live device is
+  `#[ignore]`d.** Measured, not asserted: every `crcbl-vk` `src/` test passes
+  with `VK_DRIVER_FILES` pointed at a missing manifest. The one pure test kept
+  in an e2e binary on purpose is
+  `the_rotation_frame_of_reference_agrees_with_the_shaders`
+  (`crates/crcbl/tests/sprite_e2e/sprite/rotation.rs`): it pins the frame of
+  reference its neighbours' pixel assertions are written in, so it belongs next
+  to what it protects.
+- **`crcbl-mtl` and `crcbl-dx12` keep the `#[ignore]` half of the rule, not the
+  directory half — do not "fix" them by moving files.** `crcbl-dx12` re-exports
+  only `Dx12Instance` and `crcbl-mtl` only `MetalDevice` and `MetalInstance`, so
+  their tests live in `src/` against `pub(crate)` surface, and moving them out
+  would widen two backends' public APIs just to host tests — the opposite of
+  what `seam_from_outside.rs` checks. Every test whose body creates a real
+  device, instance or adapter is `#[ignore]`d with a reason naming its harness;
+  the split was read off the bodies, not the files. So on `macos-latest` and
+  `windows-latest` the workspace sweep runs their pure tests only; device tests
+  run in `mtl e2e` and `dx12 e2e`, and `test-cross-platform`'s DX12 adapter
+  report step passes `--run-ignored all` because the adapter line it publishes
+  is printed by a device test.
+- **Filenames name the subject, never the tier.** `<platform>_e2e.rs` for a
+  hardware or window-system suite (a directory such as `vk_e2e/` when it wants
+  modules); `seam_from_outside.rs` for a test of a crate's public surface from
+  an integration binary, since an in-crate test can reach private items;
+  `run-<suite>-e2e.sh` or `.ps1` for a harness, and **a sourced helper drops the
+  `run-` prefix** (`crates/crcbl-vk/tests/vulkan-icd.sh`,
+  `crates/crcbl-shell/tests/sway-session.sh`). A tier name such as
+  `integration.rs` spends the name on a fact the build system already knows and
+  becomes where unrelated tests accumulate; no file carries one, and that is the
+  state to keep.
+- **Every file in a `tests/` directory carries a `//!` header** saying what it
+  covers **and why it is a separate target** — the half that gets skipped
+  (`crates/crcbl-shell/tests/appkit_session.rs` is a `harness = false` target
+  because AppKit is main-thread-only). A submodule's header says what that
+  module owns rather than repeating its root's preamble.
+
+**The per-subsystem anchors** — the non-negotiable suites each area owes:
+
+| Area                                    | Anchor                                                                                                                              |
+| --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `crcbl-core`                            | Property tests on `WorldPos` rebase round-trips and pool handle invalidation                                                        |
+| `crcbl-hal`, `crcbl-vk`, `crcbl-webgpu` | The graph-compile unit suite on NullBackend; triangle and mesh goldens on lavapipe; browser-versus-native                           |
+| `crcbl-ecs` and `crcbl-net`             | Replication roundtrip (client state equals server state); a churn soak with leak assert                                             |
+| `crcbl-phys`                            | Analytic cases with known answers (orbit period, terminal velocity); the CCD suite; BVH property tests; determinism-hash replays    |
+| `crcbl-scene`                           | glTF fixtures synthesized in code; the fetched, pinned Khronos subset walked against `shelf.expect`; the save, load, hash roundtrip |
+| `crcbl-ui`                              | Draw-list snapshot tests with no GPU; a hit-test unit grid                                                                          |
+| Editor                                  | The random-command and full-undo property test, headless through the command protocol                                               |
+| Samples                                 | An input-script determinism check and at least one golden frame each, in CI                                                         |
+
+The delivery order was: nextest, CI skeleton, coverage wiring and the
+NullBackend suite at P0; lavapipe render e2e and the golden-image tooling at P1;
+the determinism harness and sim e2e pattern at P2; the phys suites from P3; the
+glTF corpus at P9 and the scene roundtrip at P11C; the editor's undo suite at
+P12.
+
+**Three rules the plan once stated and the tree deliberately replaced — do not
+restore them:** a workspace-wide `--features e2e` (per-crate features name what
+a suite needs, and one flag meaning "all of it" is true of no real machine); "CI
+always runs `--all-features`" as the counter-measure to silent skips
+(double-gating makes that the run that skips, and the harness count is the check
+that cannot pass while testing nothing); and "property tests are `proptest`,
+in-crate" (seeded loops are the right shape for long operation sequences).
+
 ## What the 2026-08 re-verification could not settle (2026-09-06)
 
 Every `## ` section dated 2026-08-31 or earlier was read against the tree on
@@ -194,14 +413,15 @@ sample's error type is in fact a type alias for
 Stated plainly. "Not reviewed" is the honest line.
 
 - **I did not read the other plan documents.** Claims these seven make about the
-  physics plan (since folded into `docs/notes/simulation.md`), `07-ui-debug.md`,
-  `11-cli-headless.md`, `12-testing.md`, `16-wasm-modules.md`, the animation
-  plan (topic 17), `26-prediction.md`, `31-vis-culling.md` and `ROADMAP.md` were
-  checked against the **tree**, never against those documents. Where I say
-  "topic 5 requires `libm`" I am quoting `13-audio.md`'s own correction, not the
-  physics plan. Several of those files are being edited concurrently by the
-  parent and by sibling agents, so they may say something different by the time
-  this is read.
+  physics plan (since folded into `docs/notes/simulation.md`), the UI plan
+  (topic 7, since folded into `docs/notes/tooling.md`), `11-cli-headless.md`,
+  the testing plan (topic 12, since folded into this file),
+  `16-wasm-modules.md`, the animation plan (topic 17), `26-prediction.md`,
+  `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
+  against those documents. Where I say "topic 5 requires `libm`" I am quoting
+  `13-audio.md`'s own correction, not the physics plan. Several of those files
+  are being edited concurrently by the parent and by sibling agents, so they may
+  say something different by the time this is read.
 - **I did not read `docs/plan/sample/*.md`.** Sibling agents own them. The
   sample list in `00-overview.md` I rebuilt from `git ls-files apps/` and from
   the _filenames_ in `docs/plan/sample/`, not from those documents' contents.
@@ -314,12 +534,12 @@ Stated plainly, as gaps:
   checked only that nothing in the tree implements any of it. The doc's own
   provenance rule (re-read from a real SDK before trusting a declaration) still
   stands and I did not test it.
-- **I did not verify `07-ui-debug.md`'s CSS/flex design against any browser or
-  spec.** I established only that none of it is implemented.
+- **I did not verify the UI plan's CSS/flex design against any browser or
+  spec.** I established only that none of it was implemented then.
 - **I did not run `cargo test`, `cargo clippy` or any GPU harness.** This pass
   touched Markdown only. The gates I ran are `prettier@3.8.3 --check`,
   `tools/check-doc-citations.sh` and `tools/check-wrapped-strings.sh`.
-- **`docs/plan/12-testing.md`'s two _closed_ correction blocks (shader-artifact
+- **The testing plan's two _closed_ correction blocks (shader-artifact
   validation, cross-backend compare) were left in place unverified.** They read
   as archaeology but their content is a live description of four validation
   gates, so "when in doubt, keep" applied. Whether `spirv-val`, the naga WGSL
@@ -328,7 +548,7 @@ Stated plainly, as gaps:
 - **I did not check the sample plans (`docs/plan/sample/*.md`)** beyond the
   towers/arena blocking relationship and the lantern/quarry/bracket/sparks
   `GameModule` exemptions.
-- **The five findings I inherited from the `12-testing.md` pre-verification were
+- **The five findings I inherited from the testing plan's pre-verification were
   acted on, and one of them was wrong.** That report claimed
   `crates/crcbl-vk/tests/run-vk-e2e.ps1` surfaces `--bless`; it explicitly does
   not — its own comment says "There is no `--bless` flag here, unlike the Linux
@@ -1149,12 +1369,12 @@ uncertainty.
   instanced RGBA pass with alpha blending, and a skinned button is nine sprites.
   _The cost paid_: the caller owned the ordering, because `RenderGraph` runs
   passes in declaration order and the sprite pass carrying a skin had to precede
-  the UI pass carrying its label. **Superseded 2026-09-15** by
-  `docs/plan/07-ui-debug.md` rung 1: the UI pass grew the RGBA image atlas and
-  the textured quad this decision declined, because the plan's styled widgets
-  need colour art interleaved with text — the _changes it_ this entry named. A
-  button skin is now `crcbl_ui::ButtonSkin`, drawn into the same draw list as
-  its label, and the menu's sprite pass is gone.
+  the UI pass carrying its label. **Superseded 2026-09-15** by topic 7's rung 1
+  (`docs/notes/tooling.md`): the UI pass grew the RGBA image atlas and the
+  textured quad this decision declined, because the plan's styled widgets need
+  colour art interleaved with text — the _changes it_ this entry named. A button
+  skin is now `crcbl_ui::ButtonSkin`, drawn into the same draw list as its
+  label, and the menu's sprite pass is gone.
 
 - **A fixed backdrop for breakout, or a parallax band?** Taken: **fixed.**
   _(Moved here from Considered and declined — it is a judgement about this
@@ -1190,22 +1410,25 @@ uncertainty.
   rest of it.** The core shipped early, out of P10, because both existing
   samples wanted it and two more are planned before P10 — leaving it there would
   have guaranteed a third and fourth per-sample HUD, the shape `web.rs` already
-  took twice. What P10 still owes is the rest of `07-ui-debug.md`'s suite
-  (inspector, console, culling stats, debug-draw controls, UI inspector) and
-  netcode's netgraph (`docs/backlog.md`, _Netgraph HUD, LAN discovery_), which
-  is unbuildable before the transport can measure itself. _Changes it_: a sample
-  that needs one of those sooner, which is the same argument that moved the
-  frame-timing core.
+  took twice. What P10 still owed was the rest of the UI plan's suite
+  (inspector, console, culling stats, debug-draw controls, UI inspector); the
+  console, the counters and the debug-draw layer have since landed, and what is
+  left is under _The debug overlay, and what is left of it_ in
+  `docs/backlog.md`, with netcode's netgraph (`docs/backlog.md`, _Netgraph HUD,
+  LAN discovery_), which is unbuildable before the transport can measure itself.
+  _Changes it_: a sample that needs one of those sooner, which is the same
+  argument that moved the frame-timing core.
 
 - **How does a module register with the panel — retained list or per frame?**
   Taken: **per frame**, `DebugPanel::add(&dyn DebugModule)` once per system the
   frame actually has, matching the crate's immediate-mode authoring. A retained
   registry would need the panel to hold borrows or `Rc`s of every system that
-  reports, which is the plugin framework `07-ui-debug.md` explicitly does not
-  want, and it would make "a section appears because the system is present" into
-  "a section appears because someone remembered to register and to unregister".
-  _Changes it_: a module whose data is expensive enough to want gathering off
-  the frame path, which would want a handle rather than a per-frame call.
+  reports, which is a plugin framework the UI's immediate-mode authoring rule
+  (`docs/notes/tooling.md`) does not want, and it would make "a section appears
+  because the system is present" into "a section appears because someone
+  remembered to register and to unregister". _Changes it_: a module whose data
+  is expensive enough to want gathering off the frame path, which would want a
+  handle rather than a per-frame call.
 
 - **What does the panel's FPS number mean?** Taken: **frames divided by the time
   they took** over a rolling 120-frame window, not the mean of the per-frame
@@ -1629,9 +1852,10 @@ GAPS — reported honestly:
 ## Test-file names: what the rename slice left, and one rename declined
 
 Record; what is left unclaimed is in docs/backlog.md under the same heading. The
-naming slice took `docs/plan/12-testing.md`'s "filenames name the subject, never
-the taxonomy tier" and applied it to nine files. What it could not close, and
-one thing it deliberately did not do:
+naming slice took the testing plan's "filenames name the subject, never the
+taxonomy tier" (now _What the deleted 12-testing plan left behind_, above) and
+applied it to nine files. What it could not close, and one thing it deliberately
+did not do:
 
 **`crates/crcbl-shell/tests/appkit_session.rs` is not renamed to `appkit_e2e.rs`
 — considered and declined.** By subject it is the macOS member of the family
@@ -1650,7 +1874,7 @@ not get re-opened from the filename alone. If the suffix ever stops implying a
 gate, the rename becomes correct and the header is where to look.
 
 **The stale path references this entry listed are all fixed** — verified
-2026-08-23: `broadphase.rs` and `docs/plan/12-testing.md` name
+2026-08-23: `broadphase.rs` and the testing plan named
 `crates/crcbl-phys/tests/broadphase_churn.rs`, `forces.rs` names
 `crates/crcbl-phys/tests/dynamics.rs`, and `crcbl/src/engine.rs` names
 `crates/crcbl/tests/seam_from_outside.rs`. Each was prose in a code span rather
@@ -1664,13 +1888,14 @@ nothing but a reader was ever misled.
 
 ### What the non-backend test-name rename left behind
 
-The prose-sentence rule in `docs/plan/12-testing.md` was applied to every test
-name of three words or fewer outside the backend crates. Measured with a
-`#[test]`/`#[tokio::test]` extractor over the whole tree: 138 such names before,
-1 after. The `debug_format` bullet and the `ray_misses_aabb`, `decode_empty`,
-`decode_truncated`, `debug_output` and `debug_formatting` copies named in "Exact
-test-name collisions still open between non-backend crates" above are resolved;
-the rest of that entry's list still stands.
+The prose-sentence rule (_What the deleted 12-testing plan left behind_, above)
+was applied to every test name of three words or fewer outside the backend
+crates. Measured with a `#[test]`/`#[tokio::test]` extractor over the whole
+tree: 138 such names before, 1 after. The `debug_format` bullet and the
+`ray_misses_aabb`, `decode_empty`, `decode_truncated`, `debug_output` and
+`debug_formatting` copies named in "Exact test-name collisions still open
+between non-backend crates" above are resolved; the rest of that entry's list
+still stands.
 
 - **Closed: the stranded `orbit_integration_deterministic` citation.** The test
   is `an_orbit_hashes_the_same_twice_and_differently_in_reverse` in
@@ -1692,12 +1917,12 @@ the rest of that entry's list still stands.
   copies in `crcbl-shaders` now name their shader** — read end to end first, and
   they are one contract instantiated per shader, not one claim written several
   ways: each reads its own `.slang` source, or asserts its own `PARAMS_SIZE` and
-  field offsets. That is the same situation `docs/plan/12-testing.md` describes
-  for the backend crates, where the fix is to differ by the one word that names
-  what is under test. Renaming them meant editing the `PARAMS_SIZE` doc comments
-  in `cull.rs`, `clear_counters.rs` and `draw_gen.rs`, which cite the test by
-  name; those three doc-comment lines are the only non-test text the rename
-  touched.
+  field offsets. That is the same situation the backend-naming rule above
+  describes for the backend crates, where the fix is to differ by the one word
+  that names what is under test. Renaming them meant editing the `PARAMS_SIZE`
+  doc comments in `cull.rs`, `clear_counters.rs` and `draw_gen.rs`, which cite
+  the test by name; those three doc-comment lines are the only non-test text the
+  rename touched.
 - **Same-crate duplicate names in `crcbl-render` were left alone**:
   `a_pool_leaks_nothing` and
   `a_pool_error_flattens_into_the_seams_without_losing_its_message` each exist
@@ -1727,7 +1952,7 @@ app its copies live in:
   `two_windows_resizing_do_not_collapse_into_each_other`), `crcbl-jobs`'
   `assert_send` across four containers for the rest.
 - **21 spanning unrelated units**, listed below.
-- **6 across the GPU backends**, which `docs/plan/12-testing.md` already
+- **6 across the GPU backends**, which the backend-naming rule above already
   governs.
 
 **So the great majority is deliberate parallel structure and renaming it would

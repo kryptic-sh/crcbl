@@ -41,7 +41,7 @@
 //! the HAL rules in `docs/notes/backends.md` — which also name the render graph
 //! specifically as living above the seam rather than in it. The graph compiles
 //! identically against [`NullBackend`](crcbl_hal::null), which is what makes the
-//! graph-compile suite `docs/plan/12-testing.md` calls a non-negotiable anchor
+//! graph-compile suite `docs/notes/process.md` calls a non-negotiable anchor
 //! run on every machine, with no ICD in the room.
 //!
 //! # Two tiers, one renderer

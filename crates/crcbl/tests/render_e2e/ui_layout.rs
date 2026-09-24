@@ -1,4 +1,4 @@
-//! [`Scene::UiLayout`]: `docs/plan/07-ui-debug.md` rung 8a's outliner, tabs and
+//! [`Scene::UiLayout`]: UI rung 8a's outliner, tabs and
 //! dockable splitter layout, drawn, held to its golden and to relations read
 //! off the frame itself.
 //!

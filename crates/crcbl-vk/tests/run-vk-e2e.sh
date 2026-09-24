@@ -6,7 +6,7 @@
 # The tests are feature-gated *and* `#[ignore]`d, so a plain
 # `cargo nextest run --workspace --all-features` on a machine with no Vulkan
 # loader stays green. This script is the only thing that turns them on, and CI
-# runs this script — `docs/plan/12-testing.md` calls a silently-skipped e2e job a
+# runs this script — `docs/notes/process.md` calls a silently-skipped e2e job a
 # known trap, so the script fails when the suite reports zero tests run.
 #
 # Everything here is headless: the suite renders into an offscreen image ring
@@ -74,7 +74,7 @@
 #
 # GOLDEN IMAGES
 #   `--bless` regenerates `tests/golden/*.png` rather than comparing against
-#   them, which is the spelling `docs/plan/12-testing.md` asks for. A blessed run
+#   them, which is the spelling `docs/notes/process.md` asks for. A blessed run
 #   deliberately **fails**: it has not checked anything, and a gate that any
 #   missing reference switches off is not a gate. Review the regenerated image,
 #   commit it, and re-run without the flag.
@@ -243,7 +243,7 @@ crcbl_nextest_plain "$OUTPUT" "${OUTPUT}.plain"
 
 if [ "$STATUS" -ne 0 ]; then
     echo "crcbl vk e2e: the suite failed" >&2
-    # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+    # `docs/notes/process.md`: "diffs uploaded as CI artifacts on failure".
     # Naming the directory here is what makes the CI step's `if: failure()`
     # upload obvious rather than folklore.
     if [ -d "${REPO_ROOT}/target/golden-diff" ]; then
@@ -253,7 +253,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
-# The trap `docs/plan/12-testing.md` names by name: a job that skips everything
+# The trap `docs/notes/process.md` names by name: a job that skips everything
 # and reports success is worse than no job — and so is one nextest cancelled
 # after two tests, whose summary still ends in the total it never reached.
 if ! crcbl_nextest_summary "${OUTPUT}.plain" "crcbl vk e2e" \
@@ -339,7 +339,7 @@ echo "crcbl vk e2e: every device was destroyed with nothing left alive"
 # runs against, so a line here is a finding rather than a fact of life. It is a
 # banner on a developer's machine — somebody on other hardware is not wrong to
 # run this — and a failure under `CI`, exactly as the loader probe below is, for
-# `docs/plan/12-testing.md`'s reason: a silently-skipped e2e job is worse than no
+# `docs/notes/process.md`'s reason: a silently-skipped e2e job is worse than no
 # job.
 SKIPS="$(grep -c 'no TASK_SHADER on this device' "${OUTPUT}.plain" || true)"
 if [ "$SKIPS" -gt 0 ]; then

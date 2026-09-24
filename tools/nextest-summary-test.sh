@@ -6,7 +6,7 @@
 #
 # Every e2e harness in this repository decides whether its suite really ran by
 # calling one of those helpers, and a guard nothing exercises is worse than no
-# guard — `docs/plan/12-testing.md` makes that the rule and this file is the
+# guard — `docs/notes/process.md` makes that the rule and this file is the
 # helpers' half of it. The five bugs the bash helper was extracted to fix were
 # all in code that had never been fed anything but a healthy log.
 #

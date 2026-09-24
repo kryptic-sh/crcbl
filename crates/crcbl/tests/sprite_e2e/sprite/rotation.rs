@@ -18,7 +18,7 @@
 //! sign in it would relabel every expected colour *consistently*, so the sweep
 //! beside it would pass while asserting the mirror image. It pins the frame of
 //! reference its neighbours' pixel assertions are written in, and it belongs
-//! next to what it protects; `docs/plan/12-testing.md` cites it as the exemplar
+//! next to what it protects; `docs/notes/process.md` cites it as the exemplar
 //! of placement following what a test needs rather than which directory looks
 //! tidier.
 

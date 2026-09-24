@@ -16,7 +16,7 @@
 //! Circular motion is the input several of these use, because it sweeps every
 //! pan position without a table of hand-picked ones. It is a fixture, not the
 //! subject — the file is not about orbits, and "orbit" in this workspace is
-//! `docs/plan/12-testing.md`'s anchor term for `crcbl-phys`'s analytic cases.
+//! `docs/notes/process.md`'s anchor term for `crcbl-phys`'s analytic cases.
 
 use crcbl_audio::AudioSource;
 use crcbl_audio::event::AudioEvent;

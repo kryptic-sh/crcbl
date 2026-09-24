@@ -6,7 +6,7 @@
 # The tests are feature-gated *and* `#[ignore]`d, so a plain
 # `cargo nextest run --workspace --all-features` on a machine with no display
 # stays green. This script is the only thing that turns them on, and CI runs
-# this script — `docs/plan/12-testing.md` calls a silently-skipped e2e job a
+# this script — `docs/notes/process.md` calls a silently-skipped e2e job a
 # known trap, so the script fails when the suite reports zero tests run.
 #
 # Exits non-zero if Xvfb will not start, if the display does not answer before
@@ -98,7 +98,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
-# The trap `docs/plan/12-testing.md` names by name: a job that skips everything
+# The trap `docs/notes/process.md` names by name: a job that skips everything
 # and reports success is worse than no job — and so is one nextest cancelled
 # after two tests, whose `Summary [ 0.1s] 2/15 tests run` still ends in the
 # total it never reached. The server's log tail is printed on the way out here,

@@ -187,7 +187,7 @@ and 0.033 ms at ten thousand — 2.5 ns per field enemy (the `RenderState` copy,
 the cull, the instance build); the other ~0.09 ms is command recording, submit
 and present, flat in the field.
 
-**The 1080p UI-pass criterion from `docs/plan/07-ui-debug.md` (under 0.5 ms
+**The 1080p UI-pass criterion from the UI plan's exit criteria (under 0.5 ms
 GPU)** was measured 2026-08-07 with
 `--wall-clock --fps 0 --tick-hz 1 --frames 900 --prefill 10000 --size 1920x1080 --debug-overlay`:
 a 0.065–0.068 ms total GPU frame over three repeats, the panel's own pass 0.005

@@ -4978,7 +4978,7 @@ pub(crate) mod tests {
 
     /// Polls a readback to completion, with a deadline rather than a sleep.
     ///
-    /// `docs/plan/12-testing.md`'s rule, and the reason the deadline is here
+    /// `docs/notes/process.md`'s rule, and the reason the deadline is here
     /// rather than left to `slow-timeout`: a readback that never becomes ready
     /// fails as a named panic naming the stage it reached, where a bare loop
     /// would be a SIGKILL four minutes later with nothing in the log.

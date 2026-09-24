@@ -775,7 +775,7 @@ jobs:
           cargo clippy --workspace --all-targets --all-features --locked -- -D
           warnings
       # **No `--run-ignored all` here, and that is the whole design.**
-      # `docs/plan/12-testing.md` reserves the workspace sweep as the run that
+      # `docs/notes/process.md` reserves the workspace sweep as the run that
       # deliberately does *not* execute the ignored suites, so it stays green on
       # a machine with no compositor, no X server, no Vulkan loader and no GPU —
       # which these runners are. `--all-features` compiles `vk-e2e` and
@@ -800,7 +800,7 @@ jobs:
       # `tests/appkit_session.rs` is the *only* executable coverage the AppKit
       # backend has, it is `harness = false`, and it is behind no feature — so
       # nothing anywhere would go red if it stopped being built or was renamed.
-      # `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap;
+      # `docs/notes/process.md` calls a silently-skipped e2e job a known trap;
       # this is that trap's macOS shape, and naming the target explicitly is what
       # closes it. `tests/run-win32-e2e.ps1` does the same thing by parsing
       # nextest's summary, because its suite is feature-gated and `#[ignore]`d
@@ -883,9 +883,10 @@ jobs:
             --success-output immediate "${filter[@]}"
 
   # The only job that runs the Wayland backend against a real compositor.
-  # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
-  # against the real backends under a nested compositor (sway headless / Xvfb)
-  # in CI" for P0, and calls a silently-skipped e2e job a known trap — so this
+  # `docs/plan/15-windowing.md` schedules "scripted resize/mode-switch/input
+  # sequences against the real backends under a nested compositor (sway
+  # headless / Xvfb) in CI", and `docs/notes/process.md` calls a
+  # silently-skipped e2e job a known trap — so this
   # job is required like every other one (no `continue-on-error`), and the
   # harness itself fails when the suite reports zero tests run.
   wayland-e2e:
@@ -938,10 +939,10 @@ jobs:
         run: crates/crcbl-shell/tests/run-wayland-e2e.sh
 
   # The only job that runs the X11 backend against a real X server.
-  # `docs/plan/12-testing.md` schedules "scripted resize/mode-switch sequences
-  # against the real backends under a nested compositor (sway headless / Xvfb)
-  # in CI" for P0 — this is the Xvfb half — and calls a silently-skipped e2e
-  # job a known trap, so this job is required like every other one (no
+  # `docs/plan/15-windowing.md` schedules "scripted resize/mode-switch/input
+  # sequences against the real backends under a nested compositor (sway
+  # headless / Xvfb) in CI" — this is the Xvfb half — and
+  # `docs/notes/process.md` calls a silently-skipped e2e job a known trap, so this job is required like every other one (no
   # `continue-on-error`), and the harness itself fails when the suite reports
   # zero tests run.
   x11-e2e:
@@ -1022,7 +1023,7 @@ jobs:
   # `crcbl-vk` against lavapipe, with validation on, and asserts the summary line
   # it prints as it exits — the frames it was asked for, the `x11` shell, the
   # extent and the *effective* mode. The loader probe is a hard failure when `CI`
-  # is set, for the reason `docs/plan/12-testing.md` gives: a silently-skipped
+  # is set, for the reason `docs/notes/process.md` gives: a silently-skipped
   # e2e job is worse than no job.
   #
   # One pass, where `x11-e2e` runs two: nothing here asserts anything a window
@@ -1130,7 +1131,7 @@ jobs:
   # from its first slice.
   #
   # **Its own job rather than a step in `build + test (windows-latest)`**, and
-  # not for tidiness. `docs/plan/12-testing.md` calls a silently-skipped e2e job
+  # not for tidiness. `docs/notes/process.md` calls a silently-skipped e2e job
   # a known trap, and the counter-measure is a harness that fails when the suite
   # reports zero tests run — which needs the suite to be the only thing in the
   # run whose count is being read. Folded into a job that also runs the whole
@@ -1453,7 +1454,7 @@ jobs:
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
   # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every
-  # later suite is built on, and `docs/plan/12-testing.md` calls a
+  # later suite is built on, and `docs/notes/process.md` calls a
   # silently-skipped e2e job a known trap — so this job is required like every
   # other one, and the harness fails when the suite reports zero tests run.
   #
@@ -1494,7 +1495,7 @@ jobs:
       # scaffold. The harness starts its own headless compositor through
       # `crcbl-shell`'s `sway-session.sh`; without sway installed it says so and
       # fails, because in CI a skipped pass is the trap
-      # `docs/plan/12-testing.md` names.
+      # `docs/notes/process.md` names.
       #
       # `vulkan-validationlayers` because the suite now sets
       # `CRCBL_VK_VALIDATION_FATAL=1` on the scaffolded run, and `crcbl-vk`
@@ -1527,8 +1528,8 @@ jobs:
           CRCBL_CLI_E2E_BACKEND: vk
         run: crates/crcbl-cli/tests/run-cli-e2e.sh
 
-  # `docs/plan/12-testing.md` schedules "lavapipe render e2e + golden-image
-  # tooling" for P1 and the Vulkan plan's corrections make it "a hard P1 gate,
+  # The testing plan (topic 12; its rules are in `docs/notes/process.md`)
+  # scheduled "lavapipe render e2e + golden-image tooling" for P1 and the Vulkan plan's corrections make it "a hard P1 gate,
   # not 'if practical' — a gate cannot be optional". This is that job: the
   # `crcbl-vk` suite plus the sandbox's own frame, entirely headless, against
   # the software rasteriser.
@@ -1911,7 +1912,7 @@ jobs:
       # The step above proves breakout runs on a real driver without a
       # validation error; it cannot tell a correct board from a black one, and
       # neither can `apps/breakout/tests/headless.rs`, which compares tick counts
-      # and a summary line. `docs/plan/12-testing.md` asks each sample for a
+      # and a summary line. `docs/notes/process.md` asks each sample for a
       # determinism check *and* a golden frame, and this is the second half:
       # `--screenshot` writes the frame the run presented and the suite compares
       # it, after asserting the frame holds a board at all.
@@ -1967,7 +1968,7 @@ jobs:
       # its sample reaches a real driver without a validation error; it cannot
       # tell a correct frame from a black one, and neither can the crates' own
       # unit tests, which compare simulation state and never a pixel.
-      # `docs/plan/12-testing.md` asks each sample for a determinism check *and*
+      # `docs/notes/process.md` asks each sample for a determinism check *and*
       # a golden frame, and these are the second half: `--screenshot` writes the
       # frame the run presented and each suite compares it, after asserting the
       # frame holds its own subject at all — asteroids' rocks, flappy's sky and
@@ -2074,7 +2075,7 @@ jobs:
           CRCBL_VK_SYNC_VALIDATION: '1'
           CRCBL_VK_VALIDATION_FATAL: '1'
         run: apps/hud/tests/run-hud-golden.sh
-      # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+      # `docs/notes/process.md`: "diffs uploaded as CI artifacts on failure".
       # The reference, what lavapipe actually rendered, and a red-marked diff of
       # the two — enough to tell "the tolerance is too tight" from "the triangle
       # moved" without reproducing the run. `if: failure()` because a passing run
@@ -2604,7 +2605,7 @@ jobs:
       #
       # It is deliberately unconditional and deliberately counts. A glob that
       # matched nothing would compile nothing and exit 0, which is the
-      # silently-skipped gate `docs/plan/12-testing.md` names as a known trap and
+      # silently-skipped gate `docs/notes/process.md` names as a known trap and
       # every e2e script here already guards against.
       #
       # `-c -o /dev/null` compiles to AIR and discards it: what is asserted is
@@ -3071,8 +3072,10 @@ jobs:
       # that only prints a number enforces nothing.
       #
       # COVERAGE_FLOOR is set just below the measured line coverage, so it fails
-      # on a real regression and not on rounding. `docs/plan/12-testing.md` asks
-      # for per-crate floors (core/phys/net high, backend crates looser);
+      # on a real regression and not on rounding. The testing plan asked
+      # for per-crate floors (core/phys/net high, backend crates looser;
+      # `docs/backlog.md`, _Coverage gates one workspace floor, not per-crate
+      # thresholds_);
       # `cargo llvm-cov` gates the workspace as a whole, so this is the
       # workspace floor and the per-crate split waits for tooling that can
       # express it. Raise the number when coverage rises — never lower it to

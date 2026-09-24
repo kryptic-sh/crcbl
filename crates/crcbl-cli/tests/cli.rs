@@ -19,7 +19,7 @@
 //! driven suite in this workspace uses, and that convention is worth more than
 //! this one pair reading precisely.
 //!
-//! `docs/plan/12-testing.md` calls the CLI "the e2e substrate: if it can't be
+//! `docs/notes/process.md` calls the CLI "the e2e substrate: if it can't be
 //! tested without a GUI, it's built wrong". These are the tests that make that
 //! claim checkable.
 

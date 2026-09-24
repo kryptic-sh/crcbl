@@ -103,7 +103,7 @@
 //! * **If it is still refused, the injection is skipped out loud.**
 //!   `CGEventPost` puts an event in the session's stream and the session gives
 //!   it to whoever is frontmost, so it is the one part that cannot proceed.
-//!   `docs/plan/12-testing.md` calls a silently-skipped end-to-end check a known
+//!   `docs/notes/process.md` calls a silently-skipped end-to-end check a known
 //!   trap, so the skip prints what did not run, why, and the evidence — and
 //!   `docs/backlog.md` carries `interpretKeyEvents:` as unverified on CI.
 //!
@@ -886,7 +886,7 @@ mod macos {
     ///
     /// # A skip that is quiet is worse than a failure
     ///
-    /// `docs/plan/12-testing.md` names a silently-skipped end-to-end check as a
+    /// `docs/notes/process.md` names a silently-skipped end-to-end check as a
     /// known trap: it reports the same green as one that ran, so a path stops
     /// being covered and nothing says so. This is the opposite of that. It names
     /// what was skipped, names what is therefore unverified, and prints the
@@ -1396,7 +1396,7 @@ mod macos {
     /// all of it.
     ///
     /// A deadline and a poll rather than a sleep, which
-    /// `docs/plan/12-testing.md` makes the rule for anything asynchronous — and
+    /// `docs/notes/process.md` makes the rule for anything asynchronous — and
     /// here the asynchronous thing is the **window server**, which is the case
     /// the rule was written for. Everything is kept rather than only the
     /// matching event, because the assertions that follow need to see what

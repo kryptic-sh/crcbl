@@ -8,7 +8,7 @@
 //! window-system suites: `cargo nextest run --workspace --all-features` on a
 //! machine with no Vulkan loader must stay green, and the harness script is the
 //! only thing that turns these on — and it fails when the suite reports zero
-//! tests run, because `docs/plan/12-testing.md` calls a silently-skipped e2e job
+//! tests run, because `docs/notes/process.md` calls a silently-skipped e2e job
 //! a known trap.
 //!
 //! Everything here runs **headless**, through

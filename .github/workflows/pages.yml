@@ -211,7 +211,7 @@ jobs:
       # those are facts about an image that changes; a runner that stopped
       # shipping either would otherwise turn the gate below into a step that
       # skips and reports success, which is the failure mode
-      # `docs/plan/12-testing.md` warns about by name.
+      # `docs/notes/process.md` warns about by name.
       - name: Check the browser gate's assumptions
         run: |
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
@@ -507,7 +507,7 @@ jobs:
       # those are facts about an image that changes; a runner that stopped
       # shipping either would otherwise turn the gate below into a step that
       # skips and reports success, which is the failure mode
-      # `docs/plan/12-testing.md` warns about by name.
+      # `docs/notes/process.md` warns about by name.
       - name: Check the browser gate's assumptions
         run: |
           browser="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"

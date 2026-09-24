@@ -378,7 +378,7 @@ impl ValidationReport {
     /// The "on" half is not pedantry, and it is the half that fails today: a
     /// run that passed because Windows has no *Graphics Tools* feature proves
     /// nothing about validation, and nothing else in a green log says so.
-    /// `docs/plan/12-testing.md` calls the equivalent for e2e jobs — a suite
+    /// `docs/notes/process.md` calls the equivalent for e2e jobs — a suite
     /// that silently skips everything — a known trap.
     ///
     /// # Panics
@@ -910,7 +910,7 @@ mod tests {
     ///   the layer was missing proves nothing about validation, and that
     ///   failure mode is invisible without a line saying so — the trap
     ///   `crcbl_vk::debug`'s `ValidationReport::enabled` exists for, and
-    ///   `docs/plan/12-testing.md` names for e2e jobs generally. The harness
+    ///   `docs/notes/process.md` names for e2e jobs generally. The harness
     ///   fails when this line is absent, so the check cannot be lost by
     ///   renaming the test.
     /// * **That `GetDeviceRemovedReason` answers.** It is asserted on a device

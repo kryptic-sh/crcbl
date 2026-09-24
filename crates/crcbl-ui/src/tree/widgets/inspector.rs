@@ -1,4 +1,4 @@
-//! The property inspector: `docs/plan/07-ui-debug.md` rung 8's
+//! The property inspector: UI rung 8's
 //! reflection-driven panel with per-type overrides.
 //!
 //! # What it draws

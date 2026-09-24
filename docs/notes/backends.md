@@ -3341,7 +3341,7 @@ A floor would catch that, and it is **not** being added: any threshold below the
 real number is arbitrary, and a threshold equal to it fails CI every time a
 device test is added, which trains people to bump it without reading. The counts
 are printed by both harnesses and visible in the run log, and the classification
-that produces them is now documented in `docs/plan/12-testing.md`. Revisit if a
+that produces them is now documented in `docs/notes/process.md`. Revisit if a
 collapse ever actually happens — at that point the floor has evidence behind it
 instead of a guess.
 
@@ -3835,8 +3835,8 @@ there is nothing to hold the capability to — is written and unrun.
 
 Not a defect and not obviously fixable: the branch exists because the capability
 is optional, and no runner here lacks it. It is recorded because an untaken
-branch that always passes is the shape `docs/plan/12-testing.md` warns about,
-and because the same branch in group AF **is** taken — the macOS runner opens a
+branch that always passes is the shape `docs/notes/process.md` warns about, and
+because the same branch in group AF **is** taken — the macOS runner opens a
 device without `timestamp-query` — which shows the machinery works in general
 while saying nothing about AI's copy of it. If a runner ever loses the feature,
 this is the entry that says the path was never proven.

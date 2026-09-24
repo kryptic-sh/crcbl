@@ -1,7 +1,7 @@
 //! Beam-first spatial scoring: which of a set of rectangles a directional move
 //! from one rectangle lands on.
 //!
-//! `docs/plan/07-ui-debug.md`'s spatial navigation, revised 2026-09-15. Three
+//! The UI's spatial-navigation rule (`docs/notes/tooling.md`), revised 2026-09-15. Three
 //! steps, for a move from `from` in a direction:
 //!
 //! 1. **A candidate lies in the direction** when, measured along the move's

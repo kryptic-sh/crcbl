@@ -1,7 +1,7 @@
 //! Taffy's Chrome-generated flexbox fixtures, laid out by **this engine's**
 //! element tree.
 //!
-//! `docs/plan/07-ui-debug.md` section 2: Taffy is pinned, and an upgrade lands
+//! UI section 2 (`docs/notes/tooling.md`): Taffy is pinned, and an upgrade lands
 //! with its fixture corpus green. Running the fixtures through `taffy::TaffyTree`
 //! would prove Taffy; running them through [`Ui`] proves what this crate adds on
 //! top — the traversal and cache traits over the node store, the dispatch

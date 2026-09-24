@@ -10,7 +10,7 @@
 //!                                  scene depth (tested, never written)
 //! ```
 //!
-//! `docs/plan/07-ui-debug.md` item 5 is what this is, and
+//! The UI's debug item 5 (`docs/notes/tooling.md`) is what this is, and
 //! topic 43's foundations block is where it was
 //! scheduled: the layer the four owed views —
 //! topic 45's cascade overlay and atlas view,

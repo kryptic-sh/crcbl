@@ -6,7 +6,7 @@
 #
 # # What this is for
 #
-# `docs/plan/12-testing.md` asks every sample for a determinism check **and** a
+# `docs/notes/process.md` asks every sample for a determinism check **and** a
 # golden frame. `apps/breakout/tests/headless.rs` is the determinism half, and it
 # compares tick counts and a summary line — nothing in it contains a pixel, so it
 # passes unchanged whether the frame is correct, black or wrongly tonemapped.

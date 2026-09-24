@@ -7,8 +7,9 @@
 //!                                            └─ CRCBL_BLESS=1: overwrite the reference
 //! ```
 //!
-//! `docs/plan/12-testing.md` schedules this for P1 — "lavapipe render e2e +
-//! golden-image tooling (`--bless`)" — and specifies the shape: "`crcbl
+//! The testing plan (topic 12; its standing rules are in
+//! `docs/notes/process.md`) scheduled this for P1 — "lavapipe render e2e +
+//! golden-image tooling (`--bless`)" — and specified the shape: "`crcbl
 //! screenshot` output vs checked-in references; compare with per-pixel
 //! tolerance + SSIM-style metric (rasterizers differ slightly); regenerate via
 //! `--bless` flag; diffs uploaded as CI artifacts on failure."
@@ -211,7 +212,7 @@
 //! under `cargo nextest` has no argument of its own to read.
 //!
 //! Blessing is a deliberate act with a review consequence:
-//! `docs/plan/12-testing.md`'s exit criterion is "A rendering change that shifts
+//! `docs/notes/process.md`'s golden rule is "A rendering change that shifts
 //! output must touch a golden image (blessed intentionally) — unreviewed visual
 //! drift is impossible."
 
@@ -391,7 +392,7 @@ impl Outcome {
             } => Err(format!(
                 "golden image mismatch.\n  {}\n  rendered: {}\n  diff:     {}\n\n\
                  If this change is intentional, re-run with {BLESS_ENV}=1 and commit the new \
-                 reference — docs/plan/12-testing.md requires that a rendering change which \
+                 reference — docs/notes/process.md requires that a rendering change which \
                  shifts output touches a golden image deliberately.",
                 comparison.summary(),
                 actual.display(),

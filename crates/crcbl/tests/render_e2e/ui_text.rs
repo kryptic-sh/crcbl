@@ -1,4 +1,4 @@
-//! [`Scene::UiText`]: `docs/plan/07-ui-debug.md` rung 5's real fonts, drawn,
+//! [`Scene::UiText`]: UI rung 5's real fonts, drawn,
 //! held to its golden and to relations read off the frame itself.
 //!
 //! Every claim measures pixels against the stylesheet's colours and lengths

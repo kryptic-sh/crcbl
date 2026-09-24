@@ -1,4 +1,4 @@
-//! [`Scene::UiInspector`]: `docs/plan/07-ui-debug.md` rung 8's
+//! [`Scene::UiInspector`]: UI rung 8's
 //! reflection-driven property inspector, drawn, held to its golden and to
 //! relations read off the frame itself.
 //!

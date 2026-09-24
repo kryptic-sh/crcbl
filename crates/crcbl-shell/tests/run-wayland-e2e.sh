@@ -6,7 +6,7 @@
 # The tests are feature-gated *and* `#[ignore]`d, so a plain
 # `cargo nextest run --workspace --all-features` on a machine with no compositor
 # stays green. This script is the only thing that turns them on, and CI runs
-# this script — `docs/plan/12-testing.md` calls a silently-skipped e2e job a
+# this script — `docs/notes/process.md` calls a silently-skipped e2e job a
 # known trap, so the script fails when the suite reports zero tests run.
 #
 # Exits non-zero if sway will not start, if the socket does not appear before
@@ -68,7 +68,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
-# The trap `docs/plan/12-testing.md` names by name: a job that skips everything
+# The trap `docs/notes/process.md` names by name: a job that skips everything
 # and reports success is worse than no job — and so is one nextest cancelled
 # after two tests, whose `Summary [ 0.1s] 2/15 tests run` still ends in the
 # total it never reached. The compositor's log tail is printed on the way out
@@ -519,8 +519,8 @@ self_test_validation() {
 }
 
 # Vulkan first, and only when there is a loader to run it on: this harness is
-# also used on developer machines, and `docs/plan/12-testing.md`'s "no silently
-# skipped gate" rule is served by the message rather than by failing a machine
+# also used on developer machines, and `docs/notes/process.md`'s "nothing may
+# skip silently" rule is served by the message rather than by failing a machine
 # that never claimed to have Vulkan. CI installs the drivers, so CI runs it.
 # `--fullscreen` covers the mode a window is *born* in. `F11` covers the mode it
 # is switched to while running, which is a different path end to end: a key has
@@ -544,7 +544,7 @@ SANDBOX_APP_ID="sh.kryptic.crcbl.sandbox"
 BIN_DIR="${CARGO_TARGET_DIR:-${REPO_ROOT}/target}/debug"
 
 # Polls a file for a line, or fails naming what never appeared. A deadline and
-# a poll, never a fixed sleep — `docs/plan/12-testing.md` makes that the rule
+# a poll, never a fixed sleep — `docs/notes/process.md` makes that the rule
 # for anything asynchronous, and it is the same one the Rust suite's
 # `pump_until` follows.
 wait_for_line() {

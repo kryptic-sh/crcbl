@@ -128,7 +128,7 @@ cd "$REPO_ROOT"
 # The loader probe, in `run-x11-e2e.sh`'s shape and for its reason: a developer
 # machine without a Vulkan runtime should say so and move on, and CI installs
 # one on purpose, so a skip there is the silently-skipped-e2e trap
-# `docs/plan/12-testing.md` names. There is no null-backend fallback to fall
+# `docs/notes/process.md` names. There is no null-backend fallback to fall
 # through to — a run that never reached a `VkSwapchainKHR` is exactly what this
 # gate is about.
 if have_vulkan_loader; then
@@ -187,7 +187,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
-# The trap `docs/plan/12-testing.md` names by name: a job that skips everything
+# The trap `docs/notes/process.md` names by name: a job that skips everything
 # and reports success is worse than no job — and so is one nextest cancelled
 # after two tests, whose `Summary [ 0.1s] 2/15 tests run` still ends in the total
 # it never reached. The colour-stripped copy is load-bearing because CI sets

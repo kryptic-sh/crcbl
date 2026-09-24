@@ -24,8 +24,8 @@
 //! sizes — which is what a UI's frames and icons are — well, and is the simplest
 //! allocator that never moves an image once placed, so a registered
 //! [`AtlasImage`] stays valid for the atlas's whole life. There is no eviction
-//! and no second page yet (`docs/plan/07-ui-debug.md` puts both with real
-//! fonts): an image that does not fit is [`AtlasError::Full`], never a panic.
+//! and no second page yet (`docs/backlog.md`, _What UI rung 1 shipped
+//! without_): an image that does not fit is [`AtlasError::Full`], never a panic.
 //!
 //! The page is [`PAGE_SIZE`] texels square, a power of two so every UV this
 //! module hands out is exact in `f32`, and inside the 4096 WebGPU's
@@ -54,7 +54,7 @@ use crate::widget::SkinInsets;
 
 /// The atlas page's width and height in texels.
 ///
-/// 1024 rather than the 2048 `docs/plan/07-ui-debug.md` allows: the pictures
+/// 1024 rather than the 2048 the UI's atlas rule (`docs/notes/tooling.md`) allows: the pictures
 /// the UI draws today are the menu's five 16-texel frames, and a 2048 page is
 /// sixteen megabytes of GPU memory held whether anything is on it or not. Both
 /// are powers of two, which is what keeps [`AtlasImage::uv`] exact.

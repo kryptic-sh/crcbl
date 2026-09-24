@@ -867,54 +867,54 @@ pub enum Scene {
     /// Rectangles, an outline and glyph-atlas text through [`UiRenderer`]:
     /// `ui.slang`.
     Ui,
-    /// `docs/plan/07-ui-debug.md` rung 1's draw-list primitives through
+    /// UI rung 1's draw-list primitives through
     /// [`UiRenderer`]: two analytic rounded rectangles, a clipped image quad and
     /// a nine-slice, from pictures registered after the renderer was built — so
     /// the frame carries the image atlas's in-frame upload too. See
     /// [`ui_primitives_layout`] for what each part is for.
     UiPrimitives,
-    /// `docs/plan/07-ui-debug.md` rungs 2 and 3's element tree through
+    /// UI rungs 2 and 3's element tree through
     /// [`UiRenderer`]: nested flex rows and columns with gaps and padding, an
     /// absolutely positioned overlay and a clipped overflow, laid out by Taffy.
     /// See [`ui_tree_layout`] for what each part is for.
     UiTree,
-    /// `docs/plan/07-ui-debug.md` rung 4's stylesheets through [`UiRenderer`]:
+    /// UI rung 4's stylesheets through [`UiRenderer`]:
     /// a panel themed by custom properties, one of two buttons hovered by the
     /// scene's pointer, an id rule beating a later class rule, and labels that
     /// inherit their colour or fall back to one. See [`ui_style_layout`] for
     /// what each part is for.
     UiStyle,
-    /// `docs/plan/07-ui-debug.md` rung 5's real fonts through [`UiRenderer`]:
+    /// UI rung 5's real fonts through [`UiRenderer`]:
     /// a paragraph wrapped to a fixed width, one word at two sizes, a kerned
     /// pair beside the same glyphs unkerned, and centred text, all in the
     /// committed font through the glyph atlas. See [`ui_text_layout`] for what
     /// each part is for.
     UiText,
-    /// `docs/plan/07-ui-debug.md` rung 6's focus through [`UiRenderer`]: a
+    /// UI rung 6's focus through [`UiRenderer`]: a
     /// scripted pad walks a grid of buttons, opens a modal and scrolls a list
     /// inside it to a row that starts out of view, and a step toward the grid
     /// is refused. See [`ui_focus_layout`] for what each part is for.
     UiFocus,
-    /// `docs/plan/07-ui-debug.md` rung 7's widget set through [`UiRenderer`]:
+    /// UI rung 7's widget set through [`UiRenderer`]:
     /// a button, a checkbox, two sliders, a drag-value, two collapsing
     /// headers, a tree, a split pane and a virtualized list, styled by
     /// `default.css` and driven by a scripted pointer and pad. See
     /// [`ui_widgets_layout`] for what each part is for.
     UiWidgets,
-    /// `docs/plan/07-ui-debug.md` rung 8a's editor-grade surfaces through
+    /// UI rung 8a's editor-grade surfaces through
     /// [`UiRenderer`]: a virtualized outliner scrolled to the row the pad walked
     /// to with one row selected, a tab strip showing one pane, and a dockable
     /// splitter layout whose outer divider a drag moved, styled by
     /// `default.css`. See [`ui_layout_layout`] for what each part is for.
     UiLayout,
-    /// `docs/plan/07-ui-debug.md` rung 8's reflection-driven property inspector
+    /// UI rung 8's reflection-driven property inspector
     /// through [`UiRenderer`]: one row per field of a component, an open group
     /// beside a shut one, a three-component vector on one row through a
     /// per-type override, and a drag-value the script engaged and stepped past
     /// the end of its field's range, styled by `default.css`. See
     /// [`ui_inspector_layout`] for what each part is for.
     UiInspector,
-    /// `docs/plan/07-ui-debug.md` rung 7's single-line text input through
+    /// UI rung 7's single-line text input through
     /// [`UiRenderer`]: an engaged input scrolled to the end of a long line, a
     /// selection a held drag is making, a placeholder and a masked value,
     /// styled by `default.css`. See [`ui_text_input_layout`] for what each part

@@ -1,6 +1,6 @@
 //! The engine's reserved `ui` context: the navigation actions every UI screen
-//! is driven by, as `docs/plan/07-ui-debug.md`'s "Navigation = reserved UI
-//! actions" table defines them.
+//! is driven by, as the reserved `ui_*` table in `docs/notes/tooling.md`
+//! (_What the deleted 07-ui-debug plan left behind_) defines them.
 //!
 //! | Action     | Kind    | Keyboard                      | Gamepad                       | Repeat         |
 //! | ---------- | ------- | ----------------------------- | ----------------------------- | -------------- |

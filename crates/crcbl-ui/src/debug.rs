@@ -6,8 +6,8 @@
 //! **one** panel that every sample switches on, where frame timing and FPS are
 //! always present and every other module appears because the system it reports
 //! on is present, not because the sample asked for it. That is what this module
-//! is, and `docs/plan/07-ui-debug.md`'s "Debug tools" section is the list of
-//! modules that will land on top of it.
+//! is, and the debug-item table in `docs/notes/tooling.md` (_What the deleted
+//! 07-ui-debug plan left behind_) lists the modules that land on top of it.
 //!
 //! # The panel does not know what a system is
 //!

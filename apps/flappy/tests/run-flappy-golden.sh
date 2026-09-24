@@ -6,7 +6,7 @@
 #
 # # What this is for
 #
-# `docs/plan/12-testing.md` asks every sample for a determinism check **and** a
+# `docs/notes/process.md` asks every sample for a determinism check **and** a
 # golden frame. The determinism half is the crate's own unit tests and the
 # `Run flappy headless against lavapipe` step in `.github/workflows/ci.yml`, and
 # neither of them contains a pixel — they pass unchanged whether the frame is

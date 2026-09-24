@@ -3,7 +3,7 @@
 // The debug draw layer's one shader: world-space line segments, transformed by
 // the camera and emitted in the colour they were appended with.
 //
-// `docs/plan/07-ui-debug.md` item 5 is what this belongs to — the immediate-mode
+// Debug item 5 in `docs/notes/tooling.md` is what this belongs to — the immediate-mode
 // buffer any system appends lines, boxes, spheres and frusta to — and
 // `crcbl_render::debug_draw` is the Rust half that fills the buffer this reads.
 // Every primitive in that module is a list of segments by the time it arrives

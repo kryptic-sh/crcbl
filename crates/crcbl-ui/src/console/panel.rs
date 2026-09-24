@@ -2,7 +2,7 @@
 //! and the completion rows sit, and what they draw.
 //!
 //! Debug-console decision 6 in `docs/notes/tooling.md`, on the element tree —
-//! `docs/plan/07-ui-debug.md` rung 7d2. [`ConsolePanel::layout`] begins the
+//! UI rung 7d2. [`ConsolePanel::layout`] begins the
 //! frame, builds the tree and lays it out; [`ConsolePanel::point`] and
 //! [`ConsolePanel::render`] only read what it built. So a test can ask where a
 //! thing is without a draw list, and the pointer is hit-tested against the same

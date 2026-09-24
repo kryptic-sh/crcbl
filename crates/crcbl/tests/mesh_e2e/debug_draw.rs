@@ -1,6 +1,6 @@
 //! The debug draw layer, measured in the texels it actually wrote.
 //!
-//! `docs/plan/07-ui-debug.md` item 5's immediate-mode buffer draws world-space
+//! The immediate-mode buffer of the UI's debug item 5 (`docs/notes/tooling.md`) draws world-space
 //! segments into the HDR scene target before the tonemap reads it —
 //! `docs/plan/18-render-features.md`'s interaction rule — so what a check here
 //! asks is not "did the buffer get longer" but "is the linear value at this

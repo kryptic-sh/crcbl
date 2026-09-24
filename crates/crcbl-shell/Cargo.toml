@@ -101,7 +101,7 @@ harness = false
 [features]
 # The nested-compositor end-to-end suite. Off by default so a plain
 # `cargo nextest run` on a machine with no compositor stays green; CI enables it
-# in a job that launches headless sway. `docs/plan/12-testing.md` calls the
+# in a job that launches headless sway. `docs/notes/process.md` calls the
 # silently-skipped variant a known trap, so the tests are additionally
 # `#[ignore]`d and the harness asserts that a non-zero number of them ran.
 wayland-e2e = []

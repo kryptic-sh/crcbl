@@ -570,7 +570,7 @@ mod tests {
     /// and the source is reachable afterwards only because `Arc<T>` is itself
     /// an [`AudioSource`]. This used to sleep 20 ms and drop, which observed
     /// neither half — and a fixed sleep is what
-    /// `docs/plan/12-testing.md` says not to wait with. Both waits below poll
+    /// `docs/notes/process.md` says not to wait with. Both waits below poll
     /// for the condition against a deadline instead.
     #[test]
     fn the_null_stream_fills_its_source_until_it_is_dropped() {

@@ -218,7 +218,7 @@ try {
 
     if ($status -ne 0) {
         Write-Error "crcbl vk e2e: the suite failed (exit $status)"
-        # `docs/plan/12-testing.md`: "diffs uploaded as CI artifacts on failure".
+        # `docs/notes/process.md`: "diffs uploaded as CI artifacts on failure".
         # Naming the directory here is what makes the CI step's `if: failure()`
         # upload obvious rather than folklore.
         $diffDir = Join-Path $repoRoot 'target/golden-diff'

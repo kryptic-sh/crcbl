@@ -46,7 +46,7 @@
 #
 # # The zero-tests check is the point
 #
-# `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
+# `docs/notes/process.md` calls a silently-skipped e2e suite a known trap, and
 # a suite that is both feature-gated and `#[ignore]`d has two ways to run
 # nothing. `--no-tests fail` catches an empty selection; parsing nextest's own
 # summary catches a filter that matched nothing inside a selection that was not

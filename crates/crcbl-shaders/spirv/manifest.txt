@@ -172,7 +172,7 @@ entry-points = computeMain:glcompute, occlusionMain:glcompute, lateMain:glcomput
 
 [debug_draw]
 source = shaders/debug_draw.slang
-source-sha256 = cbfad9a0cba94a4833b799817b119774ff78e77376251f9043c5611ebb12ccb9
+source-sha256 = d15347995b8ece071e684f4ffd0071849ce9bf40b1c8ba90e08497cd3084c26c
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/debug_draw.spv
 spirv-sha256 = 8720d3c93385ce49a3decc0cb13b046cfc59a70237da9514551b42299dc80b88

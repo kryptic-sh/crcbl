@@ -1,4 +1,4 @@
-//! The widget set on the tree: `docs/plan/07-ui-debug.md` rung 7.
+//! The widget set on the tree: UI rung 7.
 //!
 //! Every widget is a builder on [`Ui`] that composes blocks and spans, as the
 //! plan says a widget is, and returns the [`Response`] of the node focus rests

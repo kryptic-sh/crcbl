@@ -94,7 +94,7 @@
 //! [`null`] is a complete, recording implementation and is built
 //! unconditionally. A feature gate was considered and rejected: the backend is
 //! the substrate for the graph-compile suite that lands in *other* crates at P1
-//! (`docs/plan/12-testing.md`), so the feature would have to be enabled from
+//! (`docs/notes/process.md`), so the feature would have to be enabled from
 //! those crates' dev-dependencies — the classic unification footgun where
 //! `cargo test -p crcbl-render` passes and `cargo build -p crcbl-render` does
 //! not. It has no dependencies of its own and is dead-code eliminated when

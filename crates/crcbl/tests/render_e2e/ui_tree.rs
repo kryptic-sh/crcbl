@@ -1,4 +1,4 @@
-//! [`Scene::UiTree`]: `docs/plan/07-ui-debug.md` rungs 2 and 3's element tree,
+//! [`Scene::UiTree`]: UI rungs 2 and 3's element tree,
 //! laid out by Taffy and drawn, held to its golden and to relations read off
 //! the frame itself.
 //!

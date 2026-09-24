@@ -168,7 +168,7 @@ crcbl-console = { path = "crates/crcbl-console", version = "0.1.0" }
 # but macros; the trait half depends on `glam` and `thiserror` alone, so the
 # arrow into it from a component costs a browser build the description and no
 # more, and the macro half is host-compiled and reaches no target at all. See
-# `docs/plan/07-ui-debug.md`'s rung 8 for what reads it.
+# UI rung 8's inspector (`crcbl_ui::tree::widgets::inspector`) for what reads it.
 crcbl-reflect = { path = "crates/crcbl-reflect", version = "0.1.0" }
 crcbl-reflect-derive = { path = "crates/crcbl-reflect-derive", version = "0.1.0" }
 # The golden suites' shared fixture, `apps/crcbl-sample-test`. A path-only

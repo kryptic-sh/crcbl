@@ -61,7 +61,7 @@
 //! `cargo nextest run --workspace --all-features` on a machine with no display
 //! stays green. `tests/run-windowed-e2e.sh` is the only thing that turns them
 //! on, and it fails when the suite reports zero tests run —
-//! `docs/plan/12-testing.md` calls a silently-skipped e2e a known trap.
+//! `docs/notes/process.md` calls a silently-skipped e2e a known trap.
 //!
 //! # And on Win32, which is the same suite against a different WSI
 //!

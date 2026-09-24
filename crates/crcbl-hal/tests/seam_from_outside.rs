@@ -654,7 +654,7 @@ fn the_screenshot_readback_path_polls_instead_of_blocking() {
         .expect("request readback");
 
     // The poll loop. Bounded by an iteration deadline rather than a sleep, per
-    // `docs/plan/12-testing.md`'s frame-poll discipline.
+    // `docs/notes/process.md`'s frame-poll discipline.
     let mut image = vec![0u8; pixels as usize];
     let mut polls = 0;
     let mut state = ReadbackState::Pending;

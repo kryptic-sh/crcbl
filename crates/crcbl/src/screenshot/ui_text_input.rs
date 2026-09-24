@@ -1,5 +1,5 @@
 //! [`Scene::UiTextInput`](super::Scene::UiTextInput)'s content: rung 7's
-//! single-line text input — `docs/plan/07-ui-debug.md` — four inputs on one
+//! single-line text input — UI rung 7c — four inputs on one
 //! page, styled by the engine's `default.css` and driven by a scripted pad,
 //! typing and pointer, so that what the input promises can be read back off
 //! the frame.

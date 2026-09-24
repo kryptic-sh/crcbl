@@ -1,4 +1,4 @@
-//! A single-line text input: `docs/plan/07-ui-debug.md` rung 7's text input
+//! A single-line text input: UI rung 7's text input
 //! with selection and clipboard, on [`crate::edit`]'s model.
 //!
 //! # Engaged, under the LOCKED rule

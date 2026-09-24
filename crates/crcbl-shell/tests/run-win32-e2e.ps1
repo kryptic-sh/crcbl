@@ -7,7 +7,7 @@
 # The tests are feature-gated *and* `#[ignore]`d, so a plain
 # `cargo nextest run --workspace --all-features` stays green on the ordinary
 # Windows job. This script is the only thing that turns them on, and CI runs
-# this script — `docs/plan/12-testing.md` calls a silently-skipped e2e job a
+# this script — `docs/notes/process.md` calls a silently-skipped e2e job a
 # known trap, so the script fails when the suite reports zero tests run.
 #
 # Exits non-zero if nextest fails, if no tests ran, or if the count cannot be
@@ -89,7 +89,7 @@ try {
         exit $status
     }
 
-    # The trap `docs/plan/12-testing.md` names by name: a job that skips
+    # The trap `docs/notes/process.md` names by name: a job that skips
     # everything and reports success is worse than no job — and so is one
     # nextest cancelled after two tests, whose summary still ends in the total
     # it never reached. `tools/nextest-summary.ps1` is the one PowerShell copy of

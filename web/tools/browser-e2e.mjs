@@ -94,7 +94,7 @@
 // mid-range colour is the whole of the design.
 //
 // EXIT STATUS. Non-zero if any check fails *or* if zero checks ran. The second
-// half is not decoration: `docs/plan/12-testing.md` names a silently-skipped
+// half is not decoration: `docs/notes/process.md` names a silently-skipped
 // e2e job as a known trap, and a harness whose browser never started would
 // otherwise print nothing and succeed.
 
@@ -11581,7 +11581,7 @@ const failed = checks.filter((c) => !c.ok);
 
 say('');
 if (checks.length === 0) {
-  // The trap `docs/plan/12-testing.md` names: a harness that checked nothing and
+  // The trap `docs/notes/process.md` names: a harness that checked nothing and
   // said so quietly is worse than no harness.
   warn('web e2e: ZERO CHECKS RAN — the gate is not gating.');
   if (browser?.stderr.length) warn(browser.stderr.slice(-40).join('\n'));

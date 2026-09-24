@@ -790,7 +790,7 @@ mod tests {
         assert!(!btn.hit_test(pos, Vec2::new(0.0, 0.0), &atlas()));
     }
 
-    /// **The sweep `docs/plan/12-testing.md` asks for**, where the two tests
+    /// **The sweep `docs/notes/process.md` asks for**, where the two tests
     /// above are two points.
     ///
     /// Two points cannot see a transposed axis: the centre is inside whichever

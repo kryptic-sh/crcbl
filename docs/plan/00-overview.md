@@ -92,7 +92,7 @@ is an orthographic projection with `z` as z-index.
 | 4     | ◐ 04-ecs-server-client — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | ECS, tick loop, transport seam, replication                    |
 | 5     | ◐ 05-physics — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`              | From-scratch physics: sector space, forces/orbits, CCD         |
 | 6     | [06-assets-scenes.md](06-assets-scenes.md)                                                     | glTF import, scene format, asset ids, hot reload               |
-| 7     | [07-ui-debug.md](07-ui-debug.md)                                                               | Immediate-mode GUI, debug draw, profiler, inspector            |
+| 7     | ◐ 07-ui-debug — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Immediate-mode GUI, debug draw, profiler, inspector            |
 | 8     | [08-editor.md](08-editor.md)                                                                   | Scene editor built on the engine, gizmos, play-in-editor       |
 | 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)                                         | Metal and DX12 implementations of the HAL — **deferred**       |
 | 10    | ◐ 10-wasm-webgpu — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`          | Wasm target: WebGPU backend, browser platform, capability gaps |
@@ -111,7 +111,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | Topic | Doc                                                                                         | Theme                                                                      |
 | ----- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | 11    | [11-cli-headless.md](11-cli-headless.md)                                                    | `crcbl` CLI: headless engine/editor control, scripting                     |
-| 12    | [12-testing.md](12-testing.md)                                                              | Test infra: unit/property/e2e, golden images, determinism                  |
+| 12    | ◐ 12-testing — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`           | Test infra: unit/property/e2e, golden images, determinism                  |
 | 13    | [13-audio.md](13-audio.md)                                                                  | Spatial cue grammar, mixer, occlusion, audio testing                       |
 | 14    | [14-persistence.md](14-persistence.md)                                                      | Save games (snapshot-based), settings layers, profiles                     |
 | 15    | [15-windowing.md](15-windowing.md)                                                          | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |

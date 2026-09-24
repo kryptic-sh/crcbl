@@ -34,7 +34,7 @@
 # The same shape as `crates/crcbl-vk/tests/run-vk-e2e.sh` and
 # `crates/crcbl-shell/tests/run-x11-e2e.sh`: it brings its own environment up,
 # says what it needs and why, prints what it actually checked, and **fails when
-# zero checks ran** — `docs/plan/12-testing.md` names a silently-skipped e2e job
+# zero checks ran** — `docs/notes/process.md` names a silently-skipped e2e job
 # as a known trap and this is the guard against it.
 #
 # WHAT THIS IS THE ONLY GATE FOR

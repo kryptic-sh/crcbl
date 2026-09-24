@@ -59,7 +59,7 @@
 #
 # # The zero-tests check is the point
 #
-# `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
+# `docs/notes/process.md` calls a silently-skipped e2e suite a known trap, and
 # `run-tiling-e2e.sh` records the time it sprang here: a runner naming the wrong
 # `--test` reports success having run nothing. `--no-tests fail` catches an empty
 # selection; parsing nextest's own summary catches a filter — or a missing

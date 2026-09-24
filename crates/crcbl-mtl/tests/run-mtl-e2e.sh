@@ -41,7 +41,7 @@
 # clear the zero check. That is the same "check that cannot fail" shape the guard
 # exists to prevent, one level up.
 #
-# `docs/plan/12-testing.md`'s placement rule is what makes the narrower selection
+# `docs/notes/process.md`'s placement rule is what makes the narrower selection
 # possible: a test lives ungated in `src/` iff it can pass with no GPU, and a
 # test that needs a live device is `#[ignore]`d. So `--run-ignored only` selects
 # exactly the device tests, and the number this script prints is the number that
@@ -55,7 +55,7 @@
 #
 # # The zero-tests check is the point
 #
-# `docs/plan/12-testing.md` calls a silently-skipped e2e suite a known trap, and
+# `docs/notes/process.md` calls a silently-skipped e2e suite a known trap, and
 # a suite that is both feature-gated and `#[ignore]`d has two ways to run
 # nothing. Parsing the summary is what closes that.
 #

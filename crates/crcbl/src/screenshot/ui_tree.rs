@@ -1,5 +1,5 @@
 //! [`Scene::UiTree`](super::Scene::UiTree)'s content: a small panel built with
-//! `docs/plan/07-ui-debug.md` rungs 2 and 3's element tree and laid out by
+//! UI rungs 2 and 3's element tree and laid out by
 //! Taffy, so that each thing layout promises can be read back off the frame.
 //!
 //! # The layout, and what each part of it is for

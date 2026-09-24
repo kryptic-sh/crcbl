@@ -1,5 +1,5 @@
 //! [`Scene::UiPrimitives`](super::Scene::UiPrimitives)'s content:
-//! `docs/plan/07-ui-debug.md` rung 1's draw-list primitives, laid out so each
+//! UI rung 1's draw-list primitives, laid out so each
 //! one can be held to a relation read off its own pixels.
 //!
 //! A module of its own rather than more of `screenshot.rs`, which is already the

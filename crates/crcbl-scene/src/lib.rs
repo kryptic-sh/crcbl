@@ -26,7 +26,7 @@
 //! `crcbl-sprite`, WAV in `crcbl-audio` — because each landed in the crate that
 //! owned the thing being decoded. glTF's owner is this crate: its package
 //! description has said "scene format and glTF import" since the workspace
-//! skeleton, `docs/plan/12-testing.md`'s anchor list assigns the glTF corpus to
+//! skeleton, `docs/notes/process.md`'s anchor list assigns the glTF corpus to
 //! it, and the dependency direction the plan states — `crcbl-scene` →
 //! `crcbl-assets` — is the one an importer that reads through the asset seam
 //! actually needs.

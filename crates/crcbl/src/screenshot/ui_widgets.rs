@@ -1,5 +1,5 @@
 //! [`Scene::UiWidgets`](super::Scene::UiWidgets)'s content: the widget set —
-//! `docs/plan/07-ui-debug.md` rung 7 — every widget on one page, styled by the
+//! UI rung 7 — every widget on one page, styled by the
 //! engine's `default.css` and driven by a scripted pointer and pad, so that
 //! what the widgets promise can be read back off the frame.
 //!

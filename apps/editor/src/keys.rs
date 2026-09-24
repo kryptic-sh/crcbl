@@ -171,7 +171,7 @@ pub fn map() -> ActionMap {
     // alone. Its default binds `s`, so a pushed `ui` would own the key and
     // `Ctrl+S` would stop saving the moment a panel took the keyboard — and a
     // save that works only while nothing is selected is worse than no
-    // shortcut. `docs/plan/07-ui-debug.md`'s rung 7d1 status already records
+    // shortcut. `docs/backlog.md`'s _What UI rung 7d1 shipped without_ records
     // that default as unsettled, for the same collision under four samples'
     // start panels. Navigation keeps the arrows, Tab, Enter, Space and Escape.
     // Only the keys are narrowed: the pad bindings stay, as the engine loop's

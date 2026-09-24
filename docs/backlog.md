@@ -2483,6 +2483,47 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   overlap/double-free refusal. Keep the existing fragmentation/compute
   compaction plan below; do not replace it with an unmeasured CPU compactor.
 
+## What the deleted 07-ui-debug plan left unbuilt (2026-09-24)
+
+The plan's rules and a table resolving its rung, section and debug-item numbers
+are in `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left
+behind_). Every rung is built; what each left is in the _What UI rung N shipped
+without_ sections below, and the debug tools' remainder is under _The debug
+overlay, and what is left of it_, _Netgraph HUD, LAN discovery_, _Inspector
+stats carry no per-system tick time_, _World-anchored debug text is not built_
+and _The debug draw layer's console switch is one bit, not a category set_.
+
+### The UI stage's exit criteria are not demonstrated
+
+Three of the plan's six exit criteria are open; re-checked 2026-09-24.
+
+- **A HUD built by editing a `.css` file plus about thirty lines of tree code,
+  restyled live without a recompile** — the health bar, minimap frame and wave
+  banner that demonstrate the web-workflow claim. Nothing loads a sheet from a
+  file: `apps/editor/src/panel.rs` adds `editor.css` as a string through
+  `Ui::add_stylesheet`, and no application calls the polled reload. `apps/hud`
+  is the natural home (_hud's whole P10 half is unbuilt_); what it needs is a
+  sheet read through the asset source and polled each frame, with the reload's
+  last-good-sheet behaviour visible on screen.
+- **The debug overlay running in the sandbox over a live scene, with entity
+  selection and console commands against the server.** Selecting an entity
+  should have each system that owns it draw its data through a per-system
+  debug-UI callback, which `SystemTrait` does not have; `Inspector::collect`
+  reports counts only, and tick times are their own entry. Console commands
+  reach the server only through the unbuilt `Flags::SIM` transport half.
+- **A CI check that `crcbl-ui` names no renderer.** It holds today — the
+  manifest names `glam`, `bytemuck`, `crcbl-core`, `crcbl-reflect`, `taffy`,
+  `cssparser` and `skrifa` — but only the manifest's comment says so. One CI
+  step asserting `cargo tree -p crcbl-ui` excludes `crcbl-render` and every
+  backend crate, shown to fail before it is trusted, closes it; the same step
+  shape is owed for `crcbl-server`.
+
+Met, for the record: the fixture corpus passes
+(`crates/crcbl-ui/tests/taffy_fixtures.rs`), draw-list snapshot tests exist in
+`crcbl_ui::draw_list`, and the UI pass is its own profiler row (`ui-overlay`)
+and was measured at 0.005 ms at 1080p on 2026-08-07 against the 0.5 ms budget
+(`docs/notes/samples.md`).
+
 ## What UI rung 6 shipped without (2026-09-16)
 
 `crcbl_ui::tree`'s focus landed with the gaps below.
@@ -2495,8 +2536,8 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   runs no game tick (`crcbl::engine::run_ticks` drains and discards), so game
   actions already cannot fire under it, and pushing would change nothing a
   sample does. Pushing lands when `Menu` moves onto the tree; the samples then
-  stop handling menu keys directly, per `07-ui-debug.md`'s 2026-08-09
-  correction.
+  stop handling menu keys directly, per the reserved-action rule in
+  `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left behind_).
 - **No gamepad bindings on the `ui` actions**: `Binding` has no gamepad member
   and there is no backend, so the plan's dpad, stick, shoulder, South and East
   column is undeclared.
@@ -2967,13 +3008,14 @@ the gaps below.
 `crcbl_ui::tree`'s widget set landed with the gaps below.
 
 - **Decision owed: tree rows take left and right while focused and not
-  engaged.** `07-ui-debug.md`'s LOCKED rule says focus never captures
-  navigation, and `Ui::tree_node` rows answer left and right as the WAI-ARIA
-  Authoring Practices tree view pattern does (open or step into children, close
-  or step to the parent). Where that pattern does nothing the move falls through
-  to spatial navigation, so arrowing never stops dead on a tree. Options: keep
-  the exception and amend the rule's text, or make tree rows engage-first like a
-  slider (an extra accept per expand, as no common tree view does).
+  engaged.** The UI's LOCKED rule in `docs/notes/tooling.md` says focus never
+  captures navigation, and `Ui::tree_node` rows answer left and right as the
+  WAI-ARIA Authoring Practices tree view pattern does (open or step into
+  children, close or step to the parent). Where that pattern does nothing the
+  move falls through to spatial navigation, so arrowing never stops dead on a
+  tree. Options: keep the exception and amend the rule's text, or make tree rows
+  engage-first like a slider (an extra accept per expand, as no common tree view
+  does).
 - **State inside a closed parent is dropped.** A closed header's or tree node's
   body is not built, so nested open states and split positions inside it are
   pruned with it. Keeping them needs retention of unbuilt descendants in the
@@ -3019,6 +3061,11 @@ the gaps below.
   only two families exist, and `Font::parse` wants `'static` bytes.
 - **A shelf emptied by eviction keeps its height**, so a fragmented page can
   refuse a glyph; it is counted as unplaced.
+- **Only the engine's fonts, and Latin text.** `FontFamily` is a closed enum
+  (`Bitmap`, `Sans`), so an application cannot register a font of its own; and
+  there is no shaping and no bidi. The design waits for non-Latin text before
+  adding `harfrust` shaping and UAX #9 bidi (`rustybuzz` is archived), and the
+  atlas is shaped so neither is precluded.
 
 ## What UI rung 4 shipped without (2026-09-16)
 
@@ -3026,6 +3073,13 @@ the gaps below.
 
 - **No application loads or polls a stylesheet**, and `Ui::style_stats` is shown
   in neither the debug panel nor an inspector.
+- **Not in the property subset** (re-checked 2026-09-24 against
+  `crcbl_ui::style`'s `Property::parse`): `opacity`, because the draw list has
+  no group opacity and multiplying each command's alpha is not what `opacity`
+  means where children overlap; `inherit` and `!important` (`initial` and
+  `unset` exist); the `border` and `font` shorthands; `em` and the other
+  relative units. The scope-creep rule applies: each lands when the editor or a
+  sample needs it.
 - **The sRGB transfer function now exists twice** — in `crcbl-render`'s mip
   generation and in `crcbl-ui`'s colour parsing — and belongs in one place.
 - **Untested**: trimming the definition cache at its cap, and a stylesheet write
@@ -3053,6 +3107,12 @@ the gaps below.
   `content_size` feature is enabled, which scroll views will need.
 - **Fixtures outside the corpus**: the four flex fixtures with `<text>` leaves
   and the two unrounded ones.
+- **Not built from the layout subset** (re-checked 2026-09-24): `z-index` and
+  stacking contexts, so paint order is tree order; custom-draw spans, so a span
+  is text or an image and nothing else; and block layout, since `display` takes
+  `flex` or `none` and Taffy's `block_layout` feature stays off until a consumer
+  needs it. The layout subset they belong to is in `docs/notes/tooling.md`
+  (_What the deleted 07-ui-debug plan left behind_).
 - **No sample golden draws a readout panel**: five apps call it and the only one
   with a golden script, shard, has no panel in its frame, so the move is held by
   a unit test that compares the tree's draw list with the old arithmetic float
@@ -3060,9 +3120,8 @@ the gaps below.
 
 ## What UI rung 1 shipped without (2026-09-15)
 
-`docs/plan/07-ui-debug.md` rung 1 — `crcbl_ui::image`, `DrawList::image`,
-`nine_slice`, `rounded_rect` and `push_clip`, and the menu drawn through the UI
-pass — left these:
+UI rung 1 — `crcbl_ui::image`, `DrawList::image`, `nine_slice`, `rounded_rect`
+and `push_clip`, and the menu drawn through the UI pass — left these:
 
 - **The overlay cut is vestigial.** `DrawList::begin_overlay` existed so the
   menu's sprite pass could sit between `ui-composite` and `ui-overlay`; nothing
@@ -3090,8 +3149,11 @@ pass — left these:
   sprite pass went away; radv's frame went from 0.024 to 0.027 ms. Not yet
   tried: skipping the distance field and the second sample for solid and glyph
   fragments without breaking WGSL's uniform-control-flow rule.
-- **One atlas page and no eviction.** A full page is `AtlasError::Full`; a
-  second page, eviction and batching by texture arrive with rung 5's text atlas.
+- **One image-atlas page and no eviction.** A full page is `AtlasError::Full`.
+  Rung 5 gave the _glyph_ atlas its pages and eviction; the RGBA image atlas
+  still has one 1024² page (`crcbl_ui::image`), so a second page, eviction and
+  the design's batching by stacking context and then by texture, keeping CSS
+  paint order, are all still owed. Re-checked 2026-09-24.
 - **The lavapipe 1-level deltas in the menu sample goldens are unattributed.**
   Breakout, flappy, asteroids and hud match radv exactly and differ by at most
   one level on lavapipe, inside tolerance and outside the panel. Hud's golden
@@ -6210,9 +6272,10 @@ What building it takes, when the first `SIM` variable is wanted:
 - the replay stream recording it, so a replay reproduces it;
 - a client that is not the host refusing it.
 
-That is also what `docs/plan/07-ui-debug.md` item 4's "works identically over a
-network connection" asks of the console. Building the transport half before a
-caller exists would be machinery nothing exercises.
+That is also what debug item 4 of the UI section in `docs/notes/tooling.md`
+(_What the deleted 07-ui-debug plan left behind_) asks of the console: that it
+"works identically over a network connection". Building the transport half
+before a caller exists would be machinery nothing exercises.
 
 ### Web text input drops `AltGr` characters
 
@@ -10380,9 +10443,9 @@ restart" exit criterion.
 `apps/viewer/assets/shelf/Suzanne/glTF/Suzanne.gltf`, a real Khronos CC0
 document, and `apps/viewer/src/shelf.rs`'s
 `the_default_model_loads_from_the_committed_shelf` puts it through the importer
-on every machine. The rest of the Khronos subset `12-testing.md`'s anchor list
-asks for is fetched at a pinned upstream commit against a per-file sha256
-(`tools/fetch-shelf.sh`, run in CI), and
+on every machine. The rest of the Khronos subset the test anchor list in
+`docs/notes/process.md` asks for is fetched at a pinned upstream commit against
+a per-file sha256 (`tools/fetch-shelf.sh`, run in CI), and
 `every_shelf_model_imports_as_this_manifest_says` parses every fetched model and
 asserts its outcome against `apps/viewer/assets/shelf.expect`.
 
@@ -10403,10 +10466,14 @@ quad.
 **Partially built.** `cargo llvm-cov` runs in `ci.yml`'s `coverage (linux)` job,
 pinned to lavapipe so the number is not runner-dependent, and gates
 `COVERAGE_FLOOR` through `cargo llvm-cov report --fail-under-lines`. That is a
-**single workspace floor**. The per-crate split `12-testing.md` used to promise
-(core/phys/net high, backend crates looser because e2e covers them) does not
-exist, and `ci.yml`'s own comment on the gate says why: it waits for tooling
-that can express it.
+**single workspace floor**. The per-crate split the testing plan promised (core,
+phys and net high; backend crates looser because their e2e suites cover them)
+does not exist, and `ci.yml`'s own comment on the gate says why: it waits for
+tooling that can express it. **What it would take:** per-package
+`cargo llvm-cov report --package` runs, or a script over the JSON export, with a
+floor per crate set just below its measured line coverage; each floor shown to
+fail (lower the coverage, watch the job go red) before it is trusted, as the
+workspace floor's own comment asks.
 
 ### The editor: slices 1 to 3 landed, and what they leave (2026-08-27)
 
@@ -13613,9 +13680,8 @@ stopped moving, and the parameter set is what the first consumer is for. What it
 would take now: `serde::Deserialize` on `EffectDesc`, `Shape`, `Spawn`,
 `Modifiers` and `Ramp` (all plain data, so this is derives plus a RON reader
 through `crcbl_assets::AssetSource`), then the reload path, then the widgets —
-`docs/plan/07-ui-debug.md` has no curve editor or gradient bar yet, and topic
-20's tooling section says this sample is what would add them to the
-demand-driven list.
+`crcbl-ui` has no curve editor or gradient bar yet, and topic 20's tooling
+section says this sample is what would add them to the demand-driven list.
 
 ### The pool allocator fragments, and nothing compacts it
 
@@ -20848,10 +20914,11 @@ after.
 The declined `appkit_session.rs` rename and the stale path references that are
 now fixed are in docs/notes/process.md under the same heading. What is left:
 
-**Test _names_ inside these files were not touched.** `docs/plan/12-testing.md`
-records six crates as drifted below the prose-sentence-name convention —
-`crcbl-ecs`, `crcbl-net`, `crcbl-input`, `crcbl-phys`, `crcbl-audio` and
-`crcbl-store`. Two of the renamed files sit in that set and show it:
+**Test _names_ inside these files were not touched.** The naming rule in
+`docs/notes/process.md` (_What the deleted 12-testing plan left behind_) records
+six crates as drifted below the prose-sentence-name convention — `crcbl-ecs`,
+`crcbl-net`, `crcbl-input`, `crcbl-phys`, `crcbl-audio` and `crcbl-store`. Two
+of the renamed files sit in that set and show it:
 `crates/crcbl-audio/tests/spatial_chain.rs` still has
 `centre_position_is_symmetric` and `right_position_pans_to_right`, and
 `orbit_cue_changes_over_time` now names a fixture the file is no longer named
@@ -20879,7 +20946,7 @@ this entry went on claiming five copies for months after.
 `a_device_outlives_the_instance_that_made_it` **collides again, and this entry's
 own criterion is what says so.** It reads here as deliberately unqualified — the
 seam's obligation checked on `NullBackend` from outside the crate, which
-`docs/plan/12-testing.md` calls the backend-agnostic shape — on the grounds that
+`docs/notes/process.md` calls the backend-agnostic shape — on the grounds that
 the bare name belonged to the one test genuinely about no backend. It no longer
 does: `crates/crcbl/tests/hal_seam_e2e.rs`, the cross-backend seam suite written
 after this entry, defines the same name under `#[test]`, so there are two
@@ -20896,8 +20963,9 @@ exist.
 The slice marked every `crcbl-mtl` and `crcbl-dx12` test that opens a real
 device, instance or adapter with `#[ignore]`, and narrowed both harnesses from
 running the whole crate to `--run-ignored only`, so the count each guards on is
-the number of device tests. `docs/plan/12-testing.md`'s placement section
-records what landed. What it did not settle:
+the number of device tests. The placement rule in `docs/notes/process.md` (_What
+the deleted 12-testing plan left behind_) records what landed. What it did not
+settle:
 
 ### The Metal device-test count is a source reading, not a measured run
 
@@ -20937,10 +21005,11 @@ tests disappearing.
 The slice brief asked for `--run-ignored all` on both
 `cargo nextest run --workspace --all-features --locked --profile ci` lines in
 `ci.yml`, so the ordinary sweeps would keep running the newly-ignored tests.
-**That was not done, on `docs/plan/12-testing.md`'s authority**, which reserves
-that run as the one that deliberately does not execute the ignored set so it
-stays green on a machine with no compositor and no GPU. Measured rather than
-argued, and re-derived on 2026-08-21 after `crcbl-wgpu` went:
+**That was not done, on the authority of the harness rules** in
+`docs/notes/process.md` (_What the deleted 12-testing plan left behind_), which
+reserve that run as the one that deliberately does not execute the ignored set
+so it stays green on a machine with no compositor and no GPU. Measured rather
+than argued, and re-derived on 2026-08-21 after `crcbl-wgpu` went:
 `cargo nextest list --workspace --all-features --run-ignored only` on Linux
 selects `crcbl-vk::vk_e2e`, `crcbl-shell`'s `wayland_e2e` and `x11_e2e`, the
 agnostic `crcbl::*_e2e` suites, the samples' device goldens — `lantern`,
@@ -20992,9 +21061,40 @@ recorded here rather than left to be re-derived:
   mean either a clock seam in the simulator (a production change) or a poll loop
   that spins until the message arrives. Neither was in scope.
 
-Also not touched: `docs/plan/12-testing.md`'s frame-poll rule is prose, and
+Also not touched: the frame-poll rule in `docs/notes/process.md` is prose, and
 nothing enforces it. A grep for `thread::sleep` under `crates/*/src` and
 `crates/*/tests` is the whole of the available check.
+
+## What the deleted 12-testing plan left unbuilt (2026-09-24)
+
+The plan's conventions — harness rules, naming, placement, blessing, the anchor
+list — are the standing test rules in `docs/notes/process.md` (_What the deleted
+12-testing plan left behind_). Its other open items already have entries:
+_Coverage gates one workspace floor, not per-crate thresholds_, the undo
+property test under _The editor: slices 1 to 3 landed, and what they leave_,
+_The determinism smoke test has no input script_, _Coverage the testing plan
+asks for and nothing provides_ below, the frame-poll paragraph closing _Fixed
+sleeps left in tests the assert-nothing slice did not own_, and the terse test
+names under _Test-file names: what the rename slice left, and one rename
+declined_.
+
+### The churn soak runs without replication
+
+The anchor list asks `crcbl-ecs` and `crcbl-net` for a churn soak with a leak
+assert: spawn and despawn over many ticks **with replication running**, then
+assert that pools, baselines and per-sector stores return to size.
+`crates/crcbl-ecs/tests/churn_soak.rs` is the ECS half and is thorough — id
+recycling, component rows against the sparse map, the deferred-destruction
+queue, stale handles. Nothing drives the same churn through a `Server`, an
+`InMemoryTransport` and a `Client` (verified 2026-09-24 by reading that file and
+listing `crates/crcbl-net/tests`, `crcbl-server/tests` and `crcbl-client`; no
+soak exists there). What it would take: the soak's seeded churn run through
+`crates/crcbl-server/tests/client_server_session.rs`'s fixture, asserting after
+each tick that the client's entity count matches the server's and, at the end,
+that `SessionManager`'s per-sector baseline stores and the client's baselines
+hold no entry for a despawned entity. Name the observable for each store before
+writing the loop, as the ECS half does, and break one (skip a baseline removal)
+to see the test go red.
 
 ## What the coverage audit found and this session did not fix
 
@@ -21005,8 +21105,8 @@ with thin coverage. The "tests that cannot fail" findings all shipped — see
 evidence that produced it, so the next session does not re-derive it.
 
 One result is deliberately recorded as a **non**-gap, because it looks like one
-and re-auditing it costs a day: the "ECS replication roundtrip"
-`docs/plan/12-testing.md` asks for exists already, as
+and re-auditing it costs a day: the "ECS replication roundtrip" the test anchor
+list in `docs/notes/process.md` asks for exists already, as
 `a_lossless_run_leaves_the_clients_state_hash_equal_to_the_servers` in
 `crates/crcbl-net/tests/replication.rs`, with loss and reorder variants beside
 it.
@@ -21093,8 +21193,16 @@ in place.
   `the_three_paths_committed_goldens_agree_at_both_dolly_stops`. `viewer`,
   `orbit`, `puppet`, `sparks`, `breach`, `shard`, `bracket` and `options` have
   no `tests/` directory at all. `viewer` is a tool rather than a demo, so the
-  question is whether the plan's rule reaches it; the other seven have no such
+  question is whether the anchor rule reaches it; the other seven have no such
   argument.
+- **No sample runs an input-script determinism check.** The anchor list asks
+  every sample for one beside its golden. `apps/breakout/tests/headless.rs` and
+  `apps/sandbox/tests/headless.rs` run the real binary headless and compare tick
+  counts and a summary line, and the samples' golden scripts
+  (`apps/*/tests/run-*-golden.sh`) hold a frame; none replays scripted input and
+  asserts a state hash, because there is no input-script format to replay —
+  `crcbl sim` takes `--seed` only (_The determinism smoke test has no input
+  script_). This lands after the script format does.
 
 ## What the three-scene `render_e2e` does and does not prove
 
@@ -21435,15 +21543,16 @@ it. Sparse accessors are refused partly on YAGNI and partly because `gltf`'s
 sparse iterator has the same `count - 1` underflow the dense one has, in three
 more places.
 
-**Not covered by anything yet:** a real-world glTF. Every fixture is
-hand-assembled in `crates/crcbl-scene/src/gltf_fixture.rs` — one triangle, one
-material, two nodes — which is what makes the malformed cases readable in a diff
-but means no exporter output and no large file has ever been through this code
-by way of a test — `apps/viewer/assets/shelf/` vendors the Khronos CC0 Suzanne
-and `apps/viewer` is the only thing that opens it. `docs/plan/12-testing.md`'s
-anchor list wants a vendored Khronos subset at P9; that is where the "does it
-load Sponza" question gets answered, and until then "it parses glTF" means "it
-parses the subset the fixtures cover".
+**Real-world glTF is covered by import only** (re-checked 2026-09-24). The unit
+fixtures are hand-assembled in `crates/crcbl-scene/src/gltf_fixture.rs` — one
+triangle, one material, two nodes — which is what makes the malformed cases
+readable in a diff. Real exporter output reaches the importer through the
+viewer's shelf: the committed Khronos CC0 Suzanne, and the rest of the Khronos
+subset fetched at a pinned commit (`tools/fetch-shelf.sh`) and walked by
+`every_shelf_model_imports_as_this_manifest_says` against
+`apps/viewer/assets/shelf.expect`. So the corpus answers "does it import"; what
+nothing answers yet is whether a real document still looks right (_No golden
+over a real glTF document_).
 
 ### What the backend validation gates do not cover
 
@@ -24327,10 +24436,11 @@ in one wasm module — so it belongs with the native milestone, not this one.
 ## World-anchored debug text is not built (2026-08-31)
 
 **Deliberately out of scope** of the debug draw layer that landed the same day.
-`docs/plan/07-ui-debug.md` item 5 names "lines, boxes, spheres, frusta and
-world-anchored text"; `crcbl_render::debug_draw` is the first four and nothing
-of the fifth. There is no stub: the module's header says so and `DebugDraw` has
-no text method to mistake for one.
+The UI plan's debug item 5 named "lines, boxes, spheres, frusta and
+world-anchored text" (item 5 in `docs/notes/tooling.md`'s _What the deleted
+07-ui-debug plan left behind_); `crcbl_render::debug_draw` is the first four and
+nothing of the fifth. There is no stub: the module's header says so and
+`DebugDraw` has no text method to mistake for one.
 
 **Why it was split off.** Text needs a glyph atlas and a rasteriser seam, and
 the workspace has exactly one — `crcbl_ui::text::FontAtlas`, uploaded and
@@ -24351,13 +24461,13 @@ joint's index on a skeleton. Nothing shipping.
 
 ## The debug draw layer's console switch is one bit, not a category set (2026-08-31)
 
-`r_debug_draw` is a single `bool`, while `docs/plan/07-ui-debug.md` item 5's
-controls are per-category ("AABBs, system overlays") per system. No system
-appends to the buffer yet, so a category enum and filter today would be an
-interface with one implementation and a parameter every call site passes the
-same value for. The switch is declared through the per-crate table seam, so a
-category variable joins `crcbl_render::console_table` beside it and the gather
-does not change.
+`r_debug_draw` is a single `bool`, while the UI plan's debug item 5 wanted
+controls per category ("AABBs, system overlays") per system. No system appends
+to the buffer yet, so a category enum and filter today would be an interface
+with one implementation and a parameter every call site passes the same value
+for. The switch is declared through the per-crate table seam, so a category
+variable joins `crcbl_render::console_table` beside it and the gather does not
+change.
 
 **What splits it:** two systems appending and someone wanting one without the
 other. Then a category on the append, a bitset in place of the bool, and the

@@ -277,7 +277,7 @@ impl Headless {
     }
 
     /// Reads `size` bytes of `staging` back into `out`, polling with a deadline
-    /// rather than sleeping — `docs/plan/12-testing.md`.
+    /// rather than sleeping — `docs/notes/process.md`.
     pub(crate) fn readback(&self, staging: crcbl::hal::BufferHandle, size: u64, out: &mut [u8]) {
         let device = self.device.as_ref();
         let label = format!("{} readback", crate::SUITE);

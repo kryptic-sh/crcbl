@@ -1,5 +1,5 @@
 //! Focus, keyboard and gamepad navigation, and the engaged state:
-//! `docs/plan/07-ui-debug.md` rung 6.
+//! UI rung 6.
 //!
 //! # One focused node per tree
 //!

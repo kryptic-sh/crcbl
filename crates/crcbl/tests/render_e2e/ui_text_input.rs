@@ -1,4 +1,4 @@
-//! [`Scene::UiTextInput`]: `docs/plan/07-ui-debug.md` rung 7's single-line
+//! [`Scene::UiTextInput`]: UI rung 7's single-line
 //! text input, drawn, held to its golden and to relations read off the frame
 //! itself.
 //!

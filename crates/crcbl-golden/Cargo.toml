@@ -8,7 +8,7 @@ repository.workspace = true
 
 # `png` is the one dependency, and it is here rather than hand-rolled on
 # purpose. A golden image has to be a file a human opens from a CI artifact —
-# `docs/plan/12-testing.md` asks for "diffs uploaded as CI artifacts on failure",
+# `docs/notes/process.md` asks for "diffs uploaded as CI artifacts on failure",
 # which is worth nothing if the artifact needs a bespoke viewer. Writing a PNG
 # encoder is tractable; writing a *decoder* that survives someone re-saving the
 # file from an image editor is not, and a golden that silently fails to load is

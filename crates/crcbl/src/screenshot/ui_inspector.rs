@@ -1,5 +1,5 @@
 //! [`Scene::UiInspector`](super::Scene::UiInspector)'s content: the
-//! reflection-driven property inspector of `docs/plan/07-ui-debug.md` rung 8,
+//! reflection-driven property inspector of UI rung 8,
 //! over a component with one field of every shape a row is drawn for, styled by
 //! the engine's `default.css` and driven by a scripted pointer and pad so that
 //! what the panel promises can be read back off the frame.

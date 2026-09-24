@@ -1,4 +1,4 @@
-//! [`Scene::UiPrimitives`]: `docs/plan/07-ui-debug.md` rung 1's draw-list
+//! [`Scene::UiPrimitives`]: UI rung 1's draw-list
 //! primitives, held to their golden and to one relation per primitive read off
 //! the frame itself.
 //!

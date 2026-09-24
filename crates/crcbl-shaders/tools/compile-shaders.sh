@@ -660,7 +660,7 @@ for SOURCE in "${SHADERS[@]}"; do
             echo "crcbl shaders: $ARTIFACT does not match a fresh compile of $SOURCE." >&2
             echo "  Run crates/crcbl-shaders/tools/compile-shaders.sh and commit the result." >&2
             echo "  A rendering change that shifts output must also re-bless its golden" >&2
-            echo "  image (docs/plan/12-testing.md)." >&2
+            echo "  image (docs/notes/process.md)." >&2
             STATUS=1
         fi
         if declares wgsl && ! cmp -s "$FRESH_WGSL" "$WGSL_ARTIFACT"; then

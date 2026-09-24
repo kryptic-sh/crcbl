@@ -116,7 +116,7 @@ fn both_patches_camera() -> Camera {
 /// and `level_buckets` is empty on the mesh path — so this withholds the mesh
 /// features from it and takes the uniform cut, which every backend has. Skipping
 /// instead would report "not supported here" as "passed", which is the trap
-/// `docs/plan/12-testing.md` names and this suite's header opens with.
+/// `docs/notes/process.md` names and this suite's header opens with.
 fn open_with_an_observable() -> Headless {
     let headless = Headless::open_for_mesh_with(
         Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,

@@ -22,7 +22,8 @@
 //! expands to carries the clip that was current when the command went in. The
 //! fragment stage discards outside it. No GPU scissor and no stencil: a scissor
 //! is per draw, so a list that clipped two panels differently would be two
-//! draws, and `docs/plan/07-ui-debug.md` keeps batching as the reason.
+//! draws, and the UI's rendering rules (`docs/notes/tooling.md`) keep batching
+//! as the reason.
 
 use crate::font::Font;
 use crate::font::atlas::{GlyphAtlas, SUBPIXEL_BINS};

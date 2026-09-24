@@ -53,7 +53,7 @@
 //! its own measurements. The two adapters are radv on the discrete card and
 //! lavapipe, which rasterise this silhouette a texel apart — every bound here
 //! is set off the worse of the two with room, on
-//! `docs/plan/12-testing.md`'s terms for a measurement that has to survive a
+//! `docs/notes/process.md`'s terms for a measurement that has to survive a
 //! different rasteriser.
 
 use crate::harness::Headless;

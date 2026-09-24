@@ -1,7 +1,7 @@
 //! The element tree: blocks and spans rebuilt every frame, with identity that
 //! survives the rebuild, laid out by Taffy.
 //!
-//! `docs/plan/07-ui-debug.md` rungs 2 and 3. A frame is four calls:
+//! UI rungs 2 and 3. A frame is four calls:
 //!
 //! ```text
 //! ui.begin_frame(pointer)      hover and press, from LAST frame's rectangles

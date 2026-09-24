@@ -116,7 +116,7 @@
 //! pool — a plain table of "what was this last used for" — and produces a
 //! [`CompiledGraph`] whose barriers name *virtual* resources; only
 //! [`CompiledGraph::execute`] resolves those to handles. That split is why
-//! `docs/plan/12-testing.md` can call the graph-compile suite a
+//! `docs/notes/process.md` can call the graph-compile suite a
 //! non-negotiable anchor and have it mean something: the interesting half runs
 //! on any machine, in microseconds, with no ICD in the room — including the
 //! cross-frame half, which needs two `compile` calls against one

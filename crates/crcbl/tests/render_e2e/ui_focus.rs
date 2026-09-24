@@ -1,4 +1,4 @@
-//! [`Scene::UiFocus`]: `docs/plan/07-ui-debug.md` rung 6's focus, drawn, held
+//! [`Scene::UiFocus`]: UI rung 6's focus, drawn, held
 //! to its golden and to relations read off the frame itself.
 //!
 //! Every claim measures pixels against the colours and lengths the scene's

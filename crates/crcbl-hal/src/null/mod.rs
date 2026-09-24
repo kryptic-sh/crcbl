@@ -7,7 +7,7 @@
 //!    not be implemented without naming a backend type, this module would not
 //!    build. The foundations stage named exactly this as its deliverable
 //!    check (`docs/notes/backends.md`).
-//! 2. **Be the substrate for the graph-compile suite.** `docs/plan/12-testing.md`
+//! 2. **Be the substrate for the graph-compile suite.** `docs/notes/process.md`
 //!    assigns `crcbl-hal`/`crcbl-vk`/`crcbl-webgpu` a "graph-compile unit suite on
 //!    NullBackend"; the render graph that lands at P1 compiles its pass list
 //!    against this backend in CI, with no GPU and no window.

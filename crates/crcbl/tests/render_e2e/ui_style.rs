@@ -1,4 +1,4 @@
-//! [`Scene::UiStyle`]: `docs/plan/07-ui-debug.md` rung 4's stylesheets, drawn,
+//! [`Scene::UiStyle`]: UI rung 4's stylesheets, drawn,
 //! held to its golden and to relations read off the frame itself.
 //!
 //! Every claim below measures pixels against the colours and lengths the

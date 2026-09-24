@@ -497,7 +497,7 @@ fn frame_body(
 }
 
 /// Reads `size` bytes of `staging` into `out`, polling with a deadline rather
-/// than sleeping — `docs/plan/12-testing.md`.
+/// than sleeping — `docs/notes/process.md`.
 fn readback(
     device: &dyn crcbl::hal::Device,
     staging: crcbl::hal::BufferHandle,

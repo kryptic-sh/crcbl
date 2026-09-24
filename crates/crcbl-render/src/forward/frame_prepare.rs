@@ -219,7 +219,7 @@ impl ForwardRenderer {
                 scene.atlas_rects,
             )?;
 
-            // `docs/plan/07-ui-debug.md` item 5's immediate-mode buffer: whatever
+            // The UI's debug item 5, the immediate-mode buffer: whatever
             // any system appended since the last frame, uploaded and cleared here.
             // **The camera this frame is drawn with**, not a second derivation of
             // it — the ground grid's pass takes the same matrix for the same

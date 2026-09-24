@@ -558,7 +558,7 @@ fn decode(format: u32, bytes: &[u8]) -> String {
 /// `OpenClipboard` fails while another process holds it, which on Windows is
 /// routine rather than exceptional — so this retries with a deadline, the same
 /// bounded shape `win32::clipboard`'s own open uses and the same one
-/// `docs/plan/12-testing.md` asks for instead of a sleep.
+/// `docs/notes/process.md` asks for instead of a sleep.
 #[cfg(target_os = "windows")]
 struct Clipboard;
 

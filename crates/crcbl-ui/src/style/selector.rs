@@ -1,6 +1,6 @@
 //! Selectors: which nodes a rule applies to.
 //!
-//! The grammar is `docs/plan/07-ui-debug.md` section 3's, and no more:
+//! The grammar is UI section 3's (`docs/notes/tooling.md`), and no more:
 //!
 //! ```text
 //! selector-list  = selector ("," selector)*

@@ -1,7 +1,7 @@
 //! The Win32 backend against a real Windows desktop.
 //!
 //! Run with `crates/crcbl-shell/tests/run-win32-e2e.ps1`, which turns these on
-//! and fails when the suite reports zero tests run — `docs/plan/12-testing.md`
+//! and fails when the suite reports zero tests run — `docs/notes/process.md`
 //! calls a silently-skipped e2e job a known trap, and this is the
 //! counter-measure. Like the Wayland and X11 suites they are gated twice, behind
 //! the `win32-e2e` feature *and* `#[ignore]`, so that
@@ -834,7 +834,7 @@ impl Session {
     /// Pumps until `ready`, or fails naming what never happened.
     ///
     /// A deadline and a poll, never a fixed sleep, which
-    /// `docs/plan/12-testing.md` makes the rule for anything asynchronous. Here
+    /// `docs/notes/process.md` makes the rule for anything asynchronous. Here
     /// the asynchronous thing is usually *another process* — a helper injecting
     /// input, or the desktop deciding who is in front — which is the case the
     /// rule was written for.

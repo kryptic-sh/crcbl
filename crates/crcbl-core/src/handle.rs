@@ -648,7 +648,7 @@ mod tests {
     }
 
     proptest! {
-        /// The anchor test from `docs/plan/12-testing.md`: after an arbitrary
+        /// The anchor test from `docs/notes/process.md`: after an arbitrary
         /// insert/remove/clear sequence, the pool agrees with a `HashMap`
         /// reference model on length and contents, every live handle still
         /// resolves to the value it was inserted with, and every handle that

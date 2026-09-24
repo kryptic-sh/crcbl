@@ -24,7 +24,7 @@ crate names `libm` — it reaches `Cargo.lock` only through `naga` and
 
 **The question to answer:** take the new dependency (`libm`, the user's call per
 the dependency rule), or hand-roll approximations with golden values from the
-specification. Either way `12-testing.md`'s verification rules apply.
+specification. Either way the test conventions in `docs/notes/process.md` apply.
 
 ### The transcendental policy is decided; the deny mechanism is not built (2026-08-27, decided 2026-09-06)
 

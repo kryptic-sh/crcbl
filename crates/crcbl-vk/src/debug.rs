@@ -238,7 +238,7 @@ impl ValidationReport {
     ///
     /// The "enabled" half is not pedantry: a test that passes because the layer
     /// was missing proves nothing, and that failure mode is invisible without
-    /// this check. `docs/plan/12-testing.md` calls the equivalent for e2e jobs —
+    /// this check. `docs/notes/process.md` calls the equivalent for e2e jobs —
     /// a suite that silently skips everything — a known trap.
     ///
     /// # Panics

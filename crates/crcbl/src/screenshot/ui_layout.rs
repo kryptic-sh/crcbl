@@ -1,5 +1,5 @@
 //! [`Scene::UiLayout`](super::Scene::UiLayout)'s content: the editor-grade
-//! surfaces of `docs/plan/07-ui-debug.md` rung 8a — a virtualized outliner, a
+//! surfaces of UI rung 8a — a virtualized outliner, a
 //! tab strip and a dockable splitter layout — on one page, styled by the
 //! engine's `default.css` and driven by a scripted pointer and pad, so that
 //! what each promises can be read back off the frame.

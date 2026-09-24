@@ -3,7 +3,7 @@
 //! # The job, and only the job
 //!
 //! `docs/plan/08-editor.md`'s missing-pieces list asks for "a reflection-style
-//! property hook per component", and `docs/plan/07-ui-debug.md`'s rung 8 asks
+//! property hook per component", and UI rung 8 asked
 //! for "a reflection-driven property inspector with per-type overrides". That is
 //! the whole of what this crate is for, and it is a much smaller thing than
 //! general-purpose reflection: a panel **shows a value, edits it, and reports
@@ -135,7 +135,7 @@
 //!
 //! # What this crate deliberately does not do
 //!
-//! * **No UI.** `docs/plan/07-ui-debug.md`'s rung 8's inspector widget is
+//! * **No UI.** UI rung 8's inspector widget is
 //!   `crcbl_ui::tree::widgets::inspector`, and the arrow points **from** it to
 //!   here: this crate does not depend on `crcbl-ui` and never will, because a
 //!   component has to be able to describe itself without dragging a stylesheet,

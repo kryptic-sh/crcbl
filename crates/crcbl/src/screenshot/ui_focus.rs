@@ -1,5 +1,5 @@
 //! [`Scene::UiFocus`](super::Scene::UiFocus)'s content: focus driven by a
-//! scripted pad — `docs/plan/07-ui-debug.md` rung 6 — through a grid of
+//! scripted pad — UI rung 6 — through a grid of
 //! buttons, into a modal that opens over it, and down a scroll list inside the
 //! modal, so that what focus promises can be read back off the frame.
 //!

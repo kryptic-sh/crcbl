@@ -23,7 +23,7 @@
 //! from an internal [`ManualTime`], so a test that drives both the shell and a
 //! [`FrameClock`](crcbl_core::FrameClock) from the same schedule gets a session
 //! that is byte-identical on every machine — the property
-//! `docs/plan/12-testing.md` demands of every nondeterminism source.
+//! `docs/notes/process.md` demands of every nondeterminism source.
 //! [`HeadlessShell::set_time`] exists so the shell's clock can be slaved to a
 //! test's own `ManualTime` rather than drifting alongside it.
 //!

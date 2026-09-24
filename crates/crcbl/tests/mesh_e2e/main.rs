@@ -31,7 +31,7 @@
 //! Splitting rather than gating is the point. Moving those tests whole and
 //! wrapping their assertions in a mesh-shader capability check would leave three
 //! backends running a test whose substance is skipped, which reports "not
-//! supported here" as "passed" — the shape `docs/plan/12-testing.md` calls a
+//! supported here" as "passed" — the shape `docs/notes/process.md` calls a
 //! known trap and this repo keeps removing.
 //!
 //! # The goldens moved with the tests

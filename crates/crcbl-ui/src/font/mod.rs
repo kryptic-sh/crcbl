@@ -1,5 +1,5 @@
 //! Real fonts: parsing, the coverage rasteriser, the glyph atlas and text
-//! layout — `docs/plan/07-ui-debug.md` rung 5.
+//! layout — UI rung 5.
 //!
 //! ```text
 //!  TTF bytes ──skrifa──▶ Font (cmap, advances, metrics, GPOS pair kerning)
@@ -116,7 +116,7 @@ impl fmt::Display for FontError {
 
 impl std::error::Error for FontError {}
 
-/// A font's line metrics, in font units: `docs/plan/07-ui-debug.md`'s
+/// A font's line metrics, in font units: the
 /// ascender, descender and line gap, as `skrifa` selects them from `hhea` or
 /// `OS/2`.
 #[derive(Clone, Copy, Debug, PartialEq)]

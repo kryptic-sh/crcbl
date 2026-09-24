@@ -1686,7 +1686,7 @@ impl Drop for AppKitShell {
 /// `build + test (macos-latest)` CI job.
 ///
 /// **Nothing here is `#[ignore]`d**, on the same terms as the Win32 suite:
-/// `docs/plan/12-testing.md` calls a silently-skipped suite a known trap, and a
+/// `docs/notes/process.md` calls a silently-skipped suite a known trap, and a
 /// failure here is the runner's answer rather than a gap in the schedule.
 ///
 /// # What this suite deliberately does **not** do, and why

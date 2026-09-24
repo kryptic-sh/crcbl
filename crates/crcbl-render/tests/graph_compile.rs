@@ -1,7 +1,7 @@
 //! The graph-compile suite: what the render graph produces, asserted against
 //! `NullBackend`'s recorded command stream.
 //!
-//! `docs/plan/12-testing.md` lists this among the per-subsystem "non-negotiables"
+//! `docs/notes/process.md` lists this among the per-subsystem "non-negotiables"
 //! — "`crcbl-hal`/`crcbl-vk`/`crcbl-webgpu`: graph-compile unit suite on
 //! NullBackend" — and `crcbl-hal`'s null backend exists to make exactly this
 //! assertable. Every test here runs **with no ICD, no driver and no GPU**, which

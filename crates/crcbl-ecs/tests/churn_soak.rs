@@ -1,6 +1,6 @@
 //! Spawn/despawn churn over many ticks, then assert nothing leaked.
 //!
-//! `docs/plan/12-testing.md` asks `crcbl-ecs` for a "churn soak with leak
+//! `docs/notes/process.md` asks `crcbl-ecs` for a "churn soak with leak
 //! assert" by name. The loop is the easy half; what "leaked" means here is the
 //! substance, so each place this ECS can lose something is named below together
 //! with the observable that would differ if it did.

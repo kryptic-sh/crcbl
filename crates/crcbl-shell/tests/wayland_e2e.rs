@@ -6,7 +6,7 @@
 //! `cargo nextest run --workspace --all-features` stays green on a machine with
 //! no compositor, which is every CI runner except the one job that launches one.
 //! The harness fails when the suite reports zero tests run, which is the
-//! counter-measure to `docs/plan/12-testing.md`'s "silently skipped e2e" trap.
+//! counter-measure to `docs/notes/process.md`'s "silently skipped e2e" trap.
 //!
 //! # What these are for
 //!
@@ -127,7 +127,7 @@ impl Session {
 
     /// Pumps until `ready`, or fails naming what never happened.
     ///
-    /// A deadline and a poll, never a fixed sleep: `docs/plan/12-testing.md`
+    /// A deadline and a poll, never a fixed sleep: `docs/notes/process.md`
     /// makes that the rule for anything asynchronous, and a compositor
     /// handshake is the asynchronous case the rule was written for.
     fn pump_until(&mut self, what: &str, ready: impl Fn(&Self) -> bool) {

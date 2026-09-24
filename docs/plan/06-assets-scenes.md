@@ -294,11 +294,11 @@ and for the same reason.
 crate is the IO seam and its own docs say decoding belongs to whoever owns the
 format, which is how PNG ended up in `crcbl-sprite` and WAV in `crcbl-audio`.
 glTF's owner is the crate whose package description has said "scene format and
-glTF import" since the workspace skeleton, that [12-testing.md](12-testing.md)'s
-anchor list assigns the glTF corpus to, and whose dependency direction
-(`crcbl-scene` → `crcbl-assets`) the task-2 note above already states. A third
-crate would have been a new name for the same responsibility beside a crate that
-had already claimed it.
+glTF import" since the workspace skeleton, that the test anchor list
+([../notes/process.md](../notes/process.md)) assigns the glTF corpus to, and
+whose dependency direction (`crcbl-scene` → `crcbl-assets`) the task-2 note
+above already states. A third crate would have been a new name for the same
+responsibility beside a crate that had already claimed it.
 
 **Parsing only.** No GPU pool upload, no textures, no mip generation, no RON
 scene format, no hot reload, no `crcbl import`. Skins and animations are in the
@@ -408,7 +408,7 @@ always argued a shipped game should get.
   over a synthetic two-system world because a one-chunk scene cannot express the
   third: `a_scene_written_out_reads_back_the_same` (byte-compare every file
   through a real temp directory, then the parsed value and `World::hash_state` —
-  the save→load→hash roundtrip [12-testing.md](12-testing.md) asks for),
+  the save→load→hash roundtrip the test anchor list asks for),
   `editing_one_entity_touches_only_its_lines`, and
   `moving_one_entity_changes_one_chunk_file`, which asserts the two chunk files
   moved and `scene.ron`/`env.ron` did not.

@@ -9,7 +9,7 @@
 # the tests are feature-gated *and* `#[ignore]`d, this script is the only thing
 # that turns them on, and CI runs this script.
 #
-# `docs/plan/12-testing.md` calls a silently-skipped e2e job a known trap, so
+# `docs/notes/process.md` calls a silently-skipped e2e job a known trap, so
 # the script fails when the suite reports zero tests run.
 #
 # It needs no display, no GPU and no compositor: the scaffolded game runs
@@ -126,7 +126,7 @@ if [ "$STATUS" -ne 0 ]; then
     exit "$STATUS"
 fi
 
-# The trap `docs/plan/12-testing.md` names by name: a job that skips everything
+# The trap `docs/notes/process.md` names by name: a job that skips everything
 # and reports success is worse than no job — and so is one that stopped after two
 # tests and printed a total that reads like fifteen.
 PLAIN="${RUNTIME_DIR}/nextest.plain.log"

@@ -1,4 +1,4 @@
-//! Stylesheets for [`crate::tree`]: `docs/plan/07-ui-debug.md` section 3.
+//! Stylesheets for [`crate::tree`]: UI section 3 in `docs/notes/tooling.md`.
 //!
 //! ```text
 //! default.css (the engine's)  →  app sheets, in the order added  →  inline
