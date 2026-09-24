@@ -23,11 +23,12 @@ toolkit the stage 8 editor is made of.
 
 ## What is built, and how far it is from this design
 
-`crates/crcbl-ui` exists and is **not** the DOM/CSS system described below.
-Nothing in the workspace parses a stylesheet, lays out a flex box or builds a
-block/span tree; no engine crate reads a `.css` file, and `crcbl_ui::widget`'s
-`Style` is a plain struct of five colours rather than a cascade. What shipped is
-the pre-CSS toolkit the debug panel and the samples needed first:
+`crates/crcbl-ui` exists, and the DOM/CSS system described below is being built
+into it rung by rung: `tree` builds a block/span tree laid out by Taffy's
+flexbox, and `style` parses stylesheets with `cssparser` and cascades them over
+it. The pre-CSS toolkit the debug panel and the samples needed first sits beside
+it — `crcbl_ui::widget`'s `Style` is still a plain struct of five colours rather
+than a cascade. Module by module:
 
 - **`draw_list`** — `DrawList`, `DrawCommand`, `Vertex2d`: the one interface
   between the UI and the renderer, as the rendering section below describes.
@@ -52,7 +53,8 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   `default.css`. Not built from that rung yet: `opacity`, `inherit`,
   `!important`, the `border` shorthand, `font` and text alignment; nothing sets
   `:focus`, `:disabled` or `:engaged` until the focus rung; and no application
-  loads or polls a sheet yet.
+  loads or polls a sheet from a file — `apps/editor` adds its own `editor.css`
+  as a string, and the screenshot scenes do the same.
 - **`text`** and **`font`** — **rung 5 is built** (2026-09-16): `skrifa` 0.47
   parsing of the committed Atkinson Hyperlegible, vertical TrueType hinting, the
   engine's own signed-area coverage rasteriser, a shelf-packed single-channel

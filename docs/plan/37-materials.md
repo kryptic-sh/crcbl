@@ -5,18 +5,20 @@ see the correction under "Templates and instances" for what that reference
 turned out to be) and stage 6 fills it from glTF. What's missing is the
 **authoring layer**: how a material is defined, tuned, validated, and
 hot-reloaded as an asset — and how a _render_ material would relate to the
-_surface_ properties the rest of the engine is planned to read, which nothing in
-the tree carries yet.
+_surface_ properties the rest of the engine is planned to read, of which the
+tree carries only friction and restitution so far.
 
 ## Two materials, one link (the mess this prevents)
 
 The engine will grow two independent notions with the same name. **One of them
-exists today and the other does not**: the render material is
-`crcbl_shaders::mesh::GpuMaterial` and `crcbl_render::material_table`, while
-there is no surface material anywhere — no such type, and `crcbl-phys`'s
-`Collider` and its components carry no material field of any kind. So the row
-below is a forward reference, exactly as topics 13, 24, 28, 33 and 36 treat it,
-and none of those consumers reads one yet.
+exists today and the other only in its first sliver**: the render material is
+`crcbl_shaders::mesh::GpuMaterial` and `crcbl_render::material_table`, while the
+surface material is `crcbl_phys::material::SurfaceMaterial` — friction,
+restitution and how each combines, set per body or collider through
+`PhysicsSystem::set_material`, and read by the contact solver (36) alone. It is
+a code value, not an asset, and nothing links it to a render material. So the
+row below is still mostly a forward reference, exactly as topics 13, 24, 28 and
+33 treat it, and none of those consumers reads one yet.
 
 | Kind                 | Lives on | Consumers                                                                                                            |
 | -------------------- | -------- | -------------------------------------------------------------------------------------------------------------------- |

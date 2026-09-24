@@ -6,9 +6,10 @@ cue grammar). World voice obeys the `competitive_integrity` gate exactly like
 footsteps: when the gate is on, **no positional data reaches the wire**.
 FPS-era, with breach; the capture seam is useful earlier.
 
-> **Status, 2026-08-27: nothing in this document is built, and three of the
-> things it builds on are not built either.** Stated plainly because the
-> delivery table below reads like a schedule rather than a to-do list:
+> **Status, 2026-08-27 (re-checked 2026-09-24): nothing in this document is
+> built, and most of the things it builds on are not built either.** Stated
+> plainly because the delivery table below reads like a schedule rather than a
+> to-do list:
 >
 > - **No capture.** There is no `AudioCapture` anywhere; `crcbl-audio` opens
 >   output only (`AudioStream::open` takes an `AudioSource`), and nothing in the
@@ -16,10 +17,11 @@ FPS-era, with breach; the capture seam is useful earlier.
 > - **No codec seam and no Opus.** No manifest depends on an Opus crate; the
 >   only mention of Opus in the tree is a line in `crcbl-audio`'s QOA module
 >   saying Vorbis and Opus will sit behind a decoder seam one day.
-> - **The mixer voice bus does not exist.** "Team/direct routing + PTT/VAD
->   actions + mixer voice bus/ducking" needs the bus graph
->   [13-audio.md](13-audio.md) specifies and has not built — `crcbl-audio` has a
->   `Mixer` of voices with nothing above them, no bus type and no limiter.
+> - **The mixer voice bus exists; ducking does not.** "Team/direct routing +
+>   PTT/VAD actions + mixer voice bus/ducking" needs the buses
+>   [13-audio.md](13-audio.md) specifies. `crcbl_audio::Bus` now has six fixed
+>   gain stages, `Bus::Voice` among them, each gain an `[engine.audio]` key; but
+>   a bus is a gain and nothing more — no ducking and no limiter.
 > - **The `competitive_integrity` gate does not exist** either, so every "under
 >   the gate" behaviour below has no flag to hang on. Topic 31 is where that
 >   lands.
@@ -31,7 +33,7 @@ FPS-era, with breach; the capture seam is useful earlier.
 > None of that argues against the design below, which is why it is kept whole.
 > It does mean the first slice is further from the front of the queue than the
 > table suggests: the capture seam is genuinely standalone, and everything after
-> it waits on the bus graph, the gate and a transport.
+> it waits on ducking, the gate and a transport.
 
 ## Modes
 

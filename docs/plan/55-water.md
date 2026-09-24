@@ -26,11 +26,13 @@ given one bit for bit, each shown red by a sabotage. Priced at 1920×1080 by
 `mesh_e2e`'s `the_price_of_the_water_passes`, p50: on radv (RX 7900 XTX)
 `water-copy` 0.021 ms and `water` 0.132 ms, the frame 0.955 ms against 0.803 ms
 with no body; on lavapipe 1.160 ms and 14.799 ms, the frame 82.6 ms against 67.0
-ms. **The browser price is not taken**: the render harness has no pass timer, so
-it waits for the tide sample, which is the rung's other half. The DFG table is
-not read (Schlick); the sky prefilter, sky-view LUT and reflection block are
-borrowed from the SSR and sky passes rather than uploaded twice; `Medium` has no
-anisotropy until a rung reads one.
+ms. **The browser price is one gate run's reading**: the render harness has no
+pass timer, so it came with the tide sample, the rung's other half, whose
+milestone 1 in [sample/21-tide.md](sample/21-tide.md) records it from one boot's
+frames rather than a dedicated measurement. The DFG table is not read (Schlick);
+the sky prefilter, sky-view LUT and reflection block are borrowed from the SSR
+and sky passes rather than uploaded twice; `Medium` has no anisotropy until a
+rung reads one.
 
 The rest of this section is the survey that preceded rung 1, and the consumers
 it names are still missing what it says:

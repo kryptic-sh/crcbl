@@ -8,28 +8,29 @@ grids, equipment slots, weapon attachments. Kit rules follow the player kit
 (30): first-class, optional, zero engine privileges. Drag-drop lands wave 1 (the
 editor asset browser wants it); the kit is FPS-era with breach.
 
-> **Status, 2026-09-07.** Part 2 is built and has its first consumer; part 1 is
+> **Status, 2026-09-07, re-checked 2026-09-24.** Part 2 is built and has two
+> consumers; part 1's pointer mechanism is built, and the rest of part 1 is
 > still the engine's to build.
 >
-> **Part 1, drag-drop: not in `crcbl-ui`.** There is still no drag source, no
-> drop target, no typed payload and no `can_accept`. What there _is_ is
-> `widget.rs`'s press capture — `UiState::interact` latches the widget a press
-> started over — and `apps/shard/src/panel.rs` builds a working grid drag out of
-> it, inside one `draw` function. That is the measurement this section was
-> missing: a game can have a drag today, and what it cannot have is a **typed**
-> one a second panel reuses without copying that function's hit-test and its
-> capture bookkeeping.
+> **Part 1, drag-drop: the pointer half is in `crcbl-ui`.** It shipped
+> 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a typed
+> payload, `can_accept`, drop feedback as widget state (`DropFeedback`),
+> cross-grid drags and the grab offset — built on `widget.rs`'s press capture,
+> and `apps/shard` and `apps/breach` use it with their own copies deleted. It is
+> grids only: there is no general drag source or drop target outside a
+> `CellGrid`, no ghost drawn under the pointer, and no pad, keyboard or touch
+> path.
 >
-> **The styling half still has the harder dependency.** This section hangs
+> **The styling half is not how the feedback arrives.** This section hangs
 > feedback on `:drop-ok` / `:drop-bad` pseudo-classes "like everything else
-> (topic 7)", and there is no stylesheet system in `crcbl-ui` at all — no CSS
-> parser, no selectors, no pseudo-classes, and the only `.css` file in the repo
-> is `web/style.css`, which belongs to the Pages site. `docs/backlog.md`'s
-> 2026-09-06 decision settles it: the capability is built against widget state,
-> egui's and imgui's shape, rather than waiting for topic 7.
+> (topic 7)". `crcbl-ui` does now have a stylesheet system — `crcbl_ui::style`
+> parses CSS with selectors and pseudo-classes — but it has no `:drop-ok` or
+> `:drop-bad`, and `docs/backlog.md`'s 2026-09-06 decision stands: the
+> capability is built against widget state, egui's and imgui's shape, and the
+> panel decides what an accepting or refusing cell looks like.
 >
-> Also unbuilt: the first consumer named below. There is no editor asset browser
-> because there is no editor.
+> Also unbuilt: the first consumer named below. `apps/editor` exists, but it has
+> no asset browser.
 >
 > **Part 2, the grid kit: built, and consumed twice.** `crates/crcbl-inventory`
 > is the model half — one `Grid` with an occupancy map and an optional tag
@@ -46,9 +47,10 @@ editor asset browser wants it); the kit is FPS-era with breach.
 > and it took no engine change either; see "Decided" below for what the second
 > consumer measured.
 >
-> What of this document is still unbuilt is the Delivery table below: nesting
-> and the rollup through it, mounts and coverage, items as entities, the command
-> protocol and access grants, the stash, and client optimism.
+> What of this document is still unbuilt is the Delivery table below: the rest
+> of part 1 (above), nesting and the rollup through it, mounts and coverage,
+> items as entities, the command protocol and access grants, the stash, and
+> client optimism.
 >
 > **Icon bake:** `crcbl icon bake` is not a verb. `crcbl-cli`'s parser accepts
 > `new`, `run`, `build`, `screenshot`, `replay`, `crpix`, `lod`, `import`,

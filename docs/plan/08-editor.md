@@ -83,9 +83,9 @@ Run-time discovery needs a link-time distributed slice (`linkme` or
 
 Everything else below stands unchanged: the server still drops commands, there
 is one schedule per `World`, there is no snapshot, the samples' state is outside
-the ECS, the editor draws no inspector panel, the format cannot hold one entity
-in two systems, debug draw is not a gizmo layer, `AssetSource` cannot list, and
-there are no `serve`/`scene`/`edit` subcommands.
+the ECS, the format cannot hold one entity in two systems, debug draw is not a
+gizmo layer, `AssetSource` cannot list, and there are no `serve`/`scene`/`edit`
+subcommands.
 
 Two things sit behind it, in both directions:
 
@@ -98,13 +98,14 @@ Two things sit behind it, in both directions:
   when it was written: `crcbl_render::stack::CameraStack::from_ron` and
   `crcbl_inventory::catalog::Catalog::from_ron` both predate it.) Feature 6, the
   asset browser, still waits on the rest of stage 6 — there is no watcher and no
-  `crcbl bake`. Feature 3 waits on stage 7's inspector, which is also unbuilt
-  ([07-ui-debug.md](07-ui-debug.md)).
-- **Two sample plans wait on it**, and they are the only two samples with no app
-  directory. [sample/07-towers.md](sample/07-towers.md)'s milestone 2 _is_ this
-  document's dogfood pass — its exit criterion is "map authored 100% in the
-  editor, zero hand-edited scene text" — and
-  [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too.
+  `crcbl bake`. Feature 3 landed in slice 3 on stage 7's inspector
+  (`Ui::inspector_with`, [07-ui-debug.md](07-ui-debug.md)).
+- **Two sample plans wait on it.** [sample/07-towers.md](sample/07-towers.md)'s
+  milestone 2 _is_ this document's dogfood pass — its exit criterion is "map
+  authored 100% in the editor, zero hand-edited scene text" — and
+  [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too. Towers
+  has an app directory; arena is one of five sample plans without one, beside
+  mirrors, meadow, mane and relief.
 
 ## Where the tree stands against this design (surveyed 2026-09-15)
 

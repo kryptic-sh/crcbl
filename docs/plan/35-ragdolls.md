@@ -9,12 +9,15 @@ must land in the _same place_ for everyone.
 **Depends on** the contact solver (36, L2) for bodies-vs-world and L3 joints for
 the articulation — ragdolls are the flagship consumer of both.
 
-**Nothing here is built, and neither is anything it depends on**: no ragdoll
-type anywhere in the workspace, no contact solver (36), no joints, and no
-rotational dynamics at all in `crcbl-phys` — a `RigidBody` has no angular
-velocity and no inertia tensor, so a body cannot yet tumble, let alone
-articulate. `KineticContact` (28), which the death handoff reads the killing
-impulse from, has no type either.
+**Nothing here is built, but everything it depends on is**: there is no ragdoll
+type anywhere in the workspace, while `crcbl-phys` has the contact solver (36),
+rotational dynamics, joints (`SphericalJoint` with cone and twist limits,
+`RevoluteJoint` with limits, breakable joints) and `KineticContact` (28), which
+carries the impulse, point and normal the death handoff reads the killing blow
+from. `apps/tumble`'s Bridge room already assembles them into capsule ragdolls
+pushed down a flight of stairs (`apps/tumble/src/bridge.rs`), so the solver is
+shown to hold an articulated body; the bone mapping, the death handoff, the
+server/client split and the render-pose blend below are all unbuilt.
 
 ## The split: server settles, client performs
 

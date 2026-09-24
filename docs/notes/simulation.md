@@ -65,7 +65,7 @@ rekey.
 **Honest limit to state alongside any trust claim:** this project never
 demonstrates a trust model where the host is adversarial.
 
-### Nothing in this document is built, and three prerequisites are missing too (2026-08-27)
+### Nothing in this document is built, and most of its prerequisites are missing too (2026-08-27)
 
 Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.

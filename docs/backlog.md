@@ -2686,17 +2686,20 @@ implemented or benchmarked.
 `crcbl-wind` landed with the gaps below; `docs/plan/56-wind.md` is the design,
 and its rungs W2–W6 are separate slices rather than gaps.
 
-- **Nothing reads the field.** `crcbl_phys::WindQuery` has one implementation
-  and no caller: rung W4's rigid-body drag needs two `crcbl-phys` prerequisites
-  that do not exist (rigid-body rotation, per-body medium properties), and
-  trees, grass, hair and water are other plans. The crate is therefore **not
-  linked into `crcbl-server`**, which the plan's decision 6 says it should be —
-  an unused dependency is one `cargo machete` refuses, so the arrow lands with
-  the first consumer.
-- **The GPU bind group is built by the test, not by `crcbl-render`.** The layout
-  is declared by `shaders/wind.slang` and constructed in
-  `crates/crcbl/tests/render_e2e/wind.rs`; a `crcbl_render::wind` module with no
-  pass reading it would be machinery nothing exercises.
+- **Only grass reads the field, and only on the GPU** (re-checked 2026-09-24).
+  Grass rung G1 made `crcbl-render`'s grass pass the first consumer: a caller
+  hands `ForwardRenderer::set_wind` the uniform block
+  `crcbl_wind::WindField::gpu_params` narrows, and
+  `ForwardRenderer::set_wind_layers` the two authored layers, and
+  `crcbl_render::grass` builds the bindings `grass_gen.slang` samples them
+  through (`crates/crcbl/tests/render_e2e/wind.rs` still builds its own for the
+  W1 comparison). On the CPU, `crcbl_phys::WindQuery` still has one
+  implementation and no caller: rung W4's rigid-body drag needs per-body medium
+  properties, which do not exist (rigid-body rotation, the other prerequisite,
+  now does), and trees, hair and water are other plans. The crate is therefore
+  **not linked into `crcbl-server`**, which the plan's decision 6 says it should
+  be — an unused dependency is one `cargo machete` refuses, so the arrow lands
+  with the first simulation consumer.
 - **Two readings the plan does not settle.** The direction layer's texel is a
   _deflection_ composed with the weather's base direction by a complex product,
   not an absolute direction — otherwise turning the weather would not turn the
@@ -3235,10 +3238,14 @@ and what they left_ below. Tessellation is planned, nothing built:
 `docs/plan/55-water.md`'s still pool landed with the gaps below; each is
 verified absent, not guessed.
 
-- **The browser price of both water passes is unmeasured.** The render harness
-  draws the golden in Chrome but times no pass; the price comes with the tide
-  sample's demo, which is also rung 1's owed half (the sample skeleton, the
-  courtyard scene and `/demos/tide/`).
+- **The browser price of both water passes is one gate run's reading, not a
+  dedicated measurement** (re-checked 2026-09-24). The render harness draws the
+  golden in Chrome but times no pass. The tide sample, rung 1's other half,
+  shipped (`apps/tide`, `/demos/tide/`) and prints the water's cost in its
+  `[HUD]` heartbeat; `sample/21-tide.md`'s milestone 1 records the p50 that one
+  boot's frames gave at a 959×463 canvas, on an RDNA-3 adapter and on
+  SwiftShader. A deliberate browser price — a fixed canvas, a warm-up, a sample
+  count — is still owed.
 - **A rejected refraction sample shows the straight-through floor**, which
   leaves a ghost of the occluder's silhouette — visible above the post in
   `still_pool.png`. That is the standard screen-space refraction limit; the
@@ -3263,35 +3270,35 @@ verified absent, not guessed.
 - **`BodyError::TooManyVertices` has no test**: reaching a `u32` index's limit
   is impractical in a test.
 
-## Water, wind, grass and hair: planned, nothing built (2026-09-15)
+## Water, wind, grass and hair: planned 2026-09-15, first rungs built
 
 Four engine topics and three fixtures were researched and planned at the user's
-request, with the implementation deliberately left for later:
-[55-water.md](plan/55-water.md), [56-wind.md](plan/56-wind.md),
+request: [55-water.md](plan/55-water.md), [56-wind.md](plan/56-wind.md),
 [57-grass.md](plan/57-grass.md), [58-hair.md](plan/58-hair.md), and the samples
 [tide](plan/sample/21-tide.md), [meadow](plan/sample/22-meadow.md) and
 [mane](plan/sample/23-mane.md). ROADMAP rows P7D–P7G and S4F–S4H carry them.
-What the plans leave open:
+**Since built** (re-checked 2026-09-24): water rung 1 and tide's milestone 1
+(2026-09-15), wind W1 (2026-09-16), and grass G1 (2026-09-16), G2 and G3
+(2026-09-17), each with a _What … shipped without_ entry above. Hair, meadow and
+mane have nothing built. What the plans leave open:
 
 - **Order and start are the user's call.** Nothing is scheduled ahead of
-  existing work. The dependency order the plans imply: the two physics
-  prerequisites below, then wind W1 (small, and read by everything else), then
-  water rungs 1–2 and grass G1–G2 in either order, then hair H1–H3. Water rung 1
-  (a still pool: the surface pass, refraction, absorption, sky reflection) needs
-  neither physics nor wind and is the smallest visible first slice.
-- **Two `crcbl-phys` prerequisites gate floating and wind-pushed bodies.**
-  `RigidBody` has no inertia, torque or angular velocity, and
-  `PhysicsSystem::step` applies every `ForceProvider` to every dynamic body with
-  no per-body parameters. Buoyancy that rights a hull and wind that spins debris
-  need rotation; a crate and a boat that float differently need a per-body
-  medium component. Neither is planned in detail anywhere yet; 55's decision 13
-  names both. The contact solver being unbuilt is a separate, older gap.
+  existing work. The dependency order the plans imply for what is left: the
+  physics prerequisite below, then water rung 2 and the grass rungs past G3 in
+  either order, then hair H1–H3.
+- **One `crcbl-phys` prerequisite still gates floating and wind-pushed bodies.**
+  Rotation is built — `RigidBody` has angular velocity and inertia, and the
+  contact solver landed with it — but `PhysicsSystem::step` applies every
+  `ForceProvider` to every dynamic body with no per-body parameters, so a crate
+  and a boat that float differently still need a per-body medium component. It
+  is not planned in detail anywhere yet; 55's decision 13 names it.
 - **Decision: guarded copies of the light walk, or a shared Slang module.**
   Water, grass and hair each draw in a pass of their own lit by the clustered
   lights and the cascades, and `mesh.slang` is where that walk lives with no
-  `#include`. The plans follow `volumetric.slang`'s precedent — a copy held
-  letter for letter by a guard — which would make four guarded copies. The
-  alternative is a Slang module imported by every lit shader, which changes how
+  `#include`. Water and grass followed `volumetric.slang`'s precedent — a copy
+  held letter for letter by a guard — so `volumetric.slang`, `water.slang` and
+  `grass.slang` each carry one, and hair would add a fourth. The alternative is
+  a Slang module imported by every lit shader, which changes how
   `crcbl-shaders`' build hashes sources. Not researched further.
 - **Decision: vertex colour as wind data.** 57's T1 bakes Crysis's bending data
   into `MeshVertex::color` for wind-flagged meshes, moving that mesh's albedo
@@ -9157,9 +9164,6 @@ and _What the deleted 45-shadows plan left behind_):
 
 Kept intact; listed so the next audit does not re-derive it.
 
-- **`29-fp-rendering.md`** — viewmodel pass, ADS, PiP optics. No viewmodel pass,
-  no depth-slice remap, no second camera. `apps/breach` is new and untracked at
-  the time of this audit and was not examined.
 - **`31-vis-culling.md`** — server-side visibility replication filtering. No
   `vis_culled` tag, no `competitive_integrity` gate, no PVS bake, no leak
   auditor anywhere in `crates/`, `apps/` or `tools/`.
@@ -9176,6 +9180,23 @@ Kept intact; listed so the next audit does not re-derive it.
   reads and writes it. What exists is the runtime shape: `GpuMaterial`'s
   `base_color`, `metallic`, `roughness` and page-layer column, filled from glTF
   by `crcbl_scene::gltf_import`.
+
+### First-person rendering: everything above the PiP view is unbuilt (2026-09-24)
+
+`29-fp-rendering.md` was listed above as wholly unbuilt until 2026-09-24. Its
+second camera is built as a `ForwardRenderer` view (`create_view`, `begin_view`,
+`add_passes_with_views`, `set_instance_views`, `ViewDesc::effects`, shared
+shadow atlas; tested in `crates/crcbl/tests/forward_e2e/views.rs`). Nothing else
+is. Missing: the viewmodel pass (fixed ~54° FOV, reserved near depth slice,
+after opaque and before transparency, lit by world shadows), the
+one-entity/two-model split and its self-shadow rule (the world-model goes
+depth-only into shadows, the viewmodel casts none), the camera pipeline (eye
+socket, ADS lerp to a sight socket, per-weapon FOV zoom, bob/sway/kick layers),
+the muzzle-vs-eye tracer blend, scope lens material/reticle/eyebox, full-body
+1P, spectator/kill-cam POV assembly, cosmetic loadout slots, and the
+pose/cosmetic/audio parity suites. It depends on anim sockets and additive
+layers (topic 17), neither of which exists. Verified: no `viewmodel` symbol in
+`crates/`; view APIs read.
 
 ### Unfinished work from the backend and platform plans
 
@@ -9985,16 +10006,23 @@ web topology. Move them to the notes when that plan is folded.
 
 ## Wholly unbuilt topics
 
-Each of these has no crate, no type and no consumer. They were left almost
-untouched; what follows is the dependency chain that would have to move first,
-which is the part not obvious from the documents.
+Each topic here had no crate, no type and no consumer when this section was
+written. That no longer holds everywhere — the contact solver's rungs 0 to 5
+landed under this heading, and ballistics and ragdolls now have parts or
+prerequisites built, which their entries say. What follows is the dependency
+chain that would have to move first, which is the part not obvious from the
+documents.
 
 ### Navigation — `24-navigation.md` (2026-08-27)
 
 No `crcbl-nav` crate. No bake, no query API, no crowd, no `crcbl nav` CLI, and
-no arena sample to force it. **Blocked upstream on static trimesh/heightfield
-colliders** (above): step 1 voxelizes physics colliders, and the collider set is
-three analytic primitives.
+no arena sample to force it. **No longer blocked on static trimesh** (re-checked
+2026-09-24): step 1 voxelizes physics colliders, and
+`crcbl_phys::mesh::TriangleMesh` (`ColliderComponent::Mesh`,
+`PhysicsWorld::add_mesh`) now gives it a walkable world to voxelize. A
+heightfield collider is still absent (_Static trimesh / heightfield colliders
+with a BVH midphase_, above), and so are the per-collider nav flags step 1
+reads.
 
 ### Client prediction and lag compensation — `26-prediction.md` (2026-08-27)
 
@@ -10012,14 +10040,27 @@ with eviction) and determinism hashing (`crcbl_server::sim_hash::hash_world`).
 Also depends on the cooked hitbox tracks that the missing animation cook would
 produce (_No cook, no cooked clip format_).
 
-### Ballistics and kinetic impact — `28-ballistics.md` (2026-08-27)
+### Ballistics: solver `KineticContact` is built; the ballistic half and controller emission are not (2026-08-27, re-verified 2026-09-24)
 
-Nothing built. No `Round`, no `BallisticMaterial`, no penetrating sweep, no
-`KineticContact` — `grep -rn KineticContact crates/ apps/` returns nothing.
-**Blocked on two things:** the collider property block carrying surface material
-(owned by `37-materials.md`; `crcbl-phys`'s `Collider` and its components have
-no material field of any kind), and static trimesh statics for entry/exit
-traversal.
+Built: `crcbl_phys::KineticContact` (source, impactor, struck, point, normal,
+relative velocity, impactor mass, energy deposited, impulse). The contact solver
+raises one per contact per step once the approach speed reaches
+`ContactSettings::restitution_threshold` and the impulse reaches
+`ContactSettings::kinetic_impulse`, so resting contacts raise none; it is read
+through `PhysicsSystem::kinetic_contacts`. `KineticSource` is
+`#[non_exhaustive]` with only `Contact`. Not built: the `Ballistic` source and
+everything behind it (`Round`, `BallisticMaterial` fields on
+`crcbl_phys::material::SurfaceMaterial`, which holds friction and restitution
+only; the ordered entry/exit penetrating sweep, deposition accounting,
+ricochet/deflection, drag media, the armor chain-truncation contract, the
+lag-comp composite query); emission from CCD and `CharacterController` contacts,
+which is how fall damage and dropped objects are meant to arrive;
+`collider_id`/`collider_tag` on the event (the plan guarantees them so damage
+models never guess the body part); and the shot-trace viz,
+`crcbl phys shoot|penmatrix` and the golden-slab/kinetic suites. Static trimesh
+(`crcbl_phys::mesh::TriangleMesh`) now exists, so the entry/exit traversal is
+unblocked on geometry. It is still blocked on ballistic material fields.
+Verified by reading `contact/mod.rs` and `solver.rs`'s emission.
 
 `apps/breach` ships a hitscan pistol that is one
 `crcbl_phys::PhysicsWorld::cast_ray` per shot. That is not a down payment on
@@ -10247,8 +10288,7 @@ body.
 workspace; there is no bone-to-body mapping or authored ragdoll asset, no death
 handoff from the last animated pose and the killing `KineticContact`, no
 server-simplified / client-detail split with its settle snapshot, and no blend
-of the bodies back into the render pose. `35-ragdolls.md`'s opening still says
-that nothing it depends on is built, which is no longer true.
+of the bodies back into the render pose.
 
 ### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
 
@@ -11342,9 +11382,10 @@ still needs is its own schema.
 
 ### arena and mirrors do not exist, and towers' co-op exit criteria still cannot be met (2026-09-07)
 
-**Two samples with no crate, down from three.** `apps/towers` was built
-2026-09-07 (milestone 1's solo slice); `arena` and `mirrors` still have a
-`docs/plan/sample/` document and no `apps/` directory.
+**Five sample plans with no crate** (re-checked 2026-09-24). `apps/towers` was
+built 2026-09-07 (milestone 1's solo slice), leaving `arena` and `mirrors`; the
+samples planned on 2026-09-15 added `meadow`, `mane` and `relief`, which also
+have a `docs/plan/sample/` document and no `apps/` directory.
 
 **Why it belongs here too:** the exit criteria that name towers are the co-op
 ones, and those are milestone 3's. `13-audio.md`'s "towers plays creep/tower
@@ -11369,20 +11410,26 @@ volume setting a settings screen would expose.
 
 ### Voice pool, priority and stealing (2026-08-27)
 
-**Not built.** `Mixer` holds voices in a plain growable `Vec<(VoiceId, Voice)>`
-behind a `Mutex` — no capacity, no priority, no distance-based stealing.
-Per-voice state _is_ built (cursor, varispeed pitch, per-channel gains, L/R
-fractional delay lines), and a release list gives a stopped voice a one-block
-fade instead of a click.
+**Budget, priority and stealing are built (re-checked 2026-09-24); a pool and
+distance-based stealing are not.** `Mixer::set_voice_budget` caps the voices
+sounding at once (no cap is the default), `Voice::with_priority` ranks a voice,
+and `Mixer::try_play` answers with a `PlayOutcome`: played, stole the
+lowest-priority voice (the oldest among equals, equal priority stealing), or
+refused. `refused_count` and `stolen_count` count the pressure. `apps/horde` is
+the one app that sets a budget. Per-voice state is built too (cursor, varispeed
+pitch, per-channel gains, L/R fractional delay lines), and a release list gives
+a stopped or stolen voice a one-block fade instead of a click. The voices still
+live in a plain growable `Vec<(VoiceId, Voice)>` behind a `Mutex`, and the
+priority is the caller's number — nothing scores a voice by its distance or
+loudness.
 
-**What it would take:** a capacity, a priority score, and a steal policy.
+**What is left:** a distance- or audibility-aware steal score, if a sample shows
+the caller's priority is not enough, and a fixed-capacity pool if the `Vec` ever
+shows up in a profile.
 
 **Trap for whoever does it:** `Mixer` documents that ids are monotonic and never
 reused so a stale `VoiceId` can never name a later voice. A pool that recycles
 slots must keep that, which means the id and the slot cannot be the same thing.
-
-**What it blocks:** any game that can start more sounds than the machine can mix
-— nothing bounds voice count today.
 
 ### ITD parameter smoothing and crossfaded delay lines (2026-08-27)
 
@@ -11829,7 +11876,7 @@ question does not arise. Signed results still need a consumer.
 
 ## Voice (`docs/plan/32-voip.md`)
 
-### Nothing in this document is built, and three prerequisites are missing too (2026-08-27)
+### Nothing in this document is built, and most of its prerequisites are missing too (2026-08-27)
 
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/simulation.md` under this heading.
@@ -11842,15 +11889,17 @@ The record behind this — the argument, the options and the measurements — is
 - **No codec seam, no Opus.** No manifest depends on an Opus crate. The only
   mention of Opus in the tree is a line in `crcbl-audio`'s QOA module saying
   Vorbis and Opus will sit behind a decoder seam one day.
-- **The mixer voice bus does not exist** — see the bus-graph entry above.
+- **The mixer voice bus exists; ducking does not.** `crcbl_audio::Bus::Voice` is
+  one of the six fixed gain stages; the ducking the slice names waits on the
+  limiter and mix snapshots (_The mixer limiter_, above).
 - **The `competitive_integrity` gate does not exist**, so every "under the gate"
   behaviour has no flag to hang on. That is topic 31's.
 - **The forcing sample has no session.** breach shipped single-player.
 
 **What it would take, in the order the dependencies allow:** the `AudioCapture`
 seam is genuinely standalone and useful on its own (device pick, level meter,
-loopback self-monitor). Everything after it waits on the bus graph, the gate and
-a network transport.
+loopback self-monitor). Everything after it waits on ducking, the gate and a
+network transport.
 
 **What it blocks:** nothing else depends on voice; it is a leaf.
 
@@ -11858,16 +11907,18 @@ a network transport.
 
 ### UI drag-drop capability, and the stylesheet it assumes (2026-08-27)
 
-**Not built.** `crcbl-ui` has a drag, but only a slider's: `menu.rs` tracks a
+**The grid mechanism is built (see below); the general capability is not.**
+Before 2026-09-23 `crcbl-ui`'s only drag was a slider's: `menu.rs` tracks a
 `dragging: Option<usize>` for the row the pointer is pulling, and `widget.rs`
-handles press-A / drag-onto-B / release. No drag source, no drop target, no
-typed payload, no `can_accept`.
+handles press-A / drag-onto-B / release.
 
-**The harder half is the styling, not the mechanism.** The design hangs feedback
-on `:drop-ok` / `:drop-bad` pseudo-classes "like everything else (topic 7)", and
-there is no stylesheet system in `crcbl-ui` at all — no CSS parser, no
-selectors, no pseudo-classes. The only `.css` file in the repo is
-`web/style.css`, which belongs to the Pages site.
+**The styling half is settled by the decision below, not by a stylesheet.** The
+design hangs feedback on `:drop-ok` / `:drop-bad` pseudo-classes "like
+everything else (topic 7)". `crcbl-ui` has since gained a stylesheet system —
+`crcbl_ui::style`, a CSS parser with selectors, specificity and pseudo-classes
+(`:hover`, `:active`, `:focus`, `:disabled`, `:engaged`, `:checked`, `:open`,
+`:refused`) — but no `:drop-ok` or `:drop-bad`, and the feedback arrives as
+widget state instead.
 
 **DECIDED 2026-09-06 —** drag-drop is built against the state that already
 exists — a typed payload, a `can_accept` predicate, and feedback carried as
@@ -11877,8 +11928,10 @@ inventory kit rather than scheduled on its own, which also settles the consumer
 question: the first consumer the plan names, the editor's asset browser, does
 not exist and neither does the editor.
 
-**What it blocks:** the grid kit's entire interaction model, and outliner
-reparenting and VFX curve handles in an editor that does not exist yet.
+**What it blocks:** outliner reparenting and VFX curve handles in the editor,
+and the editor's asset browser — `apps/editor` exists, and has neither an asset
+browser nor drag-drop. The grid kit's interaction model was the other consumer,
+and `grid_drag` below now serves it.
 
 **The mechanism shipped 2026-09-23 as `crcbl_ui::grid_drag`** (`CellGrid`,
 `GridDrag<P>`, a typed payload, `can_accept`, drop feedback as widget state,
@@ -12245,22 +12298,27 @@ just this one.
 
 ## hud (`docs/plan/sample/04-hud.md`)
 
-### hud's whole P10 half waits on a styling system (2026-08-27)
+### hud's whole P10 half is unbuilt, and the styling system it waited on has landed (2026-08-27, re-checked 2026-09-24)
 
-**Not built**, and each piece waits on the same thing rather than on this
-sample: the CSS subset and its stylesheets, the theme switcher, the gallery
-page, the UI inspector, hot reload, and per-theme golden frames.
-`apps/hud/src/page.rs` draws everything out of `DrawList::rect`,
-`DrawList::rect_outline` and `DrawList::text` — there is no style resolution
-anywhere. The **wasm front end and the Pages demo are NOT among the gaps**:
-`apps/hud/src/web.rs`, `web/demos/hud/` and the `hud` row in `web/build.sh`'s
-`DEMOS` all exist, and `apps/hud/tests/run-hud-golden.sh` runs in CI against
-lavapipe with `apps/hud/tests/golden/panels.png` as its reference. The doc used
-to record the web build as deferred; that has been corrected.
+**Not built:** hud's stylesheets, the theme switcher, the gallery page, the UI
+inspector in the demo, the hot-reload showcase, and per-theme golden frames.
+`apps/hud/src/page.rs` still draws everything out of `DrawList::rect`,
+`DrawList::rect_outline` and `DrawList::text`, with no style resolution. **What
+they waited on is no longer missing:** `crcbl-ui`'s rungs 1 to 8b built the
+tree, the CSS subset (`crcbl_ui::style`: `cssparser`, selectors, the cascade,
+`default.css`), polled stylesheet reload (`Ui::poll_stylesheets`), the widget
+set and the inspector (`Ui::inspector`), and `apps/editor` already styles its
+panels with a sheet of its own. What is left is hud's port onto them. The **wasm
+front end and the Pages demo are NOT among the gaps**: `apps/hud/src/web.rs`,
+`web/demos/hud/` and the `hud` row in `web/build.sh`'s `DEMOS` all exist, and
+`apps/hud/tests/run-hud-golden.sh` runs in CI against lavapipe with
+`apps/hud/tests/golden/panels.png` as its reference. The doc used to record the
+web build as deferred; that has been corrected.
 
-**What it would take:** the styling system (topic 7 / P10). **What it blocks:**
-hud's exit criteria in full, and the wider claim that the engine's own UI —
-debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
+**What it would take:** rebuilding `page.rs` on `crcbl_ui::tree` with a
+stylesheet per theme, then the gallery, switcher and goldens on top. **What it
+blocks:** hud's exit criteria in full, and the wider claim that the engine's own
+UI — debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
 
 ## viewer
 
@@ -12729,11 +12787,18 @@ withholds a feature the menu offers; `apps/lantern/src/gpu.rs`'s `Forced` is the
 nearest thing in the tree and it withholds geometry and binding features, not
 effects.
 
-### The four `crcbl-render` findings the monitor left are unfixed (2026-08-27)
+### Three of the four `crcbl-render` findings the monitor left are fixed (2026-08-27, re-verified 2026-09-24)
 
-**Carried forward on trust from the doc**, not re-verified: duplicate imports,
-an undeclared page read, one view per renderer and one view per offscreen run.
-The doc says all four are in `docs/backlog.md`; I did not confirm the entries.
+**Re-verified 2026-09-24; three of the four are closed.** The monitor's commit
+(`5c5c7bfe`) found duplicate imports, an undeclared page read, one view per
+renderer and one view per offscreen run. `RenderGraph::import_image` now hands a
+second importer of one handle the first one's id and refuses a disagreeing
+declaration (`GraphError::ImportDeclarationConflict`);
+`ForwardRenderer::add_passes` imports the pages it samples
+(`BASE_COLOR_PAGE_LABEL` and its three siblings); and one renderer serves
+several views through `create_view`, though lantern has not moved onto it (see
+_Findings the roadmap carried that nothing else did_). The one still open is
+`OffscreenSetup` rendering one view per run, recorded in that same section.
 
 ## quarry
 
@@ -17699,17 +17764,16 @@ item lives.
   `SubresourceOutOfRange` check — which only runs for `ImageSource::Transient` —
   cannot catch a caller naming a page layer that does not exist; that lands on
   the backend's validation instead of on the graph's own check.
-- **One `ForwardRenderer` cannot serve two views.** `add_passes` takes
-  `&'a mut self` against the graph's lifetime, so two calls on one renderer do
-  not compile (`E0499`), and `begin_frame` writes one camera into the frame's
-  uniform slot and freezes one resolved effect set. A second view therefore
-  costs a whole second renderer: a second copy of the geometry and cluster
-  pools, the material table, the page and the instance ring, plus a second
-  shadow atlas. For lantern's eleven objects that is small; for a scene with a
-  real residency budget it is not. The answer is a view parameter inside
-  `crcbl-render` — per-view camera uniform and effect set over shared residency
-  — rather than a renderer per camera. Not attempted: it moves `begin_frame`'s
-  signature and every caller.
+- **`apps/lantern` still draws its monitor with a second `ForwardRenderer`,
+  though one renderer can now serve two views** (re-checked 2026-09-24). This
+  bullet used to say one could not: `add_passes` took `&'a mut self` against the
+  graph's lifetime and `begin_frame` froze one camera and one effect set, so a
+  second view cost a second copy of the geometry and cluster pools, the material
+  table, the page, the instance ring and the shadow atlas. The view parameter it
+  asked for landed 2026-09-15 as `ForwardRenderer::create_view` / `begin_view` /
+  `add_passes_with_views` (_What secondary views shipped without_). lantern's
+  `Gpu::monitor` and its doc comment in `apps/lantern/src/gpu.rs` still argue
+  the old shape; porting the monitor onto a view drops the second residency.
 - **`OffscreenSetup` renders one view per run.** The headless path opens one
   offscreen ring at one extent, so the golden suite's monitor claims are made by
   rendering the monitor's view _as if it were the frame_ at
@@ -21154,15 +21218,17 @@ Two findings that are **not** fixed:
 the slice-1 primitives", and that is all that was built. Everything below was in
 scope for the sample overall and is not in the tree.
 
-**Waiting on the styling system, not on this sample.** The CSS subset and its
-`.css` files, the ≥2 themes and their runtime switcher, the widget gallery page,
-the UI inspector, the live-restyle hot-reload showcase, and the per-theme golden
-frames in CI. All of them are P10 in the sample's own doc and all of them rest
-on a layout/styling engine that does not exist: `crcbl-ui` today has `DrawList`,
-`FontAtlas`, `Label`, `Button`, `Style`, `Hud`/`HudPanel`/`Anchor`, `Menu` and
-the `debug` panel, and no stylesheet, cascade, selector or box model anywhere.
-Building any of it now would be machinery with a single speculative consumer.
-The one thing worth recording for whoever starts P10: `page::draw` is one
+**Waited on the styling system when it was written; that system has since landed
+(re-checked 2026-09-24).** The CSS subset and its `.css` files, the ≥2 themes
+and their runtime switcher, the widget gallery page, the UI inspector, the
+live-restyle hot-reload showcase, and the per-theme golden frames in CI. All of
+them are P10 in the sample's own doc, and when milestone 1 shipped all of them
+rested on a layout/styling engine that did not exist. It does now: `crcbl-ui`
+has the `tree` (Taffy flexbox), `style` (stylesheets, selectors, the cascade,
+polled reload), the widget set and the inspector, while the old `Hud` and
+`HudPanel` are deleted and only `Anchor` is left of them. None of it is in hud
+yet — _hud's whole P10 half is unbuilt_ above is the entry that owns the port.
+The one thing worth recording for whoever starts it: `page::draw` is one
 function that positions everything from named constants at the top of
 `apps/hud/src/page.rs`, so the styling work replaces that function's body rather
 than restructuring the sample.
@@ -24376,11 +24442,12 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   and verify it per "`apps/quarry`'s device harness ignores `CRCBL_ADAPTER`",
   then time `tools/run-samples-windowed.ps1 -Backend dx12` with
   `CRCBL_ADAPTER=cpu` to decide a WARP windowed-samples CI step.
-- **The last pushes were not yet seen green on CI** when the session ended:
-  `ecf12489` (four small fixes), `a7abc741` (crcbl-render tests off wasm32) and
-  `e1183f59` (stale docs), pushed on top of `8b14da89` (joints, the `TALL_STACK`
-  removal, the Greenhill test), whose own run was cancelled by the push. Read
-  the next main run before building on them.
+- **The session's last pushes have since been seen green.** `ecf12489` (four
+  small fixes), `a7abc741` (crcbl-render tests off wasm32) and `e1183f59` (stale
+  docs), pushed on top of `8b14da89` (joints, the `TALL_STACK` removal, the
+  Greenhill test), were unchecked when the session ended; `main`'s CI workflow
+  has passed many times on top of them since, most recently checked green on
+  `c0af7237` (2026-09-24).
 - **Decisions waiting on the user**, each with its entry: the `SyncedFile`
   lost-write fix (EW calls it a must before Steam Cloud), the `Host` rehello
   livelock fix, `Apps::launch_command_line` truncation, the dx12 mesh flag, the

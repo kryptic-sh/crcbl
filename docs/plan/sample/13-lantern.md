@@ -216,9 +216,12 @@ Recorded in `docs/backlog.md` rather than here: ray tracing and the acceleration
 structures. All three layers of the toggle resolution order have sources now —
 the programmatic one drives both the `--no-*` flags and the pause menu's rows,
 the camera one is the in-scene monitor's, and `[engine.video]` reaches the
-request through `gpu.rs`'s `video_effects` read. The monitor itself left
+request through `gpu.rs`'s `video_effects` read. The monitor itself left four
 findings in `crcbl-render` — duplicate imports, an undeclared page read, one
-view per renderer and one view per offscreen run — all of them in the backlog.
+view per renderer and one view per offscreen run. The first three are closed in
+the engine (the graph merges a handle's imports, `add_passes` imports its pages,
+and `ForwardRenderer::create_view` serves a second view), though the monitor
+still draws through a second renderer; the offscreen one is in the backlog.
 
 **Two things this list used to carry are built, and saying they are not was the
 worse error.** The **Pages web demo** exists: `apps/lantern/src/web.rs` is the

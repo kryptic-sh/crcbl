@@ -95,9 +95,12 @@ here it is the dogfood case: the panel is built out of these widgets.
   every button on it is one the loop already owns, so `MenuAction` is
   `Infallible`.
 
-Not built, and each waiting on the styling system rather than on this sample:
-the CSS subset and its stylesheets, the theme switcher, the gallery page, the UI
-inspector, hot reload, and per-theme golden frames — see `docs/backlog.md`.
+Not built: hud's stylesheets, the theme switcher, the gallery page, the UI
+inspector, hot reload, and per-theme golden frames — see `docs/backlog.md`. They
+waited on the styling system, which has since landed in `crcbl-ui` (the tree,
+the CSS subset, polled reload, the widgets and the inspector —
+[../07-ui-debug.md](../07-ui-debug.md)); what is left is this sample's port onto
+it.
 
 **The wasm front end and the Pages demo are not among them, and this section
 used to say they were.** `apps/hud/src/web.rs` is the browser entry point,
