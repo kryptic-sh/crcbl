@@ -74,6 +74,36 @@
 //! walk it forward and round. The two value rows are read back by id —
 //! [`Menu::slider`] and [`Menu::cycler`] — rather than fired, so no value ever
 //! reaches a game's action table looking like a button press.
+//!
+//! # Captions
+//!
+//! [`Menu::subtitle`] is lines of text under the title — the controls, a
+//! warning — drawn in the hint's colour. They are not rows: nothing selects,
+//! hovers or fires them, so the selection, the pointer and every index into
+//! [`Menu::items`] are exactly what they were without them.
+//!
+//! # Fitting a small window, then scrolling
+//!
+//! [`Menu::layout_with_font_fitted`] lays a menu out in a registered font at
+//! the largest size that fits the window, in two stages:
+//!
+//! 1. **Shrink.** Every font size and gap shrinks by one factor, in steps of
+//!    [`FIT_FONT_STEP`], down to [`MenuStyle::MIN_FONT_SIZE`]; the art stays at
+//!    a whole-number scale of at least one, so the frames' corners stay on
+//!    whole pixels.
+//! 2. **Scroll.** If even the smallest size is too tall, the item list is
+//!    capped at the height left and scrolls; the title and the captions stay
+//!    put. Only a menu too wide at the smallest size — the list scrolls up and
+//!    down only — or too short to show one row is refused, with a
+//!    [`MenuFitError`] saying which.
+//!
+//! A scrolled list follows the keyboard: a selection moved by
+//! [`Menu::select_next`] or [`Menu::select_previous`] is scrolled into view by
+//! the next layout. [`Menu::scroll_wheel`] moves it by the pointer's wheel
+//! instead, until the keyboard next moves the selection. A row scrolled wholly
+//! out of view is neither drawn nor hit.
+
+use std::ops::Range;
 
 use glam::Vec2;
 
@@ -84,7 +114,9 @@ use crate::style::{Declaration, PseudoClasses, Sides};
 use crate::text::FontAtlas;
 #[cfg(test)]
 use crate::text::LINE_HEIGHT;
-use crate::tree::{AvailableSpace, FamilyName, Length, LengthAuto, NodeKey, Ui};
+use crate::tree::{
+    AvailableSpace, FamilyName, Length, LengthAuto, LineHeight, NodeKey, Overflow, Ui,
+};
 use crate::widget::{
     ButtonSkin, ButtonState, NATURAL_FONT_SIZE, PointerInput, SkinInsets, UiState, WidgetId,
 };
@@ -221,6 +253,15 @@ impl MenuStyle {
     /// brick and the menu stops reading as part of the game.
     pub const MAX_SCALE: u32 = 4;
 
+    /// The smallest item font size [`Menu::layout_with_font_fitted`] shrinks
+    /// to, in pixels per em.
+    ///
+    /// Eight: a typical face's x-height is about half an em, so this leaves
+    /// lowercase four pixels tall — the fewest the hinter can snap `e`, `c`
+    /// and `o` apart in. A window that needs smaller text gets a scrolled
+    /// list, or a [`MenuFitError`], rather than a menu nobody can read.
+    pub const MIN_FONT_SIZE: f32 = 8.0;
+
     /// The shipped look, at `scale` device pixels per texel.
     ///
     /// `scale` is clamped to at least one — a menu drawn at zero is not a
@@ -257,6 +298,47 @@ impl MenuStyle {
             // fill separates from the game behind it, not so much that the
             // player loses track of where the ball was.
             scrim_color: [0.0, 0.0, 0.0, 0.66],
+        }
+    }
+
+    /// This style with its item font at `item_size`, and every other length
+    /// shrunk by the same factor — what [`Menu::layout_with_font_fitted`]
+    /// tries.
+    ///
+    /// The frames' corners are the art's texels at the whole-number scale the
+    /// factor leaves, never below one, so the nine-slice stays on whole
+    /// pixels. Every other length but the font sizes is rounded to a whole
+    /// pixel, which with [`row_line`]'s whole line pitch makes every row a
+    /// whole number of pixels tall — what lets a scrolled list build only the
+    /// rows in view and still put them where the layout said.
+    fn shrunk(&self, item_size: f32) -> Self {
+        let factor = item_size / self.item_size;
+        let whole = |length: f32| (length * factor).round();
+        let art = (self.scale * factor).floor().max(1.0);
+        let corners = |insets: SkinInsets| {
+            let texels = |length: f32| (length / self.scale * art).round();
+            SkinInsets::new(
+                texels(insets.left),
+                texels(insets.right),
+                texels(insets.top),
+                texels(insets.bottom),
+            )
+        };
+        Self {
+            scale: art,
+            panel: corners(self.panel),
+            button: corners(self.button),
+            panel_padding: Vec2::new(whole(self.panel_padding.x), whole(self.panel_padding.y)),
+            button_padding: Vec2::new(whole(self.button_padding.x), whole(self.button_padding.y)),
+            item_gap: whole(self.item_gap),
+            title_gap: whole(self.title_gap),
+            title_size: self.title_size * factor,
+            item_size,
+            hint_gap: whole(self.hint_gap),
+            track_width: whole(self.track_width),
+            track_height: whole(self.track_height),
+            handle_size: Vec2::new(whole(self.handle_size.x), whole(self.handle_size.y)),
+            ..*self
         }
     }
 
@@ -575,6 +657,10 @@ impl MenuItem {
 pub struct Menu {
     /// The heading, drawn above the items.
     pub title: String,
+    /// Lines drawn under the title, centred and in the hint's colour, one
+    /// line each — see the module's *Captions*. Empty by default, which draws
+    /// exactly the menu there was before captions existed.
+    pub subtitle: Vec<String>,
     items: Vec<MenuItem>,
     selected: usize,
     /// Whether the selected item is being held down.
@@ -593,6 +679,15 @@ pub struct Menu {
     /// has hold of it: a caller pushing the value it last read back in every
     /// frame would otherwise fight the drag it is reading from.
     dragging: Option<usize>,
+    /// How far a scrolled item list is scrolled, in pixels: what the next
+    /// [`Menu::layout_with_font_fitted`] starts from before it clamps it to
+    /// the list's reach and, while `follow_selection` holds, scrolls the
+    /// selection into view. Zero for a list that is not scrolled.
+    scroll: f32,
+    /// Whether the next fitted layout scrolls the selection into view. Set by
+    /// every keyboard move and cleared by [`Menu::scroll_wheel`]: a wheel
+    /// snapped back to the selection every frame could never move the list.
+    follow_selection: bool,
 }
 
 impl Menu {
@@ -601,12 +696,15 @@ impl Menu {
     pub fn new(title: impl Into<String>, items: Vec<MenuItem>) -> Self {
         Self {
             title: title.into(),
+            subtitle: Vec::new(),
             items,
             selected: 0,
             pressed: false,
             pressed_index: None,
             hovered: None,
             dragging: None,
+            scroll: 0.0,
+            follow_selection: true,
         }
     }
 
@@ -630,11 +728,20 @@ impl Menu {
     }
 
     /// Moves the selection down one, wrapping at the end.
+    ///
+    /// A scrolled list — see [`Menu::layout_with_font_fitted`] — is scrolled
+    /// to the new selection by the next layout, by as little as brings it
+    /// wholly into view. "As little" is measured from the scroll the menu
+    /// holds, which [`Menu::point`] and [`Menu::scroll_wheel`] keep up to
+    /// date: a caller that calls neither still always sees the selection, but
+    /// held at the edge it scrolled past rather than moving inside a still
+    /// list.
     pub fn select_next(&mut self) {
         self.move_selection(1);
     }
 
-    /// Moves the selection up one, wrapping at the start.
+    /// Moves the selection up one, wrapping at the start. A scrolled list
+    /// follows it, as [`Menu::select_next`] says.
     pub fn select_previous(&mut self) {
         self.move_selection(-1);
     }
@@ -646,6 +753,7 @@ impl Menu {
         let len = self.items.len() as isize;
         let next = (self.selected as isize + delta).rem_euclid(len);
         self.selected = next as usize;
+        self.follow_selection = true;
         // A keyboard move takes the highlight back off the pointer: otherwise a
         // cursor left resting over an item makes the arrow keys look dead.
         self.hovered = None;
@@ -663,6 +771,7 @@ impl Menu {
             Some(index) => {
                 self.selected = index;
                 self.hovered = None;
+                self.follow_selection = true;
                 true
             }
             None => false,
@@ -925,19 +1034,29 @@ impl Menu {
     /// `ui` — so a press that starts on one item and is released over another
     /// fires neither — and a click that also **moves the selection**, so the
     /// keyboard picks up where the mouse left off.
+    ///
+    /// In a scrolled list only the part of a row inside the list's
+    /// [`viewport`](MenuLayout::viewport) is hit, and a row scrolled wholly
+    /// out of it is not hit at all. While the list follows the keyboard, the
+    /// scroll `layout` settled on is kept as the one the next keyboard move
+    /// scrolls from — see [`Menu::select_next`].
     pub fn point(
         &mut self,
         layout: &MenuLayout,
         ui: &mut UiState,
         pointer: PointerInput,
     ) -> Option<WidgetId> {
+        if self.follow_selection {
+            self.scroll = layout.scroll();
+        }
+        let in_view = layout
+            .viewport()
+            .is_none_or(|viewport| contains(viewport, pointer.pos));
         let mut clicked = None;
         let mut hovered = None;
         for (index, item) in layout.items.iter().enumerate() {
-            let inside = pointer.pos.x >= item.min.x
-                && pointer.pos.x <= item.max.x
-                && pointer.pos.y >= item.min.y
-                && pointer.pos.y <= item.max.y;
+            let inside =
+                in_view && layout.shows(index) && contains((item.min, item.max), pointer.pos);
             let (state, fired) = ui.interact(item.id, inside, pointer.down, pointer.released);
             if inside {
                 hovered = Some(index);
@@ -997,6 +1116,39 @@ impl Menu {
         clicked
     }
 
+    /// Scrolls a scrolled item list by a wheel's `delta`, in pixels, and says
+    /// whether it moved: positive `y` moves toward the end of the list, as
+    /// [`Ui::scroll_wheel`] reads a wheel. `x` is ignored — the list scrolls
+    /// up and down only.
+    ///
+    /// Only while `pointer` is over the panel, since the list is the one thing
+    /// in it that moves. The list stops following the keyboard's selection
+    /// until the keyboard next moves it, so the selection may be scrolled out
+    /// of view — and the scroll is kept to the fraction of a pixel, so a
+    /// trackpad's small steps add up, while each layout draws it at the whole
+    /// pixel nearest. `false` for a list that does not scroll, so the caller
+    /// can give the wheel to something else.
+    ///
+    /// A separate call rather than a [`PointerInput`] field, as
+    /// [`Ui::scroll_wheel`] is, because every caller builds that by literal.
+    pub fn scroll_wheel(&mut self, layout: &MenuLayout, pointer: Vec2, delta: Vec2) -> bool {
+        let Some(list) = &layout.setup.list else {
+            return false;
+        };
+        if !contains(layout.panel, pointer) {
+            return false;
+        }
+        let from = if self.follow_selection {
+            list.scroll
+        } else {
+            self.scroll.clamp(0.0, list.reach)
+        };
+        let to = (from + delta.y).clamp(0.0, list.reach);
+        self.follow_selection = false;
+        self.scroll = to;
+        to != from
+    }
+
     /// Lays this menu out centred in an `extent`-sized framebuffer, at the
     /// largest scale that fits.
     ///
@@ -1038,8 +1190,9 @@ impl Menu {
         style: &MenuStyle,
     ) -> MenuLayout {
         let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
-        self.laid_out(Some(screen), style, None, None, atlas, |ui, built| {
-            Self::read_layout(ui, built, &self.items, screen, style, None)
+        let setup = Setup::default();
+        self.laid_out(Some(screen), style, None, &setup, atlas, |ui, built| {
+            Self::read_layout(ui, built, &self.items, screen, style, &setup)
         })
     }
 
@@ -1053,7 +1206,8 @@ impl Menu {
     /// is: `font-size` is [`MenuStyle`]'s, and the line pitch is the font's
     /// `line-height: normal`. [`Menu::layout`]'s scale fit has no counterpart
     /// here — it counts on the bitmap font's advances growing exactly with the
-    /// scale, which a parsed font's do not — so `style` is the caller's. A
+    /// scale, which a parsed font's do not — so `style` is the caller's; see
+    /// [`Menu::layout_with_font_fitted`] for a fit that measures instead. A
     /// cycler's chevrons keep its caption still only in a font whose `<`, `>`
     /// and space advance alike.
     #[must_use]
@@ -1063,26 +1217,265 @@ impl Menu {
         style: &MenuStyle,
         font: &'static Font,
     ) -> MenuLayout {
-        let screen = Vec2::new(extent.0 as f32, extent.1 as f32);
+        let setup = Setup {
+            font: Some(font),
+            ..Setup::default()
+        };
+        self.placed(extent_size(extent), style, &setup)
+    }
+
+    /// Lays this menu out centred in `font`, as [`Menu::layout_with_font`]
+    /// does, at the largest size up to `style` that fits the framebuffer —
+    /// shrinking it first and scrolling its item list after, as the module's
+    /// *Fitting a small window, then scrolling* describes.
+    ///
+    /// **Fits** is [`Menu::layout`]'s word: inside [`FIT_FRACTION`] of the
+    /// framebuffer on both axes. `style` is the largest the menu is drawn at,
+    /// and is what it is drawn at when that fits. Otherwise the item font
+    /// steps down by [`FIT_FONT_STEP`] to [`MenuStyle::MIN_FONT_SIZE`] — or
+    /// stays at `style`'s own, if that is smaller — and every other length
+    /// shrinks with it by the same factor, the art to the whole-number scale
+    /// the factor leaves and never below one. The step is found by bisection
+    /// over the steps, which is the largest that fits so long as a smaller
+    /// step never lays out a bigger panel — every length shrinks with the
+    /// font, so only a rounded pixel could. If even the smallest step is
+    /// too tall, the item list at that step is capped at the height the rest
+    /// of the panel leaves, and scrolls: see [`MenuLayout::viewport`].
+    ///
+    /// Every length but the font sizes is rounded to a whole pixel, and each
+    /// row's line pitch is the font's `line-height: normal` rounded up to one,
+    /// so every row is a whole number of pixels tall — which is what lets a
+    /// scrolled list draw only the rows in view where this layout put them. A
+    /// `style` that fits is therefore drawn at exactly its own lengths only
+    /// when they are whole, as [`MenuStyle::pixel_art`]'s are.
+    ///
+    /// A pure function of the menu — its contents, its selection and its
+    /// scroll — and its arguments: the same inputs lay out the same menu.
+    ///
+    /// # Errors
+    ///
+    /// [`MenuFitError::TooWide`] when the panel is wider than the room even at
+    /// the smallest step, which scrolling up and down cannot help, and
+    /// [`MenuFitError::TooShort`] when the frame, the title and the captions
+    /// leave less height than the list's tallest row — or no list at all.
+    pub fn layout_with_font_fitted(
+        &self,
+        extent: (u32, u32),
+        style: &MenuStyle,
+        font: &'static Font,
+    ) -> Result<MenuLayout, MenuFitError> {
+        let screen = extent_size(extent);
+        let room = screen * FIT_FRACTION;
+        let sizes = fit_sizes(style.item_size);
+        let measure = |item_size: f32| {
+            let style = style.shrunk(item_size);
+            let setup = Setup {
+                font: Some(font),
+                line: Some(row_line(font, &style)),
+                list: None,
+            };
+            let measured = self.measure(&style, &setup);
+            Candidate {
+                style,
+                setup,
+                measured,
+            }
+        };
+        let fits = |candidate: &Candidate| {
+            let panel = candidate.measured.panel;
+            panel.x <= room.x && panel.y <= room.y
+        };
+
+        let mut fitting = measure(sizes[0]);
+        if !fits(&fitting) {
+            let last = sizes.len() - 1;
+            let smallest = if last == 0 {
+                fitting
+            } else {
+                measure(sizes[last])
+            };
+            if !fits(&smallest) {
+                return self.scrolled(screen, room, smallest);
+            }
+            // `sizes[lo]` is too big and `sizes[hi]`, which `fitting` holds,
+            // fits.
+            fitting = smallest;
+            let (mut lo, mut hi) = (0, last);
+            while hi - lo > 1 {
+                let mid = (lo + hi) / 2;
+                let candidate = measure(sizes[mid]);
+                if fits(&candidate) {
+                    hi = mid;
+                    fitting = candidate;
+                } else {
+                    lo = mid;
+                }
+            }
+        }
+        Ok(self.placed(screen, &fitting.style, &fitting.setup))
+    }
+
+    /// The fit's second stage: `candidate`, too tall for `room` at the
+    /// smallest size the fit may use, with its item list capped at the height
+    /// the rest of the panel leaves, and scrolled.
+    fn scrolled(
+        &self,
+        screen: Vec2,
+        room: Vec2,
+        candidate: Candidate,
+    ) -> Result<MenuLayout, MenuFitError> {
+        let Candidate {
+            style,
+            setup,
+            measured,
+        } = candidate;
+        let font_size = style.item_size;
+        if measured.panel.x > room.x {
+            return Err(MenuFitError::TooWide {
+                font_size,
+                width: measured.panel.x,
+                room: room.x,
+            });
+        }
+        let chrome = measured.panel.y - measured.list.y;
+        let mut height = (room.y - chrome).floor();
+        loop {
+            if self.items.is_empty() || height < measured.tallest {
+                return Err(MenuFitError::TooShort {
+                    font_size,
+                    height: chrome + measured.tallest,
+                    room: room.y,
+                });
+            }
+            // Every row, unscrolled: the geometry `scroll_list` scrolls.
+            let list = ListView {
+                size: Vec2::new(measured.list.x, height),
+                viewport: (Vec2::ZERO, Vec2::ZERO),
+                scroll: 0.0,
+                reach: 0.0,
+                shown: 0..self.items.len(),
+                shown_top: 0.0,
+            };
+            let setup = Setup {
+                list: Some(list),
+                ..setup.clone()
+            };
+            let layout = self.placed(screen, &style, &setup);
+            // The panel is its measured chrome plus the list's height, less
+            // whatever Taffy's rounding moved; a pixel over is a pixel off
+            // the list.
+            let over = layout.panel_size().y - room.y;
+            if over <= 0.0 {
+                return Ok(self.scroll_list(layout));
+            }
+            height -= over.ceil();
+        }
+    }
+
+    /// Scrolls `layout` — placed with every row of its capped list built and
+    /// unscrolled — to this menu's scroll, clamped to the list's reach and,
+    /// while the list follows the keyboard, moved by as little as brings the
+    /// selected row wholly into view. Every row's rectangles move with it, and
+    /// the rows left overlapping the viewport are the ones drawn and hit.
+    fn scroll_list(&self, mut layout: MenuLayout) -> MenuLayout {
+        let list = layout
+            .setup
+            .list
+            .as_mut()
+            .expect("a scrolled layout has a list");
+        let (top, bottom) = (list.viewport.0.y, list.viewport.1.y);
+        let height = bottom - top;
+        let end = layout.items.last().map_or(top, |row| row.max.y);
+        list.reach = (end - top - height).max(0.0);
+
+        let mut scroll = self.scroll.round().clamp(0.0, list.reach);
+        if self.follow_selection
+            && let Some(row) = layout.items.get(self.selected)
+        {
+            let (row_top, row_bottom) = (row.min.y - top, row.max.y - top);
+            if row_top < scroll {
+                scroll = row_top;
+            } else if row_bottom > scroll + height {
+                scroll = row_bottom - height;
+            }
+        }
+        let scroll = scroll.clamp(0.0, list.reach);
+        list.scroll = scroll;
+
+        let up = Vec2::new(0.0, scroll);
+        for row in &mut layout.items {
+            row.min -= up;
+            row.max -= up;
+            row.label_pos -= up;
+            row.hint_pos -= up;
+            if let Some(track) = &mut row.track {
+                track.0 -= up;
+                track.1 -= up;
+            }
+        }
+        let rows = &layout.items;
+        let first = rows
+            .iter()
+            .position(|row| row.max.y > top)
+            .unwrap_or(rows.len());
+        let past = rows
+            .iter()
+            .rposition(|row| row.min.y < bottom)
+            .map_or(first, |last| (last + 1).max(first));
+        list.shown = first..past;
+        list.shown_top = rows.get(first).map_or(0.0, |row| row.min.y + scroll - top);
+        layout
+    }
+
+    /// Lays this menu out centred in `screen` at `style`, built as `setup`
+    /// says, and reads the layout back.
+    fn placed(&self, screen: Vec2, style: &MenuStyle, setup: &Setup) -> MenuLayout {
         self.laid_out(
             Some(screen),
             style,
             None,
-            Some(font),
+            setup,
             &FontAtlas::built_in(),
-            |ui, built| Self::read_layout(ui, built, &self.items, screen, style, Some(font)),
+            |ui, built| Self::read_layout(ui, built, &self.items, screen, style, setup),
+        )
+    }
+
+    /// The panel, the item list and the list's tallest row at `style`, built
+    /// as `setup` says, before any of them is placed.
+    fn measure(&self, style: &MenuStyle, setup: &Setup) -> Measured {
+        self.laid_out(
+            None,
+            style,
+            None,
+            setup,
+            &FontAtlas::built_in(),
+            |ui, built| {
+                let size = |key| {
+                    let (min, max) = ui.rect(key).expect("laid out this frame");
+                    max - min
+                };
+                Measured {
+                    panel: size(built.panel),
+                    list: size(built.items),
+                    tallest: built
+                        .rows
+                        .iter()
+                        .map(|row| size(row.row).y)
+                        .fold(0.0, f32::max),
+                }
+            },
         )
     }
 
     /// Reads a [`MenuLayout`] back out of `ui`, which [`Menu::laid_out`] built
-    /// for `items` at `style` in `screen`, its text in `font`.
+    /// for `items` at `style` in `screen`, as `setup` says.
     fn read_layout(
         ui: &Ui,
         built: &BuiltMenu,
         items: &[MenuItem],
         screen: Vec2,
         style: &MenuStyle,
-        font: Option<&'static Font>,
+        setup: &Setup,
     ) -> MenuLayout {
         let rect = |key| ui.rect(key).expect("laid out this frame");
         let panel = rect(built.panel);
@@ -1117,9 +1510,13 @@ impl Menu {
             })
             .collect();
 
+        let mut setup = setup.clone();
+        if let Some(list) = &mut setup.list {
+            list.viewport = rect(built.items);
+        }
         MenuLayout {
             style: *style,
-            font,
+            setup,
             screen,
             panel,
             title_pos,
@@ -1135,7 +1532,7 @@ impl Menu {
     /// not tell a menu that grew from one that moved.
     #[must_use]
     pub fn panel_size(&self, atlas: &FontAtlas, style: &MenuStyle) -> Vec2 {
-        self.laid_out(None, style, None, None, atlas, |ui, built| {
+        self.laid_out(None, style, None, &Setup::default(), atlas, |ui, built| {
             let (min, max) = ui.rect(built.panel).expect("laid out this frame");
             max - min
         })
@@ -1143,7 +1540,8 @@ impl Menu {
 
     /// Builds this menu with [`Menu::build`] and lays it out, in the calling
     /// thread's one menu tree, then hands the tree to `read`. Its text is in
-    /// `font`, registered in that tree, or in the bitmap font for `None`.
+    /// `setup`'s font, registered in that tree, or in the bitmap font for
+    /// none.
     ///
     /// **One tree per thread, rebuilt by every call** — two, one to measure
     /// in and one to place in — rather than a fresh
@@ -1152,15 +1550,16 @@ impl Menu {
     /// inline lengths, so a kept tree resolves each node's style from its own
     /// last resolve and lays out from Taffy's cache instead of from nothing.
     /// It holds no state a call can see: the pointer it begins each frame with
-    /// is off every rectangle, so no rule's `:hover` applies, and whatever the
-    /// last call built is replaced and pruned. `read` must not lay out a menu
-    /// itself, which would borrow the tree twice.
+    /// is off every rectangle, so no rule's `:hover` applies, every build sets
+    /// the item list's scroll, and whatever the last call built is replaced
+    /// and pruned. `read` must not lay out a menu itself, which would borrow
+    /// the tree twice.
     fn laid_out<R>(
         &self,
         screen: Option<Vec2>,
         style: &MenuStyle,
         skin: Option<&MenuSkin>,
-        font: Option<&'static Font>,
+        setup: &Setup,
         atlas: &FontAtlas,
         read: impl FnOnce(&Ui, &BuiltMenu) -> R,
     ) -> R {
@@ -1172,11 +1571,11 @@ impl Menu {
         tree.with(|tree| {
             let mut ui = tree.borrow_mut();
             ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
-            if let Some(font) = font {
+            if let Some(font) = setup.font {
                 ui.register_font(MENU_FONT, font)
                     .expect("the menu's family name is not reserved");
             }
-            let built = self.build(&mut ui, screen, style, skin, font.is_some());
+            let built = self.build(&mut ui, screen, style, skin, setup);
             let available = screen.map_or(AvailableSpace::MAX_CONTENT, AvailableSpace::definite);
             ui.layout(Vec2::ZERO, available, atlas);
             read(&ui, &built)
@@ -1190,8 +1589,11 @@ impl Menu {
     /// root that is only as big as the panel. `skin` is `Some` only when the
     /// tree is to be drawn: it binds the frames `default.css` names and adds
     /// the scrim, which is positioned out of the flow and moves nothing.
-    /// `in_font` names [`MENU_FONT`] on the root, which every span inherits;
-    /// otherwise the text is `default.css`'s bitmap font.
+    /// A `setup` with a font names [`MENU_FONT`] on the root, which every span
+    /// inherits; otherwise the text is `default.css`'s bitmap font. Its line
+    /// pitch, if any, is set on the item list for every row to inherit, and
+    /// its list, if any, caps the item list at its size, clips it and builds
+    /// only the rows it shows, scrolled to where the layout put them.
     ///
     /// **What comes from where.** Every length is `style`'s, set inline, because
     /// it is the pixel-art scale times a base metric and a stylesheet has no
@@ -1205,7 +1607,7 @@ impl Menu {
         screen: Option<Vec2>,
         style: &MenuStyle,
         skin: Option<&MenuSkin>,
-        in_font: bool,
+        setup: &Setup,
     ) -> BuiltMenu {
         use Declaration as D;
         if let Some(skin) = skin {
@@ -1218,7 +1620,7 @@ impl Menu {
         let mut root = screen.map_or_else(Vec::new, |screen| {
             vec![D::Width(px(screen.x)), D::Height(px(screen.y))]
         });
-        if in_font {
+        if setup.font.is_some() {
             root.push(D::FamilyName(Some(FamilyName::new(MENU_FONT))));
         }
         let panel_corners = style.panel_corners();
@@ -1261,10 +1663,30 @@ impl Menu {
                 D::Height(px(style.handle_size.y)),
             ],
         };
+        let caption = [D::FontSize(style.item_size)];
+        let mut list = vec![D::RowGap(Length::Px(style.item_gap))];
+        if let Some(line) = setup.line {
+            list.push(D::LineHeight(LineHeight::Px(line)));
+        }
+        if let Some(view) = &setup.list {
+            list.extend([
+                D::Overflow(Overflow::Hidden),
+                D::FlexShrink(0.0),
+                D::Width(px(view.size.x)),
+                D::Height(px(view.size.y)),
+            ]);
+        }
+        let (shown, offset) = setup.list.as_ref().map_or(
+            (0..self.items.len(), 0.0),
+            // The first row built is laid out at the list's top, so the
+            // offset is the scroll less how far down that row starts.
+            |view| (view.shown.clone(), view.scroll - view.shown_top),
+        );
 
         let mut title = None;
-        let mut rows = Vec::with_capacity(self.items.len());
+        let mut rows = Vec::with_capacity(shown.len());
         let mut panel_key = None;
+        let mut items_key = None;
         ui.block("menu-screen", &root, |ui| {
             if let Some(skin) = skin {
                 ui.span(".menu-scrim", skin.scrim, &[]);
@@ -1281,14 +1703,27 @@ impl Menu {
                             .key,
                         );
                     }
-                    ui.block(
-                        ".menu-items",
-                        &[D::RowGap(Length::Px(style.item_gap))],
-                        |ui| {
-                            for (index, item) in self.items.iter().enumerate() {
-                                rows.push(self.build_row(ui, index, item, &rows_style));
+                    if !self.subtitle.is_empty() {
+                        ui.block(".menu-captions", &[], |ui| {
+                            for line in &self.subtitle {
+                                ui.span(".menu-caption", line.as_str(), &caption);
                             }
-                        },
+                        });
+                    }
+                    items_key = Some(
+                        ui.block(".menu-items", &list, |ui| {
+                            // Set every build, not only a scrolled one's: the
+                            // tree is shared, and an offset a scrolled menu
+                            // left on this node would move the next menu's
+                            // rows.
+                            ui.set_scroll_offset(Vec2::new(0.0, offset));
+                            for (index, item) in self.items.iter().enumerate() {
+                                if shown.contains(&index) {
+                                    rows.push(self.build_row(ui, index, item, &rows_style));
+                                }
+                            }
+                        })
+                        .key,
                     );
                 })
                 .key,
@@ -1297,6 +1732,7 @@ impl Menu {
         BuiltMenu {
             panel: panel_key.expect("the screen builds its panel"),
             title,
+            items: items_key.expect("the panel builds its item list"),
             rows,
         }
     }
@@ -1354,9 +1790,14 @@ impl Menu {
     pub fn render_art(&self, dl: &mut DrawList, layout: &MenuLayout, skin: &MenuSkin) {
         let mut whole = DrawList::new();
         self.render(&mut whole, layout, skin);
-        for command in whole.commands() {
+        // Each under the clip it was drawn under, which a scrolled list's
+        // frames need: a row half out of view is cut at the list's edge.
+        for (command, clip) in whole.commands().iter().zip(whole.clips()) {
             if matches!(command, DrawCommand::Image { .. }) {
+                dl.push_clip(clip.min, clip.max);
                 dl.push_command(command.clone());
+                dl.pop_clip()
+                    .expect("the clip pushed above is still on the stack");
             }
         }
     }
@@ -1378,7 +1819,7 @@ impl Menu {
             Some(layout.screen),
             &layout.style,
             Some(skin),
-            layout.font,
+            &layout.setup,
             &FontAtlas::built_in(),
             |ui, _| ui.emit(dl),
         );
@@ -1417,6 +1858,9 @@ const PRESSED_IMAGE: &str = "menu-button-pressed";
 struct BuiltMenu {
     panel: NodeKey,
     title: Option<NodeKey>,
+    /// The block the rows are in.
+    items: NodeKey,
+    /// The rows built, which a scrolled list's render limits to those in view.
     rows: Vec<BuiltRow>,
 }
 
@@ -1466,6 +1910,148 @@ struct BuiltRow {
 /// window would have no frame visible on the short axis, and the scrim behind it
 /// would have nothing to dim.
 pub const FIT_FRACTION: f32 = 0.9;
+
+/// How far apart the item font sizes [`Menu::layout_with_font_fitted`] tries
+/// are, in pixels.
+///
+/// A quarter pixel rather than any size at all: a window dragged through
+/// every size in between then draws at a bounded set of sizes, so the glyph
+/// atlas is not handed a fresh rasterisation of every glyph for each pixel of
+/// the drag, and the fit is a bisection over a known list.
+pub const FIT_FONT_STEP: f32 = 0.25;
+
+/// The item font sizes [`Menu::layout_with_font_fitted`] tries, largest first:
+/// `largest` itself, then every [`FIT_FONT_STEP`] below it down to
+/// [`MenuStyle::MIN_FONT_SIZE`]. Only `largest` when it is no bigger than
+/// that.
+fn fit_sizes(largest: f32) -> Vec<f32> {
+    let mut sizes = vec![largest];
+    let spare = largest - MenuStyle::MIN_FONT_SIZE;
+    if spare > 0.0 {
+        let steps = (spare / FIT_FONT_STEP).floor() as u32;
+        sizes.extend(
+            (0..=steps)
+                .rev()
+                .map(|step| MenuStyle::MIN_FONT_SIZE + step as f32 * FIT_FONT_STEP)
+                .filter(|&size| size < largest),
+        );
+    }
+    sizes
+}
+
+/// A fitted row's line pitch in `font` at `style`: its `line-height: normal`
+/// rounded up to a whole pixel — see [`MenuStyle::shrunk`].
+fn row_line(font: &Font, style: &MenuStyle) -> f32 {
+    font.metrics().normal_line_height(style.item_size).ceil()
+}
+
+/// `extent` as a size in pixels.
+fn extent_size(extent: (u32, u32)) -> Vec2 {
+    Vec2::new(extent.0 as f32, extent.1 as f32)
+}
+
+/// Whether `point` is inside `rect`, edges included.
+fn contains(rect: (Vec2, Vec2), point: Vec2) -> bool {
+    point.x >= rect.0.x && point.x <= rect.1.x && point.y >= rect.0.y && point.y <= rect.1.y
+}
+
+/// How a menu's tree is built beyond its style: the font its text is in, and
+/// what [`Menu::layout_with_font_fitted`] decided. The default is the bitmap
+/// font and every row in the flow — what [`Menu::layout`] builds.
+#[derive(Debug, Clone, PartialEq, Default)]
+struct Setup {
+    /// The font the text is measured and drawn in; `None` for the bitmap font.
+    font: Option<&'static Font>,
+    /// Every row's line pitch, in whole pixels; `None` for the font's own.
+    line: Option<f32>,
+    /// The item list capped and scrolled; `None` for a list as tall as its
+    /// rows.
+    list: Option<ListView>,
+}
+
+/// A scrolled item list: see [`Menu::layout_with_font_fitted`].
+#[derive(Debug, Clone, PartialEq)]
+struct ListView {
+    /// The list's width and its capped height, in whole pixels.
+    size: Vec2,
+    /// Where the list shows its rows: `(min, max)` in screen pixels.
+    viewport: (Vec2, Vec2),
+    /// How far the rows are scrolled, in whole pixels.
+    scroll: f32,
+    /// The furthest they can be.
+    reach: f32,
+    /// The rows at least partly in view: the ones built, drawn and hit.
+    shown: Range<usize>,
+    /// How far below the list's top the first shown row starts, unscrolled.
+    shown_top: f32,
+}
+
+/// What [`Menu::measure`] reads off a menu.
+struct Measured {
+    panel: Vec2,
+    list: Vec2,
+    tallest: f32,
+}
+
+/// One size [`Menu::layout_with_font_fitted`] tries: the style and setup it
+/// builds with, and what that measured.
+struct Candidate {
+    style: MenuStyle,
+    setup: Setup,
+    measured: Measured,
+}
+
+/// Why [`Menu::layout_with_font_fitted`] could not fit a menu, even at the
+/// smallest size it may shrink to with its item list scrolled. Every length is
+/// in pixels, and `room` is [`FIT_FRACTION`] of the framebuffer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MenuFitError {
+    /// The panel is wider than the room, and a list that scrolls up and down
+    /// cannot make it narrower.
+    TooWide {
+        /// The item font size it was measured at.
+        font_size: f32,
+        /// The panel's width there.
+        width: f32,
+        /// The width it had to fit.
+        room: f32,
+    },
+    /// The frame, the title and the captions leave less height than the
+    /// list's tallest row — or the menu has no rows to scroll.
+    TooShort {
+        /// The item font size it was measured at.
+        font_size: f32,
+        /// The panel's height showing one row, its tallest.
+        height: f32,
+        /// The height it had to fit.
+        room: f32,
+    },
+}
+
+impl std::fmt::Display for MenuFitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::TooWide {
+                font_size,
+                width,
+                room,
+            } => write!(
+                f,
+                "the menu is {width}px wide at a {font_size}px font, the smallest                  it may shrink to, and the window has room for {room}px"
+            ),
+            Self::TooShort {
+                font_size,
+                height,
+                room,
+            } => write!(
+                f,
+                "the menu needs {height}px to show one row at a {font_size}px                  font, the smallest it may shrink to, and the window has room                  for {room}px"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MenuFitError {}
 
 #[cfg(test)]
 fn text_width(atlas: &FontAtlas, text: &str, size: f32) -> f32 {
@@ -1544,8 +2130,9 @@ impl MenuItemLayout {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MenuLayout {
     style: MenuStyle,
-    /// The font the text was measured in, `None` for the bitmap font.
-    font: Option<&'static Font>,
+    /// How the tree was built: the font the text was measured in and, for a
+    /// fitted layout, the rows' line pitch and a scrolled list.
+    setup: Setup,
     screen: Vec2,
     panel: (Vec2, Vec2),
     title_pos: Vec2,
@@ -1590,9 +2177,42 @@ impl MenuLayout {
     }
 
     /// Every button, in the order they are drawn.
+    ///
+    /// In a scrolled list every row is here, where the scroll put it: a row
+    /// scrolled out of view lies outside the [`viewport`](Self::viewport), and
+    /// outside the panel too, and is neither drawn nor hit — see
+    /// [`shows`](Self::shows).
     #[must_use]
     pub fn items(&self) -> &[MenuItemLayout] {
         &self.items
+    }
+
+    /// Where a scrolled item list shows its rows: `(min, max)` in screen
+    /// pixels, inside the panel. `None` when the list is not scrolled and
+    /// every row is in view.
+    ///
+    /// A row is drawn cut at this rectangle's edges and hit only inside it.
+    #[must_use]
+    pub fn viewport(&self) -> Option<(Vec2, Vec2)> {
+        self.setup.list.as_ref().map(|list| list.viewport)
+    }
+
+    /// How far the item list is scrolled, in pixels: zero unless it scrolls.
+    #[must_use]
+    pub fn scroll(&self) -> f32 {
+        self.setup.list.as_ref().map_or(0.0, |list| list.scroll)
+    }
+
+    /// Whether row `index` is at least partly in view, and so drawn and hit.
+    /// Every row is, unless the list scrolls; no row past the last is.
+    #[must_use]
+    pub fn shows(&self, index: usize) -> bool {
+        index < self.items.len()
+            && self
+                .setup
+                .list
+                .as_ref()
+                .is_none_or(|list| list.shown.contains(&index))
     }
 
     /// The whole framebuffer, as the rectangle the scrim covers.
@@ -2024,6 +2644,499 @@ mod tests {
         assert_eq!(drawn(&in_atlas), (Vec::new(), 1));
 
         assert_eq!(menu.layout(extent, &atlas()), before);
+    }
+
+    // -----------------------------------------------------------------------
+    // Captions
+    // -----------------------------------------------------------------------
+
+    /// [`pause_menu`] with two lines under its title.
+    fn captioned_menu() -> Menu {
+        let mut menu = pause_menu();
+        menu.subtitle = vec!["ARROWS MOVE".to_owned(), "ENTER PICKS".to_owned()];
+        menu
+    }
+
+    /// The `(text, pos, colour)` of every bitmap string `dl` draws.
+    fn texts(dl: &DrawList) -> Vec<(String, Vec2, [f32; 4])> {
+        dl.commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Text {
+                    text, pos, color, ..
+                } => Some((text.clone(), *pos, *color)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// **The lines under the title are drawn there, in the hint's colour, and
+    /// inside the panel** — between the title and the first row, in the
+    /// order given — and the rows are laid out below them rather than over
+    /// them.
+    #[test]
+    fn captions_are_drawn_under_the_title_in_the_hint_colour() {
+        let atlas = atlas();
+        let menu = captioned_menu();
+        let layout = menu.layout((960, 720), &atlas);
+        let mut dl = DrawList::new();
+        menu.render(&mut dl, &layout, &skin());
+        let drawn = texts(&dl);
+        let line = |wanted: &str| {
+            drawn
+                .iter()
+                .find(|(text, ..)| text == wanted)
+                .unwrap_or_else(|| panic!("{wanted} is not drawn: {drawn:?}"))
+                .clone()
+        };
+        let (_, first, first_colour) = line("ARROWS MOVE");
+        let (_, second, second_colour) = line("ENTER PICKS");
+        assert_eq!(first_colour, layout.style().hint_color);
+        assert_eq!(second_colour, layout.style().hint_color);
+
+        let title_bottom = layout.title_pos().y + line_height(layout.style().title_size);
+        let caption_bottom = second.y + line_height(layout.style().item_size);
+        let (panel_min, panel_max) = layout.panel();
+        assert!(
+            title_bottom <= first.y && first.y < second.y,
+            "the captions are not under the title, in order: {first:?} {second:?}"
+        );
+        assert!(
+            caption_bottom <= layout.items()[0].min.y,
+            "the first row starts at {} over a caption ending at {caption_bottom}",
+            layout.items()[0].min.y
+        );
+        for pos in [first, second] {
+            assert!(pos.x >= panel_min.x && pos.x <= panel_max.x, "{pos:?}");
+        }
+    }
+
+    /// **A caption takes no input from either device.** The keyboard walks
+    /// the three rows and wraps as it did without captions, the commit key
+    /// fires the rows' ids, and a pointer over a caption hovers and clicks
+    /// nothing — the highlight stays with the keyboard.
+    #[test]
+    fn captions_are_skipped_by_the_keyboard_and_the_pointer() {
+        let atlas = atlas();
+        let mut menu = captioned_menu();
+        let mut fired = Vec::new();
+        for _ in 0..=menu.items().len() {
+            fired.push(menu.activate());
+            menu.select_next();
+        }
+        assert_eq!(fired, [Some(1), Some(2), Some(3), Some(1)]);
+        assert!(menu.select_id(1));
+        menu.select_previous();
+        assert_eq!(menu.activate(), Some(3), "the wrap upward went astray");
+        assert!(menu.select_id(1));
+
+        let layout = menu.layout((960, 720), &atlas);
+        let mut dl = DrawList::new();
+        menu.render(&mut dl, &layout, &skin());
+        let (_, caption, _) = texts(&dl)
+            .into_iter()
+            .find(|(text, ..)| text == "ENTER PICKS")
+            .expect("the caption is drawn");
+        let on_caption = caption + Vec2::new(2.0, 2.0);
+        let mut ui = UiState::new();
+        assert_eq!(menu.point(&layout, &mut ui, press_at(on_caption)), None);
+        assert_eq!(menu.point(&layout, &mut ui, release_at(on_caption)), None);
+        assert_eq!(
+            menu.state(0),
+            ButtonState::Hovered,
+            "the caption took the hover"
+        );
+        assert_eq!(menu.selected(), 0);
+    }
+
+    /// A menu of captions and no rows has nothing to select or fire, and lays
+    /// out, fitted or not, without an index to panic on.
+    #[test]
+    fn a_menu_of_only_captions_selects_nothing() {
+        let mut menu = Menu::new("NOTICE", Vec::new());
+        menu.subtitle = vec!["NOTHING TO CHOOSE".to_owned()];
+        menu.select_next();
+        menu.select_previous();
+        assert_eq!(menu.activate(), None);
+        assert_eq!(menu.selected_item(), None);
+        let layout = menu.layout((960, 720), &atlas());
+        assert!(layout.items().is_empty());
+        let fitted = menu
+            .layout_with_font_fitted((480, 360), &MenuStyle::pixel_art(1), font_like_roboto())
+            .expect("a notice fits");
+        assert!(fitted.items().is_empty() && fitted.viewport().is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Fitted in a font, and scrolled
+    // -----------------------------------------------------------------------
+
+    /// Every glyph's advance in [`font_like_roboto`], in ems.
+    const ADVANCE_EM: f32 = 0.55;
+
+    /// A stand-in for a parsed UI font such as Roboto: every glyph
+    /// [`ADVANCE_EM`] wide, on a line 1.172 em tall, as Roboto's own metrics
+    /// give it. One parse per process, as an app's registered font is, so two
+    /// layouts in it compare equal.
+    fn font_like_roboto() -> &'static Font {
+        use crate::font::FontMetrics;
+        static FONT: std::sync::OnceLock<&'static Font> = std::sync::OnceLock::new();
+        FONT.get_or_init(|| {
+            Font::fixed_pitch(
+                FontMetrics {
+                    units_per_em: 1000,
+                    ascent: 928.0,
+                    descent: -244.0,
+                    line_gap: 0.0,
+                },
+                ADVANCE_EM * 1000.0,
+            )
+        })
+    }
+
+    /// The row count of [`scene_menu`].
+    const SCENES: usize = 17;
+
+    /// A stand-in for EW's scene menu: [`SCENES`] rows, each a label and a
+    /// one-line description in the hint slot — the longest seventy
+    /// characters — under a title and two captions.
+    fn scene_menu() -> Menu {
+        let items = (0..SCENES)
+            .map(|index| {
+                let description = format!("{:02} {}", index, "a".repeat(40 + index * 2))
+                    .chars()
+                    .take(70)
+                    .collect::<String>();
+                MenuItem::new(
+                    100 + index as WidgetId,
+                    format!("SCENE {index:02} NAME"),
+                    description,
+                )
+            })
+            .collect();
+        let mut menu = Menu::new("SCENES", items);
+        menu.subtitle = vec![
+            "UP/DOWN MOVES - ENTER LOADS - ESC CLOSES".to_owned(),
+            "LOADING A SCENE DISCARDS UNSAVED WORK".to_owned(),
+        ];
+        menu
+    }
+
+    /// The smallest window EW supports.
+    const SMALL: (u32, u32) = (480, 360);
+
+    /// The fitted layout of `menu` at `extent`, from EW's style.
+    fn fitted(menu: &Menu, extent: (u32, u32)) -> MenuLayout {
+        menu.layout_with_font_fitted(extent, &MenuStyle::pixel_art(2), font_like_roboto())
+            .unwrap_or_else(|error| panic!("{extent:?}: {error}"))
+    }
+
+    /// Whether `inner` lies wholly inside `outer`.
+    fn within(inner: (Vec2, Vec2), outer: (Vec2, Vec2)) -> bool {
+        inner.0.x >= outer.0.x
+            && inner.0.y >= outer.0.y
+            && inner.1.x <= outer.1.x
+            && inner.1.y <= outer.1.y
+    }
+
+    /// **Seventeen rows with descriptions and two captions fit a 480x360
+    /// window.** The panel is inside the fit's share of the framebuffer; the
+    /// font is no smaller than the minimum; the art is at a whole-number
+    /// scale with the art's corners; seventeen rows do not fit that height
+    /// at any legible size, so the list scrolls, and its viewport is inside
+    /// the panel, every row drawn is inside the panel's width and reaches
+    /// into the viewport, and the widest description ends inside its row.
+    /// The same inputs lay out the same menu.
+    #[test]
+    fn a_seventeen_row_menu_fits_a_480_by_360_window() {
+        let menu = scene_menu();
+        let layout = fitted(&menu, SMALL);
+        let style = layout.style();
+        let screen = extent_size(SMALL);
+        let panel = layout.panel();
+        assert!(
+            within(panel, (Vec2::ZERO, screen)),
+            "the panel {panel:?} leaves the window"
+        );
+        assert!(layout.panel_size().cmple(screen * FIT_FRACTION).all());
+        assert!(
+            style.item_size >= MenuStyle::MIN_FONT_SIZE,
+            "{}",
+            style.item_size
+        );
+        assert!(
+            style.scale >= 1.0 && style.scale.fract() == 0.0,
+            "{}",
+            style.scale
+        );
+        assert_eq!(style.panel_corners().left, PANEL_INSETS.left * style.scale);
+
+        let viewport = layout
+            .viewport()
+            .expect("seventeen rows scroll at 360 tall");
+        assert!(within(viewport, panel), "{viewport:?} leaves {panel:?}");
+        let shown: Vec<usize> = (0..SCENES).filter(|&index| layout.shows(index)).collect();
+        assert!(shown.len() > 1 && shown.len() < SCENES, "{shown:?}");
+        for &index in &shown {
+            let row = layout.items()[index];
+            assert!(
+                row.min.x >= panel.0.x && row.max.x <= panel.1.x,
+                "row {index} {row:?} is wider than the panel"
+            );
+            assert!(
+                row.max.y > viewport.0.y && row.min.y < viewport.1.y,
+                "row {index} is drawn but nowhere in view"
+            );
+            let description = &menu.items()[index].hint;
+            let end =
+                row.hint_pos.x + description.chars().count() as f32 * ADVANCE_EM * style.item_size;
+            assert!(
+                end <= row.max.x + 0.5,
+                "row {index}'s description ends at {end}"
+            );
+        }
+        assert!(within(
+            (layout.items()[0].min, layout.items()[0].max),
+            viewport
+        ));
+        assert_eq!(fitted(&menu, SMALL), layout, "the fit is not deterministic");
+    }
+
+    /// **The fit is the largest step that fits.** At a window big enough to
+    /// fit without scrolling but too small for the ceiling, the chosen size
+    /// fits and the next step up does not; and a window big enough for the
+    /// ceiling gets the ceiling, unscrolled.
+    #[test]
+    fn the_fit_takes_the_largest_step_that_fits() {
+        let menu = scene_menu();
+        let ceiling = MenuStyle::pixel_art(2);
+        let font = font_like_roboto();
+        let extent = (1100, 900);
+        let layout = fitted(&menu, extent);
+        let chosen = layout.style().item_size;
+        assert!(layout.viewport().is_none(), "{extent:?} scrolled");
+        assert!(
+            chosen < ceiling.item_size && chosen > MenuStyle::MIN_FONT_SIZE,
+            "{extent:?} does not exercise the shrink: {chosen}"
+        );
+        let panel_at = |size: f32| {
+            let style = ceiling.shrunk(size);
+            let setup = Setup {
+                font: Some(font),
+                line: Some(row_line(font, &style)),
+                list: None,
+            };
+            menu.measure(&style, &setup).panel
+        };
+        let room = extent_size(extent) * FIT_FRACTION;
+        assert!(panel_at(chosen).cmple(room).all());
+        assert!(
+            !panel_at(chosen + FIT_FONT_STEP).cmple(room).all(),
+            "a step larger than {chosen} fits too"
+        );
+
+        let roomy = fitted(&menu, (3840, 2160));
+        assert_eq!(roomy.style().item_size, ceiling.item_size);
+        assert_eq!(roomy.style().scale, ceiling.scale);
+        assert!(roomy.viewport().is_none());
+    }
+
+    /// **Below the minimum the fit refuses, and says why.** A window too
+    /// narrow for the descriptions at [`MenuStyle::MIN_FONT_SIZE`] is too
+    /// wide a menu, which scrolling cannot help; a window too short for the
+    /// title, the captions and one row is too short. Neither is laid out at
+    /// a smaller size than the minimum.
+    #[test]
+    fn the_fit_refuses_honestly_below_the_minimum() {
+        let menu = scene_menu();
+        let style = MenuStyle::pixel_art(2);
+        let font = font_like_roboto();
+        match menu.layout_with_font_fitted((300, 360), &style, font) {
+            Err(MenuFitError::TooWide {
+                font_size,
+                width,
+                room,
+            }) => {
+                assert_eq!(font_size, MenuStyle::MIN_FONT_SIZE);
+                assert!(
+                    width > room && room == 300.0 * FIT_FRACTION,
+                    "{width} {room}"
+                );
+            }
+            other => panic!("a 300px window gave {other:?}"),
+        }
+        match menu.layout_with_font_fitted((480, 60), &style, font) {
+            Err(MenuFitError::TooShort {
+                font_size,
+                height,
+                room,
+            }) => {
+                assert_eq!(font_size, MenuStyle::MIN_FONT_SIZE);
+                assert!(height > room, "{height} {room}");
+            }
+            other => panic!("a 60px window gave {other:?}"),
+        }
+    }
+
+    /// **The keyboard keeps its selection in view, all the way down and all
+    /// the way back.** Every step of a walk to the last row and back to the
+    /// first leaves the selected row wholly inside the viewport, both for a
+    /// caller that only lays out and draws and for one that also runs the
+    /// pointer — which keeps the list still while the selection moves inside
+    /// it, as a list does.
+    #[test]
+    fn scrolling_keeps_the_selected_row_in_view_down_and_up() {
+        for with_pointer in [false, true] {
+            let mut menu = scene_menu();
+            let mut ui = UiState::new();
+            let mut scrolls = Vec::new();
+            let mut step = |menu: &mut Menu, moved: &str| {
+                let layout = fitted(menu, SMALL);
+                let viewport = layout.viewport().expect("the list scrolls");
+                let selected = layout.items()[menu.selected()];
+                assert!(
+                    layout.shows(menu.selected()) && within((selected.min, selected.max), viewport),
+                    "after {moved} to row {}, {selected:?} is not wholly in {viewport:?}",
+                    menu.selected(),
+                );
+                if with_pointer {
+                    menu.point(&layout, &mut ui, PointerInput::hovering(OFF_SCREEN));
+                }
+                scrolls.push(layout.scroll());
+            };
+            step(&mut menu, "opening");
+            for _ in 1..SCENES {
+                menu.select_next();
+                step(&mut menu, "down");
+            }
+            assert_eq!(menu.selected(), SCENES - 1);
+            for _ in 1..SCENES {
+                menu.select_previous();
+                step(&mut menu, "up");
+            }
+            assert_eq!(menu.selected(), 0);
+            assert!(scrolls[SCENES - 1] > 0.0, "the walk down never scrolled");
+            assert_eq!(*scrolls.last().expect("walked"), 0.0);
+            if with_pointer {
+                // One step up from the bottom stays inside the view, so the
+                // list does not move.
+                assert_eq!(scrolls[SCENES], scrolls[SCENES - 1], "{scrolls:?}");
+            }
+        }
+    }
+
+    /// **A row scrolled out of view is neither drawn nor hit.** With the last
+    /// row selected the first is scrolled off the top: a press where it was
+    /// placed hovers and fires nothing, a row in view still answers, and the
+    /// draw list holds the title, the captions and the shown rows' text and
+    /// frames and nothing of the others.
+    #[test]
+    fn rows_scrolled_out_of_view_are_neither_drawn_nor_hit() {
+        let mut menu = scene_menu();
+        menu.select_previous();
+        let last = SCENES - 1;
+        assert_eq!(menu.selected(), last);
+        let layout = fitted(&menu, SMALL);
+        let viewport = layout.viewport().expect("the list scrolls");
+        assert!(!layout.shows(0), "the first row is still in view");
+        assert!(layout.shows(last));
+
+        let mut ui = UiState::new();
+        let hidden = layout.items()[0];
+        let where_it_was = (hidden.min + hidden.max) * 0.5;
+        assert_eq!(menu.point(&layout, &mut ui, press_at(where_it_was)), None);
+        assert_eq!(menu.point(&layout, &mut ui, release_at(where_it_was)), None);
+        assert_eq!(
+            menu.state(0),
+            ButtonState::Idle,
+            "a hidden row took the hover"
+        );
+        let visible = layout.items()[last];
+        let on_it = (visible.min + visible.max) * 0.5;
+        menu.point(&layout, &mut ui, press_at(on_it));
+        assert_eq!(
+            menu.point(&layout, &mut ui, release_at(on_it)),
+            Some(100 + last as WidgetId)
+        );
+
+        let shown = (0..SCENES).filter(|&index| layout.shows(index)).count();
+        let mut dl = DrawList::new();
+        menu.render(&mut dl, &layout, &skin());
+        let runs: Vec<Vec2> = dl
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Glyphs { origin, .. } => Some(*origin),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 1 + 2 + 2 * shown, "title, captions, shown rows");
+        let frames = pictures(&dl).len();
+        assert_eq!(
+            frames,
+            1 + 9 + 9 * shown,
+            "scrim, panel, shown rows' frames"
+        );
+        // Every row's text starts inside the viewport's reach: none is drawn
+        // at a hidden row's place.
+        for origin in &runs[3..] {
+            assert!(
+                origin.y + layout.style().item_size > viewport.0.y && origin.y < viewport.1.y,
+                "a row's text at {origin:?} is out of {viewport:?}"
+            );
+        }
+        // And the art alone keeps the list's clip.
+        let mut art = DrawList::new();
+        menu.render_art(&mut art, &layout, &skin());
+        assert_eq!(art.len(), frames);
+        assert!(
+            art.clips()[10..]
+                .iter()
+                .all(|clip| clip.min == viewport.0 && clip.max == viewport.1),
+            "a row's frame lost the list's clip"
+        );
+    }
+
+    /// **The wheel scrolls the list, and the keyboard takes it back.** A
+    /// wheel over the panel moves the list and reports it — even off the
+    /// selection, which stays where it was — a wheel off the panel, or past
+    /// the end, reports nothing, and the next keyboard move scrolls its row
+    /// back into view.
+    #[test]
+    fn the_wheel_scrolls_the_list_and_the_keyboard_takes_it_back() {
+        let mut menu = scene_menu();
+        let layout = fitted(&menu, SMALL);
+        let (panel_min, panel_max) = layout.panel();
+        let over = (panel_min + panel_max) * 0.5;
+        assert_eq!(layout.scroll(), 0.0);
+        assert!(!menu.scroll_wheel(&layout, Vec2::new(1.0, 1.0), Vec2::new(0.0, 60.0)));
+        assert!(menu.scroll_wheel(&layout, over, Vec2::new(0.0, 60.0)));
+        let wheeled = fitted(&menu, SMALL);
+        assert_eq!(wheeled.scroll(), 60.0, "the wheel did not move the list");
+        assert_eq!(menu.selected(), 0);
+        assert!(!wheeled.shows(0), "60px should scroll the first row away");
+
+        assert!(menu.scroll_wheel(&wheeled, over, Vec2::new(0.0, 10_000.0)));
+        let bottom = fitted(&menu, SMALL);
+        assert!(!menu.scroll_wheel(&bottom, over, Vec2::new(0.0, 10.0)));
+        assert!(bottom.shows(SCENES - 1));
+
+        menu.select_next();
+        let back = fitted(&menu, SMALL);
+        let row = back.items()[1];
+        assert!(within(
+            (row.min, row.max),
+            back.viewport().expect("scrolls")
+        ));
+
+        // A menu that fits unscrolled has no list for the wheel to move.
+        let small = pause_menu();
+        let unscrolled = small.layout((960, 720), &atlas());
+        assert!(!menu.clone().scroll_wheel(
+            &unscrolled,
+            unscrolled.panel_centre(),
+            Vec2::new(0.0, 10.0)
+        ));
     }
 
     // -----------------------------------------------------------------------

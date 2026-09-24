@@ -283,6 +283,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Menus that fit a small window in an app's font** —
+  `Menu::layout_with_font_fitted(extent, &style, font)` lays a menu out in a
+  registered font at the largest size up to `style` whose panel fits
+  `FIT_FRACTION` of the window. It first shrinks every font size and gap by one
+  factor, the item font in `FIT_FONT_STEP` steps down to
+  `MenuStyle::MIN_FONT_SIZE` (8px), with the art kept at a whole-number scale of
+  at least one. If even that is too tall, it caps the item list at the height
+  left and scrolls it, under a fixed title. It returns a `MenuFitError` —
+  `TooWide` or `TooShort`, naming the size and the room — rather than a menu
+  that does not fit. A scrolled list keeps the keyboard's selection in view,
+  scrolls under `Menu::scroll_wheel(&layout, pointer, delta)`, and neither draws
+  nor hits a row scrolled out of view: `MenuLayout::viewport`,
+  `MenuLayout::scroll` and `MenuLayout::shows(index)` say which part is shown.
+  `Menu::render_art` now keeps each frame's clip. `Menu::layout` and
+  `Menu::layout_with_font` lay out what they did.
+- **`Menu::subtitle`** — lines under a menu's title, centred and drawn in the
+  hint colour (`.menu-caption` in `default.css`). They are not rows: the
+  keyboard, the pointer and `Menu::items` indices are unaffected.
 - **`crcbl_ui::tree::Ui::scroll_wheel(delta)`** scrolls the `overflow: scroll`
   blocks under this frame's pointer by a wheel's movement, each axis going to
   the innermost block that can still move along it and chaining outward once it

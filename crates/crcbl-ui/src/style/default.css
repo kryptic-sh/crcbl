@@ -576,6 +576,14 @@ menu {
   color: color(srgb-linear 1 0.94 0.55);
 }
 
+/* Lines under the title: the controls, a warning. They explain rather than
+ * offer, so they are drawn in the hint's colour, below. */
+.menu-captions {
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+}
+
 .menu-items {
   flex-direction: column;
 }
@@ -594,7 +602,8 @@ menu-item:active {
 }
 
 .menu-label,
-.menu-hint {
+.menu-hint,
+.menu-caption {
   flex-shrink: 0;
 }
 
@@ -602,8 +611,10 @@ menu-item:active {
   color: color(srgb-linear 0.94 0.95 1);
 }
 
-/* A key hint, a slider's value or a cycler's caption: dimmer than its label. */
-.menu-hint {
+/* A key hint, a slider's value or a cycler's caption: dimmer than its label.
+ * And a line under the title, which is no row's. */
+.menu-hint,
+.menu-caption {
   color: color(srgb-linear 0.62 0.64 0.82);
 }
 

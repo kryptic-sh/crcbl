@@ -3041,6 +3041,54 @@ the gaps below.
   exercises it), a list inside nested scroll containers or a modal, and
   `Ui::enabled` on the slider and split pointer paths.
 
+## What the fitted, scrolled menu left open (2026-09-25)
+
+`Menu::subtitle`, `Menu::layout_with_font_fitted` and the scrolled item list
+(`MenuLayout::viewport`/`scroll`/`shows`, `Menu::scroll_wheel`) landed for EW's
+scene menu with the gaps below.
+
+- **Needs a decision: scroll at the smallest size, or at the largest that fits
+  the width.** Once even `MenuStyle::MIN_FONT_SIZE` is too tall, the list
+  scrolls at that minimum, which shows the most rows. The cost is a short, wide
+  window: by this rule a seventeen-row menu at 1440x400 scrolls in 8px text even
+  where its width would allow its ceiling's (reasoned from the rule, not run).
+  The alternative — scroll at the largest step whose _width_ fits — reads better
+  there and shows fewer rows everywhere. The tests' stand-in for EW's menu is
+  held near the minimum by its seventy-character descriptions at 480 wide
+  anyway, so at EW's smallest window the two differ little.
+- **A keyboard-only caller sees the selection held at the list's edge.**
+  `Menu::layout_with_font_fitted` is `&self`, so the scroll it settles on
+  reaches the model only through `Menu::point` or `Menu::scroll_wheel`. A caller
+  that calls neither always sees the selection, but walking back up from the
+  bottom scrolls the list with it instead of moving the selection inside a still
+  list. Considered and declined: writing the scroll back from the layout through
+  a `Cell`, which would make `Menu` lose `Sync`. An explicit
+  `Menu::keep_scroll(&MenuLayout)` is the other way, if a caller needs it.
+- **EW's fit test must look at the rows in view.** In a scrolled layout
+  `MenuLayout::items` holds every row where the scroll put it, so a row out of
+  view lies outside the panel by design; a check that every row is inside the
+  panel has to take the rows `MenuLayout::shows` and hold them to
+  `MenuLayout::viewport`, which is inside the panel.
+- **`MenuSet` knows nothing of the fit or the wheel**: `MenuSet::point` lays out
+  with `Menu::layout` (the bitmap font), so the engine-drawn menus never scroll.
+  EW drives its `Menu` directly.
+- **A fitted row's line pitch is rounded up to a whole pixel**, so a fitted
+  layout at a style differs from `Menu::layout_with_font` at the same style by
+  up to a pixel a row. It is what lets a scrolled render build only the rows in
+  view and land them where the layout put them.
+- **Considered and declined: `MenuItemKind::Caption`**, a non-selectable row
+  anywhere in the list. EW's lines sit under the title, and a row that is not
+  selectable would touch the selection's wrap, the first selectable row, the
+  pointer and every index a caller holds. Worth it only when a caption between
+  rows is needed.
+- **Not measured**: the fit lays the menu out about two plus log2 of the steps
+  times per call (one step per `FIT_FONT_STEP` from the ceiling to the minimum),
+  and a frame calls it for its hit test and its drawing. Not benchmarked.
+- **Untested**: the fit in a real TTF (the tests use a synthetic fixed-pitch
+  font); a slider dragged in a scrolled list, or scrolled away mid-drag; the
+  pixels of a scrolled menu (no golden). A menu too wide at the minimum is
+  refused, never truncated or ellipsised.
+
 ## What UI rung 5 shipped without (2026-09-16)
 
 `crcbl_ui::font` landed with the gaps below.
@@ -3074,17 +3122,19 @@ the gaps below.
   `Inter` is never looked up; a list of names would need an interned list type,
   since `NodeStyle` is `Copy`. A registered font must be `&'static` (as
   `DrawList::glyphs` already requires). `Menu::layout_with_font` takes the
-  caller's `MenuStyle` — there is no scale fit in a font, because
-  `Menu::layout`'s fit assumes the bitmap font's advances scale exactly — and
-  there is no font counterpart of `Menu::panel_size`; a cycler's chevrons hold
-  its caption still only in a font whose `<`, `>` and space advance alike. The
-  warning for a name nothing is registered under names the span's selector, not
-  the family (`FamilyName` is a hash). **Untested**: a text input's caret stops
-  in a registered font (`text_input`'s `measure` takes the resolved font, but no
-  test drives it), and the pixels a registered real TTF rasterises to — the
-  tests use a synthetic fixed-pitch `Font` that has no outlines. EW's
-  `ui_font.rs` still rewrites `DrawCommand::Text` itself; moving it to
-  `register_font` is EW's change, not made.
+  caller's `MenuStyle` as given — `Menu::layout`'s scale fit assumes the bitmap
+  font's advances scale exactly; the fit in a font is
+  `Menu::layout_with_font_fitted`, whose gaps are listed under _What the fitted,
+  scrolled menu left open_ — and there is no public font counterpart of
+  `Menu::panel_size`; a cycler's chevrons hold its caption still only in a font
+  whose `<`, `>` and space advance alike. The warning for a name nothing is
+  registered under names the span's selector, not the family (`FamilyName` is a
+  hash). **Untested**: a text input's caret stops in a registered font
+  (`text_input`'s `measure` takes the resolved font, but no test drives it), and
+  the pixels a registered real TTF rasterises to — the tests use a synthetic
+  fixed-pitch `Font` that has no outlines. EW's `ui_font.rs` still rewrites
+  `DrawCommand::Text` itself; moving it to `register_font` is EW's change, not
+  made.
 
 ## What UI rung 4 shipped without (2026-09-16)
 
