@@ -1,7 +1,7 @@
 //! `docs/plan/55-water.md` rung 1's price: the two water passes over the still
 //! pool, and the same frame with no body.
 //!
-//! `docs/plan/43-render-standards.md` prices a rung before it counts as built,
+//! Topic 43 prices a rung before it counts as built,
 //! off `crcbl_render::PassStats`; this is that measurement for the surface
 //! passes. `tests/render_e2e.rs`'s `still_pool` module holds the picture.
 

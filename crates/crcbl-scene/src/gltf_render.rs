@@ -1103,7 +1103,7 @@ fn vertex(
         // `from_normal` fills the frame with
         // `crcbl_shaders::vertex::orthonormal_basis`' stand-in, which agrees
         // with no UV parameterisation — so the mesh must not claim
-        // `MESH_AUTHORED_TANGENTS`, and `docs/plan/43-render-standards.md` §2
+        // `MESH_AUTHORED_TANGENTS`, and topic 43 §2
         // says the fragment stage takes its screen-space derivative frame
         // instead until the MikkTSpace call `docs/backlog.md` carries lands.
         return MeshVertex::from_normal(position, normal, [1.0; 4], uv, range);

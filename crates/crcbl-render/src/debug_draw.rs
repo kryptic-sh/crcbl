@@ -11,7 +11,7 @@
 //! ```
 //!
 //! `docs/plan/07-ui-debug.md` item 5 is what this is, and
-//! `docs/plan/43-render-standards.md`'s foundations block is where it was
+//! topic 43's foundations block is where it was
 //! scheduled: the layer the four owed views —
 //! topic 45's cascade overlay and atlas view,
 //! topic 25's cluster bounds and the light list's

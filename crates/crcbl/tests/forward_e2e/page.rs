@@ -1,6 +1,6 @@
 //! The base-colour page's mip chain, read back level by level.
 //!
-//! `docs/plan/43-render-standards.md`'s filtering rung: every layer of the page
+//! Topic 43's filtering rung: every layer of the page
 //! goes up with the chain `crcbl::render::mip` builds on the host, one copy per
 //! level. A picture cannot show it — a trilinear fetch blends whatever the
 //! levels hold — so this copies each level of the page's image into a buffer

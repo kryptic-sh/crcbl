@@ -1819,7 +1819,7 @@ fn sky_camera_looking_up(projection: Projection) -> crcbl::render::Camera {
 /// **The background is the gradient the ray through it sees**, evaluated on the
 /// host and compared texel by texel, from a camera aimed at each hemisphere.
 ///
-/// `docs/plan/43-render-standards.md` §8's second half. The sky already reached
+/// Topic 43 §8's second half. The sky already reached
 /// the ambient term and the reflection fallback; what this asks is whether the
 /// pass that *draws* it puts the right radiance at the right pixel. Every part
 /// of `sky.slang` is load-bearing for that: the unprojection, the view rotation,

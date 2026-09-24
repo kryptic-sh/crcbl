@@ -1863,7 +1863,7 @@ fn the_mask_cuts_the_plate_its_depth_and_its_shadow(image: &Image) {
     );
 }
 
-/// `docs/plan/43-render-standards.md` §3's **alpha-mask cutout**, drawn — the
+/// Topic 43 §3's **alpha-mask cutout**, drawn — the
 /// only frame in the tree that discards a fragment.
 ///
 /// The golden is not the evidence and cannot be, on
@@ -2529,7 +2529,7 @@ fn the_corrugation_is_regularised_and_the_flat_band_is_not_touched(image: &Image
     );
 }
 
-/// `docs/plan/43-render-standards.md` §2's rung 4, second half — **glTF's
+/// Topic 43 §2's rung 4, second half — **glTF's
 /// `doubleSided`** — drawn.
 ///
 /// The golden is the picture that was reviewed and it cannot be the evidence:
@@ -3177,7 +3177,7 @@ const ROUGH_SKY_BELOW_CEILING: f32 = 35.0;
 /// **The sky is the environment a missed ray falls back to**, and it is read
 /// along the ray rather than applied as a constant.
 ///
-/// `docs/plan/43-render-standards.md` §8 ranks a sky above scenery for exactly
+/// Topic 43 §8 ranks a sky above scenery for exactly
 /// this: the environment SSR falls back to and the ambient a metal needs are
 /// one term. The ambient half landed first; this is the reflection half.
 ///
@@ -7426,7 +7426,7 @@ fn predicted_drawn_channel(
 /// A mirror under an atmosphere reflects the **sky-view LUT**, not the three
 /// bands that stand in for it.
 ///
-/// `docs/plan/43-render-standards.md` §8's reflection half, and the fixture is
+/// Topic 43 §8's reflection half, and the fixture is
 /// arranged so that the two answers are distinguishable in one frame:
 /// [`Scene::AtmosphereMirror`] looks level across a metallic floor with the sun
 /// about 45° to the right, and the two bands sit at mirrored columns of one
@@ -7806,7 +7806,7 @@ fn the_gradient_mirror_scene_reflects_its_bands_and_matches_its_golden() {
 
 /// The frame drawn under an atmosphere is the sky-view LUT the host marched.
 ///
-/// `docs/plan/43-render-standards.md` §8's device half. The fixture puts no
+/// Topic 43 §8's device half. The fixture puts no
 /// geometry in the frame, so every pixel is `sky.slang`'s background arm; this
 /// unprojects each band's pixels into world rays, reads the same LUT through
 /// `crcbl_shaders::atmosphere::SkyView::radiance`, and holds the two together.
@@ -8040,7 +8040,7 @@ const fn sun_disc_ring(centre: (u32, u32)) -> [(u32, u32); 4] {
 
 /// **The sun's own disc is drawn, and it is the disc the host predicts.**
 ///
-/// `docs/plan/43-render-standards.md` §8's last piece. The sky-view LUT holds
+/// Topic 43 §8's last piece. The sky-view LUT holds
 /// the air's scattered light and nothing else — the sun is a quarter of a
 /// degree across against texels several degrees wide — so until `sky.slang`
 /// drew a disc, the brightest thing in a real sky was missing from every frame
@@ -8250,7 +8250,7 @@ fn predicted_sky_ambient_channel(
 /// **The sky's ambient term lights a surface on a device, and what it lights it
 /// with is `SkyView::irradiance` of the LUT this frame marched.**
 ///
-/// `docs/plan/43-render-standards.md` §8's third half. The projection reaching
+/// Topic 43 §8's third half. The projection reaching
 /// the frame block is held by `crcbl-render`'s
 /// `an_atmosphere_writes_the_luts_own_ambient_term`, which reads the rows back
 /// out of the bytes `begin_frame` wrote; what those rows are *for* was held by

@@ -4,7 +4,7 @@
 //!
 //! [`crate::fog`] answers the second question alone, in closed form, for a
 //! medium that only *absorbs*. This module is the other half of the standard
-//! froxel volumetric pass described in `docs/plan/43-render-standards.md` §4:
+//! froxel volumetric pass described in topic 43 §4:
 //! the frustum is cut into slices along `z`, each slice is shaded once against
 //! the lights its froxel already lists, and the column is composited front to
 //! back. What a slice owes that composite is two numbers —

@@ -15,7 +15,7 @@
 //! [`ArrayPages`](crcbl_hal::BindingModel::ArrayPages) page: one image, one
 //! descriptor, and a layer index in the material row selecting between them.
 //! [`upload_texture_mip_layers`] is the same page with every layer's mip chain
-//! behind it — `docs/plan/43-render-standards.md`'s filtering rung, whose chain
+//! behind it — topic 43's filtering rung, whose chain
 //! [`crate::mip`] builds on the host.
 //!
 //! All three go through the same body, and it records **one copy per level of

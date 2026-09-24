@@ -182,7 +182,7 @@
 
 // The vertex pool's two streams, and the arithmetic that reads one back.
 //
-// `docs/plan/43-render-standards.md` §2's 2026-08-30 layout: the pool is one
+// Topic 43 §2's 2026-08-30 layout: the pool is one
 // storage buffer holding `POSITION_WORDS` words of position for every vertex
 // and then `ATTRIBUTE_WORDS` words of attributes for every vertex, and
 // `FrameUniforms::vertex_pool` says where the second region starts. Everything
@@ -953,7 +953,7 @@ struct GpuMesh
 /// parameterisation at all, so a normal map read through it is rotated by an
 /// arbitrary angle per vertex.
 ///
-/// `docs/plan/43-render-standards.md` §2's rung 1 in one bit.
+/// Topic 43 §2's rung 1 in one bit.
 static const uint MESH_AUTHORED_TANGENTS = 1;
 
 /// The page column value that means "this material names no page", matching
@@ -964,7 +964,7 @@ static const uint MESH_AUTHORED_TANGENTS = 1;
 /// layer 0 is an ordinary layer. Every page read in this file tests against it
 /// — `base_color_texel` and `shading_normal_of` are the two — and returns the
 /// value a surface with no texture is supposed to have rather than fetching a
-/// texel somebody had to remember to write. `docs/plan/43-render-standards.md`
+/// texel somebody had to remember to write. Topic 43
 /// §2's row (d) is where that trade is argued, and
 /// `crcbl_shaders::mesh::the_shader_declares_the_same_no_page_the_host_does` is
 /// what holds the two declarations together.
@@ -992,7 +992,7 @@ struct GpuMaterial
     /// `normal_texture`.
     ///
     /// **Two layers to a word, and that is what makes the row 64 bytes.**
-    /// `docs/plan/43-render-standards.md` §2 sizes it for four page rows, the
+    /// Topic 43 §2 sizes it for four page rows, the
     /// alpha cutoff and flags; written as four separate `uint`s the row needs
     /// eighteen words and `std430` rounds it to eighty. A page layer index is
     /// bounded by the device's maximum array layers, so sixteen bits is a limit
@@ -1168,7 +1168,7 @@ static const uint TILING_PHYSICAL = 1;
 /// Zero is `OPAQUE`, so a row nobody marked is not masked and pays nothing —
 /// `TILING_AUTHORED`'s arrangement exactly. There is no `BLEND` bit: this
 /// renderer builds no blended pipeline, and a mode nothing could honour is not
-/// a mode. See `docs/plan/43-render-standards.md` §3.
+/// a mode. See topic 43 §3.
 static const uint ALPHA_MODE_MASK = 1;
 
 /// `GpuMaterial::flags` bit 1: glTF's `doubleSided: true`, matching
@@ -2269,7 +2269,7 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
 /// The depth-only vertex stage: stream 0's twelve bytes, the instance's
 /// transform, and nothing else.
 ///
-/// `docs/plan/43-render-standards.md` §2 split the pool into a position region
+/// Topic 43 §2 split the pool into a position region
 /// and an attribute region so the passes that need a clip position and nothing
 /// more could stop paying for a whole record. This is the pass that spends it.
 /// `crcbl_render::forward`'s depth pipeline — the shadow cascades and the depth
@@ -2954,7 +2954,7 @@ static const float FOG_RATIO_KERNEL[5] = {
 ///
 /// **This is why fog could be built at all.** This workspace's rule is that no
 /// transcendental may reach a colour — four platforms' implementations of them
-/// differ in the last place — and `docs/plan/43-render-standards.md` §4 held
+/// differ in the last place — and topic 43 §4 held
 /// exponential height fog as a decision rather than a slice for exactly that
 /// reason. The way out is to build the function from the operations the rule
 /// permits: range reduction against a two-part `ln 2`, a Taylor kernel in
@@ -5032,7 +5032,7 @@ float3 orthonormal_tangent(float3 normal)
 ///
 /// **The frame this returns is therefore always right-handed about `normal`,
 /// and that is the limitation rather than a defect.** It is the whole of
-/// `docs/plan/43-render-standards.md` §2's rung 1: a screen-space frame cannot
+/// topic 43 §2's rung 1: a screen-space frame cannot
 /// tell a mirrored UV shell from a flipped screen basis, so it cannot recover
 /// the handedness glTF stores in a tangent's `w`, and the left half of a
 /// mirrored character lights inside out through it. What it is for is the mesh
@@ -5080,7 +5080,7 @@ TangentFrame derivative_frame(float3 dpdx, float3 dpdy, float2 duvdx, float2 duv
 /// The shading normal: the surface normal this material's normal map perturbs,
 /// or the surface normal itself where the material names no map.
 ///
-/// `docs/plan/43-render-standards.md` §2's rung 2, and the whole of what the
+/// Topic 43 §2's rung 2, and the whole of what the
 /// normal page buys.
 ///
 /// # Two uniform branches, and both of them are free
@@ -5908,7 +5908,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // is no branch anywhere selecting it. An author who wants the probes to be
     // the whole of the environment sets `DirectionalLight::ambient` to zero.
     //
-    // The gradient sky is a third term on those same terms — `docs/plan/43-render-standards.md`
+    // The gradient sky is a third term on those same terms — topic 43
     // §8. It is added and not chosen between, because a scene may have a sky
     // above it and bounce light around it, and both reach a diffuse surface as
     // an L1 environment. A frame with no sky adds exactly zero.
@@ -6005,7 +6005,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // the low bits of any HDR value far from the fog colour. That is what makes
     // the whole feature additive-zero: a frame with no fog configured is the
     // frame this engine drew before fog existed, and every golden blessed then
-    // still matches. `docs/plan/43-render-standards.md` §4.
+    // still matches. Topic 43 §4.
     //
     // The ray is eye to fragment, and both ends are measured from the fog's
     // reference plane. Unbranched for the probe grid's reason: a feature made
@@ -6057,7 +6057,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
 
 /// The depth-only pass's fragment stage: the alpha mask and **nothing else**.
 ///
-/// `docs/plan/43-render-standards.md` §3's cutout, in the two passes that write
+/// Topic 43 §3's cutout, in the two passes that write
 /// depth without shading — `crcbl_render::forward`'s depth prepass and its
 /// shadow atlas, which are one pipeline driven with two frame blocks. Without
 /// it a masked surface writes a full silhouette into both: it occludes itself

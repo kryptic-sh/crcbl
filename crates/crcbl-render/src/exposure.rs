@@ -1,4 +1,4 @@
-//! `docs/plan/43-render-standards.md` §6's auto-exposure: the luminance
+//! Topic 43 §6's auto-exposure: the luminance
 //! histogram of the finished frame, the reduce that turns it into one number,
 //! and the buffer the tonemap reads that number out of.
 //!

@@ -594,7 +594,7 @@ pub(crate) fn forward_pass_prices(
     prices
 }
 
-/// **The rung's price**, on `docs/plan/43-render-standards.md`'s terms: what the
+/// **The rung's price**, on topic 43's terms: what the
 /// forward pass costs with a froxel full of area lights against the same froxel
 /// full of point lights, and against the sun alone.
 ///

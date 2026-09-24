@@ -40,8 +40,10 @@ churned in a move commit.
 | Tessellation: baked displacement, run-time pattern tables               | [59-tessellation.md](59-tessellation.md)                                                                                                  |
 
 **What this engine does not do at all** is a different question from how well it
-does these, and it is answered in one place:
-[43-render-standards.md](43-render-standards.md).
+does these. The gap survey that answered it was deleted on 2026-09-24: its rules
+are in the [rendering notes](../notes/rendering.md) (_What the deleted
+43-render-standards plan left behind_) and its open rows in `docs/backlog.md`
+(_The rendering-gap survey's open rows_).
 
 ## Interactions (kept honest)
 

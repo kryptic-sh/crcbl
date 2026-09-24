@@ -78,7 +78,7 @@
 //!
 //! The cost is one comparison per element per frame after the last write to it,
 //! and one extra upload of that element on the first frame it stands still.
-//! Nothing reads the field yet — `docs/plan/43-render-standards.md` §9 is why
+//! Nothing reads the field yet — topic 43 §9 is why
 //! it is here before its readers are.
 //!
 //! # The pool never grows

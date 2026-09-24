@@ -203,7 +203,7 @@ entry-points = binMain:glcompute, startsMain:glcompute, scatterMain:glcompute, l
 
 [exposure]
 source = shaders/exposure.slang
-source-sha256 = dbbfba9f27d3d94013bd76ce656c933f5a54cadaa202f359de6c971bc5b61d63
+source-sha256 = 0273443c311a039c8f06954307b6495d33860777d0504495531d28223782786d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/exposure.spv
 spirv-sha256 = 91805d21af3658476e40240346588a65e053f9c977d864a7ec6d4f8e7d8d797d
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = c3c7f2674ed5709e33ce233ac2686bf014648a897cfb1be4155fecccca8f7c02
+source-sha256 = 574efc1ab8c0f37077fd432410be7e0c81cafec0894e3a72087f324631756bea
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -445,7 +445,7 @@ entry-points = computeMain:glcompute
 
 [sky]
 source = shaders/sky.slang
-source-sha256 = bc8351c399e97b7cdac16b8ce47a997f0a6bf2b99124c3a22d622dc20571e5b0
+source-sha256 = 9d99913db427445ca08854796b8c6759f527d0b8762a6a40e7e0fa5a2d93bb91
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/sky.spv
 spirv-sha256 = b04f59f5b55d2ecf5aa38c22ee7e6dd4270fd7f70fcd1223a3f96d0a4190dde2
@@ -529,7 +529,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = 60871eac44126407a7a817154aa1acbb7b91ba011a3d9dda0d5d35c430a7a548
+source-sha256 = 5d014b362564d9083914fc4106c34fedb197a00d4970e2b4ffe5f80b9765161d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
 spirv-sha256 = f15dfc0ec15c6bd55ba303d1eec499e787e53e928d6fd050d556b382010c8e07
@@ -569,7 +569,7 @@ entry-points = writingTaskMain:taskext
 
 [tonemap]
 source = shaders/tonemap.slang
-source-sha256 = 812d0e7a32795132f72dee7c72fe17567cb963b206d7b5a3d0c792142d46dde2
+source-sha256 = 284f602eaaba483e2a5f231f9c8f70811bf00896b01d6b6dd58e26dc7b4161b8
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/tonemap.spv
 spirv-sha256 = 4f1a2d94575c68ef5bfb20d25c84671e348d81229ea128d3600968fd12c72c74
@@ -611,7 +611,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [upscale]
 source = shaders/upscale.slang
-source-sha256 = c22f1088f15449d1086750771f7b634ce214d0c1a90ab16553ded7761b0190be
+source-sha256 = cd8c285e60bb8d19c7c79f0da3d0ae53e8fc1ce25f51696c466d45fa746e0652
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/upscale.spv
 spirv-sha256 = 385a4b3f3846d0a53095179e2da04be011cab9ba5af6a464bc7dd132fafc4b48

@@ -1,4 +1,4 @@
-//! **Normal maps on a real device** — `docs/plan/43-render-standards.md` §2's
+//! **Normal maps on a real device** — topic 43 §2's
 //! rungs 1 and 2, read back off the shaded frame rather than argued.
 //!
 //! Every frame here is one flat quad in the `z = 0` plane, facing the camera,
@@ -18,7 +18,7 @@
 //!   the rung's whole point, and the only test here that would pass on a
 //!   renderer that sampled the page and ignored the frame;
 //! * the same page under a **left-handed** tangent frame and a mirrored UV, which
-//!   is the case `docs/plan/43-render-standards.md` §2 gives as the reason the
+//!   is the case topic 43 §2 gives as the reason the
 //!   vertex route was chosen over the derivative one: the tilt has to land on
 //!   the other side, and a renderer that dropped the handedness would draw both
 //!   quads identically;
@@ -561,7 +561,7 @@ const PAGE_TILT_TOLERANCE: f32 = 2.0 / 255.0;
 
 /// **A left-handed tangent frame puts the tilt on the other side.**
 ///
-/// This is the reading `docs/plan/43-render-standards.md` §2 chose the vertex
+/// This is the reading topic 43 §2 chose the vertex
 /// route for. The mirrored quad carries the same page, the same normal and the
 /// same light; what differs is that its `u` runs along world `-X` and its
 /// bitangent is flipped, which is exactly what a mirrored UV shell of a

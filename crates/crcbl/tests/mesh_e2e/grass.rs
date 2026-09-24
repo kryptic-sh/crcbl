@@ -3,7 +3,7 @@
 //! the meadow's field drawn as shells at several stack heights, and the blade
 //! meadow at each level of detail.
 //!
-//! `docs/plan/43-render-standards.md` prices a rung before it counts as built,
+//! Topic 43 prices a rung before it counts as built,
 //! off `crcbl_render::PassStats`; this is that measurement for the grass
 //! passes. `tests/render_e2e.rs`'s `grass` module holds the picture and the
 //! instance data.

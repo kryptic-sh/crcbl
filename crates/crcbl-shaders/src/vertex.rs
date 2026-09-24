@@ -1,6 +1,6 @@
 //! The v2 vertex's attribute encodings, host side.
 //!
-//! `docs/plan/43-render-standards.md` §2's 2026-08-30 decision splits the
+//! Topic 43 §2's 2026-08-30 decision splits the
 //! vertex into a position stream and an attribute stream, and pays for the
 //! split by narrowing every attribute: the normal and the tangent become one
 //! `snorm16x4` quaternion, each UV pair becomes `unorm16x2` over a per-mesh
@@ -296,7 +296,7 @@ impl UvRange {
 ///
 /// **This is a stand-in, not a tangent.** The frame it returns is arbitrary
 /// about the normal — it agrees with no UV parameterisation, so a normal map
-/// sampled through it is wrong. `docs/plan/43-render-standards.md` §2 says
+/// sampled through it is wrong. Topic 43 §2 says
 /// such a mesh takes the derivative frame in the shader until the importer
 /// fills a real tangent (the MikkTSpace call `docs/backlog.md` carries); what
 /// this function is for is the host side of that gap, so the encoding never

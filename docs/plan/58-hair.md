@@ -158,7 +158,9 @@ elsewhere.
 ## The rungs
 
 Each rung is priced on the desktop adapter, lavapipe and the browser before it
-counts as built, per [43-render-standards.md](43-render-standards.md).
+counts as built, per the pricing rule in the
+[rendering notes](../notes/rendering.md) (_What the deleted 43-render-standards
+plan left behind_).
 
 | Rung | What it buys                                                                                                                                                | What it costs                                | Needs                                                         |
 | ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- | ------------------------------------------------------------- |

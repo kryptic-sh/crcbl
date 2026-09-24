@@ -1,5 +1,5 @@
 //! **A material naming no base-colour page shades exactly as one naming a
-//! white layer** — `docs/plan/43-render-standards.md` §2's row (d), measured on
+//! white layer** — topic 43 §2's row (d), measured on
 //! a device rather than argued from the sampler's specification.
 //!
 //! # Why this test exists

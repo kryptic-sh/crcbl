@@ -337,6 +337,272 @@ and both histories starting empty, the shadow cut is a subset of the camera's.
   eye pushed along the sun per cascade, asking two cascades two different
   questions about one caster.
 
+## What the deleted 43-render-standards plan left behind (2026-09-24)
+
+Record; topic 43 was the gap survey — what a current engine ships and where this
+one stands — written 2026-08-27 with every "where this one is" row read out of
+the code, and its delivery table ordered the gaps by benefit per unit of work.
+Built from it: the foundations block's rows (a) vertex v2 with the 64-byte
+`GpuMaterial` and `depthVertexMain`, (b) `crcbl_render::stack::CameraStack`, (d)
+`PageDesc` over `PageKind`, (e) `crcbl_render::debug_draw` and (g)
+`crcbl::settings::presets`; the viewer's PBR shelf; the normal, packed
+metallic-roughness-occlusion and emissive pages, with the importer reading all
+five glTF maps; alpha-mask and double-sided modes; specular antialiasing; CMAA2;
+the probe volume's scroll; the motion-vector target; mips and anisotropy
+(`crcbl_render::mip`); height fog and the froxel column; auto-exposure; ACES;
+the spatial upscale; the gradient sky and Hillaire's atmosphere. Row (f) was
+refused. The open rows — blended transparency, block compression, grading, MSAA,
+the motion-vector consumers, HDR output and foundation (c) — are in
+`docs/backlog.md` under _The rendering-gap survey's open rows (from the deleted
+43-render-standards plan, 2026-09-24)_.
+
+Code cites the plan as "topic 43 §2", "topic 43's filtering rung", "row (d)" or
+"topic 43 prices a rung". Those resolve here:
+
+| Citation                                      | What it covered                                                                                                                                                              |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| §1                                            | What is at or above the standard — _What "current" means_ below                                                                                                              |
+| §2, rungs 1–4                                 | Materials: the tangent frame (1), the normal page (2), the packed and emissive pages (3), alpha-mask and double-sided (4); the vertex v2 layout                              |
+| §2's filtering rung, the filtering subsection | Host-built mips, the trilinear and anisotropic sampler, `texture_quality` as a `lod_min` clamp, block compression                                                            |
+| §3                                            | Transparency: sorting before order-independence; the rung itself is `docs/plan/53-transparency.md`'s                                                                         |
+| §4                                            | Volumetrics, and the no-transcendental rule's escapes that height fog needed                                                                                                 |
+| §5                                            | Global illumination: the probes, the split-sum, which trace family                                                                                                           |
+| §6                                            | Post-processing and auto-exposure                                                                                                                                            |
+| §7, the render-scale row                      | The spatial upscale                                                                                                                                                          |
+| §8                                            | The gradient sky and the atmosphere                                                                                                                                          |
+| §9                                            | Motion vectors and the rungs that read them                                                                                                                                  |
+| §10                                           | What the survey refused to re-open                                                                                                                                           |
+| Delivery, "the rule", "prices a rung"         | The pricing rule and the fused-clears floor                                                                                                                                  |
+| Foundations block, rows (a)–(g)               | (a) vertex v2; (b) the render stack as RON; (c) the acceleration-structure seam; (d) the page allocator; (e) debug draw; (f) a shared importance helper; (g) quality presets |
+
+**What "current" means.** The comparand is the feature set common to Unreal 5,
+Unity HDRP and Godot 4 — not the frontier of any one of them. A row marked
+missing is missing; a row marked refused has its reason written where the
+technique is owned, and re-proposing it means arguing with that reason. The
+survey stated first where this engine is ahead: GPU-driven submission
+(`cull.slang`, `draw_gen.slang`), mesh shaders over a cluster DAG with
+screen-space-error LOD (Nanite's shape at a fraction of its scope — no software
+rasteriser, no streaming), clustered forward, four backends with byte-comparable
+goldens including a browser, reversed-Z with an HDR target and linear lighting,
+and the Cook-Torrance BRDF Unreal, HDRP and Filament shade with. The comparand
+claims cannot be checked from this tree; `docs/notes/process.md` (_What the plan
+audit of 2026-09-03 did not reach_) says so.
+
+**A rung is priced before it is called built** (2026-08-30). Milliseconds per
+pass on the desktop adapter, on lavapipe and in the browser, read off
+`crcbl_render::PassStats` — not a sentence saying it is cheap. The software and
+browser tiers pay tens of times the desktop cost and are the tiers every golden
+runs on, so the desktop number alone is not a price. The per-machine baseline is
+`docs/backlog.md`'s _Profiling: five of the eight gaps are still open_. Two
+prices the delivery table recorded: row (a)'s depth prepass costs 20.6/20.4 ms
+against the full stage's 22.9/24.2 ms on lavapipe over 144 dunes patches at
+640x480, and 0.073–0.074 ms either way on an RX 7900 XTX; row (e)'s 1024 boxes
+at 256x192 cost 0.030/0.031 ms on the RX 7900 XTX against the forward pass's
+0.013/0.014, and 1.865/2.187 ms on lavapipe against its 0.134/0.159. Neither has
+a browser figure.
+
+**Every `forward` figure includes the pass's fused full-extent clears**
+(measured 2026-09-05). The pass clears the scene colour, reflectivity and motion
+targets as `LoadOp::Clear`s in its begin; timing them apart would need a pass of
+their own. `crates/crcbl/tests/mesh_e2e/depth_only.rs` measures the floor — same
+extent and stack, empty draw list: at 640x480 over 48 recorded frames a
+`forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms on lavapipe (medians of
+three), against the loaded field's 0.135 and 29.255 ms. Subtracting it gives the
+draw's own cost; no quoted share has had it subtracted.
+
+**A foundation is scheduled before any feature rung that would be cheaper with
+it** (2026-08-30), and the lighting order interleaves the raster rungs with the
+foundations: (g) lands with the first rung that needs it, (c) when the
+ray-tracing tier's updater is next. The user's rule for the order: best-looking
+for the performance, cheapest real win first.
+
+**The tangent frame goes by the vertex route, because of mirrored UVs** (§2 rung
+1, corrected 2026-08-27). The derivative route cannot recover the handedness
+glTF stores in a tangent's `w`, so every mirrored shell lights inside out; the
+earlier argument from determinism was wrong, since `geometric_normal_of` already
+takes `ddx`/`ddy` under the cross-backend goldens. The screen-space frame is the
+fallback for a mesh without `GpuMesh::MESH_AUTHORED_TANGENTS`, and it applies
+the UV Jacobian's sign rather than inheriting it, because that sign also carries
+the target's screen-space `y`, which radv runs the other way. A ray-traced hit
+has no derivatives, so an unmarked mesh has no normal mapping there — the
+argument for MikkTSpace ahead of the ray-tracing tier.
+
+**Colour pages are sRGB, number pages linear.** `BASE_COLOR_PAGE_FORMAT` and
+`EMISSIVE_PAGE_FORMAT` are `Rgba8UnormSrgb`; `NORMAL_PAGE_FORMAT` and
+`MRO_PAGE_FORMAT` are `Rgba8Unorm`. A number decoded through the sRGB curve
+looks merely "shinier than intended", which is why it survives review;
+`forward::the_page_formats_split_colour_from_number` is the guard.
+
+**The vertex v2 layout** (landed 2026-08-30; the decision record is _DECIDED —
+the vertex and material strides widen once_ below). Stream 0 is a `float3`
+position, twelve bytes, all the depth prepass and every shadow pass fetch
+through `depthVertexMain`. Stream 1 is twenty bytes: a QTangent in `snorm16x4`
+with glTF's handedness in its sign, `uv0` and `uv1` in `unorm16x2` against a
+per-mesh `UvRange` in `GpuMesh::uv_range` (both geometry paths fetch that row,
+and a cluster DAG needs one range for every level), and an `rgba8` colour. The
+streams are two regions of one storage buffer, not two bindings, because a ninth
+storage buffer in the vertex stage is a renderer no browser can build; the
+boundary travels in `FrameUniforms::vertex_pool.x` and
+`skinning::Params::attribute_base`. `every_shader_decodes_a_vertex_the_same_way`
+holds the three shader copies equal.
+
+**`GpuMaterial` is sixty-four bytes because two page indices share a word.**
+Eighteen plain words is seventy-two bytes, which `std430` rounds to eighty; the
+four layer indices ride sixteen bits each (`color_normal_pages`,
+`mro_emissive_pages`), bounded by `MAX_PAGE_LAYER`. `GpuMaterial::NO_PAGE`
+(`0xFFFF`) is out of band on all four columns, so a row naming no page shades
+the literal identity instead of sampling a neutral layer — eight bits cannot
+encode a flat normal (`0x80` decodes to `1/255` off).
+
+**The page allocator is not the shadow atlas's** (row (d), decided 2026-08-31).
+`PageDesc` is whole layers uploaded once at scene build and indexed by number;
+`crcbl_render::shadow::AtlasAllocator` allocates and frees rectangles every
+frame with a quadtree. Sharing them would be an abstraction with one real user.
+If decal atlases want rectangles, that is the second caller and the moment to
+extract one. A kind nothing names costs a 1×1 placeholder, magenta so that a
+read which should have early-outed shows in the frame.
+
+**glTF's channel arithmetic, term for term** (§2 rung 3). Roughness is
+`material.roughness * texel.g` and metalness `material.metallic * texel.b` (glTF
+§3.9.2), resolved once and read by the direct lobe, the reflectivity attachment
+SSR reloads and the RSM's `metallic_of`, so the shaded frame and the map that
+refills the probes agree. Occlusion `texel.r` multiplies the indirect terms
+alone, never the direct lobe (§3.9.5); emission is
+`material.emissive * texel.rgb` (§3.9.4). Where `metallicRoughnessTexture` and
+`occlusionTexture` name different images the occlusion `r` is resampled into the
+packed layer; a channel with no image is `0xFF`, each product's identity.
+
+**Page reads are an unconditional `Sample` with the select below it**, the form
+WGSL's uniformity analysis accepts; the normal page is read with `SampleGrad` on
+derivatives taken above the early return for the same reason. SPIR-V, MSL and
+DXIL accepted every other form; only the browser gate objected.
+
+**Masked and double-sided draws route per bucket** (2026-09-05): the material's
+mode is in the bucket key (`GpuMaterial::MODE_MASK` through
+`GpuInstance::MATERIAL_MODE_SHIFT`) and `ForwardRenderer::depth_partitions`
+splits the depth passes on it. Measured on lantern at 1920x1080: on lavapipe the
+split takes back most of the cutout's cost (prepass 3.209 → 1.444 ms, atlas
+15.462 → 9.770 ms against an opaque 1.367 and 9.203); on radv a twin bucket per
+mode costs twelve empty indirect dispatches per shadow view (`shadow` 0.138 →
+0.221 ms) whatever the mask, so a scene of mostly opaque geometry with a little
+foliage wins everywhere the fragment stage costs more than an empty dispatch. A
+double-sided instance also skips the cluster cone rejection (`cone_may_reject`),
+since a cone means "draws nothing" only under back-face culling.
+
+**Mips are built on the host, not in compute** (2026-08-29), for three reasons
+each sufficient: a compute pass over an sRGB page needs a `UNORM` view alias
+(`ImageDesc::view_formats`, which does not exist, and WebGPU refuses the
+reinterpretation without it); a host filter gives the same bytes on all four
+backends where a device-built chain is four drivers' rounding; and offline is
+what current engines do — a compute pass is for a texture the frame produced.
+The filter averages in linear light and re-encodes, weights by alpha, and
+renormalises a normal after averaging (`crcbl_render::mip::normal_chain`, which
+also copies a one-texel cell byte for byte).
+
+**Exactness claims about a page stay on magnified or `SampleLevel` reads.** The
+specification bounds the LOD computation and leaves the anisotropic footprint to
+the implementation, so a minified textured surface is where rasterisers may
+differ by more than a last bit; those frames compare under
+`Tolerance::RASTERISER`. The anisotropy is `ForwardRenderer::anisotropy_for`'s,
+`DEFAULT_ANISOTROPY` clamped to the device, and the player's key is
+`[engine.video] anisotropic_filtering`, the first key allowed to ask for more
+than the engine's default because the device's ceiling bounds it. WebGPU reports
+a ceiling of one (_What the filtering rung still owes_ in `docs/backlog.md`).
+
+**Block compression is KTX2 carrying supercompressed UASTC** (decided
+2026-09-06): Khronos' own pipeline and what `KHR_texture_basisu` names, so one
+asset transcodes at load for every device family — BC7/BC5/BC4 where
+`Features::TEXTURE_COMPRESSION_BC` is granted, ASTC or ETC2 otherwise — which
+matters because BC is optional in WebGPU. UASTC rather than ETC1S because these
+are material pages and ETC1S is known for wrecking normal maps. The encoder is a
+pinned `basisu` CLI for reproducibility (two encoder releases produce different
+blocks from the same input); the engine only ever transcodes, so the encoder is
+never linked into a game or a wasm build. Unbuilt; the rung is in the backlog.
+
+**Sort before order-independence** (§3). Weighted-blended OIT is an
+approximation that cannot be blessed against a reference — a golden blessed
+against it records the approximation as the answer — so sorted blending first,
+and an order-independent scheme only if sorting proves insufficient.
+
+**No transcendental reaches a colour, and there are four ways around it** (§4,
+§8). Four platforms' `exp`, `log2` and `pow` differ in the last place, and the
+rule keeps the ceiling on that disagreement known rather than absorbed — every
+golden compares under `Tolerance::RASTERISER`, and `Tolerance::EXACT` is in no
+image test. The escapes: a table cooked on the host (`crcbl_shaders::dfg`); a
+construction from exactly specified IEEE operations (`crcbl_shaders::fog`'s
+`exp_neg` — range reduction on a two-part `ln 2`, a Horner Taylor kernel, `2^-n`
+written into the exponent field, within two units in the last place of
+`f64::exp`); a projection done on the host (the sky's spherical harmonics); and
+`sqrt` for `pow` where the exponent allows (`d * sqrt(d)` for
+Henyey-Greenstein's three-halves power, since IEEE requires a correctly rounded
+`sqrt`). The same rule bins the exposure histogram by the float's exponent field
+rather than `log2`, steps adaptation linearly rather than by
+`1 - exp(-rate * delta)`, and blends the gradient sky by a cubic rather than a
+`pow`. `docs/notes/simulation.md` records it as the workspace policy. The fog's
+observables are laws, not differences:
+`doubling_the_fog_density_squares_the_transmittance` and
+`splitting_a_slice_composites_to_the_same_radiance`.
+
+**Which trace family** (§5, 2026-08-27). Screen-space marching (SSR, GTAO) is
+contact-scale and never GI on its own. SDF marching (Lumen's software path,
+SDFGI) removes the off-screen limit at the cost of a bake, a volume per mesh and
+no skinned geometry. Voxel cone tracing leaks through thin walls and is largely
+superseded. A march is chosen for reach, not speed — on ray-tracing hardware the
+traced path is faster and more accurate — and WebGPU has no ray tracing. Since
+2026-08-30 GI is hardware ray tracing only (_DECIDED — GI is hardware ray
+tracing only_ below) and the probe volume is every tier's bounce; SSGI was
+withdrawn the same day, contact shadows shipped 2026-09-01, and the cone trace
+and the SDF path stay recorded as the ray-tracing tier's raster alternatives,
+unscheduled.
+
+**The spatial upscale is Catmull-Rom** (§7, 2026-08-27): Mitchell-Netravali at
+`B = 0, C = 0.5`, interpolating, sixteen taps of multiplies and adds. Bilinear
+is the worse choice at the same cost class, because a resolution slider is
+judged on how the frame looks at 0.5. It does not jitter, accumulate or keep a
+history, so a temporal upscaler later replaces the pass without moving the seam.
+At full scale there is no pass.
+
+**The sky** (§8). A consumer takes the gradient
+(`crcbl_shaders::sky::SkyGradient`), not its L1 projection: an ambient term
+wants the cosine-weighted integral, which L1 is, and a reflection wants radiance
+along one direction. `sky.slang` draws at the reversed-Z far plane tested
+`GreaterOrEqual` with writes off, so it binds no depth texture and has no
+`discard`; `Sky::NONE` adds no pass. The atmosphere is Hillaire's (EGSR 2020)
+over Bruneton and Neyret's Earth: the transmittance and multiple-scattering LUTs
+are cooked into `crates/crcbl-shaders/tables/atmosphere.bin` and held by
+`cook-atmosphere --check`; the sky-view LUT is marched on the host with no
+platform transcendental and indexed by `sign(s)·s²` of the direction's `y` and
+by `1 − 2u²` for the azimuth's cosine instead of the paper's angles — the one
+deliberate departure. A moving sun is paid a stripe at a time (`SkyViewBuild`,
+`SKY_VIEW_BUILD_ROWS` rows per `begin_frame`, restarting on a new move), so the
+sky may lag by one build. A mirror reads the LUT and a rough lobe the three
+bands, mixed by `sharpness_of`'s ramp, and the reflection pass binds the same
+per-slot buffer the background draws from. The sun disc carries the
+`DirectionalLight`'s illuminance over its solid angle, with limb darkening spent
+into `SUN_LIMB_FIT` rather than a `pow`. Deliberately absent: aerial perspective
+in this rung, and a ground bounce below the horizon, which the probe volume
+carries. Preetham was declined 2026-08-30: visibly wrong at low sun. Priced
+2026-09-05 at 1920x1080: the `sky` pass is 0.004 ms p50 on an RX 7900 XTX and
+0.419 ms on lavapipe, inside the whole frame's run-to-run spread; on the host,
+`SkyView::build` is 24.57 ms and one `SkyViewBuild::step` 1.496 ms.
+
+**Motion vectors** (§9) are texture-coordinate space, current minus previous,
+`+y` down, so a history is read at `uv - motion` — written on `MOTION_FORMAT`
+and `TransientImageDesc::motion`, observed by
+`crates/crcbl/tests/mesh_e2e/motion.rs` and `skinned_motion.rs`. A slot in
+`GpuInstance` is populated rather than reserved, and widening the record is
+cheap while few shaders index past `INSTANCE_STRIDE`, which is why
+`previous_transform` was taken before its first reader.
+
+**What the survey refused to re-open** (§10), each with its reason where the
+technique is owned: deferred shading and visibility buffers, a second material
+model (anisotropic GGX, clearcoat, sheen and subsurface, which would arrive
+together with a `MATERIAL_STRIDE` widening) and parallax occlusion mapping —
+_What the deleted 44-lighting plan left behind_; VSM, EVSM and virtual shadow
+maps — _What the deleted 45-shadows plan left behind_; HBAO and HBAO+ and
+float-hash or interleaved-gradient rotations — _What the deleted
+46-ambient-occlusion plan left behind_.
+
 ## What the deleted 44-lighting plan left behind (2026-09-24)
 
 Record; the built part of the plan is clustered forward (`light_cluster.slang`,
@@ -657,8 +923,9 @@ Code cites the plan's numbered **decisions** and its named **rungs** — "topic
   the tile size. It is deliberately **not** topic 25's helper (see _What the
   deleted 25-lod plan left behind_ above) — `GroupCost::projected_error` divides
   by the distance to a sphere's surface and `coverage` by the distance to a
-  light's centre — `docs/plan/43-render-standards.md`'s row (f) says why; the
-  two constants name each other.
+  light's centre — topic 43's row (f) says why (_What the deleted
+  43-render-standards plan left behind_ above); the two constants name each
+  other.
 - **A light that gets no tile still lights and does not occlude**, which makes
   the budget a quality knob rather than a correctness cliff. Spot was built
   before point because a point light is six of a spot plus face selection.
@@ -1904,7 +2171,8 @@ the helper holds the two rows apart by their `FrameCounters` instance counts
 rather than by a duration. Measured 2026-09-05 at 640x480 over 48 recorded
 frames, the floor is a `forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms
 on lavapipe — medians of three runs each, spread 0.009–0.010 and 0.256–0.268 —
-and it is written into `docs/plan/43-render-standards.md`'s Delivery preamble.
+and it is written into _What the deleted 43-render-standards plan left behind_
+above.
 
 - **The SSR row's `forward` shares are split now (_What the deleted
   47-reflections plan left behind_), and no lantern-side floor row was added,
@@ -2404,9 +2672,10 @@ carry a temporal blend now that it never runs on a golden's tier — C2 stands
 until this is answered, and the fixed-pattern every-probe-every-frame update is
 the default; (ii) what the seam adds — an acceleration-structure build and
 refit, a ray-query capability, and the storage the hit shading reads — which is
-foundation (c) in `docs/plan/43-render-standards.md`'s delivery table; (iii)
-whether ray-traced shadows and reflections join the RT tier as a preset above
-the atlas and SSR, which is a pricing question once the queries exist.
+foundation (c), now `docs/backlog.md`'s _Foundation (c): the
+acceleration-structure seam_; (iii) whether ray-traced shadows and reflections
+join the RT tier as a preset above the atlas and SSR, which is a pricing
+question once the queries exist.
 
 The survey that led here stays below for the record.
 
@@ -2420,8 +2689,8 @@ heading.
   SSR row's refusals (_What the deleted 47-reflections plan left behind_).
 - **Whether SSGI counts as GI — WITHDRAWN.** The probe volume is the bounce on
   every tier; SSGI would be a second, view-dependent estimate of it for a pass
-  of its own. Struck from the GI candidates below and from
-  `43-render-standards.md` §7's ordering.
+  of its own. Struck from the GI candidates below and from the rendering-gap
+  survey's §5 ordering.
 - **Burley diffuse — DECLINED.** Lambert stays, improved by the terms around it
   (multi-scatter compensation, the AO tint and bent normals, LTC area lights,
   the probe bounce). _What the deleted 44-lighting plan left behind_ records it.
@@ -2513,7 +2782,7 @@ candidate 3, the desktop-only contact term on top.
    and a triangle-leaf `Bvh`, red-checked by sabotaging the intersector. Second:
    `cook-probes` on `cook-dfg`'s terms. Third: `apps/lantern` swaps its analytic
    `bounce` for the general bake — the two must agree on a box. Static geometry
-   and, alone, static lights. Overturns `43-render-standards.md`'s "no baked GI"
+   and, alone, static lights. Overturns the rendering-gap survey's "no baked GI"
    as a decision, closes the probe plan's deferred bake, and makes P7C's
    ray-traced GI row worth re-arguing as reflections and shadows only.
 2. **Bake the transport, not the answer** (the Enlighten reduction). Per probe,
@@ -2525,7 +2794,7 @@ candidate 3, the desktop-only contact term on top.
    after candidate 1.
 3. ~~**Non-temporal SSGI over the Hi-Z pyramid, delivered as an image.**~~
    **Withdrawn 2026-08-30** — the probe volume is the bounce on every tier. The
-   plan's SSGI row, with one correction: `43-render-standards.md` §9 and the
+   plan's SSGI row, with one correction: the rendering-gap survey's §9 and the
    antialiasing plan filed it behind motion vectors for temporal accumulation,
    and that is a choice — GTAO's fixed-pattern-plus-blur determinism argument
    transfers to a cosine gather. Costs: it needs an albedo the tree does not
@@ -2541,9 +2810,9 @@ SDFs, card atlas, virtual texturing); every RT-hardware family (no WebGPU ray
 tracing in 2026; all temporal); Godot SDFGI and AMD Brixelizer (the best RT-free
 runtime answers, but SDF generator + 3D images + cascade state — reconsider only
 if question 1 below is "fully dynamic"); Godot HDDAGI (unmerged, re-check in a
-year); voxel cone tracing (thin-wall leaks, already "largely superseded" in
-`43-render-standards.md`); radiance cascades in 3D (right philosophy, "remains
-an open problem" per radiance.wiki, the 0.3 ms figure is a 2023 demo); NRC
+year); voxel cone tracing (thin-wall leaks, already "largely superseded" in the
+rendering-gap survey); radiance cascades in 3D (right philosophy, "remains an
+open problem" per radiance.wiki, the 0.3 ms figure is a 2023 demo); NRC
 (training signal is live path-traced rays); Frostbite/SEED surfel GI, "GIBS"
 (read in depth after the survey, and the survey's one-liner was wrong twice:
 surfels spawn from the G-buffer in 16×16 screen tiles, not at ray hits, and only
@@ -2573,8 +2842,8 @@ in the probe design; a contained escalation later).
    the plan for zero milliseconds. Every engine surveyed recommends the baked
    answer for this hardware tier.
 2. May a golden ever carry a temporal component? If the answer is a permanent
-   no, it belongs in `43-render-standards.md` §5 as one constraint rather than
-   three scattered refusals.
+   no, it belongs in the rendering-gap survey's rules as one constraint rather
+   than three scattered refusals.
 3. What is the GI budget in milliseconds, on which tier — is candidate 3's
    doubling acceptable on desktop if off by default on the web tier?
 4. ~~Is a bake step acceptable in the content pipeline?~~ **No** (the rule
@@ -2591,9 +2860,9 @@ in the probe design; a contained escalation later).
 Nothing here is started until question 1 is answered.
 
 **Where it sits in the schedule (2026-08-30):** the bake tool itself is
-foundation (c) in `docs/plan/43-render-standards.md`'s delivery table, and
-candidate 1's probe volume is its first output — so the tool is scheduled, and
-its first output waits on question 1, not the other way round.
+foundation (c) (`docs/backlog.md`, _Foundation (c): the acceleration-structure
+seam_), and candidate 1's probe volume is its first output — so the tool is
+scheduled, and its first output waits on question 1, not the other way round.
 
 ### The mesh goldens absorb a whole-frame darkening of a few per cent (2026-08-27)
 
@@ -2705,8 +2974,8 @@ that differs from the index buffer's would move the barycentric evaluation and
 Decision record; the decision is in `docs/backlog.md`.
 
 **Scoped 2026-09-06, and held on the decisions below.** The whole rung was read
-against the tree before anything was written, because `43-render-standards.md`
-§3 says the order-independent question "should decide about before it is built,
+against the tree before anything was written, because the rendering-gap survey's
+§3 said the order-independent question "should decide about before it is built,
 not after", and the sort's shape turns out to be a decision too. What the
 reading settled:
 

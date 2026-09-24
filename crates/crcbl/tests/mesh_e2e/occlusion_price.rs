@@ -1,5 +1,5 @@
 //! **What the occlusion cull costs, and what it saves** —
-//! `docs/plan/43-render-standards.md`'s rule that a rung is priced before it is
+//! topic 43's rule that a rung is priced before it is
 //! called built.
 //!
 //! Two scenes, each drawn through a renderer culling by occlusion and one that

@@ -1,5 +1,5 @@
 //! **The packed metallic-roughness-occlusion page reaches the shading, one
-//! channel at a time** — `docs/plan/43-render-standards.md` §2's rung 3,
+//! channel at a time** — topic 43 §2's rung 3,
 //! measured on a device.
 //!
 //! # Why this file exists

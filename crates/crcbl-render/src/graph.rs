@@ -3205,7 +3205,7 @@ impl TransientImageDesc {
     /// The motion-vector channel: `crate::forward`'s `MOTION_FORMAT`, written
     /// by the forward pass beside its colour and reflectivity targets.
     ///
-    /// `docs/plan/43-render-standards.md` §9's third attachment — the one that
+    /// Topic 43 §9's third attachment — the one that
     /// blocked TAA, temporal SSR, temporal upscaling, per-object motion blur and
     /// SSGI's accumulation. What it holds is **current minus previous, in
     /// texture coordinates, `+y` down**: a pass holding the previous frame reads

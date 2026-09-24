@@ -1776,7 +1776,7 @@ fn sky_band_at(extent: (u32, u32), band: (f32, f32)) -> (u32, u32) {
 /// **The plaza stands under Hillaire's atmosphere, and it is the same sun the
 /// shadows are cast by.**
 ///
-/// `docs/plan/43-render-standards.md` §8. The sky over the plaza is not an
+/// Topic 43 §8. The sky over the plaza is not an
 /// authored gradient and not the clear colour: every band of it agrees with
 /// `crcbl_shaders::atmosphere::SkyView` marched on the host from
 /// [`sun::Sky::atmosphere`] — the very value `crate::gpu`'s frame and this

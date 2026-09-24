@@ -78,20 +78,20 @@ Plans 43, 51 and 52 were audited against the tree and eleven false claims were
 corrected in `2ee32c1`. What that pass could not check, stated as a gap rather
 than as a reason:
 
-- **Every measured figure in all three docs was taken on trust.**
-  `43-render-standards.md`'s normal-map cost, its row (a) and row (e) timings
-  and the LTC speed-ups; the volumetrics plan's transmittance comparison, its
-  froxel counts and its sample fractions (the plan is deleted; those figures
-  live on in the doc comments of `crates/crcbl/tests/mesh_e2e/hdr.rs` and
+- **Every measured figure in all three docs was taken on trust.** The gap
+  survey's (topic 43's) normal-map cost, its row (a) and row (e) timings and the
+  LTC speed-ups; the volumetrics plan's transmittance comparison, its froxel
+  counts and its sample fractions (the plan is deleted; those figures live on in
+  the doc comments of `crates/crcbl/tests/mesh_e2e/hdr.rs` and
   `crates/crcbl/tests/mesh_e2e/froxels.rs`); the debug console plan's
   decision-10 cost claims (now in `docs/notes/tooling.md`, and still
   unmeasured). Re-checking any of them means running the GPU harnesses, which
   the audit was told not to do because another agent held the GPU. This is the
   same shape of drift that produced the AO table's four wrong integers: a figure
   carried across a change to the pass it measures.
-- **The golden re-bless claims in `43-render-standards.md` §2 rung 2** — the
-  five named goldens, `room` moving 360 pixels by at most thirteen, `live`
-  moving past tolerance — are unverified.
+- **The golden re-bless claims in the gap survey's §2 rung 2** — the five named
+  goldens, `room` moving 360 pixels by at most thirteen, `live` moving past
+  tolerance — are unverified.
 - **The volumetrics plan's rungs were checked by symbol and test _name_, not by
   behaviour.** The host-side arithmetic was read; that each pass does what the
   prose says it does was not.
@@ -101,8 +101,8 @@ than as a reason:
 - **The sibling ladders were opened on 2026-09-04 and read against the tree, not
   measured.** 45, 47 and 49 held; 46 was rewritten by the technique slice; 50
   carried three sun-only claims a day after the punctual producer landed and was
-  corrected, as was the lighting-order row in `43-render-standards.md`'s
-  Delivery table. Their measured figures were still taken on trust.
+  corrected, as was the lighting-order row in the gap survey's Delivery table.
+  Their measured figures were still taken on trust.
 - **The debug console plan's browser assertions were spot-checked, not
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.
@@ -793,9 +793,10 @@ are the ones flagged as most likely to yield:
 highest rate of any pass. The rule that finished work leaves the plans had not
 been holding: `ROADMAP.md`'s phase table carried no marker for a sample that
 shipped and is gated on every push, and named a blocker that had shipped a week
-earlier; `43-render-standards.md`'s delivery table still put contact shadows at
-the head of a queue they left on 2026-09-01. A delivery table is the worst place
-in the repository to be wrong, because it is read as the index of what exists.
+earlier; the gap survey's (topic 43's) delivery table still put contact shadows
+at the head of a queue they left on 2026-09-01. A delivery table is the worst
+place in the repository to be wrong, because it is read as the index of what
+exists.
 
 A second pass on 2026-09-02 took options' sample plan, horde's sample plan (both
 since deleted), the irradiance-probe plan (since folded into

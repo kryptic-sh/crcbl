@@ -246,7 +246,7 @@ impl Default for Capacities {
 /// without the kind beside it, and this enum is what makes a caller write the
 /// kind down.
 ///
-/// `docs/plan/43-render-standards.md` §2's rung 3 landed the other two kinds on
+/// Topic 43 §2's rung 3 landed the other two kinds on
 /// 2026-09-06; the four here are the four page columns `mesh::GpuMaterial`
 /// carries and there is no fifth waiting.
 ///
@@ -356,7 +356,7 @@ struct Page<'a> {
 ///
 /// # Layer 0 is an ordinary layer, and where its old invariant went
 ///
-/// Until `docs/plan/43-render-standards.md` §2's row (d) this type **burned**
+/// Until topic 43 §2's row (d) this type **burned**
 /// layer 0 on both pages — an all-white texel on the base-colour page, the
 /// neutral normal on the other — because
 /// [`NO_PAGE`](mesh::GpuMaterial::NO_PAGE) was zero and a material naming no
@@ -398,7 +398,7 @@ impl<'a> PageDesc<'a> {
     pub const WHITE: u8 = 0xFF;
 
     /// The neutral tangent-space normal texel: `(0.5, 0.5, 1.0)` in RGBA8,
-    /// which is `docs/plan/43-render-standards.md` §2's neutral normal.
+    /// which is topic 43 §2's neutral normal.
     ///
     /// # It is not exactly flat, and the shader is what makes "no map" exact
     ///

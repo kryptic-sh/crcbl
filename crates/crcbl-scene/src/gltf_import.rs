@@ -1266,7 +1266,7 @@ fn build(
             // the shadow atlas, and the reflective shadow map.
             //
             // **`BLEND` is recorded as `OPAQUE`, and the loss is chosen.**
-            // `docs/plan/43-render-standards.md` §3 — "Transparency — absent,
+            // Topic 43 §3 — "Transparency — absent,
             // structurally" — is that `crcbl-render`'s forward pass builds no
             // shaded pipeline with a `BlendState` at all, so there is nothing
             // a blend bit could select and no reading of it that comes out
@@ -2512,7 +2512,7 @@ pub(crate) mod tests {
 
     /// **`emissiveTexture` arrives beside the factor, not instead of it.**
     ///
-    /// The two are one product — `docs/plan/43-render-standards.md` §2's rung 3
+    /// The two are one product — topic 43 §2's rung 3
     /// — and they split across the seam: the factor is a number and rides the
     /// row, the image is a page layer and rides beside it.
     ///
@@ -2776,7 +2776,7 @@ pub(crate) mod tests {
 
     /// **`BLEND` is recorded as `OPAQUE`, and that is the decision rather than
     /// an oversight.** This renderer builds no blended pipeline at all —
-    /// `docs/plan/43-render-standards.md` §3 — so no bit could honour it, and
+    /// topic 43 §3 — so no bit could honour it, and
     /// reading it as `MASK` would punch a hard-edged hole through a surface the
     /// author asked to fade. The warning is what keeps the loss visible, so it
     /// is asserted beside the row.

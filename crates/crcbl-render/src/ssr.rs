@@ -129,7 +129,7 @@ pub(crate) struct SsrImages {
 /// terms exactly: it is what `clippy::too_many_arguments` objects to, and two
 /// of these are `BufferHandle`s that would be indistinguishable at the call
 /// site. They travel together because they are one idea —
-/// `docs/plan/43-render-standards.md` §8's "the environment a missed ray falls
+/// topic 43 §8's "the environment a missed ray falls
 /// back to is the term a sky provides", plus
 /// the irradiance probes' grid for the bounce light around it.
 #[derive(Clone, Copy, Debug)]

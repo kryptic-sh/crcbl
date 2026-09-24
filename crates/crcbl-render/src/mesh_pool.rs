@@ -467,7 +467,7 @@ impl MeshPool {
             // **Two regions, not one interleaved array.** The first
             // `vertex_capacity * POSITION_STRIDE` bytes are every vertex's
             // position and the rest is every vertex's attributes, which is
-            // `docs/plan/43-render-standards.md` §2's split — see
+            // topic 43 §2's split — see
             // `MeshPool::attribute_base`, the one number a shader cannot derive
             // for itself. The buffer is the same size either way.
             //

@@ -282,7 +282,7 @@ pub(crate) const SCENE_COLOR_FORMAT: Format = TransientImageDesc::scene_color((1
 /// picks the wrong aspects.
 const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 
-/// The format `docs/plan/43-render-standards.md` §2's **normal** page is
+/// The format topic 43 §2's **normal** page is
 /// created with.
 ///
 /// **`Rgba8Unorm`, and the missing `Srgb` is the whole decision.**
@@ -299,7 +299,7 @@ const BASE_COLOR_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// one compiles.
 const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
 
-/// The format `docs/plan/43-render-standards.md` §2's **metallic-roughness-
+/// The format topic 43 §2's **metallic-roughness-
 /// occlusion** page is created with.
 ///
 /// **`Rgba8Unorm`, and the missing `Srgb` is the same decision
@@ -315,7 +315,7 @@ const NORMAL_PAGE_FORMAT: Format = Format::Rgba8Unorm;
 /// search for which callers of a shared name meant which page.
 const MRO_PAGE_FORMAT: Format = Format::Rgba8Unorm;
 
-/// The format `docs/plan/43-render-standards.md` §2's **emissive** page is
+/// The format topic 43 §2's **emissive** page is
 /// created with.
 ///
 /// **`Rgba8UnormSrgb`, and it is the base-colour page's decision rather than
@@ -335,7 +335,7 @@ const EMISSIVE_PAGE_FORMAT: Format = Format::Rgba8UnormSrgb;
 /// device's: the format is the one [`base_color_page_import`] and
 /// [`normal_page_import`] have to declare, and the filter is the one
 /// [`crate::mip`] builds the chain with. A kind added by
-/// `docs/plan/43-render-standards.md` §2's rung 3 is a new arm in each.
+/// topic 43 §2's rung 3 is a new arm in each.
 ///
 /// [`base_color_page_import`]: ForwardRenderer::base_color_page_import
 /// [`normal_page_import`]: ForwardRenderer::normal_page_import
@@ -403,7 +403,7 @@ impl PageKind {
 const PAGE_PLACEHOLDER_TEXEL: [u8; 4] = [0xFF, 0x00, 0xFF, 0xFF];
 
 /// The format the motion-vector target is created with: two channels of half
-/// float, `docs/plan/43-render-standards.md` §9's third colour attachment.
+/// float, topic 43 §9's third colour attachment.
 ///
 /// **Named here rather than in [`TransientImageDesc::motion`]**, on
 /// [`crate::graph`]'s other format-owning descriptions' terms: the description
@@ -650,7 +650,7 @@ const CONTACT_SHADOW_BINDING: u32 = 28;
 /// filterable format on WebGPU without an optional feature.
 const PROBE_VISIBILITY_BINDING: u32 = 29;
 
-/// The bind-group slot `docs/plan/43-render-standards.md` §2's packed
+/// The bind-group slot topic 43 §2's packed
 /// **metallic-roughness-occlusion** page is sampled through.
 ///
 /// **Appended past [`PROBE_VISIBILITY_BINDING`], never inserted**, for
@@ -666,7 +666,7 @@ const PROBE_VISIBILITY_BINDING: u32 = 29;
 /// Metal's sampler argument table.
 const MRO_PAGE_BINDING: u32 = 30;
 
-/// The bind-group slot `docs/plan/43-render-standards.md` §2's **emissive**
+/// The bind-group slot topic 43 §2's **emissive**
 /// page is sampled through.
 ///
 /// **Appended past [`MRO_PAGE_BINDING`], never inserted**, for that constant's
@@ -1219,7 +1219,7 @@ pub const MIN_RENDER_SCALE: f32 = 0.25;
 /// The anisotropy the base-colour page is sampled with where the device grants
 /// [`Features::SAMPLER_ANISOTROPY`].
 ///
-/// Eight, which is `docs/plan/43-render-standards.md`'s filtering rung's
+/// Eight, which is topic 43's filtering rung's
 /// default and the figure current engines default their own slider to: past it
 /// the footprint's long axis is already sampled finely enough that sixteen is
 /// invisible at a grazing angle and costs the same again in fetches. A device
@@ -2452,7 +2452,7 @@ struct Rollback {
     /// The froxel volume, which owns three
     /// pipelines, two layouts and two rings of buffers.
     volumetric: Option<Volumetric>,
-    /// `docs/plan/43-render-standards.md` §6's auto-exposure, which owns three
+    /// Topic 43 §6's auto-exposure, which owns three
     /// pipelines, one layout and three rings of buffers.
     exposure: Option<Exposure>,
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
@@ -3673,7 +3673,7 @@ impl ForwardRenderer {
         // `check_scene` above, before this device object existed.
         //
         // **Every layer goes up with its mip chain**, built here on the host by
-        // [`crate::mip`] — `docs/plan/43-render-standards.md`'s filtering rung.
+        // [`crate::mip`] — topic 43's filtering rung.
         // The chain is what a trilinear sampler needs to stop shimmering on a
         // minified surface, and it is built at upload rather than by a compute
         // pass because the page's format is what decodes it and a host chain is
@@ -8758,7 +8758,7 @@ impl ForwardRenderer {
         }
     }
 
-    /// `docs/plan/43-render-standards.md` §2's **normal** page, the raw handles.
+    /// Topic 43 §2's **normal** page, the raw handles.
     ///
     /// [`base_color_page`](Self::base_color_page)'s counterpart, on every one of
     /// its terms: one `D2Array` image, one layer per
@@ -8796,7 +8796,7 @@ impl ForwardRenderer {
         }
     }
 
-    /// `docs/plan/43-render-standards.md` §2's packed
+    /// Topic 43 §2's packed
     /// **metallic-roughness-occlusion** page, the raw handles.
     ///
     /// [`normal_page`](Self::normal_page)'s counterpart, on every one of its
@@ -8829,7 +8829,7 @@ impl ForwardRenderer {
         }
     }
 
-    /// `docs/plan/43-render-standards.md` §2's **emissive** page, the raw
+    /// Topic 43 §2's **emissive** page, the raw
     /// handles.
     ///
     /// [`base_color_page`](Self::base_color_page)'s counterpart down to the
@@ -9123,8 +9123,8 @@ impl ForwardRenderer {
     /// before the upscale costs what its extent costs, so a scale of `0.7` is
     /// roughly half the shading work of `1.0`; the UI is composited onto the
     /// target afterwards at native resolution, so text stays sharp while the 3D
-    /// frame gets cheap. `docs/plan/43-render-standards.md` is where that trade
-    /// is written down.
+    /// frame gets cheap. `docs/notes/rendering.md` (_What the deleted
+    /// 48-post-processing plan left behind_) is where that trade is written down.
     ///
     /// **`1.0` is not a special case with a fast path, it is the absence of the
     /// feature.** At full scale the internal extent *is* the caller's, the post
@@ -9162,7 +9162,7 @@ impl ForwardRenderer {
     /// The anisotropy the base-colour page is sampled with, in force from the
     /// next [`begin_frame`](Self::begin_frame).
     ///
-    /// `docs/plan/43-render-standards.md`'s filtering rung, the player's half:
+    /// Topic 43's filtering rung, the player's half:
     /// [`anisotropy_for`](Self::anisotropy_for) is what a renderer nobody has
     /// called this on samples with, and this is what a settings row moves it
     /// to. Clamped to `1.0..=max_sampler_anisotropy` where the device was
@@ -9249,7 +9249,7 @@ impl ForwardRenderer {
     /// at build, [`set_anisotropy`](Self::set_anisotropy)'s clamp after.
     ///
     /// **Trilinear over the whole chain, anisotropic where the device is** —
-    /// `docs/plan/43-render-standards.md`'s filtering rung: a minified surface
+    /// topic 43's filtering rung: a minified surface
     /// reads the level its footprint matches instead of shimmering through
     /// level 0, a magnified one blends four texels instead of stepping between
     /// them, and a surface at a grazing angle keeps its detail along the long
@@ -9607,7 +9607,7 @@ impl ForwardRenderer {
     /// Sets the exponential height fog the colour pass composites over every
     /// shaded surface.
     ///
-    /// `docs/plan/43-render-standards.md` §4's cheapest large win: distance
+    /// Topic 43 §4's cheapest large win: distance
     /// reads as distance, a valley fills while a hilltop stays clear, and it
     /// costs four numbers in a block every pipeline already binds.
     ///
@@ -9641,7 +9641,7 @@ impl ForwardRenderer {
     /// Lights the scene with a gradient sky, on top of whatever ambient and
     /// irradiance grid it already has.
     ///
-    /// `docs/plan/43-render-standards.md` §8's rung. [`Sky`] is three
+    /// Topic 43 §8's rung. [`Sky`] is three
     /// radiances — zenith, horizon, ground — and what reaches a surface is that
     /// gradient projected onto the L1 basis the probe grid already uses, so a
     /// surface facing up receives the sky and one facing down the ground's
@@ -9675,7 +9675,7 @@ impl ForwardRenderer {
     /// Replaces the gradient with Hillaire's atmosphere, or `None` to put the
     /// gradient back.
     ///
-    /// `docs/plan/43-render-standards.md` §8. A frame with an atmosphere takes
+    /// Topic 43 §8. A frame with an atmosphere takes
     /// it for all three of the things a sky is: the background the sky pass
     /// draws, the L1 ambient term `mesh.slang` adds, and the environment
     /// `ssr.slang` falls back to when a ray hits nothing. The
@@ -10924,7 +10924,7 @@ struct ClusterStages {
 impl MeshModules {
     /// **Three targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
     /// writes the shaded colour, then `docs/plan/18-render-features.md`'s
-    /// reflectivity channel, then `docs/plan/43-render-standards.md` §9's motion
+    /// reflectivity channel, then topic 43 §9's motion
     /// vector — and both pipeline shapes name that same entry point, so each
     /// target is one more element of this array and not a second pipeline, a
     /// second entry point or a new interpolant. The refusal the AO section
@@ -11265,7 +11265,7 @@ impl MeshModules {
     /// problem. `depthVertexMain` is that same clip position written the same
     /// way, with everything the discarded varyings needed — the attribute
     /// region and the previous frame's position — left unread;
-    /// `docs/plan/43-render-standards.md` §2 split the pool for exactly this
+    /// topic 43 §2 split the pool for exactly this
     /// pass, and this is where it is spent.
     ///
     /// **The mesh-shader path still runs the colour pipeline's geometry
@@ -11328,7 +11328,7 @@ impl MeshModules {
     /// behind the geometry stage, and [`MeshModules::vertex`] in
     /// [`MeshModules::depth_vertex`]'s place.
     ///
-    /// `docs/plan/43-render-standards.md` §3's cutout, in the two passes that
+    /// Topic 43 §3's cutout, in the two passes that
     /// write depth without shading. A masked instance drawn through the pipeline
     /// above writes its full silhouette: it occludes itself through the hole it
     /// can see through, and it casts the shadow of a leaf that has none.
@@ -19544,7 +19544,7 @@ mod tests {
     /// **The depth-only passes run the depth-only entry point, and the colour
     /// pass does not.**
     ///
-    /// `docs/plan/43-render-standards.md` §2 split the vertex pool so a pass
+    /// Topic 43 §2 split the vertex pool so a pass
     /// that wants a clip position and no more could fetch stream 0 alone, and
     /// [`MeshModules::depth_pipeline`] naming `mesh.slang`'s `depthVertexMain`
     /// is the whole of how that split is spent. **Nothing else in the tree sees

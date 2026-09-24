@@ -85,7 +85,7 @@ struct TonemapParams
     /// Non-zero to take the exposure from `measured[0]` instead of from
     /// [`TonemapParams::exposure`].
     ///
-    /// `docs/plan/43-render-standards.md` §6's auto-exposure, and the switch is
+    /// Topic 43 §6's auto-exposure, and the switch is
     /// here rather than in a second pipeline for [`TonemapParams::curve`]'s
     /// reason exactly. Zero is what a frame that added no exposure passes
     /// writes, and on that frame this pass reads the number the host set and is

@@ -75,9 +75,9 @@ defaults for forward-compat; no migration machinery in MVP.
 The mesh row above — "packed binary matching GPU pool layout" — is unbuilt:
 nothing in the workspace writes or reads a cooked mesh, and every mesh the
 engine draws is imported from glTF or built from RON at load. So the vertex
-layout decision `43-render-standards.md` §2 records is **not** a migration:
-there is no file to migrate. What it binds is the format this row will have when
-it is built:
+layout decision the rendering notes record (_What the deleted
+43-render-standards plan left behind_) is **not** a migration: there is no file
+to migrate. What it binds is the format this row will have when it is built:
 
 - **It carries a format version in its header from its first byte**, and the
   loader refuses a version it does not know rather than reading it as the
@@ -162,9 +162,10 @@ binary blob for shipping and wasm (solves the many-small-fetches problem;
   consumers.
 - Textures: sRGB/linear handling correct from the start. Mip generation is at
   **import, on the host, in linear light** — corrected 2026-08-29; this line
-  used to name a compute pass on upload, and
-  [43-render-standards.md](43-render-standards.md)'s filtering subsection says
-  why that is the wrong first form here.
+  used to name a compute pass on upload, and the
+  [rendering notes](../notes/rendering.md) (_What the deleted
+  43-render-standards plan left behind_) say why that is the wrong first form
+  here.
 
 ## Hot reload (dev builds)
 

@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/43-render-standards.md` §6's auto-exposure, first half: the
+// Topic 43 §6's auto-exposure, first half: the
 // luminance histogram of the scene target, built on the GPU with no readback.
 //
 // # Why a histogram and not an average

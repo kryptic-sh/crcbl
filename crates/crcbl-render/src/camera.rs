@@ -467,7 +467,7 @@ impl Default for DirectionalLight {
 
 /// Exponential height fog: how thick the air is, and what colour it scatters.
 ///
-/// `docs/plan/43-render-standards.md` §4's cheapest large win. Density falls
+/// Topic 43 §4's cheapest large win. Density falls
 /// off exponentially with height above [`reference_height`](Self::reference_height),
 /// and `mesh.slang`'s fragment stage integrates it along the ray from the eye
 /// to each shaded point — so a distant surface fades towards
@@ -581,7 +581,7 @@ impl Default for Fog {
 
 /// A gradient sky: three radiances, and the environment they light with.
 ///
-/// `docs/plan/43-render-standards.md` §8. The sky is a smoothstep blend from
+/// Topic 43 §8. The sky is a smoothstep blend from
 /// [`ground`](Self::ground) through [`horizon`](Self::horizon) to
 /// [`zenith`](Self::zenith) in a direction's `y`, and what reaches the scene is
 /// that field projected onto the L1 spherical-harmonic basis the irradiance
@@ -658,7 +658,7 @@ impl Default for Sky {
 /// Hillaire's atmosphere: a sun, an exposure and a viewpoint, over the planet
 /// `crcbl_shaders::atmosphere`'s committed tables describe.
 ///
-/// `docs/plan/43-render-standards.md` §8. Where [`Sky`] is three authored
+/// Topic 43 §8. Where [`Sky`] is three authored
 /// colours, this is the light a real planet's air scatters — so the sky is blue
 /// overhead because Rayleigh scattering is, and red at a low sun because the
 /// slant path has already taken the blue out, rather than because somebody

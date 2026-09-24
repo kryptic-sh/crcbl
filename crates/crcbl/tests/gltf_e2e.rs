@@ -655,7 +655,7 @@ fn an_imported_gltf_draws_its_own_texture_where_its_own_hierarchy_puts_it() {
 /// **An imported `emissiveTexture` lights the half of the surface it covers and
 /// leaves the other half dark**, with every light in the frame off.
 ///
-/// The importer half of `docs/plan/43-render-standards.md` §2's rung 3, on a
+/// The importer half of topic 43 §2's rung 3, on a
 /// device and through a real file: `crates/crcbl/tests/mesh_e2e/emissive_page.rs`
 /// already measures what the shader does with an emissive layer, and its layers
 /// are authored by hand into a `PageDesc`. What is unproven until here is that a

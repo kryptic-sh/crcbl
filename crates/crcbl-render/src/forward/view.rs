@@ -718,7 +718,7 @@ pub(super) struct View {
     /// The froxel volume and its composite — see
     /// [`crate::volumetric`].
     pub(super) volumetric: Volumetric,
-    /// `docs/plan/43-render-standards.md` §6's auto-exposure — see
+    /// Topic 43 §6's auto-exposure — see
     /// [`crate::exposure`]. Named for what it owns rather than for the value:
     /// [`ForwardRenderer::exposure`] is the number a caller set.
     pub(super) auto_exposure: Exposure,
@@ -735,7 +735,7 @@ pub(super) struct View {
     /// [`crate::upscale`], and it draws nothing at a
     /// [`render_scale`](ForwardRenderer::render_scale) of `1.0`.
     pub(super) upscale: Upscale,
-    /// `docs/plan/43-render-standards.md` §8's background pass — see
+    /// Topic 43 §8's background pass — see
     /// [`crate::sky_pass`]. It draws on no frame whose sky is [`Sky::NONE`],
     /// which is every frame until a caller calls
     /// [`set_sky`](ForwardRenderer::set_sky).
@@ -1463,7 +1463,7 @@ impl View {
                 .unwrap_or(view_projection)
                 .to_cols_array(),
             // Where the pool's attribute region begins, which is the one thing
-            // about `docs/plan/43-render-standards.md` §2's two streams that a
+            // about topic 43 §2's two streams that a
             // shader cannot derive: it is the pool's *capacity*, and a shader
             // has never been told that. Fixed for the life of the pool and
             // written every frame anyway, because this is the block that
@@ -2702,7 +2702,7 @@ impl View {
             None => tonemapped,
         };
 
-        // `docs/plan/43-render-standards.md` §6's auto-exposure, and it reads
+        // Topic 43 §6's auto-exposure, and it reads
         // the image the tonemap is about to read: the frame with the medium, the
         // reflection and the chain already in it, which is the picture a viewer
         // sees and therefore the one to expose for. Binning `scene_color`

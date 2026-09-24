@@ -392,7 +392,7 @@ pub enum Scene {
     /// out where neither highlight reaches and holds them to a tolerance its
     /// own sweep set.
     FillLight,
-    /// `docs/plan/43-render-standards.md` §3's **alpha-mask cutout**: a masked
+    /// Topic 43 §3's **alpha-mask cutout**: a masked
     /// plate floating over a small flat floor, under a sun tilted far enough
     /// that the plate's shadow lands clear of the plate's own footprint.
     ///
@@ -448,7 +448,7 @@ pub enum Scene {
     /// a plane at a known scale and a pixel maps to a floor position by a
     /// division.
     AlphaMask,
-    /// `docs/plan/43-render-standards.md` §2's rung 4, second half: **glTF's
+    /// Topic 43 §2's rung 4, second half: **glTF's
     /// `doubleSided`** — back-face culling off, and the back face lit through a
     /// reversed normal.
     ///
@@ -610,7 +610,7 @@ pub enum Scene {
     /// twenty-fifth — and `ssr_sun` for why the sun has no X component, which is
     /// what makes the two bands beside the reflection its controls.
     Ssr,
-    /// `docs/plan/43-render-standards.md` §8's sky **in a mirror**: a metallic
+    /// Topic 43 §8's sky **in a mirror**: a metallic
     /// floor to the horizon under an atmosphere with a low sun, looked at
     /// level.
     ///

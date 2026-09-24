@@ -194,7 +194,7 @@ pub fn oct_encode(direction: [f32; 3]) -> [f32; 2] {
 /// inverse, and the same paper's.
 ///
 /// **The two halves of the square are `+Y` and `-Y`**, not `+Z` and `-Z`: this
-/// engine's world is `+Y` up (`docs/plan/43-render-standards.md`'s axes), and
+/// engine's world is `+Y` up, and
 /// putting the fold on the vertical axis means the seam runs around the horizon
 /// rather than through the ceiling and the floor — the two directions a probe in
 /// a room has the most to say about.

@@ -1,7 +1,7 @@
 //! The auto-exposure histogram, read out of the buffer the frame left it in and
 //! checked bin by bin against `crcbl_shaders::exposure` on the host.
 //!
-//! `docs/plan/43-render-standards.md` §6's rung is two things — a histogram of
+//! Topic 43 §6's rung is two things — a histogram of
 //! the finished frame and a reduce that turns it into one number — and a
 //! picture cannot tell them apart. A histogram that binned the wrong texels and
 //! a reduce that read the wrong window compose to *an* exposure, and the frame

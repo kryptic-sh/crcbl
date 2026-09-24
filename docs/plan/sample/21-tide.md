@@ -56,7 +56,9 @@ the surface it sits on is this sample's failure, however good the surface looks.
   the flow map, the shore field, the underwater mask, and the CPU query points
   drawn over the rendered surface so disagreement is something you can look at.
 - **Per-pass cost** for the water passes in the debug panel and the headless
-  summary, per [43-render-standards.md](../43-render-standards.md).
+  summary, per the pricing rule in the
+  [rendering notes](../../notes/rendering.md) (_What the deleted
+  43-render-standards plan left behind_).
 - **Pages web demo** at `/demos/tide/`, with the scene, the sea state, the wind,
   the medium preset and the camera as page controls rather than keys, on
   alcove's pattern (`apps/alcove/src/web.rs`).

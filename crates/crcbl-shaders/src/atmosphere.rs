@@ -8,7 +8,7 @@
 //! coefficients are Bruneton and Neyret's, restated by Hillaire, and every one
 //! of them is a named constant below with the paper it comes from.
 //!
-//! `docs/plan/43-render-standards.md` §8 decided the technique and the shape it
+//! Topic 43 §8 decided the technique and the shape it
 //! takes here, which is not quite the paper's:
 //!
 //! * **The transmittance and multiple-scattering LUTs are cooked and
@@ -1063,7 +1063,7 @@ impl SkyView {
     /// this sky where a consumer takes a gradient and cannot take the LUT.
     ///
     /// **`ssr.slang` is that consumer**, and this is the least that keeps the
-    /// reflection pass and the drawn sky agreeing — `docs/plan/43-render-standards.md`
+    /// reflection pass and the drawn sky agreeing — topic 43
     /// §8 states the decision and `docs/backlog.md` carries what it leaves. The
     /// march's own poles are the two polar bands, and the horizon band is the
     /// LUT's azimuthal mean at `y = 0`, so a mirror pointed at the zenith, the
@@ -2110,7 +2110,7 @@ mod tests {
     ///
     /// `#[ignore]` because it is a measurement and not a check: a wall clock on
     /// a shared machine is not something to fail a build on. It is what the
-    /// numbers in `docs/plan/43-render-standards.md` §8 and the `CHANGELOG`
+    /// numbers in topic 43 §8 and the `CHANGELOG`
     /// entry come from, so it is here rather than in a scratch file. Medians of
     /// three, and `--release` because a debug march is not the one that ships.
     #[test]

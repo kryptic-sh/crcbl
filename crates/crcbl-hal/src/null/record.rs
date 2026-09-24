@@ -1143,7 +1143,7 @@ impl Recorder {
     /// bound by the same call, and a pass driven with the wrong one of the two
     /// still records a legal frame. `crcbl_render::forward`'s colour pipeline and
     /// its depth-only twin are that pair — `vertexMain` against
-    /// `depthVertexMain`, the second reading `docs/plan/43-render-standards.md`
+    /// `depthVertexMain`, the second reading topic 43
     /// §2's position stream alone — and pointing the depth one back at the
     /// colour one's stage is a change no golden, no validation rule and no
     /// timing measurement on a desktop adapter reports.

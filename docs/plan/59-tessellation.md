@@ -47,9 +47,9 @@ Absent, and the tree has most of what it needs:
   size and format. Trilinear sampling has landed
   (`crates/crcbl-render/src/material_table.rs`).
 - **Parallax occlusion mapping is refused** by topic 44 (recorded in the
-  [rendering notes](../notes/rendering.md)) and
-  [43-render-standards.md](43-render-standards.md); the only planned height
-  march is the decals' T1 tier ([33-decals.md](33-decals.md)).
+  [rendering notes](../notes/rendering.md)) and by the gap survey's refusals in
+  the same notes; the only planned height march is the decals' T1 tier
+  ([33-decals.md](33-decals.md)).
 - **The ~2 px triangle floor** topic 25 specified for the forward renderer is
   not implemented (`docs/backlog.md`, _LOD: the ~2 px triangle floor_), and it
   is the floor tessellation must respect.
@@ -177,8 +177,10 @@ NVIDIA's sample does — is recorded as a decision below.
 ## The rungs
 
 Each rung is priced on the desktop adapter, lavapipe and the browser before it
-counts as built, per [43-render-standards.md](43-render-standards.md), and runs
-on the WebGPU backend in the fixture's browser demo.
+counts as built, per the pricing rule in the
+[rendering notes](../notes/rendering.md) (_What the deleted 43-render-standards
+plan left behind_), and runs on the WebGPU backend in the fixture's browser
+demo.
 
 | Rung  | What it buys                                                                                                                                                                          | What it costs                                                            | Needs                                                                |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ | -------------------------------------------------------------------- |

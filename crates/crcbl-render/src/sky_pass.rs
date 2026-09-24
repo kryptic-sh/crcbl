@@ -1,4 +1,4 @@
-//! `docs/plan/43-render-standards.md` §8's second half: the pass that **draws**
+//! Topic 43 §8's second half: the pass that **draws**
 //! the sky, where §8's first half only lit and reflected with it.
 //!
 //! [`crcbl_shaders::sky`] projects a [`crate::Sky`] into an L1 probe for the

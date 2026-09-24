@@ -1,7 +1,7 @@
 //! **What the depth-only passes cost**, now that they fetch stream 0 of the
 //! vertex pool and nothing else.
 //!
-//! `docs/plan/43-render-standards.md` §2 split a vertex into a twelve-byte
+//! Topic 43 §2 split a vertex into a twelve-byte
 //! position region and a twenty-byte attribute region so that the passes which
 //! want a clip position and no more could stop reading the whole record.
 //! `mesh.slang`'s `depthVertexMain` is what spends that split, and

@@ -929,7 +929,7 @@ fn a_bucket_fills_and_empties_as_its_instance_comes_and_goes() {
 /// buckets — so the passes that route on a mode bind a pipeline per bucket
 /// rather than one per frame.**
 ///
-/// The routing half of `docs/plan/43-render-standards.md` §3's per-bucket
+/// The routing half of topic 43 §3's per-bucket
 /// split, on the device that actually does it. The host writes a material's
 /// [`GpuMaterial::mode`] into
 /// [`GpuInstance::MATERIAL_MODE_SHIFT`](crcbl::shaders::mesh::GpuInstance::MATERIAL_MODE_SHIFT)'s
@@ -1068,7 +1068,7 @@ fn two_modes_of_one_mesh_scatter_into_two_buckets(mode: u32, what: &str) {
 }
 
 /// The alpha-mask half of [`two_modes_of_one_mesh_scatter_into_two_buckets`] —
-/// `docs/plan/43-render-standards.md` §3's per-bucket split, on the device that
+/// topic 43 §3's per-bucket split, on the device that
 /// actually does the scatter.
 #[test]
 #[ignore = "needs a real GPU and a backend pin; run tests/run-draw-gen-e2e.sh"]

@@ -1363,7 +1363,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // surface would find, and a scene may have bounce light around it and a sky
     // above it. A zeroed probe volume leaves the sky alone and a black sky
     // leaves the probes alone, which is what made each of them land switched
-    // off. `docs/plan/43-render-standards.md` §8 is why the sky is here at all:
+    // off. Topic 43 §8 is why the sky is here at all:
     // the environment a missed ray falls back to is the term a sky provides.
     //
     // The sky at the surface's roughness rather than only along the mirror

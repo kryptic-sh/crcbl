@@ -408,8 +408,8 @@ pub type ProbeSteps = [[i32; 3]; PROBE_LEVELS];
 /// [`level_of`](Self::level_of), which is the rule and the mirror of what the
 /// shaders evaluate.
 ///
-/// **The rows stay one buffer.** `docs/plan/43-render-standards.md`'s §5 C1 is
-/// that there is one storage buffer, so a level is a *range* of it —
+/// **The rows stay one buffer.** The GI survey's constraint C1 in
+/// `docs/notes/rendering.md` is no ninth storage buffer, so a level is a *range* of it —
 /// [`level_row`](Self::level_row) is where each begins, and the visibility image
 /// keeps one layer per row across every level, so a capture covers the whole
 /// clipmap in the call it always made.

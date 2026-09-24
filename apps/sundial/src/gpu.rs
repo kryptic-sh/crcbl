@@ -27,7 +27,7 @@
 //!
 //! **The pose rather than the light**, because a frame reads two things off it:
 //! the [`crcbl::render::DirectionalLight`] the forward pass shades with and the
-//! [`crcbl::render::Atmosphere`] `docs/plan/43-render-standards.md` §8's sky
+//! [`crcbl::render::Atmosphere`] topic 43 §8's sky
 //! pass draws. Keeping the pose is what makes those the same sun.
 //!
 //! # What a filter costs, and what it does not
@@ -531,7 +531,7 @@ impl Gpu {
         // about what is lit — `plaza::lights`' doc carries that argument.
         self.renderer.set_lights(&plaza::lights());
         // Hillaire's sky, from the same pose the light below is built from —
-        // `docs/plan/43-render-standards.md` §8. Handed over every frame for
+        // topic 43 §8. Handed over every frame for
         // the lights' reason and for one of its own: the sun moves once per
         // fixed step, and `ForwardRenderer` marches a stripe of the sky-view
         // LUT per frame while it does. A frame whose sun has not moved costs

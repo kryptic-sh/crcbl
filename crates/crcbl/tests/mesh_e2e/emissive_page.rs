@@ -1,5 +1,5 @@
 //! **The emissive page reaches the shading, and it is a factor over the row's
-//! own radiance** — `docs/plan/43-render-standards.md` §2's rung 3, measured on
+//! own radiance** — topic 43 §2's rung 3, measured on
 //! a device.
 //!
 //! # Why this file exists

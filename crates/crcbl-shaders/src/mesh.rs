@@ -34,7 +34,7 @@ use crate::vertex::{QTangent, UvRange};
 
 /// Bytes one vertex spends in the **position** stream: a `float3`, no padding.
 ///
-/// `docs/plan/43-render-standards.md` §2's 2026-08-30 layout, stream 0. This is
+/// Topic 43 §2's 2026-08-30 layout, stream 0. This is
 /// the whole of what a depth prepass or a shadow cascade has to fetch, and it
 /// is why the pool keeps the two streams in regions of their own rather than
 /// interleaved — see [`MeshVertex`], whose docs carry the arithmetic.
@@ -354,7 +354,7 @@ pub const MESH_ENTRY_STRIDE: usize = 56;
 /// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
 ///
-/// # Sixty-four, which is `docs/plan/43-render-standards.md` §2's own number
+/// # Sixty-four, which is topic 43 §2's own number
 ///
 /// That section's table sizes the row at 64 bytes for "four page rows … plus
 /// the alpha cutoff and flags", and the four page rows are what make the
@@ -405,7 +405,7 @@ const PAGE_HALF_MASK: u32 = 0xFFFF;
 /// `DrawConstants` in `shaders/mesh.slang`.
 pub const DRAW_CONSTANTS_SIZE: usize = 16;
 
-/// One vertex in the two-stream layout `docs/plan/43-render-standards.md` §2
+/// One vertex in the two-stream layout topic 43 §2
 /// decided on 2026-08-30.
 ///
 /// # Two streams, one record
@@ -822,7 +822,7 @@ pub struct FrameUniforms {
     /// into the pool read as words; `yzw` unread padding `std140` aligns a
     /// vector to sixteen bytes with.
     ///
-    /// `docs/plan/43-render-standards.md` §2's two streams live in one buffer:
+    /// Topic 43 §2's two streams live in one buffer:
     /// the first [`POSITION_STRIDE`] bytes per vertex of positions, then
     /// [`ATTRIBUTE_STRIDE`] bytes per vertex of attributes. A vertex `v`'s
     /// position is at word `3 v` and its attributes at word `x + 5 v`, which
@@ -1254,7 +1254,7 @@ pub struct GpuInstance {
     /// travel from anywhere.
     ///
     /// **Nothing reads it yet, and that is the point of it being here.**
-    /// `docs/plan/43-render-standards.md` §9: temporal antialiasing, temporal
+    /// Topic 43 §9: temporal antialiasing, temporal
     /// reflections, temporal upscaling, per-object motion blur and screen-space
     /// global illumination all want a motion vector, and a motion vector wants
     /// this and a target to write itself into that no pass here has. Reserving
@@ -1597,7 +1597,7 @@ pub struct GpuMesh {
     /// argued in full.
     ///
     /// **A table field rather than a draw constant**, though
-    /// `docs/plan/43-render-standards.md` §2 says "the draw constants": the row
+    /// topic 43 §2 says "the draw constants": the row
     /// is what both geometry paths already fetch to resolve a mesh's vertices,
     /// and the mesh path fetches it through `instance.mesh` where the raster
     /// path fetches it through the bucket's — so a pair carried in either
@@ -1639,7 +1639,7 @@ impl GpuMesh {
     /// which is uniform across a primitive, so it costs nothing a per-pixel
     /// select would have saved.
     ///
-    /// `docs/plan/43-render-standards.md` §2's rung 1: the vertex route is the
+    /// Topic 43 §2's rung 1: the vertex route is the
     /// one to take because only a stored tangent's `w` recovers the handedness
     /// a mirrored UV shell needs, and the derivative frame is what a mesh with
     /// no tangent gets until MikkTSpace fills one.
@@ -1948,7 +1948,7 @@ pub struct GpuMaterial {
     /// alpha modes take: `OPAQUE` is the absence of every bit, `MASK` is the
     /// first bit below, and `BLEND` has no bit because the renderer has no
     /// blended pass to honour one with — see
-    /// `docs/plan/43-render-standards.md` §3. `doubleSided` is the second, and
+    /// topic 43 §3. `doubleSided` is the second, and
     /// it is a mode in its own right rather than an alpha mode.
     ///
     /// **Zero is the honest default**, exactly as [`GpuMesh::flags`] is: a
@@ -2019,7 +2019,7 @@ impl GpuMaterial {
     /// page — a full `extent² × 4` bytes of white on the colour page and of
     /// `(0.5, 0.5, 1.0)` on the normal one — plus an invariant every producer
     /// of a page had to keep and `crcbl_render`'s `PageDesc::check` had to
-    /// police. See `docs/plan/43-render-standards.md` §2's row (d).
+    /// police. See topic 43 §2's row (d).
     ///
     /// [`ForwardRenderer::with_scene`](https://docs.rs/crcbl-render) exempts a
     /// column carrying this from the row check it applies to every other, which
@@ -2068,7 +2068,7 @@ impl GpuMaterial {
     /// **A cutout, not a fade**: there is no sorting, no blend state and no new
     /// pass — the surface is either there or it is not, which is what foliage,
     /// grates and chain-link want and is the whole of
-    /// `docs/plan/43-render-standards.md` §3's first step. `BLEND` has no
+    /// topic 43 §3's first step. `BLEND` has no
     /// constant beside this one because it has no pass to be drawn in; an
     /// importer that meets one records `OPAQUE` and says so.
     ///
@@ -4663,7 +4663,7 @@ mod tests {
     }
 
     /// **`depthVertexMain` fetches the position stream and nothing else**,
-    /// which is the whole of what `docs/plan/43-render-standards.md` §2's split
+    /// which is the whole of what topic 43 §2's split
     /// vertex pool was for.
     ///
     /// The claim is about the code a driver compiles, so it is asked of the

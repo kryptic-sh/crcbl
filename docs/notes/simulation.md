@@ -10,16 +10,17 @@ Decision record; the decision is in `docs/backlog.md`.
 This supersedes the 2026-08-30 "no libm on either side" reading recorded below,
 which was about shaders; the decision above splits the two sides.
 
-**DECIDED 2026-08-30 — no `libm`.** The policy is `43-render-standards.md` §4's:
-a transcendental is cooked into a table on the host or built from multiplies
-(`fog::exp_neg`), and never reaches a colour in a shader. Closed together with
-the transcendental-policy entry below. **Open, and it is a decision rather than
-a task.** `05-physics.md`'s 2026-07-27 correction routes determinism-bearing
-math through the **`libm` crate**; `13-audio.md`'s correction requires **own
-polynomial approximations plus a CI deny** on std transcendentals. They are not
-interchangeable and neither is built. No workspace crate names `libm` — it
-reaches `Cargo.lock` only through `naga` and `num-traits`, neither of which is
-in a sim path — and there is no deny anywhere.
+**DECIDED 2026-08-30 — no `libm`.** The policy is the gap survey's §4 rule
+(`docs/notes/rendering.md`, _What the deleted 43-render-standards plan left
+behind_): a transcendental is cooked into a table on the host or built from
+multiplies (`fog::exp_neg`), and never reaches a colour in a shader. Closed
+together with the transcendental-policy entry below. **Open, and it is a
+decision rather than a task.** `05-physics.md`'s 2026-07-27 correction routes
+determinism-bearing math through the **`libm` crate**; `13-audio.md`'s
+correction requires **own polynomial approximations plus a CI deny** on std
+transcendentals. They are not interchangeable and neither is built. No workspace
+crate names `libm` — it reaches `Cargo.lock` only through `naga` and
+`num-traits`, neither of which is in a sim path — and there is no deny anywhere.
 
 **The question to answer:** take the new dependency (`libm`, the user's call per
 the dependency rule), or hand-roll approximations with golden values from the
@@ -32,13 +33,13 @@ Decision record; the decision is in `docs/backlog.md`.
 The text below was written while the policy was open; it is kept for the
 argument, not for its verdict.
 
-**DECIDED 2026-08-30 — one policy, the cooked-table rule.**
-`43-render-standards.md` §4 as written is the workspace policy: tables cooked on
-the host, multiplies in the shader, no libm on either side. The conflict is
-resolved by choosing this side; nothing further to build. **Not built, and it
-needs a decision.** `13-audio.md` requires own polynomial approximations plus a
-CI deny on std float transcendentals; `05-physics.md` requires the `libm` crate.
-Neither exists: no `libm` in any manifest, no polynomial approximations, and
+**DECIDED 2026-08-30 — one policy, the cooked-table rule.** Topic 43 §4's rule
+(now in `docs/notes/rendering.md`) is the workspace policy: tables cooked on the
+host, multiplies in the shader, no libm on either side. The conflict is resolved
+by choosing this side; nothing further to build. **Not built, and it needs a
+decision.** `13-audio.md` requires own polynomial approximations plus a CI deny
+on std float transcendentals; `05-physics.md` requires the `libm` crate. Neither
+exists: no `libm` in any manifest, no polynomial approximations, and
 `crcbl-audio` calls `powf`, `sin`, `exp` and `cos` today (`spatial.rs`,
 `synth.rs`).
 

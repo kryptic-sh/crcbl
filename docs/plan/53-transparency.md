@@ -2,8 +2,9 @@
 
 Written 2026-09-06, when the five decisions this rung was held on were taken.
 Its place in the set is [18-render-features.md](18-render-features.md)'s index;
-what a current engine ships and where this one stands against it is
-[43-render-standards.md](43-render-standards.md) §3, which now points here.
+what a current engine ships and where this one stands against it was the gap
+survey's §3, whose rule is in the [rendering notes](../notes/rendering.md)
+(_What the deleted 43-render-standards plan left behind_).
 
 It is the last rung of the raster ladder, and the first that touches the
 **structure** of the frame rather than what a pass computes: every other rung so
@@ -184,13 +185,12 @@ Every symbol named here exists today unless the line says it is new.
 
 The second is what makes decision 4's SSR half enforceable rather than a
 convention. `MeshModules::COLOR_TARGETS` is three targets — the shaded colour,
-[18-render-features.md](18-render-features.md)'s reflectivity channel, and
-[43-render-standards.md](43-render-standards.md) §9's motion vector — and a
-pipeline must declare all three because the attachments are all three. The
-blended pipeline declares the same three and writes only the first: reflectivity
-stays the opaque surface's `F0` behind the glass, and the motion vector stays
-the opaque surface's, which is what the passes reading them were written
-against.
+[18-render-features.md](18-render-features.md)'s reflectivity channel, and the
+gap survey's §9 motion vector — and a pipeline must declare all three because
+the attachments are all three. The blended pipeline declares the same three and
+writes only the first: reflectivity stays the opaque surface's `F0` behind the
+glass, and the motion vector stays the opaque surface's, which is what the
+passes reading them were written against.
 
 No new capability. Blending on a single colour target is core on all four
 backends and needs no `Features` bit.
@@ -302,10 +302,12 @@ Four things wait on a blended pass:
 | **Blended transparency with GPU-sorted keys**      | Glass, water and soft-edged foliage — the last thing a current engine draws that this one cannot | `Capacities::blended`, a `SidedPipelines`, `blended_partitions`, `blend_sort.slang`, two `ColorTargetState` constructors, and one more render pass |
 | **Order-independent transparency** _(unscheduled)_ | Interpenetrating blended surfaces, which per-object order cannot get right                       | A pass that is an approximation with no reference to bless against — decision 1's refusal, and the reason it is a separate row                     |
 
-The first row is [43-render-standards.md](43-render-standards.md)'s delivery
-table's entry for this topic, and it is **priced before it is called built** on
-that table's rule: the sort and the blended pass each write their millisecond
-cost on the desktop adapter, on lavapipe and in the browser into this document,
-read off `crcbl_render::PassStats`. The browser figure is the one that decides
-whether `Capacities::blended`'s default is the right size, since the fixed-slot
-shape of decision 2 pays for its slots whether or not they draw.
+The first row is the gap survey's entry for this topic (`docs/backlog.md`, _The
+rendering-gap survey's open rows_), and it is **priced before it is called
+built** on the survey's rule (the [rendering notes](../notes/rendering.md)
+(_What the deleted 43-render-standards plan left behind_)): the sort and the
+blended pass each write their millisecond cost on the desktop adapter, on
+lavapipe and in the browser into this document, read off
+`crcbl_render::PassStats`. The browser figure is the one that decides whether
+`Capacities::blended`'s default is the right size, since the fixed-slot shape of
+decision 2 pays for its slots whether or not they draw.

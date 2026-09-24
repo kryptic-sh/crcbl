@@ -234,7 +234,7 @@ pub mod draw_gen;
 pub mod mesh;
 
 /// The v2 vertex's attribute encodings — the tangent-frame quaternion, the
-/// per-mesh UV range and the `rgba8` colour `docs/plan/43-render-standards.md`
+/// per-mesh UV range and the `rgba8` colour topic 43
 /// §2 narrows the vertex into. Host side only until the slice that replaces
 /// [`mesh::MeshVertex`] wires them.
 pub mod vertex;

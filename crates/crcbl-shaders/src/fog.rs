@@ -28,7 +28,7 @@
 //! `froxel_of` are not a precedent — their result is floored into an integer
 //! slice index, where a last-place disagreement changes nothing.
 //!
-//! `docs/plan/43-render-standards.md` §4 ranks height fog as the cheapest large
+//! Topic 43 §4 ranks height fog as the cheapest large
 //! win left on its gap list and then names that rule as what blocks it, with
 //! three exits: fit the exponential the way `tonemap.slang` fits the ACES RRT,
 //! let the fog goldens be the first in the tree to carry a tolerance, or drop

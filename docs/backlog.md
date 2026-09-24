@@ -4473,14 +4473,14 @@ does its own pass; this entry is about making that pass complete.
    towards a target. It needs pass timestamps on every backend, and the
    2026-09-15 D3D12 hardware run found the timestamp pair not advancing (the
    "D3D12 on hardware" entry), so that is a prerequisite on dx12.
-4. **Temporal upscaling**, its own rung under `docs/plan/43-render-standards.md`
-   §7/§9: jitter, a motion-vector target, history, and disocclusion rejection.
-   The per-instance half of motion vectors now exists
-   (`GpuInstance::previous_transform`, since `1d6d604`). It shares the jitter
-   and the history with TAA, so the golden decision in _TAA is unbuilt: jitter,
-   history, and the golden decision it owes_ covers it too. `upscale.slang`'s
-   header still says `GpuInstance` carries no previous transform, which is
-   stale; fix it when this work starts.
+4. **Temporal upscaling**, its own rung under the rendering-gap survey's §7/§9
+   (_The rendering-gap survey's open rows_): jitter, a motion-vector target,
+   history, and disocclusion rejection. The per-instance half of motion vectors
+   now exists (`GpuInstance::previous_transform`, since `1d6d604`). It shares
+   the jitter and the history with TAA, so the golden decision in _TAA is
+   unbuilt: jitter, history, and the golden decision it owes_ covers it too.
+   `upscale.slang`'s header still says `GpuInstance` carries no previous
+   transform, which is stale; fix it when this work starts.
 5. **Optionally, scale above 1.0** (supersampling down to the output), which the
    clamp forbids today.
 
@@ -4899,13 +4899,13 @@ The record behind this — the argument, the options and the measurements — is
 `docs/notes/rendering.md` under this heading.
 
 `GpuMaterial::ALPHA_MODE_MASK`, `mesh.slang`'s `alpha_masked` and
-`depthMaskedFragmentMain` landed with `docs/plan/43-render-standards.md` §3's
-first step; the per-bucket routing that replaced the whole-frame pipeline swing
-— `GpuMaterial::MODE_MASK`, `GpuInstance::MATERIAL_MODE_SHIFT`,
-`draw_gen.slang`'s `bucket_mode` and `ForwardRenderer::depth_partitions` —
-landed after it, and `GpuMaterial::DOUBLE_SIDED` with
-`ForwardRenderer::sided_partitions`, the `CullMode::None` twins and
-`mesh.slang`'s `double_sided_normal` the same day. What they left:
+`depthMaskedFragmentMain` landed with the rendering-gap survey's §3 first step;
+the per-bucket routing that replaced the whole-frame pipeline swing —
+`GpuMaterial::MODE_MASK`, `GpuInstance::MATERIAL_MODE_SHIFT`, `draw_gen.slang`'s
+`bucket_mode` and `ForwardRenderer::depth_partitions` — landed after it, and
+`GpuMaterial::DOUBLE_SIDED` with `ForwardRenderer::sided_partitions`, the
+`CullMode::None` twins and `mesh.slang`'s `double_sided_normal` the same day.
+What they left:
 
 **DECIDED 2026-09-06 —** shape 3: the bucket table is rebuilt in `begin_frame`
 whenever the set of live `(mesh, mode)` pairs has changed since the last build,
@@ -5031,7 +5031,7 @@ The record behind this — the argument, the options and the measurements — is
 `docs/notes/rendering.md`, `docs/notes/browser.md` under this heading.
 
 `crcbl_shaders::atmosphere` and `crcbl_render::ForwardRenderer::set_atmosphere`
-landed with `docs/plan/43-render-standards.md` §8's sky. What they left:
+landed with the rendering-gap survey's §8 sky. What they left:
 
 **DECIDED 2026-09-06 —** aerial perspective is Hillaire's third LUT — a 32×32×32
 camera froxel volume of transmittance and in-scatter — built by the atmosphere
@@ -5656,16 +5656,16 @@ C2). **Single bounce, as on the raster tier**, unless C2's temporal question is
 answered yes, in which case a further bounce is the previous frame's rows read
 at each hit — which is history, and that decision's to make.
 
-**What it waits on.** Foundation (c) in `docs/plan/43-render-standards.md`'s
-delivery table — an acceleration-structure resource with build and refit encoder
-verbs, a ray-query capability, and inline ray queries from compute (the shape
-`VK_KHR_ray_query`, DXR 1.1 inline and Metal's `intersection_query` share); see
-_Ray tracing and the acceleration structures are unbuilt_ and _Ray-traced
-lighting (P7C) is not built_. `Features::RAY_QUERY` exists in
-`crates/crcbl-hal/src/caps.rs` and the Vulkan and D3D12 adapters report it;
-nothing consumes it. Per the P7C row in `docs/plan/ROADMAP.md`, Slang cannot yet
-emit ray queries for Metal and `crcbl-dx12` was deferred on 2026-08-21, so the
-first backend this reaches is Vulkan hardware.
+**What it waits on.** Foundation (c) (_Foundation (c): the
+acceleration-structure seam_) — an acceleration-structure resource with build
+and refit encoder verbs, a ray-query capability, and inline ray queries from
+compute (the shape `VK_KHR_ray_query`, DXR 1.1 inline and Metal's
+`intersection_query` share); see _Ray tracing and the acceleration structures
+are unbuilt_ and _Ray-traced lighting (P7C) is not built_. `Features::RAY_QUERY`
+exists in `crates/crcbl-hal/src/caps.rs` and the Vulkan and D3D12 adapters
+report it; nothing consumes it. Per the P7C row in `docs/plan/ROADMAP.md`, Slang
+cannot yet emit ray queries for Metal and `crcbl-dx12` was deferred on
+2026-08-21, so the first backend this reaches is Vulkan hardware.
 
 **What it would take**, once (c) exists: a compute pass that, per probe row,
 casts the fixed direction set, shades each hit with the same light list the
@@ -5911,8 +5911,8 @@ What is left:
   moved, and the only thing that noticed was a session that re-ran the binary by
   hand. A fixture that asserted a _shape_ rather than a duration — say, that
   `ssr` stays under some fraction of the frame — is the shape of the fix;
-  nothing here proposes the threshold, because `43-render-standards.md` refuses
-  to assert durations and this would be one at one remove.
+  nothing here proposes the threshold, because the pricing rule records
+  durations rather than asserting them, and this would be one at one remove.
 
 ## Probe visibility: what the slice did not do (2026-09-02)
 
@@ -6932,8 +6932,8 @@ been verified on radv and on lavapipe and nowhere else.
 
 `ForwardRenderer::set_shadow_cadence` pins the pair per renderer and the two
 console variables are the global default. Nothing reads a `settings.toml` key or
-a `docs/plan/43-render-standards.md` tier into either. Deliberately out of scope
-for that slice, and the shape is already there when it is wanted.
+a quality tier into either. Deliberately out of scope for that slice, and the
+shape is already there when it is wanted.
 
 **Still true as stated, and one thing near it changed on 2026-09-02.** An
 `autoexec.cfg` is a config file rather than a settings file, so it gives the
@@ -6991,8 +6991,8 @@ for sundial (18), alcove (19) and options (20), the last three deleted on
 2026-09-24 with their built parts done. Most of the ladders' first rungs are
 built — FXAA, the Hi-Z march, GTAO, the shadow ladder through PCSS and its
 early-out, the ACES curve, auto-exposure, the froxel column, render scale, the
-gradient sky and multi-scatter compensation — and
-`docs/plan/43-render-standards.md`'s delivery table is the record of which.
+gradient sky and multi-scatter compensation — and _The rendering-gap survey's
+open rows_ lists which rows of the survey are built and which are not.
 `apps/options` is sample 20, `apps/sundial` sample 18 and `apps/alcove` sample
 19; `docs/plan/sample/17-mirrors.md` is planned, not built. What follows is what
 the plans could not settle. The reflections and volumetrics plans were deleted
@@ -7073,8 +7073,8 @@ arm unexercised. It schedules the lantern change and its bless.
 
 ### What the motion-vector pass left owed (2026-08-30)
 
-`docs/plan/43-render-standards.md` §9's pass is built — `MOTION_FORMAT`'s
-`Rg16Float` target from `TransientImageDesc::motion`,
+Topic 43 §9's pass is built — `MOTION_FORMAT`'s `Rg16Float` target from
+`TransientImageDesc::motion`,
 `crcbl_shaders::mesh::FrameUniforms::previous_view_proj`, `mesh.slang`'s
 `motion_vector` on both geometry paths, `DebugView::Motion`, and
 `crates/crcbl/tests/mesh_e2e/motion.rs` on radv and lavapipe. What it did not
@@ -7202,8 +7202,8 @@ which is where the re-bless was spent. What the slice did not do:
 
 ### What auto-exposure left owed (2026-08-29)
 
-`docs/plan/43-render-standards.md` §6's histogram-and-reduce rung is built —
-`shaders/exposure.slang`, `crcbl_shaders::exposure`, `crcbl_render::exposure`,
+Topic 43 §6's histogram-and-reduce rung is built — `shaders/exposure.slang`,
+`crcbl_shaders::exposure`, `crcbl_render::exposure`,
 `RenderEffects::AUTO_EXPOSURE` and the `auto_exposure` settings key, checked
 end-to-end by `crates/crcbl/tests/mesh_e2e/exposure.rs` on radv. Four things it
 did not do.
@@ -7947,12 +7947,12 @@ The 2026-08-27 question — when to spend the `MeshVertex` and `GpuMaterial`
 widening that gates normal mapping, the metallic-roughness and occlusion pages,
 alpha-mask materials and any second BRDF lobe — is answered: **once, now, and
 into the long-term layout rather than a wider copy of today's.** The layout is
-`docs/plan/43-render-standards.md` §2's: a position-only stream 0 (`float3`,
-twelve bytes) that the depth prepass and every shadow pass read alone, and an
-attribute stream 1 of a QTangent in `snorm16x4`, two quantised UV sets and an
-`rgba8` colour — 32 bytes against the 64 of today's four `float4`s — with
-`GpuMaterial` at 64 bytes carrying four page indices. It is the foundations
-block's first row in that plan's delivery table.
+topic 43 §2's: a position-only stream 0 (`float3`, twelve bytes) that the depth
+prepass and every shadow pass read alone, and an attribute stream 1 of a
+QTangent in `snorm16x4`, two quantised UV sets and an `rgba8` colour — 32 bytes
+against the 64 of today's four `float4`s — with `GpuMaterial` at 64 bytes
+carrying four page indices. It is the foundations block's first row in that
+plan's delivery table.
 
 **What made the decision cheap:** there is no `.crcblmesh` on disk to migrate —
 zero tracked files, no source mentions one — so the format is born v0 under
@@ -7967,11 +7967,12 @@ KTX2 with Basis Universal UASTC, transcoded at load to BC7, ASTC or ETC2 per
 `Capability`, which is Khronos' own pipeline (`KHR_texture_basisu`) and what
 three.js, Babylon and Bevy ship for the web tier. The encoder is a pinned
 `basisu` CLI run by the bake tool, the way `compile-shaders.sh` pins slangc, and
-the loader is the `basis-universal` crate's transcoder feature plus `ktx2`. Plan
-43 §2 carries the specification. **Not yet chosen: the pinned `basisu` version**
-— 43 §2 fixes the pinning mechanism, and the version is picked when the rung is
-built, the way `SLANG_VERSION` was. Those are new dependencies and land with
-this slice, not ahead of it.
+the loader is the `basis-universal` crate's transcoder feature plus `ktx2`.
+_Block-compressed pages_ under _The rendering-gap survey's open rows_ carries
+the specification. **Not yet chosen: the pinned `basisu` version** — the
+mechanism is fixed, and the version is picked when the rung is built, the way
+`SLANG_VERSION` was. Those are new dependencies and land with this slice, not
+ahead of it.
 
 ### The raster lighting stack: what its twelve calls left (2026-08-30)
 
@@ -7979,8 +7980,9 @@ The record behind this — the argument, the options and the measurements — is
 `docs/notes/rendering.md` under this heading.
 
 The decision above puts the traditional raster stack on every tier, and the
-twelve calls it needed were all answered on 2026-08-30 — the per-topic plans and
-`43-render-standards.md`'s delivery table carry the answers and the work that
+twelve calls it needed were all answered on 2026-08-30 — the per-topic notes and
+the rendering-gap survey (_What the deleted 43-render-standards plan left
+behind_ in `docs/notes/rendering.md`) carry the answers and the work that
 followed them. What is left of that round is the refusals, which are here so
 they are not re-proposed, and the two answers that named a remainder:
 
@@ -8368,35 +8370,6 @@ to the new topic number. The mapping is topic 18's own index table. Worth doing
 in one commit that touches nothing else, and worth doing before the next
 technique's ladder lands, because each new rung adds citations to the old path.
 
-### The rendering-gap survey has no owner per row (2026-08-27)
-
-**DECIDED 2026-08-30 — the survey has no owner because
-`43-render-standards.md`'s delivery table is the owner.** Read that table; this
-section stays as the record of the 2026-08-27 gaps.
-`docs/plan/43-render-standards.md` enumerates what a current engine ships and
-where this one stands, and its delivery table orders the gaps by benefit per
-unit of work. The rows above **blended transparency** each have a section
-arguing them; the rows below have a paragraph and no decision record.
-
-**DECIDED 2026-09-06 —** colour grading is a post-tonemap 3D LUT, 32³ in
-`Rgba8`, authored as a `.cube` file and cooked at load, identity when absent,
-carried as a `CameraStack` field: Unreal applies its LUT post-tonemap, Unity a
-log-encoded one and Godot 4 a 3D LUT colour correction, and `.cube` is the
-Adobe/Resolve interchange every authoring tool writes. The full design and what
-is owed — the `CameraStack` field, the load-time parse and the lookup inside the
-tonemap pass — are under _Colour grading, the post-tonemap LUT, is specified and
-unbuilt_ below. Order-independent transparency is answered too — refused now,
-per-object sorted alpha blending instead; see "No transparent pass, and
-therefore no depth sort" below.
-
-**The previous-transform row is spent.** Reserving the slot in
-`crcbl_shaders::mesh::GpuInstance` was the one row here that was a decision
-rather than a design, and it has landed: `GpuInstance::previous_transform`, at a
-stride of 160. Two rows this entry named have since been argued as well — the
-froxel pass is built (`crcbl_render::volumetric`; see _The froxel column casts
-its shaft_), and specular IBL is topic 44's rung 3, whose `DFG` half
-`crcbl_shaders::dfg` already cooks.
-
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
 
 `crcbl::engine`'s `GpuContextDesc` has no adapter field, so a suite built on
@@ -8475,10 +8448,10 @@ backends carry multisampled-image unit tests (`crcbl-dx12`'s `resolve.rs` and
 
 ### Colour grading, the post-tonemap LUT, is specified and unbuilt (2026-09-24)
 
-Decided 2026-09-06 (the rendering-gap survey's DECIDED paragraph, above) and
-specified in the post-processing plan, deleted 2026-09-24. Verified 2026-09-24:
-no LUT, `.cube` reader or `ImageType::D3` use in `crcbl-render`, and no grade
-lane in `tonemap.slang`'s block.
+Decided 2026-09-06 in the rendering-gap survey (_The rendering-gap survey's open
+rows_ below) and specified in the post-processing plan, deleted 2026-09-24.
+Verified 2026-09-24: no LUT, `.cube` reader or `ImageType::D3` use in
+`crcbl-render`, and no grade lane in `tonemap.slang`'s block.
 
 **The form: a post-tonemap 3D lookup table**, what Unreal, Unity and Godot 4
 ship. It applies to the display-referred colour the tonemap produced, so a grade
@@ -8552,12 +8525,12 @@ half 2 changes the histogram's input, so the exposure e2e is the arbiter.
 
 ### Depth of field and lens artefacts are missing, and follow colour grading (2026-09-24)
 
-`docs/plan/43-render-standards.md` §6 marks both missing. The post-processing
-plan ruled that each is a display-referred effect with parameters, so each needs
-the serialized per-pass parameter shape the colour-grading LUT field settles,
-and neither has a reason to be built before there is a curve and a grade to
-defocus and to flare. No design beyond that was written. Verified 2026-09-24:
-nothing of either in `crcbl-render` or `crcbl-shaders`.
+The rendering-gap survey's §6 marked both missing. The post-processing plan
+ruled that each is a display-referred effect with parameters, so each needs the
+serialized per-pass parameter shape the colour-grading LUT field settles, and
+neither has a reason to be built before there is a curve and a grade to defocus
+and to flare. No design beyond that was written. Verified 2026-09-24: nothing of
+either in `crcbl-render` or `crcbl-shaders`.
 
 ### Considered and declined for post-processing and antialiasing (2026-09-24)
 
@@ -8658,6 +8631,220 @@ directory — cannot be provoked at all, since `dirs::config_dir` decides it.
 Related and unowned: `crates/crcbl-store/src/lib.rs` records that an IndexedDB
 fallback for the browser is still to come, so OPFS is the only web backend and
 the no-store case silently does not persist.
+
+## The rendering-gap survey's open rows (from the deleted 43-render-standards plan, 2026-09-24)
+
+Topic 43 was the gap survey: what a current engine ships (the feature set common
+to Unreal 5, Unity HDRP and Godot 4), where this one stands, and a delivery
+table ordering the gaps by benefit per unit of work. On 2026-08-30 that table
+was made the owner of every open row, so this section is its replacement: one
+entry per row the survey still had open when it was deleted, each naming what a
+current engine ships, where crcbl stands, the owner and the next step. The
+survey's binding rules, including the pricing rule every row below is held to
+and what it refused to re-open, are in `docs/notes/rendering.md` under _What the
+deleted 43-render-standards plan left behind_, with a table resolving the "topic
+43 §N" and "row (x)" citations in code.
+
+Built and off this list (verified 2026-09-24 by symbol): the vertex v2 layout
+and 64-byte `GpuMaterial` with `depthVertexMain`, `CameraStack`, `PageDesc` over
+`PageKind`, `debug_draw`, `settings::presets`, the viewer's shelf,
+`Light::Rect`, the normal, packed and emissive pages (the importer reads all
+five glTF maps, `emissiveTexture` included — `GltfScene::emissive_textures`),
+alpha-mask and double-sided modes, specular antialiasing, CMAA2, the probe
+volume's scroll, the motion-vector target, mips and anisotropy, height fog and
+the froxel column, auto-exposure, ACES, the spatial upscale, the gradient sky
+and the atmosphere. Row (f), the shared importance helper, was refused. The
+previous-transform slot the survey reserved in `GpuInstance` is spent
+(`previous_transform`).
+
+The survey's order, which is still the order these want building in:
+
+1. Blended transparency with GPU-sorted keys.
+2. Block-compressed pages.
+3. Colour grading, then depth of field and lens artefacts.
+4. MSAA 2×/4×/8×.
+5. The motion-vector consumers: TAA, temporal SSR, temporal upscaling,
+   per-object motion blur.
+6. HDR display output.
+7. Foundation (c), the acceleration-structure seam, when the ray-tracing tier's
+   updater is next.
+
+### Blended transparency with GPU-sorted keys
+
+**A current engine ships** a sorted alpha-blended pass after the opaque one,
+forward-shaded even in a deferred engine, plus alpha-to-coverage or an
+order-independent scheme for foliage and hair. **Here:** `MASK` and
+`doubleSided` are built; `BLEND` is imported as `OPAQUE` with a warning and no
+blended geometry pass exists. **Owner:** `docs/plan/53-transparency.md`, which
+carries the five decisions of 2026-09-06, the sort key and the fixture, and _No
+transparent pass, and therefore no depth sort_ in this file. It is the raster
+ladder's last rung, and P7C is scheduled after it.
+
+### Block-compressed pages: KTX2 and Basis at the bake, BC7/BC5/BC4 on the device
+
+**A current engine ships** block-compressed textures — BC7 for colour, BC5 for a
+two-channel normal, BC4 for a mask, with ETC2 or ASTC where BC is absent.
+**Here:** every page is uncompressed `Rgba8Unorm`/`Rgba8UnormSrgb`. The device
+half exists — `Format::Bc7RgbaUnormSrgb`, `Bc5RgUnorm` and `Bc4RUnorm` behind
+`Features::TEXTURE_COMPRESSION_BC` — and nothing in `crcbl-render` or
+`crcbl-scene` asks for them: verified 2026-09-24, the BC formats appear outside
+the HAL and backends only in `crcbl-webgpu`'s tests, and no `Cargo.toml` names
+`ktx2` or `basis-universal`. **This is the bandwidth rung** — four to six times
+less texture traffic, which is what makes normal maps and the material pages
+affordable in the browser; until it lands a page costs four times its BC7 size.
+
+**The design, decided 2026-09-06** (the rules are in `docs/notes/rendering.md`,
+_What the deleted 43-render-standards plan left behind_; the MikkTSpace half of
+the same decision is under _DECIDED — the vertex and material strides widen
+once_):
+
+- KTX2 carrying supercompressed UASTC, per `KHR_texture_basisu`; UASTC rather
+  than ETC1S because ETC1S artefacts normal maps.
+- Transcoded at load to BC7/BC5/BC4 where `TEXTURE_COMPRESSION_BC` was granted,
+  ASTC or ETC2 otherwise. ETC2 and ASTC each need a `Features` bit and `Format`
+  variants, added on the day a device without BC is targeted.
+- Encoder: the `basisu` CLI, pinned in one place and run by the bake tool the
+  way `crates/crcbl-shaders/tools/compile-shaders.sh` runs `slangc`, with a
+  `--check` mode. **Not yet chosen: the pinned `basisu` version** — picked when
+  the rung is built, the way `SLANG_VERSION` was.
+- Loader: the `basis-universal` crate with only its transcoder feature, plus
+  `ktx2`. Both are new dependencies the user has agreed to; they land with the
+  slice, not ahead of it.
+- `crcbl_scene::gltf_import` reads `KHR_texture_basisu` out of the document's
+  JSON by hand (the resolved `gltf` crate has no feature for it), as one more
+  branch where `source` is read today.
+
+**Owes:** the bake step and its `--check`, the load-time transcode choice, the
+importer branch, per-kind BC formats in `PageKind::format`, and a price on the
+three tiers. The survey expected the mip chains to ship inside the asset, as
+current engines do, rather than be built by `crcbl_render::mip` at load.
+
+### Colour grading, depth of field and lens artefacts
+
+**A current engine ships** a 3D LUT grade, gather or scatter depth of field, and
+chromatic aberration, vignette and grain. **Here:** none of the three (verified
+2026-09-24). **Owner:** _Colour grading, the post-tonemap LUT, is specified and
+unbuilt_ carries the grade's full design (a post-tonemap 32³ `Rgba8Unorm` LUT
+authored as `.cube`, identity when absent, a `CameraStack` field, applied inside
+the tonemap pass before the AA resolve); _Depth of field and lens artefacts are
+missing, and follow colour grading_ carries the other two, which wait on the
+serialized per-pass parameter shape the LUT field settles.
+
+### MSAA 2×, 4× and 8×
+
+**A current engine ships** MSAA as an option on a forward renderer. **Here:**
+`Antialiasing` is `None`, `Fxaa` and `Cmaa2`; every pipeline and transient is
+single-sample. **Owner:** _MSAA was reopened rather than reversed_, which
+carries the design (the rungs above CMAA2 on the one ladder, a multisampled
+depth prepass, one depth resolve, alpha-to-coverage, opt-in only) and the
+measurement it is gated on.
+
+### The motion-vector consumers
+
+**A current engine ships** TAA, temporal reflections, a temporal upscaler (DLSS,
+FSR 3, XeSS or TSR, every one of which requires motion vectors) and per-object
+motion blur. **Here:** the target is built (`MOTION_FORMAT`,
+`TransientImageDesc::motion`) and nothing samples it. The convention is
+texture-coordinate space, current minus previous, `+y` down, so a history is
+read at `uv - motion`. Owners:
+
+- **TAA** — _TAA is unbuilt: jitter, history, and the golden decision it owes_.
+- **Temporal SSR** — _Temporal SSR is unbuilt, and waits on TAA's history
+  decision_.
+- **Temporal upscaling** — item 4 of _The engine owns scaling on every platform:
+  a full upscale pass_.
+- **Per-object motion blur** — no entry of its own until now, and no design: the
+  survey listed it as the fourth consumer and wrote nothing beyond that. It is
+  the one consumer that needs no history, so it is not blocked on the golden
+  decision the other three share; it is a post pass after the tonemap reading
+  the target along each pixel's vector. Whatever samples the target first owes
+  what _What the motion-vector pass left owed_ lists: the sky's camera motion
+  and the `SAMPLED` usage bit.
+- **SSGI's accumulation** was the fifth, and went with SSGI's withdrawal on
+  2026-08-30 — the probe volume is the bounce on every tier.
+
+### HDR display output
+
+**A current engine ships** HDR output to an HDR display, as scRGB or HDR10.
+**Here:** the frame is HDR up to the tonemap and the swapchain is sRGB only —
+`SurfaceCaps::preferred_format` picks the first sRGB format, and `SwapchainDesc`
+carries a `format` and no colour space (read 2026-09-24 in
+`crates/crcbl-hal/src/swapchain.rs`). The `HDR output` settings key is one of
+the `Named` keys with no reader (_The settings catalogue's named keys have no
+reader_). **No design was written.** What it would take, as a suggestion rather
+than a decision: a colour space on the swapchain seam and in `SurfaceCaps`, each
+backend's mapping (Vulkan's `VkColorSpaceKHR`, DXGI's colour space, Metal's
+`CAMetalLayer` EDR, and the canvas's HDR tone-mapping mode where a browser has
+one), a display-referred encode in the tonemap for the chosen space, and a
+reader for the key. Where that sits against the clamp-downward settings rule — a
+display that cannot show HDR must refuse the key — is part of the design.
+
+### Foundation (c): the acceleration-structure seam
+
+**A current engine ships** hardware ray tracing on the devices that have it.
+**Here:** `crcbl-hal` has `Features::RAY_QUERY` and
+`Features::ACCELERATION_STRUCTURE` and nothing else — no resource, no build or
+refit verb, no `Capability::RayQuery` (verified 2026-09-24 by grepping
+`crates/crcbl-hal/src`). Four things wait on it: `ROADMAP.md`'s P7C, sundial's
+milestone 5 and alcove's ray-traced rung (_Ray tracing and the acceleration
+structures are unbuilt_), and lantern's both-paths comparison. GI is hardware
+ray tracing only (`docs/notes/rendering.md`, _DECIDED — GI is hardware ray
+tracing only_), and the probe volume's traced updater rides on this seam.
+
+**The seam, as the survey outlined it (2026-09-06)** — the intersection of
+`VK_KHR_acceleration_structure` with `VK_KHR_ray_query`, DXR 1.1's inline ray
+tracing and Metal's `intersection_query`, all three of which build a two-level
+structure on the device, refit it in place when only transforms moved, and
+answer a query from an ordinary shader stage with no hit shaders and no binding
+table:
+
+- **An acceleration-structure resource** on `crcbl-hal`'s existing resource
+  terms: a handle, a description, and destruction that follows frame retirement.
+  Two levels, because all three APIs have exactly two.
+- **Two encoder verbs, build and refit.** Build takes geometry ranges; refit
+  takes a built structure and the transforms that moved. Separate verbs rather
+  than a flag, because a rebuild is per-scene-change work and a refit is
+  per-frame work, and a seam that spelled them the same would hide which one a
+  caller pays for.
+- **`Capability::RayQuery`**, answered by a `match` like every other
+  `crcbl_hal::Capability`; `crcbl-webgpu` answers it with a permanent
+  `ApiAbsence` divergence, the shape of its `BindlessDescriptorArray` answer.
+- **Inline ray queries from compute only**, to begin with — one shader shape,
+  and the updater's consumer is a compute pass anyway.
+
+**Deliberately excluded:** ray-tracing pipelines, hit groups, the shader binding
+table and callable shaders — the parts the three APIs spell differently. Every
+dependent needs only a shadow, occlusion or reflection ray, and the pipeline
+form can be added later without replacing the inline one. **When:** after the
+raster ladder's last rung (blended transparency), per the survey's lighting
+order. The passes above the seam are P7C's (_Ray-traced lighting (P7C) is not
+built_).
+
+### Smaller rows the survey's sections left open
+
+Each already has an owner; listed so the survey's coverage is complete here.
+
+- **`texture_quality` as a `lod_min` clamp** — the cheap form of that key: the
+  top level or two of every chain go unread and the picture is what a smaller
+  page draws. In _What the deleted 39-capabilities plan left unbuilt_'s key
+  list. Streaming is the expensive form and is topic 25's.
+- **A cubemap sky**, for a scene whose environment is an authored image rather
+  than a planet. Its own rung, not blocked by the atmosphere; no design and no
+  other entry.
+- **`occlusionTexture.strength`**, **`uv1`'s writer** and **the mesh-shader
+  path's depth-only stage** — _The packed and emissive pages: what rung 3's
+  device half left_ and _The v2 vertex layout: what is left to spend it_.
+- **MikkTSpace tangents** — _Normal maps: what the tangent and page rungs left_.
+- **World-anchored debug text** — _World-anchored debug text is not built_.
+- **Decal atlases**, the page container's next caller —
+  `docs/plan/33-decals.md`.
+- **The histogram's cost** — _What auto-exposure left owed_.
+- **Froxel rungs 3 and 4** — _Froxel rungs 3 and 4: a filtered 3D target and a
+  density field_.
+- **The GI alternatives below ray tracing** — a cone trace over a colour pyramid
+  and mesh-plus-global SDF marching stay recorded as the raster alternatives and
+  are not scheduled (_Cone-traced SSR over a colour pyramid, rung 3, is unbuilt_
+  carries the cone trace as a reflection rung).
 
 ## Recovered from the plan docs during the 2026-08-27 pruning pass
 
@@ -8940,8 +9127,8 @@ and _What the deleted 45-shadows plan left behind_):
   ladder) and a ray-traced rung in `apps/alcove` and the mirrors sample are the
   comparison fixtures waiting on it.
 - **Dependencies.** The seam's acceleration-structure and ray-query commands on
-  `crcbl-vk` first; the deferred `crcbl-dx12` is the only other backend that
-  could run it.
+  `crcbl-vk` first (outlined under _Foundation (c): the acceleration-structure
+  seam_); the deferred `crcbl-dx12` is the only other backend that could run it.
 
 ### Whole documents with nothing built, re-verified (2026-08-27)
 
@@ -17289,11 +17476,11 @@ every frame under it, which is the argument against it in one line.
 ## What the viewer's shelf slice left (2026-08-30, re-scoped 2026-09-06)
 
 The viewer's milestone 4, the PBR showcase, is built: the native drop, the
-shelf, and — since 2026-09-06, with both halves of `43-render-standards.md` §2's
-rung 3 — the full metallic-roughness set, so a shelf model's
-`metallicRoughnessTexture`, `occlusionTexture` and `emissiveTexture` all reach a
-page and all four material maps draw. What is left is the shelf slice's own
-leftovers, none of them about the material set:
+shelf, and — since 2026-09-06, with both halves of the survey's §2 rung 3 — the
+full metallic-roughness set, so a shelf model's `metallicRoughnessTexture`,
+`occlusionTexture` and `emissiveTexture` all reach a page and all four material
+maps draw. What is left is the shelf slice's own leftovers, none of them about
+the material set:
 
 - **The browser gate's `playing` and `deforming` checks read the _dropped_
   document.** The page opens on Suzanne, which has no skin, so
@@ -17313,9 +17500,9 @@ leftovers, none of them about the material set:
 
 ## The v2 vertex layout: what is left to spend it (2026-08-30)
 
-`crcbl_shaders::mesh::MeshVertex` is the two-stream layout of
-`docs/plan/43-render-standards.md` §2, and the pool, the three shader copies and
-every constructor use it. Left behind, each its own slice:
+`crcbl_shaders::mesh::MeshVertex` is the two-stream layout of topic 43 §2
+(`docs/notes/rendering.md`), and the pool, the three shader copies and every
+constructor use it. Left behind, each its own slice:
 
 - **The mesh-shader path still reads a whole vertex for depth.**
   `crcbl_render::forward`'s `MeshModules::depth_pipeline` names `mesh.slang`'s
@@ -17359,10 +17546,9 @@ every constructor use it. Left behind, each its own slice:
 
 ## The generalised page allocator: what row (d) left (2026-09-06)
 
-`docs/plan/43-render-standards.md` §2's row (d) landed in two commits:
-`GpuMaterial::NO_PAGE` went out of band at `0xFFFF`, and
-`crcbl_render::scene::PageDesc` became a table over `PageKind` with an extent
-and a layer list per kind. What it left:
+Topic 43 §2's row (d) landed in two commits: `GpuMaterial::NO_PAGE` went out of
+band at `0xFFFF`, and `crcbl_render::scene::PageDesc` became a table over
+`PageKind` with an extent and a layer list per kind. What it left:
 
 - **The placeholder texel is never read, so nothing asserts its colour.** A
   `PageKind` with no layers gets a 1×1 image of `crcbl_render::forward`'s
@@ -17393,11 +17579,11 @@ and a layer list per kind. What it left:
 
 ## The packed and emissive pages: what rung 3's device half left (2026-09-06)
 
-`docs/plan/43-render-standards.md` §2's rung 3 landed on the device:
-`crcbl_render::scene::PageKind` has `MetallicRoughnessOcclusion` and `Emissive`,
-`mesh.slang` binds `mro_textures` at 30 and `emissive_textures` at 31 and reads
-them through `mro_texel` and `emissive_texel`, and the fragment stage applies
-glTF's three products. What it left:
+Topic 43 §2's rung 3 landed on the device: `crcbl_render::scene::PageKind` has
+`MetallicRoughnessOcclusion` and `Emissive`, `mesh.slang` binds `mro_textures`
+at 30 and `emissive_textures` at 31 and reads them through `mro_texel` and
+`emissive_texel`, and the fragment stage applies glTF's three products. What it
+left:
 
 - **`occlusionTexture.strength` is not carried anywhere, and the shader shades
   at a strength of one.** glTF 2.0 §3.9.5 is
@@ -17455,11 +17641,10 @@ glTF's three products. What it left:
 
 ## Normal maps: what the tangent and page rungs left (2026-08-30)
 
-`docs/plan/43-render-standards.md` §2's rung 1 and the normal half of its rung 2
-landed: the importer reads `TANGENT` and `normalTexture`, `GpuMesh` carries
-`MESH_AUTHORED_TANGENTS`, `GpuMaterial` is 64 bytes, and the normal page
-perturbs the shading normal through a vertex frame or a screen-space one. What
-they left:
+Topic 43 §2's rung 1 and the normal half of its rung 2 landed: the importer
+reads `TANGENT` and `normalTexture`, `GpuMesh` carries `MESH_AUTHORED_TANGENTS`,
+`GpuMaterial` is 64 bytes, and the normal page perturbs the shading normal
+through a vertex frame or a screen-space one. What they left:
 
 - **No tangent generator.** A primitive with no `TANGENT` accessor takes the
   fragment stage's screen-space frame (`derivative_frame` in `mesh.slang`), and
@@ -22677,13 +22862,13 @@ against, or found on the way:
   glint".
 
 - **The importer reads every glTF texture slot now.** This entry said
-  `metallicRoughnessTexture` was still unimported; that was true until
-  `docs/plan/43-render-standards.md` §2's rung 3 landed on 2026-09-06, and
-  `crcbl_scene::gltf_render` now decodes the metallic-roughness, occlusion and
-  emissive slots onto their own pages beside base colour and normal. The gloss
-  map is no longer flat: a document that varies roughness over a surface arrives
-  with the map applied. What those pages still do not carry is recorded under
-  "The packed and emissive pages: what rung 3's device half left".
+  `metallicRoughnessTexture` was still unimported; that was true until the
+  survey's §2 rung 3 landed on 2026-09-06, and `crcbl_scene::gltf_render` now
+  decodes the metallic-roughness, occlusion and emissive slots onto their own
+  pages beside base colour and normal. The gloss map is no longer flat: a
+  document that varies roughness over a surface arrives with the map applied.
+  What those pages still do not carry is recorded under "The packed and emissive
+  pages: what rung 3's device half left".
 
 - **An imported default material is no longer `GpuMaterial::UNTINTED`**, and
   that is deliberate. glTF defaults a material to `metallic 1.0, roughness 1.0`;
@@ -23616,9 +23801,10 @@ occlude it, and that is a texel comparison of exactly the shape
 
 **A coverage gap, stated as one.** The pricing rule asks for the desktop
 adapter, lavapipe _and_ the browser. The first two are in
-`docs/plan/43-render-standards.md`'s row (e); the third is missing, because the
-price test runs under the mesh-e2e runner, which has no browser leg, and no demo
-appends a segment yet — so there is nothing for the browser gate to time.
+`docs/notes/rendering.md` (_What the deleted 43-render-standards plan left
+behind_, row (e)); the third is missing, because the price test runs under the
+mesh-e2e runner, which has no browser leg, and no demo appends a segment yet —
+so there is nothing for the browser gate to time.
 
 **What it would take.** A caller. The first system that appends its own geometry
 gives the browser gate something to measure, and `PassStats` already reports the

@@ -238,7 +238,7 @@ impl Sky {
     /// The **same** sun, as [`crcbl::render::ForwardRenderer::set_atmosphere`]
     /// takes it.
     ///
-    /// `docs/plan/43-render-standards.md` §8's Hillaire atmosphere, and this is
+    /// Topic 43 §8's Hillaire atmosphere, and this is
     /// the whole of what sundial hands it. Both fields are read off
     /// [`Sky::light`] rather than spelled again — the direction is
     /// [`Sky::towards`] and the illuminance is that light's own `color`, which

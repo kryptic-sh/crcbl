@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/43-render-standards.md` §8's second half: the pass that **draws**
+// Topic 43 §8's second half: the pass that **draws**
 // the gradient sky the frame already lights and reflects with.
 //
 // # Why the sky is a pass and not a clear colour

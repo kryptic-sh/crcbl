@@ -159,7 +159,7 @@ bitflags::bitflags! {
         /// reduce that turns it into one number, and the tonemap reading that
         /// number instead of the one a caller set.
         ///
-        /// `docs/plan/43-render-standards.md` §6's rung, and **the third bit
+        /// Topic 43 §6's rung, and **the third bit
         /// not in [`RenderEffects::DEFAULT_STACK`]**. The reason is
         /// [`VOLUMETRIC_FOG`](Self::VOLUMETRIC_FOG)'s rather than
         /// [`BLOOM`](Self::BLOOM)'s: it does not add a term to the picture, it

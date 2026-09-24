@@ -1,6 +1,6 @@
 //! The motion-vector pass, read back through the debug view that encodes it.
 //!
-//! `docs/plan/43-render-standards.md` §9's subtraction: where a fragment is now,
+//! Topic 43 §9's subtraction: where a fragment is now,
 //! minus where it was last frame, in texture coordinates. Two things feed it and
 //! both belong to the renderer rather than to a caller — `GpuInstance`'s
 //! previous transform, which `crates/crcbl-render/src/instance_pool.rs` fills,

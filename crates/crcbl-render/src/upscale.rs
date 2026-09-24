@@ -1,4 +1,4 @@
-//! `docs/plan/43-render-standards.md`'s render-scale row: the spatial upscale
+//! Topic 43's render-scale row: the spatial upscale
 //! that carries an internal render target to the caller's own extent.
 //!
 //! # It is the second pass in this crate that changes the frame's shape

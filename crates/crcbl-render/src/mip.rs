@@ -4,7 +4,7 @@
 //! level 0 (extent²) ─box, linear light─▶ level 1 (extent/2)² ─▶ … ─▶ 1×1
 //! ```
 //!
-//! `docs/plan/43-render-standards.md`'s filtering rung: every layer of a
+//! Topic 43's filtering rung: every layer of a
 //! [`PageDesc`](crate::scene::PageDesc) reaches the device with its whole chain,
 //! and [`crate::texture`] uploads one copy per level. The chain is built here
 //! rather than by a compute pass because the page's `Rgba8UnormSrgb` format is

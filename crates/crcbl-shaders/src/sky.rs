@@ -1,7 +1,7 @@
 //! A gradient sky: the radiance the background reads as, and the environment
 //! that radiance lights the scene with.
 //!
-//! `docs/plan/43-render-standards.md` §8 puts a sky above scenery on the gap
+//! Topic 43 §8 puts a sky above scenery on the gap
 //! list for one reason: **the environment term screen-space reflections fall
 //! back to, and the ambient term a metal needs, are the same term a sky would
 //! provide.** So this module answers both at once. [`SkyGradient`] is what a
