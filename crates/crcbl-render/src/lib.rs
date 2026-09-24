@@ -226,7 +226,7 @@ pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{
     DEFAULT_ANISOTROPY, DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardOverlayTargets,
     ForwardRenderer, FrameTargets, MAX_VIEWS, MIN_RENDER_SCALE, SCENE_CLEAR, SHADOW_LOD_BIAS,
-    SkinnedInstanceDesc, ViewDesc, ViewId, ViewMask, ViewTarget,
+    SkinnedInstanceDesc, ViewBackground, ViewDesc, ViewId, ViewMask, ViewTarget,
 };
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,
@@ -260,8 +260,8 @@ pub use skinning::{
     normal_basis, skin_vertex,
 };
 pub use sprite_pass::{
-    ATLAS_FORMAT, AtlasDesc, AtlasSlot, CONSTANTS_SIZE, INSTANCE_STRIDE, SAMPLE_PIXEL,
-    SAMPLE_SMOOTH, SheetDesc, SheetError, SheetId, SlotCopy, Sprite, SpriteConstants,
+    ATLAS_FORMAT, ATLAS_FORMATS, AtlasDesc, AtlasSlot, CONSTANTS_SIZE, INSTANCE_STRIDE,
+    SAMPLE_PIXEL, SAMPLE_SMOOTH, SheetDesc, SheetError, SheetId, SlotCopy, Sprite, SpriteConstants,
     SpriteInstance, SpriteRenderer, sheet_lane,
 };
 pub use ssao::{r_ssao_bent_normals, r_ssao_blur_passes, r_ssao_slices};

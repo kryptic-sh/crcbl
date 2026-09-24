@@ -1434,8 +1434,9 @@ impl GpuInstance {
     /// on draws in every view: an instance nobody said anything about is drawn
     /// by all of them, and a renderer that has only ever had one view writes
     /// exactly the record it wrote before the mask existed. A cull that is no
-    /// view's — a shadow cascade's, a shadowed light's — tests no bit at all,
-    /// so what an instance hides from a camera still casts its shadow.
+    /// view's — a shadow cascade's, a shadowed light's — tests
+    /// [`CASTS_NO_SHADOW`](Self::CASTS_NO_SHADOW) instead of any of these, so
+    /// what an instance hides from a camera still casts its shadow.
     ///
     /// Bits 4 to 7 are left free, so the material mode can widen without
     /// moving this field.
@@ -1444,6 +1445,22 @@ impl GpuInstance {
     /// The hidden-views mask's bits in [`GpuInstance::flags`]: bits 8 to 15,
     /// one per view — see [`GpuInstance::HIDDEN_VIEWS_SHIFT`].
     pub const HIDDEN_VIEWS_MASK: u32 = 0xff << Self::HIDDEN_VIEWS_SHIFT;
+
+    /// [`GpuInstance::flags`] bit 16: this instance **casts no shadow**.
+    ///
+    /// The shadow culls' own bit on the hidden-views mask's terms: every cull
+    /// that is no view's — a cascade's and a shadowed light's — hands this as
+    /// the bit it rejects on, so `cull.slang` drops the instance before it
+    /// tests a bound and no shadow draw, on any geometry path, ever names it.
+    /// A camera's cull tests its own view bit and not this one, so the
+    /// instance is still drawn and still *receives* shadows.
+    ///
+    /// **Set, not clear, means the exception**, for
+    /// [`HIDDEN_VIEWS_SHIFT`](Self::HIDDEN_VIEWS_SHIFT)'s reason: the all-zero
+    /// record every other flag relies on casts, as every instance did before
+    /// the bit existed. Past the hidden-views mask rather than in bits 4 to 7,
+    /// which are the material mode's room to widen.
+    pub const CASTS_NO_SHADOW: u32 = 1 << 16;
 
     /// This instance's material mode, unpacked from
     /// [`flags`](GpuInstance::flags).
@@ -3499,7 +3516,7 @@ mod tests {
         for line in [
             "float2 pixel, out uint selected,",
             "sun_cascade_tint = cascade_tint(sun_cascade, sun_fade);",
-            "output.lit = float4(lit * sun_cascade_tint, albedo.a);",
+            "output.lit = float4(lit * sun_cascade_tint, 1.0);",
         ] {
             assert!(
                 mesh.contains(line),

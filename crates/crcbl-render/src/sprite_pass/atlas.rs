@@ -108,6 +108,8 @@
 //! created with. Linear filtering at a slot's edge reads half a texel outside
 //! the cell; without the gutter that half texel is the neighbouring icon.
 
+use std::borrow::Cow;
+
 use crcbl_core::{Handle, Pool};
 use crcbl_hal::{
     BufferHandle, BufferImageCopy, Device, Extent3d, Format, HalError, ImageAspect, ImageCopy,
@@ -126,17 +128,31 @@ use crate::texture::{UploadedTexture, stage_region};
 /// [module docs](self).
 pub const GUTTER: u32 = 1;
 
-/// The one format an atlas is created in, and so the one a copy source must be.
+/// The format an atlas is created in unless its [`AtlasDesc::format`] names
+/// the other one [`ATLAS_FORMATS`] holds, and the texel layout
+/// [`SpriteRenderer::write_slot`] takes whatever the atlas's format.
 ///
 /// The format every [`SpriteRenderer::register_sheet`] upload uses, for the
 /// reason given there: the sampler decodes to linear and the blend happens in
-/// linear light. A copy moves bytes, not colours, so a source in any other
-/// format would arrive reinterpreted — which is why the copy refuses one
-/// rather than converting it.
+/// linear light.
 pub const ATLAS_FORMAT: Format = Format::Rgba8UnormSrgb;
 
+/// Every format [`SpriteRenderer::create_atlas`] accepts: [`ATLAS_FORMAT`], and
+/// its `BGRA` twin, which is what a swapchain-format render target — a
+/// [`ForwardRenderer`](crate::ForwardRenderer) view drawn for an icon — most
+/// often is.
+///
+/// **A copy moves bytes, not colours**, so a copy source has to be in the
+/// atlas's own format exactly: one in any other would arrive reinterpreted,
+/// which is why [`SpriteRenderer::add_slot_copies`] refuses one rather than
+/// converting it, and why the format is chosen once, with the atlas. Both are
+/// sRGB, so either atlas is sampled into linear light the same way, and a
+/// sampled `BGRA` texel reaches the shader in `rgba` order like any other.
+pub const ATLAS_FORMATS: [Format; 2] = [ATLAS_FORMAT, Format::Bgra8UnormSrgb];
+
 /// Bytes one [`ATLAS_FORMAT`] texel occupies, and so the stride of the pixels
-/// [`SpriteRenderer::write_slot`] takes.
+/// [`SpriteRenderer::write_slot`] takes — the same for every one of
+/// [`ATLAS_FORMATS`], which `every_atlas_format_is_four_bytes_a_texel` checks.
 const TEXEL_BYTES: u32 = match ATLAS_FORMAT.texel_size(ImageAspect::COLOR) {
     Some(bytes) => bytes,
     None => panic!("the atlas format is a single colour plane"),
@@ -160,6 +176,10 @@ pub struct AtlasDesc<'a> {
     pub rows: u32,
     /// How sprites drawn from the atlas are sampled.
     pub sample: SampleMode,
+    /// The atlas image's format: one of [`ATLAS_FORMATS`] — [`ATLAS_FORMAT`]
+    /// unless every image copied in will be in the other, since a copy source
+    /// must match it exactly.
+    pub format: Format,
 }
 
 /// The marker type an atlas cell's [`Handle`] names.
@@ -209,8 +229,8 @@ impl AtlasSlot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlotCopy {
     /// The rendered image, in the graph the copy is added to: a transient a
-    /// render pass drew, or an import. Exactly the slot's cell size, in
-    /// [`ATLAS_FORMAT`].
+    /// render pass drew, or an import. Exactly the slot's cell size, in the
+    /// atlas's own [`AtlasDesc::format`].
     pub source: ImageId,
     /// Where it goes.
     pub slot: AtlasSlot,
@@ -245,10 +265,10 @@ pub enum SheetError {
         /// The cell the stale handle named.
         index: u32,
     },
-    /// The source image is not what the slot holds: the wrong size, the wrong
-    /// format, not a copy source, or not an image of this graph.
+    /// The source image is not what the slot holds: the wrong size, not the
+    /// atlas's own format, not a copy source, or not an image of this graph.
     #[error(
-        "copy into slot {index} of atlas {sheet:?}: the source must be a {cell:?} {ATLAS_FORMAT:?} \
+        "copy into slot {index} of atlas {sheet:?}: the source must be a {cell:?} {format:?} \
          image this graph can copy from, and {found}"
     )]
     SourceMismatch {
@@ -258,12 +278,24 @@ pub enum SheetError {
         index: u32,
         /// The extent the source must have.
         cell: (u32, u32),
+        /// The format the source must have: the atlas's own.
+        format: Format,
         /// What the source actually is.
         found: String,
     },
+    /// [`AtlasDesc::format`] is not one of [`ATLAS_FORMATS`]. Nothing is
+    /// created.
+    #[error("atlas {label:?} asked for {format:?}, and an atlas is one of {ATLAS_FORMATS:?}")]
+    AtlasFormat {
+        /// The atlas's label.
+        label: String,
+        /// The format it asked for.
+        format: Format,
+    },
     /// The pixels handed to [`SpriteRenderer::write_slot`] are not exactly
-    /// one cell: `width * height` [`ATLAS_FORMAT`] texels, tightly packed.
-    /// Nothing is cropped or padded to make them fit.
+    /// one cell: `width * height` [`ATLAS_FORMAT`] texels, tightly packed,
+    /// whatever the atlas's own format. Nothing is cropped or padded to make
+    /// them fit.
     #[error(
         "write into slot {index} of atlas {sheet:?}: a {cell:?} cell is {expected} bytes of \
          tightly packed {ATLAS_FORMAT:?}, and {found} were given"
@@ -291,6 +323,7 @@ pub(super) struct Atlas {
     pub(super) sheet: SheetId,
     pub(super) texture: UploadedTexture,
     pub(super) extent: (u32, u32),
+    format: Format,
     cell: (u32, u32),
     columns: u32,
     capacity: u32,
@@ -340,6 +373,7 @@ impl Atlas {
             sheet,
             texture,
             extent,
+            format: desc.format,
             cell: desc.cell,
             columns: desc.columns,
             capacity,
@@ -424,7 +458,7 @@ impl Atlas {
             ImportedImage {
                 image: self.texture.image,
                 view: self.texture.view,
-                format: ATLAS_FORMAT,
+                format: self.format,
                 extent: self.extent,
                 initial: ResourceState::ShaderRead,
                 claim: InitialClaim::Tracked,
@@ -450,6 +484,7 @@ impl Atlas {
             sheet: self.sheet,
             index: copy.slot.cell.index(),
             cell: self.cell,
+            format: self.format,
             found,
         };
         let Some((format, extent, usage)) = graph.image_facts(copy.source) else {
@@ -458,7 +493,7 @@ impl Atlas {
                 copy.source
             )));
         };
-        if format != ATLAS_FORMAT || extent != self.cell {
+        if format != self.format || extent != self.cell {
             return Err(mismatch(format!("it is a {extent:?} {format:?} image")));
         }
         if usage.is_some_and(|usage| !usage.contains(ImageUsage::TRANSFER_SRC)) {
@@ -467,6 +502,22 @@ impl Atlas {
             ));
         }
         Ok(())
+    }
+
+    /// `pixels`, in [`ATLAS_FORMAT`]'s `RGBA` order, as the bytes this atlas's
+    /// own format stores: borrowed as they are for an `RGBA` atlas, and with
+    /// each texel's red and blue swapped for a `BGRA` one. The staging copy
+    /// moves bytes, so the order has to be the image's before it is staged.
+    fn texels_from_rgba<'p>(&self, pixels: &'p [u8]) -> Cow<'p, [u8]> {
+        if self.format == Format::Bgra8UnormSrgb {
+            let mut swapped = pixels.to_vec();
+            for texel in swapped.chunks_exact_mut(TEXEL_BYTES as usize) {
+                texel.swap(0, 2);
+            }
+            Cow::Owned(swapped)
+        } else {
+            Cow::Borrowed(pixels)
+        }
     }
 
     /// Refuses `pixels` that are not exactly `slot`'s cell, tightly packed.
@@ -548,21 +599,28 @@ impl SpriteRenderer {
     ///
     /// # Errors
     ///
-    /// [`SheetError::Hal`] for an empty cell or grid, a size past `u32` or
-    /// past the device's limit, or any seam call. A failure leaves nothing
-    /// behind and no id allocated.
+    /// [`SheetError::AtlasFormat`] for a [`AtlasDesc::format`] that is not one
+    /// of [`ATLAS_FORMATS`]. [`SheetError::Hal`] for an empty cell or grid, a
+    /// size past `u32` or past the device's limit, or any seam call. A failure
+    /// leaves nothing behind and no id allocated.
     pub fn create_atlas(
         &mut self,
         device: &dyn crcbl_hal::Device,
         desc: &AtlasDesc<'_>,
     ) -> Result<SheetId, SheetError> {
+        if !ATLAS_FORMATS.contains(&desc.format) {
+            return Err(SheetError::AtlasFormat {
+                label: desc.label.to_string(),
+                format: desc.format,
+            });
+        }
         let extent = Atlas::extent(desc)?;
         let texture = crate::texture::upload_cleared_texture(
             device,
             self.queue,
             &crate::texture::ClearedTextureDesc {
                 label: desc.label,
-                format: ATLAS_FORMAT,
+                format: desc.format,
                 width: extent.0,
                 height: extent.1,
                 layers: 1,
@@ -617,8 +675,9 @@ impl SpriteRenderer {
     ///
     /// [`SheetError::StaleSlot`] or [`SheetError::NotAnAtlas`] for a slot this
     /// renderer does not currently own, and [`SheetError::SourceMismatch`] for
-    /// a source that is not exactly the slot's cell size in [`ATLAS_FORMAT`],
-    /// is a transient without `TRANSFER_SRC`, or is not an image of `graph`.
+    /// a source that is not exactly the slot's cell size in the atlas's own
+    /// [`AtlasDesc::format`], is a transient without `TRANSFER_SRC`, or is not
+    /// an image of `graph`.
     pub fn add_slot_copies(
         &self,
         graph: &mut RenderGraph<'_>,
@@ -671,7 +730,10 @@ impl SpriteRenderer {
     ///
     /// `pixels` are exactly the cell, `width * height` [`ATLAS_FORMAT`]
     /// texels tightly packed, rows top to bottom; the row padding the device's
-    /// copy wants is added here. The atlas moves from `ShaderRead` into
+    /// copy wants is added here. **`RGBA` whatever the atlas's format**: into
+    /// a `Bgra8UnormSrgb` atlas each texel's red and blue are swapped on the
+    /// way to the staging buffer, so one decoded icon writes the same colour
+    /// into either kind. The atlas moves from `ShaderRead` into
     /// `TransferDst` and back through the graph's own barriers, exactly as
     /// for [`add_slot_copies`](Self::add_slot_copies), so the same rules hold:
     /// safe while frames that sampled the old texels are in flight, and
@@ -704,12 +766,13 @@ impl SpriteRenderer {
         atlas.check(slot)?;
         atlas.check_pixels(slot, pixels)?;
         let (image, origin, cell) = atlas.destination(slot);
+        let texels = atlas.texels_from_rgba(pixels);
         let (staging, row_texels) = stage_region(
             device,
             "sprite atlas write staging",
-            ATLAS_FORMAT,
+            atlas.format,
             cell,
-            pixels,
+            &texels,
         )?;
         let target = atlas.import(graph);
         self.atlas_staging.push(staging);
@@ -805,6 +868,7 @@ mod tests {
             columns,
             rows,
             sample: SampleMode::Smooth,
+            format: ATLAS_FORMAT,
         }
     }
 
@@ -815,9 +879,19 @@ mod tests {
 
     /// A transient in `graph` of `extent` in the atlas's format.
     fn source(graph: &mut RenderGraph<'_>, extent: (u32, u32), usage: ImageUsage) -> ImageId {
+        source_in(graph, extent, usage, ATLAS_FORMAT)
+    }
+
+    /// [`source`], in `format`.
+    fn source_in(
+        graph: &mut RenderGraph<'_>,
+        extent: (u32, u32),
+        usage: ImageUsage,
+        format: Format,
+    ) -> ImageId {
         graph.create_image(
             "rendered icon",
-            TransientImageDesc::new(extent, ATLAS_FORMAT, usage),
+            TransientImageDesc::new(extent, format, usage),
         )
     }
 
@@ -1285,6 +1359,189 @@ mod tests {
         }
         assert_eq!(graph.pass_count(), 0, "a refused copy adds no pass");
         drop(graph);
+        renderer.destroy(device.as_ref());
+    }
+
+    /// Every atlas format stores a texel in the bytes [`TEXEL_BYTES`] counts,
+    /// which is what lets [`SpriteRenderer::write_slot`] take one pixel layout
+    /// and size it once for every atlas.
+    #[test]
+    fn every_atlas_format_is_four_bytes_a_texel() {
+        for format in ATLAS_FORMATS {
+            assert_eq!(
+                format.texel_size(ImageAspect::COLOR),
+                Some(TEXEL_BYTES),
+                "{format:?}"
+            );
+            assert!(format.is_srgb(), "{format:?} is sampled into linear light");
+        }
+    }
+
+    /// **An atlas is one of [`ATLAS_FORMATS`] or nothing**: every other
+    /// format is refused by name before an image exists, including the two
+    /// that differ from an accepted one only in their encoding.
+    #[test]
+    fn an_atlas_in_a_format_outside_the_list_is_refused_and_creates_nothing() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        let images = recorder.live_objects(ObjectKind::Image);
+        for format in [Format::Rgba8Unorm, Format::Bgra8Unorm, Format::Rgba16Float] {
+            let refused = renderer.create_atlas(
+                device.as_ref(),
+                &AtlasDesc {
+                    format,
+                    ..desc(1, 1)
+                },
+            );
+            assert!(
+                matches!(
+                    refused,
+                    Err(SheetError::AtlasFormat { format: named, .. }) if named == format
+                ),
+                "{format:?}: {refused:?}"
+            );
+        }
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Image),
+            images,
+            "a refused atlas creates no image"
+        );
+        for format in ATLAS_FORMATS {
+            let atlas = renderer
+                .create_atlas(
+                    device.as_ref(),
+                    &AtlasDesc {
+                        format,
+                        ..desc(1, 1)
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{format:?} is an atlas format: {error}"));
+            let mut graph = RenderGraph::new(queue);
+            let imported = renderer
+                .atlas(atlas)
+                .expect("just created")
+                .import(&mut graph);
+            assert_eq!(
+                graph.image_facts(imported).map(|(format, _, _)| format),
+                Some(format),
+                "every graph that copies into the atlas or samples it is told its own format"
+            );
+        }
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **A copy source must be in the atlas's own format, whichever it is**:
+    /// an `RGBA` source into a `BGRA` atlas is refused as it is the other way
+    /// round, and the refusal names the format the atlas wanted.
+    #[test]
+    fn a_copy_source_must_match_the_atlas_s_own_format() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        for (atlas_format, other) in [
+            (Format::Bgra8UnormSrgb, Format::Rgba8UnormSrgb),
+            (Format::Rgba8UnormSrgb, Format::Bgra8UnormSrgb),
+        ] {
+            let atlas = renderer
+                .create_atlas(
+                    device.as_ref(),
+                    &AtlasDesc {
+                        format: atlas_format,
+                        ..desc(1, 1)
+                    },
+                )
+                .expect("an atlas format");
+            let slot = renderer.allocate_slot(atlas).expect("a free cell");
+            let mut graph = RenderGraph::new(queue);
+            let wrong = source_in(&mut graph, CELL, SOURCE_USAGE, other);
+            let refused = renderer.add_slot_copies(
+                &mut graph,
+                &[SlotCopy {
+                    source: wrong,
+                    slot,
+                }],
+            );
+            assert!(
+                matches!(
+                    refused,
+                    Err(SheetError::SourceMismatch { format, .. }) if format == atlas_format
+                ),
+                "a {other:?} source into a {atlas_format:?} atlas: {refused:?}"
+            );
+            assert_eq!(graph.pass_count(), 0, "a refused copy adds no pass");
+            let right = source_in(&mut graph, CELL, SOURCE_USAGE, atlas_format);
+            renderer
+                .add_slot_copies(
+                    &mut graph,
+                    &[SlotCopy {
+                        source: right,
+                        slot,
+                    }],
+                )
+                .unwrap_or_else(|error| panic!("a {atlas_format:?} source copies: {error}"));
+            assert_eq!(graph.pass_count(), 1, "the matching source copies");
+        }
+        renderer.destroy(device.as_ref());
+    }
+
+    /// **A write into a `BGRA` atlas stages its `RGBA` pixels with red and blue
+    /// swapped**, so the texel the sampler reads back is the colour the caller
+    /// wrote, and the same pixels into an `RGBA` atlas are staged untouched.
+    #[test]
+    fn a_write_into_a_bgra_atlas_stages_its_pixels_swizzled() {
+        let recorder = Recorder::new();
+        let (device, queue) = open(&recorder);
+        let mut renderer = renderer(device.as_ref(), queue);
+        let pixels = cell_pixels(9);
+        let swapped: Vec<u8> = pixels
+            .chunks_exact(TEXEL_BYTES as usize)
+            .flat_map(|texel| [texel[2], texel[1], texel[0], texel[3]])
+            .collect();
+        for (format, expected) in [
+            (Format::Bgra8UnormSrgb, &swapped),
+            (Format::Rgba8UnormSrgb, &pixels),
+        ] {
+            let atlas = renderer
+                .create_atlas(
+                    device.as_ref(),
+                    &AtlasDesc {
+                        format,
+                        ..desc(1, 1)
+                    },
+                )
+                .expect("an atlas format");
+            let slot = renderer.allocate_slot(atlas).expect("a free cell");
+            let commands = write_frame(
+                device.as_ref(),
+                queue,
+                &recorder,
+                &mut renderer,
+                slot,
+                Staged::AfterBegin,
+                &pixels,
+            );
+            let &[staging] = staged_buffers(&commands).as_slice() else {
+                panic!("one write, one staging buffer: {commands:#?}");
+            };
+            let region = commands
+                .iter()
+                .find_map(|command| match command {
+                    Command::CopyBufferToImage(copy) if copy.buffer == staging => Some(copy),
+                    _ => None,
+                })
+                .expect("the write's copy");
+            let staged = recorder.buffer_bytes(staging).expect("still held");
+            let row = (CELL.0 * TEXEL_BYTES) as usize;
+            let pitch = (region.buffer_row_length * TEXEL_BYTES) as usize;
+            for y in 0..CELL.1 as usize {
+                assert_eq!(
+                    &staged[y * pitch..y * pitch + row],
+                    &expected[y * row..(y + 1) * row],
+                    "{format:?}: staged row {y}"
+                );
+            }
+        }
         renderer.destroy(device.as_ref());
     }
 

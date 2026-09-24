@@ -1164,7 +1164,7 @@ fn fragmentMain( _S112 : pixelInput_0, @builtin(position) position_2 : vec4<f32>
     }
     var _S129 : vec3<f32> = vec3<f32>((1.0f - fresnel_0));
     var fade_1 : f32 = saturate(thickness_0 / 0.25f);
-    var _S130 : pixelOutput_0 = pixelOutput_0( vec4<f32>(straight_0.xyz * vec3<f32>((1.0f - fade_1)) + (behind_1.xyz * transmittance_0 * _S129 + (environment_0 * vec3<f32>(fresnel_0) + scattered_0 * _S129) * vec3<f32>(air_2.survives_0) + air_2.inscatter_0 * (_S127 - transmittance_0 * _S129)) * vec3<f32>(fade_1), straight_0.w) );
+    var _S130 : pixelOutput_0 = pixelOutput_0( vec4<f32>(straight_0.xyz * vec3<f32>((1.0f - fade_1)) + (behind_1.xyz * transmittance_0 * _S129 + (environment_0 * vec3<f32>(fresnel_0) + scattered_0 * _S129) * vec3<f32>(air_2.survives_0) + air_2.inscatter_0 * (_S127 - transmittance_0 * _S129)) * vec3<f32>(fade_1), max(straight_0.w, fade_1)) );
     return _S130;
 }
 

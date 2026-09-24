@@ -7,6 +7,7 @@ struct TonemapParams_std140_0
     @align(16) exposure_0 : f32,
     @align(4) curve_0 : u32,
     @align(8) auto_exposure_0 : u32,
+    @align(4) coverage_alpha_0 : u32,
 };
 
 @binding(2) @group(0) var<uniform> params_0 : TonemapParams_std140_0;
@@ -56,7 +57,16 @@ struct pixelInput_0
 @fragment
 fn fragmentMain( _S2 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
 {
-    var color_1 : vec3<f32> = (textureSample((scene_0), (sceneSampler_0), (_S2.uv_1))).xyz;
+    var color_1 : vec4<f32> = (textureSample((scene_0), (sceneSampler_0), (_S2.uv_1)));
+    var alpha_0 : f32;
+    if((params_0.coverage_alpha_0) != u32(0))
+    {
+        alpha_0 = saturate(color_1.w);
+    }
+    else
+    {
+        alpha_0 = 1.0f;
+    }
     var exposure_2 : f32;
     if((params_0.auto_exposure_0) != u32(0))
     {
@@ -66,7 +76,7 @@ fn fragmentMain( _S2 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) 
     {
         exposure_2 = params_0.exposure_0;
     }
-    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_0(color_1, exposure_2, params_0.curve_0), 1.0f) );
+    var _S3 : pixelOutput_0 = pixelOutput_0( vec4<f32>(tonemap_0(color_1.xyz, exposure_2, params_0.curve_0), alpha_0) );
     return _S3;
 }
 

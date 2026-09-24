@@ -6022,7 +6022,13 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // Deliberately **not** clamped: the target is `Rgba16Float` and the tonemap
     // pass is what maps this into the swapchain. A `saturate` here would throw
     // away the very range HDR-from-P1 exists to carry — see `tonemap.slang`.
-    output.lit = float4(lit, albedo.a);
+    //
+    // **The alpha is coverage, one**, and not the albedo's: nothing blends
+    // this attachment, a masked fragment that survived its cutoff covers its
+    // pixel whole, and an opaque material's texel alpha means nothing at all.
+    // A transparent view reads this lane as the frame's coverage — see
+    // `tonemap.slang`'s `coverage_alpha`.
+    output.lit = float4(lit, 1.0);
     // `roughness` is the clamped lobe input, stored as the level it will
     // reload as — `REFLECTIVITY_LEVELS` says why the rounding happens here.
     output.reflectivity =
@@ -6037,7 +6043,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // that made it bright.
     if (frame.ambient.w <= CASCADE_VIEW)
     {
-        output.lit = float4(lit * sun_cascade_tint, albedo.a);
+        output.lit = float4(lit * sun_cascade_tint, 1.0);
         // Not reflective, for every other view's reason: `ssr.slang` must march
         // nothing off a debug picture. It matters more here than there,
         // because this one *is* the shaded picture — a reflection `ssr_blur.slang`

@@ -53,7 +53,8 @@ struct pixelInput_0
 fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_1 : vec4<f32>) -> pixelOutput_0
 {
     var _S4 : vec3<i32> = vec3<i32>(vec2<i32>(position_1.xy), i32(0));
-    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>((textureLoad((scene_0), ((_S4)).xy, ((_S4)).z)).xyz + tent_0(_S3.uv_3) * vec3<f32>(params_0.strength_0), 1.0f) );
+    var color_0 : vec4<f32> = (textureLoad((scene_0), ((_S4)).xy, ((_S4)).z));
+    var _S5 : pixelOutput_0 = pixelOutput_0( vec4<f32>(color_0.xyz + tent_0(_S3.uv_3) * vec3<f32>(params_0.strength_0), color_0.w) );
     return _S5;
 }
 

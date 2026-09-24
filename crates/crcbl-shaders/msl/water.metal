@@ -2332,12 +2332,14 @@ struct pixelInput_0
     float fade_1 = saturate(thickness_0 / 0.25f);
 
 #line 1365
-    pixelOutput_0 _S204 = { float4(straight_0.xyz * float3((1.0f - fade_1))  + (behind_1.xyz * transmittance_0 * _S203 + (environment_0 * float3(fresnel_0)  + scattered_0 * _S203) * float3(air_2.survives_0)  + air_2.inscatter_0 * (_S198 - transmittance_0 * _S203)) * float3(fade_1) , straight_0.w) };
+    pixelOutput_0 _S204 = { float4(straight_0.xyz * float3((1.0f - fade_1))  + (behind_1.xyz * transmittance_0 * _S203 + (environment_0 * float3(fresnel_0)  + scattered_0 * _S203) * float3(air_2.survives_0)  + air_2.inscatter_0 * (_S198 - transmittance_0 * _S203)) * float3(fade_1) , max(straight_0.w, fade_1)) };
+
+#line 1370
     return _S204;
 }
 
 
-#line 1366
+#line 1370
 struct vertexMain_Result_0
 {
     float4 position_2 [[position]];

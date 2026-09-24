@@ -20,8 +20,10 @@ use crate::sprite::{
     assert_the_camera_maps_a_world_unit_to_a_pixel, background_rgb, close, rgb, sprite_camera,
     srgb_byte, world_to_pixel,
 };
-use crcbl::hal::{CommandEncoderDesc, ImageUsage, PresentInfo, ResourceState, SubmitInfo};
-use crcbl::render::{AtlasDesc, AtlasSlot, RenderGraph, SlotCopy, Sprite, TransientImageDesc};
+use crcbl::hal::{CommandEncoderDesc, Format, ImageUsage, PresentInfo, ResourceState, SubmitInfo};
+use crcbl::render::{
+    ATLAS_FORMAT, AtlasDesc, AtlasSlot, RenderGraph, SlotCopy, Sprite, TransientImageDesc,
+};
 
 /// One cell, in texels. Drawn at twice that in world units, which is two
 /// device pixels a texel under the suite's camera.
@@ -101,14 +103,15 @@ fn centre(rect: [f32; 4]) -> (u32, u32) {
     (pixel[0] as u32, pixel[1] as u32)
 }
 
-/// Records and submits one frame — each `fills` entry rendered and copied, or
-/// written, into its slot, then `sprites` drawn over the suite's clear — and
-/// returns the readback **without waiting for it**, so a caller can put a
-/// second frame in flight behind it.
+/// Records and submits one frame — each `fills` entry rendered in `format` and
+/// copied, or written, into its slot, then `sprites` drawn over the suite's
+/// clear — and returns the readback **without waiting for it**, so a caller can
+/// put a second frame in flight behind it.
 fn submit_frame(
     headless: &Headless,
     renderer: &mut crcbl::render::SpriteRenderer,
     pool: &mut crcbl::render::TransientPool,
+    format: Format,
     fills: &[(AtlasSlot, Fill<'_>)],
     sprites: &[Sprite],
 ) -> (FrameStaging, crcbl::hal::CommandBufferHandle) {
@@ -160,7 +163,7 @@ fn submit_frame(
                 "rendered icon",
                 TransientImageDesc::new(
                     CELL,
-                    crcbl::render::ATLAS_FORMAT,
+                    format,
                     ImageUsage::COLOR_ATTACHMENT | ImageUsage::TRANSFER_SRC,
                 ),
             );
@@ -206,6 +209,14 @@ fn submit_frame(
 
 /// A renderer with one two-cell atlas.
 fn atlas_renderer(headless: &Headless) -> (crcbl::render::SpriteRenderer, crcbl::render::SheetId) {
+    atlas_renderer_in(headless, ATLAS_FORMAT)
+}
+
+/// A renderer with one two-cell atlas in `format`.
+fn atlas_renderer_in(
+    headless: &Headless,
+    format: Format,
+) -> (crcbl::render::SpriteRenderer, crcbl::render::SheetId) {
     let mut renderer = crcbl::render::SpriteRenderer::new(
         headless.device.as_ref(),
         headless.queue,
@@ -221,6 +232,7 @@ fn atlas_renderer(headless: &Headless) -> (crcbl::render::SpriteRenderer, crcbl:
                 columns: 2,
                 rows: 1,
                 sample: crcbl::render::SampleMode::Pixel,
+                format,
             },
         )
         .expect("the atlas is created");
@@ -247,6 +259,7 @@ fn a_rendered_target_copied_into_a_slot_draws_as_a_sprite() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(red, Fill::Rendered(RED)), (green, Fill::Rendered(GREEN))],
         &[
             Sprite::new(red.sheet(), left, red.uv()),
@@ -299,6 +312,7 @@ fn a_slot_refilled_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(first_slot, Fill::Rendered(RED))],
         &[Sprite::new(atlas, square, first_slot.uv())],
     );
@@ -316,6 +330,7 @@ fn a_slot_refilled_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(second_slot, Fill::Rendered(GREEN))],
         &[Sprite::new(atlas, square, second_slot.uv())],
     );
@@ -368,6 +383,7 @@ fn host_pixels_written_into_a_slot_draw_as_a_sprite() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(written, Fill::Written(&pixels))],
         &[
             Sprite::new(atlas, left, empty.uv()),
@@ -425,6 +441,7 @@ fn a_slot_written_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(slot, Fill::Written(&quadrants))],
         &sprites,
     );
@@ -434,6 +451,7 @@ fn a_slot_written_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         &headless,
         &mut renderer,
         &mut pool,
+        ATLAS_FORMAT,
         &[(slot, Fill::Written(&solid))],
         &sprites,
     );
@@ -455,6 +473,70 @@ fn a_slot_written_while_its_frame_is_in_flight_keeps_that_frame_its_texels() {
         assert!(
             close(actual, solid_colour, 2),
             "the second frame at ({x}, {y}) should be {solid_colour:?}, got {actual:?}"
+        );
+    }
+
+    renderer.destroy(headless.device.as_ref());
+    pool.destroy(headless.device.as_ref());
+    headless.finish();
+}
+
+/// **A `BGRA` atlas draws both kinds of fill in their own colours**: a
+/// `Bgra8UnormSrgb` render copied into one cell, and `RGBA` host pixels written
+/// into the other.
+///
+/// The render is what [`ForwardRenderer`](crcbl::render::ForwardRenderer)'s
+/// swapchain-format views produce, and the copy only moves bytes — so a `BGRA`
+/// source into an `RGBA` atlas would arrive with red and blue exchanged, which
+/// is why the atlas takes the format instead. The written quadrants are `RGBA`
+/// as every write is, and land in their own colours only because the write
+/// swaps them into the atlas's order; a write that staged them as they came
+/// exchanges red and blue in every quadrant, and [`WRITTEN`] differs in both.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-sprite-e2e.sh"]
+fn a_bgra_atlas_draws_a_bgra_render_and_written_pixels_in_their_own_colours() {
+    assert_the_camera_maps_a_world_unit_to_a_pixel();
+
+    let headless = Headless::open_for_sprites();
+    let mut pool = crcbl::render::TransientPool::new();
+    let (mut renderer, atlas) = atlas_renderer_in(&headless, Format::Bgra8UnormSrgb);
+    let rendered = renderer.allocate_slot(atlas).expect("cell 0");
+    let written = renderer.allocate_slot(atlas).expect("cell 1");
+    let pixels = quadrant_cell(WRITTEN);
+
+    let left = rect([-80.0, -16.0]);
+    let right = rect([40.0, -16.0]);
+    let (staging, commands) = submit_frame(
+        &headless,
+        &mut renderer,
+        &mut pool,
+        Format::Bgra8UnormSrgb,
+        &[
+            (rendered, Fill::Rendered(RED)),
+            (written, Fill::Written(&pixels)),
+        ],
+        &[
+            Sprite::new(atlas, left, rendered.uv()),
+            Sprite::new(atlas, right, written.uv()),
+        ],
+    );
+    let image = staging.read(&headless);
+    headless.device.destroy_command_buffer(commands);
+
+    let (x, y) = centre(left);
+    let actual = rgb(&image, x, y);
+    assert!(
+        close(actual, stored(RED), 2),
+        "the rendered slot at ({x}, {y}) should be {:?}, got {actual:?} — red and blue \
+         exchanged is a BGRA render read as RGBA",
+        stored(RED)
+    );
+    for ((x, y), expected) in quadrant_centres(right).into_iter().zip(WRITTEN) {
+        let actual = rgb(&image, x, y);
+        assert!(
+            close(actual, expected, 2),
+            "the written slot at ({x}, {y}) should be {expected:?}, got {actual:?} — red and \
+             blue exchanged is RGBA pixels staged into a BGRA atlas unswapped"
         );
     }
 

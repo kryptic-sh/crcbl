@@ -22433,15 +22433,35 @@ there: 17, 8 and 10 call sites). The rest:
   are in flight (the refill is queue-ordered after them); a full atlas is
   `SheetError::AtlasFull`, a freed slot `StaleSlot`. The icon cache stays EW's,
   as agreed. Still open:
-  - The render half exists as secondary views (`ForwardRenderer::create_view`,
-    `begin_view`, `add_passes_with_views` into a cell-sized transient, then
-    `add_slot_copies`), but three gaps keep it from making icons, all queued as
-    EW asks (2026-09-24): a view always renders opaque (tonemap writes alpha 1,
-    the scene clear is opaque, the sky draws); the view renders in the
-    renderer-wide `target_format()`, so a `Bgra8UnormSrgb` swapchain's copy is
-    refused with `SheetError::SourceMismatch` by the `Rgba8UnormSrgb`-only
-    atlas; and an instance hidden from the primary view still casts into the
-    sun's cascades.
+  - The render half landed 2026-09-24: a `ViewDesc::transparent()` view
+    (`ViewBackground::Transparent`) renders coverage alpha, straight, with no
+    sky; `AtlasDesc::format` takes `Bgra8UnormSrgb` as well as `Rgba8UnormSrgb`
+    (`ATLAS_FORMATS`), so a swapchain-format view copies in; and
+    `ForwardRenderer::set_instance_casts_shadow` keeps an icon instance out of
+    every shadow cull. EW wires the icon cache. What it left open:
+    - FXAA and CMAA2 are refused on a transparent view (`create_view` returns
+      `HalError::InvalidDescriptor`), because both blend edges with the
+      transparent black beside them; a transparent view has hard edges.
+    - Straight alpha leaves empty texels transparent black, so an icon magnified
+      with linear filtering fringes dark at its silhouette. Only 1:1 pixel
+      sampling is tested. Premultiplied output, or a dilated edge, would fix it;
+      nothing asks yet.
+    - Bloom glow past a silhouette and volumetric fog over the background are
+      dropped where coverage is zero; only bloom's alpha is tested.
+    - `mesh.slang` now writes lit alpha 1 instead of the material's albedo
+      alpha, and `water.slang` writes `max(behind alpha, fade)`. Neither is
+      checked by colour: no test draws a sub-one-alpha material or water into a
+      transparent view.
+    - `capture_probe_visibility` still sees no-shadow instances, so an icon
+      model placed before a probe capture lands in it.
+    - A transparent view ignores `render_scale` and auto-exposure is left out of
+      `ViewDesc::transparent()` (it would meter the empty background).
+    - Found while testing it, not caused by it: the vk render-golden suite hit
+      access violations (`0xc0000005`) in 7 and then 19 different tests at the
+      default thread count on this machine's RX 7900 XTX, with validation errors
+      about freeing a command pool still in use; every one passes alone, and the
+      suite passes whole at `--test-threads 2`. No baseline from before the
+      change was taken, so it is unattributed.
   - Only same-queue ordering is claimed; a copy on another queue would need a
     semaphore nothing records.
   - A `Sprite` carries UVs, not a slot, so drawing a freed slot's UVs is not

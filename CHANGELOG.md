@@ -16,6 +16,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_render::ViewDesc` has a `background` field** (`ViewBackground::Scene`
+  or `ViewBackground::Transparent`), so a struct literal of it needs one;
+  `ViewDesc::default()` and literals built with `..` from it are unaffected and
+  draw what they always drew.
+- **`crcbl_render::AtlasDesc` has a `format` field**, so every literal needs
+  one: `ATLAS_FORMAT` (`Rgba8UnormSrgb`) is what every atlas was.
+  `SheetError::SourceMismatch` carries the atlas's `format`, and `SheetError`
+  has an `AtlasFormat` variant, so an exhaustive `match` needs another arm.
+- **`crcbl_shaders::tonemap::TonemapParams` has a `coverage_alpha` field**, so a
+  literal of it needs one; `false` writes the block every frame wrote before.
+- **The forward pass writes an alpha of one**, not the material's base-colour
+  alpha, into the `Rgba16Float` scene target, and the bloom composite and the
+  water surface carry the alpha they read instead of writing one. Nothing
+  displayed changes — the tonemap still writes an opaque alpha to every
+  non-transparent view — but a caller reading the scene target's alpha back
+  (`add_passes` returns it) now reads coverage.
+
 - **`crcbl_phys::ContactCounters` gained public fields for joints** — `joints`,
   `joint_error`, `joint_angle_error` and `broken_joints` — so a struct literal
   of it that names every field needs them. Literals built with `..` from
@@ -255,6 +272,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Transparent views, for rendering a model into an icon** —
+  `ViewDesc::background: ViewBackground::Transparent` (or
+  `ViewDesc::transparent()`) makes a secondary view clear to transparent black,
+  draw no sky, and leave the frame's coverage in its target's alpha: `255` where
+  geometry was drawn and `0` elsewhere, with covered pixels byte-identical to an
+  opaque view's. The colour is straight alpha, which is what the sprite pass
+  blends. Such a view is drawn at its target's own extent whatever
+  `render_scale` says, and `create_view` refuses one whose effects name either
+  antialiasing tier (`ViewBackground::REFUSED_ON_TRANSPARENT`) with
+  `HalError::InvalidDescriptor`, since both blend edge pixels with the empty
+  background. Bloom and auto-exposure keep the alpha; `ViewDesc::transparent()`
+  leaves auto-exposure out because it meters the background as black.
+- **`BGRA` sprite atlases** — `AtlasDesc::format` takes `Rgba8UnormSrgb` or
+  `Bgra8UnormSrgb` (`ATLAS_FORMATS`), so a swapchain-format view's target can be
+  copied into a slot with `add_slot_copies`, which now checks a source against
+  the atlas's own format. `write_slot` still takes `RGBA` pixels and swaps red
+  and blue into a `BGRA` atlas. Any other format is refused by `create_atlas`
+  with `SheetError::AtlasFormat`.
+- **Instances that cast no shadow** —
+  `ForwardRenderer::set_instance_casts_shadow(handle, false)` keeps an instance
+  out of every shadow cull (the sun's cascades, spot and point lights) on every
+  geometry path, and so out of the atlas and the reflective shadow maps; it is
+  still drawn and still receives shadows. `instance_casts_shadow` reads it back,
+  and the bit (`GpuInstance::CASTS_NO_SHADOW`) survives `set_instance`.
 - **Restoring a body asleep** — `PhysicsSystem::put_to_sleep(entity)` puts a
   registered dynamic body's island to sleep at once, without stepping, with its
   velocities zeroed and forces cleared as an island that fell asleep on its own.

@@ -4099,3 +4099,267 @@ fn a_point_light_and_a_spot_each_darken_the_floor_their_own_caster_blocks() {
         spot.1
     );
 }
+
+// ---------------------------------------------------------------------------
+// Instances that cast no shadow
+// ---------------------------------------------------------------------------
+//
+// `ForwardRenderer::set_instance_casts_shadow`: an instance told not to cast is
+// rejected by every shadow cull — the cascades', a spot's, a point light's six
+// faces — so the atlas and the frame are exactly what they would be without it.
+// Each scene below is drawn with the caster **hidden from the camera**, so the
+// only thing it can put in the picture is its shadow: casting, it darkens the
+// floor; told not to, the frame has to be the frame with no caster at all, byte
+// for byte. And on every geometry path the adapter offers, since the shadow
+// pass records its draws through whichever the device selected.
+
+/// Every geometry path a shadow draw is recorded through, each built exactly
+/// with `ForwardRenderer::with_scene_on_path` — a device's feature set alone
+/// does not pin one, since a backend may grant a feature it was not asked for.
+const EVERY_GEOMETRY_PATH: [crcbl::hal::GeometryPath; 3] = [
+    crcbl::hal::GeometryPath::MeshShader,
+    crcbl::hal::GeometryPath::IndirectCount,
+    crcbl::hal::GeometryPath::IndirectPerBatch,
+];
+
+/// One scene of the no-shadow checks.
+struct CasterScene {
+    /// Names the scene in every line and message.
+    name: &'static str,
+    /// Places what receives the shadow and sets the scene's lights.
+    receiver: fn(&mut crcbl::render::ForwardRenderer),
+    /// Places the caster and hands back its handle.
+    caster: fn(&mut crcbl::render::ForwardRenderer) -> crcbl::render::InstanceHandle,
+    camera: crcbl::render::Camera,
+    sun: crcbl::render::DirectionalLight,
+}
+
+/// Where a scene's caster is in the second of two frames.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Caster {
+    /// Never placed.
+    Absent,
+    /// Placed, hidden from the camera, and casting in both frames.
+    Casting,
+    /// Placed and hidden the same way, casting in the first frame and told not
+    /// to before the second — so the second is also the frame after a toggle,
+    /// which a cached atlas has to notice.
+    TurnedOff,
+}
+
+/// Opens a device, builds the renderer on `path`, lays out `scene` with its
+/// caster as `caster` says, and draws two frames of it — returning the second,
+/// or `None` where the device cannot run `path` at all.
+///
+/// Two frames on one renderer rather than one, so the frame compared is never
+/// a first frame against a later one: every run below has drawn exactly as
+/// much before the frame it hands back.
+fn second_frame(
+    scene: &CasterScene,
+    path: crcbl::hal::GeometryPath,
+    caster: Caster,
+) -> Option<ShadowFrame> {
+    let headless = Headless::open_for_mesh_with(
+        Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+    );
+    let mut renderer = match crcbl::render::ForwardRenderer::with_scene_on_path(
+        headless.device.as_ref(),
+        headless.queue,
+        headless.format,
+        &crcbl::render::scene::demo(),
+        path,
+    ) {
+        Ok(renderer) => renderer,
+        Err(HalError::UnsupportedFeatures { missing }) => {
+            headless.finish();
+            eprintln!(
+                "{suite}: shadow — this device cannot run {path:?} (it lacks {missing:?})",
+                suite = crate::SUITE
+            );
+            return None;
+        }
+        Err(other) => panic!("the forward renderer builds on {path:?}: {other}"),
+    };
+    assert_eq!(renderer.geometry_path(), path);
+    (scene.receiver)(&mut renderer);
+    let placed = (caster != Caster::Absent).then(|| {
+        let handle = (scene.caster)(&mut renderer);
+        renderer.set_instance_views(handle, crcbl::render::ViewMask::NONE);
+        handle
+    });
+    let mut fixture = ShadowFixture {
+        headless,
+        renderer,
+        pool: crcbl::render::TransientPool::new(),
+    };
+    let drawn = ShadowScene {
+        prepare: &|_| {},
+        camera: scene.camera,
+        sun: scene.sun,
+        model: crcbl::math::Mat4::IDENTITY,
+    };
+    let _ = fixture.draw(&drawn);
+    if let (Caster::TurnedOff, Some(handle)) = (caster, placed) {
+        fixture.renderer.set_instance_casts_shadow(handle, false);
+        assert_eq!(fixture.renderer.instance_casts_shadow(handle), Some(false));
+    }
+    let second = fixture.draw(&drawn);
+    fixture.finish();
+    Some(second)
+}
+
+/// **A caster told not to cast leaves the frame, and the atlas where it can be
+/// read, exactly as a scene without it** — on every geometry path — while the
+/// same caster left casting visibly does not.
+fn a_caster_that_casts_no_shadow_leaves_no_mark(scene: &CasterScene) {
+    let name = scene.name;
+    let mut paths = Vec::new();
+    for path in EVERY_GEOMETRY_PATH {
+        let Some(absent) = second_frame(scene, path, Caster::Absent) else {
+            continue;
+        };
+        let casting = second_frame(scene, path, Caster::Casting).expect("the same device");
+        let turned_off = second_frame(scene, path, Caster::TurnedOff).expect("the same device");
+        let (shadowed, darkest) = difference(&casting.image, &absent.image);
+        let (left, worst) = difference(&turned_off.image, &absent.image);
+        eprintln!(
+            "{suite}: shadow — {name} on {path:?}: casting moves {shadowed} pixels (by up to \
+             {darkest}), casting none moves {left} (by up to {worst})",
+            suite = crate::SUITE
+        );
+        assert!(
+            shadowed > 0,
+            "{name} on {path:?}: the hidden caster's shadow has to be in the frame, or the \
+             comparison below is between two unshadowed frames"
+        );
+        assert_eq!(
+            left, 0,
+            "{name} on {path:?}: a caster told not to cast must leave the frame exactly as a \
+             scene without it, and moved {left} pixels by up to {worst}"
+        );
+        if let (Some(casting), Some(turned_off), Some(absent)) =
+            (casting.atlas(), turned_off.atlas(), absent.atlas())
+        {
+            assert!(
+                casting != absent,
+                "{name} on {path:?}: the casting caster is in the atlas"
+            );
+            assert!(
+                turned_off == absent,
+                "{name} on {path:?}: and one told not to cast is in no tile of it"
+            );
+        }
+        paths.push(path);
+    }
+    eprintln!(
+        "{suite}: shadow — {name}: checked on {paths:?}",
+        suite = crate::SUITE
+    );
+    assert!(
+        paths.contains(&crcbl::hal::GeometryPath::IndirectPerBatch),
+        "every device runs one indirect draw per bucket, so at least that path was checked"
+    );
+}
+
+/// The sun's cascades: the cube hanging over the open box.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_caster_that_casts_no_shadow_is_in_no_cascade() {
+    a_caster_that_casts_no_shadow_leaves_no_mark(&CasterScene {
+        name: "the sun's cascades",
+        receiver: |renderer| {
+            crate::mesh_scene::place(
+                renderer,
+                crcbl::render::scene::DEMO_OPEN_BOX,
+                crcbl::render::scene::DEMO_UNTINTED,
+                crcbl::math::Mat4::from_translation(BOX_AT),
+            );
+        },
+        caster: |renderer| {
+            crate::mesh_scene::place(
+                renderer,
+                crcbl::render::scene::DEMO_CUBE,
+                crcbl::render::scene::DEMO_UNTINTED,
+                crcbl::math::Mat4::from_translation(CUBE_AT),
+            )
+        },
+        camera: overhead_camera(),
+        sun: crcbl::render::DirectionalLight {
+            direction: sun(1.0),
+            ..crcbl::render::DirectionalLight::default()
+        },
+    });
+}
+
+/// The floor the spot and the point light shine on: the cube scaled into a
+/// floor whose `+Y` face is the plane `y = 0`, on `render_spot`'s terms.
+fn place_floor(renderer: &mut crcbl::render::ForwardRenderer) {
+    crate::mesh_scene::place_cube_at(
+        renderer,
+        crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(
+            0.0,
+            -0.5 * SPOT_FLOOR_SCALE,
+            0.0,
+        )) * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(SPOT_FLOOR_SCALE)),
+    );
+}
+
+/// The dim sun the spot and point scenes are lit under, on `render_spot`'s
+/// terms.
+fn dim_sun() -> crcbl::render::DirectionalLight {
+    crcbl::render::DirectionalLight {
+        color: crcbl::render::DirectionalLight::default().color * 0.03,
+        ambient: crcbl::render::DirectionalLight::default().ambient * 0.09,
+        ..crcbl::render::DirectionalLight::default()
+    }
+}
+
+/// A shadowed spot's tile: the pyramid under `spot_light`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_caster_that_casts_no_shadow_is_in_no_spot_light_s_tile() {
+    a_caster_that_casts_no_shadow_leaves_no_mark(&CasterScene {
+        name: "a spot light's tile",
+        receiver: |renderer| {
+            place_floor(renderer);
+            renderer.set_lights(&[spot_light()]);
+        },
+        caster: |renderer| {
+            crate::mesh_scene::place(
+                renderer,
+                crcbl::render::scene::DEMO_PYRAMID,
+                crcbl::render::scene::DEMO_UNTINTED,
+                crcbl::math::Mat4::from_translation(crcbl::math::Vec3::new(
+                    0.0,
+                    0.4 * SPOT_CASTER_SCALE,
+                    0.0,
+                )) * crcbl::math::Mat4::from_scale(crcbl::math::Vec3::splat(SPOT_CASTER_SCALE)),
+            )
+        },
+        camera: spot_camera(),
+        sun: dim_sun(),
+    });
+}
+
+/// A shadowed point light's six faces: the pyramid beside `point_light`.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_caster_that_casts_no_shadow_is_in_no_point_light_face() {
+    a_caster_that_casts_no_shadow_leaves_no_mark(&CasterScene {
+        name: "a point light's faces",
+        receiver: |renderer| {
+            place_floor(renderer);
+            renderer.set_lights(&[point_light()]);
+        },
+        caster: |renderer| {
+            crate::mesh_scene::place(
+                renderer,
+                crcbl::render::scene::DEMO_PYRAMID,
+                crcbl::render::scene::DEMO_UNTINTED,
+                point_caster(crcbl::math::Vec3::new(POINT_CASTER_AT, 0.0, 0.0)),
+            )
+        },
+        camera: point_camera(),
+        sun: dim_sun(),
+    });
+}

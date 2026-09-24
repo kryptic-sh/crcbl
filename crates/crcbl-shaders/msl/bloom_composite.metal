@@ -113,20 +113,23 @@ struct pixelInput_0
     int3 _S12 = int3(int2(position_0.xy), int(0));
 
 #line 147
-    float3 color_0 = ((scene_1).read(vec<uint,2>(((_S12)).xy), uint(((_S12)).z))).xyz;
+    float4 color_0 = ((scene_1).read(vec<uint,2>(((_S12)).xy), uint(((_S12)).z)));
 
-#line 147
-    float3 _S13 = tent_0(_S11.uv_2, &kernelContext_2);
+#line 153
+    float3 _S13 = color_0.xyz;
 
-#line 147
-    pixelOutput_0 _S14 = { float4(color_0 + _S13 * float3((&kernelContext_2)->params_0->strength_0) , 1.0f) };
+#line 153
+    float3 _S14 = tent_0(_S11.uv_2, &kernelContext_2);
 
+#line 153
+    pixelOutput_0 _S15 = { float4(_S13 + _S14 * float3((&kernelContext_2)->params_0->strength_0) , color_0.w) };
 
-    return _S14;
+#line 153
+    return _S15;
 }
 
 
-#line 150
+#line 153
 struct vertexMain_Result_0
 {
     float4 position_1 [[position]];
@@ -165,22 +168,22 @@ struct FullscreenOutput_0
     thread FullscreenOutput_0 output_1;
 
 
-    float2 _S15 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
+    float2 _S16 = float2(float((index_0 << 1U) & 2U), float(index_0 & 2U));
 
 #line 138
-    (&output_1)->uv_4 = _S15;
-    (&output_1)->position_2 = float4(_S15 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
+    (&output_1)->uv_4 = _S16;
+    (&output_1)->position_2 = float4(_S16 * float2(2.0f, -2.0f) + float2(-1.0f, 1.0f), 0.0f, 1.0f);
 
 #line 139
-    thread vertexMain_Result_0 _S16;
+    thread vertexMain_Result_0 _S17;
 
 #line 139
-    (&_S16)->position_1 = output_1.position_2;
+    (&_S17)->position_1 = output_1.position_2;
 
 #line 139
-    (&_S16)->uv_3 = output_1.uv_4;
+    (&_S17)->uv_3 = output_1.uv_4;
 
 #line 139
-    return _S16;
+    return _S17;
 }
 

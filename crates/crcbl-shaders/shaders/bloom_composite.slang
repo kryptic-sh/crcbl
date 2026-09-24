@@ -144,8 +144,11 @@ FullscreenOutput vertexMain(uint index: SV_VertexID)
 float4 fragmentMain(FullscreenOutput input) : SV_Target
 {
     int2 pixel = int2(input.position.xy);
-    float3 color = scene.Load(int3(pixel, 0)).rgb;
-    // Alpha 1.0: this image stands in for the scene target from here on, and the
-    // tonemap that reads it writes 1.0 into the swapchain whatever is here.
-    return float4(color + tent(input.uv) * params.strength, 1.0);
+    float4 color = scene.Load(int3(pixel, 0));
+    // The scene's alpha, carried: this image stands in for the scene target
+    // from here on, and on a transparent view that alpha is the frame's
+    // coverage, which the tonemap writes out — see `tonemap.slang`'s
+    // `coverage_alpha`. Glow added past a silhouette lands where the coverage
+    // is zero and is dropped with the background.
+    return float4(color.rgb + tent(input.uv) * params.strength, color.a);
 }

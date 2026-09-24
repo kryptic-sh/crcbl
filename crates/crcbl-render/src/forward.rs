@@ -215,7 +215,7 @@ mod view;
 use bucket_draws::{BucketDraws, EmitTail, RegionStep};
 
 use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput};
-pub use view::{FrameTargets, MAX_VIEWS, ViewDesc, ViewId, ViewMask, ViewTarget};
+pub use view::{FrameTargets, MAX_VIEWS, ViewBackground, ViewDesc, ViewId, ViewMask, ViewTarget};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -4905,6 +4905,7 @@ impl ForwardRenderer {
             &ViewInputs {
                 id: ViewId::PRIMARY,
                 effects: RenderEffects::all(),
+                background: ViewBackground::Scene,
                 target_format,
                 emit,
                 instances: &instance_buffers,
@@ -5063,9 +5064,13 @@ impl ForwardRenderer {
                     level_groups: &level_groups,
                     level_meshes: &level_meshes,
                     instance_capacity: scene.capacities.instances,
-                    // No view's: a shadow map is drawn from everything resident,
-                    // so an instance a camera hides still casts its shadow.
-                    hidden_view: 0,
+                    // No view's: a shadow map is drawn from everything resident
+                    // that casts, so an instance a camera hides still casts its
+                    // shadow and one `set_instance_casts_shadow` turned off does
+                    // not — on every geometry path, since this is the cull they
+                    // all draw from. The reflective shadow maps draw these same
+                    // survivors, so such an instance bounces no light either.
+                    hidden_view: mesh::GpuInstance::CASTS_NO_SHADOW,
                     // A light slot may hold a point light, whose six faces cull
                     // separately into six regions of the one generator; a
                     // cascade never does.
@@ -6359,17 +6364,55 @@ impl ForwardRenderer {
     /// On [`ForwardRenderer::add_instance`]'s terms, for the same reason.
     pub fn set_instance(&mut self, handle: InstanceHandle, desc: &InstanceDesc) {
         let mut instance = self.gpu_instance(desc);
-        instance.flags |= self.hidden_views(handle);
+        instance.flags |= self.kept_flags(handle);
         self.instances.set(handle, &instance);
     }
 
-    /// The hidden-views bits `handle`'s record carries, which a rewrite of the
-    /// record keeps — see [`ForwardRenderer::set_instance_views`]. Zero for a
-    /// stale handle, whose rewrite writes nothing anyway.
-    fn hidden_views(&self, handle: InstanceHandle) -> u32 {
+    /// The bits of `handle`'s record a rewrite of it keeps: its hidden views
+    /// and whether it casts — see [`ForwardRenderer::set_instance_views`] and
+    /// [`ForwardRenderer::set_instance_casts_shadow`]. Zero for a stale
+    /// handle, whose rewrite writes nothing anyway.
+    fn kept_flags(&self, handle: InstanceHandle) -> u32 {
         self.instances.get(handle).map_or(0, |record| {
-            record.flags & mesh::GpuInstance::HIDDEN_VIEWS_MASK
+            record.flags
+                & (mesh::GpuInstance::HIDDEN_VIEWS_MASK | mesh::GpuInstance::CASTS_NO_SHADOW)
         })
+    }
+
+    /// Sets whether `handle` casts a shadow. Every instance starts casting.
+    ///
+    /// **Every shadow map and nothing else**: an instance that casts none is
+    /// rejected by the cull of the sun's cascades and of every shadowed light,
+    /// on every geometry path, so it lands in no tile of the atlas — and in no
+    /// reflective shadow map, which draws those same culls' survivors, so it
+    /// bounces no light into the probes either. Every camera still draws it,
+    /// and it still receives the shadows the rest of the scene casts.
+    ///
+    /// What a model drawn for an icon wants, placed where the scene's sun can
+    /// see it: see [`ViewBackground::Transparent`] and
+    /// [`set_instance_views`](Self::set_instance_views).
+    ///
+    /// A change redraws every shadow map the atlas had cached, because it moves
+    /// [`InstancePool::revision`]. Not a move, on
+    /// [`set_instance_views`](Self::set_instance_views)' terms, and a stale
+    /// handle is ignored.
+    pub fn set_instance_casts_shadow(&mut self, handle: InstanceHandle, casts: bool) {
+        if let Some(record) = self.instances.get(handle) {
+            let flags = if casts {
+                record.flags & !mesh::GpuInstance::CASTS_NO_SHADOW
+            } else {
+                record.flags | mesh::GpuInstance::CASTS_NO_SHADOW
+            };
+            self.instances.set_flags(handle, flags);
+        }
+    }
+
+    /// Whether `handle` casts a shadow, or `None` for a stale handle.
+    #[must_use]
+    pub fn instance_casts_shadow(&self, handle: InstanceHandle) -> Option<bool> {
+        self.instances
+            .get(handle)
+            .map(|record| record.flags & mesh::GpuInstance::CASTS_NO_SHADOW == 0)
     }
 
     /// Takes the object `handle` names back out of the scene, freeing its slot.
@@ -6816,7 +6859,7 @@ impl ForwardRenderer {
     /// On [`add_skinned_instance`](Self::add_skinned_instance)'s terms.
     pub fn set_skinned_instance(&mut self, handle: InstanceHandle, desc: &SkinnedInstanceDesc<'_>) {
         let mut instance = self.skinned_gpu_instance(desc, 0);
-        instance.flags |= self.hidden_views(handle);
+        instance.flags |= self.kept_flags(handle);
         if !self.instances.set(handle, &instance) {
             return;
         }
@@ -7476,7 +7519,7 @@ impl ForwardRenderer {
                     "{:?} was named twice in one frame",
                     view.view
                 );
-                (*view, self.internal_extent(view.extent))
+                (*view, self.view_extent(built.background, view.extent))
             })
             .collect();
 
@@ -11857,6 +11900,7 @@ mod tests {
                 exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
                 curve: crcbl_shaders::tonemap::TonemapCurve::Aces,
                 auto_exposure: false,
+                coverage_alpha: false,
             }
             .to_bytes(),
             "an untouched renderer must write the exposure the constant used to hold, \
@@ -11880,6 +11924,7 @@ mod tests {
                     exposure: 3.5,
                     curve: crcbl_shaders::tonemap::TonemapCurve::Aces,
                     auto_exposure: false,
+                    coverage_alpha: false,
                 }
                 .to_bytes(),
                 "the frame's own block must carry the exposure in force",
@@ -11942,6 +11987,7 @@ mod tests {
                     exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
                     curve: TonemapCurve::Clamp,
                     auto_exposure: false,
+                    coverage_alpha: false,
                 }
                 .to_bytes(),
                 "every frame of the ring must carry the selected curve",
@@ -11971,6 +12017,7 @@ mod tests {
                 exposure: crcbl_shaders::tonemap::DEFAULT_EXPOSURE,
                 curve: TonemapCurve::Clamp,
                 auto_exposure: false,
+                coverage_alpha: false,
             }
             .to_bytes(),
             "a debug view's block must carry the clamp, since its pixels are data",

@@ -260,9 +260,11 @@ pub struct DrawGenDesc<'a> {
     ///
     /// One bit of
     /// [`GpuInstance::HIDDEN_VIEWS_MASK`](crcbl_shaders::mesh::GpuInstance::HIDDEN_VIEWS_MASK)
-    /// for a generator that culls for a camera, and **zero** for one that culls
-    /// for no view — a shadow cascade's or a shadowed light's — which rejects
-    /// nothing on it, so an instance a camera hides still casts its shadow.
+    /// for a generator that culls for a camera, and
+    /// [`GpuInstance::CASTS_NO_SHADOW`](crcbl_shaders::mesh::GpuInstance::CASTS_NO_SHADOW)
+    /// for one that culls for no view — a shadow cascade's or a shadowed
+    /// light's — so an instance a camera hides still casts its shadow and one
+    /// told not to cast does not. Zero rejects nothing on it.
     pub hidden_view: u32,
     /// The most a frame of this generator may ask for, which decides what it
     /// allocates: [`DrawMode::Plain`] is region 0 alone, as every generator was;

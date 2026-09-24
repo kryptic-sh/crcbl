@@ -162,8 +162,9 @@ struct SpriteInstance
 [[vk::binding(1, 0)]]
 StructuredBuffer<SpriteInstance> sprites D3D12_REGISTER(t1, space0);
 
-/// The sheet: `Rgba8UnormSrgb` or `Rgba8Unorm`, straight (not premultiplied)
-/// alpha.
+/// The sheet: `Rgba8UnormSrgb`, `Rgba8Unorm` or — an atlas made for a
+/// swapchain-format render — `Bgra8UnormSrgb`, straight (not premultiplied)
+/// alpha. The view reads every one of them in `rgba` order.
 [[vk::binding(0, 1)]]
 Texture2D<float4> sheet D3D12_REGISTER(t0, space1);
 

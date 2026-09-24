@@ -94,7 +94,7 @@ use crate::texture::{UploadedTexture, upload_texture};
 
 pub mod atlas;
 
-pub use atlas::{ATLAS_FORMAT, AtlasDesc, AtlasSlot, SheetError, SlotCopy};
+pub use atlas::{ATLAS_FORMAT, ATLAS_FORMATS, AtlasDesc, AtlasSlot, SheetError, SlotCopy};
 
 // ---------------------------------------------------------------------------
 // The shader ABI

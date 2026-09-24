@@ -92,6 +92,16 @@ struct TonemapParams
     /// the pass that ran before `exposure.slang` existed — which is what keeps
     /// every golden image in the tree untouched.
     uint auto_exposure;
+    /// Non-zero to write the scene colour's alpha into the target instead of
+    /// 1.0.
+    ///
+    /// `crcbl_render::ViewBackground::Transparent`'s lane: that view clears
+    /// its scene target to transparent black and every pass that draws
+    /// geometry writes an alpha of one, so the scene's alpha *is* the frame's
+    /// coverage by the time it reaches this pass. Zero on every other view,
+    /// which writes the opaque alpha this pass always wrote — a lane rather
+    /// than a pipeline for [`TonemapParams::curve`]'s reason.
+    uint coverage_alpha;
 };
 
 /// [`TonemapParams::curve`]: exposure and clamp, the operator this pass shipped
@@ -210,14 +220,16 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     // rasterisers agreeing about texel-centre arithmetic, which is exactly the
     // class of difference `crcbl-golden`'s tolerance was measured against and
     // should not have to absorb.
-    float3 color = scene.Sample(sceneSampler, input.uv).rgb;
-    // Alpha 1.0 rather than the scene's: the swapchain is composited opaque
-    // (`CompositeAlpha::Opaque`), and carrying a scene alpha into it would make
-    // the window's transparency depend on the geometry that happened to be
-    // drawn.
+    float4 color = scene.Sample(sceneSampler, input.uv);
+    // Alpha 1.0 rather than the scene's unless the block asks for coverage:
+    // the swapchain is composited opaque (`CompositeAlpha::Opaque`), and
+    // carrying a scene alpha into it would make the window's transparency
+    // depend on the geometry that happened to be drawn. A transparent view's
+    // target is not a swapchain, and the alpha is the point of it.
+    float alpha = params.coverage_alpha != 0u ? saturate(color.a) : 1.0;
     // The measured exposure or the caller's, decided per frame by the block.
     // Reading the buffer unconditionally would be the same picture and a
     // dependency on a value no pass wrote on a frame that does not measure.
     float exposure = params.auto_exposure != 0u ? measured[0] : params.exposure;
-    return float4(tonemap(color, exposure, params.curve), 1.0);
+    return float4(tonemap(color.rgb, exposure, params.curve), alpha);
 }

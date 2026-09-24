@@ -500,3 +500,262 @@ fn a_view_nothing_began_this_frame_is_refused() {
         |_, _| {},
     );
 }
+
+/// **A transparent view takes neither antialiasing tier**, alone or together,
+/// and is refused by name rather than drawn with a fringe; the description
+/// [`ViewDesc::transparent`] hands out is one it accepts.
+#[test]
+fn a_transparent_view_refuses_both_antialiasing_tiers() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    let before = recorder.total_live_objects();
+    for tier in [
+        RenderEffects::ANTIALIASING,
+        RenderEffects::CMAA2,
+        ViewBackground::REFUSED_ON_TRANSPARENT,
+    ] {
+        let refused = renderer.create_view(
+            device,
+            queue,
+            &ViewDesc {
+                effects: ViewDesc::transparent().effects.union(tier),
+                background: ViewBackground::Transparent,
+            },
+        );
+        assert!(
+            matches!(&refused, Err(HalError::InvalidDescriptor(message))
+                if message.contains("transparent view")),
+            "{tier:?}: {refused:?}"
+        );
+    }
+    assert_eq!(
+        recorder.total_live_objects(),
+        before,
+        "a refused view builds nothing"
+    );
+    assert!(
+        ViewDesc::transparent()
+            .effects
+            .intersection(ViewBackground::REFUSED_ON_TRANSPARENT)
+            .is_empty()
+    );
+    renderer
+        .create_view(device, queue, &ViewDesc::transparent())
+        .expect("the transparent description is one a transparent view takes");
+    renderer
+        .create_view(
+            device,
+            queue,
+            &ViewDesc {
+                effects: RenderEffects::all(),
+                background: ViewBackground::Scene,
+            },
+        )
+        .expect("and an opaque view still takes every effect");
+    renderer.destroy(device);
+}
+
+/// **A transparent view draws no sky, no resolve and no upscale, and asks the
+/// tonemap for coverage** — while the primary camera in the same frame draws
+/// all three and writes the opaque alpha it always wrote.
+///
+/// The sky is set and the render scale halved so that each of the three is a
+/// pass the primary camera does record: a view that skipped them only because
+/// the frame had none would pass nothing.
+#[test]
+fn a_transparent_view_draws_no_sky_resolve_or_upscale_and_writes_coverage() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+    place_cube(&mut renderer, Mat4::IDENTITY);
+    renderer.set_sky(crate::camera::Sky {
+        zenith: Vec3::new(0.2, 0.3, 0.6),
+        horizon: Vec3::new(0.5, 0.5, 0.5),
+        ground: Vec3::new(0.1, 0.1, 0.1),
+    });
+    renderer.set_render_scale(0.5);
+    renderer.set_effect_request(crate::effects::EffectRequest {
+        camera: RenderEffects::DEFAULT_STACK.union(RenderEffects::CMAA2),
+        ..crate::effects::EffectRequest::default()
+    });
+    let view = renderer
+        .create_view(device, queue, &ViewDesc::transparent())
+        .expect("built");
+    let count =
+        |labels: &[String], label: &str| labels.iter().filter(|each| *each == label).count();
+
+    let alone = frame_labels(device, queue, &mut renderer, None);
+    let with_view = frame_labels(device, queue, &mut renderer, Some(view));
+    for label in ["sky", "cmaa2-apply", "upscale"] {
+        assert_eq!(
+            count(&alone, label),
+            1,
+            "the primary camera records `{label}`"
+        );
+        assert_eq!(
+            count(&with_view, label),
+            1,
+            "and the transparent view records no `{label}` of its own"
+        );
+    }
+    assert_eq!(
+        count(&with_view, "tonemap"),
+        2,
+        "the view still tonemaps its own frame"
+    );
+
+    let slot = renderer.frame;
+    let lane = |block: BufferHandle| {
+        let bytes = recorder.buffer_bytes(block).expect("begin_frame wrote it");
+        u32::from_le_bytes(bytes[12..16].try_into().expect("4"))
+    };
+    let built = renderer.views[view.index() - 1].as_ref().expect("built");
+    assert_eq!(
+        lane(built.tonemap_uniforms[slot]),
+        1,
+        "the view's tonemap writes coverage"
+    );
+    assert_eq!(
+        lane(renderer.primary.tonemap_uniforms[slot]),
+        0,
+        "and the primary camera's the opaque alpha"
+    );
+    renderer.destroy(device);
+}
+
+/// **Every shadow cull rejects on the no-shadow bit and every camera cull on
+/// its own view bit**, so an instance told not to cast is dropped from each
+/// cascade's and each light's survivors and from no camera's.
+#[test]
+fn every_shadow_cull_rejects_on_the_no_shadow_bit_and_no_camera_cull_does() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let (mut renderer, view) = renderer_with_view(device, queue);
+    // A shadowed spot and a shadowed point light beside the sun, so the light
+    // slots' culls — the point light's six-face one included — run this frame
+    // alongside the cascades'.
+    renderer.set_lights(&[
+        crate::light::Light::Spot(crate::light::SpotLight {
+            position: Vec3::new(0.0, 3.0, 0.0),
+            radius: 6.0,
+            color: Vec3::ONE,
+            direction: Vec3::NEG_Y,
+            inner_angle: 0.2,
+            outer_angle: 0.4,
+            fill: false,
+        }),
+        crate::light::Light::Point(crate::light::PointLight {
+            position: Vec3::new(2.0, 1.0, 0.0),
+            radius: 4.0,
+            color: Vec3::ONE,
+            fill: false,
+        }),
+    ]);
+    renderer
+        .begin_frame(
+            device,
+            &Camera::default(),
+            &DirectionalLight::default(),
+            (64, 48),
+        )
+        .expect("write");
+    renderer
+        .begin_view(device, view, &Camera::default(), (64, 64))
+        .expect("write");
+    let slot = renderer.frame;
+    let hidden_view = |draws: &DrawGen| {
+        let bytes = recorder
+            .buffer_bytes(draws.cull_params(slot))
+            .expect("live");
+        u32::from_le_bytes(bytes[104..108].try_into().expect("4"))
+    };
+    // A slot no light holds this frame writes no parameters and dispatches no
+    // cull, so its block is still the zeroes it was created with; every cull
+    // the frame does run carries the bit.
+    let written: Vec<(usize, u32)> = renderer
+        .shadow_draws
+        .iter()
+        .map(hidden_view)
+        .enumerate()
+        .filter(|(_, bit)| *bit != 0)
+        .collect();
+    assert!(
+        written.len() >= shadow::CASCADES + 2,
+        "every cascade and both lights cull this frame: {written:?}"
+    );
+    for (index, bit) in written {
+        assert_eq!(
+            bit,
+            mesh::GpuInstance::CASTS_NO_SHADOW,
+            "shadow cull {index}"
+        );
+    }
+    for camera in [ViewId::PRIMARY, view] {
+        assert_eq!(
+            hidden_view(renderer.view_draws(camera)),
+            camera.hidden_bit(),
+            "{camera:?} culls on its own bit and not on the no-shadow one"
+        );
+    }
+    renderer.destroy(device);
+}
+
+/// **Whether an instance casts is its own, and a rewrite keeps it** — on
+/// [`ForwardRenderer::set_instance_views`]' terms: moving an object does not
+/// start it casting again, and its views and its shadow are independent bits.
+#[test]
+fn an_instance_keeps_casting_no_shadow_through_a_rewrite() {
+    let (_, device, queue) = open();
+    let device = device.as_ref();
+    let (mut renderer, view) = renderer_with_view(device, queue);
+    let cube = renderer
+        .add_instance(&crate::scene::InstanceDesc {
+            mesh: crate::scene::DEMO_CUBE,
+            material: crate::scene::DEMO_UNTINTED,
+            transform: Mat4::IDENTITY,
+        })
+        .expect("room");
+    assert_eq!(
+        renderer.instance_casts_shadow(cube),
+        Some(true),
+        "every instance starts casting"
+    );
+
+    renderer.set_instance_casts_shadow(cube, false);
+    renderer.set_instance_views(cube, ViewMask::only(view));
+    assert_eq!(renderer.instance_casts_shadow(cube), Some(false));
+    assert_eq!(
+        renderer.instance_views(cube),
+        Some(ViewMask::only(view)),
+        "the views are a bit field of their own"
+    );
+    renderer.set_instance(
+        cube,
+        &crate::scene::InstanceDesc {
+            mesh: crate::scene::DEMO_CUBE,
+            material: crate::scene::DEMO_UNTINTED,
+            transform: Mat4::from_translation(Vec3::X),
+        },
+    );
+    assert_eq!(
+        renderer.instance_casts_shadow(cube),
+        Some(false),
+        "moving an object does not start it casting"
+    );
+    assert_eq!(renderer.instance_views(cube), Some(ViewMask::only(view)));
+
+    let revision = renderer.instances.revision();
+    renderer.set_instance_casts_shadow(cube, true);
+    assert_eq!(renderer.instance_casts_shadow(cube), Some(true));
+    assert_ne!(
+        renderer.instances.revision(),
+        revision,
+        "a change moves the revision every cached shadow map is keyed on"
+    );
+
+    renderer.remove_instance(cube);
+    assert_eq!(renderer.instance_casts_shadow(cube), None, "a stale handle");
+    renderer.set_instance_casts_shadow(cube, false);
+    renderer.destroy(device);
+}

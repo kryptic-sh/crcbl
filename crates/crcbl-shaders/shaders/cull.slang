@@ -295,8 +295,9 @@ struct CullParams
     /// still counts — see `visible_count` — but is not written.
     uint capacity;
     /// The `GpuInstance::flags` bit that removes an instance from this cull:
-    /// the camera's own bit of the hidden-views mask, or zero for a cull that
-    /// is no view's — every shadow cull — which rejects nothing on it.
+    /// the camera's own bit of the hidden-views mask, or
+    /// `GpuInstance::CASTS_NO_SHADOW` for a cull that is no view's — every
+    /// shadow cull.
     uint hidden_view;
     /// `CULL_*` bits: what this frame's dispatches do beyond the frustum.
     uint features;
@@ -417,7 +418,8 @@ bool admits(GpuInstance instance)
     }
     // The view this cull draws for has been told not to draw the instance —
     // `crcbl_shaders::mesh::GpuInstance::HIDDEN_VIEWS_SHIFT`. A shadow cull
-    // passes zero, so a hidden instance still casts its shadow.
+    // passes the no-shadow bit instead, so an instance hidden from a camera
+    // still casts its shadow and one told not to cast does not.
     return (instance.flags & cull.hidden_view) == 0;
 }
 

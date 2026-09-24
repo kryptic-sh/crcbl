@@ -116,6 +116,9 @@ impl ViewMask {
     }
 }
 
+/// What a [`ViewBackground::Transparent`] view's scene colour is cleared to.
+const TRANSPARENT_CLEAR: [f32; 4] = [0.0; 4];
+
 /// What [`ForwardRenderer::create_view`] builds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ViewDesc {
@@ -127,14 +130,98 @@ pub struct ViewDesc {
     /// here: the atlas is drawn once for the frame, and every view samples it
     /// whenever the frame drew it.
     pub effects: RenderEffects,
+    /// What the view's picture holds where no geometry is — see
+    /// [`ViewBackground`].
+    pub background: ViewBackground,
 }
 
 impl Default for ViewDesc {
-    /// Every effect the frame draws.
+    /// Every effect the frame draws, over the frame's own background.
     fn default() -> Self {
         Self {
             effects: RenderEffects::all(),
+            background: ViewBackground::Scene,
         }
+    }
+}
+
+impl ViewDesc {
+    /// A [`ViewBackground::Transparent`] view with every effect the frame draws
+    /// except the ones such a view cannot take, and auto-exposure.
+    ///
+    /// The two antialiasing tiers are what
+    /// [`ForwardRenderer::create_view`] refuses on a transparent view.
+    /// [`RenderEffects::AUTO_EXPOSURE`] it would accept, and it is left out
+    /// because the meter reads the whole target: the transparent background is
+    /// metered as black, so a model filling a quarter of the picture would be
+    /// exposed differently from the same model filling half of it. The view
+    /// takes the caller's exposure instead — see
+    /// [`ForwardRenderer::set_exposure`].
+    #[must_use]
+    pub const fn transparent() -> Self {
+        Self {
+            effects: RenderEffects::all().difference(
+                ViewBackground::REFUSED_ON_TRANSPARENT.union(RenderEffects::AUTO_EXPOSURE),
+            ),
+            background: ViewBackground::Transparent,
+        }
+    }
+}
+
+/// What a view's picture holds where no geometry covers a pixel — see
+/// [`ViewDesc::background`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ViewBackground {
+    /// The frame's own background: the sky where one is set, [`SCENE_CLEAR`]
+    /// where none is, and an alpha of one at every pixel. What the primary
+    /// camera draws, and what every view drew before this choice existed.
+    #[default]
+    Scene,
+    /// Nothing: the view clears to transparent black, draws no sky, and its
+    /// target's alpha is the frame's **coverage** — one where geometry was
+    /// drawn and zero where it was not.
+    ///
+    /// For a picture composited over something else, such as a model rendered
+    /// into an icon. The colour is **straight**, not premultiplied, which is
+    /// what [`SpriteRenderer`](crate::SpriteRenderer) blends: a covered pixel
+    /// holds the colour an opaque view would have drawn there, and a
+    /// transparent one holds whatever light the air in front of the far plane
+    /// scattered — zero on a frame without volumetric fog — which a
+    /// straight-alpha blend weighs by zero.
+    ///
+    /// # What keeps the alpha, and what cannot
+    ///
+    /// The forward pass, grass and water write coverage; the volumetric
+    /// composite, the reflection composite and the bloom composite carry the
+    /// alpha they read; the tonemap writes it into the target. **The two
+    /// antialiasing tiers cannot**: each blends a pixel's colour with its
+    /// neighbours' across exactly the edges the coverage has, so an edge
+    /// pixel would come out mixed with the transparent black beside it — a
+    /// premultiplied colour under a straight-alpha consumer, which is a dark
+    /// fringe. [`ForwardRenderer::create_view`] refuses a transparent view
+    /// whose [`ViewDesc::effects`] name either of them, and
+    /// [`ViewDesc::transparent`] is a description it accepts.
+    ///
+    /// [`render_scale`](ForwardRenderer::render_scale)'s upscale filters on
+    /// the same terms and so **does not apply**: a transparent view is drawn at
+    /// its target's own extent whatever the scale is.
+    ///
+    /// Bloom and auto-exposure keep the alpha and change the colour. Bloom's
+    /// glow past a silhouette lands on pixels the coverage says are empty and
+    /// is dropped with them; auto-exposure meters the background as black —
+    /// see [`ViewDesc::transparent`].
+    Transparent,
+}
+
+impl ViewBackground {
+    /// The effects a [`ViewBackground::Transparent`] view is refused with —
+    /// see that variant.
+    pub const REFUSED_ON_TRANSPARENT: RenderEffects =
+        RenderEffects::ANTIALIASING.union(RenderEffects::CMAA2);
+
+    /// Whether this background leaves the target's alpha as coverage.
+    pub(super) const fn is_transparent(self) -> bool {
+        matches!(self, Self::Transparent)
     }
 }
 
@@ -195,6 +282,8 @@ pub(super) struct ViewInputs<'a> {
     pub(super) id: ViewId,
     /// The effects it may draw — see [`ViewDesc::effects`].
     pub(super) effects: RenderEffects,
+    /// What it draws where no geometry is — see [`ViewDesc::background`].
+    pub(super) background: ViewBackground,
     /// The format the caller's target has, which the resolves and the upscale
     /// write.
     pub(super) target_format: Format,
@@ -468,6 +557,9 @@ pub(super) struct Overlays<'a> {
 pub(super) struct View {
     /// The effects this view may draw, as [`ViewDesc::effects`] asked for them.
     pub(super) effects: RenderEffects,
+    /// What this view draws where no geometry is, as
+    /// [`ViewDesc::background`] asked for it.
+    pub(super) background: ViewBackground,
     /// What this frame draws in this view: the frame's resolved effects under
     /// [`View::effects`], frozen by [`View::begin_frame`] so that the frame's
     /// two halves agree on it.
@@ -1114,6 +1206,7 @@ impl View {
         let view =
             Self {
                 effects: inputs.effects,
+                background: inputs.background,
                 // Replaced by every `begin_frame`, on `lod_params`' terms.
                 frame_effects: inputs.effects,
                 // No frame has begun it.
@@ -1437,6 +1530,10 @@ impl View {
                 // pass wrote would be reading whatever the last frame in this
                 // slot left there.
                 auto_exposure: self.frame_effects.contains(RenderEffects::AUTO_EXPOSURE),
+                // The frame's coverage into the target's alpha on a transparent
+                // view, and the opaque one every other view writes — see
+                // [`ViewBackground::Transparent`].
+                coverage_alpha: self.background.is_transparent(),
             }
             .to_bytes(),
         )?;
@@ -1805,7 +1902,11 @@ impl View {
         } = cull;
         let emit = passes.emit;
         let skinned = passes.skinned;
-        let draws_sky = passes.draws_sky;
+        // The frame's sky, on every view but a transparent one — whose
+        // background is the empty one it clears to. See
+        // [`ViewBackground::Transparent`].
+        let transparent = self.background.is_transparent();
+        let draws_sky = passes.draws_sky && !transparent;
         let probe_buffer = passes.probe_buffer;
         let probe_table = passes.probe_table;
         let occlusion_placeholder = passes.occlusion_placeholder;
@@ -2213,7 +2314,17 @@ impl View {
 
         let pass = graph
             .add_render_pass("forward")
-            .clear_color(scene_color, SCENE_CLEAR)
+            // Transparent black on a transparent view: zero coverage where no
+            // geometry lands, and no colour for the air in front of the far
+            // plane to add to but its own.
+            .clear_color(
+                scene_color,
+                if transparent {
+                    TRANSPARENT_CLEAR
+                } else {
+                    SCENE_CLEAR
+                },
+            )
             // `mesh.slang`'s second target, and **cleared rather than loaded or
             // discarded**. A pixel no geometry covered has no material, and the
             // pass that will read this marches a ray from whatever it finds
@@ -2900,14 +3011,28 @@ impl ForwardRenderer {
     /// # Errors
     ///
     /// [`HalError::InvalidDescriptor`] when [`MAX_VIEWS`] views already exist,
-    /// and whatever the device refuses while building one — in which case
-    /// nothing of the view is left behind.
+    /// or for a [`ViewBackground::Transparent`] view whose effects name one of
+    /// [`ViewBackground::REFUSED_ON_TRANSPARENT`] — a filter that would blend
+    /// its coverage edges with the empty background, see that variant. And
+    /// whatever the device refuses while building one — in which case nothing
+    /// of the view is left behind.
     pub fn create_view(
         &mut self,
         device: &dyn Device,
         queue: QueueHandle,
         desc: &ViewDesc,
     ) -> Result<ViewId, HalError> {
+        let refused = desc
+            .effects
+            .intersection(ViewBackground::REFUSED_ON_TRANSPARENT);
+        if desc.background.is_transparent() && !refused.is_empty() {
+            return Err(HalError::InvalidDescriptor(format!(
+                "a transparent view cannot run {refused:?}: an antialiasing filter blends each \
+                 edge pixel with the transparent black beside it, which a straight-alpha consumer \
+                 draws as a dark fringe. Take them out of `ViewDesc::effects`, as \
+                 `ViewDesc::transparent()` does"
+            )));
+        }
         let free = (0..MAX_VIEWS - 1)
             .find(|index| self.views.get(*index).is_none_or(Option::is_none))
             .ok_or_else(|| {
@@ -2927,6 +3052,7 @@ impl ForwardRenderer {
             &ViewInputs {
                 id,
                 effects: desc.effects,
+                background: desc.background,
                 target_format: self.target_format,
                 emit: self.emit,
                 instances: self.instances.buffers(),
@@ -3027,11 +3153,18 @@ impl ForwardRenderer {
             view != ViewId::PRIMARY,
             "the primary camera's blocks are written by `begin_frame`"
         );
+        let background = self
+            .views
+            .get(view.index() - 1)
+            .and_then(Option::as_ref)
+            .unwrap_or_else(|| panic!("{view:?} is not a view this renderer built"))
+            .background;
         let scene = self
             .frame_scene
             .take()
             .expect("`begin_view` follows the `begin_frame` that opened the frame");
-        let frame = self.view_frame(&scene, extent, self.instances.slot_count(), camera.eye);
+        let mut frame = self.view_frame(&scene, extent, self.instances.slot_count(), camera.eye);
+        frame.extent = self.view_extent(background, extent);
         let written = self
             .views
             .get_mut(view.index() - 1)
@@ -3117,6 +3250,19 @@ impl ForwardRenderer {
             target.0 as f32 / target.1 as f32
         };
         (aspect, self.internal_extent(target))
+    }
+
+    /// The internal extent a secondary view with `background` is drawn at, for
+    /// a target of `target`: [`frame_extents`](Self::frame_extents)' answer,
+    /// except that a [`ViewBackground::Transparent`] view is always drawn at
+    /// its target's own extent — the upscale would filter its coverage edges,
+    /// see that variant.
+    pub(super) fn view_extent(&self, background: ViewBackground, target: (u32, u32)) -> (u32, u32) {
+        if background.is_transparent() {
+            target
+        } else {
+            self.frame_extents(target).1
+        }
     }
 
     /// What every view's [`View::begin_frame`] reads of this frame, for a view

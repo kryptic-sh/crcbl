@@ -1363,5 +1363,9 @@ float4 fragmentMain(SurfaceOutput input) : SV_Target
     // Two multiplies rather than a `lerp`, on `mesh.slang`'s fog composite's
     // terms: at a fade of one the frame is `lit` bit for bit.
     float fade = saturate(thickness / WATER_SHORE_FADE);
-    return float4(straight.rgb * (1.0 - fade) + lit * fade, straight.a);
+    // Coverage in the alpha: the surface covers its pixel wherever it shows,
+    // whatever was behind it. `max` rather than a blend so a pixel over
+    // covered ground stays exactly one — the opaque frame's value on every
+    // view but a transparent one. See `tonemap.slang`'s `coverage_alpha`.
+    return float4(straight.rgb * (1.0 - fade) + lit * fade, max(straight.a, fade));
 }
