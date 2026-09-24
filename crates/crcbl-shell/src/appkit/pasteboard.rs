@@ -70,7 +70,7 @@
 //!   version-dependent and reaches nothing this one does not.
 //!
 //! Offering both at once is the caller's job and the reader picks, which is
-//! what `docs/plan/15-windowing.md` specifies.
+//! what the windowing rules in `docs/notes/backends.md` specify.
 //!
 //! # Decision: drag-and-drop lives here, and on Win32 it does not
 //!
@@ -79,7 +79,7 @@
 //! clipboard. Here they are one mechanism: `-[NSDraggingInfo
 //! draggingPasteboard]` answers an `NSPasteboard`, read with the same
 //! `dataForType:` and `pasteboardItems` calls as the general one. That is the
-//! "one implementation, two triggers" `docs/plan/15-windowing.md` states for
+//! "one implementation, two triggers" the windowing rules state for
 //! Wayland and X11, arriving on a third platform — so [`file_urls`] serves a
 //! drop and [`get`] serves a paste, from one place.
 //!

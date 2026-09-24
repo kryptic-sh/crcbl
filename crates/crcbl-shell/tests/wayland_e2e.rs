@@ -2605,8 +2605,8 @@ fn a_window_that_did_not_ask_for_drops_receives_none() {
 /// write that only a later pump could perform, and a blocking write waits for a
 /// read that only a later pump could perform; the payload here is eight times
 /// the size of a pipe buffer, so both halves have to be interleaved for it to
-/// complete at all. `docs/plan/15-windowing.md`'s clipboard notes name the same
-/// hazard for X11, where the owner answering its own `ConvertSelection` is the
+/// complete at all. The windowing rules' clipboard notes
+/// (`docs/notes/backends.md`) name the same hazard for X11, where the owner answering its own `ConvertSelection` is the
 /// textbook deadlock.
 #[test]
 #[ignore = "needs a Wayland compositor; run tests/run-wayland-e2e.sh"]

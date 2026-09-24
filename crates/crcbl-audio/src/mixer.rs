@@ -185,7 +185,7 @@ impl PlayOutcome {
 
 /// Which of the mixer's six fixed gain stages a voice passes through.
 ///
-/// `docs/plan/13-audio.md`'s bus decision, and the set is **fixed and not
+/// The six-bus decision in `docs/notes/simulation.md`, and the set is **fixed and not
 /// game-extensible**: a game wanting a seventh category uses the closest of
 /// these six. That is what lets a settings screen lay the list out without
 /// scrolling, gives `[engine.audio]` a fixed key list, and keeps a game's choice
@@ -252,7 +252,7 @@ impl Bus {
 
     /// The `[engine.audio]` key holding this bus's gain.
     ///
-    /// `docs/plan/13-audio.md`'s key table, spelled here so a settings reader
+    /// The audio key table in `docs/notes/simulation.md`, spelled here so a settings reader
     /// takes the names from the enum rather than writing them out a second time.
     #[must_use]
     pub const fn settings_key(self) -> &'static str {
@@ -374,7 +374,7 @@ impl Voice {
     /// Route the voice to `bus`.
     ///
     /// **A builder and not a setter**, because the route is fixed at spawn:
-    /// `docs/plan/13-audio.md` says a sound that would need to move between
+    /// The audio rules say a sound that would need to move between
     /// buses is two sounds, and a mid-playback re-route is the version of that
     /// which sounds like a glitch rather than like a decision.
     #[must_use]
@@ -463,7 +463,7 @@ impl Voice {
     ///
     /// `bus` and `master` are the two gains above the voice, and they are
     /// applied **here**, before the sum, rather than to the finished buffer:
-    /// `docs/plan/13-audio.md` calls a bus a gain on the way in, which is what
+    /// The audio rules call a bus a gain on the way in, which is what
     /// keeps the buffer count at one and the arithmetic order stateable in a
     /// single line. That line is
     ///
@@ -765,7 +765,7 @@ impl Mixer {
     /// Set the grammar every later [`Mixer::cue`] is computed with.
     ///
     /// **Set it once, at start-up.** The shipped defaults are the *trained*
-    /// grammar — `docs/plan/13-audio.md` versions them like a save format,
+    /// grammar — the audio rules version them like a save format,
     /// because changing them mid-title breaks the skill a player built. What
     /// this is for is a game whose world is not scaled like the default's:
     /// its own [`CueGrammar`] is stated here, once, instead of being handed to
@@ -1141,7 +1141,7 @@ mod tests {
 
     /// **The gain chain is voice, then bus, then master, left to right.**
     ///
-    /// `docs/plan/13-audio.md` makes the order contract rather than detail,
+    /// The audio rules make the order contract rather than detail,
     /// because floating-point multiplication is not associative and every golden
     /// buffer in this crate moves if it is regrouped. So the three gains are
     /// chosen to have that property — `(a × b) × c` and `a × (b × c)` differ in

@@ -11,8 +11,9 @@ workspace = true
 
 # One unconditional dependency, and it is the workspace's own. The DSP core
 # (mixer, voices, spatial cue grammar, WAV/QOA decoders) is pure `f32` block
-# processing with nothing under it, which is what `docs/plan/13-audio.md` means
-# by "pure-DSP core, platform seam at the device edge", and it stays that way.
+# processing with nothing under it, which is what the audio rules in
+# `docs/notes/simulation.md` mean by "pure DSP, with the device seam at the
+# edge", and it stays that way.
 #
 # `src/synth.rs`'s noise generator is the exception: it needs a *deterministic*
 # white-noise sequence, and `crcbl_core::rand` is where this engine's splitmix64
@@ -33,8 +34,8 @@ crcbl-core = { workspace = true }
 # build for `wasm32-unknown-unknown`, but only by pulling `wasm-bindgen`,
 # `js-sys`, `web-sys` and `futures-util` into the wasm graph to drive an
 # AudioWorklet of its own — a second answer to the question this crate's `web`
-# module already answers, and the exact framework dependency
-# `docs/plan/15-windowing.md` rejects for the shell. Gating it keeps the wasm
+# module already answers, and the exact framework dependency the windowing
+# rules in `docs/notes/backends.md` reject for the shell. Gating it keeps the wasm
 # build graph at *zero* third-party crates.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18.1"

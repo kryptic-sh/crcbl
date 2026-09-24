@@ -989,7 +989,7 @@ impl Shell for Win32Shell {
     ///   1.25, which is what the display settings offer and what
     ///   `GetDpiForWindow` reports.
     /// * [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) — `WM_SIZING`,
-    ///   named by `docs/plan/15-windowing.md` as this platform's form of it,
+    ///   named by the windowing rules as this platform's form of it,
     ///   and implemented in [`geometry`].
     /// * [`POINTER_CONFINE`](ShellCaps::POINTER_CONFINE) and
     ///   [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) — `ClipCursor` over the

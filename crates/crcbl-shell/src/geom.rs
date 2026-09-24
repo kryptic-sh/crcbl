@@ -346,7 +346,7 @@ impl AspectRatio {
     /// The largest size with this aspect ratio that fits inside `bounds`.
     ///
     /// This is the letterbox computation, and it lives here because
-    /// `docs/plan/15-windowing.md` makes in-renderer letterboxing the
+    /// the windowing rules in `docs/notes/backends.md` make in-renderer letterboxing the
     /// **universal fallback**: Wayland has no aspect hint at all, and a tiling
     /// window manager can force any size on any backend, so every consumer that
     /// aspect-locks needs this math and none of them should write it twice.

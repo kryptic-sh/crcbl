@@ -145,8 +145,9 @@ only reach a server somebody is paying to host — and the project hosts nothing
 WebRTC was considered as the way around it and declined: it still needs a hosted
 signalling broker, it still cannot discover LAN hosts, and talking to browser
 peers would put a full WebRTC stack on the native side, which is a framework of
-exactly the kind the dependency policy in
-[../15-windowing.md](../15-windowing.md) rejects.
+exactly the kind the dependency policy in the
+[backends notes](../../notes/backends.md) (_What the deleted 15-windowing plan
+left behind_) rejects.
 
 The consequence, recorded so nobody re-derives it: **WebTransport and WebSocket
 are not in the plan.** The transport surface is UDP and in-memory. See the LAN

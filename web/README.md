@@ -2,7 +2,7 @@
 
 The browser half of P5. Everything here is hand-written ES modules loaded
 directly by the page: **no framework, no bundler, no npm, no `node_modules`.**
-That is the same policy `docs/plan/15-windowing.md` sets for the engine's
+That is the same policy `docs/notes/backends.md` records for the engine's
 platform bindings — thin bindings to an ABI the platform forces on us, never a
 framework that owns policy — and it applies here for the same reason.
 

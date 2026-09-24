@@ -72,8 +72,8 @@ pub struct Styles {
 ///
 /// # Borderless is a style change, not a mode the system has
 ///
-/// Windows has no "fullscreen" state to ask for — `docs/plan/15-windowing.md`
-/// drops exclusive fullscreen, and the *borderless* kind is simply a window
+/// Windows has no "fullscreen" state to ask for — the windowing rules in
+/// `docs/notes/backends.md` drop exclusive fullscreen, and the *borderless* kind is simply a window
 /// with `WS_POPUP` positioned over a monitor. That has a consequence the two
 /// Linux backends do not share and [`set_mode`](crate::Shell::set_mode) has to
 /// account for: there is no window manager to refuse, so the effective mode is
@@ -160,7 +160,7 @@ pub fn track_sizes(constraints: SizeConstraints, scale_factor: f64, frame: Frame
 ///
 /// This is the Win32 half of
 /// [`ShellCaps::ASPECT_HINT_HONORED`](crate::ShellCaps::ASPECT_HINT_HONORED),
-/// and `docs/plan/15-windowing.md` names it exactly — "Windows `WM_SIZING` rect
+/// and the windowing rules name it exactly — "Windows `WM_SIZING` rect
 /// adjust". The system sends the message *while* the user drags, with the
 /// rectangle it is about to apply; writing a corrected rectangle back makes the
 /// window snap to the ratio live rather than after the button is released.

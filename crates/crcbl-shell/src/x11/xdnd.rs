@@ -4,7 +4,7 @@
 //! # What this implements, and what it deliberately does not
 //!
 //! **Receiving only.** These windows are drop *targets*; nothing here starts a
-//! drag. `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in
+//! drag. The windowing rules in `docs/notes/backends.md` scope drag-and-drop to "file paths in
 //! (viewer/editor import)", and a source is the other half of a protocol nobody
 //! in this engine asks for — it needs a pointer grab, a drag icon, an action
 //! menu and an offer this seam has no vocabulary to express.

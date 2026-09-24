@@ -18,7 +18,7 @@
 //!
 //! # Decision: borderless is a style swap, and the way back has to be exact
 //!
-//! `docs/plan/15-windowing.md` keeps two display modes and drops exclusive
+//! The windowing rules (`docs/notes/backends.md`) keep two display modes and drop exclusive
 //! fullscreen, and — separately — this backend does **not** use
 //! `toggleFullScreen:`. Spaces fullscreen is a third mode with its own
 //! animation, its own space, its own `NSWindowDelegate` callbacks and its own

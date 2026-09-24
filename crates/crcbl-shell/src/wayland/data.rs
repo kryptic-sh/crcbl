@@ -7,8 +7,8 @@
 //!
 //! # One implementation, two triggers
 //!
-//! `docs/plan/15-windowing.md` states that clipboard and drag-and-drop "share
-//! one implementation with two triggers" on Wayland and X11, and this module is
+//! The windowing rules in `docs/notes/backends.md` state that clipboard and
+//! drag-and-drop are "one implementation, two triggers" on Wayland and X11, and this module is
 //! where that stops being an aspiration. A `wl_data_offer` reached by
 //! `wl_data_device.selection` and one reached by `wl_data_device.enter` are the
 //! same object with the same `receive` request; the only differences are what

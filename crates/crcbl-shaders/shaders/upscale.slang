@@ -8,7 +8,7 @@
 // Render scale is the single largest performance knob a settings menu can
 // offer — every pass before this one costs what its extent costs, so drawing
 // the frame at 70% of the window is roughly half the shading work — and it is
-// the knob `docs/plan/15-windowing.md`'s borderless definition already assumes.
+// the knob the borderless definition in `docs/notes/backends.md` already assumes.
 // Until this pass existed the post chain's `[upscale]` stage was an ordering
 // rule for something nothing implemented, and every internal target in the
 // frame was the swapchain's size.

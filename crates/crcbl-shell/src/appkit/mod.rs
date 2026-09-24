@@ -14,7 +14,8 @@
 //! no `dlopen` here — see [`ffi`], which makes the same argument
 //! `src/win32/ffi.rs` does and the reverse of `src/x11/ffi.rs`'s.
 //!
-//! `docs/plan/15-windowing.md`'s macOS row, which reads in full: "hand-written
+//! The windowing backend table's macOS row (`docs/notes/backends.md`), which
+//! reads in full: "hand-written
 //! Objective-C runtime FFI (`objc_msgSend`) to AppKit". Every declaration in
 //! [`ffi`] is ours; there is no `objc2`, no `cocoa`, no `core-foundation`, no
 //! framework — and, like the Win32 backend and unlike the two Linux ones, no
@@ -47,9 +48,9 @@
 //! | Event timestamps rebased onto the engine clock | complete — [`TimeBase`] |
 //! | `NSPasteboard`, both directions, `public.utf8-plain-text` beside the engine's own format | complete — [`CLIPBOARD`](crate::ShellCaps::CLIPBOARD), see [`pasteboard`] |
 //! | File drops in: `registerForDraggedTypes:`, `NSDraggingDestination`, the `accept_drops` gate | complete — [`DRAG_DROP`](crate::ShellCaps::DRAG_DROP), see [`view`] |
-//! | Drag and drop **out** — starting a drag from a window | **never in this plan** — `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in (viewer/editor import)", which is what every other backend implements too |
+//! | Drag and drop **out** — starting a drag from a window | **never in this plan** — the windowing rules in `docs/notes/backends.md` scope drag-and-drop to "file paths in (viewer/editor import)", which is what every other backend implements too |
 //! | Lazily provided pasteboard data (`pasteboard:provideDataForType:`) | **never** — structurally unavailable to a shell whose callbacks record rather than act; [`pasteboard`] argues it in full |
-//! | Spaces fullscreen (`toggleFullScreen:`) | **never** — `docs/plan/15-windowing.md` keeps two display modes, and borderless here is a frameless window at screen size |
+//! | Spaces fullscreen (`toggleFullScreen:`) | **never** — the windowing rules keep two display modes, and borderless here is a frameless window at screen size |
 //!
 //! # What AppKit does that no other backend models
 //!
@@ -178,7 +179,7 @@
 //!     shares nothing with the clipboard, which is why that backend has two
 //!     modules. `-[NSDraggingInfo draggingPasteboard]` answers an
 //!     `NSPasteboard`, so this backend has one — the "one implementation, two
-//!     triggers" `docs/plan/15-windowing.md` states for the two Linux backends,
+//!     triggers" the windowing rules state for the two Linux backends,
 //!     arriving on a third platform for a reason of its own.
 //!
 //! # Decision: `objc_msgSend` is transmuted per call site, from one place

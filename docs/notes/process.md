@@ -419,7 +419,7 @@ Stated plainly. "Not reviewed" is the honest line.
   `16-wasm-modules.md`, the animation plan (topic 17), `26-prediction.md`,
   `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
   against those documents. Where I say "topic 5 requires `libm`" I am quoting
-  `13-audio.md`'s own correction, not the physics plan. Several of those files
+  the audio plan's own correction, not the physics plan. Several of those files
   are being edited concurrently by the parent and by sibling agents, so they may
   say something different by the time this is read.
 - **I did not read `docs/plan/sample/*.md`.** Sibling agents own them. The
@@ -449,11 +449,12 @@ Stated plainly. "Not reviewed" is the honest line.
   gate's two blind spots. I checked by hand the ones I introduced:
   `[41-webgpu-stream]` (since folded into `docs/notes/browser.md`), `[42-steam]`
   (from `00-overview.md`; since folded into `docs/notes/backends.md`),
-  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from the netcode plan,
-  since folded into `docs/notes/simulation.md`) — all resolve relative to
+  `[13-audio]` (from `32-voip.md`; since folded into
+  `docs/notes/simulation.md`), `[27-auth.md]` (from the netcode plan, since
+  folded into `docs/notes/simulation.md`) — all resolve relative to
   `docs/plan/`. I did **not** re-check the pre-existing relative links in these
   files.
-- **Carried forward on trust, not re-checked:** the `13-audio.md` claim that the
+- **Carried forward on trust, not re-checked:** the audio plan's claim that the
   physics plan's correction requires the `libm` crate; the netcode plan's
   assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
   and inventory entries there, not the WebRTC one); the ROADMAP's phase markings
@@ -599,10 +600,11 @@ Stated plainly, so the next session does not mistake silence for coverage.
 - **Only seven docs were read against the tree**: `01-foundations` (since folded
   into `docs/notes/backends.md`), `02-vulkan-backend` (since folded into
   `docs/notes/backends.md`), `09-backends-metal-dx12.md`, `10-wasm-webgpu`
-  (since folded into `docs/notes/browser.md`), `15-windowing.md`,
-  `39-capabilities` (since folded into `docs/notes/backends.md`),
-  `41-webgpu-stream` (since folded into `docs/notes/browser.md`). Everything
-  else in `docs/plan/` was untouched and unverified.
+  (since folded into `docs/notes/browser.md`), `15-windowing` (since folded into
+  `docs/notes/backends.md`), `39-capabilities` (since folded into
+  `docs/notes/backends.md`), `41-webgpu-stream` (since folded into
+  `docs/notes/browser.md`). Everything else in `docs/plan/` was untouched and
+  unverified.
 - **`41-webgpu-stream` was verified only at its two stale points** (the reply
   set, the offscreen surface command). Its wire conventions, handle rules and
   "cases easy to get wrong" were read but not checked call-by-call against

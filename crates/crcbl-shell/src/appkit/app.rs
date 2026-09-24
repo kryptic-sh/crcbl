@@ -428,7 +428,7 @@ static DELEGATE: OnceLock<Result<usize, String>> = OnceLock::new();
 /// There is no Objective-C compiler in this build. `objc_allocateClassPair` plus
 /// `class_addMethod` is what `@implementation` compiles *to*, and writing it out
 /// is the whole of the "hand-written Objective-C runtime FFI" that
-/// `docs/plan/15-windowing.md` asks for on this platform. The Win32 backend does
+/// the windowing rules (`docs/notes/backends.md`) ask for on this platform. The Win32 backend does
 /// the same thing with `RegisterClassExW` and a `WNDPROC`; the difference is
 /// only that Win32 has one entry point and this has one per message.
 ///

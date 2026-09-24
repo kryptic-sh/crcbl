@@ -23,8 +23,8 @@
 //! `xdg-shell`'s type table point at `wayland`'s `wl_surface` without either
 //! file knowing about the other. Adding a protocol to the build is therefore
 //! one line in the caller's list, never an edit here — the property
-//! `docs/plan/15-windowing.md`'s P0.5b/c slices (`wl_seat`, `xdg-decoration`,
-//! `data-device`) depend on.
+//! the windowing plan's P0.5b/c slices (`wl_seat`, `xdg-decoration`,
+//! `data-device`) depended on.
 //!
 //! # The part that has to be exactly right
 //!

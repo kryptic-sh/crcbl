@@ -706,7 +706,7 @@ mod macos {
              nothing to gate on and must say so"
         );
 
-        // Both formats at once, which is what `15-windowing.md` specifies: the
+        // Both formats at once, which is what the windowing rules specify: the
         // text is what TextEdit pastes and the RON is what another Crucible
         // pastes, from one write.
         shell

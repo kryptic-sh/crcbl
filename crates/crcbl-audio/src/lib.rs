@@ -1,6 +1,7 @@
 //! Audio device seam and streaming thread.
 //!
-//! `docs/plan/13-audio.md` makes audio a first-class pillar. This module
+//! The audio rules in `docs/notes/simulation.md` make audio a first-class
+//! pillar. This module
 //! builds the platform abstraction: open an output stream and drive a
 //! user-provided callback at the hardware sample rate. The mixer,
 //! spatialiser, and cue grammar are separate modules that implement
@@ -63,7 +64,8 @@ pub const CHANNELS: usize = 2;
 
 /// The engine's fixed internal sample rate, in Hz.
 ///
-/// `docs/plan/13-audio.md` fixes it at 48 kHz: the mixer's voices hold sample
+/// The audio rules (`docs/notes/simulation.md`) fix it at 48 kHz: the mixer's
+/// voices hold sample
 /// data authored for this rate, and the spatial cue grammar's ITD delays and
 /// pitch ratios are derived against it. A device that runs at some other rate
 /// is resampled at the output edge — see [`web`] for the browser's, which is

@@ -1,9 +1,10 @@
 # Topic 54 — Android: the shell backend the platform is missing
 
 Written 2026-09-07, from a survey of what an Android build would actually hit.
-Its place in the set is [15-windowing.md](15-windowing.md)'s backend table,
-which this adds a row to and nothing else; the precedent for how a platform port
-is shaped here is the wasm track, whose record in the
+Its place in the set is the windowing backend table in the
+[backends notes](../notes/backends.md) (_What the deleted 15-windowing plan left
+behind_), which this adds a row to and nothing else; the precedent for how a
+platform port is shaped here is the wasm track, whose record in the
 [browser notes](../notes/browser.md) (_What the deleted 10-wasm-webgpu plan left
 behind_) is the honest account of what such a track costs. The decision that
 this is a windowing topic at all is `docs/notes/backends.md`'s, under
@@ -75,10 +76,11 @@ Nothing else is Android-shaped and broken. Read from the tree on 2026-09-07:
   `ContactId`, a `TouchPhase` and a position; `ShellCaps::TOUCH` gates it;
   `Pending::observe` folds it into `TouchContact`; `crcbl_ui::touch` has the
   on-screen controls; `HeadlessShell::touch` scripts it. Only the web backend
-  sets the capability today. [15-windowing.md](15-windowing.md)'s "Explicitly
-  out (post-MVP or never)" list still ends with the word "touch", and that line
-  was overtaken by the browser backend — it is wrong as written and this
-  document is the correction.
+  sets the capability today. The windowing plan's "Explicitly out (post-MVP or
+  never)" list ended with the word "touch", and that line was overtaken by the
+  browser backend; the windowing rules in the
+  [backends notes](../notes/backends.md) now say the seam has grown touch for
+  this document.
 - **The lifecycle vocabulary is the real hole.** `ShellEvent`'s window-lifetime
   variants are `Resized`, `ScaleFactorChanged`, `CloseRequested`,
   `WindowDestroyed`, `Focus`, `PointerFocus` and `MonitorsChanged`, and none of
@@ -115,8 +117,8 @@ callbacks, `ALooper`, `AInputQueue`, `ANativeWindow`, `AConfiguration`,
 workspace, the way `crates/crcbl-shell/src/win32/` and
 `crates/crcbl-shell/src/appkit/` already do for their platforms.
 
-**Refused: `winit` and `android-activity`.** By the rule
-[15-windowing.md](15-windowing.md) states and has held to on every other
+**Refused: `winit` and `android-activity`.** By the rule the windowing rules in
+the [backends notes](../notes/backends.md) state and have held to on every other
 platform: _"Rejected: frameworks that own policy — winit, SDL, GLFW"_, against
 _"Accepted: thin bindings to APIs the OS or driver requires by ABI"_. An
 activity glue crate owns the loop, the lifecycle state machine and the input

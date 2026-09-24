@@ -4,7 +4,7 @@
 //! # Two display modes, and no third
 //!
 //! [`DisplayMode`] has exactly two variants because
-//! `docs/plan/15-windowing.md` locks it at two. Exclusive/true fullscreen — the
+//! the windowing rules in `docs/notes/backends.md` lock it at two. Exclusive/true fullscreen — the
 //! mode that changes the display's video timing — is **dropped by decision**,
 //! not deferred:
 //!
@@ -29,11 +29,11 @@
 //!
 //! # Aspect ratio is a constraint, not a mode
 //!
-//! `15-windowing.md`'s table describes windowed mode as "freeform **or
+//! The windowing rules describe windowed mode as "freeform **or
 //! aspect-locked**", which reads like two modes. It is one mode with a
 //! constraint, and the constraint lives in [`SizeConstraints`] alongside
-//! min/max — where the trait sketch's `set_constraints(win, c) // min/max/aspect`
-//! already put it. Modelling it in both places would create a question with no
+//! min/max — where the windowing plan's trait sketch,
+//! `set_constraints(win, c) // min/max/aspect`, already put it. Modelling it in both places would create a question with no
 //! good answer: if `DisplayMode::Windowed { aspect: Some(16:9) }` and
 //! `SizeConstraints { aspect: Some(4:3) }` disagree, which wins? Keeping one
 //! home also means an aspect lock survives a round trip through borderless and

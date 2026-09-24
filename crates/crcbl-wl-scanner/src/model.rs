@@ -5,7 +5,7 @@
 //! dropped — they cannot affect a single byte on the socket, and carrying them
 //! would only widen the surface that has to stay correct.
 //!
-//! Enums *are* kept, because `docs/plan/15-windowing.md`'s backends read
+//! Enums *are* kept, because the shell's backends read
 //! `xdg_toplevel.state` and `wl_output.transform` by name, and a hand-copied
 //! integer that drifts from the XML is exactly the class of bug this generator
 //! exists to remove.

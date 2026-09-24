@@ -1,7 +1,8 @@
 //! Hand-written Objective-C runtime FFI, and the C structures AppKit passes
 //! across it.
 //!
-//! `docs/plan/15-windowing.md`'s macOS row, which reads in full: "hand-written
+//! The windowing backend table's macOS row (`docs/notes/backends.md`), which
+//! reads in full: "hand-written
 //! Objective-C runtime FFI (`objc_msgSend`) to AppKit". Every declaration below
 //! is ours; there is no `objc2`, no `cocoa`, no `core-foundation`, and no
 //! framework of any kind.
@@ -62,7 +63,7 @@
 //!
 //! | Not used | What it would buy | Why not |
 //! | --- | --- | --- |
-//! | `toggleFullScreen:` and `NSWindowStyleMaskFullScreen` | Spaces fullscreen | `docs/plan/15-windowing.md` drops exclusive fullscreen and keeps two modes; Spaces fullscreen is a third, with its own animation, its own space and its own failure modes. Borderless here is a frameless window at screen size — see [`window`](super::window) |
+//! | `toggleFullScreen:` and `NSWindowStyleMaskFullScreen` | Spaces fullscreen | the windowing rules in `docs/notes/backends.md` drop exclusive fullscreen and keep two modes; Spaces fullscreen is a third, with its own animation, its own space and its own failure modes. Borderless here is a frameless window at screen size — see [`window`](super::window) |
 //! | `NSPasteboardTypeString` and `NSPasteboardTypeFileURL` as `NSString *` globals | the two type identifiers | they are *values* — `public.utf8-plain-text` and `public.file-url` — and a compatibility contract with every other application, so [`pasteboard`](super::pasteboard) spells them out where a Linux host's tests can read them. Reaching them through a linker symbol would put the one part of the pasteboard mapping that can be silently wrong somewhere no test can see |
 //! | `pasteboard:provideDataForType:` and a non-nil `addTypes:owner:` | lazily provided pasteboard data | the callback has to be answered from a run-loop turn this backend does not own between two [`pump`](crate::Shell::pump)s, and a lazy owner owes the pasteboard a flush before the process exits. [`pasteboard`](super::pasteboard) argues both; it is the same refusal `win32::clipboard` makes about `WM_RENDERFORMAT` |
 //! | `NSFilenamesPboardType`, `com.apple.pasteboard.promised-file-url` | older and promised file drops | deprecated in 10.13 and, for a promise, a file the seam has no way to name a destination directory for. See [`pasteboard`](super::pasteboard) |

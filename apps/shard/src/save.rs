@@ -21,10 +21,10 @@
 //!
 //! [`SaveWriter`] and [`SaveReader`] own the magic, the format version, the
 //! SHA-256 over everything before it and the atomic write;
-//! `docs/plan/14-persistence.md`'s correction of 2026-07-27 owns the shape — a
+//! the persistence rules in `docs/notes/simulation.md` own the shape — a
 //! header, a sector set, and one snapshot per sector. Shard is a single-sector
 //! game, so it writes exactly one [`SectorSave`], at [`SectorId::ZERO`], and
-//! that is the shape that plan says every MVP sample produces. Nothing in
+//! that is the shape those rules say every MVP sample produces. Nothing in
 //! `crcbl-store` changed on this sample's behalf.
 //!
 //! What is this module's is the **payload** — the bytes inside that one sector —
@@ -33,7 +33,7 @@
 //!
 //! **The platform arm is not [`Backing::platform`](crcbl::store::record::Backing::platform).**
 //! That one answers with the *config* directory, which is where a high score
-//! belongs; `docs/plan/14-persistence.md` puts saves in the **data** directory,
+//! belongs; the persistence rules put saves in the **data** directory,
 //! and it hands out a path rather than the [`StorageSource`] a [`SaveWriter`]
 //! writes through. `docs/backlog.md` records that a second consumer of *this*
 //! rule would be the moment to hoist it into the engine.
@@ -62,8 +62,8 @@
 //!   way a floor does without a byte having to agree with a roll.
 //!
 //! **A payload from an older version reads as no save**, with the reason logged.
-//! There is no migration seam — `docs/plan/14-persistence.md` owes `crcbl-store`
-//! one and it is not built — so a bump orphans the saves written before it,
+//! There is no migration seam — `docs/backlog.md` owes `crcbl-store` one
+//! (_The migration seam_) — so a bump orphans the saves written before it,
 //! which for a sample with no players is the honest trade and for the engine is
 //! not.
 //!
@@ -191,8 +191,8 @@ const PAYLOAD_MAGIC: &[u8; 4] = b"SHRD";
 ///
 /// The container's `format_version` says how the header and the sector table are
 /// laid out; this says how *this* sample's sector bytes are, which is the
-/// per-system version `docs/plan/14-persistence.md` asks the header to carry and
-/// it does not. Bump it when a field is added, moved or reinterpreted.
+/// per-system version the persistence rules ask the header to carry and it
+/// does not. Bump it when a field is added, moved or reinterpreted.
 ///
 /// **1 → 2** added what the character is carrying. **2 → 3** added what they
 /// have learned, which is also what decides the ceiling their health is checked

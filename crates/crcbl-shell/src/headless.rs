@@ -8,7 +8,8 @@
 //!    method could not be written without naming a compositor, this module
 //!    would not compile.
 //! 2. **Be the substrate CI runs the engine through.**
-//!    `docs/plan/15-windowing.md` is explicit that this is not a stub: "CI and
+//!    The windowing rules in `docs/notes/backends.md` are explicit that this is
+//!    not a stub: "CI and
 //!    `crcbl screenshot`/`sim` run the identical engine loop through it". A
 //!    render test pairs it with [`SurfaceTarget::Offscreen`] — which
 //!    [`surface_target`](Shell::surface_target) returns — so the golden-image
@@ -1294,7 +1295,7 @@ impl Shell for HeadlessShell {
         //
         // The scale factor comes from the monitor the window lands on, not from
         // the primary one: a borderless window on a HiDPI secondary monitor is
-        // exactly the case `docs/plan/15-windowing.md`'s DPI matrix is looking
+        // exactly the case the windowing rules' DPI matrix is looking
         // for, and reporting the primary's scale there produces a swapchain at
         // the wrong size. `set_mode` takes the same pair from the same place.
         let (size, scale_factor) = match desc.mode {
@@ -2067,7 +2068,7 @@ mod tests {
         );
         // 1280x720 logical at 1.5 is 1920x1080 physical — the swapchain must be
         // recreated at the new size, which is the leak the DPI matrix test in
-        // `docs/plan/15-windowing.md` is looking for.
+        // the windowing rules (`docs/notes/backends.md`) is looking for.
         assert_eq!(
             shell.window_state(window).expect("state").size(),
             Some(PhysicalSize::new(1920, 1080))

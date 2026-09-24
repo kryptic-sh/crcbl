@@ -99,7 +99,7 @@ pub enum ShellEvent {
     /// Carries the *new* physical size as well: on Wayland a scale change is a
     /// `configure` that also restates the size, and on Win32 `WM_DPICHANGED`
     /// hands over a suggested rectangle. A consumer must treat this as a resize
-    /// too. `docs/plan/15-windowing.md` calls out "scale-factor changes
+    /// too. The windowing rules (`docs/notes/backends.md`) call out "scale-factor changes
     /// mid-session must not leak wrong-size swapchains" as a required test, and
     /// putting both facts in one event is what makes that testable rather than
     /// order-dependent.
@@ -211,7 +211,7 @@ pub enum ShellEvent {
 
     /// The pointer entered or left the window.
     ///
-    /// Not in `15-windowing.md`'s variant list, and added anyway: every backend
+    /// Not in the windowing rules' event set, and added anyway: every backend
     /// delivers enter/leave natively (`wl_pointer.enter`, X11
     /// `EnterNotify`, `WM_MOUSELEAVE`), the UI layer needs it for hover state,
     /// and the alternative — inferring it from motion events that stop

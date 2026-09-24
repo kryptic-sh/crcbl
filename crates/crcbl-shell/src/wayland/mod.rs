@@ -7,7 +7,7 @@
 //! than `#[cfg(unix)]` — macOS is a Unix with no Wayland, and the BSDs are not
 //! a target this engine claims.
 //!
-//! `docs/plan/15-windowing.md`'s Linux policy in one sentence:
+//! The windowing rules' Linux policy (`docs/notes/backends.md`) in one sentence:
 //! **libwayland-client owns the connection and the proxy objects; the protocol
 //! layer above `wl_proxy_marshal_array_flags` is ours.** [`ffi`] is the first
 //! half — hand-written `extern "C"` declarations, reached by `dlopen` for the

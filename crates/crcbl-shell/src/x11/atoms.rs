@@ -20,8 +20,8 @@
 //!
 //! # What is in the table, and what is not
 //!
-//! Only names this backend actually sends or compares. `docs/plan/15-windowing.md`
-//! scopes the X11 work at "what the shell actually uses", and an atom nobody
+//! Only names this backend actually sends or compares. The windowing rules in
+//! `docs/notes/backends.md` scope the X11 work at "what the shell actually uses", and an atom nobody
 //! reads is a round trip nobody needed:
 //!
 //! | Group | Atoms | For |

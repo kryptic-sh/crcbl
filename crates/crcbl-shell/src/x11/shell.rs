@@ -222,7 +222,7 @@ impl Shell for X11Shell {
     /// And one that is clear for a reason rather than for want of work:
     /// [`HW_UPSCALE`](ShellCaps::HW_UPSCALE), because X11 has no viewporter and
     /// no equivalent — the renderer does an upscale blit, which is the exact
-    /// decision `docs/plan/15-windowing.md` names caps for.
+    /// decision the windowing rules (`docs/notes/backends.md`) name caps for.
     ///
     /// [`DRAG_DROP`](ShellCaps::DRAG_DROP) is set, and it is the one bit here
     /// that depends on nothing: XDND is client-to-client client messages plus a

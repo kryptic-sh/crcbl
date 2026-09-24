@@ -108,8 +108,8 @@
 //! not move; one backend obligation turned out to cost more than predicted, and
 //! that is written down where it is paid.
 //!
-//! `HeadlessShell` is not a stub standing in for the real thing: per
-//! `docs/plan/15-windowing.md` it is a first-class implementation that CI,
+//! `HeadlessShell` is not a stub standing in for the real thing: per the
+//! windowing rules in `docs/notes/backends.md` it is a first-class implementation that CI,
 //! `crcbl screenshot` and `crcbl sim` run the *identical* engine loop through.
 //! Where the real compositor turned out to differ from what it models, the
 //! difference is documented in the Wayland backend rather than smoothed over —
@@ -118,7 +118,7 @@
 //! # Decision: `dyn`-primary, like the HAL
 //!
 //! [`Shell`] is object-safe and [`open`] returns `Box<dyn Shell>`. This is
-//! forced rather than chosen: `docs/plan/15-windowing.md` requires Wayland and
+//! forced rather than chosen: the windowing rules require Wayland and
 //! X11 to be compiled in together and selected *at runtime*, so the backend
 //! cannot be a type parameter. The consequences are the ones `crcbl-hal`
 //! documents — no generic methods, no `impl Trait` returns, no cross-crate

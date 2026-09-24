@@ -112,9 +112,9 @@ Cross-cutting topic docs (identity, no ordering implied):
 | ----- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
 | 11    | [11-cli-headless.md](11-cli-headless.md)                                                    | `crcbl` CLI: headless engine/editor control, scripting                     |
 | 12    | ◐ 12-testing — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`           | Test infra: unit/property/e2e, golden images, determinism                  |
-| 13    | [13-audio.md](13-audio.md)                                                                  | Spatial cue grammar, mixer, occlusion, audio testing                       |
-| 14    | [14-persistence.md](14-persistence.md)                                                      | Save games (snapshot-based), settings layers, profiles                     |
-| 15    | [15-windowing.md](15-windowing.md)                                                          | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |
+| 13    | ◐ 13-audio — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Spatial cue grammar, mixer, occlusion, audio testing                       |
+| 14    | ◐ 14-persistence — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`       | Save games (snapshot-based), settings layers, profiles                     |
+| 15    | ◐ 15-windowing — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`         | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |
 | 16    | [16-wasm-modules.md](16-wasm-modules.md)                                                    | Game logic as wasm modules: FFI ABI, any language, modding                 |
 | 17    | ◐ 17-animation — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`         | Skeletal animation: cooked clips, state machine, GPU skinning              |
 | 18    | [18-render-features.md](18-render-features.md)                                              | Render features index: how the techniques interact, deliver and risk       |
@@ -240,8 +240,9 @@ presence at all, except `render-harness`, which has one that is not a demo —
 - Scripting-as-text: game logic is wasm modules (topic 16); Lua VM template
   covers script-style workflows post-MVP.
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the
-  cue grammar (incl. occlusion) and mixing are MVP; see
-  [13-audio.md](13-audio.md).
+  cue grammar (incl. occlusion) and mixing are MVP; see the
+  [simulation notes](../notes/simulation.md) (_What the deleted 13-audio plan
+  left behind_).
 - Physics L2 contact solver is MVP-stretch (non-gating); L2 + L3 joints got a
   full design in topic 36, whose rungs 0 to 5 are built (its decisions are in
   [simulation notes](../notes/simulation.md), the rest in `docs/backlog.md`)

@@ -155,7 +155,8 @@ pub enum Step {
 
 /// What a finished [`Read`] turns into.
 ///
-/// **One transfer machine, reached two ways.** `docs/plan/15-windowing.md` says
+/// **One transfer machine, reached two ways.** The windowing rules
+/// (`docs/notes/backends.md`) say
 /// the clipboard and drag-and-drop are "one implementation, two triggers" on
 /// Linux, and on X11 that is literally true: a drop's payload arrives through
 /// `ConvertSelection` on `XdndSelection` exactly as a paste arrives through

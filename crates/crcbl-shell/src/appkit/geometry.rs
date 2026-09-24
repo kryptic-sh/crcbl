@@ -193,7 +193,8 @@ pub fn usable_scale(backing: f64) -> f64 {
 ///
 /// # Borderless is a style mask, not a mode the system has
 ///
-/// `docs/plan/15-windowing.md` drops exclusive fullscreen and keeps two modes,
+/// The windowing rules (`docs/notes/backends.md`) drop exclusive fullscreen and
+/// keep two modes,
 /// and neither of them is macOS's *Spaces* fullscreen — `toggleFullScreen:`,
 /// which moves the window to a space of its own with an animation, a menu bar
 /// that slides, and a set of failure modes that are entirely its own. Borderless
@@ -263,7 +264,7 @@ pub fn content_limits(constraints: SizeConstraints) -> (NSSize, NSSize) {
 ///
 /// This is the macOS half of
 /// [`ASPECT_HINT_HONORED`](crate::ShellCaps::ASPECT_HINT_HONORED), and
-/// `docs/plan/15-windowing.md` names it exactly — "macOS
+/// the windowing rules in `docs/notes/backends.md` name it exactly — "macOS
 /// `setContentAspectRatio`". Unlike the Win32 backend there is no rectangle
 /// algebra to write: AppKit enforces the ratio during the drag itself, and the
 /// terms go across as a size whose *proportion* is what is read.

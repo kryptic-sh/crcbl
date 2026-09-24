@@ -265,7 +265,7 @@ fn a_scripted_session_runs_the_engine_loop_through_a_trait_object() {
         "1 configure + 6 drags + 1 dpi"
     );
 
-    // The DPI check `docs/plan/15-windowing.md` asks for: a scale change
+    // The DPI check the windowing rules (`docs/notes/backends.md`) ask for: a scale change
     // mid-session must not leave a wrong-size swapchain behind.
     assert_eq!(engine.scale_factor, 2.0);
     let state: WindowState = shell.window_state(window).expect("state");

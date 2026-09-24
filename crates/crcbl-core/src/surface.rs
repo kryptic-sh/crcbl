@@ -2,8 +2,8 @@
 //!
 //! # Why this lives in `crcbl-core`
 //!
-//! `docs/plan/15-windowing.md` describes `SurfaceTarget` as "the *single*
-//! sanctioned platform leak": the shell produces it, a HAL backend consumes it,
+//! The windowing rules in `docs/notes/backends.md` describe `SurfaceTarget` as
+//! "the *single* sanctioned platform leak": the shell produces it, a HAL backend consumes it,
 //! and nothing in between is allowed to look inside. That makes it **shared
 //! vocabulary between two crates that must not depend on each other**:
 //!

@@ -16,8 +16,8 @@
 //! # `[engine.audio]`: two layers, and the key **is** the value
 //!
 //! A bus gain resolves through the player's file and the game's programmatic
-//! control, and that is all — `docs/plan/13-audio.md` spells out why the other
-//! two layers are missing rather than unbuilt. There is no per-camera layer
+//! control, and that is all — the audio rules in `docs/notes/simulation.md`
+//! spell out why the other two layers are missing rather than unbuilt. There is no per-camera layer
 //! because there is one listener and one mix; there is no device-capability
 //! layer because no audio device removes the ability to multiply a sample by a
 //! scalar.
@@ -946,11 +946,12 @@ pub enum KeyStatus {
     /// A reader in this module answers it, so writing it changes a frame or a
     /// mix.
     Read,
-    /// Named by `docs/plan/15-windowing.md`'s catalogue and read by nothing.
+    /// Named by the display catalogue in `docs/notes/backends.md` and read by
+    /// nothing.
     ///
     /// Named anyway, and now rather than later, because a key named late is a
-    /// file every existing player has already written — `docs/plan/14-persistence.md`'s
-    /// second catalogue rule.
+    /// file every existing player has already written — catalogue rule 2 in
+    /// `docs/notes/simulation.md`'s persistence rules.
     Named,
 }
 
@@ -1056,7 +1057,7 @@ const NAMED_HELP: [&str; 8] = [
 ];
 
 /// The `[engine.video]` rows nothing reads yet, with the kinds and the help
-/// `docs/plan/15-windowing.md` fixed for them.
+/// the display catalogue (`docs/notes/backends.md`) fixed for them.
 ///
 /// Literals, unlike the rows below them, because there is nothing in the tree
 /// to derive them from — that is exactly what makes them [`KeyStatus::Named`].

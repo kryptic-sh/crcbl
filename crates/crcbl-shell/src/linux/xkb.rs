@@ -12,7 +12,8 @@
 //!
 //! # Decision: libxkbcommon, not our own XKB parser
 //!
-//! `docs/plan/15-windowing.md` names "keymap handling (XKB parsing)" as a
+//! The windowing rules in `docs/notes/backends.md` name "keymap handling (XKB
+//! parsing)" as a
 //! specific cost risk, and this is the module that either pays it or does not.
 //! It does not, and the reasoning is the same "bindings, not frameworks" test
 //! the rest of the Linux backend is decided by:
@@ -34,7 +35,7 @@
 //!   discovered by a user, never by us, because we all type US-QWERTY.
 //! * **It owns no policy.** There is no event loop in it, no window, no state
 //!   machine we do not drive. We hand it a string and ask it questions; it
-//!   never calls us. That is the line `15-windowing.md` draws, and this is on
+//!   never calls us. That is the line the windowing rules draw, and this is on
 //!   the accepted side of it — unlike winit or SDL, which would answer
 //!   "should this window be fullscreen" for us.
 //! * **We keep the part that matters.** Scancode → [`KeyCode`] — the mapping

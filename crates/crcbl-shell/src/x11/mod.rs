@@ -7,7 +7,7 @@
 //! `ld.so` on a machine with no X libraries and the Wayland entry before it
 //! would never be tried.
 //!
-//! `docs/plan/15-windowing.md`'s Linux policy applied to the other half:
+//! The windowing rules' Linux policy (`docs/notes/backends.md`) applied to the other half:
 //! **libxcb owns the connection and the wire encoding; the request/event layer
 //! above it — core, EWMH atoms, RandR, XKB — is ours.** [`ffi`] is the first
 //! part, `dlopen`'d for the reasons that module states. [`atoms`], [`keys`] and

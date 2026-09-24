@@ -39,7 +39,8 @@
 //! path walk can answer
 //!
 //! [`MonitorInfo::refresh_millihertz`] exists because 59.94 Hz is not 60, and
-//! `docs/plan/15-windowing.md`'s frame pacing needs the difference.
+//! frame pacing needs the difference (refresh is read, never written:
+//! `docs/notes/backends.md`).
 //! `EnumDisplaySettingsW` cannot express it: `DEVMODEW::dmDisplayFrequency` is
 //! an integer count of hertz and reports 60 for a 59.94 Hz mode. So the exact
 //! figure comes from `QueryDisplayConfig` first: its `DISPLAYCONFIG_RATIONAL`

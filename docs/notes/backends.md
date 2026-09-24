@@ -3,6 +3,215 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 15-windowing plan left behind (2026-09-24)
+
+Record; topic 15 designed `crcbl-shell`, the from-scratch windowing that
+replaced winit: its own event loop, windows, monitors, input and surface handles
+behind one trait, with native backends per platform and all windowing logic
+ours. Built from it: the `Shell` trait with Wayland, X11, Win32, AppKit, web and
+headless backends (`crates/crcbl-shell/src/*`), selected at runtime by
+`open_backend`; `crcbl-wl-scanner`, the Wayland protocol codegen; `ShellCaps`,
+`SurfaceTarget` (`crates/crcbl-core/src/surface.rs`), the two display modes and
+`set_constraints`; monitors, DPI, cursors, pointer lock and confine; clipboard
+on every desktop backend, and file drops (Wayland `data-device`, XDND, Win32
+`WM_DROPFILES`, AppKit), with `CF_HDROP` read and published for uri-lists; the
+display catalogue in code (`crcbl::settings::catalogue`, `NAMED_VIDEO_KEYS`), of
+which `frame_limit` and `render_scale` are read; and end-to-end suites against
+real desktops for every native backend.
+
+What it left unbuilt is in `docs/backlog.md` under _What the deleted
+15-windowing plan left unbuilt (2026-09-24)_ (engine letterboxing, the soak and
+DPI-matrix suites), _The settings catalogue's named keys have no reader_ (the
+eight `Named` keys), _HDR display output_, _The engine owns scaling on every
+platform_ (render scale and `HW_UPSCALE`), and the IME and pre-edit bullets
+under _What the Win32 backend has and has not been run against_ and _What the
+AppKit backend has and has not been run against_.
+
+Code cites the plan as "topic 15" and by section, row and slice. Those resolve
+here:
+
+| Citation                                                | What it specified                                                                                                                                                           |
+| ------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The dependency line; "the Linux policy"; the WSI note   | **Bindings, not frameworks** and **The Linux exception is forced by the WSI ABI**                                                                                           |
+| The backend table; "the Windows row", "the macOS row"   | The backend table below                                                                                                                                                     |
+| The display-mode table; "two modes"                     | **Two display modes, windowed and borderless**                                                                                                                              |
+| Aspect lock per backend; the letterbox fallback         | **Aspect lock is native where it exists, and letterboxing always works**                                                                                                    |
+| The display catalogue; rule 1; rule 2                   | **The display catalogue**; rule 1 is the 39-capabilities section's clamp rule, rule 2 is in `docs/notes/simulation.md` (_What the deleted 14-persistence plan left behind_) |
+| The seam sketch; `ShellEvent`'s variant list            | **No platform type crosses the seam** and **The event set**                                                                                                                 |
+| `ShellCaps`; "caps, never platform sniffing"            | **Capabilities, never platform sniffing**                                                                                                                                   |
+| The clipboard notes; "one implementation, two triggers" | **The clipboard is mime-typed** and **Drag and drop is files in**                                                                                                           |
+| `HeadlessShell` "is not a stub"                         | **`HeadlessShell` is a first-class backend**                                                                                                                                |
+| The DPI matrix; the event-injection harness             | **Tested against real desktops**; the owed suites are in the backlog                                                                                                        |
+| "Keymap handling (XKB parsing)"; subset discipline      | **Protocol work is ours, and scoped to what we use**                                                                                                                        |
+| Slices P0, P0.5b/c, P0.6, P5, P5C                       | The backend table below                                                                                                                                                     |
+| The 2026-08-09 corrections                              | **The engine owns scaling**; **`crcbl-dx12` defends the two-mode rule**; `CF_HDROP`                                                                                         |
+
+The rules, each with its _why_:
+
+- **Bindings, not frameworks.** The rule is that no framework makes decisions
+  for us, not that no code but ours links into the process. Rejected: frameworks
+  that own policy — winit, SDL, GLFW (windowing), and by the same logic egui
+  (UI) and wgpu as the performance tier. Accepted: thin bindings to APIs the OS
+  or driver requires by ABI — `ash`, `objc2` and `windows-rs` in the HAL, and on
+  Linux libwayland-client and libxcb for the connection and proxy objects only.
+  Everything above those handles (protocol selection, event loop, window
+  lifecycle, DPI, input, modes) is ours. Godot's `DisplayServer` is the nearest
+  prior art for the shape.
+- **The Linux exception is forced by the WSI ABI.** `vkCreateWaylandSurfaceKHR`
+  takes a real `wl_display*` and `wl_surface*`, and the driver's WSI calls
+  libwayland on them (`wl_proxy_marshal_flags`, its own queue dispatch); the
+  same holds for `vkCreateXcbSurfaceKHR` and a genuine `xcb_connection_t*`.
+  Objects invented from raw socket bytes are not those objects, so a hand-rolled
+  wire client cannot present through Vulkan. Our codegen sits on
+  `wl_proxy_marshal_flags`, as the Rust wayland-client crates do: we own the
+  protocol layer, not the transport ABI. **Full independence is documented, not
+  scheduled**: render offscreen, export the memory as a dma-buf
+  (`VK_EXT_external_memory_dma_buf`) and present through `zwp_linux_dmabuf_v1`,
+  `linux-drm-syncobj-v1` explicit sync and `wp_presentation` — a real subsystem,
+  revisited only as a deliberate exercise.
+- **Two display modes, windowed and borderless (locked).** Exclusive fullscreen
+  is dropped: Wayland cannot modeset by design, macOS fights it, and on Windows
+  borderless with DXGI flip-model reaches independent-flip latency without the
+  alt-tab disasters. Windowed is a decorated window, freeform **or
+  aspect-locked**, rendering at the client area 1:1. Borderless is a frameless
+  window at monitor size with the desktop mode untouched, the frame rendered at
+  an internal resolution and upscaled to the native surface. The same reasoning
+  refuses Spaces fullscreen on macOS: it is a third mode.
+- **The engine owns scaling.** Render scale is a renderer feature, an offscreen
+  target upscaled to the swapchain after tonemap and AA, with the UI composited
+  at native resolution afterwards. The plan also named a Wayland `wp_viewport`
+  fast path; that was superseded on 2026-09-21 (`docs/backlog.md`, _The engine
+  owns scaling on every platform_), and `ShellCaps::HW_UPSCALE` describes a
+  mechanism nothing asks for.
+- **Aspect lock is native where it exists, and letterboxing always works.**
+  Windows `WM_SIZING` rect adjust; macOS `setContentAspectRatio`; X11
+  `WM_NORMAL_HINTS` aspect; Wayland has no aspect hint, so it picks the nearest
+  aspect-correct size in the `configure` round. `ShellCaps::ASPECT_HINT_HONORED`
+  says which. **Letterboxing in the renderer is the universal fallback**,
+  because tiling window managers and compositors can force any size, and it must
+  always work; only two samples do it today (see the backlog).
+- **The display catalogue (locked 2026-08-27)**, `[engine.video]` keys named
+  whole before they are built, each row in `crcbl::settings::catalogue`:
+  `display_mode` (`"windowed"` or `"borderless"`), `monitor` (a monitor
+  **name**; absent means wherever the window is), `resolution`
+  (`[width, height]` in device pixels, the surface extent), `present_mode`
+  (`"auto"`, `"vsync"`, `"adaptive"`, `"off"`), `frame_limit` (frames a second,
+  `0` unlimited), `render_scale` (a fraction of the surface, the internal
+  extent), `brightness` (a scalar in the tonemap pass), `hdr_output` (bool),
+  `ui_scale` (a multiplier over the window's scale factor, UI only) and `fov`
+  (vertical, degrees). This topic owned rows that are properties of a window,
+  surface or monitor; graphics quality belonged to topic 39 and the file to
+  topic 14.
+  - **`resolution` and `render_scale` are two rows.** One sizes the window and
+    swapchain, UI included; the other sizes an offscreen target and makes the
+    frame cheaper without touching the window. A menu that conflates them
+    resizes a struggling player's window. In borderless, `resolution` is
+    ignored, since borderless covers the monitor.
+  - **Under rule 1 (keys only clamp downward), `display_mode = "borderless"` is
+    a ceiling**, not a command: a game that opened windowed stays windowed. The
+    keys with a genuine downward reading are `render_scale`, `resolution` and
+    `frame_limit`, whose zero means unlimited and so sits at the top of the
+    order (`FrameLimit::clamped_to`). `monitor`, `fov` and `ui_scale` have no
+    order.
+  - **Refresh rate is read, never written.** The engine never modesets, so
+    refresh is an observation (`MonitorInfo::refresh_millihertz`), in the same
+    family as `crcbl_hal::DisplayTiming`; writing one would be exclusive
+    fullscreen under another name. There is no `refresh_rate` key.
+  - **HDR output is a swapchain colour-space negotiation, not brightness.**
+    Topic 18's HDR is the internal `Rgba16Float` working space; HDR _output_
+    presents in a wide colour space and needs a colour space beside the format
+    on `SwapchainDesc` and `SurfaceCaps`, a HAL change.
+  - **`monitor` is a name used as a hint, never an index.** An index means a
+    different screen after a hotplug, and `MonitorInfo::name` is neither unique
+    nor stable, so resolve by name, fall back to the primary, and never fail a
+    start-up over it.
+  - **Declined: a per-monitor or per-adapter settings profile.** It makes
+    settings two-dimensional, ends the diff-against-defaults file, and adds a
+    fifth resolution layer keyed on an unstable monitor name. Revisit only with
+    a concrete report of a player losing settings to a hardware change, and then
+    as a profile mechanism.
+- **No platform type crosses the seam.** Consumers compile against `crcbl-shell`
+  types only, and a `#[cfg]` in a consumer is a regression. `SurfaceTarget` is
+  "the _single_ sanctioned platform leak": an opaque handle (Wayland display and
+  surface, xcb connection and window, `HWND`, `NSView`, canvas) that only the
+  HAL backends destructure, playing raw-window-handle's role.
+- **The event set.** `ShellEvent` is engine-typed: `Resized`,
+  `ScaleFactorChanged`, `CloseRequested`, `Focus`, `Key` (scancode, keysym,
+  state), `PointerMotion` (absolute and raw delta), `Button`, `Wheel`,
+  `TextCommit`, `MonitorsChanged` and `DroppedFile`, with timestamps kept on
+  input for the input pipeline. Variants added since are the backends' own
+  findings, not departures.
+- **Capabilities, never platform sniffing.** `ShellCaps` flags (`HW_UPSCALE`,
+  `ASPECT_HINT_HONORED`, `POINTER_WARP`, `TEXT_IME`, `CLIPBOARD`, …) are what
+  the renderer and UI branch on: "the renderer picks blit-vs-viewport and
+  windowed-aspect behavior from caps, never from _am I on Wayland_".
+- **Backend selection is at runtime on Linux**: "backend selection at runtime,
+  not compile time, on Linux: try Wayland socket → fall back to X11 (both
+  compiled in; `CRCBL_SHELL=x11` override)". Other platforms have one backend
+  each.
+- **`HeadlessShell` is a first-class backend, not a stub**: a fixed virtual
+  monitor, scripted event injection and no OS calls. "CI and
+  `crcbl screenshot`/`sim` run the identical engine loop through it", which
+  proves the seam agnostic the way the null HAL backend does.
+- **One `scale_factor` concept over `fractional-scale-v1` (Wayland),
+  per-monitor-v2 (Windows) and `backingScaleFactor` (macOS).** It is the
+  compositor's HiDPI factor, a different quantity from render scale.
+- **Raw motion and pointer lock are P0 features**, and input timestamps are kept
+  end to end: the esports audio pillar implies esports input standards.
+- **The clipboard is mime-typed.** `text/plain` always, plus
+  `application/x-crcbl+ron` so engine-to-engine copies are lossless while
+  outside apps still read RON text: offer both, the reader picks. Each backend's
+  reality is owned: Wayland `data-device` offers, the X11 selection protocol
+  with `TARGETS` and `INCR` (the classic X11 clipboard iceberg) scoped to what
+  we offer and accept, Win32 `CF_UNICODETEXT` plus a registered format,
+  NSPasteboard, and the browser's async clipboard, which is permission-gated and
+  pastes only on a user gesture, surfaced through `ShellCaps::CLIPBOARD` so the
+  editor UI degrades gracefully in-browser. File lists ride the same machinery
+  (`text/uri-list`, `CF_HDROP`, file URLs).
+- **Drag and drop is files in**: file paths in (viewer/editor import), over the
+  same mime set; on Wayland and X11, drag-and-drop and the clipboard share the
+  offer and receive plumbing — one implementation, two triggers. Starting a drag
+  is out on every backend: it needs a pointer grab, a drag icon and an action
+  negotiation the seam has no words for.
+- **Protocol work is ours, and scoped to what we use.** Wayland marshalling is
+  generated from the protocol XMLs by our own build-time codegen, emitting
+  `wl_proxy_marshal_flags` calls against libwayland-client's connection (core,
+  `xdg-shell`, `xdg-decoration`, `wp_viewporter`, `fractional-scale-v1`,
+  `pointer-constraints`, `relative-pointer`, `data-device`;
+  `zwp_linux_dmabuf_v1` only for independent presentation), with `wayr` as the
+  donor. X11 is a core subset over libxcb plus EWMH atoms, RandR and XKB,
+  request and event layer ours, and its scope stays at what the shell actually
+  uses. Keymap handling (XKB parsing), wire codecs and fd passing are the real
+  cost, contained by implementing only the messages we send and receive. Windows
+  and macOS FFI is written by hand, dozens of functions audited by use. The web
+  backend is a hand-rolled JS shim of plain wasm imports, never `wasm-bindgen`
+  (the no-`wasm-bindgen` rule is in `docs/notes/browser.md`).
+- **Tested against real desktops, not behind a GPU backend.** Win32 and AppKit
+  were first scheduled with the Metal and DX12 backends on the grounds that they
+  would otherwise be compile-verified only. That was the HAL's reasoning: P0.6
+  tested a whole X11 backend against a real server before a renderer existed, so
+  the two landed at P5C with end-to-end suites of their own. The plan scheduled
+  "scripted resize/mode-switch/input sequences against the real backends under a
+  nested compositor (sway headless / Xvfb) in CI", and a DPI matrix in which
+  "scale-factor changes mid-session must not leak wrong-size swapchains"; the
+  soak and DPI halves are owed (backlog).
+- **`crcbl-dx12` defends the two-mode rule from below the seam.** It calls
+  `MakeWindowAssociation(DXGI_MWA_NO_ALT_ENTER)` per swapchain so DXGI's own
+  message hook cannot turn Alt+Enter into a fullscreen transition nothing above
+  the seam would see — a window-global side effect a HAL backend arguably should
+  not have.
+- **Out of scope:** exclusive fullscreen; multi-window until the editor needs
+  it; gamepad raw backends, which `crcbl-input` owns; touch, which the seam has
+  since grown for `54-android.md`; and drag-out.
+
+| Platform | Backend                                                                                                  | Landed |
+| -------- | -------------------------------------------------------------------------------------------------------- | ------ |
+| Wayland  | libwayland-client connection/proxies + **our** protocol codegen on `wl_proxy_marshal_flags` (wayr donor) | P0     |
+| X11      | libxcb connection + **our** request/event layer (core, EWMH atoms, RandR, XKB)                           | P0     |
+| Web      | canvas + DOM events via our own minimal JS shim + wasm imports                                           | P5     |
+| Windows  | hand-written Win32 FFI (`extern "system"` decls for the surface we use)                                  | P5C    |
+| macOS    | hand-written Objective-C runtime FFI (`objc_msgSend`) to AppKit                                          | P5C    |
+
 ## What the deleted 39-capabilities plan left behind (2026-09-24)
 
 Record; the built part is the capability seam in `crcbl-hal` (`Features`,
@@ -2733,9 +2942,10 @@ Record; what is uncovered is in docs/backlog.md under the same heading.
   UTI.** A pasteboard type is an arbitrary string, the mime is unique to this
   engine by construction, and it is byte-identical to what the other three
   backends name the same format with. Only text uses a system UTI.
-- **Drag and drop _out_ is not implemented on any backend.** `15-windowing.md`
-  scopes drag-and-drop to "file paths in"; `NSDraggingSource` is absent by plan
-  decision rather than by gap.
+- **Drag and drop _out_ is not implemented on any backend.** The windowing rules
+  (_What the deleted 15-windowing plan left behind_) scope drag-and-drop to
+  "file paths in"; `NSDraggingSource` is absent by plan decision rather than by
+  gap.
 - **No menu bar.** An unbundled Regular-policy application gets the system's
   default menu bar — enough to be focusable, not enough to ship (no ⌘Q).
   Building one is `NSMenu`/`NSMenuItem` and a decision about what belongs in it,

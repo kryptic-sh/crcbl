@@ -11,8 +11,8 @@ repository.workspace = true
 # backend selection and a lost compositor connection explain themselves.
 #
 # There is deliberately **no** `wayland-client`, `wayland-sys`,
-# `wayland-scanner` or `smithay-client-toolkit`: `docs/plan/15-windowing.md`
-# accepts thin bindings to an ABI the driver forces on us and rejects
+# `wayland-scanner` or `smithay-client-toolkit`: the windowing rules in
+# `docs/notes/backends.md` accept thin bindings to an ABI the driver forces on us and reject
 # frameworks that own policy. libwayland-client is reached through hand-written
 # `extern "C"` declarations in `src/wayland/ffi.rs`, loaded with `dlopen` (see
 # that module for why not `#[link]`), and the protocol layer above it is

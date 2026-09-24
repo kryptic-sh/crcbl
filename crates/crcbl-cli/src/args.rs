@@ -16,7 +16,7 @@
 //!    the superlative is false and only the ratio survives. Read
 //!    `[workspace.dependencies]` in the root `Cargo.toml` for what the baseline
 //!    actually is rather than trusting a sentence here.
-//! 2. **Consistency with decisions already made.** `docs/plan/15-windowing.md`
+//! 2. **Consistency with decisions already made.** The windowing plan
 //!    rejected `winit`, `x11rb` and `wayland-client` and this workspace
 //!    hand-wrote a Wayland protocol scanner and its own libxcb bindings rather
 //!    than take them. A CLI that reaches for a parser generator while the

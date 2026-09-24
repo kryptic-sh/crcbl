@@ -12,7 +12,8 @@
 //! That code is wrong three ways and all three are invisible until someone
 //! files a bug: it is wrong on a Wayland compositor that does not implement
 //! `wp_viewporter`, wrong under XWayland, and wrong the day the shell grows a
-//! backend nobody thought about. `docs/plan/15-windowing.md` is explicit — "the
+//! backend nobody thought about. The windowing rules in `docs/notes/backends.md`
+//! are explicit — "the
 //! renderer picks blit-vs-viewport and windowed-aspect behavior from caps, never
 //! from *am I on Wayland*" — and this module is the mechanism. It mirrors
 //! `crcbl-hal`'s `Features`, where the renderer asks for `DRAW_INDIRECT_COUNT`
@@ -47,8 +48,9 @@ bitflags::bitflags! {
         ///
         /// Wayland's `wp_viewporter`; the browser's CSS-sized canvas. Absent on
         /// X11, where the renderer must do an upscale blit instead. This is the
-        /// exact decision `docs/plan/15-windowing.md` calls out as the reason
-        /// caps exist.
+        /// exact decision the windowing rules call out as the reason caps
+        /// exist. Nothing asks for it: the engine does its own upscale on every
+        /// platform (`docs/backlog.md`, _The engine owns scaling_).
         const HW_UPSCALE = 1 << 0;
 
         /// The window system will enforce an aspect ratio during an interactive
@@ -100,7 +102,7 @@ bitflags::bitflags! {
         /// position, unaccelerated and unclamped by the screen edge.
         ///
         /// This is what a first-person camera must read;
-        /// `docs/plan/15-windowing.md` makes raw motion a P0 feature, not an
+        /// the windowing rules make raw motion a P0 feature, not an
         /// afterthought, on the grounds that an esports-grade engine cannot
         /// derive aim from clamped absolute positions. Without this bit,
         /// [`ShellEvent::PointerMotion`](crate::ShellEvent::PointerMotion)
@@ -138,7 +140,7 @@ bitflags::bitflags! {
         ///
         /// Explicitly a capability because the browser gates clipboard reads
         /// behind a permission prompt and a user gesture, which
-        /// `docs/plan/15-windowing.md` calls out by name: the editor UI has to
+        /// the windowing rules call out by name: the editor UI has to
         /// degrade gracefully in-browser rather than offering a paste button
         /// that cannot work.
         const CLIPBOARD = 1 << 7;

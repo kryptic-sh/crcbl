@@ -823,7 +823,7 @@ impl Shell for AppKitShell {
     ///   window carries `NSWindowStyleMaskTitled`, so AppKit draws the title bar
     ///   and the UI layer must not.
     /// * [`ASPECT_HINT_HONORED`](ShellCaps::ASPECT_HINT_HONORED) —
-    ///   `setContentAspectRatio:`, which `docs/plan/15-windowing.md` names as
+    ///   `setContentAspectRatio:`, which the windowing rules name as
     ///   this platform's form of it, and which AppKit enforces during the drag
     ///   itself.
     /// * [`POINTER_LOCK`](ShellCaps::POINTER_LOCK) —
@@ -871,9 +871,9 @@ impl Shell for AppKitShell {
     /// * [`DRAG_DROP`](ShellCaps::DRAG_DROP) — `registerForDraggedTypes:` and
     ///   the `NSDraggingDestination` methods on the content view, honouring
     ///   [`WindowDesc::accept_drops`](crate::WindowDesc::accept_drops). The bit
-    ///   is **files in**, which is what `docs/plan/15-windowing.md` scopes
+    ///   is **files in**, which is what the windowing rules scope
     ///   drag-and-drop to and what the other three backends implement:
-    ///   *starting* a drag is not in the plan on any platform. Registration is
+    ///   *starting* a drag is out of scope on any platform. Registration is
     ///   what the system gates on, so a window created without the flag cannot
     ///   receive a drop even in principle.
     ///

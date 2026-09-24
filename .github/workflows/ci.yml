@@ -883,7 +883,8 @@ jobs:
             --success-output immediate "${filter[@]}"
 
   # The only job that runs the Wayland backend against a real compositor.
-  # `docs/plan/15-windowing.md` schedules "scripted resize/mode-switch/input
+  # The windowing rules in `docs/notes/backends.md` schedule
+  # "scripted resize/mode-switch/input
   # sequences against the real backends under a nested compositor (sway
   # headless / Xvfb) in CI", and `docs/notes/process.md` calls a
   # silently-skipped e2e job a known trap — so this
@@ -939,7 +940,8 @@ jobs:
         run: crates/crcbl-shell/tests/run-wayland-e2e.sh
 
   # The only job that runs the X11 backend against a real X server.
-  # `docs/plan/15-windowing.md` schedules "scripted resize/mode-switch/input
+  # The windowing rules in `docs/notes/backends.md` schedule
+  # "scripted resize/mode-switch/input
   # sequences against the real backends under a nested compositor (sway
   # headless / Xvfb) in CI" — this is the Xvfb half — and
   # `docs/notes/process.md` calls a silently-skipped e2e job a known trap, so this job is required like every other one (no

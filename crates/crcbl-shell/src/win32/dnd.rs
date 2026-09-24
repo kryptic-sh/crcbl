@@ -4,7 +4,7 @@
 //! Deliberately **not** in [`clipboard`](super::clipboard), although the two
 //! landed in one slice. On Wayland and X11 the clipboard and drag-and-drop are
 //! "one implementation, two triggers" — the same offer object reached two ways —
-//! and `docs/plan/15-windowing.md` says so. On Win32 they are two unrelated
+//! and the windowing rules in `docs/notes/backends.md` say so. On Win32 they are two unrelated
 //! mechanisms that happen to move the same kind of data: the clipboard is a
 //! window-station object read with `GetClipboardData`, and a drop is a shell
 //! object delivered as a window message. Putting them in one module would
@@ -21,7 +21,7 @@
 //!
 //! [`ShellEvent::DroppedFile`](crate::ShellEvent::DroppedFile) is *files, in,
 //! with a position* — the same shape the Wayland backend emits, and
-//! `docs/plan/15-windowing.md` scopes drag-and-drop to "file paths in
+//! the windowing rules scope drag-and-drop to "file paths in
 //! (viewer/editor import)". `DragAcceptFiles` plus `WM_DROPFILES` delivers
 //! exactly that: an `HDROP` carrying the paths and the client-space point, in
 //! one message, with the accept gate enforced by the system.

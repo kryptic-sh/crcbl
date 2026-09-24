@@ -16,7 +16,7 @@ behind_): a transcendental is cooked into a table on the host or built from
 multiplies (`fog::exp_neg`), and never reaches a colour in a shader. Closed
 together with the transcendental-policy entry below. **Open, and it is a
 decision rather than a task.** The physics plan's 2026-07-27 correction routes
-determinism-bearing math through the **`libm` crate**; `13-audio.md`'s
+determinism-bearing math through the **`libm` crate**; the audio plan's
 correction requires **own polynomial approximations plus a CI deny** on std
 transcendentals. They are not interchangeable and neither is built. No workspace
 crate names `libm` — it reaches `Cargo.lock` only through `naga` and
@@ -37,7 +37,7 @@ argument, not for its verdict.
 (now in `docs/notes/rendering.md`) is the workspace policy: tables cooked on the
 host, multiplies in the shader, no libm on either side. The conflict is resolved
 by choosing this side; nothing further to build. **Not built, and it needs a
-decision.** `13-audio.md` requires own polynomial approximations plus a CI deny
+decision.** The audio plan required own polynomial approximations plus a CI deny
 on std float transcendentals; the physics plan required the `libm` crate.
 Neither exists: no `libm` in any manifest, no polynomial approximations, and
 `crcbl-audio` calls `powf`, `sin`, `exp` and `cos` today (`spatial.rs`,
@@ -384,6 +384,285 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
+## What the deleted 13-audio plan left behind (2026-09-24)
+
+Record; topic 13 designed `crcbl-audio`, the first-party audio engine, around
+one idea: directional audio is a gameplay pillar, so the spatialiser is a
+learnable, deterministic cue grammar rather than realistic HRTF. Built from it:
+the grammar (`crcbl_audio::spatial`: `Listener`, `CueGrammar`, `compute_cue`)
+for rules 1 to 4; the `Mixer` with its listener (`Mixer::set_listener`), its
+grammar (`Mixer::set_cue_grammar`, `Mixer::cue`), the six-bus `Bus` enum with
+`Mixer::set_bus_gain`, a voice budget with priority stealing
+(`Mixer::set_voice_budget`, `Mixer::try_play`, `Voice::with_priority`), a
+one-block release fade and a fractional `DelayLine` per ear; the WAV and QOA
+decoders (`wav.rs`, `qoa.rs`); the `AudioStream` device seam over `cpal`, the
+browser worklet (`crcbl_audio::web`) and a null backend; the `AudioEvent` wire
+format (`event.rs`); the `[engine.audio]` bus keys, read by
+`crcbl::settings::audio_gains` and applied by
+`SettingsSource::apply_audio_gains` in asteroids, breakout, flappy and horde;
+and one golden buffer, `crates/crcbl-audio/tests/burst-reference.wav`.
+
+What it left unbuilt is in `docs/backlog.md` under _Audio (from the deleted
+13-audio plan, 2026-09-24)_: the limiter and mix snapshots, the pool and a
+distance term in stealing, ITD smoothing, occlusion, the transcendental deny,
+per-sample goldens and `crcbl audio render`, the overlay, cue inspector, grammar
+trainer and music streaming, the four unread audio settings, the unit and
+property tests, the lock-free command path, and server-event audio.
+`AudioEvent`'s missing bus slot is under _The audio buses have no wire slot and
+no limiter_.
+
+Code cites the plan as "topic 13" and by rule, section and slice. Those resolve
+here:
+
+| Citation                                          | What it specified                                                                               |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| Rules 1 to 5, "the four rules", "the grammar"     | **The cue grammar** below                                                                       |
+| "Versioned like a save format"                    | **The grammar is deterministic, continuous and tuned in one struct**                            |
+| "Pure-DSP core, platform seam at the device edge" | **Pure DSP, with the device seam at the edge**                                                  |
+| 48 kHz, the internal format                       | **48 kHz, `f32`, stereo**                                                                       |
+| The bus decision, "six buses", the key table      | **Six fixed buses** and the key table under **Audio keys resolve through two layers**           |
+| The order contract, "a gain on the way in"        | **The gain chain is ordered, and the order is the contract**                                    |
+| Why the audio clamp chain has two layers          | **Audio keys resolve through two layers, and the key is the value**                             |
+| Competitive mode, server events                   | **Sound is presentation**                                                                       |
+| The 2026-07-27 corrections                        | **ITD uses fractional delay lines** and the transcendental record at the top of this file       |
+| The 2026-08-09 correction                         | The missing limiter (backlog) and **A golden pins a waveform, never bytes**                     |
+| Slice P4A                                         | Device seam, mixer and buses, WAV/QOA, voices, rules 1 to 4 built; no app sends an `AudioEvent` |
+| Slices P10, post-MVP                              | Streaming, ducking, cue inspector, occlusion (P10); reverb, doppler, surround (post-MVP)        |
+
+The rules, each with its _why_:
+
+- **The cue grammar (locked).** Stylised, deliberately not realistic HRTF: real
+  HRTF cues vary between people and are muddy, and these are exaggerated,
+  consistent and learnable.
+
+  | #   | Direction     | Cue                                                                                                                                                       |
+  | --- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+  | 1   | Ahead         | The reference: full volume, unprocessed. Every other cue is judged against it.                                                                            |
+  | 2   | Right or left | The far ear gets an interaural time delay (ITD) and a slightly lower volume (ILD). The near ear stays clean.                                              |
+  | 3   | Behind        | Slightly quieter than ahead, plus a small downward pitch shift. Front/back is what real ears resolve worst, so the grammar makes it unmistakable.         |
+  | 4   | Above, below  | A slight pitch shift, up for above and down for below, symmetric.                                                                                         |
+  | 5   | Occluded      | Material-based muffling: a lowpass and attenuation from what is in the way. A closed room muffles everything across its walls; thin wood is not concrete. |
+
+- **The grammar is deterministic, continuous and tuned in one struct.** The same
+  relative position gives exactly the same transform, every time, for every
+  sound, with no randomisation anywhere in the spatial chain. Cues interpolate
+  across the sphere (front-right-up blends rules 2, 3 inverted and 4), so
+  players read angles rather than octants. The constants live in `CueGrammar`,
+  and the shipped defaults are the _trained_ grammar: changing them mid-title
+  breaks a skill players built, so they are versioned like a save format. The
+  `Mixer` owns one beside its listener, so a game that wants the defaults never
+  spells them.
+- **Distance is inverse-square-ish with a clamp; doppler waits.** Doppler is a
+  _motion_ cue and must not corrupt the positional grammar when it lands.
+- **Pure DSP, with the device seam at the edge.** The DSP core is plain `f32`
+  block processing that runs identically on native and wasm and tests as plain
+  functions; `AudioStream` (not `AudioDevice`, which the plan once called it) is
+  the seam, over `cpal` natively, the AudioWorklet in a browser and a null
+  backend for headless CI. Read `crcbl_audio::web`'s header before touching the
+  browser path: the worklet and the wasm instance are one thread there.
+- **The audio callback never allocates, and was meant never to lock.** The plan
+  put the game's commands on a lock-free SPSC ring into a callback that owns all
+  DSP state. As built, `Mixer` keeps its voices, gains, listener and grammar
+  behind uncontended `Mutex`es that `fill` takes, `Mixer::new` takes each lock
+  once so no platform mutex is allocated inside a callback, and
+  `crates/crcbl-audio/tests/fill_allocation.rs` asserts the no-allocation half.
+  `fill` can still free the last `Arc` of a finished voice's samples.
+- **48 kHz, `f32`, stereo.** A fixed internal rate (`INTERNAL_SAMPLE_RATE`), and
+  stereo because the grammar is a stereo grammar; surround would extend the
+  rules, not replace them.
+- **Voice ids are monotonic and never reused**, so a stale `VoiceId` cannot name
+  a later voice. A pool that recycles slots must keep the id and the slot apart.
+- **Pitch is varispeed.** A resampling ratio is cheap and clean at the small
+  cents ranges rules 3 and 4 use; the duration change does not matter for cue
+  effects.
+- **Six fixed buses (locked 2026-08-27): `master`, `music`, `sfx`, `ui`,
+  `voice`, `ambience`.** Each is one linear gain, and a voice is routed to one
+  bus at spawn for its whole life; a sound that would need to move is two
+  sounds. `ambience` exists because a wind loop that ducks with the gunfire is a
+  bug players report, `voice` because team voice (`32-voip.md`) is the one thing
+  a player must be able to silence alone. **The set is not game-extensible**: a
+  game wanting a seventh category uses the closest of the six, which keeps the
+  settings screen unscrolled, `[engine.audio]`'s key list fixed and a game's bus
+  names from becoming a compatibility surface.
+- **The gain chain is ordered, and the order is the contract.**
+  `sample × voice_gain × bus_gain × master_gain`, left to right. Floating-point
+  multiplication is not associative, so a regrouping that looks like a refactor
+  moves every golden. Test the order with three gains whose products differ
+  under regrouping, checked in the test itself, never against an observed
+  constant (`the_gain_chain_is_voice_then_bus_then_master`). A bus is a **gain
+  on the way in**, applied before the one sum, so there is one buffer and the
+  order fits in a line. Two consequences: `Mixer::route_gain` is unity for
+  `Bus::Master`, or a voice routed there takes the master twice
+  (`a_voice_on_the_master_bus_is_not_attenuated_twice`); and gains are read once
+  per block, since a gain moving between two voices of one block puts a step in
+  the buffer.
+- **An arbitrary routing graph is refused.** Sends, returns and per-bus effect
+  chains are a mixer product. Ducking is a modulation of bus gains over time and
+  does not need one; reverb sends would, and reverb is post-MVP. Reopen only for
+  a concrete effect that must be shared across several buses at once.
+- **Audio keys resolve through two layers, and the key is the value.** One
+  linear `[0, 1]` key per bus: `master_volume`, `music_volume`, `sfx_volume`,
+  `ui_volume`, `voice_volume`, `ambience_volume` (`Bus::settings_key`). There is
+  no per-camera layer, because there is one listener and one mix, and no
+  device-capability layer, because no device removes the ability to multiply by
+  a scalar. An `[engine.video]` key only clamps downward; an audio key has
+  nothing above it to clamp against, and a game that ducks scales on top of it.
+  The section's other keys are named with their domains: `output_device` (a
+  device **name**, never an index, default when absent), `speaker_config`
+  (`mono` or `stereo`), `dynamic_range` (`full` or `night`) and
+  `mute_on_focus_loss`; none is read.
+- **Mono is an accessibility feature, and it sums after the spatial chain.** It
+  is the difference between playing and not for a player with hearing in one
+  ear. Rule 2 collapses in mono; rules 3 and 4 are pitch cues and survive, which
+  the trainer should say. Skipping the chain instead would stop exercising the
+  ITD delay lines and lose the elevation cues too.
+- **Sound is presentation.** Sounds are server events or client-derived (own
+  footsteps, UI), and the server never mixes. By default a replicated event
+  carries `WorldPos` and the client places it against its listener. In
+  **competitive mode** (the `competitive_integrity` gate, topic 31) the server
+  computes the grammar per listener and the wire carries only quantised ear
+  parameters, never positions; the DSP core consumes parameters either way.
+- **Occlusion rides physics raycasts with versioned material presets.** A
+  throttled, cached `crcbl-phys` ray from listener to emitter per voice, hits
+  mapped through acoustic-material presets to a lowpass cutoff and gain,
+  smoothed across blocks. Same learnability contract: a material is a fixed,
+  versioned preset, so players learn "behind wood" versus "behind concrete".
+  Closed rooms need no special case. Portal and room-graph propagation is
+  post-MVP.
+- **ITD uses fractional delay lines** (2026-07-27): an integer tap that changes
+  as an emitter moves clicks, and delay modulation _is_ pitch shift, which
+  corrupts rules 3 and 4. The named machinery is interpolated fractional delay,
+  per-block parameter smoothing, and crossfaded dual delay lines for large jumps
+  and ear swaps; only the first is built.
+- **A golden pins a waveform, never bytes.** The one golden began as a digest of
+  every sample's `f32::to_bits` and failed on macOS and Windows at its first CI
+  run; Windows being `x86_64` like the Linux runner pins that on libm, not the
+  architecture. Pin the waveform at a tolerance plus total energy separately,
+  since a per-sample bound is blind to a small coherent drift.
+- **Post-MVP or declined:** reverb zones, portal acoustics, doppler, surround,
+  and Vorbis/Opus (behind the decoder seam when it comes). Assets are WAV and
+  QOA, SFX fully resident.
+
+## What the deleted 14-persistence plan left behind (2026-09-24)
+
+Record; topic 14 designed `crcbl-store`'s persistence: save games as snapshots,
+layered TOML settings, per-player profiles, all through an async storage seam so
+the browser is first-class. Built from it: `StorageSource` with native storage,
+`write_atomic` and `OpfsStorage` in a browser; the save container
+(`SaveWriter`/`SaveReader`, magic `CRCBLSVE`, sector entries and a SHA-256) with
+`AutosaveRing`; `record::Record`, the one-number profile every high score uses;
+`SettingsStack` and its layers; `crcbl::settings`, with hot-apply
+(`crcbl::settings::apply`, `Applied`) and the catalogue in code
+(`crcbl::settings::catalogue`, `KeyStatus`);
+`crcbl settings get|set|list|preset`; `apps/options`, the settings screen; and
+`apps/shard`, whose save loads natively and in a browser.
+
+What it left unbuilt is in `docs/backlog.md` under _Persistence (from the
+deleted 14-persistence plan, 2026-09-24)_: the migration seam, the header
+fields, saves over `SnapshotWriter`, the game-defaults and CLI layers, profiles,
+`crcbl save`, `Command::Save`, apply-on-confirm, browser fallbacks and quota,
+accessibility settings, and the test matrix.
+
+Code cites the plan as "topic 14". Those resolve here:
+
+| Citation                                 | What it specified                                                                  |
+| ---------------------------------------- | ---------------------------------------------------------------------------------- |
+| "Save games = snapshots", no second path | **A save is a snapshot**                                                           |
+| The 2026-07-27 correction; save shape    | **A save follows the galaxy wire model**                                           |
+| The migration seam, per-system versions  | **Saves are versioned, with a migration seam** (unbuilt)                           |
+| "Atomic writes always"                   | **Atomic writes are a native guarantee**                                           |
+| The layers, "four layer kinds"           | **Settings are four layers storing only the player's diffs**                       |
+| Catalogue rule 2, the spelling           | **Catalogue rule 2** and **Keys are bare snake_case nouns**                        |
+| Hot-apply versus apply-on-confirm        | **Hot-apply what can be, confirm what can blank a screen**                         |
+| "When there is nowhere to write"         | **A browser with no store keeps running and says so once**                         |
+| The catalogue's edges                    | **The catalogue's edges are stated, not implied**                                  |
+| Where saves and records live             | **Saves go in the data directory, records in the config directory**                |
+| Slices P2, P4, P10                       | Storage, settings and the container (P2); `Record` (P4); the settings screen (P10) |
+
+The rules, each with its _why_:
+
+- **Three kinds of persisted data.** Save games are full server state at a tick,
+  in a versioned binary container over the snapshot encoding, owned by the
+  server. Settings are engine and game options in layered TOML, local to the
+  client. Profiles are per-player local data (high scores, unlocks, key binds)
+  in RON, local to the client. Saves are runtime state, so they take the compact
+  replication encoding rather than text; `crcbl save dump` was to render any
+  save as RON for inspection.
+- **A save is a snapshot.** Editor play-mode restore, a save game and a
+  join-in-progress snapshot are **one mechanism with three triggers**, and
+  keeping them one is what prevents save-game rot. Loading is the scene-load
+  path, instantiating from a snapshot instead of scene chunks. As built,
+  `apps/shard` writes its own payload inside one `SectorSave` rather than the
+  replication encoder's output, so the claim is a design and not yet a fact.
+- **A save is the server's.** Saves capture authoritative state, triggered by a
+  server command, so the console, the CLI, a game's button and the autosave
+  timer take one path. Single player saves locally; a dedicated server keeps
+  world saves and players hold profiles, not world state.
+- **A save follows the galaxy wire model** (2026-07-27). "Full world state" is
+  incoherent past one sector, so a save is a header (versions, scene ref and
+  hash, tick, playtime), the sector set it covers, per-sector snapshots from the
+  replication encoder, on-rails elements, and per-system extension blocks. A
+  single-sector game writes exactly the simple format, so the container was
+  right from P2 instead of restructured after saves shipped. The sector set is
+  built; the rest of the header, on-rails elements and extension blocks are not.
+- **Saves are versioned, with a migration seam.** The header carries the format
+  and per-system versions, serde defaults absorb additive change, and
+  `fn migrate(old_ver, bytes)` was to exist from day one, empty. It does not
+  exist, though `SAVE_FORMAT_VERSION` has already been bumped once.
+- **Atomic writes are a native guarantee.** `write_atomic` writes a `create_new`
+  temp file, syncs it and the parent directory, renames and syncs the parent
+  again. OPFS has no rename, so `OpfsStorage` prevents torn reads but does not
+  make a write durable at return. Never carry a native atomicity test over to
+  the browser and call it passed. Keep the last N autosaves in a ring.
+- **Saves go in the data directory, records in the config directory.** A high
+  score belongs with configuration and a save does not; `record::Backing` uses
+  the config directory and `apps/shard` writes its own data-directory arm. A
+  second consumer is the moment to hoist that arm into the engine.
+- **Settings are four layers storing only the player's diffs.** Engine defaults,
+  game defaults, the player's file and CLI or environment overrides, the later
+  winning; `settings.toml` holds only what the player changed, so files stay
+  small and survive upgrades. Namespaces are `[engine.video]`, `[engine.audio]`,
+  `[engine.input]` and `[game.*]`, free for the game. Unknown keys warn and
+  never crash. Only the engine layer and the player's file have producers today.
+- **Hot-apply what can be, confirm what can blank a screen.** Volume and
+  sensitivity apply at once; vsync, resolution and display mode apply on confirm
+  with a timed revert provided by the engine. The first half is
+  `crcbl::settings::apply`; the second is unbuilt.
+- **Key binds live in the profile, not in `settings.toml`.** They are structured
+  per-player data (action to chord maps), and games extend the action set.
+- **Catalogue rule 2: a key gets its name and value domain before anything reads
+  it.** A key is a compatibility surface the moment a player's file contains it,
+  and the settings screen's row identity and the file on disk are what churn if
+  it is named late. An unread key is exactly an absent key, so naming costs
+  nothing. Catalogues are written whole with a status per row. Rule 1, the
+  downward clamp, is in `docs/notes/backends.md` (_What the deleted
+  39-capabilities plan left behind_).
+- **Keys are bare snake_case nouns, never negated, one section per namespace**:
+  adopted from `crcbl_store::settings`' own example (`vsync`,
+  `resolution = [1920, 1080]`, `master_volume`), not invented. A negated key
+  would make `shadows = false` and `no_shadows = false` both writable and
+  opposite.
+- **A browser with no store keeps running and says so once.** Without OPFS the
+  user layer is empty and every key reads absent, which clamps nothing. A web
+  demo must not fail to start, must show on its settings screen that changes
+  last this session only, and must **not** fall back to `localStorage`, a second
+  backend outside the `StorageSource` seam; the planned fallback is IndexedDB
+  behind the seam.
+- **The storage seam is async**, as assets are, because the browser forces it.
+  Native uses the platform config, data and cache directories; a dedicated
+  server takes a configurable data directory. Quota and failure come back as
+  results, never panics.
+- **The catalogue's edges are stated, not implied.** Input settings belong to
+  topic 19 (its rules are this file's 19-input section); it names the deadzone
+  but no mouse sensitivity or invert-Y, whose namespace would be
+  `[engine.input]`. Accessibility (subtitles, text size, colourblind filters,
+  reduced motion) has no owner at all.
+- **Declined:** a settings migration format, because a clamp-only layer already
+  answers every skew (so renaming a key is a break to avoid, not a migration to
+  write); and per-monitor or per-adapter profiles, whose reason is in
+  `docs/notes/backends.md` (_What the deleted 15-windowing plan left behind_)
+  and which, if ever wanted, are a profile mechanism, not a second key axis.
+
 ## What the deleted 04-ecs-server-client plan left behind (2026-09-24)
 
 Record; stage 4 designed the simulation half of the engine: the ECS, the
@@ -545,7 +824,7 @@ view, which the stage's acceptance test needs, are under _orbit_.
 - **Transcendentals are constructed in-engine, in `f64` (the user's decision,
   2026-09-17).** A range reduction and a polynomial on `crcbl_shaders::trig`'s
   pattern: no platform `libm` and no `libm` crate, superseding the 2026-07-27
-  answer (the `libm` crate) and agreeing with `13-audio.md`'s own-polynomial
+  answer (the `libm` crate) and agreeing with the audio plan's own-polynomial
   line. Sim crates **ban FMA contraction**: no `mul_add`, no fast-math. Basic
   IEEE operations are already bit-exact everywhere, so the scope is
   "deterministic across targets within the sim math kernel", which is what the

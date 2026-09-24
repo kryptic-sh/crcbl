@@ -44,8 +44,8 @@
 //! So *every* interesting configure — a real geometry, a fullscreen size, a
 //! user resize, a close request — is downstream of attaching a buffer. And
 //! attaching a buffer is **the renderer's job**: at P1 `crcbl-vk`'s swapchain
-//! presents, which attaches, which maps. `docs/plan/15-windowing.md` puts
-//! presentation in the HAL, so a shell that carried a `wl_shm` pool around
+//! presents, which attaches, which maps. The windowing rules in
+//! `docs/notes/backends.md` put presentation in the HAL, so a shell that carried a `wl_shm` pool around
 //! would own a second, worse presentation path forever.
 //!
 //! The resolution is this module: the smallest possible stand-in for the

@@ -11,7 +11,8 @@
 //! inside the module, which is also why there is no `dlopen` here — see [`ffi`]
 //! for that argument, which is the reverse of the one `src/x11/ffi.rs` makes.
 //!
-//! `docs/plan/15-windowing.md`'s Windows row, which reads in full: "hand-written
+//! The windowing backend table's Windows row (`docs/notes/backends.md`), which
+//! reads in full: "hand-written
 //! Win32 FFI (`extern "system"` decls for the surface we use)". Every
 //! declaration in [`ffi`] is ours; there is no `windows-rs`, no `winapi`, no
 //! framework, and — unlike the two Linux backends — no `dlopen`, for the reason

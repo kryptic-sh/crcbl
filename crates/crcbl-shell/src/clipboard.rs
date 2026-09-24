@@ -9,7 +9,8 @@
 //! adding a method to a trait that three backends already implement means
 //! touching three backends, whereas leaving an unimplemented method on the
 //! trait costs nothing but the `Unsupported` arm each of them writes once.
-//! `docs/plan/15-windowing.md` also settles the design questions that would
+//! The windowing rules in `docs/notes/backends.md` also settle the design
+//! questions that would
 //! otherwise make this speculative — the mime set is specified, and clipboard
 //! and drag-and-drop are stated to share one implementation on Wayland and X11
 //! ("one implementation, two triggers"), so the payload types below serve both.
@@ -69,7 +70,7 @@
 //!
 //! # Two mime types, always offered together
 //!
-//! `15-windowing.md` specifies `text/plain` plus the custom
+//! The windowing rules specify `text/plain` plus the custom
 //! `application/x-crcbl+ron` so that engine↔engine copies are lossless while
 //! outside applications still receive readable text. Offering both is the
 //! caller's job, and [`ClipboardOffer`] is a slice for exactly that reason.

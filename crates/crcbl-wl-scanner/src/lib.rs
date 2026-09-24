@@ -1,7 +1,8 @@
 //! Crucible's Wayland protocol code generator.
 //!
 //! Protocol XML in, Rust marshalling code out. This is the "our own build-time
-//! codegen" half of `docs/plan/15-windowing.md`'s Linux policy: libwayland-client
+//! codegen" half of the windowing rules' Linux policy (`docs/notes/backends.md`):
+//! libwayland-client
 //! owns the connection and the proxy objects because the Vulkan WSI ABI forces
 //! it, and **everything above `wl_proxy_marshal_array_flags` is ours** — no
 //! `wayland-client`, no `wayland-scanner`, no `smithay-client-toolkit`.

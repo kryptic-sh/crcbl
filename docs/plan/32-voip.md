@@ -18,10 +18,11 @@ FPS-era, with breach; the capture seam is useful earlier.
 >   only mention of Opus in the tree is a line in `crcbl-audio`'s QOA module
 >   saying Vorbis and Opus will sit behind a decoder seam one day.
 > - **The mixer voice bus exists; ducking does not.** "Team/direct routing +
->   PTT/VAD actions + mixer voice bus/ducking" needs the buses
->   [13-audio.md](13-audio.md) specifies. `crcbl_audio::Bus` now has six fixed
->   gain stages, `Bus::Voice` among them, each gain an `[engine.audio]` key; but
->   a bus is a gain and nothing more — no ducking and no limiter.
+>   PTT/VAD actions + mixer voice bus/ducking" needs the buses the audio rules
+>   in the [simulation notes](../notes/simulation.md) specify.
+>   `crcbl_audio::Bus` now has six fixed gain stages, `Bus::Voice` among them,
+>   each gain an `[engine.audio]` key; but a bus is a gain and nothing more — no
+>   ducking and no limiter.
 > - **The `competitive_integrity` gate does not exist** either, so every "under
 >   the gate" behaviour below has no flag to hang on. Topic 31 is where that
 >   lands.
@@ -54,9 +55,9 @@ FPS-era, with breach; the capture seam is useful earlier.
 ## Capture (the seam topic 13 doesn't have yet)
 
 - **`AudioCapture` seam** beside the output seam — which is `AudioStream`, not
-  the `AudioDevice` [13-audio.md](13-audio.md) used to name: enumerate inputs,
-  select device, open at 48 kHz mono (engine-internal rate — no resampling), 20
-  ms frames. Match the shipped output seam's shape rather than this document's
+  the `AudioDevice` the audio plan used to name: enumerate inputs, select
+  device, open at 48 kHz mono (engine-internal rate — no resampling), 20 ms
+  frames. Match the shipped output seam's shape rather than this document's
   older wording; `crcbl_audio::INTERNAL_SAMPLE_RATE` is the constant
   "engine-internal rate" means. `cpal` native; `getUserMedia` + AudioWorklet on
   wasm (permission is a user-gesture flow — surfaced through `ShellCaps`-style

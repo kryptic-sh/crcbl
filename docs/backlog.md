@@ -2987,7 +2987,7 @@ the gaps below.
   crate such as `unicode-segmentation` (a new dependency) or keeping `char`.
 - **Pre-edit is not drawn**: the shell has no pre-edit event (`appkit/view.rs`
   records the marked text's length and nothing reads it), so composition text
-  cannot be underlined at the caret until `15-windowing.md` adds one.
+  cannot be underlined at the caret until the shell seam grows one.
 - **The web clipboard refuses copy and paste**, shown by the field's `:refused`
   border. Options: implement the web backend's clipboard, or keep an in-process
   fallback so copy and paste work within one page.
@@ -7667,21 +7667,21 @@ above is of the forward pass, which is not the same measurement.
 
 ### The audio buses have no wire slot and no limiter (2026-08-28)
 
-`docs/plan/13-audio.md`'s bus decision is built in `crcbl-audio`. **The reader
-this entry was also headed for shipped on 2026-08-28**:
-`SettingsSource::apply_audio_gains` hands the player's bus volumes to a mixer at
-start-up and asteroids, breakout, flappy and horde all call it, with
-`apps/options` reading the same keys for its faders. Two halves are still not
-built, deliberately out of that slice:
+The six-bus decision (`docs/notes/simulation.md`, _What the deleted 13-audio
+plan left behind_) is built in `crcbl-audio`. **The reader this entry was also
+headed for shipped on 2026-08-28**: `SettingsSource::apply_audio_gains` hands
+the player's bus volumes to a mixer at start-up and asteroids, breakout, flappy
+and horde all call it, with `apps/options` reading the same keys for its faders.
+Two halves are still not built, deliberately out of that slice:
 
-- **`AudioEvent` carries no bus.** The plan already prices this: a 28-byte wire
+- **`AudioEvent` carries no bus.** The audio plan priced this: a 28-byte wire
   format gaining a route becomes 29 or 32, and `WIRE_SIZE` plus both round-trip
   tests move with it. It is worth doing rather than deriving the bus from the
   sound id — the same sound legitimately belongs to different buses in different
   contexts — but it is a versioned wire change and wants its own slice.
 - **No limiter, so the buses meet the same clamp the voices did.** `fill` still
-  clamps the sum to `[-1, 1]` per sample, which is what the plan's own
-  2026-08-09 correction records as the missing master limiter. Buses make it
+  clamps the sum to `[-1, 1]` per sample, which is what the audio plan's
+  2026-08-09 correction recorded as the missing master limiter. Buses make it
   easier to hit: a player raising several buses is a mix that clips where the
   same voices at unity did not.
 
@@ -8688,12 +8688,12 @@ the six `[engine.audio]` bus gains and saves them through
 eight `Named` keys, which face the ceiling question below.
 
 The keys still `Named` face a design question that `render_scale` and
-`frame_limit` did not: `docs/plan/15-windowing.md`'s rule 1 says
-`[engine.video]` may only clamp downward, and it reads
-`display_mode = "borderless"` as a **ceiling** that does not force a game into
-borderless. That makes the obvious round trip — persist the F11 toggle every
-sample already has — not obviously expressible in this namespace, and it is a
-decision rather than an implementation.
+`frame_limit` did not: rule 1 says `[engine.video]` may only clamp downward, and
+the windowing rules (`docs/notes/backends.md`, _What the deleted 15-windowing
+plan left behind_) read `display_mode = "borderless"` as a **ceiling** that does
+not force a game into borderless. That makes the obvious round trip — persist
+the F11 toggle every sample already has — not obviously expressible in this
+namespace, and it is a decision rather than an implementation.
 
 **Neither platform arm of `with_platform_storage` is covered by a test.** The
 round trips are through `MemoryStorage`, which is what `SettingsSource::Source`
@@ -11364,11 +11364,12 @@ the gate, which would not notice the next break.
 
 ## The services and content plans — what the seven still owe
 
-`docs/plan/00-overview.md`, `13-audio.md`, `14-persistence.md`, the netcode plan
-(since folded; see _Netcode_ below), `27-auth.md`, `32-voip.md` and
-`34-inventory.md` were audited against the tree on 2026-08-27. Three entries
-below need a decision rather than work, and two of them point at richer entries
-this file already carries rather than restating them.
+`docs/plan/00-overview.md`, the audio and persistence plans (since folded; see
+_Audio_ and _Persistence_ below), the netcode plan (since folded; see _Netcode_
+below), `27-auth.md`, `32-voip.md` and `34-inventory.md` were audited against
+the tree on 2026-08-27. Three entries below need a decision rather than work,
+and two of them point at richer entries this file already carries rather than
+restating them.
 
 ## Overview (`docs/plan/00-overview.md`)
 
@@ -11455,13 +11456,23 @@ samples planned on 2026-09-15 added `meadow`, `mane` and `relief`, which also
 have a `docs/plan/sample/` document and no `apps/` directory.
 
 **Why it belongs here too:** the exit criteria that name towers are the co-op
-ones, and those are milestone 3's. `13-audio.md`'s "towers plays creep/tower
+ones, and those are milestone 3's. The audio plan's "towers plays creep/tower
 audio spatially in co-op" is unmet on both halves — the sample ships silent and
-there is no co-op — and `14-persistence.md`'s "towers: save mid-wave, quit,
+there is no co-op — and the persistence plan's "towers: save mid-wave, quit,
 resume — solo and dedicated-server co-op" is unmet on both too, since slice 1
 has no save. Those documents' MVP bars are still unreachable rather than merely
 unmet, and a reader checking "are we done" against a built `apps/towers` needs
 that stated.
+
+## Audio (from the deleted 13-audio plan, 2026-09-24)
+
+The plan's rules — the cue grammar, the pure-DSP core, the six fixed buses and
+their gain order, the two-layer audio keys, mono after the spatial chain, sound
+as presentation, occlusion by raycast, goldens that pin a waveform — are in
+`docs/notes/simulation.md` under _What the deleted 13-audio plan left behind_.
+What it left unbuilt is below, with the bus wire slot under _The audio buses
+have no wire slot and no limiter_ and the copied cue plumbing under
+_`crcbl_audio::CueDeck`_.
 
 ### The mixer limiter (2026-08-27)
 
@@ -11469,7 +11480,11 @@ that stated.
 each — **and the limiter is not.**
 
 **What it would take:** a soft-knee limiter on master, then mix snapshots on
-top.
+top: named sets of bus gains (menu, gameplay) interpolated over time, which is
+what ducking is. Ducking is a modulation of bus gains, so it needs no routing
+graph. The `dynamic_range = "night"` setting (_Audio settings beyond the bus
+gains_) is this limiter driven harder, and the overlay's "limiter activity"
+meter reads it.
 
 **What it blocks:** three consumers now, not one — P10's ducking and mix
 snapshots, `32-voip.md`'s "mixer voice bus/ducking" slice, and any per-category
@@ -11577,9 +11592,89 @@ scope rather than a slip.
 **What it blocks:** the blindfold exit criterion is stated as a measured bar
 ("≥90% accuracy after ~15 minutes of grammar-trainer practice") and the trainer
 that would produce the measurement does not exist. The number in that criterion
-has never been taken.
+has never been taken. **Music streaming** was to decode music incrementally
+while SFX stay fully resident; Vorbis and Opus are post-MVP behind the decoder
+seam. None of these has a sample asking for it yet.
 
-## Persistence (`docs/plan/14-persistence.md`)
+### Audio settings beyond the bus gains (2026-09-24)
+
+The audio plan named four more `[engine.audio]` keys, with domains, and nothing
+reads any of them (verified 2026-09-24: none appears in any `.rs` file):
+
+- **`output_device`**: a device **name**, absent meaning the system default,
+  resolved by name with a fallback to the default and never by index (an index
+  names a different device after a hotplug). `AudioStream::open` takes `cpal`'s
+  `default_output_device`, and nothing enumerates devices.
+- **`speaker_config`**: `mono` or `stereo`; stereo is the only rung the DSP has
+  and surround is deliberately absent from the domain. Mono is an accessibility
+  feature: sum to mono **after** the spatial chain, not by skipping it, or the
+  ITD delay lines stop being exercised and the elevation cues go too. Rule 2's
+  ITD and ILD collapse in mono while rules 3 and 4, pitch cues, survive; the
+  grammar trainer should say which, and the sphere-sweep tests should cover it.
+- **`dynamic_range`**: `full` or `night`. Night mode is the missing limiter
+  (_The mixer limiter_) driven harder, so it waits on that.
+- **`mute_on_focus_loss`**: `true` or `false`. The input side exists,
+  `ShellEvent::Focus`.
+
+None of these may be added to `crcbl::settings::catalogue` as `Read` before a
+reader lands. The audio clamp chain has two layers only (the player's file and
+the game's programmatic control), and an audio key is the value rather than a
+ceiling; the reasons are in the notes section above.
+
+### Audio unit and property tests the plan specifies (2026-09-24)
+
+Not written (verified 2026-09-24 against the test names in `crcbl-audio`'s
+`mixer`, `spatial` and `synth` modules and `tests/spatial_chain.rs`, which cover
+symmetry, panning direction, determinism, the gain order and the steal fade):
+
+- ITD sample counts, ILD gains and pitch ratios against closed-form values over
+  a sphere-sweep table, including the mono case above.
+- A resampler signal-to-noise bound.
+- "The limiter never clips", once there is a limiter.
+- Grammar continuity: a small position delta gives a bounded output delta across
+  octant seams, and an orbiting emitter shows no pitch glide beyond a stated
+  cents bound (which needs _ITD parameter smoothing_ first).
+- A stolen voice leaves no dangling delay-line state; today only the fade is
+  asserted (`a_stolen_voice_fades_out_over_one_block`).
+- The blindfold exit criterion: a listener with about 15 minutes of
+  grammar-trainer practice calls front, back, left, right, above and below of a
+  repeated cue at 90% or better, measured and recorded. It needs the trainer.
+
+### The audio callback locks, and there is no command ring (2026-09-24)
+
+The audio plan put the game's commands (play, move emitter, set bus gain) on a
+lock-free SPSC ring into a callback that owns all DSP state and never locks or
+allocates, with emitter positions streamed in per tick and interpolated per
+block. As built, `Mixer` holds its voices, releasing voices, listener, grammar
+and bus gains behind `Mutex`es that `AudioSource::fill` takes, and its own doc
+comment argues an uncontended mutex costs a pair of atomics. `Mixer::new` takes
+each lock once so macOS does not allocate its platform mutex inside the first
+callback, and `tests/fill_allocation.rs` guards the no-allocation half.
+
+**Open question, not a task yet:** whether a contended lock on the audio thread
+(a game thread holding the voice lock across `try_play` while a callback
+arrives) ever shows as a dropout. Nothing has measured it. A ring is the answer
+if it does; until then the `Mutex` is what makes `&self` entry points safe.
+
+### No sound travels as a server event (2026-09-24)
+
+The audio plan's P4A slice included event replication wiring: spatial sounds
+raised by server events (`ServerToClient::Event` carrying `WorldPos`) and placed
+by the client against its listener. `crcbl_audio::event::AudioEvent` is the
+28-byte wire format for it, round-trip tested, and **no app or engine crate
+sends or receives one** (verified 2026-09-24: `AudioEvent` appears only in
+`event.rs` and `tests/spatial_chain.rs`). Every sounding sample raises its cues
+client-side from state it already has. The competitive-mode variant (quantised
+ear parameters instead of positions, behind topic 31's `competitive_integrity`
+gate) depends on this path existing first.
+
+## Persistence (from the deleted 14-persistence plan, 2026-09-24)
+
+The plan's rules — saves as snapshots with one mechanism for three triggers, the
+galaxy-shaped save, atomic writes as a native guarantee, four settings layers
+storing only diffs, catalogue rule 2 and the key spelling, the no-store browser
+case — are in `docs/notes/simulation.md` under _What the deleted 14-persistence
+plan left behind_. What it left unbuilt is below.
 
 ### The migration seam (2026-08-27)
 
@@ -11694,13 +11789,76 @@ learned from a failed acknowledgement after the fact).
 **What it blocks:** any pre-save quota warning, and browsers without OPFS get no
 persistence rather than degraded persistence.
 
-### Persistence test matrix (2026-08-27)
+### Persistence test matrix (2026-08-27, checked 2026-09-24)
 
-**Not verified by me.** The document lists a save→load→hash roundtrip property,
-version-skew fixtures per released format version, a kill-during-write atomicity
-test, a settings layer-resolution table, and an OPFS roundtrip in the browser
-e2e job. I did not enumerate `crcbl-store`'s tests to say which of those five
-exist. Treat the list as unverified in both directions.
+The plan listed five tests. Checked on 2026-09-24 by reading the test names in
+`crates/crcbl-store/src/{save,settings,lib}.rs`, `apps/shard/src/save.rs` and
+the OPFS checks in `web/tools/browser-e2e.mjs`:
+
+- **Settings layer resolution: built.** `crcbl_store::settings`' tests cover
+  highest-layer-wins, fall-through and deep merge. Unknown-key tolerance is not
+  a named test of its own.
+- **OPFS roundtrip in the browser job: built**, through options' `settings.toml`
+  and shard's save.
+- **Save→load→state-hash property: not built.** The container round-trips its
+  header and sectors
+  (`a_save_reads_back_with_its_header_its_sector_and_a_valid_checksum`) and
+  shard round-trips its own payload, but nothing loads a world from a save and
+  compares `hash_world` at the same tick. It waits on saves going through
+  `SnapshotWriter` (_The "no second serialization path" claim is not yet true_).
+- **Version-skew fixtures: not built.** No save from an older
+  `SAVE_FORMAT_VERSION` is checked in; shard's
+  `a_payload_from_an_older_version_reads_as_no_save` covers its own payload
+  only. It waits on _The migration seam_.
+- **Kill-during-write: not built.** `write_atomic`'s tests cover the temp file
+  and a failed rename (`atomic_write_removes_temp_file_when_rename_fails`), not
+  a process killed mid-write leaving the previous save intact. A child process
+  killed between `write_all` and the rename is the shape.
+
+### Settings apply-on-confirm with timed revert (2026-09-24)
+
+**Not built.** Settings that can leave a player unable to see the screen —
+resolution, display mode, present mode — were to apply on confirm, with an
+engine-provided timer that reverts if the player does not confirm. Volume and
+sensitivity apply at once. `crcbl::settings::apply` answers `Applied::Live` or
+`Applied::NextStart`, and nothing in `crcbl::settings` confirms or reverts
+(verified 2026-09-24 by grepping `crates/crcbl/src/settings.rs`). The live
+mechanisms exist — `GpuContext::set_pacing` reconfigures a running swapchain and
+`crcbl::engine::ModeRequest::toggle` switches display mode — so what is owed is
+the flow around them.
+
+**Related:** the engine pause menu's `MenuAction::Fullscreen` is a live
+`Shell::set_mode` whose result is forgotten at exit, so `display_mode` is never
+written; and `display_mode = "borderless"` is a ceiling under rule 1, which is
+the decision _The settings catalogue's named keys have no reader_ records.
+`apps/options` has no rows for display mode, resolution or present mode for the
+same reason: no seam re-modes a live window and reports what the window system
+did.
+
+### One save path: `Command::Save` (2026-09-24)
+
+**Not built.** The persistence rules make saving a server command
+(`Command::Save`) so the console's `save`, `crcbl save`, a game's UI button and
+the autosave timer take one path. Two triggers exist: a game calling
+`SaveWriter` itself (`apps/shard`'s `Vault::store`) and `AutosaveRing`. There is
+no console command and no CLI verb, so nothing has reached a save from outside
+the game process. It depends on server-side command handling.
+
+**Also owed with it:** a storage section in the debug panel showing the storage
+paths, file sizes, the last save's tick and the autosave ring's state.
+
+### Accessibility settings have no owner (2026-09-24)
+
+The persistence plan checked every document under `docs/plan/` on 2026-08-27 and
+none mentions subtitles, text size, colourblind filters or reduced motion. The
+only handling in the tree is `web/style.css`'s `prefers-reduced-motion` block,
+which belongs to the demo site, not the engine. Two of the four are subsystems
+rather than keys — a caption presenter, and a post-chain colourblind filter that
+would join the graphics quality catalogue — so they want a topic of their own
+rather than rows added to a catalogue.
+
+Mouse sensitivity and invert-Y have a namespace (`[engine.input]`) and no named
+key: the input rules name only the deadzone.
 
 ## Netcode (from the deleted 23-netcode plan, 2026-09-24)
 
@@ -13194,12 +13352,11 @@ left out:
   data-directory twin of that rule and lives in the sample. **A second consumer
   of the data-directory rule is the moment to hoist it into `crcbl-store`**, and
   the shape to hoist is `Vault::open` plus `Vault::source`.
-- **No migration seam, and it now has a casualty.**
-  `docs/plan/14-persistence.md` still owes `crcbl-store` a
-  `fn migrate(old_ver, bytes)`. Shard's version bumps to 2 and then 3 orphaned
-  every save written before them: they read as no save, with a logged reason,
-  and the zone opens fresh. Acceptable for a sample with no players; the entry
-  that must close is topic 14's, not this one.
+- **No migration seam, and it now has a casualty.** `crcbl-store` is still owed
+  a `fn migrate(old_ver, bytes)` (_The migration seam_). Shard's version bumps
+  to 2 and then 3 orphaned every save written before them: they read as no save,
+  with a logged reason, and the zone opens fresh. Acceptable for a sample with
+  no players; the entry that must close is the persistence one, not this one.
 - **No save on teardown.** `crcbl::engine::HostedGame` has no hook that runs on
   the way out and takes `&mut self` — `summary` takes `&self` and is a getter —
   so the autosave cadence is the whole of when a save happens. A tab or a window
@@ -13212,9 +13369,10 @@ left out:
   read — and it means the demo cannot say "you have played for X" from the
   heartbeat, only from the debug panel's `playtime` row.
 - **Autosave only, no manual save.** `apps/shard/src/menu.rs`'s pause panel has
-  no SAVE row and there is no key bound to one. `docs/plan/14-persistence.md`
-  wants console, CLI, UI button and autosave timer to be one path; the path
-  exists (`Shard::autosave` → `Vault::store`) but only the timer calls it.
+  no SAVE row and there is no key bound to one. The persistence rules want
+  console, CLI, UI button and autosave timer to be one path (_One save path:
+  `Command::Save`_); the path exists (`Shard::autosave` → `Vault::store`) but
+  only the timer calls it.
 
 ### shard's wasm heap: the ceiling's own figure is stale (2026-09-16)
 
@@ -13338,8 +13496,8 @@ Stated as gaps rather than explained away:
   covered only by the browser gate. **A `--save-dir` flag would close it** and
   is what topic 14 already asks for under "server deployments: configurable data
   dir"; it was left out as scope.
-- **Only OPFS was exercised in a browser, and only where OPFS exists.**
-  `docs/plan/14-persistence.md` names IndexedDB as the fallback and
+- **Only OPFS was exercised in a browser, and only where OPFS exists.** The
+  persistence plan named IndexedDB as the fallback and
   `crates/crcbl-store/src/web/mod.rs` records that no shim implements one. A
   browser without OPFS — or a page on `file://` — gets `Vault::None` and a
   warning, and nothing tests that path.
@@ -14311,7 +14469,7 @@ leaves behind is smaller than it was:
 **What each corrected row leaves owed**, in the order a reader would meet them:
 
 - **`crcbl save` is an unbuilt verb, and blocked.** `crcbl-store`'s `save.rs`
-  has no CLI reaching it and `14-persistence.md`'s exit criteria assume
+  has no CLI reaching it and the persistence plan's exit criteria assumed
   `save list|dump|diff|restore` — but `dump` is specified to render RON and this
   tree has no RON reader, which is its own open decision below. `sim` and
   `settings` were the other two of these and both shipped on 2026-08-23.
@@ -14425,7 +14583,7 @@ Closing it is two separate decisions, not one task:
   needs is a decision about the spelling a shell hands over, since
   `set k [1, 2]` and `set k "[1, 2]"` cannot both mean the array.
 
-Also owed, and smaller: `docs/plan/14-persistence.md`'s exit criterion
+Also owed, and smaller: the persistence plan's exit criterion
 ("`crcbl save dump/diff` works on any save; settings scriptable via CLI") is now
 half met, and the `save` half is blocked on the RON reader decision recorded
 elsewhere in this file. And the default config path on Windows and macOS has no
@@ -18854,6 +19012,49 @@ uncovered:
   with until `crcbl-mtl` can present — permanently so, since the 2026-08-05
   decision makes Metal the only Apple path. See the platform sections below.
 
+## What the deleted 15-windowing plan left unbuilt (2026-09-24)
+
+The plan's rules — bindings not frameworks, the two display modes, the display
+catalogue, the seam and its capabilities, the clipboard mime set, files-in
+drag-and-drop — are in `docs/notes/backends.md` under _What the deleted
+15-windowing plan left behind_. The unread display keys are under _The settings
+catalogue's named keys have no reader_, HDR output under _HDR display output_,
+render scale and `HW_UPSCALE` under _The engine owns scaling on every platform_,
+and IME pre-edit under the Win32 and AppKit sections below. Two things had no
+entry.
+
+### Letterboxing is a sample's job, not the engine's
+
+The plan made letterboxing in the renderer the **universal fallback** that must
+always work: tiling window managers and compositors can force any size, and
+Wayland has no aspect hint at all (`ShellCaps::ASPECT_HINT_HONORED` is clear
+there). No engine code letterboxes a frame. `apps/asteroids/src/gpu.rs` and
+`apps/breakout/src/gpu.rs` each compute their own viewport, and neither calls
+`crcbl_shell::AspectRatio::fit`, the shared letterbox computation whose doc
+comment exists so nobody writes it twice; `crcbl_render::atlas_view` letterboxes
+only a debug view. Verified 2026-09-24 by grepping for letterbox and pillarbox
+across `crates/` and `apps/`.
+
+**What it would take:** an engine-owned letterbox from the aspect in a window's
+`SizeConstraints` to a viewport and clear bars, then moving the two samples onto
+it. Golden frames of letterbox correctness belong with it (next entry).
+
+### Shell soak and DPI-matrix suites
+
+The plan's testing section asked for three things against the real backends
+under a nested compositor (sway headless, Xvfb) in CI: resize-storm and
+mode-flip **soak** tests, letterbox golden frames, and a DPI matrix in which
+scale-factor changes mid-session (a simulated monitor drag) never leak a
+wrong-size swapchain.
+
+What exists, by test name (2026-09-24): `win32_e2e.rs` has a resize storm that
+must arrive as one event; the Wayland and X11 suites each switch mode and resize
+from outside once per test; `seam_from_outside.rs` drives a resize storm, a
+scale change and a mode switch against `HeadlessShell` only. **Owed:** a
+repeated mode-flip and resize loop against a real backend, a mid-session scale
+change against a real compositor with a swapchain attached, and any letterbox
+golden (there is no engine letterbox to photograph yet).
+
 ## What the Win32 backend has and has not been run against
 
 The whole of `crates/crcbl-shell/src/win32/` and its e2e suite were written on a
@@ -19880,8 +20081,8 @@ deleted rather than annotated.
   and a stolen voice fades over one block. `apps/horde` uses it (`MAX_VOICES`,
   `priority`), with `dropped` and `stolen` rows on its debug panel. Still
   missing, verified:
-  - **No distance term in stealing.** `docs/plan/13-audio.md` asks for priority
-    plus distance; only priority and age decide now.
+  - **No distance term in stealing.** The audio plan asked for priority plus
+    distance; only priority and age decide now.
   - **Releasing voices sit outside the budget** for the one block they fade, so
     per-block work is the budget plus steals per block.
   - **A finished voice holds its slot until the next `fill`** reaps it.
@@ -20561,8 +20762,8 @@ docs/notes/simulation.md under its own heading.
   solver's rung 5, so only the heightfield form is owed (_Static trimesh /
   heightfield colliders with a BVH midphase_), and the character controller has
   not been tested on a mesh end to end.
-- **`crcbl-audio` has no limiter**, though `13-audio.md` specifies a soft-knee
-  limiter on master; the bus graph is built. Mix snapshots and ducking at P10
+- **`crcbl-audio` has no limiter**, though the audio plan specified a soft-knee
+  limiter on master; the six buses are built. Mix snapshots and ducking at P10
   depend on it.
 - **One golden audio buffer exists**
   (`crates/crcbl-audio/tests/burst-reference.wav`), not one per sample that

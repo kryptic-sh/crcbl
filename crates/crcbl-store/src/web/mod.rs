@@ -149,8 +149,9 @@
 //!
 //! # What is not closed
 //!
-//! - **No IndexedDB fallback.** `docs/plan/14-persistence.md` names IndexedDB as
-//!   the fallback for browsers without OPFS. Nothing here needs it — the wasm
+//! - **No IndexedDB fallback.** The persistence rules in
+//!   `docs/notes/simulation.md` name IndexedDB as the fallback for browsers
+//!   without OPFS. Nothing here needs it — the wasm
 //!   side is a queue of `(name, bytes)` records and a shim could satisfy them
 //!   from IndexedDB without this crate knowing — but no shim does yet, and the
 //!   choice is not represented in [`OpfsEnvironment`].

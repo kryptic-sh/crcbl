@@ -18,7 +18,7 @@
 //!
 //! # Borderless is a style swap, and the way back has to be exact
 //!
-//! `docs/plan/15-windowing.md` keeps two display modes and drops exclusive
+//! The windowing rules (`docs/notes/backends.md`) keep two display modes and drop exclusive
 //! fullscreen, so borderless here is the recipe every Windows game uses:
 //! remember the window's style, extended style and *placement*, switch to
 //! `WS_POPUP`, and `SetWindowPos` it over the target monitor's rectangle. The

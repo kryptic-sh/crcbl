@@ -50,7 +50,8 @@
 //! asks for it. That is exactly a mime type, so [`MimeType::CrcblRon`] is
 //! published under `application/x-crcbl+ron` and read back losslessly, while
 //! [`MimeType::TextUtf8`] reaches Notepad. Offering both is the caller's job
-//! and the reader picks, which is what `docs/plan/15-windowing.md` specifies.
+//! and the reader picks, which is what the windowing rules in
+//! `docs/notes/backends.md` specify.
 //!
 //! # `text/uri-list` is also read from `CF_HDROP`
 //!

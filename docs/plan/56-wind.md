@@ -170,7 +170,7 @@ history.
 | Water            | CPU and GPU regional speed; intensity per texel | sea-state blend; ripple and detail-normal strength                         | [55-water.md](55-water.md)         |
 | Cloth and flags  | sample per triangle or vertex                   | per-triangle drag and lift on relative velocity                            | `crcbl-phys`                       |
 | Particles        | CPU sample per particle                         | drag in a moving frame (God of War's particles)                            | [20-particles.md](20-particles.md) |
-| Audio            | CPU speed at the listener                       | a wind bed's gain                                                          | [13-audio.md](13-audio.md)         |
+| Audio            | CPU speed at the listener                       | a wind bed's gain                                                          | `crcbl-audio`                      |
 
 **The rigid-body force, stated so it is written once.** Projected area of a
 sphere is `πr²`; of a box with extents `L` against a unit relative direction `d`

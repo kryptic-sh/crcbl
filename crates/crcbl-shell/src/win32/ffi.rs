@@ -26,7 +26,8 @@
 //!
 //! # Decision: Windows 10 version 1607 is the floor
 //!
-//! Set by DPI, not by anything else here. `docs/plan/15-windowing.md` requires
+//! Set by DPI, not by anything else here. The windowing rules in
+//! `docs/notes/backends.md` require
 //! "one `scale_factor` concept over … per-monitor-v2 (Windows)", and the three
 //! APIs that make per-monitor DPI work — `SetProcessDpiAwarenessContext`,
 //! `GetDpiForWindow` and `AdjustWindowRectExForDpi` — all arrive in 1607.

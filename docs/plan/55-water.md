@@ -549,8 +549,9 @@ particles ([53-transparency.md](53-transparency.md),
 [20-particles.md](20-particles.md)); wet surfaces and rain ripples (a material
 wetness hook); underwater light shafts through the froxel volume (the froxel
 ladder's density field, in `docs/backlog.md`); surf, river and waterfall audio
-along a line or area ([13-audio.md](13-audio.md)); a GPU ripple cascade;
-breaking-wave deformation.
+along a line or area (the audio rules in the
+[simulation notes](../notes/simulation.md)); a GPU ripple cascade; breaking-wave
+deformation.
 
 **Refused, with the reason**: foam and ripple feedback buffers read across
 frames (the no-history rule — decision 10 replaces them); GPU readback for

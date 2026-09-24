@@ -14,7 +14,7 @@
 //!
 //! # Architecture
 //!
-//! `docs/plan/15-windowing.md` chooses a JS shim over `wasm-bindgen` /
+//! The windowing rules in `docs/notes/backends.md` choose a JS shim over `wasm-bindgen` /
 //! `web-sys`. Everything the browser has to say arrives through one of the
 //! `__crcbl_web_*` functions, and there is exactly **one** queue behind them:
 //! the [`Bridge`], owned by the live [`WebShell`] through an [`Rc`] and reached

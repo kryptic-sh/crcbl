@@ -3,8 +3,8 @@
 //!
 //! # Decision: `dlopen`, not `#[link]`
 //!
-//! `docs/plan/15-windowing.md` accepts "thin bindings to APIs the OS or driver
-//! requires *by ABI*", which is what this file is — fourteen libwayland entry
+//! The windowing rules in `docs/notes/backends.md` accept "thin bindings to APIs
+//! the OS or driver requires by ABI", which is what this file is — fourteen libwayland entry
 //! points plus five libc ones, declared by hand and audited by use. What it does **not** settle is how the library is
 //! reached, and the two options are not equivalent:
 //!
@@ -320,7 +320,7 @@ mod prototype {
 ///
 /// Fourteen functions. Each one is used; a function that stops being used is
 /// deleted from this struct in the same commit, which is what "audited by use"
-/// means in `docs/plan/15-windowing.md`.
+/// means in the windowing rules (`docs/notes/backends.md`).
 pub struct Lib {
     pub display_connect: prototype::DisplayConnect,
     pub display_disconnect: prototype::DisplayVoid,

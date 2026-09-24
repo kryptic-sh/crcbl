@@ -37,7 +37,8 @@
 //! # Decision: the refresh rate comes from CoreGraphics, and can say 59.94
 //!
 //! [`MonitorInfo::refresh_millihertz`] exists because 59.94 Hz is not 60, and
-//! `docs/plan/15-windowing.md`'s frame pacing needs the difference. Two APIs
+//! frame pacing needs the difference (refresh is read, never written:
+//! `docs/notes/backends.md`). Two APIs
 //! could answer here and only one of them can:
 //!
 //! * `-[NSScreen maximumFramesPerSecond]` is an `NSInteger` — whole hertz, the

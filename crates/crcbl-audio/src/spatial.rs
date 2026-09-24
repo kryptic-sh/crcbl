@@ -8,7 +8,8 @@
 //! * **Continuous**: cues interpolate smoothly across the sphere.
 //! * **Learnable**: fixed, exaggerated cues that a skilled player can read.
 //!
-//! The four rules from [topic 13](docs/plan/13-audio.md):
+//! The four rules of the cue grammar (`docs/notes/simulation.md`, _What the
+//! deleted 13-audio plan left behind_):
 //!
 //! | # | Direction     | Cue                                                                     |
 //! |---|---------------|-------------------------------------------------------------------------|

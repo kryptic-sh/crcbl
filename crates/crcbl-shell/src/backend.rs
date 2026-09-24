@@ -2,7 +2,8 @@
 //!
 //! # The decision: runtime selection, one registry, `Box<dyn Shell>`
 //!
-//! `docs/plan/15-windowing.md` requires it in one sentence — "backend selection
+//! The windowing rules in `docs/notes/backends.md` require it in one sentence —
+//! "backend selection
 //! at runtime, not compile time, on Linux: try Wayland socket → fall back to
 //! X11 (both compiled in; `CRCBL_SHELL=x11` override)" — and that sentence has
 //! consequences the API has to absorb *now*, because retrofitting them costs a
@@ -144,7 +145,7 @@ struct Registration {
 
 /// Every backend compiled into this build, in the order [`open`] tries them.
 ///
-/// The order is the preference order from `docs/plan/15-windowing.md`: Wayland
+/// The order is the windowing rules' preference order: Wayland
 /// first, X11 as the fallback. On a session running both — which is every
 /// XWayland-capable compositor — Wayland wins, and `CRCBL_SHELL=x11` is how a
 /// developer reproduces an X11 bug without logging out.

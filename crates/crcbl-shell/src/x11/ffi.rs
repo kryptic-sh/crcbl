@@ -42,8 +42,8 @@
 //!
 //! What is **not** taken from libxcb is anything above the wire:
 //! `xcb-util`'s ICCCM and EWMH helpers are not loaded, because
-//! `docs/plan/15-windowing.md` puts "our request/event layer (core, EWMH atoms,
-//! RandR, XKB)" on our side of the line. [`super::atoms`] and
+//! the windowing backend table (`docs/notes/backends.md`) puts "our
+//! request/event layer (core, EWMH atoms, RandR, XKB)" on our side of the line. [`super::atoms`] and
 //! [`super::selection`] are that layer.
 //!
 //! # Which libraries, and why each one
@@ -1587,8 +1587,8 @@ mod prototype {
 /// Forty-four functions, plus four behind the `x11-e2e` feature for the
 /// harness that walks another process's window tree. Each one is used; a
 /// function that stops being used is deleted from this struct in the same
-/// commit, which is what "audited by use" means in
-/// `docs/plan/15-windowing.md`.
+/// commit, which is what "audited by use" means in the windowing rules
+/// (`docs/notes/backends.md`).
 pub struct Lib {
     pub connect: prototype::Connect,
     pub disconnect: prototype::Disconnect,

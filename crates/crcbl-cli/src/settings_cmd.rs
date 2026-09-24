@@ -1,6 +1,6 @@
 //! `crcbl settings` — a game's `settings.toml`, from a terminal.
 //!
-//! `docs/plan/14-persistence.md` schedules `crcbl settings get|set|list` as
+//! The persistence plan scheduled `crcbl settings get|set|list` as
 //! "scriptable settings", and `docs/plan/11-cli-headless.md` is the reason it
 //! has to exist at all: a capability the settings *screen* has and a script
 //! does not is a capability implemented GUI-side. The mechanism is

@@ -1,8 +1,8 @@
 //! Generates the Wayland protocol marshalling code.
 //!
-//! `docs/plan/15-windowing.md`: "we generate marshaling from the protocol XMLs
-//! with our own build-time codegen, emitting `wl_proxy_marshal_flags` calls
-//! against libwayland-client's connection". This is that build step;
+//! The windowing rules in `docs/notes/backends.md` generate Wayland marshalling
+//! "from the protocol XMLs by our own build-time codegen, emitting
+//! `wl_proxy_marshal_flags` calls against libwayland-client's connection". This is that build step;
 //! `crcbl-wl-scanner` is the generator, and it is a workspace crate rather than
 //! a module in here so that its output can be unit-tested against
 //! `wayland-scanner`'s.

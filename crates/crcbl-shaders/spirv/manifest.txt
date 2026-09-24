@@ -611,7 +611,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [upscale]
 source = shaders/upscale.slang
-source-sha256 = cd8c285e60bb8d19c7c79f0da3d0ae53e8fc1ce25f51696c466d45fa746e0652
+source-sha256 = 1bd03dad84c364eeefd44261e78009f9801698db78b1e986e0372bb1c9ee22f9
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/upscale.spv
 spirv-sha256 = 385a4b3f3846d0a53095179e2da04be011cab9ba5af6a464bc7dd132fafc4b48

@@ -108,7 +108,7 @@ browser's own gate and the demo site's deploy.
   lock and raw motion, fractional scale, clipboard. All four desktop backends
   receive file drops and set `ShellCaps::DRAG_DROP` (X11's `x11/xdnd.rs` landed
   2026-08-31); starting a drag **out** is the one deliberate gap, scoped away by
-  [15-windowing.md](15-windowing.md).
+  the windowing rules in the [backends notes](../notes/backends.md).
 - **`crcbl-wl-scanner`** — the Wayland protocol code generator: protocol XML in,
   Rust marshalling out. libwayland-client owns the connection and the proxy
   objects because the Vulkan WSI ABI forces it, and everything above
@@ -311,15 +311,15 @@ never built.
   (XDND version 5, receiving, landed 2026-08-31) — and each sets
   `ShellCaps::DRAG_DROP`. So `08-editor.md`'s "this is editor work, not seam
   work" is now correct rather than false. What no backend does is drag **out**,
-  which `15-windowing.md` scopes away deliberately.
+  which the windowing rules scope away deliberately.
 - **Render scale reaches two samples, and that is the gap — not the renderer.**
   This bullet was headed "Render scale has no renderer half" and then said in
   its own body that the half was built, which it is: `crcbl_render::upscale`
   entered through `ForwardRenderer::set_render_scale` (2026-08-27), the
   `[engine.video] render_scale` key reading into it, and `apps/options` carrying
-  the slider. That is what borderless asks for — `15-windowing.md` defines the
-  mode as "internal render target at chosen resolution, upscale-blit to native
-  surface", which is the spatial pass — so nothing is owed before it. The
+  the slider. That is what borderless asks for — the windowing rules define the
+  mode as an internal render target at a chosen resolution upscaled to the
+  native surface, which is the spatial pass — so nothing is owed before it. The
   _temporal_ upscaler this bullet named is not a near-term row at all; the gap
   survey's §7 refused the history buffer deliberately (its open rows are in
   `docs/backlog.md`), on the same determinism argument the froxel column refuses
@@ -632,9 +632,9 @@ tables):
   [../notes/process.md](../notes/process.md)) — unit + property + e2e per
   subsystem, in the same phase as the subsystem, never later. Golden
   images/buffers, determinism hashes, lavapipe CI.
-- **Audio** ([13-audio.md](13-audio.md)) — spatial cue grammar lands P4A, before
-  the first sample; every sample ships with directional sound.
-- **Persistence** ([14-persistence.md](14-persistence.md)) — settings +
+- **Audio** ([simulation notes](../notes/simulation.md)) — spatial cue grammar
+  lands P4A, before the first sample; every sample ships with directional sound.
+- **Persistence** ([simulation notes](../notes/simulation.md)) — settings +
   save/load ride the P2 snapshot machinery; profiles at P4 (breakout high
   score); OPFS wasm at P5; settings UI at P10; co-op world save/resume proven in
   towers (S6).
