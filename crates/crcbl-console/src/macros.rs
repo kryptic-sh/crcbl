@@ -1,9 +1,9 @@
 //! The declarative macros a crate declares its console entries with.
 //!
-//! Declarative and not a proc-macro, which plan 52 declined for the reason the
-//! workspace declined one before: an attribute cannot register anything these
-//! cannot, and it would put `syn` and `quote` in the build of every crate that
-//! owns a knob.
+//! Declarative and not a proc-macro, which the console plan declined
+//! (`docs/notes/tooling.md`) for the reason the workspace declined one before:
+//! an attribute cannot register anything these cannot, and it would put `syn`
+//! and `quote` in the build of every crate that owns a knob.
 //!
 //! ## The name is the ident
 //!
@@ -22,11 +22,11 @@
 /// `&'static str` with the set after `one_of`. Flags are optional and go in a
 /// `#[flags(...)]` attribute under the doc comment.
 ///
-/// **There is deliberately no text form.** A `String` in a `static` needs a lock
-/// and an allocation the engine's statics do not want, so a text variable exists
-/// only as a [`Binding`](crate::Binding) — plan decision 1. A declaration whose
-/// type is `String` or a bare `&'static str` matches no rule here and does not
-/// compile.
+/// **There is deliberately no text form.** A `String` in a `static` needs a
+/// lock and an allocation the engine's statics do not want, so a text variable
+/// exists only as a [`Binding`](crate::Binding) — debug-console decision 1. A
+/// declaration whose type is `String` or a bare `&'static str` matches no rule
+/// here and does not compile.
 ///
 /// ```
 /// crcbl_console::convar! {

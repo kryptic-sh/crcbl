@@ -565,10 +565,10 @@ esac
 # on the browser path where a character a visitor pressed reaches a text field
 # rather than a binding. Every other check in the driver passes against a web
 # backend that emits no `ShellEvent::TextCommit` at all — that is what shipped
-# until `docs/plan/52-debug-console.md` slice 7 — because every one of them
-# reads a key *edge*, and the panel opened on the backtick even then. `quarry`
-# alone, because it is the only demo whose heartbeat prints the debug view the
-# console line sets.
+# until debug-console slice 7 (`docs/notes/tooling.md`) — because every one of
+# them reads a key *edge*, and the panel opened on the backtick even then.
+# `quarry` alone, because it is the only demo whose heartbeat prints the debug
+# view the console line sets.
 #
 # Two names are matched, and both are the halves worth deleting when a slow
 # machine makes them flake:

@@ -48,8 +48,8 @@
 //!
 //! [`console`] is the third: a bounded ring every sink pushes into, which is
 //! what the debug console draws. It holds records the filter refused, so the
-//! panel can show what the terminal did not — `docs/plan/52-debug-console.md`
-//! decision 4.
+//! panel can show what the terminal did not — debug-console decision 4 in
+//! `docs/notes/tooling.md`.
 //!
 //! A log file is the fourth, and the only one that is opt-in: [`attach_file`]
 //! sends every line stderr gets to a rotated file as well, for the build that
@@ -1393,10 +1393,10 @@ mod tests {
     /// **The ring is fed before the filter, and the filter still decides
     /// stderr.**
     ///
-    /// The two halves of plan 52 decision 4, and each fails silently alone: a
-    /// ring fed after the filter shows the panel exactly what the terminal
-    /// already printed, and a ring that widened the filter would print every
-    /// dropped line to CI.
+    /// The two halves of debug-console decision 4, and each fails silently
+    /// alone: a ring fed after the filter shows the panel exactly what the
+    /// terminal already printed, and a ring that widened the filter would print
+    /// every dropped line to CI.
     ///
     /// `capture` cannot answer the stderr half — it deliberately captures
     /// *before* the filter too, so a capturing thread sees everything — which is

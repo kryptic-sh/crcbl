@@ -150,7 +150,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 49    | [49-antialiasing.md](49-antialiasing.md)                                               | Antialiasing: FXAA, CMAA2, TAA's blocker, and MSAA repriced                |
 | 50    | [50-irradiance-probes.md](50-irradiance-probes.md)                                     | Irradiance probes: the static L1 grid, the diffuse GI twin                 |
 | 51    | [51-volumetrics.md](51-volumetrics.md)                                                 | Volumetrics: height fog and the froxel column                              |
-| 52    | [52-debug-console.md](52-debug-console.md)                                             | The debug console: variables and commands declared beside the code         |
+| 52    | ✅ 52-debug-console — done, deleted 2026-09-24; rules in `docs/notes/tooling.md`       | The debug console: variables and commands declared beside the code         |
 | 53    | [53-transparency.md](53-transparency.md)                                               | Blended transparency: the sorted pass, its keys, and what it blocks        |
 | 54    | [54-android.md](54-android.md)                                                         | Android: the shell backend the platform is missing, and its device floor   |
 | 55    | [55-water.md](55-water.md)                                                             | Water: bodies, the surface pass, waves, foam and buoyancy                  |

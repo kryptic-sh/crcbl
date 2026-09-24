@@ -3,20 +3,194 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 52-debug-console plan left behind (2026-09-24)
+
+Record; the plan was built. It specified a Source-engine-style console
+(`ConVar`, `ConCommand`, `help`, `find`, tab completion) in every game and every
+build: opened with the backtick, drawn over the top of the frame, showing the
+lines the engine logs, with every setting a variable it prints and sets. What it
+left open is in `docs/backlog.md` under _What the deleted 52-debug-console plan
+left unbuilt_, _What the start-up autoexec left uncovered_ and the two
+touch-console entries.
+
+Code comments cite the plan's **decisions** and **delivery slices** by number —
+"debug-console decision 3", "debug-console slice 8". Both numberings are kept
+below so each citation still resolves. The backlog once held an open question
+about this (whether to keep a one-line stub per slice, rewrite every citation,
+or keep the plan); it was settled on 2026-09-24 by the owner's rule that a fully
+built plan is deleted: the numbers live here, every citation outside
+`CHANGELOG.md` points here, and the changelog keeps the old path as history.
+
+**The decisions**, by the number the code cites:
+
+- **Decision 1 — the registry is a crate of its own with no dependencies, and a
+  variable is its own storage.** `crcbl-console` depends on nothing but
+  `core`/`std`, so it compiles on every target, tests headless and is read by
+  the UI, the engine and the CLI alike; it neither draws nor knows about
+  settings files. A `ConVar`'s cell is a typed atomic, so the owning code reads
+  it with `.get()` and never polls the console. **A `Text` variable has no
+  static cell** (a `String` in a `static` needs a lock and an allocation), so it
+  exists only as a `Binding` over storage elsewhere. `Kind` is what makes a set
+  coerce and refuse rather than blind-write a string.
+- **Decision 2 — declared beside the code, listed once per crate, gathered at
+  one seam; no linker tricks.** `convar!`/`concommand!` are the annotation: the
+  ident is the console name (matched, sorted and de-duplicated without regard to
+  ASCII case), the doc comment is the help, the type is the `Kind`. Each crate
+  lists its declarations in one `console_table()`, and **a test in that crate
+  reads its own `src/` and fails when a declaration is missing from the table**
+  (`crcbl_console::guard`); a second guard reads the workspace manifests and
+  fails when a crate depending on `crcbl-console` is missing from the gather in
+  `debug_console::engine_tables`. A game hands its table over through the
+  defaulted `HostedGame::console_table`. Two tables declaring one name are
+  refused at gather time with both crates named. Code-declared names take
+  Source's prefixes (`r_`, `ui_`, `snd_`, `phys_`, `net_`, `cl_`/`sv_`);
+  settings-backed ones keep their key name bare. **`linkme` was declined**
+  because it does not list WebAssembly, **`inventory` because it runs code
+  before `main`**, which this engine never does and whose silent failure would
+  be "not implemented arriving as passed". If `linkme` ever lists wasm, the
+  per-crate lists collapse into one distributed slice with no change to `Table`.
+- **Decision 3 — every settings key is a typed variable, and applying one lives
+  in one place.** `settings::console_bindings` derives one `ARCHIVE` binding per
+  `settings::catalogue()` key, so a key added to the catalogue is a console
+  variable the same day. `CatalogueKey::kind` is a `crcbl_console::Kind`, not a
+  prose domain, and `apps/options` reads the same `Kind`, so the two cannot
+  disagree; every numeric range is asserted equal to its setter's own clamp, so
+  the console never accepts a value the file reads back as a different one. A
+  `KeyStatus::Named` key (declared, unread) is `READ_ONLY` and its help says
+  nothing reads it, so the console is honest about the whole catalogue.
+  `settings::apply` writes one key and applies it through a `settings::Stage`;
+  `GameGpu::apply_video` and `GameGpu::set_debug_view` default to `Unsupported`,
+  so a host with no renderer says so rather than passing. `Stage` is its own
+  trait because `GameGpu` is `Sized` (it takes `self` in `destroy`) and has no
+  `dyn`, and because a key reaches more than a renderer. **Settings are not
+  saved on exit**: `save` writes the file, so a debug session that flips twenty
+  variables never silently becomes the player's file — the same call
+  `apps/options` made. **The console's writes are deferred**: a `Binding`
+  reaches its host as `&mut dyn Any`, which cannot hold a borrow of the renderer
+  or the mixer, so `ConsoleHost` records into `settings::Deferred` and
+  `Loop::drain_console` applies it where the bundle is in hand.
+- **Decision 4 — the log the panel shows is the log.** One bounded ring,
+  `crcbl_core::log::console`, pushed from `StderrLogger::emit` and from the web
+  sink **before** each sink's own filter, read with `snapshot_since(sequence)`
+  so a reader copies only what arrived. Everything the console prints goes
+  through `console::print` at `Info` under `CONSOLE_TARGET`, so the terminal and
+  the panel show the same exchange and a test can assert it through
+  `log::capture`. `log <filter>` goes through `Filter::try_parse`, which refuses
+  what `Filter::parse` skips, because a person at a console can be told. The
+  panel's own view is a separate `LevelFilter` threshold, so "show me debug
+  lines" never means "print debug lines to the CI log".
+- **Decision 5 — the key and the takeover.** `CONSOLE_KEY` is the bare backtick,
+  reserved by the loop in every game with no per-app code; with `Ctrl` or `Meta`
+  held it is the browser's devtools shortcut and is left alone, on the page's
+  side too (`SWALLOWED_BARE` in `web/engine/shell.js`). The open console claims
+  every key, every `TextCommit`, the wheel and the pointer over the panel;
+  releases whatever the game was holding when it opened, so no key sticks down;
+  swallows the character the toggling press commits; and `Escape` closes it
+  before it pauses. The web backend commits text for a printable
+  `KeyboardEvent.key` only when neither `Ctrl` nor `Meta` is held.
+- **Decision 6 — the panel is drawn last, and touch is a drawn keyboard.** The
+  panel is the top `CONSOLE_HEIGHT_FRACTION` of the frame at a whole-number
+  scale, drawn after the debug overlay so nothing covers it. A line is the
+  record's message with its target in front unless the console printed it, the
+  level carried by colour; "the same lines as stderr" means the same records in
+  the same order, not the same glyphs. **Touch uses `ConsoleButton` and
+  `TouchKeyboard`, drawn by the loop, not a focused DOM element**, for the three
+  reasons in `crates/crcbl-ui/src/console/keyboard.rs`'s module docs: no native
+  backend reports a contact, the shim focuses the canvas on every `pointerdown`,
+  and the atlas covers printable ASCII only. Both are on screen only once a
+  contact has arrived, `PauseControl`'s rule.
+- **Decision 7 — the commands, each declared by the crate that owns it.** The
+  built-ins are `help`, `find`, `echo`, `clear`, `toggle` and `reset`
+  (`crcbl-console`'s `builtin.rs`); `pause`, `quit`, `fps`, `save`, `dump`,
+  `config`, `bind`/`unbind`, `debug_view` and `quality` are in `crcbl`, and
+  `log` in `crcbl-core`. A set is `name value` or `name = value`. **An enum
+  value may hold a space** (`debug_view ambient occlusion`), so a set joins
+  everything after the name and completion treats the rest of the line as one
+  token; a per-token "simplification" breaks it. **A bare `reset` skips every
+  `ARCHIVE` variable**, so a debug session cannot empty the player's settings
+  file. A `Fault` prints and leaves state alone.
+- **Decision 8 — one debug-view variable, declared in `crcbl`, and the loop is
+  the only writer of a renderer's view.** `crcbl::debug_view`'s `r_debug_view`
+  lives beside `GameGpu::set_debug_view`, the only seam that can apply it, not
+  in `crcbl-render`, where a static has no renderer to reach.
+  `Loop::apply_debug_view` hands a renderer a **change**, an edge, so a renderer
+  is left as its sample set it up until something moves the variable. A sample's
+  own view row _is_ the variable (lantern's `AO VIEW`, quarry's
+  `LOD VIEW`/`HEATMAP`, viewer's `N`): a sample that wrote its own view every
+  frame undid every console line.
+- **Decision 9 — `Flags::SIM` is reserved, not built.** Console commands are
+  host input and not part of the tick stream, so a variable that changes what
+  the simulation computes must not be a console variable yet. The rule for the
+  first `SIM` variable, and what building it takes, is the backlog entry.
+- **Decision 10 — the cost needs no per-tier pricing.** Closed, one ring push
+  per log record on a path that already formats a string; open, a copy of at
+  most `CONSOLE_RING_LINES` records and a draw list of the visible lines; no GPU
+  work; completion is a prefix scan over a sorted table of under a thousand
+  names. None of it has been timed (see the limits section below).
+
+**`config` and autoexec**, which the code cites as slice 9:
+
+- **`config` takes a bare name, never a path.** ASCII letters, digits, `-` and
+  `_`, `.cfg` optional, refused by `file_named` before storage is asked for
+  anything, so a filesystem path is never built from console input. The bytes
+  come from `SettingsStack::with_platform_storage`, so "the settings directory"
+  is the platform config directory natively and OPFS in a browser.
+- **A file runs through the same `Registry::execute`, `Context` and host a typed
+  line does**, so there is no second execution path to disagree. A failing line
+  is reported as `file.cfg:3: …` and the file runs on, with a closing count.
+- **Recursion has two bounds because they end different things**: a file already
+  running is refused by name, which ends every cycle, and `CONFIG_NESTING_LIMIT`
+  bounds a chain of distinct files, which no cycle check sees.
+- **A run that reads no settings file runs no autoexec.** `AUTOEXEC` runs from
+  `Loop::new` before the first frame; the gate is `EngineLink::app_name`, not
+  `with_platform_storage`, which natively answers `Some` and would hand a
+  headless run `~/.config/<game>/autoexec.cfg`. A missing file is silent; a file
+  that will not run is printed and the boot carries on.
+
+**The delivery slices**, by the number the code cites:
+
+| Slice | Name                    | Landed                 | What it delivered                                                                                                                                                                                                                                      |
+| ----- | ----------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 1     | `crcbl-console`         | 2026-08-30             | The registry crate: `Kind`/`Value`, `ConVar`, `Binding`, `ConCommand`, the macros, `Registry::gather`, the parser, `help`/`find`/`echo`/`clear`, completion, `History` and `guard::declared_names`.                                                    |
+| 2     | Settings typed          | 2026-08-30             | `CatalogueKey::kind`, `settings::apply` over `Stage`, `settings::console_bindings`, and the defaulted `GameGpu::apply_video`/`set_debug_view` forwarded by every bundle with a `ForwardRenderer`; the console's writes deferred to slice 5's drain.    |
+| 3     | The log ring            | 2026-08-30             | `crcbl_core::log::console`, `console::print`, `Filter::try_parse`, the live `set_filter`, and the `log` command.                                                                                                                                       |
+| 4     | The panel's widgets     | 2026-08-30             | `crcbl_ui::console`: `LogView`, `ConsolePanel` and the completion rows, drawn from values; its `TextField` was replaced by `Ui::text_input` over `LineEdit` on 2026-09-16.                                                                             |
+| 5     | The engine              | 2026-08-31             | `CONSOLE_KEY`, the takeover, `debug_console::Console`, the gather and its two guards, `pause`/`quit`/`fps`/`save`/`dump`, `Loop::drain_console`, `CONSOLE_LEVEL_KEY`, and the panel drawn last.                                                        |
+| 6     | Every debug view        | 2026-08-31             | `crcbl::debug_view` and `Loop::apply_debug_view`; lantern, quarry and viewer write the variable. The exit criterion's demo is `apps/quarry`, since breakout has no forward pass, proven on radv and lavapipe by `apps/quarry/tests/device/console.rs`. |
+| 7     | The web                 | 2026-08-31             | `TextCommit` from `__crcbl_web_key`, `SWALLOWED_BARE` in the shim, a controls row on every demo page, and `EXPECTATIONS.quarry.console` in the browser gate.                                                                                           |
+| 8     | Paste, `bind`, `toggle` | 2026-08-31             | Paste (now `TextPump`'s since 2026-09-16), `bind`/`unbind` over `HostedGame::actions` and `Loop::drain_binds`, `toggle` and `reset` as built-ins; asteroids and breach each drive a rebind end to end.                                                 |
+| 9     | `config`                | 2026-08-31, 2026-09-02 | `crcbl::console_config`: `config <name>`, then `AUTOEXEC` run by `Console::run_autoexec` before the first frame.                                                                                                                                       |
+| 10    | Touch                   | 2026-08-31             | `ConsoleButton` and `TouchKeyboard`, gated on a contact; the guard `an_untouched_run_keeps_every_click_the_console_would_have_taken`, and browser group F.                                                                                             |
+| 11    | `Flags::SIM`            | deferred, not built    | Decision 9's reserved flag; the backlog entry says what building it takes.                                                                                                                                                                             |
+
+**Considered and declined**, so none is re-proposed:
+
+- **`linkme`/`inventory` registration** — decision 2.
+- **A `#[convar]` proc-macro attribute** — it registers nothing the declarative
+  `convar!` cannot, adds `syn`/`quote`, and the workspace declined a proc-macro
+  once already (`Format::ALL`) on the same ground.
+- **Parsing the settings TOML for the variable list** — the catalogue is the
+  authority and is derived from the readers; a file would list keys nothing
+  reads.
+- **A console-side value cache** — the variable is the storage; a cache is a
+  second copy that drifts.
+- **Auto-saving `ARCHIVE` variables on exit** — decision 3.
+- **IME on the web** — `ShellCaps::TEXT_IME` stays clear there; it is the
+  windowing plan's work, not the console's.
+
+**A sabotage lesson from slice 7**: the browser gate's restore check first asked
+only whether a later heartbeat said `view: shaded`, which every heartbeat on an
+untouched page says, so it passed with the feature removed. It now fails unless
+the view was `ambient occlusion` going in. A check of a restore has to read the
+state before the restore.
+
 ## What the debug console left as limits (2026-08-31)
 
-**The console shipped.** Every delivery slice in `docs/plan/52-debug-console.md`
-has landed — the registry, typed settings, the log ring, the panel, the engine
-takeover, the shared debug view, the web backend, the paste key and `bind`,
-`config`, and the button and keyboard a finger reaches. The one item that has
-not is `Flags::SIM`, and it is **deferred by decision 9 rather than
-outstanding**: its trigger is the first `SIM` variable anyone wants, and nobody
-wants one, so building the transport for it now would be machinery with no
-caller.
-
-What follows is what those slices left as limits rather than fixed — each stated
-in the code as well as here. It is no longer a tracking entry for unshipped
-work.
+Every delivery slice in the table above landed except `Flags::SIM`, which is
+deferred by decision 9 rather than outstanding. What follows is what those
+slices left as limits rather than fixed — each stated in the code as well as
+here. The open work they left is in `docs/backlog.md` under _What the deleted
+52-debug-console plan left unbuilt_.
 
 What slice 1 left as limits rather than fixed, each stated in the code:
 
@@ -222,11 +396,11 @@ What slice 6 — `crcbl::debug_view`, the shared view, the samples that gave up
 their own — left as limits rather than fixed:
 
 - **`crcbl::debug_view::r_debug_view` is process-global, which is a test
-  hazard.** A `ConVar` **is** the storage — plan decision 1 — so two loops in
-  one process share the view, and `cargo test` runs a crate's tests as threads
-  of one process. `debug_view::for_test()` is the answer and it is public for
-  that reason: it serialises the checks that move the view and restores `Shaded`
-  at both ends. The damage does not arrive where the view was moved:
+  hazard.** A `ConVar` **is** the storage — decision 1 — so two loops in one
+  process share the view, and `cargo test` runs a crate's tests as threads of
+  one process. `debug_view::for_test()` is the answer and it is public for that
+  reason: it serialises the checks that move the view and restores `Shaded` at
+  both ends. The damage does not arrive where the view was moved:
   `ForwardRenderer::resolved_effects` drops the antialiasing tier while any view
   is on, so a bystander check asserting a bundle's effects fails instead —
   measured at about one `cargo test -p quarry --lib` run in three before the
@@ -274,15 +448,6 @@ their own — left as limits rather than fixed:
 What slice 7 — the web backend's `TextCommit`, the shim's swallow, the browser
 gate — left as limits rather than fixed:
 
-- **`AltGr` types nothing in a browser.** `__crcbl_web_key` commits text only
-  when neither `Ctrl` nor `Meta` is held, which is the plan's decision 5 — and
-  Windows and X11 both report `AltGr` as `Ctrl`+`Alt`, so a character reached
-  through it (`@`, `\`, `{` on a German or French layout) commits nothing.
-  Stated on the entry point. The fix is one clause — treat `Ctrl`+`Alt` as text,
-  the rule browsers' own editors use — and its cost is that every
-  `Ctrl+Alt+<key>` shortcut on a layout with no `AltGr` would then type a
-  character into whatever holds the caret. It wants the user's call, and a
-  keyboard with an `AltGr` to try it on; nothing in the tree has one.
 - **`is_text` is now spelled in three places.** `win32::keys::is_text`,
   `appkit::keys::is_text` and the new `web::text_of` all say "a committed
   character is text unless it is a control character", and `linux::xkb::text`
@@ -310,37 +475,6 @@ gate — left as limits rather than fixed:
 What slice 8's first two follow-ups — the paste key, `bind`/`unbind` — left as
 limits rather than fixed:
 
-- **Six of the eight `HostedGame::actions` overrides are compile-checked and not
-  driven.** Every sample that keeps an `ActionMap` hands it over — asteroids,
-  breach, breakout, flappy, horde, orbit, puppet, shard — in two shapes: the map
-  on the `Game` behind a new `Game::action_map_mut` (asteroids, breakout,
-  flappy, horde) and the map on the hosted struct itself (breach, orbit, puppet,
-  shard). One of each shape is driven end to end by a console line in its own
-  crate:
-  `asteroids::app::tests::a_console_rebind_moves_the_key_the_ship_fires_on`
-  reads the action off the map `Game::tick` itself reads, and
-  `breach::app::tests::a_console_rebind_moves_the_key_the_view_turns_on` reads
-  the camera yaw `draw` turns from `look_turn`. The other six are the same two
-  lines over a field checked by hand to be the one their own `key_event` replay
-  feeds, and nothing drives them. Closing it is one test per app, each needing
-  an observable that game already exposes; breach could not use the range map
-  for its own, because `RenderState::imposed_aim` writes the yaw there.
-- **A browser cannot paste.** `crates/crcbl-shell/src/web/mod.rs` answers
-  `clipboard_request` with `Unsupported`, so `Ctrl`+`V` in a demo prints that
-  this backend has no clipboard to read — checked by name in
-  `web/run-browser-e2e.sh` and by `EXPECTATIONS.quarry.console.pasteRefused`.
-  Closing it is `navigator.clipboard.readText()`, a permission-gated promise in
-  a secure context: the shim would have to call it from the keydown whose
-  gesture satisfies that requirement, and resolve it back into a queued
-  `ShellEvent::ClipboardData`. Whether a headless CI browser can be granted the
-  permission at all is the first thing to find out — if it cannot, the refusal
-  check is the only one that gate can carry.
-- **A pasted newline joins two lines rather than submitting the first.**
-  `TextField::insert` drops control characters, which is the rule every other
-  path into the field already follows. Source's console runs each line of a
-  multi-line paste; doing that here means the field growing a queue of pasted
-  lines and the console draining it, which is a change to `crcbl-ui`'s widget
-  rather than to the paste path.
 - **Only the one clipboard is read.** `Shift`+`Insert` is deliberately not a
   second spelling of the paste key: on X11 it means the _primary selection_,
   which is a different clipboard from the one `Shell::clipboard_request` reads,
@@ -353,12 +487,6 @@ limits rather than fixed:
   Win32 or AppKit clipboard through the _console_. Each of those backends has
   clipboard tests of its own; what is unproven is the console's use of them on a
   real display.
-- **`bind` cannot spell a mouse button, an axis or an on-screen control.**
-  `bind <action> <key>` takes a `KeyCode` only, so an action driven by
-  `Binding::MouseButton`, `KeyAxis`, `Wasd`, `PointerPosition` or `Virtual` can
-  be listed (`crcbl::debug_console::binding_name` prints each) and cleared, but
-  not written back. A `bind aim mouse` spelling needs a parser for the other
-  variants and a decision about what `Wasd` looks like on one line.
 
 ### A proc-macro dependency for identifier concatenation (2026-08-27)
 

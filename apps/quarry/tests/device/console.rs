@@ -1,11 +1,12 @@
 //! `debug_view ambient occlusion`, in a sample that never had a row for it.
 //!
-//! `docs/plan/52-debug-console.md`'s slice-6 exit criterion, on this fixture
-//! because it is the one with a device suite of its own. **quarry has no
-//! ambient-occlusion control anywhere**: its pause panel has a `LOD VIEW` row
-//! and a `HEATMAP` row and nothing else, its command line has `--lod-tint` and
-//! `--heatmap` and nothing else, and until the console landed the occlusion view
-//! was reachable in `apps/lantern` alone. Its render stack does run the pass —
+//! Debug-console slice 6's exit criterion (`docs/notes/tooling.md`), on this
+//! fixture because it is the one with a device suite of its own. **quarry has
+//! no ambient-occlusion control anywhere**: its pause panel has a `LOD VIEW`
+//! row and a `HEATMAP` row and nothing else, its command line has `--lod-tint`
+//! and `--heatmap` and nothing else, and until the console landed the occlusion
+//! view was reachable in `apps/lantern` alone. Its render stack does run the
+//! pass —
 //! [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
 //! carries it — so there is a channel here to draw, and nothing that could draw
 //! it.

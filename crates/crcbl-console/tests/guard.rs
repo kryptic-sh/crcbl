@@ -1,10 +1,10 @@
 //! This crate holding its own table to its own source.
 //!
-//! Plan decision 2's guard, applied here first because the built-in commands are
-//! themselves an instance of it: they are declared beside the behaviour and
-//! listed once, exactly as `crcbl-render`'s will be. Every other crate that owns
-//! a console entry writes this same test over its own `src/` and its own
-//! `console_table()`.
+//! Debug-console decision 2's guard, applied here first because the built-in
+//! commands are themselves an instance of it: they are declared beside the
+//! behaviour and listed once, exactly as `crcbl-render`'s will be. Every other
+//! crate that owns a console entry writes this same test over its own `src/`
+//! and its own `console_table()`.
 
 use std::collections::BTreeSet;
 

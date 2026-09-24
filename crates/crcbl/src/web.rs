@@ -300,9 +300,10 @@ impl log::Log for WebLogger {
     fn log(&self, record: &log::Record<'_>) {
         // Before the filter, and the same push the native sink makes: the
         // console's ring holds what the browser console did not print, which is
-        // `docs/plan/52-debug-console.md` decision 4. `try_from_secs_f64` rather
-        // than `from_secs_f64` because that one panics on a non-finite number,
-        // and a logger must not be the thing that ends a frame.
+        // debug-console decision 4 in `docs/notes/tooling.md`.
+        // `try_from_secs_f64` rather than `from_secs_f64` because that one
+        // panics on a non-finite number, and a logger must not be the thing
+        // that ends a frame.
         crcbl_core::log::console::push(
             record.level(),
             record.target(),

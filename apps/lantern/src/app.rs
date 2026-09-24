@@ -122,8 +122,9 @@ pub struct Lantern {
 /// **Read, not kept.** The `AO VIEW` row used to own a `bool` of its own and
 /// hand it to the renderer in [`HostedGame::draw`]; it writes
 /// [`crcbl::debug_view`] now, so the row and the console's
-/// `debug_view ambient occlusion` are one value — `docs/plan/52-debug-console.md`
-/// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
+/// `debug_view ambient occlusion` are one value — debug-console decision 8 in
+/// `docs/notes/tooling.md` — and [`crcbl::engine::Loop`] is what puts it into
+/// force.
 fn occlusion_view() -> bool {
     crcbl::debug_view::current() == DebugView::AmbientOcclusion
 }

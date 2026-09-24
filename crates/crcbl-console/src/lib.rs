@@ -4,8 +4,8 @@
 //! Valve's Source engine is the model, on the user's instruction: a `ConVar`
 //! **is** its own storage, so the code that owns a knob reads it directly and
 //! never polls the console; a `ConCommand` is a name and a function; `help` and
-//! `find` are how everything else is discovered. `docs/plan/52-debug-console.md`
-//! is the design and the record of what was declined on the way.
+//! `find` are how everything else is discovered. `docs/notes/tooling.md`
+//! records the design and what was declined on the way.
 //!
 //! This crate depends on nothing but `core`/`std`. It draws nothing, reads no
 //! settings file and names no engine type — a variable whose storage lives

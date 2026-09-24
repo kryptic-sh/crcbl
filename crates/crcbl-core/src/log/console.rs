@@ -1,10 +1,11 @@
 //! The console's view of the log: the ring every sink feeds, and the target the
 //! console's own output carries.
 //!
-//! `docs/plan/52-debug-console.md` decision 4 is the design. The panel shows
-//! **the** log rather than a second one, so there is one bounded ring here and
-//! every sink pushes into it — [`crate::log`]'s own `StderrLogger` natively and
-//! `crcbl::web`'s `WebLogger` in a browser, through the one [`push`] both call.
+//! Debug-console decision 4 in `docs/notes/tooling.md` is the design. The panel
+//! shows **the** log rather than a second one, so there is one bounded ring
+//! here and every sink pushes into it — [`crate::log`]'s own `StderrLogger`
+//! natively and `crcbl::web`'s `WebLogger` in a browser, through the one
+//! [`push`] both call.
 //!
 //! Two things follow from where the push sits, and both are deliberate:
 //!

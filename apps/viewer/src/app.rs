@@ -691,8 +691,9 @@ impl<S: Shell + ?Sized> PendingLoop<S> {
 /// **Read, not kept.** [`NORMALS_KEY`] used to flip a field of this sample's
 /// own and [`Viewer::draw`] pushed it at the renderer every frame; the key
 /// writes [`crcbl::debug_view`] now, so it and the console's
-/// `debug_view normals` are one value — `docs/plan/52-debug-console.md`
-/// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
+/// `debug_view normals` are one value — debug-console decision 8 in
+/// `docs/notes/tooling.md` — and [`crcbl::engine::Loop`] is what puts it into
+/// force.
 fn normals_view() -> bool {
     crcbl::debug_view::current() == DebugView::Normals
 }

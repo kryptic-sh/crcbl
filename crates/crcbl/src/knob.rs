@@ -10,11 +10,11 @@
 //! # Why a sample reaches its knobs by name
 //!
 //! A crate declares its variables beside the code that owns them and lists them
-//! once, in a `console_table()` of its own — `docs/plan/52-debug-console.md`
-//! decision 2. Some of those modules are private, so a name is the only handle a
-//! sample has; and where the module is public, the name is still **the seam a
-//! person typing `r_ssao_radius 1.5` goes through**, so a pause row and a typed
-//! line cannot hold two answers that disagree.
+//! once, in a `console_table()` of its own — debug-console decision 2 in
+//! `docs/notes/tooling.md`. Some of those modules are private, so a name is the
+//! only handle a sample has; and where the module is public, the name is still
+//! **the seam a person typing `r_ssao_radius 1.5` goes through**, so a pause
+//! row and a typed line cannot hold two answers that disagree.
 //!
 //! # Ranges and sets are the variable's, not the caller's
 //!

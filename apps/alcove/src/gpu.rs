@@ -609,8 +609,9 @@ fn request_for(video: RenderEffects, effects: RenderEffects) -> EffectRequest {
 ///
 /// A second inherent block rather than lines inside the one above, so the
 /// forwards `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up sit beside the
-/// invocation that needs them. `docs/plan/52-debug-console.md` decision 3 is
-/// where the pair comes from, and `crcbl::settings` holds both bodies.
+/// invocation that needs them. Debug-console decision 3 in
+/// `docs/notes/tooling.md` is where the pair comes from, and `crcbl::settings`
+/// holds both bodies.
 impl Gpu {
     /// Put the player's `[engine.video]` section into force now.
     ///

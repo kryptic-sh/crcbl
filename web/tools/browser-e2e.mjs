@@ -1307,10 +1307,10 @@ const EXPECTATIONS = {
     movingLabel: 'the dolly keeps running down the face under its own steam',
     // **The engine's debug console, typed at through a real keyboard**, which
     // is the one place in this gate where characters a visitor pressed reach a
-    // text field rather than a binding. `docs/plan/52-debug-console.md` slice
-    // 7: until the web backend emitted `ShellEvent::TextCommit` the console
-    // opened in a browser and could not be typed at, so nothing here could
-    // press a debug view.
+    // text field rather than a binding. Debug-console slice 7
+    // (`docs/notes/tooling.md`): until the web backend emitted
+    // `ShellEvent::TextCommit` the console opened in a browser and could not be
+    // typed at, so nothing here could press a debug view.
     //
     // **quarry carries it**, for the reason it carries the native console
     // check in `apps/quarry/tests/device/console.rs`: `Quarry::log_heartbeat`

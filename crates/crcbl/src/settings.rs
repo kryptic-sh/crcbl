@@ -964,19 +964,20 @@ pub struct CatalogueKey {
     pub key: String,
     /// The name the console types, which is the key without its namespace.
     ///
-    /// The spelling `docs/plan/52-debug-console.md` decision 2 fixes for a
-    /// settings-backed variable: `antialiasing`, not `engine.video.antialiasing`
-    /// and not `r_antialiasing`, because a bare key is what the user typed in
-    /// the example the plan is written against. It is `&'static str` where
+    /// The spelling debug-console decision 2 (`docs/notes/tooling.md`) fixes
+    /// for a settings-backed variable: `antialiasing`, not
+    /// `engine.video.antialiasing` and not `r_antialiasing`, because a bare key
+    /// is what the user typed in the example the console's plan was written
+    /// against. It is `&'static str` where
     /// [`key`](Self::key) is a `String` because that is what it comes from —
     /// [`VIDEO_KEYS`] and its siblings — and because
     /// [`Binding`] needs a name that outlives the call.
     pub name: &'static str,
     /// What the key accepts, as the console's own domain type.
     ///
-    /// **Was prose until `docs/plan/52-debug-console.md` decision 3.** A string
-    /// could say "1 to 16" while the setter clamped to something else, and
-    /// nothing could tell; a [`Kind`] is what a value is coerced and
+    /// **Was prose until debug-console decision 3** (`docs/notes/tooling.md`).
+    /// A string could say "1 to 16" while the setter clamped to something else,
+    /// and nothing could tell; a [`Kind`] is what a value is coerced and
     /// range-checked through, so
     /// `every_numeric_kind_agrees_with_the_setter_that_writes_it` can hold the
     /// two together. The prose that was here is [`help`](Self::help).
@@ -1027,9 +1028,9 @@ const GAIN_HELP: &str = "the bus gain; absent is unity";
 /// What a [`KeyStatus::Named`] key's [`Binding`] carries: the settings stack is
 /// still its storage, and nothing may write it.
 ///
-/// [`Flags::READ_ONLY`] is the console half of [`KeyStatus::Named`] — the plan's
-/// decision 3, so `help` lists the whole catalogue instead of hiding the part of
-/// it no frame reads.
+/// [`Flags::READ_ONLY`] is the console half of [`KeyStatus::Named`] —
+/// debug-console decision 3, so `help` lists the whole catalogue instead of
+/// hiding the part of it no frame reads.
 const NAMED_FLAGS: Flags = Flags::ARCHIVE.union(Flags::READ_ONLY);
 
 /// The help line of each [`NAMED_VIDEO_KEYS`] row, in that table's order.
@@ -1040,9 +1041,9 @@ const NAMED_FLAGS: Flags = Flags::ARCHIVE.union(Flags::READ_ONLY);
 /// then edited once.
 ///
 /// **Each one opens with what the row's [`KeyStatus::Named`] means**, in the
-/// words `docs/plan/52-debug-console.md` decision 3 asks the console to print,
-/// because that is the fact a person reading `help` needs before the rest of the
-/// line is worth anything.
+/// words debug-console decision 3 (`docs/notes/tooling.md`) asks the console to
+/// print, because that is the fact a person reading `help` needs before the
+/// rest of the line is worth anything.
 const NAMED_HELP: [&str; 8] = [
     "nothing reads this yet — how the window sits on the desktop",
     "nothing reads this yet — monitor name; absent means wherever the window is",
@@ -1262,9 +1263,9 @@ impl std::error::Error for Unsupported {}
 /// takes `self` by value in `destroy`, so it is not object-safe and there is no
 /// `&mut dyn GameGpu` for [`apply`] to take; and a settings key reaches more
 /// than a renderer — the mixer and the loop's clock are seams no GPU bundle
-/// owns. So the bundle keeps the pair `docs/plan/52-debug-console.md` decision 3
-/// puts on it, [`GpuStage`] is the one line that forwards to it, and this is the
-/// vocabulary [`apply`] speaks.
+/// owns. So the bundle keeps the pair debug-console decision 3
+/// (`docs/notes/tooling.md`) puts on it, [`GpuStage`] is the one line that
+/// forwards to it, and this is the vocabulary [`apply`] speaks.
 ///
 /// **Every method defaults to [`Unsupported`]**, so an implementor writes only
 /// the seams it actually has and a caller is told which of them did nothing
@@ -1413,9 +1414,10 @@ pub enum Applied {
 /// Write one catalogue key and apply it through `stage`.
 ///
 /// **The one place a settings key is written and applied together**, and the
-/// reason `docs/plan/52-debug-console.md` decision 3 asked for it: until this
-/// existed the fan-out was `apps/options`', per key, so a console — or a second
-/// screen — would have had to copy it, and a copy is where the two drift.
+/// reason debug-console decision 3 (`docs/notes/tooling.md`) asked for it:
+/// until this existed the fan-out was `apps/options`', per key, so a console —
+/// or a second screen — would have had to copy it, and a copy is where the two
+/// drift.
 ///
 /// One function with a match rather than a function per key, because every arm
 /// is the same three steps in the same order (coerce, write, apply) and the
@@ -1831,8 +1833,9 @@ impl SharedSettings {
 /// [`Any`] is implemented only for `'static` types, so a host cannot hold the
 /// renderer or the mixer a write has to reach. It holds the stack — through a
 /// [`SharedSettings`], so the game's settings screen is editing the same one —
-/// and a [`Deferred`] — see that type. `Loop::new` builds one and the
-/// frame drains it; that is `docs/plan/52-debug-console.md`'s slice 5.
+/// and a [`Deferred`] — see that type. `Loop::new` builds one and the frame
+/// drains it; that is debug-console slice 5, recorded in
+/// `docs/notes/tooling.md`.
 #[derive(Debug, Default)]
 pub struct ConsoleHost {
     stack: SharedSettings,
@@ -3423,13 +3426,13 @@ mod tests {
     /// **Every numeric kind's own range is the range its setter stores**, at
     /// both ends.
     ///
-    /// The failure this exists for is the one
-    /// `docs/plan/52-debug-console.md` decision 3 names: a domain that says
-    /// "1 to 16" while the setter clamps to something else, so a console
-    /// accepts a value the file then reads back as a different one. Written as
-    /// a sweep over [`catalogue`] rather than a list, so a key added with a
-    /// hand-written range joins it the day it lands — and the count is
-    /// asserted, because a sweep that matched nothing would pass in silence.
+    /// The failure this exists for is the one debug-console decision 3
+    /// (`docs/notes/tooling.md`) names: a domain that says "1 to 16" while the
+    /// setter clamps to something else, so a console accepts a value the file
+    /// then reads back as a different one. Written as a sweep over
+    /// [`catalogue`] rather than a list, so a key added with a hand-written
+    /// range joins it the day it lands — and the count is asserted, because a
+    /// sweep that matched nothing would pass in silence.
     #[test]
     fn every_kind_admits_the_ends_of_its_own_range_and_reads_them_back() {
         let mut checked = 0;

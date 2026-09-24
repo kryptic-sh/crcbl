@@ -109,7 +109,7 @@ pub use crcbl_client as client;
 ///
 /// Re-exported because a game names the engine and nothing else, and a settings
 /// screen writing a key through [`settings::apply`] has to spell the [`Value`]
-/// it is writing. `docs/plan/52-debug-console.md` is the design.
+/// it is writing. `docs/notes/tooling.md` records the design.
 ///
 /// [`Value`]: crcbl_console::Value
 pub use crcbl_console as console;
@@ -391,8 +391,8 @@ pub mod text_input;
 
 /// Everything this crate exposes to the debug console.
 ///
-/// One list per crate, gathered by the engine at one seam —
-/// `docs/plan/52-debug-console.md` decision 2. It holds the commands the engine
+/// One list per crate, gathered by the engine at one seam — debug-console
+/// decision 2 in `docs/notes/tooling.md`. It holds the commands the engine
 /// itself owns — including [`settings::presets::quality`], which writes the
 /// `[engine.video]` keys of a tier rather than holding a value of its own —
 /// [`debug_view::r_debug_view`], the one view every host draws, and, through

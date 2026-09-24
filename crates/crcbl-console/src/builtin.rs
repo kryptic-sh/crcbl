@@ -1,10 +1,10 @@
 //! The commands every registry carries.
 //!
-//! Six of plan 52's table, and the six that need nothing but the registry
-//! itself: `help`, `find`, `echo`, `clear`, `toggle` and `reset`. The rest —
-//! `save`, `dump`, `log`, `debug_view`, `pause`, `quit`, `fps` — belong to the
-//! crates that own the behaviour and arrive with them, which is decision 2
-//! applied to commands.
+//! Six of debug-console decision 7's table (`docs/notes/tooling.md`), and the
+//! six that need nothing but the registry itself: `help`, `find`, `echo`,
+//! `clear`, `toggle` and `reset`. The rest — `save`, `dump`, `log`,
+//! `debug_view`, `pause`, `quit`, `fps` — belong to the crates that own the
+//! behaviour and arrive with them, which is decision 2 applied to commands.
 //!
 //! They are declared here with [`concommand!`](crate::concommand) and listed in
 //! [`builtin_table`], exactly as another crate would declare and list its own —
@@ -120,11 +120,11 @@ fn reset_one(cx: &mut crate::Context<'_>, name: &str) -> Result<(), Fault> {
 /// Bare `reset`: every variable that is neither saved nor read-only, back to
 /// what it was declared holding.
 ///
-/// **`ARCHIVE` is left alone deliberately** — plan decision 7's "every
+/// **`ARCHIVE` is left alone deliberately** — debug-console decision 7's "every
 /// non-`ARCHIVE` variable". A saved variable is the player's settings file, and
 /// a debug command that emptied it would be a session's worth of preferences
-/// gone; `READ_ONLY` is skipped because [`Var::set`] would refuse it, and a bare
-/// `reset` that faulted half way through would leave the rest of the table
+/// gone; `READ_ONLY` is skipped because [`Var::set`] would refuse it, and a
+/// bare `reset` that faulted half way through would leave the rest of the table
 /// untouched with no way to tell which half moved.
 ///
 /// Only the variables that actually differ are written, so what this prints is

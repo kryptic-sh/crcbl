@@ -511,9 +511,10 @@ fn skinning_error(error: SkinningError) -> HalError {
 ///
 /// A second inherent block rather than lines inside the one above, so the
 /// forward `crcbl::impl_game_gpu!(Gpu, with_renderer)` picks up sits beside the
-/// invocation that needs it. `docs/plan/52-debug-console.md` decision 3 is where
-/// the pair comes from, and `crcbl::settings` holds both bodies — every bundle
-/// with a `ForwardRenderer` writes exactly these two lines.
+/// invocation that needs it. Debug-console decision 3 in
+/// `docs/notes/tooling.md` is where the pair comes from, and `crcbl::settings`
+/// holds both bodies — every bundle with a `ForwardRenderer` writes exactly
+/// these two lines.
 impl Gpu {
     /// Put the player's `[engine.video]` section into force now.
     ///

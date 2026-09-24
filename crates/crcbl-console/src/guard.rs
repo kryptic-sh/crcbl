@@ -1,9 +1,9 @@
 //! Holding a crate's console table to its own source.
 //!
-//! Plan decision 2's second half. A crate declares its variables and commands
-//! beside the code that owns them and lists them once in a `console_table()`;
-//! nothing but a test makes the list keep up. That test is the same text-guard
-//! shape `crcbl_shaders::volumetric`'s
+//! Debug-console decision 2's second half. A crate declares its variables and
+//! commands beside the code that owns them and lists them once in a
+//! `console_table()`; nothing but a test makes the list keep up. That test is
+//! the same text-guard shape `crcbl_shaders::volumetric`'s
 //! `both_shaders_spell_the_same_atlas_walk` already uses: read the crate's own
 //! `src/`, take every name it declared, and assert each is in the table. A
 //! forgotten entry is then a red test rather than a command that quietly does

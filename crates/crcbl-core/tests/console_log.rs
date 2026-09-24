@@ -163,10 +163,10 @@ fn a_bad_directive_is_refused_and_changes_nothing() {
 /// **What the console prints is on stderr, in the ring, and under the `console`
 /// target.**
 ///
-/// The engine drains a `Context`'s lines through this in slice 5; what this
-/// slice owes is that the one funnel exists and that a line taking it lands in
-/// both places at once, so the panel and the terminal cannot show different
-/// text.
+/// The engine drains a `Context`'s lines through this (debug-console slice 5);
+/// what the log ring's slice owes is that the one funnel exists and that a line
+/// taking it lands in both places at once, so the panel and the terminal cannot
+/// show different text.
 #[test]
 fn a_console_line_reaches_the_capture_and_the_ring_under_one_target() {
     let _order = with_filter("info");

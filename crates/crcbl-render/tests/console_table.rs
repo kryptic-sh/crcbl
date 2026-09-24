@@ -1,6 +1,6 @@
 //! This crate's console table, held to this crate's source.
 //!
-//! Plan decision 2's second half, written here exactly as
+//! Debug-console decision 2's second half, written here exactly as
 //! `crates/crcbl-core/tests/console_table.rs` writes it: a variable declared
 //! beside the pass it switches on is only reachable once it is in the crate's
 //! one list, and nothing but this makes the list keep up. Forgetting it is then

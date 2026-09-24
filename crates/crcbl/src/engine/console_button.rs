@@ -5,10 +5,10 @@
 //!
 //! [`CONSOLE_KEY`](super::CONSOLE_KEY) is the backtick and nothing else, so
 //! before this a finger had **no route to the console at all** — a fact
-//! `web/templates/demo-loop-keys.html` had already written down while
-//! `docs/plan/52-debug-console.md` decision 6 recorded only the missing
-//! keyboard. A keyboard drawn inside a panel nobody with a phone can open is a
-//! feature that cannot be reached, so the two land together.
+//! `web/templates/demo-loop-keys.html` had already written down while the
+//! console plan's decision 6 recorded only the missing keyboard. A keyboard
+//! drawn inside a panel nobody with a phone can open is a feature that cannot
+//! be reached, so the two land together.
 //!
 //! # Why the loop draws it and [`PauseControl`](super::PauseControl) does not
 //!
@@ -17,7 +17,7 @@
 //! see either. Nothing about the console is a game's: the panel is drawn by
 //! [`Loop::frame`](super::Loop::frame) after everything else, so the button
 //! that opens it is drawn there too and no `apps/*` crate gains a line. That is
-//! the plan's exit criterion — "with no per-app code" — kept.
+//! the console plan's exit criterion — "with no per-app code" — kept.
 //!
 //! # It reads contacts, not the pointer
 //!

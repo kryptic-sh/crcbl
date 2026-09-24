@@ -946,12 +946,12 @@ mod tests {
 
     /// **A `bind` typed at the console moves the key the view turns on.**
     ///
-    /// `docs/plan/52-debug-console.md` slice 8, over the *other* shape of
-    /// `HostedGame::actions`: breach keeps its [`ActionMap`] on the hosted
-    /// struct itself rather than inside a `Game` a module away, and this is that
-    /// half proven. The observable is not the map — it is the **eye**, which
-    /// `draw` turns from `look_turn(&self.actions, …)`: a rebind that reached
-    /// some other map leaves the view exactly where it was.
+    /// Debug-console slice 8 (`docs/notes/tooling.md`), over the *other* shape
+    /// of `HostedGame::actions`: breach keeps its [`ActionMap`] on the hosted
+    /// struct itself rather than inside a `Game` a module away, and this is
+    /// that half proven. The observable is not the map — it is the **eye**,
+    /// which `draw` turns from `look_turn(&self.actions, …)`: a rebind that
+    /// reached some other map leaves the view exactly where it was.
     ///
     /// The practice map, not the range: the range imposes an aim on the camera
     /// during its warm-up (see `RenderState::imposed_aim`), and a yaw something

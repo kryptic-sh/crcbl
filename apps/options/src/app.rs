@@ -599,9 +599,10 @@ impl Screen {
     /// the stack and applies whatever this screen can apply.
     ///
     /// **The single place this screen writes a setting**, and the reason
-    /// `docs/plan/52-debug-console.md` decision 3 moved the fan-out into the
-    /// engine: the per-key spelling, the clamp and the live application were
-    /// this file's, and a console would have had to copy all three.
+    /// debug-console decision 3 (`docs/notes/tooling.md`) moved the fan-out
+    /// into the engine: the per-key spelling, the clamp and the live
+    /// application were this file's, and a console would have had to copy all
+    /// three.
     ///
     /// A refusal — a value outside the key's domain, or a stack with no user
     /// layer — lands on the row as [`SaveState::Failed`], which is where it

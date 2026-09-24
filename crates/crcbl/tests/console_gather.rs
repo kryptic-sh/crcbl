@@ -1,10 +1,10 @@
 //! The engine's gather, held to the workspace's manifests.
 //!
-//! Plan decision 2's *other* guard, and the one
+//! Debug-console decision 2's *other* guard, and the one
 //! `crates/crcbl-core/tests/console_table.rs` cannot make: that test keeps a
-//! crate's table in step with its own source, and says nothing about whether the
-//! engine gathers that table at all. A crate could declare a command, list it
-//! correctly, pass its own guard, and be reachable from no console in the
+//! crate's table in step with its own source, and says nothing about whether
+//! the engine gathers that table at all. A crate could declare a command, list
+//! it correctly, pass its own guard, and be reachable from no console in the
 //! workspace.
 //!
 //! So this reads the manifests. Every crate that depends on `crcbl-console`

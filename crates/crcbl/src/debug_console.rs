@@ -1,11 +1,11 @@
 //! The engine's half of the debug console: the state a loop keeps, the keys it
 //! reads, and the commands the engine itself owns.
 //!
-//! `docs/plan/52-debug-console.md` is the design. The three pieces below it were
-//! built first and each knows nothing of the others — `crcbl_console` is the
-//! registry and the parser, `crcbl_core::log::console` is the ring every log
-//! record lands in, and `crcbl_ui::console` is a panel that draws values it is
-//! handed. This module is where they meet:
+//! `docs/notes/tooling.md` records the design, decision by decision. The three
+//! pieces below it were built first and each knows nothing of the others —
+//! `crcbl_console` is the registry and the parser, `crcbl_core::log::console`
+//! is the ring every log record lands in, and `crcbl_ui::console` is a panel
+//! that draws values it is handed. This module is where they meet:
 //!
 //! ```text
 //! ShellEvent ─→ Console::observe ─→ History / Registry::complete / the log view
@@ -34,10 +34,10 @@
 //! `CONSOLE_PASTE_KEY` and the loop's `ask_for_paste` are gone with it.
 //!
 //! A line the console prints goes through the **log**, not into the panel, so
-//! the terminal and the panel show the same records in the same order — plan
-//! decision 4. The panel reads them back out of the ring on the next frame like
-//! any other record, which is why there is no second path for the console's own
-//! output to drift down.
+//! the terminal and the panel show the same records in the same order —
+//! debug-console decision 4. The panel reads them back out of the ring on the
+//! next frame like any other record, which is why there is no second path for
+//! the console's own output to drift down.
 //!
 //! # What is the loop's, and what is here
 //!
@@ -480,10 +480,10 @@ impl Console {
     ///
     /// # Panics
     ///
-    /// If two tables claim one name, naming both — plan decision 2 refuses a
-    /// duplicate rather than resolving it, because either resolution leaves one
-    /// crate reading a variable the console is not setting. It is a wiring
-    /// mistake in the gather rather than anything a run can produce, and
+    /// If two tables claim one name, naming both — debug-console decision 2
+    /// refuses a duplicate rather than resolving it, because either resolution
+    /// leaves one crate reading a variable the console is not setting. It is a
+    /// wiring mistake in the gather rather than anything a run can produce, and
     /// `crates/crcbl/tests/console_gather.rs` is what holds the gather to the
     /// crates that own a table.
     #[must_use]
@@ -825,10 +825,10 @@ impl Console {
     /// log.
     ///
     /// The echoed line goes first, prefixed the way the prompt draws it, so the
-    /// terminal shows the same exchange the panel does — plan decision 4's whole
-    /// point. A fault is printed like any other line and leaves the state alone,
-    /// which is [`Registry::execute`](crcbl_console::Registry::execute)'s own
-    /// guarantee.
+    /// terminal shows the same exchange the panel does — debug-console decision
+    /// 4's whole point. A fault is printed like any other line and leaves the
+    /// state alone, which is
+    /// [`Registry::execute`](crcbl_console::Registry::execute)'s own guarantee.
     fn run(&mut self, line: &str) {
         crcbl_core::log::console::print(&format!("{}{line}", crcbl_ui::console::PROMPT));
         self.history.push(line);
@@ -1002,10 +1002,10 @@ fn completing(text: &str) -> &str {
 /// Every crate's console table the engine gathers, named by the crate it came
 /// from.
 ///
-/// Plan decision 2's one seam. The crate name beside each table is what
-/// `crates/crcbl/tests/console_gather.rs` reads: it walks the workspace
-/// manifests for every crate that depends on `crcbl-console` and asserts each is
-/// named here, so a crate that grows a table and is forgotten is a red test
+/// Debug-console decision 2's one seam. The crate name beside each table is
+/// what `crates/crcbl/tests/console_gather.rs` reads: it walks the workspace
+/// manifests for every crate that depends on `crcbl-console` and asserts each
+/// is named here, so a crate that grows a table and is forgotten is a red test
 /// rather than a set of commands nothing can reach.
 ///
 /// The game's own table is **not** here — it arrives through

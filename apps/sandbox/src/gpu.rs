@@ -538,10 +538,10 @@ impl Gpu {
 ///
 /// One-line forwards. Every one but the last two already existed for the loop
 /// that used to call them from `app.rs`; the trait is what lets the engine call
-/// them instead. The pair at the end is
-/// `docs/plan/52-debug-console.md` decision 3's, written out here rather than
-/// through `crcbl::impl_game_gpu!(Gpu, with_renderer)` because this bundle
-/// writes its whole block by hand.
+/// them instead. The pair at the end is debug-console decision 3's
+/// (`docs/notes/tooling.md`), written out here rather than through
+/// `crcbl::impl_game_gpu!(Gpu, with_renderer)` because this bundle writes its
+/// whole block by hand.
 impl crcbl::engine::GameGpu for Gpu {
     fn atlas(&self) -> &FontAtlas {
         Self::atlas(self)

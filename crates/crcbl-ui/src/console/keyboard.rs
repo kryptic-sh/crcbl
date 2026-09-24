@@ -1,9 +1,9 @@
 //! The on-screen keyboard the console draws for a device that has no keys.
 //!
-//! `docs/plan/52-debug-console.md` decision 6 recorded "no on-screen keyboard"
-//! as a known gap: a phone can open the panel and press **Send**, and can type
-//! nothing into it. This is that gap closed, and it is **drawn** rather than
-//! borrowed from the platform.
+//! The console plan's decision 6 recorded "no on-screen keyboard" as a known
+//! gap: a phone can open the panel and press **Send**, and can type nothing
+//! into it. This is that gap closed, and it is **drawn** rather than borrowed
+//! from the platform.
 //!
 //! # Why a drawn keyboard and not the platform's
 //!

@@ -3457,7 +3457,7 @@ pub const FULLSCREEN_KEY: crcbl_core::input::KeyCode = crcbl_core::input::KeyCod
 /// [`KeyCode::Backquote`](crcbl_core::input::KeyCode::Backquote) on every
 /// backend the engine has. It is the engine's rather than each game's for
 /// [`DEBUG_OVERLAY_KEY`]'s reason — the thing it opens is the engine's — and
-/// `docs/plan/52-debug-console.md` decision 5 is where that is argued.
+/// debug-console decision 5 in `docs/notes/tooling.md` is where that is argued.
 ///
 /// **Only the bare key toggles.** With `Ctrl` or `Meta` held it is a browser's
 /// devtools shortcut on two platforms, so [`Pending::observe`] leaves those
@@ -5022,7 +5022,7 @@ pub trait GameGpu: GpuSurface + Sized {
     /// Put a `[engine.video]` section into force on this bundle's renderer,
     /// **now** rather than at the next start-up.
     ///
-    /// The seam `docs/plan/52-debug-console.md` decision 3 adds so that
+    /// The seam debug-console decision 3 (`docs/notes/tooling.md`) adds so that
     /// [`crcbl::settings::apply`](crate::settings::apply) has somewhere to send
     /// a write: the render scale, the page's anisotropy and the player's half of
     /// the effect resolution all live on a
@@ -5052,9 +5052,9 @@ pub trait GameGpu: GpuSurface + Sized {
     /// holds.
     ///
     /// [`apply_video`](Self::apply_video)'s sibling and
-    /// `docs/plan/52-debug-console.md` decision 8's whole mechanism: the debug
-    /// views are the engine's, not one sample's, so `r_debug_view` needs one
-    /// forwarder per bundle rather than a key binding in each game.
+    /// debug-console decision 8's whole mechanism (`docs/notes/tooling.md`):
+    /// the debug views are the engine's, not one sample's, so `r_debug_view`
+    /// needs one forwarder per bundle rather than a key binding in each game.
     /// [`ForwardRenderer::debug_view`](crcbl_render::ForwardRenderer::debug_view)
     /// is the precedence this has to compose the renderer's independent switches
     /// into, and an implementation sets **every** one of them so that no earlier
@@ -6205,12 +6205,12 @@ pub trait HostedGame: Sized {
 
     /// Everything this game exposes to the debug console.
     ///
-    /// The one seam `docs/plan/52-debug-console.md` decision 2 puts on a host:
-    /// a game declares its variables and commands beside the code that owns
-    /// them, lists them once in a `console_table()` of its own, and hands that
-    /// list over here. [`Loop::new`] gathers it beside the engine's own tables,
-    /// so a game's variable is in `help` and reachable by name with no other
-    /// wiring at all.
+    /// The one seam debug-console decision 2 (`docs/notes/tooling.md`) puts on
+    /// a host: a game declares its variables and commands beside the code that
+    /// owns them, lists them once in a `console_table()` of its own, and hands
+    /// that list over here. [`Loop::new`] gathers it beside the engine's own
+    /// tables, so a game's variable is in `help` and reachable by name with no
+    /// other wiring at all.
     ///
     /// **A static list rather than a method on `self`**, because the gather
     /// happens once and a [`crcbl_console::Table`] is `&'static` data: a
@@ -6229,8 +6229,9 @@ pub trait HostedGame: Sized {
 
     /// The action map the console's `bind` and `unbind` rebind.
     ///
-    /// `docs/plan/52-debug-console.md` slice 8's second follow-up. An
-    /// [`ActionMap`](crate::input::ActionMap) is the *game's* — the engine
+    /// Debug-console slice 8's second follow-up, recorded in
+    /// `docs/notes/tooling.md`. An [`ActionMap`](crate::input::ActionMap) is
+    /// the *game's* — the engine
     /// declares no actions and holds no map — so rebinding one needs the game
     /// to hand it over, exactly as
     /// [`take_pending_frame_limit`](Self::take_pending_frame_limit) needs it to
@@ -6279,7 +6280,7 @@ pub trait HostedGame: Sized {
     /// Move one `[engine.audio]` bus's gain on the mixer this game plays
     /// through.
     ///
-    /// `docs/plan/52-debug-console.md` slice 5's one open seam, and
+    /// Debug-console slice 5's one open seam (`docs/notes/tooling.md`), and
     /// [`actions`](Self::actions)' shape for
     /// [`Deferred`](crate::settings::Deferred)'s reason: a console write reaches
     /// its host as `&mut dyn Any` and cannot hold a borrow of the mixer, so it
@@ -6712,9 +6713,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             since_last_pump,
         );
         // The character the toggling key produced, which must not be typed into
-        // the field it just opened — plan decision 5. Set from the key event
-        // itself rather than from `Pending::toggle_console`, because a *repeat*
-        // of the key commits text too and does not toggle anything.
+        // the field it just opened — debug-console decision 5. Set from the key
+        // event itself rather than from `Pending::toggle_console`, because a
+        // *repeat* of the key commits text too and does not toggle anything.
         let mut swallow_text = false;
         self.shell.pump(&mut |event| {
             if toggles_console(&event) {
@@ -7105,9 +7106,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // frame to toggle the pause a second time. Both in one frame is one
         // toggle: the player asked once, with two fingers or with two hands.
         let pause_control = self.game.take_pending_pause();
-        // **Escape closes the console before it pauses the game** — plan
-        // decision 5. One press does one thing, and the thing on top of the
-        // frame is what it does it to.
+        // **Escape closes the console before it pauses the game** —
+        // debug-console decision 5. One press does one thing, and the thing on
+        // top of the frame is what it does it to.
         let escape_closed_console = pending.toggle_pause && self.console.is_open();
         if escape_closed_console {
             self.console.close();
@@ -7217,9 +7218,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         self.draw_list.begin_overlay();
         self.draw_menu();
         self.draw_debug_overlay();
-        // **Last, so nothing covers it** — plan decision 6. The overlay is a
-        // developer tool that stays legible over the game; the console is the
-        // one thing that stays legible over the overlay.
+        // **Last, so nothing covers it** — debug-console decision 6. The
+        // overlay is a developer tool that stays legible over the game; the
+        // console is the one thing that stays legible over the overlay.
         self.console.draw(&mut self.draw_list, self.gpu.atlas());
         // **Over the panel**, because it is the way out as much as the way in:
         // a finger that opened the console has no key to close it with.
@@ -7547,7 +7548,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
 
     /// Hands what a console write recorded to the seams that can apply it.
     ///
-    /// `docs/plan/52-debug-console.md` slice 2 left this: a
+    /// Debug-console slice 2 (`docs/notes/tooling.md`) left this: a
     /// [`Binding`](crcbl_console::Binding) reaches its host as `&mut dyn Any`
     /// and so cannot hold a borrow of the renderer or the clock, and records
     /// into a [`settings::Deferred`](crate::settings::Deferred) instead. This is
@@ -7620,7 +7621,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
 
     /// Puts the debug view every host shares into force where it has moved.
     ///
-    /// `docs/plan/52-debug-console.md` decision 8's whole seam:
+    /// Debug-console decision 8's whole seam (`docs/notes/tooling.md`):
     /// [`crate::debug_view::r_debug_view`] is the value — set by
     /// `debug_view ambient occlusion`, by `apps/lantern`'s `AO VIEW` row, by
     /// `apps/quarry`'s `LOD`/`HEATMAP` rows and by `apps/viewer`'s `N` — and
@@ -16173,11 +16174,12 @@ mod tests {
     /// **A phone can open the console, type a command and run it, with no key
     /// pressed anywhere.**
     ///
-    /// The whole of `docs/plan/52-debug-console.md` slice 10's touch half, end
-    /// to end: a finger lands, the engine's own button appears and opens the
-    /// panel, the on-screen keyboard appears with it, and taps on it spell a
-    /// line that **Send** then runs. Every step is a contact or a pointer press
-    /// — nothing here presses a key, which is the point.
+    /// The whole of debug-console slice 10's touch half
+    /// (`docs/notes/tooling.md`), end to end: a finger lands, the engine's own
+    /// button appears and opens the panel, the on-screen keyboard appears with
+    /// it, and taps on it spell a line that **Send** then runs. Every step is a
+    /// contact or a pointer press — nothing here presses a key, which is the
+    /// point.
     #[test]
     fn a_finger_opens_the_console_types_a_line_and_sends_it() {
         let logs = crcbl_core::log::capture();
@@ -16733,10 +16735,10 @@ mod tests {
 
     /// **A bare variable prints its value, on stderr and in the panel.**
     ///
-    /// Plan decision 4's whole claim: the console's own output goes through the
-    /// log, so the terminal and the panel show one line and not two that can
-    /// disagree. Asserted on both — the capture is the sink's side and the
-    /// panel's `LogView` is the ring's.
+    /// Debug-console decision 4's whole claim: the console's own output goes
+    /// through the log, so the terminal and the panel show one line and not two
+    /// that can disagree. Asserted on both — the capture is the sink's side and
+    /// the panel's `LogView` is the ring's.
     #[test]
     fn a_variable_typed_into_the_console_prints_its_value_to_the_log_and_the_panel() {
         let logs = crcbl_core::log::capture();
@@ -16767,11 +16769,12 @@ mod tests {
 
     /// **A set reaches the bundle on the frame it was typed.**
     ///
-    /// The drain `docs/plan/52-debug-console.md` slice 2 left owed: a `Binding`
-    /// records into a `settings::Deferred` because it cannot hold a borrow of
-    /// the renderer, and this is the loop handing that over. Both spellings the
-    /// plan promises are exercised, because the `=` is optional and a parser
-    /// that dropped it would still pass a test that only typed one of them.
+    /// The drain debug-console slice 2 left owed (`docs/notes/tooling.md`): a
+    /// `Binding` records into a `settings::Deferred` because it cannot hold a
+    /// borrow of the renderer, and this is the loop handing that over. Both
+    /// spellings decision 7 promises are exercised, because the `=` is optional
+    /// and a parser that dropped it would still pass a test that only typed one
+    /// of them.
     #[test]
     fn setting_a_variable_through_the_console_reaches_the_bundle() {
         let mut engine = with_console_open();
@@ -16800,11 +16803,11 @@ mod tests {
     }
 
     /// **`debug_view ambient occlusion` reaches the bundle**, in both the
-    /// spellings the plan promises and with the space in the value intact.
+    /// spellings decision 7 promises and with the space in the value intact.
     ///
-    /// `docs/plan/52-debug-console.md`'s slice-6 exit criterion, at the seam it
-    /// is made of: the command and the variable underneath it write one cell,
-    /// and [`Loop::apply_debug_view`] is what carries it to
+    /// Debug-console slice 6's exit criterion (`docs/notes/tooling.md`), at the
+    /// seam it is made of: the command and the variable underneath it write one
+    /// cell, and [`Loop::apply_debug_view`] is what carries it to
     /// [`GameGpu::set_debug_view`]. The value is two words, which is the case a
     /// parser that split on whitespace would lose — and `ambient occlusion` is
     /// exactly the view the user asked to be able to reach everywhere.
@@ -17006,15 +17009,15 @@ mod tests {
 
     /// **Ctrl+V puts what is on the clipboard into the field.**
     ///
-    /// `docs/plan/52-debug-console.md` slice 8's first follow-up, end to end
-    /// through the loop — and down **one** path since rung 7d2: the key is an
-    /// `Edit::Paste` like it is in any other field, the field asks through
-    /// `Ui::take_clipboard_requests`, the loop's `TextPump` issues the read once
-    /// the pump has let go of the shell, and the answer — which arrives in a
-    /// *later* batch, because every backend's read is asynchronous — is matched
-    /// back by request id and lands in the line being typed. The field's
-    /// contents are the observable; the request having been made is not, since a
-    /// request nothing answered types nothing.
+    /// Debug-console slice 8's first follow-up (`docs/notes/tooling.md`), end
+    /// to end through the loop — and down **one** path since rung 7d2: the key
+    /// is an `Edit::Paste` like it is in any other field, the field asks
+    /// through `Ui::take_clipboard_requests`, the loop's `TextPump` issues the
+    /// read once the pump has let go of the shell, and the answer — which
+    /// arrives in a *later* batch, because every backend's read is asynchronous
+    /// — is matched back by request id and lands in the line being typed. The
+    /// field's contents are the observable; the request having been made is
+    /// not, since a request nothing answered types nothing.
     #[test]
     fn the_paste_key_puts_the_clipboard_into_the_console_field() {
         let mut engine = with_console_open();
@@ -17232,11 +17235,12 @@ mod tests {
     /// **A gain typed at the console reaches the running mixer**, and is read
     /// back off it.
     ///
-    /// `docs/plan/52-debug-console.md` slice 5's one open seam. The observable
-    /// is deliberately not the settings key — `crcbl::settings::apply` wrote
-    /// that before this existed and a check on it passed while the mix never
-    /// moved — but [`Mixer::bus_gain`](crcbl_audio::mixer::Mixer::bus_gain) on
-    /// the game's own mixer, which is what a voice is multiplied by.
+    /// Debug-console slice 5's one open seam (`docs/notes/tooling.md`). The
+    /// observable is deliberately not the settings key —
+    /// `crcbl::settings::apply` wrote that before this existed and a check on
+    /// it passed while the mix never moved — but
+    /// [`Mixer::bus_gain`](crcbl_audio::mixer::Mixer::bus_gain) on the game's
+    /// own mixer, which is what a voice is multiplied by.
     ///
     /// The value it opens at is asserted first: every mixer starts at unity, so
     /// a check that only looked at the end would pass on a console line that did
@@ -17404,8 +17408,8 @@ mod tests {
         );
     }
 
-    /// **Escape closes the console before it pauses the game** — plan decision
-    /// 5. One press does one thing, to the thing on top of the frame.
+    /// **Escape closes the console before it pauses the game** — debug-console
+    /// decision 5. One press does one thing, to the thing on top of the frame.
     #[test]
     fn escape_closes_the_console_before_it_pauses_the_game() {
         let mut engine = with_console_open();
@@ -17548,7 +17552,8 @@ mod tests {
         );
     }
 
-    /// **The console is drawn last, so nothing covers it** — plan decision 6.
+    /// **The console is drawn last, so nothing covers it** — debug-console
+    /// decision 6.
     ///
     /// Asserted as *nothing after it leaves its rectangle*, rather than as a
     /// count: the overlay's own row count moves with what the frame recorded, so

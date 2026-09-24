@@ -81,11 +81,12 @@ than as a reason:
 - **Every measured figure in all three docs was taken on trust.**
   `43-render-standards.md`'s normal-map cost, its row (a) and row (e) timings
   and the LTC speed-ups; `51-volumetrics.md`'s transmittance comparison, its
-  froxel counts and its sample fractions; `52-debug-console.md`'s decision-10
-  cost claims. Re-checking any of them means running the GPU harnesses, which
-  the audit was told not to do because another agent held the GPU. This is the
-  same shape of drift that produced the AO table's four wrong integers: a figure
-  carried across a change to the pass it measures.
+  froxel counts and its sample fractions; the debug console plan's decision-10
+  cost claims (now in `docs/notes/tooling.md`, and still unmeasured).
+  Re-checking any of them means running the GPU harnesses, which the audit was
+  told not to do because another agent held the GPU. This is the same shape of
+  drift that produced the AO table's four wrong integers: a figure carried
+  across a change to the pass it measures.
 - **The golden re-bless claims in `43-render-standards.md` §2 rung 2** — the
   five named goldens, `room` moving 360 pixels by at most thirteen, `live`
   moving past tolerance — are unverified.
@@ -100,7 +101,7 @@ than as a reason:
   carried three sun-only claims a day after the punctual producer landed and was
   corrected, as was the lighting-order row in `43-render-standards.md`'s
   Delivery table. Their measured figures were still taken on trust.
-- **`52-debug-console.md`'s browser assertions were spot-checked, not
+- **The debug console plan's browser assertions were spot-checked, not
   enumerated**: `web/tools/browser-e2e.mjs` was read only around the console,
   autoexec and touch groups.
 

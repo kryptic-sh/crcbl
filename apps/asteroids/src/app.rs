@@ -896,9 +896,9 @@ mod tests {
 
     /// **A `bind` typed at the console moves the key the ship fires on.**
     ///
-    /// `docs/plan/52-debug-console.md` slice 8's second follow-up, in a shipping
-    /// demo rather than over the engine's fixture: the console line reaches
-    /// `HostedGame::actions` — which for this game is
+    /// Debug-console slice 8's second follow-up (`docs/notes/tooling.md`), in a
+    /// shipping demo rather than over the engine's fixture: the console line
+    /// reaches `HostedGame::actions` — which for this game is
     /// [`Game::action_map_mut`](crate::game::Game::action_map_mut), a sibling
     /// module away — and the observable is the **action**, read off the map the
     /// simulation itself reads on the tick it decides what the ship did.

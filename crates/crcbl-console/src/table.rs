@@ -11,9 +11,9 @@ use crate::var::{Binding, ConVar};
 /// declaration missing from its crate's list is a red test in that crate, which
 /// is what [`guard::declared_names`](crate::guard::declared_names) is for.
 ///
-/// Plan decision 2 records why this is a hand-written list rather than a
-/// distributed slice: `linkme` does not list WebAssembly, and fifteen demos ship
-/// as wasm.
+/// Debug-console decision 2 records why this is a hand-written list rather than
+/// a distributed slice: `linkme` does not list WebAssembly, and fifteen demos
+/// ship as wasm.
 #[derive(Clone, Copy, Debug)]
 pub struct Table {
     vars: &'static [&'static ConVar],

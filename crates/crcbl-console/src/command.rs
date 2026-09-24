@@ -60,10 +60,10 @@ impl ConCommand {
 /// it: a test asserts on what `help` printed by reading [`lines`](Self::lines),
 /// with no closure, no interior mutability and no second borrow of the thing it
 /// is writing into — a closure sink would have to capture a buffer the
-/// assertion then has to get back out. The second is that plan decision 4 sends
-/// every console line through `crcbl_core::log` as well as to the panel, so the
-/// engine drains one vector into both; a callback would make the panel and the
-/// terminal two separate wirings that can disagree.
+/// assertion then has to get back out. The second is that debug-console
+/// decision 4 sends every console line through `crcbl_core::log` as well as to
+/// the panel, so the engine drains one vector into both; a callback would make
+/// the panel and the terminal two separate wirings that can disagree.
 ///
 /// `host` is `&mut dyn Any` because this crate depends on nothing and cannot
 /// name the engine state a [`Binding`](crate::Binding) writes; the crate that

@@ -280,9 +280,9 @@ pub use volumetric::FroxelBuffers;
 
 /// Everything this crate exposes to the debug console.
 ///
-/// One list per crate, gathered by the engine at one seam —
-/// `docs/plan/52-debug-console.md` decision 2, whose worked example is this
-/// crate. It holds [`debug_draw::r_debug_draw`], the switch the debug draw
+/// One list per crate, gathered by the engine at one seam — debug-console
+/// decision 2 in `docs/notes/tooling.md`, whose worked example in the plan was
+/// this crate. It holds [`debug_draw::r_debug_draw`], the switch the debug draw
 /// layer reads once a frame, the occlusion chain's own — `ssao::r_ssao_slices`
 /// and `ssao::r_ssao_blur_passes`, which `crate::ssao`'s header argues are two
 /// variables rather than one quality knob, `ssao::r_ssao_intensity` and

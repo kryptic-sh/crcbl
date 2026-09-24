@@ -330,11 +330,12 @@ impl Quarry {
 
     /// Which overlay the frame is drawn with, if any.
     ///
-    /// **Read, not kept.** The rows below used to move a field of this fixture's
-    /// own and [`HostedGame::draw`] pushed it at the renderer every frame; they
-    /// write [`crcbl::debug_view`] now, so a row and the console's
-    /// `debug_view lod tint` are one value — `docs/plan/52-debug-console.md`
-    /// decision 8 — and [`crcbl::engine::Loop`] is what puts it into force.
+    /// **Read, not kept.** The rows below used to move a field of this
+    /// fixture's own and [`HostedGame::draw`] pushed it at the renderer every
+    /// frame; they write [`crcbl::debug_view`] now, so a row and the console's
+    /// `debug_view lod tint` are one value — debug-console decision 8 in
+    /// `docs/notes/tooling.md` — and [`crcbl::engine::Loop`] is what puts it
+    /// into force.
     #[must_use]
     pub fn debug_view(&self) -> DebugView {
         crcbl::debug_view::current()

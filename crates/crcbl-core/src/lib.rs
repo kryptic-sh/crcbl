@@ -54,8 +54,8 @@ pub mod world;
 
 /// Everything this crate exposes to the debug console.
 ///
-/// One list per crate, gathered by the engine at one seam —
-/// `docs/plan/52-debug-console.md` decision 2. It holds `log`, the command that
+/// One list per crate, gathered by the engine at one seam — debug-console
+/// decision 2 in `docs/notes/tooling.md`. It holds `log`, the command that
 /// reads and sets the live filter; `tests/console_table.rs` is what keeps it in
 /// step with what the source actually declares.
 #[must_use]

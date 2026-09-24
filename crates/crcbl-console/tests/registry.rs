@@ -34,7 +34,7 @@ convar! {
 }
 
 convar! {
-    /// A variable declared the way plan 52 writes one.
+    /// A variable declared the way debug-console decision 2 writes one.
     pub static R_SHOUTED: bool = true;
 }
 
@@ -107,7 +107,7 @@ concommand! {
     }
 }
 
-/// The host state a binding writes, standing in for slice 2's settings stack.
+/// The host state a binding writes, standing in for the settings stack.
 #[derive(Debug, Default)]
 struct Host {
     volume: f32,
@@ -686,9 +686,10 @@ fn reset_refuses_a_variable_whose_storage_is_the_settings_stack() {
     assert_eq!(host.volume, 0.25, "and it wrote nothing");
 }
 
-/// **A bare `reset` moves the debug variables and leaves the saved ones**, which
-/// is plan decision 7's "every non-`ARCHIVE` variable": a console session that
-/// emptied the player's settings file would be a preference gone for good.
+/// **A bare `reset` moves the debug variables and leaves the saved ones**,
+/// which is debug-console decision 7's "every non-`ARCHIVE` variable": a
+/// console session that emptied the player's settings file would be a
+/// preference gone for good.
 #[test]
 fn a_bare_reset_moves_the_unsaved_variables_and_leaves_the_saved_ones() {
     let registry = reset_registry();

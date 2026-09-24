@@ -893,14 +893,14 @@ the struct and in the macro's docs.
 The 2026-09-07 seam review proposed the knob beside
 `crcbl::render::console_table()` or in `crcbl-console`. Neither works.
 `crcbl-console`'s Cargo.toml charter is "**No dependencies at all**, on purpose"
-(plan decision 1), so it cannot log a refused write — and reporting the refusal
-rather than dropping it is the one behaviour both samples' `set` had.
-`crcbl-render` is wrong the other way: the knowledge is about `ConVar` and
-`Table`, not rendering, and there are three console tables (`crcbl`,
-`crcbl_core`, `crcbl_render`), so `Knob::named` takes the table as an argument
-and a knob in render could not name the other two. It landed in
-`crates/crcbl/src/knob.rs`, the same place the pause menu and `PageBundle` went
-for the same kind of reason.
+(debug-console decision 1 in `docs/notes/tooling.md`), so it cannot log a
+refused write — and reporting the refusal rather than dropping it is the one
+behaviour both samples' `set` had. `crcbl-render` is wrong the other way: the
+knowledge is about `ConVar` and `Table`, not rendering, and there are three
+console tables (`crcbl`, `crcbl_core`, `crcbl_render`), so `Knob::named` takes
+the table as an argument and a knob in render could not name the other two. It
+landed in `crates/crcbl/src/knob.rs`, the same place the pause menu and
+`PageBundle` went for the same kind of reason.
 
 Its tests are `crates/crcbl/tests/knob.rs` and not a `mod tests`:
 `crcbl_console::guard::declared_names` holds `crcbl::console_table` to every

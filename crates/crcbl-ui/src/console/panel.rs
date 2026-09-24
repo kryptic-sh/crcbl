@@ -1,7 +1,7 @@
 //! The console panel: where the log, the prompt, the field, the **Send** button
 //! and the completion rows sit, and what they draw.
 //!
-//! `docs/plan/52-debug-console.md` decision 6, on the element tree —
+//! Debug-console decision 6 in `docs/notes/tooling.md`, on the element tree —
 //! `docs/plan/07-ui-debug.md` rung 7d2. [`ConsolePanel::layout`] begins the
 //! frame, builds the tree and lays it out; [`ConsolePanel::point`] and
 //! [`ConsolePanel::render`] only read what it built. So a test can ask where a

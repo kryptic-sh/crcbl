@@ -91,7 +91,7 @@ const SWALLOWED = new Set([
  * debug console in every demo, and everything typed at that console arrives as
  * a `keydown` the page has no business acting on. Held with Ctrl or Meta it is
  * a browser shortcut instead, and the engine deliberately leaves it alone —
- * `docs/plan/52-debug-console.md` decision 5, which is the same test
+ * debug-console decision 5 in `docs/notes/tooling.md`, which is the same test
  * `Pending::observe` applies on the engine's own side. So the swallow has to
  * carry the same condition: unconditional would take the visitor's devtools
  * shortcut away, and none at all would let the page act on a keystroke the

@@ -1,6 +1,6 @@
 //! This crate's console table, held to this crate's source.
 //!
-//! Plan decision 2's second half, and the three lines
+//! Debug-console decision 2's second half, and the three lines
 //! `crcbl_console::guard::declared_names` exists for: a declaration beside the
 //! code it belongs to is only reachable once it is in the crate's one list, and
 //! nothing but this makes the list keep up. Forgetting it is then a red test

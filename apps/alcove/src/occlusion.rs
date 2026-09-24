@@ -9,14 +9,15 @@
 //!
 //! # Why by name and not by symbol
 //!
-//! `crcbl_render::ssao` is a private module: the variables it declares reach the
-//! outside world through [`crcbl::render::console_table`], which is the seam
-//! `docs/plan/52-debug-console.md` decision 2 puts on a crate. So this module
-//! looks each one up in that table rather than naming a `pub static` that does
-//! not exist — and that is the right shape as well as the only one, because it
-//! is exactly the seam a person typing `r_ssao_radius 1.5` goes through. A row
-//! on the pause panel and a typed line cannot hold two answers that disagree,
-//! because there is one cell and both write it.
+//! `crcbl_render::ssao` is a private module: the variables it declares reach
+//! the outside world through [`crcbl::render::console_table`], which is the
+//! seam debug-console decision 2, recorded in `docs/notes/tooling.md`, puts on
+//! a crate. So this module looks each one up in that table rather than naming a
+//! `pub static` that does not exist — and that is the right shape as well as
+//! the only one, because it is exactly the seam a person typing
+//! `r_ssao_radius 1.5` goes through. A row on the pause panel and a typed line
+//! cannot hold two answers that disagree, because there is one cell and both
+//! write it.
 //!
 //! # Ranges are the variable's, not this sample's
 //!
@@ -252,9 +253,9 @@ pub fn reset() {
 /// Whether the frame draws the occlusion channel as grey instead of shading.
 ///
 /// **Read, not kept**, on `apps/lantern`'s terms: the `AO VIEW` row and the
-/// console's `debug_view ambient occlusion` are one value —
-/// `docs/plan/52-debug-console.md` decision 8 — and [`crcbl::engine::Loop`] is
-/// what puts it into force.
+/// console's `debug_view ambient occlusion` are one value — debug-console
+/// decision 8 in `docs/notes/tooling.md` — and [`crcbl::engine::Loop`] is what
+/// puts it into force.
 #[must_use]
 pub fn occlusion_view() -> bool {
     crcbl::debug_view::current() == DebugView::AmbientOcclusion

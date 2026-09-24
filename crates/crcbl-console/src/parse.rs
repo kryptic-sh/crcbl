@@ -1,8 +1,8 @@
 //! Turning a typed line into the statements the registry runs.
 //!
-//! Source's grammar, which is what plan decision 7 asks for: a bare name, a name
-//! and its arguments, an optional `=` between the two, double-quoted strings,
-//! and `;` separating several statements on one line.
+//! Source's grammar, which is what debug-console decision 7 asks for: a bare
+//! name, a name and its arguments, an optional `=` between the two,
+//! double-quoted strings, and `;` separating several statements on one line.
 
 use crate::value::Fault;
 

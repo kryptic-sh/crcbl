@@ -6021,49 +6021,99 @@ determinism and accept the tile. That is a design call about how this project
 verifies rendering, not an AO fix, and it is why the AO path was not touched in
 the session that found this.
 
-## A plan's numbered slices are an addressing scheme (2026-08-31)
+## What the deleted 52-debug-console plan left unbuilt (2026-09-24)
 
-**The standing rule is that shipped work leaves the plans**, and
-`docs/plan/52-debug-console.md`'s "Delivery, in order" is eleven numbered slices
-of which ten have landed — narrative that `git log` and the changelog already
-hold. Trimming it to the one deferred item was tried on 2026-08-31 and
-**reverted**, because the numbers are cited from outside the document as
-identifiers:
+The console is built; its rules and a table of its numbered decisions and
+delivery slices are in `docs/notes/tooling.md` under _What the deleted
+52-debug-console plan left behind_. The plan's slice 8 said four of the gaps
+below were "in `docs/backlog.md`" when they were only in the notes file's limits
+section; they are here now, re-verified against the tree on 2026-09-24.
 
-| citation                              | names                 |
-| ------------------------------------- | --------------------- |
-| `CHANGELOG.md`                        | slices 2, 5, 10       |
-| `crates/crcbl/src/engine.rs`          | slices 2, 5, 6, 8, 10 |
-| `crates/crcbl/src/settings.rs`        | slice 5               |
-| `crates/crcbl/src/console_config.rs`  | slice 9               |
-| `apps/asteroids/src/app.rs`           | slice 8               |
-| `apps/breach/src/app.rs`              | slice 8               |
-| `apps/quarry/tests/device/console.rs` | slice 6               |
-| `web/tools/browser-e2e.mjs`           | slice 7               |
-| `web/run-browser-e2e.sh`              | slice 7               |
+### `Flags::SIM` is reserved, and its first variable is the trigger
 
-Deleting the list leaves every one of those pointing at nothing, and one of them
-is the changelog, which is history rather than a document to rewrite.
-**`tools/check-doc-citations.sh` does not catch this** — it resolves paths, and
-every one of these paths still resolves; only the slice number inside it goes
-stale. So the trim passed every gate and was still wrong.
+**Deferred on purpose, not outstanding.** `crcbl_console::Flags::SIM` exists and
+prints, and nothing in the workspace declares a variable with it (verified
+2026-09-24: the only uses are in `crates/crcbl-console/src/var.rs`). Console
+commands are host input, like a key press, and are not part of the tick input
+stream, so a variable that changes what the simulation computes would break the
+same-binary determinism that physics, replay and netcode rest on. **Until this
+is built, such a variable must not be a console variable.**
 
-**This needs a call, and the options are:**
+What building it takes, when the first `SIM` variable is wanted:
 
-- **Leave it.** The plan carries shipped narrative forever, against the rule.
-- **Reduce each landed slice to one line** — number, name, landed date — so the
-  narrative goes but the identifier survives. Every citation keeps working. This
-  is the cheap option and it is what I would do.
-- **Delete the list and rewrite every one of those citations** to name the thing
-  rather than the number. Correct, and it touches the changelog, which argues
-  against it.
+- a `Command` message carrying the set over the transport;
+- the server applying it on a tick boundary, not when the line is typed;
+- the replay stream recording it, so a replay reproduces it;
+- a client that is not the host refusing it.
 
-The same question applies to any plan whose delivery list is numbered and cited
-from outside it. **`45-shadows.md` is not one of them** — checked 2026-08-31:
-its five atlas items are referenced by number from exactly one place, this file,
-so trimming that list costs one line here and nothing else. The rule to carry
-forward is to grep for the numbers before trimming a list, rather than to assume
-either answer.
+That is also what `docs/plan/07-ui-debug.md` item 4's "works identically over a
+network connection" asks of the console. Building the transport half before a
+caller exists would be machinery nothing exercises.
+
+### Web text input drops `AltGr` characters
+
+`__crcbl_web_key` in `crates/crcbl-shell/src/web/mod.rs` queues a
+`ShellEvent::TextCommit` only for an edge with neither `Ctrl` nor `Meta` held
+(verified 2026-09-24: `typing` tests `STATE_CTRL | STATE_SUPER`). Windows and
+X11 report `AltGr` as `Ctrl`+`Alt`, so a character reached through it (`@`, `\`,
+`{` on a German or French layout) commits nothing in a browser — in the console
+and in every other text field. The function's own doc comment states the gap.
+
+**It needs a decision, not just code.** Treating `Ctrl`+`Alt` as text is the
+rule browsers' own editors use, and would type a character for every
+`Ctrl+Alt+<key>` shortcut on a layout with no `AltGr`. The likely better fix is
+`KeyboardEvent.getModifierState("AltGraph")`, which the shim would have to read
+and pass in the state word; nothing reads it today. Either way it wants a
+keyboard with an `AltGr` to try it on, and nothing in the tree has one.
+
+### Seven of the nine `HostedGame::actions` overrides are compile-checked, not driven
+
+Every sample that keeps an `ActionMap` hands it to `bind`/`unbind` through
+`HostedGame::actions`, in two shapes: the map on the `Game`, reached through
+`Game::action_map_mut` (asteroids, breakout, flappy, horde), and the map on the
+hosted struct (breach, orbit, puppet, shard, towers). One of each shape is
+driven end to end by a console line:
+`asteroids::app::tests::a_console_rebind_moves_the_key_the_ship_fires_on` and
+`breach::app::tests::a_console_rebind_moves_the_key_the_view_turns_on` (verified
+2026-09-24: no other app test types a `bind` line). The other seven are the same
+one-line body over a field checked by hand to be the one their `key_event`
+replay feeds; a forward to the wrong map would compile.
+
+Closing it is one test per app, each needing an observable that game already
+exposes. breach could not use its range map for its own, because
+`RenderState::imposed_aim` writes the yaw there.
+
+### A browser cannot paste
+
+`Shell::clipboard_request` in `crates/crcbl-shell/src/web/mod.rs` returns
+`Unsupported` and `clipboard_readable` answers `false` (verified 2026-09-24), so
+`Ctrl`+`V` in a demo's console prints that the backend has no clipboard —
+checked by `EXPECTATIONS.quarry.console.pasteRefused` and by name in
+`web/run-browser-e2e.sh`. Closing it is `navigator.clipboard.readText()`, a
+permission-gated promise in a secure context: the shim would call it from the
+keydown whose gesture satisfies the requirement and resolve it into a queued
+`ShellEvent::ClipboardData`. **First find out whether a headless CI browser can
+be granted the permission at all**; if not, the refusal check is the only one
+the gate can carry.
+
+### A pasted newline joins two lines
+
+`crcbl_ui::edit::LineEdit::insert` drops control characters (verified
+2026-09-24), which is the rule every path into a field follows, so pasting
+`echo a` newline `echo b` into the console gives the one line `echo aecho b`.
+Source's console runs each line of a multi-line paste. Doing that here means a
+queue of pasted lines the console drains one submit at a time, which is a change
+to how `Ui::text_input` hands a paste over, not to `TextPump`'s clipboard path.
+
+### `bind` spells keys only
+
+`debug_console::apply_bind` in `crates/crcbl/src/debug_console.rs` rebinds an
+action to `Binding::Key` alone (verified 2026-09-24), so an action driven by a
+mouse button, `KeyAxis`, `Wasd`, `Chord`, `PointerPosition`, a pad input or a
+`Virtual` on-screen control can be listed (`binding_name` prints each variant)
+and cleared, but not written back. A `bind aim mouse` spelling needs a parser
+for the other variants and a decision about how `Wasd` and `KeyAxis` read on one
+line.
 
 ## What the start-up autoexec left uncovered (2026-09-02)
 

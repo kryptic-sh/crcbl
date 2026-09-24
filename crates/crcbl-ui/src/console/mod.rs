@@ -1,12 +1,12 @@
 //! The debug console's widgets: an editable line, a view of the log, and the
 //! panel that lays the two out.
 //!
-//! `docs/plan/52-debug-console.md` decision 6 is the design. Everything here is
-//! **data in, draw list out**: the panel is handed the log records it should
-//! show and the completion candidates it should offer, and it reports the line
-//! that was submitted. It reads no ring, no registry and no keyboard — the
-//! engine's slice owns all three — so the whole console panel is testable with
-//! nothing running.
+//! Debug-console decision 6 in `docs/notes/tooling.md` is the design.
+//! Everything here is **data in, draw list out**: the panel is handed the log
+//! records it should show and the completion candidates it should offer, and it
+//! reports the line that was submitted. It reads no ring, no registry and no
+//! keyboard — the engine's slice owns all three — so the whole console panel is
+//! testable with nothing running.
 //!
 //! ```text
 //! ConsolePanel ── layout(extent, atlas, pointer, input) ─→ ConsoleLayout

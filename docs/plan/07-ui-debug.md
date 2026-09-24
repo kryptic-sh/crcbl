@@ -445,9 +445,10 @@ Surfaces for instrumentation that already exists:
 4. **Console** — log sink view with filtering + command registry (`Fn(&str)`
    handlers registered by systems). Server commands route through the normal
    transport as `Command` messages — the console works identically over a
-   network connection (server-authoritative debugging, free). **Planned in full
-   and pulled forward in [52-debug-console.md](52-debug-console.md)**
-   (2026-08-30); the transport half is that plan's reserved `SIM` flag.
+   network connection (server-authoritative debugging, free). **Planned in full,
+   pulled forward and built (2026-08-30/31)**; its rules are in
+   [the tooling notes](../notes/tooling.md), and the transport half is the
+   reserved `Flags::SIM`, whose trigger and cost are in `docs/backlog.md`.
 5. **Debug draw controls** — toggle the stage 3 debug-draw categories (AABBs,
    system overlays) per system. **The geometry half of the layer those controls
    toggle is built (2026-08-31)**: `crcbl_render::debug_draw` is the

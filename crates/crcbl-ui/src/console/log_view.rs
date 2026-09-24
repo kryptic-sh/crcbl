@@ -1,9 +1,9 @@
 //! The console's view of the log: the lines it holds, where it is scrolled to,
 //! and how they are drawn.
 //!
-//! `docs/plan/52-debug-console.md` decision 6. The view is fed [`Record`]s and
-//! nothing else — it does not read the ring, which is why a test here can hold
-//! a log with no logger installed.
+//! Debug-console decision 6 in `docs/notes/tooling.md`. The view is fed
+//! [`Record`]s and nothing else — it does not read the ring, which is why a
+//! test here can hold a log with no logger installed.
 //!
 //! # What it draws is narrower than what it holds
 //!

@@ -33,11 +33,11 @@ impl Flags {
     pub const READ_ONLY: Self = Self(1 << 1);
     /// Reserved: a value the simulation reads.
     ///
-    /// Nothing sets one yet. Plan decision 9 is the rule that lands with the
-    /// first one: a `SIM` variable travels as a transport `Command`, is applied
-    /// on a tick boundary and is recorded by the replay stream, because a
-    /// variable that changes what the simulation computes would otherwise break
-    /// same-binary determinism.
+    /// Nothing sets one yet. Debug-console decision 9 is the rule that lands
+    /// with the first one: a `SIM` variable travels as a transport `Command`,
+    /// is applied on a tick boundary and is recorded by the replay stream,
+    /// because a variable that changes what the simulation computes would
+    /// otherwise break same-binary determinism.
     pub const SIM: Self = Self(1 << 2);
 
     /// Every flag with a name, in the order [`Display`](fmt::Display) prints
@@ -126,7 +126,7 @@ enum Cell {
 ///
 /// **There is no text `ConVar`.** Every constructor takes a kind that fits an
 /// atomic, so no path builds one with [`Kind::Text`]; a text variable is a
-/// [`Binding`] instead. Plan decision 1.
+/// [`Binding`] instead. Debug-console decision 1.
 ///
 /// The cells are read and written [`Relaxed`](Ordering::Relaxed): a console
 /// variable orders nothing but itself, and a reader that saw the old value one
@@ -384,11 +384,11 @@ impl ConVar {
 
 /// A variable whose storage is somewhere else.
 ///
-/// The shape every settings key takes in slice 2: a `get`/`set` pair over the
-/// host state a [`Context`](crate::Context) carries, so the console can print
-/// and write a value it does not own. The host is `&dyn Any` because this crate
-/// depends on nothing and so cannot name what the engine keeps there; the pair
-/// of functions is written by the crate that *can*.
+/// The shape every settings key takes (debug-console slice 2): a `get`/`set`
+/// pair over the host state a [`Context`](crate::Context) carries, so the
+/// console can print and write a value it does not own. The host is `&dyn Any`
+/// because this crate depends on nothing and so cannot name what the engine
+/// keeps there; the pair of functions is written by the crate that *can*.
 #[derive(Clone, Copy)]
 pub struct Binding {
     name: &'static str,
@@ -709,7 +709,8 @@ mod tests {
 
     // -- bindings ------------------------------------------------------------
 
-    /// A stand-in for the host state slice 2 will put behind a binding.
+    /// A stand-in for the host state debug-console slice 2 puts behind a
+    /// binding.
     #[derive(Debug, Default)]
     struct FakeHost {
         gain: f32,

@@ -636,9 +636,9 @@ pub(crate) mod shim {
     /// * **A release commits nothing**, on every backend. Only `STATE_EDGE`
     ///   does.
     /// * **`Ctrl` or `Meta` held makes the press a shortcut**, not typing —
-    ///   `docs/plan/52-debug-console.md` decision 5. `Ctrl+A` would otherwise
-    ///   type an `a` into whatever has the caret, because a browser reports
-    ///   `key: "a"` for it all the same.
+    ///   debug-console decision 5 in `docs/notes/tooling.md`. `Ctrl+A` would
+    ///   otherwise type an `a` into whatever has the caret, because a browser
+    ///   reports `key: "a"` for it all the same.
     ///
     /// A **repeat** does commit, and that is deliberate: holding a key down in
     /// a text field types it over and over on every platform, and the engine's

@@ -66,10 +66,10 @@ pub enum Kind {
     Enum(&'static [&'static str]),
     /// Free text.
     ///
-    /// **No [`ConVar`](crate::ConVar) has this kind** — a `String` in a `static`
-    /// needs a lock and an allocation the engine's statics do not want, so a
-    /// text variable exists only as a [`Binding`](crate::Binding), whose storage
-    /// is somewhere that can hold one. Plan decision 1.
+    /// **No [`ConVar`](crate::ConVar) has this kind** — a `String` in a
+    /// `static` needs a lock and an allocation the engine's statics do not
+    /// want, so a text variable exists only as a [`Binding`](crate::Binding),
+    /// whose storage is somewhere that can hold one. Debug-console decision 1.
     Text,
 }
 

@@ -1,10 +1,10 @@
 //! The debug view every game shares: one console variable, one application.
 //!
-//! `docs/plan/52-debug-console.md` decision 8 — "the AO view, and every debug
-//! view, in every build". [`crcbl_render::ForwardRenderer`] has carried five
-//! independent switches and a precedence resolver for a long time, and until
-//! this module nothing engine-level set them: `apps/lantern` hand-wired the
-//! occlusion view behind its pause panel, `apps/quarry` owned a
+//! Debug-console decision 8 in `docs/notes/tooling.md` — the AO view, and every
+//! debug view, in every build. [`crcbl_render::ForwardRenderer`] has carried
+//! five independent switches and a precedence resolver for a long time, and
+//! until this module nothing engine-level set them: `apps/lantern` hand-wired
+//! the occlusion view behind its pause panel, `apps/quarry` owned a
 //! [`DebugView`] of its own, `apps/viewer` bound `N` to the normals view, and
 //! the other thirteen samples had no way to reach any of it.
 //!
@@ -17,12 +17,12 @@
 //!
 //! # Why the variable is the storage, and why it lives here
 //!
-//! A [`ConVar`](crcbl_console::ConVar) **is** the value, Source-style — plan
-//! decision 1 — so a row and a console line cannot hold two answers that
-//! disagree. That is the whole reason the three samples above gave up their own
-//! fields: each wrote its view into the renderer on every frame, so whichever of
-//! the two ran last won, and a console line was silently undone by the next
-//! frame.
+//! A [`ConVar`](crcbl_console::ConVar) **is** the value, Source-style —
+//! debug-console decision 1 — so a row and a console line cannot hold two
+//! answers that disagree. That is the whole reason the three samples above gave
+//! up their own fields: each wrote its view into the renderer on every frame,
+//! so whichever of the two ran last won, and a console line was silently undone
+//! by the next frame.
 //!
 //! It is declared in `crcbl` rather than in `crcbl-render`, where decision 8
 //! sketched it, because **nothing in `crcbl-render` can apply it**: a static has
@@ -67,9 +67,9 @@ crcbl_console::convar! {
 crcbl_console::concommand! {
     /// Draw a debug channel instead of the shaded frame — `debug_view ambient occlusion`.
     ///
-    /// With no argument, prints the view in force. The spelling
-    /// `docs/plan/52-debug-console.md` decision 7 promises; `r_debug_view` is
-    /// the variable underneath, and both reach the same cell.
+    /// With no argument, prints the view in force. The spelling debug-console
+    /// decision 7 (`docs/notes/tooling.md`) promises; `r_debug_view` is the
+    /// variable underneath, and both reach the same cell.
     pub fn debug_view(cx, args) {
         if args.is_empty() {
             cx.print(format!("debug_view = {}", current().label()));

@@ -1,20 +1,20 @@
 //! `config`: running a file of console lines, and the one that runs itself at
 //! start-up.
 //!
-//! `docs/plan/52-debug-console.md` slice 9's "a `config` command that runs a
-//! file of commands" — Source's `exec`, under the name the plan gives it. A
-//! line typed at the console is one line; a config file is the twenty a person
-//! would otherwise retype every session, and running one is the same
+//! Debug-console slice 9's "a `config` command that runs a file of commands" —
+//! Source's `exec`, under the name the plan gave it (`docs/notes/tooling.md`).
+//! A line typed at the console is one line; a config file is the twenty a
+//! person would otherwise retype every session, and running one is the same
 //! [`Registry::execute`](crcbl_console::Registry::execute) over the same
 //! [`Context`], so a command reachable from the prompt is reachable from a file
 //! and no second execution path exists to disagree with the first.
 //!
 //! # Why it is here and not in `crcbl-console`
 //!
-//! `crcbl-console` depends on nothing and names no engine type — plan decision
-//! 1 — and this command has to reach a **file**, which on `wasm32` is not a
-//! filesystem at all. Both halves of that are already answered in this crate:
-//! [`crate::settings`]'s `save` writes through
+//! `crcbl-console` depends on nothing and names no engine type — debug-console
+//! decision 1 — and this command has to reach a **file**, which on `wasm32` is
+//! not a filesystem at all. Both halves of that are already answered in this
+//! crate: [`crate::settings`]'s `save` writes through
 //! [`SettingsStack::with_platform_storage`], which is a config directory
 //! natively and the page's Origin Private File System store in a browser. So
 //! `config` reads through the same seam, out of the same directory the
