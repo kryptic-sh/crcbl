@@ -3217,9 +3217,9 @@ EW after the engine implementation lands, then update EW's pinned revision.
 
 ## Physics rungs 0 and 1 shipped without (2026-09-17)
 
-- **Tumble's wind tunnel and golden frame**
-  ([24-tumble.md](plan/sample/24-tumble.md)'s milestone 1, skipped rather than
-  built; its bullets scene became milestone 6's Bullets room).
+- **Tumble's wind tunnel and golden frame** (its milestone 1, skipped rather
+  than built; its bullets scene became milestone 6's Bullets room) — carried
+  under _What the deleted 24-tumble plan left unbuilt_ below.
 - **Decision: a clock for wasm.** `Instant` panics on wasm32, so tumble's page
   shows no step time and its browser figure is JS timing around the whole frame
   call, not a broadphase/narrow-phase/solver split. Options: a `performance.now`
@@ -3255,13 +3255,78 @@ EW after the engine implementation lands, then update EW's pinned revision.
   broadphase and softness unit tests were not sabotaged; the integration tests
   in `crates/crcbl-phys/tests/contacts.rs` were.
 
+## What the deleted 24-tumble plan left unbuilt (2026-09-25)
+
+Tumble's plan was deleted on 2026-09-25 with milestones 2 (Spin), 3 (Pachinko),
+5 (Settle), 6 (Bullets) and 7 (Bridge) built, milestone 4 (Tower) built but for
+the Galton board, and milestone 1 built but for the wind tunnel and the golden
+frame: six rooms on keys 1–6 in `apps/tumble`, and the `/demos/tumble/` page
+gated in `pages.yml` on the pinned hash. Its rules and measurements are in
+`docs/notes/samples.md` under _What the deleted sample plans 13, 16 and 24 left
+behind_. What it still asks for, each verified absent from `apps/tumble/src` on
+2026-09-25 unless marked:
+
+### Tumble's wind tunnel, Galton board and golden frames (2026-09-25)
+
+- **The wind tunnel** (milestone 1): spheres under a drag provider — the one
+  scene milestone 1 named that today's engine could always have drawn.
+- **The Galton board** (milestone 4): balls through a lattice of pegs into bins,
+  the bin histogram drawn against the binomial curve it should approach — a
+  statistics check that fails visibly when restitution or friction is wrong.
+- **A golden frame per scene**, and the CI golden step milestone 1 asked for.
+  `apps/tumble` has no `tests` directory at all; the native check is
+  `scene.rs`'s `the_hash_at_the_check_tick_is_the_pinned_one` and the browser
+  gate, which prove the simulation and not the picture.
+
+### Tumble's full-scale pit and its benchmark figures are rung 6's (2026-09-25)
+
+Milestone 8, "Pit": the ball pit spawning **without end**, overflowing, and
+despawning each ball once it is past a radius named as a constant and shown on
+the page (`apps/tumble/src/pit.rs` stops at `BALLS` and never despawns), with
+spawns and despawns per second on the panel, the thread-count and SIMD hash
+checks, and **the most live bodies held inside a 60 Hz tick, recorded natively
+and in the browser**. It waits on the solver work in _Contact solver rung 6:
+colouring, the wide kernel and parallel stages_, which names the pit as its
+proving scene. The exit criteria also want **the base-100 pyramid's figure** as
+the benchmark (the base-20 pyramid is the regression case and stands); no
+base-100 figure is recorded anywhere (grepped `apps/tumble` and
+`crates/crcbl-phys` for it, 2026-09-25).
+
+### Tumble's pool and gale, and its replay room (2026-09-25)
+
+- **Milestone 9, "Pool and gale"**: crates and balls floating in a pool under
+  gusts, submerged fraction against Archimedes and drag from the wind field —
+  the scene for _Buoyancy and wind force providers_, which is the engine half.
+- **Scope item 10, "Replay"**: a pile's run recorded and replayed, with both
+  hashes on the page. It needs a replay recorder to exist first (topic 22).
+
+### Tumble's debug view, page controls and server loopback (2026-09-25)
+
+- **The physics debug view**: contact points and normals, AABBs, islands
+  coloured and sleeping bodies dimmed. The draw is the engine's to provide —
+  _Physics debug suite: draw, scrub, query visualiser_ — and tumble is where it
+  would be seen first.
+- **Page controls.** The plan wanted the scene selector, the spawn rate, the
+  body cap and the debug view as HTML controls on `/demos/tumble/`; the page has
+  none, and `apps/tumble/src/menu.rs` says they arrive with the scenes that need
+  them. The room is picked by the keys only.
+- **Sample rule 2 is not met and no exemption is written.** The plan had the
+  bodies as server state over the loopback, which would also measure what
+  replicating thousands of transforms costs; `apps/tumble/src` opens no
+  `InMemoryTransport` and implements no `GameModule` (grep, 2026-09-25). Either
+  the loopback or an argued exemption on lantern's ground — tumble has no game
+  state either, but its plan claimed the loopback as a measurement — is owed.
+- **Not verified:** that every rung's counters reach the headless summary as
+  well as the panel and the page, which the exit criteria ask for; only the
+  panel and the page were read.
+
 ## Physics and tessellation: planned, with decisions owed (2026-09-15)
 
 Physics has been built since: the contact solver's rungs 0 to 5 landed by
-2026-09-23 with [tumble](plan/sample/24-tumble.md), its decisions are in
-`docs/notes/simulation.md` (_What the deleted 36-contact-solver plan left
-behind_), and what it left is under _Contact solver L2/L3: rungs 0 to 5 built,
-and what they left_ below. Tessellation is planned, nothing built:
+2026-09-23 with `apps/tumble`, its decisions are in `docs/notes/simulation.md`
+(_What the deleted 36-contact-solver plan left behind_), and what it left is
+under _Contact solver L2/L3: rungs 0 to 5 built, and what they left_ below.
+Tessellation is planned, nothing built:
 [59-tessellation.md](plan/59-tessellation.md) with
 [relief](plan/sample/25-relief.md). What stays open:
 
@@ -10203,6 +10268,21 @@ force providers_. From rung 2:
   - Heavy loads on light chains (an 800 kg anvil on 5 kg planks, 160:1) stretch
     unbreakable hinges up to 8 cm for a few ticks: the sequential solver's
     mass-ratio limit, helped only partly by substeps.
+  - **Needs a decision: an island sleeps however deep its contacts are.** Sleep
+    reads only speed (`ContactSettings::sleep_speed`, `sleep_angular_speed`), so
+    a stack that reaches a still equilibrium while interpenetrated sleeps with
+    the overlap in it. Reported by EW 2026-09-25 (EW's authoring bug, since
+    fixed there): a light slug spawned about 1 cm inside an 11-part shotgun that
+    was lying on it, on a static table, slept with the two bodies 9–11 mm into
+    each other and the slug 2.7 mm into the table. Alone, the same slug rests
+    0.08 mm in, which is the contact spring's compression, verified in a scratch
+    reproduction. The depth under the heavy body is the soft contact's
+    mass-ratio limit, the same one the anvil-on-planks case above shows. The
+    option is to keep an island awake while any touching contact is deeper than
+    some bound (a few linear slops), so the push-out gets its chance. It would
+    cost a per-island depth check each tick, and in a genuinely heavy-on-light
+    stack it could hold an island awake forever. Not decided; nothing asks for
+    it.
   - Not built: the six-degree-of-freedom joint (L3's generic joint, with a lock,
     a limit and a motor per axis), the spherical joint's spring, the distance
     joint's spring force range. From the mesh half: no contact reduction across
@@ -10622,15 +10702,15 @@ browser build, which exists.
 
 **A doc claim corrected while auditing:** `16-wasm-modules.md` said
 `apps/lantern` and `apps/quarry` "carry none and claim no exemption". They do
-claim one now — `docs/plan/sample/13-lantern.md` and quarry's rules (in
-`docs/notes/samples.md`) both exempt the two samples from sample rules 2 and 10
-on the ground that they open no `World`, and `docs/plan/sample/10-sparks.md`
-exempts itself on topic 20's — visual-only VFX read no gameplay state.
-**`apps/bracket` is the one left**, and its own doc says so rather than being
-silent: `docs/plan/sample/16-bracket.md` records that it opens no `World` and
-implements no `GameModule` today, that rule 2 is owed here rather than exempted,
-and that the missing piece is engine work — a way for a `GameModule` to receive
-a `ClientToServer::Command` and reply to it, which `crcbl-server`'s receive loop
+claim one now — lantern's and quarry's rules (in `docs/notes/samples.md`) both
+exempt the two samples from sample rules 2 and 10 on the ground that they open
+no `World`, and `docs/plan/sample/10-sparks.md` exempts itself on topic 20's —
+visual-only VFX read no gameplay state. **`apps/bracket` is the one left**, and
+its rules say so rather than being silent: bracket's rules in
+`docs/notes/samples.md` record that it opens no `World` and implements no
+`GameModule` today, that rule 2 is owed here rather than exempted, and that the
+missing piece is engine work — a way for a `GameModule` to receive a
+`ClientToServer::Command` and reply to it, which `crcbl-server`'s receive loop
 leaves as an empty arm.
 
 **Two browser gaps stated in the doc and worth keeping visible:**
@@ -12413,6 +12493,15 @@ lantern's _Ray tracing and the acceleration structures are unbuilt_. Their rules
 and recorded measurements are in `docs/notes/samples.md` under _What the deleted
 sample plans 05, 14, 18, 19 and 20 left behind_.
 
+The plans for lantern (13), bracket (16) and tumble (24) were deleted on
+2026-09-25, each with at least half of it built. Lantern's and bracket's
+leftovers are under their headings below; tumble's are under _What the deleted
+24-tumble plan left unbuilt_, beside the physics entries. Their rules and
+recorded measurements are in `docs/notes/samples.md` under _What the deleted
+sample plans 13, 16 and 24 left behind_. The plans for hud (04), orbit (06) and
+shard (15) stay: less than half of hud and orbit is built, and shard's unbuilt
+milestone 2 is a networked design the plan still holds.
+
 ## breakout
 
 ### Breakout's 10-minute soak is unrun (2026-08-27)
@@ -12568,6 +12657,18 @@ stylesheet per theme, then the gallery, switcher and goldens on top. **What it
 blocks:** hud's exit criteria in full, and the wider claim that the engine's own
 UI — debug overlay, editor chrome, every sample HUD — is styled by stylesheets.
 
+**The inspector hud asks for is not the one that exists (checked 2026-09-25).**
+`Ui::inspector` (`crates/crcbl-ui/src/tree/widgets/inspector.rs`) is rung 8's
+reflection-driven _property_ inspector — a row per field of a `Reflect` value.
+The plan's UI inspector is a tree inspector: hover an element, see its layout
+boxes, the rules that matched it and its computed values. Nothing in `crcbl-ui`
+draws that; `crcbl_ui::style`'s cascade computes the matched set but exposes no
+view of it. That half is engine work before it is hud's. The plan's other exit
+criteria with nothing behind them yet: the live restyle shown headless (a
+screenshot before and after a `.css` edit), and the whole gallery traversable by
+pad, arrows or WASD alone behind a focus-path e2e — `crcbl_ui`'s focus exists
+(rung 6), a gallery to walk does not.
+
 ## viewer
 
 ### Viewer's hot-reload demo is built but not recorded (2026-08-27)
@@ -12655,6 +12756,22 @@ an open obligation rather than a settled decision.
 the doc. The exemption is hard to argue: rule 11's own text says the exemption
 is narrow and orbit has explicit 2D chrome. **What it blocks:** rule 11's claim
 that the ladder has no untextured-quad holdouts left.
+
+### Orbit's crash scrub and its drift record are owed (2026-09-25)
+
+**Not built.** The plan's "debug tools as instruments" asks for a physics scrub
+after a crashed landing, and its exit criteria for an energy-drift bound over
+ten thousand timewarped periods "recorded in doc". `apps/orbit` has no scrub or
+replay of a crash (verified by grep, 2026-09-25), and the drift bound exists
+only as the `DRIFT` bound inside
+`ten_thousand_revolutions_leave_the_orbit_where_it_was`
+(`crates/crcbl-phys/src/orbit.rs`) — a bound on the propagator, sized for
+another platform's `libm`, not a figure measured on this sample's flight. **What
+it would take:** record the drift that test measures in the plan's "Where this
+stands", and the scrub once the engine has one (_Physics debug suite: draw,
+scrub, query visualiser_). The scrub route is a guess at the cheapest one.
+Orbit's plan stays in `docs/plan/sample/06-orbit.md`; this entry only points at
+it.
 
 ## towers (`docs/plan/sample/07-towers.md`)
 
@@ -12990,18 +13107,41 @@ letter on its colour because there is no icon atlas and `crcbl icon bake` is not
 a verb. The sample still has no `build.rs` and no `assets/`, and the obligation
 now has a consumer waiting on it rather than none.
 
-## lantern (`docs/plan/sample/13-lantern.md`)
+## lantern
 
 ### Ray tracing and the acceleration structures are unbuilt (2026-08-27)
 
-**Not built.** Milestones 2 and 3 — BLAS and TLAS, ray-traced shadows and AO,
-ray-traced reflections and GI, the side-by-side and A/B-flip modes — are all
-unstarted, and the exit criterion "every topic 18 effect has a golden frame
-**per lighting path**" cannot be met with one path. The debug panel's `unbuilt`
+**Not built.** Lantern's milestones 1 (the room and the whole raster path) and 4
+(the toggle matrix across all three layers, the forced-path runs, the Pages
+demo) are built; milestones 2 and 3 are all unstarted — **2**: the acceleration
+structures plus ray-traced shadows and AO (P7C); **3**: ray-traced reflections
+and GI, and the side-by-side and A/B-flip modes. The debug panel's `unbuilt`
 section says so on screen. This entry used to add that the environment a
 reflection falls back to is a baked grid `bounce` gathers from one analytic
 bounce off the room's shell; that is no longer the case — lantern's CPU bake
 left with the RSM updater.
+
+**What finishing means, from the deleted plan's exit criteria:**
+
+- **The structures behave:** BLAS built at bake, TLAS refit per frame from the
+  same instance data the cull pass reads, and the panel showing build cost and
+  refit cost separately.
+- **A golden frame per topic 18 effect per lighting path** in CI — today there
+  is one path, so one golden per claim.
+- **Side-by-side and A/B-flip modes**, and through them a **human-reviewed
+  pairwise comparison** of the two paths, recorded in `docs/notes/samples.md`
+  beside lantern's rules with the goldens it was made against. The paths are not
+  expected to match pixel for pixel; a scene that reads right on one and wrong
+  on the other is a defect in whichever is wrong.
+- **A material edited once is correct under both paths**, demonstrated by the
+  side-by-side rather than argued.
+- **The web demo renders the complete raster picture** — no effect silently
+  absent, no black surface where a ray-traced one would be.
+- **A recorded budget for both paths at a stated resolution, and for the
+  browser.** Nothing records a whole-frame lantern budget today, for the raster
+  path either: per-pass lantern timings exist in `docs/notes/rendering.md` for
+  individual effects, which is not the criterion (checked 2026-09-25 by grepping
+  the notes and this file for lantern budgets).
 
 **What it would take:** topic 18's ray-tracing half. **What it blocks:** the
 sample's entire reason for existing — that a human has compared the two lighting
@@ -13134,7 +13274,7 @@ figure on screen is the shape the physics moved. An authored rig would be a
 second character system with no animation to drive it, and `apps/puppet` owns
 that seam.
 
-## bracket (`docs/plan/sample/16-bracket.md`)
+## bracket
 
 ### bracket's ladder still stretches, six times slower (2026-09-06)
 
@@ -13189,6 +13329,14 @@ is a way for a `GameModule` to receive a command and reply to it, and it is
 engine work. `docs/backlog.md` already carries this under "bracket does not yet
 drive the transport (2026-08-24)"; it is re-verified and still accurate.
 
+**The multi-client half is absent for a second, independent reason:** `Server`
+holds one transport and one session manager, so "many connections, low
+bandwidth" has no implementation to demonstrate. The exit criterion the
+milestone closes: a native client completes the full flow — queue, match,
+result, ladder — against a server found by direct address or LAN discovery, and
+the same flow runs in-process in the web build. A browser cannot show the
+multi-client half either way, since both ends live in one wasm module.
+
 **Rule 2 is owed here rather than exempted.** `apps/bracket` opens no `World`
 and implements no `GameModule`. Unlike sparks, bracket should NOT get an
 exemption written — its exit criteria assume the transport arrives — so the
@@ -13207,6 +13355,46 @@ remove.
 **What it blocks:** topic 27's tier 3, which `docs/plan/sample/11-breach.md`
 explicitly handed to bracket when breach went LAN-only. If bracket does not
 build it, nothing does.
+
+### bracket's ladder is not persisted, and nothing reads service traffic on the netgraph (2026-09-25)
+
+**Not built.** Bracket's deleted plan asked, in milestone 5, for the ladder to
+persist through topic 14 and to survive a server restart "with no lost or
+duplicated results"; `apps/bracket/src` touches no `crcbl::store` API (verified
+2026-09-25 by grep). **What it would take:** a `SaveWriter` payload holding each
+player's rating, deviation and volatility plus the result log's sequence number,
+so a result replayed after a restart is refused rather than counted twice, and a
+test that stops and reopens the server mid-run and fails when the sequence check
+is removed. It belongs with the native server milestone above: the web demo has
+no restart to survive.
+
+**Separately, the exit criterion "the netgraph shows service traffic sensibly"**
+— rule 4's network module on request/response traffic rather than tick traffic,
+where a panel that reads as broken is a finding about the panel — cannot be
+checked until the transport milestone carries traffic.
+
+### bracket's client, parties and nightly soak are smaller than the plan's (2026-09-25)
+
+**Not built, each verified 2026-09-25 against `apps/bracket/src` and
+`.github/workflows/`:**
+
+- **The client is a no-input demo, not the UI-only client the plan scoped** —
+  sign in, queue, see the estimated wait, get matched, press a button to "play",
+  see the rating change and the ladder position. The page draws the draw list's
+  primitives (`apps/bracket/src/page.rs`); the plan wanted it built on
+  `crcbl-ui`'s widgets as their second non-trivial consumer after hud. Sign-in
+  needs the identity milestone.
+- **No party formation.** The queue pairs single players; nothing in `queue.rs`
+  groups them.
+- **The population soak is unit tests, not a nightly job.** `sim.rs`'s tests
+  (`a_population_finds_its_true_skills`,
+  `the_ladder_keeps_its_scale_over_a_long_run`) run on every CI pass at 64
+  players; no workflow runs "thousands of synthetic clients" on a schedule. What
+  it would take: a scheduled job running `bracket sim` at a few thousand players
+  and failing on the convergence tolerance recorded in `docs/notes/samples.md`
+  (_bracket (16): measured_). Note that `a_population_finds_its_true_skills`
+  asserts a mean error under 90 points, not the under-40 tolerance the plan
+  recorded from five seeds; whether to tighten it is a call about flake margin.
 
 ### The two pointer axes: what is deliberate, and the arm nothing exercises (2026-08-28)
 
@@ -23840,7 +24028,10 @@ The entry this replaces said lantern could not be built because the engine had
 no way for an app to describe a scene. That is gone: the six scene-API slices
 landed and `apps/lantern` renders the charter's room from a `SceneDesc` of its
 own. What follows is what the sample still owes, and the findings the first real
-room produced. `docs/plan/sample/13-lantern.md` carries the status.
+room produced. Lantern's rules and recorded readings are in
+`docs/notes/samples.md` (_What the deleted sample plans 13, 16 and 24 left
+behind_), and its unbuilt ray-traced half is _Ray tracing and the acceleration
+structures are unbuilt_.
 
 ### Owed, in the order a slice would take them
 
@@ -23850,10 +24041,11 @@ room produced. `docs/plan/sample/13-lantern.md` carries the status.
   because nothing builds a structure; lantern's panel says so on a row rather
   than implying a choice was made.
 - **The rest of milestone 4's matrix.** The three effect rows are on the pause
-  menu now, doing read-modify-write on the programmatic layer. What the charter
-  asks for beyond them — the side-by-side and A/B-flip comparison modes — is
-  still owed. The `--help` half is closed: the three flags now point at the
-  SHADOWS, AO and REFLECTIONS rows and say what an `unavailable` row means, and
+  menu now, doing read-modify-write on the programmatic layer, and milestone 4
+  is built. The side-by-side and A/B-flip comparison modes this bullet used to
+  list here are milestone 3's, and wait on ray tracing (above). The `--help`
+  half is closed: the three flags now point at the SHADOWS, AO and REFLECTIONS
+  rows and say what an `unavailable` row means, and
   `the_help_names_every_effect_row_the_pause_menu_has` holds the prose to
   `menu::EFFECT_ROWS`' own labels so a renamed row fails a test rather than
   leaving the help describing a row nobody can find.
@@ -24634,13 +24826,13 @@ is absent" — and it satisfies sample rule 7, which asks for a wasm build on th
 demo site and nothing about netcode. So this is a slice boundary, not a gap in
 what shipped.
 
-What it leaves undone is the thing `docs/plan/sample/16-bracket.md` says bracket
-is _for_: "the first consumer of the transport that is pure request/response —
-no snapshots, no interpolation, no tick", against a protocol that "has only ever
-been driven by tick-shaped traffic".
+What it leaves undone is the thing bracket's deleted plan said it is _for_ (its
+rules are in `docs/notes/samples.md`): "the first consumer of the transport that
+is pure request/response — no snapshots, no interpolation, no tick", against a
+protocol that "has only ever been driven by tick-shaped traffic".
 
 **What that needs, and it is engine work rather than sample work.**
-`ClientToServer::Command` is decoded and dropped — `crcbl-server/src/lib.rs`'s
+`ClientToServer::Command` is decoded and dropped — `crcbl-server/src/peer.rs`'s
 receive loop has an arm for it whose body is empty, and whose comment says so
 plainly ("nothing on this server consumes one yet ... a caller must not read
 this arm as a command being acted on"). Queueing, leaving the queue and

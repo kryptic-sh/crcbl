@@ -690,6 +690,264 @@ seam past its band (`SEAM_BLEED`'s doc carries the sweep).
   14's, and per-monitor or per-adapter profiles, which topic 15 refuses.
 - **Exempt from rules 2, 10 and 11** — the settings are the content.
 
+## What the deleted sample plans 13, 16 and 24 left behind (2026-09-25)
+
+The plans for lantern (13), bracket (16) and tumble (24) were deleted on
+2026-09-25 with about half or more of each one built. What they still owe is in
+`docs/backlog.md`: lantern's and bracket's under their own headings in _The
+sample plans — what they still owe_, lantern's ray-traced half under _Ray
+tracing and the acceleration structures are unbuilt_; tumble's under _What the
+deleted 24-tumble plan left unbuilt_, with the solver rungs its last two rooms
+wait on under _Contact solver rung 6_ and _Buoyancy and wind force providers_.
+Each sample's gate and what it proves stay in the ladder table of
+`docs/plan/sample/00-samples-overview.md`. What follows is what still binds.
+**Every figure below was moved from the plans as written and was not re-measured
+on 2026-09-25**; each names the test or command that reproduces it.
+
+### lantern (13): the rules its plan set
+
+- **The sample makes graceful degradation checkable.** Ray tracing is Vulkan and
+  D3D12 only; macOS, iOS and every browser render the rasterised twin. A raster
+  path nobody looks at carefully ships broken to most of the audience, so
+  lantern exists to make "the fallback also works" something a human has seen
+  rather than something a plan asserts. The Pages demo runs `Rasterised` by
+  construction, and that is the point: the browser is the raster path's largest
+  audience.
+- **Both lighting paths draw the same scene, not the same pixels.** A scene that
+  reads correctly on one path and wrongly on the other is a defect in whichever
+  is wrong. **One material model** feeds both — the same material table and BRDF
+  — which is what keeps two lighting paths from becoming two renderers.
+- **A lesser path is held to the same golden as the best.**
+  `the_room_draws_the_same_on_a_path_below_the_devices_own`
+  (`apps/lantern/tests/golden.rs`) draws the room on the adapter's own selectors
+  and again with every feature above `ForcedPaths`'s floor withheld, and holds
+  both arms to one reference: a lesser path is a constraint on data layout
+  rather than a separate renderer, so a difference is a bug in the better path
+  and a per-path reference is what would bless it. The subtraction goes through
+  `crcbl::engine::ForcedPaths::optional_features`, the function `--force-*`
+  uses, so it cannot drift from the flags. The arms are asserted to differ
+  exactly when the adapter offers a withheld flag, so a device already at the
+  floor is a checked claim rather than a silent skip.
+- **Every effect toggles independently, from each of the three layers of the
+  resolution order** — the camera stack (`room::MONITOR_STACK`, the in-scene
+  monitor's view, which drops the reflections), `[engine.video]` (`gpu.rs`'s
+  `video_effects`) and the programmatic override (`--no-shadows`, `--no-ao`,
+  `--no-reflections` and the pause menu's rows). A toggle that works from only
+  one layer is a finding about the resolution point. A menu row is
+  read-modify-write on the **programmatic** layer and nothing else
+  (`crcbl_lantern::toggled_effect`), so it never discards a decision another
+  layer made and can turn an effect back on after `--no-*`; what a row shows is
+  the **resolved** answer, and an effect the device cannot draw reads
+  `UNAVAILABLE` rather than `OFF`, so the panel never offers a tick that does
+  nothing.
+- **A golden claim is a ratio between two blocks of pixels**, a block the effect
+  works on against a control block it does not touch, so a frame that merely got
+  brighter fails; each is re-run at twenty-five times the pixel count so it is a
+  claim about the room rather than about the sampling.
+- **Neither metal surface has an ambient term, and that is the model.** Ambient
+  scales the diffuse albedo and a conductor has none; reflection is the metals'
+  only fill (argued in `docs/plan/18-render-features.md`). The mirror panel's
+  foot is a real screen-space hit; the rest of that face, and the rough block
+  above `ROUGHNESS_CUTOFF`, take the irradiance-probe environment. The probe
+  grid is a blurry low-frequency field and the only answer the raster path has
+  for anything outside the frame; ray tracing is what replaces it, and the
+  panel's `unbuilt` section says so rather than faking it.
+- **The probes are the engine's, filled every frame.** `crcbl_lantern::bounce`
+  only places them from the room's own dimensions and ships their rows zeroed
+  with `ProbeUpdate::EveryFrame`; `crcbl_render`'s reflective-shadow-map updater
+  fills them from the sun's near cascade and the lamp's shadow faces, under the
+  no-bake rule (`docs/notes/rendering.md`). One bounce, no history; the fixed
+  camera deliberately puts a floor in full sun beside a wall in shadow, the
+  configuration a second bounce would change most.
+- **The acceleration structures, when they are built**, are built at bake (BLAS)
+  and refit per frame (TLAS) from the same instance data the cull pass reads,
+  with build cost and refit cost shown separately on the panel.
+- **Hard cap:** no gameplay, no second scene, no authoring tools (the workbench
+  pattern is sparks' and hud's), no physically-measured validation against a
+  reference renderer, no denoiser research, and no effect beyond what topic 18
+  ships.
+- **Exempt from rules 2 and 10** on the viewer's ground — there is no game
+  state, so no `World`, no system, no `GameModule`; **from rule 8** (decided
+  2026-09-06) because the rule is about positional game events and a fixture has
+  none to cue, with hud as the precedent; and **from rule 11** because the
+  subject is 3D lighting. **Rules 4 and 12 apply in full.**
+
+### lantern (13): measured (2026-08-14)
+
+On radv, by `apps/lantern/tests/golden.rs`:
+
+- **`every_effect_toggles_and_the_frame_says_so`**, four states at 1280×960: the
+  shadowed floor goes 51.0 → 141.3 with the atlas off while the sunlit floor
+  does not move; the plinth's contact corner goes 51.5 → 58.9 with occlusion off
+  while open floor does not move; the mirror panel's foot goes 29.8 → 1.3 with
+  the march off while the part of the same face that reflects nothing goes 20.1
+  → 0.0 — that part is the probe environment, which the reflection pass also
+  supplies.
+- **`zero_probes_only_remove_the_ssr_and_rough_fallbacks`**, at the golden's own
+  256×192: the panel's reflecting-nothing point reads 20.3 with authored probes
+  and 0.0 with the rows zeroed, its foot 51.6 and 49.0, and the brass block's
+  camera-facing face 97.4 and 89.7 — so the panel's upper face is probe data
+  outright, its foot a real screen hit, and the block mostly the sun's own
+  specular with the environment on top.
+- **The path pair:** radv resolves the two arms of
+  `the_room_draws_the_same_on_a_path_below_the_devices_own` to
+  `MeshShader / Bindless` and `IndirectPerBatch / ArrayPages`, and llvmpipe
+  reports mesh shading and bindless too, so the lavapipe leg draws the same
+  pair.
+
+### bracket (16): the rules its plan set
+
+- **Why it is its own sample.** breach and shard are LAN only, which strands
+  topic 27's tier 3, the `crcbl-mint` chain and every matchmaking concern with
+  no consumer. Matchmaking quality is a property of a **population over time**,
+  so attaching it to a real game would need a real playerbase; with the match
+  resolved by a stub, a synthetic population of any size runs in CI,
+  deterministically, in seconds. What it proves that nothing else does is
+  **reliable-channel, request/response traffic** — no snapshots, no
+  interpolation, no tick.
+- **No hosted service.** A hosted matchmaker was considered and declined: it
+  would have been the project's only infrastructure, and the browser client it
+  enabled was the sole justification for WebTransport and the WebSocket
+  fallback, which left topic 23 as a result (the LAN rule in
+  `docs/notes/simulation.md`). The server is a process on the same machine or
+  LAN, found the way breach and shard find theirs.
+- **The match stub is deliberately not fair**: a seeded roll weighted by the
+  participants' true skill. An outcome that always favoured the higher rating
+  would make convergence trivial and prove nothing.
+- **Glicko-2, transcribed step by step from Glickman's paper and checked against
+  its worked example** (`rating::tests::the_paper_s_worked_example`). A rating
+  system nobody can falsify is a number generator. Why Glicko-2 rather than Elo
+  is the ladder's _scale_: the record is `docs/notes/simulation.md`, _Glicko-2
+  lands in bracket, and the lever is the step size_.
+- **Pairing adjacent players on a rating-sorted queue is optimal for the line,
+  not an approximation.** The total gap over pairs drawn from a line is
+  minimised by pairing adjacent points, so no search finds a materially better
+  set, and it is `O(n log n)` for the sort — which is what lets thousands run in
+  CI.
+- **`Rating` has no constructor taking arbitrary points** outside the crate's
+  own tests: one starts provisional and moves only through `settle`, so a
+  non-finite rating has nowhere to enter from. An `f64` parameter would have let
+  a NaN in to spread through every later match.
+- **`bracket sim` is the sample's subcommand, not the engine CLI's** —
+  `bracket sim [--seed N] [--players N] [--ticks N]`, routed in
+  `apps/bracket/src/main.rs` before the ordinary parser, so a word that parser
+  does not know is genuinely unknown. The run length is in **ticks**, because a
+  tick is what the matchmaker advances; the match count is an output.
+- **The demo takes no input and runs `Sim` directly.** Every decision comes from
+  a hash over the seed and a counter, so a run is reproducible from its seed.
+  Routing it through a tick-shaped loopback as things stand would look like the
+  transport claim while not being it; queueing, leaving and reporting are
+  commands, and the command path is engine work (backlog). The rating update
+  runs the host's `exp`, `ln` and `powf`, so two platforms agree to the
+  precision anything reports rather than byte for byte; nothing compares
+  bracket's output across platforms.
+- **Rule 2 is owed, not exempted**: `apps/bracket` opens no `World` and
+  implements no `GameModule` today, and its exit criteria assume it will.
+  **Exempt from rule 11** — the subject is a service and its client is a UI.
+  Rule 4 applies, and its network module is the interesting one: the netgraph
+  reporting service traffic rather than tick traffic, which a panel built for
+  tick traffic may read as broken — a finding about the panel if so.
+- **Hard cap:** no game, cosmetics, progression beyond rating, chat or social,
+  elimination tournaments (the name is about pairing, not a tree), anti-cheat,
+  region or latency routing, or a production identity service. A feature that
+  needs a real playerbase to evaluate does not belong here.
+
+### bracket (16): measured (2026-09-10)
+
+Runs of `bracket sim` at 2000 ticks and seed 1. `rating error` is the mean
+distance from true skill at the end of the run; a larger population starts
+closer, because its mean is nearer the middle of the skill range.
+
+| players | matches | wait, ticks | pairing, points apart | rating error, points |
+| ------- | ------- | ----------- | --------------------- | -------------------- |
+| 2       | 6       | 30.83       | 400.6                 | 194.9                |
+| 4       | 150     | 31.01       | 261.2                 | 29.0                 |
+| 8       | 859     | 9.00        | 107.6                 | 42.5                 |
+| 16      | 2971    | 3.48        | 59.3                  | 27.1                 |
+| 64      | 15099   | 1.42        | 37.5                  | 34.5                 |
+| 256     | 63146   | 1.06        | 18.0                  | 36.2                 |
+| 1024    | 255607  | 1.01        | 5.8                   | 39.7                 |
+
+**Convergence at a stated size:** 64 players over roughly fifteen thousand
+matches land between 25.7 and 34.5 points of mean error, from 254.0 — seeds 1 to
+5 gave 34.5, 27.0, 25.7, 31.7 and 28.1 over 15 099 to 15 241 matches. The
+tolerance bracket claims is **under 40 points on a 1000-point skill range**, the
+figure to hold a change against.
+
+**The degenerate row is both halves of the trade-off at once.** Two players give
+the matchmaker one pair: it waits thirty ticks _and_ pairs four hundred points
+apart, and six matches happen in the run. Four players halve the gap with the
+same wait; the wait falls only once there is a queue to pick from, and from
+sixteen up it is a tick or two. Pairing quality is monotone from four players up
+while rating error is flat within its seed spread — what the ladder needs is
+matches, not crowds.
+
+### tumble (24): the rules its plan set
+
+- **Tumble shows where the physics engine is weak, and by how much** — the
+  user's framing: it "will show us where the gaps are in the physics engine and
+  its performance". A scene the engine cannot produce ships **labelled as the
+  gap it is**, on its room's hint line, never hidden or faked, and the rung that
+  closes it turns the label off. The scene list is the contact solver's
+  acceptance suite (its rung table is in `docs/notes/simulation.md`) and the
+  ball pit is its benchmark.
+- **Rule 9's "no game-code collision math" is kept**: no bounce is drawn that
+  the engine does not compute. **Exempt from rule 11**, on lantern's ground.
+- **Determinism is a pinned constant.** Every room starts the same way every run
+  and the room key never reaches the simulation, so the hash at
+  `scene::CHECK_TICK` is `scene::PINNED_HASH` natively and the browser gate
+  holds the wasm build to the same constant.
+- **The Tower room's pyramid runs alone in its own system** at the default
+  contact settings, so the room's solver time is the pyramid's and comparable
+  with Box3D's benchmark; the column and the dominoes share a second system at
+  the same defaults, the column's cubes asking for twelve substeps through
+  `PhysicsSystem::set_substeps`, because at 30 Hz twenty cubes buckle.
+- **Bullets fire a charge held for one tick**, so the tick's speculative
+  contacts know nothing of the shot's speed. The stated speed limit is the one
+  tested: 80 m/s at point blank.
+- **The bridge breaks one weak link at 15 kN.** An 800 kg anvil put 20 kN on
+  every hinge — a chain carries its tension end to end — so a threshold on every
+  hinge snapped all twenty-two in two ticks.
+- **Settle has no room of its own**: its claim is that every room with contacts
+  comes to rest, with awake and sleeping bodies and islands on the panel. "A
+  dropped ball wakes exactly the island it lands on" is a `crcbl-phys` test,
+  `crates/crcbl-phys/tests/settling.rs`, not a scene; the mesh's own proving
+  scene is `crates/crcbl-phys/tests/meshes.rs`.
+- **Debug reading is lazy**: the debug module constructs its reading only inside
+  the visible panel's `debug_section`, so a hidden panel costs no extra
+  canonical physics hash. `debug_reading_hashes_only_while_visible` covers
+  hidden, visible and re-shown panels, and restoring the eager reading made its
+  hidden-panel assertion fail.
+- **Non-goals (hard cap):** soft bodies, cloth, fracture and fluids — a topic
+  each; vehicles; gameplay; reduced-coordinate articulations, which the contact
+  solver declines.
+
+### tumble (24): measured (2026-09-23)
+
+- **Settle.** The pit asleep at tick 1000, the Tower room's pyramid at 58 and
+  its column and dominoes at 276 until the next flick wakes them, and the wall
+  326 ticks after its spawner is stopped (it never is on the page). After rung 4
+  gave one-point contacts twist friction — before it, a ball rested spinning
+  about the vertical for ever — the wall sleeps 367 ticks after its spawner
+  stops and the pit at tick 966.
+- **Bullets**, over twenty seconds: with rung 4's sweeps none of the forty shots
+  or forty spins tunnelled, 364 bodies were stopped and 2.92 s of their motion
+  dropped; with the sweeps off every one tunnelled
+  (`nothing_tunnels_through_the_rooms_sensors`).
+- **Bridge.** The cradle carries 1.981 kg·m/s in and 1.973 out. Before the anvil
+  the bridge's hinges held to 3.8 mm with crates on it, a crate putting at most
+  2.5 kN on a hinge; the weak link goes at tick 758; the ragdolls' joints held
+  to 5.3 mm and 69 mrad down the stairs.
+- **The lazy debug reading**, sequential release Vulkan runs at 960×720 on the
+  Radeon ICD's discrete adapter, the same paused state at 256 ticks and 320 pit
+  balls, 500 frames timed after warm-up: hidden-panel p50/p95 went from
+  0.907/0.928 to 0.597/0.616 ms, and 0.876/0.897 to 0.589/0.630 ms in the repeat
+  pair — p50 reductions of 34.2% and 32.8%. Visible-panel p50/p95 was
+  1.083/1.118 ms eager and 1.101/1.123 ms lazy, no visible-panel improvement.
+  The timer is CPU frame time — page, menu and instance preparation,
+  acquisition, submission and frame-ring waits, excluding start-up and stepping
+  — not isolated GPU time. Hashes and visible hash rows matched throughout.
+
 ## shard's doused zone was never lifted, and the numbers if it should be (2026-09-04)
 
 **Considered and declined, so it is not re-proposed.** When the no-bake rule

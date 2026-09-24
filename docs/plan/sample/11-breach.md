@@ -54,7 +54,8 @@ whoever happens to connect.
 
 What it removes from this sample: ranked-shaped auth (topic 27 tier 3), a
 matchmaking service, and the server-signed result chain — all of which move to
-`bracket` ([16-bracket.md](16-bracket.md)), where they can be tested against a
+`bracket` (`apps/bracket`, its rules in
+[the samples notes](../../notes/samples.md)), where they can be tested against a
 synthetic population instead of needing a real playerbase. The **integrity gate
 (31) stays** — it is a property of what the server sends, not of who is allowed
 to connect, and it is the more interesting half.

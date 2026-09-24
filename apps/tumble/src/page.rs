@@ -39,8 +39,9 @@
 //! sag against the unloaded chain's, its hinges whole and the joints broken,
 //! and the worst joint error in the room.
 //!
-//! `docs/plan/sample/24-tumble.md` asks that a scene the engine cannot produce
-//! yet ship labelled as the gap it is, and each room's hint line is that label.
+//! Tumble's rules (`docs/notes/samples.md`) ask that a scene the engine
+//! cannot produce yet ship labelled as the gap it is, and each room's hint
+//! line is that label.
 
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::readout::{ReadoutPanel, ReadoutRow};

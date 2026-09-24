@@ -209,10 +209,11 @@ specifies is not wrong; what changes is which parts have a consumer.
   index into its simulated population — a sample type, not the engine one this
   section means.
 - **Signed results survive, at the tier a local host can back.** bracket
-  ([sample/16-bracket.md](sample/16-bracket.md)) is the named consumer: the host
-  signs a match result so a client cannot forge one, and a forged or unsigned
-  result must be rejected by a test that fails when the check is removed. That
-  is the useful half of the ranked chain and it needs no service.
+  (`apps/bracket`; its rules in [the samples notes](../notes/samples.md)) is the
+  named consumer: the host signs a match result so a client cannot forge one,
+  and a forged or unsigned result must be rejected by a test that fails when the
+  check is removed. That is the useful half of the ranked chain and it needs no
+  service.
 
   **`apps/bracket` shipped without it** (2026-08-27), and the reason is worth
   recording rather than filing as a miss: bracket is matchmaking, rating and

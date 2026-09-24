@@ -113,18 +113,18 @@ carry real content.
 
 ## Where this stands
 
-**Milestone 1's first slice is built.** `apps/shard` is a torch-lit interior
-zone walked in an isometric-ish third person, running natively and in a browser
-from one build; `web/demos/shard/` is the page and `shard` is a row in
-`web/build.sh`'s `DEMOS` array. It is what this doc's milestone 1 exists to be:
-the **load** on the fallback paths rather than a fixture for them —
-`apps/lantern` and `apps/quarry` are the acceptance fixtures, and this is a zone
-of modular tiles with a torch over every brazier and a spot over the shrine,
-more lights than there are shadow slots to give them, screen-space occlusion and
-reflections, and an irradiance volume the engine's updater fills every frame,
-all in a dark interior where a mistake in any of them shows. It also gives the
-Pages site the 3D flagship this doc asks for; every browser figure recorded
-before it came from a 2D sample.
+**Milestone 1 is built**, and every exit criterion of it below is met.
+`apps/shard` is a torch-lit interior zone walked in an isometric-ish third
+person, running natively and in a browser from one build; `web/demos/shard/` is
+the page and `shard` is a row in `web/build.sh`'s `DEMOS` array. It is what this
+doc's milestone 1 exists to be: the **load** on the fallback paths rather than a
+fixture for them — `apps/lantern` and `apps/quarry` are the acceptance fixtures,
+and this is a zone of modular tiles with a torch over every brazier and a spot
+over the shrine, more lights than there are shadow slots to give them,
+screen-space occlusion and reflections, and an irradiance volume the engine's
+updater fills every frame, all in a dark interior where a mistake in any of them
+shows. It also gives the Pages site the 3D flagship this doc asks for; every
+browser figure recorded before it came from a 2D sample.
 
 **Every renderer feature it leans on already existed** — shadows, effects and
 probes in `crates/crcbl-render/` — but saying none of them gained a line on
@@ -171,7 +171,11 @@ first consumer rather than its second**: `docs/backlog.md`'s decision of
 one place this doc's original plan was overtaken. The exit criterion that
 depends on it — "used without a single engine change made on its behalf" — is
 **met**: nothing in `crcbl-inventory`, `crcbl-ui` or `crcbl` changed for either
-slice, and what shard wanted from them is filed as topic 34 findings.
+slice, and what shard wanted from them is filed as topic 34 findings. Since then
+the engine has taken over two pieces shard and breach each carried: the pointer
+drag is `crcbl_ui::grid_drag` (2026-09-23), the typed drag-drop the findings
+asked for, and a hovered cell asks `Grid::can_move_within` rather than trying a
+move on a cloned grid (2026-09-25).
 
 **Level and rarity arrived together**, because each is what makes the other
 worth having. Felling a foe is worth `foe::Kind::experience` — a warden is five
@@ -286,17 +290,20 @@ run over.
   `web/tools/browser-e2e.mjs` is set at 32 MiB against that reading, and
   `web/run-browser-e2e.sh` fails a shard run whose driver never took it.
 
-  **The heap on CI is untaken until the next Pages run.** The page change that
-  prints it is newer than the evidence above, so the SwiftShader logs quoted
-  here carry no `[MEM]` line; the figure will be in the next `web-e2e-shard`
-  artifact's `shard-swiftshader.log`, which is that run's browser console.
+  **The heap has been re-taken since, and it grew.** By 2026-09-16 the readings
+  agreed across this machine's hardware adapter, local SwiftShader and CI's
+  SwiftShader to the byte, at **18.6 MiB** — so the ceiling is 1.7× the reading
+  rather than the trebling this section's figure argued, and the growth from
+  10.9 MiB is not attributed. The decision that leaves is in `docs/backlog.md`,
+  _shard's wasm heap: the ceiling's own figure is stale_.
 
 - ✅ The inventory kit used without a single engine change made on its behalf;
   anything it needed filed as a topic 34 finding instead. Met 2026-09-07: the
-  kit is consumed through `crcbl::inventory`, the drag is built inside the
+  kit is consumed through `crcbl::inventory`, the drag was built inside the
   sample out of `UiState`'s press capture, and the findings — a typed drag-drop
   capability, a `PointerUpdate::pixels` to match `TouchUpdate`'s, a
-  `Grid::relink` for a loaded grid — are in `docs/backlog.md`.
+  `Grid::relink` for a loaded grid — went to `docs/backlog.md`. The typed drag
+  has since shipped as `crcbl_ui::grid_drag` and shard uses it.
 
 **Milestone 2**
 

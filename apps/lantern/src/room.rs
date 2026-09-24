@@ -17,7 +17,7 @@
 //!
 //! # The plan
 //!
-//! `docs/plan/sample/13-lantern.md`'s Scope asks for "a room with a window, a
+//! Lantern's plan asked for "a room with a window, a
 //! mirror-grade surface, a rough metal surface, a coloured bounce wall, and a
 //! moving light". Each of those is one thing below, and each is placed where the
 //! [`fixed_camera`] can see it at once.

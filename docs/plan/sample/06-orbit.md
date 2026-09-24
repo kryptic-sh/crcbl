@@ -86,6 +86,18 @@ markers and the apo/peri glyphs are drawn as rectangles, polylines and text.
 That is rule 11 owed rather than exempted; this doc claims no exemption and
 should not be read as taking one.
 
+**Milestone 1 is built with one substitution (re-checked 2026-09-25):** landing
+is `touch_down`'s radius test in `apps/orbit/src/game.rs` — altitude against the
+body's radius, anything under `LANDING_SPEED` a landing — not landing legs as
+swept capsule contacts against terrain, and there is no terrain patch to sweep
+against. Nor is there a physics scrub after a crashed landing, and the exit
+criteria's drift bound is not recorded here: the one figure in the tree is the
+`DRIFT` bound inside `crcbl-phys`'s
+`ten_thousand_revolutions_leave_the_orbit_where_it_was`, which bounds the
+propagator rather than this sample's flight. `docs/backlog.md` carries each —
+_`apps/orbit` — what the first slice left_ and _Orbit's crash scrub and its
+drift record are owed_.
+
 ## Exit criteria
 
 - Full mission (surface → orbit → moon landing → return) completable by a

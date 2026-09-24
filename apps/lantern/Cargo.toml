@@ -12,7 +12,7 @@ publish = false
 # can only reach the room it renders through a lib target — a bin crate has no
 # linkable artifact. `src/main.rs` owns argv and the exit code, and `src/web.rs`
 # is the `extern "C"` entry point a browser's JS shim drives once per
-# `requestAnimationFrame`, which `docs/plan/sample/13-lantern.md`'s Scope asks for.
+# `requestAnimationFrame` — the Pages demo, the raster path's largest audience.
 #
 # `cdylib` is what `wasm32-unknown-unknown` links into a `.wasm`; `rlib` is what
 # `main.rs` and the golden suite link against. Both are needed — a `cdylib`-only

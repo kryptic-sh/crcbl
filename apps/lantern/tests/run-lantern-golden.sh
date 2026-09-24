@@ -6,7 +6,7 @@
 #
 # # What this is for
 #
-# `docs/plan/sample/13-lantern.md`'s milestone 1a. The suite is
+# Lantern's milestone 1a, the raster room. The suite is
 # `apps/lantern/tests/golden.rs`, and it is the only thing in the tree that renders
 # an **application's** `SceneDesc` — every other frame comes from
 # `crcbl_render::scene::demo`. A description that reached the device short by a

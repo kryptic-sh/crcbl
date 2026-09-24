@@ -98,9 +98,13 @@ here it is the dogfood case: the panel is built out of these widgets.
 Not built: hud's stylesheets, the theme switcher, the gallery page, the UI
 inspector, hot reload, and per-theme golden frames — see `docs/backlog.md`. They
 waited on the styling system, which has since landed in `crcbl-ui` (the tree,
-the CSS subset, polled reload, the widgets and the inspector — rules in
+the CSS subset, polled reload, focus and the widgets — rules in
 [../../notes/tooling.md](../../notes/tooling.md)); what is left is this sample's
-port onto it.
+port onto it. **The UI inspector is the exception** (checked 2026-09-25):
+`Ui::inspector` is a reflection-driven _property_ inspector, and nothing in
+`crcbl-ui` shows an element's boxes, matched rules and computed values, so that
+half is engine work first — `docs/backlog.md`, _hud's whole P10 half is
+unbuilt_.
 
 **The wasm front end and the Pages demo are not among them, and this section
 used to say they were.** `apps/hud/src/web.rs` is the browser entry point,
@@ -122,4 +126,6 @@ the **per-theme** part of it, because there are no themes yet.
 - Full gallery traversable by pad/arrows/WASD alone (focus-path e2e green) —
   pointer never required.
 - Published on the Pages site; loads fast (UI-only bundle is the smallest wasm
-  artifact — measure and record it).
+  artifact — measure and record it). Published, and measured once: 2 720 934
+  bytes, under breakout's, flappy's, asteroids' and horde's at the time
+  (`docs/backlog.md`, _`apps/hud` milestone 1: what was deliberately left out_).

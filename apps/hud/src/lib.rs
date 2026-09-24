@@ -17,10 +17,10 @@
 //! the slice-1 primitives (blocks, spans, text, bars)". What is deliberately not
 //! here is everything the document files under P10 — the CSS subset and its
 //! stylesheets, the two themes and the runtime switcher, the widget gallery, the
-//! UI inspector, the hot-reload showcase and the per-theme golden frames. All of
-//! those rest on a styling system that does not exist yet, so building toward
-//! them now would be machinery with no consumer. `docs/backlog.md` records what
-//! each one is waiting on.
+//! UI inspector, the hot-reload showcase and the per-theme golden frames. They
+//! waited on a styling system that has since landed in `crcbl-ui`, and what is
+//! left is this sample's port onto it (the UI inspector aside, which `crcbl-ui`
+//! does not have yet). `docs/backlog.md` records each one.
 //!
 //! # It is a real client/server sample
 //!

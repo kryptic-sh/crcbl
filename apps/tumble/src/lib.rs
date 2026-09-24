@@ -1,7 +1,7 @@
 //! Tumble — the physics gallery: each rung of the contact solver on the scene
 //! built to prove it.
 //!
-//! `docs/plan/sample/24-tumble.md`, **milestone 7, rung 5 "Bridge"**, from
+//! Tumble's **milestone 7, rung 5 "Bridge"**, from
 //! the contact solver's rung table (`docs/notes/simulation.md`), over
 //! milestone 6's rung 4 "Bullets", milestone 5's rung 3 "Settle", milestone
 //! 4's rung 2 "Tower", milestone 3's rung 1 "Pachinko" and milestone 2's rung

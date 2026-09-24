@@ -4,7 +4,7 @@
 //! across a seam without catching, not tunnelling through it, sleeping on it,
 //! and the query world hitting its triangles.
 //!
-//! `docs/plan/sample/24-tumble.md` names no scene for the mesh alone — its
+//! Tumble has no scene for the mesh alone — its
 //! stairs come with the ragdolls, which need joints — so the proving scene is
 //! [`stairs_and_ramp`] here. As in the other suites, every bound was measured
 //! before it was written down, and each check that guards a fix is run with

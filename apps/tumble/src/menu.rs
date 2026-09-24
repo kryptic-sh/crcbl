@@ -17,7 +17,7 @@
 //! There is nothing else to put on it: the scenes run themselves from a fixed
 //! start, which is what makes the hash at the check tick a constant, and a
 //! scene switch, the spawn rate and the body cap
-//! `docs/plan/sample/24-tumble.md` wants as page controls arrive with the
+//! the plan wanted as page controls (`docs/backlog.md`) arrive with the
 //! scenes that need them.
 
 use crcbl::engine::pause_only;

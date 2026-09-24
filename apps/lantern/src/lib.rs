@@ -3,8 +3,8 @@
 //! One indoor room, chosen for lighting rather than for geometry, rendered under
 //! whatever paths the device offers. **Not a game**: the lighting is the
 //! content, and there is nothing to play.
-//! [`docs/plan/sample/13-lantern.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/13-lantern.md)
-//! is the charter, and its non-goals are a hard cap.
+//! [`docs/notes/samples.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/notes/samples.md)
+//! records the charter's rules, and its non-goals are a hard cap.
 //!
 //! **No `World`, no system, no `GameModule`**, and their absence is the
 //! charter's answer rather than an oversight: sample rules 2 and 10 exist so a

@@ -18,7 +18,7 @@
 //!
 //! # What it cannot show yet
 //!
-//! `docs/plan/sample/24-tumble.md`'s pit spawns **without end**, overflows and
+//! The full-scale pit (`docs/backlog.md`) spawns **without end**, overflows and
 //! despawns what rolls past a radius; that is rung 6's, with the most bodies
 //! held inside a tick. This one stops at [`BALLS`].
 

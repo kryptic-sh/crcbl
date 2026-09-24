@@ -7,8 +7,8 @@
 //! [`DrawList::text`], and a pair of rects where the inner one is a fraction of
 //! the outer's width. There is no widget type in this file and no styling
 //! system behind it: the CSS subset, the stylesheets and the two themes are P10
-//! work that depends on a layout engine that does not exist yet, and building
-//! toward them here would be machinery with no consumer.
+//! work, and the layout engine they depend on has since landed in `crcbl-ui`;
+//! porting this page onto it is owed (`docs/backlog.md`).
 //!
 //! ```text
 //!  ┌ vitals ─────────┐        ┌ WAVE 3 ┐

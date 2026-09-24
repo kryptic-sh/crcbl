@@ -7,7 +7,7 @@
 //! thousand is one nobody has tested. With the match resolved by a stub, a
 //! population of any size runs deterministically from a seed.
 //!
-//! See `docs/plan/sample/16-bracket.md`.
+//! Its rules and measurements are in `docs/notes/samples.md`.
 
 //! # Two front ends, one loop
 //!
