@@ -22,7 +22,7 @@
 # A default headless run of horde never leaves its title screen, because nothing
 # presses a key — `field: 0` in the summary's `SceneStats`, and a golden of that
 # would go on passing after every enemy sprite stopped drawing. The suite passes
-# `--prefill`, the fixture `docs/plan/sample/03-horde.md` already defines, which
+# `--prefill`, the fixture horde's scale measurement already uses, which
 # stages the field and starts the run through the same action map a player's key
 # goes through. `apps/horde/tests/golden.rs` says how much and why, and refuses
 # the frame if the summary does not report the run as `Playing`.

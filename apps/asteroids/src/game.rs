@@ -7,7 +7,7 @@
 //! treadmill at a couple of entities a second. This game creates and destroys
 //! entities *constantly* — a bullet every sixth of a second, two rocks for every
 //! one shot, a whole wave at a time — which is the reason
-//! `docs/plan/sample/02-asteroids.md` picked it: generational ids, deferred
+//! the sample's plan picked it: generational ids, deferred
 //! destruction and pool slot recycling all get hammered, and a leak shows up as
 //! a number that climbs.
 //!
@@ -1721,7 +1721,7 @@ pub struct RenderState {
 /// the entity pool.
 ///
 /// **This is the churn sample, and these are the numbers the churn is judged
-/// by.** `docs/plan/sample/02-asteroids.md`'s whole case is that a game which
+/// by.** The sample's whole case is that a game which
 /// spawns and destroys forever must not grow forever, and the soak test asserts
 /// exactly the three counts at the bottom of this struct — until this section
 /// existed they were assertable and not *watchable*, so a leak in a real
@@ -4685,10 +4685,10 @@ mod tests {
 
     /// **Hundreds of spawns and deaths, and nothing leaks.**
     ///
-    /// `docs/plan/sample/02-asteroids.md` says this is what the sample exists to
-    /// justify: bullets at four a second, two rocks for every one shot, a wave
-    /// at a time, and a restart that wipes the field — all of it hammering
-    /// generational ids, deferred destruction and pool slot recycling.
+    /// This is what the sample exists to justify: bullets at four a second, two
+    /// rocks for every one shot, a wave at a time, and a restart that wipes the
+    /// field — all of it hammering generational ids, deferred destruction and
+    /// pool slot recycling.
     ///
     /// The invariant is checked on **every** tick rather than at the end,
     /// because a leak that is cleaned up before the last tick is still a leak

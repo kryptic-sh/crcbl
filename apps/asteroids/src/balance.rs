@@ -3,7 +3,7 @@
 //! `assets/balance.ron` is one RON struct — [`Balance`] — holding every value
 //! that decides how this game *plays*. It is read through
 //! [`crcbl::assets::AssetSource`], the seam the engine gives content, and
-//! `docs/plan/sample/02-asteroids.md`'s third milestone is what asked for it:
+//! the sample plan's third milestone is what asked for it:
 //! the first data-driven balance outside a scene.
 //!
 //! # The rule for what moved and what stayed

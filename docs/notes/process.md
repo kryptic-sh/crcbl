@@ -254,13 +254,13 @@ Stated plainly. "Not reviewed" is the honest line.
   those. I did **not** run the citation gate over the whole tree, only over my
   own files.
 - **Numbers I did not verify and therefore removed rather than corrected.**
-  `docs/plan/sample/03-horde.md` carried "161 tests"; I did not run
-  `cargo test -p horde` to check it, so the sentence lost the count rather than
-  gaining a new one. Every measured table in that doc — the render series, the
-  batching claim, the fill margin, the simulation series, the `--workers`
-  re-measurement, and the superseded 18a table — is **carried forward on
-  trust**. I read them for internal consistency and left them untouched; none
-  was re-measured.
+  Horde's sample plan carried "161 tests"; I did not run `cargo test -p horde`
+  to check it, so the sentence lost the count rather than gaining a new one.
+  Every measured table in that plan (now in `docs/notes/samples.md`, _horde
+  (03): the scale push, measured_) — the render series, the batching claim, the
+  fill margin, the simulation series, the `--workers` re-measurement, and the
+  superseded 18a table — is **carried forward on trust**. I read them for
+  internal consistency and left them untouched; none was re-measured.
 - **`docs/plan/sample/14-quarry.md`'s Measured section is likewise carried
   forward.** The 233-pixel figure, the cluster counts, the cone-rejection
   result: all read, none re-run.
@@ -793,7 +793,7 @@ earlier; `43-render-standards.md`'s delivery table still put contact shadows at
 the head of a queue they left on 2026-09-01. A delivery table is the worst place
 in the repository to be wrong, because it is read as the index of what exists.
 
-A second pass on 2026-09-02 took `sample/20-options.md`, `sample/03-horde.md`,
+A second pass on 2026-09-02 took `sample/20-options.md`, horde's sample plan,
 `50-irradiance-probes.md` and `18-render-features.md`, and found seventeen more.
 **The plan for a shipped sample was the worst document audited anywhere** —
 `20-options.md` still carried the heading "the audio half is built, the video
@@ -807,9 +807,8 @@ sentence in it is a candidate the day the work lands.
 Still unaudited among the plans: `00`-`17`, `20`, `22`-`49`, `51`, `52`, and the
 seventeen remaining `docs/plan/sample/` files — over 18,000 lines. `19-input.md`
 and `21-jobs.md` were audited on 2026-09-02 and yielded eight, six of them wrong
-on the day they were written. Nothing has re-derived `03-horde.md`'s four
-measurement tables; those figures are carried on trust and are the bulk of that
-document.
+on the day they were written. Nothing has re-derived horde's four measurement
+tables, now in `docs/notes/samples.md`; those figures are carried on trust.
 
 **And this file itself was swept on 2026-09-02** for entries whose subject had
 shipped — one deleted, two clauses cut, five reworded. What that sweep did

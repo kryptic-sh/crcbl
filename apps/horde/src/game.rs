@@ -9,9 +9,9 @@
 //! agents and then ten thousand**, so the interesting number is not how often
 //! something spawns but how much work one tick does per live body.
 //!
-//! `docs/plan/sample/03-horde.md` is the plan. What is here is the core loop —
-//! arena, player, enemies, damage, death — plus the progression the art
-//! sub-slice added: XP that drops where an enemy died, and a "pick 1 of 3"
+//! The rules the plan set are in `docs/notes/samples.md`. What is here is the
+//! core loop — arena, player, enemies, damage, death — plus the progression the
+//! art sub-slice added: XP that drops where an enemy died, and a "pick 1 of 3"
 //! level-up from a fixed pool of six upgrades. The scale push, the measurement
 //! and the browser demo are the sub-slice after.
 //!
@@ -826,13 +826,13 @@ const SPAWN_BURST_CAP: u32 = 64;
 /// The default ceiling on live enemies.
 ///
 /// **1500, not the plan's 10,000, and that is a decision rather than an
-/// oversight.** The exit criterion of `docs/plan/sample/03-horde.md` is 10k at
-/// 60 fps and 60 Hz. Both phases the roadmap put that behind have since moved:
-/// P7's GPU-driven half landed, and `crcbl-jobs` ships — this file's own
-/// `steer_enemies` runs on its pool. What has not happened is the sub-slice
-/// that raises this number and measures where it breaks, so the ceiling stays
-/// where it was last measured rather than where the plan wants it.
-/// `--max-enemies` is here so raising it needs no rebuild.
+/// oversight.** The plan's exit criterion was 10k at 60 fps and 60 Hz. Both
+/// phases the roadmap put that behind have since moved: P7's GPU-driven half
+/// landed, and `crcbl-jobs` ships — this file's own `steer_enemies` runs on its
+/// pool. What has not happened is the sub-slice that raises this number and
+/// measures where it breaks, so the ceiling stays where it was last measured
+/// rather than where the plan wants it. `--max-enemies` is here so raising it
+/// needs no rebuild.
 pub const DEFAULT_MAX_ENEMIES: usize = 1_500;
 
 /// The gap between spawns after `elapsed` seconds of a run.
@@ -1075,7 +1075,7 @@ pub fn clamp_to_arena(position: DVec3, radius: f64) -> DVec3 {
 ///
 /// **Enemies walk through them and bolts fly through them**, and that is the
 /// decision rather than an unfinished half of one.
-/// `docs/plan/sample/03-horde.md`'s hard cap bars pathfinding, and a prop the
+/// The sample's hard cap bars pathfinding, and a prop the
 /// horde had to route around is pathfinding wearing a tree costume: the seek
 /// loop is the hottest path in this game and the sample exists to show that its
 /// cost does not move with the size of the field. An obstacle query per enemy
@@ -3892,8 +3892,8 @@ impl Game {
     /// one every sixteenth (see [`spawn_interval`]), so a field of ten thousand
     /// is somewhere over ten minutes of play that nothing survives — there is no
     /// way to *measure* the plan's target by playing to it. `--prefill` puts the
-    /// field there on frame zero instead, and the numbers in
-    /// `docs/plan/sample/03-horde.md` are all taken through it.
+    /// field there on frame zero instead, and the numbers in horde's
+    /// measurement in `docs/notes/samples.md` are all taken through it.
     ///
     /// The layout is a grid over the **whole arena**, sized so `count` fits:
     /// staging them at the 1.25 units separation settles at would need 125 × 125

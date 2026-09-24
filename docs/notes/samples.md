@@ -3,6 +3,301 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted sample plans 01, 02, 03 and 12 left behind (2026-09-24)
+
+The plans for breakout (01), asteroids (02), horde (03) and flappy (12) were
+deleted on 2026-09-24: every milestone each one named is built. What they still
+owe — exit-criterion measurements, one editor test, one debug-tools session and
+two design decisions — is in `docs/backlog.md` under _The sample plans — what
+they still owe_, one heading per sample. Each sample's gate and what it proves
+stay in the ladder table of `docs/plan/sample/00-samples-overview.md`. What
+follows is what still binds: the decisions, their reasons and, for horde, the
+only copy of its scale measurement.
+
+### flappy (12): why a second game, and what it settled
+
+- **One consumer cannot tell an API from an accident.** Flappy exists to answer
+  whether the engine can host a _second_ game without breakout's shape leaking
+  into it — the same argument the project paid for with the seam that looked
+  complete until `crcbl-wgpu` implemented it and the shader that compiled until
+  Dawn read it. Its shape is deliberately unlike breakout's: continuous
+  scrolling, procedural spawning, one input, instant loss. The findings it
+  existed to produce are `docs/plan/ROADMAP.md`'s _What the second, third and
+  fourth games found_; the next sample is judged against this argument.
+- **No new engine subsystem.** A game this small appearing to need one is a
+  finding to record, not a reason to grow the engine.
+- **The ceiling stops the bird rather than killing it**, because a lid that
+  kills punishes the safest answer to a low gap.
+- **A restart advances the course seed** (`course_seed` in
+  `apps/flappy/src/game.rs`) deterministically, so "a new run is a new course"
+  and "a recorded script replays exactly" both hold.
+- **Gap positions are a pure function of seed and index** (`gap_centre`, an
+  integer hash plus affine float operations), never a running generator, so
+  client and server agree without sending the pipe list. That the course is the
+  same natively and in a browser holds by that construction; no test compares
+  the two.
+- **Frame-rate independence is asserted at 20, 60 and 240 fps**, the check that
+  caught three real bugs in breakout.
+- **No network debug module, on purpose.** Flappy runs over `InMemoryTransport`;
+  `HostedGame::debug_sections` in `apps/flappy/src/app.rs` contributes the
+  course and the audio and nothing else. With breakout it is the check that the
+  panel is modular rather than built round a connection.
+
+### breakout (01): the rules its plan set
+
+- **A moving paddle steers the ball; a still paddle mirrors it.** `game::bounce`
+  reflects off the contact normal when the paddle stands still; a paddle being
+  driven decides the outgoing direction instead, including sending the ball back
+  the way it came. That is response policy — the contact still comes from
+  `PhysicsSystem::sweep_sphere`. An earlier pass aimed off the contact offset
+  across the paddle, which reads as aiming with a bat rather than steering with
+  one, and was rejected.
+- **No gravity on the ball.** A ball that arcs cannot be aimed; the speed ramp
+  per hit is the only thing that changes its speed after a launch.
+- **`game::brick_position` is the committed board's generator**, not what the
+  game spawns: the board is `apps/breakout/assets/scenes/board.scn/`, and
+  `scene::tests::the_committed_board_is_what_the_writer_writes` holds the chunk
+  byte for byte to what `Scene::save` writes from it, which keeps the layout in
+  one place.
+- **The court's wall faces land exactly on the colliders** the ball bounces off;
+  near them is not good enough in a game whose subject is where the ball
+  rebounds.
+- **One debug module, the board.** No network module (in-memory transport — the
+  other half of flappy's modularity check) and no audio module, because
+  `apps/breakout/src/audio.rs` keeps no counter a row could read. State invented
+  to fill the panel would be the panel bending the game.
+- **The scope cap**: no power-ups, levels, menus beyond start and game over,
+  juice or local multiplayer. Art was never under the cap; reading it that way
+  is what put forty bricks through the UI draw list (S1B finding 1).
+
+### asteroids (02): the rules its plan set
+
+- **Rotation is interpolated the short way round.** An angle integrated per tick
+  and drawn per frame stutters, and an angle wraps; `lerp_angle` in
+  `apps/asteroids/src/game.rs` carries the argument. Asteroids was the first
+  sample where a drawn thing turns.
+- **What goes in `assets/balance.ron`**: a value the art, the protocol or the
+  world's size is baked against stays a constant; a value that only changes how
+  the game plays goes in the file. The tick rate and the seed stay flags — a
+  value with two doors can be asked for twice and answered differently. The rule
+  is written in `apps/asteroids/src/balance.rs`.
+- **A malformed balance file is refused by line and column** before the run
+  starts, never fallen back on. `--balance <FILE>` is the same loader over a
+  `DirSource`, `apps/breakout`'s `--scene` shape.
+- **The committed table is the numbers the game already had**, asserted field by
+  field by `the_committed_table_is_the_numbers_this_game_shipped_with`, which is
+  why the goldens did not move when the constants became data.
+- **The scope cap**: no UFOs, hyperspace, power-ups, particles or two-player.
+
+### horde (03): the rules its plan set
+
+- **"Terrain" in the cap means simulation terrain.** Decoration drawn under a
+  flat arena is allowed; **pathfinding stays out**, so the props block the
+  player and nothing else and the horde seeks in a straight line at a cost that
+  does not move with the field. A prop enemies had to route round would be
+  pathfinding wearing a tree costume. `game::scatter_props` deals them from the
+  _game's_ seed, not the run's, so a restart keeps the cover where the player
+  learned it; `game::push_out_of_props` runs once, on the player.
+- **One `assets/actors.crpix` at one frame size** (34 texels, the brute's
+  collider) holds the player, every enemy kind and both pickups, so the whole
+  crowd is one `SpriteRenderer` batch in any emission order and `art::Scene`
+  needs no grouping pass.
+- **The level-up freezes the field as simulation state**, not a loop pause:
+  `freeze_field` zeroes every velocity once, on the tick the screen opens, so a
+  seeded script replays the choice and the hot path gains no branch.
+- **The potion is a second `PickupKind`, not a second population**, and
+  `game::drops_potion` deals it from a `LOOT_HAND` salt on the run seed indexed
+  by the kill counter. The rate (one brute in twenty) was settled by
+  measurement: at one in three the kiting soak stopped reaching a death.
+- **The start screen was argued against and then asked for**; the user's call is
+  final, and the reasoning is in `apps/horde/src/game.rs` so nobody
+  re-implements the autostart.
+- **`--prefill N` is the scale fixture** and starts its own run, since a field
+  left at the title screen would time a `run_tick` that returns on its second
+  line (`a_prefilled_run_does_not_wait_at_the_title_screen`). It stages `N`
+  enemies on a grid fitted to the arena — 0.82 units apart at ten thousand —
+  because a 1.25-unit grid collapses 5 280 of ten thousand onto shared positions
+  against the walls, which
+  `a_prefilled_field_is_the_size_and_shape_it_was_asked_for` catches.
+- **The tick's cost tracks local density, not `N`**, so any criterion or budget
+  stated as a count has to say which crowd — spread or converged. The
+  measurement below is the evidence.
+- **The scope cap**: no meta-progression, many weapons or characters, bosses,
+  terrain, pathfinding, or particles beyond reused debug-draw primitives — a
+  benchmark wearing a game costume.
+
+### horde (03): the scale push, measured
+
+Milestone 3's exit measurement, moved here when the plan was deleted and not
+re-measured on the way: like the 2026-09-02 audit (`docs/notes/process.md`), the
+move carries these figures on trust. Every figure was taken with the release
+binary (`cargo build --release -p horde`) on the reference Linux machine: AMD
+Ryzen 9 9950X3D (32 threads) and AMD Radeon RX 7900 XTX on radv (Mesa 26.1.6).
+
+**Conditions common to every table.** There was no display, so every run is
+`--headless`, which gives `crcbl-vk` an offscreen image ring at 960 × 720 — the
+same acquire → record → submit → present path, not a windowed or vsynced
+present. The render and simulation tables were taken **single-threaded**, before
+`steer_enemies` went onto `crcbl_jobs::pool`'s `par_for`; the threaded
+re-measure is the last table. No browser figure was taken:
+`web/run-browser-e2e.sh` runs the demo under SwiftShader, which measures the
+software rasteriser.
+
+#### The render side: flat, and nowhere near a budget
+
+Conditions: `--backend vk`, `--wall-clock --fps 0 --tick-hz 1 --frames 20000`.
+One hertz of tick keeps the measured frame the render path alone; `--wall-clock`
+makes the frame-timing module read the real clock (a headless run otherwise
+steps exactly 1/60 s); `--fps 0` keeps the limiter's sleep out of the frame.
+**CPU** is the debug overlay's `FrameStats` mean over its 120-frame window;
+**GPU** is one resolved frame's `PassTimers` from frame 19 997. Three repeats
+agreed to the microsecond except at 5 000, whose CPU read ranged 0.109–0.277 ms
+and sprites pass 0.016–0.031 ms; the quiet repeat is reported. The columns are
+not addable — GPU work overlaps the next frame's CPU.
+
+|  field | drawn | batches | CPU frame | `arena` GPU | `sprites` GPU | `menu` GPU | `ui-composite` GPU |
+| -----: | ----: | ------: | --------: | ----------: | ------------: | ---------: | -----------------: |
+|      0 |   305 |       3 |  0.107 ms |    0.005 ms |      0.009 ms |   0.012 ms |           0.004 ms |
+|  1 000 |   554 |       4 |  0.096 ms |    0.005 ms |      0.009 ms |          — |           0.005 ms |
+|  2 000 |   801 |       4 |  0.109 ms |    0.005 ms |      0.012 ms |   0.009 ms |           0.004 ms |
+|  5 000 | 1 555 |       4 |  0.109 ms |    0.004 ms |      0.016 ms |   0.008 ms |           0.003 ms |
+| 10 000 | 2 750 |       4 |  0.123 ms |    0.005 ms |      0.027 ms |   0.009 ms |           0.004 ms |
+
+Re-measured 2026-08-07 with `assets/terrain.crpix` and `assets/props.crpix` in
+the frame. The `field 0` row is the title screen (the fixture cannot start a
+non-prefilled run); from 2 000 up the player dies at about a second and the
+death menu is up at the measured frame. `—` is an empty, skipped pass. `drawn`
+counts a constant 305 — 300 ground tiles, 4 props and the player — plus the
+visible horde: the arena is 96 × 72 units against a view of about 37 × 28, so
+what is drawn is bounded by the screen, not the field. `field`, `culled`,
+`ground`, `props`, `drawn` and `batches` are horde's `scene` debug-panel
+section.
+
+**The frame's shape has moved since.** The UI compositor now draws
+`ui-composite` (the HUD) and `ui-overlay` (menu, panel, console), and since
+2026-09-15 the menu's frame is drawn in `ui-overlay`, so the `menu` column's
+pass no longer exists (`crates/crcbl-render/src/ui_pass.rs`). The table's
+`ui-composite` is the whole UI pass as it stood on the day; it has not been
+re-measured.
+
+**"CPU frame time flat 1k → 10k on the render side" is met by a wide margin:**
+0.096 → 0.123 ms, so nine thousand more enemies cost 27 µs a frame, 0.16 % of a
+16.67 ms budget. With `--backend null` the game's own share is 0.008 ms at zero
+and 0.033 ms at ten thousand — 2.5 ns per field enemy (the `RenderState` copy,
+the cull, the instance build); the other ~0.09 ms is command recording, submit
+and present, flat in the field.
+
+**The 1080p UI-pass criterion from `docs/plan/07-ui-debug.md` (under 0.5 ms
+GPU)** was measured 2026-08-07 with
+`--wall-clock --fps 0 --tick-hz 1 --frames 900 --prefill 10000 --size 1920x1080 --debug-overlay`:
+a 0.065–0.068 ms total GPU frame over three repeats, the panel's own pass 0.005
+ms (unchanged from 960 × 720; the pass is now named `ui-overlay`), and a
+0.150–0.153 ms CPU frame mean. The 2.25× pixel count moved the field sprite pass
+0.020 → 0.041 ms. Two orders of magnitude of clearance; the figures come from
+the engine's own exit log (`gpu passes` / `frame cpu` lines), so the run needs
+no instrumentation.
+
+#### The batching claim: flat in the size of the horde
+
+`batches` is 4 at every populated count (terrain, props, actors, bolt) and 3
+when no bolt is in the air. **The claim was never the number** but that it does
+not move with the horde; a sheet for a new subject adds a constant, and emitting
+one sheet more than once is what breaks it.
+`an_interleaved_field_of_every_kind_is_four_batches` and
+`ten_thousand_visible_enemies_are_still_four_batches` in `apps/horde/src/art.rs`
+catch that, the second packing all ten thousand inside the view in `swap_remove`
+order. The count is `crcbl::render::sprite_pass::batch_count`, the pass's own
+answer, and `a_batch_is_a_run_of_one_sheet_and_not_a_distinct_sheet_count` pins
+`A A B A` = 3.
+
+#### The fill margin: visible, and irrelevant to the budget
+
+The `sprites` pass goes 0.009 → 0.027 ms from an empty field to a full screen of
+crowd against a flat 0.005 ms `arena` clear. At 960 × 720 a world unit is 25.71
+pixels, so the 34-texel quad is 43.7 pixels square and the 2 445 actor quads at
+ten thousand are 4.67 megapixels, 6.8 framebuffers of blended fill;
+`SpriteRenderer` has no alpha discard. But
+`two_thirds_of_the_shared_frame_is_transparent_margin` measures the average
+enemy at **31.5 %** of its quad (62 % grunt at 18 texels, 28 % runner at 13, 10
+% brute at 34), so the one-sheet decision costs about **12 µs a frame, 0.07 % of
+the budget**. A sheet per kind would buy those 12 µs for a grouping pass and an
+emission order to get wrong — not worth it at any count this sample reaches.
+
+#### The simulation side: this is what breaks
+
+Conditions: `--backend null`, fixed-step clock (one tick per frame),
+single-threaded. Each figure is a **marginal**: wall time for `--frames 180`
+minus `--frames 60` (or 600 minus 480) over the 120 ticks between, best of
+three, so start-up and the prefill cancel. Render inside the window is about 0.2
+% of the measurement at ten thousand.
+
+| enemies | ms/tick, ticks 60–180 | µs/enemy | ms/tick, ticks 480–600 | µs/enemy |
+| ------: | --------------------: | -------: | ---------------------: | -------: |
+|     500 |                 0.241 |    0.481 |                  0.939 |    1.877 |
+|   1 000 |                 0.418 |    0.418 |                  2.158 |    2.158 |
+|   2 000 |                 1.190 |    0.595 |                  6.026 |    3.013 |
+|   5 000 |                 4.854 |    0.971 |                 26.289 |    5.258 |
+|  10 000 |                14.658 |    1.466 |                 84.087 |    8.409 |
+
+**The two columns are the finding**: the same field one to three seconds in
+(spread) and eight to ten seconds in (converged on the player) differ five- to
+sixfold, because separation is `N` overlap queries and a query costs the size of
+its answer. Single-threaded, spread carried ten thousand at 14.66 ms of 16.67;
+converged broke near three thousand, and ten thousand converged was 84 ms — 12
+Hz. That superseded 18a's provisional 8–9k, taken during slice 18a on a
+1.25-unit grid that at ten thousand is larger than the arena and never
+converged:
+
+| enemies (18a, superseded) | ms/tick | µs/enemy |
+| ------------------------: | ------: | -------: |
+|                       500 |   0.418 |     0.84 |
+|                     1 000 |   0.619 |     0.62 |
+|                     2 000 |   1.307 |     0.65 |
+|                     5 000 |   3.848 |     0.77 |
+|                    10 000 |  18.433 |     1.84 |
+
+It read the rise at ten thousand as the working set leaving cache; the cause was
+its own grid getting denser against the arena it was clamped into.
+
+#### Re-measured with the pool threaded (2026-08-10)
+
+Same marginal method on a 32-thread machine, varying only `--workers`:
+
+| case                     | enemies | `--workers 1` | `--workers 16` | speed-up |
+| ------------------------ | ------: | ------------: | -------------: | -------: |
+| spread, ticks 60–180     |  10 000 |      6.508 ms |       3.525 ms |    1.85× |
+| converged, ticks 480–600 |   5 000 |     11.508 ms |       2.842 ms |    4.05× |
+| converged, ticks 480–600 |  10 000 |     37.383 ms |       7.933 ms |    4.71× |
+
+**Every case is inside the 16.67 ms budget at sixteen workers**, including the
+converged ten thousand. It is a different, roughly 2.2× faster machine (37.4 ms
+single-threaded against 84.1 ms), so the machine-independent claim is the
+speed-up column. The single-threaded analysis had predicted "something like 6
+ms" at sixteen cores; it measured 7.9 ms. The two single-threaded wins it named
+first are both taken — `PhysicsSystem::body_mut` exists and steering calls
+`overlap_sphere_into` with a reused buffer — so P8's headline claim for horde is
+met by `par_for` alone, without a parallel ECS schedule.
+
+#### The exit criteria, answered
+
+- **"10 000 enemies at 60 fps render / 60 Hz tick."** Render: yes, with two
+  orders of magnitude to spare. Tick: single-threaded, yes spread and no
+  converged (5×); threaded at sixteen workers, yes for both. The criterion does
+  not say which crowd and needs rewriting (backlog, _What horde still owes_).
+- **"CPU frame time flat 1k → 10k on the render side."** Yes.
+- **"Playable and mildly fun for 5 minutes."** No. A default run dies at about
+  24 seconds with 30 kills and 46 things on the field; at `--prefill 5000` and
+  above the player dies in under a second, several enemies inside
+  `PLAYER_RADIUS` on frame zero. The target count and the survival target cannot
+  both hold in this arena — a design finding, in the backlog.
+- **"Profiler capture archived."** The tables are it: `FrameStats` and
+  `PassTimers` are the instruments the plan named. No panel image exists; there
+  was no display.
+- **P7 buys this sample almost nothing.** GPU culling would replace a 28 µs CPU
+  cull at ten thousand and the whole render path is 0.12 ms, so P7's ceiling
+  here is 0.7 % of the budget. The roadmap put horde behind P7 and P8; it needed
+  neither to be built, and P8 was the phase it was waiting on.
+
 ## shard's doused zone was never lifted, and the numbers if it should be (2026-09-04)
 
 **Considered and declined, so it is not re-proposed.** When the no-bake rule
@@ -80,13 +375,9 @@ particles are not particles — they're entities". For bracket the answer is the
 opposite (see below), so that backlog entry can be closed for sparks and
 narrowed to bracket.
 
-## flappy (`docs/plan/sample/12-flappy.md`)
+## Records from individual samples
 
-Nothing owed that I found. The debug panel claim that this doc carried as "still
-owed" was false and has been corrected: `HostedGame::debug_sections` in
-`apps/flappy/src/app.rs` contributes the course and the audio and no network
-module, which is the modularity check the doc wanted. Same correction applied to
-`docs/plan/sample/01-breakout.md`, whose single module is the board.
+Each record below is about one sample and names it.
 
 ### What `apps/shard`'s fight slice left out, and why (2026-08-26)
 

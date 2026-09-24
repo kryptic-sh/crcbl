@@ -21,7 +21,7 @@
 //! scale sample's subject in it: `field: 0` in the summary's `SceneStats`, and a
 //! golden of it would go on passing after every enemy sprite stopped drawing.
 //!
-//! `--prefill N` is the fixture `docs/plan/sample/03-horde.md` already defines
+//! `--prefill N` is the fixture horde's scale measurement already uses
 //! for exactly that. It stages the field and then starts the run through the
 //! same action map a player's key goes through, so the frame below is a run in
 //! `Playing` with hundreds of enemies on it.

@@ -55,8 +55,8 @@ that it worked.
    `crcbl bench --scenario jobs|phys` opens none, so its environment block
    carries no adapter, backend or driver version, and `apps/horde`'s ad-hoc
    flags (`--wall-clock`, `--fps 0`, `--tick-hz 1`, `--frames`, `--prefill`) are
-   still how the numbers in [sample/03-horde.md](sample/03-horde.md) get
-   produced.
+   still how horde's scale measurement in
+   [../notes/samples.md](../notes/samples.md) gets produced.
 3. **No baseline or regression detection.** Nothing stores a previous run to
    compare against, so "is this slower than last week" is unanswerable.
    **Scheduled 2026-08-30 as the next slice of this topic**, because the render

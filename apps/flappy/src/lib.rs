@@ -19,8 +19,8 @@
 //! of a fixed field, procedural spawning instead of a static grid, one button
 //! instead of two axes, instant loss instead of three lives. Any place the
 //! engine resists that is a **finding**, recorded in `docs/plan/ROADMAP.md`
-//! rather than worked around here. See
-//! [`docs/plan/sample/12-flappy.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/12-flappy.md).
+//! rather than worked around here. The rules the sample settled are in
+//! `docs/notes/samples.md`.
 //!
 //! # Two front ends, one loop
 //!

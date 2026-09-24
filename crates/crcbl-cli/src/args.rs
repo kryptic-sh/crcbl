@@ -856,7 +856,7 @@ fn scenario_names() -> String {
 
 /// Items the workload holds when `--items` is not given.
 ///
-/// The crowd size `docs/plan/sample/03-horde.md` sets as its exit criterion,
+/// The crowd size horde's plan set as its exit criterion,
 /// because the pass this benchmark stands in for is horde's steering.
 const DEFAULT_BENCH_ITEMS: usize = 10_000;
 

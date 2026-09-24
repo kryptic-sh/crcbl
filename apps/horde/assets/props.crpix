@@ -27,7 +27,7 @@
 # The alternatives were both worse and both cost something measured.
 # Splitting the sheet so a canopy could be drawn over the actors is a second run
 # of one sheet in a frame, which is another draw call in `SceneStats::batches` —
-# a number `art.rs`, `docs/plan/sample/03-horde.md` and the changelog all quote.
+# a number `art.rs`, `docs/notes/samples.md` and the changelog all quote.
 # Making the prop short enough that the overlap "does not arise" is this,
 # without saying so.
 #

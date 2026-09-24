@@ -268,8 +268,8 @@ fn assemble<S: Shell + ?Sized>(
             );
         }
         // **A prefilled field starts itself.** `--prefill` is the scale
-        // measurement's fixture and every number in
-        // `docs/plan/sample/03-horde.md` was taken through it; left on the title
+        // measurement's fixture and every number in horde's measurement in
+        // `docs/notes/samples.md` was taken through it; left on the title
         // screen it would time a simulation that short-circuits on its first
         // line, and report it as ten thousand enemies a tick. The edge is
         // queued, not poked, so it goes through the same action map a player's
@@ -1532,9 +1532,9 @@ mod tests {
     /// **`--prefill` starts its own run.**
     ///
     /// The scale fixture stages ten thousand enemies and every number in
-    /// `docs/plan/sample/03-horde.md` was measured through it. Left on the title
-    /// screen it would time a `run_tick` that returns on its second line and
-    /// report the result as the cost of a full field.
+    /// horde's measurement in `docs/notes/samples.md` was taken through it.
+    /// Left on the title screen it would time a `run_tick` that returns on its
+    /// second line and report the result as the cost of a full field.
     #[test]
     fn a_prefilled_run_does_not_wait_at_the_title_screen() {
         // `at_the_title_screen`, deliberately: `scripted` queues a start edge of
@@ -1821,11 +1821,11 @@ mod tests {
 
     /// **`--prefill` reaches the field, the cap and the first frame's sprites.**
     ///
-    /// Every number in `docs/plan/sample/03-horde.md` was taken through this
-    /// flag, so a flag that parsed and did nothing — or that staged the field
-    /// but left the views empty, which is exactly what happens if `stage_field`
-    /// forgets to refresh them — would make all of them measurements of an empty
-    /// arena.
+    /// Every number in horde's measurement in `docs/notes/samples.md` was taken
+    /// through this flag, so a flag that parsed and did nothing — or that
+    /// staged the field but left the views empty, which is exactly what happens
+    /// if `stage_field` forgets to refresh them — would make all of them
+    /// measurements of an empty arena.
     #[test]
     fn a_prefilled_run_draws_a_crowd_on_its_very_first_frame() {
         let options = Options {

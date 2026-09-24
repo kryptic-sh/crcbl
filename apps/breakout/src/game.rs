@@ -118,7 +118,7 @@ const BALL_START_Y: f64 = -5.0;
 const BALL_SPEED: f64 = 11.0;
 /// What one broken brick multiplies the ball's speed by.
 ///
-/// `docs/plan/sample/01-breakout.md` puts "speed ramps per hit" in scope, and a
+/// Breakout's plan put "speed ramps per hit" in scope, and a
 /// game whose ball moves at exactly one speed from the first brick to the
 /// fortieth has no arc to it. 2% a brick is small enough not to be felt as a
 /// jolt and compounds to the cap over most of a grid.

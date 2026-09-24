@@ -10273,7 +10273,13 @@ Every file under `docs/plan/sample/` was audited against its app and against the
 engine crates on 2026-08-27. Nothing here is a closed plan waiting to be
 deleted; it is what those plans still describe and the tree does not have.
 
-## breakout (`docs/plan/sample/01-breakout.md`)
+The plans for breakout, asteroids, horde and flappy were deleted on 2026-09-24
+with every milestone built. Their headings below carry everything those plans
+still asked for — flappy's asked for nothing more — and the rules and horde's
+scale measurement are in `docs/notes/samples.md` under _What the deleted sample
+plans 01, 02, 03 and 12 left behind_.
+
+## breakout
 
 ### Breakout's 10-minute soak is unrun (2026-08-27)
 
@@ -10297,22 +10303,68 @@ change which brick is hit. A clock-derived jitter on the launch angle reddens it
 at `1e-2` of the launch vector and leaves the outcome unchanged at `1e-4`, so
 float-level nondeterminism between two runs is not what it holds.
 
-## asteroids (`docs/plan/sample/02-asteroids.md`)
+### Breakout's editor round trip is proven on the file, not on the game (2026-09-24)
+
+The plan's milestone 3 ended "layout edited in the editor — breakout becomes the
+smallest editor round-trip test". Most of it is built: `apps/editor` exists,
+`scene::vocabulary` in `apps/editor/src/scene.rs` registers breakout's `Brick`
+through `crcbl_breakout::register_components`, and
+`apps/editor/tests/vocabularies.rs` opens the committed board
+(`the_editor_opens_breakouts_board_through_the_games_own_registration`) and
+saves it byte for byte (`both_games_committed_scenes_round_trip_byte_for_byte`).
+
+**Not tested (verified 2026-09-24 by reading that file and grepping
+`apps/editor` for `crcbl_breakout::Board`):** an edit to a brick through
+`EditCommand` that the _game_ then loads and plays. The one edit test,
+`an_edit_reaches_a_nested_field_of_puppets_surface`, is puppet's, and no editor
+test hands a saved scene back to `crcbl_breakout::Board::load`. **What it would
+take:** one test in `apps/editor/tests/vocabularies.rs` that moves a brick with
+`EditCommand::SetProperty`, saves into a `MemorySource`, and asserts
+`Board::load` over that source reads the moved brick. **What it blocks:**
+nothing; it is the last clause of a finished milestone.
+
+### The one-sitting code-size bars are unmet, for breakout and asteroids (2026-09-24)
+
+Breakout's plan set "total game code small enough to read in one sitting (~500
+lines target)" as an exit criterion and asteroids' plan "the same bar (~700
+lines target)". Measured 2026-09-24 with `wc -l` over every `.rs` under each
+`src/`: `apps/breakout/src` is 8 696 lines (`game.rs` alone 3 292) and
+`apps/asteroids/src` is 10 670, most of it doc comments and tests. Flappy's
+"smaller than breakout" does hold (7 455).
+
+**Needs a decision, not code:** redefine the bar as something a tool measures —
+non-test, non-comment lines of the game module, say — or drop it as superseded
+by the documentation-heavy style every sample adopted. Nothing depends on it.
+
+## asteroids
 
 ### Asteroids' 10-minute soak and stale-handle session are unrun (2026-08-27)
 
 **Partly built.** `hundreds_of_spawns_and_deaths_leak_nothing` in
-`apps/asteroids/src/game.rs` asserts entity and pool counts return to baseline,
-which is the leak check in miniature. The exit criteria ask for a **10-minute**
-input-script soak and for a full session with the **entity inspector open and
-entities selected as they die** — and there is no entity inspector in the tree
-to open.
+`apps/asteroids/src/game.rs` asserts entity and pool counts return to baseline
+between waves, which is the leak check in miniature. The exit criteria ask for a
+**10-minute** input-script soak with entity and pool counts returning to
+baseline between waves, and for **no stale-handle panics across a full session
+with the entity inspector open and entities selected as they die**.
 
-**What it would take:** the debug-tools inspector (a `crcbl-ui` surface, not a
-sample feature), plus a long scripted run. **What it blocks:** the stale-handle
-criterion, which is the one asteroids exists to answer.
+**The inspector exists now; no sample hosts it.** `Ui::inspector` in
+`crates/crcbl-ui/src/tree/widgets/inspector.rs` draws any `Reflect` value. Its
+callers are `apps/editor/src/panel.rs`, a test in `apps/puppet/src/map.rs` over
+one `Surface` value, and the UI-inspector screenshot scene (verified 2026-09-24
+by grepping for `inspector_with(`); no sample's running debug panel hosts one.
+Nothing selects a live entity and keeps a handle to it across ticks, which is
+the part the criterion tests.
 
-## horde (`docs/plan/sample/03-horde.md`)
+**What it would take:** an entity-inspector module on the debug panel that holds
+a selected entity's handle and reads its components through `Reflect` each
+frame, hosted by asteroids first; then a scripted session that selects rocks as
+they split and bullets as they expire, run for ten minutes alongside the soak.
+The soak itself needs a harness that runs a sample that long and reports memory
+and tick drift — nothing in `tools/` does, the same gap as breakout's. **What it
+blocks:** the stale-handle criterion, which is the one asteroids exists to
+answer.
+
+## horde
 
 ### Horde's default enemy cap is 1500, and whether it should still be (2026-08-27)
 
@@ -10324,22 +10376,23 @@ was corrected in the same pass that found it.
 
 **What is still open:** whether 1500 is the right default now that the tick
 parallelises. `crates/crcbl-jobs` ships, `apps/horde`'s `steer_enemies` runs on
-`crcbl_jobs::pool`'s `par_for`, and the sample doc's 2026-08-10 re-measurement
-records every converged case inside the frame budget at sixteen workers. The
-sub-slice that raises the ceiling and measures where it breaks has not run, so
-the number is where it was last measured rather than where the plan wants it.
+`crcbl_jobs::pool`'s `par_for`, and the 2026-08-10 re-measurement (in
+`docs/notes/samples.md`, _horde (03): the scale push, measured_) records every
+converged case inside the frame budget at sixteen workers. The sub-slice that
+raises the ceiling and measures where it breaks has not run, so the number is
+where it was last measured rather than where the plan wants it.
 
 **What it blocks:** the sample's own 10k-at-60 exit criterion, which no run has
 attempted since the pool landed.
 
 ### Horde's "playable and mildly fun for 5 minutes" exit criterion is unmet and unmeetable as written (2026-08-27)
 
-**Carried forward from the doc, not re-measured.** The doc records a default run
-ending in a death at about 24 seconds, and a death in under a second at
-`--prefill 5000` and above, because ten thousand in a 96x72 arena is 0.82 units
-apart and contact damage is a rate summed over everything touching. The doc says
-this is already in `docs/backlog.md`; I did not confirm the entry is still
-there.
+**Carried forward from the plan, not re-measured.** The measurement (now in
+`docs/notes/samples.md`, _horde (03): the scale push, measured_) records a
+default run ending in a death at about 24 seconds, and a death in under a second
+at `--prefill 5000` and above, because ten thousand in a 96x72 arena is 0.82
+units apart and contact damage is a rate summed over everything touching. The
+two ways out are argued under _What horde still owes_ below.
 
 **What it would take:** a design decision — a bigger arena, a different damage
 model, or a rewritten criterion that separates the render claim from the
@@ -10347,7 +10400,7 @@ survival claim. **What it blocks:** the sample's exit.
 
 ### Horde has no browser budget of its own (2026-08-27)
 
-**Not measured.** The doc's own conditions table says so:
+**Not measured.** The scale measurement's conditions say so:
 `web/run-browser-e2e.sh` runs the demo under Chromium's SwiftShader, which
 measures the software rasteriser rather than the browser, and no machine with a
 real browser GPU has taken the number. The exit criteria already treat it as a
@@ -17722,9 +17775,9 @@ it costs is **tree quality**, not answers.
 `apps/horde` runs `N` broadphase overlap queries per tick — one per enemy, for
 separation — plus one for contact damage and one for aiming, so it is the first
 consumer where the _per-query overhead_ rather than the query's answer is the
-cost. Provisional numbers and their conditions are in
-`docs/plan/sample/03-horde.md`; both entries below sit in front of them and
-neither was taken, because either is an API change to `crcbl-phys` and this
+cost. The numbers and their conditions are in `docs/notes/samples.md` under
+_horde (03): the scale push, measured_; both entries below sit in front of them
+and neither was taken, because either is an API change to `crcbl-phys` and this
 slice was the sample.
 
 - **The allocations are gone and nobody has measured what they cost.**
@@ -17748,13 +17801,13 @@ slice was the sample.
 - **A broadphase query costs what its _answer_ costs, so the tick's cost tracks
   local density rather than entity count.** The same ten thousand enemies cost
   14.66 ms a tick spread over the arena and 84.09 ms after eight seconds of
-  converging on the player — measured, both columns, in
-  `docs/plan/sample/03-horde.md`. This is not a complaint about `crcbl-phys`; it
-  is the fact any budget stated in "N agents" is wrong about, and it is why
-  18a's provisional 8–9k figure was both too optimistic (it never let the crowd
-  converge) and taken on a fixture that at ten thousand described a field larger
-  than the arena. **Anything that quotes a per-agent cost for this crate has to
-  say what the neighbourhoods looked like.**
+  converging on the player — measured, both columns, in horde's scale
+  measurement in `docs/notes/samples.md`. This is not a complaint about
+  `crcbl-phys`; it is the fact any budget stated in "N agents" is wrong about,
+  and it is why 18a's provisional 8–9k figure was both too optimistic (it never
+  let the crowd converge) and taken on a fixture that at ten thousand described
+  a field larger than the arena. **Anything that quotes a per-agent cost for
+  this crate has to say what the neighbourhoods looked like.**
 
 - **The neighbour sum's order is the BVH's traversal order, and horde chose to
   live with it.** Floating-point addition is not associative, so the separation
@@ -17772,10 +17825,10 @@ slice was the sample.
 ## What horde still owes
 
 S3 is done — the core loop, the art and progression, and now audio, the longest
-run, the browser demo and the scale measurement. `docs/plan/sample/03-horde.md`
-carries the numbers and their conditions; this is what was raised and not
-finished. Entries the measurement closed have been deleted rather than
-annotated.
+run, the browser demo and the scale measurement. `docs/notes/samples.md` carries
+the numbers and their conditions (_horde (03): the scale push, measured_); this
+is what was raised and not finished. Entries the measurement closed have been
+deleted rather than annotated.
 
 - **`--prefill` starts its own run, and that coupling is not obvious.**
   `assemble` in `apps/horde/src/app.rs` queues a start edge when
@@ -17792,7 +17845,10 @@ annotated.
   the player (84.09 ms). The difference is a factor of 5.7 at a fixed count,
   because separation is a broadphase query whose cost is the size of its answer;
   a horde converges by construction, so the second number is the one the game
-  spends its time at. Whoever owns the criterion has to say **which crowd**.
+  spends its time at. Those two are single-threaded; the 2026-08-10 threaded
+  re-measure put both inside the budget at sixteen workers (3.5 and 7.9 ms, on a
+  faster machine), so the tick half passes either way today — but a criterion
+  stated as a count still has to say **which crowd**, and the plan's did not.
 
 - **"Playable and mildly fun for 5 minutes" cannot be true of this arena at the
   plan's count.** Ten thousand enemies in 96 × 72 units is 0.82 units apart,
@@ -18050,8 +18106,10 @@ not:
   simulated play), 337 rocks spawned, 1,221 bullets fired, six waves cleared,
   checking the entity and collider accounting on **every** tick. Ten minutes of
   wall-clock soak with the inspector open, and the "no stale-handle panics with
-  entities selected as they die" criterion, both need the entity inspector,
-  which this sample does not use yet.
+  entities selected as they die" criterion, both need an entity inspector on the
+  debug panel: `Ui::inspector` exists, but no sample hosts one over live
+  entities. What closing it takes is under _Asteroids' 10-minute soak and
+  stale-handle session are unrun_ above.
 - **The overlap query does not know about the seam.** Ship-versus-rock is a
   single `overlap_sphere` at the ship's position, so a ship straddling an edge
   does not see a rock straddling the opposite one until one of them has wrapped.
@@ -18059,22 +18117,6 @@ not:
   costs four broadphase queries a tick to fix a one-tick artefact at a boundary
   both bodies cross constantly, and no test could tell the difference without
   being written to.
-- **No golden image covers a single asteroids pixel.** Weaker than it was: the
-  browser gate now loads the demo in a real Chromium, opens a WebGPU device and
-  reads the canvas back with every check green, so "the frame is not blank, not
-  one flat colour and changes between frames" is checked — 89 distinct colours
-  across a 959×463 canvas on the SwiftShader adapter. What is still unchecked is
-  whether it is the **right** picture, and in particular whether a rotated
-  `SampleMode::Pixel` sprite looks right on a real driver.
-  `crates/crcbl/tests/sprite_e2e/` has sprite goldens including a rotated one,
-  so the shader path is covered; the game's own frame is not. There is also no
-  display in the build environment, so the _windowed_ native path is compiled
-  and never run. The art was checked by eye against the baked PNGs, and that is
-  the honest report of it.
-- **Tuning constants are compiled in.** The plan's milestone 3 wants them from a
-  data file after stage 6. Every one of them is a `pub const` in `game.rs` with
-  its reasoning written beside it, which is the form that survives being moved
-  into a file.
 
 ## Deferred decisions
 

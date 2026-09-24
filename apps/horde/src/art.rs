@@ -49,8 +49,8 @@
 //! putting the shots between the crowd and the player, say — and
 //! `tests::an_interleaved_field_of_every_kind_is_four_batches` and
 //! `tests::ten_thousand_visible_enemies_are_still_four_batches` are what say
-//! it has not happened. The measured table in `docs/plan/sample/03-horde.md`
-//! was taken before either sheet existed and reads two; it says so.
+//! it has not happened. The measured table in `docs/notes/samples.md` was
+//! re-taken with both sheets in the frame and reads four.
 //!
 //! What the shared actors frame costs is the transparent margin round the two
 //! small kinds. A runner is 13 texels of art in a 34-texel quad, so about seven
@@ -108,8 +108,8 @@
 //! drawn to their own collider like every actor, so a wizard overlapping a
 //! canopy edge is a wizard standing on that ground. Splitting the sheet so a
 //! canopy could go over the actors would be a second run of one sheet, which is
-//! another draw call in a number `docs/plan/sample/03-horde.md` and the
-//! changelog both quote.
+//! another draw call in a number `docs/notes/samples.md` and the changelog
+//! both quote.
 //!
 //! They are above the ground rather than in it for a plainer reason: the ground
 //! is generated from the view and the props are culled against it, so they are
@@ -377,8 +377,8 @@ pub struct Scene {
 ///
 /// **The numbers this sample exists to make visible**, which is why they are a
 /// debug-panel module rather than a comment: the claim in this module's header
-/// is that the batch count does not move with the horde, and the claim in
-/// `docs/plan/sample/03-horde.md` is that the CPU cost of a frame is flat from
+/// is that the batch count does not move with the horde, and the claim the
+/// sample's plan made is that the CPU cost of a frame is flat from
 /// one thousand enemies to ten thousand. Neither can be read off a frame rate.
 ///
 /// [`SceneStats::batches`] is
@@ -2660,13 +2660,13 @@ mod tests {
     /// **How much of the shared frame is transparent margin**, weighted by the
     /// mix the spawner actually deals.
     ///
-    /// The number `docs/plan/sample/03-horde.md` quotes when it says what the
-    /// one-sheet decision costs, pinned here so it is checkable rather than
-    /// recomputed by hand every time someone redraws a silhouette. Everything in
-    /// it is derived — the silhouettes from the baked bytes, the weights from
-    /// [`EnemyKind::from_roll`] — so a kind that changed size, or a spawn table
-    /// that changed the mix, moves this number rather than leaving the doc
-    /// quietly wrong.
+    /// The number horde's measurement in `docs/notes/samples.md` quotes when it
+    /// says what the one-sheet decision costs, pinned here so it is checkable
+    /// rather than recomputed by hand every time someone redraws a silhouette.
+    /// Everything in it is derived — the silhouettes from the baked bytes, the
+    /// weights from [`EnemyKind::from_roll`] — so a kind that changed size, or
+    /// a spawn table that changed the mix, moves this number rather than
+    /// leaving the doc quietly wrong.
     ///
     /// A transparent fragment is **not** free: `SpriteRenderer` has no alpha
     /// discard, so the margin is rasterised and blended exactly like the art.
@@ -2703,7 +2703,7 @@ mod tests {
         assert!(
             (0.30..0.33).contains(&fraction),
             "the average enemy fills {:.1}% of its {side} x {side} quad; \
-             docs/plan/sample/03-horde.md says 31.5%",
+             docs/notes/samples.md says 31.5%",
             fraction * 100.0,
         );
         // The brute is the one that fills its frame exactly — the frame size is
@@ -2726,8 +2726,8 @@ mod tests {
     fn a_field_larger_than_the_view_is_culled_to_the_view() {
         with_scene(|scene| {
             // The arena, filled evenly — the same shape `Game::stage_field`
-            // produces, which is the fixture every number in
-            // `docs/plan/sample/03-horde.md` was taken through.
+            // produces, which is the fixture every number in horde's
+            // measurement in `docs/notes/samples.md` was taken through.
             let (half_x, half_y) = (
                 crate::game::ARENA_HALF_WIDTH,
                 crate::game::ARENA_HALF_HEIGHT,

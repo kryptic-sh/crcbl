@@ -15,9 +15,9 @@
 # thousand walked in spawn order would be ten thousand batches. **With one sheet
 # there is no order to get wrong**: the player, all three enemy kinds and the
 # pickups are one run however the lists are walked, and `art.rs` needs no
-# grouping pass over the crowd at all. That is the property `docs/plan/sample/
-# 03-horde.md`'s scale sub-slice measures, so it is the one this file is built
-# for.
+# grouping pass over the crowd at all. That is the property the scale
+# sub-slice measured (`docs/notes/samples.md`), so it is the one this file is
+# built for.
 #
 # The price is the transparent margin around the two small kinds — a runner's
 # quad is 34 texels wide for 13 texels of art, so about seven times the fill.

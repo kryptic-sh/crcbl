@@ -709,7 +709,7 @@ mod tests {
     }
 
     /// **Same script, same game**, which is the determinism criterion in the
-    /// form `docs/plan/sample/01-breakout.md` states it.
+    /// form breakout's plan stated it: same script, same final score.
     ///
     /// `a_headless_run_is_deterministic` cannot make that claim: it never
     /// launches, so both of its runs score zero and a simulation that had gone

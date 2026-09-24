@@ -7695,8 +7695,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // nothing about the machine. Printed either way, **with the clock
         // named**, because a number whose conditions are not stated is not a
         // measurement — `apps/horde`'s `--wall-clock` exists to make this line
-        // mean something and every figure in `docs/plan/sample/03-horde.md` was
-        // taken through it.
+        // mean something and every figure in horde's scale measurement
+        // (`docs/notes/samples.md`) was taken through it.
         let frame = &self.debug.frame;
         if let (Some(best), Some(worst)) = (frame.best(), frame.worst()) {
             log::info!(

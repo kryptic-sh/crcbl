@@ -170,13 +170,16 @@ baked in from the start — wasm is a first-class target, not a port.
 Each roadmap S-phase is proven by a **sample project** — small complete
 games/tools in `apps/`, numbered in build order: see
 [sample/00-samples-overview.md](sample/00-samples-overview.md), which is the
-canonical list and now runs to twenty-five documents (breakout, asteroids,
-horde, hud, viewer, orbit, towers, arena, puppet, sparks, breach, flappy,
-lantern, quarry, shard, bracket, mirrors, sundial, alcove, options, tide,
-meadow, mane, tumble, relief).
+canonical list and now runs to twenty-five samples (breakout, asteroids, horde,
+hud, viewer, orbit, towers, arena, puppet, sparks, breach, flappy, lantern,
+quarry, shard, bracket, mirrors, sundial, alcove, options, tide, meadow, mane,
+tumble, relief). Four of them — breakout, asteroids, horde and flappy — no
+longer have a document of their own: every milestone was built and the plans
+were deleted on 2026-09-24, with their rules and horde's scale measurement in
+`docs/notes/samples.md` and what they still owe in `docs/backlog.md`.
 
 **What is in `apps/` today, read from the tree on 2026-09-23**, is twenty of the
-twenty-five documents — `breakout`, `asteroids`, `flappy`, `horde`, `hud`,
+twenty-five samples — `breakout`, `asteroids`, `flappy`, `horde`, `hud`,
 `lantern`, `viewer`, `orbit`, `towers`, `puppet`, `sparks`, `quarry`, `shard`,
 `breach`, `bracket`, `options`, `sundial`, `alcove`, `tide` and `tumble` —
 beside five that are not samples at all: `apps/bare` (the engine used as a plain

@@ -15,8 +15,8 @@
 //!
 //! It is the first consumer of the dynamic broadphase at a scale where the
 //! broadphase is the point: `N` overlap queries a tick for separation, one for
-//! contact damage, one for aiming, and a swept sphere per bolt. See
-//! [`docs/plan/sample/03-horde.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/03-horde.md).
+//! contact damage, one for aiming, and a swept sphere per bolt. Its rules and
+//! its scale measurement are in `docs/notes/samples.md`.
 //!
 //! # What is here, and what is not
 //!

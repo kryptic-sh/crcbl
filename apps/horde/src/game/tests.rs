@@ -1108,7 +1108,7 @@ fn a_player_walking_into_a_prop_off_centre_slides_round_it() {
 
 /// **Enemies and bolts pass through the props, and that is the decision.**
 ///
-/// `docs/plan/sample/03-horde.md`'s hard cap bars pathfinding, so a prop the
+/// The sample's hard cap bars pathfinding, so a prop the
 /// horde had to route around would be pathfinding wearing a tree costume —
 /// see `PropKind`. Both halves are asserted here because both are things a
 /// later change could quietly take away, and neither would show up as a
@@ -4386,11 +4386,11 @@ fn the_record_reaches_the_render_state_without_entering_the_simulation() {
 /// **A prefilled field is the size it was asked for, inside the arena, and
 /// made of the game's own mix of kinds.**
 ///
-/// The fixture every number in `docs/plan/sample/03-horde.md` is taken
-/// through, so a fixture that quietly staged a tenth of what it was asked
-/// for — or piled the whole field onto one wall, which is what a 1.25-unit
-/// grid does at ten thousand — would make every one of those numbers a
-/// measurement of something else.
+/// The fixture every number in horde's measurement in `docs/notes/samples.md`
+/// is taken through, so a fixture that quietly staged a tenth of what it was
+/// asked for — or piled the whole field onto one wall, which is what a
+/// 1.25-unit grid does at ten thousand — would make every one of those numbers
+/// a measurement of something else.
 #[test]
 fn a_prefilled_field_is_the_size_and_shape_it_was_asked_for() {
     let mut game = Game::with_setup(&Setup {

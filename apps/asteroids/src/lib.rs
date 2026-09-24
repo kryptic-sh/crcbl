@@ -17,8 +17,9 @@
 //! It is also the first consumer of the P6 physics slice: the simulation drives
 //! thrust and damping through the L1 force pipeline, bullets through segment
 //! CCD, and ship-versus-rock through a broadphase sphere overlap — and it is the
-//! caller that had to decide what a screen wrap means to a BVH. See
-//! [`docs/plan/sample/02-asteroids.md`](https://github.com/kryptic-sh/crcbl/blob/main/docs/plan/sample/02-asteroids.md).
+//! caller that had to decide what a screen wrap means to a BVH. The rules the
+//! sample settled are in `docs/notes/samples.md`, and what it still owes in
+//! `docs/backlog.md`.
 //!
 //! # What is here, and what is not
 //!
