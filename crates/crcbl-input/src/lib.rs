@@ -7,8 +7,9 @@
 //! Every action belongs to one named context: [`ActionMap::declare`] puts it in
 //! [`GAMEPLAY_CONTEXT`], which is always active, and [`ActionMap::declare_in`]
 //! names another. [`ActionMap::push_context`] and [`ActionMap::pop_context`]
-//! stack contexts over it, and **the topmost active context that binds an input
-//! consumes it** — `context.rs` has the rules, including what happens to a key
+//! stack contexts over it — [`ActionMap::push_context_modal`] one that passes
+//! nothing it does not bind — [`GLOBAL_CONTEXT`] stays above them all, and
+//! **the topmost active context that binds an input consumes it** — `context.rs` has the rules, including what happens to a key
 //! held while the stack changes, and what [`ActionMap::suppress_held`] and
 //! [`ActionMap::suppress_held_action`] withhold on request. [`ui`] declares the
 //! engine's reserved `ui`
@@ -78,7 +79,7 @@ pub mod web_gamepad;
 #[cfg(any(windows, test))]
 pub mod xinput;
 
-pub use context::GAMEPLAY_CONTEXT;
+pub use context::{GAMEPLAY_CONTEXT, GLOBAL_CONTEXT};
 pub use device::Device;
 pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
@@ -653,11 +654,12 @@ pub enum ActionMapError {
     UnknownAction(String),
     /// No context with this name has been declared.
     UnknownContext(String),
-    /// [`ActionMap::push_context`] was asked for a context already on the
-    /// stack — [`GAMEPLAY_CONTEXT`] always is.
+    /// [`ActionMap::push_context`] was asked for a context already active —
+    /// [`GAMEPLAY_CONTEXT`] and [`GLOBAL_CONTEXT`] always are.
     ContextAlreadyActive(String),
     /// [`ActionMap::pop_context`] was asked for a context that is not the
-    /// topmost pushed one — [`GAMEPLAY_CONTEXT`] is never pushed.
+    /// topmost pushed one — [`GAMEPLAY_CONTEXT`] and [`GLOBAL_CONTEXT`] are
+    /// never pushed.
     ContextNotOnTop(String),
     /// A [`Binding::PadStick`]'s dead zone or a [`Binding::PadTrigger`]'s
     /// threshold on the named action is not finite and in `0.0..1.0`.
@@ -700,11 +702,14 @@ pub struct ActionMap {
 
     // Contexts ---------------------------------------------------------------
     /// Every declared context's name, in declaration order;
-    /// [`GAMEPLAY_CONTEXT`] is index 0.
+    /// [`GAMEPLAY_CONTEXT`] is index 0 and [`GLOBAL_CONTEXT`] index 1.
     contexts: Vec<String>,
-    /// The active contexts as indices into `contexts`, bottom first. Never
-    /// empty: index 0 is the base and is never popped.
+    /// The pushable stack as indices into `contexts`, bottom first. Never
+    /// empty: index 0 is the base and is never popped. [`GLOBAL_CONTEXT`] is
+    /// always active and is not on it.
     stack: Vec<usize>,
+    /// The contexts on `stack` that were pushed modal.
+    modal: Vec<usize>,
     /// Which active context owns each bound input, rebuilt whenever the stack
     /// or a binding changes.
     routes: Routes,
@@ -760,8 +765,9 @@ impl ActionMap {
         Self {
             slots: Vec::new(),
             name_to_idx: HashMap::new(),
-            contexts: vec![GAMEPLAY_CONTEXT.to_owned()],
+            contexts: vec![GAMEPLAY_CONTEXT.to_owned(), GLOBAL_CONTEXT.to_owned()],
             stack: vec![0],
+            modal: Vec::new(),
             routes: Routes::default(),
             suppressed: Suppressed::default(),
             last_device: None,

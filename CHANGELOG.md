@@ -283,6 +283,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Modal input contexts and a global one above them.**
+  `ActionMap::push_context_modal(name)` pushes a context that passes nothing it
+  does not bind to the contexts beneath — keys, pointer buttons, on-screen
+  controls, the wheel and pad inputs reach nothing below it — while the
+  pointer's position and motion still route, and an input held as it opens is
+  withheld until released, as for any push. `GLOBAL_CONTEXT` (`"global"`) is
+  always active, never pushed or popped, and routed before the whole stack, a
+  modal context included, for toggles that must work over any screen; it is not
+  listed by `active_contexts`.
 - **Menus that fit a small window in an app's font** —
   `Menu::layout_with_font_fitted(extent, &style, font)` lays a menu out in a
   registered font at the largest size up to `style` whose panel fits

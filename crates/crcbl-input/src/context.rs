@@ -11,12 +11,18 @@
 //! loudly instead of popping each other's context. An action in a context that
 //! is not on the stack is idle, as a disabled one is.
 //!
+//! [`GLOBAL_CONTEXT`] sits above the stack: always active, never pushed or
+//! popped, and routed before every pushed context — the place for a toggle
+//! that must work over any screen.
+//!
 //! # Consumption
 //!
 //! **An input belongs to the topmost active context that binds it**, and only
 //! that context's actions read it; an input no active context binds reaches
 //! nothing, and one the top context does not bind falls through to the first
-//! context beneath that does. "Binds" is by binding, not by enabled flag: a
+//! context beneath that does — unless the context between was pushed with
+//! [`ActionMap::push_context_modal`], which stops every input it does not bind
+//! but the pointer's position and motion. "Binds" is by binding, not by enabled flag: a
 //! disabled action is silenced, and its keys stay its context's until
 //! [`ActionMap::rebind`] moves them. Inputs are keys (the keys a
 //! [`Binding::Chord`] owns, not its modifier), pointer buttons, on-screen
@@ -88,6 +94,18 @@ use super::{
 /// The base context: always active, and where [`ActionMap::declare`] puts an
 /// action.
 pub const GAMEPLAY_CONTEXT: &str = "gameplay";
+
+/// The context above every other: always active, never pushed or popped, and
+/// routed ahead of the whole stack, a modal context included — where a toggle
+/// that must work over any screen goes (a debug camera, the map key, the key
+/// that opens and closes an inventory). Declare into it with
+/// [`ActionMap::declare_in`]. It is not on the stack, so
+/// [`ActionMap::active_contexts`] does not list it.
+pub const GLOBAL_CONTEXT: &str = "global";
+
+/// [`GLOBAL_CONTEXT`]'s index in [`ActionMap::contexts`]: registered second, at
+/// construction.
+const GLOBAL_INDEX: usize = 1;
 
 /// The owner of each input some active context binds, as an index into
 /// [`ActionMap::contexts`].
@@ -285,13 +303,31 @@ impl Routes {
     /// claims what nothing above it already has.
     fn build(map: &ActionMap) -> Self {
         let mut routes = Self::default();
-        for &context in map.stack.iter().rev() {
+        // Below a modal context only the pointer's position and motion still
+        // route: a screen reads the cursor, and nothing else passes it.
+        let mut below_modal = false;
+        let order = std::iter::once(GLOBAL_INDEX).chain(map.stack.iter().rev().copied());
+        for context in order {
             let bindings = || {
                 map.slots
                     .iter()
                     .filter(move |slot| slot.context == context)
                     .flat_map(|slot| slot.decl.bindings.iter())
             };
+            if below_modal {
+                for binding in bindings() {
+                    match binding {
+                        Binding::MouseMotion => {
+                            routes.motion.get_or_insert(context);
+                        }
+                        Binding::PointerPosition { .. } => {
+                            routes.pointer.get_or_insert(context);
+                        }
+                        _ => {}
+                    }
+                }
+                continue;
+            }
             for binding in bindings() {
                 binding.visit_keys(|key| {
                     routes.keys.entry(key).or_insert(context);
@@ -366,6 +402,7 @@ impl Routes {
                     }
                 }
             }
+            below_modal = map.modal.contains(&context);
         }
         routes
     }
@@ -382,11 +419,35 @@ impl ActionMap {
     /// [`ActionMapError::UnknownContext`] if no action was ever declared in it,
     /// [`ActionMapError::ContextAlreadyActive`] if it is already on the stack.
     pub fn push_context(&mut self, context: &str) -> Result<(), ActionMapError> {
+        self.push(context, false)
+    }
+
+    /// Push a declared context on top of the stack as **modal**: every key,
+    /// pointer button, on-screen control, wheel and pad input it does not bind
+    /// reaches nothing beneath it, where [`ActionMap::push_context`] lets it
+    /// fall through. The pointer's position and motion still route beneath,
+    /// and [`GLOBAL_CONTEXT`] stays above it.
+    ///
+    /// Everything else is [`ActionMap::push_context`]'s: an input held when it
+    /// opens loses its owner and is withheld until released, so a walk held
+    /// into an inventory stops, and does not resume when it closes until the
+    /// key is pressed again.
+    ///
+    /// # Errors
+    /// As [`ActionMap::push_context`].
+    pub fn push_context_modal(&mut self, context: &str) -> Result<(), ActionMapError> {
+        self.push(context, true)
+    }
+
+    fn push(&mut self, context: &str, modal: bool) -> Result<(), ActionMapError> {
         let index = self.context_index(context)?;
-        if self.stack.contains(&index) {
+        if self.is_active(index) {
             return Err(ActionMapError::ContextAlreadyActive(context.to_owned()));
         }
         self.stack.push(index);
+        if modal {
+            self.modal.push(index);
+        }
         self.restack();
         Ok(())
     }
@@ -407,12 +468,14 @@ impl ActionMap {
             return Err(ActionMapError::ContextNotOnTop(context.to_owned()));
         }
         self.stack.pop();
+        self.modal.retain(|&modal| modal != index);
         self.restack();
         Ok(())
     }
 
-    /// The active contexts' names, bottom first: [`GAMEPLAY_CONTEXT`], then
-    /// each pushed context in the order it was pushed.
+    /// The stack's contexts' names, bottom first: [`GAMEPLAY_CONTEXT`], then
+    /// each pushed context in the order it was pushed. [`GLOBAL_CONTEXT`] is
+    /// active too, above them all, and is not listed.
     pub fn active_contexts(&self) -> impl Iterator<Item = &str> {
         self.stack
             .iter()
@@ -425,7 +488,13 @@ impl ActionMap {
         self.contexts
             .iter()
             .position(|name| name == context)
-            .is_some_and(|index| self.stack.contains(&index))
+            .is_some_and(|index| self.is_active(index))
+    }
+
+    /// Whether the context at `index` routes input: [`GLOBAL_CONTEXT`] always,
+    /// any other while it is on the stack.
+    fn is_active(&self, index: usize) -> bool {
+        index == GLOBAL_INDEX || self.stack.contains(&index)
     }
 
     /// The context an action was declared in, or `None` if it is not declared.
@@ -445,7 +514,7 @@ impl ActionMap {
     /// Whether the slot at `idx` reacts to input: enabled, in an active context.
     pub(crate) fn is_live(&self, idx: usize) -> bool {
         let slot = &self.slots[idx];
-        slot.enabled && self.stack.contains(&slot.context)
+        slot.enabled && self.is_active(slot.context)
     }
 
     /// Rebuild the routes after a binding changed, and re-resolve every live
@@ -618,7 +687,7 @@ impl ActionMap {
             // read as a release that taps: a stack change cancels every
             // pattern in flight — see `patterns.rs`.
             self.slots[idx].patterns.cancel();
-            if self.stack.contains(&self.slots[idx].context) {
+            if self.is_active(self.slots[idx].context) {
                 if self.slots[idx].enabled {
                     self.resolve_one(idx);
                 }
@@ -697,6 +766,119 @@ mod tests {
             "popped: Space is gameplay's again"
         );
         assert!(!map.button_held("accept"));
+    }
+
+    /// Gameplay's walk on W, shoot on the left button, zoom on the wheel and
+    /// an aim that reads the pointer's X; an inventory that binds only Escape;
+    /// and the map toggle on M in [`GLOBAL_CONTEXT`].
+    fn inventory_over_gameplay() -> ActionMap {
+        let mut map = ActionMap::new();
+        map.declare(button("walk", vec![Binding::Key(KeyCode::KeyW)]));
+        map.declare(button(
+            "shoot",
+            vec![Binding::MouseButton(PointerButton::Left)],
+        ));
+        map.declare(axis("zoom", ActionKind::Axis1, vec![Binding::MouseScroll]));
+        map.declare(axis(
+            "aim_x",
+            ActionKind::Axis1,
+            vec![Binding::PointerPosition {
+                axis: crate::PointerAxis::X,
+            }],
+        ));
+        map.declare_in(
+            "inventory",
+            button("close", vec![Binding::Key(KeyCode::Escape)]),
+        );
+        map.declare_in(
+            GLOBAL_CONTEXT,
+            button("map", vec![Binding::Key(KeyCode::KeyM)]),
+        );
+        map
+    }
+
+    /// **A modal context stops every input it does not bind; a plain one lets
+    /// it fall through.** Over a plain inventory, W still walks; over a modal
+    /// one, W, the left button and the wheel reach nothing while Escape, which
+    /// it binds, closes it — and the pointer's position still reaches the aim
+    /// beneath, because a screen reads the cursor.
+    #[test]
+    fn a_modal_context_stops_what_it_does_not_bind() {
+        let mut map = inventory_over_gameplay();
+        map.push_context("inventory").expect("declared");
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyW, true);
+        assert!(map.button_held("walk"), "a plain context lets W through");
+        map.key_event(KeyCode::KeyW, false);
+        map.pop_context("inventory").expect("on top");
+
+        map.push_context_modal("inventory").expect("declared");
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyW, true);
+        map.mouse_button(PointerButton::Left, true);
+        map.mouse_scroll(0.0, 1.0);
+        map.pointer_position(0.5, 0.25);
+        map.key_event(KeyCode::Escape, true);
+        assert!(!map.button_held("walk"), "W reached gameplay");
+        assert!(
+            !map.button_held("shoot"),
+            "the left button reached gameplay"
+        );
+        assert_eq!(map.axis1("zoom"), 0.0, "the wheel reached gameplay");
+        assert!(map.just_pressed("close"), "the modal context's own key");
+        assert_eq!(map.axis1("aim_x"), 0.5, "the cursor is still read beneath");
+    }
+
+    /// **A key held into a modal context is dead until pressed again**, after
+    /// it closes too: the walk held when the inventory opened does not resume
+    /// when it closes.
+    #[test]
+    fn a_key_held_into_a_modal_context_waits_for_a_new_press() {
+        let mut map = inventory_over_gameplay();
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyW, true);
+        assert!(map.button_held("walk"));
+
+        map.push_context_modal("inventory").expect("declared");
+        assert!(!map.button_held("walk"), "the walk stops as it opens");
+        map.pop_context("inventory").expect("on top");
+        map.begin_tick(TICK);
+        assert!(!map.button_held("walk"), "and does not resume as it closes");
+
+        map.key_event(KeyCode::KeyW, false);
+        map.key_event(KeyCode::KeyW, true);
+        assert!(map.button_held("walk"), "a new press walks");
+    }
+
+    /// **The global context works over anything, and is never pushed or
+    /// popped.** M toggles the map over a modal inventory; pushing or popping
+    /// it is refused; it is active and not listed among the stack's contexts.
+    #[test]
+    fn the_global_context_stays_above_a_modal_one() {
+        let mut map = inventory_over_gameplay();
+        map.push_context_modal("inventory").expect("declared");
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::KeyM, true);
+        assert!(
+            map.just_pressed("map"),
+            "M is global's over the modal screen"
+        );
+
+        assert_eq!(
+            map.push_context(GLOBAL_CONTEXT),
+            Err(ActionMapError::ContextAlreadyActive(
+                GLOBAL_CONTEXT.to_owned()
+            ))
+        );
+        assert_eq!(
+            map.pop_context(GLOBAL_CONTEXT),
+            Err(ActionMapError::ContextNotOnTop(GLOBAL_CONTEXT.to_owned()))
+        );
+        assert!(map.is_context_active(GLOBAL_CONTEXT));
+        assert_eq!(
+            map.active_contexts().collect::<Vec<_>>(),
+            [GAMEPLAY_CONTEXT, "inventory"]
+        );
     }
 
     /// **An input the top context does not bind falls through**, and one no
