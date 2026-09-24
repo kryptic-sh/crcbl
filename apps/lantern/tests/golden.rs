@@ -923,7 +923,7 @@ fn inspect(image: &Image, extent: (u32, u32), block: (u32, u32)) {
     // is what proves each has matching direct-light terms with no GPU. What is
     // left between them is the coloured wall's bounce, and the only light on
     // that wall is the lamp — so this claim is red for any updater that gathers
-    // the sun alone, which is what `docs/plan/50-irradiance-probes.md`'s
+    // the sun alone, which is what the irradiance probes'
     // punctual producer exists to fix.
     let tinted = project(&camera, extent, TINTED_AT);
     // The block has to stay off the coloured wall itself, or this measures the

@@ -10,7 +10,8 @@
 //!                                        the weight that corner keeps ▼
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s decision of 2026-08-30: the one thing
+//! The irradiance-probe decision of 2026-08-30, recorded in
+//! `docs/notes/rendering.md`: the one thing
 //! that makes a probe grid stop leaking is Majercik et al. 2019's per-probe
 //! visibility test — *Dynamic Diffuse Global Illumination with Ray-Traced
 //! Irradiance Fields*, §3, whose depth term is McGuire et al. 2017's light-field

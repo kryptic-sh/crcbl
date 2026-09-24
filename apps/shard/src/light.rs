@@ -363,7 +363,7 @@ fn probe_position(cell: [u32; 3]) -> DVec3 {
 ///
 /// Until 2026-09-04 this gathered the torches' first bounce by casting rays into
 /// [`crate::zone::world`] at `t = 0` — a bake in the sense
-/// `docs/plan/50-irradiance-probes.md`'s no-bake rule forbids, since the flames
+/// the irradiance probes' no-bake rule forbids, since the flames
 /// flicker and the result outlived them. The rows are the engine's updater's
 /// now, through [`ProbeUpdate::EveryFrame`].
 ///
@@ -393,7 +393,7 @@ pub fn probes() -> ProbeGrid {
             // the extent the updater's near cascade covers, and a clipmap's
             // coarser levels are for a world larger than this one.
             levels: 1,
-            // **Never scrolled.** `docs/plan/50-irradiance-probes.md`'s follow
+            // **Never scrolled.** The irradiance probes' follow
             // re-centres a level on a tracked point and re-captures the slabs
             // the step exposes, and neither half applies here: this level's
             // probes already partition the whole zone — half a cell in from each

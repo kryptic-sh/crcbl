@@ -170,7 +170,7 @@ impl Utils<'_> {
     /// Whether the Steam overlay is enabled and ready for this process
     /// (`ISteamUtils::IsOverlayEnabled`). It can take a few seconds after
     /// init to become true, and never does when Steam did not inject the
-    /// overlay — see `docs/plan/42-steam.md`, "Platforms".
+    /// overlay — see `docs/notes/backends.md`, "The manual procedure".
     #[must_use]
     pub fn overlay_enabled(&self) -> bool {
         let client = &self.steam.client;

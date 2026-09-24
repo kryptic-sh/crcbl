@@ -1,4 +1,4 @@
-//! `ISteamInventory` (`docs/plan/42-steam.md` slice 15, its inventory half):
+//! `ISteamInventory` (Steamworks slice 15, its inventory half):
 //! the items a player holds, the definitions they are made from, and buying
 //! more.
 //!
@@ -21,7 +21,7 @@
 //! check, dev-only item generation, quantity transfers, trades, timed drops,
 //! eligible-promo queries, per-item dynamic properties, and inspecting an
 //! item by its token. Under app 480 whether SpaceWar's example definitions
-//! exist is believed, not verified (`docs/plan/42-steam.md`, R3).
+//! exist is believed, not verified (`docs/notes/backends.md`, R3).
 
 use core::ffi::c_char;
 use std::{marker::PhantomData, sync::Arc};

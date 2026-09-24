@@ -345,7 +345,7 @@ static const uint SHADOW_ATLAS_TILES = 16;
 /// How many clipmap levels the irradiance volume's header carries room for,
 /// matching `crcbl_shaders::probe::PROBE_LEVELS`.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s layered density: a few concentric
+/// The irradiance probes' layered density: a few concentric
 /// levels of one grid, each twice the last, so a fragment near the middle reads
 /// dense probes and one far out reads sparse ones. Sizes
 /// `FrameUniforms::probe_level_origin` and its reciprocal twin, so this is a
@@ -537,7 +537,7 @@ struct FrameUniforms
     /// How far each level has scrolled, as whole probe steps already reduced
     /// into `0..probe_counts`; `w` unused.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s scrolling: a level re-centres on
+    /// The irradiance probes' scrolling: a level re-centres on
     /// the camera by whole probe steps, `probe_level_origin` above has already
     /// moved with it, and this is the wrap that leaves the probes which stayed
     /// naming the rows they already had. `probe_wrap` is the one place it is
@@ -1834,7 +1834,7 @@ Texture2D<float4> ltc_matrix D3D12_REGISTER(t27, space0);
 [[vk::binding(28, 0)]]
 Texture2D<float> contact_shadow D3D12_REGISTER(t28, space0);
 
-/// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**: one layer
+/// The irradiance probes' per-probe **visibility map**: one layer
 /// per row of `probes`, `PROBE_VISIBILITY_EXTENT` texels square, `r` the mean
 /// distance from that probe to the nearest static surface in a direction and `g`
 /// the mean of its square. `crcbl_shaders::probe_visibility` owns the layout,
@@ -4532,7 +4532,7 @@ float2 probe_moments(uint index, float3 direction)
 /// the bound callable without it.** `PROBE_OCCLUDED_WEIGHT` is a property of the
 /// weighted mean's divisor — it is what keeps the sum of eight corner weights
 /// off zero — so a gather that has no divisor must not pay it:
-/// `docs/plan/50-irradiance-probes.md`'s reflective-shadow-map updater sums
+/// The irradiance probes' reflective-shadow-map updater sums
 /// thousands of texels into one probe, where a floor under every wall-hidden
 /// texel is not a rounding error but that many ten-thousandths of flux leaking
 /// through the wall. Such a pass calls this; the trilinear gather calls
@@ -4697,7 +4697,7 @@ WeightedProbe probe_corner(uint level, uint3 cell, float3 origin, float3 spacing
 ///
 /// # Each corner is weighed by whether it can see the surface
 ///
-/// `docs/plan/50-irradiance-probes.md`'s rung, and the one thing that makes a
+/// The probe visibility rung, and the one thing that makes a
 /// probe grid stop leaking: a corner's weight is its trilinear share times
 /// `probe_weight`, which is the Chebyshev bound of that probe's visibility map
 /// in the direction of this fragment. A probe on the far side of a wall is
@@ -6112,7 +6112,7 @@ void depthMaskedFragmentMain(VertexOutput input)
 /// What the reflective shadow map's three targets hold, one member per
 /// `SV_Target` — `crcbl_render::forward::MeshModules::RSM_TARGETS` is the
 /// matching `ColorTargetState` array and
-/// `docs/plan/50-irradiance-probes.md` is the design.
+/// `docs/notes/rendering.md` records the design.
 ///
 /// # Three targets, and the third is a position rather than a depth
 ///
@@ -6164,7 +6164,7 @@ struct RsmOutput
 /// The reflective shadow map's fragment stage: what a texel of the sun's near
 /// cascade reflects, where it is and which way it faces.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s raster updater, first half.
+/// The irradiance probes' raster updater, first half.
 /// `probe_gather.slang` is the second, and `RsmOutput` is the contract between
 /// them.
 ///

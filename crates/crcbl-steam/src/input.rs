@@ -9,7 +9,7 @@
 //! holds (a Deck, a DualSense, a Switch Pro pad) onto it, remaps included.
 //! Each [`SteamPads::poll`] reads those actions per controller into a
 //! `GamepadSnapshot`, by the seam's conventions, so a game cannot tell these
-//! events from XInput's (`docs/plan/42-steam.md`, "Input").
+//! events from XInput's (the Steam rules in `docs/notes/backends.md`).
 //!
 //! ```text
 //! SteamPads::open(&mut steam, manifest)  ── Init(true), the manifest, EnableDeviceCallbacks

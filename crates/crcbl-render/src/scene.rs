@@ -559,7 +559,7 @@ impl<'a> PageDesc<'a> {
 }
 
 /// Who writes an irradiance volume's rows: the description that authored them,
-/// or `docs/plan/50-irradiance-probes.md`'s every-frame updater.
+/// or the irradiance probes' every-frame updater.
 ///
 /// # Why this is a field of the volume and not an effect bit or a console
 /// variable

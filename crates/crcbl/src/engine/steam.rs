@@ -1,4 +1,4 @@
-//! The loop's Steam limb (`docs/plan/42-steam.md` slice 8): Steam pumped once
+//! The loop's Steam limb (Steamworks slice 8): Steam pumped once
 //! a frame, its overlay treated as a focus loss, its events handed to the
 //! game, and Steam Input as the loop's pad source.
 //!

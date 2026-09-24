@@ -383,9 +383,11 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
-## Steamworks: four decisions the plan is waiting on (2026-08-22)
+## Steamworks: four decisions, all taken (2026-08-22, settled 2026-09-23)
 
-Decision record; the decision is in docs/backlog.md.
+Decision record, as the options stood on 2026-08-22; the answers are in
+`docs/backlog.md` under this heading, and the rules that came of them in
+`docs/notes/backends.md` under _What the deleted 42-steam plan left behind_.
 
 - **The binding route, and whether this MIT repo publishes our own flat-API
   declarations.** (a) hand-write `extern "C"` declarations and `repr(C)` structs

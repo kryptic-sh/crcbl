@@ -58,7 +58,7 @@ const DFG_BINDING: u32 = SKY_PREFILTER_BINDING + 1;
 /// [`dfg::DFG_SIZE`] as an image extent.
 const DFG_SIZE: u32 = dfg::DFG_SIZE as u32;
 
-/// The binding `ssr.slang` reads `docs/plan/50-irradiance-probes.md`'s per-probe
+/// The binding `ssr.slang` reads the irradiance probes' per-probe
 /// visibility maps through — the image [`crate::forward`] binds to `mesh.slang`,
 /// so that the reflection's probe fallback is weighed by the same Chebyshev
 /// bound the diffuse gather is and stops reading a probe through a wall.
@@ -131,7 +131,7 @@ pub(crate) struct SsrImages {
 /// site. They travel together because they are one idea —
 /// `docs/plan/43-render-standards.md` §8's "the environment a missed ray falls
 /// back to is the term a sky provides", plus
-/// `docs/plan/50-irradiance-probes.md`'s grid for the bounce light around it.
+/// the irradiance probes' grid for the bounce light around it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SsrEnvironment {
     /// The irradiance table the forward pass binds to `mesh.slang`, so a

@@ -125,7 +125,7 @@ crcbl-wl-scanner = { path = "crates/crcbl-wl-scanner", version = "0.1.0" }
 crcbl-store = { path = "crates/crcbl-store", version = "0.1.0" }
 crcbl-audio = { path = "crates/crcbl-audio", version = "0.1.0" }
 # Steamworks over the SDK's flat C API, loaded at runtime — see
-# `docs/plan/42-steam.md`. Only the umbrella's `steam` feature names it.
+# `docs/notes/backends.md`. Only the umbrella's `steam` feature names it.
 crcbl-steam = { path = "crates/crcbl-steam", version = "0.1.0" }
 crcbl-assets = { path = "crates/crcbl-assets", version = "0.1.0" }
 crcbl-ui = { path = "crates/crcbl-ui", version = "0.1.0" }

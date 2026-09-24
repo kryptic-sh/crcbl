@@ -59,7 +59,7 @@
 //! stops there and contributes only the air in front of it, so
 //! [`SkyView::irradiance`]'s lower hemisphere is the air's own glow and not a
 //! bounce. What bounces off the scene's floor is
-//! `docs/plan/50-irradiance-probes.md`'s volume, and adding an idealised
+//! the irradiance probes' volume, and adding an idealised
 //! sphere's albedo here as well would count it twice.
 //!
 //! Regenerate or verify the committed tables with the tool that owns them:

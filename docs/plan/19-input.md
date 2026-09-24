@@ -109,9 +109,9 @@ into the map it is declared in.
 ## Device backends (zero 3rd-party rule, topic 15 discipline)
 
 **Every gamepad backend below adopts one seam**, `crcbl_input::GamepadEvent` in
-`crates/crcbl-input/src/gamepad.rs` (landed as `42-steam.md`'s slice 7a, so
-Steam Input emits the same events): positional buttons, sticks −1…1 with +Y up,
-triggers 0…1, raw axes, consumed directly by a game or through
+`crates/crcbl-input/src/gamepad.rs` (landed as the Steamworks plan's slice 7a,
+so Steam Input emits the same events): positional buttons, sticks −1…1 with +Y
+up, triggers 0…1, raw axes, consumed directly by a game or through
 `ActionMap::gamepad_event`. No backend defines its own event type. Pads are
 polled, not window events, so they never pass through `ShellEvent`; a target
 with no backend has no pad module at all rather than one that reports "no pads".

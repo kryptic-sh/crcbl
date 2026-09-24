@@ -1331,9 +1331,10 @@ pub fn place(
     // all rather than part of `with_scene`: a description carries no instances.
     //
     // **Timed, and the number is reported**, because it is the one the clipmap
-    // slice is priced against — `docs/plan/50-irradiance-probes.md` records what
+    // slice is priced against — `docs/notes/rendering.md` records what
     // it costs today, and a capture that quietly grew a millisecond a probe is
-    // exactly the regression that plan's next rung cannot survive. Native only:
+    // exactly the regression a clipmap of thousands of probes cannot survive.
+    // Native only:
     // `std::time::Instant::now` panics on `wasm32-unknown-unknown`, and the web
     // build measures with the page's own clock or not at all.
     #[cfg(not(target_arch = "wasm32"))]

@@ -4,8 +4,8 @@
 //! Conflicts are not this module's business: Steam keeps one version of each
 //! file, and settles a clash between devices before the game starts, in its
 //! own dialog. [`crcbl_store::synced::SyncedFile`] over this storage is what
-//! notices a clash and hands it to the game (`docs/plan/42-steam.md`,
-//! "Cloud").
+//! notices a clash and hands it to the game (`docs/notes/backends.md`,
+//! "Cloud conflicts are the game's to see").
 
 use std::{
     ffi::{CStr, CString},

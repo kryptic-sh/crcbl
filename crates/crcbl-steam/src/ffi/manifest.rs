@@ -18,7 +18,7 @@
 //! reads, and its declaration exists in one place.
 //!
 //! **Provenance.** Every declaration was written from the SDK 1.65 header
-//! mirror (see `docs/plan/42-steam.md`, "Conventions"). The drift gate has
+//! mirror (Steamworks.NET's copy of the headers). The drift gate has
 //! run against that mirror's headers, and **not** yet against an SDK zip
 //! downloaded from Valve, which no machine this was written on had; until it
 //! has, a declaration here is a claim about the mirror's fidelity as much as
@@ -49,7 +49,7 @@
 //! here as returning the `repr(C, packed)` struct of the same size and
 //! alignment; whether rustc returns it as each target's C compiler does is
 //! reasoned, not tested, and only a real controller on each target confirms
-//! it (`docs/plan/42-steam.md`, "The cases that are easy to get wrong").
+//! it (`docs/notes/backends.md`, R10).
 
 use core::ffi::{c_char, c_void};
 

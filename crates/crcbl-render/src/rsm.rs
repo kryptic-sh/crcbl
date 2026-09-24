@@ -15,7 +15,7 @@
 //!                            crate::probe_gather ──▶ every probe row
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s raster updater, first half. This module
+//! The irradiance probes' raster updater, first half. This module
 //! owns both maps' extents, the descriptions of their attachments and the
 //! arithmetic that says how much world a sun texel covers; [`crate::forward`]
 //! records the passes, because the pipeline and the draws are that module's.
@@ -72,8 +72,8 @@ crcbl_console::convar! {
     /// [`ProbeUpdate`](crate::scene::ProbeUpdate) on the volume itself, and that
     /// module's docs say why a console variable cannot be it. This is what a
     /// pricing run turns off so the two passes' cost can be read off the frame
-    /// with everything else held still — `docs/plan/50-irradiance-probes.md`
-    /// carries the numbers.
+    /// with everything else held still — `docs/notes/rendering.md`
+    /// carries the numbers, under _What the RSM probe updater shipped without_.
     pub static r_probe_bounce: bool = true;
 }
 

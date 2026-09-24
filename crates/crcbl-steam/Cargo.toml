@@ -6,7 +6,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-# No binding crate. `docs/plan/42-steam.md` rules out every one — the SDK
+# No binding crate. `docs/notes/backends.md` rules out every one — the SDK
 # cannot be vendored, and a link-time dependency on `steam_api` kills the
 # process in the dynamic loader on a machine without Steam — so the declarations
 # are hand-written and the library is opened at runtime.

@@ -1,6 +1,6 @@
 //! Steam in the sandbox, behind its `steam` feature.
 //!
-//! `docs/plan/42-steam.md` slices 1b, 3a, 3b, 4, 7b and 8: on a windowed run,
+//! Steamworks slices 1b, 3a, 3b, 4, 7b and 8: on a windowed run,
 //! initialise Steam under Valve's shared test app 480, log who is playing, and
 //! lend the session to the loop, which pumps it once a frame, takes an opened
 //! overlay as a focus loss — pausing and releasing held input exactly as

@@ -450,6 +450,174 @@ The rules and their reasons:
   second morphological tier beside CMAA2 — is listed with the reasons in the
   backlog's declined entry.
 
+## What the deleted 50-irradiance-probes plan left behind (2026-09-24)
+
+Record; the raster half is built — the L1 grid in `crcbl_render::probe` and
+`crcbl_shaders::probe`, read by `probe_irradiance` in `mesh.slang` and as the
+SSR miss in `ssr.slang`; the per-probe visibility maps
+(`crcbl_shaders::probe_visibility`, `crcbl_render::probe_capture`,
+`probe_weight`); the raster updater (`crcbl_render::rsm`,
+`crcbl_render::probe_gather`, `ProbeUpdate::EveryFrame`); and the clipmap's
+levels and whole-step scroll (`ProbeVolume::level_origin`, `follow`, `exposed`,
+`probe_capture::recapture`, `ForwardRenderer::follow_probe_volume`). What is not
+is in `docs/backlog.md` under _What the deleted 50-irradiance-probes plan left
+unbuilt_ (the traced updater, relocation, and what was declined), _What the RSM
+probe updater shipped without_ (the sky through the visibility map) and _What
+the probe clipmap's scrolling shipped without_ (the stall, the transients,
+recapture on demand, lantern's finer level 0, the `Authored` refusal). The plan
+was topic 18's probe section, split out verbatim on 2026-08-27; code that cites
+"the probe plan's rung" means the visibility rung below.
+
+**One volume, two updaters, and no leaking** — the user's decision of
+2026-08-30, on "best-looking dynamic lighting for decent performance, and above
+all no light leaking", taken after the no-bake rule of the same day. The grid
+stays; what fills it changed:
+
+- **No static bakes.** `apps/lantern`'s `bounce` and `apps/shard`'s
+  `light::probes` once computed a lighting result at load from a sun and torches
+  that then moved — a bake whatever thread ran it. Both went with the updater
+  that replaced them; the modules stay, and place probes without lighting them.
+  **Captured on load, then on scroll — never baked**: the visibility maps are
+  captured when a scene loads and the slab a scroll exposes in the frame it
+  appears; that is geometry, which is why the word is _captured_. The lighting
+  rows are never stored across a load; the updater recomputes them every frame,
+  which keeps the sun and every lamp dynamic.
+- **No leaking: every reader weighs each of its eight probes by a Chebyshev test
+  against that probe's visibility map, on every path** — the diffuse read and
+  the specular fallback alike. The map is an octahedral depth and depth² per
+  probe (Majercik et al. 2019's contribution, the one thing that stops a probe
+  grid leaking), so a probe on the far side of a wall gets no weight.
+  `crcbl_shaders::probe_visibility` owns the layout, the mapping and the bound
+  and is the Rust mirror the render tests compare the shader against.
+- **The raster updater, every frame, on all four backends**: the sun's near
+  cascade and every shadowed punctual light's faces are drawn a second time as
+  reflective shadow maps (`crcbl_render::rsm` says why they are two), and one
+  compute pass gathers both into every probe, **each sample gated by that
+  probe's visibility map**, so a texel the probe cannot see adds nothing. A
+  fixed sample pattern, every probe every frame, no history: survey constraint
+  C2 (a frame is a function of its own inputs) holds.
+- **The traced updater fills the same rows** from inline ray queries on
+  `crcbl-vk`, `crcbl-dx12` and `crcbl-mtl` — unbuilt, designed in the backlog.
+  The volume, the visibility test and the shader readers are the same on both
+  tiers; only the pass that writes the rows differs. That is what "the diffuse
+  GI twin" meant.
+- **Single bounce on both tiers**, until C2's temporal question is answered yes;
+  a second bounce is reading the previous frame's rows, which is history.
+
+**One base, two sample producers — nothing else is bespoke.** The diagram is the
+design, not the tree:
+
+```text
+  placement (clipmap, scroll, relocation)   ── shared
+        │
+  sample producer: per probe, N directions → (radiance, distance, backface)
+        ├── raster tier: depth cube per probe (distance, backface) captured on
+        │                load/scroll + the RSM gather (radiance), gated by it
+        └── RT tier:     inline ray queries, every frame — one ray gives all
+                         three, dynamic objects included
+        │
+  integrate ── shared: samples → L1 irradiance rows + octahedral depth/depth²
+        │
+  shading read ── shared: level pick, trilinear, SSR fallback
+                  both paths: Chebyshev weight
+```
+
+The producer's contract is a sample buffer of a fixed layout; the integrate
+pass, the storage, the relocation rule and the shader read never know which
+producer ran. As built, the raster capture writes distance and distance² and no
+backface channel, and relocation does not exist.
+
+**The clipmap: layered density, camera-centred** (the user's addition,
+2026-08-30). A few levels, each a fixed probe count centred on one point, level
+`k` spaced `2^k` times level 0; a fragment reads the finest level that contains
+it, blended over a band at each level's edge, then the trilinear gather and the
+Chebyshev weight within it. **Rows are per level, with an offset per level, so
+survey constraint C1 (no ninth storage buffer) holds.**
+
+**Scrolling is by whole probe steps (2026-09-05).** `ProbeVolume::steps` is a
+per-level whole-step offset, reduced into `0..count` on the host so the shader's
+wrap in `probe_row` is one compare and one subtract. `ProbeVolume::follow`
+re-centres every level by the nearest whole step of its own spacing and answers
+the rows the move invalidated; `ProbeVolume::exposed` is the rule that a step of
+`k` probes along one axis exposes exactly `k` slabs and leaves the other
+`count − k` at the rows they had (the union, on several axes).
+`probe_capture::recapture` draws only the exposed rows and the gather's position
+table is rewritten beside it. lantern follows `bounce::follow_point` every frame
+and its volume never moves (less than one whole step of slack), which is what
+kept every lantern golden byte-identical.
+
+**The grid itself (designed 2026-08-14):**
+
+- **L1, three dot products.** Four coefficients per channel, packed so
+  irradiance for a normal is three dot products against `float4(N, 1)`: no
+  `pow`, no trigonometry, one `max(…, 0)` for ringing.
+- **Additive, which is what makes it safe to land empty.** The probe term is
+  added to `frame.ambient` and the sky; a scene with no probes uploads zeroes
+  and `x + 0 == x` exactly on every target, so the frame is bit-identical with
+  no branch. An author who wants probes to be the whole ambient zeroes
+  `DirectionalLight::ambient`. AO still scales the diffuse environment alone.
+- **The specular fallback is two terms, not a `lerp`**:
+  `hit_color * fresnel * confidence` plus
+  `probe_radiance(…) * fresnel * (1 - confidence)`, so with a zero volume the
+  fallback is exactly zero and existing SSR hits keep their multiplication
+  order, bit for bit. The rows hold irradiance with the clamped-cosine transfer
+  folded in, so `probe_radiance` divides the constant band by `π` and the linear
+  band by `2π/3` first; dotting the stored rows would brighten a constant
+  environment by `π`. Above `ROUGHNESS_CUTOFF` the probe term is returned at
+  zero sharpness and the blur composites it unfiltered. **The honest limit**: an
+  L1 probe in a mirror is a gradient, not a room — "not black", which is what a
+  metal needed, not "a mirror".
+- **No new render pass, no new `Features` flag, no selector** — a read-only
+  storage buffer in a fragment stage, which the seam permits. **The probe
+  binding is appended after `AMBIENT_OCCLUSION_BINDING`, never inserted**:
+  `crcbl-mtl` numbers Metal arguments by counting layout entries while Slang
+  numbers by declaration order, and they agree only while both ascend. The index
+  is past everything `mesh_cluster.slang` declares, so that file needs no
+  mirror.
+- **Both sides of both flips meet**, so probe goldens go under
+  `Tolerance::RASTERISER` like every 3D golden. The cell index: the far corner's
+  trilinear weight is exactly zero where the index changes. `probe_weight`'s
+  `to_surface <= moments.x`: at the flip the Chebyshev bound is
+  `variance / variance`, one, which is the other branch's answer. There is no
+  tap whose comparison is the answer, which is SSR's exposure.
+
+**How the probe claims are tested, and each was shown red:**
+
+- A Rust mirror of the SH evaluation checked against the literature: a constant
+  radiance `L` integrates to irradiance `π·L`, and the L1 band's transfer is
+  `2π/3`.
+- `Scene::Probes`: ambient zero, the sun down, so every pixel is the probe term;
+  two probes of opposite-coloured L1, observed as a ratio between two blocks of
+  one frame, which fails for a flat ambient (ratio 1) and a zero volume (black).
+- `a_probe_behind_a_wall_lights_nothing_through_it` and
+  `a_probe_behind_a_wall_reflects_nothing_through_it` in
+  `crates/crcbl/tests/render_e2e.rs`: one fixture drawn with and without a wall;
+  the walled band must drop by `LEAK_RATIO` **and** the other band gain
+  `LEAK_MIN_GAIN`, so a run that simply darkens the room fails too. Red by
+  forcing the Chebyshev weight to `1.0` (in `ssr.slang` alone for the specular
+  one, which leaves the diffuse test green). The specular fixture subtracts a
+  draw without the reflection pair so only the SSR pass's output is compared.
+
+**What the capture costs, measured**
+(`apps/lantern --headless --frames 400 --size 1920x1080`, radv on an RX 7900
+XTX, median of three): **0.93 ms for 60 probes against 12 occluders** at load,
+16 µs a probe against the 0.28 ms the old host ray cast took. The weighting does
+not resolve on the diffuse path (`forward` 0.293 ms p50 with
+`r_probe_visibility` on, 0.302 off); on the specular path it does, and that
+price is in `docs/backlog.md` under _The SSR visibility weight costs the
+software tier 11% of a frame_. A frame that follows without stepping is free
+(1.476 against 1.475 ms on radv); a step's cost and its stall are in the
+scrolling entry. A clipmap of a few thousand probes is a load of tens of
+milliseconds, a load path rather than a redesign; each figure is measured on the
+three tiers before a rung counts.
+
+**What this amended.** The 2026-08-30 GI decision said the tier below ray
+tracing has no bounce term; it has this one, because it is leak-free and costs
+one compute pass and one extra render pass of three small targets. The DDGI
+rejection stands on its temporal half and falls on its ray-tracing half (the
+traced updater); the light-field-probe rejection ("no leaking defect yet") is
+withdrawn — leaking is the defect the decision is about.
+
 ## What the deleted 51-volumetrics plan left behind (2026-09-24)
 
 Record; rungs 1a to 2 are built — `crcbl_render::volumetric`'s
@@ -622,10 +790,10 @@ Decision record; the decision is in `docs/backlog.md`.
 - **The ground below the horizon is black, deliberately.** A view ray that meets
   the planet returns only the air in front of it, so the atmosphere's own lower
   hemisphere adds nothing to `SkyView::irradiance`. What bounces off a scene's
-  floor is `docs/plan/50-irradiance-probes.md`'s volume, and an idealised
-  sphere's albedo here would count it twice. `GROUND_ALBEDO` is still used by
-  the multiple-scattering cook, where it belongs. Revisit only if a scene wants
-  a sky with no floor under it.
+  floor is the irradiance-probe volume's, and an idealised sphere's albedo here
+  would count it twice. `GROUND_ALBEDO` is still used by the multiple-scattering
+  cook, where it belongs. Revisit only if a scene wants a sky with no floor
+  under it.
 
 - **A rough lobe still reflects the atmosphere as three bands.** The mirror half
   shipped: `ssr.slang`'s `sky_environment` reads the sky-view LUT along the
@@ -1395,17 +1563,18 @@ orders cheaper than a compute BVH), the browser tier pays nothing, and the
 raster stack is one stack on four backends rather than two.
 
 **Amended later the same day (2026-08-30):** the tier below ray tracing carries
-one bounce after all — `docs/plan/50-irradiance-probes.md`'s decision: the
-existing `GpuProbe` grid gains a per-probe octahedral depth map (rendered from
-static geometry on load, re-rendered on demand; a capture of geometry, not of
-light), `probe_irradiance` weights probes by a Chebyshev test against it so
-nothing leaks through a wall, and a compute pass fills the rows every frame from
-the sun's reflective shadow map, each sample gated by the same map. The user
-chose it on "best-looking for decent performance, and above all no light
-leaking": it is the one cheap option that is leak-free, and it is the same
-volume the RT tier fills by ray queries. The lantern and shard bakes leave with
-the slice that lands it. Order among the raster items: LTC area lights, the
-shadow atlas, the AO tint, **this**, then the atmosphere, then anything else.
+one bounce after all — the probe decision recorded under _What the deleted
+50-irradiance-probes plan left behind_ above: the existing `GpuProbe` grid gains
+a per-probe octahedral depth map (rendered from static geometry on load,
+re-rendered on demand; a capture of geometry, not of light), `probe_irradiance`
+weights probes by a Chebyshev test against it so nothing leaks through a wall,
+and a compute pass fills the rows every frame from the sun's reflective shadow
+map, each sample gated by the same map. The user chose it on "best-looking for
+decent performance, and above all no light leaking": it is the one cheap option
+that is leak-free, and it is the same volume the RT tier fills by ray queries.
+The lantern and shard bakes leave with the slice that lands it. Order among the
+raster items: LTC area lights, the shadow atlas, the AO tint, **this**, then the
+atmosphere, then anything else.
 
 **Answered 2026-08-30 on the user's "best-looking for the performance": (i) no
 temporal blend — fixed pattern, every probe every frame, on both tiers; (iii)
@@ -1451,7 +1620,7 @@ report lives outside the tree; this entry is its durable part):
   not arrive on the browser tier.
 - **C2 — a frame is a function of its own inputs.** `Tolerance::RASTERISER`, the
   SSR row's history refusal (_What the deleted 47-reflections plan left behind_)
-  and `50-irradiance-probes.md`'s DDGI refusal all say so.
+  and the probe volume's DDGI refusal all say so.
 - **C3 — the budget.** The whole frame is 0.990 ms p50 at 1920×1080 on an RX
   7900 XTX (`docs/backlog.md`'s _What GTAO left owed_, the 2026-08-28
   distribution).
@@ -1527,8 +1696,8 @@ candidate 3, the desktop-only contact term on top.
    `cook-probes` on `cook-dfg`'s terms. Third: `apps/lantern` swaps its analytic
    `bounce` for the general bake — the two must agree on a box. Static geometry
    and, alone, static lights. Overturns `43-render-standards.md`'s "no baked GI"
-   as a decision, closes `50-irradiance-probes.md`'s deferred bake, and makes
-   P7C's ray-traced GI row worth re-arguing as reflections and shadows only.
+   as a decision, closes the probe plan's deferred bake, and makes P7C's
+   ray-traced GI row worth re-arguing as reflections and shadows only.
 2. **Bake the transport, not the answer** (the Enlighten reduction). Per probe,
    the L1 response to a small basis of sun directions plus a sky term; the host
    folds the live sun into a weighted sum of rows before the upload `ProbeTable`
@@ -1570,9 +1739,9 @@ binds 10 storage buffers against the 8 this tree pins, and needs a storage image
 no `.slang` here uses yet); full Enlighten (custom clustering pipeline;
 candidate 2 is the part worth having); lightmaps before probes (needs UV unwrap,
 atlas and a denoiser on top of everything probes need); parallax-corrected
-cubemap probes (cube arrays, mip chains, `SampleLevel` — all refused in
-`50-irradiance-probes.md`; the specular twin of candidate 1, re-open after it);
-SH L2 (priced in `50-irradiance-probes.md`; a contained escalation later).
+cubemap probes (cube arrays, mip chains, `SampleLevel` — all refused in the
+probe design; the specular twin of candidate 1, re-open after it); SH L2 (priced
+in the probe design; a contained escalation later).
 
 **The questions, and the one that decides the rest:**
 
@@ -2100,11 +2269,11 @@ point. **Nothing was retuned.**
 
 Record; the limits still deferred are in `docs/backlog.md` under this heading.
 
-The design is `docs/plan/18-render-features.md`'s "Irradiance probes: the
-design" — a static grid of L1 spherical-harmonic probes in a read-only storage
-buffer, adding no render pass, added to `frame.ambient` for diffuse and returned
-by an SSR miss for specular. Read it first; all slices are built and both of its
-open questions are taken, so what stays here is the record and the limits.
+The design is recorded above under _What the deleted 50-irradiance-probes plan
+left behind_ — a static grid of L1 spherical-harmonic probes in a read-only
+storage buffer, adding no render pass, added to `frame.ambient` for diffuse and
+returned by an SSR miss for specular. All slices are built and both of its open
+questions are taken, so what stays here is the record and the limits.
 
 The seam still permits a read-only storage binding of a host-visible buffer, and
 appending the mesh binding after `AMBIENT_OCCLUSION_BINDING` needed no

@@ -382,7 +382,7 @@ impl ForwardRenderer {
             //
             // **The one derivation both paths below read.** The atlas's fitting
             // loop takes it, and so does the shadows-off branch that keeps
-            // `docs/plan/50-irradiance-probes.md`'s punctual producer fed — so a
+            // the irradiance probes' punctual producer fed — so a
             // face drawn into the atlas and the same face drawn into the reflective
             // shadow map cannot be through different matrices.
             let slot_matrices = |held: shadow::Assignment, light: &Light| -> (Vec<Mat4>, Frustum) {
@@ -703,7 +703,7 @@ impl ForwardRenderer {
             // are off.
             self.rsm_cull_ready = self.probe_update_runs()
                 && (updater_drives_cascade_zero || (redraw[0] && regions[0].is_some()));
-            // `docs/plan/50-irradiance-probes.md`'s gather, parameterised from the
+            // The irradiance probes' gather, parameterised from the
             // cascade this frame just fitted and the sun it was fitted to. Written
             // here rather than in the pass body: a pass body runs while the frame's
             // commands are being recorded, and a host write to a buffer an earlier

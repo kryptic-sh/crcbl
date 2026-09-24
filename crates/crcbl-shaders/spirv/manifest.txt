@@ -232,7 +232,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 55e1c389385bdca5be34e701c84a7e576182381c48a03f2882c1b0c81bfb47d0
+source-sha256 = 1e96ce824b66301d3e1c97f99d019346a4440de59ad334f4494468019497e06d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
 spirv-sha256 = b4e42d109d885c12e4c19af7a1612dba9d0f79f26f6c1eb6af57e62baa480011
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = efd2e2e48fcd8b657170218250b640aceaf61c3608e398abf02ee15951c7a01d
+source-sha256 = 79212b9e4589a3f5fe5d8fd3de898d95e19ebe5dffdf81ce6df05fc8f586c2da
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -369,7 +369,7 @@ entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext, fr
 
 [probe_capture]
 source = shaders/probe_capture.slang
-source-sha256 = b67bd2b124db9a6912f5513f34c5c55afabfd9ae158147c8a31d170775f78772
+source-sha256 = 6e5bf26dc55d166b48a775d45b4ccbc5803a0d2da09a53cb66fa8802ec7d2205
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/probe_capture.spv
 spirv-sha256 = 904bfff87388388a96054d5dec690fad78fd4cb697ce7ac996e819f3f758c636
@@ -383,7 +383,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [probe_gather]
 source = shaders/probe_gather.slang
-source-sha256 = d0f743f49ed61882808fd6535417fd8bb5362aeca0c42e2e58ff4c231ab641f7
+source-sha256 = e5a93d3793f2407401ffd75c036891ecfd9fabfef2195fa3dedb4155c07a6fde
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/probe_gather.spv
 spirv-sha256 = a25e5d6f0367ae073ec1ae861a74e4c813406a54aa6e87b6c8a68bcf29ebda21
@@ -529,7 +529,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = fcc4ee6e338473c71db2362ea8c3901fde77c2b694e9f9e21304ace74ac4677f
+source-sha256 = edaaca1578a750ca1c0728fc7af5c3350075348ae5df7e987848ea8f781a3367
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
 spirv-sha256 = f15dfc0ec15c6bd55ba303d1eec499e787e53e928d6fd050d556b382010c8e07

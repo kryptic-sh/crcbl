@@ -160,7 +160,7 @@ mod probe;
 /// resolved into the octahedral layer `mesh.slang` reads.
 mod probe_capture;
 
-/// The compute pass that reads `docs/plan/50-irradiance-probes.md`'s reflective
+/// The compute pass that reads the irradiance probes' reflective
 /// shadow map into every probe row of a volume the scene asked to be updated.
 mod probe_gather;
 

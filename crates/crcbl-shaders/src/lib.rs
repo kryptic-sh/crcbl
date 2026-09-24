@@ -254,7 +254,7 @@ pub mod probe;
 pub mod probe_visibility;
 
 /// The reflective-shadow-map updater's constants and parameter block, in the
-/// layout `probe_gather.slang` declares — `docs/plan/50-irradiance-probes.md`'s
+/// layout `probe_gather.slang` declares — the irradiance probes'
 /// every-frame producer for [`probe`]'s rows.
 pub mod probe_gather;
 

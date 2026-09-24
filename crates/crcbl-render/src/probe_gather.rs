@@ -7,7 +7,7 @@
 //!  the punctual producer rows ─────┘     walking every producer
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s raster updater, second half.
+//! The irradiance probes' raster updater, second half.
 //! [`crate::rsm`] is the pass that draws the map and
 //! [`crcbl_shaders::probe_gather`] owns the parameter block and the two numbers
 //! this side and the shader have to agree on.
@@ -175,7 +175,7 @@ impl ProbeGather {
         // device feature. Declaring the filterable pair as unfilterable is
         // allowed and is the honest description of what this pass does with
         // them; the other way round is what made every 3D demo draw black on
-        // Chromium, and `docs/plan/50-irradiance-probes.md` records it.
+        // Chromium.
         let sampled = |binding: u32, view_type: ImageViewType| BindGroupLayoutEntry {
             binding,
             visibility: ShaderStages::COMPUTE,

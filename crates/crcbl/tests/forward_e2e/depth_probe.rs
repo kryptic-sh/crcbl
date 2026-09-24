@@ -958,7 +958,7 @@ impl DepthProbe {
                 count: 1,
                 flags: crcbl::hal::BindingFlags::empty(),
             },
-            // `docs/plan/50-irradiance-probes.md`'s per-probe visibility maps,
+            // The irradiance probes' per-probe visibility maps,
             // on the row above's terms and with two differences that matter:
             // the module declares a `Texture2DArray`, so this entry has to as
             // well — WebGPU refuses a pipeline whose layout claims a dimension

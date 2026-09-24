@@ -17,7 +17,7 @@
 //!
 //! The rows are [`MemoryLocation::DeviceLocal`] and the buffer carries
 //! [`BufferUsage::TRANSFER_DST`] beside [`BufferUsage::STORAGE`], which is what
-//! `docs/plan/50-irradiance-probes.md`'s updater needs of it: the seam refuses a
+//! the irradiance probes' updater needs of it: the seam refuses a
 //! *writable* storage binding of a host-visible buffer — D3D12's rule, argued at
 //! [`MemoryLocation`] — so a table a dispatch may one day fill cannot be
 //! host-visible whatever its binding says today. Nothing writes a probe on the

@@ -3,6 +3,299 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 42-steam plan left behind (2026-09-24)
+
+Record; the plan designed `crates/crcbl-steam` — Steamworks over the SDK's flat
+C API, hand-written FFI loaded at runtime, an event queue drained once a frame,
+typed tokens for asynchronous calls — and every slice but two is built and
+merged to `main` (`13999937`, "merge steam-sdk: Steamworks support"). **Nothing
+has run against a real Steam client**, and the drift gate has never read an SDK
+zip from Valve, only the Steamworks.NET mirror of the 1.65 headers. The open
+work — every slice's unrun manual steps, slice 13, slice 12's handshake wiring,
+slice 15's shipping half, the recorded review findings — is in `docs/backlog.md`
+under _Steamworks: every slice but 13 built and merged, nothing verified against
+Steam_; the decisions that shaped it are under _Steamworks: four decisions, all
+taken_ there, and their first option trees in `docs/notes/simulation.md` under
+the same heading.
+
+**App 480 (Spacewar) is the testing app id, permanently** (the user,
+2026-09-23). crcbl is an engine and the owner does not plan to publish it on
+Steam, so it gets no app id of its own: samples, smoke tests and every manual
+step target 480, and what 480 lacks (per-app achievements, cloud quota,
+rich-presence tokens, Steam Input default layouts, depots) is recorded as
+untestable under 480, never waited for. A game that ships on Steam supplies its
+own app id, depots and store configuration.
+
+Code cites the plan by **slice number** and by the names of its rules below, so
+both are kept.
+
+### The two findings everything rests on
+
+- **The SDK cannot enter the repo, and CI can never run it.** Valve's access
+  agreement licenses redistributing `redistributable_bin` in object form beside
+  a shipped game, and using the headers "solely to develop the Licensee
+  Software"; nothing grants publishing them, this repo is public under MIT, and
+  the zip is behind a partner login. So **nothing from the SDK is committed** —
+  no header, no `steam_api.json`, no redistributable — only our own declarations
+  of the C ABI, each carrying the SDK version it was read from (Steamworks.NET
+  has published its own under MIT for a decade; precedent, not permission). A
+  developer downloads the SDK and sets `CRCBL_STEAM_SDK`; it is read by the
+  drift gate and, as a development fallback, by the library search — never at
+  build time. `.gitignore` keeps `steam_appid.txt` and unzipped SDK directories
+  out of history.
+- **Steam is a backend the project does not have to run.** Relay, lobbies, cloud
+  and identity are Valve's; everything built keeps that property.
+  **Microtransactions are declined for exactly that reason**: there is no client
+  interface, only the `ISteamMicroTxn` Web API called from a server holding the
+  publisher key. Reopen only with a backend. The same reason leaves
+  encrypted-ticket decryption (slice 12) unbuilt.
+
+### The rules
+
+- **Runtime loading, never link-time.** `dlopen`/`LoadLibraryExW` at
+  `Steam::init` is the only route with no new dependency that lets CI build the
+  crate at all: `#[link]` needs SDK files at link time and dies in the dynamic
+  loader before `main` on a machine without them; `steamworks-rs` vendors the
+  SDK and links the same way; build-time `bindgen` would need libclang and the
+  SDK on every machine. Rejected, not revisited. It is `crcbl-vk`'s argument for
+  the Vulkan loader; the Windows shell links its system DLLs because
+  `user32.dll` cannot be absent and `steam_api64.dll` usually is.
+- **The library is opened by absolute path, never by bare name**, from the
+  executable's directory (and `../Frameworks/` in a macOS bundle), then
+  `$CRCBL_STEAM_SDK/redistributable_bin/<platform>/`, every path reported on
+  failure. Windows uses `LOAD_WITH_ALTERED_SEARCH_PATH`, so a planted DLL in the
+  working directory is never considered; Linux `RTLD_NOW | RTLD_LOCAL`, because
+  a bare `dlopen` never searches the executable's directory. **The module is
+  never unloaded** — interface pointers and callback buffers point into it — and
+  is cached once for `init` and `relaunch_via_steam` alike.
+- **Targets.** 64-bit Windows, Linux and macOS (one universal dylib); `aarch64`
+  Linux has a loader path and no machine, so it is unverified; **32-bit is out
+  of scope** (the workspace ships none); elsewhere the crate is its
+  documentation and no public items. The `cfg` is **written on each module, not
+  through a macro**, because rustfmt does not look inside macro invocations and
+  slice 1's `supported!` wrapper hid the crate from `cargo fmt`. Items absent on
+  a target are named in backticks, never intra-doc-linked, since `cargo doc` is
+  a `-D warnings` gate there.
+- **The crate never writes `steam_appid.txt` and never sets `SteamAppId`**
+  (`set_var` is `unsafe` with the audio and job threads running). A failed init
+  says what is missing — Valve's message, the working directory, whether the
+  file was there — and samples document `echo 480 > steam_appid.txt`. The file
+  must never ship: with it present `RestartAppIfNecessary` answers false
+  regardless.
+- **Only what a slice uses is declared**, and every declaration is checked
+  twice: by the version handshake at init and by the drift gate.
+- **The version handshake.** `SteamInternal_SteamAPI_Init` is called with
+  exactly the interface-version strings of the accessors bound, from the one
+  table in `crates/crcbl-steam/src/ffi/versions.rs`, so a client that cannot
+  honour them fails with `VersionMismatch`. **It carries only strings Valve's
+  own `InitEx` list carries** — the timeline and game-server interfaces are
+  absent from it, so they are guarded by the accessor null check alone. The
+  version strings follow no pattern (`SteamMatchMaking009`,
+  `STEAMINVENTORY_INTERFACE_V003`), so both columns are stored literally. Every
+  accessor result is null-checked; a null is an error, never a stored pointer.
+- **Never bind `SteamAPI_RunCallbacks`, and never bind `SteamAPI_InitFlat`.**
+  Absence is the enforcement. The header forbids mixing manual dispatch with the
+  C++ callback path, and `InitFlat` skips the version check. Since
+  `RunCallbacks` used to call `SteamAPI_ReleaseCurrentThreadMemory`, the pump
+  calls it itself.
+- **No Rust is ever called from Steam.** Manual dispatch is a poll. The three
+  APIs that take a function pointer — `SteamAPI_SetWarningMessageHook`, the
+  `ConnectionStatusChanged` networking config callback and Steam Input's
+  `EnableActionEventCallbacks` — are deliberately unbound. A slice that needs
+  one must wrap it in `catch_unwind` and say why polling will not do.
+- **Packing is read per struct, from the pragma in force at it.** Callback
+  structs are `pack(4)` on Linux and macOS and `pack(8)` on Windows
+  (`VALVE_CALLBACK_PACK_SMALL`/`LARGE`), so `CallbackMsg_t` is 20 bytes
+  against 24. **The exceptions are `pack(1)`**: `SteamNetworkingIPAddr`,
+  `SteamNetworkingIdentity`, `InputAnalogActionData_t` and
+  `InputDigitalActionData_t`; `SteamNetworkingMessage_t` and
+  `SteamRelayNetworkStatus_t` sit under no pragma and are natural `repr(C)`.
+  `CSteamID` is 8 bytes aligned to 1, so its fields are `[u8; 8]`, not `u64` —
+  which is what makes `AvatarImageLoaded_t` 20 bytes under both packings. Tables
+  must differ by OS for any struct with an 8-byte field at an offset 4 mod 8, or
+  an unpadded size 4 mod 8 holding an 8-byte field; **if every table agrees,
+  suspect the table**. `ValvePackingSentinel_t` (24 and 32 bytes, as the header
+  asserts) is the canary test before any real struct is read.
+- **Layout numbers come from the SDK's own compiler, never from reasoning.**
+  `crates/crcbl-steam/src/ffi/structs.rs`'s tables follow `crcbl-shell`'s
+  `assert_layout!` (a field without a row fails to compile), and the numbers are
+  a C++ probe's `sizeof`/`offsetof` over the headers, under both packings.
+- **Never reference a packed field.** A payload is size-checked, a null pointer
+  refused, then copied by one `read_unaligned` into a plain-data type; Miri (the
+  `miri (crcbl-steam)` CI job) interprets the decode tests.
+- **By-value `pack(1)` returns are ABI-unverified (R10).**
+  `GetAnalogActionData`, `GetDigitalActionData` and `GetMotionData` return a
+  packed struct by value with no out-pointer alternative. Reasoned, not tested:
+  the fields sit at natural offsets, so SysV x86-64 returns it in two integer
+  registers, Windows x64 through a hidden pointer, AArch64 in `x0`/`x1`, and
+  `repr(C, packed)` gives rustc the same size and alignment. **No CI test can
+  confirm it**: a Rust fake agrees with a Rust caller by construction. Only a
+  real controller on each OS and architecture does, and a target not run is
+  named unverified.
+- **The drift gate** (`crates/crcbl-steam/src/ffi/drift.rs`, `#[ignore]`d, run
+  as `cargo test -p crcbl-steam -- --ignored drift`) reads the headers as text:
+  every bound declaration appears verbatim after whitespace normalising, every
+  `versions.rs` row matches its accessor and `#define`, and every bound struct
+  matches its header block — fields, `k_iCallback` expression and the pragma in
+  force. **It fails without `CRCBL_STEAM_SDK`**: it only ever runs on purpose,
+  and "skipped" must not read as "passed". **It never runs in CI** (no SDK
+  there, and the mirror's licence posture is not one to lean on); flipping that
+  later is a CI step, not a code change.
+  `crates/crcbl-steam/src/ffi/signatures.rs` ties each declaration's C types to
+  the Rust type it is called through, on every test run — the step-4 review
+  found nothing else did.
+- **No JSON dependency.** `steam_api.json` lacks the lifecycle functions,
+  `CallbackMsg_t` and every size, so the gate reads header text with a small
+  scanner. If JSON parsing is ever needed, extract the private RFC 8259 parser
+  in `crates/crcbl-sprite/src/load.rs` rather than add `serde_json`.
+- **Ownership is by shape.** `Client` (interface pointers, pipe, shutdown) sits
+  behind an `Arc`; `SteamAPI_Shutdown` is its `Drop`, so it runs when the last
+  owner is gone and no `shutdown(&mut self)` exists. **One live `Steam` per
+  loaded library**, guarded by an `AtomicBool` in the `Lib`, not a process
+  global: unit tests are threads of one process, and each fake-`Lib` test needs
+  its own guard. Accessors borrow `&Steam`; tokens are redeemed through
+  `&mut Steam`; RAII values (lobbies, tickets, captures, transports, query and
+  inventory handles) end their own resource once.
+- **`Send` surfaces call Steam only on the pump thread, checked (R1).** Valve
+  states no thread safety for `ISteamNetworkingSockets` or `ISteamRemoteStorage`
+  — the "any thread" wording in the header is about releasing a message. So
+  `SteamTransport` and `SteamCloudStorage` are `Send` (their traits require it)
+  but every Steam call they make passes `Client::on_pump_thread()` first; off it
+  they return a typed error without touching Steam, and an off-thread drop skips
+  its call and logs. That is what makes `unsafe impl Send + Sync for Client`
+  sound. **The fallback, if a game wants its server or saves on a worker
+  thread**: forward calls to the pump thread through a queue, answering
+  `Pending` until it runs — the browser storage backends' shape. Nobody needs it
+  yet.
+- **Valve's ids are exact-width newtypes**, not `crcbl_core::Handle<T>`: a
+  generation nothing checks would be a check that cannot fail.
+- **Errors name the failure.** A Steam `false` is `SteamError::Refused(name)`,
+  never ignored; a `&str` with a NUL is `InteriorNul`, never truncated; returned
+  C strings are copied before the next call (they are Steam's buffer); nothing
+  panics on Steam input.
+- **The pump is a drained queue**, not closures or channels — the frame's
+  `shell.pump` idiom. Unknown callback ids are skipped and counted (every SDK
+  adds more); a claimed id whose size disagrees is counted in
+  `PumpDiagnostics::decode_mismatches`, which every smoke test asserts is zero.
+  `GetNextCallback` and `FreeLastCallback` are paired by the drain loop, which
+  decodes strictly between them. Callback ids live in one table
+  (`crates/crcbl-steam/src/callbacks.rs`) as Valve's base plus offset.
+- **An asynchronous call is a typed token redeemed after the pump**, and
+  registering is the only way to make one. The pump fetches each answer while
+  handling its completion (`steam_api.h` allows `GetAPICallResult` only there),
+  with exactly the registered id and size. **Dropping a token abandons the
+  answer, never the effect** — a created or joined lobby is left rather than
+  owned by nobody.
+- **Double input must be impossible: one backend owns a physical pad.** With
+  Steam Input live, Steam also exposes a virtual XInput/evdev pad (vendor
+  `0x28DE`); native backends skip it and Steam Input reports the pad.
+  `crcbl_input::xinput` filters by vendor (ordinal 108, as SDL does); evdev and
+  GameController cannot yet, so `steam_input` replaces them there.
+- **Cloud conflicts are the game's to see, so Auto-Cloud is not enough.**
+  Auto-Cloud resolves a conflict in the Steam client's own dialog before launch
+  and tells the game nothing. `ISteamRemoteStorage` plus `crcbl_store::synced` —
+  a generation header and a local shadow, backend-neutral — surfaces a
+  `Conflict` with both payloads; never merged, never partially applied.
+- **A mock `libsteam_api` was considered and declined.** A fake cdylib would
+  exercise `dlopen` too, but Cargo cannot build one as a test prerequisite
+  without the unstable artifact-dependency feature, and **a fake named like the
+  real library could land beside a sample's executable in `target/` and be
+  loaded by a developer's real run** — a game silently "signed in" to nothing.
+  The fake stays a `#[cfg(test)]` struct of function pointers
+  (`crates/crcbl-steam/src/testing.rs`), unreachable from any feature. What it
+  cannot prove is that the signatures match C; that is the drift gate's job for
+  types and a real client's for calling convention and by-value returns.
+- **CI proves only what it can, and says so.** Layouts for both packings run
+  natively on the OS each describes; decode, registry, drain, conformance,
+  voice, cloud and input mapping run over the fake; Miri runs the unsafe decode.
+  Everything a real client decides has an `#[ignore]`d smoke test or a manual
+  step instead: **ignored is "not run here", never "passed"**.
+- **The manual procedure, common to every slice.** Steam running and logged in;
+  `CRCBL_STEAM_SDK` set; `steam_appid.txt` holding `480` in the working
+  directory; Windows 11, a Linux desktop (the Deck where a slice says so) and
+  macOS; `cargo test -p crcbl-steam -- --ignored <filter>` plus the sample's
+  steps; what ran and what did not recorded per OS. **Assert mechanisms (init,
+  events arriving, calls completing), never values read back from 480**, which
+  every Steamworks developer shares — and leave its achievements as found. "Two
+  accounts" means two machines. **The overlay** is believed to inject into any
+  process on Windows but only at a Steam launch on Linux and macOS
+  (`LD_PRELOAD`/`DYLD_INSERT_LIBRARIES`), so "no overlay" from a terminal launch
+  there is not evidence of a bug; slice 1b's step records the launch that works.
+
+**The risks the plan named**, each still open unless a real run closes it: R1
+thread safety (above); R2 Steam's launch-time conflict dialog pre-empting the
+game; R3 what 480 carries (cloud quota, a Steam Input manifest path, SpaceWar's
+achievements, board and item definitions, rich-presence tokens); R4 the overlay
+over each shell and GPU backend; R5 overlay injection outside a Steam launch; R6
+topic 19's backends adopting the gamepad seam (done for evdev, XInput and
+GameController); R7 the Linux shipping glibc floor (`sniper`); R8 macOS signing
+and entitlements for the dylib and overlay; R9 accessor versions moving under a
+real SDK; R10 the by-value returns (above).
+
+**The defaulted decisions**, each with the alternative and its cost:
+
+| Decision                              | Taken                                                                       | Alternative, and its cost                                                                         |
+| ------------------------------------- | --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Binding route (ratified 2026-09-06)   | hand-written flat-API declarations, drift gate                              | `steamworks-rs`: a new dependency, and link-time death without the library                        |
+| Cloud (overridden by EW 2026-09-22)   | `ISteamRemoteStorage` backend, because Auto-Cloud cannot surface a conflict | Auto-Cloud only: zero code, EW requirement 5 unmet                                                |
+| Steam Input (in scope 2026-09-22)     | onto the shared gamepad seam, one owner per pad                             | Steam's XInput/evdev emulation only: no glyphs or remap awareness; "same events" only by accident |
+| App id (the user, 2026-09-23)         | 480 permanently                                                             | an app id of crcbl's own: a partner fee for an engine not meant to be published                   |
+| Slice 15's shipping half (2026-09-23) | a game's, not crcbl's: crcbl provides what a game needs to ship             | crcbl ships on Steam itself: nothing of crcbl's is a product to ship                              |
+| Multi-session host (EW, 2026-09-22)   | slice 2, transport-generic (`Box<dyn Transport>` peers), N a parameter      | each co-op game re-writes session management                                                      |
+| Loading                               | runtime, absolute paths, executable directory then `CRCBL_STEAM_SDK`        | link-time: CI cannot build                                                                        |
+| SDK in CI                             | never; the drift gate is local                                              | CI fetches headers: drift checked every push, the mirror's licence posture unclear                |
+| Drift-gate input                      | header text, hand-written scanner                                           | `serde_json` over `steam_api.json`: a new edge, and the JSON lacks what the gate needs            |
+| `steam_appid.txt`                     | never written, no env vars set                                              | written or `set_var`: a side effect in the user's directory, or an `unsafe` write with threads up |
+| 32-bit and `aarch64` Linux            | 32-bit out; `linuxarm64` listed, unverified                                 | a build and test matrix nothing else in the workspace has                                         |
+| `Send` surfaces                       | `Send`, Steam calls on the pump thread only                                 | all `!Send`: no `Transport`/`StorageSource`; or truly threaded: rests on guarantees Valve omits   |
+| Slice 13 (2026-09-23)                 | deferred until a dedicated headless build wants it                          | now: a second init, pipe and guard with no caller                                                 |
+| Steam-virtual-pad filter (2026-09-23) | the vendor query, `xinput1_4.dll` ordinal 108                               | `GetGamepadIndexForController`: couples XInput to Steam's slot list                               |
+
+**The interface catalogue's refusals**: `ISteamVideo` and `ISteamMusic`
+(broadcast and music-player control, no engine use), `ISteamHTMLSurface` (an
+embedded browser no engine UI can host), `ISteamHTTP` (nothing needs an HTTP
+client, and one that did would not tie it to Steam), the deprecated
+`ISteamNetworking` and `ISteamController`, and microtransactions (above).
+`ISteamParties`, `ISteamNetworkingMessages` and `ISteamParentalSettings` are on
+demand.
+
+**The delivery slices**, by the number the code cites; EW (the first consumer, a
+co-op listen-server game) set the build order 1 → 1b → 3a → 3b → 4 → 2 → 6 → 5 →
+7a–c → 8 → 9 → 10–15:
+
+| Slice | Name                                       | Landed              | What it delivered                                                                                                                                          |
+| ----- | ------------------------------------------ | ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1     | Loader, init, pump, local `SteamId`        | 2026-09-22          | The runtime loader, the version handshake, the manual-dispatch pump, shutdown on the last owner, the fake `Lib`, the drift gate, the CI steps and Miri job |
+| 1b    | Umbrella feature, sandbox, basics          | 2026-09-23          | `crcbl`'s `steam` feature, `apps/sandbox --features steam`, `relaunch_via_steam`, `HostedGame::take_pending_focus_loss` for the overlay pause              |
+| 2     | Multi-session host                         | 2026-09-23          | `crcbl_server::Host` over `Box<dyn Transport>` peers, `crcbl_net::SessionEndReason` and `Client::ended` — no Steam code                                    |
+| 3a    | Lobbies, invites, join paths, the registry | 2026-09-23          | `SteamCall<T>` and the call registry, `Lobby`, rich presence, invites, and all four join paths including `+connect_lobby`                                  |
+| 3b    | Persona, friends, avatars                  | 2026-09-23          | Persona names and states, the friends list, avatars, friends' rich presence, the overlay dialogs                                                           |
+| 4     | `SteamTransport` and `SteamListener`       | 2026-09-23          | P2P over relay as a `crcbl_net::Transport`, lobby-member admission, `EndReason`, `crcbl_net::conformance`, the pump-thread check                           |
+| 5     | Voice to PCM                               | 2026-09-23          | `VoiceCapture` under game push-to-talk, polling through Steam's tail; `decompress` to mono `f32` at 48 kHz                                                 |
+| 6     | Cloud                                      | 2026-09-23          | `SteamCloudStorage` and `crcbl_store::synced` (the conflict protocol, and the workspace's one CRC-32)                                                      |
+| 7a    | The gamepad seam                           | 2026-09-23          | `crcbl_input::gamepad`, the XInput backend and the loop's `PadSource`, on `main` first                                                                     |
+| 7b    | Steam Input                                | 2026-09-23          | `SteamPads` over `crates/crcbl-steam/assets/crcbl_pad.vdf`, and the Steam-pad filter in `crcbl_input::xinput`                                              |
+| 7c    | Deck text input and glyphs                 | 2026-09-23          | The full-screen and floating keyboards, and `SteamPads::glyph`                                                                                             |
+| 8     | The loop's Steam limb                      | 2026-09-23          | `crates/crcbl/src/engine/steam.rs`: the loop pumps a lent Steam, takes the overlay as a focus loss, and polls Steam Input as its pad source                |
+| 9     | Achievements, stats, leaderboards          | 2026-09-23          | `Stats` and `Leaderboards`; breakout's consumer not built                                                                                                  |
+| 10    | Screenshots and the timeline               | 2026-09-23          | `Screenshots` and `Timeline`; no engine capture of a running frame to write                                                                                |
+| 11    | Apps and Remote Play                       | 2026-09-23          | Ownership, DLC, betas, install directory, content checks, `RemotePlay`, and one string-growth rule (`apps::content::grow`)                                 |
+| 12    | Auth tickets                               | 2026-09-23, partial | Session, web-API and encrypted tickets and `AuthGate`; the handshake wiring and server-side decryption are not built                                       |
+| 13    | Game-server API                            | deferred, not built | Until a dedicated headless build wants it; the backlog holds the design and the module-or-crate choice                                                     |
+| 14    | Workshop                                   | 2026-09-23          | `Workshop`, `UgcQuery` and `ItemUpdate`                                                                                                                    |
+| 15    | Inventory, then shipping                   | 2026-09-23, partial | `Inventory` and `InventoryResult`; the engine's side of shipping is not started                                                                            |
+
+**What the step-4 review found and fixed before the merge**, so none returns:
+`SyncedFile::load` left a failed load's permission to save standing;
+`SteamListener`'s drop closed every connection accepted on it ungracefully (the
+socket now closes with its last connection); an abandoned `Entries` answer kept
+Steam's download alive; `Steam::take` matched a token by handle alone, so an
+earlier session's token could redeem a new call; a re-join made a second `Lobby`
+owner (now `AlreadyInLobby`); `EndReason::from_code` overflowed near `i32::MIN`;
+`Voice::decompress` grew to any size a remote packet named; and
+`crcbl_net::conformance` passed a transport that never returned reliable
+messages. What it recorded and did not fix is in the backlog entry.
+
 ## What the deleted 01-foundations plan left behind (2026-09-24)
 
 Record; the plan was fully built, so it left nothing open in the backlog.

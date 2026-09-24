@@ -630,7 +630,7 @@ const LTC_TABLE_BINDING: u32 = 27;
 /// the frame on every pass that computed one.
 const CONTACT_SHADOW_BINDING: u32 = 28;
 
-/// The bind-group slot `docs/plan/50-irradiance-probes.md`'s per-probe
+/// The bind-group slot the irradiance probes' per-probe
 /// visibility maps are read through: one `Rg32Float` layer per probe.
 ///
 /// **Appended past [`CONTACT_SHADOW_BINDING`], never inserted**, for that
@@ -952,7 +952,7 @@ const SHADOW_CULLS: usize = shadow::CASCADES + shadow::LIGHT_SLOTS;
 /// would cost.
 const SHADOW_VIEWS: usize = shadow::CASCADES + shadow::LIGHT_SLOTS * shadow::POINT_FACES;
 
-/// Cascade 0's view, which is the one `docs/plan/50-irradiance-probes.md`'s
+/// Cascade 0's view, which is the one the irradiance probes'
 /// reflective shadow map is drawn through.
 ///
 /// **A cascade is its own view index**, which is what `add_shadow_pass`'s view
@@ -978,7 +978,7 @@ const fn shadow_cull(slot: usize) -> usize {
 /// One punctual shadow face this frame draws into the punctual reflective
 /// shadow map, and everything both halves of the updater need of it.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s punctual producer. It carries no
+/// The irradiance probes' punctual producer. It carries no
 /// matrix and no visible set: a face's transform is already in the uniform block
 /// [`ForwardRenderer::shadow_groups`] binds, and its draws are the ones its
 /// slot's cull generated for the atlas — which is what makes this rung cost no
@@ -1926,7 +1926,7 @@ pub struct ForwardRenderer {
     /// [`MeshModules::depth_clear_pipeline`], which is where the whole argument
     /// for it lives.
     shadow_clear_pipeline: GraphicsPipelineHandle,
-    /// `docs/plan/50-irradiance-probes.md`'s reflective shadow map — see
+    /// The irradiance probes' reflective shadow map — see
     /// [`MeshModules::rsm_pipeline`]. Built on every scene and bound only by a
     /// frame whose volume asked for [`ProbeUpdate::EveryFrame`].
     rsm_pipeline: SidedPipelines,
@@ -2416,7 +2416,7 @@ struct Rollback {
     materials: Option<MaterialTable>,
     /// The irradiance probe table, which owns one buffer.
     probes: Option<ProbeTable>,
-    /// `docs/plan/50-irradiance-probes.md`'s updater, which owns one pipeline,
+    /// The irradiance probes' updater, which owns one pipeline,
     /// one layout and a ring of blocks — and only exists for a scene whose
     /// volume asked to be updated.
     probe_gather: Option<ProbeGather>,
@@ -3778,7 +3778,7 @@ impl ForwardRenderer {
         let probe_buffers: Vec<BufferHandle> = (0..FRAMES_IN_FLIGHT)
             .map(|frame| probe_table.buffer(frame))
             .collect();
-        // `docs/plan/50-irradiance-probes.md`'s updater, built **only** for a
+        // The irradiance probes' updater, built **only** for a
         // description that asked for it. A volume left at
         // [`ProbeUpdate::Authored`] gets no pipeline, no buffers and no pass, so
         // the default really is the frame every scene drew before this landed.
@@ -4513,7 +4513,7 @@ impl ForwardRenderer {
                 // ceiling already, which the check at the end of the layout
                 // holds it to, so `read_only: false` here would buy a write
                 // nothing performs at the price of a binding budget there is
-                // none of. `docs/plan/50-irradiance-probes.md`'s gather is a
+                // none of. The irradiance probes' gather is a
                 // compute pass with a layout of its own, and that is where the
                 // writable binding of these rows belongs.
                 read_only: true,
@@ -4630,7 +4630,7 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
-        // `docs/plan/50-irradiance-probes.md`'s per-probe visibility maps, last
+        // The irradiance probes' per-probe visibility maps, last
         // of the set — see [`PROBE_VISIBILITY_BINDING`] on why last is
         // structural.
         //
@@ -5265,7 +5265,7 @@ impl ForwardRenderer {
         // [`MeshModules::depth_clear_pipeline`].
         service();
         let shadow_clear_result = modules.depth_clear_pipeline(device, mesh_pipeline_layout);
-        // And `docs/plan/50-irradiance-probes.md`'s reflective shadow map, built
+        // And the irradiance probes' reflective shadow map, built
         // from the same modules and the same layout — see
         // [`MeshModules::rsm_pipeline`]. Built on every scene rather than only
         // on one whose probes ask to be updated: the modules are released a line
@@ -6177,7 +6177,7 @@ impl ForwardRenderer {
         Ok(())
     }
 
-    /// Whether this frame records `docs/plan/50-irradiance-probes.md`'s two
+    /// Whether this frame records the irradiance probes' two
     /// updater passes.
     ///
     /// The scene's own answer and the console's together: the volume decides
@@ -6433,7 +6433,7 @@ impl ForwardRenderer {
     /// Captures a visibility map for every probe, from the static geometry
     /// standing in the scene right now.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s rung: each probe records how far
+    /// The probe visibility rung: each probe records how far
     /// away the nearest surface is in every direction, and `mesh.slang`'s
     /// `probe_irradiance` then weighs each of a fragment's eight probes by
     /// whether it can *see* that fragment — so a probe on the far side of a wall
@@ -6522,7 +6522,7 @@ impl ForwardRenderer {
     /// Re-centres the irradiance clipmap on `point` by whole probe steps, and
     /// captures the probes the step exposed.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s scrolling: each level moves a whole
+    /// The irradiance probes' scrolling: each level moves a whole
     /// number of its own probe spacings towards `point`, so the probes that stay
     /// inside it stand exactly where they stood and go on being addressed at the
     /// rows they already had — and only the slabs the step brought in are
@@ -6548,7 +6548,7 @@ impl ForwardRenderer {
     /// The recapture is [`ForwardRenderer::capture_probe_visibility`]'s pass
     /// over fewer rows, and it waits on [`Device::wait_idle`] exactly as that
     /// one does — so a step drains the device before it rewrites anything and
-    /// leaves it drained. That is a stall, and it is why the plan prices a step
+    /// leaves it drained. That is a stall, and it is why the probe records price a step
     /// separately from a frame. A call that steps nothing returns before the
     /// wait, so the ordinary frame pays a rounding per level and per axis and
     /// nothing else.
@@ -7773,7 +7773,7 @@ impl ForwardRenderer {
 
         // --- the probe gather ---
         //
-        // `docs/plan/50-irradiance-probes.md`'s updater, second half: the map
+        // The irradiance probes' updater, second half: the map
         // the pass above drew, read into every row of the table. **Here rather
         // than beside that pass** because the write is `&mut` — the group naming
         // the map's transient views is cached across frames, and a group naming a
@@ -8190,7 +8190,7 @@ impl ForwardRenderer {
             // And the probe rows, which are in those groups too and which no
             // cascade reads — declared on the placeholder's and the pages'
             // terms, plus one of their own: the rows are device-local and a copy
-            // destination so `docs/plan/50-irradiance-probes.md`'s gather can
+            // destination so the irradiance probes' gather can
             // write them, and a pass that binds a buffer it has not declared is
             // one the graph cannot order that write against.
             .read_buffer(reads.probes);
@@ -8381,7 +8381,7 @@ impl ForwardRenderer {
 
         // --- the reflective shadow map ---
         //
-        // `docs/plan/50-irradiance-probes.md`'s updater, first half, recorded
+        // The irradiance probes' updater, first half, recorded
         // here because this is where cascade 0's bind group and its
         // already-generated draws are. **A pass of its own at its own extent**,
         // and [`crate::rsm`]'s header argues why it cannot ride the atlas above:
@@ -8453,7 +8453,7 @@ impl ForwardRenderer {
 
         // --- the punctual reflective shadow map ---
         //
-        // `docs/plan/50-irradiance-probes.md`'s punctual producer: the same
+        // The irradiance probes' punctual producer: the same
         // pipeline and the same per-bucket call list as the pass above, under
         // one viewport per shadowed light face instead of one whole map. A spot
         // is a tile and a point light is six, which is `shadow::tile_span` — so
@@ -10946,7 +10946,7 @@ impl MeshModules {
     /// **Three targets again, and a different three.** `mesh.slang`'s
     /// `RsmOutput` writes the surface's diffuse albedo, its world normal encoded
     /// `n * 0.5 + 0.5`, and its world position with a coverage flag in `w` —
-    /// which is what `docs/plan/50-irradiance-probes.md`'s gather needs of a
+    /// which is what the irradiance probes' gather needs of a
     /// texel and nothing more.
     ///
     /// Element order is `SV_Target` order and each format is the one the
@@ -10999,7 +10999,7 @@ impl MeshModules {
         let depth_vertex = named_entry(&MESH, "depthVertexMain", Stage::Vertex)?;
         let depth_clear_vertex = named_entry(&MESH, "depthClearVertexMain", Stage::Vertex)?;
         // **Named rather than looked up by stage, on the vertex entry points'
-        // terms exactly.** Since `docs/plan/50-irradiance-probes.md`'s updater
+        // terms exactly.** Since the irradiance probes' updater
         // landed, this module has *two* fragment entry points — the shaded one
         // and `rsmFragmentMain` — and `entry` answers `None` for two matches, so
         // a stage lookup here refuses the build outright with "exposes no
@@ -11404,7 +11404,7 @@ impl MeshModules {
     /// stage, `rsmFragmentMain` in the shaded stage's place, and
     /// [`MeshModules::RSM_TARGETS`] in [`MeshModules::COLOR_TARGETS`]'s.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s updater draws the sun's near
+    /// The irradiance probes' updater draws the sun's near
     /// cascade a second time through this — see [`crate::rsm`], which owns the
     /// attachments, and `ForwardRenderer::add_shadow_pass`, which records the
     /// pass out of that cascade's own bind group and its own already-generated
@@ -17878,7 +17878,7 @@ mod tests {
         let device = device.as_ref();
         // **A scene whose probes ask to be updated**, because the widest frame
         // is the one with every pass in it and
-        // `docs/plan/50-irradiance-probes.md`'s two are recorded by a volume
+        // the irradiance probes' two are recorded by a volume
         // rather than by an effect bit — the ground grid's argument exactly. A
         // renderer built on the demo's empty grid records neither, and the bound
         // would then be checked against a frame that could not reach it.

@@ -2951,7 +2951,7 @@ fn leak_camera() -> Camera {
 /// **The leak fixture**: one room, two probes, and a wall between them that is
 /// there or is not.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s rung is that a probe on the far side of
+/// The probe visibility rung is that a probe on the far side of
 /// a wall from a surface contributes nothing to it. Nothing in a single frame
 /// says whether that happened — a room lit by a probe grid looks like a room —
 /// so the claim is a comparison of one scene against itself with the wall taken
@@ -3021,7 +3021,7 @@ const LEAK_MIRROR_METALLIC: f32 = 1.0;
 /// **The leak fixture through a mirror**: [`probe_leak_forward`]'s room, probes
 /// and wall, with the room shaded as a mirror and the reflection pair allowed.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s rung reaches the specular path here.
+/// The probe visibility rung reaches the specular path here.
 /// `ssr.slang` marches the depth buffer, finds nothing along a ray that leaves
 /// this floor upward and outward, and falls back to the same eight probe rows
 /// `mesh.slang`'s diffuse gather reads — so a probe on the far side of the
@@ -3219,7 +3219,7 @@ pub fn probe_bounce_grid() -> crate::render::scene::ProbeGrid {
 /// probes the reflective shadow map fills every frame, and a wall between them
 /// that is there or is not.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s raster updater, measured the way
+/// The irradiance probes' raster updater, measured the way
 /// [`probe_leak_forward`] measures the authored rows: one scene against itself
 /// with the divider taken away, because nothing in a single frame says whether a
 /// probe gathered flux it should not have.
@@ -3330,7 +3330,7 @@ const PROBE_CLIPMAP_RADIANCE: f32 = 0.35;
 /// **The clipmap fixture's volume**: two levels of one grid, the fine one red
 /// and the coarse one blue.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s layered density. The claim it exists
+/// The irradiance probes' layered density. The claim it exists
 /// for is that a fragment reads the finest level containing it and *fades* into
 /// the next one rather than switching — so the two levels are made as different
 /// as two rows can be, and each level's rows are made identical to each other:
@@ -3467,7 +3467,7 @@ const SCROLL_RADIANCE: f32 = 0.35;
 /// along `x`, each holding a *different* constant environment, scrolled by
 /// `steps` whole probe steps.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s toroidal addressing, as something a
+/// The irradiance probes' toroidal addressing, as something a
 /// frame can be wrong about. A level that has stepped `k` probes wraps cell `c`
 /// onto row `(c + k) mod count`, and the only way to see that happen is for the
 /// rows to differ from one another: these four hold red, green, blue and yellow,
@@ -3692,7 +3692,7 @@ pub fn slab_follow_point() -> [f32; 3] {
 /// **The slab fixture**: a room with a divider, a volume captured on one side of
 /// it, and one whole probe step that brings a probe across.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s recapture: the slab a scroll exposes is
+/// The irradiance probes' recapture: the slab a scroll exposes is
 /// captured in the frame it appears, and this is the claim as something a frame
 /// can be wrong about. The red probe is captured at [`SLAB_ORIGIN`] `+`
 /// [`SLAB_SPACING`], where the divider is nowhere near it; one step back stands

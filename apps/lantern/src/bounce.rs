@@ -16,7 +16,7 @@
 //!
 //! Until 2026-09-04 this module also *baked* the sun's first bounce into the
 //! rows — an analytic gather against the room's interior box, run once at load.
-//! `docs/plan/50-irradiance-probes.md`'s no-bake decision replaced it with the
+//! The irradiance probes' no-bake decision replaced it with the
 //! engine's own reflective-shadow-map updater, which fills the same rows every
 //! frame from the scene as it actually stands: the lamp moves, the sun moves,
 //! and every occluder in the room — the plinth, the mirror panel, the metal
@@ -134,7 +134,7 @@ pub fn probes() -> ProbeGrid {
 /// How many **whole probe steps** the volume may take from where it was
 /// authored, on each axis, without standing a probe inside a wall.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s scrolling is by whole steps of a
+/// The irradiance probes' scrolling is by whole steps of a
 /// level's own spacing, so the budget is in steps rather than in metres: the
 /// room has [`spacing`] to spare over the level's own extent — half a cell at
 /// each end, which is exactly where [`grid_origin`] put the outermost probes —
@@ -175,7 +175,7 @@ fn grid_centre() -> Vec3 {
 
 /// Where the room's irradiance volume should be centred for an eye at `eye`.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s camera follow, **held inside the
+/// The irradiance probes' camera follow, **held inside the
 /// room**: the engine re-centres each level on the point it is handed, and a
 /// point this room's volume cannot reach without putting a probe in a wall is
 /// not one to hand it. `travel` is that budget, and in this room it is zero on

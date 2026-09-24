@@ -226,10 +226,11 @@ Stated plainly. "Not reviewed" is the honest line.
   and the whole Rust gate — I edited no Rust.
 - **Relative Markdown links and crate-relative backtick paths** are the citation
   gate's two blind spots. I checked by hand the ones I introduced:
-  `[41-webgpu-stream]` (since folded into `docs/notes/browser.md`),
-  `[42-steam.md]` (from `00-overview.md`), `[13-audio.md]` (from `32-voip.md`),
-  `[27-auth.md]` (from `23-netcode.md`) — all resolve relative to `docs/plan/`.
-  I did **not** re-check the pre-existing relative links in these files.
+  `[41-webgpu-stream]` (since folded into `docs/notes/browser.md`), `[42-steam]`
+  (from `00-overview.md`; since folded into `docs/notes/backends.md`),
+  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from `23-netcode.md`) —
+  all resolve relative to `docs/plan/`. I did **not** re-check the pre-existing
+  relative links in these files.
 - **Carried forward on trust, not re-checked:** the `13-audio.md` claim that
   `05-physics.md`'s correction requires the `libm` crate; the `23-netcode.md`
   assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
@@ -304,12 +305,13 @@ Stated plainly, as gaps:
   `crates/crcbl-store/src/replay.rs` (format constants, `FileTransport`),
   `crash_ring.rs` and `crates/crcbl-cli/src/replay_cmd.rs`, and all held. I
   found nothing prunable that was not already marked.
-- **`docs/plan/42-steam.md`'s technical content was not verified against a real
-  Steamworks SDK.** Every C signature, accessor version, packing rule and
-  licence quote in it came from the doc's own 2026-08-22 research against a
-  third-party header mirror. I checked only that nothing in the tree implements
-  any of it. The doc's own provenance rule (re-read from a real SDK before
-  trusting a declaration) still stands and I did not test it.
+- **The Steam plan's technical content (42-steam, since folded into
+  `docs/notes/backends.md`) was not verified against a real Steamworks SDK.**
+  Every C signature, accessor version, packing rule and licence quote in it came
+  from the doc's own 2026-08-22 research against a third-party header mirror. I
+  checked only that nothing in the tree implements any of it. The doc's own
+  provenance rule (re-read from a real SDK before trusting a declaration) still
+  stands and I did not test it.
 - **I did not verify `07-ui-debug.md`'s CSS/flex design against any browser or
   spec.** I established only that none of it is implemented.
 - **I did not run `cargo test`, `cargo clippy` or any GPU harness.** This pass
@@ -796,15 +798,16 @@ the head of a queue they left on 2026-09-01. A delivery table is the worst place
 in the repository to be wrong, because it is read as the index of what exists.
 
 A second pass on 2026-09-02 took `sample/20-options.md`, horde's sample plan,
-`50-irradiance-probes.md` and `18-render-features.md`, and found seventeen more.
-**The plan for a shipped sample was the worst document audited anywhere** —
-`20-options.md` still carried the heading "the audio half is built, the video
-half is not" over a screen that has laid out the whole video catalogue since
-2026-08-28, and two self-corrections whose referents no longer existed: one
-correcting a paragraph that had itself been corrected, and one warning about a
-claim below it that appears nowhere in the file. A plan written to describe work
-that does not exist yet is the highest-risk document there is, because every
-sentence in it is a candidate the day the work lands.
+the irradiance-probe plan (since folded into `docs/notes/rendering.md`) and
+`18-render-features.md`, and found seventeen more. **The plan for a shipped
+sample was the worst document audited anywhere** — `20-options.md` still carried
+the heading "the audio half is built, the video half is not" over a screen that
+has laid out the whole video catalogue since 2026-08-28, and two
+self-corrections whose referents no longer existed: one correcting a paragraph
+that had itself been corrected, and one warning about a claim below it that
+appears nowhere in the file. A plan written to describe work that does not exist
+yet is the highest-risk document there is, because every sentence in it is a
+candidate the day the work lands.
 
 Still unaudited among the plans: `00`-`17`, `20`, `22`-`49`, `51`, `52`, and the
 seventeen remaining `docs/plan/sample/` files — over 18,000 lines. `19-input.md`

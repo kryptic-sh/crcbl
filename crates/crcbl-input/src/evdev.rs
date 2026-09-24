@@ -93,15 +93,16 @@
 //!
 //! # Steam Input's virtual pad is read like any other
 //!
-//! Valve's vendor id, 0x28DE, is **not** filtered out. `docs/plan/42-steam.md`
-//! declines wrapping `ISteamInput` and relies on the opposite: Steam Input's
-//! gamepad emulation reaching this backend as an ordinary controller, which
+//! Valve's vendor id, 0x28DE, is **not** filtered out. Without Steam Input,
+//! Steam's gamepad emulation reaching this backend as an ordinary controller
 //! is how a game launched from Steam on a Deck gets the built-in controls. That
 //! emulated pad is the only copy: per `hid-steam`'s source, the driver
 //! removes its own gamepad node while Steam holds the controller's hidraw
 //! node, so one physical pad is not reported twice. Unverified on a Deck. A
-//! game that adds Steam Input itself would then see the pad twice, once from
-//! each — filtering vendor 0x28DE here is that change's job, not this one's.
+//! game that turns Steam Input on (`crcbl-steam`'s `SteamPads`) would see the
+//! pad twice, once from each, so `crcbl::engine::steam::steam_input` replaces
+//! this backend rather than polling beside it; a vendor filter here is what
+//! would let the two run together, and `docs/backlog.md` carries it.
 //!
 //! # Not on other targets
 //!

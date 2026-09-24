@@ -4850,7 +4850,7 @@ const CLIPMAP_MIRROR_LEVELS: f32 = 1.5;
 /// **The clipmap's claim, on the device: a fragment crossing a level boundary
 /// fades rather than steps, and it fades the way the host says it does.**
 ///
-/// `docs/plan/50-irradiance-probes.md`'s layered density.
+/// The irradiance probes' layered density.
 /// `crcbl::screenshot::probe_clipmap_forward` is the fixture: one room, one
 /// flat floor, and a volume of two levels whose rows are a red constant
 /// environment and a blue one. Every row of a level is identical, so the
@@ -5032,7 +5032,7 @@ const SCROLL_MIRROR_LEVELS: f32 = 2.0;
 /// **A scrolled level reads the rows the host says it does, at every offset of
 /// the wrap.**
 ///
-/// `docs/plan/50-irradiance-probes.md`'s toroidal addressing on the device.
+/// The irradiance probes' toroidal addressing on the device.
 /// `crcbl_shaders::probe::ProbeVolume::row` and `mesh.slang`'s `probe_row` are
 /// two spellings of one rule — add the level's scroll offset to the cell and
 /// bring it back inside the counts — and nothing about a compile, a golden or
@@ -5220,7 +5220,7 @@ const SLAB_KEPT_LEVELS: f32 = 2.0;
 /// **The slab a scroll exposes is re-captured, and the probes it did not expose
 /// are left where they were.**
 ///
-/// `docs/plan/50-irradiance-probes.md`'s recapture on the device. The fixture
+/// The irradiance probes' recapture on the device. The fixture
 /// captures two probes on the `+X` side of a divider and then takes one whole
 /// probe step back, which stands the red probe a quarter unit from the divider's
 /// far face and leaves the green one exactly where it was.

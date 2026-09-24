@@ -12,8 +12,9 @@
 //!                          copy_buffer_to_image ──────────▶ Rg32Float D2Array
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s raster sample producer, the half that
-//! says "depth cube per probe … captured on load". [`crate::probe_visibility`]
+//! The irradiance probes' raster sample producer — in the pipeline diagram
+//! `docs/notes/rendering.md` keeps, the half that says "depth cube per probe …
+//! captured on load". [`crate::probe_visibility`]
 //! owns the geometry a capture is *about* and
 //! [`crcbl_shaders::probe_visibility`] owns the layout it produces; this module
 //! is the pass between them.
@@ -489,7 +490,7 @@ pub(crate) fn capture(
 /// Captures the maps of **only** `rows` and writes them into the layers of
 /// `image` those rows name.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s slab recapture: a level that scrolled
+/// The irradiance probes' slab recapture: a level that scrolled
 /// `k` probes along an axis has `k` slabs holding a map about where their probe
 /// used to stand, and
 /// [`ProbeVolume::exposed`](crcbl_shaders::probe::ProbeVolume::exposed) is which

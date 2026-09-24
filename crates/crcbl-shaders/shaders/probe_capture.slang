@@ -3,7 +3,7 @@
 // One face of one probe's depth cube: the static geometry drawn from the
 // probe's own position, writing **how far away it is** rather than a depth.
 //
-// `docs/plan/50-irradiance-probes.md`'s raster producer. A probe's visibility
+// The irradiance probes' raster producer. A probe's visibility
 // map wants the distance to the nearest surface in every direction, and the
 // cheapest thing that answers that for every direction at once is the same
 // thing a reflection capture is: six 90° views from the probe, tiled into one

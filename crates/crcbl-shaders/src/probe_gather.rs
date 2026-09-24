@@ -11,7 +11,7 @@
 //!                                        one workgroup per probe → GpuProbe row
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s raster updater. `crcbl_render::rsm` is
+//! The irradiance probes' raster updater. `crcbl_render::rsm` is
 //! the pair of render passes that fill those targets and
 //! `crcbl_render::probe_gather` is the dispatch that reads them; this module
 //! owns the numbers both sides have to agree on, the block the dispatch is
@@ -34,8 +34,8 @@
 //! number this crate owns rather than a literal in the Slang. The shader reads
 //! it out of [`GatherParams::rsm_side`](crate::probe_gather::GatherParams);
 //! nothing in `probe_gather.slang` names
-//! it. That is also what makes the sweep in `docs/plan/50-irradiance-probes.md`
-//! a change to one line.
+//! it. That is also what makes a sweep of the map's resolution a change to one
+//! line.
 
 /// Texels along one side of the reflective shadow map.
 ///

@@ -35,7 +35,7 @@
 //! "skipped" must not read as "passed".
 //!
 //! **It has run against the Steamworks.NET mirror of the 1.65 headers**
-//! (`docs/plan/42-steam.md`, "Conventions"), laid out as
+//! (`docs/backlog.md`'s Steamworks entry says how), laid out as
 //! `$CRCBL_STEAM_SDK/public/steam/*.h`, and never against an SDK zip from
 //! Valve, which no machine this crate was written on had. Its first run there
 //! found a real transcription error (`GetAppID` declared as returning

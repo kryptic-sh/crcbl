@@ -10,7 +10,8 @@
 //!                                          Rg32Float layer per probe → 29
 //! ```
 //!
-//! `docs/plan/50-irradiance-probes.md`'s decision of 2026-08-30. The grid stays
+//! The irradiance-probe decision of 2026-08-30, recorded in
+//! `docs/notes/rendering.md`. The grid stays
 //! what it was — one L1 row per probe, added to the ambient term — and gains the
 //! one thing Majercik et al. 2019 identify as what makes a probe grid stop
 //! leaking: each probe records how far away the nearest surface is in every
@@ -23,7 +24,7 @@
 //!
 //! # It is a capture of geometry, and it is not a bake
 //!
-//! The distinction the plan insists on, and it is the whole reason this rung is
+//! The distinction the probe rules insist on, and it is the whole reason this rung is
 //! allowed under the no-bake rule: what is stored is **where the walls are**,
 //! not what the lights did. Every light in the scene still moves, every one of
 //! them still lights the probes through the rows, and nothing here outlives the

@@ -2,7 +2,7 @@
 // set, "pad", whose actions are a neutral gamepad — a digital action per
 // positional button and an analog action per stick and trigger — so Steam's
 // configurator maps any controller onto the layout every crcbl pad backend
-// reports (docs/plan/42-steam.md, "Input").
+// reports (docs/notes/backends.md, the Steam section).
 //
 // The action names are the ones `crates/crcbl-steam/src/input.rs` looks up,
 // and a test there reads this file and fails if the two disagree.

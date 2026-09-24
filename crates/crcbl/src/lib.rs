@@ -265,8 +265,8 @@ pub use crcbl_shell as shell;
 /// reaches a shipped binary.
 pub use crcbl_sprite as sprite;
 /// [`crcbl-steam`](crcbl_steam): Steamworks — init, the per-frame callback
-/// pump, the local player's identity, and the Steam features
-/// `docs/plan/42-steam.md` lands slice by slice.
+/// pump, the local player's identity, and the Steam features its slices have
+/// bound.
 ///
 /// Behind the non-default `steam` feature, on `inventory`'s terms: a game
 /// not shipping on Steam links none of it. With it on, a machine without Steam

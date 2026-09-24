@@ -13,7 +13,7 @@
 //! cloud for the app it says so and stops.
 //!
 //! Conflicts need two machines and are a manual step: see
-//! `docs/plan/42-steam.md`, slice 6, "Needs a real client".
+//! `docs/backlog.md`'s Steamworks entry, slice 6's manual steps.
 
 #![cfg(all(
     target_pointer_width = "64",

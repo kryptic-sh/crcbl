@@ -4,8 +4,7 @@
 //! Steam records only while the game says so and plays nothing back through
 //! this API: [`VoiceCapture`] is push-to-talk under the game's control, its
 //! packets travel over the game's own transport, and each receiver turns them
-//! into mono `f32` samples with [`Voice::decompress`] (`docs/plan/42-steam.md`,
-//! "Voice").
+//! into mono `f32` samples with [`Voice::decompress`].
 
 use std::{marker::PhantomData, rc::Rc, sync::Arc};
 

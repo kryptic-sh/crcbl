@@ -203,11 +203,12 @@ dimension constants and ships their rows zeroed with `ProbeUpdate::EveryFrame`,
 and `crcbl_render`'s reflective-shadow-map updater fills them every frame from
 the sun's near cascade and the lamp's shadow faces, each sample gated by the
 probe's captured visibility. The analytic one-box gather the module used to bake
-at load is gone with `docs/plan/50-irradiance-probes.md`'s no-bake rule — what
-the rows hold now sees the plinth, the panel, the block and the post as
-occluders, which the box never could. It is still one bounce and no history, and
-the fixed camera still deliberately puts a floor in full sun beside a wall in
-shadow, which is the configuration a second bounce would change most.
+at load is gone with the no-bake rule (`docs/notes/rendering.md`, _What the
+deleted 50-irradiance-probes plan left behind_) — what the rows hold now sees
+the plinth, the panel, the block and the post as occluders, which the box never
+could. It is still one bounce and no history, and the fixed camera still
+deliberately puts a floor in full sun beside a wall in shadow, which is the
+configuration a second bounce would change most.
 
 ### Still owed at this milestone, and where
 

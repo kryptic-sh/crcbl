@@ -29,5 +29,6 @@ workspace = true
 # windowed run, pump once a frame, log the player's identity and the overlay,
 # and pause the way focus loss does when the overlay opens. Off by default,
 # because a sandbox run should not touch a developer's Steam client unless
-# asked; `docs/plan/42-steam.md` slice 1b is what it exists to check by hand.
+# asked; Steamworks slice 1b's manual step (in `docs/backlog.md`) is what it
+# exists to check by hand.
 steam = ["crcbl/steam"]

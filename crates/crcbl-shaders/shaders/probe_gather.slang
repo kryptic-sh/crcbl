@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// The second half of `docs/plan/50-irradiance-probes.md`'s raster updater: the
+// The second half of the irradiance probes' raster updater: the
 // reflective shadow map `mesh.slang`'s `rsmFragmentMain` drew, gathered into
 // every probe row of the volume, each sample gated by that probe's own
 // visibility map.

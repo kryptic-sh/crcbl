@@ -32,8 +32,9 @@
 //!                                          glyph(id, control) ──▶ the button's PNG
 //! ```
 //!
-//! `docs/plan/42-steam.md` is the design; this crate is its slices as they
-//! land. What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11, 12, 14 and 15's inventory half: the library is
+//! The design's rules and the slice table this crate's docs cite by number
+//! are in `docs/notes/backends.md` (_What the deleted 42-steam plan left
+//! behind_). What exists now is slices 1, 1b, 3a, 3b, 4, 5, 6, 7b, 7c, 9, 10, 11, 12, 14 and 15's inventory half: the library is
 //! found and opened at runtime, Steam is initialised with a version
 //! handshake, the callback pipe is drained by manual dispatch into a queue of
 //! `SteamEvent`s, the local player's identity, the machine's basics and the

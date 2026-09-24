@@ -5611,6 +5611,132 @@ jobs passed on `3430ba7` — but WARP and SwiftShader now clear it by less than
 they did. If that row ever flakes, the fix is a re-sweep on the driver that
 flaked, not a nudge.
 
+## What the deleted 50-irradiance-probes plan left unbuilt (2026-09-24)
+
+The irradiance-probe plan was deleted on 2026-09-24 with its raster half built:
+the L1 grid, the visibility maps and their Chebyshev weight, the reflective
+shadow map updater and the clipmap's whole-step scroll. Its rules and
+measurements are in `docs/notes/rendering.md` under _What the deleted
+50-irradiance-probes plan left behind_. Two of its unbuilt pieces already had
+entries and still do: the sky entering through the visibility map (_What the RSM
+probe updater shipped without_) and the stall-free scroll, the `Authored`
+refusal, lantern's finer level 0, recapture on demand and the hoisted transients
+(_What the probe clipmap's scrolling shipped without_). The rest is below.
+
+The plan's pipeline is one base with two sample producers, and only the
+placement and producer stages are unfinished:
+
+- **placement** — the clipmap (built), the scroll (built), relocation (below);
+- **producer** — per probe, N directions giving radiance, distance and backface:
+  the raster one (built: `crcbl_render::probe_capture` for distance,
+  `crcbl_render::rsm` and `crcbl_render::probe_gather` for radiance) and the
+  traced one (below);
+- **integrate** — samples into the L1 rows and the octahedral depth/depth² maps
+  (built);
+- **read** — level pick, trilinear, Chebyshev, the SSR fallback (built).
+
+The producer's contract is a sample buffer of a fixed layout, so the integrate
+pass, the storage, relocation and every shader reader never learn which producer
+ran. A new producer that needs a reader change has broken the design.
+
+### The traced probe updater is unbuilt (2026-09-24)
+
+**Design, as the plan fixed it.** A second producer fills the **same** rows and
+the same visibility maps from inline ray queries, **every frame**, on
+`crcbl-vk`, `crcbl-dx12` and `crcbl-mtl`; WebGPU has no ray tracing and stays on
+the raster producer with no engine branch. One ray per direction gives all three
+samples at once — radiance at the hit, distance to it, and whether it hit a
+backface — and dynamic objects are in the acceleration structure, so **the
+traced tier adds dynamic occluders to the visibility**, which the raster tier's
+captured maps (static geometry, on load and on scroll) cannot. It is the
+ray-tracing half of DDGI, accepted; DDGI's temporal half stays refused, so the
+direction set is fixed and nothing accumulates across frames (survey constraint
+C2). **Single bounce, as on the raster tier**, unless C2's temporal question is
+answered yes, in which case a further bounce is the previous frame's rows read
+at each hit — which is history, and that decision's to make.
+
+**What it waits on.** Foundation (c) in `docs/plan/43-render-standards.md`'s
+delivery table — an acceleration-structure resource with build and refit encoder
+verbs, a ray-query capability, and inline ray queries from compute (the shape
+`VK_KHR_ray_query`, DXR 1.1 inline and Metal's `intersection_query` share); see
+_Ray tracing and the acceleration structures are unbuilt_ and _Ray-traced
+lighting (P7C) is not built_. `Features::RAY_QUERY` exists in
+`crates/crcbl-hal/src/caps.rs` and the Vulkan and D3D12 adapters report it;
+nothing consumes it. Per the P7C row in `docs/plan/ROADMAP.md`, Slang cannot yet
+emit ray queries for Metal and `crcbl-dx12` was deferred on 2026-08-21, so the
+first backend this reaches is Vulkan hardware.
+
+**What it would take**, once (c) exists: a compute pass that, per probe row,
+casts the fixed direction set, shades each hit with the same light list the
+raster gather uses, and writes the rows and the depth/depth² maps through the
+integrate step the raster producer already feeds; a selector on the volume (the
+way `ProbeUpdate` already chooses between `Authored` and `EveryFrame`) that
+picks it where the device reports ray queries; and the price measured on the
+desktop adapter before it counts, per the standing rule. Not specified by the
+plan, and suggested here: run the two leak tests (`a_probe_behind_a_wall_…` in
+`crates/crcbl/tests/render_e2e.rs`) and `Scene::Probes` on the traced producer
+too, and add one fixture only it can pass — a wall **moved after load** hiding a
+probe with no recapture.
+
+**Verified 2026-09-24:** no ray-tracing `.slang`, no acceleration structure and
+no producer other than the raster one exist in the tree.
+
+### Probe relocation is unbuilt, and nothing counts backfaces (2026-09-24)
+
+**Design, as the plan fixed it.** DDGI's rule: a probe whose samples are mostly
+backfaces sits inside geometry, and is moved out or disabled. It belongs to the
+shared placement stage and is answered by both producers once both report
+backfaces; it lands with whichever producer reports one first.
+
+**Why nothing can be built yet.** The raster capture (`probe_capture.slang`,
+`crcbl_render::probe_capture`) writes distance and distance² per octahedral
+texel and no backface channel, so the premise has nothing behind it on the
+raster tier. The traced producer gets it per ray for free. On the raster tier it
+would be a facing test per captured texel, counted per probe — the plan's
+diagram gives the capture that job, but no slice built it.
+
+**What it has to respect**, from the rules in the notes: a relocated probe's
+position is what `probe_weight`, the gather's position table and the capture all
+read, so a move is a recapture of that row; the rule must be a function of the
+captured geometry alone (no history), so a golden stays a function of its
+inputs; and a disabled probe must read as weight zero in every reader, so the
+eight-probe blend renormalises as it does for a probe behind a wall. Those three
+are inferred from the rules, not stated by the plan.
+
+**Verified 2026-09-24:** no backface channel, no relocation and no per-probe
+disable exist.
+
+### Considered and declined for the probe volume (2026-09-24)
+
+Carried from the deleted plan so none is re-proposed without its reason:
+
+- **Static bakes** — forbidden by the no-bake rule of 2026-08-30. lantern's and
+  shard's CPU bakes were deleted with it. **The gather bake tool is moot** under
+  the same rule. The plan also named a missing prerequisite, a ray-triangle
+  intersector; that has since landed (`TriangleMesh::cast_ray` over
+  `ray_triangle`, in `crates/crcbl-phys/src/mesh/query.rs`, checked 2026-09-24),
+  so only the rule stands against it now.
+- **DDGI's temporal half** — a golden must not depend on how many frames came
+  before it. Its ray-tracing half is accepted, as the traced updater above.
+- **SH L2** — about 99% of diffuse irradiance against L1's 87%, for 27 floats
+  against 12, a gain `Tolerance::RASTERISER` cannot resolve. Escalating is one
+  constant and one function if it is ever wanted.
+- **The Valve ambient cube** — never rings negative, but 18 floats to L1's 12
+  and a per-axis select. Recorded as **the drop-in if L1 ringing is ever seen**.
+- **A 3D texture with hardware trilinear** — vendor filter weights are the
+  filtered read the AO and SSR designs avoid; an eight-tap manual lerp over a
+  cache-resident table costs less and risks nothing. (`crcbl_render::transient`
+  has no 3D image either.)
+- **A compute pass that accumulates into the volume over frames** — the temporal
+  refusal again. A compute pass that refills every row each frame, as the gather
+  does, is not this.
+- **Prefiltered radiance cubemaps** — **deferred, not declined**, with the
+  trigger "somebody looks at lantern's panel and objects". They are what puts a
+  recognisable room in a mirror, and need cube arrays, mip chains and a
+  `SampleLevel` at a computed LOD, which `ssr.slang` refuses. The entry is
+  _Named limits, so they are not rediscovered_ under _Irradiance probes: the
+  slice plan (designed 2026-08-14)_.
+
 ## The probe table's upload barriers are guarded by unit tests alone (2026-09-04)
 
 S2 made `crcbl_render::probe`'s table device-local and a ring of
@@ -5688,8 +5814,10 @@ scene scrolls, is unchanged.
 5. **A scroll moves the geometry and not the light.** Under
    `ProbeUpdate::Authored` a row a step brings in keeps the irradiance the probe
    that left had, because nothing rewrites the table on a scroll.
-   `ProbeUpdate::EveryFrame` has no such gap. An authored volume that scrolls
-   wants a rule nobody has written.
+   `ProbeUpdate::EveryFrame` has no such gap. The rule is decided (above: an
+   `Authored` volume does not scroll, and `follow_probe_volume` refuses it with
+   an `Err`) and not built — verified 2026-09-24, `follow_probe_volume` still
+   steps an authored volume and its doc still says so.
 6. **Not measured:** Metal, D3D12, the browser tier, any windowed run, and the
    60-row recapture on lavapipe. The figures above are radv and lavapipe only.
 
@@ -5698,14 +5826,15 @@ scene scrolls, is unchanged.
 The record behind this — the argument, the options and the measurements — is in
 `docs/notes/rendering.md` under this heading.
 
-`docs/plan/50-irradiance-probes.md`'s raster updater is built and so is its
-punctual half: `crcbl_render::rsm` draws the sun's near cascade as a reflective
-shadow map and every shadowed point and spot light's faces as a second one,
-`crcbl_render::probe_gather` sums every texel of both into every probe row
-through `probe_chebyshev`, and `ProbeGrid::update` selects it — `Authored` by
-default, so no existing scene records either pass. lantern and shard's CPU bakes
-are gone with it, `apps/lantern`'s frame claim 6 is restored, and the plan
-sections that described both halves are deleted. What follows is what they left.
+The probe volume's raster updater is built and so is its punctual half (the
+rules are in `docs/notes/rendering.md` under _What the deleted
+50-irradiance-probes plan left behind_): `crcbl_render::rsm` draws the sun's
+near cascade as a reflective shadow map and every shadowed point and spot
+light's faces as a second one, `crcbl_render::probe_gather` sums every texel of
+both into every probe row through `probe_chebyshev`, and `ProbeGrid::update`
+selects it — `Authored` by default, so no existing scene records either pass.
+lantern and shard's CPU bakes are gone with it and `apps/lantern`'s frame claim
+6 is restored. What follows is what it left.
 
 **What is not verified.** The browser tier and any windowed run — neither was
 measured. Metal and D3D12 are type-checked on the cross-target clippy legs and
@@ -5714,7 +5843,7 @@ are the only verdict on `rsmFragmentMain`'s three targets and on the gather's
 `groupshared` reduction, which is the construct `crcbl_shaders::exposure`
 records Slang's Metal backend as sensitive to.
 
-**Still owed from the plan, in order:**
+**Still owed:**
 
 **DECIDED 2026-09-06 —** the sky enters the gather through the depth map's
 misses: for each octahedral texel whose depth is far, the sky radiance in that
@@ -5722,9 +5851,26 @@ direction is added, and the host zeroes `frame.sky_sh_*` for an updater-owned
 volume. That is DDGI's own mechanism — miss rays sample the sky — realised
 through the map the updater already has. It is scheduled after the scroll ring.
 
-- **Scrolling, and recapture on scroll.** Probes outside cascade 0's
-  camera-following sphere gather nothing, and the volume does not move.
-  `ProbeUpdate::EveryFrame`'s own doc comment says so.
+- **The sky through the visibility map is not built.** Verified 2026-09-24:
+  nothing in `probe_gather.slang` reads the sky, and an updater-owned volume
+  still gets the sky from `mesh.slang`'s `sky_irradiance` — three dot products
+  against `frame.sky_sh_*` with no direction to gate, so the sky reaches a
+  fragment through every wall the probes respect. Why it is not a binding
+  change: zeroing `sky_sh_*` and folding the sky into the rows along the
+  directions a probe's own map reports as open changes how every updater-owned
+  scene is lit (lantern and shard), so it lands as a re-bless with a reason.
+  What it takes: the gather reads each probe's octahedral map, and for a texel
+  whose stored distance reaches the capture's far plane — a miss — adds the
+  sky's radiance in that texel's direction (the same sky `sky_irradiance`
+  evaluates) into the rows; `ForwardRenderer` zeroes the frame block's
+  `sky_sh_*` on a frame whose volume is `ProbeUpdate::EveryFrame`; and a fixture
+  in the shape of the leak tests — a probe with a wall between it and open sky —
+  shows the sky blocked.
+- **Probes outside cascade 0's camera-following sphere gather nothing.** The
+  scroll (_What the probe clipmap's scrolling shipped without_) closes that for
+  a volume small enough to follow the camera; a volume authored to cover its
+  whole scene keeps rows the cascade cannot reach. `ProbeUpdate::EveryFrame`'s
+  doc comment says both.
 
 ## Two price fixtures print a `forward` that bundles its fused clears (2026-09-05)
 
@@ -5769,8 +5915,9 @@ What is left:
 
 ## Probe visibility: what the slice did not do (2026-09-02)
 
-The maps and the Chebyshev weighting ship — `docs/plan/50-irradiance-probes.md`
-records what is now true. What is owed:
+The maps and the Chebyshev weighting ship — `docs/notes/rendering.md` records
+their rules under _What the deleted 50-irradiance-probes plan left behind_. What
+is owed:
 
 - **Recapture on demand is not written.** The scroll path exists since
   2026-09-05 (`probe_capture::recapture`, driven by
@@ -7888,7 +8035,8 @@ Verified 2026-09-24: no jitter, history target or TAA module in `crcbl-render`;
 - **A history target with neighbourhood clamping**, read at `uv - motion`. That
   makes a frame a function of how many frames were drawn before it, which the
   SSR row (`docs/notes/rendering.md`, _What the deleted 47-reflections plan left
-  behind_) and the irradiance-probes plan both refuse for goldens.
+  behind_) and the probe volume's DDGI refusal (_What the deleted
+  50-irradiance-probes plan left behind_) both refuse for goldens.
 - **The motion target it reads is in the frame**: `TransientImageDesc::motion`
   (`crcbl_render::forward`'s `MOTION_FORMAT`, `Rg16Float`), written by
   `mesh.slang`'s `motion_vector` on both geometry paths, with skinned surfaces
@@ -7973,8 +8121,8 @@ behind_.
 ### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
 
 That topic was split into one document per technique — `44-lighting.md` through
-`50-irradiance-probes.md`, with `18-render-features.md` kept as the index that
-holds the interactions, the delivery table and the risks. A hundred and
+topic 50, the irradiance probes, with `18-render-features.md` kept as the index
+that holds the interactions, the delivery table and the risks. A hundred and
 twenty-eight citations in forty-eight files (re-counted 2026-09-06; 120 in 40 on
 2026-08-29, and it grows with each rung) — doc comments, shader headers and test
 headers across `crcbl-shaders`, `crcbl-render`, `crcbl`, `crcbl-vk`,
@@ -9587,15 +9735,20 @@ emits JSON beside an environment block.
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
 
-### Steamworks: slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15 (inventory) built on `steam-sdk`, nothing verified against Steam (2026-09-23)
+### Steamworks: every slice but 13 built and merged, nothing verified against Steam (2026-09-23)
 
-**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7b, 7c, 8, 9, 10, 11, 12, 14 and 15's
-inventory half are built on branch `steam-sdk`** (not merged):
-`crates/crcbl-steam` — the runtime loader, `Steam::init` with the version
-handshake, the manual-dispatch pump, shutdown on the last owner's drop, the
-local identity and machine basics, `relaunch_via_steam`, the fake-library rig,
-the drift gate and the CI steps (clippy and rustdoc for macOS and Windows, a
-`miri (crcbl-steam)` job) — plus the umbrella's `steam` feature,
+**Slices 1, 1b, 3a, 3b, 4, 2, 6, 5, 7a, 7b, 7c, 8, 9, 10, 11, 12 (client half),
+14 and 15's inventory half are built and merged to `main`** (`13999937`, "merge
+steam-sdk: Steamworks support"); slice 13 is deferred and slice 15's shipping
+half is not started. The plan was deleted on 2026-09-24; its rules, the
+one-row-per-slice table code cites by number, the risks (R1–R10) and the
+defaulted decisions with their alternatives are in `docs/notes/backends.md`
+under _What the deleted 42-steam plan left behind_. Built: `crates/crcbl-steam`
+— the runtime loader, `Steam::init` with the version handshake, the
+manual-dispatch pump, shutdown on the last owner's drop, the local identity and
+machine basics, `relaunch_via_steam`, the fake-library rig, the drift gate and
+the CI steps (clippy and rustdoc for macOS and Windows, a `miri (crcbl-steam)`
+job) — plus the umbrella's `steam` feature,
 `HostedGame::take_pending_focus_loss`, `apps/sandbox --features steam`, and
 slice 3a's async call registry, lobbies, invites, rich presence and join paths,
 slice 3b's friends list, personas and avatars, and slice 4's `SteamTransport`
@@ -9612,8 +9765,27 @@ overlay as a focus loss, and polls Steam Input as its pad source), slice 10's
 screenshots and timeline, and slice 11's ownership, DLC, betas and Remote Play,
 and slice 12's tickets and `AuthGate`, slice 14's Workshop (`Workshop`,
 `UgcQuery`, `ItemUpdate`), and slice 15's inventory (`Inventory`,
-`InventoryResult`). The plan, `docs/plan/42-steam.md`, carries a status line per
-slice.
+`InventoryResult`). Slice 7a's gamepad seam (`crcbl_input::gamepad`, the XInput
+backend, the loop's `PadSource`) landed on `main` first.
+
+**Every real-client step below follows the common manual procedure** in the
+notes (Steam logged in, `CRCBL_STEAM_SDK` set, `steam_appid.txt` holding `480`,
+Windows 11, a Linux desktop or Deck and macOS, results recorded per OS, and
+mechanisms asserted, never values read back from 480). **The plan's exit bar for
+each slice**, so "done" has a meaning when these run: slice 1 — the smoke test
+and the drift gate pass on all three OSes, or the OS not run is named; 1b — the
+overlay pause seen on one OS and each other OS seen or recorded with the launch
+tried; 2 — slice 4's two-machine run repeated with three joiners through a
+`Host`; 3a — all four join paths on at least two OSes; 3b — seen on two OSes; 4
+— Windows↔Linux and Linux↔macOS; 5 — an intelligible round trip on two OSes; 6 —
+a real conflict surfaced on one OS pair, or the 480-quota gap recorded; 7b — the
+Deck run end to end, Windows and macOS run or named (with their by-value returns
+named unverified); 7c — seen on the Deck, desktop Big Picture recorded or named;
+8 — Shift+Tab pausing a `Loop`-driven sample on each OS; 9 — the toast on each
+OS; 10 — both seen on Windows and Linux; 11 — mechanisms seen, DLC named
+untestable under 480; 12 — both verdicts seen; 14 — the round trip seen; 15 — a
+depot-shaped build per OS that launches from Steam, checked by a game with its
+own app id or under 480 as far as 480 allows.
 
 **Not verified, and each is a gap rather than a pass:**
 
@@ -9627,8 +9799,9 @@ slice.
   needs a partner login, so every declaration is still only as good as the
   mirror's copy. How to reproduce: download `CodeGen/steam/` from
   `rlabrecque/Steamworks.NET` into `<dir>/public/steam/` and set
-  `CRCBL_STEAM_SDK=<dir>`; the mirror is never committed or fetched by CI (see
-  the plan's "Defaulted decisions").
+  `CRCBL_STEAM_SDK=<dir>`; the mirror is never committed or fetched by CI (the
+  _SDK in CI_ row of the notes' defaulted decisions). The gate is proven red by
+  changing one parameter type, one field name and one pragma, each in turn.
 - **`tests/smoke.rs` has never passed against a real client.** On the Windows
   development machine (Steam running, no SDK), the only `steam_api64.dll` was
   one bundled with an installed game, from an older SDK. Through it,
@@ -9638,6 +9811,13 @@ slice.
   earlier, at `SteamAPI_SteamUtils_v011`) — the loader works on a real DLL; the
   1.65 surface is unexercised. Without any library, `NoLibrary` listed the path
   and `LoadLibraryExW`'s error 126. Linux and macOS loaders were not run at all.
+  What the smoke test asks, under 480 on each OS: init succeeds; `steam_id()` is
+  non-zero and the same across two runs; 300 pumps leave `decode_mismatches` at
+  zero; drop and exit are clean. And by hand: with Steam stopped,
+  `NoSteamClient` says so; with the redistributable absent, `NoLibrary` lists
+  the paths; without `steam_appid.txt`, the message names the file and the
+  working directory. On macOS, record whether a browser-downloaded dylib's
+  quarantine attribute had to be cleared.
 - **The `pack(4)` layout tables** (Linux and macOS) come from a C++ program
   compiled with MinGW GCC against the mirror's headers, `pack(4)` obtained by
   forcing the platform test in a copy of `steamclientpublic.h` — so the
@@ -9763,9 +9943,18 @@ slice.
   handshake list (`SteamInternal_GameServer_Init_V2`, the
   `SteamGameServer_InitEx` versions), the game-server pipe, a one-live guard of
   its own, `ISteamGameServer` (logon, server info, auth sessions, advertising),
-  `ISteamGameServerStats` and `ISteamMatchmakingServers`, with the plan's
-  pipe-separation test. Slice 12's `AuthGate` already serves a game server's
-  verdicts unchanged.
+  `ISteamGameServerStats`, game-server networking sockets (the `…_SteamAPI_v013`
+  twins) and `ISteamMatchmakingServers` (the server browser).
+  `ISteamGameServer`'s accessor is `SteamAPI_SteamGameServer_v015`
+  (`SteamGameServer015`, from the 1.65 mirror). Its own `Arc<GameServerClient>`
+  with `SteamGameServer_Shutdown` in its `Drop` is a sibling of `Client`, not
+  nested in it, so a listen server that also runs a game server holds both.
+  Tests the design asks for, over a fake that tells two pipes apart: the
+  sibling's init and shutdown ordering, and pipe separation (a callback on the
+  game-server pipe never lands in the client's queue). Its real-client step: a
+  headless server on Linux logs on anonymously under 480 and appears in a
+  client's server-browser query. Slice 12's `AuthGate` already serves a game
+  server's verdicts unchanged.
 - **Slice 12's manual steps have not run, and two halves are not built**: one
   account's ticket validating on another's machine, a tampered ticket rejected,
   and a cancelled ticket ending the validator's session — on every OS. Not
@@ -9844,8 +10033,8 @@ slice.
 - **`aarch64` Linux** (`linuxarm64`) has a loader path and no machine.
 
 **Found by the step 4 review (2026-09-23) and not fixed** — each needs a
-decision, a real run, or is work of its own. What the review fixed is in the
-plan's "Review (step 4)".
+decision, a real run, or is work of its own. What the review fixed is in
+`docs/notes/backends.md` under _What the deleted 42-steam plan left behind_.
 
 - **Needs a decision: `SyncedFile` can lose a confirmed write silently.** A
   `save` writes the cloud blind, and a device drops its kept copy once a load
@@ -9935,13 +10124,13 @@ surfaced to the game, and the local `SteamId` as its identity. EW's build order
 (2026-09-22): 1, 1b, 3a, 3b, 4, then the multi-session host (slice 2), then 6,
 5, 7a–7c; slice 9 optional; 10–15 after, for the full API.
 
-**An engine piece EW needs whatever the transport, scheduled inside the Steam
-plan:**
+**An engine piece EW needs whatever the transport, scheduled with the Steam
+slices:**
 
 - **A gamepad seam in `crcbl-input` (slice 7a).** Landed on `main` as
-  `crates/crcbl-input/src/gamepad.rs` with the XInput backend, and merged into
-  `steam-sdk`; `SteamPads` reports through it. Topic 19's evdev and
-  GameController backends, when built, adopt it.
+  `crates/crcbl-input/src/gamepad.rs` with the XInput backend; `SteamPads`
+  reports through it, and topic 19's evdev and GameController backends have
+  adopted it.
 
 **Decided 2026-09-23 (the user): crcbl tests on app 480 (Spacewar) permanently**
 — its samples, smoke tests and manual real-client steps — and gets no app id of
@@ -9950,15 +10139,15 @@ decided the same for EW (Steam testing on 480, no app id of EW's own for now).
 **Still undecided on EW's side: which Steamworks SDK EW's real-client runs
 use.**
 
-**Unverified, and each is flagged in the plan's "Risks":** whether app 480 has a
-cloud quota or honours a Steam Input manifest path; whether SpaceWar's
-achievements, leaderboard and inventory item definitions exist; whether the
-overlay injects into a terminal-launched process on Linux and macOS, and
-composites over our own windowing on each shell and GPU backend; the by-value
-struct-return ABI for Steam Input action data on each target; and the macOS
-signing and entitlement needs for the dylib. Valve documents no thread safety
-for `ISteamNetworkingSockets` or `ISteamRemoteStorage`, so the plan restricts
-their Steam calls to the pump thread by a runtime check.
+**Unverified, and each is one of the risks (R1–R10) listed in the notes:**
+whether app 480 has a cloud quota or honours a Steam Input manifest path;
+whether SpaceWar's achievements, leaderboard and inventory item definitions
+exist; whether the overlay injects into a terminal-launched process on Linux and
+macOS, and composites over our own windowing on each shell and GPU backend; the
+by-value struct-return ABI for Steam Input action data on each target; and the
+macOS signing and entitlement needs for the dylib. Valve documents no thread
+safety for `ISteamNetworkingSockets` or `ISteamRemoteStorage`, so the crate
+restricts their Steam calls to the pump thread by a runtime check.
 
 ### `check-doc-citations.sh` misses crate-relative paths too (2026-08-27)
 
@@ -9971,15 +10160,13 @@ by hand, not by the gate.
 
 **What it would take:** the same widening the relative-link entry proposes, plus
 a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
-The awkward part is that some such paths are deliberately external —
-`42-steam.md` cites `public/steam/steam_api_flat.h` inside the Steam SDK and
-`steamworks-sys/build.rs` in a third-party repo — so widening needs an opt-out,
-which is a design question rather than a script change. Since 2026-09-22,
-`42-steam.md` also relies on this blind spot on purpose. It writes the files of
-the not-yet-created `crcbl-steam` crate crate-relative
-(`crcbl-steam/src/pump.rs`), and its "Conventions" section says so. Widening the
-gate would flag every one of those paths, so a widened gate needs an opt-out for
-them too, or the plan must switch to another marker.
+The awkward part is that some such paths are deliberately external — the Steam
+plan cited `public/steam/steam_api_flat.h` inside the Steam SDK and
+`steamworks-sys/build.rs` in a third-party repo, and the code under
+`crates/crcbl-steam` still names SDK headers — so widening needs an opt-out,
+which is a design question rather than a script change. (The plan also wrote the
+then-uncreated crate's files crate-relative on purpose; the crate exists and the
+plan was deleted on 2026-09-24, so that use is gone.)
 
 **Verified in this pass:** every relative `.md` link in `docs/plan/` and
 `docs/plan/sample/` resolves today, checked by a one-off script rather than by
@@ -15983,69 +16170,47 @@ aggregation itself verified are in docs/notes/process.md under the same heading.
   and `PhysicsWorld::closest_hit`/`closest_swept`, verified at symbol level
   only.
 
-## Steamworks: four decisions the plan is waiting on (2026-08-22)
+## Steamworks: four decisions, all taken (2026-08-22, settled 2026-09-23)
 
-**DEFERRED 2026-08-30 — all four wait until Steam is in scope.** The plan's
-recommendation (hand-written `extern "C"`, no `steamworks-rs`) stands as the
-default answer then. `docs/plan/42-steam.md` designs `crcbl-steam` end to end
-and is blocked on none of these to _start_ — slice 1 (lifecycle, pump, overlay
-event) runs on SpaceWar app id 480. Each of these gates something later, and
-each is the user's call.
+**All four are answered and built; nothing here waits on the user.** The first
+option trees are in `docs/notes/simulation.md` under this heading, and the rules
+that came out of them, with every other call the plan defaulted and its
+alternative, in `docs/notes/backends.md` under _What the deleted 42-steam plan
+left behind_. The open Steam work is the entry _Steamworks: every slice but 13
+built and merged, nothing verified against Steam_. As they stand:
 
-**DECIDED 2026-09-06 —** the plan's own defaults are ratified and all four stay
-deferred until Steam is in scope: hand-written `extern "C"` declarations and
-`repr(C)` structs with a drift gate against the SDK's `steam_api.json`, rather
-than `steamworks-rs`; Auto-Cloud configuration first, with a `SteamCloudStorage`
-backend over `ISteamRemoteStorage` only if per-file control or in-game sync UI
-is wanted; and Steam Input only if the Deck is targeted, returning then as a
-slice feeding `ActionMap` through `Binding::Virtual`. Precedent: Steamworks.NET
-has published its own flat-API declarations under MIT for a decade, and
-Auto-Cloud is the zero-code path Valve documents for a game with an atomic save
-layout. The four option trees are in docs/notes/simulation.md under the same
-heading.
-
-**IN SCOPE 2026-09-22 — "the full Steam API" is now asked for**, and
-`docs/plan/42-steam.md` was re-planned on that basis. Two of the ratified
-defaults changed as a result:
-
-- **Cloud: the `ISteamRemoteStorage` backend is now required.** EW needs sync
-  conflicts surfaced to the game. Auto-Cloud cannot do that: the Steam client
-  resolves a conflict in its own dialog before launch and tells the game
-  nothing. That is exactly the ratification's own trigger ("only if per-file
-  control … is wanted"). Detecting the conflict is a backend-neutral synced-file
-  protocol in `crcbl-store`: a generation header plus a local shadow.
-- **Steam Input is in scope.** It feeds a shared gamepad seam, so it arrives as
-  the same `GamepadEvent`s a native backend would produce. It does not use
-  `Binding::Virtual`. EW requires the same events, and `Binding::Virtual` is the
+- **The binding route: hand-written flat-API declarations, loaded at runtime,
+  with a drift gate** (ratified 2026-09-06), not `steamworks-rs`. The gate reads
+  the SDK's **header text**, not `steam_api.json` as the 2026-09-06 wording had
+  it — the JSON lacks the lifecycle functions, `CallbackMsg_t` and every size —
+  so no JSON dependency was added. It runs locally only; CI never fetches the
+  SDK.
+- **Cloud: the `ISteamRemoteStorage` backend is required** (EW, 2026-09-22),
+  overriding the ratified "Auto-Cloud first": the Steam client resolves an
+  Auto-Cloud conflict in its own dialog before launch and tells the game
+  nothing, and EW needs the conflict surfaced. That was the ratification's own
+  trigger ("only if per-file control … is wanted"). Built as `SteamCloudStorage`
+  over the backend-neutral `crcbl_store::synced`.
+- **Steam Input is in scope** (2026-09-22), reversing "only if the Deck is
+  targeted": it feeds the shared gamepad seam as the same `GamepadEvent`s a
+  native backend produces, not `Binding::Virtual`, which is the
   on-screen-control path.
+- **No app id of crcbl's own** (the user, 2026-09-23): crcbl tests on 480
+  (Spacewar) permanently, with mechanism-only smoke tests that never assert a
+  value read back, since 480's data is shared by everyone. The owner does not
+  plan to publish crcbl on Steam; per-app configuration — achievements, stats,
+  Auto-Cloud, rich presence, depots — belongs to a game that ships with crcbl,
+  under its own app id.
 
-The plan's "Defaulted decisions" table records every other call made while the
-user was away, each with its alternative. The ones most worth a look:
-
-- CI never fetches the SDK, so the drift gate runs locally only.
-- The drift gate reads the SDK headers as text with hand-written code. No JSON
-  dependency is added: an earlier draft proposed `serde_json`, and review found
-  `steam_api.json` lacks the lifecycle functions and struct sizes anyway.
-- `SteamTransport` and `SteamCloudStorage` are `Send` but call Steam only on the
-  pump thread, checked at runtime, because Valve states no thread safety for
-  either interface.
-- The crate never writes `steam_appid.txt` or sets `SteamAppId`.
-- 32-bit targets are out of scope.
-- Microtransactions are declined: they need a server that holds a publisher key.
-
-**DECIDED 2026-09-23 — no app id of crcbl's own.** crcbl is an engine and will
-most likely never be published on Steam, so it tests on 480 permanently, with
-mechanism-only smoke tests that never assert a value read back (480's data is
-shared with everyone). Per-app configuration — achievements, stats, Auto-Cloud,
-rich presence, depots — belongs to a game that ships with crcbl, under its own
-app id.
-
-**Two things the plan could not verify**, recorded so nobody reads them as
-settled: whether SDK **1.64** exists at all (`steamworks-rs` pins it; 1.63 of
-2026-01-29 is the last confirmed release), and the exact interface accessor
-version strings, which were read from Steamworks.NET's header mirror rather than
-Valve's login-gated zip. The plan mandates re-reading both from a real SDK
-before any declaration is trusted.
+**History, kept so it is not misread.** 2026-08-30 deferred all four "until
+Steam is in scope"; 2026-09-06 ratified the plan's defaults and kept them
+deferred; 2026-09-22 brought "the full Steam API" into scope and changed the
+cloud and input answers above. The plan's early doubt whether SDK 1.64 existed
+is settled: the Steamworks.NET mirror moved to 1.64 on 2026-03-13 and to 1.65 on
+2026-07-26 (1.65a on 2026-08-07), and every declaration is read from the 1.65
+mirror. What is still unverified is the same mirror standing in for Valve's
+login-gated zip; re-reading from a real SDK is the drift-gate gap in the open
+entry.
 
 ## Four source files are past the size where anyone can hold them (2026-08-22)
 
@@ -22068,11 +22233,10 @@ heading. What is still deferred is below.
   prefiltered radiance cubemaps, which need the filtered read `ssr.slang`
   refuses. Trigger: when somebody looks at lantern's panel and objects.
 
-- **The bake tool is deferred on a hard prerequisite**, not on taste: a gather
-  bake needs a ray-triangle intersector, and the workspace has none —
-  `crcbl-phys` offers ray-vs-sphere, ray-vs-AABB and ray-vs-capsule. The BVH
-  half of that prerequisite is no longer missing: `crcbl_phys::Bvh` is built and
-  `PhysicsWorld` holds one.
+The bake tool this entry used to defer is no longer deferred: the no-bake rule
+of 2026-08-30 forbids static bakes, so it is declined — see _Considered and
+declined for the probe volume_ under _What the deleted 50-irradiance-probes plan
+left unbuilt_.
 
 ## The browser gate's budgets are measured, not fixed (2026-08-20)
 

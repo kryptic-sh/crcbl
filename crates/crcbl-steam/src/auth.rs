@@ -1,4 +1,4 @@
-//! `ISteamUser`'s tickets (`docs/plan/42-steam.md` slice 12): proving to
+//! `ISteamUser`'s tickets (Steamworks slice 12): proving to
 //! another player, to a web service or to a publisher backend that this is
 //! who Steam says it is.
 //!
@@ -13,7 +13,7 @@
 //!   [`Auth::encrypted_ticket`]) go to a backend holding the app's key.
 //!   Decrypting one needs Valve's separate `sdkencryptedappticket` library on
 //!   that backend, which this crate does not load: the project runs no
-//!   backend (`docs/plan/42-steam.md`, "Steam is a backend the project does
+//!   backend (`docs/notes/backends.md`, "Steam is a backend the project does
 //!   not have to run").
 //!
 //! Every ticket and session is ended by the value that holds it — a

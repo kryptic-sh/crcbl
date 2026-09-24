@@ -310,7 +310,7 @@ struct FrameUniforms
     /// How far each level has scrolled, as whole probe steps already reduced
     /// into `0..probe_counts`; `w` unused.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s scrolling: a level re-centres on
+    /// The irradiance probes' scrolling: a level re-centres on
     /// the camera by whole probe steps, `probe_level_origin` above has already
     /// moved with it, and this is the wrap that leaves the probes which stayed
     /// naming the rows they already had. `probe_wrap` is the one place it is

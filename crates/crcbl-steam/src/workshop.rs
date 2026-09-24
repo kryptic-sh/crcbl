@@ -1,4 +1,4 @@
-//! `ISteamUGC` (`docs/plan/42-steam.md` slice 14): the Workshop — finding
+//! `ISteamUGC` (Steamworks slice 14): the Workshop — finding
 //! items, the ones the player subscribes to and where they are installed, and
 //! making and updating items of the player's own.
 //!

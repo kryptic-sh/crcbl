@@ -2418,7 +2418,7 @@ impl View {
             // this frame's slot is already in `ShaderRead` and the graph has
             // nothing to transition. It is declared anyway, because the rows are
             // device-local and `TRANSFER_DST` precisely so
-            // `docs/plan/50-irradiance-probes.md`'s gather can write them — and
+            // the irradiance probes' gather can write them — and
             // a pass that binds a buffer without declaring it is a pass the
             // graph cannot barrier the day something does.
             .read_buffer(probe_table);

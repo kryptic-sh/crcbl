@@ -1,4 +1,4 @@
-//! `ISteamApps` beyond the basics (`docs/plan/42-steam.md` slice 11): who
+//! `ISteamApps` beyond the basics (Steamworks slice 11): who
 //! owns what, the game's DLC, its beta branches, where it is installed, and
 //! a file's details.
 //!

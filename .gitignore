@@ -18,7 +18,8 @@
 /apps/viewer/assets/shelf/*
 !/apps/viewer/assets/shelf/Suzanne/
 
-# Steamworks (`crates/crcbl-steam`, `docs/plan/42-steam.md`). The SDK's licence
+# Steamworks (`crates/crcbl-steam`; rules in `docs/notes/backends.md`). The SDK's
+# licence
 # forbids publishing it, so an unzipped SDK dropped into the checkout must not
 # be committable, and `steam_appid.txt` — the development app-id file Steam
 # reads from the working directory — must never reach history or a build.

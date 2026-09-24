@@ -284,7 +284,7 @@ Texture2D<float4> sky_prefilter D3D12_REGISTER(t10, space0);
 [[vk::binding(11, 0)]]
 Texture2D<float4> dfg D3D12_REGISTER(t11, space0);
 
-/// `docs/plan/50-irradiance-probes.md`'s per-probe **visibility map**, the very
+/// The irradiance probes' per-probe **visibility map**, the very
 /// image the forward pass binds to `mesh.slang`: one layer per row of
 /// [`probes`], `r` the mean distance from that probe to the nearest static
 /// surface in a direction and `g` the mean of its square.
@@ -1031,7 +1031,7 @@ float2 probe_moments(uint index, float3 direction)
 /// `mesh.slang` is where the arithmetic and the constants it reads are argued in
 /// full, this split included: [`PROBE_OCCLUDED_WEIGHT`] is a property of the
 /// weighted mean's divisor, so a gather that has no divisor — the
-/// reflective-shadow-map updater `docs/plan/50-irradiance-probes.md` describes,
+/// reflective-shadow-map updater `docs/notes/rendering.md` describes,
 /// summing thousands of texels into one probe — calls this instead and pays no
 /// per-texel leak through the wall it stands behind.
 float probe_chebyshev(uint index, float3 probe_position, float3 world_position, float3 normal)
@@ -1205,7 +1205,7 @@ float2 probe_level_of(float reach, uint levels)
 ///
 /// # Each corner is weighed by whether it can see the surface
 ///
-/// `docs/plan/50-irradiance-probes.md`'s rung, on the specular path: a corner's
+/// The probe visibility rung, on the specular path: a corner's
 /// weight is its trilinear share times [`probe_weight`], the Chebyshev bound of
 /// that probe's visibility map in the direction of this surface. A probe on the
 /// far side of a wall is further away than the wall it recorded, so it keeps

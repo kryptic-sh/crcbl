@@ -197,13 +197,13 @@ Two consequences worth stating before somebody meets them:
   what a metal owes the room is a reflection, not a scatter. So a fully metallic
   surface out of every light's reach is **black** until it has something to
   reflect, and the two rows that give it one are exactly SSR (rules in the
-  [rendering notes](../notes/rendering.md)) and irradiance probes
-  ([50-irradiance-probes.md](50-irradiance-probes.md)). The default is clear of
-  it — `GpuMaterial::UNTINTED` is `metallic 0.0` — but **scenes are not**:
-  `apps/lantern`'s mirror slab and its brass block are both fully metallic, and
-  `crcbl_scene`'s two glTF paths default a row to metallic as glTF specifies. So
-  the reassurance this bullet used to carry is spent, and the surfaces standing
-  black without those two rows are the ones lantern ships to show them off.
+  [rendering notes](../notes/rendering.md)) and irradiance probes (rules in the
+  same notes). The default is clear of it — `GpuMaterial::UNTINTED` is
+  `metallic 0.0` — but **scenes are not**: `apps/lantern`'s mirror slab and its
+  brass block are both fully metallic, and `crcbl_scene`'s two glTF paths
+  default a row to metallic as glTF specifies. So the reassurance this bullet
+  used to carry is spent, and the surfaces standing black without those two rows
+  are the ones lantern ships to show them off.
 - **The engine's Lambert term carries no `1 / pi`, so neither does the specular
   one.** Trowbridge-Reitz normalises to `alpha2 / (pi * shape * shape)` and
   Lambert to `albedo / pi`; this engine's diffuse is a bare `albedo * N·L`, the

@@ -30,8 +30,8 @@
 //!
 //! The tables in this module's tests are the output of a C++ program,
 //! compiled with MinGW-w64 GCC 16.2.0 for x86-64, that includes the SDK 1.65
-//! headers — the Steamworks.NET mirror's copy (`docs/plan/42-steam.md`,
-//! "Conventions"), not a Valve zip — and prints `sizeof` and every field's
+//! headers — the Steamworks.NET mirror's copy, not a Valve zip — and
+//! prints `sizeof` and every field's
 //! `offsetof` and `sizeof`. It is compiled twice: as is, which selects
 //! `VALVE_CALLBACK_PACK_LARGE` (Windows), and against a copy of
 //! `steamclientpublic.h` whose platform test is forced true, which selects

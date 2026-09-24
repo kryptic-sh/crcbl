@@ -41,7 +41,7 @@
 //!
 //! # The grid is a clipmap, and this module owns where its levels stand
 //!
-//! `docs/plan/50-irradiance-probes.md`'s layered density:
+//! The irradiance probes' layered density:
 //! [`ProbeVolume`](crate::probe::ProbeVolume) is a small number of concentric
 //! levels of one grid, each twice the last. Two rules follow from that and both
 //! are written here once:
@@ -95,7 +95,7 @@ const _: () = assert!(
 
 /// How many clipmap levels a [`ProbeVolume`] header carries room for.
 ///
-/// `docs/plan/50-irradiance-probes.md`'s layered density: three or four levels,
+/// The irradiance probes' layered density: three or four levels,
 /// each the same probe count, level `k` spaced `2^k` times level 0 and centred
 /// on the same point — dense probes near the middle and sparse ones out at the
 /// edge. Four is the top of the range that decision names, and it is the array
@@ -176,7 +176,7 @@ pub const TRANSFER_L1: f32 = 2.0 * std::f32::consts::PI / 3.0;
 /// survives into a stored *irradiance* coefficient is their product.
 ///
 /// **Public because a shader has to declare it.**
-/// `docs/plan/50-irradiance-probes.md`'s updater does the projection on the
+/// The irradiance probes' updater does the projection on the
 /// device, so `shaders/probe_gather.slang` carries a copy of this number and
 /// [`crate::probe_gather`]'s
 /// `the_gather_projects_a_sample_the_way_this_module_does` is what holds the two
@@ -399,7 +399,7 @@ pub type ProbeSteps = [[i32; 3]; PROBE_LEVELS];
 ///
 /// # Several levels of it, concentric, each twice the last
 ///
-/// `docs/plan/50-irradiance-probes.md`'s layered density. One uniform grid over
+/// The irradiance probes' layered density. One uniform grid over
 /// a whole scene is either too coarse near the middle or too large away from
 /// it, so the volume is [`levels`](Self::levels) of the same grid: the same
 /// [`counts`](Self::counts) every level, level `k` spaced `2^k` times level 0,
@@ -470,7 +470,7 @@ pub struct ProbeVolume {
     /// How many **whole probe steps** each level has scrolled from where
     /// [`origin`](Self::origin) authored it, on each axis.
     ///
-    /// `docs/plan/50-irradiance-probes.md`'s scrolling: a level re-centres on a
+    /// The irradiance probes' scrolling: a level re-centres on a
     /// tracked point by moving a whole number of its own probe spacings, so the
     /// probes that stay inside it stand at exactly the world positions they
     /// stood at before — the arithmetic is `origin + step · spacing` and a step

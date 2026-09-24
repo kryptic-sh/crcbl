@@ -682,7 +682,7 @@ impl Gpu {
         // at all, because a light is a row of the light list and not an
         // instance.
         // **The irradiance volume follows the eye, and in this room it never
-        // moves.** `docs/plan/50-irradiance-probes.md`'s scrolling re-centres
+        // moves.** The irradiance probes' scrolling re-centres
         // each level on a tracked point by whole probe steps and re-captures the
         // slabs the step exposed; `bounce::follow_point` is what this room hands
         // it, and that is the volume's own centre whatever the camera does,
