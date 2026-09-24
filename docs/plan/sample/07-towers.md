@@ -220,7 +220,8 @@ milestone 3's problem rather than these slices'.
 - 4-player **LAN** co-op session completes 10 waves on a dedicated headless
   server found through the lobby browser — the engine's marquee demo, recorded.
   All clients native: a browser cannot host, cannot discover LAN hosts, and
-  cannot reach a LAN server from an HTTPS page (topic 23's LAN correction).
+  cannot reach a LAN server from an HTTPS page (the LAN rule in
+  `docs/notes/simulation.md`).
 - The **web build ships and is single player**, like every other sample's — same
   game over `InMemoryTransport`, so the wasm target cannot rot.
 - Map authored 100% in the editor, zero hand-edited scene text.

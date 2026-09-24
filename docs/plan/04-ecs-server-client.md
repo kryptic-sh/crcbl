@@ -14,9 +14,9 @@ replication to a rendering client. After this stage the sandbox is a real
 - Transport is a trait from day one; in-memory channel is the first impl and the
   permanent single-player path. The trait is message-oriented and async-agnostic
   — no UDP assumptions in the interface. (This was originally motivated by a
-  browser transport; browsers have no network transport at all now — see topic
-  23's LAN correction — but the shape is right regardless and is what lets
-  in-memory and UDP share one interface.)
+  browser transport; browsers have no network transport at all now — see the LAN
+  rule in the [simulation notes](../notes/simulation.md) — but the shape is
+  right regardless and is what lets in-memory and UDP share one interface.)
 
 ## ECS model (`crcbl-ecs`)
 

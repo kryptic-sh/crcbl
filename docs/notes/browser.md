@@ -680,8 +680,8 @@ backlog still uses:
   target; its canonical record is `docs/plan/21-jobs.md`'s wasm threading rules.
 - **The networking half is removed.** Native multiplayer is LAN and web builds
   are single player, so no browser client has a server to reach;
-  `docs/plan/23-netcode.md`'s LAN correction has the reasoning and the WebRTC
-  route deferred rather than refused.
+  `docs/notes/simulation.md` has the reasoning (_What the deleted 23-netcode
+  plan left behind_) and the WebRTC route deferred rather than refused.
 - **The editor is a native target.** Its asset browser, OS drag-drop and
   notify-based file watcher are native-shaped; see `docs/plan/08-editor.md`.
 - **The sequencing lesson.** The browser work finished the platform half (page,

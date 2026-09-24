@@ -60,8 +60,8 @@ synthetic population instead of needing a real playerbase. The **integrity gate
 to connect, and it is the more interesting half.
 
 What it adds as engine work: **LAN host discovery** — hosts announce on the
-local network, clients enumerate them — which topic 23's "lobby-lite" names but
-does not specify. See that topic for the shape.
+local network, clients enumerate them. Its design is in `docs/backlog.md` under
+_Netgraph HUD, LAN discovery_.
 
 ## Proves (the whole competitive spine, as one game)
 

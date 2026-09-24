@@ -149,8 +149,9 @@ exactly the kind the dependency policy in
 [../15-windowing.md](../15-windowing.md) rejects.
 
 The consequence, recorded so nobody re-derives it: **WebTransport and WebSocket
-are not in the plan.** The transport surface is UDP and in-memory. See topic
-23's LAN correction.
+are not in the plan.** The transport surface is UDP and in-memory. See the LAN
+rule recorded from topic 23 in the
+[simulation notes](../../notes/simulation.md).
 
 **Browser multiplayer is deferred, not refused.** One route survives the
 no-infrastructure constraint — WebRTC data channels with manually exchanged

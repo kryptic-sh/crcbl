@@ -178,9 +178,9 @@ OAuth, scaling — that's the backend project.
 
 **No hosted infrastructure exists in this project, so tier 3 as written has no
 deployment.** Sessions are LAN — direct connect by address, or a host found
-through local-network discovery (topic 23's correction) — and web builds have no
-networking at all. What this document specifies is not wrong; what changes is
-which parts have a consumer.
+through local-network discovery (designed in `docs/backlog.md`, _Netgraph HUD,
+LAN discovery_) — and web builds have no networking at all. What this document
+specifies is not wrong; what changes is which parts have a consumer.
 
 ### What survives, and where it is proven
 

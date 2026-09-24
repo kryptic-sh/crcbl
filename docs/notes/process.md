@@ -228,19 +228,20 @@ Stated plainly. "Not reviewed" is the honest line.
   gate's two blind spots. I checked by hand the ones I introduced:
   `[41-webgpu-stream]` (since folded into `docs/notes/browser.md`), `[42-steam]`
   (from `00-overview.md`; since folded into `docs/notes/backends.md`),
-  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from `23-netcode.md`) —
-  all resolve relative to `docs/plan/`. I did **not** re-check the pre-existing
-  relative links in these files.
+  `[13-audio.md]` (from `32-voip.md`), `[27-auth.md]` (from the netcode plan,
+  since folded into `docs/notes/simulation.md`) — all resolve relative to
+  `docs/plan/`. I did **not** re-check the pre-existing relative links in these
+  files.
 - **Carried forward on trust, not re-checked:** the `13-audio.md` claim that
-  `05-physics.md`'s correction requires the `libm` crate; the `23-netcode.md`
+  `05-physics.md`'s correction requires the `libm` crate; the netcode plan's
   assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
   and inventory entries there, not the WebRTC one); the ROADMAP's phase markings
   wherever a document says "which the ROADMAP marks done".
 - **Not audited for staleness at all** within my seven: the cue grammar's rule
   table, the latency budget table in `32-voip.md`, the coverage/mount model in
-  `34-inventory.md`, and the galaxy-scale wire section of `23-netcode.md` beyond
-  confirming that `SectorId` reaches `messages.rs` and `session.rs`. Those are
-  design, and design was in scope to keep, not to verify.
+  `34-inventory.md`, and the galaxy-scale wire section of the netcode plan
+  beyond confirming that `SectorId` reaches `messages.rs` and `session.rs`.
+  Those are design, and design was in scope to keep, not to verify.
 
 ## Coverage gaps in the sample audit
 
@@ -1189,9 +1190,10 @@ uncertainty.
   have guaranteed a third and fourth per-sample HUD, the shape `web.rs` already
   took twice. What P10 still owes is the rest of `07-ui-debug.md`'s suite
   (inspector, console, culling stats, debug-draw controls, UI inspector) and
-  `23-netcode.md`'s netgraph, which is unbuildable before the transport can
-  measure itself. _Changes it_: a sample that needs one of those sooner, which
-  is the same argument that moved the frame-timing core.
+  netcode's netgraph (`docs/backlog.md`, _Netgraph HUD, LAN discovery_), which
+  is unbuildable before the transport can measure itself. _Changes it_: a sample
+  that needs one of those sooner, which is the same argument that moved the
+  frame-timing core.
 
 - **How does a module register with the panel — retained list or per frame?**
   Taken: **per frame**, `DebugPanel::add(&dyn DebugModule)` once per system the

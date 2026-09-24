@@ -10486,6 +10486,35 @@ client's delta-apply path to accept previous-tick baselines as well as acked
 ones, and says it must exist at P2 rather than being discovered when the first
 replay is written.
 
+### Replay: nothing records, and the viewing and spectating consumers are unbuilt (2026-09-24)
+
+`crcbl_store::replay::ReplayWriter` and `crash_ring::CrashRing` have no caller
+outside `crcbl-store` and `crcbl-cli`'s own tests (grep over `crates/` and
+`apps/`, 2026-09-24; the CLI's non-test path only reads, through
+`FileTransport`). So no server records a session, and there is no record toggle
+— the plan's server command, reachable identically from console, CLI, UI and
+game code, with auto-record as one config flag. Also unbuilt: the time-scrub
+debugger (timeline, any entity's state at a tick, two ticks diffed side by
+side), the replay browser screen with a marker seek bar and 0.25×–8× speed and
+frame-step, and live spectating as a delayed relay of the recording stream,
+where the broadcast delay is read-cursor lag. Spectating rides the dedicated
+server (P13); `crcbl_server::Host` is multi-session since 2026-09-23, so a
+spectator connection would be one more peer rather than a new host. The scrub
+debugger rides topic 7's debug tools (P10). Testing still owes seek == linear
+playback at the same tick, `verify` catching seeded nondeterminism at the right
+tick, and a crash mid-write leaving a playable file (torn tail tolerated).
+Verified: the consumer grep; the UI and relay absence is inferred from no
+matching symbols.
+
+### Replay: the rules the unbuilt recording must keep
+
+`docs/plan/22-replay.md` still stands and holds them — above all its _Correction
+(design review, 2026-07-27)_: a recording is a tick-linear delta chain plus
+keyframes, and migrating an old replay is a whole-file transcode on load that
+fails loudly, because `FileTransport` bypasses the handshake's schema-hash gate.
+Replays are state recordings, not input demos, and playback is just a client
+over `FileTransport`. Move them to the notes when that plan is folded.
+
 ### Profiling: five of the eight gaps are still open (2026-08-27)
 
 The profiling plan was deleted on 2026-09-24; its rules and the numbered list of
@@ -11007,11 +11036,11 @@ the gate, which would not notice the next break.
 
 ## The services and content plans — what the seven still owe
 
-`docs/plan/00-overview.md`, `13-audio.md`, `14-persistence.md`, `23-netcode.md`,
-`27-auth.md`, `32-voip.md` and `34-inventory.md` were audited against the tree
-on 2026-08-27. Three entries below need a decision rather than work, and two of
-them point at richer entries this file already carries rather than restating
-them.
+`docs/plan/00-overview.md`, `13-audio.md`, `14-persistence.md`, the netcode plan
+(since folded; see _Netcode_ below), `27-auth.md`, `32-voip.md` and
+`34-inventory.md` were audited against the tree on 2026-08-27. Three entries
+below need a decision rather than work, and two of them point at richer entries
+this file already carries rather than restating them.
 
 ## Overview (`docs/plan/00-overview.md`)
 
@@ -11338,31 +11367,54 @@ test, a settings layer-resolution table, and an OPFS roundtrip in the browser
 e2e job. I did not enumerate `crcbl-store`'s tests to say which of those five
 exist. Treat the list as unverified in both directions.
 
-## Netcode (`docs/plan/23-netcode.md`)
+## Netcode (from the deleted 23-netcode plan, 2026-09-24)
 
-### There is still no network transport, and therefore no crypto (2026-08-27)
+The plan's rules — the encryption rule, LAN-only networking, the rejected
+transports, ack-baseline deltas, encoded-space comparison, the one-datagram
+rule, backpressure, sectors as the wire architecture — are in
+`docs/notes/simulation.md` under _What the deleted 23-netcode plan left behind_.
+What it left unbuilt is below.
+
+### There is no UDP transport, and therefore no crypto of our own (2026-08-27)
 
 **DEFERRED 2026-08-30 — the transport and the first crypto crate are decided
-when netcode (`23-netcode.md`) is the active topic**, not before. **Not built.**
-`Transport` is implemented by `InMemoryTransport` and by `crcbl_store`'s
-`FileTransport` — a process-local pair and a replay file, neither touching a
-socket. The UDP layer, its reliability (acks, resend, fragmentation), connection
-tokens, X25519 and XChaCha20-Poly1305 are all P13 and all absent.
+when netcode is the active topic**, not before. **Not built:** no `UdpSocket`
+exists anywhere in `crates/` or `apps/` (grep, 2026-09-24). `Transport` is
+implemented by `InMemoryTransport`, `crcbl_store`'s `FileTransport` and, since
+2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P over Valve's relay, run
+through `crcbl_net::conformance`; `crcbl_server::Host` serves several sessions
+over `Box<dyn Transport>` peers). The Steam path is a real network transport,
+but none of the plan's own layer exists.
+
+**The design, for whoever builds it** (Gaffer / netcode.io lineage):
+
+- **One socket, channel-multiplexed packets.** Per-packet header: protocol id,
+  sequence, ack and a 64-bit ack bitfield piggybacked on every packet, so
+  reliable resend needs no separate ack traffic and RTT falls out free, feeding
+  topic 21's tick-lead estimate.
+- **Resend** of unacked reliable payloads on an RTT-derived RTO; the sequenced
+  channel never resends. **Fragmentation** on the reliable channel only, from a
+  conservative 1200-byte MTU, discovery optional later.
+- **Connection tokens** (netcode.io pattern): a short-lived token minted by a
+  trusted source — the server itself for direct connect, a backend later — as an
+  anti-spoof filter and the carrier of key material when a backend mints it.
+- **Per-packet AEAD from the first packet after the hello**: X25519 in the
+  handshake (hello → key exchange → version gate → session accept; only InMemory
+  skips the exchange), then XChaCha20-Poly1305 with the nonce derived from
+  direction plus sequence and the header under the tag. Rekey on reconnect.
+  Nonce uniqueness is property-tested.
+- **Keepalive and timeout**: heartbeats when idle, drop-detection windows, and a
+  graceful disconnect message distinct from a timeout.
+- The risks the plan named: ack wraparound, RTO tuning and fragment loss, gated
+  by the condition-simulator soak below.
 
 **What _is_ built is narrower and easy to overread:** `crcbl_net::auth` is
 per-session HMAC-SHA256 keyed with the handshake's 32-byte `ResumeToken`,
 truncated to 128 bits, plus a `ReplayWindow`. It authenticates and orders; it
-does not encrypt.
-
-**The caveat that is not in either document until now:** the resume token
-travels in the clear inside the handshake's `Accept`, so an observer who watched
-the handshake holds the session key. The MAC defends against a spoofer who can
-send packets but did not see the handshake, and against nobody else.
-
-**Decision needed when the UDP layer starts:** taking on RustCrypto crates. The
-sanctioned-exception policy already covers it in principle; the actual
-dependency addition is still the user's call, and it is the first crypto
-dependency the workspace would have.
+does not encrypt. The resume token travels in the clear inside the handshake's
+`Accept`, so an observer who watched the handshake holds the session key. The
+MAC defends against a spoofer who can send packets but did not see the
+handshake, and against nobody else.
 
 **DECIDED 2026-09-06 —** RustCrypto is taken when netcode starts —
 `x25519-dalek`, `chacha20poly1305`, `hmac` and `sha2` — and the Noise handshake
@@ -11370,31 +11422,44 @@ stands as decided. Cryptography is the standing exception to writing it here,
 and RustCrypto is the sanctioned Rust answer. It schedules nothing before the
 transport exists; the dependencies land with that slice, not ahead of it.
 
-### The channel table is three rows and the seam has two (2026-08-27)
+**Open question, not yet asked:** how `SteamTransport` stands against the
+encryption rule. It seals nothing itself — `crates/crcbl-steam/src/net/` never
+mentions encryption (grep, 2026-09-24) — so whatever confidentiality it has is
+Valve's networking layer's, which the rule as written does not cover and nothing
+here has verified. Either the rule names Steam's transport-level encryption as
+satisfying it, or the payload is sealed on top.
+
+### The channel table: four channels, and the seam has two (2026-08-27)
 
 **Partly built.** `crcbl_net::transport::MessageKind` is
 `Reliable | Unreliable`, with `send_reliable` / `send_unreliable` and a
-`recv_reliable` a backend may override so control traffic is not starved.
+`recv_reliable` a backend may override so control traffic is not starved. The
+plan's table:
 
-- **reliable-ordered** — built. `kind` is a truthful label on a received message
-  and an ignored field on a sent one; every implementation overwrites it, so a
-  mismatched field cannot silently reroute anything.
-- **unreliable-sequenced** — **not sequenced.** `Unreliable` promises only "may
-  be dropped or reordered". What actually stops a stale snapshot beating a fresh
-  one is a layer up: `crcbl_net::delta` refuses a delta whose tick is not newer
-  than the baseline's. Lateness is rejected at apply time rather than prevented
-  at the channel.
-- **reliable-fragmented** — does not exist. `MAX_IN_MEMORY_MESSAGE_BYTES` (64
-  KiB) _refuses_ an oversized message; nothing reassembles.
-- **unreliable-event** (added by the 2026-07-27 correction) — no representation
-  at all.
+- **reliable-ordered** (commands, events, chat, console) — built. `kind` is a
+  truthful label on a received message and an ignored field on a sent one; every
+  implementation overwrites it, so a mismatched field cannot silently reroute
+  anything.
+- **unreliable-sequenced** (snapshots; latest wins, drops fine, no resend) —
+  **not sequenced.** `Unreliable` promises only "may be dropped or reordered".
+  What actually stops a stale snapshot beating a fresh one is a layer up:
+  `crcbl_net::delta` refuses a delta whose tick is not newer than the
+  baseline's. Lateness is rejected at apply time rather than prevented at the
+  channel.
+- **reliable-fragmented** (bulk: a join-in-progress snapshot, replays) — does
+  not exist. `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB) _refuses_ an oversized
+  message; nothing reassembles. (`SteamTransport` accepts up to its own
+  `MAX_MESSAGE_BYTES`, Steam's send limit, and leaves the splitting to Valve's
+  layer.)
+- **unreliable-event** (added 2026-07-27: footstep and gunfire cues, impact VFX;
+  tick-stamped, fire-and-forget, late = dropped) — no representation at all.
 
 **What it would take, and the trap:** whoever adds sequencing to the channel
 must keep the delta tick check rather than replace it — the two catch different
 things, and only one of them survives a transport swap.
 
 **What it blocks:** a join-in-progress snapshot larger than 64 KiB has no path
-today; transient cues (footsteps, impacts) have nowhere to ride but
+over `InMemoryTransport`; transient cues have nowhere to ride but
 reliable-ordered, where one loss head-of-line blocks them into a stale burst.
 
 ### Quantization, the priority/budget encoder, and the one-datagram rule (2026-08-27)
@@ -11402,10 +11467,18 @@ reliable-ordered, where one loss head-of-line blocks them into a stale burst.
 **Not built.** No quantization anywhere in `crcbl-net`; no per-client budget, no
 relevance×staleness rotation, no adaptive snapshot rate.
 
-**Correction to the document's own plan, which had a false premise:**
-`SnapshotWriter::new_with_sector` takes a `SectorId` and a `TickId` and nothing
-else — it does _not_ take a client id, as the bandwidth section claimed. The
-per-client state is `SessionManager`'s (`last_acked_ticks` and
+**The design:** quantisation is per component type, schema-declared and applied
+at snapshot encode — positions as sector-local fixed point (sectors bound the
+range, so 16–24 bits per axis), quaternions smallest-three, velocities
+half-float. The budget is bytes per tick with a **Tribes 2 priority
+accumulator** over relevance × staleness: what matters updates every tick, the
+long tail rotates. Delta granularity starts whole-component-on-change and moves
+to per-field masks only when towers' numbers justify it. Sustained over-budget
+drops the snapshot rate (30, then 20 Hz) rather than queueing.
+
+**Where the budget lives:** `SnapshotWriter::new_with_sector` takes a `SectorId`
+and a `TickId` and nothing else — no client id, which the plan wrongly claimed.
+The per-client state is `SessionManager`'s (`last_acked_ticks` and
 `baseline_stores`, both keyed by sector), so a budget belongs there and is per
 (client, sector) rather than per client.
 
@@ -11420,14 +11493,45 @@ every session the galaxy model is for.
 
 ### Netgraph HUD, LAN discovery (2026-08-27)
 
-**Not built.** No netgraph (RTT, jitter, loss, bandwidth, snapshot size, resend
-counts, tick-lead) in `crcbl-ui`'s debug overlay; no LAN announce/enumerate.
-Both are scheduled (P10 and post-MVP respectively), so this is scope, not slip.
+**Not built.** No netgraph (RTT, jitter, loss, send/recv bandwidth, snapshot
+size, resend counts, tick-lead — per client on the server panel, self on the
+client) in `crcbl-ui`'s debug overlay; no LAN announce/enumerate. Both are
+scheduled (P10 and post-MVP respectively), so this is scope, not slip. Why the
+netgraph cannot be written yet is under _The debug overlay, and what is left of
+it_ below.
 
-**Trap the document already names for discovery, worth keeping:** the discovery
-window must be shown to time out cleanly when nothing answers. A lobby that
-hangs on a silent network is the obvious failure and the one nobody writes a
-test for.
+**LAN discovery, as designed:** hosts announce at a modest interval over both
+broadcast and link-local multicast (networks disagree about which they forward);
+the datagram carries the protocol and schema hash the handshake gates on, the
+game and mode, current and maximum players, and whether a password is set.
+Clients listen for a short window, list what replied and age entries out when a
+host stops announcing — no registry, no client state between runs. Announcements
+authenticate nothing, and direct connect by address stays in every sample's
+lobby beside discovery. On the Steam path, lobbies (`crcbl_steam::matchmaking`)
+cover finding a session, through Valve's backend rather than the LAN.
+
+**Tests it owes, and the trap:** two processes on one host find each other
+through the real code path, and the discovery window must be shown to time out
+cleanly when nothing answers. A lobby that hangs on a silent network is the
+obvious failure and the one nobody writes a test for.
+
+### Netcode: multi-sector subscription and entity migration are design only (2026-09-24)
+
+Sectors are the wire architecture (the rule is in the notes). Sector-scoped
+envelopes and (client, sector) baselines are built (`SessionManager`'s
+per-sector `last_acked_ticks` / `baseline_stores`). Subscription as the
+primitive is not: subscribing a client to a sector set (its bubble plus a
+margin, server-controlled), subscribe = full sector state through the
+join-in-progress machinery, unsubscribe = bulk destroy, and events and scene
+chunks scoped the same way (stage 6 streaming and net subscription are one
+concept). The sector ownership table (sector → sim instance) and the explicit
+entity migration on a boundary crossing — an index move plus a `WorldPos` rebase
+in-process, the same event over a transport later — are not built either; that
+table is the server-meshing seam. Spectators and recordings would subscribe the
+same way. Everything degenerates to one sector today, and it activates with
+physics bubbles and streaming (P11, orbit is the proof). Verified: no
+subscription, ownership or migration symbol in `crcbl-net` or `crcbl-server`
+(grep, 2026-09-24).
 
 ### Netcode test matrix (2026-08-27)
 
@@ -11435,6 +11539,14 @@ test for.
 `crates/crcbl-net/tests/replication.rs` is the crate's integration suite. The
 condition simulator (`condition.rs`) and inbound rate limiting (`rate_limit.rs`)
 are built, so the machinery the soak needs is there.
+
+The plan's matrix: a reliability soak under the condition simulator (loss up to
+30%, reorder, duplication) where every reliable message arrives in order and the
+sequenced channel never delivers stale over fresh; the fuzzed decode corpus; a
+handshake matrix where every version and schema mismatch refuses cleanly;
+reconnect after a scripted drop resuming within the grace window with state-hash
+continuity; and a towers 4-player session under budget with the numbers
+recorded.
 
 **Not verified by me:** whether the reliability soak, the handshake matrix, the
 reconnect-with-hash-continuity test and the bandwidth measurement actually exist
@@ -11460,8 +11572,9 @@ today is "no confidentiality, integrity only against an attacker who did not see
 the handshake".
 
 **What it blocks:** every feature gated on `authenticated + PlayerId`, and the
-topic 23 "no competitive claims" caveat, which this document says resolves here
-and does not.
+netcode's "no competitive claims" caveat (its trust rule, in
+`docs/notes/simulation.md`), which this document says resolves here and does
+not.
 
 ### The engine has no `PlayerId` (2026-08-27)
 
@@ -19096,12 +19209,13 @@ The modular panel is built and every sample switches it on with F3 (or
 
 - **There is no network module, and no sample could show one yet.** The panel is
   ready for it — a module is a `DebugModule` impl and one `add` call — but
-  nothing was written, for two reasons. The first is that `23-netcode.md`'s
-  netgraph list (RTT, jitter, loss, send/recv bandwidth, snapshot size, resend
-  counts, tick-lead) is **not measurable today**: `InMemoryTransport` has no
-  timing, no loss and no byte accounting, and `Client` exposes only
-  `is_connected`, `session_id`, `last_applied_tick`, `baseline_entity_count`,
-  `baseline_system_count`, `processing_error_count`, `auth_failure_count` and
+  nothing was written, for two reasons. The first is that the netgraph list
+  (_Netgraph HUD, LAN discovery_ above) (RTT, jitter, loss, send/recv bandwidth,
+  snapshot size, resend counts, tick-lead) is **not measurable today**:
+  `InMemoryTransport` has no timing, no loss and no byte accounting, and
+  `Client` exposes only `is_connected`, `session_id`, `last_applied_tick`,
+  `baseline_entity_count`, `baseline_system_count`, `processing_error_count`,
+  `auth_failure_count` and
   `rate_limited_message_count`/`rate_limited_byte_count`. Those are real numbers
   and a module could show them, but they are a connection-health readout, not a
   netgraph, and shipping them under that name would make the P10 work look done.

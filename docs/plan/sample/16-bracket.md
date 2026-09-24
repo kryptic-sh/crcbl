@@ -24,8 +24,8 @@ seconds.
 matchmaking service was considered and declined: it would have been the only
 piece of infrastructure in the whole project, and the browser client it would
 have enabled was the sole justification for WebTransport and the WebSocket
-fallback existing at all. Both are dropped from topic 23 as a result — see the
-LAN correction there.
+fallback existing at all. Both were dropped from topic 23 as a result — see the
+LAN rule in `docs/notes/simulation.md`.
 
 So this sample's server is a process on the same machine or the same LAN, found
 the same way breach and shard find theirs. What it still proves that nothing

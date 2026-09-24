@@ -6,6 +6,17 @@ re-watch), and **live spectating** (esports casting, delayed viewing). Built
 almost entirely from machinery that already exists — the recording _is_ the
 replication stream.
 
+**Status (2026-09-24): the storage half is built and nothing records.** Built:
+the flat `.crpl` container (`crcbl_store::replay`), `FileTransport` playback,
+`crcbl_store::crash_ring::CrashRing` and the `crcbl replay <FILE>` metadata
+report. `ReplayWriter` and `CrashRing` have no caller outside `crcbl-store` and
+`crcbl-cli`'s own tests, so no server records a session and no panic hook dumps
+a ring. Keyframes, the seek index, deltas, side tracks, the record toggle,
+`verify`/`dump`/`diff`/`clip`, the scrub debugger, the replay browser and the
+spectator relay are all unbuilt; `docs/backlog.md` tracks them under _Replay:
+the container is flat, and every `crcbl replay` subverb is owed_ and _Replay:
+nothing records, and the viewing and spectating consumers are unbuilt_.
+
 ## Core insight: record the wire
 
 The server already emits, every tick: snapshot deltas + events, tick-id stamped
@@ -122,15 +133,15 @@ two bullets are the plan, not a description.
 
 ## Delivery
 
-| Slice                                                                | Phase                                                             |
-| -------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Keyframes and the index are still owed over `crcbl_store::replay` |
-| Black-box ring + crash dump; record-by-default in dev/editor         | Nothing installs `crcbl_store::crash_ring`'s ring yet             |
-| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Every subverb beyond the metadata report is still owed            |
-| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                            |
-| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                               |
-| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)                       |
-| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                              |
+| Slice                                                                | Phase                                                           |
+| -------------------------------------------------------------------- | --------------------------------------------------------------- |
+| `.crpl` writer/reader, keyframes+index, `FileTransport` playback     | Writer, reader and playback built; keyframes and the index owed |
+| Black-box ring + crash dump; record-by-default in dev/editor         | The ring is built; nothing installs it, and nothing records     |
+| `crcbl replay` CLI (record/play headless/dump/diff/clip/verify)      | Every subverb beyond the metadata report is still owed          |
+| Time-scrub debugger UI + marker track                                | P10 (with debug tools)                                          |
+| Replay browser screen; determinism verifier in CI (soak runs verify) | P10                                                             |
+| Live spectator relay + broadcast delay (rides dedicated server)      | P13 (towers marquee demo gains a spectator)                     |
+| Esports observer polish (POV tracks, caster timeline), relay fan-out | post-MVP (arena era)                                            |
 
 ## Testing (topic 12)
 

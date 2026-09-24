@@ -384,6 +384,133 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
+## What the deleted 23-netcode plan left behind (2026-09-24)
+
+Record; topic 23 designed the network stack under the stage-4 `Transport` seam:
+which transports exist, an own UDP reliability layer, and the protocol
+foundations that are cheap before a socket exists and misery to retrofit after.
+Built from it, in `crcbl-net`: the seam itself with `InMemoryTransport` and
+`MessageKind::{Reliable, Unreliable}` (`transport.rs`); the handshake's
+protocol, build and schema-hash gate (`HandshakeGate`, `Hello`, `RejectReason`);
+sessions and reconnect (`SessionManager`, `ResumeToken`); the
+`ConditionSimulator` wrapper (`condition.rs`); `InboundRateLimiter` and the
+decoder fuzz tree `crates/crcbl-net/fuzz`, which CI's `decoder-fuzz` job runs;
+ack-baseline deltas with removals, keyframe recovery and sector keys
+(`delta.rs`, `SectorId`, `SnapshotWriter::new_with_sector`, and `crcbl-server`'s
+`KEYFRAME_RECOVERY_TICKS`); per-session HMAC with a `ReplayWindow` (`auth.rs`),
+which authenticates and does not encrypt; and the transport conformance suite
+(`conformance.rs`). Since then `crcbl-steam`'s `SteamTransport` implements
+`Transport` and runs that suite, and `crcbl_server::Host` serves several
+sessions over `Box<dyn Transport>` peers (`docs/notes/backends.md`, _What the
+deleted 42-steam plan left behind_) — so a network transport exists, but it is
+Valve's relay, not this plan's UDP layer.
+
+What it left unbuilt is in `docs/backlog.md` under _Netcode (from the deleted
+23-netcode plan, 2026-09-24)_: the UDP layer and its crypto, the missing
+channels, quantisation and the priority encoder, the netgraph and LAN discovery,
+multi-sector subscription and entity migration, and the test matrix.
+
+- **Every packet on every network transport is AEAD-sealed (LOCKED).** No
+  plaintext mode on the wire and no "disable crypto" flag. `InMemoryTransport`
+  is the only plaintext path, because it never touches a network. The HMAC in
+  `auth.rs` is not this: its key, the `ResumeToken`, travels in the clear in the
+  handshake's `Accept`, so it defends only against a spoofer who did not see the
+  handshake.
+- **Crypto primitives are audited RustCrypto crates behind a seam; the protocol
+  is ours.** Rolling a cipher is the one from-scratch the project refuses. The
+  handshake, nonce discipline and framing are written here: nonces derive from
+  direction plus packet sequence, unique by construction and never reused; the
+  tag covers the header, so acks and sequence numbers cannot be forged; keys are
+  renewed on reconnect. The risk that remains is misuse, not primitive strength.
+- **Direct-connect key exchange is honest about its trust.** X25519 in the
+  handshake encrypts against passive snooping and is MITM-able without an
+  authenticated root; a token minted by a trusted source (or an
+  operator-configured pre-shared key) upgrades it. No ranked or competitive
+  integrity claim is made before that root exists (topic 27).
+- **Sessions are LAN, and web builds have no networking** (2026-08-09).
+  WebTransport and WebSocket were removed: a browser cannot listen on a socket,
+  cannot discover hosts on a local network, and an HTTPS page cannot open an
+  insecure connection to a LAN address. WebRTC is **deferred, not refused** —
+  its costs are under _Deferred: browser multiplayer over WebRTC_ below. Direct
+  connect by address stays first-class; LAN discovery is a convenience over it,
+  and **an announcement is a hint, never trusted** — the handshake, schema-hash
+  gate and AEAD do all their work unchanged.
+- **TCP and QUIC-from-scratch are rejected.** TCP's head-of-line blocking
+  poisons the snapshot channel; QUIC from scratch means TLS 1.3 from scratch,
+  the wrong bugs to own. If a native QUIC need ever appears, `quinn` behind the
+  seam is the sanctioned exception, the same policy as wasmtime.
+- **Consumers never know which transport carries them.** Every transport
+  implements the same channel semantics; `kind` on a received `Message` is a
+  truthful label, overwritten by every implementation, never a routing
+  instruction.
+- **Ack-baseline deltas are the design of record** — the Quake 3
+  delta-compressed snapshot, superseding per-tick dirty sets. Each snapshot is a
+  delta against that (client, sector)'s last acked baseline over a bounded ring:
+  unchanged is zero bytes, a lost update is never resent because the current
+  value ships next, and a value lost and unchanged still differs from the
+  baseline and is re-included — the baseline diff is the desync detector. State
+  never rides the reliable channel. **Removals travel in the delta**
+  (`SystemDelta::removed`). A baseline that fell off the ring, or acks that
+  stopped advancing, get a **keyframe**, and the decoder **refuses a keyframe
+  containing removed or modified entries**, so a keyframe never becomes a delta
+  with a flag. `MAX_DELTA_BYTES` is the transport limit minus `AUTH_OVERHEAD`,
+  because a delta the transport then refuses is a client desynced for good.
+  Dirty flags remain a server-side encoding accelerator, not the wire model.
+- **The delta tick check stays.** `crcbl_net::delta` refuses a delta whose tick
+  is not newer than its baseline's; that is what stops a stale snapshot beating
+  a fresh one today. Whoever adds sequencing to the channel keeps the check
+  rather than replacing it.
+- **Compare "changed" in encoded space**, from P2 onward — the identity codec
+  until quantisation lands. Otherwise the encoder is rewritten when quantisation
+  arrives, and prediction's comparison breaks (topic 26).
+- **Quantisation is a wire concern, not a sim concern.** The determinism hash
+  uses unquantised server state.
+- **A steady-state snapshot fits one ~1200-byte datagram.** Only the reliable
+  channel fragments, so the budget encoder sheds by priority rather than
+  fragmenting — a hard contract (about 576 kbps at 60 Hz), not a guideline. The
+  priority model is the **Tribes 2 priority accumulator** (relevance ×
+  staleness), adopted with its starvation rules rather than reinvented, and
+  **predicted components are exempt from rotation**, because skipping their tick
+  stalls reconciliation.
+- **An ordered stream under snapshots drops queued unsent snapshots on
+  backpressure** rather than let the queue snowball latency — the lesson of the
+  removed WebSocket fallback, which transfers to any ordered carrier.
+  `InMemoryTransport`'s bounded channel returns `TransportError::Backpressure`
+  with no coalescing behind it.
+- **Game code writes values; the engine syncs them.** Declaring a replicated
+  component schema is a game's whole netcode surface: no sync calls, no RPCs, no
+  per-field flags in gameplay logic. Modules get the same, because the engine
+  owns their arrays.
+- **Sectors are the wire architecture, not a later optimisation.** Every message
+  is sector-scoped; wire coordinates are sector-local, so absolute galactic
+  positions never cross the network; subscription to a sector set is the
+  primitive, and join, save and replay stay well defined at any world size
+  because each is a sector set. On-rails (Kepler) regions are not replicated at
+  all — clients compute them. A shared server never timewarps under connected
+  clients with divergent bubbles.
+- **Bandwidth numbers describe injected latency only.** Nothing in the project
+  crosses the internet, so prediction and lag compensation are validated against
+  the condition simulator, and no number here describes real internet
+  conditions.
+- **Backend infrastructure stays out of the engine core.** NAT traversal,
+  relays, matchmaking, accounts and server browsers are separate services; the
+  token mint is the boundary they would use, and the engine never grows
+  matchmaking. Steam's relay and lobbies are that shape: Valve runs them.
+
+Other plans cite this one by the names below; they resolve here and in the
+backlog.
+
+| Citation                                   | What it specified                                                                                   |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| The encryption rule                        | Per-packet AEAD on every network transport, no disable flag (above)                                 |
+| The LAN correction (2026-08-09)            | LAN-only sessions, no web networking, WebTransport/WebSocket removed, LAN discovery added (above)   |
+| The channel table                          | Reliable-ordered, unreliable-sequenced, reliable-fragmented, unreliable-event (backlog)             |
+| The galaxy wire model, sector subscription | Sector-scoped envelopes, (client, sector) baselines, subscription and migration (above and backlog) |
+| The one-datagram rule                      | A steady-state snapshot fits one ~1200-byte datagram (above)                                        |
+| The netgraph                               | RTT, jitter, loss, send/recv bandwidth, snapshot size, resend counts, tick-lead (backlog)           |
+| The token layer, "lobby-lite"              | Connection tokens as the key-material carrier; LAN announce and enumerate (backlog)                 |
+| The condition simulator                    | `ConditionSimulator`: latency, jitter, loss, duplication, reorder over any transport                |
+
 ## What the deleted 36-contact-solver plan left behind (2026-09-24)
 
 Record; the built part of the plan is rungs 0 to 5 of its ladder in
@@ -1132,9 +1259,10 @@ recorded rather than refused so the decision is reopenable.
 Data channels with **manually exchanged connection codes**: peer A creates the
 connection, waits for ICE gathering to complete so candidates are embedded in
 the SDP, and the compressed base64 of that is a "code" pasted to peer B, who
-answers with one of their own. No signalling server. It maps onto topic 23's
-channel semantics **better than WebSocket would have** — DataChannel offers both
-ordered-reliable and unordered-unreliable, so the unreliable channel survives.
+answers with one of their own. No signalling server. It maps onto the netcode
+channel semantics (_The channel table_ in `docs/backlog.md`) **better than
+WebSocket would have** — DataChannel offers both ordered-reliable and
+unordered-unreliable, so the unreliable channel survives.
 
 Against it: a third transport to maintain; a JS shim owning `RTCPeerConnection`
 (the same `extern "C"` shape `crcbl-audio`'s web module already uses, so no

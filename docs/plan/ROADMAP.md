@@ -395,10 +395,10 @@ bricks left and the ball's ramped speed.
 
 What stays at P10 is the rest of [07-ui-debug.md](07-ui-debug.md)'s debug suite
 — inspector, console, culling stats, debug-draw controls, UI inspector — and the
-network module is still [23-netcode.md](23-netcode.md)'s netgraph (RTT, jitter,
-loss, send/recv bandwidth, snapshot size, resend counts, tick-lead), which lands
-with it. Both docs already name these; this is the same work with an earlier
-start and a stated obligation on samples, not a second plan.
+network module is still the netgraph (RTT, jitter, loss, send/recv bandwidth,
+snapshot size, resend counts, tick-lead; `docs/backlog.md`, _Netgraph HUD, LAN
+discovery_), which lands with it. Both already name these; this is the same work
+with an earlier start and a stated obligation on samples, not a second plan.
 
 Breakout and flappy were the retrofit consumers, and they are the check that the
 panel is genuinely modular: neither has a network module to show, because both

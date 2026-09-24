@@ -121,8 +121,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 19    | ◐ 19-input — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Device-agnostic action input: kb/mouse/pad/touch, one config               |
 | 20    | [20-particles.md](20-particles.md) — ◐ CPU staging and gallery built; GPU system open       | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
 | 21    | [21-jobs.md](21-jobs.md) — ◐ primitives, pool, wasm threads built; topology open            | Threading: pipeline threads + job pool, mailboxes, tick sync               |
-| 22    | [22-replay.md](22-replay.md)                                                                | State recording: replays, black-box debug, spectating                      |
-| 23    | [23-netcode.md](23-netcode.md)                                                              | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
+| 22    | [22-replay.md](22-replay.md) — ◐ flat container, playback, crash ring built; rest open      | State recording: replays, black-box debug, spectating                      |
+| 23    | ◐ 23-netcode — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`           | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
 | 24    | [24-navigation.md](24-navigation.md)                                                        | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds             |
 | 25    | ◐ 25-lod — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`               | LOD: hand-first + QEM auto fallback, GPU selection in cull pass            |
 | 26    | [26-prediction.md](26-prediction.md)                                                        | Client prediction/rollback + query-only lag comp, fairness harness         |
@@ -251,7 +251,7 @@ presence at all, except `render-harness`, which has one that is not a demo —
 - Real network transport for native (QUIC/UDP) — the seam exists from stage 4;
   single player over the in-memory transport exercises the whole path. Native
   sessions are LAN over UDP (P13); browsers have no network transport at all —
-  see topic 23's LAN correction.
+  see the LAN rule in [the simulation notes](../notes/simulation.md).
 - ~~Ray tracing, mesh shaders (extensions later; keep the HAL open to them).~~
   **Both moved into the MVP on 2026-08-09** — see the ROADMAP correction. Mesh
   shaders are the primary geometry path (topic 3 §3.5); ray-traced lighting is

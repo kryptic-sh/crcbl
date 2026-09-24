@@ -35,8 +35,8 @@ MVP netcode _cannot_ serve well — it exists to force the post-MVP netcode work
 - 1 symmetric arena map (editor-built), top-down-ish camera, WASD + aim.
 - 2 weapons (hitscan, projectile), health/respawn, FFA deathmatch to score
   limit. 2–8 players, **all native, on a LAN** — a browser has no network
-  transport (topic 23's LAN correction). The web build ships single player, so
-  the wasm target cannot rot.
+  transport (the LAN rule in `docs/notes/simulation.md`). The web build ships
+  single player, so the wasm target cannot rot.
 - Bots (dumb roam+shoot) so netcode testing doesn't require 8 humans — doubles
   as headless load-test client harness (engine tool fallout).
 - **Debug panel on, network module included** (sample rule 4). This sample is
