@@ -2054,7 +2054,13 @@ impl GpuContext {
             },
         )?;
         self.in_flight.push_back((value, command_buffer));
-        self.retire_to(FRAMES_IN_FLIGHT)?;
+        // One frame left executing, not `FRAMES_IN_FLIGHT`: the next frame
+        // records into the per-frame ring slot this wait frees, and the ring
+        // is `FRAMES_IN_FLIGHT` deep. Keeping two in flight let the third
+        // frame write the slot the oldest was still reading — hidden by the
+        // present wait in a window, and a live race offscreen and under
+        // `Pacing::Off`, where nothing else holds the CPU back.
+        self.retire_to(FRAMES_IN_FLIGHT - 1)?;
 
         match self.device.present(
             self.queue,
@@ -11956,6 +11962,79 @@ mod tests {
         shell.destroy_window(window).expect("the window goes away");
     }
 
+    /// **A frame is recorded while only the one before it may still run**:
+    /// after every submit, the frame just submitted is the only one left in
+    /// flight, so the next frame's writes into the `FRAMES_IN_FLIGHT`-deep
+    /// ring land in a slot the GPU has finished with. Under `Pacing::Off`,
+    /// where no present wait holds the CPU back and this retirement is the
+    /// only thing that does.
+    #[test]
+    fn the_loop_keeps_one_frame_executing_while_it_records_the_next() {
+        use crcbl_hal::CommandEncoderDesc;
+        use crcbl_hal::null::NullInstance;
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let mut shell = HeadlessShell::new();
+        let window = shell
+            .create_window(&WindowDesc::default())
+            .expect("headless always creates a window");
+        let mut shell_events = 0;
+        let extent = wait_for_configure(&mut shell, window, &mut shell_events).expect("configured");
+        let instance: Box<dyn Instance> = Box::new(NullInstance::gpu_driven());
+        let target = shell
+            .surface_target(window)
+            .expect("the window is still alive");
+        let stage = GpuContext::start_device(
+            instance,
+            &target,
+            extent,
+            "frames in flight test",
+            Features::empty(),
+            Features::empty(),
+            Pacing::Off,
+        )
+        .expect("the null backend opens everywhere");
+        let mut pending = PendingGpuContext {
+            stage,
+            target,
+            extent,
+            label: "frames in flight test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing: Pacing::Off,
+            video: VideoSettings::unrestricted(),
+        };
+        let mut gpu = loop {
+            if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                break context;
+            }
+        };
+
+        for frame in 1..=5u64 {
+            let acquired = gpu.acquire().expect("acquire").expect("no resize happened");
+            let encoder = gpu.device().create_command_encoder(&CommandEncoderDesc {
+                label: Some("frames in flight test"),
+                queue: gpu.queue(),
+            });
+            let command_buffer = encoder.finish().expect("an empty command buffer");
+            gpu.submit_and_present(&acquired, command_buffer)
+                .expect("present");
+            let in_flight: Vec<u64> = gpu.in_flight.iter().map(|(value, _)| *value).collect();
+            assert_eq!(
+                in_flight,
+                vec![frame],
+                "after frame {frame}'s submit only it may still run"
+            );
+            assert!(
+                in_flight.len() < FRAMES_IN_FLIGHT,
+                "the ring would be overrun"
+            );
+        }
+
+        gpu.destroy().expect("teardown");
+        shell.destroy_window(window).expect("the window goes away");
+    }
+
     /// The runtime switch, against a backend that records what the swapchain
     /// did: a pacing change rebuilds when — and only when — the present mode
     /// moves.
@@ -13696,7 +13775,9 @@ mod tests {
                 let (_shell, _window, _recorder, mut gpu) =
                     null_context("present-wait span test", Pacing::Vsync);
                 // Two frames: the first has nothing submitted to wait on, the
-                // second does, and both go through the acquire.
+                // second does, and both go through the acquire. The second's
+                // submit also retires the first — the loop keeps one frame in
+                // flight — and that wait is a span too: three in all.
                 null_frame(&mut gpu).expect("the null backend presents");
                 null_frame(&mut gpu).expect("the null backend presents");
 
@@ -13704,6 +13785,8 @@ mod tests {
                 assert_eq!(
                     span_shapes(&snapshot),
                     vec![
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
+                        (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
                         (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
                         (crate::perf::PRESENT_WAIT_SPAN, SpanEnd, 0),
                         (crate::perf::PRESENT_WAIT_SPAN, SpanBegin, 0),
@@ -13726,6 +13809,20 @@ mod tests {
                     null_context("retirement wait spans", Pacing::Vsync);
                 null_frame(&mut gpu).expect("first frame");
                 null_frame(&mut gpu).expect("second frame");
+                // The loop keeps one submission in flight, so a second
+                // outstanding one is queued by hand: two waits are what this
+                // test needs to tell one span per wait from one per call.
+                let extra = gpu
+                    .device()
+                    .create_command_encoder(&crcbl_hal::CommandEncoderDesc {
+                        label: Some("retirement wait spans"),
+                        queue: gpu.queue(),
+                    })
+                    .finish()
+                    .expect("an empty command buffer");
+                let submitted = gpu.submitted;
+                gpu.in_flight.push_back((submitted, extra));
+                assert_eq!(gpu.in_flight.len(), 2, "two submissions to retire");
                 drop(crcbl_core::trace::drain());
                 gpu.retire_to(0).expect("retire both submissions");
                 assert_eq!(

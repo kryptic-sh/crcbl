@@ -2539,6 +2539,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The frame loop could overwrite a frame the GPU was still reading.**
+  `GpuContext::submit_and_present` retired down to `FRAMES_IN_FLIGHT` (two)
+  submissions, so the next frame recorded into the two-deep per-frame ring
+  (instances, view uniforms, cull parameters) while the frame that last used
+  that slot could still be executing. A window's present wait hid it; offscreen
+  runs and `Pacing::Off` had nothing else holding the CPU back, and a secondary
+  view could copy out an empty or stale picture on Vulkan. It now retires to
+  one, so a frame records only while the one before it may still run — the
+  double buffering the constant always described.
 - **`crcbl::screenshot`: every UI scene now refuses a forward geometry path, as
   `Sprite` and `Ui` already did.** `OffscreenSetup::request_on_path` with
   `UiPrimitives`, `UiTree`, `UiStyle`, `UiText`, `UiFocus`, `UiWidgets`,
