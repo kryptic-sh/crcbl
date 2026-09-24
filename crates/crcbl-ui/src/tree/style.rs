@@ -14,7 +14,8 @@
 //! The two halves are hashed apart. [`NodeStyle::layout_hash`] folds in every
 //! field that can move a box and none that only colours one, which is what
 //! lets a paint-only change — a hover colour — leave every layout cache in the
-//! tree alone.
+//! tree alone. `text-overflow` is a paint field: it changes what a span draws,
+//! never its box.
 
 use core::hash::Hasher;
 
@@ -209,6 +210,35 @@ impl Overflow {
     pub const fn clips(self) -> bool {
         matches!(self, Self::Hidden | Self::Scroll)
     }
+}
+
+/// `white-space`, cut down to whether a text span's lines may break at a
+/// space.
+///
+/// Explicit newlines break under either value: the tree never collapses white
+/// space, so `nowrap` here is nearer CSS's `pre` than its `nowrap`, which would
+/// fold a newline into a space.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum WhiteSpace {
+    /// Lines break at spaces to fit the width the span is laid out under.
+    #[default]
+    Normal,
+    /// Lines break at newlines only, whatever they overflow: min-content is
+    /// max-content.
+    NoWrap,
+}
+
+/// `text-overflow`: what a text span shows of a line its box cannot hold.
+///
+/// It applies only to a span that is `white-space: nowrap` and whose own
+/// `overflow` clips — see [`crate::tree`]'s emission notes for the rule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextOverflow {
+    /// The line is drawn whole, overflowing its box.
+    #[default]
+    Clip,
+    /// The line is cut to fit and ends in `…`.
+    Ellipsis,
 }
 
 /// `line-height`: the pitch between a text span's lines.
@@ -463,6 +493,11 @@ pub struct NodeStyle {
     pub line_height: LineHeight,
     /// Where a text span's lines sit across its content box. Inherited.
     pub text_align: TextAlign,
+    /// `white-space`: whether a text span's lines break at spaces. Inherited.
+    pub white_space: WhiteSpace,
+    /// `text-overflow`: what a text span shows of a line too long for its
+    /// box.
+    pub text_overflow: TextOverflow,
     /// `outline-width`, in pixels: a ring drawn outside the border box that
     /// takes no space. Nothing is drawn while it is zero.
     pub outline_width: f32,
@@ -526,6 +561,8 @@ impl NodeStyle {
         family_name: None,
         line_height: LineHeight::Normal,
         text_align: TextAlign::Left,
+        white_space: WhiteSpace::Normal,
+        text_overflow: TextOverflow::Clip,
         outline_width: 0.0,
         outline_color: [0.0; 4],
         outline_offset: 0.0,
@@ -543,8 +580,9 @@ impl NodeStyle {
     ///
     /// Floats go in by their bits, so `0.0` and `-0.0` hash apart — a spurious
     /// relayout at worst, never a missed one. The text fields that size a
-    /// span — its font, size and line height — are not here: they move a text
-    /// span's box through its content hash, which the tree folds them into.
+    /// span — its font, size, line height and `white-space` — are not here:
+    /// they move a text span's box through its content hash, which the tree
+    /// folds them into.
     pub fn layout_hash(&self, state: &mut impl Hasher) {
         fn length(state: &mut impl Hasher, value: Length) {
             match value {
@@ -856,6 +894,7 @@ mod tests {
             nav_up: NavTarget::None,
             nav_left: NavTarget::Id(NavId::new("x")),
             nav_wrap: NavWrap::Both,
+            text_overflow: TextOverflow::Ellipsis,
             ..base
         };
         assert_eq!(layout_hash(&base), layout_hash(&painted));

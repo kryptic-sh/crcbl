@@ -5,9 +5,9 @@
 //! ```
 //!
 //! A node's style is what its matching rules set, in cascade order, over the
-//! initial values — with `color`, `font-size`, `font-family`, `line-height` and
-//! `text-align` inherited from its parent — and then its builder's inline
-//! [`Declaration`]s on top. Rules from the engine's [`DEFAULT_CSS`] sit below
+//! initial values — with `color`, `font-size`, `font-family`, `line-height`,
+//! `text-align` and `white-space` inherited from its parent — and then its
+//! builder's inline [`Declaration`]s on top. Rules from the engine's [`DEFAULT_CSS`] sit below
 //! every app sheet's, whatever their selectors; within one of those two origins
 //! a rule of a higher [`Specificity`] tier beats a lower one, and within a tier
 //! the later rule wins. Inline declarations beat every rule.

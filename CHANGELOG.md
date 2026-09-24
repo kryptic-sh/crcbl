@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::tree::NodeStyle` has `white_space` and `text_overflow` fields and
+  `crcbl_ui::style::Declaration` `WhiteSpace` and `TextOverflow` members**, for
+  the new properties below, so an exhaustive match, or a struct literal without
+  `..NodeStyle::DEFAULT`, needs them. Their initial values, `normal` and `clip`,
+  lay out and draw every existing tree exactly as before.
 - **`crcbl_render::ViewDesc` has a `background` field** (`ViewBackground::Scene`
   or `ViewBackground::Transparent`), so a struct literal of it needs one;
   `ViewDesc::default()` and literals built with `..` from it are unaffected and
@@ -283,6 +288,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`text-overflow: ellipsis` and `white-space: nowrap` in the UI tree's
+  stylesheets.** `white-space: nowrap` (inherited, as in CSS) keeps a text span
+  in a parsed font on one line under any width — explicit newlines still break.
+  A span that is `text-overflow: ellipsis`, `white-space: nowrap` and
+  `overflow: hidden` (or `scroll`) draws each line too long for its content box
+  cut at a char boundary to the longest prefix that fits with `…` after it, in
+  the span's own font — the bitmap font, `sans-serif` or one registered with
+  `Ui::register_font` — and `...` in a font without the `…` glyph; a box too
+  narrow for even that shows nothing. The cut never moves a box.
+- **`Ui::text(key)` reads back the text a span showed at the last layout** —
+  after any ellipsis, so `"Take item 18 fr…"` — whatever font it is in, where a
+  parsed font's `DrawCommand::Glyphs` carries no string. A wrapped span answers
+  its text unbroken; a block, an image span, an unknown key and a span not laid
+  out yet answer `None`.
 - **Modal input contexts and a global one above them.**
   `ActionMap::push_context_modal(name)` pushes a context that passes nothing it
   does not bind to the contexts beneath — keys, pointer buttons, on-screen

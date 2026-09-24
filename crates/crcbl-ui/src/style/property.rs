@@ -27,6 +27,8 @@
 //! | `font-family` | a comma-separated list; the first of `bitmap`, `sans-serif` and `"Atkinson Hyperlegible"` in it is used, after the first registered font named ahead of it |
 //! | `line-height` | `normal` \| number \| px |
 //! | `text-align` | `left` \| `start` \| `center` \| `right` \| `end` |
+//! | `white-space` | `normal` \| `nowrap` |
+//! | `text-overflow` | `clip` \| `ellipsis` |
 //! | `outline-width` | px |
 //! | `outline-offset` | px, either sign |
 //! | `outline-color` | colour |
@@ -117,7 +119,7 @@ use crate::font::is_reserved_family;
 use crate::tree::{
     Align, BorderImage, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection,
     FlexWrap, FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavId, NavTarget,
-    NavWrap, NodeStyle, Overflow, Position, TextAlign,
+    NavWrap, NodeStyle, Overflow, Position, TextAlign, TextOverflow, WhiteSpace,
 };
 
 /// A property a stylesheet can name, longhand or shorthand.
@@ -161,6 +163,8 @@ pub(crate) enum Property {
     FontFamily,
     LineHeight,
     TextAlign,
+    WhiteSpace,
+    TextOverflow,
     Outline,
     OutlineWidth,
     OutlineColor,
@@ -240,6 +244,8 @@ impl Property {
             "font-family" => Self::FontFamily,
             "line-height" => Self::LineHeight,
             "text-align" => Self::TextAlign,
+            "white-space" => Self::WhiteSpace,
+            "text-overflow" => Self::TextOverflow,
             "outline" => Self::Outline,
             "outline-width" => Self::OutlineWidth,
             "outline-color" => Self::OutlineColor,
@@ -419,6 +425,20 @@ impl Property {
                         _ => return None,
                     })
                 })?)),
+                Self::WhiteSpace => out.push(D::WhiteSpace(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "normal" => WhiteSpace::Normal,
+                        "nowrap" => WhiteSpace::NoWrap,
+                        _ => return None,
+                    })
+                })?)),
+                Self::TextOverflow => out.push(D::TextOverflow(keyword(input, |name| {
+                    Some(match_ignore_ascii_case! { name,
+                        "clip" => TextOverflow::Clip,
+                        "ellipsis" => TextOverflow::Ellipsis,
+                        _ => return None,
+                    })
+                })?)),
                 Self::Outline => outline(input, out)?,
                 Self::OutlineWidth => out.push(D::OutlineWidth(px(input, Sign::NonNegative)?)),
                 Self::OutlineColor => out.push(D::OutlineColor(color(input)?)),
@@ -515,6 +535,8 @@ impl Property {
             }
             Self::LineHeight => to.line_height = from.line_height,
             Self::TextAlign => to.text_align = from.text_align,
+            Self::WhiteSpace => to.white_space = from.white_space,
+            Self::TextOverflow => to.text_overflow = from.text_overflow,
             Self::Outline => {
                 to.outline_width = from.outline_width;
                 to.outline_color = from.outline_color;
@@ -1251,6 +1273,8 @@ mod tests {
             ("top", "-4px"),
             ("line-height", "1.25"),
             ("text-align", "CENTER"),
+            ("white-space", "NoWrap"),
+            ("text-overflow", "ellipsis"),
             ("outline-offset", "-2px"),
             ("nav-up", "#top"),
             ("nav-down", "NONE"),
@@ -1273,6 +1297,16 @@ mod tests {
         assert_eq!(style.inset.top, px(-4.0));
         assert_eq!(style.line_height, LineHeight::Multiple(1.25));
         assert_eq!(style.text_align, TextAlign::Center);
+        assert_eq!(style.white_space, WhiteSpace::NoWrap);
+        assert_eq!(style.text_overflow, TextOverflow::Ellipsis);
+        assert_eq!(
+            style_of(&[("white-space", "nowrap"), ("white-space", "normal")]).white_space,
+            WhiteSpace::Normal
+        );
+        assert_eq!(
+            style_of(&[("text-overflow", "ellipsis"), ("text-overflow", "clip")]).text_overflow,
+            TextOverflow::Clip
+        );
         assert_eq!(style.outline_offset, -2.0);
         assert_eq!(style.nav_up, NavTarget::Id(NavId::new("top")));
         assert_eq!(style.nav_down, NavTarget::None);
@@ -1324,6 +1358,11 @@ mod tests {
             ("line-height", "120%"),
             ("line-height", "2em"),
             ("text-align", "justify"),
+            ("white-space", "pre"),
+            ("white-space", "nowrap nowrap"),
+            ("text-overflow", "fade"),
+            ("text-overflow", "\"…\""),
+            ("text-overflow", "clip ellipsis"),
             ("outline-width", "-1px"),
             ("outline", "2px"),
             ("outline", "red"),

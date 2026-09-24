@@ -20,7 +20,7 @@ use taffy::{
 };
 
 use super::store::NodeStore;
-use super::style::{Display, NodeStyle};
+use super::style::{Display, NodeStyle, WhiteSpace};
 use super::{Content, FrameNode};
 use crate::font::Font;
 use crate::font::layout::{TextLayout, wrap_width};
@@ -55,7 +55,8 @@ struct MeasureKey {
 /// Text in the bitmap font never wraps, so it measures the same in every
 /// bucket. Text in a parsed font is laid out by [`TextLayout`]: its max-content
 /// size unbroken, its min-content size broken at every space, and at a definite
-/// width broken to fit it.
+/// width broken to fit it — unless it is `white-space: nowrap`, which measures
+/// unbroken under every width.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct MeasureCache {
     entries: HashMap<MeasureKey, Size<f32>>,
@@ -101,10 +102,10 @@ impl MeasureCache {
                 }
             }
             Some(font) => {
-                let wrap = match width {
-                    AvailableSpace::MinContent => Some(0.0),
-                    AvailableSpace::MaxContent => None,
-                    AvailableSpace::Definite(width) => Some(width),
+                let wrap = match (style.white_space, width) {
+                    (WhiteSpace::NoWrap, _) | (_, AvailableSpace::MaxContent) => None,
+                    (WhiteSpace::Normal, AvailableSpace::MinContent) => Some(0.0),
+                    (WhiteSpace::Normal, AvailableSpace::Definite(width)) => Some(width),
                 };
                 let measured = TextLayout::new(
                     font,

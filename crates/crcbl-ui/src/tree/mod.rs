@@ -119,7 +119,11 @@
 //! parsed font, the committed one or one [`Ui::register_font`] registered — as
 //! a [`crate::font::layout::TextLayout`] broken at the width layout measured it
 //! under, aligned by its `text-align` and pushed as one
-//! [`DrawList::glyphs`] run of that font. An image span
+//! [`DrawList::glyphs`] run of that font. A span that is
+//! `text-overflow: ellipsis`, `white-space: nowrap` and `overflow: hidden` (or
+//! `scroll`) draws each line too long for its content box cut to fit and ending
+//! in `…` — `...` in a font without that glyph — and [`Ui::text`] reads back
+//! what it drew; `ellipsis.rs` has the rule. An image span
 //! stretches its picture over its content box. Outlines are drawn after the
 //! whole tree, in build order, each under the clip its node was drawn under,
 //! so a later sibling never covers a focus ring: a ring `outline-offset`
@@ -132,7 +136,8 @@
 //! A text span is a leaf whose measure callback lays its text out under the
 //! width Taffy offers: unbroken for max-content, broken at every space for
 //! min-content, and broken to fit for a definite width — so a wrapped label
-//! grows its block's height. Measurements are cached by the text, the style
+//! grows its block's height. A `white-space: nowrap` span is measured unbroken
+//! under every width. Measurements are cached by the text, the style
 //! fields that size it and the whole-pixel width; see `layout.rs`.
 //!
 //! # Layout output is rounded
@@ -144,6 +149,9 @@
 //! rounding are comparisons, the four operations and `floor` — no `sqrt`,
 //! `powf` or `mul_add` — so the result does not depend on a platform's libm.
 
+mod ellipsis;
+#[cfg(test)]
+mod ellipsis_tests;
 mod emit;
 pub mod focus;
 #[cfg(test)]
@@ -188,7 +196,7 @@ pub use store::NodeKey;
 pub use style::{
     Align, BorderImage, BorderImageWidth, Display, Edges, FlexDirection, FlexWrap, ImageName,
     Justify, Length, LengthAuto, LineHeight, NavId, NavTarget, NavWrap, NodeStyle, Overflow,
-    Position,
+    Position, TextOverflow, WhiteSpace,
 };
 pub use widgets::{
     AXES, ClipboardAnswer, ClipboardReply, ClipboardRequest, DOUBLE_CLICK_TIME, DockLayout,
@@ -310,6 +318,17 @@ enum Content {
     Image(AtlasImage),
 }
 
+/// What a text span shows, decided at layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    /// Not laid out yet this frame.
+    Pending,
+    /// Its whole text.
+    Whole,
+    /// Its text cut to fit: `Ui::cut[start..end]`.
+    Cut { start: usize, end: usize },
+}
+
 /// One node as this frame built it.
 #[derive(Clone, Debug)]
 struct FrameNode {
@@ -331,6 +350,9 @@ struct FrameNode {
     /// else its built-in family's — or `None` for the bitmap font. Resolved
     /// when the span is built.
     font: Option<&'static Font>,
+    /// What a text span shows; [`Shown::Whole`] for every other node once
+    /// laid out.
+    shown: Shown,
     content_hash: u64,
     /// Folded over each child's key as the child is built.
     child_hash: u64,
@@ -373,6 +395,9 @@ pub struct Ui {
     nodes: Vec<FrameNode>,
     children: Vec<NodeId>,
     text: String,
+    /// Every text span's text as `text-overflow: ellipsis` cut it at the last
+    /// layout, run together.
+    cut: String,
     /// The blocks whose closures are running, innermost last.
     open: Vec<usize>,
     /// How many nodes each call site has built under each parent this frame.
@@ -448,6 +473,7 @@ impl Ui {
         self.nodes.clear();
         self.children.clear();
         self.text.clear();
+        self.cut.clear();
         self.open.clear();
         self.call_sites.clear();
         self.duplicates.clear();
@@ -768,6 +794,7 @@ impl Ui {
                     style.font_family,
                     font.map(Font::id),
                     style.line_height.bits(),
+                    style.white_space,
                 ));
                 self.live_text.insert(hash);
                 hash
@@ -786,6 +813,7 @@ impl Ui {
             style: resolved.style,
             content,
             font,
+            shown: Shown::Pending,
             content_hash,
             child_hash: 0,
             fresh,
@@ -964,9 +992,43 @@ impl Ui {
             compute_root_layout(&mut tree, NodeId::from(root), space);
             round_layout(&mut tree, NodeId::from(root));
         }
+        self.cut_text(atlas);
         self.fit_text_inputs(atlas);
         self.clamp_scroll();
         self.place(origin);
+    }
+
+    /// The text `node` shows: `None` unless it is a text span.
+    fn shown_text(&self, node: &FrameNode) -> Option<&str> {
+        match (node.content, node.shown) {
+            (Content::Text { .. }, Shown::Cut { start, end }) => Some(&self.cut[start..end]),
+            (Content::Text { start, end }, _) => Some(&self.text[start..end]),
+            (Content::Block | Content::Image(_), _) => None,
+        }
+    }
+
+    /// The text the span `key` showed at this frame's layout: its text as it
+    /// was built, or — under `text-overflow: ellipsis` — cut to fit its box,
+    /// so `"Take item 18 fr…"`. What a caller reads a span's text back by
+    /// whatever font it is in: a span in a parsed font draws a
+    /// [`DrawList::glyphs`] run, which carries glyph ids and no string.
+    ///
+    /// **A wrapped span answers its text unbroken**: the lines layout broke it
+    /// into are where it was drawn, not what it says, and the spaces a line
+    /// broke at are still in it. Lines are joined by the newlines the text
+    /// itself holds, each one cut on its own.
+    ///
+    /// `None` for a block, an image span, a key no node of this frame has, and
+    /// a span built since the last [`Ui::layout`] — so from
+    /// [`Ui::begin_frame`] until the frame is laid out.
+    #[must_use]
+    pub fn text(&self, key: NodeKey) -> Option<&str> {
+        let index = self.store.by_key(key)?.paint_order;
+        let node = self.nodes.get(index).filter(|node| node.key == key)?;
+        if node.shown == Shown::Pending {
+            return None;
+        }
+        self.shown_text(node)
     }
 
     /// Clamps every `overflow: scroll` block's offset to the reach its content

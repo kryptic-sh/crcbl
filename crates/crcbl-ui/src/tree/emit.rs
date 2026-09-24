@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use glam::Vec2;
 
-use super::style::{Display, ImageName, NodeStyle};
+use super::style::{Display, ImageName, NodeStyle, WhiteSpace};
 use super::{Content, Ui, padding_box};
 use crate::draw_list::{Border, CornerRadii, DrawList};
 use crate::font::layout::TextLayout;
@@ -59,23 +59,26 @@ impl Ui {
                 let padding = padding_box(min, &node.layout);
                 paint_box(list, &node.style, (min, max), padding, &self.images);
             }
-            Content::Text { start, end } => {
+            Content::Text { .. } => {
                 let (content_min, content_max) = content_box(min, &node.layout);
-                let text = &self.text[start..end];
+                // What layout decided it shows: cut by `text-overflow`, or whole.
+                let text = self.shown_text(node).expect("a text span shows text");
                 let style = &node.style;
                 match node.font {
                     None => list.text(content_min, text, style.color, style.font_size),
                     Some(font) => {
                         // Broken at the width the layout measured it under —
-                        // the unrounded one — and aligned in the box it is
-                        // drawn in, the rounded one.
+                        // the unrounded one — unless it is `nowrap`, and
+                        // aligned in the box it is drawn in, the rounded one.
                         let unrounded = &self.store.get(node.slot).unrounded;
+                        let wrap = (style.white_space == WhiteSpace::Normal)
+                            .then(|| content_width(unrounded));
                         let mut layout = TextLayout::new(
                             font,
                             text,
                             style.font_size,
                             style.text_line_height(font),
-                            Some(content_width(unrounded)),
+                            wrap,
                         );
                         layout.align(content_max.x - content_min.x, style.text_align);
                         list.glyphs(

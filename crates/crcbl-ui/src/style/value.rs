@@ -8,7 +8,7 @@ use crate::draw_list::CornerRadii;
 use crate::tree::{
     Align, BorderImageWidth, Direction, Display, Edges, FamilyName, FlexDirection, FlexWrap,
     FontFamily, ImageName, Justify, Length, LengthAuto, LineHeight, NavTarget, NavWrap, NodeStyle,
-    Overflow, Position, TextAlign,
+    Overflow, Position, TextAlign, TextOverflow, WhiteSpace,
 };
 
 /// Which sides of a box a declaration sets.
@@ -114,6 +114,10 @@ pub enum Declaration {
     LineHeight(LineHeight),
     /// `text-align`. Inherited.
     TextAlign(TextAlign),
+    /// `white-space`. Inherited.
+    WhiteSpace(WhiteSpace),
+    /// `text-overflow`.
+    TextOverflow(TextOverflow),
     /// `outline-width`, in pixels.
     OutlineWidth(f32),
     /// `outline-color`, in linear light.
@@ -191,6 +195,8 @@ impl Declaration {
             Self::FamilyName(value) => style.family_name = value,
             Self::LineHeight(value) => style.line_height = value,
             Self::TextAlign(value) => style.text_align = value,
+            Self::WhiteSpace(value) => style.white_space = value,
+            Self::TextOverflow(value) => style.text_overflow = value,
             Self::OutlineWidth(value) => style.outline_width = value,
             Self::OutlineColor(value) => style.outline_color = value,
             Self::OutlineOffset(value) => style.outline_offset = value,
@@ -248,6 +254,8 @@ impl NodeStyle {
             D::FamilyName(self.family_name),
             D::LineHeight(self.line_height),
             D::TextAlign(self.text_align),
+            D::WhiteSpace(self.white_space),
+            D::TextOverflow(self.text_overflow),
             D::OutlineWidth(self.outline_width),
             D::OutlineColor(self.outline_color),
             D::OutlineOffset(self.outline_offset),
@@ -345,6 +353,8 @@ mod tests {
             font_family: FontFamily::Sans,
             line_height: LineHeight::Multiple(1.5),
             text_align: TextAlign::Center,
+            white_space: WhiteSpace::NoWrap,
+            text_overflow: TextOverflow::Ellipsis,
             align_self: Some(Align::Center),
             outline_width: 2.0,
             outline_color: [0.9, 0.8, 0.7, 0.6],
