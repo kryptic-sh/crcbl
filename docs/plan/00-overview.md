@@ -123,7 +123,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 22    | [22-replay.md](22-replay.md)                                                                | State recording: replays, black-box debug, spectating                      |
 | 23    | [23-netcode.md](23-netcode.md)                                                              | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
 | 24    | [24-navigation.md](24-navigation.md)                                                        | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds             |
-| 25    | [25-lod.md](25-lod.md)                                                                      | LOD: hand-first + QEM auto fallback, GPU selection in cull pass            |
+| 25    | ◐ 25-lod — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`               | LOD: hand-first + QEM auto fallback, GPU selection in cull pass            |
 | 26    | [26-prediction.md](26-prediction.md)                                                        | Client prediction/rollback + query-only lag comp, fairness harness         |
 | 27    | [27-auth.md](27-auth.md)                                                                    | Trust tiers (open/PSK/token), identity, ranked chain, crcbl-mint           |
 | 28    | [28-ballistics.md](28-ballistics.md)                                                        | Penetrating sweeps: material energy loss, ricochet, media drag             |
@@ -134,7 +134,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 33    | [33-decals.md](33-decals.md)                                                                | Decals: projected/parallax/carve-volume tiers, impact + decoration         |
 | 34    | [34-inventory.md](34-inventory.md)                                                          | UI drag-drop + optional grid-inventory kit (looting, slots)                |
 | 35    | [35-ragdolls.md](35-ragdolls.md)                                                            | Ragdolls: server settles / client performs, anim→physics handoff           |
-| 36    | [36-contact-solver.md](36-contact-solver.md)                                                | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
+| 36    | ◐ 36-contact-solver — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
 | 37    | [37-materials.md](37-materials.md)                                                          | Material authoring: templates+instances, render↔surface link, lint         |
 | 38    | [38-weapons.md](38-weapons.md)                                                              | Weapon kit: attachments, server-authoritative fire, recoil patterns        |
 | 39    | [39-capabilities.md](39-capabilities.md)                                                    | Device capabilities, graceful degradation, path selectors, feature matrix  |
@@ -240,8 +240,9 @@ presence at all, except `render-harness`, which has one that is not a demo —
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the
   cue grammar (incl. occlusion) and mixing are MVP; see
   [13-audio.md](13-audio.md).
-- Physics L2 contact solver is MVP-stretch (non-gating); L2 + L3 joints get a
-  full design in [36-contact-solver.md](36-contact-solver.md) and land wave 2
+- Physics L2 contact solver is MVP-stretch (non-gating); L2 + L3 joints got a
+  full design in topic 36, whose rungs 0 to 5 are built (its decisions are in
+  [simulation notes](../notes/simulation.md), the rest in `docs/backlog.md`)
   (ragdolls, 35, are their flagship consumer). L3 constraints/joints are
   post-MVP — see the layer table in [05-physics.md](05-physics.md). L0/L1/CCD
   are MVP.

@@ -158,7 +158,7 @@ slab per open tile, a solid block per wall tile, pillars, a dais, braziers, and
 doorways with holes through them. The meshes and the colliders walk the _same_
 grid, so what looks solid is solid. There is no roof, because the camera is
 above one. This is the modular kit this doc asks for deliberately — the pieces
-`docs/plan/25-lod.md`'s border locking has to hold together — at its first size.
+topic 25's border locking has to hold together — at its first size.
 
 **All six of milestone 1's verbs are here: explore, fight, loot, level, save,
 resume.** A felled foe leaves a stack where it falls, `F` takes it into a `4×4`

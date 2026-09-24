@@ -102,10 +102,10 @@ registry a new demo joins. Tide has one: `apps/tide` was built at milestone 1 on
 2026-09-15 and ships at `/demos/tide/`; meadow and mane have none.
 
 24 and 25 were planned the same day. **Tumble is the physics engine's acceptance
-suite and benchmark**, and the demand driver for
-[../36-contact-solver.md](../36-contact-solver.md): each of its scenes is one
-solver rung, and a scene the engine cannot produce yet ships labelled as the gap
-it is. **Relief proves tessellation**
+suite and benchmark**, and the demand driver for the contact solver (topic 36,
+its decisions in [simulation notes](../../notes/simulation.md)): each of its
+scenes is one solver rung, and a scene the engine cannot produce yet ships
+labelled as the gap it is. **Relief proves tessellation**
 ([../59-tessellation.md](../59-tessellation.md)) on every geometry path,
 including the browser's, where there is no tessellation stage at all.
 

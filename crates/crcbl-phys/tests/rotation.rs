@@ -1,8 +1,8 @@
 //! Rotation: torque, the inertia tensor, the gyroscopic term and the quaternion,
 //! over runs long enough for their errors to show.
 //!
-//! Rung 0 of `docs/plan/36-contact-solver.md`. The claims are the ones a
-//! tumbling body makes visible: angular momentum and energy are conserved in
+//! Contact-solver rung 0 (`docs/notes/simulation.md`). The claims are the ones
+//! a tumbling body makes visible: angular momentum and energy are conserved in
 //! zero g and energy never grows, a T-handle spun about its intermediate axis
 //! flips while one spun about its major axis does not, the quaternion stays a
 //! unit, and two runs agree to the bit.

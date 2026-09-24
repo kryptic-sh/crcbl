@@ -766,7 +766,7 @@ const _: () = assert!(crcbl_hal::depth::CLEAR == crcbl_shaders::ssao::DEPTH_FAR)
 ///
 /// A flat mesh is one bucket either way. A DAG is one bucket on
 /// [`EmitTail::Mesh`]: a bucket is a mesh's run of clusters, and the point of
-/// `docs/plan/25-lod.md`'s per-cluster selection is that one dispatch covers
+/// topic 25's per-cluster selection is that one dispatch covers
 /// several levels at once, so the run is every level's clusters end to end and
 /// the bucket's mesh id is level 0's.
 ///
@@ -833,7 +833,7 @@ struct SidedPipelines {
     double: GraphicsPipelineHandle,
 }
 
-/// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's projected
+/// The pixel budget topic 25's descent compares a group's projected
 /// error against, unless a caller sets another with
 /// [`ForwardRenderer::set_lod_error_budget`].
 ///
@@ -866,7 +866,7 @@ const DRAW_CONSTANTS_BLOCK: u64 =
     };
 
 /// How far below the budget an already-expanded group is held before it
-/// collapses again — `docs/plan/25-lod.md`'s "switch-up and switch-down differ",
+/// collapses again — topic 25's "switch-up and switch-down differ",
 /// as a fraction of [`LOD_ERROR_BUDGET`].
 ///
 /// A ratio and not an offset because the band has to scale with the budget: a
@@ -879,7 +879,7 @@ const DRAW_CONSTANTS_BLOCK: u64 =
 const LOD_HOLD_RATIO: f32 = 0.8;
 
 /// How much larger than the camera's the pixel budget a shadow cascade selects
-/// under is — `docs/plan/25-lod.md`'s "**Shadow LOD bias**: shadow-pass culling
+/// under is — topic 25's "**Shadow LOD bias**: shadow-pass culling
 /// selects +1/+2 coarser levels — casters are cheap where it never shows".
 ///
 /// # A budget factor, because a level is not a parameter of the rule
@@ -1627,7 +1627,7 @@ pub struct ForwardRenderer {
     /// its levels once per mode the scene holds, and this names the first of
     /// those runs. See [`ForwardRenderer::bucket_modes`].
     mesh_level_buckets: Vec<Vec<u32>>,
-    /// The pixel budget `docs/plan/25-lod.md`'s descent compares a group's
+    /// The pixel budget topic 25's descent compares a group's
     /// projected error against. [`LOD_ERROR_BUDGET`] until
     /// [`ForwardRenderer::set_lod_error_budget`] says otherwise.
     lod_error_budget: f32,
@@ -1852,7 +1852,7 @@ pub struct ForwardRenderer {
     atlas_view: bool,
 
     /// Where [`begin_frame`](ForwardRenderer::begin_frame) projects
-    /// `docs/plan/25-lod.md`'s selection from, when that is not the camera's own
+    /// topic 25's selection from, when that is not the camera's own
     /// eye — see
     /// [`set_frozen_selection_eye`](ForwardRenderer::set_frozen_selection_eye).
     ///
@@ -2688,7 +2688,7 @@ struct MeshGroup {
     /// so a cascade writing the camera's would leave nothing of its own to read.
     /// See [`ForwardRenderer::shadow_selection`].
     cluster_selection: Option<BufferHandle>,
-    /// Binding 19, likewise: `docs/plan/25-lod.md`'s hysteresis state, which the
+    /// Binding 19, likewise: topic 25's hysteresis state, which the
     /// draw-argument pass wrote this frame and this one only reads.
     ///
     /// **A buffer per pass** as well, because the colour pass and a cascade
@@ -3079,7 +3079,7 @@ fn read_draw_sources<'g, 'a>(
         // is a write-after-read the graph has to order, and declaring it is
         // the whole of how it learns to.
         //
-        // `docs/plan/25-lod.md`'s hysteresis state is read here and written by
+        // Topic 25's hysteresis state is read here and written by
         // the draw-argument pass a moment ago. Declaring it is what orders the
         // two — and what puts it back into `ShaderReadWrite` at the end of the
         // graph, which is where the next frame's draw-argument pass expects to
@@ -3877,7 +3877,7 @@ impl ForwardRenderer {
         let bucket_count = u32::try_from(bucket_meshes.len())
             .unwrap_or_else(|_| unreachable!("a table of a few buckets"));
 
-        // `docs/plan/25-lod.md`'s selection tables, and the one thing that
+        // Topic 25's selection tables, and the one thing that
         // decides whether `draw_gen.slang` takes a uniform cut at all.
         //
         // Every mesh id gets an entry, because the shader indexes this with
@@ -4050,7 +4050,7 @@ impl ForwardRenderer {
             service();
         }
 
-        // One ring per shadow view, indexed `[view][frame]`: `docs/plan/25-lod.md`'s
+        // One ring per shadow view, indexed `[view][frame]`: topic 25's
         // observable, one word per resident cluster holding the cut the descent
         // chose — see `ForwardRenderer::shadow_selection` for why a view cannot
         // share the camera's, which [`View::build`] allocates beside its cull.
@@ -4424,7 +4424,7 @@ impl ForwardRenderer {
                 binding: CLUSTER_GROUP_STATE_BINDING,
                 visibility: geometry,
                 kind: BindingKind::StorageBuffer {
-                    // `docs/plan/25-lod.md`'s hysteresis state, and read-only
+                    // Topic 25's hysteresis state, and read-only
                     // here: the draw-argument pass is its only writer, which is
                     // what lets a stage with one workgroup per cluster use a
                     // decision that has to survive a frame.
@@ -6296,7 +6296,7 @@ impl ForwardRenderer {
     ///
     /// # The index it lands at is not decoration
     ///
-    /// `draw_gen.slang` keys `docs/plan/25-lod.md`'s hysteresis state by the
+    /// `draw_gen.slang` keys topic 25's hysteresis state by the
     /// instance's **array index**, at `instance_index * group_stride`, and
     /// `mesh_cluster.slang`'s amplification stage reads the same address. So the
     /// record of which of a DAG's groups an object had expanded belongs to the
@@ -7057,7 +7057,7 @@ impl ForwardRenderer {
     pub const LOD_HOLD_RATIO: f32 = LOD_HOLD_RATIO;
 
     /// How far below the budget an already-expanded group is held before it
-    /// collapses again — `docs/plan/25-lod.md`'s hysteresis, as a fraction of
+    /// collapses again — topic 25's hysteresis, as a fraction of
     /// the budget.
     ///
     /// [`LOD_HOLD_RATIO`](Self::LOD_HOLD_RATIO) until this is called. **A ratio
@@ -7089,7 +7089,7 @@ impl ForwardRenderer {
 
     /// The same three numbers the **shadow cascades** selected under, which is
     /// [`lod_params`](Self::lod_params) with both budgets multiplied by
-    /// [`SHADOW_LOD_BIAS`] — `docs/plan/25-lod.md`'s shadow LOD bias, as the
+    /// [`SHADOW_LOD_BIAS`] — topic 25's shadow LOD bias, as the
     /// parameters it actually reaches the GPU as.
     ///
     /// The pixels-per-unit is the camera's, unchanged, because the cascades
@@ -7126,7 +7126,7 @@ impl ForwardRenderer {
     /// `None` where there is no amplification stage, which is every device that
     /// reports no [`Features::TASK_SHADER`] and every non-mesh geometry path.
     ///
-    /// **This is `docs/plan/25-lod.md`'s observable and nothing in the frame
+    /// **This is topic 25's observable and nothing in the frame
     /// reads it.** A frame whose every cluster came from one level is a
     /// plausible picture and matches any golden blessed from it, so a golden
     /// cannot show per-cluster selection happening at all; this can. It is
@@ -7534,7 +7534,7 @@ impl ForwardRenderer {
         // shadow atlas, which is where they always ran. See [`View::add_cull`].
         let cull = self.primary.add_cull(graph, pool, frame, instance_count);
 
-        // `docs/plan/25-lod.md`'s record of each cascade's cut. Each is written by
+        // Topic 25's record of each cascade's cut. Each is written by
         // exactly one mesh pass, so what the graph orders here is this frame's
         // write against the next frame's use of the same slot. Each arrives in
         // the state the previous frame left it in, which is the one declared as
@@ -9883,7 +9883,7 @@ impl ForwardRenderer {
     /// Shades each cluster by the **projected screen-space error** the LOD
     /// selection judged it on, instead of shading it.
     ///
-    /// The LOD tint's sibling, and the other half of `docs/plan/25-lod.md`'s
+    /// The LOD tint's sibling, and the other half of topic 25's
     /// pair: [`set_lod_view`](Self::set_lod_view) answers "which level am I
     /// looking at", and this answers "how close to the budget is this, and where
     /// is the selection about to switch". The number is the one
@@ -10164,7 +10164,7 @@ impl ForwardRenderer {
         self.atlas_view
     }
 
-    /// Pins the eye `docs/plan/25-lod.md`'s selection is projected from, so the
+    /// Pins the eye topic 25's selection is projected from, so the
     /// cut stops following the camera.
     ///
     /// [`None`] is the default and means "the camera's own eye", which is what
@@ -10552,7 +10552,7 @@ impl ForwardRenderer {
     /// [`Geometry::Dag`] mesh an object is drawn at, and therefore whether
     /// [`ForwardRenderer::add_instance`] may be given one at all.
     ///
-    /// `docs/plan/25-lod.md`'s selection happens in the amplification stage where
+    /// Topic 25's selection happens in the amplification stage where
     /// there is one, and in the cull pass where the tail is indirect and a level
     /// is an ordinary index range. **One device shape has neither**: a mesh stage
     /// with [`Features::MESH_SHADER`](crcbl_hal::Features::MESH_SHADER) and no
@@ -11796,7 +11796,7 @@ mod tests {
     /// Puts one of [`scene::demo`]'s meshes in the frame the way a caller does.
     ///
     /// **Insertion order is what the caller decides**, and it is load-bearing:
-    /// the slot an object lands in is `docs/plan/25-lod.md`'s hysteresis key. So
+    /// the slot an object lands in is topic 25's hysteresis key. So
     /// every test below places its objects in the order the frame used to hold
     /// them — the cube first, wherever there is one.
     fn place_demo(
@@ -12665,7 +12665,7 @@ mod tests {
     /// is where an abandoned slot would still be counted.
     ///
     /// Run over every mesh of [`scene::demo`], because the DAG is the one whose
-    /// slot carries `docs/plan/25-lod.md`'s hysteresis state — the reuse below is
+    /// slot carries topic 25's hysteresis state — the reuse below is
     /// exactly what [`ForwardRenderer::add_instance`] documents as inheriting a
     /// previous occupant's expanded groups.
     #[test]
@@ -15654,7 +15654,7 @@ mod tests {
                 "round {round}: and so do the draw arguments and the buffer holding the \
                  draw counts beside the mesh-dispatch arguments — plus the survivor list, \
                  which the cull pass has just written and this pass reads through the same \
-                 descriptor it scatters the runs into, and `docs/plan/25-lod.md`'s \
+                 descriptor it scatters the runs into, and `docs/notes/rendering.md`'s \
                  hysteresis state, which the clearing pass does *not* zero and which is \
                  behind the same kind of barrier for the opposite reason: it is the one \
                  buffer here carrying a value out of the previous frame, so what it needs \

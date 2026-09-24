@@ -3133,8 +3133,9 @@ EW after the engine implementation lands, then update EW's pinned revision.
 
 ## Physics rungs 0 and 1 shipped without (2026-09-17)
 
-- **Tumble's other milestone 1 scenes**: bullets, the wind tunnel and a golden
-  frame ([24-tumble.md](plan/sample/24-tumble.md)).
+- **Tumble's wind tunnel and golden frame**
+  ([24-tumble.md](plan/sample/24-tumble.md)'s milestone 1, skipped rather than
+  built; its bullets scene became milestone 6's Bullets room).
 - **Decision: a clock for wasm.** `Instant` panics on wasm32, so tumble's page
   shows no step time and its browser figure is JS timing around the whole frame
   call, not a broadphase/narrow-phase/solver split. Options: a `performance.now`
@@ -3160,8 +3161,6 @@ EW after the engine implementation lands, then update EW's pinned revision.
   sit 3–5 mm deep.
 - **Removing a body scans the whole contact pool**; per-body contact edge lists
   would make it proportional to the body's contacts.
-- **Friction is per point**, not the plan's centroid friction with twist (rung
-  2's scope).
 - **`KineticContact`** uses one global impulse threshold rather than a per-body
   one, and carries no collider id or tag.
 - **Centre of mass away from the body origin** is not modelled.
@@ -3174,9 +3173,11 @@ EW after the engine implementation lands, then update EW's pinned revision.
 
 ## Physics and tessellation: planned, with decisions owed (2026-09-15)
 
-Both are researched and planned, nothing built:
-[36-contact-solver.md](plan/36-contact-solver.md)'s decisions and rung table
-with [tumble](plan/sample/24-tumble.md), and
+Physics has been built since: the contact solver's rungs 0 to 5 landed by
+2026-09-23 with [tumble](plan/sample/24-tumble.md), its decisions are in
+`docs/notes/simulation.md` (_What the deleted 36-contact-solver plan left
+behind_), and what it left is under _Contact solver L2/L3: rungs 0 to 5 built,
+and what they left_ below. Tessellation is planned, nothing built:
 [59-tessellation.md](plan/59-tessellation.md) with
 [relief](plan/sample/25-relief.md). What stays open:
 
@@ -3199,9 +3200,8 @@ with [tumble](plan/sample/24-tumble.md), and
   terms ask for a User-Agent and forbid scraping; ambientCG serves CC0 zips from
   an unpinned CDN; Khronos's own height data (`terrain_heightmap_r16.ktx`) is
   Apache-2.0, not CC0; no Khronos glTF sample asset carries a height map.
-- **The ~2 px triangle floor** [25-lod.md](plan/25-lod.md) specifies was not
-  found implemented in the cull or draw-generation shaders, and tessellation
-  rests on it.
+- **The ~2 px triangle floor** topic 25 specified is not implemented, and
+  tessellation rests on it; see _LOD: the ~2 px triangle floor_.
 
 ## What tide's milestone 1 shipped without (2026-09-15)
 
@@ -8686,8 +8686,12 @@ exists.
 
 ### LOD: joint-weight-aware collapse for skinned meshes (2026-08-27)
 
-**Not built.** `25-lod.md` says "joint-weight-aware collapse is part of the
-auto-gen slice (weights carried through edge collapses)".
+**Not built.** Topic 25 made joint-weight-aware collapse part of the auto-gen
+slice, scheduled for P7: the cluster hierarchy is built over the bind-pose mesh,
+GPU skinning skins whichever clusters were selected, and so a collapse has to
+carry the surviving vertex's joint indices and weights (and keep a seam between
+differently weighted regions, as for the UV seams in _Three of the four QEM
+properties quarry claims to prove are not implemented_).
 `crcbl_scene::lod_resolve` builds the hierarchy over the bind pose and nothing
 there carries weights through a collapse. The QEM simplifier, the cluster DAG
 builder and `crcbl lod` are built.
@@ -9036,42 +9040,47 @@ not have.
 
 ### Bubbles, sleeping and sector streaming hooks (2026-08-27)
 
-**Not built.** Task 6 of `05-physics.md`. No type in `crcbl-phys` names a
-bubble, a sleep state or a sector: `crcbl-phys`'s world holds one BVH for the
-whole world rather than one per sector, and `grep` for `sleep`/`Bubble` across
-`crates/crcbl-phys/src/` returns nothing outside a passing mention in
-`atmosphere.rs`'s doc prose. What `apps/orbit`'s header calls "the bubble that
-hands a ship from one frame to the other" is the sample's own on-rails/live
-switch, not an engine feature.
+**Bubbles and sectors not built; sleeping is (re-checked 2026-09-24).** Task 6
+of `05-physics.md`. Sleep landed with the contact solver's rung 3
+(`crates/crcbl-phys/src/contact/island.rs`: persistent islands, island sleep,
+the wake rules, and `PhysicsSystem::put_to_sleep` for restoring a sleeper), but
+only for systems built `with_contacts`, and its thresholds are system-wide in
+`ContactSettings`, not per island or per body. No type in `crcbl-phys` names a
+bubble or a sector: the query world holds one BVH for the whole world, and the
+contact broadphase one static and one dynamic tree, rather than one per sector.
+What `apps/orbit`'s header calls "the bubble that hands a ship from one frame to
+the other" is the sample's own on-rails/live switch, not an engine feature.
 
 **What it would take:** a per-sector broadphase partition (which the streaming
 unit, the interest key and the broadphase cell are all meant to be — one
-structure, three consumers), an observer-anchored live/on-rails predicate, and
-per-island sleep thresholds. Sleeping is coupled to the contact solver (36),
-which does not exist, so the sleeping half probably lands with it.
+structure, three consumers) and an observer-anchored live/on-rails predicate.
+Per-body sleep thresholds are owed under the contact solver's entry.
 
 **What it blocks:** the horde slice's "sleeping" column; galaxy-scale cost
 claims generally.
 
 ### Static trimesh / heightfield colliders with a BVH midphase (2026-08-27)
 
-**Not built, and the single highest-leverage gap in this slice.** `crcbl-phys`'s
-collider inventory is `Sphere`, `BoxCollider` and `Capsule` and nothing else —
-`crates/crcbl-phys/src/collider.rs` defines exactly those three plus `Aabb`, and
-`grep -i trimesh|heightfield|triangle` over `crates/crcbl-phys/src/` returns
-nothing. The 2026-07-27 correction in `05-physics.md` decided **trimesh for
-statics, convex decomposition only for dynamics that need it**; that decision
-stands and is unimplemented.
+**The trimesh half is built; heightfields are not (re-checked 2026-09-24).** The
+contact solver's rung 5 added `crcbl_phys::mesh::TriangleMesh` (validated input,
+welded vertices, a BVH over the triangles, Jolt-style active edges),
+`ColliderComponent::Mesh` on static and kinematic bodies and
+`PhysicsWorld::add_mesh`; the query world descends the tree for rays, sphere and
+capsule sweeps, overlaps and penetrations, and `MeshHit` names the triangle. The
+2026-07-27 correction in `05-physics.md` decided **trimesh for statics, convex
+decomposition only for dynamics that need it**; the convex half waits on the
+hull collider (see the contact solver's entry).
 
-**What it would take:** a trimesh collider type, a BVH midphase over its
-triangles, ray/segment-vs-triangle and swept-capsule-vs-triangle, plus a
-heightfield form or a decision to fold heightfields into trimesh.
+**What is left:** a heightfield form — its own collider over a regular grid, or
+a decision to build heightfields as `TriangleMesh`es. Rung 5 measured a 256 ×
+256 grid of 131 072 triangles building in 65 ms and registering as proxies in 58
+ms, which may be answer enough.
 
-**What it blocks, all of it verified rather than inferred:**
+**What it blocked, as verified on 2026-08-27 before the trimesh landed** (none
+of these consumers has since been re-checked against `TriangleMesh`):
 
 - `24-navigation.md` step 1 voxelizes "physics colliders" into a heightfield.
-  With only analytic primitives there is no walkable world to voxelize, so nav
-  cannot start.
+  With only analytic primitives there was no walkable world to voxelize.
 - `28-ballistics.md`'s entry/exit traversal needs closed or convex-decomposed
   static meshes; its `assumed_thickness` fallback exists precisely for the cases
   this would cover.
@@ -9081,11 +9090,18 @@ heightfield form or a decision to fold heightfields into trimesh.
 
 ### Buoyancy and wind force providers (2026-08-27)
 
-**Not built.** `crcbl-phys`'s force providers are `GravityForce`,
-`PointGravity`, `DragForce`, `DampingForce`, `ThrustForce` and
-`AtmosphericDrag`. `grep -i buoyan|wind` over `crates/` returns nothing. Both
-are named in `05-physics.md`'s task 4 and its dynamics section. Small work; no
-sample demands either yet, which is why they were skipped.
+**Not built** (re-checked 2026-09-24). `crcbl-phys`'s force providers are
+`GravityForce`, `PointGravity`, `DragForce`, `DampingForce`, `ThrustForce` and
+`AtmosphericDrag`. The seam for wind exists — `crcbl_phys::wind::WindQuery`,
+implemented by the `crcbl-wind` crate — but nothing in `crcbl-phys` reads it,
+there is no `WaterQuery` in `crcbl-phys`, and nothing names buoyancy. Both are
+named in `05-physics.md`'s task 4 and its dynamics section, and they are the
+contact solver's rung 7, "Pool and gale": buoyancy from `55-water.md`'s water
+and wind drag from `56-wind.md`'s rung W4 (quadratic drag on the relative
+velocity with a per-body coefficient and projected area), proven by crates and
+balls in a pool under gusts, with the submerged fraction, depth against
+Archimedes and drag as the counters. Rigid-body rotation, one of the two
+prerequisites `wind.rs` names, is built; per-body medium properties are not.
 
 ### Physics debug suite: draw, scrub, query visualiser (2026-08-27)
 
@@ -9097,7 +9113,10 @@ is no time scrub and no query visualiser anywhere in the workspace
 `apps/puppet/src/menu.rs`).
 
 `05-physics.md` states the rule "no query without a visualizer" as an exit
-criterion. Nothing enforces it and nothing satisfies it.
+criterion. Nothing enforces it and nothing satisfies it. The contact solver
+wants the draw to show contact points, normals and impulse magnitudes, manifold
+feature ids (warm-start continuity made visible: flickering ids are the bug),
+islands coloured, sleep states, and joint frames with their limit cones.
 
 ### Camera-relative upload is not executed (2026-08-27)
 
@@ -9466,18 +9485,25 @@ traversal.
 `crcbl_phys::PhysicsWorld::cast_ray` per shot. That is not a down payment on
 this topic; it shares no vocabulary with it.
 
-### Contact solver L2/L3 — `36-contact-solver.md` (2026-08-27)
+### Contact solver L2/L3: rungs 0 to 5 built, and what they left (2026-08-27)
 
-Rungs 0 and 1 are built (2026-09-17), and rung 2 for boxes (2026-09-23): box-box
-SAT with a cached axis, clipping, four-point reduction and stable feature ids,
-analytic sphere and capsule against boxes, centroid and twist friction, and the
-Tower room in `apps/tumble`. Islands, sleep, sweeps and joints (rungs 3 onward)
-remain, and from rung 2:
+The plan (topic 36) was deleted on 2026-09-24; its decisions, rung table and
+measured departures are in `docs/notes/simulation.md` under _What the deleted
+36-contact-solver plan left behind_. Rungs 0 and 1 are built (2026-09-17), rung
+2 for boxes, and rungs 3, 4 and 5 but for two joints (2026-09-23), with a room
+for each in `apps/tumble`; compound bodies and query layers landed beside them
+for EW. `crates/crcbl-phys/src/contact/mod.rs`'s "What is not done yet" is the
+code's own list. Rung 6 and rung 7 are wholly unbuilt: see _Contact solver rung
+6: colouring, the wide kernel and parallel stages_ below, and _Buoyancy and wind
+force providers_. From rung 2:
 
 - **Hulls are not built.** There is no hull collider; finishing rung 2 means a
   `ColliderComponent::Hull`, Gregorius's Minkowski-face edge test in place of
-  box-box's full support radii, and GJK with a SAT fallback for spheres and
-  capsules against hulls.
+  box-box's full support radii, and GJK on the core shape with a SAT fallback
+  when deep for spheres and capsules against hulls (decision 2: no EPA). Rung
+  4's sweeps then need a hull gap for conservative advancement, which decision 5
+  gives to GJK. Hulls are also the convex half of `05-physics.md`'s "convex
+  decomposition only for dynamics that need it".
 - **Tall stacks ask for substeps per group.** A soft contact's stiffness does
   not grow with its load, so at the 30 Hz defaults a column buckles past
   Greenhill's height (14 one-metre cubes stand, 17 fall; the arithmetic is in
@@ -9514,11 +9540,12 @@ remain, and from rung 2:
   - Heavy loads on light chains (an 800 kg anvil on 5 kg planks, 160:1) stretch
     unbreakable hinges up to 8 cm for a few ticks: the sequential solver's
     mass-ratio limit, helped only partly by substeps.
-  - Not built: the six-degree-of-freedom joint, the spherical joint's spring,
-    the distance joint's spring force range. From the mesh half: no contact
-    reduction across a body's triangles (2.43 ms solver for 1000 balls on 131k
-    triangles), Jolt's `FixNormal` movement hint, triangle indices in
-    `PhysicsWorld` hits, and kinematic meshes are costly and untested.
+  - Not built: the six-degree-of-freedom joint (L3's generic joint, with a lock,
+    a limit and a motor per axis), the spherical joint's spring, the distance
+    joint's spring force range. From the mesh half: no contact reduction across
+    a body's triangles (2.43 ms solver for 1000 balls on 131k triangles), Jolt's
+    `FixNormal` movement hint, triangle indices in `PhysicsWorld` hits, and
+    kinematic meshes are costly and untested.
   - Not tested: bodies colliding again once a joint that kept them apart breaks;
     a kinematic body touching a group with extra substeps; release timing of the
     joint solve; the character controller on a mesh end to end; the wasm hash
@@ -9713,6 +9740,58 @@ drops today and each sets `ShellCaps::DRAG_DROP`: Wayland's data device,
 version 5, receiving). So `08-editor.md`'s "this is editor work, not seam work"
 is right and nothing is owed here. The lesson is the citation one: three true
 `grep` results about one mechanism supported a confident claim about another.
+
+### Contact solver rung 6: colouring, the wide kernel and parallel stages (2026-09-24)
+
+**Not built** (verified 2026-09-24: the solver in
+`crates/crcbl-phys/src/contact/solver.rs` is scalar `f64` on one thread, and
+`crates/crcbl-phys/Cargo.toml` does not depend on `crcbl-jobs`). The rung the
+deleted topic 36 plan called "Pit". What it would take, per its decisions 4, 7
+and 8 (recorded in `docs/notes/simulation.md`):
+
+- **Persistent greedy constraint colouring** of the awake constraints, with
+  per-colour body bitsets and an overflow colour, so no two constraints in a
+  colour share a body.
+- **Constraints prepared per colour into struct-of-arrays blocks**, with a
+  scalar twin doing exactly the same per-lane arithmetic, so the scalar and SIMD
+  builds hash the same.
+- **Staged execution on `crcbl-jobs`**, with parallel narrow-phase results
+  merged through per-worker bitsets. Order comes from the persistent arrays,
+  never a per-step sort, so the single-threaded Pages build runs the same stages
+  in the same colour order and hashes the same as N threads.
+- **Contact recycling**, and **awake and sleeping contact sets** in place of
+  today's one pool (the pit at rest spends about 96 µs a tick visiting sleeping
+  contacts), and **per-body contact edge lists** (decision 8), which also bound
+  `PhysicsSystem::disturb` and body removal.
+- **The solver interior in `f32`** — velocities, deltas, impulses and effective
+  masses — while positions stay `f64` in sector-local space (the user's decision
+  of 2026-09-17, amending `05-physics.md`'s f64 line). It changes every pinned
+  hash, native and wasm.
+
+**Binding:** hashing canonicalises −0.0 and NaN; no `mul_add` and no relaxed
+SIMD; the regression pyramid is base 20 in CI and base 100 (5050 boxes) as the
+benchmark; the hash is equal across thread counts, SIMD and scalar, native and
+wasm. Recheck determinism across sleep and wake once colouring follows the awake
+set's order.
+
+**Proving scene:** tumble's overflowing ball pit with its despawn radius, and
+cube rain. **Counters:** spawns and despawns per second, colours, overflow,
+stage times, threads, the hash across threads and targets, and the most bodies
+inside a 16.7 ms tick. For pricing, Box3D reports the 5050-box pyramid at about
+10.4 ms a step on one SSE2 thread, 25 ms scalar and 1.7 ms on eight threads.
+
+### `crcbl phys stack --check` and the solver's profiler rows (2026-09-24)
+
+**Neither exists** (verified 2026-09-24: `crates/crcbl-cli/src/main.rs`'s header
+lists `phys` among the verbs not yet landed; no profiler scope names a solver
+stage). The deleted topic 36 plan asked for `crcbl phys stack --check`, scripted
+stability scenarios run headless — the pyramid, the column, the pit settling —
+failing on the stability suites' numeric bounds (drift, penetration under the
+slop, energy never rising, sleep reached), and for profiler rows for the
+broadphase, manifold generation, the solver per substep, an island count and
+size histogram, and a sleeping ratio. Today the stage times exist only as
+`ContactCounters` and tumble's page, and the stability claims only as
+`crates/crcbl-phys/tests/`.
 
 ### Wasm module hosting: nothing but the static binding exists (2026-08-27)
 
@@ -11767,8 +11846,8 @@ The doc says all four are in `docs/backlog.md`; I did not confirm the entries.
 - **UV and normal seams are NOT constrained.** A seam is a discontinuity in an
   attribute the function is never handed. A seam split into coincident position
   vertices is locked only as a side effect of the index topology; a seam that
-  **shares** positions is invisible and drifts. `docs/plan/25-lod.md` calls this
-  out under Risks and it is not addressed.
+  **shares** positions is invisible and drifts. Topic 25 named seam drift the
+  classic auto-LOD artifact, and it is not addressed.
 - **Material boundaries are NOT constrained**, for the same reason: material
   assignment is per primitive and never reaches the function.
 - **Skinning weights are NOT carried through a collapse.**
@@ -11777,9 +11856,16 @@ The plan's "Proves" bullet once asserted all four. The rule that only border
 locking and determinism are provable today is in `docs/notes/samples.md` under
 _quarry (14): the rules its plan set_.
 
-**What it would take:** `docs/plan/25-lod.md`'s attribute slice. **What it
-blocks:** the exit criterion "the seam review is recorded with the content it
-was done against" — which cannot pass while the seams are known to drift.
+**What it would take:** topic 25's attribute slice — an attribute-aware collapse
+in which UV and normal seam edges are constrained and material boundaries
+preserved. Either `simplify` is handed each vertex's attributes and material and
+refuses (or restricts) a collapse across a discontinuity, or the caller derives
+the seam and material-boundary edges and passes them through the locked-edge
+interface `simplify_with_locked_edges` already has; the second is smaller but
+freezes seams outright. Golden meshes for the result, and the quadric extended
+over attributes if position-only error proves too coarse. **What it blocks:**
+the exit criterion "the seam review is recorded with the content it was done
+against" — which cannot pass while the seams are known to drift.
 
 ### Quarry's skinned prop is blocked on decimation, not on skinning (2026-08-27)
 
@@ -11789,14 +11875,13 @@ narrow blocker is the last bullet above — `crcbl_scene::simplify`'s quadric is
 over positions and a collapse has no rule for the weights of the vertex it
 removes. Nothing about quarry unblocks it.
 
-**What it would take:** the attribute slice in `docs/plan/25-lod.md` giving a
-collapse a rule for the removed vertex's joint indices and weights; then one
-skinned prop in quarry's scene — the plan asked for exactly one, beside the
-tiling wall piece — built into the cluster DAG, posed through
-`crcbl_render::skinning` and drawn on all three `GeometryPath` values, with a
-golden per path the way the six dolly goldens are. **What it blocks:** the last
-deliverable of quarry's milestone 4, and the "skinned weights carried through
-collapses" property.
+**What it would take:** the attribute slice (the entry above) giving a collapse
+a rule for the removed vertex's joint indices and weights; then one skinned prop
+in quarry's scene — the plan asked for exactly one, beside the tiling wall piece
+— built into the cluster DAG, posed through `crcbl_render::skinning` and drawn
+on all three `GeometryPath` values, with a golden per path the way the six dolly
+goldens are. **What it blocks:** the last deliverable of quarry's milestone 4,
+and the "skinned weights carried through collapses" property.
 
 ### Quarry's two human judgements and its browser budget are untaken (2026-08-27)
 
@@ -12047,8 +12132,8 @@ slice does not re-derive it:
   effect needs a use verb before it needs an affix system.
 - **Sector streaming.** The zone is one fixed `zone::LAYOUT`. The plan wants
   modular pieces "assembled per seed", and the pieces are the part slice 1 built
-  — a seeded assembler over them, and the border locking `docs/plan/25-lod.md`
-  describes, are what is missing.
+  — a seeded assembler over them, and the border locking topic 25's cluster DAG
+  relies on, are what is missing.
 
 ### What `apps/shard`'s save slice left out, and why (2026-08-26)
 
@@ -13247,8 +13332,8 @@ leaves behind is smaller than it was:
   ambiguous.
 - **Skinned-aware LOD.** `crcbl_scene::lod_resolve` says the hierarchy is over
   the bind pose and nothing there skins. Sidecar overrides were withdrawn by
-  `25-lod.md`'s own text, so that half of the row was work the document had
-  already cancelled.
+  topic 25's own text, so that half of the row was work the document had already
+  cancelled.
 
 **What the audit could not cover, stated as a gap:** the documents whose
 progress is dated prose rather than a table (`03`, `05`, `06`), the ones with no
@@ -13333,12 +13418,11 @@ work anybody can start.
   needs pick the signature.
 
 - **Sleeping and islands are not P8's.** `crcbl-phys`' own module table puts
-  them at **L2** — "contact solver: sequential impulses, warm starting,
-  islands", marked Stretch — and `docs/plan/05-physics.md` says the L2 items
-  land in wave 2, driven by the ragdolls topic. Nothing in `crcbl-phys` mentions
-  either today. The roadmap row promises in P8 what the physics topic schedules
-  for wave 2; the physics topic is the one to believe, because it is the one
-  with the dependency argument in it.
+  them at **L2**, and `docs/plan/05-physics.md` scheduled the L2 items for
+  wave 2. They have since been built there rather than in P8, as the contact
+  solver's rung 3 (`crates/crcbl-phys/src/contact/island.rs`, 2026-09-23). The
+  roadmap row promised in P8 what the physics topic scheduled later; the physics
+  topic was the one to believe.
 
 - **The ECS parallel schedule is the real remaining P8 work**, and it is blocked
   on a decision rather than on effort — see the entry above.
@@ -21754,8 +21838,8 @@ per-asset LOD overrides, and whatever the importer's report should persist.
 "per-asset ratio override" no longer describes anything: the DAG halves
 structurally — each group simplified to about half its triangles and re-split —
 so a ratio is not a parameter of `build_cluster_dag`. Reinstating one is a
-change to the generator's signature. `docs/plan/25-lod.md` now says so; the
-delivery table's "sidecar overrides" line is still chain-era.
+change to the generator's signature, as `docs/notes/rendering.md` records under
+_What the deleted 25-lod plan left behind_.
 
 Also recorded from the hand-authored import slice:
 
@@ -21872,9 +21956,22 @@ Per-cluster selection runs on `MeshShader` and the uniform cut on both indirect
 tails, so the dunes patch draws on every geometry path and the two agree. What
 is left of topic 25:
 
-- **Hand-authored LOD precedence and `MSFT_lod` import**, and QEM auto-gen for
-  arbitrary meshes — the only DAG in the tree is the cooked dunes artifact.
-- The bake cache, HLOD, impostors, dithered crossfade.
+- **Hand-authored levels are resolved but not drawn** — see _LOD: hand-authored
+  levels resolve at import but the renderer cannot draw them_ below. Import and
+  resolution are built (`crcbl_scene::lod_resolve::resolve_lod`, `LodOrigin`,
+  `MeshLod`, `MSFT_lod` and `name_LOD1` in `gltf_import.rs`, reported by
+  `crcbl lod stats`).
+- **QEM auto-gen for arbitrary meshes has no asset pipeline behind it.** A DAG
+  can be built for any mesh — `crcbl lod gen` over a glTF, and `apps/quarry`
+  builds its face's DAG at run time through `Geometry::Dag` — but the only
+  cooked artifact is the dunes patch, and nothing bakes an imported mesh's DAG
+  into a shipped asset.
+- The bake cache, HLOD, impostors and dithered crossfade (see _LOD: the far
+  ranges and the bake cache_ below), the ~2 px floor, the quality-setting bias
+  and the tooling rows.
+
+The plan was deleted on 2026-09-24; its locked rules are in
+`docs/notes/rendering.md` under _What the deleted 25-lod plan left behind_.
 
 **The coverage hole worth knowing about:** `OffscreenSetup::OPTIONAL_FEATURES`
 never asked for `TASK_SHADER`, so every `render_e2e` run on a mesh-capable
@@ -21906,6 +22003,80 @@ Still open from earlier slices and unchanged by this one:
   equality by the cooker, the third held to the rule by comparing the decision.
 - **The cooked artifact is only ever generated on x86-64 Linux**; no CI leg
   regenerates it on macOS or Windows.
+
+### LOD: hand-authored levels resolve at import but the renderer cannot draw them (2026-09-24)
+
+`crcbl_scene::lod_resolve::resolve_lod` applies the locked precedence rule (a
+hand level wins, a missing level is generated) and `crcbl lod stats` reports
+each level's `LodOrigin`. `crcbl_render::scene::Geometry` is `Flat` or `Dag`,
+though, and a hand-authored level is a whole-mesh level that must be **selected
+per instance, even on the `MeshShader` path**, since an artist supplies no
+crack-free cluster hierarchy. The renderer has no geometry form for that, and
+nothing in the engine calls `resolve_lod` yet.
+
+Finishing it means a per-instance level table in `Geometry` (or a third
+variant): each level its own vertex and index range, with an error per level.
+For a hand level that error has to be measured against LOD0 (the sampled
+Hausdorff distance `simplify`'s property test already computes is one way),
+since no quadric produced it. Selection then reuses the uniform cut's rule and
+metric — `MeshLevels::select` in `crcbl_shaders::level_select`, with its
+hysteresis — so a mixed chain's generated levels (uniform cuts through
+`MeshLod::dags`) and hand levels select the same way. A mesh whose whole chain
+is generated keeps the per-cluster descent. Verified by reading
+`lod_resolve.rs`'s header and `Geometry`'s variants; the level-table shape is a
+proposal.
+
+### LOD: the ~2 px triangle floor (2026-09-24)
+
+**Not built** (verified 2026-09-24: no floor constant in `draw_gen.slang`,
+`mesh_cluster.slang`, `crcbl_shaders::cluster_select` or `crcbl_render::cull`).
+Decided 2026-08-30: the descent never selects a level whose triangles fall below
+about two pixels across on screen, whatever budget a caller asks for, because a
+forward renderer shades a 2×2 quad for every triangle a pixel touches and the
+forward rule refuses the visibility buffer that would fix it. The plan put the
+floor as a constant beside the threshold in the host reference and the shader,
+with a test that a cut at the floor draws no triangle smaller than it names.
+Open design point: the DAG carries an error per group, not a triangle size, so
+the floor needs a per-group (or per-cluster) minimum edge length or mean
+triangle size stored beside the error, projected with the same pixels-per-unit
+scale. Tessellation (`59-tessellation.md`) rests on the same floor.
+
+### LOD: the quality-setting bias, stats rows, LOD panel and `lod preview` (2026-09-24)
+
+Topic 25's P10 row, none of it built: a **global LOD bias as a quality setting**
+(topic 14's settings UI; also the browser tier's lever, with web demos shipping
+a default bias), which would scale both selection budgets as one positive
+constant — the same shape as `SHADOW_LOD_BIAS`, so monotonicity holds;
+**per-level instance and triangle counts** in the render stats panel; a
+**per-asset LOD panel**, viewer first (it is the asset inspection tool), then
+the editor, with a level preview to step through, threshold overrides and a
+regenerate button; and **`crcbl lod preview`**, offscreen renders per level for
+golden frames (parsed and explicitly refused in
+`crates/crcbl-cli/src/lod_cmd.rs`; its prerequisite is under _What `crcbl lod`
+left owed_). `ForwardRenderer` exposes the budgets and `lod_hold_ratio`, but no
+settings key drives them. Verified from the CLI source and by grepping
+`crcbl-store` and `crcbl-render` for a bias setting. **The bias is graphics-only
+by construction**: it never reaches a collider or the tick hash.
+
+### LOD: the far ranges and the bake cache (2026-09-24)
+
+Designed, scheduled later, none built:
+
+- **A bake cache keyed by content hash.** Generation is deterministic (same
+  input, identical output, with a strict total order on collapse candidates), so
+  one bake step, one content hash, one cache entry per mesh; it waits on the
+  asset pipeline that would replace `cook-clusters`.
+- **HLOD** (wave 2): per-sector merged proxy meshes, a bake step taking the
+  union of a sector's static content, aggressively decimated. It is the mid-far
+  tier between per-instance LOD and sector streaming, drawn when a sector is
+  loaded but distant, selected by the same metric at sector granularity.
+- **Impostors**: octahedral billboards for the far-far tier, only after HLOD
+  proves insufficient. Both are bake outputs riding the sector machinery, and
+  **both get their own passes rather than complicating the selection shader**.
+  Orbit's planet needs neither: nothing walks a far planet.
+- **Dithered crossfade**, if hero assets demand it (it pairs with the TAA era).
+  Today a level switch is an instant swap, and correct thresholds make the pop
+  sub-pixel by definition.
 
 ## What `crcbl_scene::simplify` owes, and one workspace-wide trap it found
 

@@ -25,12 +25,13 @@ ones.
 | **L2**  | Contact solver: sequential impulses, warm starting, islands + sleeping                                                  | Stretch — may land parallel to stages 6–8; not an MVP gate |
 | **L3**  | Constraints/joints (hinges, motors, vehicle-as-constraints)                                                             | Post-MVP                                                   |
 
-Rationale: every MVP sample runs on L0+L1+CCD. **L2/L3 now have their own design
-doc — see [36-contact-solver.md](36-contact-solver.md)** (substepped sequential
-impulses, islands, sleeping, joints); they land wave 2, driven by ragdolls (35),
-grenades, and dropped loot. L2 makes stacked/resting rigid bodies possible and
-is the "generic 3D game" enabler — wanted soon, but nothing in the MVP ladder
-blocks on it.
+Rationale: every MVP sample runs on L0+L1+CCD. **L2/L3 had their own design doc,
+topic 36, since built through its rung 5 and deleted** (substepped sequential
+impulses, islands, sleeping, joints; its decisions are in
+[simulation notes](../notes/simulation.md)); they landed in wave 2, driven by
+ragdolls (35), grenades, and dropped loot. L2 makes stacked/resting rigid bodies
+possible and is the "generic 3D game" enabler — wanted soon, but nothing in the
+MVP ladder blocks on it.
 
 ## Interleaved, demand-driven delivery
 
@@ -245,9 +246,9 @@ choice, and it agrees with topic 13's "own polynomial approximations" line, so
 the two documents no longer prescribe different answers. The implementation owes
 golden values from the specification and an accuracy sweep, as the shader
 construction did. **The solver interior is f32 over f64 positions** — see
-[36-contact-solver.md](36-contact-solver.md)'s decision 7, which amends this
-document's "f64 math" line for the solver's velocities, deltas and impulses
-while body positions stay f64.
+contact-solver decision 7 ([simulation notes](../notes/simulation.md)), which
+amends this document's "f64 math" line for the solver's velocities, deltas and
+impulses while body positions stay f64.
 
 ## Correction (determinism math, 2026-08-09)
 

@@ -1,4 +1,5 @@
-//! Islands and sleep, run whole: rung 3 of `docs/plan/36-contact-solver.md`.
+//! Islands and sleep, run whole: contact-solver rung 3
+//! (`docs/notes/simulation.md`).
 //!
 //! A still island sleeps, a sleeping body costs nothing and does not move, and
 //! each of decision 4's wake rules wakes what it should and nothing else. As in

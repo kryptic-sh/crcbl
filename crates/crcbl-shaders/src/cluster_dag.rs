@@ -1,6 +1,7 @@
 //! A mesh's cluster DAG, in the cooked form the renderer receives it in.
 //!
-//! `docs/plan/25-lod.md`'s "How a DAG reaches the renderer" decided this shape.
+//! Topic 25's "How a DAG reaches the renderer" decided this shape (the rule
+//! is recorded in `docs/notes/rendering.md`).
 //! The builder is `crcbl_scene::cluster_dag::build_cluster_dag`, and neither
 //! this crate nor `crcbl-render` can call it: `crcbl-scene` depends on this one,
 //! and the renderer must not depend on `crcbl-scene` at all — that would pull
@@ -48,7 +49,7 @@
 //! for a GPU to run it one cluster at a time — see [`crate::cluster_select`],
 //! which is the record `mesh_cluster.slang`'s amplification stage reads.
 //!
-//! `docs/plan/25-lod.md`'s **hysteresis** is [`ClusterDag::expand`], which turns
+//! Topic 25's **hysteresis** is [`ClusterDag::expand`], which turns
 //! last frame's expansion into this frame's under two budgets rather than one;
 //! [`ClusterDag::cut_from`] and [`ClusterDag::uniform_level_from`] are the two
 //! granularities asked of the state it produces. What is still absent is that
@@ -243,7 +244,7 @@ impl DagLevel {
     /// pulling through an index buffer needs the same triangles spelled the
     /// other way. Every geometry path draws a DAG level out of this — the mesh
     /// path so its levels are resident in one vertex pool at all, and
-    /// `docs/plan/25-lod.md`'s uniform cut because a whole level *is* a chain
+    /// topic 25's uniform cut because a whole level *is* a chain
     /// level.
     ///
     /// [`positions`]: Self::positions
@@ -337,7 +338,7 @@ impl ClusterDag {
             .collect()
     }
 
-    /// One frame of `docs/plan/25-lod.md`'s hysteresis: which groups are
+    /// One frame of topic 25's hysteresis: which groups are
     /// expanded now, given which were expanded last frame.
     ///
     /// [`group_is_expanded`] over every group, in
@@ -386,7 +387,7 @@ impl ClusterDag {
     /// The one level a **uniform cut** draws from an eye at `eye` under a
     /// budget of `budget` pixels.
     ///
-    /// `docs/plan/25-lod.md`'s granularity for the two indirect tails: "every
+    /// Topic 25's granularity for the two indirect tails: "every
     /// cluster at one depth, which is exactly a whole-mesh level". The rule is
     /// the finest level any group is expanded at, and the top level when none
     /// is — [`crate::level_select`]'s module docs carry why that number is the
@@ -517,7 +518,7 @@ impl ClusterDag {
     /// its edges have a different level on either side.
     ///
     /// The property the whole DAG exists for, and the one
-    /// `docs/plan/25-lod.md` calls "what its tests assert": a cut has to cover
+    /// topic 25 calls "what its tests assert": a cut has to cover
     /// the surface exactly once, with no hole where two levels meet. Public
     /// because the host rule is no longer the only thing that produces a cut —
     /// `crcbl-vk`'s `the_gpu_descends_the_dag_to_the_cut_the_host_rule_says`
@@ -1485,7 +1486,7 @@ mod tests {
     /// **The uniform cut's level is the finest level the per-cluster cut
     /// draws**, at every eye and every budget of the sweep.
     ///
-    /// This is what makes `docs/plan/25-lod.md`'s two granularities one
+    /// This is what makes topic 25's two granularities one
     /// hierarchy and one metric rather than two answers that happen to look
     /// alike: the coarse decision is not an approximation of the fine one, it is
     /// the fine one's own floor. [`crate::level_select`]'s module docs carry the
@@ -1835,7 +1836,7 @@ mod tests {
     /// **A camera oscillating across a threshold settles on one level**, where
     /// the same camera under one threshold changes level every frame.
     ///
-    /// `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+    /// Topic 25: "**Hysteresis** on the threshold (switch-up and
     /// switch-down differ) kills boundary flicker." The flicker is the
     /// observable and this is it, counted: the camera steps back and forth
     /// across the distance at which a uniform cut changes level, by a thousandth
@@ -2003,7 +2004,7 @@ mod tests {
     /// `dunes` lays the patch out centred on the origin in `x` and `z` with the
     /// height on `y`, so an eye at negative `z` and a small `y` is a viewer
     /// standing at one edge of a ground plane that recedes away from them — the
-    /// shape `docs/plan/25-lod.md`'s per-cluster selection exists for. The rest
+    /// shape topic 25's per-cluster selection exists for. The rest
     /// are off a corner, high above, and level with the middle, so the sweep is
     /// not one camera's arrangement holding.
     const EYES: [[f32; 3]; 5] = [

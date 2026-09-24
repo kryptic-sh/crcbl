@@ -1,5 +1,6 @@
 //! The contact broadphase: split trees, fattened proxies, a move buffer and a
-//! pair set — `docs/plan/36-contact-solver.md` decision 3, after Box2D v3.
+//! pair set — contact-solver decision 3 (`docs/notes/simulation.md`), after
+//! Box2D v3.
 //!
 //! ```text
 //!   static tree ── walls, pegs, shelves: never moves, never queries itself

@@ -262,7 +262,7 @@ pub mod probe_gather;
 /// declares. `crcbl_scene::meshlet` is what builds them.
 pub mod meshlet;
 
-/// The dunes patch: the terrain-sized mesh `docs/plan/25-lod.md`'s per-cluster
+/// The dunes patch: the terrain-sized mesh topic 25's per-cluster
 /// selection needs, and the geometry [`cluster_dag`]'s committed DAG is built
 /// over.
 pub mod dunes;

@@ -678,7 +678,7 @@ pub struct FrameUniforms {
     /// perspective camera and `1` for an orthographic one, which has no view
     /// depth to slice by.
     ///
-    /// This slot held `docs/plan/25-lod.md`'s selection numbers until the light
+    /// This slot held topic 25's selection numbers until the light
     /// list arrived, and **no shader had read them since hysteresis landed**:
     /// the projection moved into `draw_gen.slang`, which owns the state it
     /// needs, and `mesh_cluster.slang`'s amplification stage reads that pass's
@@ -729,7 +729,7 @@ pub struct FrameUniforms {
     ///
     /// [`ProbeVolume::default`]: crate::probe::ProbeVolume::default
     pub probes: ProbeVolume,
-    /// `docs/plan/25-lod.md`'s selection numbers, the same four lanes
+    /// Topic 25's selection numbers, the same four lanes
     /// [`crate::draw_gen::Params::lod_params`] carries: `x` is how many pixels
     /// one unit of length subtends one unit from the eye, `y` is the budget an
     /// unexpanded group's projected error must exceed to expand, `z` is the
@@ -2265,7 +2265,7 @@ pub struct DrawConstants {
     /// **The bucket's, not the drawn instance's.** They name the same geometry
     /// for every instance a bucket can hold, because an indexed draw has one
     /// index range and `draw_gen.slang` takes it from this same entry. What the
-    /// distinction buys is `docs/plan/25-lod.md`'s uniform cut: a DAG's levels
+    /// distinction buys is topic 25's uniform cut: a DAG's levels
     /// are mesh table entries of their own and a bucket is one of them, while
     /// the instance goes on naming level 0 — the entry the cull pass reads a
     /// bounding box out of.

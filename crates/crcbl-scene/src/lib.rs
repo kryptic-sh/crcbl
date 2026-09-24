@@ -38,11 +38,11 @@
 //!
 //! [`meshlet`] and [`mod@simplify`] belong beside the other two for the same
 //! reason: topic 03 §3.5's cluster build and
-//! `docs/plan/25-lod.md`'s QEM decimation are both bake steps over exactly the
+//! topic 25's QEM decimation are both bake steps over exactly the
 //! host arrays `import_gltf` produces — positions and indices — so they land
 //! in the crate that owns them rather than becoming further names for the same
 //! responsibility. [`mod@lod`] is the two of them composed into
-//! `docs/plan/25-lod.md`'s chain of levels, and [`mod@cluster_dag`] is the same
+//! topic 25's chain of levels, and [`mod@cluster_dag`] is the same
 //! two composed into its cluster DAG — the structure per-cluster selection
 //! needs, which a chain cannot provide. `lod_resolve` is where that meets
 //! the importer: the plan's hand-authored precedence, deciding per level
@@ -72,7 +72,7 @@ pub mod gltf_import;
 pub mod gltf_render;
 pub mod lod;
 // Behind `gltf` with the importer rather than beside `lod`: `resolve_lod` takes
-// a `&GltfScene`, so the hand-authored half of `docs/plan/25-lod.md`'s
+// a `&GltfScene`, so the hand-authored half of topic 25's
 // precedence is a reading of the source format and does not exist without it.
 #[cfg(feature = "gltf")]
 pub mod lod_resolve;

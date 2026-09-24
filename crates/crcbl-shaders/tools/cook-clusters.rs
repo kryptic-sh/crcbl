@@ -6,14 +6,15 @@
 //!
 //! # Why there is a generator at all
 //!
-//! `docs/plan/25-lod.md`'s "How a DAG reaches the renderer": `crcbl-render` must
-//! not depend on `crcbl-scene`, because that pulls `gltf` into the renderer, and
-//! `crcbl-shaders` has no dependencies at all by design. So a DAG out of
-//! `build_cluster_dag` has no path to the renderer except as **cooked data**,
-//! and cooked data with no producer beside it is data nobody can regenerate.
-//! This is that producer, and `--check` is what stops the artifact and the
-//! builder drifting apart — the same arrangement, for the same reason, as
-//! `tools/compile-shaders.sh --check` and the SPIR-V it verifies.
+//! Topic 25's "How a DAG reaches the renderer" (recorded in
+//! `docs/notes/rendering.md`): `crcbl-render` must not depend on `crcbl-scene`,
+//! because that pulls `gltf` into the renderer, and `crcbl-shaders` has no
+//! dependencies at all by design. So a DAG out of `build_cluster_dag` has no
+//! path to the renderer except as **cooked data**, and cooked data with no
+//! producer beside it is data nobody can regenerate. This is that producer, and
+//! `--check` is what stops the artifact and the builder drifting apart — the
+//! same arrangement, for the same reason, as `tools/compile-shaders.sh --check`
+//! and the SPIR-V it verifies.
 //!
 //! # Why an example and not a binary
 //!

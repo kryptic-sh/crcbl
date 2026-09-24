@@ -1,8 +1,8 @@
 //! Static triangle meshes, run whole: the half of rung 5 of
-//! `docs/plan/36-contact-solver.md` that comes "before the stairs" — bodies
-//! sliding and rolling on a mesh, down stairs and a ramp, across a seam
-//! without catching, not tunnelling through it, sleeping on it, and the query
-//! world hitting its triangles.
+//! the contact solver (`docs/notes/simulation.md`) that comes "before the
+//! stairs" — bodies sliding and rolling on a mesh, down stairs and a ramp,
+//! across a seam without catching, not tunnelling through it, sleeping on it,
+//! and the query world hitting its triangles.
 //!
 //! `docs/plan/sample/24-tumble.md` names no scene for the mesh alone — its
 //! stairs come with the ragdolls, which need joints — so the proving scene is

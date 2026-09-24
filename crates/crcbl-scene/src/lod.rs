@@ -1,6 +1,6 @@
 //! LOD chains: one mesh becomes a chain of decimated, clustered levels.
 //!
-//! `docs/plan/25-lod.md`'s "LOD chains" section asks for "a chain of N levels
+//! Topic 25's "LOD chains" section asked for "a chain of N levels
 //! (LOD0 = full quality … LODn)", each carrying the error that producing it
 //! cost, auto-generated "by decimating the base mesh to that level's target
 //! ratio (default chain ~50/25/12/6%, per-asset overridable)". This module is
@@ -77,7 +77,7 @@ use crate::simplify::{SimplifyError, simplify};
 
 /// The plan's default chain: each level half the triangles of the one above.
 ///
-/// `docs/plan/25-lod.md` writes it as "~50/25/12/6%", which is the rounded
+/// Topic 25 wrote it as "~50/25/12/6%", which is the rounded
 /// form of the halvings this holds. A caller with an asset that wants a
 /// different curve passes its own ratios to [`build_lod_chain`] — the sidecar
 /// meta the plan overrides them from is a later slice.

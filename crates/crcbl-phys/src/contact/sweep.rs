@@ -1,4 +1,4 @@
-//! Continuous collision: rung 4 of `docs/plan/36-contact-solver.md`,
+//! Continuous collision: contact-solver rung 4 (`docs/notes/simulation.md`),
 //! decision 5 — speculative contacts for everything, then sweeps for fast
 //! bodies, with the time they lose dropped.
 //!

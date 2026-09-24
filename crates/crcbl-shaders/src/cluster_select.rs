@@ -1,10 +1,10 @@
 //! The per-cluster record `mesh_cluster.slang`'s amplification stage descends
 //! the DAG with, and the two budgets a group's expansion is judged against.
 //!
-//! `docs/plan/25-lod.md`'s "Runtime selection" picks a **cut** through a mesh's
-//! [cluster DAG](crate::cluster_dag): the set of clusters covering the surface
-//! exactly once. Writing `E(G)` for "group `G` is expanded", a cluster is drawn
-//! exactly when
+//! Topic 25's "Runtime selection" (recorded in `docs/notes/rendering.md`) picks
+//! a **cut** through a mesh's [cluster DAG](crate::cluster_dag): the set of
+//! clusters covering the surface exactly once. Writing `E(G)` for "group `G` is
+//! expanded", a cluster is drawn exactly when
 //!
 //! ```text
 //! !E(the group that produced it) && E(the group that contains it)
@@ -39,7 +39,7 @@
 //!
 //! # Hysteresis: two budgets, and the state between them
 //!
-//! `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+//! Topic 25: "**Hysteresis** on the threshold (switch-up and
 //! switch-down differ) kills boundary flicker."
 //! [`LodBudgets`](crate::cluster_select::LodBudgets) is the pair, and
 //! [`group_is_expanded`](crate::cluster_select::group_is_expanded) is the rule:
@@ -77,7 +77,7 @@ use crate::cluster_dag::GroupBounds;
 
 /// The two pixel budgets one threshold becomes under hysteresis.
 ///
-/// `docs/plan/25-lod.md`'s "switch-up and switch-down differ", named for what
+/// Topic 25's "switch-up and switch-down differ", named for what
 /// each one does to a group rather than for which way a level moves: a group
 /// starts expanding above [`expand`](Self::expand) and stops below
 /// [`hold`](Self::hold).
@@ -564,7 +564,7 @@ mod tests {
     /// **The two shaders project the error with one function**, character for
     /// character.
     ///
-    /// There are three spellings of `docs/plan/25-lod.md`'s metric now, and this
+    /// There are three spellings of topic 25's metric now, and this
     /// is the one that closes the ring:
     ///
     /// * [`ClusterGroup::projected_error`](crate::cluster_dag::ClusterGroup::projected_error)

@@ -1,5 +1,5 @@
-//! Joints: the rest of rung 5 of `docs/plan/36-contact-solver.md` — L3's
-//! constraints, solved by the same Soft Step as the contacts.
+//! Joints: the rest of contact-solver rung 5 (`docs/notes/simulation.md`) —
+//! L3's constraints, solved by the same Soft Step as the contacts.
 //!
 //! A [`Joint`] ties two bodies together at a frame fixed in each: an anchor
 //! point and an orientation. Its [`JointKind`] says which of the six relative

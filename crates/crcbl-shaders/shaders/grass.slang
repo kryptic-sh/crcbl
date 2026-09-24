@@ -246,7 +246,7 @@ struct FrameUniforms
     /// `light_cluster.slang` each declare, so there is nothing there for the two
     /// to disagree about.
     ///
-    /// This slot held `docs/plan/25-lod.md`'s selection numbers until the light
+    /// This slot held topic 25's selection numbers until the light
     /// list arrived, by which time no stage read them: the projection moved into
     /// `draw_gen.slang`, which owns the hysteresis state it needs, and
     /// `mesh_cluster.slang`'s amplification stage reads that pass's answer rather
@@ -322,7 +322,7 @@ struct FrameUniforms
     /// subtract rather than a signed remainder. All zero for a volume that has
     /// never scrolled, which is every volume before this row existed.
     uint4 probe_level_offset[PROBE_LEVELS];
-    /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
+    /// Topic 25's selection numbers, as `draw_gen.slang`'s
     /// `DrawGenParams::lod_params` carries them: `x` pixels per unit of length
     /// one unit from the eye, `y` the budget a group's projected error must
     /// exceed to expand, `z` the budget an expanded one is held down to, `w`

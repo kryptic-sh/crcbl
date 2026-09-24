@@ -3,7 +3,7 @@
 //!
 //! # Why this mesh and not another
 //!
-//! `docs/plan/25-lod.md`'s per-cluster selection scales one stored error by the
+//! Topic 25's per-cluster selection scales one stored error by the
 //! distance to the group's sphere, so **the variation across a frame comes from
 //! the distance term**. A mesh that subtends one distance — the cube, the
 //! pyramid, the open box — asks the same question of every one of its clusters

@@ -1,6 +1,6 @@
 //! The contact pipeline, run whole: rung 1 of
-//! `docs/plan/36-contact-solver.md`, measured against what physics says a
-//! ball, a capsule and a pair of balls should do.
+//! the contact solver (`docs/notes/simulation.md`), measured against what
+//! physics says a ball, a capsule and a pair of balls should do.
 //!
 //! Every bound below was measured before it was written down, and each says
 //! what it was measured at. They are properties of a long run of the assembled

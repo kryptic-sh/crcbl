@@ -1,9 +1,9 @@
 //! Mesh decimation by quadric error metrics: iterative edge collapse.
 //!
-//! `docs/plan/25-lod.md`'s "Auto-LOD: QEM simplification" section asks for
-//! "iterative edge collapse ordered by quadric error", a recorded per-level max
-//! geometric error, determinism, and degenerate/flip rejection. This module is
-//! that decimator and nothing else.
+//! Topic 25's "Auto-LOD: QEM simplification" section (recorded in
+//! `docs/notes/rendering.md`) asks for "iterative edge collapse ordered by
+//! quadric error", a recorded per-level max geometric error, determinism, and
+//! degenerate/flip rejection. This module is that decimator and nothing else.
 //!
 //! # The algorithm, and where to check it
 //!
@@ -61,7 +61,7 @@
 //!   UV seam is split into two coincident position vertices *does* get its seam
 //!   locked, but only as a side effect: the split makes both sides open in the
 //!   index topology. A seam that shares positions is invisible here and will
-//!   drift. This is the artifact `docs/plan/25-lod.md` calls out under Risks,
+//!   drift. This is the artifact topic 25 called out under Risks,
 //!   and it is not addressed.
 //! - **Material boundaries are NOT constrained**, for the same reason: material
 //!   assignment is per primitive and never reaches this function.
@@ -70,7 +70,7 @@
 //! position, so a mesh with duplicated coincident vertices is several disjoint
 //! surfaces to this code and every shared edge of it reads as a border. And
 //! skinning weights are not carried through collapses, which
-//! `docs/plan/25-lod.md` makes part of the same slice as the attribute work.
+//! topic 25 made part of the same slice as the attribute work.
 //!
 //! # Determinism
 //!
@@ -213,7 +213,7 @@ impl Simplified {
     ///
     /// `pub(crate)` because [`crate::cluster_dag`] is what needs it: a cluster
     /// covers part of a level and its error is the worst of its own vertices',
-    /// which is the per-cluster number `docs/plan/25-lod.md`'s per-cluster
+    /// which is the per-cluster number topic 25's per-cluster
     /// selection asks for. A whole-mesh maximum would give every cluster of a
     /// level the same error and make the DAG select uniformly, which is the
     /// chain again.
@@ -294,7 +294,7 @@ pub fn simplify(
 /// The two faces on a locked edge survive with it: every edge of either face
 /// has a locked endpoint, so no collapse can remove them.
 ///
-/// `docs/plan/25-lod.md` names this as the interface the cluster DAG needs:
+/// Topic 25 names this as the interface the cluster DAG needs:
 /// a group's outer boundary is interior to the mesh, so no rule over the two
 /// arrays can find it and it can only come from the caller. Locking edges that
 /// are already borders, that are not edges of the mesh at all, or that repeat
@@ -670,7 +670,7 @@ impl Decimator {
     ///   which gives that edge four faces — a fold, and a closed mesh that is
     ///   no longer closed by any edge count.
     /// - No surviving face may invert or become a sliver, which is
-    ///   `docs/plan/25-lod.md`'s degenerate/flip rejection — measured both
+    ///   topic 25's degenerate/flip rejection — measured both
     ///   against the facing the face has right now and against the one it
     ///   arrived with. See [`Self::survives`].
     fn collapse_allowed(&self, a: u32, b: u32, target: DVec3) -> bool {
@@ -1125,7 +1125,7 @@ pub(crate) mod tests {
     ///   geometry twice.
     ///
     /// **The surface itself is [`crcbl_shaders::dunes::height`]**, not a copy of
-    /// it. `docs/plan/25-lod.md`'s "How a DAG reaches the renderer" made that
+    /// it. Topic 25's "How a DAG reaches the renderer" made that
     /// function shipped geometry — the patch whose cluster DAG is committed in
     /// `crcbl-shaders` — and the crate that ships it is one this crate already
     /// depends on. So the surface the decimator is *tested* against and the
@@ -1807,7 +1807,7 @@ pub(crate) mod tests {
         assert!((distance_to_triangle(v(5.0, 0.0, 0.0), unit) - 4.0).abs() < 1e-15);
     }
 
-    /// `docs/plan/25-lod.md`'s testing section: the reported error dominates a
+    /// Topic 25's testing section: the reported error dominates a
     /// sampled Hausdorff distance between the level and the mesh it came from.
     ///
     /// **This does not certify [`Simplified::max_error`] as a Hausdorff bound**

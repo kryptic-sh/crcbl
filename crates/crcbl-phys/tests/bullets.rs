@@ -1,6 +1,6 @@
 //! Continuous collision, run whole: rung 4 of
-//! `docs/plan/36-contact-solver.md` — fast bodies swept against statics, the
-//! bullet flag, and the time a stopped body loses dropped.
+//! the contact solver (`docs/notes/simulation.md`) — fast bodies swept against
+//! statics, the bullet flag, and the time a stopped body loses dropped.
 //!
 //! Speculative contacts already stop a body whose speed is known when the
 //! tick begins: a ball fired at 300 m/s at a centimetre plate stops at it

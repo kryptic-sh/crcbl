@@ -2,7 +2,7 @@
 //!
 //! One straight run down the face's own axis, measured frame by frame on **one
 //! renderer**, which is what makes it a different measurement from the same
-//! positions rendered by fresh contexts: `docs/plan/25-lod.md`'s hysteresis is
+//! positions rendered by fresh contexts: topic 25's hysteresis is
 //! device-local state a shader writes once a frame, so a cut here depends on
 //! every frame before it.
 

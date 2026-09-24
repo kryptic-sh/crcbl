@@ -1,4 +1,5 @@
-//! Islands and sleep: rung 3 of `docs/plan/36-contact-solver.md`, decision 4.
+//! Islands and sleep: contact-solver rung 3 and decision 4
+//! (`docs/notes/simulation.md`).
 //!
 //! ```text
 //!   a contact begins touching between two dynamic bodies ─▶ their islands merge

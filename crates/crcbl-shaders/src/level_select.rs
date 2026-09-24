@@ -1,12 +1,12 @@
 //! The per-instance records `draw_gen.slang` takes a **uniform cut** with, in
 //! the byte layout that shader declares.
 //!
-//! `docs/plan/25-lod.md`'s "Runtime selection" gives the two indirect tails a
-//! coarser granularity than the mesh path's: "on `IndirectCount` and
-//! `IndirectPerBatch` it runs in the cull compute pass and takes a **uniform
-//! cut** — every cluster at one depth, which is exactly a whole-mesh level —
-//! drawn as ordinary index ranges. Same hierarchy, same error metric, one
-//! decision per instance instead of per cluster."
+//! Topic 25's "Runtime selection" (recorded in `docs/notes/rendering.md`) gives
+//! the two indirect tails a coarser granularity than the mesh path's: "on
+//! `IndirectCount` and `IndirectPerBatch` it runs in the cull compute pass and
+//! takes a **uniform cut** — every cluster at one depth, which is exactly a
+//! whole-mesh level — drawn as ordinary index ranges. Same hierarchy, same
+//! error metric, one decision per instance instead of per cluster."
 //!
 //! So this module is [`crate::cluster_select`]'s sibling and not its rival: it
 //! reads the same groups, through the same
@@ -18,7 +18,7 @@
 //!
 //! Writing `E(G)` for "group `G` is expanded" —
 //! [`group_is_expanded`](crate::cluster_select::group_is_expanded), which under
-//! `docs/plan/25-lod.md`'s hysteresis reads the previous frame's answer as well
+//! topic 25's hysteresis reads the previous frame's answer as well
 //! as this frame's projection —
 //! [`MeshLevels::select`](crate::level_select::MeshLevels::select) answers
 //!
@@ -253,7 +253,7 @@ impl MeshLevels {
     /// * The state is written for **every** group, whatever the level answer is,
     ///   because the mesh path descends the same groups per cluster and reads
     ///   exactly this buffer. A mesh whose record has a `top_level` of zero —
-    ///   which is how `docs/plan/25-lod.md`'s per-cluster path suppresses the
+    ///   which is how topic 25's per-cluster path suppresses the
     ///   uniform cut — still needs its groups judged.
     /// * The level is then the finest level any group came out expanded at, which
     ///   is [`uniform_level`](Self::uniform_level)'s rule over the state rather

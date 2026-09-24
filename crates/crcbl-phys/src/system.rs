@@ -7,14 +7,15 @@
 //!
 //! # Storage: dense sets behind generational ids
 //!
-//! `docs/plan/36-contact-solver.md` decision 8 sets the layout, after Box3D's:
-//! a body is named by a **generational id** — a [`Handle`] from a [`Pool`] of
-//! cold records — and the record says which **set** its state lives in and at
-//! which **index**. A set is struct-of-arrays: the ids, the transforms and, for
-//! the set that moves, the bodies, each column packed with no holes, so
-//! [`PhysicsSystem::step`] walks contiguous arrays in their own order and never
-//! touches a hash map or sorts anything. The entity-to-id map is consulted only
-//! where an entity crosses in: the methods that take an [`Entity`].
+//! Contact-solver decision 8 (`docs/notes/simulation.md`) sets the layout,
+//! after Box3D's: a body is named by a **generational id** — a [`Handle`] from
+//! a [`Pool`] of cold records — and the record says which **set** its state
+//! lives in and at which **index**. A set is struct-of-arrays: the ids, the
+//! transforms and, for the set that moves, the bodies, each column packed with
+//! no holes, so [`PhysicsSystem::step`] walks contiguous arrays in their own
+//! order and never touches a hash map or sorts anything. The entity-to-id map
+//! is consulted only where an entity crosses in: the methods that take an
+//! [`Entity`].
 //!
 //! There are three sets. **Static** holds an entity that has a transform and
 //! no [`RigidBody`] — a wall's collider, a replicated prop — and nothing steps
@@ -1638,7 +1639,7 @@ fn compound_query_box(shape: &CompoundShape, offset: DVec3, transform: &Transfor
 
 /// `value`'s bits with every zero and every `NaN` made one: `-0.0` hashes as
 /// `+0.0` and any `NaN` as the canonical one, so two states that compare equal
-/// hash equal — `docs/plan/36-contact-solver.md` decision 8.
+/// hash equal — contact-solver decision 8.
 pub(crate) fn canonical_bits(value: f64) -> u64 {
     if value == 0.0 {
         0

@@ -48,9 +48,9 @@ naga = { version = "30", features = ["wgsl-in"] }
 # * so `cargo build -p crcbl-shaders` still pulls in nothing at all — `gltf`
 #   included — which is the property the header comment above protects.
 #
-# `docs/plan/25-lod.md`'s "How a DAG reaches the renderer" is what this
-# implements: the artifact is committed, `--check` regenerates and compares, and
-# the consumer never sees the builder.
+# Topic 25's "How a DAG reaches the renderer" (`docs/notes/rendering.md`) is
+# what this implements: the artifact is committed, `--check` regenerates and
+# compares, and the consumer never sees the builder.
 crcbl-scene = { workspace = true }
 # `crcbl_scene::ClusterGroup::projected_error` takes a `glam::Vec3`, and the
 # generator compares it against this crate's `[f32; 3]` spelling of the same

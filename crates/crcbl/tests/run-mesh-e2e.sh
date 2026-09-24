@@ -8,7 +8,7 @@
 # `tests/mesh_e2e/` draws the demo scene through the real `ForwardRenderer` and
 # the real render graph and then measures what came out: four checked-in
 # goldens, the `Rgba16Float` scene target's linear values, the transient pool's
-# bound under a resize storm, and the level `docs/plan/25-lod.md`'s uniform cut
+# bound under a resize storm, and the level topic 25's uniform cut
 # selected. Every one of those lived in `crates/crcbl-vk/tests/vk_e2e/mesh.rs`
 # and ran on Vulkan alone.
 #

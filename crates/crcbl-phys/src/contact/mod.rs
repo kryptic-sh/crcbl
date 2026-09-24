@@ -1,4 +1,5 @@
-//! Contacts and joints: rungs 1 to 5 of `docs/plan/36-contact-solver.md`.
+//! Contacts and joints: contact-solver rungs 1 to 5, recorded in
+//! `docs/notes/simulation.md`.
 //!
 //! ```text
 //!   PhysicsSystem::step(dt), in a system built with contacts
@@ -157,7 +158,7 @@ use crate::material::SurfaceMaterial;
 use crate::system::{AwakeSet, BodyId, BodyRecord, BodySet, StaticSet, canonical_bits};
 
 /// The contact pipeline's knobs, with the values
-/// `docs/plan/36-contact-solver.md` decision 1 and Box2D v3 settled on as
+/// contact-solver decision 1 and Box2D v3 settled on as
 /// defaults.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContactSettings {

@@ -1,9 +1,9 @@
 //! The cluster DAG: group, lock, simplify, re-split, repeat.
 //!
-//! `docs/plan/25-lod.md`'s "The cluster DAG" section replaced the chain with
-//! this, in the shape Nanite uses (Brian Karis, *Nanite: A Deep Dive*, SIGGRAPH
-//! 2021 Advances in Real-Time Rendering course). [`build_cluster_dag`] is that
-//! build:
+//! Topic 25's "The cluster DAG" section (its rules are in
+//! `docs/notes/rendering.md`) replaced the chain with this, in the shape Nanite
+//! uses (Brian Karis, *Nanite: A Deep Dive*, SIGGRAPH 2021 Advances in
+//! Real-Time Rendering course). [`build_cluster_dag`] is that build:
 //!
 //! 1. **Cluster** the base mesh with [`build_meshlets`]. Those are the leaves.
 //! 2. **Group** neighbouring clusters by partitioning the cluster adjacency
@@ -70,7 +70,7 @@
 //!
 //! reading a level-0 cluster's absent producer as never expanded and a top-level
 //! cluster's absent container as always expanded. That is the descent of
-//! `docs/plan/25-lod.md`'s "Runtime selection", written as a local test one
+//! topic 25's "Runtime selection", written as a local test one
 //! cluster at a time — which is what lets a GPU evaluate it per cluster with no
 //! communication.
 //!
@@ -140,7 +140,7 @@ const GROUP_TARGET_CLUSTERS: usize = 4;
 /// What a level asks the decimator for, as a divisor of the triangle count of
 /// the level below it.
 ///
-/// `docs/plan/25-lod.md` step 3: "simplify its interior to roughly half its
+/// Step 3 of topic 25's build: "simplify its interior to roughly half its
 /// triangles". Roughly, because the locked boundaries can stall the decimation
 /// above the target — a group whose every edge touches its own boundary keeps
 /// what it has, and the level is still built.
@@ -917,7 +917,7 @@ mod tests {
 
     /// The clusters a global error threshold draws.
     ///
-    /// `docs/plan/25-lod.md`'s descent, written host-side: a cluster is drawn
+    /// Topic 25's descent, written host-side: a cluster is drawn
     /// when the group that *produced* it is within the budget and the group that
     /// *contains* it is not — descend while a group's error exceeds the
     /// threshold, stop when it does not. [`DagLevel::errors`] is the producing
@@ -934,7 +934,7 @@ mod tests {
 
     /// The clusters an "is this group expanded?" answer draws.
     ///
-    /// `docs/plan/25-lod.md`'s descent, and the whole of it: a cluster is drawn
+    /// Topic 25's descent, and the whole of it: a cluster is drawn
     /// when the group that *produced* it is not expanded and the group that
     /// *contains* it is. Both halves ask `expanded` about a **group**, which is
     /// why one answer per group is all the rule needs and why every cluster a
@@ -1581,7 +1581,7 @@ mod tests {
     /// `height_field` lays the patch out on `0..=DENSE_SIDE` in x and y with the
     /// height on z, so an eye at negative y with a small z is a viewer standing
     /// at one edge of a ground plane that recedes away from them — the shape
-    /// `docs/plan/25-lod.md`'s per-cluster selection exists for. The rest are
+    /// topic 25's per-cluster selection exists for. The rest are
     /// off a corner, high above, and level with the middle, so the sweep is not
     /// one camera's arrangement holding.
     const EYES: [Vec3; 5] = [

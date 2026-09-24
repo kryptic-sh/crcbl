@@ -472,7 +472,7 @@ Surfaces for instrumentation that already exists:
    what it needs.
 
    The four owed views still wait on the _callers_, not on the layer: topic 45's
-   cascade overlay and atlas view, `25-lod.md`'s cluster bounds and the light
+   cascade overlay and atlas view, topic 25's cluster bounds and the light
    list's reach each now need only the system that appends its own geometry.
 
 ## Tasks

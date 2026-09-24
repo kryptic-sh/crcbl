@@ -1,5 +1,5 @@
 //! The face as a cluster hierarchy — quarry's
-//! milestone 2, and `docs/plan/25-lod.md`'s subject.
+//! milestone 2, and topic 25's subject.
 //!
 //! [`crate::scene`] describes the face as one flat mesh: every cluster is drawn
 //! at full detail from every camera. That is the right shape for milestone 1

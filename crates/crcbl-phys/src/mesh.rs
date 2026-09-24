@@ -39,7 +39,7 @@
 //!
 //! Jolt's `FixNormal` also takes the pair's relative velocity as a hint for a
 //! body grazing a triangle's inactive edge side-on; that part is not
-//! transcribed — see `docs/plan/36-contact-solver.md`.
+//! transcribed — see `docs/notes/simulation.md` and `docs/backlog.md`.
 //!
 //! Edges are shared by vertex **position**, not by index: vertices at the
 //! same point are welded first, so a mesh an exporter wrote with each face's

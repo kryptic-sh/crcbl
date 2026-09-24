@@ -257,7 +257,7 @@ struct FrameUniforms
     ///
     /// **Read by nothing here** — nothing in this file shades — and declared
     /// because this block is `mesh.slang`'s and the two declarations are held
-    /// identical. The slot held `docs/plan/25-lod.md`'s selection numbers until
+    /// identical. The slot held topic 25's selection numbers until
     /// the light list arrived, by which time no stage read those either.
     uint4 cluster_grid;
     /// World → light tile `i`'s shadow clip. **Read by nothing here**, on the
@@ -279,7 +279,7 @@ struct FrameUniforms
     float4 probe_level_origin[PROBE_LEVELS];
     float4 probe_level_inv_spacing[PROBE_LEVELS];
     uint4 probe_level_offset[PROBE_LEVELS];
-    /// `docs/plan/25-lod.md`'s selection numbers, as `draw_gen.slang`'s
+    /// Topic 25's selection numbers, as `draw_gen.slang`'s
     /// `DrawGenParams::lod_params` carries them: `x` is how many pixels one unit
     /// of length subtends one unit from the eye, `y` is the budget an unexpanded
     /// group's projected error must exceed to expand, `z` is the budget an
@@ -606,7 +606,7 @@ static const float HEATMAP_VIEW = 2.5;
 /// somewhere in a gradient a viewer has to estimate. Luminance still climbs
 /// across both jumps, so the discontinuities cost the ordering nothing.
 ///
-/// Between the two is `docs/plan/25-lod.md`'s hysteresis band: a cluster shaded
+/// Between the two is topic 25's hysteresis band: a cluster shaded
 /// amber-to-yellow is one whose producer would already have expanded had it
 /// been expanded last frame, which is exactly "about to switch".
 static const float3 HEAT_UNDER_LOW = float3(0.08, 0.10, 0.35);
@@ -769,7 +769,7 @@ float3 lod_tint(uint level)
     }
 }
 
-/// One cluster's half of `docs/plan/25-lod.md`'s DAG descent, matching
+/// One cluster's half of topic 25's DAG descent, matching
 /// `crcbl_shaders::cluster_select::ClusterSelect`.
 ///
 /// **Both halves name a group, never this cluster**, and that is the whole
@@ -1152,7 +1152,7 @@ StructuredBuffer<ClusterSelect> cluster_select D3D12_REGISTER(t38, space0);
 /// The cut this frame chose, one word per resident cluster: `1` where the
 /// descent selected the cluster and `0` where it did not.
 ///
-/// `docs/plan/25-lod.md`'s observable, and the only thing that can show
+/// Topic 25's observable, and the only thing that can show
 /// per-cluster selection happening — a frame whose every cluster came from one
 /// level looks entirely plausible and matches any golden blessed from it. Read
 /// back by `crcbl-vk`'s
@@ -1168,7 +1168,7 @@ StructuredBuffer<ClusterSelect> cluster_select D3D12_REGISTER(t38, space0);
 [[vk::binding(39, 0)]]
 RWStructuredBuffer<uint> cluster_selection D3D12_REGISTER(u39, space0);
 
-/// `docs/plan/25-lod.md`'s hysteresis state, as `draw_gen.slang` left it this
+/// Topic 25's hysteresis state, as `draw_gen.slang` left it this
 /// frame: one word per (instance, group), `1` where that group is expanded.
 ///
 /// **Read here and written nowhere**, which is what makes a stage running
@@ -1506,7 +1506,7 @@ uint cluster_survives(Meshlet cluster, float4x4 transform, uint material_mode)
 ///
 /// `E` itself is not computed here. `draw_gen.slang`'s `select_level` decided it
 /// once for this (instance, group) pair and wrote it down, because
-/// `docs/plan/25-lod.md`'s hysteresis makes the answer depend on the previous
+/// topic 25's hysteresis makes the answer depend on the previous
 /// frame's — and a stage with one workgroup per cluster has nowhere to keep one.
 ///
 /// An absent group's index is zero rather than a sentinel, and zero is in range

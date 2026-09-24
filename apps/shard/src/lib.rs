@@ -56,7 +56,7 @@
 //! dais to step onto, braziers, and doorways with holes through them. There is
 //! no roof, for the reason [`zone`]'s own docs give: the camera is above one. The meshes and the colliders walk the *same* grid, so what looks solid is
 //! solid. `docs/plan/sample/15-shard.md` asks for modular tiling pieces
-//! deliberately — they are what `docs/plan/25-lod.md`'s border locking has to hold
+//! deliberately — they are what topic 25's border locking has to hold
 //! together — and this is that kit at its first size.
 //!
 //! # The light

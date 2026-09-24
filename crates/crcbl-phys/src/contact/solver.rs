@@ -1,6 +1,6 @@
 //! Soft Step: substepped sequential impulses with soft contacts, warm
 //! starting, speculative points and a restitution pass —
-//! `docs/plan/36-contact-solver.md` decision 1, after Box2D v3's
+//! contact-solver decision 1 (`docs/notes/simulation.md`), after Box2D v3's
 //! `contact_solver.c`.
 //!
 //! ```text

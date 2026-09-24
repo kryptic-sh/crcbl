@@ -35,7 +35,7 @@ pub struct Options {
     /// own.
     pub lod_budget: f32,
     /// Whether the run starts with each cluster tinted by its DAG level rather
-    /// than shaded — `docs/plan/25-lod.md`'s overlay.
+    /// than shaded — topic 25's overlay.
     pub lod_view: bool,
     /// Whether the run starts with each cluster shaded by the projected error
     /// the LOD selection judged it on — that plan's *other* overlay.

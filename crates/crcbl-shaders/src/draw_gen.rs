@@ -118,7 +118,7 @@ impl DrawMode {
 /// `shaders/draw_gen.slang`.
 ///
 /// `PartialEq` but not `Eq` since 2026-08: it holds the two floats
-/// `docs/plan/25-lod.md`'s uniform cut selects under.
+/// topic 25's uniform cut selects under.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Params {
     /// Buckets in the table, which is also how many argument structures the
@@ -190,7 +190,7 @@ pub struct Params {
     pub camera_position: [f32; 3],
     /// How many pixels one unit of length subtends one unit from the eye, the
     /// pixel budget a group's projected error is compared against, and the
-    /// budget an already-expanded group is held down to — `docs/plan/25-lod.md`'s
+    /// budget an already-expanded group is held down to — topic 25's
     /// hysteresis, and [`LodBudgets`](crate::cluster_select::LodBudgets)' two
     /// halves.
     ///

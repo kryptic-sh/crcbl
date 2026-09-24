@@ -1,8 +1,8 @@
 //! Which level came from where: hand-authored first, generated as fallback.
 //!
-//! `docs/plan/25-lod.md`'s "Hand-authored levels keep their precedence" states
-//! the rule this module is, and states it as locked. Import resolves each level
-//! in order:
+//! Topic 25's "Hand-authored levels keep their precedence" (recorded in
+//! `docs/notes/rendering.md`) states the rule this module is, and states it as
+//! locked. Import resolves each level in order:
 //!
 //! 1. **A hand-authored level exists** — the file's own geometry, reached
 //!    through the `name_LOD1` node-naming convention or the `MSFT_lod`
@@ -54,7 +54,7 @@
 //!
 //! # Where the generator's levels come from, and why there are no ratios here
 //!
-//! `docs/plan/25-lod.md` still describes the generated chain as ratios — "~50/
+//! The chain-era plan described the generated chain as ratios — "~50/
 //! 25/12/6%, per-asset overridable in sidecar meta RON" — and
 //! [`DEFAULT_LOD_RATIOS`](crate::DEFAULT_LOD_RATIOS) is that chain. Those ratios
 //! belong to [`build_lod_chain`](crate::build_lod_chain), the chain builder the
@@ -76,7 +76,7 @@ use crate::cluster_dag::{ClusterDag, ClusterDagError, build_cluster_dag};
 use crate::gltf_import::GltfScene;
 
 /// The separator between a base name and its level number, per
-/// `docs/plan/25-lod.md`'s `name_LOD1`.
+/// topic 25's `name_LOD1`.
 ///
 /// Matched exactly, case included. A convention that also accepted `_lod1` and
 /// `_Lod1` would turn every node whose name happens to end that way into a
@@ -154,7 +154,7 @@ impl MeshLod {
     /// `scene.meshes()[base].primitives()`, or empty.
     ///
     /// **Empty exactly when the generator was never run**, which is the
-    /// assertion `docs/plan/25-lod.md`'s "a fully hand-authored chain is never
+    /// assertion topic 25's "a fully hand-authored chain is never
     /// touched by the generator" comes down to. Non-empty does not imply a
     /// generated level exists: a mesh of a single cluster admits no level above
     /// its base, so the generator can run and produce a chain of one.

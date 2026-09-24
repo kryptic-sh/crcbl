@@ -1,10 +1,10 @@
 # Sample 24 — tumble (S4I, gates P8B)
 
-Physics acceptance test and benchmark, and the demand driver for
-[36-contact-solver.md](../36-contact-solver.md)'s rungs: a gallery of physics
-scenes, natively and in a browser tab, each built to show one thing the engine
-does — or, honestly, does not do yet — with the counters that measure it on the
-screen.
+Physics acceptance test and benchmark, and the demand driver for the contact
+solver's rungs (topic 36, its decisions and rung table in
+[simulation notes](../../notes/simulation.md)): a gallery of physics scenes,
+natively and in a browser tab, each built to show one thing the engine does —
+or, honestly, does not do yet — with the counters that measure it on the screen.
 
 **This is the sample that shows where the physics engine is weak, and by how
 much.** The user's framing: building it "will show us where the gaps are in the
@@ -22,15 +22,15 @@ It has no rotation (`RigidBody` holds mass, velocity and a force accumulator),
 no oriented boxes, no contact manifolds, no solver, no joints, no islands and no
 sleeping; breakout's bounce is game code, and horde's ten thousand bodies are
 kinematic sprites with no contacts. The published site runs physics on one
-thread, because GitHub Pages sends no cross-origin isolation headers.
-[36-contact-solver.md](../36-contact-solver.md)'s decisions of 2026-09-15 are
-the plan that closes it.
+thread, because GitHub Pages sends no cross-origin isolation headers. The
+contact solver's decisions of 2026-09-15 were the plan that closes it; rungs 0
+to 5 have been built since (see [simulation notes](../../notes/simulation.md)).
 
 ## Proves
 
-- **Each rung of the solver on the scene built for it** — the rung table in
-  [36-contact-solver.md](../36-contact-solver.md) pairs every rung with a scene
-  here, and the scene's counters are that rung's acceptance.
+- **Each rung of the solver on the scene built for it** — the rung table in the
+  contact solver's plan paired every rung with a scene here, and the scene's
+  counters are that rung's acceptance.
 - **Performance at scale, measured**: the ball pit reports the most live bodies
   the engine holds inside a 60 Hz tick, natively and in the browser, with the
   broadphase, narrow-phase and solver cost of each tick on the page.
@@ -88,8 +88,8 @@ The scenes, in the order the rungs make them real:
 ## Non-goals (hard cap)
 
 Soft bodies, cloth, fracture and fluids — a separate topic each. Vehicles.
-Gameplay. Reduced-coordinate articulations, which
-[36-contact-solver.md](../36-contact-solver.md) declines.
+Gameplay. Reduced-coordinate articulations, which the contact solver declines
+([simulation notes](../../notes/simulation.md)).
 
 **Exempt from sample rule 11**, on lantern's ground. **Rule 9's "no game-code
 collision math" is kept**: the first cut draws no bounce the engine does not
@@ -107,8 +107,8 @@ Each gap is labelled on screen. The pyramid runs alone in a system at the
 default contact settings, so the room's solver time is the pyramid's; the column
 and the dominoes run in a second system at the same default settings, the
 column's cubes asking for twelve substeps with `PhysicsSystem::set_substeps`,
-because at 30 Hz twenty cubes buckle — see
-[36-contact-solver.md](../36-contact-solver.md)'s status.
+because at 30 Hz twenty cubes buckle — see contact-solver rung 2's departures in
+[simulation notes](../../notes/simulation.md).
 
 Milestone 5, Settle, has no room of its own: every room with contacts shows
 awake and sleeping bodies, islands awake and asleep, and the solver's time on
@@ -208,8 +208,9 @@ throughout.
 - Every scripted scene hashes the same on two runs and across thread counts;
   once the trigonometry is pinned, natively and in wasm.
 - The base-20 pyramid stands for ten seconds with the top box's drift under the
-  bound [36-contact-solver.md](../36-contact-solver.md) states, and the base-100
-  pyramid is the benchmark figure.
+  bound contact-solver rung 2 states
+  ([simulation notes](../../notes/simulation.md)), and the base-100 pyramid is
+  the benchmark figure.
 - No tunnelling through the bullet scene's sensor below the stated speed limit.
 - The ball pit's most-bodies figure recorded natively and in the browser.
 - A golden per scene.

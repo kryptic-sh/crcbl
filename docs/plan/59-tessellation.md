@@ -4,9 +4,9 @@ Written 2026-09-15, from a survey of the tree and a research brief on how
 shipped engines tessellate now that the hardware stage is on its way out.
 Nothing in this document is built. Its place in the set is
 [18-render-features.md](18-render-features.md)'s index; the geometry system it
-extends is [25-lod.md](25-lod.md) and stage 3's GPU-driven renderer (its rules
-in [rendering notes](../notes/rendering.md)); the fixture that proves it is
-[sample/25-relief.md](sample/25-relief.md).
+extends is topic 25's cluster DAG and stage 3's GPU-driven renderer (the rules
+of both in [rendering notes](../notes/rendering.md)); the fixture that proves it
+is [sample/25-relief.md](sample/25-relief.md).
 
 **Tessellation here is not a shader stage.** WebGPU has no hull, domain,
 geometry or mesh stage, and its vertex stage may bind only uniforms and
@@ -22,13 +22,13 @@ dices patches in compute and never touches the hardware stage.
 
 Absent, and the tree has most of what it needs:
 
-- **The cluster hierarchy is already crack-free.** [25-lod.md](25-lod.md)'s
-  construction locks each group's outer boundary while simplifying inside it, so
-  any cut through the hierarchy meets itself on identical vertices.
-  `build_cluster_dag` (`crates/crcbl-scene/src/cluster_dag.rs`) and
-  `build_meshlets` (`crates/crcbl-scene/src/meshlet.rs`) build it
-  deterministically, and `crates/crcbl-shaders/tools/cook-clusters.rs` commits a
-  cooked hierarchy with a `--check` mode.
+- **The cluster hierarchy is already crack-free.** Topic 25's construction locks
+  each group's outer boundary while simplifying inside it, so any cut through
+  the hierarchy meets itself on identical vertices. `build_cluster_dag`
+  (`crates/crcbl-scene/src/cluster_dag.rs`) and `build_meshlets`
+  (`crates/crcbl-scene/src/meshlet.rs`) build it deterministically, and
+  `crates/crcbl-shaders/tools/cook-clusters.rs` commits a cooked hierarchy with
+  a `--check` mode.
 - **Quarry is already displacement baked at build time in all but name.**
   `apps/quarry/src/face.rs` bakes a hashed heightfield into a cluster hierarchy,
   and `apps/quarry/src/tile.rs` proves tiles meet across locked borders.
@@ -50,9 +50,9 @@ Absent, and the tree has most of what it needs:
   [rendering notes](../notes/rendering.md)) and
   [43-render-standards.md](43-render-standards.md); the only planned height
   march is the decals' T1 tier ([33-decals.md](33-decals.md)).
-- **The ~2 px triangle floor** [25-lod.md](25-lod.md) specifies for the forward
-  renderer was not found implemented in the cull and draw-generation shaders,
-  and it is the floor tessellation must respect.
+- **The ~2 px triangle floor** topic 25 specified for the forward renderer is
+  not implemented (`docs/backlog.md`, _LOD: the ~2 px triangle floor_), and it
+  is the floor tessellation must respect.
 
 ## The decisions
 

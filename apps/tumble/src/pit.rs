@@ -315,8 +315,9 @@ mod tests {
     }
 
     /// **The pit's cost, stage by stage, once it is full and at rest** — the
-    /// benchmark `docs/plan/36-contact-solver.md` rung 1 asks for. Ignored,
-    /// because a timing means nothing in a debug build or on a loaded machine:
+    /// benchmark contact-solver rung 1 asks for (`docs/notes/simulation.md`).
+    /// Ignored, because a timing means nothing in a debug build or on a loaded
+    /// machine:
     ///
     /// ```text
     /// cargo test -p tumble --release --lib -- --ignored pit_benchmark --nocapture

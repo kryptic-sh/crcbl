@@ -700,7 +700,7 @@ fn the_cube_scene_drew_its_geometry_and_every_material_column(image: &Image) {
     the_clear_does_not_brighten_the_silhouette_in_front_of_it(image);
 }
 
-/// The dunes patch — `docs/plan/25-lod.md`'s cluster DAG — on the backend
+/// The dunes patch — topic 25's cluster DAG — on the backend
 /// `CRCBL_GPU` names, against the reference in `tests/golden/`.
 ///
 /// **This is the scene that says a device with no amplification stage can draw
@@ -6199,7 +6199,7 @@ fn the_cube_scene_draws_the_same_frame_on_every_geometry_path() {
 /// The dunes patch on both geometry paths — see
 /// [`draw_scene_on_every_geometry_path`].
 ///
-/// **This is the two granularities of `docs/plan/25-lod.md` compared in
+/// **This is the two granularities of topic 25 compared in
 /// pixels.** The mesh arm descends the cluster DAG per cluster in its
 /// amplification stage and the lesser arm takes a uniform cut per instance in
 /// the cull pass; both are asserted here to produce the *same frame*, byte for

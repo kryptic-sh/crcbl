@@ -1,6 +1,6 @@
-//! Boxes, run whole: rung 2 of `docs/plan/36-contact-solver.md`, measured on
-//! the scenes its row names — a column, a pyramid, dominoes — and on what a
-//! box's friction should do.
+//! Boxes, run whole: contact-solver rung 2 (`docs/notes/simulation.md`),
+//! measured on the scenes its row names — a column, a pyramid, dominoes — and
+//! on what a box's friction should do.
 //!
 //! As in `contacts.rs`, every bound was measured before it was written down,
 //! and each says what it was measured at. These are properties of the whole

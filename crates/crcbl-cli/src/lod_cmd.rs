@@ -1,6 +1,6 @@
 //! `crcbl lod` — what a mesh's levels are, and where they come from.
 //!
-//! `docs/plan/25-lod.md`'s Tooling row asks for `crcbl lod gen|stats|preview`.
+//! Topic 25's Tooling row asks for `crcbl lod gen|stats|preview`.
 //! Two of the three are here; `preview` is not, and says so rather than being
 //! absent (see [`LodAction::Preview`]).
 //!
@@ -70,7 +70,7 @@ pub fn run(args: &LodArgs) -> Result<Outcome, Failure> {
         return Err(Failure::new(
             "`crcbl lod preview` is not implemented. `stats` and `gen` are host-only; a \
              preview renders each level offscreen and needs the GPU path `crcbl screenshot` \
-             has — see `docs/plan/25-lod.md`",
+             has — see `docs/notes/rendering.md`",
         )
         .with("action", Json::string(LodAction::Preview.name())));
     }

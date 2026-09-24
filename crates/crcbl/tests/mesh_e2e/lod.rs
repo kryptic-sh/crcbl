@@ -1,4 +1,4 @@
-//! `docs/plan/25-lod.md`'s **uniform cut** — one level of the dunes DAG per
+//! Topic 25's **uniform cut** — one level of the dunes DAG per
 //! instance, chosen on the GPU and drawn as ordinary index ranges.
 //!
 //! This is the half of runtime level selection that every backend runs. The
@@ -51,7 +51,7 @@ fn place_dunes(renderer: &mut ForwardRenderer) {
 /// Where the camera stands for the dunes patch: at its near edge, a little way
 /// up, looking along the surface as it recedes.
 ///
-/// `docs/plan/25-lod.md`'s shape for level selection: the patch is centred on
+/// Topic 25's shape for level selection: the patch is centred on
 /// the origin in `x` and `z` with its height on `y`, so an eye at negative `z`
 /// and a small `y` is a viewer standing at one end of a ground plane whose far
 /// edge is tens of times further away than its near one. That ratio is the whole
@@ -90,7 +90,7 @@ fn dunes_camera_back(back: f32) -> Camera {
 /// same rule host-side without needing a camera at all.
 const DUNES_RECEDING_CAMERAS: [f32; 3] = [2.0, 200.0, 1000.0];
 
-/// The host's copy of the state `docs/plan/25-lod.md`'s hysteresis makes the GPU
+/// The host's copy of the state topic 25's hysteresis makes the GPU
 /// carry between frames.
 ///
 /// **The oracle stopped being a function of one camera when hysteresis landed**,
@@ -509,7 +509,7 @@ const DUNES_DRIFT_BRACKET: (f32, f32) = (2.0, 1000.0);
 /// **A camera drifting across a level boundary settles**, on a real device, and
 /// the same camera with the band removed does not.
 ///
-/// `docs/plan/25-lod.md`: "**Hysteresis** on the threshold (switch-up and
+/// Topic 25: "**Hysteresis** on the threshold (switch-up and
 /// switch-down differ) kills boundary flicker." The flicker is the observable
 /// and this counts it, on the uniform cut where the level a frame selected is
 /// something a buffer says outright.

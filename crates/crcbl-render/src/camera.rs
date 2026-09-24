@@ -170,7 +170,7 @@ impl Projection {
     /// How many pixels one unit of length subtends one unit from the eye, in a
     /// viewport `height` pixels tall.
     ///
-    /// `docs/plan/25-lod.md`'s scale factor: the number that carries a frame's
+    /// Topic 25's scale factor: the number that carries a frame's
     /// size and field of view into a screen-space error, so a level's stored
     /// error in world units becomes the pixels its simplification would cost.
     /// [`ClusterSelect::is_drawn`] divides it by the distance to the group's

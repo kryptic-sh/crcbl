@@ -578,7 +578,7 @@ pub struct GltfNode {
 impl GltfNode {
     /// The name the document gave this node, if it gave one.
     ///
-    /// The `name_LOD1` half of `docs/plan/25-lod.md`'s hand-authored precedence
+    /// The `name_LOD1` half of topic 25's hand-authored precedence
     /// reads exactly this; [`crate::lod_resolve`] is where the convention is
     /// spelled out.
     #[inline]

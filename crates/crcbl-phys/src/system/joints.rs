@@ -1,6 +1,6 @@
 //! [`PhysicsSystem`]'s joints and solver groups: rung 5 of
-//! `docs/plan/36-contact-solver.md`. See [`crate::joint`] for the joints and
-//! `crate::contact::group` for the groups.
+//! the contact solver (`docs/notes/simulation.md`). See [`crate::joint`] for
+//! the joints and `crate::contact::group` for the groups.
 
 use crcbl_ecs::Entity;
 use glam::DVec3;

@@ -228,7 +228,7 @@ pub enum Scene {
     /// One pair per column, so neither column's evidence is the other's.
     #[default]
     Cube,
-    /// `docs/plan/25-lod.md`'s dunes patch through [`ForwardRenderer`], seen
+    /// Topic 25's dunes patch through [`ForwardRenderer`], seen
     /// from its own near edge.
     ///
     /// **The scene that proves a device with no amplification stage can draw a
@@ -6160,7 +6160,7 @@ enum UiContent {
 /// **Insertion order is the caller's and it is load-bearing**, so every scene
 /// below places its objects in the order the frame has always held them — the
 /// cube first, then whatever stands on it. The slot an object lands in is
-/// `docs/plan/25-lod.md`'s hysteresis key, and it is what kept the goldens still
+/// topic 25's hysteresis key, and it is what kept the goldens still
 /// when the five demo setters that used to do this were retired.
 ///
 /// The insert cannot fail here: the pool is

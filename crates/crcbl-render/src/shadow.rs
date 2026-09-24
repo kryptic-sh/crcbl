@@ -1096,7 +1096,7 @@ fn map_extent(light: &Light) -> f32 {
 /// How much of the frame's **height** a light's shadow map covers on screen.
 ///
 /// Topic 18's rule — "projected screen influence", the metric family
-/// `docs/plan/25-lod.md`'s level selection uses — with the two refinements this
+/// topic 25's level selection uses — with the two refinements this
 /// module's priority rung needed to make one number answer two questions:
 ///
 /// * **[`map_extent`] rather than the sphere's diameter**, so the number is
@@ -1130,7 +1130,7 @@ fn coverage(light: &Light, camera: &Camera) -> f32 {
 /// holding it.
 ///
 /// The selection's hysteresis, and it is owed for the reason
-/// `docs/plan/25-lod.md`'s was: two lights either side of the cutoff would
+/// topic 25's was: two lights either side of the cutoff would
 /// otherwise swap tiles whenever the camera drifts, and a shadow appearing and
 /// disappearing frame to frame is far worse than the wrong one of two being
 /// shadowed. Applied as a bonus on the incumbent's score, which is the same
@@ -1182,7 +1182,7 @@ const WHOLE_CELL_COVERAGE: f32 = 0.25;
 /// How far a light's [`coverage`] must fall below the threshold that earned it
 /// its tile before the tile halves.
 ///
-/// `docs/plan/25-lod.md`'s "switch-up and switch-down differ", at this module's
+/// Topic 25's "switch-up and switch-down differ", at this module's
 /// other boundary: without a band a light drifting along a threshold halves and
 /// doubles its map every frame, and a shadow whose resolution flickers is worse
 /// than one that is a size too small. A ratio rather than an offset because the

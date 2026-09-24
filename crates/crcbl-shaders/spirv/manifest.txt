@@ -186,7 +186,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = afa7a5e24f6589b3ca077fcf632fa72c7cc2e6be3a3d6f09d7b6a432ea37dc07
+source-sha256 = 80ecb32bdc7cff1fd3229e35aa320197b0c92710b1d05d9ad4704943738a22bd
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
 spirv-sha256 = 9d5e9405a6709f8d922cb52b617d86ce5db77eb3ea3ad3ed62dae996f7aacff9
@@ -232,7 +232,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 1847f6df573b7a39cbe0baf8a310fd3632c89a202d46a6ce8b11315f66267888
+source-sha256 = 4d864b25435485ad24387c12fbac3d9e4249c01a21cec65acb17fd15af2589ad
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
 spirv-sha256 = b4e42d109d885c12e4c19af7a1612dba9d0f79f26f6c1eb6af57e62baa480011
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 031aa296560942f1ad02fbb13cc2b3ea5a9bab3bb96f90f05aca52281cb103ab
+source-sha256 = c3c7f2674ed5709e33ce233ac2686bf014648a897cfb1be4155fecccca8f7c02
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -336,7 +336,7 @@ entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:v
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = c310fd30073fa804975b4743070d83045e4cded8f8c2b6f82d82aacad0a5a678
+source-sha256 = 91cf2935a307c4bd161d8c1cf12692642c99c8affc6e2be6f398b7f25189750e
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
 spirv-sha256 = 2c73475417ac32d73c5cd29d83b29f7a529877c7adfc92326ba7f7a0ff0a2e64

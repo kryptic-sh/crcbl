@@ -691,7 +691,7 @@ pub const CAPACITIES: Capacities = Capacities {
 ///
 /// **Insertion order is the caller's and it is load-bearing**, on
 /// `crcbl::render::scene`'s terms: the slot an object lands in is
-/// `docs/plan/25-lod.md`'s hysteresis key, so a golden compared across two runs
+/// topic 25's hysteresis key, so a golden compared across two runs
 /// needs the two runs to have placed things in the same order.
 const OBJECTS: [(usize, usize); 5] = [
     (PAVEMENT_MESH, GROUND_MATERIAL),

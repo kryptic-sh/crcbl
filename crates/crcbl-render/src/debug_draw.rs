@@ -14,7 +14,7 @@
 //! `docs/plan/43-render-standards.md`'s foundations block is where it was
 //! scheduled: the layer the four owed views —
 //! topic 45's cascade overlay and atlas view,
-//! `docs/plan/25-lod.md`'s cluster bounds and the light list's
+//! topic 25's cluster bounds and the light list's
 //! reach — are drawn through.
 //!
 //! **World-anchored text is not here**, and it is not deferred silently: text

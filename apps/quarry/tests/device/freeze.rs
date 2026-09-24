@@ -38,7 +38,7 @@ const STOPS: usize = 5;
 
 /// Frames rendered at one pose before the cut is read as settled.
 ///
-/// `docs/plan/25-lod.md`'s hysteresis is a per-frame fixed point: the first
+/// Topic 25's hysteresis is a per-frame fixed point: the first
 /// frame of all judges every group against the *expand* budget with no history,
 /// and the ones after it judge an expanded group against the lower hold budget.
 /// So a cut is a fact about a pose only once it has stopped moving, and freezing

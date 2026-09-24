@@ -20,15 +20,15 @@
 //! [`SemiImplicitEuler`] through [`ForceProvider`]. The integrator turns bodies
 //! as well as moving them — torque, an inertia tensor from [`MassProperties`],
 //! the gyroscopic term by the implicit midpoint rule, and the quaternion turned
-//! to match — which is rung 0 of `docs/plan/36-contact-solver.md`. This crate's
-//! `clippy.toml` refuses the platform's transcendental functions: the sine and
-//! cosine it constructs are `crcbl_core::trig`'s, and the three platform calls
-//! still standing — `AtmosphericDrag`'s exponential, the sphere of influence's
-//! power and the Kepler solution's Stumpff functions — each say why where they
-//! are made.
+//! to match — which is contact-solver rung 0 (`docs/notes/simulation.md`). This
+//! crate's `clippy.toml` refuses the platform's transcendental functions: the
+//! sine and cosine it constructs are `crcbl_core::trig`'s, and the three
+//! platform calls still standing — `AtmosphericDrag`'s exponential, the sphere
+//! of influence's power and the Kepler solution's Stumpff functions — each say
+//! why where they are made.
 //! [`SurfaceMaterial`] carries each body's friction and restitution.
 //!
-//! L2 is rungs 1 to 3 of `docs/plan/36-contact-solver.md`, in [`contact`]: a
+//! L2 is contact-solver rungs 1 to 3, in [`contact`]: a
 //! system made with [`PhysicsSystem::with_contacts`] collides spheres,
 //! capsules and boxes through split broadphase trees, analytic manifolds, a
 //! cached separating axis test with clipping for box pairs, and a substepped

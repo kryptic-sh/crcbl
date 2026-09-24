@@ -1066,7 +1066,7 @@ fn lod_json(directory: &Path, args: &[&str]) -> String {
 /// The triangle counts are asserted as a *halving* rather than as literals: the
 /// figures belong to the simplifier and would pin this test to its output, but
 /// "each level is coarser than the one below and roughly half of it" is the
-/// property `docs/plan/25-lod.md` states and the DAG builder targets.
+/// property topic 25 states and the DAG builder targets.
 #[test]
 fn lod_stats_reports_a_generated_chain_and_the_dag_behind_it() {
     let temporary = TempDir::new("lod-stats");
@@ -1456,7 +1456,7 @@ fn lod_gen_leaves_an_existing_artifact_alone_without_force() {
     );
 }
 
-/// `preview` is in `docs/plan/25-lod.md` and is not implemented. It fails saying
+/// `preview` is in topic 25 and is not implemented. It fails saying
 /// which of the three is missing, rather than reading as a typo.
 #[test]
 fn lod_preview_is_refused_as_missing_and_not_as_unknown() {

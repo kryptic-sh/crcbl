@@ -101,7 +101,7 @@ pub(crate) const MESH_SECONDS: f32 = 0.35;
 /// with the handle that names it.
 ///
 /// **Insertion order is the caller's and it is load-bearing** — the slot an
-/// object lands in is `docs/plan/25-lod.md`'s hysteresis key — so every scene in
+/// object lands in is topic 25's hysteresis key — so every scene in
 /// this suite places its objects in the order the frame has always held them:
 /// the cube first, then whatever stands beside it. That is what kept the goldens
 /// still when the five demo setters that used to do this were retired.
@@ -1406,7 +1406,7 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
 /// Where the camera stands for the dunes patch: at its near edge, a little way
 /// up, looking along the surface as it recedes.
 ///
-/// `docs/plan/25-lod.md`'s shape for per-cluster selection, and the arrangement
+/// Topic 25's shape for per-cluster selection, and the arrangement
 /// `crcbl_shaders::cluster_dag`'s `a_receding_patch_draws_its_near_end_finer
 /// _than_its_far_end` reads its histograms from: the patch is centred on the
 /// origin in `x` and `z` with its height on `y`, so an eye at negative `z` and a
@@ -1567,7 +1567,7 @@ fn dunes_distant_camera() -> crcbl_render::Camera {
     }
 }
 
-/// The host's copy of the state `docs/plan/25-lod.md`'s hysteresis makes the GPU
+/// The host's copy of the state topic 25's hysteresis makes the GPU
 /// carry between frames.
 ///
 /// **The oracle stopped being a function of one camera when hysteresis landed**,
@@ -1650,7 +1650,7 @@ fn dunes_cut(
 /// **The GPU descends the DAG to the cut the host rule says**, and one cut of
 /// one mesh draws its near end finer than its far end.
 ///
-/// `docs/plan/25-lod.md`'s runtime selection, and the check a golden cannot
+/// Topic 25's runtime selection, and the check a golden cannot
 /// make: a frame whose every cluster came from one level is an entirely
 /// plausible picture and matches any golden blessed from it. So this reads back
 /// what the amplification stage actually chose and asserts three things about
@@ -2035,7 +2035,7 @@ fn the_gpu_descends_a_scaled_instance_at_the_size_it_draws() {
 /// **The shadow cascades descend to a coarser cut than the colour pass**, from
 /// one frame, read out of both passes' own buffers.
 ///
-/// `docs/plan/25-lod.md`'s "**Shadow LOD bias**: shadow-pass culling (topic 18,
+/// Topic 25's "**Shadow LOD bias**: shadow-pass culling (topic 18,
 /// same shader) selects +1/+2 coarser levels — casters are cheap where it never
 /// shows." The bias is `crcbl_render::SHADOW_LOD_BIAS`, applied to both budgets
 /// and to nothing else: the cascades select from the **camera's** eye at the
@@ -2391,7 +2391,7 @@ fn selected_dunes_level(
 }
 
 /// **The level the uniform cut picks is the finest level the per-cluster cut
-/// draws** — the two granularities of `docs/plan/25-lod.md`'s runtime selection
+/// draws** — the two granularities of topic 25's runtime selection
 /// agreeing modulo detail, measured rather than argued.
 ///
 /// The plan gives the two indirect tails a uniform cut — "every cluster at one

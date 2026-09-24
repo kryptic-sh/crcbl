@@ -11,7 +11,7 @@
 //! # Why the line is here
 //!
 //! Everything on this side is either sized by what one camera sees or carries
-//! one camera's history from a frame to the next. `docs/plan/25-lod.md`'s
+//! one camera's history from a frame to the next. Topic 25's
 //! hysteresis lives in [`DrawGen::group_state`], so two cameras sharing one
 //! generator would each undo the other's cut. Auto-exposure reads the previous
 //! slot's measurement, and [`View::previous_view_projection`] is where the
@@ -580,7 +580,7 @@ pub(super) struct View {
     /// host-side without re-deriving it from the camera.
     ///
     /// Pixels per unit, the budget a group starts expanding over, and the budget
-    /// it is held down to — `docs/plan/25-lod.md`'s hysteresis, and
+    /// it is held down to — topic 25's hysteresis, and
     /// [`LOD_HOLD_RATIO`] is what puts the third below the second.
     pub(super) lod_params: [f32; 3],
     /// Topic 18's light list and froxel grid, and the compute pass between them.
@@ -823,7 +823,7 @@ impl View {
         rollback.draws = Some(draws);
         service();
 
-        // `docs/plan/25-lod.md`'s observable: one word per resident cluster,
+        // Topic 25's observable: one word per resident cluster,
         // holding the cut the descent chose. Empty where there is no
         // amplification stage, which is the same condition CLUSTER_SELECTION_BINDING exists
         // under — and the two cannot disagree, because this vector is what
@@ -1336,7 +1336,7 @@ impl View {
         // The same matrix again for the ground grid, whose pass `add_passes`
         // records and which has no camera to ask.
         self.camera_view_proj = view_projection;
-        // `docs/plan/25-lod.md`'s two selection numbers, from this frame's
+        // Topic 25's two selection numbers, from this frame's
         // viewport and this frame's camera. An orthographic projection has no
         // distance falloff for the metric to divide by, so it selects under a
         // budget nothing satisfies and draws the base level whole — see
@@ -1730,7 +1730,7 @@ impl View {
 
         // The camera and the two selection numbers go to the cull/draw-argument
         // pair as well as into the block above, and they are handed over rather
-        // than re-derived: `docs/plan/25-lod.md`'s uniform cut runs there, the
+        // than re-derived: topic 25's uniform cut runs there, the
         // mesh path's per-cluster descent runs off the block, and a frame that
         // selected detail against one camera while drawing with another is a
         // difference nothing in the frame can see.
@@ -1834,7 +1834,7 @@ impl View {
             }
             None => (self.draws.add_passes(graph, slot, instance_count), None),
         };
-        // `docs/plan/25-lod.md`'s record of the view's cut. Written by exactly
+        // Topic 25's record of the view's cut. Written by exactly
         // one mesh pass of this view, so what the graph orders here is this
         // frame's write against the next frame's use of the same slot.
         let selection = self

@@ -1,4 +1,4 @@
-//! Joints, run whole: rung 5 of `docs/plan/36-contact-solver.md` — each
+//! Joints, run whole: contact-solver rung 5 (`docs/notes/simulation.md`) — each
 //! joint type holding what it holds, its limits and motors reaching their
 //! targets, breaking at its threshold, a gapped Newton's cradle passing its
 //! momentum along, a plank bridge sagging as a hanging chain says it should,

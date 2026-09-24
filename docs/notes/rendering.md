@@ -137,6 +137,206 @@ correction". Those numbers resolve here:
   renderer" decision protected still holds: one pass in the same graph with the
   same computed barriers.
 
+## What the deleted 25-lod plan left behind (2026-09-24)
+
+Record; the built part of the plan is the QEM simplifier
+(`crcbl_scene::simplify`), the cluster DAG builder
+(`crcbl_scene::cluster_dag::build_cluster_dag`, with `crcbl_scene::lod`'s chain
+kept as the proof of failure), the cooked dunes artifact
+(`crates/crcbl-shaders/tools/cook-clusters.rs`,
+`crates/crcbl-shaders/clusters/dunes.dag`, `crcbl_shaders::cluster_dag`),
+app-built DAGs through `crcbl_render::scene::Geometry::Dag` (`apps/quarry`),
+per-cluster selection on `MeshShader` and the uniform cut on both indirect tails
+with per-group hysteresis (`draw_gen.slang`, `mesh_cluster.slang`,
+`crcbl_shaders::cluster_select`, `crcbl_shaders::level_select`), the shadow LOD
+bias (`SHADOW_LOD_BIAS`), hand-authored precedence at import
+(`crcbl_scene::lod_resolve`), `crcbl lod stats|gen`, and the LOD tint,
+screen-error heatmap and frozen-selection debug views. What it left open is in
+`docs/backlog.md` under _Topic 25's MVP is closed; what remains, and one
+coverage hole it found_ and its entries, _LOD: joint-weight-aware collapse for
+skinned meshes_, _Three of the four QEM properties quarry claims to prove are
+not implemented_, _What `crcbl lod` left owed_ and _What `crcbl_scene::simplify`
+owes_.
+
+Code cites the plan as "topic 25's hysteresis", "topic 25's uniform cut", "topic
+25's observable", by a section's name, or by a step of the build. Those resolve
+here:
+
+| Citation                                               | What it specified                                                                                                                                         |
+| ------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The cluster DAG, "Why a chain cannot work"             | A mesh is a DAG of clusters, not a chain of levels, because independently simplified levels crack where they meet                                         |
+| The build, steps 1 to 5                                | Cluster; group by shared-edge adjacency; lock the group's outer boundary and simplify to about half; re-split; regroup                                    |
+| Why every cut is crack-free                            | A cut's level boundaries were group boundaries in the coarser level, locked when it was simplified; error carried per group                               |
+| How a DAG reaches the renderer (the boundary to cross) | The cooked artifact in `crcbl-shaders`, committed and checked, and the generator as an example                                                            |
+| What the fallback paths do, the uniform cut            | `IndirectCount` and `IndirectPerBatch` draw every cluster at one depth, which is a chain level                                                            |
+| Hand-authored levels keep their precedence             | Hand levels first and verbatim, generated levels fill the gaps, and no silent substitution                                                                |
+| The chain, "LOD chains", `name_LOD1`                   | The pre-DAG chain of ratio levels (`build_lod_chain`, `DEFAULT_LOD_RATIOS`) and the glTF naming convention                                                |
+| Auto-LOD: QEM simplification                           | Garland–Heckbert collapse, attribute-aware, with caller-locked edges, the link condition and a recorded `max_error`                                       |
+| The attribute slice                                    | UV and normal seams, material boundaries and skinning weights carried through a collapse (unbuilt)                                                        |
+| Runtime selection, the descent, the metric             | Projected screen-space error against a pixel budget, descending from the root, with the granularity following the path                                    |
+| The two granularities                                  | Per cluster in the amplification stage on `MeshShader`; one uniform cut per instance in the cull pass otherwise                                           |
+| Hysteresis, "switch-up and switch-down differ"         | Two budgets, a band between them, and the history per (instance, group)                                                                                   |
+| The three selection tables, the selection numbers      | The host-written selection records (`crcbl_shaders::level_select`'s `MeshLevels` and `LevelGroup` among them), and the frame's scale and two budget lanes |
+| The observable, the record of a cut                    | The per-view, per-cluster readback of which clusters were drawn, the only thing that shows a cut                                                          |
+| Shadow LOD bias                                        | A positive budget multiplier per pass, selecting from the camera's eye                                                                                    |
+| The ~2 px floor                                        | No level whose triangles fall under about two pixels (unbuilt)                                                                                            |
+| Global LOD bias                                        | A quality setting, and the browser tier's default (unbuilt)                                                                                               |
+| Far ranges                                             | HLOD per sector, then octahedral impostors (unbuilt)                                                                                                      |
+| Tooling, Testing                                       | The debug views, stats rows, LOD panel, `crcbl lod gen\|stats\|preview`, golden meshes and the error-bound property test                                  |
+
+**The DAG replaced the chain (locked 2026-08-12).** A chain simplifies each
+level from the base independently and clusters each on its own, so two levels'
+cluster boundaries have no relationship: drawing one cluster at LOD0 beside its
+neighbour at LOD2 puts two differently decimated versions of one edge side by
+side, and the surface opens. That is what "simplify each level independently"
+means, not a defect of one implementation — `crcbl_scene::lod::build_lod_chain`
+is the chain that proved it. Locking every cluster boundary is not the fix
+either: boundaries are everywhere, so nothing would simplify. **The build is
+group–lock–simplify–resplit**, Nanite's shape (Karis, SIGGRAPH 2021): (1)
+cluster the base mesh with `crcbl_scene::meshlet`, the leaves; (2) group
+neighbouring clusters a handful at a time by partitioning the adjacency graph,
+**where adjacent means sharing an edge, not nearly touching**; (3) lock the
+group's outer boundary and simplify its interior to roughly half its triangles;
+(4) re-split into fresh clusters, the parents of every cluster in the group; (5)
+repeat, grouping differently each level so an edge locked at one level is
+interior at the next.
+
+**Every cut is crack-free by construction, and that is the property to test.**
+Wherever two detail levels meet across a cut, the boundary was a group boundary
+in the coarser level, locked when it was simplified. **Error is carried per
+group, not per cluster**: a group simplifies as a unit, so a cut drawing one of
+its parents while descending into another would tear along a boundary the group
+never locked. A group's error is the worst vertex charge over its parents,
+raised to the worst error of any cluster that went into it — monotone up the
+DAG, which is what makes a cut well-defined. Detail varies across a level
+because groups differ, never within one.
+
+**How a DAG reaches the renderer: a cooked artifact, mirroring the shaders.**
+`crcbl-render` cannot see `crcbl-scene` (that would pull `gltf` into the
+renderer) and `crcbl-shaders` has no dependencies by design. So a tool generates
+the DAG and writes it into `crcbl-shaders`, the artifact is committed, and a
+`--check` mode regenerates and compares. **When the real asset pipeline arrives
+it replaces the generator, not the consumer.** Rejected as a delivery mechanism,
+now and for any later one: generating the data from a dev-dependency at test
+time, which gives tests data and the shipping path none; and a conversion in a
+crate that sees both, which the renderer still cannot reach. **The generator is
+an example because of the dev-dependency cycle**: `crcbl-scene` depends on
+`crcbl-shaders`, so a normal dependency back is refused and a `[[bin]]` cannot
+see dev-dependencies, while an example can; `cargo build -p crcbl-shaders` still
+builds that crate alone. The hand-written `cube_clusters`, `pyramid_clusters`
+and `open_box_clusters` are test fixtures, not what the renderer's clusters are.
+
+**The fallback paths are a restriction of the same structure.** `IndirectCount`
+and `IndirectPerBatch` select a **uniform cut** — every cluster at one depth,
+exactly a chain level — drawn as ordinary index ranges: same hierarchy, same
+metric, one decision per instance instead of per cluster. One builder, not two,
+and a visible quality difference on the fallback paths that is an honest one.
+
+**Hand-authored first, generated as fallback (locked).** Import resolves each
+level in order: a hand-authored level (glTF nodes named `name_LOD1`,
+`name_LOD2`, or the `MSFT_lod` extension) is used verbatim and always wins; a
+missing level is generated. **Hand levels are never fed to the generator**, and
+a fully hand-authored chain is never touched by it. **A hand level is a
+whole-mesh level, so a mesh with any hand level is selected per instance even on
+the `MeshShader` path** — an artist supplies whole-mesh geometry, not a
+crack-free cluster hierarchy. **No silent substitution**: the import report
+(`crcbl lod stats`, a future LOD panel) says which level came from where.
+**There is no per-asset ratio override**: the chain era's "~50/25/12/6 %,
+per-asset overridable in sidecar meta RON" described a generator that took a
+ratio list, and the DAG's levels halve structurally, so reinstating one changes
+`build_cluster_dag`'s signature; anything owed there belongs with the sidecar
+and `AssetId` item in `docs/backlog.md`. **Skinned meshes** build the hierarchy
+over the bind pose and GPU skinning skins whichever clusters were selected.
+
+**The simplifier's rules (Garland–Heckbert, 1997).** Tests use hand-derived
+values, not values recorded from the simplifier's own output.
+
+- **A caller-supplied locked-edge set is the interface the DAG needs**, and what
+  separates this from a plain decimator: the simplifier infers topological
+  borders (an edge used by one face) itself, but a group's outer boundary is
+  interior to the mesh and only the caller knows it.
+- **The link condition** — an edge collapses only when its endpoints share
+  exactly two neighbours — or a closed mesh gains a four-face edge and stops
+  being closed.
+- **`max_error` is a quadric error, not a certified Hausdorff bound**; the
+  property test samples a lower bound on the distance and certifies nothing
+  finer.
+- **Collapse order needs a strict total order**, because a cost keyed on `f32`
+  has ties and tie order decides the result; same input, identical output.
+- **Flip rejection has to be global as well as per collapse**: a face can turn
+  all the way round under a sequence of individually legal collapses.
+- **Attribute awareness is the risk auto-LOD tools live or die by**: UV and
+  normal seams constrained, material boundaries preserved, weights carried —
+  with golden meshes, and a hand level as the escape hatch so no asset is ever
+  blocked.
+
+**Runtime selection.** Projected screen-space error — a group's error scaled by
+distance and field of view — is compared with a pixel budget, descending from
+the root while it exceeds the budget. It is the same maths and thresholds on
+every `GeometryPath`, at zero CPU cost. **A parent's error is at least its
+children's and its sphere contains theirs**, so the descent has one stopping
+point per branch and no cluster is drawn under a drawn ancestor.
+
+- **Hysteresis history is per group, and that is a soundness requirement, not a
+  saving.** A group expands above the budget and keeps expanding until its error
+  falls to a fraction of it (`ForwardRenderer::lod_hold_ratio`). A cut is a
+  cover only while expansion is monotone up the DAG, and per-cluster history can
+  leave a child collapsed under an expanded parent: a hole. From an all-zero
+  start every later frame is monotone by induction. The key is the instance
+  slot, which is why a slot's reuse matters to goldens.
+- **The importance metric is not a shared helper (tried 2026-08-31).**
+  `GroupCost::projected_error` divides by the distance to the sphere's
+  **surface** and answers infinity inside it, a worst-case error;
+  `shadow::coverage` divides by the distance to the light's **centre**, an
+  angular radius. One helper would need a flag choosing the denominator. Only
+  the band's number is shared — `shadow::LEVEL_HOLD_RATIO` is the same fifth
+  `lod_hold_ratio` opens, and each names the other.
+- **The ~2 px floor exists because forward shading of sub-pixel triangles costs
+  quads.** A forward renderer shades a full 2×2 quad for every triangle a pixel
+  touches, so triangles under a pixel cost four fragments each; the forward rule
+  refuses the visibility buffer that fixes that, so the floor stands in for it.
+- **Transitions are an instant swap**: correct thresholds make a pop sub-pixel
+  by definition, because the error metric is the pop's size.
+- **Graphics-only (locked): LOD never touches simulation.** Colliders are full
+  fidelity at every distance and setting — physics, navmesh, audio occlusion and
+  every sim query. It is structural: colliders live server-side and selection is
+  a client render concern, so a client's bias cannot reach the sim (two players
+  at different settings play one physical world, and the tick hash never depends
+  on anyone's graphics).
+- **HLOD and impostors get their own passes** and never complicate the selection
+  shader.
+
+**The shadow LOD bias is one positive budget multiplier per pass, not "+N
+levels"** (settled 2026-08-13). The descent has no level parameter, and
+level-to-level error ratios are a property of the mesh — on the dunes DAG level
+0→1 steps about 2.4×, level 2→3 about 8.8×, and the top three levels report the
+same error — so "+2 levels" would mean three things on one mesh. **Cascades
+select from the camera's eye**: a coarser caster costs a shadow edge displaced
+by the group's error, seen by the camera at the camera's distance, so the budget
+is in camera pixels. The light is the eye only for the amplification stage's
+normal-cone test. **A per-cascade factor is sound; a per-cluster or per-group
+fudge is not**: monotonicity needs one constant over a pass, and two groups on
+one branch judged against different budgets is a hole. With a factor above one
+and both histories starting empty, the shadow cut is a subset of the camera's.
+
+**Considered and declined:**
+
+- **A chain of independently simplified levels** — cracks, as above.
+- **Locking every cluster boundary** — nothing would simplify.
+- **Grouping by proximity** — clusters that nearly touch across a gap must not
+  be grouped.
+- **Per-cluster error or per-cluster hysteresis history** — both tear a cut.
+- **Generating DAGs at test time from a dev-dependency, or converting in a crate
+  that sees both** — neither gives the shipping path data.
+- **Feeding hand-authored levels to the generator, or cutting between them per
+  cluster** — they share no locked boundaries.
+- **A per-asset ratio override on the DAG generator.**
+- **A shared importance-and-hysteresis helper** across LOD and the shadow atlas.
+- **The shadow bias as "+N levels", or as a per-cluster or per-group factor.**
+- **Light-as-eye for cascade selection** — what looked like it was the camera's
+  eye pushed along the sun per cascade, asking two cascades two different
+  questions about one caster.
+
 ## What the deleted 44-lighting plan left behind (2026-09-24)
 
 Record; the built part of the plan is clustered forward (`light_cluster.slang`,
@@ -454,11 +654,11 @@ Code cites the plan's numbered **decisions** and its named **rungs** — "topic
 - **Selection by screen influence, the same metric family as LOD**, so there is
   one notion of "how much this matters on screen". Since 2026-08-31 it is
   `shadow::coverage` with `HOLD_RATIO` on the ranking and `LEVEL_HOLD_RATIO` on
-  the tile size. It is deliberately **not** `docs/plan/25-lod.md`'s helper —
-  `GroupCost::projected_error` divides by the distance to a sphere's surface and
-  `coverage` by the distance to a light's centre —
-  `docs/plan/43-render-standards.md`'s row (f) says why; the two constants name
-  each other.
+  the tile size. It is deliberately **not** topic 25's helper (see _What the
+  deleted 25-lod plan left behind_ above) — `GroupCost::projected_error` divides
+  by the distance to a sphere's surface and `coverage` by the distance to a
+  light's centre — `docs/plan/43-render-standards.md`'s row (f) says why; the
+  two constants name each other.
 - **A light that gets no tile still lights and does not occlude**, which makes
   the budget a quality knob rather than a correctness cliff. Spot was built
   before point because a point light is six of a spot plus face selection.
@@ -3198,9 +3398,9 @@ each say the order is load-bearing where a reader will find it.
 
 Whether a different order would actually move a frame is **not measured**. The
 visible list is filled by an atomic, so the draw order is not the pool's order
-to begin with; but the instance index is `docs/plan/25-lod.md`'s hysteresis key
-(see the entry above), and a slice whose whole obligation was that no golden
-moves was not the place to find out.
+to begin with; but the instance index is topic 25's hysteresis key (see the
+entry above), and a slice whose whole obligation was that no golden moves was
+not the place to find out.
 
 ### A renderer nobody placed anything in records fewer dispatches
 

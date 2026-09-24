@@ -817,7 +817,7 @@ fn an_instance_hidden_from_the_camera_is_culled_before_its_bound_is_tested() {
 /// **The empty buckets are the sharpest numbers here**, not gaps. Only the cube
 /// and the pyramid are in this scene, so every bucket after theirs — the open
 /// box's, and one per level of the dunes patch's DAG where the path takes
-/// `docs/plan/25-lod.md`'s uniform cut — has nothing to add to `SENTINEL`, and a
+/// topic 25's uniform cut — has nothing to add to `SENTINEL`, and a
 /// clearing pass that never ran leaves them holding the poison undisguised.
 ///
 /// How many of them there are is read off the arguments rather than written

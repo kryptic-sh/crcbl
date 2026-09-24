@@ -28,7 +28,7 @@
 //! That doc's scope section says the zone is "modular hand-authored pieces
 //! assembled per seed", and gives the reason: a wall segment whose level-of-
 //! detail chain breaks its own edges is visible the moment the next segment no
-//! longer meets it, which is what `docs/plan/25-lod.md`'s border locking is for.
+//! longer meets it, which is what topic 25's border locking is for.
 //! Slice 1 assembles a **fixed** layout rather than a seeded one — the pieces
 //! are what the border-locking argument needs, and a seed is what a later slice
 //! adds over them. `docs/backlog.md` carries that.
@@ -258,7 +258,7 @@ pub fn tile_centre(col: usize, row: usize) -> DVec3 {
 /// Every tile, in row-major order — the order [`place`] inserts instances in.
 ///
 /// **Insertion order is load-bearing** on `crcbl::render::scene`'s terms: the
-/// slot an object lands in is `docs/plan/25-lod.md`'s hysteresis key, so two
+/// slot an object lands in is topic 25's hysteresis key, so two
 /// runs have to place things in the same order. One iterator, walked once by
 /// both [`place`] and [`world`], is what makes that true by construction.
 pub fn tiles() -> impl Iterator<Item = (usize, usize, Cell)> {

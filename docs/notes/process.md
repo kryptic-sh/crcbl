@@ -268,7 +268,7 @@ Stated plainly. "Not reviewed" is the honest line.
   measured_) is likewise carried forward.** The 233-pixel figure, the cluster
   counts, the cone-rejection result: all read, none re-run.
 - **I did not read** `docs/plan/ROADMAP.md`, any of `docs/plan/*.md` outside the
-  sample directory beyond spot checks (`08-editor.md` existence, `25-lod.md`
+  sample directory beyond spot checks (`08-editor.md` existence, the LOD plan
   named by `simplify.rs`, `26-prediction.md`, `24-navigation.md`,
   `20-particles.md`), or `docs/backlog.md` in full — it is very large and I read
   only the passages my greps landed in. So an entry here may duplicate one

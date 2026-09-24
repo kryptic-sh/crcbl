@@ -270,7 +270,7 @@ halve or stall.
 `gen` builds one mesh primitive's cluster DAG headlessly and writes it as a
 cooked .dag artifact, the format `crates/crcbl-shaders/clusters/*.dag` is in.
 
-`preview` — offscreen renders per level, from `docs/plan/25-lod.md` — is not
+`preview` — offscreen renders per level, owed in `docs/backlog.md` — is not
 implemented. It is recognized so that asking for it fails saying so rather than
 looking like a typo.
 

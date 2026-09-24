@@ -1,5 +1,5 @@
-//! Joints in the Soft Step: rung 5 of `docs/plan/36-contact-solver.md`, L3's
-//! "a joint is a constraint with a different Jacobian".
+//! Joints in the Soft Step: contact-solver rung 5 (`docs/notes/simulation.md`),
+//! L3's "a joint is a constraint with a different Jacobian".
 //!
 //! ```text
 //!   step:  collide ─▶ joint events ─▶ islands ─▶ solve ─────────────────────▶ breaks

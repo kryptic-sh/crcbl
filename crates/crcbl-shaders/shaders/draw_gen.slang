@@ -15,7 +15,7 @@
 //
 // # Level of detail, for the paths with no amplification stage
 //
-// `docs/plan/25-lod.md`'s "Runtime selection" splits by geometry path: the mesh
+// Topic 25's "Runtime selection" splits by geometry path: the mesh
 // path descends a mesh's cluster DAG per cluster in its amplification stage,
 // and "on `IndirectCount` and `IndirectPerBatch` it runs in the cull compute
 // pass and takes a **uniform cut** — every cluster at one depth, which is
@@ -209,7 +209,7 @@
 //
 // * `tables` is every host-written table this pass reads — the bucket table and
 //   its per-bucket modes, the per-bucket cluster counts, and
-//   `docs/plan/25-lod.md`'s three selection tables — as one flat array of words. **The cost is the typed
+//   topic 25's three selection tables — as one flat array of words. **The cost is the typed
 //   `StructuredBuffer`**: `LevelGroup`'s five floats are read back through
 //   `asfloat`, and the word each field lands on is a named constant below
 //   rather than a struct member Slang lays out. `crcbl_shaders::level_select` is
@@ -592,7 +592,7 @@ struct DrawGenParams
     /// cut too coarse and a cut exactly right have the same silhouette, which
     /// is what a screen-space error budget means.
     float4 camera_position;
-    /// `docs/plan/25-lod.md`'s selection numbers: `x` is how many pixels one
+    /// Topic 25's selection numbers: `x` is how many pixels one
     /// unit of length subtends one unit from the eye, `y` is the pixel budget an
     /// unexpanded group's projected error must exceed to expand, and `z` is the
     /// budget an already-expanded group is held down to before it collapses
@@ -619,7 +619,7 @@ struct DrawGenParams
 ConstantBuffer<DrawGenParams> gen D3D12_REGISTER(b0, space0);
 
 /// The instance array, read for `GpuInstance::mesh` and `transform`: which
-/// bucket an instance scatters into, and — since `docs/plan/25-lod.md`'s uniform
+/// bucket an instance scatters into, and — since topic 25's uniform
 /// cut runs here — where its mesh's group spheres are in world space.
 [[vk::binding(1, 0)]]
 StructuredBuffer<GpuInstance> instances D3D12_REGISTER(t1, space0);
@@ -750,7 +750,7 @@ RWStructuredBuffer<Atomic<uint> > args D3D12_REGISTER(u6, space0);
 [[vk::binding(7, 0)]]
 RWStructuredBuffer<Atomic<uint> > counts_and_mesh_args D3D12_REGISTER(u7, space0);
 
-/// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance, group),
+/// Topic 25's hysteresis state: one word per (instance, group),
 /// `1` where that instance had that group expanded last frame.
 ///
 /// **The one place either geometry path's expansion is decided**, and the reason
@@ -937,7 +937,7 @@ static const float INSIDE_THE_SPHERE = 3.4028235e38;
 
 /// One group's simplification cost in **pixels**, from an eye at `eye`.
 ///
-/// `docs/plan/25-lod.md`'s metric and the whole of it. The error is a length in
+/// Topic 25's metric and the whole of it. The error is a length in
 /// the mesh's own units, `pixels_per_unit` is how many pixels one such unit
 /// subtends one unit from the eye, and the distance is measured to the *near
 /// side* of the group's sphere rather than to its centre — so what comes out
@@ -1005,7 +1005,7 @@ float max_stretch(float3x3 basis)
 /// Whether a group is **expanded** — its children drawn rather than its parents
 /// — from the eye this frame selects at, given whether it was last frame.
 ///
-/// `docs/plan/25-lod.md`'s hysteresis, and
+/// Topic 25's hysteresis, and
 /// `crcbl_shaders::cluster_select::group_is_expanded` in Slang: [`projected_error`]
 /// against `gen.lod_params.y` to *start* expanding, against `gen.lod_params.z`
 /// to *keep* expanding, and the previous answer deciding between them. Equal
@@ -1148,7 +1148,7 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     // `ENTRY_INDEX_MASK` — and the index is what everything below names.
     uint instance_index = entry & ENTRY_INDEX_MASK;
     GpuInstance instance = instances[instance_index];
-    // **`docs/plan/25-lod.md`'s uniform cut, and the one decision this pass
+    // **Topic 25's uniform cut, and the one decision this pass
     // makes about detail.** The instance names level 0 of its mesh — that is
     // what the cull pass read a bounding box out of — and the level selected
     // here names the mesh that actually draws, which the bucket table then

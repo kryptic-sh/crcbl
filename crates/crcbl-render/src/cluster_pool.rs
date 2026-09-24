@@ -7,7 +7,7 @@
 //! **corner** array is `u8` corner indices packed four to a word; and the
 //! **selection** array is one
 //! [`crcbl_shaders::cluster_select::ClusterSelect`] per cluster — the two groups
-//! `docs/plan/25-lod.md`'s descent tests, and which level of a DAG the cluster's
+//! topic 25's descent tests, and which level of a DAG the cluster's
 //! vertices live in. Every one of those shapes is decided by the record, not
 //! here — see those modules, which are where both sides of the packing are
 //! written.

@@ -89,7 +89,7 @@ it is built:
   §2, and the four-`float4` layout is never a cooked format at all.
 - **Two streams in the file, as in the pool**: positions alone, then attributes,
   each a contiguous run, so the loader uploads each to its own buffer without
-  repacking. Cluster and LOD tables (25-lod.md) sit beside them and index the
+  repacking. Cluster and LOD tables (topic 25) sit beside them and index the
   position stream.
 - **The migration rung this section once deferred** ("no migration machinery in
   MVP") is not owed before 1.0 at all: a v0 file that no longer loads is

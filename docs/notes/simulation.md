@@ -383,6 +383,229 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
 
+## What the deleted 36-contact-solver plan left behind (2026-09-24)
+
+Record; the built part of the plan is rungs 0 to 5 of its ladder in
+`crcbl-phys`: rotation and materials (`mass.rs`, `material.rs`,
+`crcbl_core::trig`), the split broadphase (`contact/broadphase.rs`), analytic
+and box-box manifolds (`contact/manifold.rs`, `contact/manifold/box_box.rs`),
+the Soft Step solver (`contact/solver.rs`), islands and sleep
+(`contact/island.rs`), sweeps (`contact/sweep.rs`), the static triangle mesh
+(`mesh.rs`, `contact/manifold/triangle.rs`), five joint kinds with breaking and
+per-group substeps (`joint.rs`, `contact/joint/`, `contact/group.rs`), and
+beside the ladder compound bodies (`compound_shape.rs`), query layers and
+`PhysicsSystem::put_to_sleep`; `apps/tumble` has a room for each rung. What it
+left open is in `docs/backlog.md` under _Contact solver L2/L3: rungs 0 to 5
+built, and what they left_, _Contact solver rung 6: colouring, the wide kernel
+and parallel stages_, _`crcbl phys stack --check` and the solver's profiler
+rows_, _Physics debug suite: draw, scrub, query visualiser_ and _Buoyancy and
+wind force providers_ (rung 7). It specified topic 5's L2 (contacts) and L3
+(constraints), which ragdolls, grenades, dropped loot and vehicles need.
+
+Code cites the plan as "contact-solver rung 3", "contact-solver decision 4" or
+by a section's name. Those resolve here:
+
+| Citation              | What it specified                                                                                                                              |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| Rung 0, Spin          | Inertia tensors, quaternion integration and the gyroscopic step; dense body sets; friction and restitution from materials; pinned trigonometry |
+| Rung 1, Pachinko      | Analytic sphere and capsule manifolds; split trees, move buffer, pair set; the Soft Step with warm start, speculative contacts, restitution    |
+| Rung 2, Tower         | Boxes and hulls: cached SAT, clipping, four-point reduction, feature ids; GJK for round shapes against hulls; centroid and twist friction      |
+| Rung 3, Settle        | Persistent islands, lazy splitting, island sleep and the wake rules                                                                            |
+| Rung 4, Bullets       | Fast-body sweeps against statics, the bullet flag, dropped time                                                                                |
+| Rung 5, Bridge        | Joints, limits, motors, breaking and extra substeps per group; the static triangle mesh with active edges                                      |
+| Rung 6, Pit (unbuilt) | Persistent colouring with an overflow colour, the wide kernel and its scalar twin, staged `crcbl-jobs` execution, contact recycling            |
+| Rung 7, Pool and gale | Buoyancy and wind force providers (unbuilt)                                                                                                    |
+| Decision 1            | The solver: Soft Step, and its parameters                                                                                                      |
+| Decision 2            | The narrow phase: analytic pairs, SAT for boxes and hulls, no EPA                                                                              |
+| Decision 3            | The broadphase: split, fattened SAH trees                                                                                                      |
+| Decision 4            | Islands for sleep, colours for solving; the wake rules                                                                                         |
+| Decision 5            | Continuous collision: speculative contacts, then single-pass sweeps                                                                            |
+| Decision 6            | Joints: impulse joints in the same solver                                                                                                      |
+| Decision 7            | Precision: `f64` positions and an `f32` solver interior                                                                                        |
+| Decision 8            | Data layout: dense and generational, not hash maps                                                                                             |
+| Decision 9            | Tests grow to the benchmarks' size                                                                                                             |
+| Materials, `combine`  | Friction and restitution on the collider property block that acoustics, nav and ballistics read, with a per-property combine rule              |
+| L3 joints             | Fixed, hinge, swing-twist cone, slider, distance and a 6-DOF joint with per-axis lock, limit and motor; breakable by force                     |
+| "Before the stairs"   | Rung 5's static triangle mesh, which tumble's ragdoll stairs need                                                                              |
+| Debug + tooling       | Debug draw of contacts, ids, islands, sleep and joint frames; profiler rows; `crcbl phys stack --check`                                        |
+
+**The finding the decisions rest on (engine research, 2026-09-15).** The user
+delegated the solver family to research after deciding physics stays built from
+scratch, with a physics showcase (`apps/tumble`) driving it. Box2D v3, Box3D,
+Rapier 0.35 and Avian had converged on one design: _islands exist for sleeping
+only, and the awake set is solved as one pool split into persistent constraint
+colours_ whose constraints never share a body. Jolt, which rebuilds and sorts
+islands each step, was the runner-up. The decisions superseded the plan's older
+sections wherever they disagreed.
+
+**Decision 1 — the solver is the Soft Step, for contacts and joints.** Collision
+runs once a tick; the solver runs 4 substeps of 1 biased and 1 relax iteration,
+warm-started, with no convergence loop. Contacts are soft at 30 Hz with damping
+ratio 10 (static contacts at twice that), push-out capped at 3 m/s; joints at 60
+Hz with damping 2; speed capped at 400 m/s and rotation at π/4 a substep.
+**Restitution is its own pass after the substeps**, above 1 m/s, because
+speculative contacts damp bounces. **A long chain or tall stack gets more
+substeps for its group, not more iterations.** Evidence: Catto's Solver2D
+comparison (Soft Step needs 4 passes for what PGS reaches in 8), Macklin's
+_Small Steps_, and adoption by Box2D, Box3D, Rapier, Avian and PhysX's TGS.
+
+**Decision 2 — analytic pairs and SAT, with no EPA.** Sphere, capsule and their
+pairs are analytic; boxes are hulls with a separating-axis test cached per pair,
+face clipping, reduction to at most four points, and **flip-invariant feature
+ids** for warm starting. Friction acts at the manifold's centroid with a twist
+term. Sphere or capsule against a general hull is to use GJK on the core shape
+with a SAT fallback when deep.
+
+**Decision 3 — split, fattened trees.** A static tree and a dynamic tree, the
+static one rebuilt after load; fat margins of min(5 cm, ⅛ of the extent); a move
+buffer so only enlarged proxies query; a pair set; persistent contacts created
+before they touch.
+
+**Decision 4 — islands for sleep, colours for solving.** Islands are persistent,
+merged on a contact beginning and split lazily, the sleepiest one a tick, and
+sleep whole after 0.5 s below 0.05 m/s. Awake constraints are to be coloured
+greedily with per-colour body bitsets, persistently, with an overflow colour.
+**Order comes from persistent arrays, never a per-step sort**, and parallel
+narrow-phase results merge through per-worker bitsets, so `crcbl-jobs` schedules
+work without deciding its order and the single-threaded Pages build hashes the
+same as N threads. A body wakes on a contact beginning with an awake body, an
+applied impulse, a new joint, or **a touching neighbour's removal** (Jolt does
+not wake on removal, a trap worth a test); **a query wakes nothing**.
+
+**Decision 5 — speculative contacts for everything, then sweeps for fast
+bodies.** After the solve, a body that moved more than half its smallest extent
+sweeps against statics (a bullet flag adds dynamic and kinematic bodies), and
+lost time is dropped rather than re-solved: single-pass, as Box2D, Jolt and
+PhysX do. The 10 km/s projectile stays the ballistics topic's segment test. This
+inverted topic 5's "sweep to the time of impact, then solve".
+
+**Decision 6 — impulse joints in the same solver**: revolute, spherical with
+cone and twist limits, distance and rope, weld, prismatic; limits, motors,
+breakable by impulse; capsule ragdolls are the ragdolls topic's server ragdoll.
+
+**Decision 7 — `f64` positions, an `f32` solver interior (decided by the user,
+2026-09-17).** Positions stay `f64` in sector-local space, since `f32` resolves
+only 0.125 m at a 2²⁰ m sector's edge. The interior (velocities, deltas,
+impulses, effective masses) can be `f32` because the solver already works on
+deltas and anchors relative to each body; the reason to switch, at rung 6, is
+width — wasm SIMD has two `f64` lanes against four `f32`, and Jolt measured a
+naive all-double build at over 2× slower against 5–10% for its boundary design.
+`f32` is exactly as deterministic as `f64`; only the hash differs, so every
+target uses one precision. This amends topic 5's locked "f64" line. The
+simulation's `sin` and `cos` are built in-engine in `f64` on
+`crcbl_shaders::trig`'s pattern, which is what rung 0's "pinned trigonometry"
+means.
+
+**Decision 8 — dense and generational storage, after Box3D's.** Generational
+body ids mapped to (set, index), the entity map only at the ECS boundary; a cold
+body record and a hot body state; contacts in a persistent pooled array with
+per-body edge lists and a colour index; constraints prepared each tick into
+per-colour struct-of-arrays blocks whose scalar path does the same per-lane
+arithmetic, so scalar and SIMD builds hash the same. **Hashing canonicalises
+−0.0 and NaN; no `mul_add`, no relaxed SIMD.**
+
+**Decision 9 — tests at the benchmarks' size.** The regression pyramid's base is
+20 in CI and 100 (5050 boxes) as the benchmark, as Box2D's and Box3D's large
+pyramid; energy never rises; penetration stays under the slop; the hash is equal
+across thread counts, SIMD and scalar, native and wasm. For pricing, Box3D
+reports that pyramid at about 10.4 ms a step on one SSE2 thread, 25 ms scalar
+and 1.7 ms on eight threads (Ryzen 7950X, 60 Hz, 4 substeps).
+
+**Rules that came from the older sections and still bind.**
+
+- **Warm starting from persistent contact ids is non-negotiable**: it is what
+  makes a stack of crates stand still instead of shivering.
+- **One material asset per surface, four consumers**: friction and restitution
+  live on the same collider property block acoustics, nav and ballistics read,
+  with a per-property combine rule — `SurfaceMaterial` and `CombineRule`.
+- **Contact impulses above a threshold raise `KineticContact`**: damage is a
+  by-product of solving, not a second collision system.
+- **The character controller stays kinematic.** It queries and sweeps and is not
+  solver-driven; dynamic bodies react through one-way pushes with a force
+  budget, so the player shoves crates and a crate cannot launch the player. That
+  reads as a decision, not a bug.
+- **Scope:** soft bodies, cloth, fracture and fluids are not the contact
+  solver's; anything deformable is a separate topic with its own case. Vehicles
+  are joints plus wheels-as-raycasts, post-MVP.
+- **The stability suites define "good enough" numerically**, because solver
+  quality is a tuning surface with no natural end, and substeps buy what
+  iteration counts cannot.
+
+**Measured departures, by rung.** The module docs carry the detail; these are
+the ones that change what a reader would assume.
+
+- **Rung 1: the speculative distance grows with the pair's closing speed**,
+  because decision 5's fixed four slops let a 30 m/s ball through a 2 cm plate;
+  **separation within a tick is tracked to first order**, since Box2D's turned
+  anchors made a rolling ball slip.
+- **Rung 2: sphere and capsule against a box stay analytic** — the closest point
+  is a clamp, exact and cheaper — and GJK waits for the hull it is for. **A
+  column does not stand at 30 Hz past Greenhill's height**: a soft contact's
+  stiffness is `m ω²` whatever it carries, so it buckles past
+  `(1.96 ω² w / g)^⅓` cubes of half-extent `w` (fifteen one-metre cubes at 30
+  Hz; measured, fourteen stood and seventeen fell). Measured: a base-20 pyramid
+  held ten seconds, top box sunk 2.76 cm, 99.7% of ids persisted; 766 µs a tick
+  in the solver and 186 µs in the narrow phase, release build, Ryzen 9 9950X3D,
+  one thread, scalar `f64`.
+- **Rung 3: turning is judged by angular speed**, not the farthest point's
+  speed; **a kinematic body wakes what it touches only while it moves**;
+  kinematic and static bodies join no island; **a static placed on a sleeper
+  wakes it**, a rule decision 4 does not list; **contacts stay in one pool**, a
+  sleeping island's skipped on a look at their records (96 µs a tick for the pit
+  at rest); **a stack sleeps before it is still** (2.4 mm aside, where awake it
+  creeps back to 0.39 mm). Measured: a base-20 pyramid asleep at tick 59, 850 µs
+  a tick awake against 1.6 µs asleep.
+- **Rung 4: a path stops if it gets a linear slop into a shape, or deeper than
+  it began, and is put a slop short** — Box2D's "a slop short" test undid the
+  solve's landings (2046 bodies stopped and 10.9 s dropped in twenty seconds,
+  against 229 and 1.5 s). There is no circle at the centroid; turning is
+  measured at the cores; the path is interpolated, not the substeps'. Time of
+  impact is conservative advancement (Mirtich 1996), the turning bounded by
+  `4 tan(α/2)` for a turn of `2α`. **One-point contacts twist against a Hertz
+  patch** of radius `√(R δ)`, clamped between `R` and half a millimetre, because
+  a ball otherwise spun on a floor for ever.
+- **Rung 5, meshes: each triangle is a broadphase proxy of its own** (as each
+  compound part is), contacts are one-sided (Box2D v3's chain-segment rule) and
+  queries two-sided, **active edges are Jolt's** (`ActiveEdges.h`), without its
+  movement hint, and there is no contact reduction across triangles. A
+  degenerate triangle is refused, not skipped, since skipping renumbers the
+  rest. A mesh goes on static and kinematic bodies only.
+- **Rung 5, joints: each kind transcribes Box3D's solver of the same name**
+  (commit `9e5a4cde`). **A joint's angular impulses turn the body in full**,
+  where contacts keep rung 0's midpoint rule (the midpoint lost half of every
+  joint correction and a 21-plank bridge gained 3.4 kJ; the full rule leaned the
+  14-cube column 4.9 cm). **A group's constraints stiffen in proportion to its
+  substeps**, capped at a quarter of the substep rate. **A broken joint is taken
+  out**, where Box3D only reports it. **Joint angles use `b3Atan2`**, since the
+  crate calls no platform transcendental.
+- **Compounds: each part is a broadphase proxy of its own**, so every contact is
+  a part pair's and ids, the SAT cache and warm starting apply unchanged; mass
+  sums the parts at one density, counting an overlap once per part.
+
+**Considered and declined:**
+
+- **XPBD** — Avian left it: deep overlap was explosive, it never truly settled,
+  friction was weaker and collision ran every substep, and Avian was 4–6× faster
+  after switching; Catto reports friction and far-from-origin precision
+  failures.
+- **PGS with a position solve** (Jolt's) — works, but needs 10 + 2 iterations.
+- **GJK/EPA with convex margins** (Jolt, PhysX's PCM) — visible gaps, and
+  warm-start points matched by distance rather than by feature.
+- **Reduced-coordinate multibodies** — tree-only (a bridge needs loop-closing
+  constraints anyway), slow to add and remove, no joint forces for breaking, and
+  a second solver.
+- **Islands solved independently, ordered by lowest entity id with contacts
+  sorted per island** — the plan's original determinism scheme, replaced by
+  decision 4's persistent colours.
+- **Waking on a query** — a query touching a sleeper wakes nothing.
+- **Sweep to the time of impact, then solve** (the plan's and topic 5's original
+  continuous-collision scheme) — replaced by decision 5.
+- **One broadphase proxy per compound body**, with the narrow phase walking part
+  pairs — it would repeat the broadphase's cull every tick and give a contact
+  several normals.
+- **A whole-system `ContactSettings::TALL_STACK`** — removed before it shipped
+  in favour of per-group substeps.
+
 ## Steamworks: four decisions, all taken (2026-08-22, settled 2026-09-23)
 
 Decision record, as the options stood on 2026-08-22; the answers are in

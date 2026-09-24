@@ -2585,7 +2585,7 @@ fn the_engine_passes_offer_every_shader_artifact_they_have() {
 /// descriptor `crcbl-dx12` refuses — and refusing it is the good outcome, since
 /// the alternative is a lost device. It has cost the WARP leg twice: the
 /// draw-generation counters, which were host-visible so the CPU could zero them
-/// before the frame, and then `docs/plan/25-lod.md`'s hysteresis state, which
+/// before the frame, and then topic 25's hysteresis state, which
 /// was host-visible so the CPU could zero it once at build.
 ///
 /// # What this still adds now the seam refuses the class
@@ -2708,7 +2708,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
 /// are `ForwardRenderer`'s, written by `mesh_cluster.slang`'s amplification
 /// stage rather than by a compute pass, and there is one per frame for the
 /// colour pass plus one per (cascade, frame) for
-/// `docs/plan/25-lod.md`'s shadow LOD bias — a set that grew with that slice and
+/// topic 25's shadow LOD bias — a set that grew with that slice and
 /// that the D3D12 refusal would meet as a lost device on WARP.
 ///
 /// The renderer only creates them where it has an amplification stage, so this

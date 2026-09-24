@@ -1,6 +1,6 @@
-//! Box against box: rung 2 of `docs/plan/36-contact-solver.md`, decision 2's
-//! separating axis test with clipping, reduced to four points, with
-//! flip-invariant feature ids.
+//! Box against box: contact-solver rung 2 (`docs/notes/simulation.md`),
+//! decision 2's separating axis test with clipping, reduced to four points,
+//! with flip-invariant feature ids.
 //!
 //! ```text
 //!   cached axis ── still separates? ──▶ no contact

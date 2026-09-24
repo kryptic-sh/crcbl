@@ -124,7 +124,7 @@ pub const MAX_ROTATION_LENGTH_ERROR: f64 = 4.0 * f64::EPSILON;
 /// For a thin bar spun off-axis at 60 Hz, two iterations drifted `5·10^-7` at
 /// half a radian a step and `0.15` at two; four held the drift under `10^-11`
 /// up to two radians a step — past the quarter turn per substep
-/// `docs/plan/36-contact-solver.md` caps rotation at — and to `2·10^-6` at
+/// contact-solver decision 1 caps rotation at — and to `2·10^-6` at
 /// five.
 pub const GYROSCOPIC_ITERATIONS: usize = 4;
 

@@ -51,7 +51,7 @@ impl ForwardRenderer {
             // viewer are sized by it — see [`ForwardRenderer::frame_extents`].
             let (_, extent) = self.frame_extents(target_extent);
             let direction = light.direction.normalize_or_zero();
-            // `docs/plan/25-lod.md`'s two selection numbers, from this frame's
+            // Topic 25's two selection numbers, from this frame's
             // viewport and this frame's camera. An orthographic projection has no
             // distance falloff for the metric to divide by, so it selects under a
             // budget nothing satisfies and draws the base level whole — see
@@ -63,7 +63,7 @@ impl ForwardRenderer {
                 self.lod_error_budget
             };
             // **The cascades select from this same camera at this same scale**, and
-            // differ from it in the budgets alone — `docs/plan/25-lod.md`'s shadow
+            // differ from it in the budgets alone — topic 25's shadow
             // LOD bias, and see [`SHADOW_LOD_BIAS`] for why the bias is one factor
             // over the whole pass rather than a level count.
             //
@@ -183,7 +183,7 @@ impl ForwardRenderer {
             let instance_count = self.instances.slot_count();
             // The camera and the two selection numbers go to the cull/draw-argument
             // pair as well as into the block above, and they are handed over rather
-            // than re-derived: `docs/plan/25-lod.md`'s uniform cut runs there, the
+            // than re-derived: topic 25's uniform cut runs there, the
             // mesh path's per-cluster descent runs off the block, and a frame that
             // selected detail against one camera while drawing with another is a
             // difference nothing in the frame can see.

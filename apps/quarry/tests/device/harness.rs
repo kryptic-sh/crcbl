@@ -276,7 +276,7 @@ impl Quarry {
 
     /// Renders one frame from `at` along the dolly and measures what came out.
     ///
-    /// **Frames accumulate.** `docs/plan/25-lod.md`'s hysteresis is device-local
+    /// **Frames accumulate.** Topic 25's hysteresis is device-local
     /// state a shader writes once a frame, so a cut depends on every frame
     /// before it on this renderer — which is what makes a dolly a different
     /// measurement from the same positions rendered by fresh contexts.
@@ -535,7 +535,7 @@ fn readback(
 
 /// **Which level each cluster of the face was drawn from.**
 ///
-/// `docs/plan/25-lod.md`'s observable, and the only thing that can show
+/// Topic 25's observable, and the only thing that can show
 /// per-cluster selection happening: a frame whose every cluster came from one
 /// level is a plausible picture and matches any golden blessed from it.
 /// `ForwardRenderer::cluster_selection` is the buffer the amplification stage

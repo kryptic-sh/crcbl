@@ -180,7 +180,7 @@ pub struct Capacities {
     /// Sized against topic 03's exit criterion — "sandbox scene: 10k+ instanced
     /// meshes" — rather than against what is resident today.
     ///
-    /// **Raising this is not linear in memory.** `docs/plan/25-lod.md`'s
+    /// **Raising this is not linear in memory.** Topic 25's
     /// hysteresis state is one word per instance per resident group per
     /// [`DrawGen`](crate::draw_gen::DrawGen), and there is a generator for the
     /// camera, one per shadow cascade and one per shadow light slot.
@@ -753,7 +753,7 @@ pub enum Geometry<'a> {
         /// falls back to otherwise.
         flags: u32,
     },
-    /// `docs/plan/25-lod.md`'s cluster DAG: several levels of one surface, each
+    /// Topic 25's cluster DAG: several levels of one surface, each
     /// its own vertex range, with the grouping that relates them.
     ///
     /// # A coarse level has no attributes, and the caller has to supply them

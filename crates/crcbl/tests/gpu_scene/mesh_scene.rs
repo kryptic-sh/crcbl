@@ -97,7 +97,7 @@ pub(crate) fn mesh_camera(projection: crcbl::render::Projection) -> Camera {
 /// with the handle that names it.
 ///
 /// **Insertion order is the caller's and it is load-bearing** — the slot an
-/// object lands in is `docs/plan/25-lod.md`'s hysteresis key, and it is also the
+/// object lands in is topic 25's hysteresis key, and it is also the
 /// instance index every CPU reference in this suite is written against — so
 /// every scene here places the cube first and whatever stands beside it after.
 pub(crate) fn place(

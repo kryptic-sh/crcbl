@@ -1,9 +1,9 @@
 //! Contact manifolds: the analytic pairs of rung 1, the box pair of rung 2
 //! and a mesh's triangles of rung 5.
 //!
-//! `docs/plan/36-contact-solver.md` decision 2 makes sphere, capsule and their
-//! pairs analytic, and boxes and hulls a cached separating axis test with
-//! clipping:
+//! Contact-solver decision 2 (`docs/notes/simulation.md`) makes sphere, capsule
+//! and their pairs analytic, and boxes and hulls a cached separating axis test
+//! with clipping:
 //!
 //! | A \ B   | sphere | capsule | box      | triangle | plane |
 //! | ------- | ------ | ------- | -------- | -------- | ----- |

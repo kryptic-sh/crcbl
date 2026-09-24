@@ -84,7 +84,7 @@
 //! rejected at creation and the heap pins the resource to `GENERIC_READ` for
 //! its lifetime — so the counters being host-visible and bound writable is what
 //! took its device down. That rule is about the *binding*, not the frequency:
-//! `docs/plan/25-lod.md`'s hysteresis state is written once a frame by
+//! topic 25's hysteresis state is written once a frame by
 //! `draw_gen.slang` and is device-local for the same reason the counters are,
 //! even though nothing zeroes it per frame. What does zero it is a start-up
 //! copy, on [`crate::mesh_pool`]'s and [`crate::texture`]'s terms — see
@@ -161,7 +161,7 @@
 //!   are at offset zero and bucket `b`'s dispatch extents at
 //!   [`DrawGen::mesh_args_offset`]`(b)`.
 //! * Every host-written table — the bucket table, its per-bucket material
-//!   modes, the per-bucket cluster counts and `docs/plan/25-lod.md`'s three
+//!   modes, the per-bucket cluster counts and topic 25's three
 //!   selection tables — is one buffer, packed by
 //!   [`crcbl_shaders::draw_gen::pack_tables`].
 //!
@@ -251,7 +251,7 @@ pub struct DrawGenDesc<'a> {
     /// many instances survive, and they are spread across the buckets rather
     /// than duplicated into each — see the module docs.
     ///
-    /// It also sizes `docs/plan/25-lod.md`'s hysteresis state, which is one word
+    /// It also sizes topic 25's hysteresis state, which is one word
     /// per (instance slot, group) — see [`DrawGen::group_state`].
     pub instance_capacity: u32,
     /// The [`GpuInstance::flags`](crcbl_shaders::mesh::GpuInstance::flags) bit
@@ -393,7 +393,7 @@ pub struct GeneratedDraws {
     /// [`DrawConstants::start_at`](crcbl_shaders::mesh::DrawConstants::start_at)
     /// carries — and then the run from the word that start names.
     pub runs_id: BufferId,
-    /// `docs/plan/25-lod.md`'s hysteresis state, as the graph knows it.
+    /// Topic 25's hysteresis state, as the graph knows it.
     ///
     /// Here because a caller whose geometry path has an amplification stage
     /// **reads** it: `mesh_cluster.slang` looks up the two groups a cluster
@@ -420,7 +420,7 @@ pub struct GeneratedDraws {
 #[derive(Debug)]
 pub struct DrawGen {
     /// Every host-written table `draw_gen.slang` reads, in one buffer: the
-    /// bucket table, the per-bucket cluster counts and `docs/plan/25-lod.md`'s
+    /// bucket table, the per-bucket cluster counts and topic 25's
     /// three selection tables.
     ///
     /// **Written once**, which is what makes the merge sound rather than merely
@@ -435,7 +435,7 @@ pub struct DrawGen {
     /// The two buffer lengths the clearing dispatch zeroes. Shared by every
     /// frame's group, because both are fixed when the bucket table is built.
     clear_params: BufferHandle,
-    /// `docs/plan/25-lod.md`'s hysteresis state: one word per (instance slot,
+    /// Topic 25's hysteresis state: one word per (instance slot,
     /// group), holding whether that instance had that group expanded.
     ///
     /// **One buffer, deliberately not a ring**, and `draw_gen.slang`'s own
@@ -622,7 +622,7 @@ impl DrawGen {
         // guarantees no more — see the module docs. They are packed together
         // rather than any other set because they are the ones written at build
         // and never per frame: the bucket table, its material modes, its cluster
-        // counts, and `docs/plan/25-lod.md`'s three selection tables all follow
+        // counts, and topic 25's three selection tables all follow
         // residency and nothing else.
         //
         // `pack_tables` is what pads an empty selection region out to one zeroed
@@ -649,7 +649,7 @@ impl DrawGen {
         device.write_buffer(tables, 0, &packed.bytes)?;
         let table_offsets = packed.offsets;
 
-        // `docs/plan/25-lod.md`'s hysteresis state. **Zeroed here and by
+        // Topic 25's hysteresis state. **Zeroed here and by
         // nothing else ever again**: `draw_gen.slang` reads an element before it
         // writes it, so what the buffer holds on the very first frame is a real
         // input, and freshly allocated device memory holds whatever it holds. A
@@ -921,7 +921,7 @@ impl DrawGen {
             // survivor count and adds to nothing.
             storage(3, true, UINT_STRIDE),
             // Every host-written table in one buffer, read only: the bucket
-            // table, the per-bucket cluster counts and `docs/plan/25-lod.md`'s
+            // table, the per-bucket cluster counts and topic 25's
             // three selection tables were all decided when a mesh became
             // resident.
             storage(4, true, UINT_STRIDE),
@@ -1416,7 +1416,7 @@ impl DrawGen {
 
     /// Every host-written table the draw-argument pass reads, in one buffer —
     /// the bucket table, the per-bucket cluster counts and
-    /// `docs/plan/25-lod.md`'s three selection tables.
+    /// topic 25's three selection tables.
     ///
     /// Shared by every frame, because all five are decided when a mesh becomes
     /// resident. Exposed for the reason the per-frame buffers are: the cluster
@@ -1452,7 +1452,7 @@ impl DrawGen {
         self.counts[frame]
     }
 
-    /// `docs/plan/25-lod.md`'s hysteresis state, for a caller binding it into a
+    /// Topic 25's hysteresis state, for a caller binding it into a
     /// mesh pipeline that reads it.
     ///
     /// One buffer for every frame in flight, unlike everything else here that a
@@ -1474,7 +1474,7 @@ impl DrawGen {
     }
 
     /// Writes `frame`'s cull parameters — this frame's frustum, how much of the
-    /// instance array to test, and the camera `docs/plan/25-lod.md`'s uniform
+    /// instance array to test, and the camera topic 25's uniform
     /// cut selects a level from.
     ///
     /// The three counters both dispatches add to are **not** zeroed here: that

@@ -19,7 +19,7 @@
 //!
 //! # What each scene shows
 //!
-//! **The T-handle** is `docs/plan/36-contact-solver.md` rung 0's proving scene
+//! **The T-handle** is contact-solver rung 0's proving scene
 //! whole: the inertia tensor from two boxes, the gyroscopic term that turns a
 //! spin about the intermediate axis into a flip, and the conservation that keeps
 //! it flipping. The contact pipeline integrates it as the same substeps would

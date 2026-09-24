@@ -148,8 +148,8 @@ pub trait Room {
     fn fixtures(&self, out: &mut Vec<Shape>);
 }
 
-/// A room's contact counters, over its run: `docs/plan/36-contact-solver.md`
-/// rung 1's row, rung 2's, rung 3's, rung 4's and rung 5's.
+/// A room's contact counters, over its run: the contact solver's rung 1 row,
+/// rung 2's, rung 3's, rung 4's and rung 5's (`docs/notes/simulation.md`).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Tally {
     /// Bodies that step: the awake ones.

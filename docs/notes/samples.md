@@ -400,9 +400,9 @@ Recorded so nobody re-derives it.
   determinism, and nothing more.** `crcbl_scene::simplify`'s header is the
   account: position borders are locked, not optionally; UV and normal seams,
   material boundaries and skin weights are not constrained. The plan's "Proves"
-  once read as though all four were proven; they are a requirement until
-  `docs/plan/25-lod.md`'s attribute slice lands (backlog, _Three of the four QEM
-  properties quarry claims to prove are not implemented_).
+  once read as though all four were proven; they are a requirement until topic
+  25's attribute slice lands (backlog, _Three of the four QEM properties quarry
+  claims to prove are not implemented_).
 - **One instance of one mesh, on purpose** — so all of the reduction is cluster
   culling, and a scene where both culls matter is horde's job (see _DECIDED —
   quarry keeps one face_ below).

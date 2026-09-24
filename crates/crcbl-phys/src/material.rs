@@ -2,12 +2,12 @@
 //!
 //! `docs/plan/37-materials.md` names a **surface material** as its own asset
 //! on colliders, beside the render material, with friction and restitution
-//! among its properties; `docs/plan/36-contact-solver.md` asks for the pair's
+//! among its properties; the contact solver's plan asked for the pair's
 //! values to come from per-property combination rules — "multiply / average /
 //! max" — so ice on rubber has an answer that is data rather than code.
 //!
 //! **The contact solver is the one consumer.** Rung 1 of
-//! `36-contact-solver.md` calls [`SurfaceMaterial::combine`] on a contact's two
+//! the contact solver calls [`SurfaceMaterial::combine`] on a contact's two
 //! bodies each tick, and a plane carries a material of its own. The asset form,
 //! the link from a render material and the other consumers `37-materials.md`
 //! lists are not built.
