@@ -10232,6 +10232,56 @@ size histogram, and a sleeping ratio. Today the stage times exist only as
 `ContactCounters` and tumble's page, and the stability claims only as
 `crates/crcbl-phys/tests/`.
 
+### Ragdolls — `35-ragdolls.md` (2026-08-27, re-verified 2026-09-24)
+
+**Its dependencies landed; the ragdoll did not.** Everything this entry used to
+name as missing now exists in `crcbl-phys`: the contact solver, joints
+(`SphericalJoint` with cone and twist limits, `RevoluteJoint` with limits,
+breakable joints) and `KineticContact`, which carries the impulse, point and
+normal the death handoff reads the killing blow from. `apps/tumble`'s Bridge
+room already assembles them into capsule ragdolls pushed down a flight of stairs
+(`apps/tumble/src/bridge.rs`), so the solver is shown to hold an articulated
+body.
+
+**Not built:** the topic itself. No ragdoll type exists anywhere in the
+workspace; there is no bone-to-body mapping or authored ragdoll asset, no death
+handoff from the last animated pose and the killing `KineticContact`, no
+server-simplified / client-detail split with its settle snapshot, and no blend
+of the bodies back into the render pose. `35-ragdolls.md`'s opening still says
+that nothing it depends on is built, which is no longer true.
+
+### Player kit — `30-player-kit.md` (2026-08-27, re-verified 2026-09-24)
+
+No `crcbl-player` crate. **The seam under it is proven, though, and that is
+worth recording:** `crcbl_phys::CharacterController::move_and_slide` takes a
+world-space displacement and holds no camera, and three samples drive that one
+controller from three rigs — `apps/puppet` (third-person orbit), `apps/breach`
+(first-person, measuring yaw the other way round, on `Flyer`'s convention) and
+`apps/shard` (fixed isometric bearing, quarter-turn yaw). Puppet and shard now
+share one conversion, `crcbl_render::OrbitCamera::walk_direction`, because both
+rigs sit on the orbit basis; the rigs themselves share no code.
+
+**Consequence for delivery step 1:** there are **three** hand-rolled rigs to
+replace when the kit lands, not one. The 3P GTA rig (spring-arm boom resolved by
+a phys capsule sweep, damped follow, auto-recenter, zoom tiers, aim mode, player
+fade) is entirely unwritten; `apps/puppet/src/camera.rs`'s `Follow` rebuilds an
+`OrbitCamera` at a fixed distance every frame with no boom sweep at all.
+
+### Weapon kit — `38-weapons.md` (2026-08-27, re-verified 2026-09-24)
+
+No `crcbl-weapons` crate, no weapon asset schema, no resolved stat block, no
+attachment algebra, no recoil pattern, no state machine, no
+`crcbl weapon stats`/`ttk`. **Blocked on ballistics (28)** for rounds — there is
+still no `Round` or `BallisticMaterial` in the tree — and on nesting in the
+inventory kit for magazines-as-containers: `crcbl-inventory` exists now, but its
+own module docs list nesting (a grid inside a grid) as deliberately not there
+yet.
+
+`apps/breach`'s pistol has no round, no penetration, no spread, no RPM: its rate
+limit is the trigger arriving as an input **edge** (one press, one shot,
+documented on `Controls::fire` in `apps/breach/src/game.rs`). The "three classic
+exploits, closed" section describes work not started.
+
 ## Tooling and infrastructure — what the plans still owe
 
 The tooling and infrastructure plans were audited against the tree on
@@ -10239,33 +10289,84 @@ The tooling and infrastructure plans were audited against the tree on
 crate-relative paths too_ are what they still describe and the tree does not
 have.
 
-### Backlog entries lost on 2026-09-23 (2026-09-24)
+### `tools/check-wrapped-strings.sh` misses a literal whose continuation resumes with a capital (2026-09-10, re-verified 2026-09-24)
 
-**Found while folding the stage 4 and 5 plans.** Commit 287d13c7
-(`feat(phys): add dynamic compound bodies of boxes`) replaced one bullet of the
-contact solver entry and, with it, every line that followed up to the editor's
-bullets: this section's heading and introduction, the start of the editor entry
-below (whose bullets were left sitting under the contact solver entry until
-2026-09-24), and these whole entries, none of which exists anywhere else in the
-file:
+**Found by the formatter, not by an author.** A control hint in
+`apps/towers/src/page.rs` outgrew `rustfmt.toml`'s `max_width`, and rustfmt
+joined the continued literal back onto one line **keeping the continuation's
+indentation inside the string** — exactly the defect that guard exists to catch,
+arriving from the formatter rather than from someone forgetting a `\`. The guard
+stayed green: its pattern requires a lowercase letter or a brace after the run
+of spaces, and the next word was capitalised. The hint is a `concat!` of two
+literals now (`HINT` in that file), which the formatter lays out normally and
+cannot collapse, so the tree is clean — but the hole is not: the pattern's
+character class after the space run is still `[a-z{]`.
 
-- _Ragdolls — `35-ragdolls.md`_, _Player kit — `30-player-kit.md`_ and _Weapon
-  kit — `38-weapons.md`_ (all 2026-08-27), from the simulation plans' section.
-- _`apps/orbit` is a demo, not yet the acceptance test_ (2026-08-27), under a
-  "Samples touched in passing" heading; its substance survives in _orbit_.
-- _`tools/check-wrapped-strings.sh` misses a literal whose continuation resumes
-  with a capital_ (2026-09-10), _Asset hot reload is still entirely future
-  tense_, _No vendored glTF corpus; the fixture is synthesized in code_,
-  _Coverage gates one workspace floor, not per-crate thresholds_, _The
-  `crcbl-ui` in the tree is not the CSS/DOM system `07-ui-debug.md` designs_,
-  _`crcbl_ui::hud`'s two panel types have no consumer_ and _The netgraph is the
-  last `DebugModule` nobody wrote_ (2026-08-27).
+**What it would take:** widen the character class after the space run to accept
+a capital and re-run the guard over every tracked Rust file to see what else it
+then finds, which is why this is its own change rather than a line in the slice
+that found it: a widened guard needs its own red-then-green and whatever it
+turns up needs fixing in the same commit.
 
-**What it would take:** read each from `git show 287d13c7^:docs/backlog.md`,
-re-verify it against the tree (several are likely stale — the netgraph one is
-partly covered by _Netgraph HUD, LAN discovery_), and restore what still holds.
-Not done here: it is outside the stage 4 and 5 fold, and restoring entries
-unchecked would carry stale claims forward.
+### Asset hot reload: two polled watches, and no engine reload path (2026-08-27, re-verified 2026-09-24)
+
+**Partly built, in two places that are not the engine's asset path.**
+`apps/viewer/src/watch.rs` polls one glTF document and reloads it when a
+re-export settles, and `crcbl_ui`'s stylesheets reload through
+`Ui::poll_stylesheets`, keeping the last good sheet on a parse error — both
+polled, with no file-watcher dependency (`notify` is in no `Cargo.toml`). No
+application loads or polls a stylesheet yet, so the "styles hot-reload like web
+dev" claim is built and not demonstrated.
+
+**Not built:** everything `06-assets-scenes.md`'s task 5 names. There is no
+asset reimport path, no in-place GPU pool update, no shader recompile keyed by
+hash (`crcbl-shaders` computes the identity and nothing keys on it), and no
+per-chunk scene reload. `crates/crcbl-assets/src/registry.rs`'s module docs
+still describe hot reload as the thing that would reintroduce the `Unloaded`
+state, which the registry deliberately does not have because nothing can reach
+it today.
+
+**What it would take:** a watch over the asset source (the two polled watches
+show a poll is enough for one path; a directory of thousands of files is the
+case `notify` would be for, and adding it is the user's decision), the reimport
+path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
+of. **What it blocks:** the editor's revert path and its asset browser, and
+`06-assets-scenes.md`'s "editing a texture/shader/scene chunk reflects without
+restart" exit criterion.
+
+### No golden over a real glTF document (2026-08-27, re-verified 2026-09-24)
+
+**The corpus exists; a picture of it does not.** `git ls-files` finds
+`apps/viewer/assets/shelf/Suzanne/glTF/Suzanne.gltf`, a real Khronos CC0
+document, and `apps/viewer/src/shelf.rs`'s
+`the_default_model_loads_from_the_committed_shelf` puts it through the importer
+on every machine. The rest of the Khronos subset `12-testing.md`'s anchor list
+asks for is fetched at a pinned upstream commit against a per-file sha256
+(`tools/fetch-shelf.sh`, run in CI), and
+`every_shelf_model_imports_as_this_manifest_says` parses every fetched model and
+asserts its outcome against `apps/viewer/assets/shelf.expect`.
+
+**Considered and kept:** `crates/crcbl-scene/src/gltf_fixture.rs`, behind the
+`gltf-fixture` feature, builds a triangle document and its `.glb` container in
+code, with the rationale in that crate's `Cargo.toml` — a binary container is a
+fixture nobody reviewing a change can read. It is the right shape for importer
+unit tests and should stay.
+
+**Still missing:** the manifest sees a model that stops importing and a model
+that gains a required extension, and cannot see one that still imports and looks
+worse — a dropped normal map, a coarser LOD. That wants a golden over a real
+document, and `crates/crcbl/tests/gltf_e2e.rs` is still one synthetic textured
+quad.
+
+### Coverage gates one workspace floor, not per-crate thresholds (2026-08-27, re-verified 2026-09-24)
+
+**Partially built.** `cargo llvm-cov` runs in `ci.yml`'s `coverage (linux)` job,
+pinned to lavapipe so the number is not runner-dependent, and gates
+`COVERAGE_FLOOR` through `cargo llvm-cov report --fail-under-lines`. That is a
+**single workspace floor**. The per-crate split `12-testing.md` used to promise
+(core/phys/net high, backend crates looser because e2e covers them) does not
+exist, and `ci.yml`'s own comment on the gate says why: it waits for tooling
+that can express it.
 
 ### The editor: slices 1 to 3 landed, and what they leave (2026-08-27)
 
@@ -10345,10 +10446,12 @@ says what that cleared and what it did not. The allow-list entry in
   instance and one collider per entity and rewrites every instance every frame),
   a save onto a directory it does not own, or a save that fails part-way.
 
-**It waits on two unbuilt things:** the scene format (features 5 and 6 have
-nothing to open or save) and `07-ui-debug.md`'s inspector. Neither has an entry
-of its own here since 2026-09-23; see _Backlog entries lost on 2026-09-23_
-below.
+**What it still waits on (re-verified 2026-09-24).** Neither of the two things
+this paragraph used to name is missing any more: `crcbl_scene::scn` is the
+format feature 5 opens and saves, and `Ui::inspector` is the inspector slice 3
+draws. What is left is the scene-format change for entities spanning systems
+(below) and, for feature 6's asset browser, a watcher and `crcbl bake` — see
+_Asset hot reload: two polled watches, and no engine reload path_ above.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
 `08-editor.md`: the edit command enum and undo log exist from day one and are
@@ -10360,12 +10463,14 @@ restores by reloading the scene; and a component's editable fields come from
 docking and tabs, the viewport's shape, file dialogs, the scene-format change
 for entities spanning systems, and the `notify` watcher.
 
-**It blocks two sample plans, and they are the only two samples with no app
-directory:** `docs/plan/sample/07-towers.md`, whose milestone 2 _is_ the editor
-dogfood pass and whose exit criterion is "map authored 100% in the editor, zero
-hand-edited scene text"; and `docs/plan/sample/08-arena.md`, which wants an
-editor-built map. Every other `docs/plan/sample/*.md` has a matching `apps/`
-dir. `08-editor.md` now records this.
+**It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
+2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
+the editor, zero hand-edited scene text" (`apps/towers` exists; that milestone
+does not); and `docs/plan/sample/08-arena.md`, which wants an editor-built map
+and has no app directory. `08-editor.md` records this, and still calls them the
+only two samples with no app directory, which stopped being true once
+`apps/towers` landed — arena, mirrors, meadow, mane and relief have none
+(re-verified 2026-09-24).
 
 **Its 2026-08-09 shell corrections were re-verified twice and the conclusion was
 wrong both times; corrected 2026-09-02.** Each cited fact is about the
@@ -19337,8 +19442,9 @@ The modular panel is built and every sample switches it on with F3 (or
   netgraph, and shipping them under that name would make the P10 work look done.
   The second was placement: the module belongs in the crate that owns the
   numbers (`crcbl-client`, following `crcbl-render`'s example), which means a
-  `crcbl-client → crcbl-ui` dependency. **That half is settled** — `crcbl-ui`
-  depends only on `glam`, `bytemuck` and `crcbl-core`, so there is no cycle, and
+  `crcbl-client → crcbl-ui` dependency. **That half is settled** — nothing
+  `crcbl-ui` depends on (`crcbl-core`, `crcbl-reflect` and third-party crates,
+  re-verified 2026-09-24) reaches `crcbl-client`, so there is no cycle, and
   `crcbl-render` has since set the precedent twice, with `FrameTimings` and
   `FrameCounters` both implementing `DebugModule`. What is left is the work, not
   the decision. **What it would take**: the transport growing byte and timing
