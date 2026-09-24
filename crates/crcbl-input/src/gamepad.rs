@@ -92,8 +92,10 @@
 //! what `crcbl::engine::lose_focus` does for keys — and a pad button held
 //! through it is **withheld until it is released**, exactly as a key held across
 //! a context push is (`context.rs`): the player coming back from an alt-tab with
-//! A still down does not jump. Sticks and triggers are levels and are never
-//! withheld; the pad's next snapshot restores them. A [`GamepadEvent::Disconnected`]
+//! A still down does not jump. Sticks and triggers are levels and are not
+//! withheld by it; the pad's next snapshot restores them. Only
+//! [`ActionMap::suppress_held`] withholds a stick or trigger, until it rests
+//! (`context.rs`). A [`GamepadEvent::Disconnected`]
 //! pad's held state is released on the spot.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -223,7 +225,7 @@ impl PadButtons {
         self.0 == 0
     }
 
-    const fn union(self, other: Self) -> Self {
+    pub(crate) const fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
 
@@ -508,7 +510,8 @@ impl ActionMap {
     }
 
     /// Recompute what the pads hold between them, lift the withholding of any
-    /// button no pad holds any more, and re-resolve every pad binding.
+    /// button no pad holds any more and of any stick or trigger back at rest,
+    /// and re-resolve every pad binding.
     fn repad(&mut self) {
         self.held_pad_buttons = self
             .pads
@@ -518,7 +521,63 @@ impl ActionMap {
             .suppressed
             .pad_buttons
             .intersection(self.held_pad_buttons);
+        for stick in [Stick::Left, Stick::Right] {
+            if self.stick_rests(stick) {
+                self.suppressed.pad_sticks.remove(&stick);
+            }
+        }
+        for trigger in [Trigger::Left, Trigger::Right] {
+            if self.trigger_rests(trigger) {
+                self.suppressed.pad_triggers.remove(&trigger);
+            }
+        }
         self.resolve_matching(Binding::reads_gamepad);
+    }
+
+    /// Whether `stick` is at rest on every pad: inside the dead zone of every
+    /// [`Binding::PadStick`] on it — reading zero through each of them — or
+    /// exactly centred if none reads it. What lifts a suppressed stick.
+    pub(crate) fn stick_rests(&self, stick: Stick) -> bool {
+        let deadzone = self
+            .bindings_all()
+            .filter_map(|binding| match *binding {
+                Binding::PadStick {
+                    stick: bound,
+                    deadzone,
+                } if bound == stick => Some(deadzone),
+                _ => None,
+            })
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        self.pads.values().all(|pad| {
+            let (x, y) = pad.stick(stick);
+            x.hypot(y) <= deadzone
+        })
+    }
+
+    /// Whether `trigger` is at rest on every pad: at or below the threshold of
+    /// every [`Binding::PadTrigger`] on it, or fully out if none reads it.
+    /// What lifts a suppressed trigger.
+    pub(crate) fn trigger_rests(&self, trigger: Trigger) -> bool {
+        let threshold = self
+            .bindings_all()
+            .filter_map(|binding| match *binding {
+                Binding::PadTrigger {
+                    trigger: bound,
+                    threshold,
+                } if bound == trigger => Some(threshold),
+                _ => None,
+            })
+            .reduce(f32::min)
+            .unwrap_or(0.0);
+        self.pads
+            .values()
+            .all(|pad| pad.trigger(trigger) <= threshold)
+    }
+
+    /// Every binding of every declared action.
+    fn bindings_all(&self) -> impl Iterator<Item = &Binding> {
+        self.slots.iter().flat_map(|slot| slot.decl.bindings.iter())
     }
 }
 

@@ -9,7 +9,9 @@
 //! names another. [`ActionMap::push_context`] and [`ActionMap::pop_context`]
 //! stack contexts over it, and **the topmost active context that binds an input
 //! consumes it** — `context.rs` has the rules, including what happens to a key
-//! held while the stack changes. [`ui`] declares the engine's reserved `ui`
+//! held while the stack changes, and what [`ActionMap::suppress_held`] and
+//! [`ActionMap::suppress_held_action`] withhold on request. [`ui`] declares the
+//! engine's reserved `ui`
 //! context, and [`text`] the `text` context a text field pushes over it.
 //!
 //! # Patterns and devices
@@ -18,7 +20,8 @@
 //! [`ActionMap::set_tap`], [`ActionMap::set_hold`] and
 //! [`ActionMap::set_double_tap`] attach a [`Tap`], a [`Hold`] and a
 //! [`DoubleTap`], all evaluated on the clock [`ActionMap::begin_tick`] advances
-//! (`repeat.rs`, and `patterns.rs` for how the last three share a press).
+//! (`repeat.rs`, and `patterns.rs` for how the last three share a press and
+//! what [`ActionMap::cancel_patterns`] cancels).
 //! [`ActionMap::last_device`] names the kind of [`Device`] that last spoke.
 //!
 //! # Gamepads
@@ -93,6 +96,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 /// Every connected pad and what it last reported, ordered by id so a sum over
 /// them runs in the same order every run.
 type Pads = BTreeMap<GamepadId, GamepadSnapshot>;
+
+/// Every key held down, with the serial of the press that put it there — a
+/// later press has a larger one, which is how a [`Binding::ScrollChord`] finds
+/// the most recently pressed key.
+type HeldKeys = HashMap<KeyCode, u64>;
 
 // ---------------------------------------------------------------------------
 // Action primitives
@@ -244,8 +252,8 @@ impl Modifier {
     }
 
     /// Whether either side is in `held`.
-    fn held(self, held: &HashSet<KeyCode>) -> bool {
-        self.keys().iter().any(|key| held.contains(key))
+    fn held(self, held: &HeldKeys) -> bool {
+        self.keys().iter().any(|key| held.contains_key(key))
     }
 }
 
@@ -332,6 +340,30 @@ pub enum Binding {
         modifier: Modifier,
         /// The key the chord owns.
         key: KeyCode,
+    },
+    /// The mouse wheel, read only while `held` is down — Z+wheel, Ctrl+wheel.
+    ///
+    /// Read as [`Binding::MouseScroll`] is: the vertical delta on an
+    /// [`ActionKind::Axis1`], inert on the other kinds. It reads the wheel as
+    /// one, too, so it takes the wheel for its context as a `MouseScroll`
+    /// would.
+    ///
+    /// **The more specific binding takes the wheel**, as it takes the key for a
+    /// [`Binding::Chord`]: while the `held` key of any scroll chord in the
+    /// context that owns the wheel is down, every plain `MouseScroll` in that
+    /// context reads zero. **With several of those keys down, the most recently
+    /// pressed one takes the wheel** and the chords on the others read zero,
+    /// so letting go of it hands the wheel back to the one pressed before. An
+    /// OS auto-repeat of a key already down is not a press and takes nothing.
+    ///
+    /// **The held key is read, not consumed**, as a chord's modifier is: a
+    /// scroll chord owns the wheel and nothing else, so a [`Binding::Key`] on
+    /// Z still sees Z — a game that also taps Z cancels that tap with
+    /// [`ActionMap::cancel_patterns`] when the wheel turns. A held key
+    /// withheld from its owner (see `context.rs`) is up for this read too.
+    ScrollChord {
+        /// The key that must be down; any key, modifiers included.
+        held: KeyCode,
     },
     /// An **on-screen control**, by the id the widget drawing it was given.
     ///
@@ -423,7 +455,8 @@ pub enum Binding {
 
 impl Binding {
     /// Calls `visit` with every key this binding owns — the keys a context
-    /// consumes by binding it. A [`Binding::Chord`]'s modifier is not one.
+    /// consumes by binding it. A [`Binding::Chord`]'s modifier is not one, and
+    /// neither is a [`Binding::ScrollChord`]'s held key.
     pub fn visit_keys(&self, mut visit: impl FnMut(KeyCode)) {
         match self {
             Self::Key(key) | Self::Chord { key, .. } => visit(*key),
@@ -445,6 +478,7 @@ impl Binding {
             Self::MouseButton(_)
             | Self::MouseMotion
             | Self::MouseScroll
+            | Self::ScrollChord { .. }
             | Self::PointerPosition { .. }
             | Self::Virtual(_)
             | Self::PadButton(_)
@@ -452,6 +486,11 @@ impl Binding {
             | Self::PadStick { .. }
             | Self::PadTrigger { .. } => {}
         }
+    }
+
+    /// Whether this binding reads the mouse wheel.
+    const fn reads_wheel(&self) -> bool {
+        matches!(self, Self::MouseScroll | Self::ScrollChord { .. })
     }
 
     /// Whether this binding reads a gamepad.
@@ -669,7 +708,9 @@ pub struct ActionMap {
     last_device: Option<Device>,
 
     // Raw input state -------------------------------------------------------
-    held_keys: HashSet<KeyCode>,
+    held_keys: HeldKeys,
+    /// The serial of the last key press — see [`HeldKeys`].
+    key_presses: u64,
     held_buttons: HashSet<PointerButton>,
     /// On-screen controls currently held — see [`Binding::Virtual`].
     held_controls: HashSet<String>,
@@ -717,7 +758,8 @@ impl ActionMap {
             routes: Routes::default(),
             suppressed: Suppressed::default(),
             last_device: None,
-            held_keys: HashSet::new(),
+            held_keys: HeldKeys::new(),
+            key_presses: 0,
             held_buttons: HashSet::new(),
             held_controls: HashSet::new(),
             control_sticks: HashMap::new(),
@@ -866,18 +908,25 @@ impl ActionMap {
     /// keyboard speaking.
     pub fn key_event(&mut self, key: KeyCode, pressed: bool) {
         if pressed {
-            self.held_keys.insert(key);
+            // An OS auto-repeat of a key already down keeps its first serial:
+            // it is not a new press.
+            if !self.held_keys.contains_key(&key) {
+                self.key_presses += 1;
+                self.held_keys.insert(key, self.key_presses);
+            }
             self.last_device = Some(Device::Keyboard);
         } else {
             self.held_keys.remove(&key);
             self.suppressed.keys.remove(&key);
         }
+        // A scroll chord's key can hand the wheel from one binding to another.
+        let wheel = self.routes.is_scroll_chord_key(key);
         if Modifier::of(key).is_some() {
             // A modifier can press or release any chord, and shadow or unshadow
             // any plain key a chord shares.
-            self.resolve_matching(Binding::reads_keyboard);
+            self.resolve_matching(|b| b.reads_keyboard() || (wheel && b.reads_wheel()));
         } else {
-            self.resolve_matching(|b| b.owns_key(key));
+            self.resolve_matching(|b| b.owns_key(key) || (wheel && b.reads_wheel()));
         }
     }
 
@@ -924,7 +973,7 @@ impl ActionMap {
         }
         self.scroll_delta.0 += dx;
         self.scroll_delta.1 += dy;
-        self.resolve_matching(|b| matches!(b, Binding::MouseScroll));
+        self.resolve_matching(Binding::reads_wheel);
     }
 
     /// Feed the pointer's position, normalised to the surface: −1.0 at one edge
@@ -1015,6 +1064,10 @@ impl ActionMap {
             *held = (x, y);
         } else {
             self.control_sticks.insert(control.to_owned(), (x, y));
+        }
+        // Centred is a stick's release: what lifts a suppress.
+        if x == 0.0 && y == 0.0 {
+            self.suppressed.control_sticks.remove(control);
         }
         self.resolve_matching(|b| matches!(b, Binding::Virtual(id) if id == control));
     }
@@ -1210,6 +1263,7 @@ impl ActionMap {
                     }
                     Binding::MouseMotion
                     | Binding::MouseScroll
+                    | Binding::ScrollChord { .. }
                     | Binding::PointerPosition { .. }
                     | Binding::PadStick { .. } => false,
                     Binding::KeyAxis { negative, positive } => {
@@ -1272,6 +1326,9 @@ impl ActionMap {
                     for binding in bindings {
                         match binding {
                             Binding::MouseScroll if view.scroll() => {
+                                value += scroll_delta.1;
+                            }
+                            Binding::ScrollChord { held } if view.scroll_chord(*held) => {
                                 value += scroll_delta.1;
                             }
                             Binding::Key(k) if view.key(*k) => {

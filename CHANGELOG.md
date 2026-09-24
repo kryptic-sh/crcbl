@@ -117,6 +117,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   key bound in a pushed context no longer reaches an action beneath it that
   binds the same key; with nothing pushed, every existing map resolves as
   before.
+- **`crcbl_input::Binding` has a `ScrollChord { held }` member**, so an
+  exhaustive match on it needs another arm. Every existing binding resolves as
+  before.
 - **The draw list carries laid-out glyph runs.** `DrawList::to_triangles` and
   `to_triangles_split` take an `Option<&mut GlyphAtlas>` after the bitmap atlas;
   `DrawCommand::Glyphs` and `Primitive::FontGlyph` are new variants, so an
@@ -755,6 +758,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   nothing. Defaults are `TAP_TIME`, `HOLD_TIME` and `DOUBLE_TAP_WINDOW`
   (`Tap::default()` and so on); a zero, negative or non-finite time is refused
   by `new`.
+- **`ActionMap::cancel_patterns(name)`** cancels an action's patterns in flight
+  as a context push does — the press in progress fires nothing until released,
+  and a first tap waiting for its second is dropped — for a press the game
+  decides was something else, such as a Z held while the wheel turns.
+- **`ActionMap::suppress_held()` and `suppress_held_action(name)`** withhold
+  every held input, or every held input one action reads, until it is pressed
+  again, and cancel the patterns in flight: movement held into a revival or a
+  menu that is not a context stops the player until pressed afresh. It is the
+  context push's withholding, widened to levels — a pad stick lifts once it is
+  back inside its dead zone, a trigger once back under its threshold, an
+  on-screen stick once it reports centre; keys, buttons and pad buttons lift on
+  release, a `Wasd` or `KeyAxis` per key. The input is withheld, not the action,
+  so another action on the same key reads it as up too.
+- **`DoubleTap::on_release()`** makes a double tap fire on the second press's
+  release, and only if that press also lasted at most `tap_time`;
+  `DoubleTap::new` and the default still fire on the second press, and
+  `fires_on_release()` says which.
+- **`Binding::ScrollChord { held }`, the wheel while a key is down** — Z+wheel,
+  Ctrl+wheel — on an `Axis1`, read as `MouseScroll` is. While a scroll chord's
+  key is down in the context that owns the wheel, that context's plain
+  `MouseScroll` reads zero; with several such keys down, the most recently
+  pressed takes the wheel and releasing it hands the wheel back. The key is
+  read, not consumed: a `Key` binding on it still fires.
 - **A GPU-rendered image can be drawn as a sprite, through an atlas.**
   `SpriteRenderer::create_atlas(device, &AtlasDesc { label, cell, columns, rows, sample })`
   creates a sheet of fixed-size cells, every texel transparent, with a one-texel

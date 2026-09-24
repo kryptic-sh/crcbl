@@ -373,6 +373,7 @@ fn binding_name(binding: &Binding) -> String {
         Binding::MouseButton(button) => format!("mouse {button:?}"),
         Binding::MouseMotion => "mouse motion".to_owned(),
         Binding::MouseScroll => "mouse wheel".to_owned(),
+        Binding::ScrollChord { held } => format!("{}+mouse wheel", held.as_str()),
         Binding::PointerPosition { axis } => format!("pointer {axis:?}"),
         Binding::KeyAxis { negative, positive } => {
             format!("{}/{}", negative.as_str(), positive.as_str())

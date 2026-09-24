@@ -10632,13 +10632,21 @@ deleted 19-input plan left behind_.
   `ActionMap::set_tap`, `set_hold` and `set_double_tap` exist
   (`crates/crcbl-input/src/patterns.rs`). Still missing: the plan's RON form
   that emits a _named_ action; pattern edges in `InputTickState`, so a server
-  applying captured ticks sees values but no pattern edges; a public
-  `cancel_patterns(name)` (EW cancels its Z double tap when the wheel moves
-  while Z is held); a double tap that fires on the second _release_ (EW's Z
-  does). EW parked adopting them (2026-09-23): it does not route input through
-  `ActionMap`, the same reason it stays off `grid_drag`, so the migration is an
-  input-architecture call for EW's user; if it comes, a waiting single tap fires
-  at `>` the window against EW's `>=`, one tick apart at exact boundaries.
+  applying captured ticks sees values but no pattern edges. EW is migrating its
+  input onto `ActionMap` (2026-09-24); a waiting single tap fires at `>` the
+  window against EW's `>=`, one tick apart at exact boundaries — deliberate,
+  since a second press at exactly the window still completes the double (the
+  `patterns.rs` module docs).
+- **Suppress and scroll-chord coverage gaps (2026-09-24).**
+  `ActionMap::suppress_held`/`suppress_held_action` and `Binding::ScrollChord`
+  are tested on one pad and one context stack each. Not covered by a test: two
+  pads where one rests and the other does not (`stick_rests` requires every pad
+  at rest), `suppress_held_action` through a `PadDpad` or a `ScrollChord`
+  binding, and a suppressed stick after `release_gamepads` (it stays withheld
+  until the pad's next snapshot, since `release_gamepads` does not run `repad`'s
+  lift). A stick with no `PadStick` binding lifts only at exactly centre, so a
+  drifting unbound stick stays withheld; harmless while nothing reads it, and
+  the lift re-checks on every pad event once something does.
 - **RON binding assets.** Nothing parses one; a game declares actions in code
   through `ActionDecl`. The plan's sketch was one record per action — `action`,
   `kind`, a binding list per device class (`keyboard`, `mouse`, `gamepad`,

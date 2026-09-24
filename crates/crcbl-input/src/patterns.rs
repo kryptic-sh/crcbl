@@ -19,7 +19,17 @@
 //!   [`Hold::time`]; [`ActionMap::hold_progress`] reports how far along it is.
 //! - A **double tap** fires on the second press, when the first lasted at most
 //!   [`DoubleTap::tap_time`] and the second went down at most
-//!   [`DoubleTap::window`] after the first came up.
+//!   [`DoubleTap::window`] after the first came up. One made with
+//!   [`DoubleTap::on_release`] fires on the second press's release instead,
+//!   and only if that press too lasted at most [`DoubleTap::tap_time`]: two
+//!   taps, not a tap and a hold.
+//!
+//! **The window's end is inclusive.** A first tap stops waiting only once
+//! `elapsed - released_at > window`, checked before the tick's press is read,
+//! so a second press landing exactly [`DoubleTap::window`] after the release
+//! still finds the first tap waiting and completes the double; a tap that
+//! waits fires on the first tick past the window, never on a tick a second
+//! press could still have claimed.
 //!
 //! # One press is one gesture
 //!
@@ -29,7 +39,9 @@
 //!   A hold is checked at the start of each tick, before that tick's events, so
 //!   a press released on the very tick it reaches [`Hold::time`] is a hold.
 //! - **A press that completed a double tap is spent**: it is neither a tap nor
-//!   a hold, and cannot start another double tap.
+//!   a hold, and cannot start another double tap. That holds for an
+//!   [`DoubleTap::on_release`] double too, from the moment the second press
+//!   goes down: the press is the double's whether or not its release fires it.
 //! - **With a double tap attached, a tap waits.** A tap that could still be the
 //!   first half of a double tap fires only once [`DoubleTap::window`] passes
 //!   with no second press, and not at all if one comes. That is the only way
@@ -42,10 +54,13 @@
 //! window lets the double tap lapse. Beyond those, anything that interrupts the
 //! action cancels whatever is in flight — the press in progress and any first
 //! tap waiting for its second: a context pushed or popped
-//! ([`ActionMap::push_context`], [`ActionMap::pop_context`]), the action being
-//! disabled or rebound, or a pattern attached or detached. A press that was
-//! down when it was cancelled is spent until it is released, so it fires
-//! nothing, even if it outlives the change.
+//! ([`ActionMap::push_context`], [`ActionMap::pop_context`]), held input
+//! withheld ([`ActionMap::suppress_held`],
+//! [`ActionMap::suppress_held_action`]), the action being disabled or rebound,
+//! a pattern attached or detached, or the game asking with
+//! [`ActionMap::cancel_patterns`]. A press that was down when it was cancelled
+//! is spent until it is released, so it fires nothing, even if it outlives the
+//! change.
 //!
 //! # What "down" means per kind
 //!
@@ -148,22 +163,48 @@ impl Default for Hold {
 /// [`DoubleTap::tap_time`], the second going down within
 /// [`DoubleTap::window`] of the first coming up.
 ///
+/// Fires on the second press unless made with [`DoubleTap::on_release`].
+///
 /// The fields are private so the only double taps that exist are ones the
 /// evaluator can time.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DoubleTap {
     tap_time: f32,
     window: f32,
+    on_release: bool,
 }
 
 impl DoubleTap {
-    /// A double tap, or `None` unless both times are finite and positive.
+    /// A double tap that fires on the second press, or `None` unless both times
+    /// are finite and positive.
     #[must_use]
     pub fn new(tap_time: f32, window: f32) -> Option<Self> {
-        (is_duration(tap_time) && is_duration(window)).then_some(Self { tap_time, window })
+        (is_duration(tap_time) && is_duration(window)).then_some(Self {
+            tap_time,
+            window,
+            on_release: false,
+        })
     }
 
-    /// The longest the first press can last, in seconds.
+    /// This double tap, firing on the second press's **release** instead of
+    /// on the press — and only if that press lasted at most
+    /// [`DoubleTap::tap_time`], as the first had to. See the module docs.
+    #[must_use]
+    pub const fn on_release(self) -> Self {
+        Self {
+            on_release: true,
+            ..self
+        }
+    }
+
+    /// Whether it fires on the second press's release rather than the press.
+    #[must_use]
+    pub const fn fires_on_release(self) -> bool {
+        self.on_release
+    }
+
+    /// The longest the first press can last, in seconds — and, for a double
+    /// tap made with [`DoubleTap::on_release`], the second.
     #[must_use]
     pub const fn tap_time(self) -> f32 {
         self.tap_time
@@ -179,11 +220,12 @@ impl DoubleTap {
 
 impl Default for DoubleTap {
     /// A first press of at most [`TAP_TIME`], and a gap of at most
-    /// [`DOUBLE_TAP_WINDOW`].
+    /// [`DOUBLE_TAP_WINDOW`], firing on the second press.
     fn default() -> Self {
         Self {
             tap_time: TAP_TIME,
             window: DOUBLE_TAP_WINDOW,
+            on_release: false,
         }
     }
 }
@@ -198,6 +240,10 @@ enum Press {
     /// Down, but it can fire nothing more: it completed a double tap, or was
     /// cancelled while down.
     Spent,
+    /// Down since the clock read `at`, as the second press of a
+    /// [`DoubleTap::on_release`] double: spent for everything but that double,
+    /// which its release fires if it was short enough.
+    Second { at: f64 },
 }
 
 /// A first tap waiting for its second.
@@ -263,10 +309,15 @@ impl PatternState {
         let down = Held::of(value).is_some();
         match (self.press, down) {
             (Press::Up, true) => {
-                // `pending` is only ever still set inside its window.
+                // `pending` is only ever still set inside its window, and only
+                // while a double tap is attached.
                 self.press = if self.pending.take().is_some() {
-                    self.double_tapped = true;
-                    Press::Spent
+                    if self.double_tap.is_some_and(DoubleTap::fires_on_release) {
+                        Press::Second { at: elapsed }
+                    } else {
+                        self.double_tapped = true;
+                        Press::Spent
+                    }
                 } else {
                     Press::Down {
                         at: elapsed,
@@ -311,8 +362,15 @@ impl PatternState {
                     self.tapped |= tap;
                 }
             }
+            (Press::Second { at }, false) => {
+                self.press = Press::Up;
+                self.double_tapped |= self
+                    .double_tap
+                    .is_some_and(|double_tap| elapsed - at <= f64::from(double_tap.tap_time));
+            }
             (Press::Spent, false) => self.press = Press::Up,
-            (Press::Up, false) | (Press::Down { .. } | Press::Spent, true) => {}
+            (Press::Up, false)
+            | (Press::Down { .. } | Press::Spent | Press::Second { .. }, true) => {}
         }
     }
 
@@ -374,6 +432,22 @@ impl ActionMap {
         let patterns = self.patterns_mut(name)?;
         patterns.double_tap = double_tap;
         patterns.cancel();
+        Ok(())
+    }
+
+    /// Cancel whatever an action's patterns have in flight, exactly as a
+    /// context push does: the press in progress is spent until it is released,
+    /// and a first tap waiting for its second is dropped. The action's value is
+    /// untouched — a held button stays held — and with nothing in flight this
+    /// changes nothing.
+    ///
+    /// For a press the game decides was something else: a Z held while the
+    /// wheel turns was a Z+wheel, not the first half of a Z double tap.
+    ///
+    /// # Errors
+    /// [`ActionMapError::UnknownAction`] if nothing with that name is declared.
+    pub fn cancel_patterns(&mut self, name: &str) -> Result<(), ActionMapError> {
+        self.patterns_mut(name)?.cancel();
         Ok(())
     }
 
@@ -866,6 +940,163 @@ mod tests {
         // is 0.5 s / 0.0625 s = 8 ticks later.
         assert_eq!(expected[..4], [0, 3, 6, 14]);
         assert_eq!(repeat_pulses(&mut patterned), expected);
+    }
+
+    /// **`cancel_patterns` with nothing in flight changes nothing**: a press
+    /// on the same tick taps as if it had never been called.
+    #[test]
+    fn cancel_patterns_with_nothing_in_flight_spends_nothing() {
+        let mut map = map_with(|map| map.set_tap("act", tap(QUARTER)).expect("declared"));
+        map.begin_tick(TICK);
+        map.cancel_patterns("act").expect("declared");
+        map.key_event(KEY, true);
+        map.begin_tick(TICK);
+        map.key_event(KEY, false);
+        assert!(map.tapped("act"));
+        assert_eq!(
+            map.cancel_patterns("nope"),
+            Err(ActionMapError::UnknownAction("nope".to_owned())),
+        );
+    }
+
+    /// **`cancel_patterns` drops a first tap waiting for its second**, as a
+    /// context switch does: the next press starts a new gesture instead.
+    #[test]
+    fn cancel_patterns_drops_a_waiting_first_tap() {
+        let mut map = map_with(|map| {
+            map.set_tap("act", tap(QUARTER)).expect("declared");
+            map.set_double_tap("act", double_tap(QUARTER, QUARTER))
+                .expect("declared");
+        });
+        map.begin_tick(TICK);
+        map.key_event(KEY, true);
+        map.begin_tick(TICK);
+        map.key_event(KEY, false);
+        map.cancel_patterns("act").expect("declared");
+        let fired = fires(&mut map, &[(0, true)], 8);
+        assert_eq!(
+            fired,
+            Fires::default(),
+            "neither the double nor the dropped tap fires"
+        );
+    }
+
+    /// **`cancel_patterns` spends the press in progress** until it is
+    /// released: no hold, no tap, and the button itself stays held.
+    #[test]
+    fn cancel_patterns_spends_the_press_in_progress() {
+        let mut map = map_with(|map| {
+            map.set_tap("act", tap(QUARTER)).expect("declared");
+            map.set_hold("act", hold(QUARTER)).expect("declared");
+        });
+        map.begin_tick(TICK);
+        map.key_event(KEY, true);
+        map.cancel_patterns("act").expect("declared");
+        assert!(map.button_held("act"), "only the patterns are cancelled");
+        let mut fired = false;
+        for _ in 0..6 {
+            map.begin_tick(TICK);
+            fired |= map.hold_fired("act");
+        }
+        map.key_event(KEY, false);
+        fired |= map.tapped("act");
+        assert!(!fired, "neither a hold nor a tap");
+        assert_eq!(fires(&mut map, &[(0, true), (1, false)], 2), taps(vec![1]));
+    }
+
+    fn released_double(tap_time: f32, window: f32) -> Option<DoubleTap> {
+        double_tap(tap_time, window).map(DoubleTap::on_release)
+    }
+
+    fn doubles(double_tap: Vec<u32>) -> Fires {
+        Fires {
+            double_tap,
+            ..Fires::default()
+        }
+    }
+
+    /// **An on-release double tap fires when the second press comes up**, not
+    /// when it goes down, and keeps the window's inclusive end.
+    #[test]
+    fn an_on_release_double_tap_fires_on_the_second_release() {
+        for (gap, expected) in [(3, vec![7]), (4, vec![8]), (5, vec![])] {
+            let mut map = map_with(|map| {
+                map.set_double_tap("act", released_double(QUARTER, QUARTER))
+                    .expect("declared");
+            });
+            let second = 2 + gap;
+            let fired = fires(
+                &mut map,
+                &[(0, true), (2, false), (second, true), (second + 2, false)],
+                16,
+            );
+            assert_eq!(
+                fired,
+                doubles(expected),
+                "second press {gap} ticks after the first release"
+            );
+        }
+    }
+
+    /// **The second press must be a tap too**: up to and including the tap
+    /// time it fires, one tick longer it is spent and fires nothing.
+    #[test]
+    fn an_on_release_double_tap_needs_a_short_second_press() {
+        for (held, expected) in [(4, vec![7]), (5, vec![])] {
+            let mut map = map_with(|map| {
+                map.set_tap("act", tap(QUARTER)).expect("declared");
+                map.set_hold("act", hold(QUARTER)).expect("declared");
+                map.set_double_tap("act", released_double(QUARTER, QUARTER))
+                    .expect("declared");
+            });
+            let fired = fires(
+                &mut map,
+                &[(0, true), (2, false), (3, true), (3 + held, false)],
+                14,
+            );
+            assert_eq!(
+                fired,
+                doubles(expected),
+                "second press held {held} ticks: never a hold or a tap either",
+            );
+        }
+    }
+
+    /// Cancelled between its press and its release, an on-release double tap
+    /// does not fire.
+    #[test]
+    fn a_cancelled_second_press_does_not_fire_on_release() {
+        let mut map = map_with(|map| {
+            map.set_double_tap("act", released_double(QUARTER, QUARTER))
+                .expect("declared");
+        });
+        map.begin_tick(TICK);
+        map.key_event(KEY, true);
+        map.begin_tick(TICK);
+        map.key_event(KEY, false);
+        map.begin_tick(TICK);
+        map.key_event(KEY, true);
+        map.cancel_patterns("act").expect("declared");
+        map.begin_tick(TICK);
+        map.key_event(KEY, false);
+        assert!(!map.double_tapped("act"));
+    }
+
+    /// The default fires on the press, as it always did, and `on_release`
+    /// changes when it fires and nothing else.
+    #[test]
+    fn a_double_tap_fires_on_the_press_unless_asked_otherwise() {
+        let press = DoubleTap::new(QUARTER, 0.5).expect("a runnable double tap");
+        assert!(!press.fires_on_release());
+        assert!(!DoubleTap::default().fires_on_release());
+        let release = press.on_release();
+        assert!(release.fires_on_release());
+        assert_eq!(
+            (release.tap_time(), release.window()),
+            (QUARTER, 0.5),
+            "same times"
+        );
+        assert_ne!(press, release);
     }
 
     /// A pattern that could not be timed is not constructible.
