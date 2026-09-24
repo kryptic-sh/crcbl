@@ -1,4 +1,4 @@
-//! The quality tiers of `docs/plan/39-capabilities.md`'s tier table, as the
+//! The quality tiers of topic 39's tier table, as the
 //! `[engine.video]` keys they are made of.
 //!
 //! # A preset is a writer, and it is a command rather than a key
@@ -25,7 +25,8 @@
 //! # What a tier covers, and what it is silent about
 //!
 //! What a tier writes is [`QualityValues`]: the render scale, the antialiasing
-//! tier, the shadow filter and the volumetric fog switch. Those are the table's
+//! tier, the shadow filter, the volumetric fog switch and the three SSAO keys
+//! (slices, blur passes, bent normals). Those are the table's
 //! rows this tree has an `[engine.video]` key for; every other row names an
 //! amount of something with no key and often no renderer half — the shadow
 //! atlas's size and light budget, the probe volume's levels, SSR's resolution,
@@ -38,7 +39,7 @@
 //! `r_shadow_faces`, and `crcbl_render::ssao`'s `r_ssao_slices` and
 //! `r_ssao_blur_passes`, are process globals a renderer reads once a frame;
 //! the player's file is what a preset writes, and
-//! `docs/plan/39-capabilities.md` is explicit that a preset is "a layer of keys
+//! topic 39 is explicit that a preset is "a layer of keys
 //! and not a second mechanism". So each of those reaches a tier in two steps
 //! and in this order: a catalogue key in [`super::catalogue`] with a reader
 //! that drives the variable — the road `RENDER_SCALE_KEY` already takes to
@@ -110,7 +111,7 @@ const _: () = assert!(
      reordered, and a quality tier would write the wrong effect key"
 );
 
-/// One column of `docs/plan/39-capabilities.md`'s tier table.
+/// One column of topic 39's tier table.
 ///
 /// `ultra` is deliberately absent: the plan's catalogue row names five words,
 /// and the table has three columns. A fourth tier with no column would be a

@@ -57,7 +57,7 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 /// naming the old set.
 const OCCLUSION_PASS_PREFIX: &str = "ssao";
 
-/// Which of `docs/plan/39-capabilities.md`'s three selectors this frame was
+/// Which of topic 39's three selectors this frame was
 /// drawn through, and whether the run asked for less than the device offers.
 ///
 /// Rule 12's "says which it took", as a value rather than as a log line, so the

@@ -564,7 +564,7 @@ fn push_constants_and_bindless_fail_loudly_on_the_portable_preset() {
 ///
 /// The preset deliberately omits both mesh flags, so this is what lets one test
 /// model a device that has the capability and another model a device that does
-/// not — the two sides of `docs/plan/39-capabilities.md`'s rule.
+/// not — the two sides of topic 39's rule.
 fn mesh_fixture(extra: Features) -> (Box<dyn Device>, ShaderModuleHandle, PipelineLayoutHandle) {
     let mut caps = NullInstance::gpu_driven().adapters()[0].caps;
     caps.features |= extra;

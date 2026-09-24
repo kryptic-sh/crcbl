@@ -926,14 +926,15 @@ it stands; what follows is the rules and their reasons, which live nowhere else.
   tap is rejected still has a divisor.
 - **The off-switch is data, not a branch, and the fetch is clamped.** AO has no
   device fact to gate on, and inventing a capability that is really a
-  performance opinion is what `docs/plan/39-capabilities.md` exists to prevent.
-  With the pass off, `ForwardRenderer::ambient_occlusion_placeholder` binds an
-  uploaded 1×1 holding `AMBIENT_OCCLUSION_NONE` (a clear cannot carry the
-  direction sentinel), and no occlusion pass is recorded at all. A `Load`
-  outside an image's extent yields **zero**, not its one texel, so the consumer
-  clamps against `GetDimensions` — unclamped, the first AO-off frame was black
-  wherever ambient was all the light, with nothing reporting an error.
-  `forward_e2e::depth_probe` asks for the clamp on every backend.
+  performance opinion is what the capability rules in `docs/notes/backends.md`
+  exist to prevent. With the pass off,
+  `ForwardRenderer::ambient_occlusion_placeholder` binds an uploaded 1×1 holding
+  `AMBIENT_OCCLUSION_NONE` (a clear cannot carry the direction sentinel), and no
+  occlusion pass is recorded at all. A `Load` outside an image's extent yields
+  **zero**, not its one texel, so the consumer clamps against `GetDimensions` —
+  unclamped, the first AO-off frame was black wherever ambient was all the
+  light, with nothing reporting an error. `forward_e2e::depth_probe` asks for
+  the clamp on every backend.
 - **The golden is not the instrument; a structural ratio is.** A pass writing a
   constant 1.0 draws a plausible frame. The check is a band inside a concave
   corner measurably darker than a band on the same surface outside it — same
@@ -1694,11 +1695,12 @@ Decision record; the decision is in `docs/backlog.md`.
   6.914 ms on that machine's llvmpipe (LLVM 22.1.8) at 960x720. The ladder's own
   order on both adapters, no two ranges overlapping, and the ladder end to end
   is 0.068 ms of a 0.649 ms radv frame; the `shadow` row is flat across all
-  three, as the selector claims. What is left is the assignment, and it is the
-  user's: `r_shadow_filter` has no tier row, so every tier runs the shipped
-  `pcss`, and `docs/plan/39-capabilities.md`'s tier table is where a row would
-  go. Same shape of question as the SSR visibility weight and the AO knobs
-  below, and the same missing route.
+  three, as the selector claims. What was left was the assignment, and it was
+  the user's: `r_shadow_filter` had no tier row, so every tier ran the shipped
+  `pcss`. It got one on 2026-09-09 — `low` writes `box`, `medium` `disc` and
+  `high` `pcss` (`crcbl::settings::presets`, and the tier table in
+  `docs/backlog.md` under _The tier table the quality presets are built from_).
+  Same shape of question as the SSR visibility weight and the AO knobs below.
 - **Considered and declined: drawing the scene twice to compare.** The occlusion
   chain's seam records its gather twice under a scissor, and that shape is
   available to a full-screen pass because each recording pays for half a target

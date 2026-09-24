@@ -1,5 +1,5 @@
 //! Which of `docs/plan/18-render-features.md`'s effects a frame draws, and
-//! `docs/plan/39-capabilities.md`'s four-layer order that decides it.
+//! topic 39's four-layer order that decides it.
 //!
 //! ```text
 //! camera stack (RON) declares what the view wants

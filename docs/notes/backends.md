@@ -3,6 +3,156 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 39-capabilities plan left behind (2026-09-24)
+
+Record; the built part is the capability seam in `crcbl-hal` (`Features`,
+`Limits`, `DeviceCaps`, `Features::GPU_DRIVEN`, the three path selectors,
+`DeviceCaps::missing`, `caps::downgrades` and `crcbl_hal::Capability`), the
+four-layer effect resolution (`crcbl_render::EffectRequest::resolve`,
+`crcbl_render::stack::CameraStack`, `crcbl::settings`), and the quality presets
+(`crcbl::settings::presets`). `TIER_A`, `TIER_B` and `RendererTier` are gone.
+What it left open is in `docs/backlog.md` under _What the deleted
+39-capabilities plan left unbuilt_ and the quality-preset entries near it.
+
+Code cites the plan as "topic 39", "topic 39's rule", "topic 39's order" and the
+like. Those resolve here:
+
+| Citation                                                         | What it specified                                                                                            |
+| ---------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| The rule; "degrades by default"; "a named, loud failure"         | **The degradation rule** below                                                                               |
+| The selectors, "three selectors", the monotonicity rule          | **Three derived selectors** and **Degradation is monotonic**                                                 |
+| The downgrade line; "every downgrade is logged once"             | **Every downgrade is logged once**                                                                           |
+| The resolution order; "four layers"; first, player, programmatic | **Four layers, one resolution point**; the first layer is the camera stack, the player's is `[engine.video]` |
+| The tier table; its columns; `ultra`                             | The tier table, now in `docs/backlog.md` under _The tier table the quality presets are built from_           |
+| The catalogue, its rows, rule 1                                  | **The `[engine.video]` clamp rule** and the backlog's catalogue entry                                        |
+| "A layer of keys and not a second mechanism"                     | **A preset is a command that writes keys**                                                                   |
+| The worked example (ray tracing on Apple)                        | **No platform branch**                                                                                       |
+| Goldens per `(GeometryPath, BindingModel, LightingPath)`         | **Every selector value is executed by something**                                                            |
+
+The rules, each with its _why_:
+
+- **The degradation rule.** A missing feature degrades by default. A game may
+  declare one required, and then its absence is a named, loud failure at device
+  creation. There is no third behaviour: nothing silently renders differently
+  without a log line, and nothing refuses to start unless someone asked it to. A
+  capability that does not map cleanly onto a backend is reported **clear** and
+  the renderer selects a lesser path; it is never emulated behind the seam.
+- **Capabilities are the truth, and there are no tiers.** A backend reports what
+  the device has as `Features` (bitflags) and `Limits` (ceilings), bundled as
+  `DeviceCaps`. The old `TIER_A` composite was demanded whole, which refused
+  Metal over one absent flag while it had the rest; two buckets could not hold
+  Metal (multi-draw-indirect without a GPU-side count), D3D12, the browser, and
+  the ray-tracing and mesh-shader axes. `Features::GPU_DRIVEN` is the
+  data-layout bundle that replaced it, and it is asked for as _optional_, never
+  required.
+- **`required` versus `optional` is `DeviceDesc`'s two fields, and the default
+  requires only what nothing works without** — `COMPUTE | TIMELINE_SEMAPHORE`.
+  `DeviceCaps::missing(required)` names what an adapter lacks. A game whose
+  whole look is ray traced puts `RAY_QUERY` in `required_features` and gets a
+  named failure rather than a picture that is quietly a different game. A
+  `FeatureRequest` type was drafted and declined: it duplicated these fields. If
+  the engine cannot in fact render without something, it belongs in `required` —
+  a downgrade path that was never going to work is worse than an honest refusal.
+- **Three derived selectors are what the renderer branches on.** Each is derived
+  from `Features`, each is one shader-permutation axis and one golden axis:
+  `GeometryPath` (`MeshShader` | `IndirectCount` | `IndirectPerBatch`, from
+  `MESH_SHADER` and `DRAW_INDIRECT_COUNT`), `BindingModel` (`Bindless` |
+  `ArrayPages`, from `DESCRIPTOR_INDEXING`) and `LightingPath` (`RayTraced` |
+  `Rasterised`, from `RAY_QUERY` and `ACCELERATION_STRUCTURE`). **A new selector
+  needs a real second path behind it**, not a capability that could have been a
+  uniform: one selector per feature is a combinatorial mess of permutations and
+  goldens.
+- **Degradation is monotonic.** Selectors are ordered best-first and resolve
+  downward; there is no capability whose absence selects a path that needs more
+  than the one above it.
+- **Named profiles are for humans, never for code.** "Native baseline" and "web
+  baseline" name points in the space for CI job names, docs and log lines.
+  Nothing branches on a profile name; a profile is a description after the fact.
+- **Every downgrade is logged once, at device creation**, naming the feature and
+  the path it selected, compared against what the device **granted** rather than
+  what the adapter could have given, and silent when the device granted the lot.
+  A silently absent feature reporting as success is the same defect as an
+  unimplemented hook returning `Ok`. **The line is an assertion target**: an e2e
+  that forces a feature off must see the engine say so.
+- **Four layers, one resolution point.** Every effect is switchable at three
+  requesting layers plus the device, resolved in `EffectRequest::resolve` and
+  nowhere else:
+
+  ```text
+  camera stack declares what the view wants        (render-stack RON: this view)
+    → [engine.video] clamps it downward            (settings: this player)
+    → programmatic override may set it either way  (game code: this moment)
+    → device capability clamps it downward, last and absolutely
+  ```
+
+  The per-camera layer exists because a render-to-texture camera feeding a
+  monitor or a planar reflection does not want reflections of its own, which is
+  a property of the camera, not of the player or the hardware. **Capability
+  clamps last and cannot be overridden upward**; forcing a feature the device
+  lacks is what `required` is for. The device layer is wired to `DeviceCaps` and
+  today removes nothing, which is a statement about the current effects rather
+  than a stub; its first rule arrives with the ray-traced variants
+  `LightingPath` already selects.
+
+- **The `[engine.video]` clamp rule.** The layer may only ever remove quality,
+  and an absent key removes nothing — the load-bearing property of the whole
+  seam. For a level-valued key: every enumerated key declares an explicit total
+  order, lowest quality first, **as data beside the key and never as a Rust
+  enum's declaration order** (a variant inserted mid-enum would silently
+  redefine every player's clamp); clamping is `min` under that order; an absent
+  or unreadable key is the identity, not the lowest rung, and an unreadable one
+  warns naming the key; `off` is simply the lowest rung, so a boolean is the
+  two-rung case. **`antialiasing` is the one key that replaces rather than
+  clamps**, because its rungs are one resolve slot rather than an amount (the
+  antialiasing ladder's eighth decision, in `docs/notes/rendering.md`); ask of
+  each new enumerated key which of the two it is.
+- **The catalogue is split three ways.** The display half (mode, monitor,
+  extent, present mode) belongs with windowing, the quality half with this
+  resolution order, and the file and its spelling with persistence, whose own
+  rule is that a key is named, with its domain, before anything reads it.
+- **A preset is a command that writes keys**, not a key and not a fifth layer.
+  `quality low|medium|high` writes every key it covers into the user file, and
+  the resolution order never sees the preset. The label is derived by
+  `presets::selected` from what the readers answer, so `custom` means exactly
+  "the covered keys are not one column's set". There are three tiers because the
+  table has three columns.
+- **Audio bus gains take no capability clamp**, and that chain is genuinely
+  shorter rather than unimplemented: no audio device removes the ability to
+  multiply a sample by a scalar, and the DSP core runs identically on native and
+  wasm.
+- **The feature matrix is a design record; `crcbl_hal::Capability` is the live
+  answer**, driven both ways by `crates/crcbl/tests/hal_seam_e2e.rs`, with
+  `DIVERGENCES` and `REVIEWED_BLOCKERS` in `crcbl-hal`'s `capability.rs` as what
+  is still owed. Three cells carry reasons worth keeping: **draw-indirect-count
+  on Metal is absent from the API** (the count lives in GPU memory and Metal's
+  only count-reading execution needs its commands to already exist; `wgpu`
+  reached the same answer), so Metal lands on another `GeometryPath`; **ray
+  tracing on Metal is blocked on Slang**, which does not emit it for the Metal
+  target; and **persistent mapped buffers are a native-only principle** — on the
+  browser every upload goes through a staging copy, which is that path's answer.
+  The occlusion-query refusal is the seam's, recorded in this file under
+  _SHIPPED — occlusion queries are refused at the seam_.
+- **No platform branch.** The worked case is ray tracing on Apple: `crcbl-mtl`
+  reports `RAY_QUERY` clear, `LightingPath` resolves to `Rasterised`, the
+  downgrade is logged once, and the raster stack the browser needs anyway draws
+  the frame — no `#[cfg]`. When Slang emits Metal ray tracing, `crcbl-mtl`
+  reports the flag and the path lights up with no engine change. Re-check
+  Slang's Metal ray-tracing support at each pin bump in
+  `crates/crcbl-shaders/tools/compile-shaders.sh`; contributing it upstream is a
+  legitimate option if it stalls. **Hand-written MSL for the ray-tracing shaders
+  is declined**: MSL can be validated only on a Mac, so a hand-kept twin would
+  drift undetectably. Do not revisit without a Metal compiler that runs off
+  macOS or a differential gate on real Apple hardware.
+- **Every selector value is executed by something.** A path no device in CI
+  selects compiles and never runs; name it in `docs/backlog.md` as a coverage
+  gap. Subtraction is the mechanism when no local adapter selects the lesser
+  path: `crates/crcbl-vk/tests/vk_e2e/draw_gen.rs` opens a device without
+  `DRAW_INDIRECT_COUNT` or without `MESH_SHADER` and asserts it is on the
+  intended path before comparing frames. **`required` must be shown to fail**
+  against the null backend, and **goldens are per
+  `(GeometryPath, BindingModel, LightingPath)` combination a backend selects**,
+  not per backend. Untested fallbacks are the risk most likely to be realised.
+
 ## What the deleted 02-vulkan-backend plan left behind (2026-09-24)
 
 Record; the built part of the plan is `crcbl-vk` and the render graph in

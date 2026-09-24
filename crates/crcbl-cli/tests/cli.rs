@@ -2764,7 +2764,7 @@ fn a_preset_selected_twice_leaves_the_file_it_left_the_first_time() {
 /// **A word that is not a tier is refused, names the tiers that exist, and
 /// writes nothing.**
 ///
-/// `ultra` by name: `docs/plan/39-capabilities.md`'s catalogue row names it and
+/// `ultra` by name: topic 39's catalogue row names it and
 /// its tier table has no column for it, so it is the word a person is most
 /// likely to try.
 #[test]

@@ -1,6 +1,6 @@
 //! The frame's phases, as span names, and what the frame cost on the CPU.
 //!
-//! `docs/plan/40-profiling.md`'s first missing piece: "Nothing measures the
+//! Topic 40's first missing piece: "Nothing measures the
 //! tick, the ECS schedule, physics, asset upload, culling's CPU half or the
 //! shell's frame. The GPU report says which pass cost what; nothing says whether
 //! the frame was GPU-bound at all." [`mod@crcbl_core::trace`] is the mechanism;
@@ -135,7 +135,7 @@ pub const CULL_FRAME_COUNTER: &str = "cull-frame";
 
 /// Puts this frame's counters on the trace, beside its spans.
 ///
-/// `docs/plan/40-profiling.md`'s "counters are spans' siblings", and the caller
+/// Topic 40's "counters are spans' siblings", and the caller
 /// is [`Loop::frame`](crate::engine::Loop::frame): sampled inside the frame
 /// span and before the drain that closes it, so a snapshot holds a frame's
 /// counters and that frame's spans together.

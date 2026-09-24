@@ -38,7 +38,7 @@
 // Topic 17 again: "The browser gets the same compute path — skinning is just a
 // compute shader, no bindless needed — so wasm gets animated characters day
 // one. Skinning is independent of every path selector in
-// `docs/plan/39-capabilities.md`." Nothing here needs a feature: a uniform
+// topic 39." Nothing here needs a feature: a uniform
 // block, three storage buffers and a `[numthreads]`, which is the same shape
 // `clear_counters.slang` has and the smallest shape a dispatch can have. There
 // is no mesh stage, no subgroup op, no wave intrinsic and no 16-bit type

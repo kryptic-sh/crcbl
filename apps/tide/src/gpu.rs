@@ -50,7 +50,7 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 /// `crcbl_render`'s labels for them.
 pub const WATER_PASSES: [&str; 2] = ["water-copy", "water"];
 
-/// Which of `docs/plan/39-capabilities.md`'s three selectors this frame was drawn
+/// Which of topic 39's three selectors this frame was drawn
 /// through, and whether the run asked for less than the device offers — rule
 /// 12's "says which it took", as a value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

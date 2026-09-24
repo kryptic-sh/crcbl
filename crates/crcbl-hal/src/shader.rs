@@ -100,7 +100,7 @@ bitflags::bitflags! {
     /// composite carrying the mesh bits would break every layout and every
     /// push-constant range in the engine on the majority of devices, to serve
     /// the one pipeline that wants them — the exact inversion of
-    /// `docs/plan/39-capabilities.md`'s rule that a missing feature degrades
+    /// topic 39's rule that a missing feature degrades
     /// rather than failing.
     ///
     /// A caller therefore names [`MESH`](Self::MESH) explicitly, and only after
@@ -156,7 +156,7 @@ impl ShaderStages {
     /// at all does not even get that far: its stage mapping has no bit to map
     /// these onto and would simply drop them, leaving a layout quietly narrower
     /// than the one that was asked for — the failure
-    /// `docs/plan/39-capabilities.md` requires to be loud.
+    /// topic 39 requires to be loud.
     ///
     /// # Errors
     ///

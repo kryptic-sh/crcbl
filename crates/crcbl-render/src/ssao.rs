@@ -137,14 +137,17 @@
 //! default is what every golden was blessed at, so this switch too leaves that
 //! frame alone.
 //!
-//! None of these is a quality preset, and none is set by one.
+//! Three of these are set by a quality preset, and only through keys.
 //! `crcbl::settings::presets` writes the `[engine.video]` keys of a tier, and
-//! `docs/plan/39-capabilities.md`'s tier table has no row for the occlusion
-//! chain — so they all stay what they are: variables declared beside the pass
-//! that reads them, the way `crate::debug_draw`'s switch is. What a tier should
-//! spend on them is `docs/backlog.md`'s, and so is the open question a
-//! `VIDEO_KEYS` row would answer: a preset clears an effect by writing that
-//! effect's key, so a knob a preset selects needs a row of its own.
+//! since 2026-09-09 topic 39's tier table has an occlusion row whose
+//! `ssao_slices`, `ssao_blur_passes` and `ssao_bent_normals` keys drive
+//! [`r_ssao_slices`], [`r_ssao_blur_passes`] and [`r_ssao_bent_normals`]. The
+//! rest — the technique, the split, the intensity and the radius — have no key,
+//! so they stay what they are: variables declared beside the pass that reads
+//! them, the way `crate::debug_draw`'s switch is. What a tier should spend on
+//! them is `docs/backlog.md`'s, and so is the open question a `VIDEO_KEYS` row
+//! would answer: a preset clears an effect by writing that effect's key, so a
+//! knob a preset selects needs a row of its own.
 
 use crcbl_hal::{
     BindGroupEntry, BindGroupHandle, BindGroupLayoutDesc, BindGroupLayoutEntry,

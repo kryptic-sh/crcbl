@@ -12,7 +12,7 @@
 //! # Rule 12, as a value rather than a log line
 //!
 //! `docs/plan/sample/00-samples-overview.md` rule 12 asks every sample to say
-//! which of `docs/plan/39-capabilities.md`'s selectors its frames took, in the
+//! which of topic 39's selectors its frames took, in the
 //! debug panel **and** in the summary. [`Paths`] is that answer read once off
 //! [`DeviceCaps`], so the panel, the `[HUD]` heartbeat and the summary line all
 //! print the same three words rather than three readings that could disagree.
@@ -42,7 +42,7 @@ use crate::map::{self, Field};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
-/// Which of `docs/plan/39-capabilities.md`'s three selectors this device drew
+/// Which of topic 39's three selectors this device drew
 /// through — rule 12's "says which it took", as a value.
 ///
 /// Read once at start-up because that is when it is decided: the selectors are

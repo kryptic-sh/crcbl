@@ -34,8 +34,9 @@ Several of those are not sketched anywhere below and are worth naming here:
   per level whether the geometry came from the file or the cluster DAG, or
   generate one.
 - `crcbl bench --scenario <NAME>` — run one fixed, named workload headless and
-  report its distribution beside the machine it ran on.
-  `docs/plan/40-profiling.md` owns it.
+  report its distribution beside the machine it ran on. Its rules are in
+  `docs/notes/tooling.md` under _What the deleted 40-profiling plan left
+  behind_.
 
 Everything below that is not in that list — `scene`, `phys`, `edit` — is
 unbuilt. They are kept as the specification they always were; the parser rejects
@@ -138,7 +139,8 @@ What the verbs that exist still owe:
   writes a whole quality tier through `crcbl::settings::presets::select`, which
   `set` could never reach because a preset is a writer rather than a key.
 - **`bench`'s device scenarios are not written** — `jobs` and `phys` are the
-  headless pair, and [40-profiling.md](40-profiling.md) owns the rest.
+  headless pair, and the rest are in `docs/backlog.md` under _Profiling: five of
+  the eight gaps are still open_.
 
 | Slice                                                        | Roadmap phase |
 | ------------------------------------------------------------ | ------------- |

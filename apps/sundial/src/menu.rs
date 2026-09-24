@@ -92,7 +92,7 @@ pub enum SundialAction {
     /// when it comes round again.
     CycleCamera,
     /// Flip the shadow passes themselves, in the one layer of
-    /// `docs/plan/39-capabilities.md`'s resolution order a panel owns.
+    /// topic 39's resolution order a panel owns.
     ///
     /// **The control for every claim this fixture makes.** With the passes off
     /// every surface is lit, so a reading that did not move when they went away

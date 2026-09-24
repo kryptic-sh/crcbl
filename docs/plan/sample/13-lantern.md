@@ -6,7 +6,7 @@ independently. Not a game — the lighting is the content.
 
 **This is the sample that makes graceful degradation checkable.** Ray tracing is
 Vulkan and D3D12 only; macOS, iOS and every browser render the rasterised twin
-([39-capabilities.md](../39-capabilities.md)). A raster path nobody looks at
+([backends notes](../../notes/backends.md)). A raster path nobody looks at
 carefully is a raster path that ships broken to most of the audience, and this
 sample exists so that "the fallback also works" is something a human has seen
 rather than something the plan asserts.

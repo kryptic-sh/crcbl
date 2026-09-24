@@ -19,7 +19,7 @@
 //!
 //! # A row writes one layer and reads the answer of all four
 //!
-//! `docs/plan/39-capabilities.md`'s order resolves four layers, and a panel owns
+//! Topic 39's order resolves four layers, and a panel owns
 //! exactly one of them — [`toggled_effect`] says which and why. What a row
 //! *shows* comes from the other end of the same order: [`EffectRequest::resolve`]
 //! against what the device permits, so a row cannot tick an effect the hardware

@@ -652,9 +652,9 @@ seam past its band (`SEAM_BLEED`'s doc carries the sweep).
   layer that stores a player's choices had been exercised by everything except a
   player. The round trip it proves is its own restart.
 - **`[engine.video]` may only clamp downward, and an absent key clamps nothing**
-  (`docs/plan/39-capabilities.md`'s rule). A settings screen is the first thing
-  that can violate it, so **requested and resolved are shown separately**: the
-  _time_ half is `menu::NEXT_START_MARK` on a row that applies at the next
+  (the clamp rule in `docs/notes/backends.md`). A settings screen is the first
+  thing that can violate it, so **requested and resolved are shown separately**:
+  the _time_ half is `menu::NEXT_START_MARK` on a row that applies at the next
   start; the _clamp_ half is `menu::HELD_MARK` — `frame_limit = 240` in a binary
   launched at 60 reads `240 fps, held to 60 fps`, from `LoopConfig::limit`.
 - **Antialiasing is a replacement inside the resolve slot, not a clamp** — a

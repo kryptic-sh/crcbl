@@ -68,7 +68,7 @@ const LANTERN_TIMED_PASSES: u32 = MAX_TIMED_PASSES + ForwardRenderer::MAX_PASSES
 ///
 /// **The camera layer is the view's, the video layer is the player's and the
 /// programmatic layer is the run's**, which is the whole of
-/// `docs/plan/39-capabilities.md`'s order made visible in one function:
+/// topic 39's order made visible in one function:
 /// `--no-shadows` is an instruction about this run and belongs to the layer that
 /// can move a decision either way, `[engine.video]` is a standing preference and
 /// belongs to the one that may only remove, while "a monitor does not reflect
@@ -103,7 +103,7 @@ fn request_for(
     }
 }
 
-/// Which of `docs/plan/39-capabilities.md`'s three selectors this frame was
+/// Which of topic 39's three selectors this frame was
 /// drawn through, and whether the run asked for less than the device offers.
 ///
 /// Rule 12's "says which it took", as a value rather than as a log line, so the

@@ -655,7 +655,7 @@ struct PendingScreenshot {
 /// Where a run's `[engine.video]` settings are read from.
 ///
 /// The [`GpuContextDesc::settings`] field, and the thing that makes
-/// `docs/plan/39-capabilities.md`'s player layer real: a context reads the
+/// topic 39's player layer real: a context reads the
 /// player's quality settings while it is opening, and
 /// [`GpuContext::effect_request`] hands them to whatever renderer is built on
 /// it. **Nothing here is fallible** — see [`SettingsSource::Platform`].
@@ -726,7 +726,7 @@ impl Default for GpuContextDesc<'_> {
             label: "crcbl",
             backend: None,
             // Nothing here needs a feature, and demanding `GPU_DRIVEN` would
-            // refuse to run on the lesser devices `docs/plan/39-capabilities.md`
+            // refuse to run on the lesser devices topic 39
             // requires the engine to degrade onto. Ask for everything optionally
             // and branch on what came back. `TIMESTAMP_QUERY` is deliberately
             // not part of `GPU_DRIVEN` — topic 10's browsers may lack it — so
@@ -993,7 +993,7 @@ impl ForcedPaths {
 
 /// The three selector rows every sample's `paths` debug section opens with.
 ///
-/// `docs/plan/39-capabilities.md`'s selectors, as a value rather than as a log
+/// Topic 39's selectors, as a value rather than as a log
 /// line, so the debug panel, the headless summary and the golden suites all
 /// read the same answer. A sample owns the rows that follow these three — its
 /// ray-tracing note, its effect set, `apps/lantern`'s second camera — and
@@ -4999,7 +4999,7 @@ pub trait GameGpu: GpuSurface + Sized {
     /// [`FrameCounters::default`](crcbl_render::FrameCounters::default) would
     /// put `draws: 0` on the panel for every bundle that forgot to implement it
     /// — "not counted" arriving as "nothing was drawn", which is the one failure
-    /// `docs/plan/40-profiling.md` names for counters. Every renderer in
+    /// topic 40 names for counters. Every renderer in
     /// `crcbl-render` answers this, so an implementation is
     /// [`plus`](crcbl_render::FrameCounters::plus)ing the ones this bundle
     /// holds.
@@ -7336,7 +7336,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     /// first two seconds every time.
     ///
     /// The GPU half is *not* this frame's — the timers are frames latent by
-    /// design and `docs/plan/40-profiling.md` refuses to stall them — which is
+    /// design and topic 40 refuses to stall them — which is
     /// why it goes in by frame number and why the row shows two distributions
     /// rather than a pair. See [`crcbl_ui::budget`].
     fn record_frame_cost(&mut self) {
@@ -11165,7 +11165,7 @@ mod tests {
 
     /// **The downgrade line is an assertion target, not decoration.**
     ///
-    /// `docs/plan/39-capabilities.md` makes it the engine's only evidence that a
+    /// Topic 39 makes it the engine's only evidence that a
     /// device refused an optional feature. Nothing but this test reads it, so
     /// without it a refactor could delete the `log::info!` in
     /// [`PendingGpuContext::poll`] and leave the suite green.
@@ -13973,7 +13973,7 @@ mod tests {
     ///
     /// The zero is the failure this is written against: a `None` sampled as `0`
     /// is indistinguishable in a trace from a frame that genuinely drew nothing,
-    /// which is `docs/plan/40-profiling.md`'s "counters that lie by omission" in
+    /// which is topic 40's "counters that lie by omission" in
     /// the one place a consumer would never think to check.
     #[test]
     fn a_traced_frame_samples_the_counters_it_has_and_omits_the_ones_it_does_not() {

@@ -6365,12 +6365,12 @@ that value lantern differed from a fixed filter in 36 bytes of 4,915,200 — so
   budget for +28 MiB of `D32Float`, a one-constant change. Blocked on nothing
   but the unmeasured peak wasm memory — see the record under _The atlas
   re-tiling's leftovers_ in `docs/notes/rendering.md`.
-- **Make the atlas size a tier knob**: `docs/plan/39-capabilities.md`'s tier
-  table drafts the shadow atlas row at 2048² with 4 shadowed local lights, 4096²
-  with 8 and 8192² with 16, and _Quality presets still owe their remaining rows_
-  records that it has no `[engine.video]` key and no renderer half.
-  `shadow::atlas_extent` and the allocator would take the extent at renderer
-  construction rather than from the constants.
+- **Make the atlas size a tier knob**: the tier table (_The tier table the
+  quality presets are built from_) drafts the shadow atlas row at 2048² with 4
+  shadowed local lights, 4096² with 8 and 8192² with 16, and _Quality presets
+  still owe their remaining rows_ records that it has no `[engine.video]` key
+  and no renderer half. `shadow::atlas_extent` and the allocator would take the
+  extent at renderer construction rather than from the constants.
 - **Keep 768 and spend the texels better**: the priority rung already demotes
   small lights to smaller tiles (`WHOLE_CELL_COVERAGE`, `tile_level`), and _The
   shadow atlas: what the rung left_ records that the anchor is conservative, so
@@ -6655,6 +6655,142 @@ What the rung did leave behind:
   need `ForwardRenderer::shadow_lights` the day a scene they cover demotes a
   light. None does.
 
+## What the deleted 39-capabilities plan left unbuilt (2026-09-24)
+
+The capability seam, the four-layer effect resolution and the quality presets
+are built; the rules they obey are in `docs/notes/backends.md` under _What the
+deleted 39-capabilities plan left behind_. What the plan specified and the tree
+does not have is below and in the preset entries that follow this section. The
+D3D12 and Metal cells of its feature matrix are in _D3D12 and Metal: the
+hardware-proof rows stay parked_; the camera stack's missing pass parameters are
+in _What the camera-stack slice left_.
+
+### The tier table the quality presets are built from (decided 2026-08-30)
+
+Decided once on the user's rule "best-looking for the performance", so a slice
+starts from a row rather than a question. Every number is a **starting budget to
+sweep on that tier's hardware**, not a constant: the constant is spelled where
+the code reads it and the sweep fixes it there.
+
+| Item                    | Low (browser, lavapipe, integrated)          | Medium                             | High (desktop, RT where present)           |
+| ----------------------- | -------------------------------------------- | ---------------------------------- | ------------------------------------------ |
+| Antialiasing            | FXAA                                         | CMAA2                              | CMAA2; MSAA opt-in                         |
+| Render scale            | 0.75                                         | 1.0                                | 1.0                                        |
+| Shadow atlas            | 2048², 4 shadowed local lights               | 4096², 8                           | 8192², 16                                  |
+| Sun shadows             | 2 cascades, box                              | 3 cascades, disc                   | 3 cascades, PCSS                           |
+| Contact shadows         | off                                          | on                                 | on                                         |
+| Ambient occlusion       | 2 slices, 1 blur, bent normals off           | 4 slices, 2 blurs, bent normals on | 4 slices, 2 blurs, bent normals on         |
+| Area lights (LTC)       | on                                           | on                                 | on                                         |
+| Probe volume            | 2 levels, 16³ probes each, capture amortised | 3 levels, 24³                      | 4 levels, 32³; traced updater on RT        |
+| Atmosphere              | on (one LUT fetch)                           | on                                 | on                                         |
+| Reflections             | SSR half-res, sky + probe fallback           | SSR full-res, Hi-Z                 | SSR + cone trace; RT reflections on RT     |
+| Volumetric fog          | off                                          | on, half-res froxels               | on                                         |
+| Bloom, auto-exposure    | on                                           | on                                 | on                                         |
+| Ray-traced shadows / GI | —                                            | —                                  | on where the device reports the capability |
+
+Each Low cell is what a frame must fit on the browser tier at 60 Hz; Medium is
+what the settings screen shows on a device reporting no ray tracing; High is
+what an RT-capable desktop opens on. The shadow cadence row decided on
+2026-09-06 (on for low, off for medium and high, half the tiles per frame) is
+the entry _The shadow cadence default still has no tier to live in_ below.
+
+**What `crcbl::settings::presets` covers today is seven keys** — `render_scale`,
+`antialiasing`, `shadow_filter`, `volumetric_fog`, `ssao_slices`,
+`ssao_blur_passes` and `ssao_bent_normals` (verified in `QualityValues`,
+2026-09-24). Every other row has no `[engine.video]` key and mostly no renderer
+half; _Quality presets still owe their remaining rows_ is that list. The
+profiling baseline is meant to measure each preset, which is what turns "priced
+on three tiers" into numbers a rung is held to (_Profiling: five of the eight
+gaps are still open_).
+
+### The graphics catalogue's quality keys, and the widening they need
+
+The catalogue was locked on 2026-08-27: every quality key is named with its
+domain now, before anything reads it, so a settings screen's rows and players'
+files never churn. Rungs are written lowest-first, which is the clamp order.
+These have **no reader** (grep of `crates/` and `apps/` for each name,
+2026-09-24):
+
+- `shadow_quality` — `off | low | medium | high`. Today the `shadows` boolean
+  (`RenderEffects::SHADOWS`) is off versus everything; the atlas has no quality
+  rungs.
+- `shadow_distance` — metres. Distinct from `shadow_quality` because it trades
+  range for resolution rather than buying either.
+- `texture_quality` — `low | medium | high`. Its cheap first form is a `lod_min`
+  clamp on the page sampler once the page has mips, before the residency
+  mechanism the LOD topic owns.
+- `draw_distance` — metres.
+- `lod_bias` — a signed scalar where negative is more detail, so its clamp order
+  runs opposite to its numeric order; the explicit-order rule is what makes that
+  expressible.
+- `particle_quality` and `decal_density` — `low | medium | high`, owned by the
+  particle and decal systems (topics 20 and 33), neither built.
+- `motion_blur`, `film_grain`, `chromatic_aberration`, `depth_of_field` —
+  `off | on`, with no pass (and no motion vectors for the first). They are lens
+  effects, a camera's property like bloom, and players most reliably want them
+  off, so the keys exist for the switch to be there on the day the pass is.
+
+Two built keys have rungs the tree lacks: `ambient_occlusion` is a boolean plus
+the SSAO bundle, and its `ssao | gtao` choice is `r_ssao_technique`, a console
+variable with no key and no preset (_What GTAO left owed_); `reflections` is
+`off | ssr`, and a ray-traced rung arrives with `LightingPath::RayTraced`, not
+before.
+
+**The widening itself is started, not finished.** `crcbl::settings::VIDEO_KEYS`
+pairs a key with one `RenderEffects` bit, and a bitflag cannot hold a rung, so
+each enumerated key needs `VIDEO_KEYS` and `RenderEffects` widened to carry a
+level. `antialiasing` was the first to land (as its own key, and the one that
+replaces rather than clamps). Every new key obeys the clamp rule in the notes:
+an explicit lowest-first order as data beside the key, `min` under it, absent
+means no clamp, and a test that writes the order out longhand rather than
+reading it from the table under test.
+
+### The engine's own settings screen (P10)
+
+`apps/options` reaches every key that has a reader, but it is a sample. The
+engine-provided screen in front of the catalogue is P10 work and unstarted; it
+is also where the requested-versus-resolved display `apps/options` proved
+(`menu::NEXT_START_MARK`, `menu::HELD_MARK`) should be carried over.
+
+### The device layer of the resolution order removes nothing yet
+
+`EffectRequest::resolve`'s fourth layer is wired to `DeviceCaps` and clears no
+effect, because no current effect has a device fact to gate on (the effects
+module argues it per effect). The first rule arrives with the ray-traced
+variants that `LightingPath` already selects. When it does, the downgrade line
+and a forced-off e2e are owed with it.
+
+### Considered and declined for capabilities and quality settings
+
+The rules these protect are in `docs/notes/backends.md` under _What the deleted
+39-capabilities plan left behind_.
+
+- **A `FeatureRequest` type**: `DeviceDesc`'s `required_features` and
+  `optional_features` already say it.
+- **A per-monitor or per-adapter quality profile**: a second axis on every key
+  before anyone asked, indexed by a monitor or adapter name that is neither
+  unique nor stable. The `quality` command covers "make this machine sensible in
+  one click". Revisit only on a concrete report of a player losing settings to a
+  hardware change.
+- **A user-defined post-chain order**: the post stack's order (bloom, exposure
+  and tonemap, AA, upscale, UI) is a correctness argument at each step, and a
+  reorderable chain produces frames nobody can reason about or bless. Per-camera
+  stack RON is the developer-facing way to change what a view runs.
+- **A catalogue-specific settings migration format**: persistence already says
+  what an unknown, unreadable or absent key does (warn, clamp nothing), which is
+  the whole story for a clamp-only layer. A renamed key stops clamping, the safe
+  direction, and is still a compatibility break to avoid.
+- **A preset consulted at resolve time** for keys the file does not mention: it
+  makes an absent key mean something, which the clamp rule forbids.
+- **A stored `quality` key**: its label drifts the moment a covered key is
+  hand-edited, and `quality = "custom"` would write nothing. Replaced by the
+  derived label on 2026-08-31.
+- **An `ultra` tier**: the table has three columns, and a fourth name has no
+  values behind it.
+- **Hand-written MSL for Metal ray tracing**: nothing off macOS can validate
+  MSL, so a hand-kept twin would drift undetectably. Do not revisit without an
+  off-macOS Metal compiler or a differential gate on Apple hardware.
+
 ## Remaining preset knobs need measured tier budgets (2026-08-31)
 
 The settings and renderer knobs exist, but the tier table still lacks the
@@ -6662,16 +6798,27 @@ hardware measurements that would make these preset values rather than guesses:
 
 - `crcbl_render::shadow::cadence::r_shadow_cadence` and `r_shadow_faces` need
   the visible lag measured per tier; the entry below owns that work.
-- `anisotropic_filtering` is named as a preset knob in
-  `docs/plan/39-capabilities.md`, but the tier table assigns it no values.
+- `anisotropic_filtering` was named as a preset knob when the presets were
+  planned, but the tier table above assigns it no values. So do the shadow atlas
+  budget and the froxel sample count.
 
 Until those measurements exist, presets must leave these knobs alone.
 
 ## Quality presets still owe their remaining rows (2026-08-31)
 
-The shadow atlas's size and light budget (2048²/4096²/8192²), the probe volume's
-levels (2/3/4), SSR's resolution and the ray-traced rung still have no
-`[engine.video]` key and mostly no renderer half.
+The shadow atlas's size and light budget (2048²/4096²/8192² with 4/8/16 shadowed
+local lights), the probe volume's levels and density (2/3/4 levels at
+16³/24³/32³), SSR's resolution and Hi-Z and cone-trace rungs, contact shadows
+and the ray-traced rungs still have no `[engine.video]` key and mostly no
+renderer half. Each reaches a tier in two steps, in this order: a catalogue key
+in `crcbl::settings::catalogue` with a reader that drives the renderer's setter
+or console variable (the road `render_scale` takes to
+`ForwardRenderer::set_render_scale`), then the column values from the tier table
+above. Contact shadows are the odd row: the shadows plan made
+`RenderEffects::CONTACT_SHADOWS` a tier item rather than a settings row, so it
+has no `VIDEO_KEYS` row (`every_effect_has_a_key_and_no_two_share_one` names it
+`TIER_ONLY`), and a preset clears an effect only by writing its row — so either
+it grows a row or presets grow a way to clear a bit without one.
 
 ## The shadow cadence default still has no tier to live in (2026-08-31)
 
@@ -6681,15 +6828,14 @@ cadence switched on" — it answers only the second of that entry's two blockers
 a preset mechanism to be set from, and still have neither a settings key nor a
 tier-table row, so the decision is exactly where it was: it needs the visible
 cost measured per tier (how far a shadow lags at that tier's frame rate and
-light speed), then a row in `docs/plan/39-capabilities.md`'s tier table, then a
-`shadow_cadence` catalogue key.
+light speed), then a row in the tier table (_The tier table the quality presets
+are built from_, above), then a `shadow_cadence` catalogue key.
 
 **DECIDED 2026-09-06 —** the shadow cadence gets its tier row: on for low, off
 for medium and high, with a budget of half the tiles per frame on low.
 Frostbite's shadow update budgets and Unity HDRP's on-demand cached shadow atlas
-are the precedent. It schedules the `shadow_cadence` key in plan 39's tier
-table, and the lantern measurement that fixes the budget before the row is
-written.
+are the precedent. It schedules the `shadow_cadence` key and its tier-table row,
+and the lantern measurement that fixes the budget before the row is written.
 
 ## Automatic first-launch quality selection needs lifecycle design (2026-08-31)
 
@@ -6761,8 +6907,9 @@ What is measured, on the four-spot dunes field with a patch nudged each frame
 `shadow` pass falls from 0.016 ms to 0.007 ms p50 on an RX 7900 XTX, and from
 3.833 ms to 1.727 ms p50 on llvmpipe, under a budget of two tiles out of six.
 What is **not** measured is the visible cost — how far a shadow lags at a given
-tier's frame rate and light speed — and that is what a default needs.
-`docs/plan/39-capabilities.md`'s tier table is where the answer would live.
+tier's frame rate and light speed — and that is what a default needs. The tier
+table (_The tier table the quality presets are built from_) is where the answer
+would live.
 
 **DECIDED 2026-09-06 —** low ships with the shadow cadence switched on, medium
 and high with it off, its budget half the tiles per frame. Frostbite budgets
@@ -7138,16 +7285,16 @@ What is left, in order of cost:
    timers resolve and `Loop::finish` reports a p50, a p95 and a share per pass
    label over the last 120 frames, replacing a line that printed one arbitrary
    latent frame. What is still missing is the half that fails: nothing records a
-   baseline, nothing compares against one, and nothing reddens. That is
-   `docs/plan/40-profiling.md`'s "Baseline storage + `--compare` + thresholds"
-   row, at P8, and that document's own decision bounds where it can run — **CI
-   does not gate on absolute timings**, because a shared runner is slower and
-   noisier than a dev box, so the comparison is against a baseline recorded on a
-   named machine and the gate is local. Which leaves a real question open: a
-   local gate is one nobody runs. The candidates are a `crcbl bench` scenario
-   that drives a sample headless and compares (the delivery row's own shape), or
-   a CI job that publishes the numbers as an artifact without gating, so a
-   regression is visible in the run rather than caught by it.
+   baseline, nothing compares against one, and nothing reddens. That is the
+   baseline bullet of _Profiling: five of the eight gaps are still open_, at P8,
+   and the profiling decisions bound where it can run — **CI does not gate on
+   absolute timings**, because a shared runner is slower and noisier than a dev
+   box, so the comparison is against a baseline recorded on a named machine and
+   the gate is local. Which leaves a real question open: a local gate is one
+   nobody runs. The candidates are a `crcbl bench` scenario that drives a sample
+   headless and compares (the bench's own shape), or a CI job that publishes the
+   numbers as an artifact without gating, so a regression is visible in the run
+   rather than caught by it.
 2. **`SHADOW_TAPS` and `SHADOW_SEARCH_TAPS` as graphics-quality settings**
    rather than constants — the natural first entries for the settings seam,
    since 16 filter taps is a real quality tier rather than a broken one and a
@@ -8399,9 +8546,9 @@ Neither half is built, verified 2026-09-24.
 
 **Checks:** the goldens it must not move —
 `crates/crcbl/tests/mesh_e2e/exposure.rs`'s percentile and the AA observers'
-counts — and a price on `docs/plan/40-profiling.md`'s baseline. Half 1 moves any
-golden whose target alpha is read; half 2 changes the histogram's input, so the
-exposure e2e is the arbiter.
+counts — and a price on the per-machine perf baseline (_Profiling: five of the
+eight gaps are still open_). Half 1 moves any golden whose target alpha is read;
+half 2 changes the histogram's input, so the exposure e2e is the arbiter.
 
 ### Depth of field and lens artefacts are missing, and follow colour grading (2026-09-24)
 
@@ -9963,39 +10110,85 @@ replay is written.
 
 ### Profiling: five of the eight gaps are still open (2026-08-27)
 
-Four of `40-profiling.md`'s eight are struck through and genuinely closed
-(`crcbl_core::trace`, `Pool::stats`, `crcbl_render::counters`,
-`crcbl_render::cull_stats`). A fifth — the benchmark harness — I struck through
-in this pass, because `crcbl bench --scenario jobs|phys`
-(`crates/crcbl-cli/src/bench/`) pins the scenario, warms up, reports p50/p95/p99
-and max with no mean, refuses percentiles below `MIN_PERCENTILE_SAMPLES`, and
-emits JSON beside an environment block.
+The profiling plan was deleted on 2026-09-24; its rules and the numbered list of
+eight missing pieces that code cites ("the seventh missing piece") are in
+`docs/notes/tooling.md` under _What the deleted 40-profiling plan left behind_.
+Pieces 1, 6, 7 and 8 are closed (`crcbl_core::trace`, `Pool::stats`,
+`crcbl_render::counters`, `crcbl_render::cull_stats`), and piece 2, the
+benchmark harness, is closed for the headless scenarios:
+`crcbl bench --scenario jobs|phys` (`crates/crcbl-cli/src/bench/`) pins the
+scenario, warms up, reports p50/p95/p99 and max with no mean, refuses
+percentiles below `MIN_PERCENTILE_SAMPLES`, and emits JSON beside an environment
+block. Re-verified 2026-09-24: `crates/crcbl-cli/src/args.rs` parses no
+`--compare` and no `--trace`, and `crcbl_core::trace` has no JSON writer.
 
 **Still open:**
 
-- **Baseline storage, `--compare`, per-metric thresholds.** Nothing stores a
-  previous run.
-- **Trace export.** No Chrome Trace Event JSON writer, and no job-system tracks.
-- **Memory/occupancy accounting.** Pool residency, buffer bytes, descriptor
-  counts, staging-ring pressure — all invisible.
+- **Baseline storage, `--compare`, per-metric thresholds** (P8, scheduled
+  2026-08-30 as the next slice). Design: `crcbl bench` writes the per-pass GPU
+  timings `crcbl_render::PassStats` already collects, plus the scenario's own
+  metrics, to a baseline file **per machine** — the bench's own JSON, never
+  committed, never compared across hosts. `crcbl bench --compare <baseline>`
+  reports each metric as a ratio against it and flags anything outside that
+  metric's threshold, which the scenario records (a 5 % move in a 0.1 ms pass is
+  noise, in frame time it is not); a pass above **1.15×** is the red line. A
+  baseline whose environment block names different hardware is refused, not
+  compared. The gate is local; CI runs the bench to prove it runs and publishes
+  the numbers as an artifact. Its consumers waiting on it: the paced headless
+  mode (_Windows opened on the live display during a session_), the regression
+  harness in _The shadow filter costs 48 taps and it timed out the browser
+  gate_, and pricing each quality preset on the three tiers (desktop, lavapipe,
+  browser).
+- **Trace export** (P8). `crcbl bench --trace <path>` writes one run as Chrome
+  Trace Event JSON — text, no dependency, built on `crcbl-cli`'s JSON machinery
+  — from a `crcbl_core::trace::Snapshot`: one track per `ThreadTrack` (the `tid`
+  the module already names) and a GPU track from `crcbl_render::timing`'s
+  per-pass timestamps, aligned to the CPU timeline by one calibration point per
+  frame rather than by assuming the clocks agree. Job-system worker tracks come
+  with it.
+- **Memory/occupancy accounting and its panel row** (P9). Pool bytes resident
+  and capacity, buffer bytes, descriptor counts, staging bytes in flight — all
+  invisible today.
 - **`crcbl-jobs` has no spans**, and no reader puts `PoolStats` on the trace or
   in a panel row. `crcbl bench --scenario jobs` is the only consumer.
   `crates/crcbl-jobs/Cargo.toml` depends on `thiserror` alone — it does **not**
   depend on `crcbl-core`, so the dependency edge the span module's placement
-  decision anticipated ("every crate that has to open a span depends on it
-  already, except `crcbl-jobs`, which gains it") has not been added.
-- **Sample-owned bench scenarios.** The ones that need a device are not written,
-  which is why the environment block carries no adapter, backend or driver
-  version.
-- **Every debug-panel perf row except Frame.** The pass list, CPU breakdown,
-  counters row, memory row, jobs row and the freeze toggle are all owed. Note
+  decision anticipated has not been added; it arrives with the first span,
+  because `cargo machete` refuses an unused edge.
+- **The ECS schedule, physics and asset upload have no spans.** `crcbl::perf`'s
+  vocabulary names only the loop's own phases, and these run inside a game's
+  `tick`; nothing opens a `crcbl_core::trace::span` in `crcbl-ecs`, `crcbl-phys`
+  or `crcbl-jobs` (grep, 2026-09-24). What it would take: spans at those crates'
+  stage boundaries — the schedule's systems, the physics stages, the upload —
+  which is also what the panel's CPU breakdown row (tick, schedule, physics,
+  upload, record, present-wait) is waiting for.
+- **Sample-owned bench scenarios.** The ones that need a device are not written
+  — horde's 10 000 enemies, the dunes patch at several camera distances, the
+  sprite and UI scenes — which is why the environment block carries no adapter,
+  backend, driver version or `GeometryPath`/`BindingModel`/`LightingPath`, and
+  why horde's scale measurement in `docs/notes/samples.md` is still produced
+  with `apps/horde`'s ad-hoc flags (`--wall-clock`, `--fps 0`, `--tick-hz 1`,
+  `--frames`, `--prefill`). Each scenario names its seed, frame count and
+  warm-up and lives with the sample that owns it.
+- **Every debug-panel perf row except Frame** (P10, with the UI slice that owns
+  the panel): the pass list sorted by cost with the frame total and each share
+  (the overlay today shows `FrameTimings`' own module, one latent frame at a
+  time); the CPU breakdown; counters (draws, instances submitted against drawn,
+  clusters and their level histogram, triangles); memory; jobs (worker
+  utilisation, tasks run, steals, longest queue); and a freeze toggle so a spike
+  can be read rather than chased. Rows follow `DebugModule`/`DebugSection`. Note
   the recorded hazard: `DebugModule` labels share one namespace and nothing
   detects a collision, so a test that searches the draw list by label text can
   silently read the wrong row.
+- **The profiler has not benchmarked itself.** The enabled cost of a span is
+  meant to be measured by a benchmark of the profiler, the only honest way to
+  know the instrumentation does not change what it measures.
 - **`--cfg crcbl_trace_off`.** Deliberately absent until there is a shipping
   build to serve; the decision (never a Cargo feature, because CI's
   `--all-features` runs would then test the compiled-out arm) is recorded and
   should not be re-argued.
+- **Tracy or another external profiler** — later, only on demonstrated need and
+  a dependency decision, as an optional feature over the same span data.
 
 ### Steamworks: every slice but 13 built and merged, nothing verified against Steam (2026-09-23)
 
@@ -10416,9 +10609,9 @@ restricts their Steam calls to the pump thread by a runtime check.
 A **second** blind spot beside the relative-Markdown-link one this file already
 records. The gate matches only backtick paths that begin with a top-level
 directory (`crates|apps|web|docs|tools|.github`), so a crate-relative citation
-like `crcbl-cli/src/bench.rs` is never checked. One was already stale —
-`40-profiling.md` pointed at a file that is now a directory — and it was found
-by hand, not by the gate.
+like `crcbl-cli/src/bench.rs` is never checked. One was already stale — the
+profiling plan pointed at a file that is now a directory — and it was found by
+hand, not by the gate.
 
 **What it would take:** the same widening the relative-link entry proposes, plus
 a resolution rule for a bare `crcbl-*/…` prefix (try `crates/`, then `apps/`).
@@ -17346,19 +17539,28 @@ they left:
 ## D3D12 and Metal: the hardware-proof rows stay parked (2026-08-30)
 
 **The constraint, stated by the user:** no Windows machine and no Apple machine
-are available right now, so every `owed` cell in `39-capabilities.md`'s table
-that needs a real device to prove — D3D12 mesh shading, Metal mesh shading,
-Metal timestamp query, and the ray-query rows on both — is parked on the same
-ground. CI's software adapters (WARP, the macOS paravirtual device) remain the
-only verdict those backends get, and a capability that a software adapter cannot
-exercise is not owed until hardware is. Reviewed with the user and left parked.
-`crcbl-dx12` has the DXIL, the mesh PSO and `DispatchMesh`; what it lacks is the
-`OPTIONS7` tier query behind `features_of` and a gate that proves the path on
-D3D12 (`39-capabilities.md`'s rule: no flag without a proof). The cost is a
-proving slice — the flag from the tier, the meshlet gates on WARP, the two
-`DIVERGENCES` rows — and the gap is performance on Windows, where the vertex
-path draws everything. If it is ever picked up, do it after foundation (a)'s
-vertex re-bless so the proof is not run twice.
+are available right now, so every `owed` cell of the capabilities plan's feature
+matrix that needs a real device to prove — D3D12 mesh shading, Metal mesh
+shading, and the ray-query rows on both — is parked on the same ground. (Metal
+timestamp query was on this list and has since landed; the matrix's live form is
+`crcbl_hal::Capability` and its `DIVERGENCES` rows. Vulkan's ray-query cell is
+owed for another reason: the adapter reports the flags, but `crcbl-hal` has no
+acceleration-structure API to build through.) CI's software adapters (WARP, the
+macOS paravirtual device) remain the only verdict those backends get, and a
+capability that a software adapter cannot exercise is not owed until hardware
+is. Reviewed with the user and left parked. `crcbl-dx12` has the DXIL, the mesh
+PSO and `DispatchMesh`; what it lacks is the `OPTIONS7` tier query behind
+`features_of` and a gate that proves the path on D3D12 (the capability rule: no
+flag without a proof). The cost is a proving slice — the flag from the tier, the
+meshlet gates on WARP, the two `DIVERGENCES` rows — and the gap is performance
+on Windows, where the vertex path draws everything. If it is ever picked up, do
+it after foundation (a)'s vertex re-bless so the proof is not run twice. Since
+2026-09-22 the workstation is a Windows machine with an RX 7900 XTX (see _D3D12
+on hardware: fixed on an RX 7900 XTX, and what is left_), so the D3D12 rows no
+longer wait on a machine: D3D12 mesh shading is parked for its own reasons
+(`docs/notes/backends.md`, _DEFERRED — dx12 mesh shading_) and D3D12 ray query
+for the missing acceleration-structure API. Only the Metal rows still wait on
+hardware.
 
 ## The frame pacer: what was accepted rather than fixed (2026-08-30)
 
@@ -17424,7 +17626,8 @@ run only — tick counts become wall-clock dependent — which the flag declares
 rather than hides; the manual clock stays the headless default "by construction"
 (`Clock` docs). Precedent: every engine's benchmark mode runs the real clock
 headless and says so. Work: the flag, the clock selection, and the per-machine
-perf baseline (`docs/plan/40-profiling.md`) as its second consumer.
+perf baseline (_Profiling: five of the eight gaps are still open_) as its second
+consumer.
 
 ## `--pacing` and `--fps` reach the engine; three quarters of what they can ask for is unexercised
 
@@ -17531,9 +17734,10 @@ under the same heading.
   synthetic workload, reports p50/p95/p99/max with the pool's own counters
   beside them, and refuses a percentile below the sample count at which a
   nearest-rank p95 is just the maximum. What it does not do is compare: there is
-  no stored baseline, no `--compare`, and no threshold — separate rows of
-  `docs/plan/40-profiling.md`'s delivery table. Until those land, two runs are
-  compared by a person reading two blocks of output.
+  no stored baseline, no `--compare`, and no threshold — separate rows of the
+  profiling entry's list (_Profiling: five of the eight gaps are still open_).
+  Until those land, two runs are compared by a person reading two blocks of
+  output.
 - **The bench's environment block has no target triple.** A binary cannot read
   one — Cargo hands `TARGET` to build scripts and nothing else, and `std` offers
   only `ARCH`, `OS` and `FAMILY`, which is what the block reports. A build
@@ -21768,7 +21972,7 @@ What is left:
   it would have been _on_ in CI and every test would have asserted the
   compiled-out arm — green on code CI never ran. When it earns its place it is
   `--cfg crcbl_trace_off` with a `build.rs`, not a feature;
-  `docs/plan/40-profiling.md` records the argument. Nothing ships from this repo
+  `docs/notes/tooling.md` records the argument. Nothing ships from this repo
   yet, so it has no caller either way.
 
 ## DEFERRED — P6A, the native wasm module host (2026-08-30)

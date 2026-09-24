@@ -226,8 +226,8 @@ audio volume:
 - There is **no device-capability layer**, because no audio device removes the
   ability to multiply a sample by a scalar. The DSP core is pure `f32` block
   processing that runs identically on native and wasm, which is this document's
-  own architecture rule. [39-capabilities.md](39-capabilities.md) says the same
-  thing from the other side.
+  own architecture rule. The capability rules in the
+  [backends notes](../notes/backends.md) say the same thing from the other side.
 
 What remains is the player's file and the game's programmatic control, and the
 resolution is a plain multiply: the file sets the bus gain, and a game that

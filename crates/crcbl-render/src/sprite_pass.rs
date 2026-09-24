@@ -817,7 +817,7 @@ impl SpriteRenderer {
     /// **Read off the batches themselves**, which is the same list
     /// [`add_pass`](Self::add_pass) walks — so a draw this reports is a draw the
     /// frame records, and a batching change moves both together. That is the
-    /// point of it existing: `docs/plan/40-profiling.md`'s complaint is that a
+    /// point of it existing: topic 40's complaint is that a
     /// consumer keeping its own copy of a count is a copy that drifts, and this
     /// is the pass's own answer.
     ///

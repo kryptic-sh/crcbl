@@ -10,7 +10,7 @@ milestones, **web first**.
 that builds for `wasm32` and ships on the Pages site. Rasterised lighting,
 `IndirectPerBatch` geometry, `ArrayPages` materials — every fallback path,
 because a browser has no ray tracing, no mesh shaders and no bindless
-([39-capabilities.md](../39-capabilities.md)).
+([backends notes](../../notes/backends.md)).
 
 **Milestone 2 — the native world.** The same game with the persistent shared
 world underneath it: sector streaming, interest-managed replication, a dedicated
@@ -22,8 +22,8 @@ every browser visitor and every Apple machine runs, and a fallback proven after
 the fact is a fallback nobody proved. Building the web slice first means the
 raster twin and both geometry fallbacks work on real content before a single
 ray-traced or meshlet feature is layered over them — and the layering is then a
-capability upgrade rather than a rewrite, which is the whole claim
-[39-capabilities.md](../39-capabilities.md) makes.
+capability upgrade rather than a rewrite, which is the whole claim topic 39
+makes (see the [backends notes](../../notes/backends.md)).
 
 This also gives the Pages site a 3D flagship. Every browser figure recorded so
 far comes from a 2D sample.

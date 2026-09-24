@@ -40,13 +40,13 @@ below, which retracts the original justification. Metal is the only path on
 macOS.
 
 > **Capability correction, 2026-08-09.** The "tier flags audit" below asserts
-> both backends are Tier A. That framing is superseded by
-> [39-capabilities.md](39-capabilities.md): there are no tiers, a backend
-> reports what the device has, and the renderer picks a path from that. Two
-> specifics this document got wrong are recorded there in full — **Metal has no
-> draw-indirect-count at all** (the count lives in GPU memory and Metal's only
-> count-reading execution needs its commands to already exist; `wgpu` reached
-> the same conclusion independently), and **Metal's bindless story is
+> both backends are Tier A. That framing is superseded by topic 39 (its rules
+> are in the [backends notes](../notes/backends.md)): there are no tiers, a
+> backend reports what the device has, and the renderer picks a path from that.
+> Two specifics this document got wrong are recorded there in full — **Metal has
+> no draw-indirect-count at all** (the count lives in GPU memory and Metal's
+> only count-reading execution needs its commands to already exist; `wgpu`
+> reached the same conclusion independently), and **Metal's bindless story is
 > unsettled** — `crcbl-mtl` withdrew `DESCRIPTOR_INDEXING` at MTL6 because bind
 > groups are flat argument tables, and getting it back needs Slang emitting
 > argument-buffer-shaped MSL rather than a flag being flipped.
@@ -81,7 +81,8 @@ clear.
   shaders on both, ray tracing on DX12 only. A capability that does not map
   cleanly is reported **clear** and the renderer selects a lesser path; it is
   never emulated behind the seam and never resolved with backend-specific
-  renderer code. See [39-capabilities.md](39-capabilities.md).
+  renderer code. See the capability rules in the
+  [backends notes](../notes/backends.md).
 - **CI**: Metal's API validation layer and D3D12's debug layer are both on and
   both gate. Compile-verified-only backends are a known trap (gpur lesson),
   which is why neither of these is one.
@@ -206,4 +207,4 @@ indirect-count draw**, and MoltenVK would have met that wall from the other
 side; the mapping table above already names ICBs as the closest fit. What has
 changed since is only how the engine reacts to it — the flag is reported clear
 and a selector picks another path, rather than a composite tier being refused
-whole. See [39-capabilities.md](39-capabilities.md).
+whole. See the capability rules in the [backends notes](../notes/backends.md).

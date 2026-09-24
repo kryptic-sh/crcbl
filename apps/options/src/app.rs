@@ -28,7 +28,7 @@
 //! `render_scale` and the effect switches of `crcbl::settings::VIDEO_KEYS`,
 //! which a `ForwardRenderer` takes and this sample has none to hand them to.
 //! Above all of those sits the quality row, which writes a whole column of
-//! `docs/plan/39-capabilities.md`'s tier table into the rows below it — see
+//! topic 39's tier table into the rows below it — see
 //! `Screen::set_quality`. The rest of
 //! the sample's video half — display mode, resolution,
 //! present mode — is not here yet, and `docs/backlog.md` says what each of

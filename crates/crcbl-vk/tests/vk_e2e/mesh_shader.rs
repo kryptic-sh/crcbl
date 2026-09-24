@@ -15,7 +15,7 @@
 //! of the module still runs.
 //!
 //! Its golden is `tests/golden/mesh_shader_triangle.png`. Per
-//! `docs/plan/39-capabilities.md` goldens are per
+//! topic 39 goldens are per
 //! `(GeometryPath, BindingModel, LightingPath)` combination a backend selects,
 //! and `GeometryPath::MeshShader` had none until this slice, because nothing
 //! could select it.
@@ -616,7 +616,7 @@ fn an_amplification_stage_delivers_its_payload_to_the_mesh_stage() {
 
 /// The golden-image gate for the mesh-shading geometry path.
 ///
-/// Per `docs/plan/39-capabilities.md`, golden images are per
+/// Per topic 39, golden images are per
 /// `(GeometryPath, BindingModel, LightingPath)` combination a backend actually
 /// selects — and until this slice `GeometryPath::MeshShader` had none, because
 /// nothing could select it. This is that image.

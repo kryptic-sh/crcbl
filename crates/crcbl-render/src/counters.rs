@@ -1,6 +1,6 @@
 //! What one frame's passes actually recorded: draws, instances, triangles.
 //!
-//! `docs/plan/40-profiling.md`'s seventh missing piece — "Counters are
+//! Topic 40's seventh missing piece — "Counters are
 //! piecemeal. `SceneStats`, `visible_count` and each sample's own rows exist;
 //! there is no one place a frame's draw count, instance count, cluster count or
 //! triangle count is reported." This is that one place, and it lives beside
@@ -31,7 +31,7 @@
 //! [`FrameCounters::plus`] propagates that: a frame holding one indirect pass
 //! has no honest total for either counter, so the sum is `None` however many
 //! direct passes it also holds. A counter that silently dropped the indirect
-//! pass's share would be `docs/plan/40-profiling.md`'s "counters that lie by
+//! pass's share would be topic 40's "counters that lie by
 //! omission" written down.
 //!
 //! # Instances drawn comes back off the GPU, a few frames late

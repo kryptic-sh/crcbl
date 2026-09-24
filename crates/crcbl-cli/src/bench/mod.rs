@@ -1,7 +1,7 @@
 //! `crcbl bench` — one fixed scenario, warmed up, timed, and reported as a
 //! distribution.
 //!
-//! `docs/plan/40-profiling.md` schedules "`crcbl bench` with fixed scenarios,
+//! Topic 40 schedules "`crcbl bench` with fixed scenarios,
 //! warm-up, percentiles, JSON output" and notes against it that "the job system
 //! is the first thing that needs proving". This is the subcommand and its two
 //! scenarios: `jobs`, which times [`crcbl::jobs::Pool`] in isolation — see

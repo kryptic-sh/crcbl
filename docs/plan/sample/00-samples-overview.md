@@ -198,8 +198,8 @@ without re-deriving it. It is not in the plan today.
    fallback paths — rasterised lighting, `IndirectPerBatch`, `ArrayPages` — and
    a fallback proven after the fact is a fallback nobody proved. The native
    milestone then layers ray tracing, meshlets and networking on top as a
-   capability upgrade rather than a rewrite, which is the claim
-   [../39-capabilities.md](../39-capabilities.md) makes.
+   capability upgrade rather than a rewrite, which is the claim topic 39 makes
+   (its rules are in the [backends notes](../../notes/backends.md)).
 
    **breach's competitive game is native only**, and that is a scope decision
    rather than a degradation: anti-cheat, raw mouse input and an unreliable
@@ -238,7 +238,7 @@ without re-deriving it. It is not in the plan today.
 
 12. **Every sample runs on every path the device offers, and says which it
     took.** `GeometryPath`, `BindingModel` and `LightingPath`
-    ([../39-capabilities.md](../39-capabilities.md)) are selected from device
+    ([backends notes](../../notes/backends.md)) are selected from device
     capability and degrade downward; a sample that only ever runs on the best
     one is how a fallback ships untested. Concretely: the selected paths appear
     in the debug panel and in the headless summary line, every sample accepts a

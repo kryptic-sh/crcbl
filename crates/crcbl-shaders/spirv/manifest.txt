@@ -432,7 +432,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [skinning]
 source = shaders/skinning.slang
-source-sha256 = 86ce0a402864ba5a43f25eeca88775b42e9335c23a7c3a5a1d6d6def1b630039
+source-sha256 = e39923c943296cccdc9251a017d8f82430f77d212491c326dda0afa5a681edba
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/skinning.spv
 spirv-sha256 = a237d1d0fdd34db2941bad9199ed34a0eff48ed31ae499b843a889a3ef848282

@@ -87,9 +87,11 @@ Three documents share this surface and the split is deliberate:
 
 - **This one** owns the rows that are properties of a window, a surface or a
   monitor.
-- [39-capabilities.md](39-capabilities.md) owns the graphics-quality rows and
-  the rule that decides how a level-valued key clamps, because the four-layer
-  resolution order those rows feed already lives there.
+- Topic 39 owned the graphics-quality rows and the rule that decides how a
+  level-valued key clamps, because the four-layer resolution order those rows
+  feed lived there. The rule and the order are now in the
+  [backends notes](../notes/backends.md); the rows are in `docs/backlog.md`
+  under _The graphics catalogue's quality keys, and the widening they need_.
 - [14-persistence.md](14-persistence.md) owns the file — the `[engine.video]`
   section, the spelling convention, and what happens when there is nowhere to
   write it.
@@ -181,7 +183,7 @@ and it is a HAL change, not a shell one.
 Stated once each, in the document that owns them, and binding on every row here:
 
 1. **The `[engine.video]` layer may only clamp downward, and an absent key
-   clamps nothing.** [39-capabilities.md](39-capabilities.md) carries the rule
+   clamps nothing.** The [backends notes](../notes/backends.md) carry the rule
    and what "downward" means for a key whose value is a level rather than a
    boolean.
 2. **A key with no implementation still gets its name and its domain now.**
@@ -207,8 +209,8 @@ discussed under rule 1 rather than here.
   a laptop from a 4K display should restore the settings that machine last used
   at 1080p. It is declined because it makes settings **two-dimensional** — every
   key gains an implicit "under which hardware" axis, the file stops being the
-  diff-against-defaults that keeps it small, and the resolution order in
-  [39-capabilities.md](39-capabilities.md) grows a fifth layer whose input is a
+  diff-against-defaults that keeps it small, and the resolution order in the
+  [backends notes](../notes/backends.md) grows a fifth layer whose input is a
   monitor name that `MonitorInfo::name`'s own doc comment says is neither unique
   nor stable across drivers. Nothing in this workspace has asked for it. Revisit
   only with a concrete report of a player losing settings to a hardware change,

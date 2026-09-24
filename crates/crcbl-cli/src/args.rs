@@ -781,7 +781,7 @@ pub struct ImportArgs {
 
 /// Which fixed workload `crcbl bench` runs.
 ///
-/// `docs/plan/40-profiling.md` requires scenarios to be "named and fixed", so
+/// Topic 40 requires scenarios to be "named and fixed", so
 /// this is an enum and not a free-form string: a name that answers to nothing is
 /// refused at parse time, with the names that do listed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

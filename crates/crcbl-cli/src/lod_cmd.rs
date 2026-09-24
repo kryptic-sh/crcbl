@@ -505,7 +505,7 @@ fn plural(count: usize) -> &'static str {
 ///
 /// The same facts as the table, so that `crcbl bench` and the editor's LOD panel
 /// read them from here rather than growing a second report — see
-/// `docs/plan/40-profiling.md`. A key that is absent is absent for a reason the
+/// topic 40's rules in `docs/notes/tooling.md`. A key that is absent is absent for a reason the
 /// module docs give: a name the file never supplied, or a number that exists
 /// only for a level the engine built.
 fn chain_json(scene: &GltfScene, chain: &Chain) -> Json {

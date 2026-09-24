@@ -431,7 +431,7 @@ pub const MONITOR_NEAR: f32 = 0.01;
 pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 
 /// What the monitor's view **asks for**, as the camera-stack layer of
-/// `docs/plan/39-capabilities.md`'s resolution order.
+/// topic 39's resolution order.
 ///
 /// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
 /// less the reflections, which are

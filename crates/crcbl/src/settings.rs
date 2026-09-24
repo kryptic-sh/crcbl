@@ -4,7 +4,7 @@
 //! # `[engine.video]`: one clamp in a chain of four
 //!
 //! Which of topic 18's effects the **player** allows, in
-//! `docs/plan/39-capabilities.md`'s effect resolution order:
+//! topic 39's effect resolution order:
 //!
 //! ```text
 //! camera stack declares what the view wants
@@ -111,7 +111,7 @@
 //!
 //! # A quality tier is a writer over these keys, not a key of its own
 //!
-//! [`presets`] is `docs/plan/39-capabilities.md`'s tier table: selecting `low`,
+//! [`presets`] is topic 39's tier table: selecting `low`,
 //! `medium` or `high` writes the individual keys that column names, through
 //! [`apply`], and nothing in the resolution order ever consults the tier. So it
 //! is a console command rather than a [`CatalogueKey`], and the word for which
@@ -1235,7 +1235,7 @@ pub fn catalogued(key: &str) -> Option<CatalogueKey> {
 /// cannot show a key, and every one of them still wants the key written. It is
 /// reported rather than swallowed because the alternative is
 /// "not implemented" arriving as "applied" — the failure
-/// `docs/plan/40-profiling.md` names for counters and this file's [`KeyStatus`]
+/// topic 40 names for counters and this file's [`KeyStatus`]
 /// names for keys.
 ///
 /// **A `Result<(), Unsupported>` rather than a three-armed enum**, because the
@@ -2659,7 +2659,7 @@ mod tests {
     /// `docs/backlog.md` carries the question.
     #[test]
     fn every_effect_has_a_key_and_no_two_share_one() {
-        /// Effects `docs/plan/39-capabilities.md`'s tiers own and a player's
+        /// Effects topic 39's tiers own and a player's
         /// file does not — see this test's header, which is where the one
         /// member of this set is argued and what it still owes is stated.
         const TIER_ONLY: RenderEffects = RenderEffects::CONTACT_SHADOWS;

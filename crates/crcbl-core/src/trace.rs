@@ -1,6 +1,6 @@
 //! CPU spans and counters: where a frame's time went, and on which thread.
 //!
-//! `docs/plan/40-profiling.md`'s span API — "a scoped CPU span with a static
+//! Topic 40's span API — "a scoped CPU span with a static
 //! name, opened and closed by RAII, nesting freely; the frame is the outermost",
 //! and counters as "spans' siblings: a named `u64` sampled per frame". The GPU
 //! half already exists as `crcbl_render::timing`'s per-pass timestamps; this is

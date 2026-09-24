@@ -922,7 +922,7 @@ pub trait Device: core::fmt::Debug + crate::threading::HalThreadSafe {
     /// device without [`Features::TASK_SHADER`]. **Refusing here is the
     /// contract**, not an implementation detail: a backend that accepted the
     /// descriptor and failed at the draw would put the diagnosis a frame away
-    /// from the mistake, and `docs/plan/39-capabilities.md` requires an absent
+    /// from the mistake, and topic 39 requires an absent
     /// capability to be a named, loud failure rather than a quiet one.
     ///
     /// Otherwise as [`Device::create_graphics_pipeline`].

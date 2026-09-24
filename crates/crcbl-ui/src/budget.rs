@@ -2,7 +2,7 @@
 //! GPU elapsed includes scheduling gaps and contention, not just active work;
 //! the larger-span classification is a diagnostic, not a throughput guarantee.
 //!
-//! `docs/plan/40-profiling.md`'s first debug-panel row, and the reason it is
+//! Topic 40's first debug-panel row, and the reason it is
 //! first: "'GPU-bound' is the first question and nothing answers it today". The
 //! two numbers come from opposite ends of the engine — the CPU one from the
 //! frame span `crcbl_core::trace` records, the GPU one from
@@ -15,7 +15,7 @@
 //!
 //! The GPU report is **frames latent by design** — a ring of query sets resolved
 //! only when a slot comes back round, so the newest GPU number is about a frame a
-//! few frames ago, and `docs/plan/40-profiling.md` is explicit that no consumer
+//! few frames ago, and topic 40 is explicit that no consumer
 //! "fixes" that by stalling. So a row pairing *this* frame's CPU cost with *this*
 //! frame's GPU cost would be stating something it cannot know.
 //!

@@ -89,7 +89,7 @@ pub enum AlcoveAction {
     /// switching away from it.
     ToggleCamera,
     /// Flip the occlusion pass itself, in the one layer of
-    /// `docs/plan/39-capabilities.md`'s resolution order a panel owns.
+    /// topic 39's resolution order a panel owns.
     ///
     /// **Not [`ToggleOcclusionView`](Self::ToggleOcclusionView).** This one
     /// removes the passes that compute the channel, which changes what the room

@@ -51,7 +51,8 @@ is an orthographic projection with `z` as z-index.
    constraint is WebGPU's, and it is what `crcbl-webgpu` has to live inside._
    The principle is a **native** principle; what the browser runs is the
    degraded path, and which path a device takes is decided by capability rather
-   than by platform — see [39-capabilities.md](39-capabilities.md).
+   than by platform — see the capability rules in the
+   [backends notes](../notes/backends.md).
 
 2. **Backend seam is a trait boundary, not a compile flag.** `crcbl-hal` defines
    the contract; `crcbl-vk` is one implementation. Renderer code above the seam
@@ -137,8 +138,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 36    | ◐ 36-contact-solver — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
 | 37    | [37-materials.md](37-materials.md)                                                          | Material authoring: templates+instances, render↔surface link, lint         |
 | 38    | [38-weapons.md](38-weapons.md)                                                              | Weapon kit: attachments, server-authoritative fire, recoil patterns        |
-| 39    | [39-capabilities.md](39-capabilities.md)                                                    | Device capabilities, graceful degradation, path selectors, feature matrix  |
-| 40    | [40-profiling.md](40-profiling.md)                                                          | Profiling, benchmarking: CPU/GPU spans, counters, trace export, perf rows  |
+| 39    | ◐ 39-capabilities — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`      | Device capabilities, graceful degradation, path selectors, feature matrix  |
+| 40    | ◐ 40-profiling — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`         | Profiling, benchmarking: CPU/GPU spans, counters, trace export, perf rows  |
 | 41    | ✅ 41-webgpu-stream — done, deleted 2026-09-24; rules in `docs/notes/browser.md`            | The encoding `crcbl-webgpu` speaks — slice 2 of stage 10's WebGPU track    |
 | 42    | ◐ 42-steam — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Steamworks (`crcbl-steam`): hand-written FFI over the SDK's flat C API     |
 | 43    | [43-render-standards.md](43-render-standards.md)                                            | What a current engine ships and where this one stands — the gap survey     |

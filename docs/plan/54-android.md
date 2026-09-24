@@ -66,8 +66,8 @@ Nothing else is Android-shaped and broken. Read from the tree on 2026-09-07:
   `#[cfg(test)]` helpers. The production path is
   `crcbl::engine::GpuContextDesc`'s `Default`, whose `required_features` is
   `Features::empty()` and whose comment says why: "demanding `GPU_DRIVEN` would
-  refuse to run on the lesser devices `docs/plan/39-capabilities.md` requires
-  the engine to degrade onto". A device without `drawIndirectCount` selects
+  refuse to run on the lesser devices topic 39 requires the engine to degrade
+  onto". A device without `drawIndirectCount` selects
   `GeometryPath::IndirectPerBatch` — the variant documented as "the floor, and
   what WebGPU gets" — and `crates/crcbl-vk/src/adapter.rs`'s own tests assert
   exactly that degradation.
@@ -176,13 +176,13 @@ code: a 1.3 loader, the three 1.3 core features, timeline semaphores and
 taken off it.
 
 Above that floor, a phone that lacks bindless or `drawIndirectCount` is **not
-refused**. It selects the reduced `GeometryPath` and `BindingModel` that
-[39-capabilities.md](39-capabilities.md) owns and that the browser-boundary
-table in the [browser notes](../notes/browser.md) already describes:
-`GeometryPath::IndirectPerBatch` draws and `BindingModel::ArrayPages` textures.
-That path is built, shipped, and gated in a real browser on every CI runner — so
-Android's weak-device story is a path this workspace already tests every push,
-not a new one.
+refused**. It selects the reduced `GeometryPath` and `BindingModel` that the
+capability rules in the [backends notes](../notes/backends.md) define and that
+the browser-boundary table in the [browser notes](../notes/browser.md) already
+describes: `GeometryPath::IndirectPerBatch` draws and `BindingModel::ArrayPages`
+textures. That path is built, shipped, and gated in a real browser on every CI
+runner — so Android's weak-device story is a path this workspace already tests
+every push, not a new one.
 
 **Refused: raising the floor to `GPU_DRIVEN` so the Android path is the good
 one.** It would refuse mid-range hardware outright to avoid testing a path that

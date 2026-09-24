@@ -1451,7 +1451,7 @@ fn arm_frame(
 /// **The camera stack is the only thing between the monitor's two frames**, and
 /// it is legible in pixels.
 ///
-/// `docs/plan/39-capabilities.md`'s first layer, rendered twice: the same view of
+/// Topic 39's first layer, rendered twice: the same view of
 /// the same room on the same device at the same instant, with
 /// [`EffectRequest::camera`](crcbl::render::EffectRequest::camera) the one field
 /// that differs — [`room::MONITOR_STACK`] in the arm the sample ships, and every

@@ -126,15 +126,15 @@ on the hot path.
 ### The settings catalogue: keys are named before they are implemented (LOCKED 2026-08-27)
 
 Two other topics enumerate the engine's player-facing settings in full —
-[15-windowing.md](15-windowing.md) for display,
-[39-capabilities.md](39-capabilities.md) for graphics quality, and
-[13-audio.md](13-audio.md) for audio buses and output. This document owns the
-part all three share: the file, the spelling, and the rule that lets them name a
-key years before anything reads it.
+[15-windowing.md](15-windowing.md) for display, topic 39 for graphics quality
+(its catalogue is in `docs/backlog.md` under _The graphics catalogue's quality
+keys, and the widening they need_), and [13-audio.md](13-audio.md) for audio
+buses and output. This document owns the part all three share: the file, the
+spelling, and the rule that lets them name a key years before anything reads it.
 
 **Rule 2 of the catalogue: a key with no implementation still gets its name and
-its value domain now.** (Rule 1 is the clamp rule, and it lives in
-[39-capabilities.md](39-capabilities.md).) A key is a compatibility surface the
+its value domain now.** (Rule 1 is the clamp rule, and it lives in the
+[backends notes](../notes/backends.md).) A key is a compatibility surface the
 moment one player's file contains it, and the two things that churn if it is
 named late are the two things that must not — the settings screen's row identity
 and the file on disk. Naming costs nothing: an unread key is exactly an absent
@@ -229,8 +229,8 @@ cover, and who owns each:
   not to the engine. Whoever picks this up should expect it to be a topic of its
   own rather than a section bolted onto this one, because two of the four —
   subtitles and colourblind filtering — are engine subsystems (a caption
-  presenter, and a post-chain filter that would join
-  [39-capabilities.md](39-capabilities.md)'s catalogue) rather than keys.
+  presenter, and a post-chain filter that would join the graphics quality
+  catalogue) rather than keys.
 
 ### Considered and declined
 

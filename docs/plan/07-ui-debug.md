@@ -122,7 +122,8 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   `widgets` bullet above.
 - **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
-  below, and the frame CPU-vs-GPU row [40-profiling.md](40-profiling.md) owns.
+  below, and the frame CPU-vs-GPU row the profiling topic specified (its rules
+  are in the [tooling notes](../notes/tooling.md)).
 
 `crcbl-ui` depends on `glam`, `bytemuck`, `crcbl-core` (for the shell's
 `ContactId`/`TouchPhase`, which `touch` hit-tests), `crcbl-reflect` (rung 8b's
@@ -408,10 +409,12 @@ standing requirement on samples, not a feature they opt into — see
 [sample/00-samples-overview.md](sample/00-samples-overview.md). Three
 consequences for how it is built:
 
-- **The perf rows are specified in [40-profiling.md](40-profiling.md)**, not
-  here. That topic owns what is measured and how — CPU frame time beside GPU
-  frame time with percentiles and which of the two is the budget, the per-pass
-  list sorted by cost, the CPU breakdown, counters, memory and pool occupancy,
+- **The perf rows were specified by the profiling topic (40)**, not here; its
+  rules are in the [tooling notes](../notes/tooling.md) and the unbuilt rows in
+  `docs/backlog.md` under _Profiling: five of the eight gaps are still open_.
+  That topic owned what is measured and how — CPU frame time beside GPU frame
+  time with percentiles and which of the two is the budget, the per-pass list
+  sorted by cost, the CPU breakdown, counters, memory and pool occupancy,
   job-system utilisation, and a freeze toggle so a spike can be read rather than
   chased. This topic owns how they are drawn: they are ordinary
   `DebugModule`/`DebugSection` rows and get no special treatment.

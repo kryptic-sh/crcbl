@@ -459,7 +459,7 @@ pub const NEXT_START_MARK: &str = "(next start)";
 /// What the frame-cap row writes between the file's ceiling and the rate this
 /// run actually runs at, when the two differ.
 ///
-/// `docs/plan/39-capabilities.md`'s rule: `[engine.video]` may only clamp
+/// Topic 39's rule: `[engine.video]` may only clamp
 /// downward, so the game's own limit — its `--fps`, or the default it was
 /// built with — is held under the file's ceiling by `FrameLimit::clamped_to`
 /// in `Loop::new`. A player who wrote 240 into a sample launched at 60 gets 60,

@@ -13,7 +13,7 @@
 //! ```
 //!
 //! Topic 03 §3.6's culling-stats readback, and
-//! `docs/plan/40-profiling.md`'s eighth missing piece: "the culling stats never
+//! topic 40's eighth missing piece: "the culling stats never
 //! leave the GPU … there is no staging buffer, no copy inside the frame graph,
 //! and no consumer". This is all three.
 //!

@@ -7188,7 +7188,7 @@ fn the_ui_panel_is_painted_and_the_bar_blends_over_two_backgrounds(image: &Image
 /// **The culling counters reach the CPU on whichever backend drew the frame**,
 /// several frames after the frame they are about.
 ///
-/// This is `docs/plan/40-profiling.md`'s item 8 checked on the backend
+/// This is topic 40's item 8 checked on the backend
 /// `CRCBL_GPU` names — and the point of running it here rather than only in
 /// `crcbl-vk`'s suite is **wgpu**, whose readback is asynchronous by nature:
 /// `map_async` resolves on a later turn of the event loop and only inside a

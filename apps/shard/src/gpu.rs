@@ -12,7 +12,7 @@
 //! # Rule 12, as a value rather than a log line
 //!
 //! `docs/plan/sample/00-samples-overview.md` rule 12 asks every sample to say
-//! which of `docs/plan/39-capabilities.md`'s selectors its frames took, in the
+//! which of topic 39's selectors its frames took, in the
 //! debug panel **and** in the summary. [`Paths`] is that answer read once off
 //! [`DeviceCaps`], so the panel, the `[HUD]` heartbeat and the summary line all
 //! print the same words rather than three readings that could disagree.
@@ -110,7 +110,7 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 /// depends on where the character and the camera have got to.
 pub const EXPOSURE: f32 = 6.0;
 
-/// Which of `docs/plan/39-capabilities.md`'s selectors this device drew through,
+/// Which of topic 39's selectors this device drew through,
 /// and which of topic 18's effects came out of the four-layer request — rule
 /// 12's "says which it took", as a value.
 ///

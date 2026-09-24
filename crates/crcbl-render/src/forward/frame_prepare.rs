@@ -26,7 +26,7 @@ impl ForwardRenderer {
             // the sampler in force — see `adopt_page_sampler`.
             self.adopt_page_sampler(device)?;
 
-            // `docs/plan/39-capabilities.md`'s four layers, applied here and nowhere
+            // Topic 39's four layers, applied here and nowhere
             // else. Frozen for the frame because this call and `add_passes` have to
             // agree: the loops below skip a shadow cull's parameter write when
             // shadows are off, and a request changed between the two would dispatch

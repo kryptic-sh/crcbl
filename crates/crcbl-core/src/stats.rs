@@ -1,6 +1,6 @@
 //! Nearest-rank percentiles, and the sample count below which one is a lie.
 //!
-//! `docs/plan/40-profiling.md` decides that a benchmark and a debug row alike
+//! Topic 40 decides that a benchmark and a debug row alike
 //! report p50, p95, p99 and max and never a mean, because "frame time is a tail
 //! problem — a mean hides exactly the stutter a player notices". This module is
 //! the arithmetic behind that decision, in one place: `crcbl_ui::budget`'s

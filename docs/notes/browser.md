@@ -645,7 +645,7 @@ backlog still uses:
   Timestamp queries, compute, indirect draw, `INDIRECT_FIRST_INSTANCE`, f16,
   dual-source blending and the BC/ETC2/ASTC families **are** available, so the
   profiler, GPU culling and the post stack all work; the gap is narrower than
-  "Tier B" implied (`docs/plan/39-capabilities.md`).
+  "Tier B" implied (the capability rules are in `docs/notes/backends.md`).
 
 - **The backend is `crcbl-webgpu`; do not rebuild on `wgpu`.** The plan first
   chose the `wgpu` crate for a native portability fallback and a "does it repro

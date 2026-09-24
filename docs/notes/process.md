@@ -378,16 +378,16 @@ Stated plainly, so the next session does not mistake silence for coverage.
   into `docs/notes/backends.md`), `02-vulkan-backend` (since folded into
   `docs/notes/backends.md`), `09-backends-metal-dx12.md`, `10-wasm-webgpu`
   (since folded into `docs/notes/browser.md`), `15-windowing.md`,
-  `39-capabilities.md`, `41-webgpu-stream` (since folded into
-  `docs/notes/browser.md`). Everything else in `docs/plan/` was untouched and
-  unverified.
+  `39-capabilities` (since folded into `docs/notes/backends.md`),
+  `41-webgpu-stream` (since folded into `docs/notes/browser.md`). Everything
+  else in `docs/plan/` was untouched and unverified.
 - **`41-webgpu-stream` was verified only at its two stale points** (the reply
   set, the offscreen surface command). Its wire conventions, handle rules and
   "cases easy to get wrong" were read but not checked call-by-call against
   `crcbl-webgpu`'s `writer`, `reply` and `tag` modules — a spec that large would
   be its own task.
-- **`39-capabilities.md`'s feature matrix was not re-verified cell by cell.**
-  The blockquote above it already says it is a design record and points at
+- **`39-capabilities`' feature matrix was not re-verified cell by cell.** The
+  blockquote above it already said it was a design record and pointed at
   `crcbl_hal::Capability`, `DIVERGENCES` and `REVIEWED_BLOCKERS` as the live
   answer, so the cells were left alone.
 - **No Rust was compiled and no test was run** in this pass — the only gates run

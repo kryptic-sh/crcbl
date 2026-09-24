@@ -3,6 +3,93 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 40-profiling plan left behind (2026-09-24)
+
+Record; the built part is `crcbl_core::trace` (spans and counters, gated at
+runtime by `CRCBL_TRACE`), `crcbl::perf`'s span vocabulary for the loop's
+phases, `crcbl_core::stats`' percentiles, `crcbl_render::timing` and
+`crcbl_render::PassStats`, `crcbl_render::counters`, `crcbl_render::cull_stats`,
+`crcbl_jobs::Pool::stats`, `crcbl bench --scenario jobs|phys`
+(`crates/crcbl-cli/src/bench/`) and the debug panel's Frame row
+(`crcbl_ui::budget`). What it left open is in `docs/backlog.md` under
+_Profiling: five of the eight gaps are still open_ and _Profiling and
+benchmarking: decisions taken 2026-08-13, before any code_. The decisions of
+2026-08-13 are recorded under that heading further down this file; this section
+holds the rest of what binds.
+
+Code cites the plan as "topic 40" and by the number of a **missing piece** in
+its original list of eight. The numbering is kept so each citation resolves:
+
+| Piece | What was missing                                                                                 | Status                                                                                                         |
+| ----- | ------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------- |
+| 1     | CPU-side spans: nothing measured the tick, schedule, physics, upload or frame, or said GPU-bound | Built as `crcbl_core::trace` and `crcbl::perf`; the ECS schedule, physics and asset upload are still unspanned |
+| 2     | A benchmark harness: fixed scenarios, warm-up, statistics beyond a mean, machine-readable output | Built as `crcbl bench` for `jobs` and `phys`; the device-backed sample scenarios are owed                      |
+| 3     | Baseline storage and regression detection                                                        | Owed                                                                                                           |
+| 4     | Trace export a profiler UI can open                                                              | Owed                                                                                                           |
+| 5     | Memory and occupancy accounting                                                                  | Owed                                                                                                           |
+| 6     | Job-system instrumentation                                                                       | Built as `Pool::stats`; no reader puts it on the trace or a panel, and `crcbl-jobs` has no spans               |
+| 7     | Counters in one place rather than piecemeal                                                      | Built as `crcbl_render::counters` (`FrameCounters`)                                                            |
+| 8     | Culling stats that leave the GPU                                                                 | Built as `crcbl_render::cull_stats` (`CullStatsRing`)                                                          |
+
+The rules, each with its _why_:
+
+- **The tooling lands before the perf work, not with it.** A profiler bolted on
+  afterwards never covers the code written before it — the argument that put
+  timestamp queries in the HAL at P0 applies to every span.
+- **One span shape, so a trace has one timeline.** A scoped CPU span with a
+  static name, opened and closed by RAII and nesting freely, the frame
+  outermost; spans carry their thread, so job workers appear as their own
+  tracks. **GPU spans come from `crcbl_render::timing`'s per-pass timestamps**
+  on their own track, aligned to the CPU timeline by one calibration point per
+  frame rather than by assuming the two clocks agree. **Counters are spans'
+  siblings**, a named `u64` sampled per frame, not log lines.
+- **The span module is `crcbl_core::trace`**, beside `time` and `log`, because
+  `crcbl-core` is the bottom of the graph. `crcbl-jobs` is the one crate that
+  must gain the dependency, and it gains it with its first span (CI's
+  `cargo machete` refuses an unused edge). A separate `crcbl-trace` crate was
+  declined: structure to carry forever for a small module, and moving it later
+  is a re-export away, which the dependency edge is not.
+- **The compile-time off switch is `--cfg crcbl_trace_off`, never a Cargo
+  feature.** A feature is on under CI's `--all-features` runs, so every test
+  would assert the compiled-out arm, and feature unification means a binary
+  could not turn it off again. The cfg, declared by a `build.rs` with
+  `cargo::rustc-check-cfg`, is built only when a shipping build needs it.
+- **A pass's GPU span includes its barriers**, because the encoder's scope rules
+  put query writes outside any pass; a pass whose barriers cost more than its
+  draws is a finding a neighbour's bucket would hide. **A pass label is summed
+  within the frame**, with the occurrence count on the row (`lantern`'s two
+  views report `shadow`, `forward` and `tonemap` twice).
+- **A device without `Features::TIMESTAMP_QUERY` gets no timers and an empty
+  report**, which is what browsers do; degrade rather than break.
+- **Benchmark scenarios are named and fixed**, live with the samples that own
+  them, and name their seed, frame count and warm-up. Output is JSON by default
+  with the environment block, and that JSON is the baseline's storage format.
+- **Baselines are per machine, never committed and never compared across
+  hosts.** A comparison against a baseline from different hardware is refused,
+  not printed. Thresholds are per metric and recorded in the scenario, because a
+  5 % move in a 0.1 ms pass is noise and a 5 % move in frame time is not. The
+  scheduled first form (2026-08-30): `PassStats`' per-pass timings written per
+  machine, a rerun reported as a ratio per pass, and **above 1.15× is the red
+  line, locally** — CI publishes numbers and never gates on them.
+- **A rung is priced on three tiers**: the desktop adapter, lavapipe and the
+  browser, each preset measured, because the software and browser tiers pay tens
+  of times the desktop cost and are the tiers every golden runs on.
+- **Counters that must move are asserted in tests**, the way the culling counts
+  are: a counter that stops being incremented when a path changes reads as an
+  improvement. A count the CPU cannot know is `None` and prints `indirect`,
+  never a zero that reads as "nothing was drawn".
+- **The profiler's own enabled cost is measured by a benchmark of the
+  profiler**, the only honest way to know that instrumentation is not changing
+  what it measures.
+- **Perf panel rows follow the `DebugModule`/`DebugSection` shape**, and labels
+  share one namespace with nothing detecting a collision, so a test that finds a
+  row by its label can silently read the wrong one. The Frame row shows two
+  rolling distributions, not one frame's CPU and GPU numbers paired, because the
+  GPU report is frames latent.
+- **Tracy or another external profiler** is an optional feature over the same
+  span data if ever wanted, on demonstrated need and a dependency decision —
+  never a second instrumentation pass.
+
 ## What the deleted 52-debug-console plan left behind (2026-09-24)
 
 Record; the plan was built. It specified a Source-engine-style console
@@ -782,11 +869,11 @@ mildly for (a), since a maintained crate has already been made to care.
 ## Profiling and benchmarking: decisions taken 2026-08-13, before any code
 
 Decision record; the work these leave owed is in docs/backlog.md under the same
-heading. `docs/plan/40-profiling.md` specifies the whole thing; it is a
-cross-cutting track in the roadmap alongside CLI, testing, audio, persistence,
-debug tools and pixel art. `crcbl_core::trace` has since landed — see below —
-and nothing else in the plan has. The decisions, so they are not re-argued when
-a slice starts:
+heading. The profiling plan these came from was deleted on 2026-09-24; the rest
+of its rules are under _What the deleted 40-profiling plan left behind_ at the
+top of this file. It was a cross-cutting track in the roadmap alongside CLI,
+testing, audio, persistence, debug tools and pixel art. The decisions, so they
+are not re-argued when a slice starts:
 
 - **Trace export is Chrome Trace Event JSON**, which Perfetto and
   `chrome://tracing` both read. Still unwritten: `crcbl_core::trace::Snapshot`

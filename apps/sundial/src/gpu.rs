@@ -72,7 +72,7 @@ const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 /// would attribute the whole of a filter's cost to a pass it does not touch.
 const SHADOW_PASSES: [&str; 2] = ["shadow", "forward"];
 
-/// Which of `docs/plan/39-capabilities.md`'s three selectors this frame was drawn
+/// Which of topic 39's three selectors this frame was drawn
 /// through, and whether the run asked for less than the device offers.
 ///
 /// Rule 12's "says which it took", as a value rather than as a log line, so the
