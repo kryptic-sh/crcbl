@@ -811,8 +811,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   Ctrl+wheel — on an `Axis1`, read as `MouseScroll` is. While a scroll chord's
   key is down in the context that owns the wheel, that context's plain
   `MouseScroll` reads zero; with several such keys down, the most recently
-  pressed takes the wheel and releasing it hands the wheel back. The key is
-  read, not consumed: a `Key` binding on it still fires.
+  pressed takes the wheel and releasing it hands the wheel back. Only an enabled
+  action's scroll chord competes: a disabled one takes the wheel from nothing
+  and silences no plain `MouseScroll`, and `set_enabled` re-reads the wheel at
+  once. The key is read, not consumed: a `Key` binding on it still fires.
 - **A GPU-rendered image can be drawn as a sprite, through an atlas.**
   `SpriteRenderer::create_atlas(device, &AtlasDesc { label, cell, columns, rows, sample })`
   creates a sheet of fixed-size cells, every texel transparent, with a one-texel

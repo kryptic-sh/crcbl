@@ -361,6 +361,13 @@ pub enum Binding {
     /// Z still sees Z — a game that also taps Z cancels that tap with
     /// [`ActionMap::cancel_patterns`] when the wheel turns. A held key
     /// withheld from its owner (see `context.rs`) is up for this read too.
+    ///
+    /// **Only an enabled action's scroll chord competes.** A key whose action
+    /// is disabled ([`ActionMap::set_enabled`]) takes the wheel from nothing
+    /// and silences no plain `MouseScroll`, however recently it was pressed:
+    /// Ctrl held for one chord keeps the wheel when Alt goes down for a chord
+    /// that cannot act right now. Enabling it again restores its place by
+    /// when its key went down, not by when it was enabled.
     ScrollChord {
         /// The key that must be down; any key, modifiers included.
         held: KeyCode,
@@ -886,16 +893,30 @@ impl ActionMap {
     /// [`ActionMap::begin_tick`], which used to re-read the held-key set and
     /// re-press a disabled action on the very next tick.
     ///
+    /// An action with a [`Binding::ScrollChord`] also leaves or rejoins the
+    /// wheel's competition, and the wheel is re-read at once.
+    ///
     /// Has no effect if the named action does not exist.
     pub fn set_enabled(&mut self, name: &str, enabled: bool) {
         let Some(&idx) = self.name_to_idx.get(name) else {
             return;
         };
         let slot = &mut self.slots[idx];
+        let changed = slot.enabled != enabled;
         slot.enabled = enabled;
         if !enabled {
             // Reset the action to idle so it doesn't stick.
             slot.reset();
+        }
+        // Only an enabled scroll chord competes for the wheel, so turning one
+        // on or off can hand the wheel to another binding.
+        let scroll_chord = slot
+            .decl
+            .bindings
+            .iter()
+            .any(|binding| matches!(binding, Binding::ScrollChord { .. }));
+        if changed && scroll_chord {
+            self.reroute();
         }
     }
 

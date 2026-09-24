@@ -338,21 +338,32 @@ impl Routes {
             // registers only where its context is the one reading the key, and
             // a scroll chord only where its context is the one reading the
             // wheel.
-            for binding in bindings() {
-                match binding {
-                    Binding::Chord { modifier, key } if routes.keys.get(key) == Some(&context) => {
-                        let modifiers = routes.chords.entry(*key).or_default();
-                        if !modifiers.contains(modifier) {
-                            modifiers.push(*modifier);
+            //
+            // A scroll chord competes for the wheel only while its action is
+            // enabled: a newer key whose action cannot use the wheel right now
+            // must not take it from an older one that can, nor silence the
+            // plain wheel. The wheel itself stays this context's either way.
+            let slots = map.slots.iter().filter(|slot| slot.context == context);
+            for slot in slots {
+                for binding in &slot.decl.bindings {
+                    match binding {
+                        Binding::Chord { modifier, key }
+                            if routes.keys.get(key) == Some(&context) =>
+                        {
+                            let modifiers = routes.chords.entry(*key).or_default();
+                            if !modifiers.contains(modifier) {
+                                modifiers.push(*modifier);
+                            }
                         }
+                        Binding::ScrollChord { held }
+                            if slot.enabled
+                                && routes.scroll == Some(context)
+                                && !routes.scroll_chords.contains(held) =>
+                        {
+                            routes.scroll_chords.push(*held);
+                        }
+                        _ => {}
                     }
-                    Binding::ScrollChord { held }
-                        if routes.scroll == Some(context)
-                            && !routes.scroll_chords.contains(held) =>
-                    {
-                        routes.scroll_chords.push(*held);
-                    }
-                    _ => {}
                 }
             }
         }
@@ -1248,6 +1259,42 @@ mod tests {
         map.begin_tick(TICK);
         map.mouse_scroll(0.0, 1.0);
         ["zoom", "zoom_z", "zoom_ctrl"].map(|name| map.axis1(name))
+    }
+
+    /// **A disabled action's scroll chord takes the wheel from nothing.** Ctrl
+    /// goes down for `zoom_ctrl`, then Z for `zoom_z` while `zoom_z` is
+    /// disabled: the wheel stays Ctrl's. With Ctrl up too, the plain wheel is
+    /// not silenced by Z. Enabled again, Z takes the wheel back from Ctrl by
+    /// when it went down, which was after Ctrl, not by when it was enabled.
+    #[test]
+    fn a_disabled_scroll_chord_takes_the_wheel_from_nothing() {
+        let mut map = scroll_chords();
+        map.key_event(KeyCode::ControlLeft, true);
+        map.set_enabled("zoom_z", false);
+        map.key_event(KeyCode::KeyZ, true);
+        assert_eq!(wheel(&mut map), [0.0, 0.0, 1.0], "Ctrl keeps the wheel");
+
+        map.key_event(KeyCode::ControlLeft, false);
+        assert_eq!(wheel(&mut map), [1.0, 0.0, 0.0], "Z silences nothing");
+
+        map.key_event(KeyCode::ControlLeft, true);
+        map.set_enabled("zoom_z", true);
+        assert_eq!(
+            wheel(&mut map),
+            [0.0, 0.0, 1.0],
+            "Ctrl went down after Z, so it is the newer press"
+        );
+        map.key_event(KeyCode::ControlLeft, false);
+        map.key_event(KeyCode::ControlLeft, true);
+        map.key_event(KeyCode::KeyZ, false);
+        map.key_event(KeyCode::KeyZ, true);
+        map.set_enabled("zoom_z", false);
+        map.set_enabled("zoom_z", true);
+        assert_eq!(
+            wheel(&mut map),
+            [0.0, 1.0, 0.0],
+            "Z pressed after Ctrl takes it back once enabled"
+        );
     }
 
     /// **A scroll chord takes the wheel from the plain binding while its key is
