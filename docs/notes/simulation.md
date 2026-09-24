@@ -15,7 +15,7 @@ which was about shaders; the decision above splits the two sides.
 behind_): a transcendental is cooked into a table on the host or built from
 multiplies (`fog::exp_neg`), and never reaches a colour in a shader. Closed
 together with the transcendental-policy entry below. **Open, and it is a
-decision rather than a task.** `05-physics.md`'s 2026-07-27 correction routes
+decision rather than a task.** The physics plan's 2026-07-27 correction routes
 determinism-bearing math through the **`libm` crate**; `13-audio.md`'s
 correction requires **own polynomial approximations plus a CI deny** on std
 transcendentals. They are not interchangeable and neither is built. No workspace
@@ -38,8 +38,8 @@ argument, not for its verdict.
 host, multiplies in the shader, no libm on either side. The conflict is resolved
 by choosing this side; nothing further to build. **Not built, and it needs a
 decision.** `13-audio.md` requires own polynomial approximations plus a CI deny
-on std float transcendentals; `05-physics.md` requires the `libm` crate. Neither
-exists: no `libm` in any manifest, no polynomial approximations, and
+on std float transcendentals; the physics plan required the `libm` crate.
+Neither exists: no `libm` in any manifest, no polynomial approximations, and
 `crcbl-audio` calls `powf`, `sin`, `exp` and `cos` today (`spatial.rs`,
 `synth.rs`).
 
@@ -383,6 +383,214 @@ leak — `entity_to_index.get().copied()` where `remove()` belongs — is caught
 **only** by the end-of-run loop that re-queries every despawned handle. Every
 per-tick assertion stays green through it. Do not delete that loop as duplicated
 work.
+
+## What the deleted 04-ecs-server-client plan left behind (2026-09-24)
+
+Record; stage 4 designed the simulation half of the engine: the ECS, the
+fixed-tick authoritative server, the transport seam and replication to a
+rendering client. Built from it: `crcbl-ecs`'s `System<T>` (dense arrays behind
+`attach`, a sparse entity-to-index map), `Schedule`, deferred destruction in
+`World`, `SystemTrait::replicate` and `debug_draw`, and `Inspector::collect`'s
+`SystemStats`; `crcbl-server`'s fixed tick, which depends on no renderer;
+`crcbl-net`'s `Transport` with `InMemoryTransport` and the ack-baseline deltas
+the netcode section below records; `crcbl-client`'s interpolation and
+`Client::set_subscribed_sectors`; and `crcbl sim` with
+`crcbl_server::sim_hash::hash_world`. Every sample from breakout on runs a
+`GameModule` on a `Server` against an `InMemoryTransport`, which met the stage's
+"smooth at mismatched tick and render rates" exit criterion at any `--tick-hz`.
+
+What it left unbuilt is in `docs/backlog.md` under _ECS, server and client (from
+the deleted 04-ecs-server-client plan, 2026-09-24)_: the jitter-adaptive buffer,
+a client id for `replicate`, the headless binary and its `cargo tree` guard, the
+input script for the determinism test, and per-system tick time.
+
+- **Systems own arrays; an entity is only an id.** `Entity` is a generational id
+  from `crcbl-core`'s `Pool` with no storage of its own. A system owns
+  `Vec`-backed dense arrays of the data for the entities attached to it, plus a
+  sparse entity-to-index map, and iterates its own arrays linearly. Not
+  archetypes, not objects with component bags: linear iteration is
+  cache-friendly by construction and mirrors the GPU-side instance arrays.
+  Another system reads by entity id through the sparse map, for cold paths only.
+- **The system that owns the array owns its wire format.** Replication is per
+  system (`SystemTrait::replicate`), which is what keeps the ECS shape and the
+  wire model from fighting.
+- **Order is declared, not inferred.** `Schedule` runs systems in the order they
+  were added. The debug-build conflict assertion the plan promised was never
+  built, and there is nothing for it to look at until systems declare their
+  access (_P8's ECS access declarations were never reserved_, above).
+- **Destruction is deferred to the end of the tick**, with a removal sweep per
+  system; generational ids make a stale reference safe to hold.
+- **Every system reports to the inspector and has a debug-draw slot.** The plan
+  asked for name, entity count and tick time; the tick time is unbuilt.
+- **The server/client split is enforced by crate boundaries, not discipline.**
+  `crcbl-server` is simulation and authoritative state, `crcbl-client` is
+  presentation (interpolation, prediction hooks, the render feed), `crcbl-net`
+  is the transport and the replication protocol. `crcbl-server` depends on no
+  renderer; only its manifest says so today.
+- **The server ticks at a fixed rate and never blocks on a client**, so it is
+  headless by construction.
+- **Single player is `InMemoryTransport` on the multiplayer path.** The
+  transport is a message-oriented, async-agnostic trait with no UDP assumption
+  in it, carrying reliable-ordered and unreliable semantics; only the transport
+  differs between one process and a network. Sample rule 2
+  (`docs/plan/sample/00-samples-overview.md`) made the split compulsory for
+  every sample, which is a stronger proof than the one sandbox the plan meant to
+  convert.
+- **Interest management is per sector, and per sector only.** `SectorId`
+  envelopes scope every snapshot, with a baseline store and ack cursor per
+  sector. The plan said finer per-client visibility would cost nothing later
+  because the writer takes a client id; `replicate` takes a byte sink and
+  nothing else, so narrowing below the sector changes every replicating system.
+- **The interpolation buffer is about 100 ms and jitter-adaptive** (design
+  review, 2026-07-27). One tick of delay survives no jitter and no dropped
+  snapshot; the industry norm, documented in Valve's Source networking, is two
+  snapshot intervals plus a jitter margin, growing under measured jitter and
+  shrinking when calm. `26-prediction.md` assumes this number. The tree holds
+  two frames per sector.
+- **Prediction is hooks, not an implementation**, until the arena era; the
+  buffer is shaped so client-side prediction can slot in.
+- **Stage 4's determinism was same-binary, same-machine**, only as far as the
+  1000-tick smoke test needed. The physics plan's cross-target rule, next
+  section, supersedes it.
+
+Other documents cite the plan as "stage 4". Those resolve here:
+
+| Citation                                  | What it specified                                                        |
+| ----------------------------------------- | ------------------------------------------------------------------------ |
+| The stage 4 system registry, inspector    | `Inspector::collect`: name and entity count per system (tick time owed)  |
+| The stage 4 snapshot machinery            | Per-system `replicate`, ack-baseline deltas, full state on join          |
+| The stage 4 determinism harness           | `crcbl sim` and `hash_world` over 1000 ticks, same input, same hash      |
+| The stage 4 exit criterion: no render dep | `crcbl-server` names no renderer (no `cargo tree` guard enforces it yet) |
+| The stage 4 hooks (prediction, interest)  | Prediction hooks on the interpolation buffer; sector-keyed interest      |
+
+## What the deleted 05-physics plan left behind (2026-09-24)
+
+Record; stage 5 designed `crcbl-phys`, the from-scratch physics pillar, for
+galaxy-scale worlds, simulator-grade dynamics and continuous collision. Built
+from it: L0's queries (`cast_ray`, sweeps, `overlap_sphere` and `QueryFilter`),
+trigger volumes and `CharacterController`; L1's force providers (`forces.rs`,
+`AtmosphericDrag` in `atmosphere.rs`), `SemiImplicitEuler`, the analytic Kepler
+`propagate` (`orbit.rs`) and the `Frames` hierarchy with sphere-of-influence
+crossings; continuous collision for spheres and capsules, and the bullet flag;
+`WorldPos` in `crcbl-core`; the `WindQuery` seam (`wind.rs`); rotation with an
+inertia tensor (`mass.rs`); the static `TriangleMesh` with its BVH midphase; and
+`crcbl_core::trig` with `crates/crcbl-phys/clippy.toml`'s deny. The contact
+solver section below built L2 and L3 through its rung 5. `apps/orbit` flies the
+L1 row, `apps/towers` the trigger and swept-bolt slice, and `apps/puppet` and
+`apps/breach` walk the controller over steps and slopes.
+
+What it left unbuilt is in `docs/backlog.md` under _Physics (from the deleted
+05-physics plan, 2026-09-24)_: bubbles and the per-sector broadphase,
+heightfields, buoyancy and wind forces, the debug suite, the camera-relative
+upload, the rest of the constructed maths, the client-side query world, shape
+hits from `overlap_sphere`, design-speed bullet tests, and the tick substeps and
+`crcbl sim` gaps under _Physics and tessellation_. Orbit's moon transfer and 3D
+view, which the stage's acceptance test needs, are under _orbit_.
+
+- **The layer table is the contract.** L0/L1/CCD gate the MVP; L2 was a stretch
+  and L3 post-MVP, and solver work never blocks the sample ladder. Each layer is
+  shippable alone and a later one never rewrites an earlier one.
+- **Demand-driven slices, and no game-code collision math (sample rule 7).**
+  Physics lands as vertical slices, each pulled in by the sample that needs it;
+  all collision and motion goes through `crcbl-phys`. **A physics feature no
+  sample demands is a feature built too early.**
+- **Physics is server simulation.** Its systems run in the server schedule, own
+  arrays like every other system and replicate like any state. **The client
+  never _advances_ simulation, but it hosts a read-only query world**
+  (2026-07-27): statics from scene load and dynamic colliders rebuilt from
+  snapshots, with interpolation-buffer staleness, for the camera boom's sweeps
+  (30) and audio occlusion rays (13).
+- **Authoritative physics is CPU; visual-only physics is GPU and never read
+  back.** Does gameplay care? CPU. Eye candy? GPU compute, rendered from device
+  buffers. A readback would poison the frame loop.
+- **Positions are sector-tiled; absolute galactic floats never exist.**
+  `WorldPos` is `{ sector: I64Vec3, local: DVec3 }`, rebased on crossing, and
+  physics computes in local or relative space. The sector edge, `2^20 m`, was
+  chosen as a useful cell first (an FPS map fits in one, Earth spans about 12),
+  and the 64-bit index follows from wanting galactic extent (`2^84 m` a side).
+- **One spatial structure, three consumers.** The sector is the streaming unit,
+  the broadphase partition and the interest-management key (the netcode rules
+  below add replication). The broadphase is one tree today, not one per sector.
+- **Rendering is camera-relative.** Instance transforms upload relative to the
+  camera's sector and position each frame, so the GPU stays `f32` without
+  jitter; `WorldPos::relative_to` is the sanctioned conversion.
+- **Reference frames are a hierarchy, and live integration happens only in
+  bubbles.** Bodies parent to their dominant gravity source (galaxy, star,
+  planet, moon, vehicle); simulation runs in the local frame while the frame
+  moves on rails, and a sphere-of-influence crossing is an explicit event.
+  Distant bodies are analytic Kepler orbits, `position = f(t)`, free and stable
+  forever; live integration runs only inside bubbles around observers, several
+  per server. Sleep plus on-rails is what makes galaxy scale cheap.
+- **Fixed substeps under the tick: a 60 Hz tick, 120–240 Hz substeps.**
+  `PhysicsSystem::tick` steps once at the tick period; a caller that wants
+  substeps steps `dt / n` itself, as `apps/orbit`'s `SUBSTEPS` does, and the
+  contact solver substeps inside the step (`ContactSettings::substeps`).
+- **Symplectic (semi-implicit) Euler by default; Kepler or RK4 for orbits**,
+  because plain Euler drifts an orbit.
+- **Forces are SI, and emergent.** Force providers append into force arrays;
+  drag is `F = ½ρv²·Cd·A` with density exponential in altitude, so terminal
+  velocity **emerges** and is never scripted. The providers named are n-body
+  gravity within a frame, drag, buoyancy, thrust and wind.
+- **Continuous collision.** A projectile tests its previous-to-current segment
+  against the broadphase from day one; fast bodies sweep a sphere or capsule
+  (capsules cover about 90% of needs), and convex-hull conservative advancement
+  waits until something forces it. The broadphase holds motion-inflated bounds,
+  and the same tree serves L0 queries and editor picking. Hit registration is a
+  swept segment plus lag-compensated rewind, so lookback in space composes with
+  lookback in time. The contact solver's decision 5 later replaced "sweep to the
+  time of impact, then solve" with speculative contacts, then sweeps.
+- **Trimesh for statics; convex decomposition only for dynamics that need it**
+  (2026-07-27). Ballistics' entry/exit penetration model depends on the choice,
+  which is why it was made up front.
+- **Transcendentals are constructed in-engine, in `f64` (the user's decision,
+  2026-09-17).** A range reduction and a polynomial on `crcbl_shaders::trig`'s
+  pattern: no platform `libm` and no `libm` crate, superseding the 2026-07-27
+  answer (the `libm` crate) and agreeing with `13-audio.md`'s own-polynomial
+  line. Sim crates **ban FMA contraction**: no `mul_add`, no fast-math. Basic
+  IEEE operations are already bit-exact everywhere, so the scope is
+  "deterministic across targets within the sim math kernel", which is what the
+  module equivalence gate and browser play require. The constructions owe golden
+  values from the specification and an accuracy sweep.
+  `crates/crcbl-phys/clippy.toml` enforces the deny; the **solver interior is
+  `f32` over `f64` positions** (contact-solver decision 7). Fixed-point
+  cross-platform lockstep stays out unless a game demands it.
+- **Debug tools are built with each layer, and no query goes without a
+  visualiser.** Draw contacts, sweeps, fat bounds, BVH bounds, islands, frame
+  hierarchies and orbit paths; surface the per-tick physics hash in the
+  inspector, loudly on mismatch; scrub back through N recorded ticks; draw the
+  last N rays and sweeps with their hits. Only the hash is built.
+- **Sector and frame edge cases get property tests** with randomised boundary
+  crossings (a rebase during a sweep, a sphere-of-influence change mid-substep),
+  and the determinism hash catches silent divergence. **`f64` SIMD throughput on
+  wasm** is bounded by bubbles keeping live-body counts small: profile before
+  optimising.
+
+The slices, as the ROADMAP's physics phases map them to samples:
+
+| Slice                                                           | Demanded by | Layer    |
+| --------------------------------------------------------------- | ----------- | -------- |
+| Box/sphere colliders, swept-sphere TOI, contact normal response | breakout    | L0+CCD   |
+| Dynamic BVH churn, sphere overlap, segment CCD, thrust+damping  | asteroids   | L0+L1    |
+| Batch overlap queries at 10k bodies, refit cost, sleeping       | horde       | L0       |
+| Sector frames, gravity/drag/atmosphere, Kepler on-rails, SOI    | orbit       | L1       |
+| TOI vs moving targets, triggers, character controller           | towers      | L0+CCD   |
+| Lag-compensated rewind queries                                  | arena       | post-MVP |
+
+Code and other documents cite the plan by layer or by decision. Those resolve
+here:
+
+| Citation                              | What it specified                                                                                      |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------ |
+| L0                                    | Queries and kinematics: ray, segment, sweep, overlap, trigger volumes, the character controller        |
+| L1                                    | Forces, ballistics, orbits: gravity, drag, thrust, buoyancy, integrators, on-rails Kepler              |
+| CCD                                   | Swept collision for L0/L1 movers: time of impact, motion-inflated broadphase                           |
+| L2, L3                                | The contact solver and joints; see the contact solver section                                          |
+| The 2026-07-27 corrections            | Trimesh statics, the client-side query world, cross-target determinism                                 |
+| The determinism decision (2026-09-17) | Constructed `f64` transcendentals, no FMA, the clippy deny                                             |
+| The substep band                      | 60 Hz tick, 120–240 Hz substeps                                                                        |
+| One structure, three consumers        | Sector as streaming unit, broadphase partition and interest key                                        |
+| Stage 5's exit criteria               | Orbit's full mission, bullet-through-paper, the controller on towers' map, scrubbed replay, debug draw |
+| Physics slices P3, P6, P8, P11        | The slice table above                                                                                  |
 
 ## What the deleted 23-netcode plan left behind (2026-09-24)
 

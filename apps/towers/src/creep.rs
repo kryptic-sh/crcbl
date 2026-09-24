@@ -24,7 +24,7 @@
 //! [`crate::path::length`]. The two answers are genuinely different — the
 //! volume is two metres across, so it catches a creep about a metre and a half
 //! before the last waypoint — and the overlap is the one the sample is for:
-//! a **trigger volume** is `docs/plan/05-physics.md`'s L0 feature this map
+//! a **trigger volume** is the L0 feature (`docs/notes/simulation.md`) this map
 //! exists to drive, and a distance check would be the game doing the physics'
 //! job. `a_creep_is_taken_by_the_volume_before_the_path_runs_out` is what holds
 //! the two apart.

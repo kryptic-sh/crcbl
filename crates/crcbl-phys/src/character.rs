@@ -159,8 +159,8 @@ pub struct CharacterConfig {
     /// slope, not the angle.
     ///
     /// A cosine and not an angle because this crate is a determinism-bearing
-    /// one and `cos` is a platform transcendental: see the correction in
-    /// `docs/plan/05-physics.md`. Authoring an angle is the caller's job, done
+    /// one and `cos` is a platform transcendental: see the determinism rule in
+    /// `docs/notes/simulation.md`. Authoring an angle is the caller's job, done
     /// once, outside the tick. This is the same runtime form Quake's
     /// `normal[2] > 0.7` and Unreal's `WalkableFloorZ` keep.
     ///

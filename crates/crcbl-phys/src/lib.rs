@@ -67,7 +67,8 @@
 //! All spatial types use `f64` for determinism. Downcasting to `f32` happens
 //! only at the render boundary via `crcbl_core::WorldPos::relative_to`.
 //!
-//! See `docs/plan/05-physics.md` for the full design.
+//! The design's rules are in `docs/notes/simulation.md`, under "What the deleted
+//! 05-physics plan left behind"; what is still owed is in `docs/backlog.md`.
 
 pub mod atmosphere;
 pub mod broadphase;

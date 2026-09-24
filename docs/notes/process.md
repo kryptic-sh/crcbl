@@ -193,14 +193,15 @@ sample's error type is in fact a type alias for
 
 Stated plainly. "Not reviewed" is the honest line.
 
-- **I did not read the other plan documents.** Claims these seven make about
-  `05-physics.md`, `07-ui-debug.md`, `11-cli-headless.md`, `12-testing.md`,
-  `16-wasm-modules.md`, the animation plan (topic 17), `26-prediction.md`,
-  `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
-  against those documents. Where I say "topic 5 requires `libm`" I am quoting
-  `13-audio.md`'s own correction, not `05-physics.md`. Several of those files
-  are being edited concurrently by the parent and by sibling agents, so they may
-  say something different by the time this is read.
+- **I did not read the other plan documents.** Claims these seven make about the
+  physics plan (since folded into `docs/notes/simulation.md`), `07-ui-debug.md`,
+  `11-cli-headless.md`, `12-testing.md`, `16-wasm-modules.md`, the animation
+  plan (topic 17), `26-prediction.md`, `31-vis-culling.md` and `ROADMAP.md` were
+  checked against the **tree**, never against those documents. Where I say
+  "topic 5 requires `libm`" I am quoting `13-audio.md`'s own correction, not the
+  physics plan. Several of those files are being edited concurrently by the
+  parent and by sibling agents, so they may say something different by the time
+  this is read.
 - **I did not read `docs/plan/sample/*.md`.** Sibling agents own them. The
   sample list in `00-overview.md` I rebuilt from `git ls-files apps/` and from
   the _filenames_ in `docs/plan/sample/`, not from those documents' contents.
@@ -232,8 +233,8 @@ Stated plainly. "Not reviewed" is the honest line.
   since folded into `docs/notes/simulation.md`) — all resolve relative to
   `docs/plan/`. I did **not** re-check the pre-existing relative links in these
   files.
-- **Carried forward on trust, not re-checked:** the `13-audio.md` claim that
-  `05-physics.md`'s correction requires the `libm` crate; the netcode plan's
+- **Carried forward on trust, not re-checked:** the `13-audio.md` claim that the
+  physics plan's correction requires the `libm` crate; the netcode plan's
   assertion that WebRTC's costs are recorded in `docs/backlog.md` (I saw the RON
   and inventory entries there, not the WebRTC one); the ROADMAP's phase markings
   wherever a document says "which the ROADMAP marks done".
@@ -417,8 +418,9 @@ and flipping `is_walkable`'s `>=` to `>` reddens it.
 to its own step and no finer, and where a boundary falls inside that step is not
 portable when the geometry is built through trig. Assert the bracket, and cover
 the exact boundary with a construction that avoids the transcendental entirely.
-`docs/plan/05-physics.md`'s libm policy for determinism is still unresolved and
-this is one more input to it.
+The physics plan's libm policy for determinism was unresolved then and this was
+one more input to it; it was decided for constructions on 2026-09-17
+(`docs/notes/simulation.md`, _What the deleted 05-physics plan left behind_).
 
 ### The sweep for a runner nobody invokes
 

@@ -60,8 +60,8 @@
 //! [`BOLT_SPEED`] is fast enough that one tick's travel is longer than a creep
 //! is wide: a test that asked "is the bolt inside a creep?" at the start of the
 //! tick and again at the end would answer no both times, on a tick the bolt
-//! passed clean through one. `docs/plan/05-physics.md`'s CCD slice is what
-//! towers drives, and
+//! passed clean through one. Time of impact against moving targets is the
+//! physics slice towers drives (`docs/notes/simulation.md`), and
 //! `a_bolt_hits_a_creep_that_a_test_at_either_end_of_the_tick_would_miss` is
 //! that claim made against a creep that is **also moving** — the creep's sphere
 //! is written by [`crate::creep::Creep::advance`] earlier in the same tick, so

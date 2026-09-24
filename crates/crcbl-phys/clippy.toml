@@ -2,7 +2,7 @@
 # `crcbl-phys`. glibc, Apple's libm, the MSVC runtime and the browser each round
 # `sin`, `exp` and the rest in their own way, so a simulation that calls them
 # reaches different bits on different targets. The user decided on 2026-09-17
-# (`docs/plan/05-physics.md`, "Decision (determinism math, 2026-09-17)") that
+# (`docs/notes/simulation.md`, "What the deleted 05-physics plan left behind") that
 # the simulation's transcendentals are constructed in-engine; `crcbl_core::trig`
 # is the sine and cosine, and `crcbl_phys::rotation_from_scaled_axis` is the
 # rotation built from them.

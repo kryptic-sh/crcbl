@@ -28,7 +28,7 @@ pub const SECTOR_SIZE_LOG2: u32 = 20;
 ///
 /// The sector grid is one structure with three consumers — streaming unit,
 /// broadphase partition and interest-management key (see
-/// `docs/plan/05-physics.md`) — so the cell size is chosen to be a *useful
+/// `docs/notes/simulation.md`) — so the cell size is chosen to be a *useful
 /// spatial cell first*, and the index widened until the extent follows:
 ///
 /// * **As a cell**: an FPS map or a town sits inside one sector; Earth's
@@ -80,7 +80,7 @@ pub const EXACT_SECTOR_DELTA: i64 = 1 << 53;
 /// That makes `sector` literally `floor(absolute / SECTOR_SIZE)`, i.e. the
 /// index of the grid cell the position is in, which is exactly what the
 /// streaming loader, the broadphase partition and interest management want as a
-/// key (one spatial structure, three consumers — see `docs/plan/05-physics.md`).
+/// key (one spatial structure, three consumers — see `docs/notes/simulation.md`).
 /// A centred range would buy one bit of precision and cost that identity, plus
 /// an off-by-half in every consumer that hashes a cell.
 ///

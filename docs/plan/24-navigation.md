@@ -10,10 +10,10 @@ planned as headless load-test clients — this is how they walk).
 **Nothing here is built**: there is no `crcbl-nav` crate, no bake step, no query
 API and no arena sample. One dependency is worth stating before the work is
 scheduled, because it is not obvious from this document: step 1 below voxelizes
-**physics colliders**, and `crcbl-phys` has only `Sphere`, `BoxCollider` and
-`Capsule` — the static trimesh/heightfield that a walkable world is actually
-made of is itself outstanding in `05-physics.md`. Nav cannot start before that
-lands.
+**physics colliders**. `crcbl-phys` gained the static `TriangleMesh` a walkable
+world is made of on 2026-09-23; the heightfield form is still owed
+(`docs/backlog.md`, _Static trimesh / heightfield colliders with a BVH
+midphase_).
 
 ## Pipeline: colliders → navmesh (Recast-lineage, ours)
 

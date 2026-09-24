@@ -412,10 +412,13 @@ no device.
   scheduled at P10 above that stage, and [32-voip.md](32-voip.md) schedules
   "mixer voice bus/ducking" with team voice against it too.
 
-- **The transcendental policy conflicts with [05-physics.md](05-physics.md).**
-  This document requires own polynomial approximations plus a CI deny; topic 5's
-  correction requires the `libm` crate. Neither exists. See topic 5's correction
-  for the full note; the decision is one decision and belongs in one place.
+- **The transcendental policy conflicted with the physics plan's.** This
+  document requires own polynomial approximations plus a CI deny; the physics
+  plan's 2026-07-27 correction required the `libm` crate. The user decided on
+  2026-09-17 for constructions in-engine, which is this document's side; the
+  decision is recorded in the [simulation notes](../notes/simulation.md) (_What
+  the deleted 05-physics plan left behind_), and what audio still owes is in
+  `docs/backlog.md` under _Audio's transcendentals and deny_.
 - **Golden buffers exist now, but not at the level the exit criterion names**
   (revised 2026-08-27; this bullet said "no instances"). There is exactly one:
   `crates/crcbl-audio/tests/burst-reference.wav`, asteroids' explosion, written

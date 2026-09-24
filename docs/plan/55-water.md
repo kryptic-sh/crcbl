@@ -3,9 +3,10 @@
 Written 2026-09-15, from a survey of the tree and three research briefs on how
 shipped games and engines draw and simulate water. Nothing in this document is
 built. Its place in the set is [18-render-features.md](18-render-features.md)'s
-index for the render half and [05-physics.md](05-physics.md) for the buoyancy
-half; the wind it reads is [56-wind.md](56-wind.md)'s; the fixture that proves
-it is [sample/21-tide.md](sample/21-tide.md).
+index for the render half and `docs/backlog.md`'s _Buoyancy and wind force
+providers_ for the buoyancy half; the wind it reads is
+[56-wind.md](56-wind.md)'s; the fixture that proves it is
+[sample/21-tide.md](sample/21-tide.md).
 
 **Water is an engine system, not a sample's shader.** A body of water is data
 the engine owns — its kind, its extent, its waves, its flow, its medium — and
@@ -286,9 +287,10 @@ in trigonometry, so the mapping is decided here rather than per shader:
   answer when a construction would be evaluated millions of times per frame and
   a fetch is cheaper; that is priced per rung, not assumed.
 
-**The CPU side runs the same constructions**, so physics needs neither platform
-libm nor a decision on [05-physics.md](05-physics.md)'s open
-`libm`-versus-tables question to evaluate a wave.
+**The CPU side runs the same constructions**, so physics needs no platform libm
+to evaluate a wave; the physics plan's `libm`-versus-constructions question was
+decided for constructions on 2026-09-17
+([simulation notes](../notes/simulation.md)).
 
 ### 7. Reflection: sky and probes always, a surface march next, planar only where flat
 

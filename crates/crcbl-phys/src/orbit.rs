@@ -1,7 +1,8 @@
 //! Analytic two-body propagation: where a coasting body is at time `t`,
 //! without integrating anything to find out.
 //!
-//! `docs/plan/05-physics.md`: "distant bodies = analytic Kepler orbits
+//! The physics plan, whose rules are in `docs/notes/simulation.md`: "distant
+//! bodies = analytic Kepler orbits
 //! (`position = f(t)`, zero integration cost, stable forever). Live
 //! integration only inside **bubbles** around observers."
 //!

@@ -4,9 +4,8 @@ Written 2026-09-15, from a survey of the tree and a research brief on how
 shipped games represent and consume wind. Nothing in this document is built. It
 is an engine service rather than a render feature: its consumers are
 [55-water.md](55-water.md), [57-grass.md](57-grass.md) (grass and trees),
-[58-hair.md](58-hair.md), cloth, particles and rigid bodies in
-[05-physics.md](05-physics.md). The fixtures that prove it are
-[sample/22-meadow.md](sample/22-meadow.md) and
+[58-hair.md](58-hair.md), cloth, particles and rigid bodies in `crcbl-phys`. The
+fixtures that prove it are [sample/22-meadow.md](sample/22-meadow.md) and
 [sample/23-mane.md](sample/23-mane.md), with
 [sample/21-tide.md](sample/21-tide.md) reading its speed for sea state.
 
@@ -164,12 +163,12 @@ history.
 
 | Consumer         | Reads                                           | Responds by                                                                | Owner                              |
 | ---------------- | ----------------------------------------------- | -------------------------------------------------------------------------- | ---------------------------------- |
-| Rigid bodies     | CPU sample at the body                          | quadratic drag on `v_rel = w − v` with a per-body `C_d` and projected area | [05-physics.md](05-physics.md)     |
+| Rigid bodies     | CPU sample at the body                          | quadratic drag on `v_rel = w − v` with a per-body `C_d` and projected area | `crcbl-phys`                       |
 | Trees and plants | GPU sample per instance, per branch at rung T3  | per-instance springs; baked per-vertex hierarchy                           | [57-grass.md](57-grass.md)         |
 | Grass            | GPU sample per blade or card                    | bend at the tip; blade tip state at the simulated rung                     | [57-grass.md](57-grass.md)         |
 | Hair and fur     | CPU sample per chain segment or object          | XPBD chains, springs                                                       | [58-hair.md](58-hair.md)           |
 | Water            | CPU and GPU regional speed; intensity per texel | sea-state blend; ripple and detail-normal strength                         | [55-water.md](55-water.md)         |
-| Cloth and flags  | sample per triangle or vertex                   | per-triangle drag and lift on relative velocity                            | [05-physics.md](05-physics.md)     |
+| Cloth and flags  | sample per triangle or vertex                   | per-triangle drag and lift on relative velocity                            | `crcbl-phys`                       |
 | Particles        | CPU sample per particle                         | drag in a moving frame (God of War's particles)                            | [20-particles.md](20-particles.md) |
 | Audio            | CPU speed at the listener                       | a wind bed's gain                                                          | [13-audio.md](13-audio.md)         |
 

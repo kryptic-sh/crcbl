@@ -3181,12 +3181,16 @@ and what they left_ below. Tessellation is planned, nothing built:
 [59-tessellation.md](plan/59-tessellation.md) with
 [relief](plan/sample/25-relief.md). What stays open:
 
-- **Physics plan errors found by the survey, not yet corrected in
-  `05-physics.md`**: its 120–240 Hz substeps are not implemented
-  (`PhysicsSystem::tick` steps once); its per-sector fat-AABB tree is one tree
-  with exact bounds; breakout's "contact normal response" is game code, against
-  sample rule 9; and `crcbl sim` registers no `PhysicsSystem`, so the
-  determinism killer test it names cannot run.
+- **Physics gaps the survey found against the physics plan** (its rules are in
+  `docs/notes/simulation.md`, _What the deleted 05-physics plan left behind_):
+  the 120–240 Hz tick substeps are not the engine's — `PhysicsSystem::tick`
+  steps once, and only callers that loop `step` themselves (`apps/orbit`'s
+  `SUBSTEPS`) or the contact solver's own `ContactSettings::substeps` substep;
+  the per-sector fat-AABB tree is one tree for the whole world (_Bubbles,
+  sleeping and sector streaming hooks_); breakout's "contact normal response" is
+  game code, against sample rule 9; and `crcbl sim` registers no
+  `PhysicsSystem`, so its 1000-tick hash covers no physics and the determinism
+  killer test cannot run.
 - **Decision: a height page in materials** — a 16-bit single-channel texture
   array and a `GpuMaterial` stride change, golden-visible.
 - **Decision: read `KHR_materials_displacement` as an unofficial glTF
@@ -9389,12 +9393,20 @@ tree on 2026-08-27. Most of what follows is not shipped work waiting to be
 deleted from a plan — it is work those plans still describe and the crates do
 not have.
 
-## Physics (`05-physics.md`)
+## Physics (from the deleted 05-physics plan, 2026-09-24)
+
+The plan's rules — the layer table, demand-driven slices, sector-tiled space,
+on-rails orbits and bubbles, the substep band, the CCD design, trimesh for
+statics and the constructed-maths determinism decision — are in
+`docs/notes/simulation.md` under _What the deleted 05-physics plan left behind_.
+What it left unbuilt is below; the contact solver's own remainder is under
+_Contact solver L2/L3: rungs 0 to 5 built, and what they left_, and orbit's
+acceptance flight under _orbit_.
 
 ### Bubbles, sleeping and sector streaming hooks (2026-08-27)
 
-**Bubbles and sectors not built; sleeping is (re-checked 2026-09-24).** Task 6
-of `05-physics.md`. Sleep landed with the contact solver's rung 3
+**Bubbles and sectors not built; sleeping is (re-checked 2026-09-24).** Sleep
+landed with the contact solver's rung 3
 (`crates/crcbl-phys/src/contact/island.rs`: persistent islands, island sleep,
 the wake rules, and `PhysicsSystem::put_to_sleep` for restoring a sleeper), but
 only for systems built `with_contacts`, and its thresholds are system-wide in
@@ -9420,7 +9432,7 @@ welded vertices, a BVH over the triangles, Jolt-style active edges),
 `ColliderComponent::Mesh` on static and kinematic bodies and
 `PhysicsWorld::add_mesh`; the query world descends the tree for rays, sphere and
 capsule sweeps, overlaps and penetrations, and `MeshHit` names the triangle. The
-2026-07-27 correction in `05-physics.md` decided **trimesh for statics, convex
+physics plan's 2026-07-27 correction decided **trimesh for statics, convex
 decomposition only for dynamics that need it**; the convex half waits on the
 hull collider (see the contact solver's entry).
 
@@ -9437,8 +9449,8 @@ of these consumers has since been re-checked against `TriangleMesh`):
 - `28-ballistics.md`'s entry/exit traversal needs closed or convex-decomposed
   static meshes; its `assumed_thickness` fallback exists precisely for the cases
   this would cover.
-- `05-physics.md`'s bullet-through-paper exit criterion ("vs 1 cm wall", "never
-  tunnels terrain").
+- The physics plan's bullet-through-paper exit criterion ("vs 1 cm wall", "never
+  tunnels terrain"), now _Bullet-through-paper at design speeds_ below.
 - `apps/orbit`'s landing on terrain, and the towers sample generally.
 
 ### Buoyancy and wind force providers (2026-08-27)
@@ -9448,13 +9460,13 @@ of these consumers has since been re-checked against `TriangleMesh`):
 `AtmosphericDrag`. The seam for wind exists — `crcbl_phys::wind::WindQuery`,
 implemented by the `crcbl-wind` crate — but nothing in `crcbl-phys` reads it,
 there is no `WaterQuery` in `crcbl-phys`, and nothing names buoyancy. Both are
-named in `05-physics.md`'s task 4 and its dynamics section, and they are the
-contact solver's rung 7, "Pool and gale": buoyancy from `55-water.md`'s water
-and wind drag from `56-wind.md`'s rung W4 (quadratic drag on the relative
-velocity with a per-body coefficient and projected area), proven by crates and
-balls in a pool under gusts, with the submerged fraction, depth against
-Archimedes and drag as the counters. Rigid-body rotation, one of the two
-prerequisites `wind.rs` names, is built; per-body medium properties are not.
+force providers the physics plan's L1 named, and they are the contact solver's
+rung 7, "Pool and gale": buoyancy from `55-water.md`'s water and wind drag from
+`56-wind.md`'s rung W4 (quadratic drag on the relative velocity with a per-body
+coefficient and projected area), proven by crates and balls in a pool under
+gusts, with the submerged fraction, depth against Archimedes and drag as the
+counters. Rigid-body rotation, one of the two prerequisites `wind.rs` names, is
+built; per-body medium properties are not.
 
 ### Physics debug suite: draw, scrub, query visualiser (2026-08-27)
 
@@ -9465,11 +9477,15 @@ is no time scrub and no query visualiser anywhere in the workspace
 (`grep -rn scrub crates/ apps/ --include=*.rs` hits one unrelated line in
 `apps/puppet/src/menu.rs`).
 
-`05-physics.md` states the rule "no query without a visualizer" as an exit
-criterion. Nothing enforces it and nothing satisfies it. The contact solver
-wants the draw to show contact points, normals and impulse magnitudes, manifold
-feature ids (warm-start continuity made visible: flickering ids are the bug),
-islands coloured, sleep states, and joint frames with their limit cones.
+The physics plan stated the rule "no query without a visualizer" as an exit
+criterion, beside a 1000-tick replay whose scrub UI works; the rule is in
+`docs/notes/simulation.md` (_What the deleted 05-physics plan left behind_).
+Nothing enforces it and nothing satisfies it. `crcbl_render::debug_draw` is the
+world-space pass the draw would use (_The viewer's skeleton overlay still
+projects by hand_). The contact solver wants the draw to show contact points,
+normals and impulse magnitudes, manifold feature ids (warm-start continuity made
+visible: flickering ids are the bug), islands coloured, sleep states, and joint
+frames with their limit cones.
 
 ### Camera-relative upload is not executed (2026-08-27)
 
@@ -9484,16 +9500,18 @@ conversion for. `apps/orbit`, the one sample with large coordinates, uses
 from the origin.
 
 **Consequence:** the f32 jitter this design exists to prevent has never been
-exercised, because nothing has yet been far enough from the origin. Task 1 of
-`05-physics.md` reads as done and its second half is not.
+exercised, because nothing has yet been far enough from the origin. The upload
+half of the physics plan's camera-relative rule was never executed; orbit's 3D
+view (_Orbit draws a map view, not 3D bodies_) is the first consumer that would
+exercise it.
 
 ### Cross-target determinism: the rest of the constructed maths (2026-08-27, re-decided 2026-09-17)
 
 The record behind the earlier `libm`-crate answer is in
 `docs/notes/simulation.md` under "Cross-target determinism: the CPU side takes
-`libm`". **The user re-decided on 2026-09-17** (`05-physics.md`, "Decision
-(determinism math, 2026-09-17)"): transcendentals are constructed in-engine, no
-`libm` crate.
+`libm`". **The user re-decided on 2026-09-17** (recorded in
+`docs/notes/simulation.md` under _What the deleted 05-physics plan left
+behind_): transcendentals are constructed in-engine, no `libm` crate.
 
 **Built:** `crcbl_core::trig`'s `f64` `sin` and `cos` (within `MAX_KERNEL_ULP`,
 arguments up to `MAX_ARGUMENT`), and `crates/crcbl-phys/clippy.toml` denying
@@ -9515,7 +9533,7 @@ platform transcendentals, `mul_add` and glam's trig-based rotation builders in
 
 ### Client-side read-only query world (2026-08-27)
 
-**Not built, and still unowned.** `05-physics.md`'s 2026-07-27 correction made
+**Not built, and still unowned.** The physics plan's 2026-07-27 correction made
 this a P10 deliverable: the client hosts a read-only `PhysicsWorld` (statics
 from scene load, dynamic colliders reconstructed from snapshots) for camera boom
 sweeps (30) and audio occlusion rays (13). `crcbl-client` imports
@@ -9526,15 +9544,56 @@ Today each sample that needs a client-side query builds its own; `apps/breach`
 casts its pistol ray on the **server** side instead, which sidesteps the problem
 rather than solving it.
 
-## ECS, server and client (`04-ecs-server-client.md`)
+### `overlap_sphere` returns entities, not shape hits (2026-09-24)
+
+**Not built.** The asteroids slice left `PhysicsSystem::overlap_sphere` (and
+`overlap_sphere_into`, `overlap_sphere_filtered`, `_filtered_into`) returning
+bare `Entity` lists, and `PhysicsWorld`'s the same over `ColliderId`s; the
+physics plan owed a real shape hit from them. `crcbl_phys::query::ShapeHit`
+exists — the sweeps and the character controller return it — but it is a ray
+parameter, point and normal, with no penetration depth, so an overlap answer
+needs either a depth on it or a sibling type. `capsule_penetrations_into`
+already computes depth for capsules and is the model. Every `_filtered` variant
+changes in step. Evidence: `crates/crcbl-phys/src/system.rs` and `world.rs`
+read, 2026-09-24.
+
+### Bullet-through-paper at design speeds (2026-09-24)
+
+**Not tested.** `crates/crcbl-phys/tests/bullets.rs` (contact-solver rung 4)
+proves continuous collision for a 300 m/s ball against a centimetre plate and
+bodies launched to 60 m/s (`LAUNCH_SPEED`) in a tick. The physics plan's exit
+criterion was a projectile at **10 km/s against a 1 cm wall at a 100% hit rate
+through segment CCD**, and a **swept capsule vehicle at 500 m/s never tunnelling
+terrain**. Neither speed is exercised. The terrain half now has `TriangleMesh`
+to stand on; a sweep that runs out of `MAX_ADVANCES` stops the body where it got
+to, which is the case a 10 km/s test would probe. Evidence: the test constants
+were read, 2026-09-24.
+
+### The character controller has not walked an authored map (2026-09-24)
+
+The physics plan's exit criterion was the controller walking towers' map —
+slopes, steps and plot edges — authored in the editor. `CharacterController`
+walks greybox courses instead: `apps/puppet`'s lane has steps and slopes either
+side of the walkable angle, and `apps/breach`'s firing line is a kerb it
+refuses, so slopes and steps are covered and editor-authored geometry is not.
+Towers has no walkable map, and the controller on a `TriangleMesh` end to end is
+untested (_Contact solver L2/L3_, rung 5's "Not tested").
+
+## ECS, server and client (from the deleted 04-ecs-server-client plan, 2026-09-24)
+
+The plan's rules — systems owning arrays, declared order, the crate split, the
+in-memory single-player path, sector-only interest and the ~100 ms buffer — are
+in `docs/notes/simulation.md` under _What the deleted 04-ecs-server-client plan
+left behind_. What it left unbuilt is below; the ECS access declarations and the
+parallel schedule are under _Jobs and threading_.
 
 ### Jitter-adaptive interpolation buffer (2026-08-27)
 
-**Not built.** `04-ecs-server-client.md`'s 2026-07-27 correction requires a
-buffer of roughly two snapshot intervals plus a jitter margin, growing under
-measured jitter and shrinking when calm. `crcbl-client` holds exactly two frames
-per sector — `prev_frames` and `current_frames`, both `HashMap<SectorId, Frame>`
-— and `grep -n "jitter|adaptive|buffer_depth"` over
+**Not built.** The stage 4 plan's 2026-07-27 correction requires a buffer of
+roughly two snapshot intervals plus a jitter margin, growing under measured
+jitter and shrinking when calm. `crcbl-client` holds exactly two frames per
+sector — `prev_frames` and `current_frames`, both `HashMap<SectorId, Frame>` —
+and `grep -n "jitter|adaptive|buffer_depth"` over
 `crates/crcbl-client/src/lib.rs` returns nothing. The alpha spans the two
 buffered snapshots' server ticks, which is correct arithmetic over a buffer that
 is one tick deep.
@@ -9544,9 +9603,9 @@ already assumes the ~100 ms figure.
 
 ### `SystemTrait::replicate` takes no client id (2026-08-27)
 
-**A reservation the plan claimed and never made.** `04-ecs-server-client.md`
-said interest management could be added post-MVP "without resurfacing every
-system" because the snapshot writer API takes a client id. It does not:
+**A reservation the plan claimed and never made.** The stage 4 plan said
+interest management could be added post-MVP "without resurfacing every system"
+because the snapshot writer API takes a client id. It does not:
 `crcbl_ecs::SystemTrait::replicate` takes `&mut Vec<u8>` and returns `bool`.
 
 What replication _is_ scoped by is the **sector**: `SectorId` envelopes, a
@@ -9576,11 +9635,22 @@ trusted.
 deterministic. But its world comes from `--seed` and there is no input script:
 `crates/crcbl-cli/src/sim_cmd.rs` says outright that neither the scene argument
 nor the input script is built, because a scene file format and a RON reader are
-both open questions. `04-ecs-server-client.md`'s exit criterion asks for "same
-input script → same state hash", which is the half not covered.
+both open questions. The stage 4 plan's exit criterion asked for "same input
+script → same state hash", which is the half not covered.
 
 **Blocks:** replay-driven regression testing, and the rollback-idempotence
 property `26-prediction.md` wants.
+
+### Inspector stats carry no per-system tick time (2026-09-24)
+
+**Not built.** The stage 4 plan had every system report
+`(name, entity_count, tick_time)` to the inspector registry.
+`crcbl_ecs::SystemStats` has only `name` and `entity_count`, and `Schedule` runs
+systems without timing them. Finishing it means timing each `SystemTrait::tick`
+in `Schedule` through an injectable clock rather than `Instant` (which panics on
+wasm32, and would put wall time in reach of determinism tests), and showing the
+number as a `DebugModule` row. Evidence: `crates/crcbl-ecs/src/inspector.rs`
+read, 2026-09-24.
 
 ## Animation (from the deleted 17-animation plan, 2026-09-24)
 
@@ -9972,7 +10042,7 @@ force providers_. From rung 2:
   box-box's full support radii, and GJK on the core shape with a SAT fallback
   when deep for spheres and capsules against hulls (decision 2: no EPA). Rung
   4's sweeps then need a hull gap for conservative advancement, which decision 5
-  gives to GJK. Hulls are also the convex half of `05-physics.md`'s "convex
+  gives to GJK. Hulls are also the convex half of the physics plan's "convex
   decomposition only for dynamics that need it".
 - **Tall stacks ask for substeps per group.** A soft contact's stiffness does
   not grow with its load, so at the 30 Hz defaults a column buckles past
@@ -10109,6 +10179,103 @@ force providers_. From rung 2:
     penetration query, so AI capsule sweeps go through `world_mut()` plus
     `entity_of`. A callback filter was declined: plain data keeps
     `OverlapQueries` `Copy + Sync`.
+
+### Contact solver rung 6: colouring, the wide kernel and parallel stages (2026-09-24)
+
+**Not built** (verified 2026-09-24: the solver in
+`crates/crcbl-phys/src/contact/solver.rs` is scalar `f64` on one thread, and
+`crates/crcbl-phys/Cargo.toml` does not depend on `crcbl-jobs`). The rung the
+deleted topic 36 plan called "Pit". What it would take, per its decisions 4, 7
+and 8 (recorded in `docs/notes/simulation.md`):
+
+- **Persistent greedy constraint colouring** of the awake constraints, with
+  per-colour body bitsets and an overflow colour, so no two constraints in a
+  colour share a body.
+- **Constraints prepared per colour into struct-of-arrays blocks**, with a
+  scalar twin doing exactly the same per-lane arithmetic, so the scalar and SIMD
+  builds hash the same.
+- **Staged execution on `crcbl-jobs`**, with parallel narrow-phase results
+  merged through per-worker bitsets. Order comes from the persistent arrays,
+  never a per-step sort, so the single-threaded Pages build runs the same stages
+  in the same colour order and hashes the same as N threads.
+- **Contact recycling**, and **awake and sleeping contact sets** in place of
+  today's one pool (the pit at rest spends about 96 µs a tick visiting sleeping
+  contacts), and **per-body contact edge lists** (decision 8), which also bound
+  `PhysicsSystem::disturb` and body removal.
+- **The solver interior in `f32`** — velocities, deltas, impulses and effective
+  masses — while positions stay `f64` in sector-local space (the user's decision
+  of 2026-09-17, amending the physics plan's f64 line). It changes every pinned
+  hash, native and wasm.
+
+**Binding:** hashing canonicalises −0.0 and NaN; no `mul_add` and no relaxed
+SIMD; the regression pyramid is base 20 in CI and base 100 (5050 boxes) as the
+benchmark; the hash is equal across thread counts, SIMD and scalar, native and
+wasm. Recheck determinism across sleep and wake once colouring follows the awake
+set's order.
+
+**Proving scene:** tumble's overflowing ball pit with its despawn radius, and
+cube rain. **Counters:** spawns and despawns per second, colours, overflow,
+stage times, threads, the hash across threads and targets, and the most bodies
+inside a 16.7 ms tick. For pricing, Box3D reports the 5050-box pyramid at about
+10.4 ms a step on one SSE2 thread, 25 ms scalar and 1.7 ms on eight threads.
+
+### `crcbl phys stack --check` and the solver's profiler rows (2026-09-24)
+
+**Neither exists** (verified 2026-09-24: `crates/crcbl-cli/src/main.rs`'s header
+lists `phys` among the verbs not yet landed; no profiler scope names a solver
+stage). The deleted topic 36 plan asked for `crcbl phys stack --check`, scripted
+stability scenarios run headless — the pyramid, the column, the pit settling —
+failing on the stability suites' numeric bounds (drift, penetration under the
+slop, energy never rising, sleep reached), and for profiler rows for the
+broadphase, manifold generation, the solver per substep, an island count and
+size histogram, and a sleeping ratio. Today the stage times exist only as
+`ContactCounters` and tumble's page, and the stability claims only as
+`crates/crcbl-phys/tests/`.
+
+## Tooling and infrastructure — what the plans still owe
+
+The tooling and infrastructure plans were audited against the tree on
+2026-08-27; the entries from here to _`check-doc-citations.sh` misses
+crate-relative paths too_ are what they still describe and the tree does not
+have.
+
+### Backlog entries lost on 2026-09-23 (2026-09-24)
+
+**Found while folding the stage 4 and 5 plans.** Commit 287d13c7
+(`feat(phys): add dynamic compound bodies of boxes`) replaced one bullet of the
+contact solver entry and, with it, every line that followed up to the editor's
+bullets: this section's heading and introduction, the start of the editor entry
+below (whose bullets were left sitting under the contact solver entry until
+2026-09-24), and these whole entries, none of which exists anywhere else in the
+file:
+
+- _Ragdolls — `35-ragdolls.md`_, _Player kit — `30-player-kit.md`_ and _Weapon
+  kit — `38-weapons.md`_ (all 2026-08-27), from the simulation plans' section.
+- _`apps/orbit` is a demo, not yet the acceptance test_ (2026-08-27), under a
+  "Samples touched in passing" heading; its substance survives in _orbit_.
+- _`tools/check-wrapped-strings.sh` misses a literal whose continuation resumes
+  with a capital_ (2026-09-10), _Asset hot reload is still entirely future
+  tense_, _No vendored glTF corpus; the fixture is synthesized in code_,
+  _Coverage gates one workspace floor, not per-crate thresholds_, _The
+  `crcbl-ui` in the tree is not the CSS/DOM system `07-ui-debug.md` designs_,
+  _`crcbl_ui::hud`'s two panel types have no consumer_ and _The netgraph is the
+  last `DebugModule` nobody wrote_ (2026-08-27).
+
+**What it would take:** read each from `git show 287d13c7^:docs/backlog.md`,
+re-verify it against the tree (several are likely stale — the netgraph one is
+partly covered by _Netgraph HUD, LAN discovery_), and restore what still holds.
+Not done here: it is outside the stage 4 and 5 fold, and restoring entries
+unchecked would carry stale claims forward.
+
+### The editor: slices 1 to 3 landed, and what they leave (2026-08-27)
+
+**Slices 1 to 3 landed 2026-09-16.** `apps/editor` loads a registered scene,
+picks by ray, edits through `EditCommand`/`UndoLog`, saves byte-stably and draws
+docked outliner and inspector panels; `docs/plan/08-editor.md`'s status section
+says what that cleared and what it did not. The allow-list entry in
+`tools/check-doc-citations.sh` is gone and the binary is in
+`tools/run-samples-windowed.sh`'s `SAMPLES`. What the slices leave:
+
 - **A tool is built against the vocabularies it can open.** `crcbl::registry`
   (slice 2) replaced the hand-written list, so a component is registered once
   and the codec, the system, the `&mut dyn Reflect` accessor and the `Placement`
@@ -10178,9 +10345,10 @@ force providers_. From rung 2:
   instance and one collider per entity and rewrites every instance every frame),
   a save onto a directory it does not own, or a save that fails part-way.
 
-**It waits on two unbuilt things:** the scene format (first entry above —
-features 5 and 6 have nothing to open or save) and stage 7's inspector (previous
-entry).
+**It waits on two unbuilt things:** the scene format (features 5 and 6 have
+nothing to open or save) and `07-ui-debug.md`'s inspector. Neither has an entry
+of its own here since 2026-09-23; see _Backlog entries lost on 2026-09-23_
+below.
 
 **Its four owner decisions were answered 2026-09-16** and are recorded in
 `08-editor.md`: the edit command enum and undo log exist from day one and are
@@ -10210,58 +10378,6 @@ drops today and each sets `ShellCaps::DRAG_DROP`: Wayland's data device,
 version 5, receiving). So `08-editor.md`'s "this is editor work, not seam work"
 is right and nothing is owed here. The lesson is the citation one: three true
 `grep` results about one mechanism supported a confident claim about another.
-
-### Contact solver rung 6: colouring, the wide kernel and parallel stages (2026-09-24)
-
-**Not built** (verified 2026-09-24: the solver in
-`crates/crcbl-phys/src/contact/solver.rs` is scalar `f64` on one thread, and
-`crates/crcbl-phys/Cargo.toml` does not depend on `crcbl-jobs`). The rung the
-deleted topic 36 plan called "Pit". What it would take, per its decisions 4, 7
-and 8 (recorded in `docs/notes/simulation.md`):
-
-- **Persistent greedy constraint colouring** of the awake constraints, with
-  per-colour body bitsets and an overflow colour, so no two constraints in a
-  colour share a body.
-- **Constraints prepared per colour into struct-of-arrays blocks**, with a
-  scalar twin doing exactly the same per-lane arithmetic, so the scalar and SIMD
-  builds hash the same.
-- **Staged execution on `crcbl-jobs`**, with parallel narrow-phase results
-  merged through per-worker bitsets. Order comes from the persistent arrays,
-  never a per-step sort, so the single-threaded Pages build runs the same stages
-  in the same colour order and hashes the same as N threads.
-- **Contact recycling**, and **awake and sleeping contact sets** in place of
-  today's one pool (the pit at rest spends about 96 µs a tick visiting sleeping
-  contacts), and **per-body contact edge lists** (decision 8), which also bound
-  `PhysicsSystem::disturb` and body removal.
-- **The solver interior in `f32`** — velocities, deltas, impulses and effective
-  masses — while positions stay `f64` in sector-local space (the user's decision
-  of 2026-09-17, amending `05-physics.md`'s f64 line). It changes every pinned
-  hash, native and wasm.
-
-**Binding:** hashing canonicalises −0.0 and NaN; no `mul_add` and no relaxed
-SIMD; the regression pyramid is base 20 in CI and base 100 (5050 boxes) as the
-benchmark; the hash is equal across thread counts, SIMD and scalar, native and
-wasm. Recheck determinism across sleep and wake once colouring follows the awake
-set's order.
-
-**Proving scene:** tumble's overflowing ball pit with its despawn radius, and
-cube rain. **Counters:** spawns and despawns per second, colours, overflow,
-stage times, threads, the hash across threads and targets, and the most bodies
-inside a 16.7 ms tick. For pricing, Box3D reports the 5050-box pyramid at about
-10.4 ms a step on one SSE2 thread, 25 ms scalar and 1.7 ms on eight threads.
-
-### `crcbl phys stack --check` and the solver's profiler rows (2026-09-24)
-
-**Neither exists** (verified 2026-09-24: `crates/crcbl-cli/src/main.rs`'s header
-lists `phys` among the verbs not yet landed; no profiler scope names a solver
-stage). The deleted topic 36 plan asked for `crcbl phys stack --check`, scripted
-stability scenarios run headless — the pyramid, the column, the pit settling —
-failing on the stability suites' numeric bounds (drift, penetration under the
-slop, energy never rising, sleep reached), and for profiler rows for the
-broadphase, manifold generation, the solver per substep, an island count and
-size histogram, and a sleeping ratio. Today the stage times exist only as
-`ContactCounters` and tumble's page, and the stability claims only as
-`crates/crcbl-phys/tests/`.
 
 ### Wasm module hosting: nothing but the static binding exists (2026-08-27)
 
@@ -14102,11 +14218,11 @@ work anybody can start.
   needs pick the signature.
 
 - **Sleeping and islands are not P8's.** `crcbl-phys`' own module table puts
-  them at **L2**, and `docs/plan/05-physics.md` scheduled the L2 items for
-  wave 2. They have since been built there rather than in P8, as the contact
-  solver's rung 3 (`crates/crcbl-phys/src/contact/island.rs`, 2026-09-23). The
-  roadmap row promised in P8 what the physics topic scheduled later; the physics
-  topic was the one to believe.
+  them at **L2**, and the physics plan scheduled the L2 items for wave 2. They
+  have since been built there rather than in P8, as the contact solver's rung 3
+  (`crates/crcbl-phys/src/contact/island.rs`, 2026-09-23). The roadmap row
+  promised in P8 what the physics topic scheduled later; the physics topic was
+  the one to believe.
 
 - **The ECS parallel schedule is the real remaining P8 work**, and it is blocked
   on a decision rather than on effort — see the entry above.
@@ -20203,10 +20319,12 @@ docs/notes/simulation.md under its own heading.
   refuses any container `libdxil` did not sign, which it signs only after its
   validator passes. What no gate checks is the DXIL's meaning against the other
   targets'; see "The differential render gate does not reach D3D12" below.
-- **L0's static trimesh/heightfield colliders do not exist.** `05-physics.md`
-  puts them in L0 (MVP); the ROADMAP marks "P3 L0" done against a narrower list.
-  towers demands them, and so does the character controller, which can only walk
-  on boxes, spheres and capsules today.
+- **L0's heightfield collider does not exist.** The physics plan put static
+  trimesh and heightfield colliders in L0 (MVP); the ROADMAP marks "P3 L0" done
+  against a narrower list. `TriangleMesh` landed on 2026-09-23 with the contact
+  solver's rung 5, so only the heightfield form is owed (_Static trimesh /
+  heightfield colliders with a BVH midphase_), and the character controller has
+  not been tested on a mesh end to end.
 - **`crcbl-audio` has no limiter**, though `13-audio.md` specifies a soft-knee
   limiter on master; the bus graph is built. Mix snapshots and ducking at P10
   depend on it.
@@ -24121,9 +24239,10 @@ candidate; it landed 2026-09-04 as a fragment-stage tint — `DebugView::Cascade
 
 The world-space half of this shipped on 2026-08-31 as
 `crcbl_render::debug_draw`: a pass that transforms segments by the camera and
-depth-tests them against the geometry they annotate, which is what
-`docs/plan/05-physics.md`'s contacts, sweeps, fat AABBs, BVH bounds and islands
-were waiting for. What is left is its **callers**.
+depth-tests them against the geometry they annotate, which is what the physics
+debug suite's contacts, sweeps, fat AABBs, BVH bounds and islands were waiting
+for (_Physics debug suite: draw, scrub, query visualiser_). What is left is its
+**callers**.
 
 `apps/viewer`'s skeleton overlay is the one that already exists and still does
 it the old way: it projects each joint to screen by hand and strokes the bones

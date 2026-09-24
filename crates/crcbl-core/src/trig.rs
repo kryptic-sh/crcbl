@@ -6,8 +6,9 @@
 //! runs on, and the platform's `sin` and `cos` do not: glibc, Apple's libm,
 //! the MSVC runtime and the browser's `Math.sin` each round in their own way,
 //! so one tick of a spinning body lands on a different last bit on each. The
-//! user decided on 2026-09-17 — `docs/plan/05-physics.md`, "Decision
-//! (determinism math, 2026-09-17)" — that the simulation's transcendentals are
+//! user decided on 2026-09-17 — recorded in `docs/notes/simulation.md`, "What
+//! the deleted 05-physics plan left behind" — that the simulation's
+//! transcendentals are
 //! **constructed in-engine**: no platform `libm` and no `libm` crate, but a
 //! range reduction and a polynomial built out of the operations IEEE-754
 //! specifies exactly.

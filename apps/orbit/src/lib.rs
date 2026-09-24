@@ -6,7 +6,8 @@
 //!
 //! # What it proves
 //!
-//! Everything in `docs/plan/05-physics.md`'s L1 row at once, and none of it
+//! Everything in the physics plan's L1 row (`docs/notes/simulation.md`) at
+//! once, and none of it
 //! reimplemented here: point gravity and quadratic atmospheric drag under a
 //! symplectic integrator while the engine is running, analytic Kepler
 //! propagation while it is not, a reference-frame hierarchy with

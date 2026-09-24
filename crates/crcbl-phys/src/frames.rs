@@ -1,7 +1,8 @@
 //! A hierarchy of reference frames, and the sphere-of-influence crossings that
 //! move a body between them.
 //!
-//! `docs/plan/05-physics.md`: "bodies parent to dominant gravity source (galaxy
+//! The physics plan, whose rules are in `docs/notes/simulation.md`: "bodies
+//! parent to dominant gravity source (galaxy
 //! → star → planet → moon → vehicle). Simulation runs in the local frame; the
 //! frame itself moves on-rails. Frame transitions (sphere-of-influence
 //! crossing) are explicit events."

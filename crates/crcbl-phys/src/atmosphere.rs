@@ -1,7 +1,8 @@
 //! An exponential atmosphere, and the quadratic drag a body moving through it
 //! feels.
 //!
-//! `docs/plan/05-physics.md`'s L1 line: "atmospheric drag `F = ½ρv²·Cd·A` with
+//! The physics plan's L1 line, whose rules are in `docs/notes/simulation.md`:
+//! "atmospheric drag `F = ½ρv²·Cd·A` with
 //! exponential density-vs-altitude — terminal velocity **emerges**, not
 //! scripted". Both halves are here, and the emergence is the point: nothing in
 //! this module knows what a terminal velocity is. It falls out of the drag rising

@@ -65,8 +65,9 @@ pub const DEFAULT_TICK_HZ: u32 = 60;
 
 /// Physics substeps inside one tick.
 ///
-/// Four at [`DEFAULT_TICK_HZ`] is 240 Hz, the top of the band
-/// `docs/plan/05-physics.md` asks for. A rocket at full throttle changes
+/// Four at [`DEFAULT_TICK_HZ`] is 240 Hz, the top of the substep band the
+/// physics plan set (`docs/notes/simulation.md`, "What the deleted 05-physics
+/// plan left behind"). A rocket at full throttle changes
 /// velocity by about 25 m/s a second, and the drag it feels goes as the square
 /// of that, so the substep is what keeps the ascent from over-shooting its own
 /// deceleration low down.

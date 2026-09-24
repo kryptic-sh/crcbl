@@ -89,8 +89,8 @@ is an orthographic projection with `z` as z-index.
 | 1     | ✅ 01-foundations — done, deleted 2026-09-24; rules in `docs/notes/backends.md`                | Workspace, crates, core types, HAL seam, window/event loop     |
 | 2     | ◐ 02-vulkan-backend — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`       | Vulkan device, swapchain, render graph, first triangle         |
 | 3     | ◐ 03-gpu-driven-rendering — built part done, deleted 2026-09-24; the rest in `docs/backlog.md` | Bindless, geometry pools, indirect draws, GPU culling          |
-| 4     | [04-ecs-server-client.md](04-ecs-server-client.md)                                             | ECS, tick loop, transport seam, replication                    |
-| 5     | [05-physics.md](05-physics.md)                                                                 | From-scratch physics: sector space, forces/orbits, CCD         |
+| 4     | ◐ 04-ecs-server-client — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | ECS, tick loop, transport seam, replication                    |
+| 5     | ◐ 05-physics — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`              | From-scratch physics: sector space, forces/orbits, CCD         |
 | 6     | [06-assets-scenes.md](06-assets-scenes.md)                                                     | glTF import, scene format, asset ids, hot reload               |
 | 7     | [07-ui-debug.md](07-ui-debug.md)                                                               | Immediate-mode GUI, debug draw, profiler, inspector            |
 | 8     | [08-editor.md](08-editor.md)                                                                   | Scene editor built on the engine, gizmos, play-in-editor       |
@@ -246,8 +246,8 @@ presence at all, except `render-harness`, which has one that is not a demo —
   full design in topic 36, whose rungs 0 to 5 are built (its decisions are in
   [simulation notes](../notes/simulation.md), the rest in `docs/backlog.md`)
   (ragdolls, 35, are their flagship consumer). L3 constraints/joints are
-  post-MVP — see the layer table in [05-physics.md](05-physics.md). L0/L1/CCD
-  are MVP.
+  post-MVP — see the layer table in the
+  [simulation notes](../notes/simulation.md). L0/L1/CCD are MVP.
 - Real network transport for native (QUIC/UDP) — the seam exists from stage 4;
   single player over the in-memory transport exercises the whole path. Native
   sessions are LAN over UDP (P13); browsers have no network transport at all —
