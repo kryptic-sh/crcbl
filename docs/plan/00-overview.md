@@ -116,9 +116,9 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 14    | [14-persistence.md](14-persistence.md)                                                      | Save games (snapshot-based), settings layers, profiles                     |
 | 15    | [15-windowing.md](15-windowing.md)                                                          | Own windowing: wire-protocol backends, 2 modes, agnostic seam              |
 | 16    | [16-wasm-modules.md](16-wasm-modules.md)                                                    | Game logic as wasm modules: FFI ABI, any language, modding                 |
-| 17    | [17-animation.md](17-animation.md)                                                          | Skeletal animation: cooked clips, state machine, GPU skinning              |
+| 17    | ◐ 17-animation — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`         | Skeletal animation: cooked clips, state machine, GPU skinning              |
 | 18    | [18-render-features.md](18-render-features.md)                                              | Render features index: how the techniques interact, deliver and risk       |
-| 19    | [19-input.md](19-input.md)                                                                  | Device-agnostic action input: kb/mouse/pad/touch, one config               |
+| 19    | ◐ 19-input — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Device-agnostic action input: kb/mouse/pad/touch, one config               |
 | 20    | [20-particles.md](20-particles.md)                                                          | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
 | 21    | [21-jobs.md](21-jobs.md)                                                                    | Threading: pipeline threads + job pool, mailboxes, tick sync               |
 | 22    | [22-replay.md](22-replay.md)                                                                | State recording: replays, black-box debug, spectating                      |
@@ -229,13 +229,14 @@ presence at all, except `render-harness`, which has one that is not a demo —
 
 ## Out of MVP scope (explicitly)
 
-- Skeletal animation: fully designed (topic 17), scheduled post-MVP wave 1 with
-  the puppet sample (09) as forcing function & acceptance test. **It started
-  early and is partly built** (2026-08-27): `crcbl-anim` ships `Skeleton`,
-  `Clip`, `Pose`, `Palette` and `BlendSpace1d`, and `apps/puppet` blends a
-  locomotion set by speed. Its own crate docs draw the line — no state machine,
-  no root motion, no GPU skinning — so what is out of MVP scope is now the upper
-  half of topic 17, not all of it.
+- Skeletal animation: designed in topic 17, scheduled post-MVP wave 1 with the
+  puppet sample (09) as forcing function & acceptance test. **It started early
+  and is partly built**: `crcbl-anim` ships `Skeleton`, `Clip`, `Pose`,
+  `Palette`, `BlendSpace1d` and two-bone IK, `crcbl-render` skins on the GPU,
+  and `apps/puppet` blends a locomotion set by speed. What is out of MVP scope
+  is the rest — the cook, the state machine, root motion and events — which
+  `docs/backlog.md` carries under _Animation (from the deleted 17-animation
+  plan, 2026-09-24)_.
 - Scripting-as-text: game logic is wasm modules (topic 16); Lua VM template
   covers script-style workflows post-MVP.
 - Audio: reverb zones, portal/room-graph propagation, doppler, surround — the

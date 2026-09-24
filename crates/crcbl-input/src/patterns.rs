@@ -65,8 +65,8 @@ pub const TAP_TIME: f32 = 0.25;
 
 /// How long a press lasts before a hold fires, in seconds.
 ///
-/// The `Hold(400, …)` the input plan (`docs/plan/19-input.md`) sketches as its
-/// example: long enough that a deliberate tap never becomes a hold.
+/// The `Hold(400, …)` the input plan's binding sketch used as its example:
+/// long enough that a deliberate tap never becomes a hold.
 pub const HOLD_TIME: f32 = 0.4;
 
 /// The longest gap between the first tap's release and the second press that

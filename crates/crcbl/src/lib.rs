@@ -78,11 +78,12 @@
 /// [`crcbl-anim`](crcbl_anim): skeletons, animation clips, clip sampling and
 /// the joint palette a skinning pass consumes.
 ///
-/// The runtime half of `docs/plan/17-animation.md` and nothing above it — no
-/// blending, no state machine, no root motion, no GPU skinning yet. It depends
-/// on `glam` alone, so re-exporting it adds no crate to a game's graph beyond
-/// the one; in particular it does **not** drag in the glTF importer, which
-/// stays behind [`scene`]'s feature where it belongs.
+/// The client runtime of skeletal animation — sampling, 1D blending, two-bone
+/// IK and the palette — and nothing above it: no state machine, no root motion
+/// (both owed in `docs/backlog.md`), and GPU skinning is [`render`]'s. It
+/// depends on `glam` alone, so re-exporting it adds no crate to a game's graph
+/// beyond the one; in particular it does **not** drag in the glTF importer,
+/// which stays behind [`scene`]'s feature where it belongs.
 pub use crcbl_anim as anim;
 /// [`crcbl-assets`](crcbl_assets): the IO seam — [`AssetSource`], the
 /// [`DirSource`] over a directory, and the registry above them.

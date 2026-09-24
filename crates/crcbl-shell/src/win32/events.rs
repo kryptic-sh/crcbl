@@ -340,7 +340,7 @@ impl RawEvent {
 /// **No input is collapsed**, deliberately. A resize is a *state* and its
 /// intermediate values describe frames nobody rendered; a keystroke, a click and
 /// a motion sample are *events*, and the durations between them are what
-/// `docs/plan/19-input.md`'s pattern evaluator is a function of. Coalescing two
+/// the action layer's patterns are defined over. Coalescing two
 /// motion samples into their endpoints would erase the path a drag took, and
 /// coalescing two key edges would turn a double-tap into a tap. Windows already
 /// collapses `WM_MOUSEMOVE` in its own queue, which is the only place that

@@ -121,7 +121,7 @@
 //! generated, and this backend does it, marking every one
 //! [`repeat: true`](ShellEvent::Key).
 //!
-//! The case for pushing it up to `docs/plan/19-input.md`'s action layer is
+//! The case for pushing it up to `crcbl-input`'s action layer is
 //! real — a shell that fabricates edges can confuse hold-pattern detection —
 //! and it loses on three counts:
 //!
@@ -1550,7 +1550,7 @@ impl Output {
 ///
 /// # One [`DeviceId`] per seat, not per physical device
 ///
-/// `docs/plan/19-input.md` wants per-device ids so that local multiplayer can
+/// The input design wants per-device ids so that local multiplayer can
 /// assign devices to players later. On Wayland the *seat* is that unit and
 /// there is no finer one: libinput merges every physical keyboard on a seat
 /// into one `wl_keyboard` and every mouse into one `wl_pointer`, and the

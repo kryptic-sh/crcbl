@@ -213,7 +213,8 @@ apart. So the settings a player expects to find that these catalogues do **not**
 cover, and who owns each:
 
 - **Input** — mouse sensitivity, invert Y, key binds, gamepad deadzone. Owned by
-  [19-input.md](19-input.md), and this document already places the binds
+  topic 19 (its rules are in the [simulation notes](../notes/simulation.md), its
+  open work in `docs/backlog.md`), and this document already places the binds
   themselves in the profile rather than in `settings.toml`, because they are
   structured per-player data that games extend. Two cautions on that ownership,
   checked 2026-08-27: topic 19 names the deadzone (it is a per-device-kind

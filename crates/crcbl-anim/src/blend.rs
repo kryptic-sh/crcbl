@@ -1,9 +1,10 @@
 //! Blending: two poses mixed by weight, a locomotion set selected by speed,
 //! and the timed fade a state switch needs.
 //!
-//! The fourth slice of `docs/plan/17-animation.md`, and the one
-//! `docs/plan/sample/09-puppet.md`'s milestone 2 is the consumer of: "client
-//! blend tree (1D locomotion by speed, crossfades)".
+//! The blending step of the animation evaluation stack (recorded in
+//! `docs/notes/simulation.md`, _What the deleted 17-animation plan left
+//! behind_), and the one `docs/plan/sample/09-puppet.md`'s milestone 2 is the
+//! consumer of: "client blend tree (1D locomotion by speed, crossfades)".
 //!
 //! ```text
 //! Pose  ─┐

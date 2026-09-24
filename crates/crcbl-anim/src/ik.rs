@@ -1,6 +1,6 @@
 //! Two-bone inverse kinematics, and the joint rotation it is built from.
 //!
-//! The first IK of `docs/plan/17-animation.md`'s post ops ("two-bone IK +
+//! The first IK of the animation evaluation stack's post ops ("two-bone IK +
 //! look-at"), and only that: no look-at, no full-body solve and no weights. A
 //! partial solve is the caller's to blend, because which pose it blends
 //! against is the caller's question.

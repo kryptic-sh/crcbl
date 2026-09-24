@@ -684,7 +684,8 @@ seam past its band (`SEAM_BLEED`'s doc carries the sweep).
   is the only browser backend (`crates/crcbl-store/src/lib.rs` records the
   IndexedDB fallback as still to come); a settings screen that silently forgets
   is the worst version of this bug.
-- **Non-goals:** input rebinding (`docs/plan/19-input.md`'s own screen),
+- **Non-goals:** input rebinding (its own screen, owed in `docs/backlog.md`
+  under _Input: no rebind screen, no input inspector, no `crcbl input` CLI_),
   accessibility settings beyond the catalogue, a migration format beyond topic
   14's, and per-monitor or per-adapter profiles, which topic 15 refuses.
 - **Exempt from rules 2, 10 and 11** — the settings are the content.

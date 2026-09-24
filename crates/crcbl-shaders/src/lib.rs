@@ -282,8 +282,8 @@ pub mod level_select;
 /// The workgroup size, uniform block and per-vertex skin binding
 /// `skinning.slang` declares, in the layouts that shader declares. What that
 /// pass writes is [`mesh::MeshVertex`], into the same pool the vertex stage
-/// pulls from, which is how `docs/plan/17-animation.md` keeps skinning out of
-/// the rendering path entirely.
+/// pulls from, which is how GPU skinning stays out of the rendering path but
+/// for one instance flag (`docs/notes/simulation.md`).
 pub mod skinning;
 
 /// The geometry `triangle.slang` pulls, in the layout that shader declares.

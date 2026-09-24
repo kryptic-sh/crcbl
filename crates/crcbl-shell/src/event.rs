@@ -4,14 +4,14 @@
 //! # Timestamps, and the clock they are on
 //!
 //! Every input-bearing variant carries an [`EventTime`]. This is not
-//! decoration: `docs/plan/19-input.md` makes the pattern evaluator "a pure
-//! function over timestamped edges" — tap versus hold versus double-tap are
-//! *defined* by inter-event durations — and topic 26's client prediction needs
-//! input-to-photon latency, which is a subtraction between an event timestamp
-//! and a present timestamp. Neither works if the timestamp is the moment the
-//! engine got around to draining the queue: a 20 ms frame quantizes every
-//! duration to 20 ms and makes a fast double-tap indistinguishable from a slow
-//! one.
+//! decoration: the input design makes the pattern evaluator a pure function
+//! over timestamped edges (`docs/notes/simulation.md`) — tap versus hold versus
+//! double-tap are *defined* by inter-event durations — and topic 26's client
+//! prediction needs input-to-photon latency, which is a subtraction between an
+//! event timestamp and a present timestamp. Neither works if the timestamp is
+//! the moment the engine got around to draining the queue: a 20 ms frame
+//! quantizes every duration to 20 ms and makes a fast double-tap
+//! indistinguishable from a slow one.
 //!
 //! So the timestamp is the **window system's**, rebased onto the engine's
 //! monotonic clock. [`EventTime`]'s own documentation states the epoch and

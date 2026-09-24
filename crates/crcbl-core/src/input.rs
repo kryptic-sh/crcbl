@@ -4,13 +4,14 @@
 //! # Why this is in `crcbl-core` and not in `crcbl-shell`
 //!
 //! The shell-boundary rule in `docs/notes/backends.md` puts "input event
-//! normalisation into engine types" in `crcbl-core::input`, and
-//! `docs/plan/19-input.md` explains
-//! why: the action layer (`crcbl-input`, P2), the profile store (topic 14, where
-//! user rebinds are serialized), the UI (glyph hints), and the editor all have
-//! to *name* a key. If [`KeyCode`] lived in the windowing crate, the save-game
-//! crate would depend on a windowing library to spell `Space`, and a headless
-//! `crcbl sim` replay would link a shell it never opens.
+//! normalisation into engine types" in `crcbl-core::input`, and the input
+//! design (`docs/notes/simulation.md`, _What the deleted 19-input plan left
+//! behind_) explains why: the action layer (`crcbl-input`, P2), the profile
+//! store (topic 14, where user rebinds are serialized), the UI (glyph hints),
+//! and the editor all have to *name* a key. If [`KeyCode`] lived in the
+//! windowing crate, the save-game crate would depend on a windowing library to
+//! spell `Space`, and a headless `crcbl sim` replay would link a shell it never
+//! opens.
 //!
 //! The split is therefore:
 //!
@@ -110,7 +111,7 @@ impl Modifiers {
 
 /// Which physical device an event came from.
 ///
-/// `docs/plan/19-input.md` requires "per-device id" on raw events from day one,
+/// The input design requires a per-device id on raw events from day one,
 /// because local-multiplayer device-to-player assignment is post-MVP but is
 /// impossible to retrofit into an event stream that never said which keyboard
 /// pressed the key. Ids are unique for the lifetime of the process and are not

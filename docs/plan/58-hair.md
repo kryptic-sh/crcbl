@@ -3,9 +3,10 @@
 Written 2026-09-15, from a survey of the tree and a research brief on how
 shipped games and Acerola's fur work render and simulate hair. Nothing in this
 document is built. Its place in the set is
-[18-render-features.md](18-render-features.md)'s index for the drawing and
-[17-animation.md](17-animation.md) for the motion; the wind it reads is
-[56-wind.md](56-wind.md)'s; the shell technique it shares with grass is
+[18-render-features.md](18-render-features.md)'s index for the drawing and topic
+17's skeletal animation (rules in
+[the simulation notes](../notes/simulation.md)) for the motion; the wind it
+reads is [56-wind.md](56-wind.md)'s; the shell technique it shares with grass is
 [57-grass.md](57-grass.md)'s; the fixture that proves it is
 [sample/23-mane.md](sample/23-mane.md).
 

@@ -4,15 +4,15 @@
 // pool in, skinned vertices written back into a *transient region of that same
 // pool*.
 //
-// `docs/plan/17-animation.md`'s "GPU skinning" section is the design, and one
-// sentence of it shapes every decision in this file: "Renderer consumes them
-// like any static mesh — **vertex pulling and the GPU-driven pipeline don't
-// know skinning exists**." So what this writes is `MeshVertex`, the identical
-// struct `mesh.slang` pulls with `SV_VertexID`, byte for byte and field for
-// field — and a skinned draw is an ordinary draw whose base vertex points at
-// the region this pass filled. Nothing downstream grows a skinning branch:
-// not the vertex stage, not the cull pass, not the draw generator, not the
-// shadow passes that read the same pool.
+// The GPU skinning rules in `docs/notes/simulation.md` (_What the deleted
+// 17-animation plan left behind_) are the design, and one shapes every
+// decision here: skinned vertices are consumed like any static mesh. So what
+// this writes is `MeshVertex`, the identical struct `mesh.slang` pulls with
+// `SV_VertexID`, byte for byte and field for field — and a skinned draw is an
+// ordinary draw whose base vertex points at the region this pass filled. One
+// instance flag is the whole branch downstream: the raster stages take the
+// base from it and the cull pass keeps the instance whole, while the draw
+// generator and the shadow passes that read the same pool know nothing of it.
 //
 // That is also why `color` and `uv` are copied through unchanged rather than
 // left alone. The destination is a *different* range of the pool from the
@@ -22,10 +22,10 @@
 // # What dispatches this
 //
 // `crcbl_render::skinning::Skinning`: it reserves the pool's transient region
-// with the prev/current ping-pong topic 17's 2026-07-27 correction asks for,
-// uploads the palette and the bindings, and records one dispatch per skinned
-// range. `crcbl_render::skinning::skin_vertex` is this entry point rewritten in
-// Rust, term for term, as the oracle a readback compares against.
+// with the prev/current ping-pong the animation plan's 2026-07-27 correction
+// asked for, uploads the palette and the bindings, and records one dispatch
+// per skinned range. `crcbl_render::skinning::skin_vertex` is this entry point
+// rewritten in Rust, term for term, as the oracle a readback compares against.
 //
 // `crates/crcbl-vk/tests/vk_e2e/skinning.rs` runs it on a real driver and
 // compares every component against that oracle — including the case the
@@ -35,10 +35,10 @@
 //
 // # Compute, and every backend can run it
 //
-// Topic 17 again: "The browser gets the same compute path — skinning is just a
-// compute shader, no bindless needed — so wasm gets animated characters day
-// one. Skinning is independent of every path selector in
-// topic 39." Nothing here needs a feature: a uniform
+// The animation design again: the browser gets the same compute path —
+// skinning is just a compute shader, no bindless needed — so wasm gets
+// animated characters from day one, and skinning is independent of every path
+// selector in topic 39. Nothing here needs a feature: a uniform
 // block, three storage buffers and a `[numthreads]`, which is the same shape
 // `clear_counters.slang` has and the smallest shape a dispatch can have. There
 // is no mesh stage, no subgroup op, no wave intrinsic and no 16-bit type
@@ -96,9 +96,9 @@ struct SkinParams
     uint input_base;
     /// First vertex of the **skinned** run, as an index into the same pool.
     ///
-    /// The transient region topic 17 asks for. It is a different range of one
-    /// buffer rather than a second buffer, which is what lets a skinned mesh be
-    /// drawn, culled and shadowed by passes that only ever knew about the pool.
+    /// The transient region the skinning design asks for: a different range of
+    /// one buffer rather than a second buffer, which is what lets a skinned mesh
+    /// be drawn, culled and shadowed by passes that only ever knew about the pool.
     uint output_base;
     /// First entry of this range's run of `SkinBinding`s.
     ///
@@ -109,9 +109,9 @@ struct SkinParams
     uint binding_base;
     /// First matrix of this range's joint palette.
     ///
-    /// One buffer holds every animated instance's palette — topic 17's "joint
-    /// palettes (SSBO, all animated instances)" — so a range names where its
-    /// own begins.
+    /// One buffer holds every animated instance's palette — the skinning
+    /// design's one joint-palette buffer for all animated instances — so a
+    /// range names where its own begins.
     uint joint_base;
     /// Joints in this range's palette. Every index is clamped against it.
     ///

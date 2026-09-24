@@ -1,16 +1,17 @@
 //! Skeletal animation: clip sampling and joint palettes.
 //!
-//! The third and fourth slices of `docs/plan/17-animation.md` — its "Clip
-//! sampling" step, the palette the evaluation stack ends at, and the blending
-//! above them; plus two-bone IK ([`ik`]), the one post op a caller has asked
-//! for, since EW's character rig places its hands with it; and **nothing above
-//! that**. There is no GPU skinning here — the skinning dispatch is
-//! `crcbl-render`'s (`skinning.rs`), and it takes a
-//! [`Palette`] this crate produced. A state machine and root motion are later
-//! slices with their own consumers, and building them now against no caller is
-//! the failure this project guards against. What is here is what
-//! `docs/plan/sample/09-puppet.md` needs through its milestone 2: a character
-//! posed from a clip, and a locomotion set mixed by speed.
+//! The client half of the animation evaluation stack recorded in
+//! `docs/notes/simulation.md` (_What the deleted 17-animation plan left
+//! behind_) — its clip-sampling step, the palette the stack ends at, and the
+//! blending above them; plus two-bone IK ([`ik`]), the one post op a caller has
+//! asked for, by EW, whose character rig is to place its hands with it; **nothing
+//! above that**. There is no GPU skinning here — the skinning dispatch is
+//! `crcbl-render`'s (`skinning.rs`), and it takes a [`Palette`] this crate
+//! produced. A state machine and root motion are later slices with their own
+//! consumers, and building them now against no caller is the failure this
+//! project guards against. What is here is what `docs/plan/sample/09-puppet.md`
+//! needs through its milestone 2: a character posed from a clip, and a
+//! locomotion set mixed by speed.
 //!
 //! ```text
 //! Skeleton   joints in palette order — parent index, inverse bind, rest pose
@@ -76,10 +77,10 @@
 //!
 //! # Determinism
 //!
-//! None is claimed. `docs/plan/17-animation.md` puts pose evaluation on the
-//! client — "pose math is client-side presentation and free to vary" — and this
-//! crate is `f32` throughout, with a slerp that goes through a transcendental.
-//! Nothing here belongs in a tick hash.
+//! None is claimed. The animation rules in `docs/notes/simulation.md` put pose
+//! evaluation on the client — pose math is client presentation and free to vary
+//! — and this crate is `f32` throughout, with a slerp that goes through a
+//! transcendental. Nothing here belongs in a tick hash.
 
 pub mod blend;
 pub mod clip;

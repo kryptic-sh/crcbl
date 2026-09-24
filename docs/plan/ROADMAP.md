@@ -184,9 +184,10 @@ browser's own gate and the demo site's deploy.
   `ColliderComponent`), and `PhysicsSystem`'s full integration loop.
 - **`crcbl-anim`** — skeletal animation: clip sampling, the joint palette the
   evaluation stack ends at, and blending above them. No state machine and no
-  root motion — both later slices of [17-animation.md](17-animation.md); GPU
-  skinning exists, but as `crcbl-render`'s `skinning` dispatch consuming this
-  crate's `Palette`.
+  root motion — both owed in `docs/backlog.md` (_State machine, root motion,
+  events, post ops_); two-bone IK is built beside the blending; GPU skinning
+  exists, but as `crcbl-render`'s `skinning` dispatch consuming this crate's
+  `Palette`.
 - **`crcbl-console`** — the debug console's registry, headless: typed variables
   and commands, parsing, completion, history and the flag guards. `crcbl-ui`'s
   `console` module is its panel, and the design's rules are in

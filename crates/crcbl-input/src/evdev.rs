@@ -88,7 +88,7 @@
 //! Steam Input's virtual pad and `hid-steam` send the Xbox letters, so their
 //! X — the left button — arrives as `BTN_NORTH`. The split is by USB vendor:
 //! Sony and Nintendo positional, everything else lettered. Other drivers that
-//! disagree are the "quirk zoo" `docs/plan/19-input.md` scopes out; the table
+//! disagree are the "quirk zoo" the input design scopes out; the table
 //! grows by demand.
 //!
 //! # Steam Input's virtual pad is read like any other

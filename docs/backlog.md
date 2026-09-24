@@ -9563,7 +9563,12 @@ input script → same state hash", which is the half not covered.
 **Blocks:** replay-driven regression testing, and the rollback-idempotence
 property `26-prediction.md` wants.
 
-## Animation (`17-animation.md`)
+## Animation (from the deleted 17-animation plan, 2026-09-24)
+
+The plan's rules — the server strip, root motion through the controller, the
+skinning prepass and its double-buffered region, the scope guards and what was
+declined — are in `docs/notes/simulation.md` under _What the deleted
+17-animation plan left behind_. What it left unbuilt is below.
 
 ### The glTF rig's arrow into `crcbl-anim` has one owner, an app (2026-08-27)
 
@@ -9591,55 +9596,127 @@ would justify extracting it.
 
 ### No cook, no cooked clip format (2026-08-27)
 
-`17-animation.md` specifies per-clip compressed curve tracks, a flat joint
-array, `crcbl import --skeletons/--clips`, and versioned cooked output. **None
-of it exists.** `crcbl import` has neither flag (`crates/crcbl-cli/src/args.rs`
-— the only `--clip` in the CLI belongs to `crcbl crpix`, the sprite baker), and
-`Skeleton`/`Clip` are runtime types a caller constructs directly.
+**The design:** a cook that reads the imported `GltfSkin`/`GltfClip` and writes
+per-clip curve tracks resampled at a fixed rate and quantised (curve fitting
+only if measured size demands it), and a skeleton as a flat joint array of
+parent indices and the bind pose, keeping joint names so retargeting can land
+later. `crcbl import` grows `--skeletons` and `--clips`, and the output is
+versioned like every other bake. **None of it exists.** `crcbl import` has
+neither flag (`crates/crcbl-cli/src/args.rs` — the only `--clip` in the CLI
+belongs to `crcbl crpix`, the sprite baker), and `Skeleton`/`Clip` are runtime
+types a caller constructs directly, or that `apps/viewer/src/anim.rs` converts
+from an imported document at load.
 
 **What it blocks, each verified separately:**
 
-- Golden-pose tests against the glTF sample-model suite (Fox, CesiumMan,
-  RiggedFigure) — nothing turns a `.glb` rig into a `Skeleton`.
-- Conservative animated AABBs, which `17-animation.md` says are computed at cook
-  time; a skinned instance is currently culled against its undeformed box.
+- Conservative animated bounds: the bind-pose box inflated by the clip's bounds,
+  computed at cook time. Today `cull.slang` never frustum-culls an instance
+  carrying `INSTANCE_BASE_VERTEX_OVERRIDE` — its source bounds cannot reject
+  deformed vertices, so it is kept whole, and in every face of a point light's
+  cube. A cooked bound would let a skinned instance be culled at all.
 - Per-clip **hitbox transform tracks**, which `26-prediction.md`'s lag
   compensation depends on for server-side posed hitboxes with no pose math.
-- The **server strip** (root track + event track + duration) that
-  `17-animation.md`'s 2026-07-27 correction introduced so the server can do root
-  motion and events without sampling pose curves.
+- The **server strip** (root track + event track + duration) that the plan's
+  2026-07-27 correction introduced so the server can do root motion and events
+  without sampling pose curves. Full curve sets stay client-only.
+
+It does **not** block golden-pose tests — see the next entry.
+
+### Golden-pose tests against the glTF sample models (2026-09-24)
+
+**Not built, and not blocked.** The plan's first delivery step pairs the import
+with golden poses: sample each clip at fixed times and hash the joint palette
+against blessed values, for Fox, CesiumMan and RiggedFigure from the glTF
+sample-model suite. `crates/crcbl-anim/tests/` holds `ik.rs`, `interpolation.rs`
+and `palette.rs` — hand-composed chains and the glTF interpolation modes, not
+blessed poses from real content.
+
+This entry used to say nothing turns a `.glb` rig into a `Skeleton`, which was
+wrong: `apps/viewer/src/anim.rs` does (`skeleton_of`, `joint_of`), and viewer
+plays the result. What is missing is the test, not a way to reach one. Where it
+lives follows the conversion: while the conversion is viewer's the test is
+viewer's, and lifting the conversion into a crate (_The glTF rig's arrow into
+`crcbl-anim` has one owner, an app_) would move the test with it. The sample
+models are not in the tree (no Fox, CesiumMan or RiggedFigure file, searched
+2026-09-24), so the test also owes a decision on vendoring them. A hash that
+cannot fail is no check: show it red by perturbing one keyframe before blessing
+it.
 
 ### State machine, root motion, events, post ops (2026-08-27)
 
 **Not built.** `crcbl-anim`'s own module header says so: no state machine, no
 root motion, no GPU skinning _in that crate_. Confirmed against its module list
-— `blend`, `clip`, `palette`, `sample`, `skeleton`, `trs`.
+— `blend`, `clip`, `ik`, `palette`, `sample`, `skeleton`, `trs`.
 
-Specifically absent: the RON state-machine asset and its runtime; animation
-events (the footstep-at-t=0.3 timing proof); root-motion extraction feeding the
-character controller; sockets/attachments; per-bone masks; additive layers; a 2D
-directional blend space; two-bone IK and look-at; `crcbl anim dump`; the editor
-state-machine panel.
+Specifically absent, with the design each was given:
+
+- **The state machine**: a RON asset, hot-reloadable, whose states are blend
+  trees and whose transitions are condition expressions over actions and
+  parameters plus exit time, with crossfade durations. Hand-authored first; an
+  editor panel views it before it ever edits it (_Animation debug tools_ below).
+  Its logic runs on the server: ticks, transition decisions and normalised clip
+  time are small POD state, replicated and saved like any component and folded
+  into the tick hash, and the client interpolates between replicated states as
+  it does transforms.
+- **Animation events** — a footstep at t=0.3 raising a gameplay or audio event —
+  timed on the server from the cooked event track. The proof owed is a test that
+  the event fires on the exact tick whatever the frame rate, and a state-machine
+  property test: scripted parameter sequences give a deterministic state/time
+  hash on the determinism harness.
+- **Root motion**, extracted on the server from the cooked root track and
+  applied as velocity to the character controller, **never to the transform** —
+  the rule in `docs/notes/simulation.md`.
+- **Blend layers**: per-bone masks (upper body shooting while the legs run),
+  additive layers (aim offsets), and a 2D directional blend space — the last
+  only once a sample needs strafing.
+- **Post ops**: sockets and attachments (a weapon on a hand joint) and look-at.
+  Full-body IK is not planned.
+
+The server-side items depend on the server strip (_No cook, no cooked clip
+format_ above); masks, additive layers, sockets and look-at do not.
+
+**Two-bone IK is built**, which this entry used to list as absent:
+`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, tested in
+`crates/crcbl-anim/tests/ik.rs`. No production code calls it yet — EW's port is
+parked on EW's side, recorded under _EW's engine-port audit_.
 
 Present and working: `Clip::sample_into`, `blend_into`, `BlendSpace1d`, `Pose`,
 `Palette::compute` — `apps/puppet` mixes idle↔walk↔run by measured speed through
 them.
 
+### Animation debug tools are unbuilt past the viewer's skeleton overlay (2026-09-24)
+
+The plan names a skeleton overlay, a clip scrubber panel, a state-machine live
+view (current state, transition progress, parameters), a blend-weight inspector,
+`crcbl anim dump <clip>` and an editor state-machine panel. Only the overlay
+exists, as viewer's skeleton toggle (`apps/viewer/src/app.rs`, drawing the posed
+skeleton over the frame). puppet reports its pose in a `[POSE]` log line
+(`apps/puppet/src/app.rs`), not a general inspector, and `crcbl-cli`'s `Command`
+enum in `crates/crcbl-cli/src/args.rs` has no `anim`.
+
+**What it would take:** a debug panel over `Pose` and `BlendSpace1d` for the
+scrubber and inspector, which could land now; the live view and the editor panel
+once a state machine exists; and `crcbl anim dump` once there is a cooked format
+to dump. Verified by the CLI's `Command` enum and by grepping `apps/` and
+`crates/` for a scrubber (none found).
+
 ### GPU skinning follow-ons (2026-08-27)
 
-Recorded because `17-animation.md` read as though the whole section were future
-work and it is not. `crates/crcbl-render/src/skinning.rs` over
+`crates/crcbl-render/src/skinning.rs` over
 `crates/crcbl-shaders/shaders/skinning.slang` is the compute prepass; the
-skinned region is a range of the mesh pool, so cull, draw generation and the
-shadow passes gained no skinning branch (the one branch is
-`GpuInstance::BASE_VERTEX_OVERRIDE` in the raster stages). `apps/puppet`
-consumes it natively and in the browser, with shadows.
+skinned region is a range of the mesh pool, so draw generation and the shadow
+passes gained no skinning branch. The one flag is
+`GpuInstance::BASE_VERTEX_OVERRIDE`: the raster stages read it for the base
+vertex, and `cull.slang` reads it to keep a deforming instance unculled.
+`apps/puppet` consumes it natively and in the browser, with shadows.
 
 Remaining work:
 
 - **One dispatch per animated range**, not one over a range table. The
   GPU-driven form needs a range table the shader can index — a second layout to
   pin against `slangc`.
+- **Conservative animated bounds**, so a skinned instance can be culled at all —
+  owed by the cook (_No cook, no cooked clip format_).
 - **Bad joint indices are contained, not diagnosed.** `Skinning::begin_frame`
   refuses them by name and the shader clamps, but `crcbl-scene` cannot do better
   at import because a glTF primitive does not know its skin.
@@ -9803,8 +9880,8 @@ were staged for it are not built either**:
 Present: snapshot rings (`crcbl_net::BaselineStore`, a per-sector `VecDeque`
 with eviction) and determinism hashing (`crcbl_server::sim_hash::hash_world`).
 
-Also depends on the cooked hitbox tracks that `17-animation.md`'s missing cook
-would produce.
+Also depends on the cooked hitbox tracks that the missing animation cook would
+produce (_No cook, no cooked clip format_).
 
 ### Ballistics and kinetic impact — `28-ballistics.md` (2026-08-27)
 
@@ -10157,6 +10234,11 @@ browser-hosted single-player game with mods has no containment at all.
 
 ### Input: patterns, RON bindings, rebind persistence and every gamepad backend (2026-08-27)
 
+The input plan was deleted on 2026-09-24; its rules — actions not keys on the
+server, positional pad buttons, rebinds as diffs over defaults, no SDL database,
+the one `CONTROL_STYLE` — are in `docs/notes/simulation.md` under _What the
+deleted 19-input plan left behind_.
+
 **Not built**, all of it re-verified:
 
 - **Pattern gaps after tap/hold/double-tap landed (2026-09-23).**
@@ -10170,14 +10252,29 @@ browser-hosted single-player game with mods has no containment at all.
   `ActionMap`, the same reason it stays off `grid_drag`, so the migration is an
   input-architecture call for EW's user; if it comes, a waiting single tap fires
   at `>` the window against EW's `>=`, one tick apart at exact boundaries.
-- **RON binding assets.** Nothing parses one; a game declares actions in code.
+- **RON binding assets.** Nothing parses one; a game declares actions in code
+  through `ActionDecl`. The plan's sketch was one record per action — `action`,
+  `kind`, a binding list per device class (`keyboard`, `mouse`, `gamepad`,
+  `touch`), and `patterns` whose entries emit a _named_ action, as
+  `Hold(400, "jump_charge")` does — loaded as the game's defaults. As built,
+  bindings are one flat `Vec<Binding>` per action and nothing downstream can
+  tell which spoke; a per-class grouping in the asset would be presentation over
+  that list, not a change to it. The tree has no RON reader yet, which is its
+  own open decision (under _The plan-document audit of 2026-08-23_).
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
-  `crcbl-store` has no profile or binding type.
-- **Glyph hints.** No glyph anything in `crcbl-input`.
-- **Gamepad: the seam and XInput are built; the rest is owed (2026-09-23).**
-  `crates/crcbl-input/src/gamepad.rs` is the seam every backend emits
-  (`GamepadEvent`, `GamepadSnapshot`,
+  `crcbl-store` has no profile or binding type. The rule it must meet: a
+  player's rebinds are stored as **diffs over the game's defaults**, never as a
+  copy of the whole set. Where the diff lives is a fork, set out under _The
+  plan-document audit of 2026-08-23_.
+- **Glyph hints.** No glyph anything in `crcbl-input`. The design: a hint shows
+  the binding for `ActionMap::last_device` (Ⓐ against `Space`, switching as the
+  player does), and a pad's printed label comes from its family —
+  `crcbl_input::gamepad::PadKind` exists for exactly this and bindings never
+  read it, because pad buttons are positional.
+- **Gamepad: the seam and all four backends are built; verification and the
+  items below are owed (2026-09-23).** `crates/crcbl-input/src/gamepad.rs` is
+  the seam every backend emits (`GamepadEvent`, `GamepadSnapshot`,
   `Binding::PadButton`/`PadStick`/`PadTrigger`, `ActionMap::gamepad_event`
   optional on top, `release_gamepads` on focus loss), and `crcbl_input::xinput`
   polls four XInput slots on Windows. Still owed:
@@ -10259,22 +10356,57 @@ context stack, `ActionMap::set_repeat`, `ActionMap::last_device`, and
 caller. `virtual_button` is built and **unjoined**: no production code calls it,
 because the two `TouchButton` users read the widget's own `take_fired` instead.
 
-**Blocked on three backends of four, corrected 2026-09-02:** local-multiplayer
-device assignment. `19-input.md`'s 2026-08-09 correction said `DeviceId` names a
-device _kind_ on **every** backend, and both it and this entry left out Wayland,
-where the `wl_seat` handler allocates a fresh id per seat — that landed thirteen
-days before the correction was written. So a test asserting two devices are
-distinguishable passes vacuously on Win32, X11 and AppKit, and on Wayland it
-would have something to say — except that **no such test exists and nothing in
-the tree brings up a second seat**, so the per-seat counter is verified by
-reading it, not by running it. A nested-sway e2e with two seats is what would
-change that, and whether the harness's compositor can be made to offer one has
-not been checked. The mechanism is a counter increment in the registry handler,
-so seat granularity is a shipping route for the slice rather than something to
-build first — but it is a route argued from the code, not one demonstrated.
-"Re-read the correction; it still describes the tree" is what this entry said
-for three weeks, which is why re-reading a claim is not the same as re-checking
-it.
+**Blocked on two backends of four, corrected 2026-09-24:** local-multiplayer
+device assignment. The input plan's 2026-08-09 correction said `DeviceId` names
+a device _kind_ on **every** backend, and both it and this entry left out
+Wayland, where the `wl_seat` handler allocates a fresh id per seat — that landed
+thirteen days before the correction was written. Win32 left the list on
+2026-09-21: `crates/crcbl-shell/src/win32/devices.rs` attributes each key,
+button and wheel message to the raw-input report that produced it and keys ids
+by interface path, so an id names a physical device there (injected input falls
+back to the per-kind constants). This entry said "three backends of four" until
+2026-09-24. So a test asserting two devices are distinguishable passes vacuously
+on X11 and AppKit, and on Wayland and Win32 it would have something to say —
+except that **no such test exists, nothing in the tree brings up a second seat,
+and no desk here has two keyboards or mice**, so both are verified by reading
+them, not by running them. A nested-sway e2e with two seats is what would change
+that, and whether the harness's compositor can be made to offer one has not been
+checked. The mechanism is a counter increment in the registry handler, so seat
+granularity is a shipping route for the slice rather than something to build
+first — but it is a route argued from the code, not one demonstrated. "Re-read
+the correction; it still describes the tree" is what this entry said for three
+weeks, which is why re-reading a claim is not the same as re-checking it.
+
+**Haptics** are unbuilt on every backend: `GamepadEvent` carries input only, and
+no backend opens an output path (XInput's `XInputSetState`, evdev's
+force-feedback `EV_FF`, GameController's `GCDeviceHaptics`, the Web Gamepad
+`vibrationActuator`). Scheduled beside device assignment as post-MVP.
+
+### Input: no rebind screen, no input inspector, no `crcbl input` CLI (2026-09-24)
+
+The input plan scheduled three tools on top of the action layer, and none
+exists:
+
+- **A listen-for-input rebind flow** provided by the engine, for the P10
+  settings screen to host: the player picks an action, presses the input, and
+  the result is written as a diff over the game's defaults. The only interactive
+  rebind in the tree is the debug console's `bind` and `unbind`
+  (`crates/crcbl/src/debug_console.rs`, calling `ActionMap::rebind`), a
+  developer tool: a `bind` line in a game's `autoexec.cfg` replays at start-up,
+  but nothing writes one. Depends on the binding schema and the persistence fork
+  in the entry above.
+- **An input inspector panel**: live devices, raw values, resolved action
+  states, the active context stack, the last-active device, and each input's
+  full resolution path — which context consumed it and through which binding.
+  The plan named it as the answer to "input eaten mysteriously" by the context
+  stack. Standalone; it needs nothing unbuilt. No inspector exists in `crcbl-ui`
+  or `crcbl`.
+- **`crcbl input`**, a CLI to inspect and edit bindings. `crcbl-cli`'s `Command`
+  enum (`crates/crcbl-cli/src/args.rs`) has no `input`. Editing needs the
+  binding asset to exist first; inspecting a game's declared actions needs a way
+  for the CLI to reach them without running the game.
+
+Verified by grep over `crates/` and `apps/` and by reading the `Command` enum.
 
 ### Replay: the container is flat, and every `crcbl replay` subverb is owed (2026-08-27)
 
@@ -13672,11 +13804,11 @@ leaves behind is smaller than it was:
   that `rebind` had no caller outside its own crate is wrong today:
   `crates/crcbl/src/debug_console.rs:336` calls it for the console's `bind`. The
   rebind UI is still P10's, and persistence lands with it, driven by what it
-  actually needs to write. Worth knowing before then: `docs/plan/19-input.md`
-  puts rebinds in "the profile (topic 14, RON) as diffs over game defaults",
-  while the settings stack already in the tree would carry an `[input.bindings]`
-  table today, with `crcbl settings get|set` working on it for free. That is a
-  fork worth taking deliberately rather than by default, because it moves a file
+  actually needs to write. Worth knowing before then: the input plan put rebinds
+  in "the profile (topic 14, RON) as diffs over game defaults", while the
+  settings stack already in the tree would carry an `[input.bindings]` table
+  today, with `crcbl settings get|set` working on it for free. That is a fork
+  worth taking deliberately rather than by default, because it moves a file
   topic 14 owns.
 
 - **Client tick alignment.** No lead, no EWMA server-time estimate, no rate
@@ -18605,8 +18737,8 @@ passed with both touch tests on `fb4266c0` (run 35596202377).
   while Windows runs its own message loop, so a three-second edge drag delivers
   a few thousand `PointerMotion` events in one `pump`. Bounded, not a leak, and
   the two obvious fixes are both wrong: coalescing loses the per-event timing
-  `docs/plan/19-input.md`'s pattern evaluator is a function of, and dropping
-  needs a "we are inside a modal loop" flag nobody else would consume.
+  the action layer's patterns are defined over, and dropping needs a "we are
+  inside a modal loop" flag nobody else would consume.
 - **No automated test covers the exact refresh rate on a physical display.**
   `win32::monitors` reads it from `QueryDisplayConfig`, and on 2026-09-21 a
   windowed `sandbox` run logged `180000 mHz` at 180 Hz and `59940 mHz` in a
@@ -19912,8 +20044,8 @@ docs/notes/simulation.md under its own heading.
 - **Audio's transcendentals are unconstructed.** See "Audio's transcendentals
   and deny".
 - **`DeviceId` is per-kind on two backends of four** — X11 and AppKit — which
-  blocks the local-multiplayer device assignment `19-input.md` says is supported
-  "from day one". Wayland allocates one id per `wl_seat`
+  blocks the local-multiplayer device assignment the input plan said was
+  supported "from day one". Wayland allocates one id per `wl_seat`
   (`crates/crcbl-shell/src/wayland/mod.rs`) and Win32 one per physical device
   (`win32::devices`, since 2026-09-21), so a distinguishability test would pass
   vacuously on two. No such test exists: nothing brings up a second seat, and no

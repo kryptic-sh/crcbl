@@ -1370,11 +1370,12 @@ pub fn push_out_of_props(position: DVec3, radius: f64, props: &[PropView]) -> DV
 /// keyboard's four keys are a [`Binding::Wasd`] composite now — the same
 /// normalised vector, from the same action — and the on-screen stick is a
 /// [`Binding::Virtual`] beside it. Nothing downstream can tell them apart, which
-/// is the whole of `docs/plan/19-input.md`'s claim.
+/// is the whole of the input design's claim (`docs/notes/simulation.md`, _What
+/// the deleted 19-input plan left behind_).
 const ACTION_MOVE: &str = "move";
 
-/// The id the on-screen stick reports under — `docs/plan/19-input.md`'s
-/// `Virtual("stick_move")`.
+/// The id the on-screen stick reports under — the input plan's binding sketch
+/// spelled it `Virtual("stick_move")`.
 ///
 /// Private on purpose: `crate::app` owns the widget and hands its deflection to
 /// [`Game::stick_moved`], so nothing outside this file has to know that the

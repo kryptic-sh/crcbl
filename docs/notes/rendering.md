@@ -1,7 +1,10 @@
 # Rendering — records
 
 Records kept so they are not re-derived: measurements, investigations, ideas
-considered and declined, and lessons. Open work lives in `docs/backlog.md`.
+considered and declined, and lessons. Open work lives in `docs/backlog.md`. GPU
+skinning's rules are in `docs/notes/simulation.md` (_What the deleted
+17-animation plan left behind_), beside the pose rules they share a pipeline
+with.
 
 ### Considered and declined: a per-scene golden tolerance
 

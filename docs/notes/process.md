@@ -195,7 +195,7 @@ Stated plainly. "Not reviewed" is the honest line.
 
 - **I did not read the other plan documents.** Claims these seven make about
   `05-physics.md`, `07-ui-debug.md`, `11-cli-headless.md`, `12-testing.md`,
-  `16-wasm-modules.md`, `17-animation.md`, `26-prediction.md`,
+  `16-wasm-modules.md`, the animation plan (topic 17), `26-prediction.md`,
   `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
   against those documents. Where I say "topic 5 requires `libm`" I am quoting
   `13-audio.md`'s own correction, not `05-physics.md`. Several of those files
@@ -811,10 +811,11 @@ that does not exist yet is the highest-risk document there is, because every
 sentence in it is a candidate the day the work lands.
 
 Still unaudited among the plans: `00`-`17`, `20`, `22`-`49`, `51`, `52`, and the
-seventeen remaining `docs/plan/sample/` files — over 18,000 lines. `19-input.md`
-and `21-jobs.md` were audited on 2026-09-02 and yielded eight, six of them wrong
-on the day they were written. Nothing has re-derived horde's four measurement
-tables, now in `docs/notes/samples.md`; those figures are carried on trust.
+seventeen remaining `docs/plan/sample/` files — over 18,000 lines. The input
+plan (topic 19) and `21-jobs.md` were audited on 2026-09-02 and yielded eight,
+six of them wrong on the day they were written. Nothing has re-derived horde's
+four measurement tables, now in `docs/notes/samples.md`; those figures are
+carried on trust.
 
 **And this file itself was swept on 2026-09-02** for entries whose subject had
 shipped — one deleted, two clauses cut, five reworded. What that sweep did

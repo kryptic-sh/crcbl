@@ -607,6 +607,240 @@ the ones that change what a reader would assume.
 - **A whole-system `ContactSettings::TALL_STACK`** — removed before it shipped
   in favour of per-group substeps.
 
+## What the deleted 17-animation plan left behind (2026-09-24)
+
+Record; topic 17 designed skeletal animation as an engine system — skeletons and
+clips from glTF, cooked to engine curves, played through blend trees and a
+data-driven state machine, skinned on the GPU — with `apps/puppet` as its
+forcing function. Built from it: the source stage (`crcbl_scene::gltf_import`'s
+`read_skins` and `read_clips` into `GltfSkin`, `GltfClip` and `GltfChannel`);
+the conversion into `crcbl-anim`'s types in `apps/viewer/src/anim.rs`
+(`skeleton_of`, `joint_of`); `crcbl_anim`'s `Skeleton`, `Clip` with
+`Clip::sample_into`, `Pose`, `Palette`, `blend_into` and `BlendSpace1d`, which
+puppet mixes idle, walk and run through by measured speed; two-bone IK
+(`crcbl_anim::ik::{solve_two_bone, rotate_joint}`, with no production caller);
+GPU skinning (`crates/crcbl-render/src/skinning.rs` over
+`crates/crcbl-shaders/shaders/skinning.slang`) with the double-buffered region
+feeding the motion target; and viewer's skeleton overlay. The rest is in
+`docs/backlog.md` under _Animation (from the deleted 17-animation plan,
+2026-09-24)_. Skinning's rules are here rather than in `docs/notes/rendering.md`
+so the pose side and the GPU side of one pipeline read together; the rendering
+notes point here.
+
+Code and docs cite the plan by its evaluation-stack steps, its delivery steps,
+its "GPU skinning" section and its 2026-07-27 correction. Those resolve here:
+
+| Citation                         | What it specified                                                                                                               |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| The source stage                 | glTF skins (joint hierarchy, inverse bind matrices) and sampled TRS channels, in the file's own keyframes and seconds           |
+| The cook                         | Fixed-rate resampled, quantised curve tracks per clip; a flat joint array; `crcbl import --skeletons/--clips`; versioned output |
+| Evaluation step 1, clip sampling | Time to local joint TRS per track — `Clip::sample_into`                                                                         |
+| Evaluation step 2, blending      | 1D blend nodes, a 2D directional space later, additive layers, per-bone masks                                                   |
+| Evaluation step 3, state machine | A RON asset, hot-reloadable: states are blend trees, transitions are conditions over actions and params plus exit time          |
+| Evaluation step 4, post ops      | Root-motion strip, sockets and attachments, two-bone IK and look-at                                                             |
+| Evaluation step 5, output        | One joint palette per instance — `Palette`                                                                                      |
+| Delivery step 1                  | Import and cook, with golden-pose tests                                                                                         |
+| Delivery step 2                  | Server anim state, the state machine, events, root motion                                                                       |
+| Delivery step 3                  | Client sampling and blending, and the GPU skinning compute pass                                                                 |
+| Delivery step 4                  | Sockets, masks, additive layers, two-bone IK and look-at                                                                        |
+| Delivery step 5                  | The puppet sample proving the stack                                                                                             |
+| Delivery step 6                  | The editor's state-machine panel, view first                                                                                    |
+| "GPU skinning"                   | The compute prepass into the vertex pool — the skinning rules below                                                             |
+| The 2026-07-27 correction        | The server strip, and the double-buffered skinned region                                                                        |
+| Debug tools                      | Skeleton overlay, clip scrubber, state-machine live view, blend-weight inspector, `crcbl anim dump <clip>`                      |
+
+**The server runs animation logic and samples no pose curves.** State-machine
+ticks, transition decisions, normalised clip time, root-motion extraction and
+animation events are the server's; sampling curves into a pose is not. The plan
+first said "no pose math on the server", and its 2026-07-27 correction narrowed
+it, because root motion and event timing both need sampled curves: the cook
+emits a per-clip **server strip** — root track, event track and duration only —
+which the server loads, and full curve sets stay client-only.
+
+**Server anim state is small POD in the tick hash; pose math is client
+presentation and free to vary.** The state replicates and saves like any
+component, and the client interpolates between replicated states exactly as it
+does transforms. `crcbl-anim` is `f32` throughout with a slerp through a
+transcendental, claims no determinism, and nothing in it belongs in a tick hash.
+
+**Root motion drives the character controller, never the transform.** The
+extracted velocity goes to topic 5's L0 controller, which resolves it against
+the world like any other move. Decided before any code to avoid the classic
+desync between an animation that moved a body and a server that did not.
+
+**`crcbl-anim` depends on `glam` alone.** Not on `crcbl-scene`, not on `gltf`,
+so a browser build that only plays cooked clips links no parser. The glTF to
+`Skeleton` conversion is index bookkeeping belonging to whoever holds both
+crates — today `apps/viewer/src/anim.rs`, where `skeleton_of` walks
+`skin.joints()` in order so a palette index stays the one `JOINTS_0` means.
+
+**The source format is glTF, read unresampled.** No new source format: import
+extends the asset pipeline, and the importer keeps the file's own keyframes in
+the file's own seconds, because the cook that resamples them needs the samples
+it started from.
+
+**The cooked format starts fixed-rate and quantised.** Curve fitting only if
+measured size demands it — measure before fitting. The skeleton is a flat joint
+array with parent indices and the bind pose, versioned like every bake, and the
+format **keeps joint names** so retargeting can land later without a format
+change.
+
+**Skinning is a compute prepass into the vertex pool, and one flag is the whole
+branch.** A joint palette buffer holding every animated instance's palette, plus
+the bind-pose run, produce `MeshVertex` values written into a transient region
+of the same pool, byte for byte the struct `mesh.slang` pulls. A skinned
+instance keeps naming its source mesh for bucket scattering and level selection;
+`GpuInstance::BASE_VERTEX_OVERRIDE` is the one branch, which the raster stages
+read for the base vertex and `cull.slang` reads to keep a deforming instance
+whole, since its source bounds cannot reject it. Shadow passes read the same
+pool, so skinned casters cost nothing extra. It needs no bindless, mesh stage,
+subgroup op or 16-bit type, so the browser runs the same path.
+
+**The skinned region is double-buffered from day one** (the 2026-07-27
+correction). Motion vectors for deforming geometry need previous-frame skinned
+positions, not a previous transform, and a ping-pong is nearly free as a pool
+layout and a pipeline rewrite later. `SkinnedRegion` reserves two runs,
+`Skinning::begin_frame` alternates them, and `mesh.slang` reads the other half
+through `previous_base_vertex`. The consumer today is the motion target; the TAA
+pass it was reserved for does not exist.
+
+**Culling a skinned instance wants conservative animated bounds from the cook.**
+The bind-pose box inflated by the clip's bounds, computed at cook time. Until a
+cook exists a skinned instance is never frustum-culled.
+
+**One dispatch per animated range, for now.** The GPU-driven form needs a range
+table the shader can index — a second layout to pin against `slangc` — and was
+deferred on purpose.
+
+**The feature's MVP is what puppet needs**: 1D blends, masks, additive layers
+and crossfades. A 2D space waits for a sample that needs strafing; the state
+machine is hand-authored RON and the editor panel is view-first; the first IK is
+two-bone plus look-at. Tests: golden poses sampled at fixed times and hashed
+against blessed values for Fox, CesiumMan and RiggedFigure; blend math against
+hand-computed two-joint cases; a state-machine property test on the determinism
+harness; events firing on the exact tick whatever the frame rate.
+
+**Considered and declined:**
+
+- **A visual blend-graph editor** before hand-authored RON hurts — the Mecanim
+  tarpit the plan named as its first risk.
+- **Full-body IK.** Not planned; two-bone and look-at are the IK.
+- **Retargeting**, initially: clips bind to their skeleton. Deferred rather than
+  refused, which is why the cooked format keeps joint names.
+- **Curve fitting in the first cooked format** — measure first.
+- **Root motion writing the transform directly** — the desync above.
+- **Morph targets in `crcbl-anim`.** The plan never specified them; the crate
+  poses skeletons, and glTF's `weights` channel path has no `Channel` variant.
+
+## What the deleted 19-input plan left behind (2026-09-24)
+
+Record; topic 19 designed engine-wide action mapping: gameplay and UI code
+consume **actions**, never devices, and keyboard, mouse, gamepad and on-screen
+controls are interchangeable binding sources behind one layer. Built from it, in
+`crcbl-input`: `ActionMap`, `ActionDecl` and the three `ActionKind`s; every
+`Binding` from `Key` to `PadTrigger`; the context stack (`context.rs`) over
+`GAMEPLAY_CONTEXT` with the reserved `ui` context; the tap, hold, double-tap and
+repeat patterns (`patterns.rs`, `repeat.rs`); `ActionMap::last_device`; the
+in-memory `ActionMap::rebind`; the `GamepadEvent` seam (`gamepad.rs`) with the
+evdev, XInput, GameController and Web Gamepad backends; and
+`ActionMap::virtual_stick`, driven by `crcbl_ui::touch`'s `TouchStick` in
+`apps/horde`. The rest is in `docs/backlog.md` under _Input: patterns, RON
+bindings, rebind persistence and every gamepad backend_, _Input: no rebind
+screen, no input inspector, no `crcbl input` CLI_ and _Input thread, stacked
+`InputTickState`, last-N ring_.
+
+Code cites the plan by its layers, its pattern evaluator, its binding sketch and
+its quirk-table scoping. Those resolve here:
+
+| Citation                     | What it specified                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shell layer, "per-device id" | Normalised raw events carrying a device id and the window system's timestamp (`crcbl-shell`, `crcbl_core::input`)                                       |
+| Device layer                 | Device registry, connect and disconnect, axis normalisation, dead zones and response curves per device kind                                             |
+| Action layer                 | `ActionMap`: bindings to actions, patterns, contexts                                                                                                    |
+| The pattern evaluator        | `press`, `release`, `hold(duration)`, `tap`, `double-tap(window)`, `repeat(rate)` — one implementation, every device                                    |
+| The binding sketch           | A RON record per action with a binding list per device class, and patterns emitting named actions (`Hold(400, "jump_charge")`, `Virtual("stick_move")`) |
+| Device backends              | The `GamepadEvent` seam and one backend per platform                                                                                                    |
+| The quirk zoo                | Per-device mapping beyond standard pads, scoped out                                                                                                     |
+| The 2026-08-09 correction    | `DeviceId` granularity per shell backend, and what it blocks                                                                                            |
+
+**The server sees actions, not keys.** The client resolves bindings locally and
+replicates action state (`move: vec2`, `jump: pressed`), so device agnosticism
+is structural, replays and bots inject actions, recorded input scripts record
+actions rather than devices, and rebinding never touches netcode.
+
+**Nothing downstream can tell which binding spoke.** As built, an action's
+bindings are one flat `Vec<Binding>`, not the sketch's per-device-class record:
+horde's `move` takes a `Binding::Wasd` and a `Binding::Virtual` side by side and
+reads one normalised vector. That is the rule arriving a level lower than the
+plan drew it, and a RON asset grouping bindings by class would be presentation
+over the same list.
+
+**Contexts are a stack, and the topmost binder consumes.** Unbound inputs fall
+through; a held input is withheld from a new owner until released. One
+declarative mechanism replaces ad-hoc "the UI ate the input" rules. The answer
+to "input eaten mysteriously" is the inspector showing each input's full
+resolution path — debuggability designed in, and still owed.
+
+**Pattern semantics are defined by unit-test tables, never by playtesting.** The
+plan made the evaluator a pure function over timestamped edges. As built it runs
+on the clock `ActionMap::begin_tick` advances, so a scripted sequence fires on
+the same ticks every run; `crcbl_input::patterns::HOLD_TIME` is the plan's 400
+ms example. The shells still keep every input event and its window-system
+timestamp — Win32 and AppKit never coalesce input, X11 keeps durations exact —
+so moving the evaluator onto event time for sub-tick fidelity (the input-thread
+entry) loses nothing on the way.
+
+**Gamepad buttons are positional.** South, East, North, West, whatever is
+printed on them. What a button is called — including the Nintendo A/B swap — is
+presentation, carried as `PadKind` for glyphs, and bindings never read it.
+
+**Every pad backend emits `GamepadEvent`.** Sticks −1…1 with +Y up, triggers
+0…1, raw axes; no backend defines its own event type. Pads are polled, never
+routed through `ShellEvent`, and a target with no backend has no pad module
+rather than one reporting "no pads".
+
+**Standard gamepads first, and no SDL-database import.** Per-device mapping is a
+rabbit hole; the common controllers are supported and the table grows by demand
+— evdev's vendor split between lettered and positional face codes, the Web
+Gamepad source's `mapping === "standard"` gate.
+
+**User rebinds are diffs over game defaults.** Never a copy of the whole binding
+set, so a game update's new defaults reach players who rebound something else.
+Where the diff is stored is open: the plan put it in the profile (topic 14,
+RON), and `crcbl_store::settings::SettingsStack` could carry it today;
+`docs/backlog.md` holds that fork.
+
+**Per-device ids at the shell boundary from day one**, because an event stream
+that never said which keyboard pressed a key cannot be retrofitted for local
+multiplayer. The granularity differs: Wayland gives one id per `wl_seat` (the
+seat is the finest unit it exposes, and multi-seat is how Linux does local
+multiplayer), Win32 one per physical device (`win32::devices`, since
+2026-09-21), and X11 and AppKit one per device kind — which is what blocks
+device assignment there.
+
+**An on-screen control is a device.** `virtual_stick` and `virtual_button` feed
+the same map as keys and pads. Their palette is one
+`crcbl_ui::touch::CONTROL_STYLE` constant, on purpose: a control is drawn over
+the game's field, and one place for its dark translucent style stops a stick and
+a button — or one button in two samples — drifting into two palettes. Geometry
+is the widget's own; `TouchStick` floats where the finger lands.
+
+**Considered and declined:**
+
+- **An SDL controller-database import**, or any third-party mapping source — the
+  zero-third-party rule, and the quirk zoo above.
+- **A stylesheet for on-screen controls.** There is no stylesheet system for it
+  to be a rule in; per-game reskinning needs topic 7's unbuilt CSS work and is
+  not planned.
+- **Labelled bindings** (Xbox letters in a binding) — positional wins.
+- **Generating Wayland key repeat in the action layer.** The Wayland shell makes
+  repeats and flags them `repeat: true`, and the consumer decides; the case is
+  in `crates/crcbl-shell/src/wayland/mod.rs`.
+- **Steam Input as the action mapper.** `ISteamInput` competes with `ActionMap`
+  (_Steamworks: four decisions_ below); Steam Input arrived instead as
+  `crcbl_steam::SteamPads`, one more `GamepadEvent` source
+  (`docs/notes/backends.md`).
+
 ## Steamworks: four decisions, all taken (2026-08-22, settled 2026-09-23)
 
 Decision record, as the options stood on 2026-08-22; the answers are in

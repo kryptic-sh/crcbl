@@ -120,7 +120,9 @@ the pre-CSS toolkit the debug panel and the samples needed first:
   widget on the tree, and menu rows taking part in tree focus — the selection
   stays the model's. `DebugPanel` and `ConsolePanel` are rung 7d2, in the
   `widgets` bullet above.
-- **`touch`** — `TouchStick`, `TouchButton`; see [19-input.md](19-input.md).
+- **`touch`** — `TouchStick`, `TouchButton`; the rules they follow are in the
+  [simulation notes](../notes/simulation.md) (_What the deleted 19-input plan
+  left behind_).
 - **`debug`** and **`budget`** — the modular panel described under "Debug tools"
   below, and the frame CPU-vs-GPU row the profiling topic specified (its rules
   are in the [tooling notes](../notes/tooling.md)).

@@ -107,9 +107,10 @@ impl std::error::Error for SkeletonError {}
 /// bind matrices and the mesh together.
 ///
 /// In practice the check passes: glTF's `skin.joints` is conventionally written
-/// in hierarchy order, and the sample assets `docs/plan/17-animation.md` names
-/// as the acceptance set are. A document that is not is a real remap job, and it
-/// is better to be told so than to be given a quietly wrong palette.
+/// in hierarchy order, and the sample assets named as the golden-pose
+/// acceptance set (Fox, CesiumMan, RiggedFigure) are. A document that is not
+/// is a real remap job, and it is better to be told so than to be given a
+/// quietly wrong palette.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Skeleton {
     joints: Vec<Joint>,

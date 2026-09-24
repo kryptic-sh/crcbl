@@ -18,9 +18,10 @@
 //!
 //! # This runs on the client, and the speed it reads does not
 //!
-//! `docs/plan/17-animation.md` puts pose evaluation on the client — "pose math
-//! is client-side presentation and free to vary" — so nothing in this module is
-//! on the tick and nothing here crosses the wire. What crosses is the number it
+//! The animation rules put pose evaluation on the client — pose math is client
+//! presentation and free to vary (`docs/notes/simulation.md`, _What the deleted
+//! 17-animation plan left behind_) — so nothing in this module is on the tick
+//! and nothing here crosses the wire. What crosses is the number it
 //! is driven by: [`crate::game::Stats::speed`] is measured from the
 //! controller's own [`MoveOutcome::motion`](crcbl::phys::MoveOutcome), on the
 //! authoritative side, at the fixed timestep.

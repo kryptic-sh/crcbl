@@ -185,7 +185,7 @@
 //! # Decision: raw events only
 //!
 //! This crate produces *normalized raw* events. Actions, bindings, contexts and
-//! patterns are `docs/plan/19-input.md`'s action layer and land at P2. What
+//! patterns are `crcbl-input`'s action layer. What
 //! this slice owes that layer is the information it cannot reconstruct later —
 //! per-device ids, and timestamps that are the window system's rather than the
 //! frame's. Both are on every input event; see [`event`].

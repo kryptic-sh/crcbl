@@ -30,8 +30,8 @@ pub enum Interpolation {
 /// about, and the variant *is* the path — a consumer matches once rather than
 /// matching a path and then trusting an array to agree with it. The fourth
 /// glTF path, `weights`, drives morph targets rather than joints and has no
-/// variant here: this crate poses a skeleton, and `docs/plan/17-animation.md`
-/// scopes morph targets out.
+/// variant here: this crate poses a skeleton, and morph targets are outside
+/// its scope.
 ///
 /// Under [`Interpolation::CubicSpline`] each keyframe occupies three
 /// consecutive entries — in-tangent, value, out-tangent — so the array is three

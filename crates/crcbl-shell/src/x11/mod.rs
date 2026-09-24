@@ -219,7 +219,7 @@ const LOCK_RECENTRE_FRACTION: f64 = 0.25;
 ///
 /// * **Durations between two events are exact.** Both are on the server's
 ///   clock, and the offset cancels. That is what
-///   `docs/plan/19-input.md`'s tap-versus-hold evaluation subtracts, so the
+///   tap-versus-hold timing subtracts, so the
 ///   part that has to be right is right.
 /// * **The absolute offset carries one connection's worth of latency.** On a
 ///   local socket that is microseconds. On a remote display it is the network
@@ -1169,8 +1169,8 @@ mod tests {
 
     #[test]
     fn durations_between_two_events_survive_calibration_exactly() {
-        // The property that has to hold, because `docs/plan/19-input.md`'s
-        // tap-versus-hold evaluation is a subtraction between two of these.
+        // The property that has to hold, because tap-versus-hold timing is a
+        // subtraction between two of these.
         let mut base = TimeBase {
             epoch_nanos: 0,
             server_origin_nanos: Some(0),

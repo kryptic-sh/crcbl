@@ -55,7 +55,7 @@
 //! - **Buttons are positional.** [`PadButton::South`] is the bottom face button
 //!   whatever is printed on it — A on an Xbox pad, Cross on a PlayStation one,
 //!   B on a Nintendo one. What the button is *called* is a glyph's business, not
-//!   a binding's (`docs/plan/19-input.md`).
+//!   a binding's (`docs/notes/simulation.md`).
 //! - **Sticks are −1…1 with +X right and +Y up**, the convention
 //!   [`ActionMap::virtual_stick`] and [`Binding::PointerPosition`] already use.
 //!   A backend whose device reports +Y down flips it; nothing downstream does.

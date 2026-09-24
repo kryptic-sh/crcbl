@@ -8,12 +8,12 @@
 //!
 //! # What the pass is
 //!
-//! `docs/plan/17-animation.md`'s skinning prepass. A joint palette and a run of
+//! The animation design's skinning prepass. A joint palette and a run of
 //! bind-pose vertices go in; the same vertices, blended onto the palette, come
 //! out in a **transient region of the same vertex pool** — and the renderer
 //! draws that region like any static mesh, because what the pass writes is
-//! [`crate::mesh::MeshVertex`] byte for byte. Vertex pulling never learns
-//! skinning exists.
+//! [`crate::mesh::MeshVertex`] byte for byte. Vertex pulling learns only that
+//! an instance's base vertex comes from its own record.
 //!
 //! # What dispatches it
 //!
@@ -114,7 +114,7 @@ pub struct Params {
     pub input_base: u32,
     /// First vertex of the **skinned** run, as an index into the same pool.
     ///
-    /// The transient region `docs/plan/17-animation.md` asks for: a different
+    /// The transient region the skinning design asks for: a different
     /// range of one buffer rather than a second buffer, which is what lets a
     /// skinned mesh be drawn, culled and shadowed by passes that only ever knew
     /// about the pool.

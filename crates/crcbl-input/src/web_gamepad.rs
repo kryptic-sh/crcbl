@@ -96,8 +96,8 @@
 //! and [`WebGamepads::poll`] returns it as an [`Unmapped`] once, on the frame
 //! it appears, for the caller to log. It is returned again only if it leaves
 //! and comes back. Chrome and Firefox standard-map the common Xbox,
-//! PlayStation and Switch pads; `docs/plan/19-input.md` scopes a quirk table
-//! for the rest out.
+//! PlayStation and Switch pads; the input design scopes a quirk table for the
+//! rest out (`docs/notes/simulation.md`).
 //!
 //! # Not on other targets
 //!

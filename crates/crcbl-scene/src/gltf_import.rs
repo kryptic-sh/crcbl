@@ -111,7 +111,7 @@
 //! one. The joint *hierarchy* is not repeated in the skin, because a joint is a
 //! node: it is [`GltfNode::children`] and [`GltfNode::local_transform`] over
 //! the nodes [`GltfSkin::joints`] names. That is the whole of what
-//! `docs/plan/17-animation.md` calls its source stage: joint hierarchy, inverse
+//! the animation pipeline calls its source stage: joint hierarchy, inverse
 //! bind matrices, and sampled TRS curves, in host memory and in the document's
 //! own units.
 //!
@@ -426,8 +426,8 @@ impl GltfSkin {
 /// make it move.
 ///
 /// Nothing here is resampled, retimed or sorted. These are the file's own
-/// keyframes, in the file's own seconds, which is what
-/// `docs/plan/17-animation.md` asks of the source stage — the cook that turns
+/// keyframes, in the file's own seconds, which is what the animation rules in
+/// `docs/notes/simulation.md` ask of the source stage — the cook that turns
 /// them into fixed-rate curves is a later one and needs the samples it started
 /// from.
 #[derive(Clone, Debug, PartialEq)]

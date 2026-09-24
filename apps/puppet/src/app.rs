@@ -195,8 +195,8 @@ pub struct Puppet {
     ///
     /// **Presentation, like the camera**: it runs on the frame's clock, nothing
     /// in it crosses the wire, and the tick would draw the same picture without
-    /// it. `docs/plan/17-animation.md` puts pose evaluation on the client, and
-    /// this is where puppet's client is.
+    /// it. The animation rules in `docs/notes/simulation.md` put pose
+    /// evaluation on the client, and this is where puppet's client is.
     anim: Animator,
     /// Seconds of frame time since the last `[POSE]` line.
     pose_report: f32,

@@ -323,7 +323,7 @@ impl RawEvent {
 /// makes that structural rather than a promise: a resize is a *state* whose
 /// intermediate values describe frames nobody rendered, while a keystroke, a
 /// click and a motion sample are *events* whose durations between them are what
-/// `docs/plan/19-input.md`'s pattern evaluator is a function of. Coalescing two
+/// the action layer's patterns are defined over. Coalescing two
 /// motion samples into their endpoints erases the path a drag took, and
 /// coalescing two key edges turns a double-tap into a tap.
 pub fn enqueue(queue: &mut Vec<RawEvent>, event: RawEvent) {

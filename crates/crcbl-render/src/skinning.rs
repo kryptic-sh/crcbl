@@ -13,7 +13,8 @@
 //!                    the caller's mesh pass ◀┘  ShaderRead
 //! ```
 //!
-//! `docs/plan/17-animation.md`'s "GPU skinning" section, and the host side of
+//! GPU skinning as the rules in `docs/notes/simulation.md` (_What the deleted
+//! 17-animation plan left behind_) set it out, and the host side of
 //! `crates/crcbl-shaders/shaders/skinning.slang`. The kernel is that file's;
 //! everything here is what it cannot do for itself — allocate the region it
 //! writes into, upload the palette it blends onto, and refuse the inputs it has
@@ -37,7 +38,7 @@
 //!
 //! # The region is double-buffered, and the motion-vector pass reads the other half
 //!
-//! `docs/plan/17-animation.md`'s 2026-07-27 correction: "TAA motion vectors for
+//! The animation plan's 2026-07-27 correction: "TAA motion vectors for
 //! skinned meshes need previous-frame skinned **positions**, not just a previous
 //! transform… the skinned-output pool region is double-buffered (prev/current
 //! ping-pong) from day one — a pool-layout decision that is nearly free now and
@@ -1630,7 +1631,7 @@ mod tests {
     /// **The two halves alternate with the parity, and the one a frame does
     /// not write is the one the frame before it did.**
     ///
-    /// This is `docs/plan/17-animation.md`'s 2026-07-27 correction as an
+    /// This is the animation plan's 2026-07-27 correction as an
     /// assertion. A region that answered the same base for both parities would
     /// be a single-buffered one wearing the API of a double-buffered one, and
     /// nothing else in the tree would notice until TAA arrived.
