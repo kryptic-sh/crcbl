@@ -119,8 +119,8 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 17    | ◐ 17-animation — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`         | Skeletal animation: cooked clips, state machine, GPU skinning              |
 | 18    | [18-render-features.md](18-render-features.md)                                              | Render features index: how the techniques interact, deliver and risk       |
 | 19    | ◐ 19-input — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Device-agnostic action input: kb/mouse/pad/touch, one config               |
-| 20    | [20-particles.md](20-particles.md)                                                          | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
-| 21    | [21-jobs.md](21-jobs.md)                                                                    | Threading: pipeline threads + job pool, mailboxes, tick sync               |
+| 20    | [20-particles.md](20-particles.md) — ◐ CPU staging and gallery built; GPU system open       | GPU-resident particles/VFX: compute sim, RON effects, workbench            |
+| 21    | [21-jobs.md](21-jobs.md) — ◐ primitives, pool, wasm threads built; topology open            | Threading: pipeline threads + job pool, mailboxes, tick sync               |
 | 22    | [22-replay.md](22-replay.md)                                                                | State recording: replays, black-box debug, spectating                      |
 | 23    | [23-netcode.md](23-netcode.md)                                                              | Transports (UDP + own reliability, LAN discovery), protocol foundations    |
 | 24    | [24-navigation.md](24-navigation.md)                                                        | Navmesh gen (Recast-lineage, sector-tiled), A\*+funnel, crowds             |

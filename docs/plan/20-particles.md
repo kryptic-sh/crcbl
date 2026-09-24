@@ -121,12 +121,17 @@ instances through §3's path, which is this document's mesh-particle row used fo
 everything. Determinism, the property that makes golden frames of an effect
 possible, is asserted by that crate's `determinism` test already.
 
-So slice 1 still owes the compute passes, the billboards, the curves and the RON
-assets. Slice 3's **mesh particles** are the one row that does work, because
-they are the path everything currently takes; flipbooks, soft particles, ribbons
-and depth collision are not, and slices 4 and 5 are untouched. `apps/sparks` is
-slice 2's gallery half — stock effects on a stage with the budget readout — and
-it is what the param surface will be tuned against.
+So slice 1 still owes the compute passes, the billboards, the curve LUT bake and
+the RON assets. The curves themselves exist host-side as `crcbl_vfx`'s `Curve`
+and `Gradient`; the spawn-shape menu is `Point` and `Cone` of the seven above,
+and the modifier menu is gravity, drag and size/colour over lifetime — curl
+noise, vortex, attractor/repulsor, orbit, distance-scaled emission and the VFX
+debug panel are all unbuilt. Slice 3's **mesh particles** are the one row that
+does work, because they are the path everything currently takes; flipbooks, soft
+particles, ribbons and depth collision are not, and slices 4 and 5 are
+untouched. `apps/sparks` is slice 2's gallery half — stock effects on a stage
+with the budget readout — and it is what the param surface will be tuned
+against.
 
 1. Pool + spawn/update compute + billboards + curves/gradients + RON assets
    - hot reload.

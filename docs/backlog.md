@@ -9018,6 +9018,25 @@ pass.
 whole premise; and `33-decals.md`'s impact VFX, which assume a VFX system
 exists.
 
+### Particles: the spawn-shape and modifier menus are two entries each (2026-09-24)
+
+`crcbl_vfx::Shape` is `Point` and `Cone`. Its doc comment says the plan's
+sphere, hemisphere, box, ring and mesh-surface are "a match arm and a sampling
+formula when something asks for one". `Modifiers` carries gravity, drag, and
+size/colour over lifetime. Curl-noise turbulence (tileable 3D noise texture),
+vortex, point attractor/repulsor and orbit are absent. So are per-effect
+distance-scaled emission (the plan's "effect LOD without a second system") and
+the VFX debug panel (live effects, counts vs budgets, pool occupancy, per-bucket
+GPU time, freeze/step, overdraw heatmap). Mesh-surface sampling needs
+geometry-pool access at cook time. Verified by reading `effect.rs`.
+
+### Particles: the rules the unbuilt system must keep
+
+`docs/plan/20-particles.md` still stands, and its rules bind whoever builds the
+GPU system: gameplay particles are entities, no GPU queries into the physics
+BVH, a fixed modifier menu (a per-particle VM is rejected), budgets live in the
+asset, and particles render pre-tonemap in HDR.
+
 ### LOD: joint-weight-aware collapse for skinned meshes (2026-08-27)
 
 **Not built.** Topic 25 made joint-weight-aware collapse part of the auto-gen
@@ -9761,9 +9780,11 @@ seeds over `pool::tests`", never as a seed to re-run.
 
 **Only the pool's workers start through the spawn seam.** `crcbl_jobs::spawn`
 ships with `Threads`, `Inline` and `Workers`. But nothing on any platform spawns
-an input, sim, net or io thread, and `crcbl-audio` spawns its DSP thread with a
-bare `std::thread::spawn` in `crates/crcbl-audio/src/lib.rs` — a lane that
-predates the seam and does not use it.
+an input, sim, net or io thread. The one bare `std::thread::spawn` in
+`crates/crcbl-audio/src/lib.rs` is `AudioStream::open_null`'s polling thread —
+the headless stream for tests and CI — not the DSP thread, which cpal creates
+inside `build_output_stream`; no code in this workspace spawns the DSP thread,
+so the seam could not own it even in principle.
 
 Also unbuilt from the same document: named pipeline threads, the thread timeline
 profiler view, the convergence report (main-thread wait breakdown), and
@@ -9834,15 +9855,23 @@ Two separate gaps, both still open:
 
 1. **Isolation.** `web/tools/serve.mjs` sends the COOP/COEP pair locally and
    `web/jobs/` asserts `crossOriginIsolated === true` against it. Nothing sends
-   those headers on GitHub Pages, so no published demo is isolated. Step 2 of
-   `21-jobs.md`'s 2026-08-03 order is a **gate**, not a step: if isolation
-   cannot be had, demos stay single-threaded through the fallback.
-2. **No demo page implements the worker shim.**
-   `grep -rln "jobs.js|__crcbl_web_jobs"` over `web/demos/`, `web/templates/`
-   and `web/pages/` returns nothing. Only `web/jobs/`, driven by
-   `web/run-jobs-e2e.sh`, does. `Workers` answers `Spawn::threaded` false until
-   a page announces itself, so **every published artifact still degrades to
-   single-threaded**, correctly and silently.
+   those headers on GitHub Pages, so no published demo is isolated. Since the
+   2026-08-30 rescope (the user's call, recorded in `21-jobs.md`'s _Order_) that
+   is a **supported configuration** rather than a gate: a published demo runs
+   the `Inline` fallback, and `web/run-jobs-e2e.sh` drives its page both
+   isolated and behind `web/tools/serve.mjs --no-isolation`. Isolating the
+   deploy (a service-worker shim, or a proxy adding the headers) stays a later
+   choice that gates nothing.
+2. **No source demo page carries the worker shim, and the published site is
+   unthreaded.** Nothing under `web/demos/` references `web/engine/jobs.js` or
+   the `__crcbl_web_jobs_*` ABI, because the shim lives in
+   `web/tools/wasm-loader-threads.js`, which `./web/build.sh --threads`
+   substitutes for a demo's loader. `web/run-horde-threads-e2e.sh` drives
+   `demos/horde/` built that way and asserts the sim reached two threads, so a
+   demo _can_ run workers; but the published build is the unthreaded one, and
+   `Workers` answers `Spawn::threaded` false until a page announces itself, so
+   **every artifact a visitor downloads still degrades to single-threaded**,
+   correctly and silently.
 
 ### loom and TSAN are specified; only Miri runs (2026-08-27)
 
@@ -9853,6 +9882,36 @@ sweep still names the crate in its six-crate list, so this one is covered twice.
 The aarch64-runner idea was tested on 2026-08-23 and rejected with evidence
 (weakened orderings went green on macOS). If that coverage is wanted, the
 instrument is a targeted stress harness with a failure counter.
+
+### Jobs: no fork-join scope, no deterministic reductions, no per-stage arenas (2026-09-24)
+
+`crcbl_jobs::Pool` offers `par_for` over a mutable slice with fixed chunks, and
+nothing else. Topic 21 also specifies `scope(|s| …)` fork-join (for BVH builds),
+**tree-ordered reductions** so the output cannot depend on worker count or steal
+order (the sim-side default), and a relaxed order-free mode that is opt-in and
+client-only. It also asks for per-thread bump arenas that job payloads allocate
+from, reset at each stage's own cadence boundary, with pool workers asserting in
+debug that they never allocate; and for a **job handle**, the third cross-thread
+primitive (one-shot results such as an asset decode or a screenshot, polled or
+continued, never joined on main). None exists in `pool.rs` or anywhere else in
+the crate. A reduction is the first to want, because any parallel sum in sim
+code without one fails the killer test by construction. Verified by reading
+`pool.rs`'s public functions (`new`, `with_workers`, `workers`, `stats`,
+`reset_stats`, `par_for`) and the crate's module list (`deque`, `mailbox`,
+`pool`, `ring`, `spawn`, `workers`).
+
+### Jobs: the rules the unbuilt topology must keep
+
+`docs/plan/21-jobs.md` still stands and holds them: only three cross-thread
+primitives, no mutexes in the frame path, the main thread converges and never
+computes, input is accumulate-then-swap, and determinism survives parallelism.
+
+### Threaded wasm: the link rules and the settled browser topology
+
+Recorded in `docs/plan/21-jobs.md`, which stays until the topology is built: the
+`--shared-memory --import-memory` link arguments, the two silent-failure rules
+(`__wasm_init_tls` per worker, a per-worker `__stack_pointer`) and the settled
+web topology. Move them to the notes when that plan is folded.
 
 ## Wholly unbuilt topics
 

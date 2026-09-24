@@ -110,11 +110,11 @@ numbering** — synchronized, not merely similar:
 Long-lived, named, pinned-count. Communication rules — the only three allowed
 primitives, all lock-free in steady state:
 
-| Primitive             | Use                                                | Semantics                                                         |
-| --------------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
-| **Mailbox (SPSC ×3)** | states: snapshots, UI draw lists, pose palettes    | latest-wins, never blocks                                         |
-| **Ring (SPSC)**       | streams: input events, audio commands, net packets | bounded, overflow = counted + policy (drop-oldest or grow-in-dev) |
-| **Job handle**        | one-shot results: asset decode, bake, screenshot   | poll or continuation, no join-on-main                             |
+| Primitive             | Use                                                | Semantics                                                                                                        |
+| --------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| **Mailbox (SPSC ×3)** | states: snapshots, UI draw lists, pose palettes    | latest-wins, never blocks                                                                                        |
+| **Ring (SPSC)**       | streams: input events, audio commands, net packets | bounded; a refused push is counted and handed back, the policy is the caller's (no drop-oldest — see 2026-08-09) |
+| **Job handle**        | one-shot results: asset decode, bake, screenshot   | poll or continuation, no join-on-main                                                                            |
 
 No shared mutable state across pipeline threads. No mutexes in the frame path (a
 mutex in a hot path is a review-rejectable smell; init/teardown may lock
@@ -139,6 +139,13 @@ learning goal fits the project charter). Used _inside_ a stage:
   non-conflicting systems concurrently on the pool; declared order is preserved
   only where a dependency exists. Debug builds assert undeclared access (the P2
   "asserted conflicts" hook grows teeth here).
+
+**Built of this section: the pool and `par_for` only.** `crcbl_jobs::Pool`
+(`pool.rs`, over `deque.rs`) offers `new`, `with_workers`, `workers`, `stats`,
+`reset_stats` and `par_for` over a mutable slice with fixed chunks, `chunk`
+being the serial cutoff. `scope`, the tree-ordered reductions, the relaxed mode
+and the ECS parallel schedule are unbuilt, and so is the job-handle primitive in
+the table above; `docs/backlog.md` carries each.
 
 ## Degradation (wasm + low-core, mandated by stage 10)
 
@@ -196,7 +203,7 @@ by the determinism rule.
 | ECS parallel schedule (startup DAG, debug access asserts)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | P8                                                                                                                                                                                                                                                                                                                            |
 | Pipeline-thread formalization (named threads, timeline profiler view)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         | P8                                                                                                                                                                                                                                                                                                                            |
 | Physics/anim/VFX `par_for` adoption — **not inside any of the three crates**: neither `crcbl-phys`, `crcbl-anim` nor `crcbl-vfx` depends on `crcbl-jobs`. What exists is adoption **by a caller**: `apps/horde` holds the `Pool` and runs its steering `par_for` over results a batch query filled, and `crcbl-phys`'s allocation-free `*_into` query forms exist so that it can. That is what a crate-side adoption would build on, and it is not the same thing                                                                                                                                                                                                                                                                                                                             | P8 → wave 1 as each system scales                                                                                                                                                                                                                                                                                             |
-| wasm-threads pool re-enable (SharedArrayBuffer)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               | post-MVP                                                                                                                                                                                                                                                                                                                      |
+| wasm-threads pool re-enable (SharedArrayBuffer) — **built**: `./web/build.sh --threads`, gated per push by `ci.yml`'s `jobs-worker-e2e`; the published site stays the unthreaded build and runs `Inline`, which is supported                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | post-MVP                                                                                                                                                                                                                                                                                                                      |
 
 The P2 line matters most: it costs almost nothing and prevents the classic
 retrofit disaster.
@@ -438,8 +445,9 @@ kept in step with the real one.
 
 **Without cross-origin isolation there is no ring**, and the fallback is
 `postMessage` — which is what `crcbl-audio`'s worklet feed already does, and
-which changes the shape rather than only the speed. That is why the isolation
-gate is a gate.
+which changes the shape rather than only the speed. Since the 2026-08-30 rescope
+(_Order_, above) that fallback is a supported configuration rather than a gap,
+so isolation gates nothing.
 
 ## Corrections (2026-08-09)
 
