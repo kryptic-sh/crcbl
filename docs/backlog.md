@@ -3290,10 +3290,10 @@ What the plans leave open:
   tint into its material. It needs no new vertex stream — the forward vertex
   stage already binds every storage buffer a browser guarantees — but it changes
   what one attribute means per mesh.
-- **Alpha-to-coverage is only on MSAA views**, which are off by default
-  ([49-antialiasing.md](plan/49-antialiasing.md)). Card grass and hair cards
-  therefore ship as cutouts with cooked coverage mips on the default view, and
-  their look on it is the one to price.
+- **Alpha-to-coverage is only on MSAA views**, which are unbuilt and would be
+  off by default (_MSAA was reopened rather than reversed_). Card grass and hair
+  cards therefore ship as cutouts with cooked coverage mips on the default view,
+  and their look on it is the one to price.
 - **Research not reachable, so not claimed in the plans**: the Sea of Thieves
   water talk's video and any slides (only the SIGGRAPH 2018 abstract is
   published); Acerola's videos (his repositories were read); Unreal's water and
@@ -4450,11 +4450,12 @@ Vulkan cannot ask for it.
 
 **What exists today** (read, not re-run): `crcbl_render::upscale` with
 `shaders/upscale.slang`, a 16-tap Catmull-Rom spatial filter targeting spirv,
-wgsl, msl and dxil. It runs as the last 3D pass, after tonemap and FXAA, with
-the UI composited afterwards at native resolution. `render_scale` goes from
-`[engine.video]` through `crcbl::settings` and `GpuContext::render_scale` to
-`ForwardRenderer::set_render_scale`, clamped to `MIN_RENDER_SCALE..=1.0`, and
-`apps/options` has a slider for it. It is checked by
+wgsl, msl and dxil. It runs as the last 3D pass, after tonemap and the AA
+resolve, with the UI composited afterwards at native resolution. `render_scale`
+goes from `[engine.video]` through `crcbl::settings` and
+`GpuContext::render_scale` to `ForwardRenderer::set_render_scale`, clamped to
+`MIN_RENDER_SCALE..=1.0`, and `apps/options` has a slider for it. It is checked
+by
 `mesh_e2e::render_scale::a_scaled_frame_is_the_same_picture_resampled_by_as_much_as_the_scale_says`.
 No crate outside `crcbl-shell` reads `HW_UPSCALE`, so the engine already always
 does its own pass; this entry is about making that pass complete.
@@ -4475,7 +4476,9 @@ does its own pass; this entry is about making that pass complete.
 4. **Temporal upscaling**, its own rung under `docs/plan/43-render-standards.md`
    §7/§9: jitter, a motion-vector target, history, and disocclusion rejection.
    The per-instance half of motion vectors now exists
-   (`GpuInstance::previous_transform`, since `1d6d604`). `upscale.slang`'s
+   (`GpuInstance::previous_transform`, since `1d6d604`). It shares the jitter
+   and the history with TAA, so the golden decision in _TAA is unbuilt: jitter,
+   history, and the golden decision it owes_ covers it too. `upscale.slang`'s
    header still says `GpuInstance` carries no previous transform, which is
    stale; fix it when this work starts.
 5. **Optionally, scale above 1.0** (supersampling down to the output), which the
@@ -6710,8 +6713,9 @@ do:
   clears the target to zero, and the sky pass writes no motion at all, so a
   consumer sees a static background under a moving camera. What is wanted is the
   camera's own motion there — reproject the far plane through
-  `previous_view_proj`. Owed to whichever rung first samples the target;
-  `docs/plan/49-antialiasing.md`'s TAA is the one that will notice.
+  `previous_view_proj`. Owed to whichever rung first samples the target; TAA
+  (_TAA is unbuilt: jitter, history, and the golden decision it owes_) is the
+  one that will notice.
 - **Nothing consumes the target.** `DebugView::Motion` observes the
   _subtraction_ — it encodes the vector into the scene target and the e2e suite
   reads it there — so the attachment itself is written and never sampled, and it
@@ -6739,10 +6743,10 @@ do:
 
 ### What the CMAA2 slice left (2026-09-06)
 
-`docs/plan/49-antialiasing.md`'s eighth decision, rung 2, is built: CMAA2 draws
-through `cmaa2_edges.slang`, `cmaa2_shapes.slang` and `cmaa2_apply.slang`,
-recorded by `crcbl_render::cmaa2` under `RenderEffects::CMAA2` and switched by
-the `antialiasing = "cmaa2"` `[engine.video]` word, checked by
+The antialiasing ladder's eighth decision, rung 2, is built: CMAA2 draws through
+`cmaa2_edges.slang`, `cmaa2_shapes.slang` and `cmaa2_apply.slang`, recorded by
+`crcbl_render::cmaa2` under `RenderEffects::CMAA2` and switched by the
+`antialiasing = "cmaa2"` `[engine.video]` word, checked by
 `crates/crcbl/tests/mesh_e2e/cmaa2.rs` on radv and lavapipe. SMAA 1x left in the
 same change — `crcbl_render::smaa`, the three `smaa_*.slang` sources,
 `crcbl_shaders::smaa` with its two cooked tables and `cook-smaa`, the CI step
@@ -6796,13 +6800,15 @@ which is where the re-bless was spent. What the slice did not do:
   re-bless that shipped the AO tangential rung says radv. Every suite is green
   on both, so nothing is broken; what is missing is a place a blesser can read
   the convention off before running `CRCBL_BLESS=1` on the wrong driver.
-  `docs/plan/49-antialiasing.md` records which set went where for this flip and
-  is not a general answer.
-- **The pass fusion plan 48 describes has not landed, so the edge detect
-  computes its own luma.** `tonemap.slang` writes `1.0` into alpha;
+  `docs/notes/rendering.md`'s _The CMAA2 default flip: what moved and where it
+  was blessed_ records which set went where for this flip and is not a general
+  answer.
+- **Pass fusion has not landed, so the edge detect computes its own luma.**
+  `tonemap.slang` writes `1.0` (or a transparent view's coverage) into alpha;
   `cmaa2_edges.slang` therefore does the luma itself per pixel, which is one dot
   product per sample it would not otherwise pay. Fusing them is a change to the
-  tonemap and a re-bless of anything reading alpha, not to this pass.
+  tonemap and a re-bless of anything reading alpha, not to this pass — _Pass
+  fusion: the tonemap's luma and the histogram's quarter level are unbuilt_.
 - **The accumulation buffer is 16 bytes a pixel and is not pooled with
   anything.** `ACCUM_WORDS` is four `u32` per pixel of the resolve target,
   allocated transiently each frame; at 1920×1080 that is about 33 MB. Nothing
@@ -6870,8 +6876,9 @@ did not do.
   invocation.** The usual optimisation is a workgroup-local histogram merged
   once per group, which cuts the global atomic traffic by the group size. Not
   taken: it needs groupshared memory across the four backends and the pass has
-  never been profiled here. `docs/plan/48-post-processing.md` has the pass's
-  shape; nothing in the tree records what it costs.
+  never been profiled here. `exposure.slang`'s header has the pass's shape;
+  nothing in the tree records what it costs. (_Pass fusion_ would also cut its
+  input to a quarter level.)
 
 - **Only radv ran it.** The e2e suite is `mesh_e2e`, which is Vulkan on this
   machine and lavapipe in CI; the DX12, Metal and WebGPU artifacts compile and
@@ -7522,9 +7529,10 @@ costs:
   touches every literal that builds a description, and it is the engine's first
   3D image on four backends — Vulkan, D3D12, Metal and WebGPU — so it needs a
   real draw on each, not only the three cross-target clippy runs, which is how a
-  read-only depth attachment once reached `crcbl-dx12` as a refusal.
-  `docs/plan/48-post-processing.md`'s colour-grading LUT is the other 3D-image
-  customer; it is uploaded, not transient, and does not wait on this.
+  read-only depth attachment once reached `crcbl-dx12` as a refusal. The
+  colour-grading LUT (_Colour grading, the post-tonemap LUT, is specified and
+  unbuilt_) is the other 3D-image customer; it is uploaded, not transient, and
+  does not wait on this.
 - **A depth-aware upsample in the composite.** There is no shared pass to reuse:
   `crates/crcbl-shaders/shaders/ssao_upsample.slang` is AO-specific — an
   `Rgba8Unorm` target with one occlusion channel and a bent direction, its own
@@ -7859,21 +7867,77 @@ than the blur. The blur's own roughness weight is still unmeasured (_The
 roughness weight is unmeasured_, under _Screen-space reflections: the slice
 plan_).
 
+### TAA is unbuilt: jitter, history, and the golden decision it owes (2026-09-24)
+
+The antialiasing plan was deleted on 2026-09-24 with FXAA, CMAA2 and the one
+`antialiasing` row built (rules in `docs/notes/rendering.md` under _What the
+deleted 49-antialiasing plan left behind_). It kept TAA specified and post-MVP.
+Verified 2026-09-24: no jitter, history target or TAA module in `crcbl-render`;
+`crcbl_render::stack`'s tests refuse `tier: taa` as an unknown variant.
+
+**What it needs, as the plan specified it:**
+
+- **A per-frame subpixel jitter on the projection.** It changes the camera
+  matrix every golden is drawn through. The screen-space shaders' reduced
+  unprojection already keeps the terms an off-centre (jittered) projection
+  needs, and
+  `the_screen_space_unprojection_is_the_full_product_for_that_sparsity` in
+  `crates/crcbl-render/src/camera.rs` guards them for exactly that projection —
+  but nothing builds one. The jitter sequence is not chosen (a Halton (2, 3)
+  pattern is the usual answer; a guess, not the plan's).
+- **A history target with neighbourhood clamping**, read at `uv - motion`. That
+  makes a frame a function of how many frames were drawn before it, which the
+  SSR row (`docs/notes/rendering.md`, _What the deleted 47-reflections plan left
+  behind_) and the irradiance-probes plan both refuse for goldens.
+- **The motion target it reads is in the frame**: `TransientImageDesc::motion`
+  (`crcbl_render::forward`'s `MOTION_FORMAT`, `Rg16Float`), written by
+  `mesh.slang`'s `motion_vector` on both geometry paths, with skinned surfaces
+  through `GpuInstance::previous_base_vertex` and
+  `SkinnedRegion::previous_base`. **The convention is texture-coordinate space,
+  current minus previous, `+y` down**, stated on `MOTION_FORMAT` and observed by
+  `DebugView::Motion`, `crates/crcbl/tests/mesh_e2e/motion.rs` and
+  `crates/crcbl/tests/mesh_e2e/skinned_motion.rs`. Two gaps belong to this rung
+  (_What the motion-vector pass left owed_): the sky and every uncovered pixel
+  read zero motion rather than the camera's, and the attachment has no `SAMPLED`
+  usage because nothing reads it — the first consumer adds the flag.
+
+**Undecided, and each is its own call:**
+
+- **The golden decision — decide once, for TAA, temporal SSR and temporal
+  upscaling together** (they share the jitter and the history). Either goldens
+  draw with the temporal passes off, which needs jitter to be zero whenever the
+  history is off so the frame stays additive-zero, or golden fixtures draw a
+  fixed number of warm-up frames under a fixed jitter sequence and the suite
+  re-blesses once. No additive-zero form exists for the "on" frame.
+- **Whether TAA is a rung of `Antialiasing` at all.** The plan put it in the AA
+  slot's ladder, then the eighth decision adopted Counter-Strike 2's row, which
+  has no temporal option — Valve refused TAA for clarity on the grounds this
+  tree refuses it for goldens.
+- **Where it sits in the chain.** The AA slot is after the tonemap; TAA is
+  commonly resolved before it, in HDR with a tonemapped weighting. The plan does
+  not say.
+
+**Tests it would owe** (not specified by the plan): a still camera converging
+toward a supersampled reference, the observer shape
+`the_resolve_moves_the_silhouette_toward_a_supersampled_reference` already uses;
+a moving camera whose ghosting is bounded, which exercises the motion read; and
+a disocclusion case.
+
 ### Temporal SSR is unbuilt, and waits on TAA's history decision (2026-09-24)
 
 Temporal accumulation of the reflection is blocked on its own work only: the
 motion vectors it would read landed 2026-08-30 (`TransientImageDesc::motion`,
 `DebugView::Motion`, skinned motion through
 `GpuInstance::previous_base_vertex`), with the convention — texture-coordinate
-space, current minus previous, `+y` down — written in
-`docs/plan/49-antialiasing.md`. What it needs is a history target, and a history
-makes a golden a function of how many frames were drawn before it, which the SSR
-row refuses. `docs/plan/49-antialiasing.md`'s TAA has the same blocker and
-neither has an additive-zero form, so **decide once, for TAA and temporal SSR
-together, which goldens carry a history and how many warm-up frames they draw**.
-Temporal SSR is then a history target, a reprojection at `uv - motion`,
-neighbourhood clamping and a disocclusion reject. Verified 2026-09-24: no TAA or
-history module in `crcbl-render`.
+space, current minus previous, `+y` down — written on `MOTION_FORMAT`. What it
+needs is a history target, and a history makes a golden a function of how many
+frames were drawn before it, which the SSR row refuses. TAA has the same blocker
+and neither has an additive-zero form, so **decide once, for TAA and temporal
+SSR together, which goldens carry a history and how many warm-up frames they
+draw** — the options are in the entry above. Temporal SSR is then a history
+target, a reprojection at `uv - motion`, neighbourhood clamping and a
+disocclusion reject. Verified 2026-09-24: no TAA or history module in
+`crcbl-render`.
 
 ### Considered and declined for reflections (2026-09-24)
 
@@ -7944,11 +8008,12 @@ arguing them; the rows below have a paragraph and no decision record.
 `Rgba8`, authored as a `.cube` file and cooked at load, identity when absent,
 carried as a `CameraStack` field: Unreal applies its LUT post-tonemap, Unity a
 log-encoded one and Godot 4 a 3D LUT colour correction, and `.cube` is the
-Adobe/Resolve interchange every authoring tool writes. Specified 2026-09-06 in
-`docs/plan/48-post-processing.md`'s colour-grading section; what is owed is the
-`CameraStack` field, the cook and the pass. Order-independent transparency is
-answered too — refused now, per-object sorted alpha blending instead; see "No
-transparent pass, and therefore no depth sort" below.
+Adobe/Resolve interchange every authoring tool writes. The full design and what
+is owed — the `CameraStack` field, the load-time parse and the lookup inside the
+tonemap pass — are under _Colour grading, the post-tonemap LUT, is specified and
+unbuilt_ below. Order-independent transparency is answered too — refused now,
+per-object sorted alpha blending instead; see "No transparent pass, and
+therefore no depth sort" below.
 
 **The previous-transform row is spent.** Reserving the slot in
 `crcbl_shaders::mesh::GpuInstance` was the one row here that was a decision
@@ -7986,17 +8051,167 @@ opening and this was a rendering change.
 
 The AA row rejected MSAA on the grounds that it "fights deferred-ish/HDR
 pipelines". That is deferred-renderer reasoning and this engine is clustered
-forward — topic 18's own architecture section rejects deferred **partly because
-deferred fights MSAA**. `MultisampleState` has been in
+forward — `docs/plan/44-lighting.md`'s "Clustered forward" section rejects
+deferred **partly because deferred fights MSAA**. `MultisampleState` has been in
 `crates/crcbl-hal/src/pipeline.rs` the whole time, carrying `samples` and
-`alpha_to_coverage`.
+`alpha_to_coverage`. The seventh and eighth decisions that reopened it are in
+`docs/notes/rendering.md` under _What the deleted 49-antialiasing plan left
+behind_; this entry is the unbuilt rung, re-verified 2026-09-24: `Antialiasing`
+has `None`, `Fxaa` and `Cmaa2` only, every pipeline and transient in
+`crcbl-render` is single-sample (`TransientImageDesc::samples` exists and every
+description passes `1`), and there is no depth-resolve pass.
 
-So the honest position is that MSAA is viable and priced, not refused: the depth
-prepass would have to be multisampled too, and both screen-space passes read
-that depth, so MSAA buys a depth resolve before SSAO and SSR or per-sample
-versions of them. **Nobody has measured that resolve**, and until somebody does,
-"FXAA and CMAA2 are the right answer for this renderer" is a judgement rather
-than a result.
+**The design, as the plan specified it** (rung 3 of the eighth decision):
+
+- **MSAA 2×, 4× and 8× as the rungs above CMAA2** on the one `Antialiasing`
+  ladder — Counter-Strike 2's row. The slot holds one filter, so picking an MSAA
+  rung is picking it instead of the post-process resolve; whether MSAA plus a
+  post filter is ever offered was not discussed.
+- **The depth prepass goes multisampled.** The forward pass attaches the depth
+  the prepass wrote, and a single-sample depth cannot sit beside a multisampled
+  colour target. By the same attachment rule the forward pass's reflectivity and
+  motion targets would go multisampled too and need resolving — a consequence,
+  not something the plan wrote down.
+- **One depth resolve pass** writes the single-sample depth `ssao.slang`,
+  `ssr.slang` and the Hi-Z pyramid read today, so neither screen-space pass is
+  rewritten per sample. Which sample the resolve keeps (nearest or farthest,
+  under reversed-Z) is not decided, and the occlusion cull's own farthest-depth
+  pyramid may want the other answer from SSR's nearest-depth one. The froxel and
+  light-cluster passes do not care.
+- **Alpha-to-coverage** comes with it: card grass and hair cards
+  (`docs/plan/57-grass.md`, `docs/plan/58-hair.md`) use it on an MSAA view and
+  ship as cutouts with cooked coverage mips everywhere else.
+- **Opt-in, never the default.** The software and browser tiers pay for every
+  sample, and 4× on lavapipe is the wrong default for a suite that runs there.
+  Because it is off by default, no golden moves when it lands.
+
+**The gate:** nobody has measured that resolve, and until somebody does, "FXAA
+and CMAA2 are the right answer for this renderer" is a judgement rather than a
+result. The plan's framing is that MSAA is right for a view doing little
+screen-space work, so a view that drops SSAO and SSR through its camera stack is
+where the arithmetic flips.
+
+**What it owes:** an observer on `Scene::Aa` of both kinds the notes require — a
+band of softened pixels and a comparison against a supersampled reference — the
+cost protocol the notes record for CMAA2, and a draw on every backend. The
+backends carry multisampled-image unit tests (`crcbl-dx12`'s `resolve.rs` and
+`view.rs`, `crcbl-webgpu`'s corpus), but no frame has been drawn through
+`crcbl-render` with more than one sample.
+
+### Colour grading, the post-tonemap LUT, is specified and unbuilt (2026-09-24)
+
+Decided 2026-09-06 (the rendering-gap survey's DECIDED paragraph, above) and
+specified in the post-processing plan, deleted 2026-09-24. Verified 2026-09-24:
+no LUT, `.cube` reader or `ImageType::D3` use in `crcbl-render`, and no grade
+lane in `tonemap.slang`'s block.
+
+**The form: a post-tonemap 3D lookup table**, what Unreal, Unity and Godot 4
+ship. It applies to the display-referred colour the tonemap produced, so a grade
+is a function of what the viewer sees and survives a change of tonemap operator.
+
+- **32³ texels in `Rgba8Unorm`**, an `ImageType::D3` image sampled trilinearly —
+  the size every tool writes, 128 KB, cheap to keep resident per camera. **Not
+  an sRGB view**: the texels are the graded output, and decoding them again
+  would apply the transfer function twice.
+- **The engine's first 3D image.** `ImageType::D3` and `ImageViewType::D3` are
+  on the seam and answered by every backend; `crcbl_render::transient`'s pool
+  has no 3D form (_Froxel rungs 3 and 4_), but a LUT is uploaded once and
+  created directly, so it does not wait on that.
+- **Authored as Adobe `.cube`, parsed at load** into the image, not committed as
+  a cooked artifact: every grading tool exports it, and 32,768 float triples are
+  not a build step worth having.
+- **Identity when absent, by skipping the lookup.** A camera with no grade sets
+  a flag in the tonemap's block and no sample is taken. A 1³ table returns one
+  texel for every input, and a 32³ ramp still re-quantises to eight bits, so
+  neither is the identity. This is what keeps every golden unmoved when the
+  field lands.
+- **A `CameraStack` field**, not a `RenderEffects` bit: a path to the `.cube`,
+  resolved against the stack file's own directory. It is the first per-pass
+  parameter with a serialized form, so it sets the shape for the rest (_What the
+  camera-stack slice left_).
+- **Inside the tonemap pass, after the curve, before the AA resolve.** After,
+  because that is what post-tonemap means; before the resolve, because grading
+  afterwards would move colours across edges the resolve had reconciled; inside
+  the pass rather than a fullscreen round trip of its own. If pass fusion (the
+  next entry) lands, the grade must come before the luma write, or the resolve
+  reads the luma of an ungraded frame.
+
+**Tests it owes:** the unmoved-golden check above (a stack with no grade draws
+the same bytes), and a graded frame compared against a host trilinear lookup of
+the same table on `TonemapCurve::apply`'s pattern — the second is a suggestion,
+not the plan's. A transparent view's alpha lane (`coverage_alpha`) is untouched
+by the grade.
+
+### Pass fusion: the tonemap's luma and the histogram's quarter level are unbuilt (2026-09-24)
+
+Decided 2026-08-30 in the post-processing plan: two fullscreen round trips the
+stack does not need, which on the software and browser tiers is the pass.
+Neither half is built, verified 2026-09-24.
+
+1. **The tonemap writes the resolve's luma into alpha**, and `fxaa.slang` and
+   `cmaa2_edges.slang` read it back instead of computing their own — one dot
+   product per tap and one fullscreen read saved on every resolved frame. Today
+   `tonemap.slang` writes `1.0`, or the scene's coverage on a
+   `ViewBackground::Transparent` view (`TonemapParams`' `coverage_alpha` lane,
+   added 2026-09-24). The two uses do not collide — a transparent view is
+   refused both AA tiers — but the lane becomes three-way: coverage, luma when a
+   resolve follows, `1.0` otherwise. The resolve must still write `1.0` into the
+   target. The luma must be the gamma-corrected value FXAA's thresholds were
+   fitted to (the linear-luma correction in `fxaa.slang`), and the colour grade,
+   when built, comes before it.
+2. **Auto-exposure's histogram bins the bloom chain's first downsample**, a
+   quarter of the area with the same distribution to within a bin's width,
+   instead of `exposure.slang`'s `histogramMain` loading the full `scene`
+   texture. On a frame without bloom the histogram builds its own quarter level.
+   Checked 2026-09-24: the bloom chain is recorded before the exposure passes
+   (the per-view `add_passes` in `crates/crcbl-render/src/forward/view.rs`), but
+   the first downsample is of the image bloom reads, while the histogram today
+   bins bloom's composited output — so the fused form meters the frame without
+   its glow, which the exposure e2e decides is or is not acceptable.
+
+**Checks:** the goldens it must not move —
+`crates/crcbl/tests/mesh_e2e/exposure.rs`'s percentile and the AA observers'
+counts — and a price on `docs/plan/40-profiling.md`'s baseline. Half 1 moves any
+golden whose target alpha is read; half 2 changes the histogram's input, so the
+exposure e2e is the arbiter.
+
+### Depth of field and lens artefacts are missing, and follow colour grading (2026-09-24)
+
+`docs/plan/43-render-standards.md` §6 marks both missing. The post-processing
+plan ruled that each is a display-referred effect with parameters, so each needs
+the serialized per-pass parameter shape the colour-grading LUT field settles,
+and neither has a reason to be built before there is a curve and a grade to
+defocus and to flare. No design beyond that was written. Verified 2026-09-24:
+nothing of either in `crcbl-render` or `crcbl-shaders`.
+
+### Considered and declined for post-processing and antialiasing (2026-09-24)
+
+From the deleted post-processing and antialiasing plans, with the reasons; the
+rules they protect are in `docs/notes/rendering.md` under the two plans' _left
+behind_ sections.
+
+- **AgX tonemapping**: a `log2` and a `pow` per channel, and no transcendental
+  may reach a pixel. Hill's ACES fit is rational arithmetic.
+- **An exponential exposure adaptation** (`1 - exp(-rate * delta)`): the same
+  rule, in arithmetic that multiplies every texel. The escape, if the linear
+  step ever reads badly, is a baked table (_What auto-exposure left owed_).
+- **A tree or subgroup reduce for the exposure histogram**: float addition is
+  not associative, so the order would be the scheduler's.
+- **The compositor's upscale (`ShellCaps::HW_UPSCALE`) as a rendering path**:
+  decided 2026-09-21 (_The engine owns scaling on every platform_).
+- **DLSS**: single-vendor and closed, where every other path is the same code on
+  all four backends; a tier that exists on one adapter is a second renderer.
+- **FSR 2 and FSR 3**: temporal, so they inherit everything TAA owes — the
+  jitter and the history — and add a history of their own. Vendor neutrality
+  answers only the DLSS objection.
+- **Any AA resolved after the UI pass**: the UI composites at native resolution
+  after the upscale so its text is rasterised sharp; filtering it blurs glyphs
+  that were never aliased.
+- **SMAA 1x beside CMAA2**: one morphological tier at a time — a menu with both
+  is a row nobody can choose between. SMAA was removed with the CMAA2 slice on
+  2026-09-06, the user's call for CMAA2's edge-scaled cost and crisper text.
+- **A wider FXAA preset where FXAA over-blurs**: CMAA2 is the answer to text and
+  thin geometry, not a stronger FXAA.
 
 ### The settings catalogue's named keys have no reader
 
@@ -21173,14 +21388,20 @@ plumbing:
   parameter is exposed by `ForwardRenderer` at all, so there is nothing yet for
   a file to say about them beyond present or absent.
 
+The first field with a design is the colour-grading LUT's path on the tonemap
+stage (_Colour grading, the post-tonemap LUT, is specified and unbuilt_), which
+is where the serialized shape gets decided; depth of field and lens artefacts
+wait on it.
+
 **The camera layer's two bits are one field on purpose.** `RenderEffects` has
 both `ANTIALIASING` and `CMAA2`, and `CameraStack` has one `antialiasing` field
-naming an `Antialiasing` tier rather than a field per bit.
-`docs/plan/49-antialiasing.md` collapsed the two into one ladder because the
-resolve slot holds one filter, and two fields would let a file ask for both —
-the state `EffectRequest::resolve` clears before it fills the slot. A reader
-reaching for `smaa:` gets a `deny_unknown_fields` refusal naming the real
-fields, which is where they find out.
+naming an `Antialiasing` tier rather than a field per bit. The antialiasing
+ladder collapsed the two into one because the resolve slot holds one filter
+(`docs/notes/rendering.md`, _What the deleted 49-antialiasing plan left
+behind_), and two fields would let a file ask for both — the state
+`EffectRequest::resolve` clears before it fills the slot. A reader reaching for
+`smaa:` gets a `deny_unknown_fields` refusal naming the real fields, which is
+where they find out.
 
 **Most views still write `EffectRequest.camera` as a literal, not from a file.**
 Only `apps/lantern` (through `apps/lantern/assets/camera.ron`) and

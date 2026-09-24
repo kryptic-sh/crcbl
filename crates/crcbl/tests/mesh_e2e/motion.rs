@@ -11,8 +11,8 @@
 //! # Why this reads the scene target and not the motion target
 //!
 //! The forward pass writes the vector into a third colour attachment, and
-//! **nothing reads that attachment yet**: `docs/plan/49-antialiasing.md`'s TAA
-//! is the first pass that will, and it is the attachment's own observer when it
+//! **nothing reads that attachment yet**: TAA (`docs/backlog.md`, _TAA is
+//! unbuilt_) is the first pass that will, and it is the attachment's own observer when it
 //! arrives. What can be checked today is the arithmetic that fills it, and
 //! `ForwardRenderer::set_motion_view` is what puts that arithmetic somewhere a
 //! frame can be read out of — the same vector, encoded into the `Rgba16Float`

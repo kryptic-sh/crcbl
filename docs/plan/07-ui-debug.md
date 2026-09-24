@@ -253,7 +253,7 @@ interface between `crcbl-ui` and the renderer.
   border and optional shadow evaluated as a signed distance in the fragment
   stage, as GPUI and Bevy do. Unity tessellates rounded corners (a resize
   rebuilds geometry) and RmlUi assumes MSAA for smooth corners; this engine has
-  MSAA off by default ([49-antialiasing.md](49-antialiasing.md)), so the
+  MSAA off by default ([rendering notes](../notes/rendering.md)), so the
   distance field is the answer that looks right on the default view.
 - **Textured quads and a clip rectangle per command.** `DrawCommand` gains a
   texture id with UVs and a clip rect. Rectangular clips are applied in the

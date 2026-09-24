@@ -724,10 +724,10 @@ pub(super) struct View {
     pub(super) auto_exposure: Exposure,
     /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
     pub(super) bloom: Bloom,
-    /// `docs/plan/49-antialiasing.md`'s cheap antialiasing tier — see
+    /// The cheap antialiasing tier — see
     /// [`crate::fxaa`].
     pub(super) fxaa: Fxaa,
-    /// `docs/plan/49-antialiasing.md`'s higher antialiasing tier — see
+    /// The higher antialiasing tier — see
     /// [`crate::cmaa2`]. It takes the resolve slot from [`View::fxaa`] on the
     /// frames [`RenderEffects::CMAA2`] is set for, and neither is built per
     /// frame: both exist, and at most one records.
@@ -1996,8 +1996,8 @@ impl View {
         // **Created whatever else the frame is doing**, on the reflectivity
         // attachment's terms exactly: it is the forward pass's third colour
         // attachment, which is in that pipeline whether or not anything reads
-        // what it wrote. Nothing does yet — `docs/plan/49-antialiasing.md`'s
-        // TAA is the first pass that will, and until then `DebugView::Motion`
+        // what it wrote. Nothing does yet — TAA (`docs/backlog.md`) is the
+        // first pass that will, and until then `DebugView::Motion`
         // is what observes the subtraction.
         let motion = graph.create_image("motion", TransientImageDesc::motion(extent));
         // The march's output and the blur's, and both are the scene target's

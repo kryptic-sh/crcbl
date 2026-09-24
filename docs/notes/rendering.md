@@ -265,6 +265,191 @@ follows is the rules and their reasons.
     passes landed, and the march's share fell while its cost rose.
   - **No `LightingPath` gate**, which still has no consumer.
 
+## What the deleted 48-post-processing plan left behind (2026-09-24)
+
+Record; most of the stack is built — the `Rgba16Float` scene, the tonemap
+(`tonemap.slang`, `crcbl_shaders::tonemap`), auto-exposure with adaptation
+(`exposure.slang`, `crcbl_render::exposure`), bloom (`crcbl_render::bloom`), the
+render-scale upscale (`upscale.slang`, `crcbl_render::upscale`), the camera
+stack as RON (`crcbl_render::stack`) and the four-layer toggle resolution
+(`crcbl_render::effects`). What is not is in `docs/backlog.md` under _Colour
+grading, the post-tonemap LUT, is specified and unbuilt_, _Pass fusion: the
+tonemap's luma and the histogram's quarter level are unbuilt_, _Depth of field
+and lens artefacts are missing, and follow colour grading_ and _What the
+camera-stack slice left_. What follows is the rules and their reasons.
+
+- **The order is a contract.** Scene (HDR `Rgba16Float`, lit in linear from the
+  start — retrofitting HDR is repainting every material) → bloom → exposure,
+  tonemap and grade → the antialiasing resolve → the upscale → the UI at native
+  resolution. Every stage before the upscale runs at the internal extent
+  `ForwardRenderer::set_render_scale` chose, which is the reason for the order:
+  each stage costs what the internal extent says. The UI composites after the
+  upscale so glyphs are rasterised sharp and never filtered.
+- **Additive zero, or a deliberate re-bless.** A post feature lands behind a
+  form where "off" is bit-identical to the frame before it existed: at full
+  scale there is no upscale pass and no second image (the stage before writes
+  the caller's target directly), a blend of exactly 0 or 1 takes a branch that
+  writes the endpoint itself, an unmeasured frame's tonemap reads the host's
+  exposure through a lane rather than the buffer. An effect with no such form —
+  every AA tier, auto-exposure, TAA — moves every golden it is on for, so
+  putting it in `RenderEffects::DEFAULT_STACK` is a decision and a re-bless
+  taken once, never a side effect.
+- **No transcendental reaches a pixel, so ACES rather than AgX.** AgX takes a
+  `log2` and a `pow` per channel, and four platforms' implementations differ in
+  the last place. Hill's fit of the ACES RRT and ODT is two changes of primaries
+  around a rational polynomial — multiplies, adds and divides — so it can be
+  blessed on all four backends. `crcbl_shaders::tonemap::TonemapCurve::apply` is
+  the same arithmetic on the CPU, pinned against the ODT's published anchors,
+  and a source grep holds the shader to the same constants.
+- **The tonemap operator is per view.** The fit is `ForwardRenderer`'s default
+  because it shades in linear HDR; the clamp is the identity on `[0, 1]`, so
+  display-referred content and a fixture predicting a code value from a host
+  model keep it. A debug view resolves to the clamp whatever a caller set
+  (`ForwardRenderer::resolved_tonemap_curve`): a readout's pixels are data.
+- **Auto-exposure's rules.** The histogram bins by the float's exponent field —
+  integer arithmetic, not a `log2`. The reduce is **one invocation** because
+  float addition is not associative and a tree sums in the order the device
+  schedules. The adaptation step is **linear**, `rate * delta` clamped into
+  `[0, 1]`, not `1 - exp(-rate * delta)`, for the transcendental rule; the two
+  rates differ by direction, as an eye's do. The previous value is the
+  `measured` ring's slot behind the one written, pre-filled with the default
+  exposure so the first step starts somewhere defined. It is out of
+  `DEFAULT_STACK` because it has no additive-zero form, and the rates are an API
+  (`ForwardRenderer::set_exposure_adaptation`) rather than a settings key
+  because `crcbl-render` has no clock to take a delta from.
+- **Bloom is a lens, and a camera given no stack has been given no lens** — the
+  reason `DEFAULT_STACK` leaves it out, recorded on that constant.
+- **Toggle layering, resolved in one place.** Camera stack (what the view wants)
+  → `[engine.video]` (may only remove; an absent key clamps nothing) →
+  programmatic (either way) → device (last and absolute).
+  `EffectRequest::resolve` applies the order and `ForwardRenderer::begin_frame`
+  freezes the answer per frame, so the halves of a frame cannot disagree. The
+  device layer removes nothing today, and that is a fact about the effects
+  rather than an unfinished clamp; its first real rule arrives with the
+  ray-traced variants `LightingPath` selects.
+- **The camera layer is per view and is a file.** `CameraStack` holds one
+  optional pass per `RenderEffects` bit; a render-to-texture monitor, a planar
+  reflection or a scope's PiP does not want reflections or GI of its own, and
+  that is a property of the camera, not of the player's hardware. **A pass
+  parameter is a field on that pass's type**, added when the parameter has a
+  serialized form — the antialiasing slot is the only one so far, and the
+  colour-grading LUT path is designed as the next.
+- **The engine does its own scaling**, decided 2026-09-21: the plan's
+  `ShellCaps::HW_UPSCALE` "free half" is not a path to build towards — see
+  `docs/backlog.md`'s _The engine owns scaling on every platform_.
+
+## What the deleted 49-antialiasing plan left behind (2026-09-24)
+
+Record; the first two rungs and the settings row are built — FXAA 3.11
+(`fxaa.slang`, `crcbl_render::fxaa`, `RenderEffects::ANTIALIASING`), CMAA2
+(`cmaa2_edges.slang`, `cmaa2_shapes.slang`, `cmaa2_apply.slang`,
+`crcbl_render::cmaa2`, `RenderEffects::CMAA2`, the default tier since
+2026-09-06) and one `antialiasing` row (`crcbl_render::Antialiasing`). What is
+not is in `docs/backlog.md` under _MSAA was reopened rather than reversed_, _TAA
+is unbuilt: jitter, history, and the golden decision it owes_, _What the CMAA2
+slice left_ and _Considered and declined for post-processing and antialiasing_.
+
+Code cites the plan's decisions by number, so the numbering is kept:
+
+- **The seventh decision (2026-08-27) — MSAA reopened and priced.** The old
+  rejection ("fights deferred-ish/HDR pipelines") is deferred-renderer
+  reasoning; this renderer is clustered forward, and `docs/plan/44-lighting.md`
+  rejected deferred partly _because_ it fights MSAA.
+  `crcbl_hal::MultisampleState` has always carried `samples` and
+  `alpha_to_coverage`. The price is a multisampled depth prepass and one depth
+  resolve before `ssao.slang`, `ssr.slang` and the Hi-Z pyramid. **MSAA is right
+  for a forward renderer doing little screen-space work**; FXAA and CMAA2 are
+  right for this one as long as SSAO and SSR are in the stack. Opt-in, never the
+  default: the software and browser tiers pay for every sample.
+- **The eighth decision (2026-08-30) — one AA row, with MSAA as its top rungs.**
+  Counter-Strike 2's row is the model: None, CMAA2, MSAA 2×/4×/8×, and no
+  temporal option (its filtering row is what `apps/options`' `ANISOTROPIES`
+  matches). **Rung 1**, the cycler row, is built; **rung 2**, CMAA2 in SMAA's
+  place, is built; **rung 3**, MSAA, is not.
+
+The rules and their reasons:
+
+- **The resolve slot holds one filter.** `Antialiasing` is the ladder (`None`,
+  `Fxaa`, `Cmaa2`) and `CameraStack` has one `antialiasing` field naming a tier,
+  never a field per bit, so a file cannot ask for both. `EffectRequest::resolve`
+  applies the `[engine.video] antialiasing` tier as a **replacement** inside the
+  slot — after the video clamp, before the programmatic override and the device
+  — because a clamp can only remove and could not choose the higher tier where
+  the camera asked for FXAA. It is the first non-clamping video key. A file
+  still holding the old boolean reads as it meant: `true` is an unpicked tier,
+  `false` is `Antialiasing::None`; neither warns.
+- **A fixture that wants no resolve names `Antialiasing::SLOT`**, never one
+  tier's bit: forcing `ANTIALIASING` off under the CMAA2 default left CMAA2
+  running, and a third rung would walk past such a fixture the same way.
+- **Readouts and transparent views take no resolve.** Every debug view but
+  `DebugView::Shaded` drops both tiers in `ForwardRenderer::resolved_effects`: a
+  pixel's colour is a legend reading, and a blend invents one no cluster holds
+  (`apps/quarry`'s colour-count tests went from 2 colours to 64 without it). A
+  `ViewBackground::Transparent` view is refused either tier
+  (`ViewBackground::REFUSED_ON_TRANSPARENT`): its alpha is coverage, and an edge
+  filter would mix an edge pixel with the transparent black beside it — a
+  premultiplied colour under a straight-alpha consumer, a dark fringe. The
+  upscale does not apply to such a view for the same reason.
+- **A resolve changes the frame's shape rather than adding a pass.** With the
+  slot empty the tonemap writes the caller's target; with it filled the tonemap
+  writes a `display-color` transient at the target's format and the resolve
+  writes the target. The ground grid draws with the tonemap, so it is filtered
+  (thin high-contrast lines are what an edge filter is for); the UI draws after,
+  so it never is.
+- **FXAA samples with `SampleLevel` everywhere.** WGSL refuses an implicit-LOD
+  sample reached from non-uniform control flow, and every tap in the filter is;
+  the native targets compiled the implicit form silently, and only
+  `web/run-render-harness-e2e.sh` caught it. **Its luma is corrected to gamma**:
+  the tonemap writes linear values into an sRGB target, so the resolve samples
+  linear, and FXAA's thresholds were fitted to gamma space. Its template is
+  `bloom_composite.slang` (a neighbourhood through an `inv_source` texel size),
+  not the 1:1 nearest-sampled `tonemap.slang`.
+- **CMAA2's accumulation is integer fixed point**
+  (`crcbl_shaders::cmaa2::BLEND_FIXED_POINT_SCALE`), because shares arrive in
+  scheduler order and float addition is not associative;
+  `the_same_frame_resolves_to_the_same_bytes_twice` holds it. **Nothing is
+  queued and nothing is dropped**: both working buffers hold one entry per
+  pixel, so no capacity decides which entries survive (_CMAA2's append lists
+  made a dense frame a function of the schedule_, below). **No lookup table**,
+  so nothing is cooked. **Historyless, so golden-safe** — the property TAA
+  lacks. Compute for the two analysis passes (two per-pixel storage buffers
+  against `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE`) and a fullscreen draw
+  for the apply, because a swapchain image cannot be bound as a storage image.
+- **An observer that counts touched pixels is not enough.**
+  `cmaa2_changes_a_band_along_the_edges_and_nothing_else` stayed green while
+  `cmaa2_shapes.slang` blended the wrong side of every edge;
+  `the_resolve_moves_the_silhouette_toward_a_supersampled_reference`, which
+  holds the resolved frame against a supersampled unresolved one, is what sees
+  direction. The FXAA fixture (`Scene::Aa`) pins a band — at least
+  `AA_MIN_SOFT_PIXELS` soft pixels with the resolve, four times fewer without,
+  mean moved by at most `AA_MEAN_TOLERANCE` — never a run's own numbers. A new
+  rung owes both kinds of check.
+- **A new AA bit is not free.** `crcbl_render::effects`' `NAMES` table must name
+  it, `every_effect_is_named_exactly_once_and_the_row_prints_them` pins the row
+  string every sample prints, and `ForwardRenderer`'s `RENDER_PASSES` and
+  `fullscreen_passes` must count its passes so the frame's timer count matches.
+- **The cost protocol, and what CMAA2 cost (2026-09-06).**
+  `apps/lantern --headless --frames 400 --size 1920x1080 --backend vk --stack <RON naming the tier>`,
+  three runs a configuration, medians of each run's per-pass p50s. Lantern's
+  monitor view resolves with FXAA whatever `--stack` says, so the room's own
+  FXAA is the **difference** of the two configurations' `fxaa` rows. On radv (RX
+  7900 XTX) the slot went from FXAA's 0.023 ms to CMAA2's 0.093 ms and the frame
+  from 1.469 to 1.571 ms; on lavapipe FXAA's 2.542 ms became CMAA2's 1.744 ms
+  and the frame 102.904 to 101.344 ms. CMAA2's cost scales with edges, not
+  pixels, which is why the software tier every golden runs on pays less for the
+  better filter.
+- **There is no single blessing adapter.** Each golden set is re-blessed where
+  its own last bless was; _The CMAA2 default flip: what moved and where it was
+  blessed_, below, records the sets for that flip. The earlier FXAA flip blessed
+  `crates/crcbl/tests/golden/` and `apps/lantern/tests/golden/` on the software
+  path and `apps/quarry/tests/golden/` on the discrete adapter, then verified
+  every one on both.
+- **Alpha-to-coverage exists only on an MSAA view**, so on the default view card
+  grass and hair cards ship as cutouts with cooked coverage mips.
+- **What is refused** — DLSS, FSR 2/3, any resolve after the UI pass, and a
+  second morphological tier beside CMAA2 — is listed with the reasons in the
+  backlog's declined entry.
+
 ## What the deleted 51-volumetrics plan left behind (2026-09-24)
 
 Record; rungs 1a to 2 are built — `crcbl_render::volumetric`'s
@@ -1148,10 +1333,9 @@ Both runs failed on the cap with **every check inside them passing** — quarry
 reported 42/42 before the step was killed — because `web/tools/browser-e2e.mjs`
 scales its own per-check budgets to the machine it is on, so a slower frame
 stretches the run instead of failing it. So the gate cannot say "too slow"; it
-can only run out of wall clock, which is what it did.
-`docs/plan/49-antialiasing.md` and the Pages workflow's own header already say
-the per-step caps bound a _hanging_ demo and cannot bound a total; this is the
-first time the total was the thing that moved.
+can only run out of wall clock, which is what it did. The Pages workflow's own
+header already says the per-step caps bound a _hanging_ demo and cannot bound a
+total; this is the first time the total was the thing that moved.
 
 Two commits of main did not deploy on that; the caps for quarry and lantern were
 raised to 20 minutes on 2026-08-28 and the gate has run inside them since. The
@@ -1354,8 +1538,8 @@ candidate 3, the desktop-only contact term on top.
    after candidate 1.
 3. ~~**Non-temporal SSGI over the Hi-Z pyramid, delivered as an image.**~~
    **Withdrawn 2026-08-30** — the probe volume is the bounce on every tier. The
-   plan's SSGI row, with one correction: `43-render-standards.md` §9 and
-   `49-antialiasing.md` file it behind motion vectors for temporal accumulation,
+   plan's SSGI row, with one correction: `43-render-standards.md` §9 and the
+   antialiasing plan filed it behind motion vectors for temporal accumulation,
    and that is a choice — GTAO's fixed-pattern-plus-blur determinism argument
    transfers to a cosine gather. Costs: it needs an albedo the tree does not
    expose (the scene target is shaded colour; the SSR row refuses a G-buffer),
@@ -2600,17 +2784,18 @@ in `cmaa2_shapes.slang`'s `accumulate` and
 pixels" claim.
 
 **Dropping the two list passes cost nothing on radv and saved time on
-lavapipe.** Against the five-pass build at `15d6bca`, measured by
-`docs/plan/49-antialiasing.md`'s protocol in the same session: on radv the
-resolve slot goes **0.095 → 0.093 ms** (`cmaa2-clear` 0.001, `cmaa2-edges`
-0.043, `cmaa2-shapes` 0.026, `cmaa2-accumulate` 0.002, `cmaa2-apply` 0.023
-before) and the whole frame **1.562 → 1.571 ms**, which is inside the run-to-run
-spread either way; on lavapipe the slot goes **2.004 → 1.744 ms** (0.101, 0.112,
-0.108, 0.108, 1.575 before) and the whole frame **102.307 → 101.344 ms**. The
-saving is the two dispatches themselves: each cost about a tenth of a
-millisecond on lavapipe whatever it was asked to do, which is that driver's
-fixed cost per dispatch, and the work they were doing did not go away — it moved
-into `cmaa2-shapes`, whose own row is unchanged.
+lavapipe.** Against the five-pass build at `15d6bca`, measured by the
+antialiasing cost protocol (_What the deleted 49-antialiasing plan left behind_)
+in the same session: on radv the resolve slot goes **0.095 → 0.093 ms**
+(`cmaa2-clear` 0.001, `cmaa2-edges` 0.043, `cmaa2-shapes` 0.026,
+`cmaa2-accumulate` 0.002, `cmaa2-apply` 0.023 before) and the whole frame
+**1.562 → 1.571 ms**, which is inside the run-to-run spread either way; on
+lavapipe the slot goes **2.004 → 1.744 ms** (0.101, 0.112, 0.108, 0.108, 1.575
+before) and the whole frame **102.307 → 101.344 ms**. The saving is the two
+dispatches themselves: each cost about a tenth of a millisecond on lavapipe
+whatever it was asked to do, which is that driver's fixed cost per dispatch, and
+the work they were doing did not go away — it moved into `cmaa2-shapes`, whose
+own row is unchanged.
 
 ## The CMAA2 default flip: what moved and where it was blessed (2026-09-06)
 

@@ -160,14 +160,14 @@ faders. Very little of what is left is machinery. Verified against the tree on
   what was chosen for each switch. `RESET` allows everything, since that is what
   an absent section means. The mark is per switch: `on (next start)` on a row
   the run came up with off.
-- **The antialiasing tier is one cycler row**, as of 2026-08-30 —
-  `docs/plan/49-antialiasing.md`'s eighth decision, rung 1. It replaced the
-  `antialiasing` and `smaa` switches, which were two booleans over one resolve
-  slot: `crcbl_render::Antialiasing` is the ladder (`none`, `fxaa`, `cmaa2`),
-  the `[engine.video] antialiasing` key holds its `Antialiasing::name` spelling,
-  and `EffectRequest::resolve` applies it as a _replacement_ inside the slot
-  rather than as a clamp — a clamp can only take a resolve away, and a player
-  picking CMAA2 where the camera asked for FXAA is asking for a different
+- **The antialiasing tier is one cycler row**, as of 2026-08-30 — the
+  antialiasing ladder's eighth decision, rung 1 (`docs/notes/rendering.md`). It
+  replaced the `antialiasing` and `smaa` switches, which were two booleans over
+  one resolve slot: `crcbl_render::Antialiasing` is the ladder (`none`, `fxaa`,
+  `cmaa2`), the `[engine.video] antialiasing` key holds its `Antialiasing::name`
+  spelling, and `EffectRequest::resolve` applies it as a _replacement_ inside
+  the slot rather than as a clamp — a clamp can only take a resolve away, and a
+  player picking CMAA2 where the camera asked for FXAA is asking for a different
   filter. `menu::ANTIALIASING_ID` sits beside `ANISOTROPY`; it is born on the
   rung `RenderEffects::DEFAULT_STACK` carries, because that is what an absent
   key means, and `RESET` writes that rung back. It wears `menu::NEXT_START_MARK`

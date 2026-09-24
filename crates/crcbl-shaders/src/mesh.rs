@@ -992,7 +992,7 @@ impl FrameUniforms {
     /// stages emit the two clip positions the subtraction needs.
     ///
     /// **It is the motion-vector target's only observer today.** Nothing reads
-    /// the attachment yet — `docs/plan/49-antialiasing.md`'s TAA is the first
+    /// the attachment yet — TAA (`docs/backlog.md`) is the first
     /// pass that will — so this view is what says the subtraction is the right
     /// one, and `crates/crcbl/tests/mesh_e2e/motion.rs` is what reads it.
     ///

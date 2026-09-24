@@ -7,8 +7,8 @@
 //! an antialiased cube is a picture of *something*, and stays green when the
 //! filter degrades into a blur or into a copy). It is the shape of the
 //! difference, and these are the retired SMAA tier's three measurements on the
-//! same scene — `docs/plan/49-antialiasing.md` says in as many words that CMAA2
-//! is held to its observer:
+//! same scene — the antialiasing ladder held CMAA2 to its observer in as many
+//! words (`docs/notes/rendering.md`):
 //!
 //! * **The frame changed at all.** Three passes that ran and wrote their source
 //!   through would leave the frame byte-identical to the no-AA one, which is
@@ -526,7 +526,7 @@ fn cmaa2_changes_a_band_along_the_edges_and_nothing_else() {
 /// shares are *scattered*: a pixel's colour is a sum over contributions
 /// produced by different work-groups, which reach it in whatever order the
 /// device schedules. A float sum in that order would make the frame a function
-/// of the scheduler — `docs/plan/49-antialiasing.md`'s determinism argument,
+/// of the scheduler — the determinism rule `docs/notes/rendering.md` records,
 /// and the reason a golden could not be blessed on it — so
 /// `cmaa2_shapes.slang` sums in fixed point with integer atomics, which are
 /// associative and commutative, and `cmaa2_apply.slang` converts once, per

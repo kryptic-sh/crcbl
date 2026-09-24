@@ -2460,10 +2460,10 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
-    /// `docs/plan/49-antialiasing.md`'s cheap antialiasing tier, which owns one
+    /// The cheap antialiasing tier, which owns one
     /// pipeline, one layout, a sampler and a ring of blocks.
     fxaa: Option<Fxaa>,
-    /// `docs/plan/49-antialiasing.md`'s higher antialiasing tier, which owns
+    /// The higher antialiasing tier, which owns
     /// four compute pipelines, one graphics pipeline, two layouts and a ring of
     /// blocks.
     cmaa2: Option<Cmaa2>,
@@ -9995,7 +9995,7 @@ impl ForwardRenderer {
     ///
     /// The forward pass writes a motion vector into a third colour attachment on
     /// every frame — see [`TransientImageDesc::motion`] — and no pass reads it
-    /// yet; `docs/plan/49-antialiasing.md`'s TAA is the first that will. This
+    /// yet; TAA (`docs/backlog.md`) is the first that will. This
     /// view is therefore what says the subtraction behind it is the right one,
     /// which is why it exists ahead of a consumer.
     ///

@@ -521,7 +521,7 @@ pub enum Scene {
     ///   by `SPECULAR_SWING` every strip — and a strip is two pixels wide, so
     ///   the mirror direction crosses the sun twice inside distances the frame
     ///   cannot resolve. That is specular aliasing, and it is the one
-    ///   aliasing `docs/plan/49-antialiasing.md`'s whole ladder is silent about:
+    ///   aliasing the whole antialiasing ladder is silent about:
     ///   no coverage-based pass can average a signal the shading generated.
     /// * the **control band**, `-z` of it, one quad whose normal is constant.
     ///   `mesh.slang`'s `specular_aa_kernel` returns exactly zero there — one

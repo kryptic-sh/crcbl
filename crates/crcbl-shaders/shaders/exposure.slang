@@ -11,7 +11,7 @@
 // object entered frame. Every engine that ships auto-exposure bins the frame
 // and takes a *quantile* of the population instead, which is stable under
 // exactly that. This pass is the binning; the reduce that reads the bins is
-// `docs/plan/48-post-processing.md`'s next rung.
+// `reduceMain`, the third entry point below.
 //
 // # The bins are read out of the float's exponent, not out of a `log2`
 //
@@ -42,11 +42,11 @@
 // All three run inside the frame they are about — the histogram reads the scene
 // colour the passes before it produced, and the tonemap reads the exposure the
 // reduce wrote — so nothing here is a frame behind and nothing is read back to
-// the host. What it does not do yet is *adapt*: the exposure a frame is drawn
-// with is the exposure that frame asked for, with no time constant on it, so a
-// cut between two differently-lit shots lands in one frame rather than over a
-// few tenths of a second. `docs/plan/48-post-processing.md` carries that as the
-// next rung, and it is the one that needs a value to survive between frames.
+// the host. The one value that survives between frames is the adaptation's
+// start: `reduceMain` steps from the exposure the frame before was drawn with,
+// read from `previous`, toward what this frame's histogram asks for, so a cut
+// between two differently-lit shots rolls over a few tenths of a second when
+// the host asks for adaptation and lands in one frame when it does not.
 
 // D3D12 takes each resource's register from its binding. A declaration's
 // `D3D12_REGISTER` suffix is `register(<class><binding>, space<set>)`, the

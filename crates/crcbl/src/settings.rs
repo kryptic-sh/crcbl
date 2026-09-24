@@ -387,8 +387,8 @@ pub fn video(stack: &SettingsStack) -> VideoSettings {
 /// # A file still holding the boolean reads as one of two things
 ///
 /// The key was a `bool` beside a second key called `smaa` until
-/// `docs/plan/49-antialiasing.md`'s eighth decision folded the pair into this
-/// ladder. There is no migration — everything here is v0 — but the two spellings
+/// the antialiasing ladder's eighth decision (`docs/notes/rendering.md`)
+/// folded the pair into this ladder. There is no migration — everything here is v0 — but the two spellings
 /// a hand-edited file can still hold are answered rather than warned about,
 /// because both had a meaning and neither is a mistake the player made:
 /// `antialiasing = true` was "the player has not asked for less", which is
@@ -396,7 +396,7 @@ pub fn video(stack: &SettingsStack) -> VideoSettings {
 /// which is [`Antialiasing::None`]. A `smaa` key is not read by anything and is
 /// reported by `crcbl settings list` as a key the engine does not define — and
 /// so is the *value* `"smaa"`, which was the higher rung's word until
-/// `docs/plan/49-antialiasing.md`'s CMAA2 slice retired that tier. It is now a
+/// the CMAA2 slice retired that tier. It is now a
 /// word no rung wears, and the paragraph below is what a file holding it gets:
 /// an unpicked tier and one warning naming the key.
 ///
@@ -3128,7 +3128,7 @@ mod tests {
     ///
     /// The spellings are the ones a hand-edited file plausibly holds: the word
     /// of a rung that is **no longer** on the ladder — `smaa`, which was the
-    /// higher tier until `docs/plan/49-antialiasing.md`'s CMAA2 slice retired
+    /// higher tier until the CMAA2 slice retired
     /// it — the same word in the wrong case, and the numbers TOML would take for
     /// the boolean this key used to be.
     #[test]

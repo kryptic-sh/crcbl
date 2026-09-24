@@ -2434,7 +2434,7 @@ fn specular_band(image: &Image, centre: (u32, u32), half: (u32, u32)) -> (f32, f
 ///   wide, so at this material's roughness the lobe's peak is a fraction of a
 ///   pixel across and which pixels find it is a lottery — the definition of a
 ///   firefly, and the one aliasing
-///   `docs/plan/49-antialiasing.md`'s ladder cannot reach, because no coverage
+///   the antialiasing ladder cannot reach, because no coverage
 ///   filter can average a signal the shading invented.
 /// * **Its energy.** The same band's mean must clear
 ///   [`SPECULAR_BAND_MEAN_FLOOR`]. Without it the first claim is satisfied by

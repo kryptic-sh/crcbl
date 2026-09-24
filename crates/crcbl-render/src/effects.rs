@@ -134,7 +134,7 @@ bitflags::bitflags! {
         /// [`Antialiasing::Cmaa2`]. So this is the *cheap* tier rather than the
         /// absent one: a view's own stack, or a player writing
         /// `antialiasing = "fxaa"`, asks for the one pass instead of the three.
-        /// `docs/plan/49-antialiasing.md` is where the ladder is written down.
+        /// `docs/notes/rendering.md` is where the ladder's rules are written down.
         const ANTIALIASING = 1 << 4;
         /// Volumetric fog — the froxel scatter, the column scan that turns it
         /// into a prefix, and the fullscreen composite over the frame.
@@ -173,11 +173,11 @@ bitflags::bitflags! {
         /// set — so switching it on moves every frame it is on for, which is the
         /// re-bless each tier of the resolve slot has already spent in turn.
         ///
-        /// There is **no time constant** on it yet: the exposure a frame is
-        /// drawn with is measured from that frame, so a cut between two
-        /// differently-lit shots lands in one frame rather than over a few
-        /// tenths of a second. `docs/plan/48-post-processing.md` carries the
-        /// adaptation as the next rung.
+        /// A view that hands `ForwardRenderer::set_exposure_adaptation` its
+        /// rates and frame delta gets an exposure that steps toward each
+        /// frame's measurement, so a cut between two differently-lit shots
+        /// rolls over a few tenths of a second; a view that sets none lands on
+        /// the measurement in one frame.
         const AUTO_EXPOSURE = 1 << 6;
         /// CMAA2 — the edge detect that writes one edge word per pixel, the
         /// shape classification with its bounded long-edge search, adding its
@@ -185,7 +185,7 @@ bitflags::bitflags! {
         /// colour apply.
         /// [`Antialiasing::Cmaa2`] is the rung a settings file names it by.
         ///
-        /// `docs/plan/49-antialiasing.md`'s antialiasing ladder, second rung and
+        /// The antialiasing ladder's second rung and
         /// **the higher of the two antialiasing tiers**. When it is set it takes
         /// the resolve slot instead of [`ANTIALIASING`](Self::ANTIALIASING):
         /// three passes where FXAA is one, over-blurring far less of the thin
@@ -204,7 +204,7 @@ bitflags::bitflags! {
         /// resolve is not a lens, so the slot belongs in the default, and the
         /// tier the engine reaches for is the honest thing to put in it.
         /// Swapping the slot moved every golden the bit is on for at once,
-        /// which is the re-bless `docs/plan/49-antialiasing.md` priced and which
+        /// which is the re-bless the antialiasing ladder priced and which
         /// was taken as a change of its own.
         ///
         /// The bit is numbered after the tiers it postdates rather than beside
@@ -367,7 +367,7 @@ pub const fn ray_tracing_note() -> &'static str {
 
 /// Which tier fills the frame's one antialiasing slot.
 ///
-/// `docs/plan/49-antialiasing.md`'s eighth decision, taken 2026-08-30 with
+/// The antialiasing ladder's eighth decision (`docs/notes/rendering.md`), taken 2026-08-30 with
 /// Counter-Strike 2's video panel in front of it: the slot holds **one** filter,
 /// so the settings seam holds one ladder rather than two independent bits a
 /// panel could switch on together. The renderer still reads
@@ -375,8 +375,9 @@ pub const fn ray_tracing_note() -> &'static str {
 /// [`bits`](Self::bits) and [`from_effects`](Self::from_effects) are the join,
 /// and [`ForwardRenderer::add_passes`] is where the bits become passes.
 ///
-/// The rungs above this one — MSAA 2×, 4× and 8× — are that section's next
-/// slice and are deliberately not here.
+/// The rungs above this one — MSAA 2×, 4× and 8× — are that decision's next
+/// slice and are deliberately not here (`docs/backlog.md`, _MSAA was reopened
+/// rather than reversed_).
 ///
 /// **Serialized in snake_case, which is [`name`](Self::name)'s spelling.** A
 /// camera stack names a rung by that word — see [`crate::stack`] — and

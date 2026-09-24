@@ -50,8 +50,8 @@ Rules that keep the two from diverging into two renderers:
   how visibility and incoming radiance are _gathered_, never how they are
   _shaded_.
 - **One tonemapped output target.** The post stack
-  ([48-post-processing.md](48-post-processing.md)) runs identically after either
-  path, so nothing downstream branches on `LightingPath`.
+  ([rendering notes](../notes/rendering.md)) runs identically after either path,
+  so nothing downstream branches on `LightingPath`.
 - **Golden images per path**, and a documented pair-wise comparison: the two
   paths are not expected to match pixel for pixel, but a scene that reads
   correctly on one and wrongly on the other is a defect in whichever is wrong.
@@ -376,8 +376,8 @@ this one's.
 A high-frequency normal map under a low roughness aliases: the shading signal
 moves faster than the pixel grid samples it, and the result is a field of
 fireflies that **no antialiasing rung removes**, because the aliasing is in the
-shading rather than in the geometry. [49-antialiasing.md](49-antialiasing.md)'s
-whole ladder is silent on it by construction.
+shading rather than in the geometry. The antialiasing ladder (FXAA, CMAA2, MSAA,
+TAA) is silent on it by construction.
 
 The industry answer is roughness regularisation: widen the lobe by the
 screen-space variance of the normal, so a surface whose normal is changing fast

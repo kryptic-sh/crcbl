@@ -2,9 +2,9 @@
 //!
 //! [`RenderEffects`] is what a frame draws; [`CameraStack`] is what a **view
 //! asks for**, written down. `docs/plan/18-render-features.md` says the post
-//! stack is "data-driven per camera (RON: which passes, parameters)" and
-//! `docs/plan/48-post-processing.md` puts that layer at the top of the
-//! resolution order, above the player's `[engine.video]` clamp; this module is
+//! stack is "data-driven per camera (RON: which passes, parameters)" and the
+//! toggle layering `docs/notes/rendering.md` records puts that layer at the top
+//! of the resolution order, above the player's `[engine.video]` clamp; this module is
 //! the reader and the writer of that file, and [`CameraStack::compile`] is the
 //! step that turns it into the bits [`EffectRequest::camera`] carries.
 //!
@@ -49,9 +49,9 @@
 //! bits of one ladder rung rather than two independent switches, and
 //! `EffectRequest::resolve` clears the whole slot before it fills it. So this
 //! file has **one** antialiasing field naming a tier, and no per-tier field
-//! beside it: two spellings of one rung is exactly what
-//! `docs/plan/49-antialiasing.md` refused when it collapsed the two bits into a
-//! ladder.
+//! beside it: two spellings of one rung is exactly what the antialiasing
+//! ladder refused when it collapsed the two bits into one
+//! (`docs/notes/rendering.md`).
 //!
 //! [`EffectRequest::camera`]: crate::EffectRequest::camera
 //! [`ForwardRenderer::set_fog`]: crate::ForwardRenderer::set_fog
@@ -105,7 +105,7 @@ pub struct BloomPass {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AntialiasingPass {
-    /// Which rung of `docs/plan/49-antialiasing.md`'s ladder this view wants.
+    /// Which rung of the antialiasing ladder this view wants.
     pub tier: Antialiasing,
 }
 

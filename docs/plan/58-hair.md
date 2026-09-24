@@ -31,7 +31,7 @@ Absent. What it builds on, and what constrains it:
   rotation — a chain is particles and constraints — but it needs a solver, and
   none exists.
 - **Alpha-to-coverage needs MSAA, which is off by default**
-  ([49-antialiasing.md](49-antialiasing.md)), and temporal accumulation is
+  ([rendering notes](../notes/rendering.md)), and temporal accumulation is
   refused. Every strand renderer in the research that is not opaque relies on
   one or the other: Unreal's grooms on temporal AA, Horizon Zero Dawn's alpha on
   its two-sample temporal resolve.

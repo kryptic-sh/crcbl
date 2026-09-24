@@ -1,4 +1,4 @@
-//! `docs/plan/49-antialiasing.md`'s antialiasing ladder, second rung: Intel's
+//! The antialiasing ladder's second rung (`docs/notes/rendering.md`): Intel's
 //! Conservative Morphological Anti-Aliasing 2, which resolves the tonemapped
 //! frame into the target.
 //!

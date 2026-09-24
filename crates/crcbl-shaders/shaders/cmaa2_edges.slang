@@ -1,13 +1,13 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/49-antialiasing.md`'s antialiasing ladder, second rung, first of
+// The antialiasing ladder's second rung (`docs/notes/rendering.md`), first of
 // the three passes CMAA2 records: the edge detect.
 //
 // # What is transcribed here, and what is this tree's own
 //
 // The algorithm is Intel's **Conservative Morphological Anti-Aliasing 2**
-// (Filip Strugar, 2018). Its stages are named in
-// `docs/plan/49-antialiasing.md` and reproduced across the three `cmaa2_*`
+// (Filip Strugar, 2018). Its stages are the reference's own, and they are
+// reproduced across the three `cmaa2_*`
 // sources in this directory:
 //
 //  1. an **edge detect** — a luma delta per pixel boundary against a threshold,
@@ -65,10 +65,10 @@
 // corrects it with one `sqrt`, exactly as `fxaa.slang` and the retired
 // `smaa_edges.slang` did; `fxaa.slang`'s header carries the argument at length.
 //
-// `docs/plan/48-post-processing.md`'s "Pass fusion" would hand this pass the
-// luma in the tonemap's alpha channel and save the fetches. That rung has not
-// landed — `tonemap.slang` writes an opaque alpha — so this pass computes its
-// own, and `docs/backlog.md` carries the fusion.
+// The post stack's "pass fusion" would hand this pass the luma in the
+// tonemap's alpha channel and save the fetches. That rung has not landed —
+// `tonemap.slang` writes an opaque alpha — so this pass computes its own, and
+// `docs/backlog.md` carries the fusion.
 //
 // # No `#include`
 //

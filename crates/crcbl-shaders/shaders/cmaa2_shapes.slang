@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/49-antialiasing.md`'s CMAA2 tier, second of its three passes: the
+// The antialiasing ladder's CMAA2 tier, second of its three passes: the
 // shape classification with its bounded long-edge search, which adds every
 // share it derives straight into the per-pixel fixed-point accumulation.
 // `cmaa2_edges.slang`'s header describes the tier, what each pass hands the
@@ -50,7 +50,7 @@
 // a sum over contributions that reach it in whatever order the device
 // schedules. **Float addition is not associative**, so a float sum in arrival
 // order would make a frame a function of the scheduler rather than of its
-// inputs — which is the property `docs/plan/49-antialiasing.md` spends its
+// inputs — which is the property this workspace's determinism rule spends its
 // length refusing, and which no golden could hold. Integer addition is
 // associative and commutative, so the accumulation is in fixed point at
 // `BLEND_FIXED_POINT_SCALE` and the one conversion back to float happens per

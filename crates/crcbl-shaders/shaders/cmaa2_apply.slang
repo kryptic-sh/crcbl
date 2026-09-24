@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/49-antialiasing.md`'s CMAA2 tier, last of its three passes: the
+// The antialiasing ladder's CMAA2 tier, last of its three passes: the
 // deferred colour apply. `cmaa2_edges.slang`'s header describes the tier and
 // what each pass hands the next.
 //

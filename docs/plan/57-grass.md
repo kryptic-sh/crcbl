@@ -25,10 +25,10 @@ decide the shape:
   exist and is not wanted.
 - **MSAA is in the seam and off by default.** `MultisampleState` in
   `crates/crcbl-hal/src/pipeline.rs` carries `samples` and `alpha_to_coverage`;
-  [49-antialiasing.md](49-antialiasing.md) prices MSAA and keeps it off because
-  SSAO and SSR read single-sample depth. So alpha-to-coverage — the antialiased
-  cutout every card-grass reference relies on — is available only on a view that
-  pays for MSAA.
+  the antialiasing ladder ([rendering notes](../notes/rendering.md)) prices MSAA
+  and keeps it off because SSAO and SSR read single-sample depth. So
+  alpha-to-coverage — the antialiased cutout every card-grass reference relies
+  on — is available only on a view that pays for MSAA.
 - **The instance pool is not a grass pool.** `ForwardRenderer`'s instances are
   full transforms culled and bucketed by `cull.slang` and `draw_gen.slang`, and
   `Capacities` (`crates/crcbl-render/src/scene.rs`) sizes them once. A field of

@@ -2462,7 +2462,7 @@ static const float SPECULAR_AA_KAPPA = 0.18;
 ///
 /// `docs/plan/44-lighting.md`'s rung 4. The aliasing it removes is in the
 /// *shading* rather than in the geometry, so no pass in
-/// `docs/plan/49-antialiasing.md`'s ladder can reach it: a normal field that
+/// the antialiasing ladder can reach it: a normal field that
 /// moves faster than the pixel grid samples it puts the lobe's peak inside some
 /// pixels and not others, and at a low roughness that peak is `1 / alpha2`.
 /// Widening the lobe by the variance the pixel could not resolve is the

@@ -20,16 +20,13 @@
 //! All three passes run inside the frame they measure — the histogram bins the
 //! scene colour the passes before it produced, and the tonemap that follows
 //! reads the exposure the reduce wrote. So the exposure a frame is drawn with
-//! is measured from that frame, with no readback to stall on and no
-//! ping-ponged buffer holding the previous frame's answer.
+//! is measured from that frame, with no readback to stall on.
 //!
-//! What it does **not** do is adapt over time: there is no time constant, so a
-//! cut between two differently-lit shots lands in a single frame. That is the
-//! next rung in [`docs/plan/48-post-processing.md`], and it is the one that
-//! needs a value to survive between frames — which is what makes it a change to
-//! this ring rather than a constant somewhere.
-//!
-//! [`docs/plan/48-post-processing.md`]: crate
+//! The one value that survives between frames is the adaptation's starting
+//! point: with an [`ExposureAdaptation`] set, the reduce steps from the
+//! previous frame's exposure — the `measured` ring's slot behind the one it
+//! writes — toward this frame's measurement, so a cut between two
+//! differently-lit shots rolls rather than landing in a single frame.
 //!
 //! # The switch is a lane of the tonemap's block
 //!

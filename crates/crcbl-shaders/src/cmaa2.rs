@@ -8,7 +8,7 @@
 //!
 //! # What the tier stores
 //!
-//! `docs/plan/49-antialiasing.md`'s CMAA2 rung is three passes over two
+//! The antialiasing ladder's CMAA2 rung is three passes over two
 //! buffers: one edge word per pixel, and a fixed-point accumulation of
 //! [`ACCUM_WORDS`] per pixel. **Neither is a list and neither has a capacity**
 //! — both are indexed by the pixel they belong to, so both are exactly as long

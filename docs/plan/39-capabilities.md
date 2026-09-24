@@ -235,10 +235,11 @@ For a level it needs saying, because "less" is not something a value type knows:
   answers "neither" where the camera asked for FXAA and the player asked for
   CMAA2 — which is not less of the camera's ask, it is nothing at all.
   `EffectRequest::resolve` therefore **replaces** the slot with the player's
-  rung, after the video clamp and before the programmatic override —
-  [49-antialiasing.md](49-antialiasing.md)'s eighth decision. Every key whose
-  rungs are amounts still clamps by `min`, and the question to ask of the next
-  enumerated key is which of the two it is.
+  rung, after the video clamp and before the programmatic override — the
+  antialiasing ladder's eighth decision
+  ([rendering notes](../notes/rendering.md)). Every key whose rungs are amounts
+  still clamps by `min`, and the question to ask of the next enumerated key is
+  which of the two it is.
 
 This is a widening of the one table in `crates/crcbl/src/settings.rs` and of
 `RenderEffects` itself, since a bitflag cannot hold a rung. Both are the same
@@ -324,9 +325,9 @@ usually no renderer half. `shadow_filter` makes every tier distinct: `low`
 writes `box`, `medium` writes `disc`, and `high` writes `pcss`.
 
 The medium and high AA cells say **CMAA2**, and CMAA2 is what
-`QualityPreset::values` writes: [49-antialiasing.md](49-antialiasing.md)'s
-eighth decision put it and SMAA 1x in one tier, and the slice that built it
-(2026-09-06) retired SMAA in the same change.
+`QualityPreset::values` writes: the antialiasing ladder's eighth decision
+([rendering notes](../notes/rendering.md)) put it and SMAA 1x in one tier, and
+the slice that built it (2026-09-06) retired SMAA in the same change.
 
 ### The catalogue
 
@@ -338,7 +339,7 @@ half.
 | Key                     | Domain (lowest rung first)             | Today                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ----------------------- | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `quality`               | `low` \| `medium` \| `high`            | **Built 2026-08-31, as a command rather than a key** — `crcbl::settings::presets` and the `quality` console command; see the section above for why it is not a catalogue key and why `ultra` is gone. It originally covered three rows; `shadow_filter` made four on 2026-09-09, and the separate AO expansion made the current seven. `apps/options` still offers no row for it — `docs/backlog.md`.                                                                                                                                                                                |
-| `anti_aliasing`         | `off` \| `fxaa` \| `cmaa2`             | **Built, as one enum key (2026-08-30)**, spelled `antialiasing` and holding `crcbl_render::Antialiasing`'s `"none"`, `"fxaa"` or `"cmaa2"` — the third rung was `"smaa"` until the CMAA2 slice replaced that tier on 2026-09-06. It was two booleans for a day; they shared one resolve slot, so a panel could switch both on and the frame picked between them out of sight. `EffectRequest::antialiasing` carries the rung and `resolve` **replaces** the slot with it rather than clamping, which is the first non-clamping video key — [49-antialiasing.md](49-antialiasing.md). |
+| `anti_aliasing`         | `off` \| `fxaa` \| `cmaa2`             | **Built, as one enum key (2026-08-30)**, spelled `antialiasing` and holding `crcbl_render::Antialiasing`'s `"none"`, `"fxaa"` or `"cmaa2"` — the third rung was `"smaa"` until the CMAA2 slice replaced that tier on 2026-09-06. It was two booleans for a day; they shared one resolve slot, so a panel could switch both on and the frame picked between them out of sight. `EffectRequest::antialiasing` carries the rung and `resolve` **replaces** the slot with it rather than clamping, which is the first non-clamping video key — [rendering notes](../notes/rendering.md). |
 | `ambient_occlusion`     | `off` \| `ssao` \| `gtao`              | **Built as a boolean plus the 2026-09-09 SSAO quality bundle.** `RenderEffects::AMBIENT_OCCLUSION` and `ambient_occlusion` select off versus on; `ssao_slices`, `ssao_blur_passes` and `ssao_bent_normals` select the GTAO budget and bent-normal output. The `ssao` versus `gtao` choice is `r_ssao_technique`, which has no key and no preset yet — `docs/backlog.md`'s _What GTAO left owed_.                                                                                                                                                                                     |
 | `shadow_quality`        | `off` \| `low` \| `medium` \| `high`   | **Built as a boolean.** `RenderEffects::SHADOWS` and the `shadows` key are `off` versus everything else; the atlas has no quality rungs.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `shadow_filter`         | `box` \| `disc` \| `pcss`              | **Built 2026-09-09** as an enum key backed by `crcbl_render::shadow::Filter`. An absent or invalid value uses shipped PCSS, and the setting writes `r_shadow_filter` at start-up and live.                                                                                                                                                                                                                                                                                                                                                                                           |

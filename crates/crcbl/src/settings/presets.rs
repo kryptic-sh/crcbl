@@ -167,8 +167,8 @@ impl QualityPreset {
             // "Render scale 1.0 | Volumetric fog on, half-res froxels" — the
             // half-res froxel grid is its own unbuilt rung, so the switch is all
             // this column can say. The AA cell says CMAA2 and CMAA2 is what it
-            // gets: `docs/plan/49-antialiasing.md`'s eighth decision put it and
-            // SMAA 1x in one tier, and the slice that built it retired SMAA in
+            // gets: the antialiasing ladder's eighth decision put it and
+            // SMAA 1x in one tier (`docs/notes/rendering.md`), and the slice that built it retired SMAA in
             // the same change.
             Self::Medium => QualityValues {
                 render_scale: 1.0,

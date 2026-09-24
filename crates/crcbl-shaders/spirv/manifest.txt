@@ -90,7 +90,7 @@ entry-points = computeMain:glcompute
 
 [cmaa2_apply]
 source = shaders/cmaa2_apply.slang
-source-sha256 = d93be426a89670bc0c03787ca9d47a7e1b550656008f0af7f2448513dfbfdd7f
+source-sha256 = 437bee7681640504862b667f550d4986a30a4904ddfd4c0508b28ae3ea83f12d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cmaa2_apply.spv
 spirv-sha256 = 80e16ab62dcd777397f5149d09e2d28ad1e98032ee1cfddd36c55fd7d4d6ebd4
@@ -104,7 +104,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [cmaa2_edges]
 source = shaders/cmaa2_edges.slang
-source-sha256 = 47a2612a16ecac957bd376c4e49bfe776d87597c4361615d052e44452472829c
+source-sha256 = 1fb63efe775412c936ce60b999b76a1f4f6393a736f84008094f1175da9d6491
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cmaa2_edges.spv
 spirv-sha256 = feac32a5c78f96f2133aaa9c38134ab1ce74f386ed6c84cb73019575de151de9
@@ -117,7 +117,7 @@ entry-points = edgesMain:glcompute
 
 [cmaa2_shapes]
 source = shaders/cmaa2_shapes.slang
-source-sha256 = 97cb859f97786b046043b422b7228557484aa3bef6de1db49725c6c21142f6a0
+source-sha256 = 957e62b3b62a8d47d736c5c211d16939bef5f4c131a88250cca4e1f2ae83acc3
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/cmaa2_shapes.spv
 spirv-sha256 = 575e06eb71686529bc605d4c278bf28e4d11b1a8f9724e1a235327a2e5139797
@@ -203,7 +203,7 @@ entry-points = binMain:glcompute, startsMain:glcompute, scatterMain:glcompute, l
 
 [exposure]
 source = shaders/exposure.slang
-source-sha256 = 83599ec41e0562c1cc8014bd50ec39bb00aded4bd0d60e500d3f7965cbe138d1
+source-sha256 = dbbfba9f27d3d94013bd76ce656c933f5a54cadaa202f359de6c971bc5b61d63
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/exposure.spv
 spirv-sha256 = 91805d21af3658476e40240346588a65e053f9c977d864a7ec6d4f8e7d8d797d
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 627eb28666bbb96ecd9a8201561be18a294bb949edafa0741b363267ec3568c3
+source-sha256 = efd2e2e48fcd8b657170218250b640aceaf61c3608e398abf02ee15951c7a01d
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
