@@ -79,14 +79,17 @@ which replaced the fixed stride rather than joining it as a second selectable
 technique — and a comparison demo with one technique in it is `apps/lantern`
 with extra steps.
 
-**The ladder is [47-reflections.md](../47-reflections.md)'s, not
+**The ladder was topic 47's, not
 [18-render-features.md](../18-render-features.md)'s** (corrected 2026-09-06;
-`ROADMAP.md` said 18 and 18 is the index). **The second rung this sample waits
-on is planar reflections**, which is the industry answer for a mirror and for
-water — Unreal's planar reflection actor, HDRP's planar reflection probes — and
-therefore the rung that makes a comparison rather than a second screen-space
-march against the first. Cone tracing is a third rung and the ray-traced path a
-fourth, the latter joining with P7C.
+`ROADMAP.md` said 18 and 18 is the index). Topic 47 was deleted on 2026-09-24
+with the Hi-Z march built: its rules are in
+[rendering notes](../../notes/rendering.md) and the unbuilt rungs in
+`docs/backlog.md` under _The reflection ladder's upper rungs are unbuilt_. **The
+second rung this sample waits on is planar reflections**, which is the industry
+answer for a mirror and for water — Unreal's planar reflection actor, HDRP's
+planar reflection probes — and therefore the rung that makes a comparison rather
+than a second screen-space march against the first. Cone tracing is a third rung
+and the ray-traced path a fourth, the latter joining with P7C.
 
 So this sample lands **after the second rung**, and its first milestone compares
 exactly two techniques. That is deliberate: a two-way comparison is where the

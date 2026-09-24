@@ -536,9 +536,10 @@ pub struct Fog {
     /// Read only by the froxel path, on `sun_scattering`'s terms, and zero is
     /// exactly off for the same reason: the term is added to the scattering
     /// source and a zero adds nothing. A light's glow is evaluated once per
-    /// froxel, at its slice's midpoint, and is not occluded — the shadow tile
-    /// the light's surfaces read is not consulted here yet;
-    /// `docs/plan/51-volumetrics.md` carries both.
+    /// froxel, at its slice's midpoint, and occluded by the light's own shadow
+    /// tiles where its row names them. What the midpoint misses — a small light
+    /// in a long far slice — is in `docs/backlog.md` under _The froxel column
+    /// casts its shaft_.
     pub light_scattering: f32,
     /// How the medium redistributes what it scatters: positive forward, zero
     /// evenly, negative back.

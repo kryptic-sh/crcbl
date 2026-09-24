@@ -49,8 +49,9 @@ decide the shape:
   field takes them from a heightfield the caller supplies until one exists.
 - **Lighting is `mesh.slang`'s, and there is no `#include`.** A grass shader
   that is lit by the clustered lights and the cascades copies that walk, and
-  [51-volumetrics.md](51-volumetrics.md) already guards such a copy letter for
-  letter against its source; grass takes the same guard.
+  `volumetric.slang` already has such a copy guarded letter for letter against
+  its source (the rule is in the [rendering notes](../notes/rendering.md));
+  grass takes the same guard.
 
 ## The decisions
 

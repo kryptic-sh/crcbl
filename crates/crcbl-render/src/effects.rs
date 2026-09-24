@@ -139,7 +139,7 @@ bitflags::bitflags! {
         /// Volumetric fog — the froxel scatter, the column scan that turns it
         /// into a prefix, and the fullscreen composite over the frame.
         ///
-        /// `docs/plan/51-volumetrics.md`'s ladder. **The second bit not in
+        /// The froxel ladder in `docs/notes/rendering.md`. **The second bit not in
         /// [`RenderEffects::DEFAULT_STACK`], and for a reason neither of the
         /// other two has**: this one does not add a term, it *moves* one. The
         /// medium it integrates is the same exponential height fog `mesh.slang`

@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/51-volumetrics.md`'s froxel column: what the air in front of every
+// The froxel column (`docs/notes/rendering.md`): what the air in front of every
 // surface adds to the frame, and what it takes away, computed once per froxel
 // instead of once per pixel.
 //
@@ -9,8 +9,8 @@
 // * `scatterMain` owns **one froxel** and answers two questions about the slab
 //   of air in it — how much radiance it scatters towards the eye, and how much
 //   of what is behind it gets through, with the sun's own contribution shadowed
-//   through the cascade atlas. That is where a punctual light's contribution
-//   goes when rung 2 of topic 51 arrives.
+//   through the cascade atlas, and each punctual light's contribution through
+//   its own shadow tile — rung 2 of the froxel column.
 // * `integrateMain` owns **one screen tile** and walks its column from the eye
 //   outward, turning each slice's own pair into the running pair in front of
 //   it. `volumetric_composite.slang` then reads one froxel per pixel.
@@ -174,9 +174,9 @@ struct GpuLight
     uint kind;
     /// The cosine of a spot's inner half-angle.
     float cos_inner;
-    /// The shadow tile `mesh.slang` occludes this light through. **Unread
-    /// here**: a punctual light reaches every froxel in its radius, occluded by
-    /// nothing — see `docs/plan/51-volumetrics.md`'s rung 2.
+    /// The shadow tile `mesh.slang` occludes this light through, read here
+    /// too: a punctual light's glow in the medium is shadowed by its own tile,
+    /// as rung 2 of the froxel column (`docs/notes/rendering.md`) has it.
     uint shadow_tile;
     /// What this light may contribute. **Unread here**: a fill light is an
     /// ordinary light to a medium, which has no specular lobe to refuse it.
@@ -204,7 +204,7 @@ struct VolumetricParams
     ///
     /// **The same numbers `FrameUniforms::fog_params` carries**, and the
     /// renderer hands them to exactly one of the two paths — see
-    /// `crcbl_render::volumetric`, and `docs/plan/51-volumetrics.md` on why
+    /// `crcbl_render::volumetric`, and `docs/notes/rendering.md` on why
     /// charging both squares the transmittance.
     float4 fog_params;
     /// The radiance the medium scatters towards the eye from every direction
@@ -521,8 +521,8 @@ float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
 }
 
 /// What the punctual lights in froxel `froxel`'s list scatter towards the eye
-/// at `at`, looked at along `view_direction` — `docs/plan/51-volumetrics.md`'s
-/// rung 2.
+/// at `at`, looked at along `view_direction` — the froxel column's rung 2
+/// (`docs/notes/rendering.md`).
 ///
 /// **The list, not the scene.** `cluster_lights` was cut into these froxels by
 /// `light_cluster.slang`, so a slab reads only the lights whose radius reaches
@@ -534,8 +534,8 @@ float spot_cone(float3 to_light, float3 axis, float cos_outer, float cos_inner)
 /// the approximation the sun's visibility already takes, and it has the same
 /// limit: a light whose radius is shorter than the slice it sits in is missed
 /// when the midpoint is outside it, which the far slices' length makes the
-/// ordinary case for a small light far away. Rung 3's jitter along the slice
-/// is what recovers those.
+/// ordinary case for a small light far away. More fixed sample points along
+/// the slice recover those; jitter and history were refused on 2026-08-30.
 ///
 /// Every light shares the medium's anisotropy: the lobe is the air's, not the
 /// light's, and `cos_theta` is the angle between the direction to *this* light
@@ -952,8 +952,8 @@ void scatterMain(uint3 thread: SV_DispatchThreadID)
     // **The slice's midpoint, and one lookup for the whole of it.** A slab of
     // air has no single place the sun does or does not reach it, and the
     // alternative to picking one is marching the segment — which at 24 slices a
-    // column is the shadow cost of a ray march, and is what rung 3's temporal
-    // reprojection buys instead. The midpoint is where the error is smallest for
+    // column is the shadow cost of a ray march; temporal reprojection, which
+    // would buy it instead, was refused. The midpoint is where error is least for
     // a slice that is entirely in or entirely out, which is what almost every
     // slice is: a shaft's edge is one froxel wide either way.
     // The column's own grid position stands in for a pixel coordinate, which is

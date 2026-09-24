@@ -97,18 +97,18 @@ taste:
 rung anywhere move this renderer towards deferred, on the grounds that forward+
 is where the industry is heading and cheaper at the frame: **shading happens in
 the forward pass and nowhere else.** A pass may _write a second attachment
-beside the lit colour_ — the reflectivity target `47-reflections.md` argued in,
-the motion target `43-render-standards.md` §9 built, an albedo or a normal that
-a screen-space GI rung may one day want — because each is a by-product of the
-shading the forward pass already did, read by one named consumer. What no rung
-may do is move the BRDF, the froxel walk or a light's evaluation _out_ of the
-forward pass into a pass that reads attachments: no G-buffer lighting, no
-deferred decals, no visibility-buffer shading (`03-gpu-driven-rendering.md`'s
-"visibility buffer slot" is an occlusion-cull input, not that). The test for a
-proposal is one question — after it lands, does `mesh.slang` still evaluate
-every light that reaches a fragment? — and `43-render-standards.md` §10 lists
-deferred and visibility buffers among what is refused on this section's
-authority.
+beside the lit colour_ — the reflectivity target the SSR row argued in (now in
+the [rendering notes](../notes/rendering.md)), the motion target
+`43-render-standards.md` §9 built, an albedo or a normal that a screen-space GI
+rung may one day want — because each is a by-product of the shading the forward
+pass already did, read by one named consumer. What no rung may do is move the
+BRDF, the froxel walk or a light's evaluation _out_ of the forward pass into a
+pass that reads attachments: no G-buffer lighting, no deferred decals, no
+visibility-buffer shading (`03-gpu-driven-rendering.md`'s "visibility buffer
+slot" is an occlusion-cull input, not that). The test for a proposal is one
+question — after it lands, does `mesh.slang` still evaluate every light that
+reaches a fragment? — and `43-render-standards.md` §10 lists deferred and
+visibility buffers among what is refused on this section's authority.
 
 **And a budget on the attachments the rule allows (2026-08-30)**: the forward
 pass writes at most **16 bytes a pixel** on the software and browser tiers — and
@@ -146,9 +146,9 @@ inputs" — had no content behind it. `mesh.slang` shaded with Lambert plus a
 Blinn-Phong lobe whose exponent and strength were two `static const` floats,
 `SPECULAR_POWER = 32.0` and `SPECULAR_STRENGTH = 0.35`, so there was exactly one
 material in the engine however many rows the table held. That is the state the
-SSR row ([47-reflections.md](47-reflections.md)) cannot be built on:
-screen-space reflections have to know which pixels reflect and how sharply, and
-nothing in the engine could say.
+SSR row (built; its rules are in the [rendering notes](../notes/rendering.md))
+cannot be built on: screen-space reflections have to know which pixels reflect
+and how sharply, and nothing in the engine could say.
 
 So the material row grew `metallic` and `roughness` — glTF's own two, under
 their own names — and the lobe became **one Cook-Torrance GGX lobe** driven by
@@ -196,8 +196,8 @@ Two consequences worth stating before somebody meets them:
   Ambient scales the diffuse albedo, and a conductor's diffuse albedo is zero —
   what a metal owes the room is a reflection, not a scatter. So a fully metallic
   surface out of every light's reach is **black** until it has something to
-  reflect, and the two rows that give it one are exactly SSR
-  ([47-reflections.md](47-reflections.md)) and irradiance probes
+  reflect, and the two rows that give it one are exactly SSR (rules in the
+  [rendering notes](../notes/rendering.md)) and irradiance probes
   ([50-irradiance-probes.md](50-irradiance-probes.md)). The default is clear of
   it — `GpuMaterial::UNTINTED` is `metallic 0.0` — but **scenes are not**:
   `apps/lantern`'s mirror slab and its brass block are both fully metallic, and

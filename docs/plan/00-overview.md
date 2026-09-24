@@ -145,11 +145,11 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 44    | [44-lighting.md](44-lighting.md)                                                       | Lighting: the two paths, the light list, clustered forward, the BRDF       |
 | 45    | [45-shadows.md](45-shadows.md)                                                         | Shadows: cascades, atlas tiles, bias, and the filter quality ladder        |
 | 46    | ✅ 46-ambient-occlusion — done, deleted 2026-09-24; rules in `docs/notes/rendering.md` | Ambient occlusion: SSAO, its depth-weighted blur, and GTAO next            |
-| 47    | [47-reflections.md](47-reflections.md)                                                 | Screen-space reflections: the Hi-Z march, roughness, determinism           |
+| 47    | ◐ 47-reflections — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`  | Screen-space reflections: the Hi-Z march, roughness, determinism           |
 | 48    | [48-post-processing.md](48-post-processing.md)                                         | The post stack: pipeline order, HDR, tonemap, bloom, where toggles live    |
 | 49    | [49-antialiasing.md](49-antialiasing.md)                                               | Antialiasing: FXAA, CMAA2, TAA's blocker, and MSAA repriced                |
 | 50    | [50-irradiance-probes.md](50-irradiance-probes.md)                                     | Irradiance probes: the static L1 grid, the diffuse GI twin                 |
-| 51    | [51-volumetrics.md](51-volumetrics.md)                                                 | Volumetrics: height fog and the froxel column                              |
+| 51    | ◐ 51-volumetrics — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`  | Volumetrics: height fog and the froxel column                              |
 | 52    | ✅ 52-debug-console — done, deleted 2026-09-24; rules in `docs/notes/tooling.md`       | The debug console: variables and commands declared beside the code         |
 | 53    | [53-transparency.md](53-transparency.md)                                               | Blended transparency: the sorted pass, its keys, and what it blocks        |
 | 54    | [54-android.md](54-android.md)                                                         | Android: the shell backend the platform is missing, and its device floor   |

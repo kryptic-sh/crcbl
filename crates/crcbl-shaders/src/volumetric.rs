@@ -187,7 +187,7 @@ pub const FROXEL_STRIDE: usize = 16;
 /// exactly one shader: the alternative is a second copy of each in the
 /// composite, run per pixel, which is the cost the froxel grid exists to avoid.
 ///
-/// It was one `float` — the visibility — until `docs/plan/51-volumetrics.md`'s
+/// It was one `float` — the visibility — until the froxel ladder's
 /// rung 2 put the punctual lights beside it: the same argument, and a lane the
 /// composite would otherwise have had to earn by walking the froxel's list
 /// again.
@@ -1151,8 +1151,8 @@ pub(crate) mod tests {
     /// `volumetric.slang`'s light row, attenuation, cone and list walk are
     /// `mesh.slang`'s.
     ///
-    /// `docs/plan/51-volumetrics.md`'s "the light loop will exist twice, and
-    /// the guard has to say so": the fragment stage and the scatter pass read
+    /// The rule that the light loop exists twice and the guard has to say so
+    /// (`docs/notes/rendering.md`): the fragment stage and the scatter pass read
     /// the same rows out of the same list, and a copy that drifted would put a
     /// light's glow somewhere other than the surface it lights — a cone that
     /// closes at one angle in the air and another on the wall. The struct and

@@ -645,7 +645,7 @@ const GLOW_RELATIVE: f32 = 1e-3;
 
 /// **The glow lanes hold the froxel's list walked at its slice midpoint.**
 ///
-/// `docs/plan/51-volumetrics.md`'s rung 2, checked where it happens: the
+/// The froxel ladder's rung 2 (`docs/notes/rendering.md`), checked where it happens: the
 /// scatter pass sums the punctual lights in a froxel's cluster list — falloff,
 /// cone and phase — at the slab's midpoint, and writes the sum to the buffer
 /// beside the column. The host walks every light in the scene from the same

@@ -5052,8 +5052,8 @@ tables, spelling `sample_transmittance`, `sample_multiscatter`, both phase
 functions and the three density profiles a second time in Slang (each is held to
 the host by a source-text test today), and either the renderer's first 3D
 storage image on four backends (no `.slang` in the tree declares an `RWTexture`;
-`docs/plan/51-volumetrics.md` reserves that first for its rung 3) or a
-32768-entry storage buffer with the trilinear read spelled out.
+the froxel ladder reserves that first for its rung 3, under _Froxel rungs 3 and
+4_ below) or a 32768-entry storage buffer with the trilinear read spelled out.
 
 - **(A) As decided:** the camera froxel volume, as a compute pass `aerial-march`
   writing a storage buffer (not a 3D image, for the filter argument above).
@@ -5752,16 +5752,17 @@ What is left:
   asserting it would be asserting which way a coin landed.
 
 - **Nothing re-takes the lantern frame's own numbers, and they went stale
-  without anything going red.** The 2026-09-02 reading in `47-reflections.md`
-  described a 1.27 ms frame of twenty-three labels; on 2026-09-05 the same
-  adapter draws 2.165 ms over 27, because `rsm`, `rsm-punctual`, `probe-gather`
-  and the `volumetric-*` passes landed in between and now hold 31.5% of it.
-  Every share quoted off that frame moved, and the only thing that noticed was a
-  session that re-ran the binary by hand. A fixture that asserted a _shape_
-  rather than a duration — say, that `ssr` stays under some fraction of the
-  frame — is the shape of the fix; nothing here proposes the threshold, because
-  `43-render-standards.md` refuses to assert durations and this would be one at
-  one remove.
+  without anything going red.** The 2026-09-02 reading the reflections plan
+  quoted (the current figures are in `docs/notes/rendering.md` under _What the
+  deleted 47-reflections plan left behind_) described a 1.27 ms frame of
+  twenty-three labels; on 2026-09-05 the same adapter draws 2.165 ms over 27,
+  because `rsm`, `rsm-punctual`, `probe-gather` and the `volumetric-*` passes
+  landed in between and now hold 31.5% of it. Every share quoted off that frame
+  moved, and the only thing that noticed was a session that re-ran the binary by
+  hand. A fixture that asserted a _shape_ rather than a duration — say, that
+  `ssr` stays under some fraction of the frame — is the shape of the fix;
+  nothing here proposes the threshold, because `43-render-standards.md` refuses
+  to assert durations and this would be one at one remove.
 
 ## Probe visibility: what the slice did not do (2026-09-02)
 
@@ -5899,14 +5900,15 @@ behind_. What it did not do:
 direction (`.gb`) plus cone angle (`.a`) and adds GTSO (Jimenez et al. 2016,
 "Practical Real-Time Strategies for Accurate Indirect Occlusion"), which is what
 Unreal and Unity HDRP ship; the tier split is `[engine.video] ssao_bent_normals`
-with low off, the format staying one so low pays bandwidth only. It retires
-`docs/plan/47-reflections.md`'s refusal of specular occlusion once built. **The
-tier key is built** — `crcbl::settings`' `SSAO_BENT_NORMALS_KEY`, which
-`crcbl::settings::presets` writes `false` for Low and `true` for Medium and
-High. **The channel change and the GTSO term are still owed**: checked
-2026-09-24, neither `ssao.slang` nor `mesh.slang` carries a cone angle, an
-octahedral direction or a GTSO term, and the target is still the three-channel
-`xyz * 0.5 + 0.5` direction beside the visibility scalar.
+with low off, the format staying one so low pays bandwidth only. It retires the
+SSR row's refusal of specular occlusion (`docs/notes/rendering.md`, _What the
+deleted 47-reflections plan left behind_) once built. **The tier key is built**
+— `crcbl::settings`' `SSAO_BENT_NORMALS_KEY`, which `crcbl::settings::presets`
+writes `false` for Low and `true` for Medium and High. **The channel change and
+the GTSO term are still owed**: checked 2026-09-24, neither `ssao.slang` nor
+`mesh.slang` carries a cone angle, an octahedral direction or a GTSO term, and
+the target is still the three-channel `xyz * 0.5 + 0.5` direction beside the
+visibility scalar.
 
 - **The widening's own bandwidth cost is unmeasured, and the switch cannot
   measure it.** Both arms of `r_ssao_bent_normals` write `Rgba8Unorm`, so the
@@ -6619,7 +6621,10 @@ and multi-scatter compensation — and `docs/plan/43-render-standards.md`'s
 delivery table is the record of which. `apps/options` is sample 20,
 `apps/sundial` sample 18 and `apps/alcove` sample 19;
 `docs/plan/sample/17-mirrors.md` is planned, not built. What follows is what the
-plans could not settle.
+plans could not settle. The reflections and volumetrics plans were deleted on
+2026-09-24 with their built parts done; what they left is under _The reflection
+ladder's upper rungs are unbuilt_ and the entries after it, and under _The
+froxel column casts its shaft_ and the two entries after it.
 
 ### What the LTC area-light rung left (2026-08-31)
 
@@ -7341,15 +7346,19 @@ were scratch and are not in the tree.
 
 ### The froxel column casts its shaft (2026-08-28)
 
-Rungs 1 and 2 of `docs/plan/51-volumetrics.md` are closed:
+Rungs 1 and 2 of the volumetrics ladder are closed (the plan was deleted
+2026-09-24; its rules and rung numbering are in `docs/notes/rendering.md` under
+_What the deleted 51-volumetrics plan left behind_):
 `crcbl_render::volumetric`'s three passes are switched by
 `RenderEffects::VOLUMETRIC_FOG`, proved against the closed form on radv, the sun
 scatters into them through a Henyey-Greenstein lobe, the cascades occlude it per
 froxel, and since 2026-08-29 every point and spot light in a froxel's cluster
 list glows in it, scaled by `Fog::light_scattering` and occluded by the light's
-own shadow tiles where its row names them. Rungs 3 and 4 — a 3D target with
-temporal reprojection, a density field — are argued there and neither is
-scheduled.
+own shadow tiles where its row names them. Rungs 3 and 4 — a filtered 3D target
+on a coarser grid, and a density field — are unscheduled, and designed under
+_Froxel rungs 3 and 4_ below. **Neither uses temporal reprojection**: it was
+refused on 2026-08-30, because a history buffer makes a frame a function of how
+many frames preceded it.
 
 These belong here rather than there, because they are gaps rather than plans:
 
@@ -7357,11 +7366,17 @@ These belong here rather than there, because they are gaps rather than plans:
   evaluated once per froxel, where the sun's visibility is, and the froxel's
   slice is long at the far end of the exponential split: a light whose radius is
   shorter than its slice contributes nothing when the midpoint is outside it,
-  though the clustering pass listed it. Rung 3's jitter along the slice — and
-  the history it is reprojected against — is what the plan names as the fix;
-  `column_lights` in `crates/crcbl/tests/mesh_e2e/froxels.rs` keeps both fixture
-  lights in the near half for exactly this reason. Not measured: how far out a
-  lamp of a given radius starts to flicker between slices as the camera moves.
+  though the clustering pass listed it. The plan named "rung 3's jitter along
+  the slice" as the fix, but with temporal reprojection refused a jitter has no
+  history to converge against; the fix that survives the refusal is rung 3's
+  sample count — several fixed, deterministic points along the slice rather than
+  the midpoint alone, priced as a quality tier. (`volumetric.slang`'s
+  `volumetric_punctual` doc and the midpoint comment in `scatterMain` still say
+  "jitter" and "temporal reprojection"; both are shader comments and need the
+  same correction when that file is next touched.) `column_lights` in
+  `crates/crcbl/tests/mesh_e2e/froxels.rs` keeps both fixture lights in the near
+  half for exactly this reason. Not measured: how far out a lamp of a given
+  radius starts to flicker between slices as the camera moves.
 
 - **`apps/lantern`'s air keeps `light_scattering` at zero.** The room has lamps
   and the `AIR` medium that
@@ -7399,8 +7414,9 @@ These belong here rather than there, because they are gaps rather than plans:
 - **The composite is before the reflection resolve, so a reflection arrives
   unfogged.** The same ordering gap `mesh.slang`'s closed form has, recorded
   further down this file, and the froxel path inherited it deliberately: it sits
-  where the analytic fog sat so the two paths are comparable. `51-volumetrics`
-  argues both should move after `ssr_blur.slang` together.
+  where the analytic fog sat so the two paths are comparable. The volumetrics
+  plan argued both should move after `ssr_blur.slang` together, and that the
+  reflection resolve is where the height fog should eventually live as well.
 
   **Blocked on a fixture, not on the change.** Moving the composite is a small
   edit in `ForwardRenderer::add_frame_passes`, and no golden in the tree would
@@ -7450,6 +7466,96 @@ These belong here rather than there, because they are gaps rather than plans:
   `the_composite_scatters_its_partial_slice_through_the_froxel_s_lighting`
   remains a text guard worth exactly what it says: the read is written down, not
   that it is right.
+
+### The two-media rule has no frame-level test (2026-09-24)
+
+The volumetrics plan's rule is that when the froxel column is present it owns
+the transmittance and `mesh.slang`'s height fog is off for that frame; charging
+both darkens the frame by the square of what the medium does. It is enforced in
+`ForwardRenderer`'s frame-block upload
+(`crates/crcbl-render/src/forward/view.rs`), which writes a zero `fog_params`
+density on a frame whose effects contain `RenderEffects::VOLUMETRIC_FOG` — see
+`crcbl_render::volumetric`'s module doc, _The medium is charged exactly once_.
+
+**The check the plan listed is not built** (verified 2026-09-24 by listing the
+test functions in `crates/crcbl/tests/mesh_e2e/hdr.rs` and
+`crates/crcbl/tests/mesh_e2e/froxels.rs`): "switching volumetrics on does not
+darken an unlit frame" — a scene with **no lights** and the same fog rows,
+rendered once per path, demanding the same frame. Unlit matters: with no sun and
+no lamps the column's source is the environment term alone, so the two frames
+are algebraically equal, and a doubled transmittance reads directly as a darker
+frame rather than hiding under the lit cube's shading.
+
+**What probably covers it already, unverified:**
+`the_froxel_volume_integrates_the_same_medium_the_closed_form_does` compares the
+two paths' transmittance on the lit cube at a density where the closed form
+leaves under 0.9, so charging the air twice should push the gap far past
+`FROXEL_TRACKS`. That is reasoning from the test's code; nobody has removed the
+zeroing and watched it redden.
+
+**What it would take:** one `#[ignore]`d GPU test in `hdr.rs` beside the other
+froxel tests, built on `fogged_cube_hdr_via` with the fixture's lights removed,
+comparing the two paths texel by texel on the background and the cube. Show it
+red by making the `fog_params` density ignore `VOLUMETRIC_FOG`, and run the
+closed-form test under the same sabotage to settle the paragraph above. Blocks
+nothing.
+
+### Froxel rungs 3 and 4: a filtered 3D target and a density field (2026-09-24)
+
+Unscheduled, and designed rather than planned; the rules they must respect are
+in `docs/notes/rendering.md` under _What the deleted 51-volumetrics plan left
+behind_.
+
+**Rung 3 — a 3D target, a coarser grid and a depth-aware lookup.** What it buys:
+the filtered lookup the storage-buffer design gave up (today the composite reads
+the nearest froxel, so a slow pan across a shaft steps rather than slides, and
+`volumetric_composite.slang`'s header names the tile-sized steps where the
+medium is thick), and a scattering grid decoupled from the clustering grid —
+about an eighth of the frame across — with the sample count along a slice as a
+quality tier. The sample count is also the fix for the small far light missed at
+the slice midpoint (the bullet in _The froxel column casts its shaft_). What it
+costs:
+
+- **A volume in the transient pool.** `crcbl_render::transient`'s
+  `TransientImageDesc` has no depth field and `TransientPool::image` hard-codes
+  `ImageType::D2` and `ImageViewType::D2` (re-verified 2026-09-24). Widening it
+  touches every literal that builds a description, and it is the engine's first
+  3D image on four backends — Vulkan, D3D12, Metal and WebGPU — so it needs a
+  real draw on each, not only the three cross-target clippy runs, which is how a
+  read-only depth attachment once reached `crcbl-dx12` as a refusal.
+  `docs/plan/48-post-processing.md`'s colour-grading LUT is the other 3D-image
+  customer; it is uploaded, not transient, and does not wait on this.
+- **A depth-aware upsample in the composite.** There is no shared pass to reuse:
+  `crates/crcbl-shaders/shaders/ssao_upsample.slang` is AO-specific — an
+  `Rgba8Unorm` target with one occlusion channel and a bent direction, its own
+  `RESOLUTION_DIVISOR`, and `1.0` where nothing drew. A froxel lookup shares
+  neither the layout nor that fallback, so this rung generalises that pass or
+  writes a second one (`docs/notes/rendering.md`, _The depth-aware upsample has
+  one reader, not three_).
+- **No temporal reprojection, and no per-frame jitter.** The industry's answer
+  to a coarse froxel grid is history; it was refused on 2026-08-30 because every
+  golden in the tree is built on a frame being a function of its own inputs.
+  Samples along the slice are fixed and deterministic.
+- **Ordering:** the 3D target comes first (the transient-pool widening, proved
+  on all four backends by a trivial pass), then the coarser grid with the
+  scatter writing it, then the upsample.
+- **Tests it owes:** the existing froxel suite must survive unchanged at the
+  sample count that reproduces today's midpoint (the closed-form comparison, the
+  zero-density identity, the density-squared law, the host scan in
+  `froxels.rs`); a new check that a pan across a shaft changes the frame
+  continuously rather than in tile steps; and a far small lamp that the midpoint
+  misses and the higher tier catches. `FROXEL_TRACKS`, the tolerance the
+  closed-form test allows for tile-centre rays, is the number this rung should
+  shrink.
+
+**Rung 4 — a density field rather than a constant medium.** Fog banks, ground
+mist, a medium that is somewhere rather than everywhere. The rendering half is a
+per-froxel density read in `scatterMain` in place of the exponential height
+profile; the open half is the field's **source**, which is a content question
+(authored volumes, a noise field, or a simulation) nobody has answered.
+`docs/plan/55-water.md` wants it for underwater light shafts (a water medium in
+the froxel volume while the camera is submerged). Depends on nothing in rung 3,
+but a field finer than the froxel grid is only visible once the lookup filters.
 
 ### DECIDED — the vertex and material strides widen once, into the compact split-stream layout (2026-08-30)
 
@@ -7653,6 +7759,153 @@ Not urgent: the error is bounded by how much the reflection contributes, and
 `RenderEffects::REFLECTIONS` is off in every frame that measures the fog law
 (`crates/crcbl/tests/mesh_e2e/hdr.rs` says why in writing).
 
+### The reflection ladder's upper rungs are unbuilt (2026-09-24)
+
+The reflections plan was deleted on 2026-09-24 with its screen-space row built:
+the Hi-Z march (`ssr.slang` over `crcbl_render::hiz`), the blur that is the
+composite (`ssr_blur.slang`), and the probe and prefiltered-sky miss fallback,
+all in `crcbl_render::ssr`. Its rules are in `docs/notes/rendering.md` under
+_What the deleted 47-reflections plan left behind_. The ladder above it:
+
+1. **The Hi-Z march** — built.
+2. **Planar reflections** — the next entry.
+3. **Cone tracing over a colour mip chain** — the entry after it.
+4. **Ray-traced reflections**, at P7C behind `LightingPath` — _Ray-traced
+   lighting (P7C) is not built_ below; nothing of it exists.
+
+Temporal accumulation sits beside the ladder rather than on it (_Temporal SSR is
+unbuilt_). The order matters to `docs/plan/sample/17-mirrors.md`, which compares
+rung 1 against rung 2 in its first milestone and cannot start before rung 2
+exists; its second milestone is the roughness row and rung 3, its third rung 4.
+The software browser tier's SSR price is also still unmeasured — see _The SSR
+visibility weight costs the software tier 11% of a frame_.
+
+Verified 2026-09-24: no planar, oblique-projection, cone-trace, colour-pyramid
+or temporal code in `crcbl-render` or `crcbl-shaders`; `Projection` has only
+`Perspective` and `Orthographic`.
+
+### Planar reflections, the reflection ladder's rung 2, are unbuilt (2026-09-24)
+
+**The design.** A second scene draw through the camera reflected in the plane,
+into a render-to-texture view, sampled by the reflecting surface. It gives an
+exact mirror with no march, and it is per plane — a second geometry pass per
+mirror, useless on anything curved — which is why it was refused **as the SSR
+row** and kept as its own rung: it is what the industry ships for a mirror and
+for flat water (Unreal's planar reflection actor, HDRP's planar reflection
+probes; Unreal's documentation budgets up to half a frame for it).
+
+**What it needs:**
+
+- **A reflected, oblique-clipped projection.** `crcbl_render::Projection` has
+  only `Perspective` (infinite-far reversed-Z) and `Orthographic`. The reflected
+  view needs Lengyel's oblique near-plane clip so geometry behind the mirror
+  plane is cut, **re-derived for infinite reversed-Z** (the published derivation
+  is OpenGL's), and the reflected winding flipped for culling. WebGPU's
+  `clip-distances` is optional, so the oblique matrix is the portable form.
+- **A second camera over the same scene.** `ForwardRenderer::create_view`
+  already draws one (`crates/crcbl-render/src/forward/view.rs`); a view costs
+  its own cull, frame blocks and clustering, and reads the scene's geometry,
+  shadow atlas and probes where they are.
+- **A consumer**: the mirror's material reads the view's colour at its own
+  screen position. Capped at one plane per frame, per the water plan.
+- **Transparency interaction**: on an opaque plane it is a floor; on a blended
+  one it is water (`docs/plan/53-transparency.md`).
+
+**Clients:** `docs/plan/sample/17-mirrors.md` (milestone 1: Hi-Z against planar,
+split screen, per-technique timer — `crcbl_render::split` already exists) and
+`docs/plan/55-water.md`'s reflection rung 3 (flat bounded bodies only).
+`apps/tide` lists planar reflection as its unbuilt milestone 6.
+
+**Tests it owes:** a golden per rung in the mirrors sample, a reflected object
+placed where a scripted camera move takes it off screen (the screen-space
+boundary the comparison exists to show), and a check that geometry behind the
+plane never appears in the reflection (the oblique clip). Whether planar goldens
+hold under `Tolerance::RASTERISER` across CI's legs is unmeasured; it is a
+rasterised camera rather than a march, so it should — a guess.
+
+### Cone-traced SSR over a colour pyramid, rung 3, is unbuilt (2026-09-24)
+
+The SSR quality rung is the Hi-Z march plus a cone trace over a colour mip chain
+for rough lobes. The Hi-Z half landed 2026-08-27. `ssr_blur.slang` still
+approximates roughness with a depth- and roughness-weighted blur, and both
+`ssr.slang`'s and `ssr_blur.slang`'s headers say cone tracing is the better
+technique. The upgrade is contained to the blur pass.
+
+**The two costs it was refused on:** building a colour pyramid of an
+`Rgba16Float` target, and a `SampleLevel` at a computed LOD — a filtered read
+whose level four rasterisers select with their own arithmetic, the thing the AO
+pair's determinism design avoided. The second is untouched and is the harder
+half.
+
+**The first is not as cheap as the plan hoped, checked 2026-09-24.** The plan
+flagged `crcbl_render::bloom`'s downsample chain as a pyramid that might be
+borrowed. Two facts in the tree stand against borrowing it as it is: the chain
+is **N separate single-mip images**, not one image with mips (the graph cannot
+attach a mip, and WebGPU needs single-level attachment views — `bloom.rs`'s
+module doc), so a computed-LOD `SampleLevel` cannot address it; and the bloom
+passes are recorded **after** the SSR composite in `ForwardRenderer`'s
+`add_passes`, so this frame's chain does not exist when the march runs, and last
+frame's would be history, which is refused. Its format (`Rgba16Float`) and
+extents (`MAX_MIPS`, `MIN_MIP_EXTENT`) are compatible, and it is built only when
+`RenderEffects::BLOOM` is on, which `RenderEffects::DEFAULT_STACK` leaves out.
+So either the SSR pair builds its own pyramid of the pre-reflection scene
+colour, or bloom's chain moves ahead of the march — which changes what bloom
+blurs.
+
+**Tests it owes:** the reflection goldens must absorb the pyramid through
+structural ratios, never a per-driver re-bless (the SSR determinism rule in the
+notes); the mirrors sample's roughness row is where it has to be visibly better
+than the blur. The blur's own roughness weight is still unmeasured (_The
+roughness weight is unmeasured_, under _Screen-space reflections: the slice
+plan_).
+
+### Temporal SSR is unbuilt, and waits on TAA's history decision (2026-09-24)
+
+Temporal accumulation of the reflection is blocked on its own work only: the
+motion vectors it would read landed 2026-08-30 (`TransientImageDesc::motion`,
+`DebugView::Motion`, skinned motion through
+`GpuInstance::previous_base_vertex`), with the convention — texture-coordinate
+space, current minus previous, `+y` down — written in
+`docs/plan/49-antialiasing.md`. What it needs is a history target, and a history
+makes a golden a function of how many frames were drawn before it, which the SSR
+row refuses. `docs/plan/49-antialiasing.md`'s TAA has the same blocker and
+neither has an additive-zero form, so **decide once, for TAA and temporal SSR
+together, which goldens carry a history and how many warm-up frames they draw**.
+Temporal SSR is then a history target, a reprojection at `uv - motion`,
+neighbourhood clamping and a disocclusion reject. Verified 2026-09-24: no TAA or
+history module in `crcbl-render`.
+
+### Considered and declined for reflections (2026-09-24)
+
+From the deleted reflections plan, with the reasons; the rules they protect are
+in `docs/notes/rendering.md` under _What the deleted 47-reflections plan left
+behind_.
+
+- **Runtime reflection captures** (parallax-corrected cubemaps re-rendered on
+  demand), declined 2026-08-30: six views per capture whenever a light moves, a
+  proxy volume in the scene format, and a second environment path. The probe
+  volume's directional environment covers the low frequencies on every tier and
+  the RT rung covers the rest. Revisit only if a demo shows a glossy interior
+  where neither is enough.
+- **Packing `F0` into the scene target's alpha**: one channel cannot carry a
+  coloured `F0` and a roughness, and transparency will want that channel.
+- **A material-id channel with the pass reading the table**: exactly wrong for
+  textured materials, because a metal's base colour — row times vertex colour
+  times page texel — is its `F0`.
+- **A G-buffer**: the reflectivity attachment moves no shading; it gains a field
+  only when a pass reads it.
+- **Half-resolution SSR**, by measurement: `ssr` was 6.3% of a lantern frame at
+  960×720 on radv (2026-09-05) against `shadow` at 15.6% and `forward` at 18.1%,
+  so halving the march returns about three and a half per cent of a frame and
+  would spend a depth-aware upsample on a colour channel.
+- **Specular occlusion from the AO scalar**: a highlight and a reflection do not
+  take the ambient's factor. Superseded by the GTSO decision in _What the
+  bent-normal slice left owed_, which retires this refusal once built.
+- **SSR on transparency**: a blended surface writing the reflectivity attachment
+  overwrites the opaque `F0` behind it.
+- **Jitter and binary-search refinement in the march**: see the determinism rule
+  in the notes.
+
 ### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
 
 That topic was split into one document per technique — `44-lighting.md` through
@@ -7701,8 +7954,9 @@ transparent pass, and therefore no depth sort" below.
 `crcbl_shaders::mesh::GpuInstance` was the one row here that was a decision
 rather than a design, and it has landed: `GpuInstance::previous_transform`, at a
 stride of 160. Two rows this entry named have since been argued as well — the
-froxel pass is `docs/plan/51-volumetrics.md`, and specular IBL is
-`44-lighting.md`'s rung 3, whose `DFG` half `crcbl_shaders::dfg` already cooks.
+froxel pass is built (`crcbl_render::volumetric`; see _The froxel column casts
+its shaft_), and specular IBL is `44-lighting.md`'s rung 3, whose `DFG` half
+`crcbl_shaders::dfg` already cooks.
 
 ### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
 

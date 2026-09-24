@@ -80,17 +80,19 @@ than as a reason:
 
 - **Every measured figure in all three docs was taken on trust.**
   `43-render-standards.md`'s normal-map cost, its row (a) and row (e) timings
-  and the LTC speed-ups; `51-volumetrics.md`'s transmittance comparison, its
-  froxel counts and its sample fractions; the debug console plan's decision-10
-  cost claims (now in `docs/notes/tooling.md`, and still unmeasured).
-  Re-checking any of them means running the GPU harnesses, which the audit was
-  told not to do because another agent held the GPU. This is the same shape of
-  drift that produced the AO table's four wrong integers: a figure carried
-  across a change to the pass it measures.
+  and the LTC speed-ups; the volumetrics plan's transmittance comparison, its
+  froxel counts and its sample fractions (the plan is deleted; those figures
+  live on in the doc comments of `crates/crcbl/tests/mesh_e2e/hdr.rs` and
+  `crates/crcbl/tests/mesh_e2e/froxels.rs`); the debug console plan's
+  decision-10 cost claims (now in `docs/notes/tooling.md`, and still
+  unmeasured). Re-checking any of them means running the GPU harnesses, which
+  the audit was told not to do because another agent held the GPU. This is the
+  same shape of drift that produced the AO table's four wrong integers: a figure
+  carried across a change to the pass it measures.
 - **The golden re-bless claims in `43-render-standards.md` §2 rung 2** — the
   five named goldens, `room` moving 360 pixels by at most thirteen, `live`
   moving past tolerance — are unverified.
-- **`51-volumetrics.md`'s rungs were checked by symbol and test _name_, not by
+- **The volumetrics plan's rungs were checked by symbol and test _name_, not by
   behaviour.** The host-side arithmetic was read; that each pass does what the
   prose says it does was not.
 - **The comparand claims cannot be checked from this tree at all** — "Unity HDRP

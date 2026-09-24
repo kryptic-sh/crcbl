@@ -20,7 +20,7 @@
 //! # What the guards hold
 //!
 //! There is no `#include` in this tree, so both shaders carry copies.
-//! `docs/plan/51-volumetrics.md`'s arrangement is what they are held under:
+//! The froxel column's arrangement (`docs/notes/rendering.md`) is what they are held under:
 //!
 //! * [`tests::the_wind_sampler_is_the_field_s`] — `grass_gen.slang` against
 //!   `wind.slang`, body for body, so the field a blade leans in is the field

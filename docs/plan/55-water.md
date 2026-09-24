@@ -52,10 +52,11 @@ it names are still missing what it says:
   (`crates/crcbl-shaders/shaders/ssr.slang`) with a probe and sky fallback, and
   it rebuilds the normal from depth (`normal_at`), so a normal-mapped ripple on
   a flat plane would reflect as a perfect mirror. Planar reflections are the
-  ladder's unbuilt second rung ([47-reflections.md](47-reflections.md)).
-  `ForwardRenderer::create_view` can draw a second camera over the same scene,
-  but `Projection` offers only `Perspective` and `Orthographic`, so no reflected
-  or oblique-clipped matrix reaches it.
+  ladder's unbuilt second rung (`docs/backlog.md`, _Planar reflections, the
+  reflection ladder's rung 2, are unbuilt_). `ForwardRenderer::create_view` can
+  draw a second camera over the same scene, but `Projection` offers only
+  `Perspective` and `Orthographic`, so no reflected or oblique-clipped matrix
+  reaches it.
 - **Particles are CPU-simulated opaque meshes** (`crcbl-vfx`), so there is no
   spray, mist or soft splash.
 - **Physics has drag and triggers, not buoyancy.**
@@ -302,8 +303,8 @@ planar. The ladder here is the same:
    pyramid along the reflection of **its own** normal, so ripples reflect as
    ripples. Single-frame, no temporal accumulation.
 3. **Planar**, for a flat bounded body only (a pool, a still lake), capped at
-   one plane per frame. It is [47-reflections.md](47-reflections.md)'s planar
-   rung, and water is its second client beside the mirror
+   one plane per frame. It is the reflection ladder's planar rung (in
+   `docs/backlog.md`), and water is its second client beside the mirror
    ([sample/17-mirrors.md](sample/17-mirrors.md)). It needs `Projection` to
    accept a reflected view with Lengyel's oblique near-plane clip, re-derived
    for this engine's infinite reversed-Z (the published derivation is OpenGL's),
@@ -487,9 +488,9 @@ have, and is refused.
 - **The medium**: a full-screen composite applying per-channel extinction by
   distance through the water, the sun's transmittance by depth below the
   surface, and caustics. Light shafts under the surface come from the froxel
-  volume with a water medium where the camera is submerged
-  ([51-volumetrics.md](51-volumetrics.md)'s density-field rung), or from a
-  radial post pass, which is multiplies only.
+  volume with a water medium where the camera is submerged (the froxel ladder's
+  density-field rung in `docs/backlog.md`), or from a radial post pass, which is
+  multiplies only.
 - **The meniscus**: the mask sampled a few pixels along the horizon normal,
   darkening where the classification changes.
 - **The underside**: refract with a relative index of 1.333; past the critical
@@ -539,10 +540,10 @@ rung runs on the WebGPU backend and publishes in the fixture's browser demo.
 **Gated elsewhere and recorded, not planned here**: mist, spray and splash
 particles ([53-transparency.md](53-transparency.md),
 [20-particles.md](20-particles.md)); wet surfaces and rain ripples (a material
-wetness hook); underwater light shafts through the froxel volume
-([51-volumetrics.md](51-volumetrics.md)'s density field); surf, river and
-waterfall audio along a line or area ([13-audio.md](13-audio.md)); a GPU ripple
-cascade; breaking-wave deformation.
+wetness hook); underwater light shafts through the froxel volume (the froxel
+ladder's density field, in `docs/backlog.md`); surf, river and waterfall audio
+along a line or area ([13-audio.md](13-audio.md)); a GPU ripple cascade;
+breaking-wave deformation.
 
 **Refused, with the reason**: foam and ripple feedback buffers read across
 frames (the no-history rule — decision 10 replaces them); GPU readback for

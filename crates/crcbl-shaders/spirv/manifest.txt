@@ -232,7 +232,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 0838e68b84e49a8b1c47c4745e34aedd4966cca0c4d3eb77b44113a327e15433
+source-sha256 = 55e1c389385bdca5be34e701c84a7e576182381c48a03f2882c1b0c81bfb47d0
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
 spirv-sha256 = b4e42d109d885c12e4c19af7a1612dba9d0f79f26f6c1eb6af57e62baa480011
@@ -625,7 +625,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]
 source = shaders/volumetric.slang
-source-sha256 = f3eba8926b00cd3546e94c9c83489136a270186235600914d1935388b5526fb0
+source-sha256 = 7a3883dabbec4c223146e460e4125856cf9f075a18e2add7fdf54b352742825a
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric.spv
 spirv-sha256 = cdb1742b68346160688b86c511c0779c781664188ee1dd3e2753b72829a633ba
@@ -639,7 +639,7 @@ entry-points = scatterMain:glcompute, integrateMain:glcompute
 
 [volumetric_composite]
 source = shaders/volumetric_composite.slang
-source-sha256 = 58ae3c02af5f3550bd58497571e2d40f362d59b5fe251dbc672d217ef4794c8a
+source-sha256 = 820f6ac768fda830d58196ac0e2fdfc9c9f76cf2fa8b7c3a9230fbc470c34909
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric_composite.spv
 spirv-sha256 = 1aa3d2c9386eda6ce01fa4cddfc7ac119d01aceb4e3766e47b25cb639021e57d

@@ -715,7 +715,7 @@ pub(super) struct View {
     /// `docs/plan/18-render-features.md`'s reflection march — see
     /// [`crate::ssr`].
     pub(super) ssr: Ssr,
-    /// `docs/plan/51-volumetrics.md`'s froxel volume and its composite — see
+    /// The froxel volume and its composite — see
     /// [`crate::volumetric`].
     pub(super) volumetric: Volumetric,
     /// `docs/plan/43-render-standards.md` §6's auto-exposure — see
@@ -2563,7 +2563,7 @@ impl View {
             self.sky_pass.lut(frame),
         );
 
-        // `docs/plan/51-volumetrics.md`'s froxel volume, and it composites over
+        // The froxel volume, and it composites over
         // the sky as well as over the geometry — a pixel at the far plane is a
         // whole column of air, which is exactly what makes a distant horizon
         // read as distant.

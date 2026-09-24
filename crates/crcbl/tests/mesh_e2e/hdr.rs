@@ -421,7 +421,7 @@ fn fogged_cube_hdr(fog: Fog) -> HdrTarget {
 /// `froxels` names.
 ///
 /// `false` is `mesh.slang`'s closed form, which every fog test above measures.
-/// `true` is `docs/plan/51-volumetrics.md`'s froxel volume: three passes, and
+/// `true` is `crcbl_render::volumetric`'s froxel volume: three passes, and
 /// the fragment stage's own density zeroed so the air is charged once. The two
 /// are the same medium along the same rays, which is what makes one frame
 /// evidence about the other.
@@ -732,7 +732,7 @@ fn the_froxel_volume_is_exactly_the_identity_at_zero_density() {
 
 /// **The froxel volume integrates the same medium the closed form does.**
 ///
-/// Rung 1a of `docs/plan/51-volumetrics.md` has no light loop in it, so the
+/// Rung 1a of the froxel ladder (`docs/notes/rendering.md`) has no light loop in it, so the
 /// column it integrates is algebraically the exponential `mesh.slang`
 /// composites: a single-scattering albedo of one against an isotropic
 /// environment. The two frames therefore have to agree — and this is the only
@@ -745,8 +745,8 @@ fn the_froxel_volume_is_exactly_the_identity_at_zero_density() {
 /// a pixel elsewhere in the tile looks along a slightly longer or shorter one.
 /// At this fixture's extent the grid is four tiles by three, which is about as
 /// coarse as it ever gets — [`FROXEL_TRACKS`] is what that measures out to, and
-/// it is measured rather than chosen. Rung 3's reprojection is what shrinks it;
-/// see topic 51.
+/// it is measured rather than chosen. Rung 3's filtered lookup is what shrinks
+/// it; see `docs/backlog.md`'s _Froxel rungs 3 and 4_.
 ///
 /// The relation is checked on the *transmittance* rather than on the radiance,
 /// for `doubling_the_fog_density_squares_the_transmittance`'s reason: green is
@@ -1001,7 +1001,7 @@ const LAMP_GLOW_FLOOR: f32 = 0.02;
 
 /// **A lamp in the medium glows, and only where the lamp is.**
 ///
-/// `docs/plan/51-volumetrics.md`'s rung 2 seen from the frame: the same scene
+/// The froxel ladder's rung 2 seen from the frame: the same scene
 /// with the medium's punctual coefficient at zero and at a value, so the only
 /// difference between the two frames is whether the froxel column reads the
 /// froxel's light list. Three claims, and each rules out a different way of
@@ -1228,7 +1228,7 @@ fn shafted_hdr(fog: Fog, shadows: bool) -> HdrTarget {
 /// **The medium behind an occluder goes dark, and only the sun goes with it.**
 ///
 /// The observable that separates a real shaft from a uniform glow, and the one
-/// `docs/plan/51-volumetrics.md` names as rung 1b-ii's: the same scene, the same
+/// the froxel ladder (`docs/notes/rendering.md`) names as rung 1b-ii's: the same scene, the same
 /// medium and the same sun, drawn once with the cascades on and once with them
 /// off, so the **only** difference between the two frames is whether a froxel
 /// is allowed to see what is standing in front of it.

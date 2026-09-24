@@ -2451,7 +2451,7 @@ struct Rollback {
     /// `docs/plan/18-render-features.md`'s reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
-    /// `docs/plan/51-volumetrics.md`'s froxel volume, which owns three
+    /// The froxel volume, which owns three
     /// pipelines, two layouts and two rings of buffers.
     volumetric: Option<Volumetric>,
     /// `docs/plan/43-render-standards.md` §6's auto-exposure, which owns three
@@ -10375,7 +10375,7 @@ impl ForwardRenderer {
         self.primary.auto_exposure.buffers(frame)
     }
 
-    /// `frame`'s froxel column: the buffers `docs/plan/51-volumetrics.md`'s
+    /// `frame`'s froxel column: the buffers the froxel volume's
     /// three passes write, and the block they read.
     ///
     /// What `crcbl`'s `mesh_e2e` copies back to check the column froxel by

@@ -96,12 +96,13 @@ depth partition is what keeps all three reading what they were written against.
 
 The blended pass is recorded after both, which settles two interactions at once.
 
-- **SSR.** [47-reflections.md](47-reflections.md) refuses SSR on transparency
-  with its reason — a transparent surface writing the reflectivity attachment
-  overwrites the opaque `F0` behind it while the scene colour there is a blend —
-  and Unreal makes SSR on translucency a separate opt-in for the same reason.
-  Running after `ssr` means a blended surface is neither an SSR source nor an
-  SSR receiver, and the write mask below is what enforces the first half.
+- **SSR.** The SSR row ([rendering notes](../notes/rendering.md)) refuses SSR on
+  transparency with its reason — a transparent surface writing the reflectivity
+  attachment overwrites the opaque `F0` behind it while the scene colour there
+  is a blend — and Unreal makes SSR on translucency a separate opt-in for the
+  same reason. Running after `ssr` means a blended surface is neither an SSR
+  source nor an SSR receiver, and the write mask below is what enforces the
+  first half.
 - **Volumetric fog.** `volumetric-composite` applies the froxel volume to the
   opaque frame. A blended surface drawn afterwards would be un-fogged, floating
   in front of air that everything else is behind. So the **blended fragment
@@ -289,9 +290,10 @@ Four things wait on a blended pass:
   not.
 - **[20-particles.md](20-particles.md)'s blended particle buckets**, which need
   the same sorted-slot machinery and can take it rather than grow a second one.
-- **The mirrors sample's water**, once [47-reflections.md](47-reflections.md)'s
-  planar rung lands: a planar reflection on an opaque plane is a floor, and on a
-  blended one it is water.
+- **The mirrors sample's water**, once the reflection ladder's planar rung lands
+  (`docs/backlog.md`, _Planar reflections, the reflection ladder's rung 2, are
+  unbuilt_): a planar reflection on an opaque plane is a floor, and on a blended
+  one it is water.
 
 ## Delivery
 

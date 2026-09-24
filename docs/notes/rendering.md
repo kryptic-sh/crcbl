@@ -58,9 +58,10 @@ it stands; what follows is the rules and their reasons, which live nowhere else.
   cost a third geometry pipeline per `GeometryPath` and a new fragment entry
   point for a buffer one pass reads, and a wrong reconstructed normal costs a
   pixel only an eighth of its occlusion. The attachment is reserved as the
-  remedy for the SSR escalation clause in `docs/plan/47-reflections.md`, whose
-  trigger is a one-pixel fringe of unrelated colour at silhouettes. Escalating
-  is contained to the prepass pipeline and the gather's first lines.
+  remedy for the SSR escalation clause (_What the deleted 47-reflections plan
+  left behind_, below), whose trigger is a one-pixel fringe of unrelated colour
+  at silhouettes. Escalating is contained to the prepass pipeline and the
+  gather's first lines.
 - **The determinism rule.** Rotation comes from an integer-indexed constant
   table (`pixel.xy & 3` into sixteen entries), never a float hash, and **the
   blur is not optional**. One binary depth comparison landing on its threshold
@@ -153,14 +154,213 @@ it stands; what follows is the rules and their reasons, which live nowhere else.
   filters 0.002 ms and 0.004 ms at 1920×1080 on radv (2026-09-02); the format
   itself has never been priced.
 - **Specular occlusion needs a cone angle the channel does not carry, and until
-  it exists `docs/plan/47-reflections.md`'s refusal of specular occlusion
-  stands.** A scalar AO is the wrong term for a reflection. The chosen encoding
-  (an octahedral direction in `.gb`, a cone angle in `.a`, and GTSO) is in
-  `docs/backlog.md`.
+  it exists the SSR row's refusal of specular occlusion (_What the deleted
+  47-reflections plan left behind_) stands.** A scalar AO is the wrong term for
+  a reflection. The chosen encoding (an octahedral direction in `.gb`, a cone
+  angle in `.a`, and GTSO) is in `docs/backlog.md`.
 - **Declined: HBAO and HBAO+.** They read the same depth and GTAO supersedes
   them on it, so one is a step onto a rung already obsolete. **Declined: a
   frame-sized transient cleared to 1.0** (`ssao-none`), which shipped first and
   was correct but strictly dearer than the placeholder.
+
+## What the deleted 47-reflections plan left behind (2026-09-24)
+
+Record; the screen-space row was built — the Hi-Z march in `ssr.slang` over
+`crcbl_render::hiz`'s pyramid, the blur that is also the composite in
+`ssr_blur.slang`, and the probe and prefiltered-sky miss fallback, all in
+`crcbl_render::ssr`. The ladder above it is not: **rung 1** the Hi-Z march
+(built), **rung 2** planar reflections, **rung 3** cone tracing over a colour
+mip chain, **rung 4** ray-traced reflections at P7C, with temporal accumulation
+beside them. Those, and the plan's considered-and-declined list, are in
+`docs/backlog.md` under _The reflection ladder's upper rungs are unbuilt_ and
+the entries after it. The shader headers describe the passes as they stand; what
+follows is the rules and their reasons.
+
+- **One reflectivity attachment on the forward pass, and no G-buffer.**
+  `Rgba8Unorm`: `rgb` is `F0`, `a` is the roughness quantised to
+  `crcbl_shaders::ssr::REFLECTIVITY_LEVELS` (since 2026-08-29; before that it
+  held the sharpness ramp, which left the fallback blind to roughness past the
+  cutoff), and `NO_REFLECTION` — no `F0`, fully rough — where nothing drew,
+  because a zero alpha reads as a mirror. **The AO chain's refusal of a normal
+  attachment does not transfer**: every clause of it is a fact about the depth
+  prepass, which has no colour target. On the forward pass a further target is
+  one more `ColorTargetState` element under the same fragment entry, no new
+  pipeline and no new interpolant. The attachment gains a field only when a pass
+  reads it, never because a G-buffer "should have" one.
+- **The escalation clause.** The normal is reconstructed from depth by the AO
+  pass's four-tap technique (`normal_at`, declared independently in each
+  shader), which is exact on a plane and wrong on a one-pixel rim at every
+  silhouette. For AO a wrong normal costs an eighth of a pixel's occlusion; for
+  SSR it is a wrong ray fetching an arbitrary colour. **If a one-pixel fringe of
+  unrelated colour appears at silhouettes, the fix is a second attachment
+  carrying the view-space normal, never a tuning of the march.** It is contained
+  to the fragment stage's return struct, one target state, one transient and the
+  first lines of `ssr.slang`, and moves no golden because only SSR reads it.
+- **The march is in screen space, and its reach is a share of the frame.** A
+  world-unit step is tens of pixels near the eye and a fraction of one far away;
+  a pixel step makes the loop bound a property of the screen, which is the whole
+  cost on CI's software rasterisers. The reach is
+  `REACH_FRACTION * min(width, height)`: a fixed pixel reach made reflections
+  _shorter_ as the window grew (`apps/lantern`'s panel reflection, asserted at
+  256×192, was absent at 1280×960). Since 2026-08-27 the stride is hierarchical:
+  a **`max`** Hi-Z pyramid (one value per texel, the nearest surface below it —
+  a min-max pair would be a second image for a bound nothing reads), crossing a
+  whole empty cell per step. The segment is clipped to the viewport before the
+  walk and ends on a border ramp; the ray starts off the surface along the
+  normal, is clipped against the near plane, and fades when it points back at
+  the viewer.
+- **Behind a surface is no evidence.** A tap is a hit only within a thickness
+  bound derived from the ray's own depth advance and floored by
+  `THICKNESS_FLOOR`; past it the march continues. Treating any "behind" as a hit
+  is the comet-tail smear off every silhouette. **No binary-search refinement**:
+  the crossing is interpolated between the last two taps.
+- **Determinism: no jitter, and every weight reaches zero where the decision is
+  fragile.** A march has no denominator — the first tap whose comparison flips
+  is the answer — so the pixels two drivers can disagree on are made, by
+  construction, the ones multiplied by almost nothing (distance, border,
+  thickness and backward fades). That reduces the exposure; it does not bound
+  it. **SSR goldens are review aids only**: every real check is a structural
+  ratio between two blocks of one frame, and fixtures reflect large,
+  low-frequency content. **If a golden flaps between CI legs, flatten that
+  fixture's reflected content or drop the golden and keep the ratio — never
+  widen the tolerance, never re-bless per driver.** The Hi-Z pyramid landed on
+  those terms; the one number it moved was `apps/lantern`'s `SSR_HIT_TOLERANCE`.
+- **The roughness cutoff stays at 0.5 and gates only the screen march.**
+  `crcbl_shaders::ssr::ROUGHNESS_CUTOFF`; `GpuMaterial::UNTINTED`'s 0.5 encodes
+  as exactly zero sharpness on every target, so nearly every surface skips the
+  march and takes the probe specular, which is more honest for a broad lobe than
+  one ray. Raising the cutoff puts every `UNTINTED` surface into the march — a
+  far larger blast radius than the filter — so it is its own slice with its own
+  decision.
+- **The blur is the composite.** `ssr.slang` writes the reflection alone into an
+  `Rgba16Float` transient; `ssr_blur.slang` filters it and adds the scene colour
+  into a second one, which `add_passes` returns in place of the scene colour. A
+  frame without the pair returns the old id and is bit-identical: that is the
+  off-switch. The kernel is the AO blur's plus a roughness weight; positive
+  sharpness blends `lerp(centre, filtered, sqrt(sharpness))` (a linear share
+  measured 8.46–8.48 levels of row bend on lavapipe, WARP and Metal against the
+  fixture's limit of 8; the square root 4.82 on lavapipe). The depth tolerance
+  is `THICKNESS_FLOOR` times `DEPTH_TOLERANCE_THICKNESSES`, because at one
+  thickness the filter switches itself off on a floor seen at a shallow angle.
+- **A miss returns the probe environment plus the prefiltered sky, times the
+  split-sum `env_brdf`**, weighed by the probe's Chebyshev visibility
+  (`probe_weight`). Exact zero needs a zeroed probe volume **and** a black sky.
+- **What the row refuses, and why** — each is also in the backlog's declined
+  entry:
+  - **No history.** Reading last frame's colour makes a golden a function of how
+    many frames were drawn before it.
+  - **No specular occlusion from the AO scalar.** AO scales the ambient term
+    alone; a highlight and a reflection do not take the same factor. It is its
+    own term (the GTSO decision in `docs/backlog.md`).
+  - **No SSR on transparency.** A transparent surface writing the reflectivity
+    attachment overwrites the opaque `F0` behind it while the scene colour there
+    is a blend, so a blended surface must write it with an empty mask
+    (`docs/plan/53-transparency.md` specifies that; the pass is unbuilt).
+  - **No half-resolution march, by measurement**: headless `apps/lantern` at
+    960×720 on radv (2026-09-05) put `ssr` at 6.3% of a 2.165 ms frame,
+    `ssr-blur` 0.6% and the five `hiz` levels 1.0%, against `shadow` 15.6% and
+    `forward` 18.1% (17.4% without its fused clears). On a hardware browser
+    (quarry, Chrome, 959x463, 2026-09-04) `ssr` was 0.053 ms, 7.2% of 0.737 ms.
+    Quote a share and an absolute together: that frame grew from 1.27 ms as
+    passes landed, and the march's share fell while its cost rose.
+  - **No `LightingPath` gate**, which still has no consumer.
+
+## What the deleted 51-volumetrics plan left behind (2026-09-24)
+
+Record; rungs 1a to 2 are built — `crcbl_render::volumetric`'s
+`volumetric-scatter`, `volumetric-integrate` and `volumetric-composite` passes
+(`volumetric.slang`, `volumetric_composite.slang`), switched by
+`RenderEffects::VOLUMETRIC_FOG`. What is left is in `docs/backlog.md` under _The
+froxel column casts its shaft_, _The two-media rule has no frame-level test_ and
+_Froxel rungs 3 and 4: a filtered 3D target and a density field_.
+
+Code cites the plan's **rungs** by number, so the numbering is kept:
+
+- **Rung 1a — the column.** The froxel buffer, the scatter, the prefix scan and
+  the composite, proved against the closed form.
+- **Rung 1b-i — the sun in the medium.** The Henyey-Greenstein phase copied into
+  both shaders, and the sun's direction in the params block.
+- **Rung 1b-ii — the shaft.** The cascade lookup copied once into `scatterMain`,
+  a visibility buffer, and the drift guard over the copy.
+- **Rung 2 — punctual lights.** The froxel's cluster list walked at the slice
+  midpoint with `mesh.slang`'s falloff and cone, occluded by the light's own
+  shadow tiles.
+- **Rung 3 (unbuilt) — a 3D target, a coarser grid and a depth-aware lookup.**
+- **Rung 4 (unbuilt) — a density field rather than a constant medium.**
+
+The rules:
+
+- **The scattering target is a storage buffer on the existing froxel grid, not a
+  3D texture.** `crcbl_render::transient` has no volume — `TransientImageDesc`
+  has no depth field and the pool hard-codes `ImageType::D2` — so a 3D target is
+  the engine's first 3D image on four backends at once, the shape of gap that
+  let a read-only depth attachment pass three cross-target clippy runs and reach
+  `crcbl-dx12` as a refusal. And the grid already exists as a buffer:
+  `crcbl_render::light_grid`'s froxels, addressed by `froxel_of`, filled by
+  `light_cluster.slang`. Four floats per froxel, in-scattered radiance in `xyz`
+  and extinction in `w`. **The price is named, not hidden**: the composite reads
+  the nearest froxel, so a slow pan across a shaft steps rather than slides.
+  Rung 3 is where that is bought back.
+- **The composite is its own fullscreen pass, not a term in `mesh.slang`.**
+  `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE` (the WebGPU guarantee) is a
+  sum over a whole pipeline layout, and the mesh layout's fragment-visible
+  storage buffers are `VERTEX`-visible on the non-mesh-shader path, where there
+  is no headroom. The plan also wanted the pass after the reflection resolve so
+  reflections are fogged; **as built it runs before the march**, where the
+  analytic fog runs, so the two paths stay comparable (`ForwardRenderer`'s
+  `add_passes` in `crates/crcbl-render/src/forward/view.rs`). Moving both after
+  `ssr_blur.slang` is in the backlog.
+- **The two media are one medium, and only one charges the transmittance.**
+  Height fog's optical depth and the column's transmittance are the same air
+  integrated twice; compositing both darkens the frame by the square of what the
+  medium does, which reads as "the fog got thicker when volumetrics were
+  enabled". When the column is present it owns the medium: `ForwardRenderer`
+  zeroes the frame block's fog density on a frame with `VOLUMETRIC_FOG`, and the
+  column's extinction is seeded from the same `Fog` rows, so switching paths
+  changes the sampling, never the medium.
+- **Slice thickness is computed, never assumed.** The split is exponential, so
+  slices differ by four orders of magnitude and `integrate_slice` takes the
+  thickness as an argument — a constant makes the near field vanish and the far
+  field glow. **The thickness is along the view ray, not along `z`** (the secant
+  factor; dropping it brightens the frame toward its edges at a wide field of
+  view). **The last slice is bounded**: `light_cluster.slang` leaves its far
+  side at `FLT_MAX` so distant lights are listed, and an unbounded length is an
+  infinite optical depth, so `scatterMain` ends it at `CLUSTER_FAR` and
+  `crcbl_shaders::fog::MAX_OPTICAL_DEPTH` is the ceiling either way. Slice zero
+  starts at the eye, not at `CLUSTER_NEAR`, or the column has a gap the closed
+  form does not.
+- **Every copied light or cascade walk is guarded letter for letter.** There is
+  no `#include`, so `mesh.slang`'s lighting exists twice, and the rule for a
+  second copy is a drift guard that splits on the function's own signature and
+  fails on the host with no GPU: `crcbl_shaders::volumetric`'s
+  `both_shaders_spell_the_same_atlas_walk` and
+  `both_shaders_spell_the_same_punctual_light`, on `crcbl_shaders::sky`'s
+  `the_shader_spells_the_same_gradient` pattern. `grass.slang` and `water.slang`
+  copy under the same arrangement. **The copy drops `shadow_slope`, both biases
+  and the `n_dot_l` early return**: they are about a receiving facet, and
+  biasing a froxel pushes its scattering out of the shadow it stands in — a lit
+  rim along every shaft. It keeps the `w` test and the far-plane test a
+  perspective map needs.
+- **The froxel's lighting leaves the scatter pass in a buffer of its own.**
+  `crcbl_shaders::volumetric::LIGHTING_STRIDE`: punctual glow in `rgb`, the
+  sun's visibility in `w`, a row the scan does not touch. The composite's
+  partial slice needs the same source `scatterMain` used; re-walking the atlas
+  per pixel is a second opaque shadow pass and a second copy, and recovering the
+  source from the column divides by `1 - T`, which is zero exactly where a thin
+  slice makes the answer meaningless.
+- **Temporal reprojection is refused (2026-08-30).** It is the industry's route
+  to a filtered, coarser froxel volume, and a history buffer makes a frame a
+  function of how many frames preceded it, which every golden in the tree is
+  built not to be. Rung 3 buys the filtering back with a 3D target, a
+  depth-aware upsample and a sample count along the slice as the quality tier —
+  never with history or a per-frame jitter.
+- **What the host already pins.** `crcbl_shaders::volumetric`'s tests hold the
+  phase function to one over the sphere at every anisotropy, mirror its lobe
+  with the sign of `g`, and demand a homogeneous column cut into 1, 2, 7, 64 and
+  512 slices composite to the same radiance; the naive `source * thickness` a
+  froxel pass reaches for first fails exactly one of them. The frame-level
+  checks are in `crates/crcbl/tests/mesh_e2e/hdr.rs` and
+  `crates/crcbl/tests/mesh_e2e/froxels.rs`.
 
 ## What the alpha-mask and double-sided material modes shipped without (2026-09-05)
 
@@ -534,21 +734,22 @@ frames, the floor is a `forward` p50 of 0.009 ms on an RX 7900 XTX and 0.258 ms
 on lavapipe — medians of three runs each, spread 0.009–0.010 and 0.256–0.268 —
 and it is written into `docs/plan/43-render-standards.md`'s Delivery preamble.
 
-- **`docs/plan/47-reflections.md`'s shares are split now, and no lantern-side
-  floor row was added, because one would measure nothing new.** There is no
-  lantern price fixture to add a row to: those figures come from headless runs
-  of the `lantern` **binary** (`c0917d6`, `b87a1ab`) reading the engine's
-  `PassStats` report, and the only fixtures in the tree that read `PassStats`
-  are `mesh_e2e`'s four. A lantern-side row would take the same number as
-  `depth_only.rs`'s: `PassBuilder::clear_color` is `LoadOp::Clear` plus
-  `StoreOp::Store` unconditionally, `ForwardRenderer::add_passes` creates
-  `reflectivity` and `motion` whatever the effect stack is doing, and
-  `RenderGraph::execute` emits a pass's barriers outside its timestamp bracket —
-  so an empty-draw-list `forward` is the same quantity at a given extent
-  whatever else the frame draws, and `price_frame`'s `CRCBL_PRICE_SIZE` already
-  takes it at any extent. What lantern adds is only that its `forward` line is
-  two passes summed, the room's and the monitor's, which `pass_stats.rs`
-  documents and the report's occurrence column shows. Measured 2026-09-05 with
+- **The SSR row's `forward` shares are split now (_What the deleted
+  47-reflections plan left behind_), and no lantern-side floor row was added,
+  because one would measure nothing new.** There is no lantern price fixture to
+  add a row to: those figures come from headless runs of the `lantern`
+  **binary** (`c0917d6`, `b87a1ab`) reading the engine's `PassStats` report, and
+  the only fixtures in the tree that read `PassStats` are `mesh_e2e`'s four. A
+  lantern-side row would take the same number as `depth_only.rs`'s:
+  `PassBuilder::clear_color` is `LoadOp::Clear` plus `StoreOp::Store`
+  unconditionally, `ForwardRenderer::add_passes` creates `reflectivity` and
+  `motion` whatever the effect stack is doing, and `RenderGraph::execute` emits
+  a pass's barriers outside its timestamp bracket — so an empty-draw-list
+  `forward` is the same quantity at a given extent whatever else the frame
+  draws, and `price_frame`'s `CRCBL_PRICE_SIZE` already takes it at any extent.
+  What lantern adds is only that its `forward` line is two passes summed, the
+  room's and the monitor's, which `pass_stats.rs` documents and the report's
+  occurrence column shows. Measured 2026-09-05 with
   `CRCBL_GPU=vk CRCBL_PRICE_SIZE=<extent> crates/crcbl/tests/run-mesh-e2e.sh the_price_of_the_depth_only_passes`,
   medians of three runs: 0.011 ms at 960×720 plus 0.005 ms at
   `room::MONITOR_EXTENT` on an RX 7900 XTX, 0.463 plus 0.098 on lavapipe — about
@@ -684,8 +885,8 @@ Decision record; the decision is in `docs/backlog.md`.
   `Rgba8Unorm` is spent, so the angle wants either a second image or a swap to
   an octahedral pair in `.gb` with the angle in `.a` — the encoding the slice
   turned down for a three-channel direction with no seam and no fold. Until it
-  exists, `docs/plan/47-reflections.md`'s refusal of specular occlusion stands
-  and is correct.
+  exists, the SSR row's refusal of specular occlusion (_What the deleted
+  47-reflections plan left behind_) stands and is correct.
 
 - **The tier split the 2026-08-30 decision asked for.** The user's call was
   scalar-only on low and the widened target on medium and high. What landed is
@@ -750,14 +951,14 @@ heading.
 ## The depth-aware upsample has one reader, not three (2026-09-02)
 
 The ambient-occlusion plan designed the bilateral upsample as **one shader with
-three readers** — the AO pass, `47-reflections.md`'s march, and
-`51-volumetrics.md`'s composite, which already samples a froxel grid far below
-the frame's resolution and would trade its trilinear lookup for a depth-aware
-one. Only the AO reader was built, and that plan section has been deleted now
-that it ships. `docs/plan/51-volumetrics.md`'s row 3 no longer cites a shared
-pass — it says the generalisation is that row's own rung. `47-reflections.md`
-does not cite it at all — checked whole-file for "upsample", "bilateral" and
-"depth-aware".
+three readers** — the AO pass, the reflection march, and the froxel composite,
+which already samples a froxel grid far below the frame's resolution and would
+trade its nearest-froxel lookup for a depth-aware one. Only the AO reader was
+built. The volumetrics plan's rung 3 stopped citing a shared pass — the
+generalisation is that rung's own work, now in `docs/backlog.md` under _Froxel
+rungs 3 and 4: a filtered 3D target and a density field_ — and the reflections
+plan never cited it (checked whole-file for "upsample", "bilateral" and
+"depth-aware" before it was deleted on 2026-09-24).
 
 What actually exists is `crates/crcbl-shaders/shaders/ssao_upsample.slang`, and
 it is **AO-specific, not a shared pass**: it reads an `Rgba8Unorm` occlusion
@@ -1043,8 +1244,8 @@ Record; the work this entry still owes is in `docs/backlog.md` under this
 heading.
 
 - **Runtime reflection captures — DECLINED.** The rebuilt probe volume is the
-  interior environment on every tier and RT reflections are the exact one.
-  `47-reflections.md`'s refusals.
+  interior environment on every tier and RT reflections are the exact one. The
+  SSR row's refusals (_What the deleted 47-reflections plan left behind_).
 - **Whether SSGI counts as GI — WITHDRAWN.** The probe volume is the bounce on
   every tier; SSGI would be a second, view-dependent estimate of it for a pass
   of its own. Struck from the GI candidates below and from
@@ -1064,9 +1265,9 @@ report lives outside the tree; this entry is its durable part):
   bind-group layout in `crcbl_render::forward` is at it. GI arrives as a sampled
   image or as rows in the probe buffer `mesh.slang` already reads, or it does
   not arrive on the browser tier.
-- **C2 — a frame is a function of its own inputs.** `Tolerance::RASTERISER`,
-  `47-reflections.md`'s SSR-history refusal and `50-irradiance-probes.md`'s DDGI
-  refusal all say so.
+- **C2 — a frame is a function of its own inputs.** `Tolerance::RASTERISER`, the
+  SSR row's history refusal (_What the deleted 47-reflections plan left behind_)
+  and `50-irradiance-probes.md`'s DDGI refusal all say so.
 - **C3 — the budget.** The whole frame is 0.990 ms p50 at 1920×1080 on an RX
   7900 XTX (`docs/backlog.md`'s _What GTAO left owed_, the 2026-08-28
   distribution).
@@ -1157,11 +1358,11 @@ candidate 3, the desktop-only contact term on top.
    `49-antialiasing.md` file it behind motion vectors for temporal accumulation,
    and that is a choice — GTAO's fixed-pattern-plus-blur determinism argument
    transfers to a cosine gather. Costs: it needs an albedo the tree does not
-   expose (the scene target is shaded colour; `47-reflections.md` refuses a
-   G-buffer), so it opens with a third attachment or a visible approximation;
-   without accumulation the only quieting tool is a wider blur, which confines
-   it to contact scale; and two GTAO-class passes is roughly a doubling of the
-   frame. The only candidate that gives dynamic objects any indirect response.
+   expose (the scene target is shaded colour; the SSR row refuses a G-buffer),
+   so it opens with a third attachment or a visible approximation; without
+   accumulation the only quieting tool is a wider blur, which confines it to
+   contact scale; and two GTAO-class passes is roughly a doubling of the frame.
+   The only candidate that gives dynamic objects any indirect response.
 
 **Considered and rejected — do not re-propose without answering the reason:**
 Lumen software (8 ms at 1080p against a 0.990 ms frame; TSR-dependent; per-mesh
@@ -1345,9 +1546,9 @@ reading settled:
   `crcbl-dx12`, `crcbl-mtl` and `crcbl-webgpu` each translate it for the overlay
   passes. The only hal work is a constructor beside `ColorTargetState::opaque`
   that carries a blend, plus one with an empty write mask for the reflectivity
-  and motion targets, which a blended surface must not write
-  (`47-reflections.md`'s refusal, and motion has no opaque history to be
-  consistent with).
+  and motion targets, which a blended surface must not write (the SSR row's
+  refusal, recorded under _What the deleted 47-reflections plan left behind_,
+  and motion has no opaque history to be consistent with).
 - **Where it sits.** After `"sky"` (`crcbl_render::sky_pass` is `LoadOp::Load`
   and fills only far-depth pixels, so a pass before it blends over clear), with
   `depth_read(scene_depth)` and no depth write, exactly the attachment shape

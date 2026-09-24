@@ -16,7 +16,7 @@
 //
 // # A pass of its own, rather than a term in `mesh.slang`
 //
-// `docs/plan/51-volumetrics.md` argues both halves. The storage-buffer budget is
+// `docs/notes/rendering.md` argues both halves. The storage-buffer budget is
 // one: `crcbl_hal::PORTABLE_STORAGE_BUFFERS_PER_STAGE` is a sum over a whole
 // pipeline layout, and the mesh layout's are visible to the vertex stage on the
 // path that has no mesh shader. The other is ordering — `mesh.slang` fogs the
@@ -28,7 +28,7 @@
 // It reads one froxel per pixel and does not filter between them. The column is
 // cut on the tile grid, so two pixels in different tiles at the same depth read
 // prefixes computed along two different tile-centre rays — visible as tile-sized
-// steps where the medium is thick. Rung 3 of topic 51 is where a filtered
+// steps where the medium is thick. The froxel column's rung 3 is where a filtered
 // lookup buys that back, and it is the rung that needs a 3D image.
 
 // D3D12 takes each resource's register from its binding. A declaration's

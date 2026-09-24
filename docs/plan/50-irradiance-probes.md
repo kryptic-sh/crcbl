@@ -219,9 +219,9 @@ determinism argument rests on.
 ### Rejected, for reasons about this tree rather than about the technique
 
 - **DDGI** (Majercik et al. 2019) needs ray tracing, which nothing here has, and
-  temporal accumulation, which [47-reflections.md](47-reflections.md) already
-  refuses in writing for SSR history: a golden must not be a function of how
-  many frames preceded it. Either one is fatal alone.
+  temporal accumulation, which the SSR row already refuses in writing for its
+  history ([rendering notes](../notes/rendering.md)): a golden must not be a
+  function of how many frames preceded it. Either one is fatal alone.
 - ~~**Light-field probes** (McGuire et al. 2017) are the correct answer to light
   leaking and cost a per-probe octahedral depth map. There is no leaking defect
   yet to justify them.~~ **Withdrawn 2026-08-30** — the per-probe depth map is

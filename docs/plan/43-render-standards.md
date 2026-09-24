@@ -23,24 +23,24 @@ re-proposing it means arguing with that reason rather than with this table.
 ahead of two of the three comparands, and that is worth stating first because
 every gap below is easier to read against it.
 
-| Area                    | Here                                                   | Owner                                                                            |
-| ----------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------- |
-| Geometry and visibility | **ahead**                                              | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md) |
-| Shadows                 | behind, ladder written                                 | [45-shadows.md](45-shadows.md)                                                   |
-| Ambient occlusion       | behind, ladder written                                 | 46 (built; rules in [rendering notes](../notes/rendering.md))                    |
-| Reflections             | comparable for screen space                            | [47-reflections.md](47-reflections.md)                                           |
-| Antialiasing            | behind, ladder written                                 | [49-antialiasing.md](49-antialiasing.md)                                         |
-| Irradiance probes       | visibility maps and the clipmap built, updater owed    | [50-irradiance-probes.md](50-irradiance-probes.md)                               |
-| **Materials**           | **far behind**, ladder in §2                           | [37-materials.md](37-materials.md), and §2 below                                 |
-| **Texture filtering**   | **a chain, trilinear, 8× anisotropic, uncompressed**   | §2's filtering subsection                                                        |
-| **Transparency**        | **absent**, argued                                     | §3 below                                                                         |
-| **Volumetrics**         | height fog and a froxel column                         | [51-volumetrics.md](51-volumetrics.md), and §4 below                             |
-| Global illumination     | behind                                                 | §5 below                                                                         |
-| Post-processing         | behind                                                 | [48-post-processing.md](48-post-processing.md), §6                               |
-| Upscaling               | spatial half built, temporal its own rung              | [15-windowing.md](15-windowing.md), §7                                           |
-| Decals                  | absent, planned                                        | [33-decals.md](33-decals.md)                                                     |
-| Particles               | simulated and drawn as instances, no pass of their own | [20-particles.md](20-particles.md)                                               |
-| Sky and atmosphere      | a gradient and Hillaire's atmosphere                   | §8 below                                                                         |
+| Area                    | Here                                                   | Owner                                                                                               |
+| ----------------------- | ------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| Geometry and visibility | **ahead**                                              | [03-gpu-driven-rendering.md](03-gpu-driven-rendering.md), [25-lod.md](25-lod.md)                    |
+| Shadows                 | behind, ladder written                                 | [45-shadows.md](45-shadows.md)                                                                      |
+| Ambient occlusion       | behind, ladder written                                 | 46 (built; rules in [rendering notes](../notes/rendering.md))                                       |
+| Reflections             | comparable for screen space                            | 47 (SSR built; rules in [rendering notes](../notes/rendering.md), upper rungs in `docs/backlog.md`) |
+| Antialiasing            | behind, ladder written                                 | [49-antialiasing.md](49-antialiasing.md)                                                            |
+| Irradiance probes       | visibility maps and the clipmap built, updater owed    | [50-irradiance-probes.md](50-irradiance-probes.md)                                                  |
+| **Materials**           | **far behind**, ladder in §2                           | [37-materials.md](37-materials.md), and §2 below                                                    |
+| **Texture filtering**   | **a chain, trilinear, 8× anisotropic, uncompressed**   | §2's filtering subsection                                                                           |
+| **Transparency**        | **absent**, argued                                     | §3 below                                                                                            |
+| **Volumetrics**         | height fog and a froxel column                         | 51 (rungs 1–2 built; rules in [rendering notes](../notes/rendering.md)), and §4 below               |
+| Global illumination     | behind                                                 | §5 below                                                                                            |
+| Post-processing         | behind                                                 | [48-post-processing.md](48-post-processing.md), §6                                                  |
+| Upscaling               | spatial half built, temporal its own rung              | [15-windowing.md](15-windowing.md), §7                                                              |
+| Decals                  | absent, planned                                        | [33-decals.md](33-decals.md)                                                                        |
+| Particles               | simulated and drawn as instances, no pass of their own | [20-particles.md](20-particles.md)                                                                  |
+| Sky and atmosphere      | a gradient and Hillaire's atmosphere                   | §8 below                                                                                            |
 
 ## 1. What is already at or above the standard
 
@@ -749,10 +749,11 @@ first, and an order-independent scheme only if the sorting proves insufficient;
 
 ## 4. Volumetrics — height fog and the sun's shaft through the froxel column
 
-> **The ladder moved to [51-volumetrics.md](51-volumetrics.md) on 2026-08-27**,
-> where the rungs, the decisions the froxel pass has to make before it is
-> written, and what each rung is checked by all live. What follows is this
-> topic's own account: how far behind the industry this area is, and why.
+> **The ladder moved to topic 51 on 2026-08-27**, and that plan was deleted on
+> 2026-09-24 with rungs 1 and 2 built: its decisions are in the
+> [rendering notes](../notes/rendering.md) (_What the deleted 51-volumetrics
+> plan left behind_) and rungs 3 and 4 in `docs/backlog.md`. What follows is
+> this topic's own account: how far behind the industry this area is, and why.
 
 **What a current engine ships:** exponential height fog with a single scattering
 term, and froxel-based volumetric lighting — a 3D texture over the view frustum,
@@ -765,10 +766,11 @@ caller asks; and the froxel column that carries the sun's shaft, behind
 subdivision, proved against the closed form, with the sun scattering into it
 through a Henyey-Greenstein lobe and occluded per froxel by the same cascades
 the surfaces are shadowed by, and every point and spot light glowing in it
-through the froxel's own cluster list since 2026-08-29. Rungs 1 and 2 of
-[51-volumetrics.md](51-volumetrics.md) are closed. What is open above them is a
-3D target with temporal reprojection, and a density field — neither scheduled,
-and each argued there.
+through the froxel's own cluster list since 2026-08-29. Rungs 1 and 2 of the
+volumetrics ladder are closed. What is open above them is a filtered 3D target
+on a coarser grid — without temporal reprojection, which was refused on
+2026-08-30 — and a density field, neither scheduled; `docs/backlog.md` carries
+both under _Froxel rungs 3 and 4: a filtered 3D target and a density field_.
 
 **Why this is the cheapest large win on the list.** The froxel grid volumetric
 fog wants is the froxel grid `light_cluster.slang` **already builds** — same
@@ -776,8 +778,8 @@ frustum subdivision, same light list per cell, and the light culling that is the
 expensive part of a volumetric pass is already paid for by the opaque shading.
 Those three passes landed 2026-08-27 — `crcbl_render::volumetric`, over a
 storage buffer on the grid the light pass already fills rather than the 3D
-texture a current engine uses. [51-volumetrics.md](51-volumetrics.md) says why,
-and what that choice gives up.
+texture a current engine uses. The [rendering notes](../notes/rendering.md) say
+why, and what that choice gives up.
 
 **Height fog alone is cheaper still** — one term in the tonemap's input, no new
 pass, no new resource — and it is most of the perceived benefit in an outdoor
@@ -849,8 +851,9 @@ which matters, because that form reads correctly and is what a froxel pass
 reaches for first. Its failure direction is the visible one: more slices, more
 light.
 
-What is left of §4 is [51-volumetrics.md](51-volumetrics.md)'s rungs 3 and 4: a
-3D target with temporal reprojection, and a density field.
+What is left of §4 is the volumetrics ladder's rungs 3 and 4 — a filtered 3D
+target on a coarser grid with a depth-aware upsample and no temporal
+reprojection, and a density field — in `docs/backlog.md`.
 
 ## 5. Global illumination
 
@@ -1347,16 +1350,16 @@ colour, the reflectivity and the motion targets over the whole extent, as
 `LoadOp::Clear`s fused into its begin: putting a timestamp around them would
 mean giving them a pass and a second full-target write of their own, so the
 millisecond figures and the shares quoted for `forward` — here, in
-[44-lighting.md](44-lighting.md) and in [47-reflections.md](47-reflections.md) —
-include them. What separates them from the draw is a second configuration rather
-than a second timestamp, and `crates/crcbl/tests/mesh_e2e/depth_only.rs`
-measures one beside its field: the same extent, the same effect stack, an empty
-draw list. At 640x480 over 48 recorded frames that floor is a `forward` p50 of
-**0.009 ms on an RX 7900 XTX** and **0.258 ms on lavapipe** — medians of three
-runs each, spread 0.009–0.010 and 0.256–0.268 — against the same runs' loaded
-field at 0.135 ms and 29.255 ms. Subtracting the floor is what turns `forward`
-into the draw's own cost, and no share quoted here or elsewhere has had it
-subtracted.
+[44-lighting.md](44-lighting.md) and in the
+[rendering notes](../notes/rendering.md) — include them. What separates them
+from the draw is a second configuration rather than a second timestamp, and
+`crates/crcbl/tests/mesh_e2e/depth_only.rs` measures one beside its field: the
+same extent, the same effect stack, an empty draw list. At 640x480 over 48
+recorded frames that floor is a `forward` p50 of **0.009 ms on an RX 7900 XTX**
+and **0.258 ms on lavapipe** — medians of three runs each, spread 0.009–0.010
+and 0.256–0.268 — against the same runs' loaded field at 0.135 ms and 29.255 ms.
+Subtracting the floor is what turns `forward` into the draw's own cost, and no
+share quoted here or elsewhere has had it subtracted.
 
 | Rung                                                                                                                                                                                                                                                                                                                                                                                                                                                                      | Why here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

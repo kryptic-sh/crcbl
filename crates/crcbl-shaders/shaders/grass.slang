@@ -31,8 +31,8 @@
 // # Copied, and from where
 //
 // There is no `#include` in this tree, so the lighting this pass shares with
-// the forward pass is a copy — `docs/plan/51-volumetrics.md`'s arrangement,
-// which `volumetric.slang` and `water.slang` are already under. What is copied
+// the forward pass is a copy — the froxel column's arrangement (`docs/notes/
+// rendering.md`), which `volumetric.slang` and `water.slang` are under. Copied
 // here from `mesh.slang`, body for body:
 //
 // * `FrameUniforms` and `GpuLight`, bound as the very buffers the forward pass

@@ -212,10 +212,10 @@ TAA needs two things this tree does not have:
 - **A per-frame subpixel jitter on the projection**, which changes the camera
   matrix every golden in the suite is drawn through.
 - **A history target with neighbourhood clamping**, which makes a frame a
-  function of how many frames were drawn before it. That is the property
-  [47-reflections.md](47-reflections.md) already refuses in writing for SSR
-  history, and [50-irradiance-probes.md](50-irradiance-probes.md) again for
-  DDGI.
+  function of how many frames were drawn before it. That is the property the SSR
+  row already refuses in writing for its history
+  ([rendering notes](../notes/rendering.md)), and
+  [50-irradiance-probes.md](50-irradiance-probes.md) again for DDGI.
 
 The motion vectors it reads are in the frame. **The convention is
 texture-coordinate space, current minus previous, `+y` down**, so this rung's

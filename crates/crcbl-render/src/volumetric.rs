@@ -1,5 +1,6 @@
-//! `docs/plan/51-volumetrics.md` rung 1: the froxel volume the medium is
-//! integrated in, and the pass that composites it over the frame.
+//! The froxel volume the medium is integrated in, and the pass that composites
+//! it over the frame — rungs 1 and 2 of the ladder whose rules are in
+//! `docs/notes/rendering.md`.
 //!
 //! ```text
 //!  begin_frame ──▶ camera + medium + cascades ──▶ params[frame]

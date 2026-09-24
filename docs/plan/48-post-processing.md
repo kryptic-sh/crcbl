@@ -178,8 +178,9 @@ rather than being invalidated by one.
   It is the **engine's first 3D image**. `ImageType::D3` and `ImageViewType::D3`
   are already on the seam and answered by every backend; what has no 3D form is
   `crcbl_render::transient`'s pool, whose `TransientImageDesc` has no depth
-  field ([51-volumetrics.md](51-volumetrics.md) records that). A LUT is uploaded
-  once and never transient, so it is created directly and does not wait on that.
+  field (the [rendering notes](../notes/rendering.md) record that under _What
+  the deleted 51-volumetrics plan left behind_). A LUT is uploaded once and
+  never transient, so it is created directly and does not wait on that.
 
 - **Authored as `.cube`, cooked at load.** Adobe's `.cube` is what Resolve,
   Photoshop, Lightroom and every grading tool export, so an artist's file drops
