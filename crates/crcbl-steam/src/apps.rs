@@ -82,7 +82,7 @@ impl Apps<'_> {
     /// [`SteamEvent::NewLaunchParameters`](crate::SteamEvent::NewLaunchParameters),
     /// and pass its words to [`connect_lobby`].
     ///
-    /// Read through [`grow`], as every string this crate reads is: the header
+    /// Read through `apps::content::grow`, as every string this crate reads is: the header
     /// states no maximum, and Steam's copy stops a byte short to leave its
     /// NUL, so a line that reaches the last byte but one is read again into
     /// a larger buffer rather than returned cut.
