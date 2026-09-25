@@ -441,7 +441,13 @@ The rules, each with its _why_:
   engaged widget per context, and engaging another commits the first; buttons
   and checkboxes fire on `ui_accept` with no engaged state. Getting stuck on a
   slider while arrowing down a settings list is the console-menu failure this
-  bans.
+  bans. **Two exceptions, both horizontal only** (decided 2026-09-25): a
+  `Menu`'s slider and cycler rows take left and right while merely selected, and
+  a tree row answers left and right as the WAI-ARIA tree view pattern does (open
+  or step in, close or step out), falling through to spatial navigation where
+  that pattern does nothing. Up and down always pass, so arrowing down a list
+  never stops on either; engaging first would cost an accept per fader and per
+  expand, which no common menu or tree view asks for.
 - **Spatial navigation is beam first, distance second** (revised 2026-09-15).
   Candidates overlapping the band the current rect projects in the move's
   direction beat any outside it, and only then does distance decide. Godot 4.4's

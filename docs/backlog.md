@@ -2905,15 +2905,18 @@ and its rungs W2–W6 are separate slices rather than gaps.
 `crcbl-reflect` and `#[derive(Reflect)]` landed with the gaps below;
 `crates/crcbl-reflect/src/impls.rs`'s module docs carry the coverage table.
 
-- **Decision owed: `crcbl_console::Value::Float` is `f32` and this crate's is
-  `f64`.** The console's `Kind`/`Value`/`Binding` are the same shape — a tag, a
-  range, a payload, a getter and a setter — and its crate costs nothing to
-  depend on, so the two vocabularies could be one. The blocker is the width:
-  every component position here is `f64` (`Brick.position`, `Surface.position`,
-  `Sun.period`), and `apps/breakout/src/scene.rs` says a board written as `f32`
-  "would round on the way through the file and move the picture". Widening the
-  console's float arm touches every `convar!` and settings key, which is why it
-  was not done with this slice.
+- **`crcbl_console::Value::Float` is `f32` and this crate's is `f64` (decided
+  2026-09-25: keep the two vocabularies).** The console's
+  `Kind`/`Value`/`Binding` are the same shape — a tag, a range, a payload, a
+  getter and a setter — and its crate costs nothing to depend on, so the two
+  vocabularies could be one. The blocker is the width: every component position
+  here is `f64` (`Brick.position`, `Surface.position`, `Sun.period`), and
+  `apps/breakout/src/scene.rs` says a board written as `f32` "would round on the
+  way through the file and move the picture". Widening the console's float arm
+  touches every `convar!` and settings key, which is why it was not done with
+  this slice. **Why kept apart:** that widening is the whole cost and nothing
+  needs one vocabulary yet; merge when an editor wants console bindings over
+  reflected fields.
 - **No enum variant switching**, and no `Vec<T>`, `Option<T>` or maps:
   `Reflect::variant` names the active variant and `fields` describes it, but
   changing which variant is active needs a constructor and a default per field.
@@ -2980,20 +2983,24 @@ and its rungs W2–W6 are separate slices rather than gaps.
 
 `Menu` and `MenuSet` moved onto the tree with the gaps below.
 
-- **Decision owed: the reserved context's keyboard defaults are not pushed.**
-  `crcbl::engine::menu_actions` rebinds `ui_move` to the arrows and `ui_accept`
-  to Enter, and unbinds `ui_next`, `ui_prev` and `ui_back`, because breakout,
-  flappy, asteroids and horde start a run with Space — their gameplay binding,
-  printed on their start panel's `PLAY` row — horde walks with WASD under its
-  panels, and Escape is the loop's `PAUSE_KEY`, folded before any menu sees it.
-  Pushing the plan's full table means those panels firing `PLAY` on Space
-  identically (press versus release, and hover taking the highlight).
-- **Decision owed: a menu's slider and cycler take left and right while merely
-  selected**, never engaged — the LOCKED rule's other exception, kept because
-  the options browser gate walks a fader with four `ArrowLeft`s and `Menu`'s
-  semantics are the API contract. Either amend the rule or make menu value rows
-  engage-first, at the cost of an accept per fader. Same shape as the tree-row
-  exception in the 7b section.
+- **The reserved context's keyboard defaults are not pushed (decided 2026-09-25:
+  keep them narrowed).** `crcbl::engine::menu_actions` rebinds `ui_move` to the
+  arrows and `ui_accept` to Enter, and unbinds `ui_next`, `ui_prev` and
+  `ui_back`, because breakout, flappy, asteroids and horde start a run with
+  Space — their gameplay binding, printed on their start panel's `PLAY` row —
+  horde walks with WASD under its panels, and Escape is the loop's `PAUSE_KEY`,
+  folded before any menu sees it. Pushing the plan's full table means those
+  panels firing `PLAY` on Space identically (press versus release, and hover
+  taking the highlight). **Why:** the full table would change what four samples'
+  own keys do under their panels; a game that wants it can push its own
+  bindings.
+- **A menu's slider and cycler take left and right while merely selected
+  (decided 2026-09-25: keep it, and the LOCKED rule now names it)**, never
+  engaged — the LOCKED rule's other exception, kept because the options browser
+  gate walks a fader with four `ArrowLeft`s and `Menu`'s semantics are the API
+  contract. Either amend the rule or make menu value rows engage-first, at the
+  cost of an accept per fader. Same shape as the tree-row exception in the 7b
+  section.
 - **A 2D demo grew about 190 KB gzipped** (breakout, measured: 1 091 171 → 1 280
   736 bytes): a menu now links Taffy, the cascade and `cssparser`, which a demo
   that drew no tree did not link. shard, already a tree consumer, grew 14 548
@@ -3024,10 +3031,12 @@ and its rungs W2–W6 are separate slices rather than gaps.
 `Ui::text_input`, `crcbl_ui::edit` and `crcbl::text_input::TextPump` landed with
 the gaps below.
 
-- **Decision owed: caret stops are `char`s, not grapheme clusters.** An `e` plus
-  a combining accent is two stops, and so is an emoji with a modifier. Nothing
-  in `Cargo.lock` segments by UAX #29; the options are adding a segmentation
-  crate such as `unicode-segmentation` (a new dependency) or keeping `char`.
+- **Caret stops are `char`s, not grapheme clusters (decided 2026-09-25: keep
+  `char`).** An `e` plus a combining accent is two stops, and so is an emoji
+  with a modifier. Nothing in `Cargo.lock` segments by UAX #29; the options are
+  adding a segmentation crate such as `unicode-segmentation` (a new dependency)
+  or keeping `char`. **Why:** the fix is a new dependency, which is the owner's
+  to add; revisit with the owner if a game's text shows a split accent.
 - **Pre-edit is not drawn**: the shell has no pre-edit event (`appkit/view.rs`
   records the marked text's length and nothing reads it), so composition text
   cannot be underlined at the caret until the shell seam grows one.
@@ -3050,15 +3059,16 @@ the gaps below.
 
 `crcbl_ui::tree`'s widget set landed with the gaps below.
 
-- **Decision owed: tree rows take left and right while focused and not
-  engaged.** The UI's LOCKED rule in `docs/notes/tooling.md` says focus never
-  captures navigation, and `Ui::tree_node` rows answer left and right as the
-  WAI-ARIA Authoring Practices tree view pattern does (open or step into
-  children, close or step to the parent). Where that pattern does nothing the
-  move falls through to spatial navigation, so arrowing never stops dead on a
-  tree. Options: keep the exception and amend the rule's text, or make tree rows
-  engage-first like a slider (an extra accept per expand, as no common tree view
-  does).
+- **Tree rows take left and right while focused and not engaged (decided
+  2026-09-25: keep the WAI-ARIA behaviour; the LOCKED rule in
+  `docs/notes/tooling.md` now names both horizontal exceptions).** The UI's
+  LOCKED rule in `docs/notes/tooling.md` says focus never captures navigation,
+  and `Ui::tree_node` rows answer left and right as the WAI-ARIA Authoring
+  Practices tree view pattern does (open or step into children, close or step to
+  the parent). Where that pattern does nothing the move falls through to spatial
+  navigation, so arrowing never stops dead on a tree. Options: keep the
+  exception and amend the rule's text, or make tree rows engage-first like a
+  slider (an extra accept per expand, as no common tree view does).
 - **State inside a closed parent is dropped.** A closed header's or tree node's
   body is not built, so nested open states and split positions inside it are
   pruned with it. Keeping them needs retention of unbuilt descendants in the
@@ -3250,8 +3260,13 @@ scene menu with the gaps below.
   `read-fonts` are linked into `crcbl-ui` unconditionally, and the font itself
   is 54 KB of it. The automatic hinter is about 57 KB. Worth a size breakdown,
   and a decision on gating the parsed font behind a feature a demo opts into.
+  **Decided 2026-09-25: gate it behind an opt-in feature**, which a demo that
+  draws a parsed font turns on; every other browser demo stops paying 274 KB
+  gzipped for text it never draws. Not built.
 - **Light-on-dark text reads heavy** under linear-light blending; a contrast
   curve built without `pow` (a table from a rational fit) needs a decision.
+  **Decided 2026-09-25: no curve for now.** It would move every text golden, and
+  nobody has reported text that reads badly; revisit with a screenshot of one.
 - **The GPU glyph pages are allocated up front** (two layers at start-up)
   because a WebGPU texture cannot grow in place; raising the page cap means
   growing and re-uploading the array across frames in flight.
@@ -3351,7 +3366,10 @@ and `push_clip`, and the menu drawn through the UI pass — left these:
   (`apps/hud`, `apps/orbit`, `apps/bracket`, `apps/breakout`, `apps/viewer`,
   `apps/sandbox`) and CI comments assert, and raises whether `begin_overlay`
   keeps a job (it also drops a game's unpopped clips before the engine's
-  overlay). Decision owed: collapse and delete the cut, or keep the two names.
+  overlay). **Decided 2026-09-25: keep the two names.** Only a paused frame pays
+  the second pass, and collapsing them churns six samples' tests and the CI
+  comments for a saving nobody has measured; `begin_overlay` keeps its job of
+  dropping a game's unpopped clips.
 - **`sharpen` is written twice**, in `sprite.slang` and `ui.slang`, because the
   shader build has no shared-module mechanism: `compile-shaders.sh` compiles
   each source alone and `build.rs` hashes each one. Folding them needs an
@@ -3668,8 +3686,10 @@ Tessellation is planned, nothing built:
   the coping moved the near coping only 2.00 levels against a 1.0 tolerance; the
   far coping, at 18.56, carries that claim.
 - **Four samples carry their own quad builder** — alcove, lantern, sundial and
-  tide each have a `MeshBuilder`. Whether one shared builder belongs in
-  `crcbl-greybox` is a decision, not yet taken.
+  tide each have a `MeshBuilder`. **Decided 2026-09-25: hoist one into
+  `crcbl-greybox`**, which already builds greybox geometry for samples; four
+  copies of the same knowledge are the ones that drift. Not built: read the four
+  first, and keep what differs between them as options.
 - **Rule 12 is not exercised for tide**: its CI golden step draws the path the
   runner selects and forces no lesser one. Sundial's step was not checked for
   the same gap.
@@ -3729,10 +3749,11 @@ request: [55-water.md](plan/55-water.md), [56-wind.md](plan/56-wind.md),
 (2026-09-17), each with a _What … shipped without_ entry above. Hair, meadow and
 mane have nothing built. What the plans leave open:
 
-- **Order and start are the user's call.** Nothing is scheduled ahead of
-  existing work. The dependency order the plans imply for what is left: the
-  physics prerequisite below, then water rung 2 and the grass rungs past G3 in
-  either order, then hair H1–H3.
+- **Order and start (decided 2026-09-25: the dependency order the plans
+  imply)**: the physics prerequisite below, then water rung 2 and the grass
+  rungs past G3 in either order, then hair H1–H3 — each started only after the
+  first-priority dependency entry and the performance-review priority at the top
+  of this file, which come first.
 - **One `crcbl-phys` prerequisite still gates floating and wind-pushed bodies.**
   Rotation is built — `RigidBody` has angular velocity and inertia, and the
   contact solver landed with it — but `PhysicsSystem::step` applies every
@@ -3746,12 +3767,17 @@ mane have nothing built. What the plans leave open:
   held letter for letter by a guard — so `volumetric.slang`, `water.slang` and
   `grass.slang` each carry one, and hair would add a fourth. The alternative is
   a Slang module imported by every lit shader, which changes how
-  `crcbl-shaders`' build hashes sources. Not researched further.
+  `crcbl-shaders`' build hashes sources. Not researched further. **Decided
+  2026-09-25: guarded copies until hair, then a module.** Three guarded copies
+  hold today; hair would make a fourth, which is where the module's cost to the
+  source hashing is worth paying, so the hair slice makes the switch.
 - **Decision: vertex colour as wind data.** 57's T1 bakes Crysis's bending data
   into `MeshVertex::color` for wind-flagged meshes, moving that mesh's albedo
   tint into its material. It needs no new vertex stream — the forward vertex
   stage already binds every storage buffer a browser guarantees — but it changes
-  what one attribute means per mesh.
+  what one attribute means per mesh. **Decided 2026-09-25: take it**, per mesh
+  and only for wind-flagged ones: it costs no vertex stream in a pass that is at
+  the browser's binding budget already.
 - **Alpha-to-coverage is only on MSAA views**, which are unbuilt and would be
   off by default (_MSAA was reopened rather than reversed_). Card grass and hair
   cards therefore ship as cutouts with cooked coverage mips on the default view,
@@ -5513,23 +5539,27 @@ likewise keeps the two volumes separate and composes them rather than merging
 them. The rest — ground black, the rough lobe's azimuth, the ramp share, Metal
 and D3D12 — stays as recorded.
 
-**OPEN 2026-09-07 — where the third LUT is marched, and the user's call before
-it is built.** A read of the tree ahead of the slice found the decision's
-"camera froxel volume" pulling against a fact it was taken without: the
-atmosphere here is marched on the host. `crcbl_shaders::atmosphere`'s
-transmittance and multiple-scattering tables are `include_bytes!` host data that
-`TRANSMITTANCE_WIDTH`'s doc says is never uploaded, and the sky-view LUT is
-`SkyView::build` on the CPU, striped by `SkyViewBuild::step` and uploaded as a
-storage buffer that `sky.slang` filters by hand — `crcbl_render::sky_pass`'s
-header argues that a hardware filter's weights differ per rasteriser and the
-goldens are compared across four. A camera froxel volume is camera-dependent, so
-it is rebuilt every frame, so it is a GPU pass — which means uploading both
-tables, spelling `sample_transmittance`, `sample_multiscatter`, both phase
-functions and the three density profiles a second time in Slang (each is held to
-the host by a source-text test today), and either the renderer's first 3D
-storage image on four backends (no `.slang` in the tree declares an `RWTexture`;
-the froxel ladder reserves that first for its rung 3, under _Froxel rungs 3 and
-4_ below) or a 32768-entry storage buffer with the trilinear read spelled out.
+**Decided 2026-09-25: (B), the host-side `AerialView`**, the draft's own
+recommendation — a fifth of (A)'s work, no new pass or binding kind, and the
+industry's precomputed answer. Its lag behind a moving sun is unmeasured and is
+the first thing to measure once built. The original question: **OPEN 2026-09-07
+— where the third LUT is marched, and the user's call before it is built.** A
+read of the tree ahead of the slice found the decision's "camera froxel volume"
+pulling against a fact it was taken without: the atmosphere here is marched on
+the host. `crcbl_shaders::atmosphere`'s transmittance and multiple-scattering
+tables are `include_bytes!` host data that `TRANSMITTANCE_WIDTH`'s doc says is
+never uploaded, and the sky-view LUT is `SkyView::build` on the CPU, striped by
+`SkyViewBuild::step` and uploaded as a storage buffer that `sky.slang` filters
+by hand — `crcbl_render::sky_pass`'s header argues that a hardware filter's
+weights differ per rasteriser and the goldens are compared across four. A camera
+froxel volume is camera-dependent, so it is rebuilt every frame, so it is a GPU
+pass — which means uploading both tables, spelling `sample_transmittance`,
+`sample_multiscatter`, both phase functions and the three density profiles a
+second time in Slang (each is held to the host by a source-text test today), and
+either the renderer's first 3D storage image on four backends (no `.slang` in
+the tree declares an `RWTexture`; the froxel ladder reserves that first for its
+rung 3, under _Froxel rungs 3 and 4_ below) or a 32768-entry storage buffer with
+the trilinear read spelled out.
 
 - **(A) As decided:** the camera froxel volume, as a compute pass `aerial-march`
   writing a storage buffer (not a 3D image, for the filter argument above).
@@ -5621,7 +5651,10 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   pavement. Attenuating the light too is a one-line change in the renderer and a
   re-bless of every atmosphere golden; it is not obviously right, because a
   scene author sets `DirectionalLight::color` expecting it to be the light they
-  get. It needs a decision, not a patch.
+  get. It needs a decision, not a patch. **Decided 2026-09-25: leave the light
+  as authored.** `DirectionalLight::color` stays the colour the scene gets, and
+  a scene that wants a reddened low sun sets it; attenuating it would also move
+  every atmosphere golden.
 
 - **`SkyParams` grew and Metal and D3D12 have not run it.** The block is sixteen
   bytes longer and `sky.slang` reads one more `float4`; no _binding_ changed, so
@@ -5680,15 +5713,17 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   find a dot however the shadow bias is set. The claim the test is actually
   about — the grazing sun — is unaffected and still reads 196.7/255.
 
-  **Two ways out, and this is the user's call because both change the picture.**
-  Turn `INTENSITY` down until the clamp has headroom again, which also darkens
-  the sky (the atmosphere's illuminance is read off the same light) and moves
-  every sundial golden a second time; or move the acne pair's steep arm off
-  `NOON_TICK` to a tick whose pavement is not at the top. **Zeroing
-  `crcbl_sundial::sun::AMBIENT` was tried and does not fix it** — measured, the
-  block still reads 255.00 with the flat term gone, so the sky's ambient alone
-  is over the top and removing the flat one would only darken every shadow in
-  the fixture.
+  **Decided 2026-09-25: move the steep arm off `NOON_TICK`**, to a tick whose
+  pavement is below the clamp — it changes the test's fixture and not the
+  sample's look, where turning `INTENSITY` down moves every sundial golden and
+  darkens the sky. Not built. The two ways out were: Turn `INTENSITY` down until
+  the clamp has headroom again, which also darkens the sky (the atmosphere's
+  illuminance is read off the same light) and moves every sundial golden a
+  second time; or move the acne pair's steep arm off `NOON_TICK` to a tick whose
+  pavement is not at the top. **Zeroing `crcbl_sundial::sun::AMBIENT` was tried
+  and does not fix it** — measured, the block still reads 255.00 with the flat
+  term gone, so the sky's ambient alone is over the top and removing the flat
+  one would only darken every shadow in the fixture.
 
 - **The seam comparison no longer draws through the shipped resolve.**
   `apps/sundial/tests/golden.rs`'s
@@ -6283,7 +6318,10 @@ scene scrolls, is unchanged.
    `capture_probe_visibility`, so it has no maps for a slab to be written into.
    Giving one of them a finer level 0 inside a coarser one is what would
    exercise the scroll; it moves that app's lighting, so it is a re-bless with a
-   reason and the user's call.
+   reason and the user's call. **Decided 2026-09-25: not for coverage alone.** A
+   sample's lighting changes when its camera genuinely outgrows its volume, not
+   to exercise a path; until then the scroll stays unexercised and this item
+   says so.
 5. **A scroll moves the geometry and not the light.** Under
    `ProbeUpdate::Authored` a row a step brings in keeps the irradiance the probe
    that left had, because nothing rewrites the table on a scroll.
@@ -6692,6 +6730,11 @@ rule browsers' own editors use, and would type a character for every
 and pass in the state word; nothing reads it today. Either way it wants a
 keyboard with an `AltGr` to try it on, and nothing in the tree has one.
 
+**Decided 2026-09-25: read `getModifierState("AltGraph")`.** The shim passes it
+in the state word and `typing` lets an `AltGraph` edge commit text, so a
+`Ctrl+Alt` shortcut on a layout without `AltGr` stays a shortcut. Not built, and
+not verifiable here without an `AltGr` keyboard.
+
 ### Seven of the nine `HostedGame::actions` overrides are compile-checked, not driven
 
 Every sample that keeps an `ActionMap` hands it to `bind`/`unbind` through
@@ -6822,15 +6865,19 @@ the deleted 45-shadows plan left behind_. Its unbuilt work is tracked here:
 
 ### The shadow tile's resolution is an open question (2026-09-24)
 
-**Not decided, and the tile is now what limits shadow quality.** The 2026-08-26
-re-tiling bought a second shadowed point light by shrinking
-`crcbl_shaders::mesh::SHADOW_TILE` from 1024 to 768 texels rather than growing
-the atlas, which is `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` (4 × 4) cells
-of it (verified 2026-09-24). The evidence that it binds: PCSS at the physical
-sun's angular radius (`tan` 0.004634) needs 4.6 m of blocker separation to reach
-two texels on lantern's near cascade and 27 m on the outer one, and rendered at
-that value lantern differed from a fixed filter in 36 bytes of 4,915,200 — so
-`SHADOW_SUN_TAN_RADIUS` ships at an artistic 0.02 instead.
+**Decided 2026-09-25: make the atlas size a tier knob**, as the tier table
+drafts — the browser tier keeps 768-texel cells while the desktop tiers grow,
+where one constant raised for everyone would spend 28 MiB of the unmeasured wasm
+peak. Each tier's value waits on the measurements under _What deciding it
+needs_. Not built. **Not decided, and the tile is now what limits shadow
+quality.** The 2026-08-26 re-tiling bought a second shadowed point light by
+shrinking `crcbl_shaders::mesh::SHADOW_TILE` from 1024 to 768 texels rather than
+growing the atlas, which is `SHADOW_ATLAS_COLUMNS` × `SHADOW_ATLAS_ROWS` (4 × 4)
+cells of it (verified 2026-09-24). The evidence that it binds: PCSS at the
+physical sun's angular radius (`tan` 0.004634) needs 4.6 m of blocker separation
+to reach two texels on lantern's near cascade and 27 m on the outer one, and
+rendered at that value lantern differed from a fixed filter in 36 bytes of
+4,915,200 — so `SHADOW_SUN_TAN_RADIUS` ships at an artistic 0.02 instead.
 
 **The options:**
 
@@ -6890,6 +6937,11 @@ nothing draws it by default and no golden has moved. What that leaves:
   call**, and the options are: give it a `VIDEO_KEYS` row (which puts it in
   `apps/options`' menu and shifts `toFader` in `web/tools/browser-e2e.mjs`),
   teach the presets to clear a keyless bit, or accept that the tier split waits.
+  **Decided 2026-09-25: teach the presets to clear a keyless bit.** It keeps the
+  2026-08-30 ruling that contact shadows are a tier item and not a menu row,
+  resolves the contradiction by making the low preset able to clear it, and
+  opens the browser pricing below through a preset rather than a new key. Not
+  built.
 
 - **The browser tier is unpriced, and is blocked rather than merely undone.**
   radv and lavapipe are measured; the third tier is not. Pricing it needs the
@@ -6945,9 +6997,13 @@ point light's cube is declined below.
 What the rung did leave behind:
 
 - **Static caching within a group is the rung above, and is unbuilt — priced
-  2026-09-05, and it needs a decision.** The cache holds a group's whole map, so
-  one moved caster redraws every caster that group covers. What the tree has and
-  lacks, read that day:
+  2026-09-05, and it needs a decision.** **Decided 2026-09-25: the cheap shape
+  below** — a `STATIC` bit in `GpuInstance::flags` (bit 17 is free), one
+  `visible` list partitioned from both ends by two counters, and the statics'
+  depth kept by the copy every backend has — built when a scene's shadow pass is
+  shown to be bound by redrawing its unmoved casters, not before. The cache
+  holds a group's whole map, so one moved caster redraws every caster that group
+  covers. What the tree has and lacks, read that day:
   - **Invalidation is whole-pool.** `ForwardRenderer::shadow_group_record` folds
     `InstancePool::revision` in, and that counter moves on any instance write;
     `GpuInstance::flags` now carries `LIVE`, `BASE_VERTEX_OVERRIDE`, the
@@ -8548,7 +8604,10 @@ order:
   page test tried the smallest scene; it uses a cube instead. Needs a decision:
   refuse an empty mesh list by name in `check_scene` (and rename the glTF test),
   or teach draw generation an empty bucket list so an empty document renders a
-  sky. Neither was taken.
+  sky. Neither was taken. **Decided 2026-09-25: refuse it by name** in
+  `check_scene`, and rename the glTF test to what it proves. A sky alone is a
+  scene with meshes and no instances, which draws; teaching draw generation an
+  empty bucket list buys nothing that path does not. Not built.
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 
@@ -11014,8 +11073,10 @@ says what that cleared and what it did not. The allow-list entry in
   adds a line to `apps/editor/src/scene.rs::vocabulary` and a dependency.
   Removing the build-time arrow entirely needs a link-time distributed slice
   (`linkme` or `inventory`), a new third-party dependency and the user's call.
-  `cargo machete` cannot see either sample's use, because their `[lib]` names
-  differ from their package names; the manifest carries an `ignored` entry.
+  **Left to the owner on 2026-09-25**; until then a line in `vocabulary` per
+  game is the way. `cargo machete` cannot see either sample's use, because their
+  `[lib]` names differ from their package names; the manifest carries an
+  `ignored` entry.
 - **Placement is a trait, and the scene format is still the open question.**
   `crcbl::registry::Placement` returns a centre and half extents, or `None` for
   a component that is not a thing in space (puppet's `Sun`), and it is a bound
@@ -11639,7 +11700,11 @@ own app id or under 480 as far as 480 allows.
   reading only `SteamTransport::end_reason()` is told the wrong one. Options: a
   defaulted `Transport::close(&mut self, reason)` hook that `SteamTransport`
   maps to its app codes (touches the trait every backend implements), or leave
-  it and document the session end as the signal. Needs a decision; not done.
+  it and document the session end as the signal. **Decided 2026-09-25: leave it,
+  and document the sealed session end as the signal** — `Client::ended()`
+  already carries the real reason, and a close hook would touch the `Transport`
+  trait on every backend for a second copy of it. The doc line on
+  `SteamTransport::end_reason` is owed.
 - **Slice 7b's manual steps have not run**: whether app 480 honours
   `SetInputActionManifestFilePath` at all (R3); the Deck run, which is also the
   check of the stick's Y sign (passed through on the belief that `joystick_move`
@@ -12982,9 +13047,10 @@ lines target)". Measured 2026-09-24 with `wc -l` over every `.rs` under each
 `apps/asteroids/src` is 10 670, most of it doc comments and tests. Flappy's
 "smaller than breakout" does hold (7 455).
 
-**Needs a decision, not code:** redefine the bar as something a tool measures —
-non-test, non-comment lines of the game module, say — or drop it as superseded
-by the documentation-heavy style every sample adopted. Nothing depends on it.
+**Decided 2026-09-25: dropped** as superseded by the documentation-heavy style
+every sample adopted on purpose; a line count of that style measures its
+comments. The other option was to redefine the bar as non-test, non-comment
+lines. Nothing depended on it, so this entry can go when next re-verified.
 
 ## asteroids
 
@@ -14021,14 +14087,18 @@ left out:
 atlas pages fixed) and 18.6 MiB after the fix, on this machine's hardware
 adapter, local SwiftShader and CI's SwiftShader alike.
 
-- **Decision owed: the ceiling's doc comment and `docs/plan/sample/15-shard.md`
+- **Decided below: the ceiling's doc comment and `docs/plan/sample/15-shard.md`
   argue from 10.9 MiB (2026-09-07), and the build now peaks at 18.6 MiB**, so
   the ceiling is 1.7× the reading rather than the trebling it describes. The
   growth from 10.9 to 18.4 MiB between 2026-09-07 and `8892e1a` is not
   attributed; part of it is the forward renderer's start-up frame, which leaves
   4 173 166 bytes on the command stream in a 7 536 640-byte buffer the stream
   never releases. Options: attribute and cut it, or restate the comment and keep
-  or move the ceiling.
+  or move the ceiling. **Decided 2026-09-25: restate the comment and the plan
+  from the 18.6 MiB reading and keep the 32 MiB ceiling** (1.7× headroom still
+  catches the 41 MiB kind of regression). Attributing the growth — the start-up
+  frame's 4 MB left on the command stream first — is performance work, filed as
+  that rather than as a reason to move the ceiling.
 - **`ImageAtlas` keeps a 4 MiB CPU page and `GlyphAtlas` 1 MiB per open page for
   the renderer's life**, pixels the GPU already holds. `ImageAtlas::pixels`
   exists so `region()` can stage one union dirty rectangle. It does not move
@@ -17756,6 +17826,11 @@ hardware macOS runner, an explicit "implemented but unproven here" state that a
 reviewer accepts once, or leaving them open indefinitely. Closing them on a
 device that cannot execute them is not among the options.
 
+**Decided 2026-09-25: the explicit "implemented but unproven here" state**,
+accepted once, per row, with the probe's output as its evidence. A hardware
+macOS runner costs money, which is the owner's to spend, and leaving them open
+indefinitely keeps four rows red that no one can turn green.
+
 ### No GPU job in CI runs on real hardware, and one defect has already proved it matters
 
 **There is no real GPU anywhere in it.** Every golden, every seam exercise and
@@ -17962,7 +18037,9 @@ and leave the next release's entries readable again.
 
 That is the user's call, not one to make unasked: a first tag starts the release
 pipeline, and the link block at the bottom of the file has never been exercised.
-Not a blocker for anything.
+**Left to the owner on 2026-09-25**, when the other open decisions were taken: a
+tag cannot be taken back, so this is the one decision here not made unasked. Not
+a blocker for anything.
 
 ### Two `crcbl-render` modules are private and cited by crate path
 
@@ -17975,11 +18052,13 @@ reachable by their console names, so nothing is broken and
 paths from outside the crate finds nothing, and a rustdoc link to one would not
 resolve.
 
-Two ways out and no decision yet: make the modules `pub` — they are peers of
-`hiz`, which already is, so the asymmetry looks accidental — or reword the
-citations to name the console variable and the shader instead. Raised by the
-2026-09-03 plan audit and not fixed, because which one is right depends on
-whether those modules are meant to be part of the crate's surface.
+**Decided 2026-09-25: make them `pub`**, as `hiz` is; the asymmetry looks
+accidental and the paths already read as public. Not built. Two ways out and no
+decision yet: make the modules `pub` — they are peers of `hiz`, which already
+is, so the asymmetry looks accidental — or reword the citations to name the
+console variable and the shader instead. Raised by the 2026-09-03 plan audit and
+not fixed, because which one is right depends on whether those modules are meant
+to be part of the crate's surface.
 
 ### The counted-claims sweep is done for `apps/*`; the wider one is not
 
@@ -19571,6 +19650,9 @@ taken:
 - **Open an issue on failure.** A `if: failure()` step running `gh issue create`
   turns a silent red into something with a notification behind it. Cheap, and it
   needs a decision about issue noise and about a token with `issues: write`.
+  **Decided 2026-09-25: this one** — a weekly job opens at most one issue a
+  week, and a silent red went unnoticed twice. The job gets
+  `permissions: issues: write` for `GITHUB_TOKEN`; no new secret. Not built.
 - **Move the whole census per-PR.** Measured at about three and a half minutes
   of interpretation on top of a cold compile, so it is not obviously too
   expensive any more — and the crcbl-jobs job that did move takes **1.4 min end
@@ -21018,15 +21100,11 @@ control — is in docs/notes/process.md under the same heading. The coverage gap
 
 ## Considered and declined
 
-The list itself is in docs/notes/samples.md under the same heading. One finding
-in it is open rather than declined:
-
-**The finding this leaves is about the engine, not the samples**:
-`crcbl_ui::hud` has no consumer anywhere in the workspace. It is either owed a
-`color` on `Label` and an optional explicit panel size — at which point the
-samples could adopt it — or it should be deleted. Not decided here, because
-adding a field nothing uses is the speculative-machinery mistake and deleting a
-module is not a call to make inside an adoption task.
+The list itself is in docs/notes/samples.md under the same heading. Its one open
+finding — that `crcbl_ui::hud` had no consumer — is stale (re-verified
+2026-09-25): `crates/crcbl-ui/src/hud.rs` now holds only `Anchor`, which the
+debug overlay places itself with, and the `Label` the finding wanted a colour on
+no longer exists. Nothing is left to decide.
 
 ## What MTL1 left open on the Metal backend
 
@@ -21035,7 +21113,10 @@ module is not a call to make inside an adoption task.
   11; `objc2` does not gate on availability, so an older system raises an
   unrecognised-selector exception rather than answering wrongly. Loud, but
   undecided — the same question the AppKit shell backend has been carrying
-  unstated since P5C.
+  unstated since P5C. **Decided 2026-09-25: macOS 11 is the floor**, the one
+  `supportsBCTextureCompression` already sets; owed is saying so — in the crate
+  docs and as `LSMinimumSystemVersion` in a packaged bundle — so an older system
+  is refused by the loader instead of by an exception.
 - **`DeviceType::Virtual` is unreachable on Metal.** There is no virtualisation
   query, so a paravirtual GPU answers every question exactly as the built-in one
   and enumerates as `Integrated`. Stated as a gap, not fixed.
@@ -23627,6 +23708,9 @@ trade-off:
 exposure without adding a dependency, and the pinning that makes CI reproducible
 is exactly what makes the cache key sound.
 
+**Decided 2026-09-25: 2, the recommendation.** Option 1's third-party action is
+a new dependency and so the owner's; 2 needs none. Not built.
+
 **The shape worth naming**, because it recurs: a failed install leaves the real
 check **skipped**, and a skipped check is not a passed one. The Pages deploy did
 the same thing earlier in the session — the build failed and the deploy was
@@ -23717,7 +23801,10 @@ What is left:
   user** when the browser wants a trace. `trace::init_from_env` returns `false`
   on `wasm32` before touching the environment, so the only thing that can turn
   the gate on cannot do so in a browser build; `set_enabled` deliberately still
-  can, and reversing that is the user's call.
+  can, and reversing that is the user's call. **Left to the owner on
+  2026-09-25**: both halves wait on a new dependency for a browser clock, and
+  taking one is the owner's; until then the zero clock and `set_enabled` stay as
+  they are.
 - **`crcbl-jobs` has not gained the `crcbl-core` edge.** Correct today: CI runs
   `cargo machete`, which fails on an unused dependency, so the edge arrives with
   the first span opened in a worker.
@@ -23747,12 +23834,13 @@ canonicalisation on, fuel or epoch limits, and no WASI. The browser needs none
 of it — there the browser _is_ the runtime, and modules instantiate through the
 same import surface — so a wasm build never carries the crate.
 
-**What is not decided is whether to take the dependency.** There is no
-`wasmtime` in `Cargo.lock` and adding one is the user's call, so P6A
-(breakout-as-`.wasm`, exit criterion "state hash == static build, native +
-browser") is blocked on an answer rather than on effort. It is the next unticked
-roadmap phase after P6 that is not Metal, dx12 or a second lighting
-implementation.
+**Left to the owner on 2026-09-25** — a new runtime dependency (`wasmtime` or
+`wasmi`) is the owner's to take, so P6A stays blocked on that answer. **What is
+not decided is whether to take the dependency.** There is no `wasmtime` in
+`Cargo.lock` and adding one is the user's call, so P6A (breakout-as-`.wasm`,
+exit criterion "state hash == static build, native + browser") is blocked on an
+answer rather than on effort. It is the next unticked roadmap phase after P6
+that is not Metal, dx12 or a second lighting implementation.
 
 The options, and what each costs:
 
@@ -23798,6 +23886,12 @@ structurally — each group simplified to about half its triangles and re-split 
 so a ratio is not a parameter of `build_cluster_dag`. Reinstating one is a
 change to the generator's signature, as `docs/notes/rendering.md` records under
 _What the deleted 25-lod plan left behind_.
+
+**Decided 2026-09-25: a per-asset override scales the runtime selection error,
+not the generator.** The DAG halves by structure, so the knob an author needs —
+keep this asset finer, or let it coarsen sooner — is a multiplier on the error
+threshold the cut is chosen against, which leaves `build_cluster_dag`'s
+signature alone. It lands in the same `.meta` file as the `AssetId` GUID.
 
 Also recorded from the hand-authored import slice:
 
