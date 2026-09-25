@@ -160,8 +160,10 @@ mod platform {
                 .window_property(root, "_NET_CLIENT_LIST")
                 .unwrap_or_default();
             listed
-                .chunks_exact(4)
-                .any(|word| u32::from_ne_bytes(word.try_into().expect("four bytes")) == window)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|word| u32::from_ne_bytes(*word) == window)
         }
     }
 }
