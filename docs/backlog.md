@@ -21145,7 +21145,12 @@ exposure without adding a dependency, and the pinning that makes CI reproducible
 is exactly what makes the cache key sound.
 
 **Decided 2026-09-25: 2, the recommendation.** Option 1's third-party action is
-a new dependency and so the owner's; 2 needs none. Not built.
+a new dependency and so the owner's; 2 needs none. Not built. The shape that
+does not depend on how `taiki-e/install-action` treats a binary already present
+(its README does not say, read 2026-09-25): an `actions/cache` step keyed on
+`tool@version` over that tool's file in `~/.cargo/bin`, and the install step
+skipped on `cache-hit`, written once as a local composite action under
+`.github/actions/` and used at each of the 17 sites.
 
 **The shape worth naming**, because it recurs: a failed install leaves the real
 check **skipped**, and a skipped check is not a passed one. The Pages deploy did
