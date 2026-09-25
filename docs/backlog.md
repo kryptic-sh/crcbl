@@ -11752,24 +11752,6 @@ own app id or under 480 as far as 480 allows.
   builds, and the macOS overlay entitlement question answered. None of it waits
   on an app id; the end-to-end launch from Steam is checked by a game with its
   own, or under 480 as far as 480 allows.
-- **Needs a decision: `Apps::launch_command_line` can silently cut a line over
-  1023 bytes.** It reads into a fixed `LAUNCH_COMMAND_LINE_CAPACITY` (1024)
-  buffer and refuses only a line with no NUL in it as `Truncated`; but Steam's
-  copies stop a byte short to leave a NUL, so a longer line most likely arrives
-  cut, NUL-terminated, and is returned as if whole. **Proposed change:** read it
-  through slice 11's `apps::content::grow` (grow while an answer reaches the
-  last byte but one, `Truncated` past `MAX_TEXT_BYTES`), as every other string
-  read does. **The test it changes:**
-  `apps::tests::a_launch_command_line_that_fills_the_buffer_is_truncated_not_cut`
-  asserts that a 1024-byte line is `Err(Truncated("GetLaunchCommandLine"))` and
-  a 1023-byte one is read whole; after the change both would be read whole (the
-  buffer grows), the refusal would move to a line past `MAX_TEXT_BYTES`, and
-  `testing::fake_get_launch_command_line` would copy as Steam does (a byte
-  short, then the NUL) rather than strncpy-style. **Decided 2026-09-25: take the
-  proposed change.** A line cut and returned as whole is the silent kind of
-  wrong the other string reads were built to refuse, and `grow` is already the
-  shared answer; the test's two assertions move with it as described. Not built
-  yet.
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator
@@ -25476,9 +25458,9 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
   meeting the every-packet-sealed rule (with a guard test owed). To build:
-  `launch_command_line` through `grow`, Box2D's farthest-point sleep check,
-  masking ui-bound pad buttons, and no pad delivery while unfocused. glam's bump
-  is in the first-priority dependency entry at the top.
+  Box2D's farthest-point sleep check, masking ui-bound pad buttons, and no pad
+  delivery while unfocused. glam's bump is in the first-priority dependency
+  entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring

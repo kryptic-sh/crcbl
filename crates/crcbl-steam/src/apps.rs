@@ -14,11 +14,6 @@ use core::ffi::c_char;
 
 use crate::{LobbyId, Steam, callbacks::fixed_string, error::SteamError};
 
-/// The buffer `launch_command_line` reads into. The header states no
-/// maximum, so the size is this crate's choice; a command line that fills it
-/// is reported as [`SteamError::Truncated`] rather than cut short.
-const LAUNCH_COMMAND_LINE_CAPACITY: usize = 1024;
-
 /// The argument Steam passes a game launched to join a lobby, followed by the
 /// lobby id.
 pub const CONNECT_LOBBY: &str = "+connect_lobby";
@@ -87,26 +82,27 @@ impl Apps<'_> {
     /// [`SteamEvent::NewLaunchParameters`](crate::SteamEvent::NewLaunchParameters),
     /// and pass its words to [`connect_lobby`].
     ///
+    /// Read through [`grow`], as every string this crate reads is: the header
+    /// states no maximum, and Steam's copy stops a byte short to leave its
+    /// NUL, so a line that reaches the last byte but one is read again into
+    /// a larger buffer rather than returned cut.
+    ///
     /// # Errors
     ///
-    /// [`SteamError::Truncated`] when it filled the whole buffer.
+    /// [`SteamError::Truncated`] for a line past [`MAX_TEXT_BYTES`].
     pub fn launch_command_line(&self) -> Result<String, SteamError> {
         let client = &self.steam.client;
-        let mut buffer = [0_u8; LAUNCH_COMMAND_LINE_CAPACITY];
-        let capacity = i32::try_from(buffer.len())
-            .map_err(|_| SteamError::Truncated("GetLaunchCommandLine"))?;
-        // SAFETY: see `subscribed`; `buffer` is `capacity` writable bytes.
-        unsafe {
-            (client.lib.fns.apps.get_launch_command_line)(
-                client.apps,
-                buffer.as_mut_ptr().cast::<c_char>(),
-                capacity,
-            );
-        }
-        // Whatever Steam's return counts, a line that fit left a NUL.
-        if !buffer.contains(&0) {
-            return Err(SteamError::Truncated("GetLaunchCommandLine"));
-        }
+        let ((), [buffer]) = grow("GetLaunchCommandLine", |[buffer], capacity| {
+            // SAFETY: see `subscribed`; `buffer` is `capacity` writable bytes.
+            unsafe {
+                (client.lib.fns.apps.get_launch_command_line)(
+                    client.apps,
+                    buffer.as_mut_ptr().cast::<c_char>(),
+                    capacity,
+                );
+            }
+            Some(())
+        })?;
         let (line, lossy) = fixed_string(&buffer);
         if lossy {
             self.steam
@@ -166,18 +162,23 @@ mod tests {
         );
     }
 
+    /// A long line is read whole, however Steam's copy cut it the first
+    /// time; one past the largest buffer is truncated, never cut.
     #[test]
-    fn a_launch_command_line_that_fills_the_buffer_is_truncated_not_cut() {
+    fn a_long_launch_command_line_grows_and_one_past_the_cap_is_truncated() {
         let steam = init_on(testing::fake_lib(), AppId(480)).unwrap();
-        testing::script(|s| s.launch_line = vec![b'x'; LAUNCH_COMMAND_LINE_CAPACITY]);
+        for len in [1023, 1024, 5000] {
+            testing::script(|s| s.launch_line = vec![b'x'; len]);
+            assert_eq!(
+                steam.apps().launch_command_line().map(|line| line.len()),
+                Ok(len),
+                "{len} bytes"
+            );
+        }
+        testing::script(|s| s.launch_line = vec![b'x'; MAX_TEXT_BYTES]);
         assert_eq!(
             steam.apps().launch_command_line(),
             Err(SteamError::Truncated("GetLaunchCommandLine"))
-        );
-        testing::script(|s| s.launch_line = vec![b'x'; LAUNCH_COMMAND_LINE_CAPACITY - 1]);
-        assert_eq!(
-            steam.apps().launch_command_line().map(|line| line.len()),
-            Ok(LAUNCH_COMMAND_LINE_CAPACITY - 1)
         );
     }
 

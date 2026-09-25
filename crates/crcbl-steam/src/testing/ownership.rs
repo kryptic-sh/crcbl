@@ -71,7 +71,7 @@ pub(crate) struct FakeSession {
 
 /// Writes as much of `text` as fits before a NUL in `capacity` bytes, as
 /// Steam's string copies do, recording the size offered.
-fn copy_out(call: &'static str, text: &[u8], out: *mut c_char, capacity: usize) {
+pub(super) fn copy_out(call: &'static str, text: &[u8], out: *mut c_char, capacity: usize) {
     script(|s| s.apps_extra.offered.push((call, capacity)));
     let Some(room) = capacity.checked_sub(1) else {
         return;

@@ -1654,19 +1654,11 @@ unsafe extern "C" fn fake_get_launch_command_line(
     out: *mut c_char,
     capacity: i32,
 ) -> i32 {
-    script(|s| {
-        let capacity = usize::try_from(capacity).unwrap();
-        let len = s.launch_line.len().min(capacity);
-        // SAFETY: the caller passes `capacity` writable bytes; the NUL goes
-        // in only when it fits, as a C strncpy-shaped copy would leave it.
-        unsafe {
-            core::ptr::copy_nonoverlapping(s.launch_line.as_ptr(), out.cast::<u8>(), len);
-            if len < capacity {
-                out.cast::<u8>().add(len).write(0);
-            }
-        }
-        i32::try_from(len).unwrap()
-    })
+    // Copied as Steam copies it: a byte short, then the NUL.
+    let line = script(|s| s.launch_line.clone());
+    let capacity = usize::try_from(capacity).unwrap();
+    ownership::copy_out("GetLaunchCommandLine", &line, out, capacity);
+    i32::try_from(line.len().min(capacity.saturating_sub(1))).unwrap()
 }
 
 /// A `SteamAPICallCompleted_t` on the pipe: `call` answered with callback
