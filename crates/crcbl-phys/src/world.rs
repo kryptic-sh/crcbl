@@ -12,6 +12,7 @@ use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 use crate::components::Transform;
 use crate::contact::manifold::gap;
 use crate::contact::shape::ContactShape;
+use crate::contact::sweep::time_of_contact;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, Penetration, ShapeHit};
 
@@ -1031,6 +1032,110 @@ fn lying_capsule_blocker_core(
     None
 }
 
+/// Where a sweep that reports no contact point met a collider:
+/// [`PhysicsWorld::sweep_lying_capsule`]'s answer.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SweptContact {
+    /// The share of the motion covered before the contact, in `[0, 1]`.
+    pub(crate) t: f64,
+    /// Unit normal pointing away from the surface met, toward the swept shape.
+    pub(crate) normal: DVec3,
+    /// Whether the swept shape began already touching or inside the collider,
+    /// as [`ShapeHit::started_inside`] means it; `t` is then zero.
+    pub(crate) started_inside: bool,
+}
+
+impl From<ShapeHit> for SweptContact {
+    fn from(hit: ShapeHit) -> Self {
+        Self {
+            t: hit.t,
+            normal: hit.normal,
+            started_inside: hit.started_inside,
+        }
+    }
+}
+
+/// The one implementation of "what does this lying capsule, moved without
+/// turning, hit first": [`PhysicsWorld::sweep_lying_capsule`].
+///
+/// A mesh sweeps it exactly, turned into the mesh's frame, as it sweeps an
+/// upright capsule. The parametric shapes are placed as in
+/// [`lying_capsule_blocker_core`] and swept by the contact pipeline's
+/// conservative advancement over [`gap`] ([`time_of_contact`]) — the query
+/// world has no closed form for a capsule that is not upright — which stops
+/// a little short of the contact rather than on it.
+///
+/// A capsule that begins touching or inside a collider meets it at once, with
+/// [`SweptContact::started_inside`], whichever way it is moving: the answer
+/// the upright sweeps give.
+fn sweep_lying_capsule_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    capsule: &LyingCapsule,
+    motion: DVec3,
+    filter: QueryFilter,
+    scratch: &mut QueryScratch,
+) -> Option<(ColliderId, SweptContact)> {
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
+    let moved = LyingCapsule {
+        head: capsule.head + motion,
+        ..*capsule
+    };
+    let bounds = capsule.aabb().union(moved.aabb());
+    bvh.traverse_aabb_into(&bounds, &mut scratch.stack, &mut scratch.candidates);
+
+    let (head, feet, radius) = (capsule.head, capsule.feet(), capsule.radius);
+    let at = |t: f64| ContactShape::Capsule {
+        a: head + motion * t,
+        b: feet + motion * t,
+        radius,
+    };
+    let advance = |target: ContactShape| {
+        let start = gap(&target, &at(0.0));
+        if start.0 <= 0.0 {
+            return Some(SweptContact {
+                t: 0.0,
+                normal: start.1,
+                started_inside: true,
+            });
+        }
+        let t = time_of_contact(&target, at, motion, start)?;
+        Some(SweptContact {
+            t,
+            normal: gap(&target, &at(t)).1,
+            started_inside: false,
+        })
+    };
+    let centre = (head + feet) * 0.5;
+    let path = Segment::new(centre, centre + motion);
+    closest_swept_core(
+        colliders,
+        generations,
+        &scratch.candidates,
+        filter,
+        |entry| match entry {
+            ColliderEntry::Sphere(s) => advance(ContactShape::Sphere {
+                centre: s.centre,
+                radius: s.radius,
+            }),
+            ColliderEntry::Box(b) => advance(ContactShape::Box {
+                centre: b.centre,
+                rotation: DQuat::IDENTITY,
+                half: b.half_extents,
+            }),
+            ColliderEntry::Capsule(c) => advance(ContactShape::Capsule {
+                a: c.bottom(),
+                b: c.top(),
+                radius: c.radius,
+            }),
+            ColliderEntry::Mesh(m) => m
+                .sweep(&path, radius, (head - feet) * 0.5, &mut scratch.mesh)
+                .map(SweptContact::from),
+        },
+    )
+}
+
 /// The broadphase bounds of a sweep: the box the segment covers, grown by the
 /// swept shape's half-extents so the traversal offers the narrow phase every
 /// collider the *volume* touches and not only the ones its centre line runs
@@ -1080,17 +1185,18 @@ fn closest_hit_core(
 /// supplying the shape-level TOI for whichever shape is being swept, over the
 /// colliders `filter` admits — which skips triggers.
 ///
-/// The sphere and capsule sweeps share this rather than each carrying a copy:
-/// what a trigger, a dead slot, an excluded collider and a layer mask mean is
-/// one rule, and a second copy of it is where the two would drift.
-fn closest_swept_core(
+/// The sphere, capsule and lying capsule sweeps share this rather than each
+/// carrying a copy: what a trigger, a dead slot, an excluded collider and a
+/// layer mask mean is one rule, and a second copy of it is where they would
+/// drift.
+fn closest_swept_core<H: SweptHit>(
     colliders: &[Option<ColliderSlot>],
     generations: &[u32],
     candidates: &[u32],
     filter: ResolvedFilter,
-    mut narrow: impl FnMut(&ColliderEntry) -> Option<ShapeHit>,
-) -> Option<(ColliderId, ShapeHit)> {
-    let mut best: Option<(f64, ColliderId, ShapeHit)> = None;
+    mut narrow: impl FnMut(&ColliderEntry) -> Option<H>,
+) -> Option<(ColliderId, H)> {
+    let mut best: Option<(f64, ColliderId, H)> = None;
     for &element in candidates {
         let idx = element as usize;
         let Some(Some(slot)) = colliders.get(idx) else {
@@ -1100,12 +1206,30 @@ fn closest_swept_core(
             continue;
         }
         if let Some(hit) = narrow(&slot.entry)
-            && hit.t < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
+            && hit.t() < best.as_ref().map_or(f64::INFINITY, |&(t, _, _)| t)
         {
-            best = Some((hit.t, id_for_slot_in(generations, element), hit));
+            best = Some((hit.t(), id_for_slot_in(generations, element), hit));
         }
     }
     best.map(|(_, id, hit)| (id, hit))
+}
+
+/// What [`closest_swept_core`] ranks a sweep's hits by: how far along the
+/// sweep each one is.
+trait SweptHit: Copy {
+    fn t(&self) -> f64;
+}
+
+impl SweptHit for ShapeHit {
+    fn t(&self) -> f64 {
+        self.t
+    }
+}
+
+impl SweptHit for SweptContact {
+    fn t(&self) -> f64 {
+        self.t
+    }
 }
 
 /// Resolve an id to a live storage slot, or `None` if the id is stale
@@ -1719,6 +1843,31 @@ impl PhysicsWorld {
             .lying_capsule_blocker(capsule, filter, &mut scratch);
         self.scratch = scratch;
         blocker
+    }
+
+    /// What a [`LyingCapsule`] moved by `motion`, without turning, meets first
+    /// among the solid colliders `filter` admits, and how far along the motion
+    /// it gets: the sweep [`crate::CharacterController::move_lying`] slides
+    /// with. See [`sweep_lying_capsule_core`] for how each shape is met.
+    pub(crate) fn sweep_lying_capsule(
+        &mut self,
+        capsule: &LyingCapsule,
+        motion: DVec3,
+        filter: QueryFilter,
+    ) -> Option<(ColliderId, SweptContact)> {
+        self.ensure_bvh();
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let hit = sweep_lying_capsule_core(
+            self.bvh.as_ref().expect("ensure_bvh built it"),
+            &self.colliders,
+            &self.generations,
+            capsule,
+            motion,
+            filter,
+            &mut scratch,
+        );
+        self.scratch = scratch;
+        hit
     }
 
     /// Get the AABB of a collider by id.

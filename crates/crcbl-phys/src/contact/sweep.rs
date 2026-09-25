@@ -408,6 +408,26 @@ fn time_of_impact(
     }
 }
 
+/// Where a shape moved without turning, `place` putting it a share of the way
+/// along `travel`, first comes within [`TOLERANCE`] of touching `obstacle`:
+/// a share of `travel` in `[0, 1]`, or `None` if it does not get there. The
+/// query world's sweep of a lying capsule stops at it.
+///
+/// `start` is the [`gap`] from `obstacle` to the shape where it begins, which
+/// the caller has measured to decide it begins clear. The answer is the same
+/// advancement [`time_of_impact`] makes, to a target of touching rather than
+/// a slop short: where [`gap`] is exact or a lower bound it never steps past
+/// the contact, and short of running out of [`MAX_ADVANCES`] it stops within
+/// [`TOLERANCE`] of it.
+pub(crate) fn time_of_contact(
+    obstacle: &ContactShape,
+    place: impl Fn(f64) -> ContactShape,
+    travel: DVec3,
+    start: (f64, DVec3),
+) -> Option<f64> {
+    advance(obstacle, &place, travel, 0.0, start, 0.0, 1.0)
+}
+
 /// Conservative advancement from the start of the path, whose gap and normal
 /// are `start`, to where the gap first comes within [`TOLERANCE`] of
 /// `target`: a share of the tick before `limit`, or `None` if it does not get

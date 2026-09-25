@@ -301,11 +301,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **A prone-body fit check in `crcbl-phys`.**
-  `LyingCapsule::new(head, yaw, radius, length)` describes a capsule lying on
-  its side: `head` is the head end's hemisphere centre, the feet end's lies
-  `length` behind it, and `yaw` is the way the head faces — a right-handed turn
-  about `+Y` from `-Z`, so a quarter turn faces `-X`.
+- **A prone body in `crcbl-phys`: a fit check and a swept, ground-following
+  move.** `LyingCapsule::new(head, yaw, radius, length)` describes a capsule
+  lying on its side: `head` is the head end's hemisphere centre, the feet end's
+  lies `length` behind it along the core, and `yaw` is the way the head faces —
+  a right-handed turn about `+Y` from `-Z`, so a quarter turn faces `-X`. Its
+  `pitch_sine` field (zero from `new`; set with `with_pitch_sine`) tilts the
+  core about the head: the sine of its angle above the horizontal, positive with
+  the head end higher, a sine because the crate constructs no inverse
+  trigonometry. `axis()` is the core's unit direction from feet to head, for
+  orienting a body model.
   `PhysicsWorld::lying_capsule_blocker(&capsule, filter)` names a solid collider
   the body would be inside, or `None` if it fits, against spheres, boxes,
   capsules, triangle meshes and a system's compounds (as their bounding box); a
@@ -314,7 +319,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `CharacterController::lying_blocker(world, &capsule)` asks it under the
   controller's own collider exclusion and query mask, so a game can refuse going
   prone, or turning while prone, into a wall its legs would pass through.
-  Nothing moves: sweeping a lying body is still to come.
+  `CharacterController::move_lying(world, &body, motion)` moves one, returning a
+  `LyingMoveOutcome` whose `body` the next call takes: the controller's position
+  becomes the head, the whole capsule is swept along the displacement with the
+  walking move's plane-set slide — so the legs stop at a wall behind or beside
+  the player — and the body is settled on the ground by a probe under each end,
+  pitched to the line between them and clamped to the walkable slope
+  (`min_ground_normal_y`). A line that would cut through an edge, such as a curb
+  or a crest, is refused and the body turned about its head or its feet onto the
+  edge instead; a lying body does not step up, and a riser taller than its round
+  end slides over is a wall it does not creep up. The move honours the
+  controller's own collider and query mask, and turns nothing: a change of yaw
+  is the caller's, checked with `lying_blocker`.
 - **`text-overflow: ellipsis` and `white-space: nowrap` in the UI tree's
   stylesheets.** `white-space: nowrap` (inherited, as in CSS) keeps a text span
   in a parsed font on one line under any width — explicit newlines still break.

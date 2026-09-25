@@ -94,7 +94,7 @@ pub mod world;
 pub use atmosphere::{Atmosphere, AtmosphericDrag};
 pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use character::{
-    CharacterConfig, CharacterController, GroundContact, GroundProbe, MoveOutcome,
+    CharacterConfig, CharacterController, GroundContact, GroundProbe, LyingMoveOutcome, MoveOutcome,
 };
 pub use collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};

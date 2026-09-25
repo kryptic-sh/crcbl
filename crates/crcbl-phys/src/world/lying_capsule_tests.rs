@@ -196,3 +196,29 @@ fn an_excluded_masked_out_or_trigger_collider_does_not_block() {
     assert!(world.set_layers(wall, LEVEL));
     assert_eq!(world.lying_capsule_blocker(&lying(0.0), filter), Some(wall));
 }
+
+/// **The fit check sees the pitch**: a body resting on the floor, pitched
+/// head up by however little, has its feet in the floor; pitched head down,
+/// they are clear of it.
+#[test]
+fn a_pitched_capsule_is_checked_where_its_pitch_puts_its_feet() {
+    let mut world = PhysicsWorld::new();
+    let floor = world.add_box(BoxCollider::new(
+        DVec3::new(0.0, -1.0, 0.0),
+        DVec3::new(50.0, 1.0, 50.0),
+    ));
+    for yaw in [0.0, FRAC_PI_2, 0.3] {
+        let level = lying(yaw);
+        assert_eq!(blocker(&mut world, &level), None, "yaw {yaw}");
+        assert_eq!(
+            blocker(&mut world, &level.with_pitch_sine(0.01)),
+            Some(floor),
+            "yaw {yaw}, head up"
+        );
+        assert_eq!(
+            blocker(&mut world, &level.with_pitch_sine(-0.01)),
+            None,
+            "yaw {yaw}, head down"
+        );
+    }
+}

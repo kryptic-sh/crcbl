@@ -3368,67 +3368,79 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
-## A lying capsule for prone characters: what the fit check left (2026-09-25)
+## A lying capsule for prone characters: what the move left (2026-09-25)
 
 EW models a prone player as a `CharacterController` with a `half_height` of
 zero, a sphere at the actor origin, while the body lies about 1.6 m behind that
-point, so the legs pass through walls. EW asked for a lying capsule —
-`(radius, length, yaw)`, the core horizontal from the head back to the feet — in
-four parts. The first shipped: `LyingCapsule`,
-`PhysicsWorld::lying_capsule_blocker` and `CharacterController::lying_blocker`,
-a non-moving "does this pose fit" that EW can already refuse going prone and
-prone turns with. Still owed:
+point, so the legs pass through walls. EW asked for a lying capsule in four
+parts. Two shipped: the fit check (`LyingCapsule`,
+`PhysicsWorld::lying_capsule_blocker`, `CharacterController::lying_blocker`) and
+the move (`CharacterController::move_lying`, in
+`crates/crcbl-phys/src/character/lying.rs`): the whole body swept with the
+walking slide, settled by a sphere probe under each end, pitched to follow the
+ground and clamped to the walkable slope, as EW decided on 2026-09-25. The pitch
+is `LyingCapsule::pitch_sine`, a sine and not an angle because the crate
+constructs no inverse trigonometry. Still owed:
 
-- **Moving a lying body, with ground contact along its length.** No query sweeps
-  a turned capsule against the query world: `sweep_capsule_core` and
-  `query::swept_capsule_vs_*` reduce a Y-aligned capsule to a point against a
-  shape grown along Y, which does not work for a horizontal core. What exists to
-  build from: a mesh already sweeps a turned capsule (`PlacedMesh::sweep` takes
-  any `half`), and the contact pipeline's conservative advancement
-  (`time_of_impact` in `crates/crcbl-phys/src/contact/sweep.rs`, stepping by
-  `contact::manifold::gap`) handles a capsule at any angle against spheres,
-  capsules and boxes. Then a prone `move_and_slide`: the same plane-set slide,
-  and a ground probe at both ends of the core rather than one under the centre.
-  **Decided by EW (2026-09-25): the core pitches to follow the ground**, clamped
-  to the walkable slope (`min_ground_normal_y`), which puts a pitch on
-  `LyingCapsule`: a horizontal core on a slope hovers at one end or is falsely
-  blocked by the rising ground under the other, and a prone body lies along the
-  ground.
 - **Turning a lying body, refusing a turn into geometry and reporting how far it
-  could turn.** Buildable from the fit check alone: step the yaw so the feet end
-  moves at most a radius per step (`length · Δyaw ≤ radius`, so nothing thinner
-  than the capsule is stepped over), and bisect the first blocked step down to a
-  tolerance; or a rotational conservative advancement through the same
-  `time_of_impact`, which already bounds a turning path. **Decided by EW
-  (2026-09-25): the turn pivots on the head end**, where EW's actor origin and
-  first-person camera sit, so the view stays still while the legs sweep; a wall
-  behind limits how far the legs turn, not where the view is.
-- **Stance switches.** Stand or crouch to prone is this slice's check at the
-  prone pose. Prone to crouch or stand is a Y-aligned capsule fit at the target,
-  which `capsule_penetrations_filtered_into` answers today (non-empty means
-  blocked), but the controller has no stance-fit method wrapping it under its
-  filter. **Decided by EW (2026-09-25): standing up keeps the origin over the
-  head's position**, so the view does not jump; the upright capsule is fitted
-  there and the stand refused if it does not fit, as EW's other stance changes
-  are.
+  could turn.** The yaw is still a per-call input that EW checks with
+  `lying_blocker`. **Decided by EW (2026-09-25): the turn pivots on the head
+  end**, where EW's actor origin and first-person camera sit. Buildable from
+  what shipped: `turn_to_rest` in `character/lying.rs` already steps a pitch
+  turn so an end moves at most a radius per step and bisects the first blocked
+  step with the fit check; a yaw turn about the head is the same loop over yaw
+  (`length · Δyaw ≤ radius`), reporting the last clear yaw.
+- **Going prone on a slope.** `LyingCapsule::new` is level, and a level body
+  facing downhill has its feet in the slope, so `lying_blocker` refuses it
+  though a body pitched onto the slope would fit. `move_lying` settles a level
+  body facing uphill (its first settle turns it down onto the slope), but a
+  level body starting inside the ground is not dug out. What is missing is a
+  "settled pose here" query — the settle run from the pose, without the slide —
+  for EW to check instead of the level pose.
+- **Stance switches.** Prone to crouch or stand is a Y-aligned capsule fit at
+  the target, which `capsule_penetrations_filtered_into` answers today
+  (non-empty means blocked), but the controller has no stance-fit method
+  wrapping it under its filter. **Decided by EW (2026-09-25): standing up keeps
+  the origin over the head's position**; EW fits the upright capsule there
+  itself, so nothing is owed here unless EW asks for the wrapper.
 
-Gaps in what shipped, and behaviour to know:
+Behaviour to know, and gaps in what shipped:
 
-- **A compound blocks by its bounds.** The query world holds one box around a
-  compound's parts (`ColliderComponent::Compound`), so a lying body in the empty
-  corner of an L-shaped compound is refused. **Planes are not in the query world
-  at all**, so they never block a lying body — or any other query; see the next
+- **The settle is not swept.** Each end's probe is a sphere sweep, and the
+  settled pose is checked with the fit check, but the pitch change and the
+  vertical placement between them are not: a rail thinner than the body between
+  the slid pose and the settled one can be passed. Same for `turn_to_rest`,
+  whose steps bound an end's travel to a radius. A body that the slide left
+  inside something (it has no depenetration: there is no push-out for a lying
+  capsule) can be turned out of it by the settle in odd ways — seen in a
+  deliberately broken test, where the feet hopped a thin mesh wall.
+- **Over an edge the body is a plank.** Crawling head first off a curb, the
+  refused line makes the body turn about its feet (riding level, head out over
+  the drop) until turning about the head is the smaller turn, then it tips in
+  one tick: in `crawling_head_first_off_a_curb_…` the head drops about 0.28 m
+  between two ticks 0.05 m apart. A body that bends at the hips is not modelled.
+- **A grounded lying body meets walls upright** (its wall normal is flattened in
+  `CharacterController::slide`, Unreal's `SlideAlongSurface` rule), and the
+  settle lifts an end only off walkable ground. Without either, a body pressed
+  against a riser's edge crept up it a skin width a tick. The upright capsule
+  was not given the flattening: it steps up, and its box sweep meets square
+  edges. Whether it creeps up a mesh or sphere edge was not checked.
+- **The parametric sweep is conservative advancement** (`time_of_contact` over
+  `contact::manifold::gap`), so it stops up to its tolerance short of the
+  contact rather than on it; a mesh is swept exactly. The capsule-against-box
+  gap is a golden-section search (`closest_on_segment_to_box`), exact on the
+  flat cases the tests pin and within its bracket elsewhere.
+- **A compound blocks by its bounds**, for the fit check and the move alike: the
+  query world holds one box around its parts. **Planes are not in the query
+  world at all**, so they neither block nor carry a lying body; see the next
   section's "The query world does not see what the solver sees".
-- **Which blocker is named is arbitrary** when several block: the first the
-  broadphase offers, deterministic but not the nearest or deepest. No
-  penetration depth or push-out is reported for a lying capsule.
-- **Only the `&mut PhysicsWorld` and `OverlapQueries` forms exist.**
-  `PhysicsSystem` and `EntityOverlapQueries` have no entity-returning form; a
-  system caller goes through `PhysicsSystem::world_mut` and maps the id back
-  with `PhysicsSystem::entity_of`.
-- **The capsule-against-box distance is a golden-section search**
-  (`closest_on_segment_to_box`, shared with the contact pipeline), exact on the
-  flat cases the tests pin and within its bracket elsewhere, not a closed form.
+- **Which blocker `lying_capsule_blocker` names is arbitrary** when several
+  block: the first the broadphase offers, deterministic but not the nearest or
+  deepest. No penetration depth or push-out is reported for a lying capsule.
+- **Only the `&mut PhysicsWorld` forms exist.** The fit check also has an
+  `OverlapQueries` form; the lying sweep is crate-private
+  (`PhysicsWorld::sweep_lying_capsule`), and `PhysicsSystem` and
+  `EntityOverlapQueries` have no entity-returning form of either.
 - **Declined: making `Capsule` a two-endpoint shape.** Every Y-aligned query —
   the Y-growth sweeps, the penetrations, `ColliderComponent::Capsule` — is built
   on `centre` and `half_height`; a separate query shape kept this change

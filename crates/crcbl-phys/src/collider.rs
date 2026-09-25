@@ -415,12 +415,13 @@ impl Capsule {
 // LyingCapsule
 // ---------------------------------------------------------------------------
 
-/// A capsule lying on its side: a prone body, its core running horizontally
-/// from the head back to the feet.
+/// A capsule lying on its side: a prone body, its core running from the head
+/// back to the feet, level or pitched to follow the ground.
 ///
 /// A query shape, not a collider — the world's own capsules stand up the Y
-/// axis — for asking whether a body lying at a pose would be inside anything:
-/// see [`crate::PhysicsWorld::lying_capsule_blocker`].
+/// axis — for asking whether a body lying at a pose would be inside anything,
+/// see [`crate::PhysicsWorld::lying_capsule_blocker`], and for moving one, see
+/// [`crate::CharacterController::move_lying`].
 ///
 /// # The pose
 ///
@@ -430,9 +431,21 @@ impl Capsule {
 ///   faces `-X`, a half turn `+Z` and three quarters `+X` — `-Z` turned by the
 ///   rotation [`crate::rotation_from_scaled_axis`] builds from `+Y · yaw`, and
 ///   the `ahead` of `OrbitCamera::walk_direction` in `crcbl-render`.
+/// - [`pitch_sine`](Self::pitch_sine) tilts the core out of the horizontal,
+///   about the head: it is the **sine** of the angle the core makes with the
+///   horizontal, **positive when the head end is higher** than the feet end —
+///   a body crawling head first up a slope has a positive pitch. Zero, which
+///   [`new`](Self::new) gives, lies level.
 /// - [`length`](Self::length) is how far behind the head the feet end's
-///   hemisphere centre lies, so the body reaches a further
+///   hemisphere centre lies, along the core, so the body reaches a further
 ///   [`radius`](Self::radius) past each of the two ends.
+///
+/// The pitch is a sine and not an angle for the reason
+/// [`CharacterConfig::min_ground_normal_y`](crate::CharacterConfig::min_ground_normal_y)
+/// is a cosine: this crate constructs no inverse trigonometry, and a pitch
+/// found from the ground comes out of a square root. [`axis`](Self::axis) is
+/// the direction it gives the core, which is what a renderer orients the body
+/// model by.
 ///
 /// A length of zero is a sphere at `head`, which is what a character
 /// controller with a `half_height` of zero already is.
@@ -442,6 +455,9 @@ pub struct LyingCapsule {
     pub head: DVec3,
     /// The way the head faces, in radians about `+Y` from `-Z`.
     pub yaw: f64,
+    /// The sine of the core's angle above the horizontal, positive with the
+    /// head end higher: in `[-1, 1]`.
+    pub pitch_sine: f64,
     /// Radius of the capsule.
     pub radius: f64,
     /// Distance from the head end's hemisphere centre back to the feet end's,
@@ -450,7 +466,7 @@ pub struct LyingCapsule {
 }
 
 impl LyingCapsule {
-    /// A capsule lying at a pose; see the type for what each part means.
+    /// A capsule lying level at a pose; see the type for what each part means.
     ///
     /// # Panics
     ///
@@ -463,13 +479,31 @@ impl LyingCapsule {
         Self {
             head,
             yaw,
+            pitch_sine: 0.0,
             radius,
             length,
         }
     }
 
-    /// The unit horizontal direction the head faces: from the feet toward the
-    /// head.
+    /// The same capsule pitched about its head: see
+    /// [`pitch_sine`](Self::pitch_sine).
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if `pitch_sine` is outside `[-1, 1]`.
+    #[inline]
+    #[must_use]
+    pub fn with_pitch_sine(self, pitch_sine: f64) -> Self {
+        debug_assert!(
+            (-1.0..=1.0).contains(&pitch_sine),
+            "a pitch sine lies in [-1, 1], not {pitch_sine}"
+        );
+        Self { pitch_sine, ..self }
+    }
+
+    /// The unit horizontal direction the head faces, which the
+    /// [`yaw`](Self::yaw) alone decides: from the feet toward the head, seen
+    /// from above.
     #[inline]
     #[must_use]
     pub fn facing(&self) -> DVec3 {
@@ -480,12 +514,23 @@ impl LyingCapsule {
         )
     }
 
+    /// The unit direction of the core from the feet end toward the head end:
+    /// the [`facing`](Self::facing), tilted up by the
+    /// [`pitch_sine`](Self::pitch_sine). Level, it is the facing itself.
+    #[inline]
+    #[must_use]
+    pub fn axis(&self) -> DVec3 {
+        let facing = self.facing();
+        let level = (1.0 - self.pitch_sine * self.pitch_sine).max(0.0).sqrt();
+        DVec3::new(facing.x * level, self.pitch_sine, facing.z * level)
+    }
+
     /// Centre of the feet end's hemisphere: [`length`](Self::length) behind
-    /// the head.
+    /// the head along the [`axis`](Self::axis).
     #[inline]
     #[must_use]
     pub fn feet(&self) -> DVec3 {
-        self.head - self.facing() * self.length
+        self.head - self.axis() * self.length
     }
 
     /// AABB of this capsule.
@@ -808,5 +853,32 @@ mod tests {
         let aabb = c.aabb();
         assert!((aabb.min - DVec3::new(-0.5, 0.0, -0.5)).length() < 1e-12);
         assert!((aabb.max - DVec3::new(0.5, 1.0, 2.0)).length() < 1e-12);
+    }
+
+    /// **The pitch convention, written out**: a positive pitch sine puts the
+    /// head end higher than the feet, the feet stay the length behind the head
+    /// along the core, and a pitch of zero is the level capsule to the bit.
+    #[test]
+    fn a_positive_pitch_puts_the_head_above_the_feet_a_length_along_the_core() {
+        let head = DVec3::new(1.0, 2.0, 3.0);
+        let level = LyingCapsule::new(head, 0.0, 0.3, 1.6);
+        assert_eq!(level.with_pitch_sine(0.0).feet(), level.feet());
+        assert_eq!(level.feet(), head + DVec3::Z * 1.6);
+
+        let raised = level.with_pitch_sine(0.6);
+        let feet = raised.feet();
+        assert!(
+            (feet - (head + DVec3::new(0.0, -0.6 * 1.6, 0.8 * 1.6))).length() < 1e-12,
+            "head up by a pitch sine of 0.6 puts the feet at {feet:?}"
+        );
+        assert!(((head - feet).length() - 1.6).abs() < 1e-12);
+        assert!((raised.axis().length() - 1.0).abs() < 1e-12);
+
+        let lowered = level.with_pitch_sine(-0.6);
+        assert!(
+            lowered.feet().y > head.y,
+            "a negative pitch raises the feet"
+        );
+        assert_eq!(lowered.facing(), raised.facing(), "the yaw alone faces");
     }
 }

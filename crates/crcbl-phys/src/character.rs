@@ -7,6 +7,10 @@
 //! inside. It is kinematic: nothing integrates it, and it moves exactly as far
 //! as the caller asks minus what the world takes away.
 //!
+//! A prone body is the same controller moving a [`LyingCapsule`] whose head is
+//! its position instead: [`CharacterController::move_lying`] sweeps the whole
+//! body with the same slide and lays it along the ground.
+//!
 //! # It does not know which camera is watching
 //!
 //! [`CharacterController::move_and_slide`] takes a **world-space
@@ -110,7 +114,11 @@ use glam::DVec3;
 use crate::broadphase::Segment;
 use crate::collider::{Capsule, LyingCapsule};
 use crate::query::{Penetration, ShapeHit};
-use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter};
+use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, SweptContact};
+
+mod lying;
+
+pub use lying::LyingMoveOutcome;
 
 /// The world's up axis. `crcbl` is right-handed with `+Y` up, and
 /// [`Capsule`] is Y-aligned, so a character controller has exactly one.
@@ -288,6 +296,16 @@ struct SlideReport {
     hit_ceiling: bool,
     stepped_up: bool,
     slides: u32,
+}
+
+/// The shape a slide sweeps.
+#[derive(Debug, Clone, Copy)]
+enum Body {
+    /// The controller's own upright capsule, centred on its position.
+    Upright,
+    /// A body lying back from the controller's position, which is its head;
+    /// the capsule's own `head` is not read.
+    Lying(LyingCapsule),
 }
 
 /// A step-up that survived all three of its checks.
@@ -585,7 +603,7 @@ impl CharacterController {
         let was_grounded = self.ground.is_some();
 
         let motion = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, motion, was_grounded);
+        let report = self.slide(world, motion, was_grounded, Body::Upright);
         self.settle_on_ground(world, was_grounded, motion);
 
         if let Some(collider) = self.self_collider {
@@ -659,12 +677,16 @@ impl CharacterController {
         flat - UP * (ground.normal.dot(flat) / ground.normal.dot(UP))
     }
 
-    /// The collect-and-slide loop, after `SV_FlyMove`.
+    /// The collect-and-slide loop, after `SV_FlyMove`, sweeping `body`.
+    ///
+    /// Only an upright body steps up; a grounded lying one meets a wall as
+    /// though the wall were upright.
     fn slide(
         &mut self,
         world: &mut PhysicsWorld,
         motion: DVec3,
         was_grounded: bool,
+        body: Body,
     ) -> SlideReport {
         let mut report = SlideReport::default();
         let primal = motion;
@@ -685,7 +707,7 @@ impl CharacterController {
             let direction = remaining / distance;
             let target = self.position + remaining;
 
-            let Some((_, hit)) = self.sweep(world, self.position, target) else {
+            let Some(hit) = self.sweep_body(world, body, remaining) else {
                 self.position = target;
                 return report;
             };
@@ -708,12 +730,14 @@ impl CharacterController {
                 self.position += hit.normal * self.config.skin_width;
             }
 
+            let mut plane = hit.normal;
             if self.is_ceiling(hit.normal) {
                 report.hit_ceiling = true;
             } else if !self.is_walkable(hit.normal) {
                 report.hit_wall = true;
                 if was_grounded
                     && !report.stepped_up
+                    && matches!(body, Body::Upright)
                     && let Some(step) = self.try_step_up(world, remaining)
                 {
                     self.position = step.position;
@@ -723,12 +747,26 @@ impl CharacterController {
                     report.stepped_up = true;
                     continue;
                 }
+                if was_grounded && matches!(body, Body::Lying(_)) {
+                    // Unreal's `SlideAlongSurface`: a grounded body is not
+                    // pushed up a wall. A lying body meets the edge of a riser
+                    // with its round end, whose normal leans up, and clipping
+                    // against that lifts it a little every tick until it is
+                    // on top; against the wall made upright, it stops. The
+                    // upright capsule is not given the rule here: it steps
+                    // up, and its sweep meets a box's edge square
+                    // (`query::swept_capsule_vs_aabb`), not leaning.
+                    let flat = (plane - UP * plane.dot(UP)).normalize_or_zero();
+                    if flat != DVec3::ZERO {
+                        plane = flat;
+                    }
+                }
             }
 
             if plane_count == MAX_PLANES {
                 return report;
             }
-            planes[plane_count] = hit.normal;
+            planes[plane_count] = plane;
             plane_count += 1;
 
             remaining = clip_to_planes(clip_from, &planes[..plane_count], remaining);
@@ -808,12 +846,7 @@ impl CharacterController {
     /// up, so a jump is not swallowed by the floor it just left.
     fn settle_on_ground(&mut self, world: &mut PhysicsWorld, was_grounded: bool, motion: DVec3) {
         self.ground = None;
-        let snap = if was_grounded && motion.dot(UP) <= 0.0 {
-            self.config.step_offset
-        } else {
-            0.0
-        };
-        let probe = snap + self.config.skin_width * GROUND_PROBE_SKINS;
+        let probe = self.settle_reach(was_grounded, motion);
 
         let Some(found) = self.probe_below(world, self.position, probe) else {
             return;
@@ -834,6 +867,19 @@ impl CharacterController {
         self.ground = Some(found.contact);
     }
 
+    /// How far below itself a move's closing ground probe looks: the
+    /// [`step_offset`](CharacterConfig::step_offset) it snaps down by, for a
+    /// character that was walking and is not asking to go up, and the probe's
+    /// slack either way.
+    fn settle_reach(&self, was_grounded: bool, motion: DVec3) -> f64 {
+        let snap = if was_grounded && motion.dot(UP) <= 0.0 {
+            self.config.step_offset
+        } else {
+            0.0
+        };
+        snap + self.config.skin_width * GROUND_PROBE_SKINS
+    }
+
     /// Sweep the capsule straight down `distance` from `from`, and describe
     /// the first surface it touches.
     ///
@@ -846,8 +892,13 @@ impl CharacterController {
         from: DVec3,
         distance: f64,
     ) -> Option<GroundProbe> {
-        let (collider, hit) = self.sweep(world, from, from - UP * distance)?;
-        Some(GroundProbe {
+        let found = self.sweep(world, from, from - UP * distance)?;
+        Some(self.ground_probe(found, distance))
+    }
+
+    /// A downward sweep of `distance` that met `found`, described as ground.
+    fn ground_probe(&self, (collider, hit): (ColliderId, ShapeHit), distance: f64) -> GroundProbe {
+        GroundProbe {
             contact: GroundContact {
                 normal: hit.normal,
                 point: hit.point,
@@ -855,7 +906,7 @@ impl CharacterController {
             },
             distance: hit.t * distance,
             walkable: self.is_walkable(hit.normal),
-        })
+        }
     }
 
     // ── Sweeping ───────────────────────────────────────────────────────
@@ -870,6 +921,31 @@ impl CharacterController {
         match self.sweep(world, from, from + delta) {
             None => distance,
             Some((_, hit)) => (hit.t * distance - self.config.skin_width).clamp(0.0, distance),
+        }
+    }
+
+    /// Sweep `body` from the controller's position by `delta`: the slide's one
+    /// sweep, whichever shape it is moving.
+    fn sweep_body(
+        &self,
+        world: &mut PhysicsWorld,
+        body: Body,
+        delta: DVec3,
+    ) -> Option<SweptContact> {
+        match body {
+            Body::Upright => self
+                .sweep(world, self.position, self.position + delta)
+                .map(|(_, hit)| hit.into()),
+            Body::Lying(lying) => world
+                .sweep_lying_capsule(
+                    &LyingCapsule {
+                        head: self.position,
+                        ..lying
+                    },
+                    delta,
+                    self.filter(),
+                )
+                .map(|(_, hit)| hit),
         }
     }
 
@@ -1773,3 +1849,7 @@ mod query_mask_tests;
 #[cfg(test)]
 #[path = "character/lying_tests.rs"]
 mod lying_tests;
+
+#[cfg(test)]
+#[path = "character/lying_move_tests.rs"]
+mod lying_move_tests;
