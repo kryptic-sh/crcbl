@@ -14,11 +14,11 @@ repository.workspace = true
 # `crcbl-vk` IS a dependency, and is deliberately **not** re-exported. P1.1
 # added `src/backend.rs`, the GPU equivalent of `crcbl_shell::backend::open`:
 # something has to depend on the backends or "try Vulkan, fall back" cannot be
-# written at all, and `docs/plan/11-cli-headless.md`'s rule is about *samples*
-# naming a backend, which `apps/sandbox` still does not. See that module's docs
-# for the full argument, including why this should move to `crcbl-render` at
-# P1.2. `log` and `thiserror` are the registry's own, and nothing else here uses
-# them.
+# written at all, and topic 11's rule (`docs/notes/tooling.md`) is about
+# *samples* naming a backend, which `apps/sandbox` still does not. See that
+# module's docs for the full argument, including why this should move to
+# `crcbl-render` at P1.2. `log` and `thiserror` are the registry's own, and
+# nothing else here uses them.
 [dependencies]
 crcbl-core = { workspace = true }
 # The console's vocabulary — `Kind`, `Value`, `Fault`, `Binding`, `Flags`. It is

@@ -3,9 +3,9 @@
 //! # Why the registry lives here
 //!
 //! This crate's manifest used to say `crcbl-vk` "is deliberately absent and
-//! stays absent", citing `docs/plan/11-cli-headless.md`'s rule that **a sample
-//! linking `crcbl-vk` directly** is an architecture regression. P1.1 is the
-//! slice that had to resolve that, and the resolution is the one
+//! stays absent", citing topic 11's rule (now in `docs/notes/tooling.md`) that
+//! **a sample linking `crcbl-vk` directly** is an architecture regression. P1.1
+//! is the slice that had to resolve that, and the resolution is the one
 //! `crcbl-shell` already uses for window-system backends:
 //!
 //! * The rule protects *consumers*: nothing above the seam may name a backend,

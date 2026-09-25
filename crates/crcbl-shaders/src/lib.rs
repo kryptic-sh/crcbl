@@ -77,14 +77,14 @@
 //!
 //! ## What this defers, deliberately
 //!
-//! `docs/plan/06-assets-scenes.md` wants **runtime** recompilation for shader
-//! hot reload, "keyed by shader hash", at P9. Nothing here forecloses it: the
-//! hash is already in the manifest and [`sha256`] is already public, and a
-//! runtime path adds a `slangc`-shaped compiler behind a dev-only feature
-//! without changing this crate's shape. P5's WGSL took exactly that shape —
-//! another artifact column in the manifest, another `include_bytes!` in the
-//! generated table — P14's MSL took it again, and DX4's DXIL took it a third
-//! time, widened only by the per-entry-point split above.
+//! Stage 6's hot reload (owed in `docs/backlog.md`) wants **runtime**
+//! recompilation for shaders, "keyed by shader hash", at P9. Nothing here
+//! forecloses it: the hash is already in the manifest and [`sha256`] is already
+//! public, and a runtime path adds a `slangc`-shaped compiler behind a dev-only
+//! feature without changing this crate's shape. P5's WGSL took exactly that
+//! shape — another artifact column in the manifest, another `include_bytes!` in
+//! the generated table — P14's MSL took it again, and DX4's DXIL took it a
+//! third time, widened only by the per-entry-point split above.
 //!
 //! # The MSL column is *source*, not a `.metallib`
 //!
@@ -180,7 +180,7 @@ pub mod sha256;
 ///
 /// Public because `build.rs` shares this exact code, and because P9's hot
 /// reload will re-read the same file at runtime to key pipeline rebuilds by
-/// shader hash (`docs/plan/06-assets-scenes.md`).
+/// shader hash (owed in `docs/backlog.md`).
 pub mod manifest;
 
 /// The declaration-order lint over `shaders/*.slang`.

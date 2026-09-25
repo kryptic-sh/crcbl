@@ -414,8 +414,8 @@ Stated plainly. "Not reviewed" is the honest line.
 
 - **I did not read the other plan documents.** Claims these seven make about the
   physics plan (since folded into `docs/notes/simulation.md`), the UI plan
-  (topic 7, since folded into `docs/notes/tooling.md`), `11-cli-headless.md`,
-  the testing plan (topic 12, since folded into this file),
+  (topic 7, since folded into `docs/notes/tooling.md`), the CLI plan (topic 11,
+  likewise), the testing plan (topic 12, since folded into this file),
   `16-wasm-modules.md`, the animation plan (topic 17), `26-prediction.md`,
   `31-vis-culling.md` and `ROADMAP.md` were checked against the **tree**, never
   against those documents. Where I say "topic 5 requires `libm`" I am quoting

@@ -1,11 +1,12 @@
 //! Scene format and glTF import.
 //!
-//! `docs/plan/06-assets-scenes.md` splits content into *source formats, which
-//! are grounded open standards* and *cooked formats, which are ours*. This
-//! crate holds the two halves that meet: reading glTF 2.0, the source format
-//! for meshes, skins and animations (`import_gltf`, behind the default `gltf`
-//! feature); and [`scn`], the `.scn/` directory of RON chunk files, which is
-//! the one format the engine owns because it owns the semantics.
+//! Stage 6's format rule (`docs/notes/tooling.md`) splits content into *source
+//! formats, which are grounded open standards* and *cooked formats, which are
+//! ours*. This crate holds the two halves that meet: reading glTF 2.0, the
+//! source format for meshes, skins and animations (`import_gltf`, behind the
+//! default `gltf` feature); and [`scn`], the `.scn/` directory of RON chunk
+//! files, which is the one format the engine owns because it owns the
+//! semantics.
 //!
 //! # The two halves are separable, and the feature is where
 //!

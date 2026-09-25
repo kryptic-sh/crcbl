@@ -1,9 +1,9 @@
 //! glTF 2.0 import: bytes through [`AssetSource`], geometry, material factors
 //! and encoded images out.
 //!
-//! This is the first half of step 3 of `docs/plan/06-assets-scenes.md`. It ends
-//! at host memory: there is no GPU pool upload, no image *decode* and no mip
-//! generation here, and the types below are what the upload step consumes.
+//! This is the first half of stage 6's step 3 (`docs/notes/tooling.md`). It
+//! ends at host memory: there is no GPU pool upload, no image *decode* and no
+//! mip generation here, and the types below are what the upload step consumes.
 //! [`crate::gltf_render`] is that step for the forward renderer.
 //!
 //! # Everything arrives through the asset seam
@@ -3367,7 +3367,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// `docs/plan/06-assets-scenes.md`'s risk section: unsupported features
+    /// Stage 6's import rule (`docs/notes/tooling.md`): unsupported features
     /// log and skip rather than failing the load.
     #[test]
     fn a_primitive_that_is_not_a_triangle_list_is_skipped_and_the_rest_still_loads() {

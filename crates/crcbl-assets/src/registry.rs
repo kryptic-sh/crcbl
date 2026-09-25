@@ -2,7 +2,7 @@
 //!
 //! # The states, and the ones that are not here
 //!
-//! `docs/plan/06-assets-scenes.md` lists `Unloaded → Loading → Ready | Failed`.
+//! Stage 6's asset model listed `Unloaded → Loading → Ready | Failed`.
 //! Three of those four exist here. `Unloaded` does not, because nothing can
 //! observe it: an asset nobody has requested has no entry, and an entry whose
 //! last reference is released is removed. "Not in the registry" is `None` from
@@ -10,7 +10,7 @@
 //! value ever holds is a match arm every caller writes and no test can reach.
 //!
 //! It comes back when something can produce it. Hot reload (step 5) turns a
-//! `Ready` entry back into one with no bytes; the GPU deletion queue the plan's
+//! `Ready` entry back into one with no bytes; the GPU deletion queue that
 //! asset model names for refcounted release will want an entry that is retiring
 //! rather than gone. Neither exists, and neither is guessed at here.
 //!

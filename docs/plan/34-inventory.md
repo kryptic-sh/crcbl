@@ -8,9 +8,10 @@ grids, equipment slots, weapon attachments. Kit rules follow the player kit
 (30): first-class, optional, zero engine privileges. Drag-drop lands wave 1 (the
 editor asset browser wants it); the kit is FPS-era with breach.
 
-> **Status, 2026-09-07, re-checked 2026-09-24.** Part 2 is built and has two
+> **Status, 2026-09-07, re-checked 2026-09-25.** Part 2 is built and has two
 > consumers; part 1's pointer mechanism is built, and the rest of part 1 is
-> still the engine's to build.
+> still the engine's to build. By the Delivery table's weight that is well under
+> half the document, which is why it stays rather than folding into the notes.
 >
 > **Part 1, drag-drop: the pointer half is in `crcbl-ui`.** It shipped
 > 2026-09-23 as `crcbl_ui::grid_drag` — `CellGrid`, `GridDrag<P>`, a typed
@@ -19,7 +20,9 @@ editor asset browser wants it); the kit is FPS-era with breach.
 > and `apps/shard` and `apps/breach` use it with their own copies deleted. It is
 > grids only: there is no general drag source or drop target outside a
 > `CellGrid`, no ghost drawn under the pointer, and no pad, keyboard or touch
-> path.
+> path. A panel's `can_accept` asks `Grid::can_move_within` (2026-09-25), which
+> runs `move_within`'s check against the grid as it is, the item's own cells
+> counting as free, without cloning the grid or moving anything.
 >
 > **The styling half is not how the feedback arrives.** This section hangs
 > feedback on `:drop-ok` / `:drop-bad` pseudo-classes "like everything else

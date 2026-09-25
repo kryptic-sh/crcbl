@@ -626,8 +626,9 @@ gets recorded in the relevant crate's docs rather than worked around silently.
 The pillars deliver in slices across every phase (their own docs carry the slice
 tables):
 
-- **CLI/headless** ([11-cli-headless.md](11-cli-headless.md)) — `crcbl` binary
-  grows a phase at a time; every subsystem is scriptable the phase it lands.
+- **CLI/headless** (topic 11; its rules are in
+  [../notes/tooling.md](../notes/tooling.md)) — `crcbl` binary grows a phase at
+  a time; every subsystem is scriptable the phase it lands.
 - **Testing** (topic 12; the conventions are in
   [../notes/process.md](../notes/process.md)) — unit + property + e2e per
   subsystem, in the same phase as the subsystem, never later. Golden

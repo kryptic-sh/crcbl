@@ -42,8 +42,8 @@
 //! required `min`/`max` (nothing here reads the bounding box), accessor
 //! `byteOffset` alignment, `normalized` on a float accessor. Refusing a file
 //! over a rule this code does not rely on would reject working assets for a
-//! purity nobody benefits from; the risk section of
-//! `docs/plan/06-assets-scenes.md` asks for the opposite bias.
+//! purity nobody benefits from; stage 6's import rule (`docs/notes/tooling.md`)
+//! asks for the opposite bias.
 
 use std::fmt;
 use std::path::Path;

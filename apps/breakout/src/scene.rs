@@ -2,8 +2,9 @@
 //!
 //! `assets/scenes/board.scn/` is breakout's board: a header, an environment and
 //! one chunk file holding a [`Brick`] per row of the grid. It is read through
-//! [`crcbl::scene::scn`], which is the engine's own scene format —
-//! `docs/plan/06-assets-scenes.md`'s "Scene format: directory of chunk files".
+//! [`crcbl::scene::scn`], which is the engine's own scene format — the
+//! directory of chunk files `docs/notes/tooling.md` records under _What the
+//! deleted 06-assets-scenes plan left behind_.
 //!
 //! ```text
 //! assets/scenes/board.scn/

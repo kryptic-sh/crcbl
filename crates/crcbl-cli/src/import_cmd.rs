@@ -1,6 +1,6 @@
 //! `crcbl import` — run the glTF importer standalone and report what came out.
 //!
-//! `docs/plan/11-cli-headless.md` asks for "run the asset import pipeline
+//! Topic 11 (`docs/notes/tooling.md`) asks for "run the asset import pipeline
 //! standalone; report what was imported/skipped", and this is the reporting
 //! half of it: a document goes through [`crcbl_scene::import_gltf`] and the
 //! counts a person wants after a bake come back — meshes, the primitives across
@@ -8,13 +8,15 @@
 //!
 //! # What this verb does not take
 //!
-//! The topic sketches `crcbl import <gltf> [--out <dir>]`. **`--out` is not
-//! built and is refused by name.** There is nothing for it to write: the
-//! importer produces an in-memory [`crcbl_scene::GltfScene`], this tree has no
-//! on-disk scene format — the RON scene directory is still an open decision in
-//! `docs/backlog.md` — and no binary scene container. An `--out` that wrote
-//! nothing, or that invented a format on the spot, would be worse than the
-//! refusal. [`crate::args::IMPORT_USAGE`] says so where a user reads it.
+//! The topic sketched `crcbl import <gltf> [--out <dir>]`. **`--out` is not
+//! built and is refused by name.** The importer produces an in-memory
+//! [`crcbl_scene::GltfScene`], and what an import should put on disk is
+//! undecided: `crcbl_scene::scn` can write a `.scn/` directory since
+//! 2026-09-07, but there is no cooked mesh and no binary scene container
+//! (`docs/backlog.md`, _`crcbl bake`, `PackSource`, the cooked mesh and
+//! `import --out`_). An `--out` that wrote nothing, or that invented a format
+//! on the spot, would be worse than the refusal. [`crate::args::IMPORT_USAGE`]
+//! says so where a user reads it, with the older reason.
 //!
 //! # The skipped half rides on the logger
 //!

@@ -3,6 +3,251 @@
 Records kept so they are not re-derived: measurements, investigations, ideas
 considered and declined, and lessons. Open work lives in `docs/backlog.md`.
 
+## What the deleted 06-assets-scenes plan left behind (2026-09-25)
+
+Record; stage 6 designed how content gets into the engine: open source formats
+in, engine-owned cooked formats out, stable asset ids, and a scene format the
+editor and git can both live with. Built from it: `.gitattributes` with LFS
+deliberately off; `crates/crcbl-assets` (`AssetId`, `crcbl_core::Handle<Asset>`,
+the `Loading | Ready | Failed` states in `AssetRegistry`, the `AssetSource` seam
+with `DirSource` and `MemorySource`); glTF parsing and validation
+(`crcbl_scene::{gltf_import, gltf_check}`) and the join to the renderer
+(`crcbl_scene::gltf_render`), which `apps/viewer` draws; the `.scn/` directory
+(`crcbl_scene::scn`) with its three writer properties in
+`crates/crcbl-scene/tests/scn_roundtrip.rs`, read by `apps/breakout` and
+`apps/puppet`; the reporting half of `crcbl import`; and a viewer-local polled
+reload (`apps/viewer/src/watch.rs`).
+
+What it left unbuilt is in `docs/backlog.md`: engine hot reload under _Asset hot
+reload: two polled watches, and no engine reload path_; the sidecar GUIDs,
+`FetchSource`, GPU retire and the `std::fs` gate under _`crcbl-assets` after
+stage 6 task 2_ and _Sidecar meta RON: three items want it, and nothing writes
+one yet_; and under _What the deleted 06-assets-scenes plan left unbuilt_,
+`crcbl bake` with `PackSource`, the cooked mesh and `import --out`, the scene
+format's editor leftovers, and the Sponza-class exit.
+
+Code cites the plan as "stage 6" or "topic 6", by task (also called step) and by
+section. Those resolve here:
+
+| Citation                                      | What it specified                                                                                  | Status                                                                     |
+| --------------------------------------------- | -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Task 1                                        | `.gitattributes` and LFS                                                                           | Built, with LFS off (**LFS is off on purpose**)                            |
+| Task (step) 2                                 | `AssetId`, the handle, the load states, `AssetSource`, `DirSource`                                 | Built (`crcbl-assets`)                                                     |
+| Task (step) 3                                 | glTF import into the GPU pools: meshes, materials, textures, mips                                  | Built through `gltf_import` and `gltf_render`; mips per **Mips at import** |
+| Task 4                                        | The `.scn/` directory, the deterministic writer, the roundtrip property tests                      | Built (`crcbl_scene::scn`); dirty-chunk tracking owed                      |
+| Task (step) 5                                 | The watcher and the reload paths for assets, shaders and scene chunks                              | Owed; the viewer has its own polled reload                                 |
+| Task 6                                        | `crcbl import` wiring and `crcbl bake`                                                             | The report is built; `--out`, `bake` and `PackSource` owed                 |
+| Task 7, the Sponza exit                       | A real glTF scene through a `.scn/` directory at stage 3's performance targets                     | Owed                                                                       |
+| Format matrix                                 | **Source formats are open standards; cooked formats are ours**                                     | Rule                                                                       |
+| "Scene format: directory of chunk files"      | **A scene is a directory of chunk files**                                                          | Built                                                                      |
+| "Deterministic writer"                        | **The deterministic writer**                                                                       | Built                                                                      |
+| "Command journal", "Scaling", "Bake"          | The editor's autosave journal, sector-sharded chunks, the shipping blob                            | Owed                                                                       |
+| Asset model, refcounted release               | Dependency tracking, and GPU retire through the stage 2 deletion queue                             | Refcount built; retire owed                                                |
+| The risk section                              | **Unsupported glTF features log and skip, loudly**; hot reload's correctness bar                   | Rule                                                                       |
+| The Corrections section (2026-07-27)          | **`AssetId` comes from a sidecar GUID**; the sidecar's import settings; the sRGB mipgen view alias | GUID owed; the alias is under **Mips at import**                           |
+| "No synchronous IO anywhere in engine crates" | **Engine crates do no synchronous IO**                                                             | Kept by construction; the CI deny is owed                                  |
+| `format: 0`, "every format the engine owns"   | **Every format the engine owns is v0 until 1.0**                                                   | Rule                                                                       |
+
+The rules, each with its _why_:
+
+- **Source formats are open standards; cooked formats are ours (locked
+  2026-07-27).** A source format is never invented where an open standard
+  suffices, and an own format exists only where the engine owns the semantics
+  (scenes) or the runtime layout (cooked output). Cooked output is a build
+  artifact and never tracked.
+
+  | Asset     | Source (tracked)                   | Cooked (shipped, web)                          |
+  | --------- | ---------------------------------- | ---------------------------------------------- |
+  | Mesh      | glTF 2.0 (`.gltf`, `.glb`)         | packed binary matching the GPU pool layout     |
+  | Skeleton  | glTF skins                         | cooked joint tables                            |
+  | Animation | glTF animation channels            | sampled, compressed curves                     |
+  | Texture   | PNG                                | KTX2 and Basis later; PNG passes through today |
+  | Audio SFX | WAV (PCM)                          | QOA                                            |
+  | Music     | WAV, FLAC                          | Vorbis or Opus, behind a decoder seam          |
+  | Scene     | own: `.scn/`, RON chunk files      | a packed blob from `crcbl bake`                |
+  | Config    | TOML (`crcbl.toml`, tuning tables) | as-is                                          |
+
+- **RON for scene chunks and entity data, TOML for flat config.** Scene data is
+  nested and enum-heavy (collider shapes, component variants), which RON maps
+  onto Rust enums natively and TOML can only spell as stringly `type = "…"`
+  tables. TOML wins where the data is flat and ubiquity matters. Both carry
+  comments.
+- **LFS is off on purpose.** Everything binary is small, golden images are
+  re-blessed often (which LFS handles worse than plain git), and a `filter=lfs`
+  line breaks `git commit` outright on a clone without the git-lfs binary. The
+  glTF corpus arrived without it: `tools/fetch-shelf.sh` fetches the Khronos
+  shelf at a pinned commit against `apps/viewer/assets/shelf.sha256`. **Whenever
+  LFS is turned on, every `actions/checkout` step gains `lfs: true` in the same
+  commit**, or CI silently tests pointer files.
+- **A scene is a directory of chunk files.** `scene.ron` is the header
+  (`Scene(format, name, systems)`, the manifest read in file order), `env.ron`
+  the camera the scene opens on and its ambient light, and `sys/<name>.ron` one
+  system's entity array (`Chunk(system, entities)`, whose `system` must match
+  the file it was read as). A directory rather than a document because the two
+  things a single file makes fight both matter: a save rewrites only the chunks
+  that changed, and two people editing different systems merge with no conflict.
+  Entities are `(system → data)` arrays mirroring ECS registration, so scene,
+  ECS and replication keep one shape. Every serde type sets
+  `deny_unknown_fields`, so a typo is a line and a column rather than a silently
+  defaulted value, and a manifest name with no registered codec is an error, not
+  a skip.
+- **The deterministic writer.** Canonical field order, entities sorted by stable
+  id, **stable ids persisted in the file and never regenerated on save** (the
+  Unity and Godot diff-noise bug), no timestamps and no editor-session state.
+  Floats are shortest-round-trip, and **no custom float writer exists or is
+  needed**: ron 0.12's serializer writes Rust's float `Display`, which is
+  shortest-round-trip out of `core`, not out of a platform libm. The trap that
+  follows: a hand-typed `7.8000000000000005` is written back as `7.8`, so **a
+  committed chunk is generated by the writer and maintained that way**, the
+  discipline `crcbl_inventory::catalog`'s `CANONICAL` and
+  `apps/breakout/src/scene.rs` encode. Any new serialized type must keep the
+  byte-stable property, and the property tests are the gate, not review.
+- **`SceneEntityId` is the file's id, not the runtime `Entity`.**
+  `crcbl_core::Pool` has no insert-at-index, so an `Entity`'s bits are a
+  function of spawn history, and persisting them would mean regenerating ids on
+  save. `scn::IdMap` (a `BTreeMap`, so its order is the file's) is the
+  correspondence while the scene is loaded. `crcbl-ecs` gains no `serde`: the
+  bound sits on `scn::chunk_of::<T>(name)`, and systems are reached by name
+  because the manifest names files.
+- **Engine crates do no synchronous IO.** `Scene::save` returns the text of each
+  file keyed by its path and the caller writes it; `Scene::load` and
+  `import_gltf` read through `&dyn AssetSource`. That is also what lets the
+  writer's tests run without a directory, and why `crcbl-scene` never enables
+  the `gltf` crate's `import` feature (blocking `std::fs` and a second image
+  decoder).
+- **Loading is asynchronous from day one.** A browser has no blocking
+  filesystem, so `AssetSource::read` is defined never to block: a source without
+  the bytes answers `StorageError::Pending` and the caller polls. That is
+  `crcbl_store::web::FetchSource`'s contract verbatim, so the browser source is
+  a delegating wrapper. `AssetSource` is **not** a blanket impl over
+  `StorageSource`: an asset source must not be writable, and a blanket impl
+  would leave `PackSource` unable to implement it on its own terms.
+- **`AssetId` comes from a sidecar GUID.** Hash-of-path orphans every reference
+  on a rename, the problem Unity's `.meta` GUIDs and Godot's `.import` UIDs
+  exist for. The corrected model is a `crate.glb.meta.ron` sidecar carrying a
+  random 128-bit GUID, created on first import and committed; references use the
+  GUID, and `AssetId::from_path` survives as a CLI and debug lookup. The sidecar
+  also carries what a bare file cannot say: a texture's colour space (a
+  standalone normal-map PNG cannot declare itself linear), usage, compression
+  target, LOD overrides and a ragdoll link. `AssetId` is 128 bits so a GUID
+  arrives through `AssetId::from_bits` without the type changing shape.
+- **One handle type, no `<T>`.** Assets are `crcbl_core::Handle<Asset>` from a
+  `crcbl_core::Pool`; a phantom parameter with one instantiation checks nothing.
+  **No `Unloaded` state** until hot reload or GPU retire can produce one, since
+  a state no value holds is a match arm no test reaches.
+- **Crate homes follow the format's owner.** `crcbl-assets` is the IO seam and
+  decodes nothing; decoding belongs to whoever owns the format (PNG in
+  `crcbl-sprite`, WAV in `crcbl-audio`, glTF in `crcbl-scene`). The arrow runs
+  `crcbl-scene` → `crcbl-assets`, because a scene references assets. The `gltf`
+  feature (on by default, off in the workspace entry) gates everything spelled
+  in terms of a glTF document, and `crcbl`'s `scn` feature reaches the loader
+  without the parser, so a shipped game links no `gltf`.
+- **Asset keys are `[A-Za-z0-9._-]` and `/`, on native too.** `DirSource` runs
+  `crcbl_store::web::canonical_key` first, so a tree that loads from a directory
+  is one that can be served over HTTP; the rest is under _`crcbl-assets` after
+  stage 6 task 2_ in `docs/backlog.md`.
+- **The importer validates the document itself.** `gltf` 1.4.1 panics on inputs
+  its validation exists to reject (reproduced: an out-of-range `POSITION`
+  accessor index, and a `.glb` declaring a length under 12), so
+  `crcbl_scene::gltf_check` bounds-checks everything and the importer parses
+  with `Gltf::from_slice_without_validation`. Buffer URIs resolve relative to
+  the document's key and through the source, so the key rules govern them.
+- **Unsupported glTF features log and skip, loudly.** The importer supports what
+  content needs, and an unsupported extension, image or primitive is a warning
+  and a counted skip, never a failed load. Refusing a file over a rule the code
+  does not depend on rejects working assets for a purity nobody benefits from.
+- **Mips at import: on the host, in linear light** (corrected 2026-08-29). The
+  chain is built at import and uploaded whole, for the reasons under _What the
+  deleted 43-render-standards plan left behind_ in `docs/notes/rendering.md`.
+  Vulkan has no sRGB storage-image format, so a mip chain the **frame itself**
+  produces for an sRGB image needs a `UNORM` view alias with the encode done in
+  the shader, or render-pass downsampling; no such texture exists yet.
+- **Every format the engine owns is v0 until 1.0** (the user's rule,
+  2026-08-30). A header carries `format: 0` from the first byte and the loader
+  refuses a version it does not know; a stale file fails loudly and is
+  re-authored or re-imported, and there is no migration machinery before 1.0.
+- **The cooked mesh is born v0 in the compact vertex layout** (decided
+  2026-08-30). It holds `crcbl_shaders::mesh::MeshVertex`'s quantised,
+  split-stream layout, never the four-`float4` one, as **two streams in the file
+  as in the pool** — positions alone, then attributes, each contiguous so the
+  loader uploads each to its own buffer without repacking — with the cluster and
+  LOD tables beside them indexing the position stream.
+- **Hot reload is dev-only, and its bar is "doesn't crash, usually works".**
+  When the engine path is built, a changed chunk file reloads only its own
+  system's entities, server-side, and the editor's revert reuses the same path.
+
+## What the deleted 11-cli-headless plan left behind (2026-09-25)
+
+Record; topic 11 made the `crcbl` binary a first-class pillar: everything the
+engine and the editor can do is reachable without a window, from a terminal, a
+script, a CI job or an agent. Built from it, in `crates/crcbl-cli`: `new`,
+`run`, `build` (`--target wasm` refused), `screenshot`, `import` (the report),
+`sim` (over a seeded world) and `settings`, beside verbs other topics added —
+`replay`, `crpix`, `lod` and `bench`. Every verb accepts `--json`, which
+`args.rs`'s own tests hold, and CI's golden images and determinism hashes run
+through `crcbl screenshot` and `crcbl sim`.
+
+What it left unbuilt is in `docs/backlog.md`: `crcbl scene` and `crcbl edit`
+under _What the deleted 11-cli-headless plan left unbuilt_; `crcbl phys --check`
+under _`crcbl phys stack --check` and the solver's profiler rows_; `sim`'s scene
+argument and input script under _The determinism smoke test has no input
+script_; `import --out` under _`crcbl bake`, `PackSource`, the cooked mesh and
+`import --out`_; `crcbl save` under _`crcbl save list|dump|diff|restore`_; and
+the device bench scenarios under _Profiling: five of the eight gaps are still
+open_.
+
+Code cites the plan as "topic 11", by its invariant and by its design rules.
+Those resolve here:
+
+| Citation                                                              | What it specified                                                                             |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| The invariant, "a sample linking `crcbl-vk` directly"                 | **No capability is implemented GUI-side**                                                     |
+| "`--json` on every subcommand", "stable JSON schemas", the exit codes | **Machine-readable output and meaningful exit codes**                                         |
+| "No interactive prompts unless a TTY is detected"                     | **Scriptable first**                                                                          |
+| "Workspace member or standalone", "a scene dir"                       | **`crcbl new` scaffolds something that builds**                                               |
+| "Report what was imported/skipped"                                    | `crcbl import`'s report, whose skips ride the engine logger                                   |
+| The exit criteria                                                     | CI through the CLI (built); a scripted zero-GUI session and towers edited from the CLI (owed) |
+| The sketched `scene`, `phys`, `edit`, `sim <scene>`, `import --out`   | **A sketched verb or option is refused by name, not ignored**; the work is in the backlog     |
+
+The rules, each with its _why_:
+
+- **No capability is implemented GUI-side.** If something works only through the
+  GUI, that is an architecture regression of the same severity as a sample
+  linking `crcbl-vk` directly. It is nearly free to keep because the server is
+  headless by construction and editor edits are `Command` values: a CLI client
+  sends the same commands the GUI sends, with the same validation, undo log and
+  result, and console commands route over the same transport. The `crcbl-vk`
+  half protects **consumers**: nothing above the seam names a backend. The
+  `crcbl` umbrella depends on `crcbl-vk` without re-exporting it, so a sample
+  asks `crcbl::backend` for one by value (`crates/crcbl/src/backend.rs` has the
+  argument).
+- **Every verb lives in one binary.** A capability that needs a second binary
+  built to reach it is the same regression as one that needs the GUI, which is
+  why the `crcbl-sim` binary became `crcbl sim` on 2026-08-23.
+- **Machine-readable output and meaningful exit codes.** `--json` on every
+  subcommand with a stable schema, human tables otherwise; exit 0 for ok, 1 for
+  a command that failed, 2 for a bad invocation. Neither is per-command, so
+  `crcbl-cli`'s `report` module renders both shapes from one result.
+- **Scriptable first.** Stdin batch modes, no interactive prompt unless a TTY is
+  detected, and never a prompt that is required.
+- **A sketched verb or option is refused by name, not ignored.** An option the
+  design names and the tree lacks exits 2 with the reason, so "not built yet"
+  reads differently from a typo, and a silently dropped argument never produces
+  output for something nobody asked for.
+- **`crcbl build --target wasm` is refused and points at `web/build.sh`.** A
+  browser bundle is a Cargo build plus the loader shim, the shader artifacts and
+  the site layout; a verb that ran Cargo alone would exit 0 having produced
+  something no page can load.
+- **Offscreen rendering rides the normal HAL**: a surface-less device, the
+  render graph and a readback, so `crcbl screenshot` works on every backend,
+  lavapipe included. It is the golden-image primitive and `crcbl sim` the
+  determinism primitive, and CI uses both.
+- **`crcbl new` scaffolds something that builds.** The topic allowed a workspace
+  member or a standalone crate; `crates/crcbl-cli/src/new.rs` records why it is
+  a standalone crate with a path dependency (a template that does not compile is
+  worse than none), and the scaffold creates a `scenes/` directory so a game's
+  paths are stable from the first commit.
+
 ## What the deleted 07-ui-debug plan left behind (2026-09-24)
 
 Record; stage 7 designed `crcbl-ui`, the engine's one GUI — an immediate-mode

@@ -3,7 +3,7 @@
 //! # Decision: a standalone crate with a path dependency, not a workspace
 //!   member
 //!
-//! `docs/plan/11-cli-headless.md` allows either ("workspace member or
+//! Topic 11 (`docs/notes/tooling.md`) allowed either ("workspace member or
 //! standalone"). The deciding constraint is the one the slice states: **a
 //! template that does not compile is worse than none.** So the question is
 //! what, exactly, a generated `Cargo.toml` can name today.
@@ -62,9 +62,9 @@ const TEMPLATES: &[(&str, &str)] = &[
         ".github/workflows/ci.yml",
         include_str!("../templates/ci.yml.tmpl"),
     ),
-    // `docs/plan/11-cli-headless.md` asks for a scene dir. The scene *format*
-    // is `crcbl-scene`'s and lands at P9; the directory is created now so the
-    // path in a game's code is stable from the first commit.
+    // Topic 11 asked for a scene dir. The scene *format* is `crcbl-scene`'s
+    // `.scn/` (landed 2026-09-07); the directory exists from the first commit
+    // so the path in a game's code is stable.
     ("scenes/.gitkeep", ""),
 ];
 

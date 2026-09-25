@@ -3,7 +3,7 @@
 //! Runs N ticks of a deterministic world and prints the state hash. Same input
 //! → same hash → provably deterministic tick loop.
 //!
-//! `docs/plan/11-cli-headless.md` puts the determinism half of its exit
+//! Topic 11 (`docs/notes/tooling.md`) puts the determinism half of its exit
 //! criterion behind this verb: "all sample CI determinism + golden-image checks
 //! run through the CLI". It used to be a binary of its own, `crcbl-sim`, which
 //! meant the one pillar the topic exists to defend had a hole in it — a
@@ -11,14 +11,15 @@
 //!
 //! # What this verb does not take
 //!
-//! The topic sketches `crcbl sim <scene> --ticks N [--input script.ron]
-//! [--hash]`. Neither the scene argument nor the input script is built, and
-//! inventing them here would mean inventing a scene file format and a RON
-//! reader, both of which are open questions in `docs/backlog.md` rather than
-//! things this tree has. So the world is generated from `--seed`, the parser
+//! The topic sketched `crcbl sim <scene> --ticks N [--input script.ron]
+//! [--hash]`. Neither the scene argument nor the input script is built: the
+//! scene format (`crcbl_scene::scn`) and `ron` exist since 2026-09-07, but an
+//! input script's schema and a way to build a runnable world from a scene
+//! without a game's code do not (`docs/backlog.md`, _The determinism smoke test
+//! has no input script_). So the world is generated from `--seed`, the parser
 //! refuses a positional argument by name, and `--hash` is not a flag because
-//! the hash is the output. [`crate::args::SIM_USAGE`] says all of that where a
-//! user reads it.
+//! the hash is the output. [`crate::args::SIM_USAGE`] says so where a user
+//! reads it, with the older reason.
 //!
 //! # The world lives here, not in the engine
 //!

@@ -1,6 +1,6 @@
 //! Two output shapes for one result, and the exit-code contract.
 //!
-//! `docs/plan/11-cli-headless.md` fixes both halves: "`--json` on every
+//! Topic 11 (`docs/notes/tooling.md`) fixes both halves: "`--json` on every
 //! subcommand; human tables otherwise" and "exit codes are meaningful (0 ok, 1
 //! command failed, 2 bad invocation)". Neither is a per-command decision, so
 //! neither is implemented per command: every subcommand returns an

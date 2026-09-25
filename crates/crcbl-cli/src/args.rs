@@ -316,9 +316,9 @@ WHAT WAS SKIPPED:
     the counts include what was skipped: an image the file names but the
     directory does not have is still an image the document declares.
 
-    This verb does not write a scene. `docs/plan/11-cli-headless.md` sketches
-    `--out <DIR>`, and there is nothing for it to write — the importer produces
-    an in-memory scene and this tree has no on-disk scene format — so `--out` is
+    This verb does not write a scene. `docs/backlog.md` sketches
+    `--out <DIR>`, and it is not built — the importer produces an in-memory
+    scene and nothing writes it out as a `.scn/` document yet — so `--out` is
     refused by name rather than ignored.
 
 OPTIONS:
@@ -409,10 +409,11 @@ prints the world's state hash. Same input, same hash, and the tick loop is
 provably deterministic; a hash that moves between two runs of one build is the
 harness reporting exactly what it exists to catch.
 
-The world comes from --seed and from nothing else. `docs/plan/11-cli-headless.md`
-sketches `crcbl sim <scene> --input script.ron`, and neither half is built: this
-tree has no scene file format and no RON reader, so there is nothing for a scene
-argument to name and no script to replay. Both are refused rather than ignored.
+The world comes from --seed and from nothing else. `docs/backlog.md`
+sketches `crcbl sim <scene> --input script.ron`, and neither half is built:
+`sim` loads no scene document and there is no input-script format, so there is
+nothing for a scene argument to load and no script to replay. Both are refused
+rather than ignored.
 There is no --hash flag either — the hash is the output.
 
 OPTIONS:
@@ -766,11 +767,11 @@ pub struct LodArgs {
 
 /// `crcbl import`.
 ///
-/// There is no output directory: `docs/plan/11-cli-headless.md` sketches
-/// `--out <dir>` and there is nothing for it to write, because the importer
-/// produces an in-memory scene and this tree has no on-disk scene format. See
-/// [`IMPORT_USAGE`], which says so where a user reads it, and `parse_import`,
-/// which refuses `--out` by name.
+/// There is no output directory: topic 11 sketched `--out <dir>`, and what an
+/// import should write is undecided — `crcbl_scene::scn` can write a `.scn/`
+/// now, but nothing here calls it (`docs/backlog.md`, _`crcbl bake`,
+/// `PackSource`, the cooked mesh and `import --out`_). [`IMPORT_USAGE`] still
+/// gives the older reason, and `parse_import` refuses `--out` by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImportArgs {
     /// The glTF to read.
@@ -961,10 +962,10 @@ pub const DEFAULT_SIM_SEED: u64 = 0;
 
 /// `crcbl sim`.
 ///
-/// There is no scene and no input script: `docs/plan/11-cli-headless.md`
-/// sketches both and this tree has neither a scene file format nor a RON
-/// reader, so the world is generated from [`seed`](Self::seed) alone. See
-/// [`SIM_USAGE`], which says so where a user reads it.
+/// There is no scene and no input script: topic 11 sketched both, and neither
+/// is built (`docs/backlog.md`, _The determinism smoke test has no input
+/// script_), so the world is generated from [`seed`](Self::seed) alone.
+/// [`SIM_USAGE`] says so where a user reads it, with the older reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimArgs {
     /// Ticks to run. Zero is a legal run of length zero.
@@ -1702,8 +1703,8 @@ fn parse_import(args: impl Iterator<Item = OsString>) -> Invocation {
             Some("-o" | "--out" | "--output") => {
                 return bad(
                     "`import` writes nothing, so it has no --out: the importer produces an \
-                     in-memory scene and this tree has no on-disk scene format to write it \
-                     to. `crcbl lod gen` is the one verb that writes a cooked artifact",
+                     in-memory scene and writing it as a .scn/ document is not built. \
+                     `crcbl lod gen` is the one verb that writes a cooked artifact",
                 );
             }
             Some(other) if other.starts_with('-') => {
@@ -1952,8 +1953,8 @@ fn parse_sim(mut args: impl Iterator<Item = OsString>) -> Invocation {
             // `Target::Wasm` and `LodAction::Preview` are parsed to make.
             _ => {
                 return Invocation::BadUsage(format!(
-                    "`sim` takes no scene: the world is generated from --seed, because this \
-                     tree has no scene file format to load `{}` from",
+                    "`sim` takes no scene: the world is generated from --seed, and loading \
+                     a scene document such as `{}` into it is not built",
                     arg.to_string_lossy()
                 ));
             }
@@ -2683,8 +2684,8 @@ mod tests {
     }
 
     /// `--out` is refused **with the reason**, not as an unknown option:
-    /// `docs/plan/11-cli-headless.md` sketches it and there is nothing for it to
-    /// write. The difference is what tells a reader "not built" from "typo".
+    /// topic 11 sketched it and nothing here writes one yet. The difference is
+    /// what tells a reader "not built" from "typo".
     #[test]
     fn import_refuses_the_output_directory_it_cannot_write() {
         for argv in [
@@ -2696,7 +2697,7 @@ mod tests {
                 panic!("{argv:?} should be a bad invocation");
             };
             assert!(
-                message.contains("--out") && message.contains("no on-disk scene format"),
+                message.contains("--out") && message.contains("is not built"),
                 "{argv:?} must be refused by name and with the reason: {message}"
             );
             assert!(
@@ -3256,9 +3257,8 @@ mod tests {
     }
 
     /// A scene argument and `--input` are refused by name rather than ignored:
-    /// `docs/plan/11-cli-headless.md` sketches both, this tree has neither a
-    /// scene format nor a RON reader, and a positional silently dropped would
-    /// print a hash for a world nobody asked for.
+    /// topic 11 sketched both, neither is built, and a positional silently
+    /// dropped would print a hash for a world nobody asked for.
     #[test]
     fn sim_refuses_the_scene_and_the_input_script_it_does_not_have() {
         for argv in [vec!["sim", "--input", "script.ron"], vec!["sim", "--hash"]] {

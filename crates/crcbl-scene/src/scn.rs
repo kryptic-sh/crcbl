@@ -1,11 +1,11 @@
 //! The `.scn/` scene directory: a header, an environment, and one RON file per
 //! system.
 //!
-//! `docs/plan/06-assets-scenes.md`'s "Scene format: directory of chunk files" is
-//! the shape, and it is a directory rather than a document for two reasons that
-//! fight inside any single file: a save rewrites one system's chunk rather than
-//! the whole scene, and two people editing different systems merge with no
-//! conflict.
+//! Stage 6's scene rule (`docs/notes/tooling.md`: _A scene is a directory of
+//! chunk files_) is the shape, and it is a directory rather than a document for
+//! two reasons that fight inside any single file: a save rewrites one system's
+//! chunk rather than the whole scene, and two people editing different systems
+//! merge with no conflict.
 //!
 //! ```text
 //! scenes/board.scn/
@@ -50,16 +50,17 @@
 //!
 //! # What is not here
 //!
-//! - **Dirty-chunk tracking.** It exists to make an editor's save cheap and
-//!   there is no editor; [`Scene::save`] rewrites every chunk the manifest
-//!   names.
-//! - **Hot reload and the watcher** — task 5 of `docs/plan/06-assets-scenes.md`.
+//! Each is owed in `docs/backlog.md`, under _What the deleted 06-assets-scenes
+//! plan left unbuilt_ and the entries it names.
+//!
+//! - **Dirty-chunk tracking.** It exists to make an editor's save cheap, and
+//!   [`Scene::save`] rewrites every chunk the manifest names.
+//! - **Hot reload and the watcher** — stage 6's task 5.
 //! - **`crcbl bake` and `PackSource`**, the single-blob shipping form — task 6.
 //! - **Sidecar `.meta.ron` GUIDs.** Assets stay referenced by canonical path;
-//!   the plan's Corrections section is where a GUID arrives, through
-//!   `crcbl_assets::AssetId::from_bits`.
-//! - **The editor**, its command journal and sector sharding — P12, and the
-//!   plan's "Scaling" subsection.
+//!   a GUID arrives through `crcbl_assets::AssetId::from_bits`.
+//! - **The editor's command journal and sector sharding** — P12, and stage 6's
+//!   "Scaling" subsection.
 
 use std::any::type_name;
 use std::collections::{BTreeMap, HashMap};
@@ -210,7 +211,7 @@ struct SceneFile {
 
 /// `env.ron`: the camera the scene opens on and the light it sits in.
 ///
-/// Deliberately small. `docs/plan/06-assets-scenes.md` calls this row "camera
+/// Deliberately small. Stage 6's scene layout called this file "camera
 /// defaults, lighting, ambience", and a field nothing reads is a type nothing
 /// fills — the renderer's own descriptions are `crcbl_render::scene`, and a
 /// second copy of them here would be a second thing to keep in step.
@@ -457,7 +458,7 @@ impl Scene {
     /// The only format version this build reads or writes.
     ///
     /// **0, and it stays 0 until 1.0** — the rule
-    /// `docs/plan/06-assets-scenes.md` fixes for every format the engine owns.
+    /// `docs/notes/tooling.md` records for every format the engine owns.
     /// The header exists so a stale file fails loudly, not so it can be carried
     /// forward: a `.scn/` that no longer loads is re-authored, and there is no
     /// migration machinery before 1.0.

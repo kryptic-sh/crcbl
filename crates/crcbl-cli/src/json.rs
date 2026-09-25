@@ -1,8 +1,8 @@
 //! A JSON writer, in eighty lines, because `--json` is a contract and
 //! `serde_json` is a dependency.
 //!
-//! `docs/plan/11-cli-headless.md` requires "`--json` on every subcommand" and
-//! "stable JSON schemas". What it does not require is a general-purpose
+//! Topic 11 (`docs/notes/tooling.md`) requires "`--json` on every subcommand"
+//! and "stable JSON schemas". What it does not require is a general-purpose
 //! serialization framework: this CLI emits objects whose shape is written out
 //! by hand a few lines away from the code that decides it, and never *parses*
 //! JSON at all. Serializing is the easy direction — escaping is the only part

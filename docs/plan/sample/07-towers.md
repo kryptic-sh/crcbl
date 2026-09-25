@@ -200,17 +200,17 @@ milestone 3's problem rather than these slices'.
   one still untouched here — it is slice 4's, and `apps/puppet`, `apps/breach`
   and `apps/shard` drive it from three different cameras in the meantime.
 - **Milestone 2 waits on towers reaching the editor. Neither the scene directory
-  nor the editor's existence holds it up any more.** `crcbl_scene::scn`
-  ([06-assets-scenes.md](../06-assets-scenes.md)'s task 4) landed 2026-09-07 and
-  `apps/breakout` reads its board out of a `.scn/` directory, so a wave that
-  saves and reloads has a format to save into; and `apps/editor` exists
-  (`docs/plan/08-editor.md`, slices 1 to 3). What is missing is towers on the
-  editor's side of the line: towers keeps its simulation in a `Stage` with no
-  ECS system, registers no components, and so is not in the editor's vocabulary
-  (`apps/editor/src/scene.rs::vocabulary` names its own block, breakout's and
-  puppet's). Every "editor-built" and "authored in the editor" line in this doc
-  still waits on that port, and slice 1's map is a table in
-  `apps/towers/src/map.rs` for exactly that reason.
+  nor the editor's existence holds it up any more.** `crcbl_scene::scn` (stage
+  6's task 4; its rules are in [../../notes/tooling.md](../../notes/tooling.md))
+  landed 2026-09-07 and `apps/breakout` reads its board out of a `.scn/`
+  directory, so a wave that saves and reloads has a format to save into; and
+  `apps/editor` exists (`docs/plan/08-editor.md`, slices 1 to 3). What is
+  missing is towers on the editor's side of the line: towers keeps its
+  simulation in a `Stage` with no ECS system, registers no components, and so is
+  not in the editor's vocabulary (`apps/editor/src/scene.rs::vocabulary` names
+  its own block, breakout's and puppet's). Every "editor-built" and "authored in
+  the editor" line in this doc still waits on that port, and slice 1's map is a
+  table in `apps/towers/src/map.rs` for exactly that reason.
 - **Milestone 3 waits on a wire.** `crcbl-net` ships `InMemoryTransport` and
   nothing else: no UDP transport, no LAN host discovery, no lobby browser. So
   "co-op over real transport" and the 4-player LAN exit criterion have no

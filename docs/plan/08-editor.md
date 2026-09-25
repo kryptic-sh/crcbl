@@ -73,6 +73,15 @@ drawn full-window, the panels are composited over it, and the viewport pane is a
 hole whose rectangle gates picking. Closing it needs an image command that can
 name a rendered target, or a render area the graph takes from the caller.
 
+> **Re-checked 2026-09-25: the renderer half of the first branch now exists.**
+> `ForwardRenderer::create_view` (2026-09-15, `crcbl_render::forward::view`)
+> draws the scene a renderer already holds through a second camera into a target
+> of its own, sharing every pool, page and shadow map, and `ViewDesc` takes a
+> transparent background and fixed lighting. What is still missing is the UI
+> half: `DrawCommand::Image` samples `crcbl_ui::image`'s atlas, which
+> `ImageAtlas::register` fills from host bytes, so no UI rect can show a view's
+> target yet.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -90,16 +99,17 @@ subcommands.
 Two things sit behind it, in both directions:
 
 - **It no longer waits on stage 6.** Feature 5 (scene IO) has a format to open
-  and save: [06-assets-scenes.md](06-assets-scenes.md)'s task 4 landed
-  2026-09-07 as `crcbl_scene::scn`, with `Scene::load` over an `AssetSource` and
-  a `Scene::save` whose text is byte-identical for equal scenes, and
-  `apps/breakout` reads its brick grid through it. (This bullet used to claim
-  there was "no RON reader anywhere in the workspace", which was already false
-  when it was written: `crcbl_render::stack::CameraStack::from_ron` and
+  and save: stage 6's task 4 landed 2026-09-07 as `crcbl_scene::scn`, with
+  `Scene::load` over an `AssetSource` and a `Scene::save` whose text is
+  byte-identical for equal scenes, and `apps/breakout` reads its brick grid
+  through it. (This bullet used to claim there was "no RON reader anywhere in
+  the workspace", which was already false when it was written:
+  `crcbl_render::stack::CameraStack::from_ron` and
   `crcbl_inventory::catalog::Catalog::from_ron` both predate it.) Feature 6, the
   asset browser, still waits on the rest of stage 6 — there is no watcher and no
-  `crcbl bake`. Feature 3 landed in slice 3 on stage 7's inspector
-  (`Ui::inspector_with`; the UI's rules are in
+  `crcbl bake` (both owed in `docs/backlog.md`; stage 6's rules are in
+  [../notes/tooling.md](../notes/tooling.md)). Feature 3 landed in slice 3 on
+  stage 7's inspector (`Ui::inspector_with`; the UI's rules are in
   [../notes/tooling.md](../notes/tooling.md)).
 - **Two sample plans wait on it.** [sample/07-towers.md](sample/07-towers.md)'s
   milestone 2 _is_ this document's dogfood pass — its exit criterion is "map
@@ -185,6 +195,13 @@ than the rest of this document suggests; each line was checked in the source.
 13. **Two statements in the 2026-08-09 corrections below are now out of date**:
     X11 does have drag-drop (through XDND), and Win32 OS drops work; only the
     Win32 clipboard file-list half (`CF_HDROP`) stands.
+
+> **Re-checked 2026-09-25: slices 1 to 3 closed four of those lines.** Item 5's
+> editor panel is drawn (slice 3's inspector), item 8's helper is
+> `Camera::ray_through`, item 9's command log is `apps/editor`'s `EditCommand`
+> and `UndoLog` (in-process, one variant), and item 11 was already marked built.
+> The other nine still hold as written, except that the viewport's renderer half
+> now exists (see _Status_, above).
 
 **The missing pieces, ranked, with owner and rough size**: the UI foundation
 (large, `crcbl-ui` and the UI pass); a viewport pane that samples a rendered

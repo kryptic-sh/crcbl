@@ -36,8 +36,8 @@
 //!    look like.
 //! 2. **The engine is one binary and the CI matrix is not one machine.** The
 //!    same `sandbox` binary runs on a developer's radv box, on a CI runner with
-//!    lavapipe and nothing else, and — per `docs/plan/11-cli-headless.md` — in
-//!    headless jobs that may have no graphics stack at all. `--headless
+//!    lavapipe and nothing else, and — per topic 11 (`docs/notes/tooling.md`)
+//!    — in headless jobs that may have no graphics stack at all. `--headless
 //!    --backend null` has to work on the last of those, and on macOS and
 //!    Windows, where this crate compiles and finds no loader at all.
 //! 3. **It costs one `dlopen`.** Loader dispatch is unchanged either way; only
@@ -191,7 +191,7 @@
 //!   `compatible_surface` at `request_adapter`; settling that belongs with
 //!   `crcbl-render` owning device selection at P1.3.
 //! * **`crcbl-vk` is a dependency of the `crcbl` umbrella.**
-//!   `docs/plan/11-cli-headless.md`'s rule is about a *sample* naming a
+//!   Topic 11's rule (`docs/notes/tooling.md`) is about a *sample* naming a
 //!   backend, and `apps/sandbox` names none — it asks the registry for one by
 //!   value. P1.2 expected the registry to move to `crcbl-render` at P1.3, and it
 //!   **did not**: this crate's own e2e suite now depends on `crcbl-render`,

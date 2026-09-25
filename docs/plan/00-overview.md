@@ -91,9 +91,9 @@ is an orthographic projection with `z` as z-index.
 | 3     | ◐ 03-gpu-driven-rendering — built part done, deleted 2026-09-24; the rest in `docs/backlog.md` | Bindless, geometry pools, indirect draws, GPU culling          |
 | 4     | ◐ 04-ecs-server-client — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | ECS, tick loop, transport seam, replication                    |
 | 5     | ◐ 05-physics — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`              | From-scratch physics: sector space, forces/orbits, CCD         |
-| 6     | [06-assets-scenes.md](06-assets-scenes.md)                                                     | glTF import, scene format, asset ids, hot reload               |
+| 6     | ◐ 06-assets-scenes — built part done, deleted 2026-09-25; the rest in `docs/backlog.md`        | glTF import, scene format, asset ids, hot reload               |
 | 7     | ◐ 07-ui-debug — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Immediate-mode GUI, debug draw, profiler, inspector            |
-| 8     | [08-editor.md](08-editor.md)                                                                   | Scene editor built on the engine, gizmos, play-in-editor       |
+| 8     | [08-editor.md](08-editor.md) — ◐ slices 1–3 built; protocol, viewport, gizmos, play open       | Scene editor built on the engine, gizmos, play-in-editor       |
 | 9     | [09-backends-metal-dx12.md](09-backends-metal-dx12.md)                                         | Metal and DX12 implementations of the HAL — **deferred**       |
 | 10    | ◐ 10-wasm-webgpu — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`          | Wasm target: WebGPU backend, browser platform, capability gaps |
 
@@ -110,7 +110,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 
 | Topic | Doc                                                                                         | Theme                                                                      |
 | ----- | ------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| 11    | [11-cli-headless.md](11-cli-headless.md)                                                    | `crcbl` CLI: headless engine/editor control, scripting                     |
+| 11    | ◐ 11-cli-headless — built part done, deleted 2026-09-25; the rest in `docs/backlog.md`      | `crcbl` CLI: headless engine/editor control, scripting                     |
 | 12    | ◐ 12-testing — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`           | Test infra: unit/property/e2e, golden images, determinism                  |
 | 13    | ◐ 13-audio — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`             | Spatial cue grammar, mixer, occlusion, audio testing                       |
 | 14    | ◐ 14-persistence — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`       | Save games (snapshot-based), settings layers, profiles                     |
@@ -133,7 +133,7 @@ Cross-cutting topic docs (identity, no ordering implied):
 | 31    | [31-vis-culling.md](31-vis-culling.md)                                                      | Optional anti-wallhack: PVS + ray envelopes, leak auditor                  |
 | 32    | [32-voip.md](32-voip.md)                                                                    | Voice: team/direct + proximity, Opus, gate-safe (no positions)             |
 | 33    | [33-decals.md](33-decals.md)                                                                | Decals: projected/parallax/carve-volume tiers, impact + decoration         |
-| 34    | [34-inventory.md](34-inventory.md)                                                          | UI drag-drop + optional grid-inventory kit (looting, slots)                |
+| 34    | [34-inventory.md](34-inventory.md) — ◐ grid kit and pointer drag built; the rest open       | UI drag-drop + optional grid-inventory kit (looting, slots)                |
 | 35    | [35-ragdolls.md](35-ragdolls.md)                                                            | Ragdolls: server settles / client performs, anim→physics handoff           |
 | 36    | ◐ 36-contact-solver — built part done, deleted 2026-09-24; the rest in `docs/backlog.md`    | Physics L2/L3: substepped impulses, islands, sleeping, joints              |
 | 37    | [37-materials.md](37-materials.md)                                                          | Material authoring: templates+instances, render↔surface link, lint         |

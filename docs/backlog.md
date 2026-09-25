@@ -3375,23 +3375,28 @@ prone turns with. Still owed:
   `contact::manifold::gap`) handles a capsule at any angle against spheres,
   capsules and boxes. Then a prone `move_and_slide`: the same plane-set slide,
   and a ground probe at both ends of the core rather than one under the centre.
-  **Decision owed (EW):** on a slope the horizontal core hovers at one end and
-  digs in at the other — keep it horizontal and accept that, or let the core
-  pitch to follow the ground, which puts a pitch on `LyingCapsule`.
+  **Decided by EW (2026-09-25): the core pitches to follow the ground**, clamped
+  to the walkable slope (`min_ground_normal_y`), which puts a pitch on
+  `LyingCapsule`: a horizontal core on a slope hovers at one end or is falsely
+  blocked by the rising ground under the other, and a prone body lies along the
+  ground.
 - **Turning a lying body, refusing a turn into geometry and reporting how far it
   could turn.** Buildable from the fit check alone: step the yaw so the feet end
   moves at most a radius per step (`length · Δyaw ≤ radius`, so nothing thinner
   than the capsule is stepped over), and bisect the first blocked step down to a
   tolerance; or a rotational conservative advancement through the same
-  `time_of_impact`, which already bounds a turning path. **Decision owed (EW):**
-  the pivot — the head (the actor origin, which is where EW's prone sphere is)
-  or the body's middle.
+  `time_of_impact`, which already bounds a turning path. **Decided by EW
+  (2026-09-25): the turn pivots on the head end**, where EW's actor origin and
+  first-person camera sit, so the view stays still while the legs sweep; a wall
+  behind limits how far the legs turn, not where the view is.
 - **Stance switches.** Stand or crouch to prone is this slice's check at the
   prone pose. Prone to crouch or stand is a Y-aligned capsule fit at the target,
   which `capsule_penetrations_filtered_into` answers today (non-empty means
   blocked), but the controller has no stance-fit method wrapping it under its
-  filter. **Decision owed (EW):** where the actor origin lands when a prone body
-  stands — at the head, or pulled back toward the middle of the body.
+  filter. **Decided by EW (2026-09-25): standing up keeps the origin over the
+  head's position**, so the view does not jump; the upright capsule is fitted
+  there and the stand refused if it does not fit, as EW's other stance changes
+  are.
 
 Gaps in what shipped, and behaviour to know:
 
@@ -8329,10 +8334,11 @@ carrying four page indices. It is the foundations block's first row in that
 plan's delivery table.
 
 **What made the decision cheap:** there is no `.crcblmesh` on disk to migrate —
-zero tracked files, no source mentions one — so the format is born v0 under
-[06-assets-scenes.md](plan/06-assets-scenes.md)'s pre-1.0 rule, and the re-bless
-is one, not one per feature. The derivative route for tangents stays rejected on
-mirrored UVs (§2's 2026-08-27 correction).
+zero tracked files, no source mentions one — so the format is born v0 under the
+pre-1.0 format rule (_Every format the engine owns is v0 until 1.0_, in
+[the tooling notes](notes/tooling.md)), and the re-bless is one, not one per
+feature. The derivative route for tangents stays rejected on mirrored UVs (§2's
+2026-08-27 correction).
 
 **DECIDED 2026-09-06 —** tangents are generated with `bevy_mikktspace`, the
 pure-Rust port of the reference implementation, because glTF's specification
@@ -10016,11 +10022,16 @@ trusted.
 
 `crcbl sim` runs 1000 ticks by default and prints
 `crcbl_server::sim_hash::hash_world`'s output, so the tick loop is shown
-deterministic. But its world comes from `--seed` and there is no input script:
-`crates/crcbl-cli/src/sim_cmd.rs` says outright that neither the scene argument
-nor the input script is built, because a scene file format and a RON reader are
-both open questions. The stage 4 plan's exit criterion asked for "same input
-script → same state hash", which is the half not covered.
+deterministic. But its world comes from `--seed` and there is no input script.
+The deleted topic 11 plan sketched
+`crcbl sim <scene> --ticks N [--input script.ron]`; both halves are refused by
+name today (`parse_sim`), and `--hash` is deliberately not a flag because the
+hash is the output. `SIM_USAGE` and the refusal now say so plainly (reworded
+2026-09-25: `crcbl_scene::scn` is the format and `ron` a workspace dependency
+since 2026-09-07). What is owed is the input script's schema and a way to build
+a runnable world from a scene without a game's code. The stage 4 plan's exit
+criterion asked for "same input script → same state hash", which is the half not
+covered.
 
 **Blocks:** replay-driven regression testing, and the rollback-idempotence
 property `26-prediction.md` wants.
@@ -10651,6 +10662,14 @@ size histogram, and a sleeping ratio. Today the stage times exist only as
 `ContactCounters` and tumble's page, and the stability claims only as
 `crates/crcbl-phys/tests/`.
 
+The deleted topic 11 plan specified the scene-shaped sibling,
+`crcbl phys <scene> --check`: a physics sanity suite over a `.scn/` directory —
+overlaps at rest, a NaN scan, island statistics — growing with each physics
+rung. Now that `crcbl_scene::scn` exists it has a format to read; what it lacks
+is the verb and a way to build a `PhysicsSystem` from a scene's registered
+components without a game's code (`crcbl::registry`'s `Placement` gives a centre
+and half extents, which is a collider's shape for a box and nothing else).
+
 ### Ragdolls — `35-ragdolls.md` (2026-08-27, re-verified 2026-09-24)
 
 **Its dependencies landed; the ragdoll did not.** Everything this entry used to
@@ -10700,6 +10719,124 @@ limit is the trigger arriving as an input **edge** (one press, one shot,
 documented on `Controls::fire` in `apps/breach/src/game.rs`). The "three classic
 exploits, closed" section describes work not started.
 
+## What the deleted 06-assets-scenes plan left unbuilt (2026-09-25)
+
+The plan's rules — the format matrix, the `.scn/` directory and its
+deterministic writer, v0 formats, the sidecar GUID, the no-synchronous-IO rule —
+are in `docs/notes/tooling.md` under _What the deleted 06-assets-scenes plan
+left behind_. Its other open work already had entries and keeps them: _Asset hot
+reload: two polled watches, and no engine reload path_, _`crcbl-assets` after
+stage 6 task 2_, _glTF import: what the first half left, and what it found
+upstream_, _Sidecar meta RON: three items want it, and nothing writes one yet_,
+_No golden over a real glTF document_ and _Viewer's hot-reload demo is built but
+not recorded_. What had none is below.
+
+### `crcbl bake`, `PackSource`, the cooked mesh and `import --out`
+
+**Not built** (verified 2026-09-25: `crates/crcbl-cli/src/args.rs`'s `Command`
+has no `Bake`, `PackSource` appears only in `crcbl-assets`' docs, and nothing in
+the workspace writes or reads a cooked mesh). Every mesh the engine draws is
+imported from glTF or built from RON at load, which is the plan's MVP shape:
+import at load time, with the `AssetSource` seam as the place a bake slots in
+without consumers changing.
+
+- **`crcbl bake`** packs a `.scn/` directory plus the cooked assets it
+  references into one binary blob, for shipping and for the browser, where many
+  small fetches are the cost. `PackSource` serves the blob as an `AssetSource`;
+  a blanket `StorageSource` impl was declined precisely to leave it room
+  (_`crcbl-assets` after stage 6 task 2_). The planned `crcbl icon bake`
+  (_`crcbl icon bake`_, under inventory) was meant to be part of this verb.
+- **The cooked mesh** is born at header version 0 and refused when unknown, in
+  `crcbl_shaders::mesh::MeshVertex`'s compact split-stream layout, two
+  contiguous streams (positions, then attributes) with the cluster and LOD
+  tables beside them — the binding shape is in the notes section above. No
+  migration before 1.0: a v0 file that stops loading is re-imported from its
+  glTF.
+- **`crcbl import <gltf> --out <dir>`** is refused by name in `parse_import`,
+  its refusal and `IMPORT_USAGE` reworded 2026-09-25 to say writing the scene is
+  not built. Its original reason — no on-disk scene format — went stale on
+  2026-09-07: `crcbl_scene::scn::Scene::save` can write a `.scn/` now, so what
+  is owed is a decision about what an import writes (a scene directory naming
+  the glTF, or cooked meshes beside it) and the verb itself.
+
+### Scene format leftovers: dirty chunks, the command journal, sector sharding
+
+**Not built**; `crcbl_scene::scn`'s module header names each. All three exist to
+serve an editor and wait on `apps/editor` growing past its in-process slices
+(`docs/plan/08-editor.md`).
+
+- **Dirty-system tracking.** `Scene::save` rewrites every chunk the manifest
+  names. The plan wanted a save to rewrite only dirty chunk files, driven by the
+  same dirty-set machinery replication needs, so a full-scene rewrite never
+  happens. The byte-stable writer makes the cost a performance question, not a
+  diff-noise one: an unchanged chunk is rewritten with the same bytes.
+- **The command journal.** Editor autosave as an append-only log of edit
+  commands (`.scn.autosave.log`, gitignored), replayed on crash and truncated by
+  an explicit save, which flushes the dirty chunks canonically. Git only ever
+  sees canonical form. It is the editor's command stream serialized, so it needs
+  a serializable command type; `apps/editor`'s `EditCommand` is not `serde`
+  today.
+- **Sector sharding.** A system whose array grows huge shards its chunk by
+  sector (`sys/<name>/{sector}.ron`), so a sector's scene data and its physics
+  load unit coincide. Needs physics sector streaming first.
+
+Per-chunk hot reload is the fourth editor-facing piece, and it is under _Asset
+hot reload: two polled watches, and no engine reload path_.
+
+### The Sponza-class exit: a real scene through the full path
+
+**Not met.** The plan's exit asked for a Sponza-class glTF scene to load through
+the whole path — a `.scn/` directory, the server, replication, the client, the
+GPU pools — and render at stage 3's performance targets, with a sandbox fly
+through it. What exists: `apps/viewer` draws any glTF on the Khronos shelf
+directly (no scene directory, no server), and `apps/breakout` and `apps/puppet`
+load `.scn/` directories whose entities are the games' own components, not glTF
+meshes. Nothing references a glTF from a scene chunk; that needs an
+asset-reference component type in some chunk and the loader resolving it through
+`AssetRegistry`. The measured half is unowned too: no scene of that size has a
+recorded frame time on any tier.
+
+## What the deleted 11-cli-headless plan left unbuilt (2026-09-25)
+
+The plan's rules — no capability GUI-side, one binary, `--json` and the exit
+codes, refusal by name — are in `docs/notes/tooling.md` under _What the deleted
+11-cli-headless plan left behind_. Most of its open verbs already had entries,
+now carrying the design: _`crcbl phys stack --check` and the solver's profiler
+rows_, _The determinism smoke test has no input script_,
+_`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
+`crcbl audio render`_ and _Profiling: five of the eight gaps are still open_;
+`import --out` is under _`crcbl bake`, `PackSource`, the cooked mesh and
+`import --out`_ above.
+
+### `crcbl scene` and `crcbl edit`: the CLI half of the editor protocol
+
+**Not built; the parser rejects both words** (verified 2026-09-25 against
+`crates/crcbl-cli/src/args.rs`'s `Command`). The specification:
+
+- `crcbl scene <file> spawn|set|delete|move|list|query` — batch scene operations
+  against a headless editor server, commands from arguments or from
+  newline-delimited stdin. Every operation is the same `Command` value the GUI
+  emits, so validation and undo apply identically. `crcbl scene paste -` takes
+  entities copied from the editor (dual-mime RON, ids re-minted on paste).
+- `crcbl edit <scene> --serve [--listen <addr>]` — a headless editor server that
+  the GUI editor, the CLI and scripts connect to concurrently, the command log
+  being the sync point; `crcbl edit <scene> -e '<cmd>' …` — one-shot edits
+  without a session.
+
+**What it waits on**: the editor's server command handling —
+`ClientToServer::Command` is matched and dropped by `crcbl-server`, `Client` has
+no send path and a server hosts one session (`docs/plan/08-editor.md`, missing
+piece 1) — and more `EditCommand` variants than `SetProperty`. When the CLI
+reads commands it will have to parse input, which is the moment
+`crates/crcbl-cli/src/json.rs` says to reconsider hand-written JSON.
+
+**The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
+`crcbl scene spawn …` → `crcbl screenshot` → `crcbl sim` session that builds and
+verifies a small scene with zero GUI launches, and the towers map modified from
+the CLI (a tower plot spawned, a spawner moved) opening correctly in the GUI
+editor with its undo history intact. The towers half also needs towers' state in
+ECS systems (_The editor: slices 1 to 3 landed, and what they leave_).
+
 ## Tooling and infrastructure — what the plans still owe
 
 The tooling and infrastructure plans were audited against the tree on
@@ -10736,21 +10873,28 @@ polled, with no file-watcher dependency (`notify` is in no `Cargo.toml`). No
 application loads or polls a stylesheet yet, so the "styles hot-reload like web
 dev" claim is built and not demonstrated.
 
-**Not built:** everything `06-assets-scenes.md`'s task 5 names. There is no
-asset reimport path, no in-place GPU pool update, no shader recompile keyed by
-hash (`crcbl-shaders` computes the identity and nothing keys on it), and no
-per-chunk scene reload. `crates/crcbl-assets/src/registry.rs`'s module docs
-still describe hot reload as the thing that would reintroduce the `Unloaded`
-state, which the registry deliberately does not have because nothing can reach
-it today.
+**Not built:** everything stage 6's task 5 named. There is no asset reimport
+path, no in-place GPU pool update (the design: a reimported mesh's range is
+swapped in the pool and the stale range retires through the deletion queue), no
+shader recompile keyed by hash (the design: a Slang recompile rebuilds the
+pipelines keyed by shader hash; `crcbl-shaders` computes the identity and
+nothing keys on it), and no per-chunk scene reload (the design: a changed
+`sys/<name>.ron` tears down and re-instantiates only that system's scene
+entities, server-side, with replication propagating the change, and the editor's
+revert reuses the same path — which needs `scn::IdMap` to gain a removal).
+Reload is dev-only and its bar is "doesn't crash, usually works".
+`crates/crcbl-assets/src/registry.rs`'s module docs still describe hot reload as
+the thing that would reintroduce the `Unloaded` state, which the registry
+deliberately does not have because nothing can reach it today.
 
 **What it would take:** a watch over the asset source (the two polled watches
 show a poll is enough for one path; a directory of thousands of files is the
 case `notify` would be for, and adding it is the user's decision), the reimport
 path, and the deletion-queue retire calls `AssetRegistry`'s refcount stops short
 of. **What it blocks:** the editor's revert path and its asset browser, and
-`06-assets-scenes.md`'s "editing a texture/shader/scene chunk reflects without
-restart" exit criterion.
+stage 6's exit criteria: editing a texture, shader or scene chunk on disk shows
+in the running sandbox without a restart, and editing one chunk file reloads
+only that system.
 
 ### No golden over a real glTF document (2026-08-27, re-verified 2026-09-24)
 
@@ -10833,7 +10977,11 @@ says what that cleared and what it did not. The allow-list entry in
   name a rendered target (`DrawCommand::Image` carries no texture identity and
   `ImageAtlas::register` takes host bytes), or a render area the graph takes
   from its caller (every pass's scissor comes from the attachment's full
-  extent). Until then a panel cannot show a second camera either.
+  extent). **The renderer half of the first exists since 2026-09-15**:
+  `ForwardRenderer::create_view` draws the scene through a second camera into a
+  target of its own (re-checked 2026-09-25). What is missing is the UI half, a
+  `DrawCommand::Image` that can sample that target rather than the host-filled
+  `ImageAtlas` page.
 - **`default.css` sets no `min-width: 0` on `split`, `.split-pane` or
   `.dock-pane`.** Flexbox's `min-width: auto` let a 240 px pane's content grow
   to 348 px; `overflow: hidden` hid it, but a rectangle is a hit test, so the
@@ -10889,10 +11037,9 @@ for entities spanning systems, and the `notify` watcher.
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
 the editor, zero hand-edited scene text" (`apps/towers` exists; that milestone
 does not); and `docs/plan/sample/08-arena.md`, which wants an editor-built map
-and has no app directory. `08-editor.md` records this, and still calls them the
-only two samples with no app directory, which stopped being true once
-`apps/towers` landed — arena, mirrors, meadow, mane and relief have none
-(re-verified 2026-09-24).
+and has no app directory. `08-editor.md` records this, and names the five sample
+plans with no app directory — arena, mirrors, meadow, mane and relief
+(re-verified 2026-09-25).
 
 **Its 2026-08-09 shell corrections were re-verified twice and the conclusion was
 wrong both times; corrected 2026-09-02.** Each cited fact is about the
@@ -10905,6 +11052,39 @@ drops today and each sets `ShellCaps::DRAG_DROP`: Wayland's data device,
 version 5, receiving). So `08-editor.md`'s "this is editor work, not seam work"
 is right and nothing is owed here. The lesson is the citation one: three true
 `grep` results about one mechanism supported a confident claim about another.
+
+### The editor: what the plan specifies beyond slice 3 (2026-09-25)
+
+**Not built, and specified in `docs/plan/08-editor.md`**, which stays until
+about half of it is: that document holds the design, and this entry is the list
+so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
+(`EditCommand` has one variant, `SetProperty`) and `crcbl-server`'s peer loop
+(`ClientToServer::Command` is matched and dropped).
+
+- **The client+server pair**: server command handling with a client send path,
+  reason-coded replies, one global undo log showing each entry's author,
+  validation against current state and last-writer-wins (the plan's 2026-07-27
+  correction); and a server hosting more than one session.
+- **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
+  a `World` has one `Schedule` and no per-system gating.
+- **The viewport pane** (the entry above has what exists).
+- **Transform gizmos**: translate, rotate and scale, axis and plane handles,
+  snapping, constant screen size. `DebugDraw` is lines only and depth-tested,
+  with no on-top mode or filled handles.
+- **The asset browser and drag-spawn**; `AssetSource` has `read` and no `list`.
+- **Play/stop** by reloading the scene (decided 2026-09-16).
+- **The other command variants** (spawn, delete, duplicate, rename, transform,
+  attach/detach system data, scene-load and save markers), and with them the
+  undo property test.
+- **Entity copy and paste** as dual-mime RON with ids re-minted on paste.
+- **Towers' ECS port, then the dogfood pass**, which is towers' milestone 2.
+- **The exit criteria**: empty scene to play and stop without a text editor
+  (owed), and the editor never linking `crcbl-vk` directly (kept so far:
+  `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
+  backend crate).
+
+The CLI half, `crcbl edit --serve` and `crcbl scene`, is under _`crcbl scene`
+and `crcbl edit`: the CLI half of the editor protocol_.
 
 ### Wasm module hosting: nothing but the static binding exists (2026-08-27)
 
@@ -10969,8 +11149,8 @@ deleted 19-input plan left behind_.
   `Hold(400, "jump_charge")` does — loaded as the game's defaults. As built,
   bindings are one flat `Vec<Binding>` per action and nothing downstream can
   tell which spoke; a per-class grouping in the asset would be presentation over
-  that list, not a change to it. The tree has no RON reader yet, which is its
-  own open decision (under _The plan-document audit of 2026-08-23_).
+  that list, not a change to it. `ron` has been a workspace dependency since
+  2026-09-06, so what is owed is the binding asset's schema, not a reader.
 - **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
   overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
   `crcbl-store` has no profile or binding type. The rule it must meet: a
@@ -11900,7 +12080,8 @@ test target at all.
 
 **What it would take:** per-sample goldens can be written today against each
 sample's own synthesis without the CLI. The CLI verb needs a script input
-format, which is the RON decision above.
+format: RON, now that `ron` is a workspace dependency, in a schema nobody has
+written yet.
 
 **Trap:** pin the waveform at a tolerance and the energy separately, never the
 bytes. A per-sample bound alone is blind to a small coherent drift spread over a
@@ -12077,9 +12258,9 @@ consumer.
 
 ### `crcbl save list|dump|diff|restore` (2026-08-27)
 
-**Not built and blocked, not merely owed.** The verb is not parsed and
-`crcbl-cli` has no module for it. `dump` is specified to render a snapshot as
-RON; the RON half is no longer the blocker — `ron` is a workspace dependency and
+**Not built, and no longer blocked.** The verb is not parsed and `crcbl-cli` has
+no module for it. `dump` is specified to render a snapshot as RON; the RON half
+is no longer the blocker — `ron` is a workspace dependency and
 `crcbl_render::stack` reads and writes it — so what is owed is the verb itself
 and the snapshot shape it would render.
 
@@ -12580,6 +12761,41 @@ driven over an item set, writing an atlas.
 
 **What it blocks:** grid UI item icons, so it is on the kit's critical path, not
 beside it.
+
+### Drag-drop on pad, keyboard and touch, and the rest of the drag's shape (2026-09-25)
+
+**Not built.** `crcbl_ui::grid_drag` is pointer-only: `GridDrag::frame` takes a
+`PointerInput`, and nothing in the module reads a pad, a key or a touch
+(verified 2026-09-25 by reading `grid_drag.rs`). `docs/plan/34-inventory.md`'s
+part 1 makes all four devices first class through one model — engaging a slot
+picks up, `ui_move` navigates while carrying, `ui_accept` drops, `ui_back`
+cancels to the origin, and touch is long-press, drag and release — and asks
+besides for a ghost subtree following the pointer or focus (the entry above
+notes no sample draws one), auto-scroll at a scrolling container's edge,
+multi-select drags carrying the selection as one payload, cross-window drags,
+and drag sources and targets outside a `CellGrid`. Its risk note: pad quick-move
+actions ("send to stash", "equip") matter more than literal dragging on a pad,
+and the kit ships both. The design stays in that plan until it folds.
+
+### Inventory kit: the 3D inspect view, contested-loot hooks, container types (2026-09-25)
+
+**Not built** and not in _The grid-inventory kit_'s owed list above:
+`crcbl-inventory` has no container-type or policy hook, and nothing renders an
+item into a panel. `docs/plan/34-inventory.md` asks for a 3D inspect view (an
+item rotated in a panel, over the render-to-texture view path, which
+`ForwardRenderer::create_view` now provides), contested-loot policy hooks
+(locks, timers, as game data), and container types such as mag-only rigs and
+quick-slots, also game data. Breach is the sample that would drive them.
+
+### Inventory: the rules the unbuilt kit must keep
+
+`docs/plan/34-inventory.md` still stands and holds them: everything is a grid
+(an equipment slot is a `1×1` filtered grid, and there is no second slot
+concept); mount and coverage are orthogonal and two worn items conflict if and
+only if their coverage sets intersect; gear is the grids it provides; a move is
+one atomic server-side transaction, never remove-then-add; the stash is
+server-side, per server instance, never in the client profile; and the kit stops
+at containers, grids, stacks, attachments and the move protocol.
 
 ### `Stack` carries no per-instance quality (2026-09-07)
 
@@ -14897,9 +15113,10 @@ leaves behind is smaller than it was:
 
 - **`crcbl save` is an unbuilt verb, and blocked.** `crcbl-store`'s `save.rs`
   has no CLI reaching it and the persistence plan's exit criteria assumed
-  `save list|dump|diff|restore` — but `dump` is specified to render RON and this
-  tree has no RON reader, which is its own open decision below. `sim` and
-  `settings` were the other two of these and both shipped on 2026-08-23.
+  `save list|dump|diff|restore`; `dump` is specified to render RON, which
+  stopped being a blocker when `ron` became a workspace dependency (2026-09-06).
+  `sim` and `settings` were the other two of these and both shipped on
+  2026-08-23.
 - **Profile rebind storage and glyph hints, and the order they have to land
   in.** `ActionMap::rebind` mutates in memory and nothing serialises it;
   `crcbl-store` has no profile or binding type at all, and its only
@@ -22034,14 +22251,15 @@ what was decided along the way.
 **`AssetId` is still hash-of-path, which the plan's own correction says is
 wrong.** `AssetId::from_path` derives the id from the canonical key, so renaming
 `props/crate.glb` gives it a different id and orphans every reference. The
-corrected model in `docs/plan/06-assets-scenes.md` is a sidecar
-`crate.glb.meta.ron` carrying a random 128-bit GUID, created on first import.
-Nothing can create one here — first import is the importer, which is task 3 — so
-the type was made 128 bits wide and given `AssetId::from_bits` so a sidecar GUID
-drops in without the type changing. What is missing is the sidecar reader, a
-writer that mints a GUID, and a registry path that prefers the sidecar's id over
-the path's. Do it in the same slice as the importer, before any content exists
-to be renamed.
+corrected model (_What the deleted 06-assets-scenes plan left behind_, in
+`docs/notes/tooling.md`) is a sidecar `crate.glb.meta.ron` carrying a random
+128-bit GUID, created on first import. Nothing could create one when this crate
+landed — first import is the importer, task 3, which has since landed as
+`crcbl_scene::import_gltf` — so the type was made 128 bits wide and given
+`AssetId::from_bits` so a sidecar GUID drops in without the type changing. What
+is missing is the sidecar reader, a writer that mints a GUID, and a registry
+path that prefers the sidecar's id over the path's. Do it in the same slice as
+the importer, before any content exists to be renamed.
 
 **No `FetchSource` asset source, deliberately.** Stage 10 owns the browser asset
 path. `crates/crcbl-assets/src/source.rs` shows the whole implementation in its
@@ -23544,12 +23762,12 @@ trying it is the thing that needs approval.
 2026-09-06** by foundation (b), the render stack as RON, which was the fourth
 wanter and the first to land. `ron` is in `[workspace.dependencies]`,
 `crcbl_render::stack` reads and writes it, and `apps/lantern/assets/camera.ron`
-is the tree's first `.ron` file. `docs/plan/06-assets-scenes.md` and topic 25
-both assume a `crate.glb.meta.ron` sidecar, and **nothing writes one yet** —
-what the sidecar needs now is its own serde schema, not a reader. Beside the
-plan's RON-for-entity-data rule there is still `crcbl-shell`'s
-`application/x-crcbl+ron` clipboard mime, which names the format and moves
-opaque bytes without parsing them.
+is the tree's first `.ron` file. The stage 6 asset rules
+(`docs/notes/tooling.md`) and topic 25 both assume a `crate.glb.meta.ron`
+sidecar, and **nothing writes one yet** — what the sidecar needs now is its own
+serde schema, not a reader. Beside the plan's RON-for-entity-data rule there is
+still `crcbl-shell`'s `application/x-crcbl+ron` clipboard mime, which names the
+format and moves opaque bytes without parsing them.
 
 Three things now want that one file, and they should land together rather than
 as competing conventions: the `AssetId` GUID this backlog already owes,

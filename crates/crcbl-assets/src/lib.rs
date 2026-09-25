@@ -1,6 +1,6 @@
 //! Asset identity, load state, and the IO seam underneath both.
 //!
-//! This is step 2 of `docs/plan/06-assets-scenes.md`: names for assets
+//! This is step 2 of stage 6 (`docs/notes/tooling.md`): names for assets
 //! ([`AssetId`]), a place to put them while they load ([`AssetRegistry`]), and
 //! the one trait every byte an asset is made of arrives through
 //! ([`AssetSource`], with [`DirSource`] as the native implementation). Nothing
@@ -73,17 +73,17 @@ use crcbl_store::web::canonical_key;
 /// # Where the bits come from, and where they will come from
 ///
 /// Today: [`AssetId::from_path`], the leading 16 bytes of the SHA-256 of the
-/// canonical key. That is the "path hashing" `docs/plan/06-assets-scenes.md`'s
-/// corrections section keeps as a lookup convenience — deliberately *not* the
-/// long-term identity scheme, because renaming a file changes its id and
+/// canonical key. That is the "path hashing" stage 6's corrections (recorded in
+/// `docs/notes/tooling.md`) keep as a lookup convenience — deliberately *not*
+/// the long-term identity scheme, because renaming a file changes its id and
 /// silently orphans every reference to it.
 ///
-/// The corrected model in that document gives every asset a sidecar meta file
-/// carrying a random 128-bit GUID, created on first import and committed. That
-/// import step does not exist yet (it is step 3), so nothing can produce such a
-/// GUID here. What this type does is make it a drop-in when it arrives: the id
-/// is 128 bits wide *because* a GUID is, and [`AssetId::from_bits`] is how one
-/// read out of a sidecar becomes an `AssetId` without the type changing shape.
+/// The corrected model there gives every asset a sidecar meta file carrying a
+/// random 128-bit GUID, created on first import and committed. The importer
+/// (step 3) writes no sidecar yet, so nothing can produce such a GUID here.
+/// What this type does is make it a drop-in when it arrives: the id is 128 bits
+/// wide *because* a GUID is, and [`AssetId::from_bits`] is how one read out of
+/// a sidecar becomes an `AssetId` without the type changing shape.
 ///
 /// [`AssetId::to_bits`] is the other half: an id has to survive being written
 /// into a scene chunk and read back, which is what step 4 does with it.

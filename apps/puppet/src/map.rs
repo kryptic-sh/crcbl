@@ -62,8 +62,8 @@
 //!
 //! `assets/scenes/blockout.scn/` is that map: a header, an environment and three
 //! chunk files, read through [`crcbl::scene::scn`] — the engine's own scene
-//! format, `docs/plan/06-assets-scenes.md`'s "Scene format: directory of chunk
-//! files".
+//! format, the directory of chunk files `docs/notes/tooling.md` records under
+//! _What the deleted 06-assets-scenes plan left behind_.
 //!
 //! ```text
 //! assets/scenes/blockout.scn/

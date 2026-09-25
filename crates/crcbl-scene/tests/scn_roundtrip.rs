@@ -1,6 +1,6 @@
 //! The `.scn/` directory's three writer properties, over a two-system scene.
 //!
-//! `docs/plan/06-assets-scenes.md`'s "Deterministic writer" section names them:
+//! The deterministic-writer rule in `docs/notes/tooling.md` names them:
 //! load → save is byte-identical, editing one entity moves only its own lines,
 //! and — the one a single-chunk scene cannot express — moving an entity between
 //! systems rewrites those two chunk files and nothing else.

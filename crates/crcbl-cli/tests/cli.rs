@@ -1575,8 +1575,8 @@ fn import_reports_what_a_document_holds() {
 
 /// What the importer skipped arrives as a warning on stderr, because `main`
 /// installs the engine logger — the "report what was imported/skipped" half of
-/// `docs/plan/11-cli-headless.md`. A skip is not a failure: the run exits 0 and
-/// the image the file names is still counted.
+/// topic 11 (`docs/notes/tooling.md`). A skip is not a failure: the run exits 0
+/// and the image the file names is still counted.
 ///
 /// Three different counts in one object, so the report cannot be reading one
 /// field for another.

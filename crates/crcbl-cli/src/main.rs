@@ -1,10 +1,10 @@
 //! `crcbl` — the Crucible engine's headless control CLI.
 //!
-//! `docs/plan/11-cli-headless.md` makes this a first-class pillar rather than a
-//! convenience: **everything the engine and the editor can do must be reachable
-//! without a window**, from a terminal, a script, a CI job or a coding agent.
-//! The invariant it protects is that no capability is implemented GUI-side, and
-//! the way it is protected is that the CLI is the thing CI runs.
+//! Topic 11 (`docs/notes/tooling.md`) makes this a first-class pillar rather
+//! than a convenience: **everything the engine and the editor can do must be
+//! reachable without a window**, from a terminal, a script, a CI job or a
+//! coding agent. The invariant it protects is that no capability is implemented
+//! GUI-side, and the way it is protected is that the CLI is the thing CI runs.
 //!
 //! P0 ships the first three subcommands the topic schedules — `new`, `run`,
 //! `build` — plus the design rules that are not per-command and would be

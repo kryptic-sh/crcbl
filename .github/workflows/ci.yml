@@ -1455,8 +1455,8 @@ jobs:
 
   # The CLI/headless pillar's own end-to-end check: `crcbl new` scaffolds a
   # project, the project *compiles*, it lints clean, and it runs its loop
-  # headless. `docs/plan/11-cli-headless.md` makes the CLI the substrate every
-  # later suite is built on, and `docs/notes/process.md` calls a
+  # headless. Topic 11's rules (`docs/notes/tooling.md`) make the CLI the
+  # substrate every later suite is built on, and `docs/notes/process.md` calls a
   # silently-skipped e2e job a known trap — so this job is required like every
   # other one, and the harness fails when the suite reports zero tests run.
   #

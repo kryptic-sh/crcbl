@@ -1,9 +1,9 @@
 //! `crcbl settings` — a game's `settings.toml`, from a terminal.
 //!
-//! The persistence plan scheduled `crcbl settings get|set|list` as
-//! "scriptable settings", and `docs/plan/11-cli-headless.md` is the reason it
-//! has to exist at all: a capability the settings *screen* has and a script
-//! does not is a capability implemented GUI-side. The mechanism is
+//! The persistence plan scheduled `crcbl settings get|set|list` as "scriptable
+//! settings", and topic 11 (`docs/notes/tooling.md`) is the reason it has to
+//! exist at all: a capability the settings *screen* has and a script does not
+//! is a capability implemented GUI-side. The mechanism is
 //! [`crcbl_store::settings`] and was already built — layered TOML, dotted keys,
 //! typed reads — so this module is the wiring, and everything interesting about
 //! it is a decision about what the wiring must not get wrong.
@@ -654,10 +654,10 @@ fn config_root(args: &SettingsArgs, app: &str) -> Result<PathBuf, Failure> {
 ///
 /// # User keys are values here, never JSON keys
 ///
-/// `docs/plan/11-cli-headless.md` asks for stable JSON schemas, and a settings
-/// file's keys are whatever the player and the game put there. Rendering them
-/// as the object's own keys would make the schema a function of the file, so
-/// the record shape is fixed and the key travels inside it.
+/// Topic 11 (`docs/notes/tooling.md`) asks for stable JSON schemas, and a
+/// settings file's keys are whatever the player and the game put there.
+/// Rendering them as the object's own keys would make the schema a function of
+/// the file, so the record shape is fixed and the key travels inside it.
 ///
 /// # Why this is a stack and not a recursive function
 ///
