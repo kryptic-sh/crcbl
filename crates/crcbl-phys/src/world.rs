@@ -5,11 +5,13 @@
 //! maintains a lazily-rebuilt BVH over their AABBs, and dispatches rays and
 //! sweeps to the shape-level intersection functions.
 
-use glam::DVec3;
+use glam::{DQuat, DVec3};
 
 use crate::broadphase::{Bvh, BvhHit, Ray, Segment};
-use crate::collider::{Aabb, BoxCollider, Capsule, Sphere};
+use crate::collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 use crate::components::Transform;
+use crate::contact::manifold::gap;
+use crate::contact::shape::ContactShape;
 use crate::mesh::{MeshScratch, PlacedMesh, TriangleMesh};
 use crate::query::{self, Penetration, ShapeHit};
 
@@ -684,6 +686,25 @@ impl OverlapQueries<'_> {
             out,
         );
     }
+
+    /// [`PhysicsWorld::lying_capsule_blocker`] under a shared borrow, working
+    /// in `scratch` instead of the world's own buffers.
+    #[must_use]
+    pub fn lying_capsule_blocker(
+        &self,
+        capsule: &LyingCapsule,
+        filter: QueryFilter,
+        scratch: &mut QueryScratch,
+    ) -> Option<ColliderId> {
+        lying_capsule_blocker_core(
+            self.bvh,
+            self.colliders,
+            self.generations,
+            capsule,
+            filter,
+            scratch,
+        )
+    }
 }
 
 /// The one implementation of "which colliders overlap this sphere".
@@ -938,6 +959,76 @@ fn capsule_penetrations_core(
             out.push((id_for_slot_in(generations, element), penetration));
         }
     }
+}
+
+/// The one implementation of "is this lying capsule inside anything solid".
+///
+/// Both [`PhysicsWorld::lying_capsule_blocker`] and
+/// [`OverlapQueries::lying_capsule_blocker`] come through here.
+///
+/// The parametric shapes are measured by the contact pipeline's own [`gap`],
+/// which already takes a capsule at any angle: the lying capsule is its core
+/// segment from head to feet, and the query world's unturned shapes are placed
+/// as that pipeline places them — a box unrotated, a capsule along `+Y`. A mesh
+/// is measured by its own capsule push-out, turned to lie along the core.
+/// Either way it is a *penetration* that blocks, as in
+/// [`capsule_penetrations_core`]: a shape the capsule only touches does not.
+fn lying_capsule_blocker_core(
+    bvh: &Bvh,
+    colliders: &[Option<ColliderSlot>],
+    generations: &[u32],
+    capsule: &LyingCapsule,
+    filter: QueryFilter,
+    scratch: &mut QueryScratch,
+) -> Option<ColliderId> {
+    let filter = ResolvedFilter::solid(colliders, generations, filter);
+    bvh.traverse_aabb_into(&capsule.aabb(), &mut scratch.stack, &mut scratch.candidates);
+
+    let (head, feet) = (capsule.head, capsule.feet());
+    let lying = ContactShape::Capsule {
+        a: head,
+        b: feet,
+        radius: capsule.radius,
+    };
+    let inside = |target: ContactShape| gap(&lying, &target).0 < 0.0;
+
+    for &element in scratch.candidates.iter() {
+        let idx = element as usize;
+        let Some(Some(slot)) = colliders.get(idx) else {
+            continue;
+        };
+        if !filter.admits(idx, slot) {
+            continue;
+        }
+        let blocked = match &slot.entry {
+            ColliderEntry::Sphere(s) => inside(ContactShape::Sphere {
+                centre: s.centre,
+                radius: s.radius,
+            }),
+            ColliderEntry::Box(b) => inside(ContactShape::Box {
+                centre: b.centre,
+                rotation: DQuat::IDENTITY,
+                half: b.half_extents,
+            }),
+            ColliderEntry::Capsule(c) => inside(ContactShape::Capsule {
+                a: c.bottom(),
+                b: c.top(),
+                radius: c.radius,
+            }),
+            ColliderEntry::Mesh(m) => m
+                .turned_capsule_penetration(
+                    (head + feet) * 0.5,
+                    (head - feet) * 0.5,
+                    capsule.radius,
+                    &mut scratch.mesh,
+                )
+                .is_some(),
+        };
+        if blocked {
+            return Some(id_for_slot_in(generations, element));
+        }
+    }
+    None
 }
 
 /// The broadphase bounds of a sweep: the box the segment covers, grown by the
@@ -1599,6 +1690,35 @@ impl PhysicsWorld {
             out,
         );
         self.scratch = scratch;
+    }
+
+    /// A solid collider a [`LyingCapsule`] would be *inside*, or `None` if it
+    /// is clear of every one `filter` admits: whether a prone body fits at
+    /// that pose.
+    ///
+    /// Nothing moves — this is the question to ask before letting a body lie
+    /// down, or before turning one that already is. A shape the capsule only
+    /// touches does not block it, as it is no
+    /// [penetration](Self::capsule_penetrations_into): a body lying with its
+    /// underside a [`radius`](LyingCapsule::radius) above the floor fits.
+    ///
+    /// Triggers are non-solid and are skipped, as the penetration query skips
+    /// them, and so is the filter's exclusion — which is where a character's
+    /// own collider goes. When several colliders block the pose, which one is
+    /// named is the first the broadphase offers: the same one for the same
+    /// world, and no nearer or deeper than the others.
+    #[must_use]
+    pub fn lying_capsule_blocker(
+        &mut self,
+        capsule: &LyingCapsule,
+        filter: QueryFilter,
+    ) -> Option<ColliderId> {
+        let mut scratch = core::mem::take(&mut self.scratch);
+        let blocker = self
+            .overlap_queries()
+            .lying_capsule_blocker(capsule, filter, &mut scratch);
+        self.scratch = scratch;
+        blocker
     }
 
     /// Get the AABB of a collider by id.
@@ -3171,3 +3291,7 @@ mod ray_exclusion_tests;
 #[cfg(test)]
 #[path = "world/query_filter_tests.rs"]
 mod query_filter_tests;
+
+#[cfg(test)]
+#[path = "world/lying_capsule_tests.rs"]
+mod lying_capsule_tests;

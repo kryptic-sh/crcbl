@@ -3354,6 +3354,69 @@ optional-extension diagnostics should be deduplicated per asset and extension so
 multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
 EW after the engine implementation lands, then update EW's pinned revision.
 
+## A lying capsule for prone characters: what the fit check left (2026-09-25)
+
+EW models a prone player as a `CharacterController` with a `half_height` of
+zero, a sphere at the actor origin, while the body lies about 1.6 m behind that
+point, so the legs pass through walls. EW asked for a lying capsule —
+`(radius, length, yaw)`, the core horizontal from the head back to the feet — in
+four parts. The first shipped: `LyingCapsule`,
+`PhysicsWorld::lying_capsule_blocker` and `CharacterController::lying_blocker`,
+a non-moving "does this pose fit" that EW can already refuse going prone and
+prone turns with. Still owed:
+
+- **Moving a lying body, with ground contact along its length.** No query sweeps
+  a turned capsule against the query world: `sweep_capsule_core` and
+  `query::swept_capsule_vs_*` reduce a Y-aligned capsule to a point against a
+  shape grown along Y, which does not work for a horizontal core. What exists to
+  build from: a mesh already sweeps a turned capsule (`PlacedMesh::sweep` takes
+  any `half`), and the contact pipeline's conservative advancement
+  (`time_of_impact` in `crates/crcbl-phys/src/contact/sweep.rs`, stepping by
+  `contact::manifold::gap`) handles a capsule at any angle against spheres,
+  capsules and boxes. Then a prone `move_and_slide`: the same plane-set slide,
+  and a ground probe at both ends of the core rather than one under the centre.
+  **Decision owed (EW):** on a slope the horizontal core hovers at one end and
+  digs in at the other — keep it horizontal and accept that, or let the core
+  pitch to follow the ground, which puts a pitch on `LyingCapsule`.
+- **Turning a lying body, refusing a turn into geometry and reporting how far it
+  could turn.** Buildable from the fit check alone: step the yaw so the feet end
+  moves at most a radius per step (`length · Δyaw ≤ radius`, so nothing thinner
+  than the capsule is stepped over), and bisect the first blocked step down to a
+  tolerance; or a rotational conservative advancement through the same
+  `time_of_impact`, which already bounds a turning path. **Decision owed (EW):**
+  the pivot — the head (the actor origin, which is where EW's prone sphere is)
+  or the body's middle.
+- **Stance switches.** Stand or crouch to prone is this slice's check at the
+  prone pose. Prone to crouch or stand is a Y-aligned capsule fit at the target,
+  which `capsule_penetrations_filtered_into` answers today (non-empty means
+  blocked), but the controller has no stance-fit method wrapping it under its
+  filter. **Decision owed (EW):** where the actor origin lands when a prone body
+  stands — at the head, or pulled back toward the middle of the body.
+
+Gaps in what shipped, and behaviour to know:
+
+- **A compound blocks by its bounds.** The query world holds one box around a
+  compound's parts (`ColliderComponent::Compound`), so a lying body in the empty
+  corner of an L-shaped compound is refused. **Planes are not in the query world
+  at all**, so they never block a lying body — or any other query; see the next
+  section's "The query world does not see what the solver sees".
+- **Which blocker is named is arbitrary** when several block: the first the
+  broadphase offers, deterministic but not the nearest or deepest. No
+  penetration depth or push-out is reported for a lying capsule.
+- **Only the `&mut PhysicsWorld` and `OverlapQueries` forms exist.**
+  `PhysicsSystem` and `EntityOverlapQueries` have no entity-returning form; a
+  system caller goes through `PhysicsSystem::world_mut` and maps the id back
+  with `PhysicsSystem::entity_of`.
+- **The capsule-against-box distance is a golden-section search**
+  (`closest_on_segment_to_box`, shared with the contact pipeline), exact on the
+  flat cases the tests pin and within its bracket elsewhere, not a closed form.
+- **Declined: making `Capsule` a two-endpoint shape.** Every Y-aligned query —
+  the Y-growth sweeps, the penetrations, `ColliderComponent::Capsule` — is built
+  on `centre` and `half_height`; a separate query shape kept this change
+  additive. Revisit with "rotating query colliders" in the next section.
+- **Not verified:** nothing was run against EW itself; the pose EW computes from
+  its actor (head at the settled origin) is assumed from its description.
+
 ## Physics rungs 0 and 1 shipped without (2026-09-17)
 
 - **Tumble's wind tunnel and golden frame** (its milestone 1, skipped rather

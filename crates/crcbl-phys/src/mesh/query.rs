@@ -396,10 +396,27 @@ impl PlacedMesh {
         capsule: &Capsule,
         scratch: &mut MeshScratch,
     ) -> Option<Penetration> {
-        let penetration = self.mesh.capsule_penetration_with(
-            self.to_local(capsule.centre),
-            self.transform.rotation.inverse() * (DVec3::Y * capsule.half_height),
+        self.turned_capsule_penetration(
+            capsule.centre,
+            DVec3::Y * capsule.half_height,
             capsule.radius,
+            scratch,
+        )
+    }
+
+    /// [`capsule_penetration`](Self::capsule_penetration) for a capsule of
+    /// `radius` about `centre - half ..= centre + half`, at any angle.
+    pub(crate) fn turned_capsule_penetration(
+        &self,
+        centre: DVec3,
+        half: DVec3,
+        radius: f64,
+        scratch: &mut MeshScratch,
+    ) -> Option<Penetration> {
+        let penetration = self.mesh.capsule_penetration_with(
+            self.to_local(centre),
+            self.transform.rotation.inverse() * half,
+            radius,
             scratch,
         )?;
         Some(Penetration {

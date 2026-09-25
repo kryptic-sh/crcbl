@@ -96,7 +96,7 @@ pub use broadphase::{Bvh, BvhHit, Ray, Segment};
 pub use character::{
     CharacterConfig, CharacterController, GroundContact, GroundProbe, MoveOutcome,
 };
-pub use collider::{Aabb, BoxCollider, Capsule, Sphere};
+pub use collider::{Aabb, BoxCollider, Capsule, LyingCapsule, Sphere};
 pub use components::{ColliderComponent, RigidBody, Transform};
 pub use compound::{AabbCompound, CompoundError, CompoundHit, CompoundPoint};
 pub use compound_shape::{CompoundBody, CompoundPart, CompoundShape};

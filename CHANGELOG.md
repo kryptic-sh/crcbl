@@ -300,6 +300,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A prone-body fit check in `crcbl-phys`.**
+  `LyingCapsule::new(head, yaw, radius, length)` describes a capsule lying on
+  its side: `head` is the head end's hemisphere centre, the feet end's lies
+  `length` behind it, and `yaw` is the way the head faces — a right-handed turn
+  about `+Y` from `-Z`, so a quarter turn faces `-X`.
+  `PhysicsWorld::lying_capsule_blocker(&capsule, filter)` names a solid collider
+  the body would be inside, or `None` if it fits, against spheres, boxes,
+  capsules, triangle meshes and a system's compounds (as their bounding box); a
+  collider it only touches does not block, so a body resting a radius above the
+  floor fits. Triggers are skipped, as the capsule penetration query skips them.
+  `CharacterController::lying_blocker(world, &capsule)` asks it under the
+  controller's own collider exclusion and query mask, so a game can refuse going
+  prone, or turning while prone, into a wall its legs would pass through.
+  Nothing moves: sweeping a lying body is still to come.
 - **`text-overflow: ellipsis` and `white-space: nowrap` in the UI tree's
   stylesheets.** `white-space: nowrap` (inherited, as in CSS) keeps a text span
   in a parsed font on one line under any width — explicit newlines still break.

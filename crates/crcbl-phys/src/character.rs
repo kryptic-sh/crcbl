@@ -108,7 +108,7 @@
 use glam::DVec3;
 
 use crate::broadphase::Segment;
-use crate::collider::Capsule;
+use crate::collider::{Capsule, LyingCapsule};
 use crate::query::{Penetration, ShapeHit};
 use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter};
 
@@ -507,6 +507,31 @@ impl CharacterController {
             "a ground probe looks a finite, non-negative distance down, not {distance}",
         );
         self.probe_below(world, position, distance)
+    }
+
+    /// A solid collider a body lying as `capsule` would be inside, or `None`
+    /// if it fits there: [`PhysicsWorld::lying_capsule_blocker`] under this
+    /// controller's [self collider](Self::with_self_collider) exclusion and
+    /// [query mask](Self::with_query_mask), so it sees exactly what the
+    /// controller's own moves see.
+    ///
+    /// Like [`probe_ground_at`](Self::probe_ground_at) it moves nothing and
+    /// records nothing. The shape is the caller's and not this controller's
+    /// [`config`](Self::config): a prone body is a different shape from the
+    /// one the controller walks with, and this is the check to make before
+    /// letting a character lie down or turn while lying.
+    ///
+    /// A capsule whose [`head`](LyingCapsule::head) is this controller's
+    /// settled [`position`](Self::position) with its radius sits a
+    /// [`skin_width`](CharacterConfig::skin_width) above the floor, and fits;
+    /// only a penetration blocks, never a touch.
+    #[must_use]
+    pub fn lying_blocker(
+        &self,
+        world: &mut PhysicsWorld,
+        capsule: &LyingCapsule,
+    ) -> Option<ColliderId> {
+        world.lying_capsule_blocker(capsule, self.filter())
     }
 
     /// Whether a surface with this normal is ground the character can stand on.
@@ -1744,3 +1769,7 @@ mod tests {
 #[cfg(test)]
 #[path = "character/query_mask_tests.rs"]
 mod query_mask_tests;
+
+#[cfg(test)]
+#[path = "character/lying_tests.rs"]
+mod lying_tests;

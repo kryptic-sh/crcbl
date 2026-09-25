@@ -412,6 +412,96 @@ impl Capsule {
 }
 
 // ---------------------------------------------------------------------------
+// LyingCapsule
+// ---------------------------------------------------------------------------
+
+/// A capsule lying on its side: a prone body, its core running horizontally
+/// from the head back to the feet.
+///
+/// A query shape, not a collider — the world's own capsules stand up the Y
+/// axis — for asking whether a body lying at a pose would be inside anything:
+/// see [`crate::PhysicsWorld::lying_capsule_blocker`].
+///
+/// # The pose
+///
+/// - [`head`](Self::head) is the centre of the hemisphere at the head end.
+/// - [`yaw`](Self::yaw) is the way the head faces, in radians: a right-handed
+///   turn about `+Y`, which is up, from `-Z`. Zero faces `-Z`, a quarter turn
+///   faces `-X`, a half turn `+Z` and three quarters `+X` — `-Z` turned by the
+///   rotation [`crate::rotation_from_scaled_axis`] builds from `+Y · yaw`, and
+///   the `ahead` of `OrbitCamera::walk_direction` in `crcbl-render`.
+/// - [`length`](Self::length) is how far behind the head the feet end's
+///   hemisphere centre lies, so the body reaches a further
+///   [`radius`](Self::radius) past each of the two ends.
+///
+/// A length of zero is a sphere at `head`, which is what a character
+/// controller with a `half_height` of zero already is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LyingCapsule {
+    /// Centre of the head end's hemisphere.
+    pub head: DVec3,
+    /// The way the head faces, in radians about `+Y` from `-Z`.
+    pub yaw: f64,
+    /// Radius of the capsule.
+    pub radius: f64,
+    /// Distance from the head end's hemisphere centre back to the feet end's,
+    /// not including the caps.
+    pub length: f64,
+}
+
+impl LyingCapsule {
+    /// A capsule lying at a pose; see the type for what each part means.
+    ///
+    /// # Panics
+    ///
+    /// Panics in debug builds if radius or length is negative.
+    #[inline]
+    #[must_use]
+    pub fn new(head: DVec3, yaw: f64, radius: f64, length: f64) -> Self {
+        debug_assert!(radius >= 0.0, "capsule radius must be non-negative");
+        debug_assert!(length >= 0.0, "capsule length must be non-negative");
+        Self {
+            head,
+            yaw,
+            radius,
+            length,
+        }
+    }
+
+    /// The unit horizontal direction the head faces: from the feet toward the
+    /// head.
+    #[inline]
+    #[must_use]
+    pub fn facing(&self) -> DVec3 {
+        DVec3::new(
+            -crcbl_core::trig::sin(self.yaw),
+            0.0,
+            -crcbl_core::trig::cos(self.yaw),
+        )
+    }
+
+    /// Centre of the feet end's hemisphere: [`length`](Self::length) behind
+    /// the head.
+    #[inline]
+    #[must_use]
+    pub fn feet(&self) -> DVec3 {
+        self.head - self.facing() * self.length
+    }
+
+    /// AABB of this capsule.
+    #[inline]
+    #[must_use]
+    pub fn aabb(&self) -> Aabb {
+        let feet = self.feet();
+        let r = DVec3::splat(self.radius);
+        Aabb {
+            min: self.head.min(feet) - r,
+            max: self.head.max(feet) + r,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -665,5 +755,58 @@ mod tests {
         let c = Capsule::new(DVec3::new(0.0, 5.0, 0.0), 0.5, 2.0);
         assert_eq!(c.top(), DVec3::new(0.0, 7.0, 0.0));
         assert_eq!(c.bottom(), DVec3::new(0.0, 3.0, 0.0));
+    }
+
+    // -- LyingCapsule --------------------------------------------------------
+
+    /// **The yaw convention, written out**: zero faces `-Z`, and each quarter
+    /// turn carries the facing a right-handed quarter turn about `+Y` — to
+    /// `-X`, `+Z`, then `+X` — with the feet the length behind the head.
+    #[test]
+    fn a_lying_capsules_feet_lie_behind_its_head_at_each_quarter_turn() {
+        use std::f64::consts::{FRAC_PI_2, PI};
+        let head = DVec3::new(1.0, 2.0, 3.0);
+        for (yaw, facing) in [
+            (0.0, DVec3::NEG_Z),
+            (FRAC_PI_2, DVec3::NEG_X),
+            (PI, DVec3::Z),
+            (3.0 * FRAC_PI_2, DVec3::X),
+        ] {
+            let capsule = LyingCapsule::new(head, yaw, 0.3, 1.6);
+            assert!(
+                (capsule.facing() - facing).length() < 1e-12,
+                "yaw {yaw} faces {:?}, not {facing:?}",
+                capsule.facing()
+            );
+            let feet = head - facing * 1.6;
+            assert!(
+                (capsule.feet() - feet).length() < 1e-12,
+                "yaw {yaw} puts the feet at {:?}, not {feet:?}",
+                capsule.feet()
+            );
+        }
+    }
+
+    /// **The facing is `-Z` turned by the engine's own rotation about `+Y`**,
+    /// at angles that are not quarter turns too — the claim the type's
+    /// documentation makes about `rotation_from_scaled_axis`.
+    #[test]
+    fn a_lying_capsule_faces_where_the_engines_yaw_rotation_turns_minus_z() {
+        for yaw in [-2.5, -0.7, 0.3, 1.1, 4.0] {
+            let turned = crate::rotation_from_scaled_axis(DVec3::Y * yaw) * DVec3::NEG_Z;
+            let facing = LyingCapsule::new(DVec3::ZERO, yaw, 0.3, 1.6).facing();
+            assert!(
+                (facing - turned).length() < 1e-12,
+                "yaw {yaw}: {facing:?} against {turned:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_lying_capsules_bounds_reach_a_radius_past_its_head_and_feet() {
+        let c = LyingCapsule::new(DVec3::new(0.0, 0.5, 0.0), 0.0, 0.5, 1.5);
+        let aabb = c.aabb();
+        assert!((aabb.min - DVec3::new(-0.5, 0.0, -0.5)).length() < 1e-12);
+        assert!((aabb.max - DVec3::new(0.5, 1.0, 2.0)).length() < 1e-12);
     }
 }
