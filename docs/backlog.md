@@ -25449,12 +25449,7 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   captions/fit/scroll, ellipsis and `Ui::text`, glyph runs carrying text,
   `Grid::can_move_within`, grid_drag turn/in-place drop/rectangular cells, and
   the prone fit check and crawl. Owed to it next, in this order: the prone turn
-  sweep and stance switch (entry "A lying capsule for prone characters"); **pad
-  chords**, asked 2026-09-25 — a
-  `Binding::PadChord { modifier: PadButton, button: PadButton }` with
-  `Binding::Chord`'s two rules (the more specific binding takes the button while
-  the modifier is held; the modifier is read, not consumed), since EW is out of
-  pad buttons for leans, fire mode, hold breath and its quickslots; and **a
+  sweep and stance switch (entry "A lying capsule for prone characters"); **a
   scrolled `grid_drag::CellGrid`**, asked 2026-09-25 so EW's stash can move onto
   `grid_drag`: a grid in content cells with a visible window (first visible row
   and column plus the visible size), where `cell_at` answers content cells

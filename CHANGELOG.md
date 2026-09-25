@@ -304,6 +304,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`Binding::PadChord { modifier, button }`: a held pad button gives the others
+  a second layer**, the pad's `Binding::Chord`. While `modifier` is held, a
+  plain `PadButton` binding on `button` in the context that owns it reads up, so
+  South and LB+South never both fire; `modifier` is read, not consumed, and
+  keeps any plain binding of its own. Its text form is `Pad:LeftShoulder+South`.
+
 - **A player's rebinds can be saved and loaded, as a diff over the declared
   defaults.** `Binding` implements `Display` and `FromStr` with a stable text
   form (`KeyR`, `Alt+KeyR`, `ControlLeft+Scroll`, `Mouse:Left`, `Pad:South`,

@@ -454,6 +454,26 @@ pub enum Binding {
         /// with [`ActionMapError::InvalidDeadzone`].
         deadzone: f32,
     },
+    /// A pad button that counts only while another pad button is held — a
+    /// held shoulder giving the face buttons a second layer. The pad's
+    /// [`Binding::Chord`], on the same two rules:
+    ///
+    /// **The more specific binding takes the button.** While `modifier` is
+    /// held, every plain [`Binding::PadButton`] on `button` (and a
+    /// [`Binding::PadDpad`] reading it), in the context that owns the button,
+    /// reads it as up — so a jump on South and a vault on LB+South never both
+    /// fire. Holding South and then pressing LB releases the one and presses
+    /// the other.
+    ///
+    /// **The modifier is read, not consumed**: a pad chord owns its `button`
+    /// and nothing else, so `modifier` can still carry a plain binding of its
+    /// own, which sees every press of it, chorded or not.
+    PadChord {
+        /// The pad button that must be held.
+        modifier: PadButton,
+        /// The pad button the chord owns.
+        button: PadButton,
+    },
     /// A pad trigger past a threshold.
     ///
     /// On an [`ActionKind::Button`], down while the pull is past `threshold`;
@@ -497,6 +517,7 @@ impl Binding {
             | Self::PointerPosition { .. }
             | Self::Virtual(_)
             | Self::PadButton(_)
+            | Self::PadChord { .. }
             | Self::PadDpad
             | Self::PadStick { .. }
             | Self::PadTrigger { .. } => {}
@@ -513,7 +534,11 @@ impl Binding {
     pub const fn reads_gamepad(&self) -> bool {
         matches!(
             self,
-            Self::PadButton(_) | Self::PadDpad | Self::PadStick { .. } | Self::PadTrigger { .. }
+            Self::PadButton(_)
+                | Self::PadChord { .. }
+                | Self::PadDpad
+                | Self::PadStick { .. }
+                | Self::PadTrigger { .. }
         )
     }
 
@@ -1295,6 +1320,7 @@ impl ActionMap {
                     Binding::MouseButton(b) => view.button(*b),
                     Binding::Virtual(id) => view.control(id),
                     Binding::PadButton(button) => view.pad_button(*button),
+                    Binding::PadChord { modifier, button } => view.pad_chord(*modifier, *button),
                     Binding::PadDpad => PadButton::DPAD.iter().any(|&b| view.pad_button(b)),
                     Binding::PadTrigger { trigger, threshold } => {
                         view.trigger(*trigger) && gamepad::pad_trigger(pads, *trigger) > *threshold
@@ -1376,6 +1402,11 @@ impl ActionMap {
                                 value += 1.0;
                             }
                             Binding::PadButton(button) if view.pad_button(*button) => {
+                                value += 1.0;
+                            }
+                            Binding::PadChord { modifier, button }
+                                if view.pad_chord(*modifier, *button) =>
+                            {
                                 value += 1.0;
                             }
                             Binding::PadTrigger { trigger, threshold }

@@ -115,6 +115,9 @@ pub(crate) struct Routes {
     /// For each key, the modifiers of the chords its **owner** binds on it:
     /// what shadows that owner's plain bindings on the key.
     chords: HashMap<KeyCode, Vec<Modifier>>,
+    /// For each pad button, the modifiers of the pad chords its **owner**
+    /// binds on it — [`Self::chords`] for the pad.
+    pad_chords: HashMap<PadButton, Vec<PadButton>>,
     buttons: HashMap<PointerButton, usize>,
     controls: HashMap<String, usize>,
     motion: Option<usize>,
@@ -166,7 +169,9 @@ impl Suppressed {
             Binding::Virtual(id) => {
                 self.controls.contains(id.as_str()) || self.control_sticks.contains(id.as_str())
             }
-            Binding::PadButton(button) => self.pad_buttons.contains(*button),
+            Binding::PadButton(button) | Binding::PadChord { button, .. } => {
+                self.pad_buttons.contains(*button)
+            }
             Binding::PadDpad => PadButton::DPAD
                 .iter()
                 .any(|&button| self.pad_buttons.contains(button)),
@@ -272,10 +277,31 @@ impl View<'_> {
         self.routes.pointer == Some(self.context)
     }
 
-    pub(crate) fn pad_button(&self, button: PadButton) -> bool {
+    /// The pad button is held, this context owns it, and it is not withheld.
+    fn owns_held_pad_button(&self, button: PadButton) -> bool {
         self.held_pad_buttons.contains(button)
             && !self.suppressed.pad_buttons.contains(button)
             && self.routes.pad_buttons.get(&button) == Some(&self.context)
+    }
+
+    /// A plain pad binding's read of `button`: down unless a pad chord on it
+    /// is satisfied.
+    pub(crate) fn pad_button(&self, button: PadButton) -> bool {
+        self.owns_held_pad_button(button)
+            && !self
+                .routes
+                .pad_chords
+                .get(&button)
+                .is_some_and(|modifiers| {
+                    modifiers
+                        .iter()
+                        .any(|&modifier| self.held_pad_buttons.contains(modifier))
+                })
+    }
+
+    /// A [`Binding::PadChord`]'s read: its button, and its modifier read raw.
+    pub(crate) fn pad_chord(&self, modifier: PadButton, button: PadButton) -> bool {
+        self.owns_held_pad_button(button) && self.held_pad_buttons.contains(modifier)
     }
 
     /// A stick is a level: a stack change never withholds it, and only a
@@ -350,7 +376,7 @@ impl Routes {
                     Binding::PointerPosition { .. } => {
                         routes.pointer.get_or_insert(context);
                     }
-                    Binding::PadButton(button) => {
+                    Binding::PadButton(button) | Binding::PadChord { button, .. } => {
                         routes.pad_buttons.entry(*button).or_insert(context);
                     }
                     Binding::PadDpad => {
@@ -387,6 +413,14 @@ impl Routes {
                             if routes.keys.get(key) == Some(&context) =>
                         {
                             let modifiers = routes.chords.entry(*key).or_default();
+                            if !modifiers.contains(modifier) {
+                                modifiers.push(*modifier);
+                            }
+                        }
+                        Binding::PadChord { modifier, button }
+                            if routes.pad_buttons.get(button) == Some(&context) =>
+                        {
+                            let modifiers = routes.pad_chords.entry(*button).or_default();
                             if !modifiers.contains(modifier) {
                                 modifiers.push(*modifier);
                             }
@@ -625,7 +659,9 @@ impl ActionMap {
                     withheld.control_sticks.insert(id.clone());
                 }
             }
-            Binding::PadButton(button) if self.held_pad_buttons.contains(*button) => {
+            Binding::PadButton(button) | Binding::PadChord { button, .. }
+                if self.held_pad_buttons.contains(*button) =>
+            {
                 withheld.pad_buttons.insert(*button);
             }
             Binding::PadDpad => {

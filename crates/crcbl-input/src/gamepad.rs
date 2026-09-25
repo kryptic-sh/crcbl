@@ -1209,4 +1209,115 @@ mod tests {
         let b = GamepadId::allocate();
         assert_ne!(a, b);
     }
+
+    /// A map with `jump` on South, `vault` on LB+South and `lean` on LB alone.
+    fn chord_map() -> ActionMap {
+        let mut map = jump_map();
+        map.declare(action(
+            "vault",
+            ActionKind::Button,
+            vec![Binding::PadChord {
+                modifier: PadButton::LeftShoulder,
+                button: PadButton::South,
+            }],
+        ));
+        map.declare(action(
+            "lean",
+            ActionKind::Button,
+            vec![Binding::PadButton(PadButton::LeftShoulder)],
+        ));
+        map
+    }
+
+    /// **The chord takes the button, and reads its modifier without
+    /// consuming it**: South alone jumps, LB+South vaults and does not jump,
+    /// and LB's own binding sees LB either way.
+    #[test]
+    fn a_pad_chord_takes_its_button_and_leaves_its_modifier_alone() {
+        let mut map = chord_map();
+        map.begin_tick(TICK);
+        map.gamepad_event(&state(PAD, holding(&[PadButton::South])));
+        assert!(map.button_held("jump"));
+        assert!(!map.button_held("vault"));
+
+        map.begin_tick(TICK);
+        map.gamepad_event(&state(PAD, holding(&[])));
+        map.gamepad_event(&state(
+            PAD,
+            holding(&[PadButton::LeftShoulder, PadButton::South]),
+        ));
+        assert!(map.button_held("vault"));
+        assert!(!map.button_held("jump"), "the plain binding fired too");
+        assert!(map.button_held("lean"), "the modifier was consumed");
+    }
+
+    /// **Holding the button and then the modifier hands it over**: the plain
+    /// binding releases and the chord presses, as a key's chord does.
+    #[test]
+    fn a_modifier_pressed_over_a_held_button_hands_the_button_to_the_chord() {
+        let mut map = chord_map();
+        map.begin_tick(TICK);
+        map.gamepad_event(&state(PAD, holding(&[PadButton::South])));
+        assert!(map.button_held("jump"));
+
+        map.begin_tick(TICK);
+        map.gamepad_event(&state(
+            PAD,
+            holding(&[PadButton::South, PadButton::LeftShoulder]),
+        ));
+        assert!(map.just_released("jump"));
+        assert!(map.just_pressed("vault"));
+    }
+
+    /// **A pad chord adds +1.0 to an axis**, as a key's chord does.
+    #[test]
+    fn a_pad_chord_drives_an_axis1() {
+        let mut map = jump_map();
+        map.declare(action(
+            "throttle",
+            ActionKind::Axis1,
+            vec![Binding::PadChord {
+                modifier: PadButton::RightShoulder,
+                button: PadButton::North,
+            }],
+        ));
+        map.gamepad_event(&state(PAD, holding(&[PadButton::North])));
+        assert!(map.axis1("throttle").abs() < 1e-6, "no modifier, no chord");
+        map.gamepad_event(&state(
+            PAD,
+            holding(&[PadButton::RightShoulder, PadButton::North]),
+        ));
+        assert!((map.axis1("throttle") - 1.0).abs() < 1e-6);
+    }
+
+    /// **A chord shadows plain bindings only in the context that owns the
+    /// button**: declared in a context off the stack, it leaves South with
+    /// the base; pushed, it takes South.
+    #[test]
+    fn a_pad_chord_shadows_only_in_the_context_that_owns_its_button() {
+        let mut map = jump_map();
+        map.declare_in(
+            "vehicle",
+            action(
+                "boost",
+                ActionKind::Button,
+                vec![Binding::PadChord {
+                    modifier: PadButton::LeftShoulder,
+                    button: PadButton::South,
+                }],
+            ),
+        );
+        let both = holding(&[PadButton::LeftShoulder, PadButton::South]);
+        map.gamepad_event(&state(PAD, both));
+        assert!(
+            map.button_held("jump"),
+            "a chord off the stack shadowed South"
+        );
+
+        map.gamepad_event(&state(PAD, holding(&[])));
+        map.push_context("vehicle").unwrap();
+        map.gamepad_event(&state(PAD, both));
+        assert!(map.button_held("boost"));
+        assert!(!map.button_held("jump"));
+    }
 }

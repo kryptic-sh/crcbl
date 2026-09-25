@@ -20,6 +20,7 @@
 //! | `Wasd`                 | `Wasd:KeyW,KeyS,KeyA,KeyD` (up, down, left, right) |
 //! | `Virtual`              | `Virtual:` and the control's id, verbatim |
 //! | `PadButton`            | `Pad:South`, by [`PadButton`] variant  |
+//! | `PadChord`             | `Pad:LeftShoulder+South` (modifier, then button) |
 //! | `PadDpad`              | `Pad:Dpad`                             |
 //! | `PadStick`             | `PadStick:Left>0.2` (the dead zone)    |
 //! | `PadTrigger`           | `PadTrigger:Right>0.25` (the threshold) |
@@ -94,6 +95,12 @@ impl fmt::Display for Binding {
             ),
             Self::Virtual(id) => write!(f, "Virtual:{id}"),
             Self::PadButton(button) => write!(f, "Pad:{}", pad_button_name(*button)),
+            Self::PadChord { modifier, button } => write!(
+                f,
+                "Pad:{}+{}",
+                pad_button_name(*modifier),
+                pad_button_name(*button)
+            ),
             Self::PadDpad => f.write_str("Pad:Dpad"),
             Self::PadStick { stick, deadzone } => {
                 write!(f, "PadStick:{}>{deadzone}", stick_name(*stick))
@@ -151,11 +158,15 @@ impl FromStr for Binding {
                     None => Err(fail("a wasd binding is four key names")),
                 },
                 "Virtual" => Ok(Self::Virtual(rest.to_owned())),
-                "Pad" => PadButton::ALL
-                    .into_iter()
-                    .find(|button| pad_button_name(*button) == rest)
-                    .map(Self::PadButton)
-                    .ok_or_else(|| fail("no such pad button")),
+                "Pad" => match rest.split_once('+') {
+                    Some((modifier, button)) => pad_button_named(modifier)
+                        .zip(pad_button_named(button))
+                        .map(|(modifier, button)| Self::PadChord { modifier, button })
+                        .ok_or_else(|| fail("a pad chord is two pad buttons")),
+                    None => pad_button_named(rest)
+                        .map(Self::PadButton)
+                        .ok_or_else(|| fail("no such pad button")),
+                },
                 "PadStick" => {
                     let (stick, deadzone) = named_level(rest, stick_named)
                         .ok_or_else(|| fail("a stick is Left or Right, then > and a dead zone"))?;
@@ -267,6 +278,12 @@ const fn pad_button_name(button: PadButton) -> &'static str {
     }
 }
 
+fn pad_button_named(name: &str) -> Option<PadButton> {
+    PadButton::ALL
+        .into_iter()
+        .find(|button| pad_button_name(*button) == name)
+}
+
 const fn stick_name(stick: Stick) -> &'static str {
     match stick {
         Stick::Left => "Left",
@@ -352,6 +369,10 @@ mod tests {
             .map(Binding::MouseButton),
         );
         all.extend(PadButton::ALL.map(Binding::PadButton));
+        all.extend(PadButton::ALL.map(|button| Binding::PadChord {
+            modifier: PadButton::LeftShoulder,
+            button,
+        }));
         for (stick, trigger) in [(Stick::Left, Trigger::Left), (Stick::Right, Trigger::Right)] {
             for level in [0.0, 0.1, 0.25, 1.0 / 3.0, 0.999_999_9] {
                 all.push(Binding::PadStick {
@@ -381,7 +402,7 @@ mod tests {
         // Every variant was reached: a new one fails to compile the `match`
         // in `Display`, and this makes sure the list tests each one we have.
         let kinds: std::collections::HashSet<_> = all.iter().map(std::mem::discriminant).collect();
-        assert_eq!(kinds.len(), 14, "one of each Binding variant");
+        assert_eq!(kinds.len(), 15, "one of each Binding variant");
     }
 
     #[test]
@@ -403,6 +424,13 @@ mod tests {
             ),
             (Binding::MouseButton(PointerButton::Left), "Mouse:Left"),
             (Binding::PadButton(PadButton::South), "Pad:South"),
+            (
+                Binding::PadChord {
+                    modifier: PadButton::LeftShoulder,
+                    button: PadButton::South,
+                },
+                "Pad:LeftShoulder+South",
+            ),
             (
                 Binding::PadTrigger {
                     trigger: Trigger::Right,
@@ -446,6 +474,8 @@ mod tests {
             "KeyAxis:KeyS,KeyW,KeyA",
             "Wasd:KeyW,KeyS,KeyA",
             "Pad:Paddle1",
+            "Pad:LeftShoulder+",
+            "Pad:Paddle1+South",
             "PadStick:Middle>0.2",
             "PadStick:Left",
             "PadTrigger:Right>much",
