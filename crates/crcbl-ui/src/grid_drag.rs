@@ -450,7 +450,7 @@ impl<P> DragFrame<'_, P> {
         // by a rotate key, say — it is a drop like any other.
         if at == held.from && !held.changed {
             if pointer.released {
-                self.released = Some(ReleaseSpot {
+                self.note_release(ReleaseSpot {
                     over: at,
                     target: None,
                     accepted: false,
@@ -463,7 +463,7 @@ impl<P> DragFrame<'_, P> {
             .map(|origin| DropTarget { at, origin });
         let accepted = target.is_some_and(|target| can_accept(&held.payload, &target));
         if pointer.released {
-            self.released = Some(ReleaseSpot {
+            self.note_release(ReleaseSpot {
                 over: at,
                 target,
                 accepted,
@@ -475,6 +475,17 @@ impl<P> DragFrame<'_, P> {
             DropFeedback::Refusing
         };
         response
+    }
+
+    /// Records what a grid answered about the cell released over. Grids may
+    /// overlap — a one-cell slot drawn on top of a larger card — and each is
+    /// run in turn, so **an accepting answer is kept against a later refusal or
+    /// click**, and among answers of the same kind the later one wins: the drop
+    /// happens if any grid under the pointer took it.
+    fn note_release(&mut self, spot: ReleaseSpot) {
+        if spot.accepted || !self.released.is_some_and(|kept| kept.accepted) {
+            self.released = Some(spot);
+        }
     }
 
     /// Ends the frame: the drop, if the pointer was released over a cell that
@@ -833,6 +844,55 @@ mod tests {
         let mut frame = drag.frame(ui, pointer);
         frame.grid(&GRID, source, |_, _| accept);
         frame.release()
+    }
+
+    /// **An overlapping grid's refusal does not undo another's acceptance.**
+    /// EW's optic strip is a one-cell grid drawn over the weapon card's: both
+    /// run each frame, and a drop either takes happens — whichever runs first,
+    /// and whichever of the two accepts.
+    #[test]
+    fn a_later_refusal_over_an_overlapping_grid_keeps_the_drop() {
+        // Grabbed at its origin, so a one-cell slot can take it.
+        let from = ORIGIN;
+        let to = UVec2::new(3, 2);
+        let (slot_min, _) = GRID.cell_bounds(to);
+        let slot = CellGrid {
+            origin: slot_min,
+            cell: GRID.cell,
+            columns: 1,
+            rows: 1,
+            id_base: 0x5000,
+        };
+        for (slot_first, slot_accepts) in
+            [(true, true), (false, true), (true, false), (false, false)]
+        {
+            let mut drag = GridDrag::new();
+            let mut ui = UiState::new();
+            let mut frame = drag.frame(&mut ui, press(centre(&GRID, from)));
+            frame.grid(&GRID, source, |_, _| false);
+            frame.finish();
+
+            let mut frame = drag.frame(&mut ui, release(centre(&GRID, to)));
+            let run_slot = |frame: &mut DragFrame<'_, &'static str>| {
+                frame.grid(&slot, |_| None, |_, _| slot_accepts);
+            };
+            if slot_first {
+                run_slot(&mut frame);
+                frame.grid(&GRID, source, |_, _| !slot_accepts);
+            } else {
+                frame.grid(&GRID, source, |_, _| !slot_accepts);
+                run_slot(&mut frame);
+            }
+            let ended = frame.release().expect("the release ends the drag");
+            let case = format!("slot first {slot_first}, slot accepts {slot_accepts}");
+            assert!(ended.accepted, "{case}: the acceptance was overwritten");
+            let accepting = if slot_accepts {
+                slot.id_base
+            } else {
+                GRID.id_base
+            };
+            assert_eq!(ended.over.map(|over| over.grid), Some(accepting), "{case}");
+        }
     }
 
     /// **Every way a held drag ends is reported by `release`**: dropped,
