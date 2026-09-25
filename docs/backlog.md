@@ -12443,10 +12443,10 @@ keyed through Steam-signed certificates) unless a caller sets the `Unencrypted`
 connection option, which `crcbl-steam` never sets: read 2026-09-25,
 `SteamTransport`'s `ConnectP2P` and `SteamListener::open`'s
 `CreateListenSocketP2P` both pass zero options and a null options pointer.
-Sealing again on top would pay twice for the same property. The condition, owed
-as work: the fake library recording each call's option count and a test failing
-on any non-zero one, so the premise is held rather than read. Not verified on
-the wire; Valve's documentation is the evidence.
+Sealing again on top would pay twice for the same property. The condition is
+held by `net::listener::tests::no_p2p_call_passes_steam_a_connection_option`
+(2026-09-25), which fails if either call passes an option. Not verified on the
+wire; Valve's documentation is the evidence.
 
 ### The channel table: four channels, and the seam has two (2026-08-27)
 
@@ -25447,9 +25447,8 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   `Menu` at its minimum size, the fixed-view sheen riding on reflections, no
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
-  meeting the every-packet-sealed rule (with a guard test owed). To build:
-  Box2D's farthest-point sleep check. glam's bump is in the first-priority
-  dependency entry at the top.
+  meeting the every-packet-sealed rule. To build: Box2D's farthest-point sleep
+  check. glam's bump is in the first-priority dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
