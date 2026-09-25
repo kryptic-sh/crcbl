@@ -33,7 +33,7 @@
 //! toolkit cannot see them, and giving it a "resume" would be the layer
 //! boundary this crate's split exists to hold.
 
-use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding, text, ui};
+use crcbl_input::{ActionDecl, ActionKind, ActionMap, Binding, PadButton, PadButtons, text, ui};
 use crcbl_ui::menu::{Menu, MenuItem, MenuSet};
 
 use super::{
@@ -107,10 +107,10 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 ///
 /// **Only the keys are narrowed.** The pad column of [`ui::declare`] stays as
 /// it is — every binding [`Binding::reads_gamepad`] names — so the left stick
-/// and the d-pad move, South accepts and East backs out: the loop
-/// withholds no pad event from the game (see
-/// [`HostedGame::gamepad_event`](super::HostedGame::gamepad_event)), so there
-/// is no game binding for the narrowing to protect.
+/// and the d-pad move, South accepts and East backs out. The loop withholds
+/// those buttons from the game while a panel has input (see
+/// [`HostedGame::gamepad_event`](super::HostedGame::gamepad_event)), but never
+/// the sticks, so the pad's movement is left alone as the keys' is.
 ///
 /// # The pad's pause
 ///
@@ -185,6 +185,33 @@ pub(super) fn menu_binds(actions: &ActionMap, key: crcbl_core::input::KeyCode) -
         .filter_map(|name| actions.bindings(name))
         .flatten()
         .any(|binding| binding.owns_key(key))
+}
+
+/// Every pad button `actions`' `ui` context binds: what a menu claims from
+/// the game while a panel has input.
+pub(super) fn menu_pad_buttons(actions: &ActionMap) -> PadButtons {
+    let mut buttons = PadButtons::EMPTY;
+    for binding in [ui::MOVE, ui::NEXT, ui::PREV, ui::ACCEPT, ui::BACK]
+        .iter()
+        .filter_map(|name| actions.bindings(name))
+        .flatten()
+    {
+        match binding {
+            Binding::PadButton(button) => buttons.insert(*button),
+            Binding::PadDpad => {
+                for button in [
+                    PadButton::DpadUp,
+                    PadButton::DpadDown,
+                    PadButton::DpadLeft,
+                    PadButton::DpadRight,
+                ] {
+                    buttons.insert(button);
+                }
+            }
+            _ => {}
+        }
+    }
+    buttons
 }
 
 /// Whether `key` is one of [`ui::MOVE`]'s horizontal keys: what a menu takes

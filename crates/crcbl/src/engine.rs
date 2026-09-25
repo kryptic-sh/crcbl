@@ -126,6 +126,7 @@ use crate::backend::GpuBackend;
 
 pub mod console_button;
 pub mod menu;
+mod pad_claims;
 pub mod pads;
 pub mod page;
 pub mod pause;
@@ -6029,13 +6030,15 @@ pub trait HostedGame: Sized {
     /// keys do. A headless run has no source and never calls this; see
     /// [`pads`] for which targets have one.
     ///
-    /// **Every event, whether or not a menu is up.** A key a menu takes is
-    /// withheld from the game, but a pad reports a snapshot of the whole pad,
-    /// and the loop has no single button in it to withhold — so South
-    /// accepting a panel reaches the game as South as well, and so does
-    /// [`PAUSE_BUTTON`]. A game that binds a menu's pad buttons to something of
-    /// its own reads [`FrameInfo::paused`] or its own menu state to ignore
-    /// them.
+    /// **A menu's buttons are withheld while a panel has input**, as a menu's
+    /// keys are. A button the `ui` context binds (the table in
+    /// [`crate::input::ui`]), pressed while the loop's menu or console has input, is
+    /// cleared from the snapshot this hook is handed until it is released —
+    /// so South accepting `RESUME` does not also reach the game, before or
+    /// after the panel closes. A button already down for the game when the
+    /// panel opened stays down until it is let go. The sticks, the triggers
+    /// and every other button reach the game as they are, and so does
+    /// [`PAUSE_BUTTON`], which the `ui` context does not bind.
     ///
     /// **The loop does not feed [`actions`](Self::actions)' map itself**, for
     /// the reason it never feeds it a key: the map is the game's, and edges
@@ -6596,6 +6599,9 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// Where this loop's pad events come from, or `None` for a run with no
     /// pads — which costs a frame one branch. See [`pads`].
     pads: Option<Box<dyn PadSource>>,
+    /// The pad buttons a menu has taken from the game — see
+    /// [`HostedGame::gamepad_event`].
+    pad_claims: pad_claims::PadClaims,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -6706,6 +6712,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             pointer_mode: PointerMode::Free,
             cursor: Some(CursorIcon::Default),
             pads: pads::for_run(config.windowed),
+            pad_claims: pad_claims::PadClaims::default(),
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -6786,6 +6793,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // Last frame's duration, which is the time since the last pump: this
         // frame's clock is not advanced until after the input is read.
         let since_last_pump = self.frame_clock.render_dt_secs();
+        // The pad's half of what the menu claims, read before the pump
+        // borrows the map.
+        let panel_has_input = showing || console_showing;
+        let menu_pad_buttons = menu::menu_pad_buttons(&self.menu_actions);
+        let pad_claims = &mut self.pad_claims;
         let mut menu = MenuPump::new(
             &mut self.menus,
             &mut self.held_keys,
@@ -6847,12 +6859,13 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let overlay_opened = false;
         // **The pads, after the shell's events and in the same pump**, so the
         // menu hears them on last frame's panel exactly as it heard the keys.
-        // Each event goes to the menu's map and to the game once each, and
-        // never to the game's own map: see `HostedGame::gamepad_event`.
+        // Each event goes to the menu's map and to the game once each, the
+        // game's with the buttons the menu claimed cleared, and never to the
+        // game's own map: see `HostedGame::gamepad_event`.
         if let Some(pads) = &mut self.pads {
             pads.poll(&mut |event| {
                 menu.observe_pad(&event);
-                game.gamepad_event(&event);
+                game.gamepad_event(&pad_claims.for_game(&event, panel_has_input, menu_pad_buttons));
             });
         }
         // The pad's pause is the key's, so it closes an open console first
@@ -15294,8 +15307,10 @@ mod tests {
             .declare(crate::input::ActionDecl {
                 name: "pad_jump".to_owned(),
                 kind: crate::input::ActionKind::Button,
+                // A button the `ui` context does not bind, so the pause panel
+                // a focus loss opens claims none of its presses.
                 bindings: vec![crate::input::Binding::PadButton(
-                    crate::input::PadButton::South,
+                    crate::input::PadButton::West,
                 )],
             });
     }
@@ -15312,7 +15327,7 @@ mod tests {
             id: PAD,
             kind: PadKind::Xbox,
         };
-        let pressed = pad_holding(&[PadButton::South]);
+        let pressed = pad_holding(&[PadButton::West]);
         pads.send(connected);
         pads.send(pressed);
         engine.frame().expect("the fake never fails");
@@ -15320,7 +15335,7 @@ mod tests {
         assert_eq!(engine.game().pads, [connected, pressed]);
         assert!(
             engine.game_mut().actions.0.just_pressed("pad_jump"),
-            "the game's map never saw South go down",
+            "the game's map never saw West go down",
         );
         engine.frame().expect("the fake never fails");
         assert_eq!(
@@ -15416,6 +15431,51 @@ mod tests {
         assert!(!engine.is_paused(), "East did not resume from the panel");
     }
 
+    /// **The panel's buttons are the panel's**: South and East pressed at the
+    /// pause panel never reach the game — not while it is up, and not on the
+    /// snapshots after the press closed it, until they are let go.
+    #[test]
+    fn a_button_the_pause_panel_takes_never_reaches_the_game() {
+        use crate::input::{GamepadEvent, PadButton};
+        let seen = |engine: &Hosted, button: PadButton| {
+            engine.game().pads.iter().any(|event| {
+                matches!(event, GamepadEvent::State { snapshot, .. } if snapshot.buttons.contains(button))
+            })
+        };
+        let mut engine = playing();
+        let pads = scripted_pads(&mut engine);
+        let pause = |engine: &mut Hosted| {
+            pads.send(pad_holding(&[PAUSE_BUTTON]));
+            pads.send(pad_holding(&[]));
+            engine.frame().expect("the fake never fails");
+            engine.frame().expect("the fake never fails");
+            assert_eq!(engine.menu_kind(), FakeMenu::Paused);
+        };
+
+        pause(&mut engine);
+        pads.send(pad_holding(&[PadButton::South]));
+        engine.frame().expect("the fake never fails");
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "South's release did not fire RESUME");
+        assert!(!seen(&engine, PadButton::South), "South reached the game");
+
+        pause(&mut engine);
+        pads.send(pad_holding(&[PadButton::East]));
+        engine.frame().expect("the fake never fails");
+        assert!(!engine.is_paused(), "East did not resume from the panel");
+        // Still held, re-sent with the panel gone.
+        pads.send(pad_holding(&[PadButton::East]));
+        engine.frame().expect("the fake never fails");
+        assert!(!seen(&engine, PadButton::East), "East reached the game");
+
+        // Let go and pressed again with no panel: the game's.
+        pads.send(pad_holding(&[]));
+        pads.send(pad_holding(&[PadButton::East]));
+        engine.frame().expect("the fake never fails");
+        assert!(seen(&engine, PadButton::East), "a fresh East was withheld");
+    }
+
     /// **Focus loss releases what the pump pressed**, including a press in
     /// the very batch the window lost focus in, and it stays released while
     /// the pad keeps reporting it — until the player lets go and presses
@@ -15428,7 +15488,7 @@ mod tests {
         declare_pad_jump(&mut engine);
         let pads = scripted_pads(&mut engine);
 
-        pads.send(pad_holding(&[PadButton::South]));
+        pads.send(pad_holding(&[PadButton::West]));
         engine
             .shell_mut()
             .set_focus(window, false)
@@ -15440,15 +15500,15 @@ mod tests {
         );
 
         // Re-sent, as a backend does when anything else on the pad moves.
-        pads.send(pad_holding(&[PadButton::South]));
+        pads.send(pad_holding(&[PadButton::West]));
         engine.frame().expect("the fake never fails");
         assert!(
             !engine.game_mut().actions.0.button_held("pad_jump"),
-            "a pad still holding South pressed it again",
+            "a pad still holding West pressed it again",
         );
 
         pads.send(pad_holding(&[]));
-        pads.send(pad_holding(&[PadButton::South]));
+        pads.send(pad_holding(&[PadButton::West]));
         engine.frame().expect("the fake never fails");
         assert!(
             engine.game_mut().actions.0.button_held("pad_jump"),

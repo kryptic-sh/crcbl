@@ -11276,16 +11276,6 @@ deleted 19-input plan left behind_.
     headless), and the ui context has a pad column. Left open:
     - A d-pad held on one pad and its opposite on another cancel out, by the
       every-pad-drives-every-binding rule, until device assignment lands.
-    - **Needs a decision: pad input is not withheld from the game while a menu
-      is up.** Every `GamepadEvent` reaches both the menu map and the game, so
-      South accepting a panel also reaches the game. Keys are claimed per key; a
-      snapshot covers the whole pad, so claiming means masking bound buttons out
-      of what the game sees. Options: mask ui-bound buttons while a panel has
-      input, or leave it to games (`FrameInfo::paused`). **Decided 2026-09-25:
-      mask them.** Keys already work this way (a claimed key never reaches the
-      game), so a pad that behaves differently is a trap every game would
-      rediscover through South accepting a panel and also jumping. Not built
-      yet.
     - **Needs a decision: pads drive the loop while the window is unfocused.**
       XInput reports regardless of focus and the loop tracks only the focus-lost
       edge, so a pad can resume a background window. Options: stop delivering
@@ -25458,9 +25448,8 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
   meeting the every-packet-sealed rule (with a guard test owed). To build:
-  Box2D's farthest-point sleep check, masking ui-bound pad buttons, and no pad
-  delivery while unfocused. glam's bump is in the first-priority dependency
-  entry at the top.
+  Box2D's farthest-point sleep check, and no pad delivery while unfocused.
+  glam's bump is in the first-priority dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
