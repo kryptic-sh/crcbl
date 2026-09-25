@@ -140,7 +140,7 @@ fn cells(extent: (u32, u32)) -> CellGrid {
     let (min, _) = bounds(extent);
     CellGrid {
         origin: Vec2::new(min.x + PANEL_PAD, min.y + PANEL_PAD + ROW_HEIGHT),
-        cell: CELL_PX,
+        cell: Vec2::splat(CELL_PX),
         columns: u32::from(loadout::GRID_W),
         rows: u32::from(loadout::GRID_H),
         id_base: CELL_ID_BASE,

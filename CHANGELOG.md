@@ -957,8 +957,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   new `SheetError::PixelsMismatch` (never cropped), and a freed slot with
   `StaleSlot`.
 - **A typed grid drag-and-drop in `crcbl_ui::grid_drag`.** `CellGrid` places a
-  grid of square cells on screen (`origin`, `cell`, `columns`, `rows`,
-  `id_base`) and owns its hit test (`cell_at`, `cell_bounds`) and cell widget
+  grid of equal rectangular cells on screen (`origin`, `cell` as a width and
+  height, `columns`, `rows`, `id_base`), so a one-cell grid is a drop slot of
+  any shape and owns its hit test (`cell_at`, `cell_bounds`) and cell widget
   ids. `GridDrag<P>` is the drag, kept across frames beside the `UiState` whose
   press capture it rides on: each frame `GridDrag::frame(ui, pointer)` opens a
   `DragFrame`, `DragFrame::grid(grid, source, can_accept)` runs one grid, and

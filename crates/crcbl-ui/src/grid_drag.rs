@@ -52,8 +52,13 @@ use glam::{UVec2, Vec2};
 
 use crate::widget::{ButtonState, PointerInput, UiState, WidgetId};
 
-/// Where a grid of equal square cells is on screen, and the widget ids its
-/// cells answer to.
+/// Where a grid of equal cells is on screen, and the widget ids its cells
+/// answer to.
+///
+/// A cell is a rectangle, [`cell`](Self::cell) wide and high: square for an
+/// inventory's grid, and a one-cell grid of any shape for a drop slot — a
+/// weapon card, an armour or quickslot — so every target is dragged onto the
+/// same way.
 ///
 /// Cells are numbered from the top-left, `x` across and `y` down; the widget id
 /// of a cell is [`id_base`](Self::id_base) plus its row-major index.
@@ -61,8 +66,9 @@ use crate::widget::{ButtonState, PointerInput, UiState, WidgetId};
 pub struct CellGrid {
     /// The top-left corner of cell `(0, 0)`, in screen pixels.
     pub origin: Vec2,
-    /// The side of one cell, in screen pixels.
-    pub cell: f32,
+    /// One cell's width (`x`) and height (`y`), in screen pixels; use
+    /// `Vec2::splat(side)` for square cells.
+    pub cell: Vec2,
     /// How many cells across.
     pub columns: u32,
     /// How many cells down.
@@ -78,7 +84,7 @@ impl CellGrid {
     #[must_use]
     pub fn cell_bounds(&self, cell: UVec2) -> (Vec2, Vec2) {
         let at = self.origin + cell.as_vec2() * self.cell;
-        (at, at + Vec2::splat(self.cell))
+        (at, at + self.cell)
     }
 
     /// Which cell `pos` is over, or `None` for a point outside the grid.
@@ -89,7 +95,7 @@ impl CellGrid {
     /// to cell `(0, 0)`.
     #[must_use]
     pub fn cell_at(&self, pos: Vec2) -> Option<UVec2> {
-        if !pos.is_finite() || self.cell <= 0.0 {
+        if !pos.is_finite() || !self.cell.is_finite() || self.cell.cmple(Vec2::ZERO).any() {
             return None;
         }
         let local = (pos - self.origin) / self.cell;
@@ -507,7 +513,7 @@ mod tests {
     /// A 4×3 grid of 10-pixel cells at `(100, 50)`.
     const GRID: CellGrid = CellGrid {
         origin: Vec2::new(100.0, 50.0),
-        cell: 10.0,
+        cell: Vec2::splat(10.0),
         columns: 4,
         rows: 3,
         id_base: 0x1000,
@@ -516,7 +522,7 @@ mod tests {
     /// A second grid, beside the first, with its own ids.
     const OTHER: CellGrid = CellGrid {
         origin: Vec2::new(200.0, 50.0),
-        cell: 10.0,
+        cell: Vec2::splat(10.0),
         columns: 2,
         rows: 2,
         id_base: 0x2000,
@@ -719,6 +725,47 @@ mod tests {
     /// `(column, row)` of a `w × h` footprint becomes `(h − 1 − row, column)`
     /// of the `h × w` one: EW's `1×2` held by its top cell is held by `(1, 0)`
     /// once it lies `2×1`, and four turns come back to where they began.
+    /// **A cell may be any rectangle.** A 300×78 one-cell slot — EW's weapon
+    /// card — is hit anywhere inside it and nowhere past it, and a grid of
+    /// 20×10 cells places and finds each cell by its own width and height; a
+    /// cell of no size, or a non-finite one, is over nothing.
+    #[test]
+    fn a_cell_may_be_any_rectangle() {
+        let slot = CellGrid {
+            origin: Vec2::new(40.0, 20.0),
+            cell: Vec2::new(300.0, 78.0),
+            columns: 1,
+            rows: 1,
+            id_base: 0x3000,
+        };
+        assert_eq!(
+            slot.cell_bounds(UVec2::ZERO),
+            (Vec2::new(40.0, 20.0), Vec2::new(340.0, 98.0))
+        );
+        assert_eq!(slot.cell_at(Vec2::new(339.0, 97.0)), Some(UVec2::ZERO));
+        assert_eq!(slot.cell_at(Vec2::new(200.0, 99.0)), None, "below the card");
+        assert_eq!(slot.cell_at(Vec2::new(341.0, 30.0)), None, "past its right");
+
+        let wide = CellGrid {
+            origin: Vec2::ZERO,
+            cell: Vec2::new(20.0, 10.0),
+            columns: 4,
+            rows: 3,
+            id_base: 0x4000,
+        };
+        for cell in wide.cells() {
+            let (min, max) = wide.cell_bounds(cell);
+            assert_eq!(max - min, Vec2::new(20.0, 10.0));
+            assert_eq!(wide.cell_at((min + max) / 2.0), Some(cell), "{cell}");
+        }
+        assert_eq!(wide.cell_at(Vec2::new(25.0, 15.0)), Some(UVec2::new(1, 1)));
+
+        for cell in [Vec2::new(20.0, 0.0), Vec2::new(f32::NAN, 10.0)] {
+            let degenerate = CellGrid { cell, ..wide };
+            assert_eq!(degenerate.cell_at(Vec2::new(5.0, 5.0)), None, "{cell}");
+        }
+    }
+
     #[test]
     fn a_quarter_turn_keeps_the_grabbed_cell() {
         let mut drag = GridDrag::new();
