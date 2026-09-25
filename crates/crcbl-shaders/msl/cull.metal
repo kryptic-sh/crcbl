@@ -3,41 +3,41 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 7508 "hlsl.meta.slang"
+#line 7694 "hlsl.meta.slang"
 matrix<float,int(3),int(3)>  abs_0(matrix<float,int(3),int(3)>  x_0)
 {
 
-#line 7386
+#line 7572
     thread matrix<float,int(3),int(3)>  result_0;
 
-#line 7386
+#line 7572
     int i_0 = int(0);
 
-#line 7386
+#line 7572
     for(;;)
     {
 
-#line 7386
+#line 7572
         if(i_0 < int(3))
         {
         }
         else
         {
 
-#line 7386
+#line 7572
             break;
         }
 
-#line 7386
+#line 7572
         result_0[i_0] = abs(x_0[i_0]);
 
-#line 7386
+#line 7572
         i_0 = i_0 + int(1);
 
-#line 7386
+#line 7572
     }
 
-#line 7386
+#line 7572
     return result_0;
 }
 
@@ -79,14 +79,14 @@ struct CullParams_natural_0
 };
 
 
-#line 284
+#line 333
 struct _MatrixStorage_float4x4_ColMajornatural_1
 {
     array<packed_float4, int(4)> data_1;
 };
 
 
-#line 284
+#line 333
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_1 transform_0;
@@ -122,7 +122,7 @@ struct GpuMesh_0
 };
 
 
-#line 703
+#line 403
 struct KernelContext_0
 {
     CullParams_natural_0 constant* cull_0;
@@ -177,11 +177,11 @@ bool in_frustum_0(float3 center_1, float3 extent_1, KernelContext_0 thread* kern
 }
 
 
-#line 2819 "core.meta.slang"
+#line 2837 "core.meta.slang"
 bool admits_0(uint _S2, KernelContext_0 thread* kernelContext_1)
 {
 
-#line 2819
+#line 2837
     uint _S3 = (kernelContext_1->instances_0+_S2)->flags_0;
 
 #line 415 "shaders/cull.slang"

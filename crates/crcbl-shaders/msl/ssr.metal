@@ -10,14 +10,14 @@ float sharpness_of_0(float roughness_0)
 }
 
 
-#line 90 "core"
+#line 188
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 116 "shaders/ssr.slang"
+#line 116
 struct SsrParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -34,7 +34,7 @@ struct SsrParams_natural_0
 };
 
 
-#line 1084 "core"
+#line 231
 struct GpuProbe_natural_0
 {
     packed_float4 sh_r_0;
@@ -43,7 +43,7 @@ struct GpuProbe_natural_0
 };
 
 
-#line 5516 "core.meta.slang"
+#line 214
 struct KernelContext_0
 {
     depth2d<float, access::sample> scene_depth_0;
@@ -63,7 +63,7 @@ struct KernelContext_0
 };
 
 
-#line 549 "shaders/ssr.slang"
+#line 549
 float depth_at_0(int2 pixel_0, int2 extent_0, KernelContext_0 thread* kernelContext_0)
 {
 

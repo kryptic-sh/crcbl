@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 90 "core"
+#line 92 "shaders/contact_shadows.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 92
 struct ContactShadowParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -19,7 +19,7 @@ struct ContactShadowParams_natural_0
 };
 
 
-#line 1084
+#line 1095 "core"
 struct KernelContext_0
 {
     depth2d<float, access::sample> scene_depth_0;

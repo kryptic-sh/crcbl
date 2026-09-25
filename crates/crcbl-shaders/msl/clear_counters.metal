@@ -13,7 +13,7 @@ struct ClearParams_0
 };
 
 
-#line 123
+#line 106
 struct KernelContext_0
 {
     ClearParams_0 constant* clear_0;
@@ -23,7 +23,8 @@ struct KernelContext_0
 };
 
 
-#line 117
+
+
 [[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], ClearParams_0 constant* clear_1 [[buffer(0)]], uint device* cull_stats_1 [[buffer(1)]], uint device* args_1 [[buffer(2)]], uint device* counts_and_mesh_args_1 [[buffer(3)]])
 {
 

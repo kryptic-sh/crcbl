@@ -94,14 +94,14 @@ struct GridParams_natural_0
 };
 
 
-#line 1084 "core"
+#line 94
 struct KernelContext_0
 {
     GridParams_natural_0 constant* grid_0;
 };
 
 
-#line 225 "shaders/grid.slang"
+#line 225
 [[fragment]] GridOutput_0 fragmentMain(pixelInput_0 _S4 [[stage_in]], float4 position_0 [[position]], GridParams_natural_0 constant* grid_1 [[buffer(0)]])
 {
 

@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 90 "core"
+#line 205 "shaders/light_cluster.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 205
 struct LightClusterParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inverse_view_proj_0;
@@ -27,7 +27,7 @@ struct LightClusterParams_natural_0
 };
 
 
-#line 90
+#line 208
 struct GpuLight_natural_0
 {
     packed_float4 position_0;
@@ -41,7 +41,7 @@ struct GpuLight_natural_0
 };
 
 
-#line 465 "shaders/light_cluster.slang"
+#line 465
 struct KernelContext_0
 {
     LightClusterParams_natural_0 constant* params_0;

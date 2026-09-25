@@ -10,7 +10,8 @@ struct ProbeConstants_0
 };
 
 
-#line 5522 "core.meta.slang"
+
+
 struct KernelContext_0
 {
     uint device* destination_0;
@@ -18,7 +19,7 @@ struct KernelContext_0
 };
 
 
-#line 104 "shaders/push_constant_probe.slang"
+#line 104
 [[kernel]] void computeMain(uint3 thread_0 [[thread_position_in_grid]], uint device* destination_1 [[buffer(0)]], ProbeConstants_0 constant* constants_1 [[buffer(1)]])
 {
 

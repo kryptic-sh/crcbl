@@ -39,7 +39,7 @@ struct FullscreenOutput_0
 };
 
 
-#line 77
+#line 75
 struct KernelContext_0
 {
     depth2d<float, access::sample> source_0;

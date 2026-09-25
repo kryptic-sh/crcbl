@@ -43,31 +43,31 @@ struct VertexOutput_0
 };
 
 
-#line 105
+#line 103
 struct KernelContext_0
 {
     RasterConstants_0 constant* constants_1;
 };
 
 
-#line 105
+#line 103
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], RasterConstants_0 constant* constants_2 [[buffer(0)]])
 {
 
-#line 105
+#line 103
     VertexOutput_0 _S2;
 
-#line 105
+#line 103
     thread KernelContext_0 kernelContext_0;
 
-#line 105
+#line 103
     (&kernelContext_0)->constants_1 = constants_2;
 
-#line 105
+#line 103
     for(;;)
     {
 
-#line 105
+#line 103
         uint corner_0;
 
 #line 126

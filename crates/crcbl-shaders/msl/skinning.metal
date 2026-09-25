@@ -26,7 +26,7 @@ struct SkinParams_0
 };
 
 
-#line 372
+#line 360
 struct SkinBinding_natural_0
 {
     packed_uint4 joints_0;
@@ -34,14 +34,14 @@ struct SkinBinding_natural_0
 };
 
 
-#line 372
+#line 354
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 372
+#line 354
 struct KernelContext_0
 {
     SkinParams_0 constant* skin_0;

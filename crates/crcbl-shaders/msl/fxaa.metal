@@ -4,7 +4,7 @@
 using namespace metal;
 
 #line 138 "shaders/fxaa.slang"
-constant array<float, int(12)> SEARCH_STEP_0 = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f, 4.0f, 8.0f };
+constant array<float, int(12)> SEARCH_STEP_0 = { { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.5f, 2.0f, 2.0f, 2.0f, 2.0f, 4.0f, 8.0f } };
 
 #line 84
 struct FxaaParams_0
@@ -16,7 +16,7 @@ struct FxaaParams_0
 };
 
 
-#line 1084 "core"
+#line 117
 struct KernelContext_0
 {
     FxaaParams_0 constant* params_0;
@@ -25,7 +25,7 @@ struct KernelContext_0
 };
 
 
-#line 165 "shaders/fxaa.slang"
+#line 165
 float3 tap_0(float2 uv_0, float2 offset_0, KernelContext_0 thread* kernelContext_0)
 {
     return ((kernelContext_0->source_0).sample((kernelContext_0->sourceSampler_0), (uv_0 + offset_0 * kernelContext_0->params_0->inv_source_0), level((0.0f)))).xyz;

@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 90 "core"
+#line 93 "shaders/ssr_blur.slang"
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 93
 struct SsrParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -18,7 +18,7 @@ struct SsrParams_natural_0
 };
 
 
-#line 1084
+#line 1095 "core"
 struct KernelContext_0
 {
     depth2d<float, access::sample> scene_depth_0;

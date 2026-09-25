@@ -13,7 +13,7 @@ struct ExposureParams_0
 };
 
 
-#line 302
+#line 92
 struct KernelContext_0
 {
     atomic<uint> device* histogram_0;

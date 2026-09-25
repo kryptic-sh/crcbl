@@ -40,7 +40,7 @@ struct UpscaleParams_0
 };
 
 
-#line 1084 "core"
+#line 99
 struct KernelContext_0
 {
     UpscaleParams_0 constant* params_0;
@@ -49,7 +49,7 @@ struct KernelContext_0
 };
 
 
-#line 152 "shaders/upscale.slang"
+#line 152
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 position_0 [[position]], UpscaleParams_0 constant* params_1 [[buffer(0)]], texture2d<float, access::sample> source_1 [[texture(0)]], sampler sourceSampler_1 [[sampler(0)]])
 {
 

@@ -32,7 +32,7 @@ struct CaptureFace_natural_0
 };
 
 
-#line 87
+#line 62
 struct KernelContext_0
 {
     float device* positions_0;
@@ -40,8 +40,7 @@ struct KernelContext_0
 };
 
 
-
-
+#line 96
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], float device* positions_1 [[buffer(1)]], CaptureFace_natural_0 constant* capture_1 [[buffer(0)]])
 {
 

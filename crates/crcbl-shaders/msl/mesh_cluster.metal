@@ -52,14 +52,14 @@ struct Meshlet_0
 };
 
 
-#line 1589
+#line 1035
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 1589
+#line 1035
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 transform_0;
@@ -95,14 +95,14 @@ struct GpuMesh_0
 };
 
 
-#line 1591
+#line 1001
 struct _MatrixStorage_float4x4_ColMajornatural_1
 {
     array<float4, int(4)> data_1;
 };
 
 
-#line 1591
+#line 1001
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_1, int(2)> data_2;
@@ -932,9 +932,9 @@ struct VertexOutput_0
             uint _S35 = corner_at_0(corner_1 + 2U, &kernelContext_6);
 
 #line 1720
-            _slang_mesh.set_index(t_2*3+0,(uint3(_S33, _S34, _S35))[0]);
-            _slang_mesh.set_index(t_2*3+1,(uint3(_S33, _S34, _S35))[1]);
-            _slang_mesh.set_index(t_2*3+2,(uint3(_S33, _S34, _S35))[2]);
+            _slang_mesh.set_index(t_2*3+0,uint3(_S33, _S34, _S35)[0]);
+            _slang_mesh.set_index(t_2*3+1,uint3(_S33, _S34, _S35)[1]);
+            _slang_mesh.set_index(t_2*3+2,uint3(_S33, _S34, _S35)[2]);
             ;
 
 #line 1720
@@ -1832,9 +1832,9 @@ uint instance_material_mode_0(uint _S44, KernelContext_0 thread* kernelContext_9
             uint _S78 = corner_at_0(corner_2 + 2U, &kernelContext_11);
 
 #line 1823
-            _slang_mesh.set_index(t_3*3+0,(uint3(_S76, _S77, _S78))[0]);
-            _slang_mesh.set_index(t_3*3+1,(uint3(_S76, _S77, _S78))[1]);
-            _slang_mesh.set_index(t_3*3+2,(uint3(_S76, _S77, _S78))[2]);
+            _slang_mesh.set_index(t_3*3+0,uint3(_S76, _S77, _S78)[0]);
+            _slang_mesh.set_index(t_3*3+1,uint3(_S76, _S77, _S78)[1]);
+            _slang_mesh.set_index(t_3*3+2,uint3(_S76, _S77, _S78)[2]);
             ;
 
 #line 1823

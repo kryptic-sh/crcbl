@@ -4,7 +4,7 @@
 using namespace metal;
 
 #line 190 "shaders/sprite.slang"
-constant array<float2, int(6)> CORNERS_0 = { float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f) };
+constant array<float2, int(6)> CORNERS_0 = { { float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f) } };
 
 #line 406
 float2 sharpen_0(float2 uv_0, float2 size_0)
@@ -29,7 +29,7 @@ struct pixelOutput_0
 };
 
 
-#line 2579 "core.meta.slang"
+#line 2597 "core.meta.slang"
 struct pixelInput_0
 {
     float2 uv_1 [[user(TEXCOORD)]];
@@ -38,14 +38,14 @@ struct pixelInput_0
 };
 
 
-#line 2579
+#line 2597
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 2579
+#line 2597
 struct SpriteConstants_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 view_proj_0;
@@ -55,7 +55,7 @@ struct SpriteConstants_natural_0
 };
 
 
-#line 2579
+#line 2597
 struct SpriteInstance_natural_0
 {
     packed_float4 rect_0;
@@ -65,7 +65,7 @@ struct SpriteInstance_natural_0
 };
 
 
-#line 2579
+#line 176 "shaders/sprite.slang"
 struct KernelContext_0
 {
     SpriteConstants_natural_0 constant* constants_0;
@@ -75,7 +75,7 @@ struct KernelContext_0
 };
 
 
-#line 423 "shaders/sprite.slang"
+#line 423
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S2 [[stage_in]], float4 position_0 [[position]], SpriteConstants_natural_0 constant* constants_1 [[buffer(0)]], SpriteInstance_natural_0 device* sprites_1 [[buffer(1)]], texture2d<float, access::sample> sheet_3 [[texture(0)]], sampler sheetSampler_1 [[sampler(0)]])
 {
 
@@ -123,7 +123,7 @@ struct SpriteVarying_0
 
 
 #line 199
-[[vertex]] vertexMain_Result_0 vertexMain(uint vertex_0 [[vertex_id]], uint instance_0 [[instance_id]], SpriteConstants_natural_0 constant* constants_2 [[buffer(0)]], SpriteInstance_natural_0 device* sprites_2 [[buffer(1)]], texture2d<float, access::sample> sheet_6 [[texture(0)]], sampler sheetSampler_2 [[sampler(0)]])
+[[vertex]] vertexMain_Result_0 vertexMain(uint vertex_0 [[vertex_id]], uint instance_0 [[instance_id]], uint base_instance_0 [[base_instance]], SpriteConstants_natural_0 constant* constants_2 [[buffer(0)]], SpriteInstance_natural_0 device* sprites_2 [[buffer(1)]], texture2d<float, access::sample> sheet_6 [[texture(0)]], sampler sheetSampler_2 [[sampler(0)]])
 {
 
 #line 199
@@ -142,7 +142,7 @@ struct SpriteVarying_0
     (&kernelContext_1)->sheetSampler_0 = sheetSampler_2;
 
 #line 221
-    SpriteInstance_natural_0 s_1 = sprites_2[instance_0 + constants_2->base_0];
+    SpriteInstance_natural_0 s_1 = sprites_2[instance_0 - base_instance_0 + constants_2->base_0];
 
 #line 221
     float4 _S4 = float4(s_1.rect_0) ;

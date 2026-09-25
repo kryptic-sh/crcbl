@@ -10,7 +10,7 @@ struct pixelOutput_0
 };
 
 
-#line 2578 "core.meta.slang"
+#line 2596 "core.meta.slang"
 struct pixelInput_0
 {
     float2 uv_0 [[user(TEXCOORD)]];
@@ -25,7 +25,7 @@ struct Cmaa2Params_0
 };
 
 
-#line 127
+#line 80
 struct KernelContext_0
 {
     Cmaa2Params_0 constant* params_0;
@@ -108,20 +108,20 @@ struct FullscreenOutput_0
 };
 
 
-#line 473 "core"
+#line 484 "core"
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], Cmaa2Params_0 constant* params_2 [[buffer(1)]], texture2d<float, access::sample> source_2 [[texture(0)]], uint device* accum_2 [[buffer(0)]])
 {
 
-#line 473
+#line 484
     thread KernelContext_0 kernelContext_1;
 
-#line 473
+#line 484
     (&kernelContext_1)->params_0 = params_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->source_0 = source_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->accum_0 = accum_2;
 
 #line 104 "shaders/cmaa2_apply.slang"

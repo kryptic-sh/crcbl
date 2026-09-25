@@ -17,7 +17,7 @@ struct Sources_default_0
 };
 
 
-#line 222
+#line 186
 struct KernelContext_0
 {
     uint device* destination_0;

@@ -10,14 +10,14 @@ int2 full_res_pixel_0(int2 pixel_0)
 }
 
 
-#line 90 "core"
+#line 152
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 152
 struct SsaoParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -27,7 +27,7 @@ struct SsaoParams_natural_0
 };
 
 
-#line 1084
+#line 1095 "core"
 struct KernelContext_0
 {
     texture2d<float, access::sample> occlusion_0;
