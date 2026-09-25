@@ -1254,7 +1254,10 @@ uncertainty.
   the engine, where a test can own a `Mixer` with no stream attached —
   `set_mix_re_aims_a_voice_that_is_already_playing`. **What would change it:** a
   headless `Audio` that opens no stream at all, which would make the render
-  check deterministic in every sample.
+  check deterministic in every sample. **Asteroids has one now** —
+  `Audio::without_output` — and its spatial assertions measure the rendered
+  audio; the other samples still read the mixer, and what converting them takes
+  is in docs/backlog.md under _Deferred decisions_.
 
   **Same race, second test, observed once:** asteroids'
   `the_engine_is_one_looping_voice_that_outlives_its_buffer` failed on
@@ -1265,7 +1268,8 @@ uncertainty.
   stream, whose polling thread can consume the one release fade between
   `set_thrust(false)` and the test's own `fill`, so the test sees silence and
   blames the backend. The fix is the same one — a headless `Audio` with no
-  stream — and it is the same decision, per sample.
+  stream — and it is the same decision, per sample. Asteroids' tests have built
+  that `Audio` since the release-block failure.
 
 - **Where does the menu art live?** Taken: **`crates/crcbl-render/assets/`**,
   baked by that crate's own `build.rs`. `apps/*` cannot depend on each other, so

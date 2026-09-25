@@ -591,27 +591,29 @@ mod tests {
     /// over a stack of one-shots: one voice, two pans.
     ///
     /// Without the `set_mix` call in `set_thrust` this fails — the mix would
-    /// stay whatever it was at ignition — and no other test would notice.
+    /// stay whatever it was at ignition — and no other test would notice. The
+    /// pan is measured in the rendered audio, which only a bare `Audio` can be
+    /// trusted to hand back whole; the voice's identity is the mixer's to say.
     #[test]
     fn the_engine_pans_with_the_ship_without_restarting() {
         let mut audio = Audio::without_output();
         audio.set_thrust(true, DVec3::new(-14.0, 0.0, 0.0));
         let left = audio.mixer.voice_mixes();
         assert_eq!(left.len(), 1);
+        let (l, r) = channel_energy(&render(&audio, ENGINE_LOOP_FRAMES));
         assert!(
-            left[0].1.gains.0 > left[0].1.gains.1,
-            "a ship on the left should be louder on the left: {:?}",
-            left[0].1.gains,
+            l > r,
+            "a ship on the left should be louder on the left: {l} against {r}",
         );
 
         audio.set_thrust(true, DVec3::new(14.0, 0.0, 0.0));
         let right = audio.mixer.voice_mixes();
         assert_eq!(right.len(), 1, "the engine restarted instead of turning");
         assert_eq!(right[0].0, left[0].0, "a new voice, not the same one");
+        let (l, r) = channel_energy(&render(&audio, ENGINE_LOOP_FRAMES));
         assert!(
-            right[0].1.gains.1 > right[0].1.gains.0,
-            "a ship on the right should be louder on the right: {:?}",
-            right[0].1.gains,
+            r > l,
+            "a ship on the right should be louder on the right: {r} against {l}",
         );
         assert_eq!(audio.plays(SOUND_THRUST), 1, "one burn, one play");
     }
@@ -624,30 +626,89 @@ mod tests {
     /// was a constant. It bites harder here than in flappy: this game's emitters
     /// really do cross the whole field, so both halves of the assertion are the
     /// normal case rather than an edge one.
+    ///
+    /// Measured in what the mixer renders, one cue per bare `Audio` so each
+    /// burst is heard on its own, and the whole burst so none of it is left out.
+    /// **The distance half holds the bearing fixed**: rendered energy is the
+    /// pan law and the rolloff multiplied together, and a cue off to one side
+    /// can come out quieter overall than one dead ahead with no rolloff at all.
+    /// A tenth of the way out along the same line from the listener differs
+    /// from the far cue in distance and nothing else.
     #[test]
     fn where_a_cue_happens_changes_how_it_sounds() {
-        let mut audio = Audio::without_output();
-        audio.play_at(SOUND_EXPLOSION, DVec3::ZERO);
-        audio.play_at(SOUND_EXPLOSION, DVec3::new(-14.0, 6.0, 0.0));
-        audio.play_at(SOUND_EXPLOSION, DVec3::new(14.0, 6.0, 0.0));
-        let mixes = audio.mixer.voice_mixes();
-        assert_eq!(mixes.len(), 3, "a cue went missing");
-        let (near, left, right) = (mixes[0].1, mixes[1].1, mixes[2].1);
+        let heard = |at: DVec3| {
+            let mut audio = Audio::without_output();
+            audio.play_at(SOUND_EXPLOSION, at);
+            let frames = audio
+                .bank
+                .sound(SOUND_EXPLOSION)
+                .expect("the explosion is banked")
+                .len()
+                / 2;
+            channel_energy(&render(&audio, frames))
+        };
+        let ear = DVec3::from(LISTENER.position.map(f64::from));
+        let far_left = DVec3::new(-14.0, 6.0, 0.0);
+        let left = heard(far_left);
+        let right = heard(DVec3::new(14.0, 6.0, 0.0));
+        let nearer = heard(ear + (far_left - ear) * 0.1);
         assert!(
-            left.gains.0 > left.gains.1,
-            "a cue to the left should be louder on the left: {:?}",
-            left.gains,
+            left.0 > left.1,
+            "a cue to the left should be louder on the left: {left:?}",
         );
         assert!(
-            right.gains.1 > right.gains.0,
-            "and one to the right, on the right: {:?}",
-            right.gains,
+            right.1 > right.0,
+            "and one to the right, on the right: {right:?}",
         );
         assert!(
-            left.volume < near.volume,
-            "a cue further away should be quieter: {} vs {}",
-            left.volume,
-            near.volume
+            left.0 < nearer.0 && left.1 < nearer.1,
+            "a cue further away should be quieter: {left:?} vs {nearer:?}",
+        );
+    }
+
+    /// **A bare `Audio` is pulled by its caller and nothing else**, which is
+    /// what every render check in this file stands on.
+    ///
+    /// A shot queued before a pause several times its own length is still
+    /// sounding after it, and the audio rendered after the pause is the audio
+    /// rendered with none. `Audio::new(true)` fails both: its null stream
+    /// drains the mixer on a thread of its own, so by the end of the pause the
+    /// shot has been played out to nobody and the engine loop is somewhere
+    /// the scheduler put it.
+    #[test]
+    fn a_bare_audio_renders_only_when_asked_and_the_same_every_time() {
+        let run = |pause: bool| {
+            let mut audio = Audio::without_output();
+            audio.play_at(SOUND_SHOT, DVec3::new(-4.0, 0.0, 0.0));
+            audio.set_thrust(true, DVec3::new(6.0, 2.0, 0.0));
+            if pause {
+                let shot_frames = audio
+                    .bank
+                    .sound(SOUND_SHOT)
+                    .expect("the shot is banked")
+                    .len()
+                    / 2;
+                std::thread::sleep(std::time::Duration::from_secs_f64(
+                    8.0 * shot_frames as f64 / f64::from(SAMPLE_RATE),
+                ));
+                assert_eq!(
+                    audio.voices(),
+                    2,
+                    "something drained the mixer while nobody asked",
+                );
+            }
+            (0..4)
+                .flat_map(|_| render(&audio, ENGINE_LOOP_FRAMES))
+                .collect::<Vec<_>>()
+        };
+        let at_once = run(false);
+        assert!(
+            at_once.iter().any(|s| s.abs() > 1e-3),
+            "the queued cues rendered as silence",
+        );
+        assert!(
+            run(true) == at_once,
+            "a pause before rendering changed what was rendered",
         );
     }
 
@@ -707,6 +768,27 @@ mod tests {
         assert_eq!(section.rows()[2], row("burns", "1"), "the burn happened");
         assert_eq!(section.rows()[3], row("engine", "off"), "the key came up");
         assert_eq!(section.rows().len(), 5, "still exactly five rows");
+    }
+
+    /// One loop of the engine, in frames: [`ENGINE_CYCLES`] of [`ENGINE_HZ`] at
+    /// [`SAMPLE_RATE`].
+    const ENGINE_LOOP_FRAMES: usize = (ENGINE_CYCLES * SAMPLE_RATE) as usize / ENGINE_HZ as usize;
+
+    /// The next `frames` frames the mixer renders, on a zeroed interleaved
+    /// stereo block — what the output would have played.
+    fn render(audio: &Audio, frames: usize) -> Vec<f32> {
+        let mut block = vec![0.0f32; frames * 2];
+        crcbl::audio::AudioSource::fill(audio.mixer.as_ref(), &mut block, SAMPLE_RATE);
+        block
+    }
+
+    /// The energy in each channel of an interleaved stereo block, left first.
+    fn channel_energy(block: &[f32]) -> (f32, f32) {
+        block
+            .chunks_exact(2)
+            .fold((0.0, 0.0), |(left, right), frame| {
+                (left + frame[0] * frame[0], right + frame[1] * frame[1])
+            })
     }
 
     /// One expected row, spelled once.

@@ -20995,16 +20995,42 @@ not:
 taken, so the block itself is a record now and lives in docs/notes/process.md
 under the same heading. One item inside it is real work rather than a decision:
 
-- **A headless `Audio` that opens no stream.** `Audio::new(true)` opens the null
-  stream, whose polling thread drains the same `Mixer` every five milliseconds,
-  so a test that renders a block and measures left against right races it —
-  which is why the samples' spatial assertions read `Mixer::voice_mixes` instead
-  of the rendered audio, and why asteroids'
-  `the_engine_is_one_looping_voice_that_outlives_its_buffer` failed once on
-  `macos-latest` (2026-08-07) with "the engine's release block was cut" and
-  passed on the immediate rerun. An `Audio` that opens nothing would make the
-  render check deterministic in every sample and close that race in the same
-  change. Precedent: the null-device test mode every engine's audio layer ships.
+- **The samples besides asteroids still test through the null stream.**
+  `Audio::new(true)` opens `AudioStream::open_null`, whose polling thread drains
+  the same `Mixer` every five milliseconds, so a test that plays a cue and then
+  reads the mixer races it for any voice short enough to be played out first.
+  Asteroids no longer does: its tests build `Audio::without_output`, which opens
+  nothing, render blocks through `AudioSource::fill` themselves, and its spatial
+  checks measure left against right in the rendered audio —
+  `a_bare_audio_renders_only_when_asked_and_the_same_every_time` fails against
+  the null-stream `Audio`, on both the voice count after a pause and the
+  rendered blocks. The same split has not been made in breakout, flappy, horde
+  or options, whose tests still build the `Audio` the game builds:
+  - breakout: `an_unknown_cue_is_ignored`,
+    `the_camera_is_the_listener_from_the_first_cue`,
+    `where_a_cue_happens_changes_how_it_sounds` (reads `Mixer::voice_mixes`).
+  - flappy: `an_unknown_cue_is_ignored_rather_than_underflowing`,
+    `a_cue_stays_counted_after_its_voice_is_gone`,
+    `the_audio_section_counts_each_cue_separately`,
+    `where_a_cue_happens_changes_how_it_sounds` (`voice_mixes`),
+    `the_listener_is_behind_the_play_plane_from_the_first_cue`,
+    `where_the_camera_is_changes_how_a_fixed_cue_sounds` (`voice_mixes`).
+  - horde: every test in `apps/horde/src/audio.rs` that builds
+    `Audio::new(true)`, the budget ones included —
+    `a_full_mixer_holds_its_budget_and_still_counts_the_cue` and
+    `the_death_cue_survives_sixteen_kills_on_the_same_tick` count voices the
+    null thread can reap mid-test — and
+    `where_a_cue_happens_and_where_the_player_stands_both_change_how_it_sounds`
+    (`voice_mixes`).
+  - options: the `headless` helper in `apps/options/src/audio.rs`'s tests, which
+    every test there goes through; its constructor also takes the bus gains.
+
+  Taking asteroids' shape in each is the fix: a stream-less constructor the
+  game's `new` wires an output onto. A spatial check converted to rendered audio
+  must hold the bearing fixed for its distance half, as asteroids' does —
+  rendered energy multiplies the pan law into the rolloff, and a test comparing
+  a cue off to one side against one dead ahead passed with the rolloff removed.
+  No flake of these has been traced; the race is read from the code.
 
 ## What the horde Pages flake left behind
 
