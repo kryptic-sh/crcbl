@@ -46,6 +46,12 @@ export const STATE_SUPER = 1 << 3;
 export const STATE_EDGE = 1 << 4;
 /** `KeyboardEvent.repeat`. */
 export const STATE_REPEAT = 1 << 5;
+/**
+ * `KeyboardEvent.getModifierState('AltGraph')`: `AltGr`, which Windows and X11
+ * also report as `ctrlKey` and `altKey`, so the engine can tell a character
+ * typed through it from a `Ctrl+Alt` shortcut.
+ */
+export const STATE_ALT_GRAPH = 1 << 6;
 
 /**
  * A contact landed — a touch `pointerdown`.
@@ -122,7 +128,8 @@ function modifiers(event) {
     (event.ctrlKey ? STATE_CTRL : 0) |
     (event.shiftKey ? STATE_SHIFT : 0) |
     (event.altKey ? STATE_ALT : 0) |
-    (event.metaKey ? STATE_SUPER : 0)
+    (event.metaKey ? STATE_SUPER : 0) |
+    (event.getModifierState?.('AltGraph') ? STATE_ALT_GRAPH : 0)
   );
 }
 

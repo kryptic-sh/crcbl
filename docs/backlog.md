@@ -6715,26 +6715,13 @@ That is also what debug item 4 of the UI section in `docs/notes/tooling.md`
 "works identically over a network connection". Building the transport half
 before a caller exists would be machinery nothing exercises.
 
-### Web text input drops `AltGr` characters
+### Web `AltGr` input is built and unverified on a real keyboard (2026-09-25)
 
-`__crcbl_web_key` in `crates/crcbl-shell/src/web/mod.rs` queues a
-`ShellEvent::TextCommit` only for an edge with neither `Ctrl` nor `Meta` held
-(verified 2026-09-24: `typing` tests `STATE_CTRL | STATE_SUPER`). Windows and
-X11 report `AltGr` as `Ctrl`+`Alt`, so a character reached through it (`@`, `\`,
-`{` on a German or French layout) commits nothing in a browser — in the console
-and in every other text field. The function's own doc comment states the gap.
-
-**It needs a decision, not just code.** Treating `Ctrl`+`Alt` as text is the
-rule browsers' own editors use, and would type a character for every
-`Ctrl+Alt+<key>` shortcut on a layout with no `AltGr`. The likely better fix is
-`KeyboardEvent.getModifierState("AltGraph")`, which the shim would have to read
-and pass in the state word; nothing reads it today. Either way it wants a
-keyboard with an `AltGr` to try it on, and nothing in the tree has one.
-
-**Decided 2026-09-25: read `getModifierState("AltGraph")`.** The shim passes it
-in the state word and `typing` lets an `AltGraph` edge commit text, so a
-`Ctrl+Alt` shortcut on a layout without `AltGr` stays a shortcut. Not built, and
-not verifiable here without an `AltGr` keyboard.
+A browser build now types `AltGr` characters: `web/engine/shell.js` reads
+`getModifierState("AltGraph")` into `STATE_ALT_GRAPH`, and `__crcbl_web_key` in
+`crates/crcbl-shell/src/web/mod.rs` lets a `Ctrl` that comes with it commit
+text. Tested through the state word only; nothing here has a keyboard with
+`AltGr`, so no browser has been driven with one.
 
 ### Seven of the nine `HostedGame::actions` overrides are compile-checked, not driven
 

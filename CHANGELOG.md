@@ -2771,6 +2771,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- A browser build types characters reached through `AltGr` — `@`, `\` and `{` on
+  a German or French layout — instead of dropping them. The shim reads
+  `KeyboardEvent.getModifierState("AltGraph")` into a new state bit, and a
+  `Ctrl` that comes with it is taken as `AltGr` and not a shortcut; `Ctrl+Alt`
+  without it still commits nothing.
+
 - `ForwardRenderer::with_scene` refuses a scene description with no meshes as
   `HalError::InvalidDescriptor`, naming what is missing, where it used to reach
   the mesh table's sizing and panic. A scene that draws only the sky is one with

@@ -453,6 +453,9 @@ pub(crate) mod shim {
     pub const STATE_EDGE: u32 = 1 << 4;
     /// `KeyboardEvent.repeat`.
     pub const STATE_REPEAT: u32 = 1 << 5;
+    /// `KeyboardEvent.getModifierState("AltGraph")`: the key was pressed through
+    /// `AltGr`, which Windows and X11 also report as `Ctrl`+`Alt`.
+    pub const STATE_ALT_GRAPH: u32 = 1 << 6;
 
     /// A contact landed: a touch `pointerdown`.
     ///
@@ -646,12 +649,13 @@ pub(crate) mod shim {
     /// that reason.
     ///
     /// `Alt` alone is left alone, so `Alt`-composed characters — the third
-    /// level of a European layout — still type. `AltGr` is the case this
-    /// misses: Windows and X11 both report it as `Ctrl`+`Alt`, so a character
-    /// reached through it commits nothing here. Recorded in
-    /// `docs/backlog.md` rather than guessed at, because the fix —
-    /// treating `Ctrl`+`Alt` as text — types a character for every
-    /// `Ctrl+Alt+<key>` shortcut on a layout that has no `AltGr`.
+    /// level of a European layout — still type. **So does `AltGr`**, which
+    /// Windows and X11 both report as `Ctrl`+`Alt`: the shim reads the
+    /// browser's own `getModifierState("AltGraph")` into [`STATE_ALT_GRAPH`],
+    /// and a `Ctrl` that comes with it is `AltGr`'s and not a shortcut's, so
+    /// `@` on a German layout types. Treating every `Ctrl`+`Alt` as text was
+    /// declined: it would type a character for each `Ctrl+Alt+<key>` shortcut
+    /// on a layout with no `AltGr`.
     ///
     /// # Safety
     ///
@@ -681,7 +685,9 @@ pub(crate) mod shim {
             repeat: state & STATE_REPEAT != 0,
             modifiers: modifiers(state),
         });
-        let typing = state & STATE_EDGE != 0 && state & (STATE_CTRL | STATE_SUPER) == 0;
+        let shortcut =
+            state & STATE_SUPER != 0 || (state & STATE_CTRL != 0 && state & STATE_ALT_GRAPH == 0);
+        let typing = state & STATE_EDGE != 0 && !shortcut;
         if let Some(text) = typing.then(|| text_of(key)).flatten() {
             queue_for(canvas, |window, bridge| ShellEvent::TextCommit {
                 window,
@@ -1509,9 +1515,41 @@ pub fn open(canvas_id: u32) -> Result<WebShell, ShellError> {
 
 #[cfg(test)]
 mod tests {
-    use super::shim::{STATE_ALT, STATE_CTRL, STATE_EDGE, STATE_REPEAT, STATE_SHIFT, STATE_SUPER};
+    use super::shim::{
+        STATE_ALT, STATE_ALT_GRAPH, STATE_CTRL, STATE_EDGE, STATE_REPEAT, STATE_SHIFT, STATE_SUPER,
+    };
     use super::*;
     use crcbl_core::input::{ButtonState, ContactId, Modifiers, PointerButton, TouchPhase};
+
+    /// **The shim packs the state word with the engine's bits**: every
+    /// `STATE_` constant `web/engine/shell.js` exports is the one this module
+    /// reads, bit for bit, and it exports no other. The two files are the two
+    /// halves of one ABI and nothing else holds them together.
+    #[test]
+    fn the_shims_state_bits_are_the_engines() {
+        let js = include_str!("../../../../web/engine/shell.js");
+        let engine = [
+            ("STATE_CTRL", STATE_CTRL),
+            ("STATE_SHIFT", STATE_SHIFT),
+            ("STATE_ALT", STATE_ALT),
+            ("STATE_SUPER", STATE_SUPER),
+            ("STATE_EDGE", STATE_EDGE),
+            ("STATE_REPEAT", STATE_REPEAT),
+            ("STATE_ALT_GRAPH", STATE_ALT_GRAPH),
+        ];
+        for (name, value) in engine {
+            let line = format!("export const {name} = 1 << {};", value.trailing_zeros());
+            assert!(
+                js.contains(&line),
+                "shell.js does not export `{line}`, which the engine reads"
+            );
+        }
+        assert_eq!(
+            js.matches("export const STATE_").count(),
+            engine.len(),
+            "shell.js exports a STATE_ bit the engine does not read"
+        );
+    }
 
     /// A shell with the one window the backend allows, ready for the shim.
     fn shell_with_window(canvas: u32) -> (WebShell, WindowId) {
@@ -1758,6 +1796,19 @@ mod tests {
         assert!(
             typed(&mut shell, "a", STATE_EDGE | STATE_SUPER).is_empty(),
             "and neither does Meta+A"
+        );
+        assert_eq!(
+            typed(
+                &mut shell,
+                "@",
+                STATE_EDGE | STATE_CTRL | STATE_ALT | STATE_ALT_GRAPH
+            ),
+            vec!["@".to_string()],
+            "AltGr+Q on a German layout arrives as Ctrl+Alt with AltGraph, and types"
+        );
+        assert!(
+            typed(&mut shell, "q", STATE_EDGE | STATE_CTRL | STATE_ALT).is_empty(),
+            "Ctrl+Alt without AltGraph is a shortcut on a layout that has no AltGr"
         );
         assert!(
             typed(&mut shell, "Enter", STATE_EDGE).is_empty(),
