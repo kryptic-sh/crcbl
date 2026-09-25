@@ -25436,33 +25436,51 @@ miter/round decision at every joint, and four vertices where there are two. If a
 caller ever needs a thick world-space line, that is the argument to revisit, and
 `push_stroke` is still the thing to lift.
 
-## Session hand-off, 2026-09-23: work in flight
+## Session hand-off, 2026-09-25: where things stand
 
-- **`GpuContext` honouring `CRCBL_ADAPTER` is finished and verified
-  (2026-09-25)** on top of `main`, from branch `wip/gpucontext-adapter-pin`
-  (`d105de02`). Once it lands, that branch is superseded and can be deleted.
-  What is left is in "`apps/quarry`'s mesh-path goldens have no local dx12 run",
-  and the WARP windowed timing is under "What the Win32 backend has and has not
-  been run against", "No sample-level pass in CI".
-- **The session's last pushes have since been seen green.** `ecf12489` (four
-  small fixes), `a7abc741` (crcbl-render tests off wasm32) and `e1183f59` (stale
-  docs), pushed on top of `8b14da89` (joints, the `TALL_STACK` removal, the
-  Greenhill test), were unchecked when the session ended; `main`'s CI workflow
-  has passed many times on top of them since, most recently checked green on
-  `c0af7237` (2026-09-24).
-- **Decisions waiting on the user**, each with its entry: the `SyncedFile`
-  lost-write fix (EW calls it a must before Steam Cloud), the `Host` rehello
-  livelock fix, `Apps::launch_command_line` truncation, the dx12 mesh flag, the
-  widened physics test bounds, the joint/contact rotation-rule split, per-group
-  stiffness, the sleep angular threshold, the Tower room's two systems, and the
-  two gamepad questions (menu input reaching the game; pads driving an unfocused
-  window).
-- **Next from the backlog triage (2026-09-23)**, all actionable without a
-  decision: `apps/options`'s frame test, the clamped-render-area test, the P7
-  decision-log assertions, the seven `web/tools` gates still printing through
-  `console`, the browser gate's mirrored constants, the WebGPU refused reply
-  buffer, a headless `Audio`, and repointing the `18-render-features.md`
-  citations.
+- **The plan clean-up is done.** Every plan at least about half built was folded
+  away on 2026-09-24/25: its binding rules went to a "What the deleted NN-name
+  plan left behind" section in `docs/notes/*.md`, its unbuilt work into this
+  file, and its row in `docs/plan/00-overview.md` (or the samples index) is
+  marked ✅ or ◐. The plans left in `docs/plan/` are the mostly-unbuilt ones,
+  each with its status line corrected: the stage and topic documents 08, 09
+  (deferred), 16, 18 (an index), 20, 21, 22, 24, 26–35, 37, 38, 53–59, and the
+  sample documents 04, 06, 07, 08, 09, 10, 11, 15, 17, 21, 22, 23 and 25. Fold
+  one when about half of it is built.
+- **`GpuContext` honours `CRCBL_ADAPTER`** (landed 2026-09-25 from branch
+  `wip/gpucontext-adapter-pin`, `d105de02`, which is superseded and can be
+  deleted). What is left is in "`apps/quarry`'s mesh-path goldens have no local
+  dx12 run", and the WARP windowed timing is under "What the Win32 backend has
+  and has not been run against", "No sample-level pass in CI".
+- **Decisions waiting on the owner**, each with its entry: Dependabot's glam
+  0.33.8 bump (pin 0.33.7, or re-pin the hashes after a cross-target proof; do
+  not merge PR #23 as is); the `SyncedFile` lost-write fix; the `Host` rehello
+  livelock fix; `Apps::launch_command_line` truncation; the dx12 mesh flag; the
+  widened physics test bounds; the joint/contact rotation-rule split; per-group
+  stiffness; the sleep angular threshold; whether an island may sleep deep in
+  penetration; the Tower room's two systems; the two gamepad questions; whether
+  Steam's own encryption satisfies the every-packet-sealed rule; `apps/options`'
+  eight unread catalogue keys; a scrolled `Menu`'s 8 px font against larger text
+  with fewer rows; whether a quality tier may ship without reflections (the
+  fixed-view sheen needs them); and a WARP windowed-samples CI step (309.8 s
+  over budget as it stands).
+- **EW (the game session) is the engine's main consumer.** Its asks through
+  2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
+  atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
+  fix, ActionMap (cancel, suppress, release double taps, scroll chords that
+  respect enabled, modal and global contexts), registered fonts, Menu
+  captions/fit/scroll, ellipsis and `Ui::text`, glyph runs carrying text,
+  `Grid::can_move_within`, grid_drag turn/in-place drop/rectangular cells, and
+  the prone fit check and crawl. Owed to it next: the prone turn sweep and
+  stance switch (entry "A lying capsule for prone characters"), and RON binding
+  persistence for a keybinding screen.
+- **Process:** push only after the previous push's CI and Pages finish (the
+  concurrency group cancels older runs, and EW pins only green commits); run
+  CI's exact wasm32 rustdoc and `tools/check-wrapped-strings.sh` before pushing;
+  format markdown with `npx --yes prettier@3.8.3`, CI's pin. The two known CI
+  flakes are the WARP grass readback timeout and the Pages browser waits
+  (entries "Cold-cache native readback" and "Two more Pages browser jobs timed
+  out").
 - **Steamworks is merged** (`13999937`); the `steam-sdk` branch and its worktree
   under `.claude/worktrees/` are no longer needed.
 
