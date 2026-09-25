@@ -140,6 +140,13 @@ fn timestamp_device_on_fresh_channel() -> (SharedChannel, WebGpuDevice) {
     (channel, device)
 }
 
+/// Whether `message` is the refusal of a reply buffer that answered `sequence`,
+/// which nothing was waiting on — the decode error named, sequence and all.
+fn names_the_refused_sequence(message: &str, sequence: u64) -> bool {
+    message.contains("reply buffer was refused")
+        && message.contains(&crate::DecodeError::UnexpectedSequence { sequence }.to_string())
+}
+
 // ── (a) instance open ──────────────────────────────────────────────────────
 
 #[test]
@@ -203,6 +210,26 @@ fn a_refused_canvas_query_opens_the_instance_and_fails_the_canvas_call() {
         instance.surface_caps(offscreen, AdapterId(0)).is_ok(),
         "a ring of GPUTextures is not described by the canvas answer",
     );
+}
+
+/// **A refused reply buffer ends the open rather than hanging it.** A buffer
+/// naming a sequence nothing asked is refused whole, the real adapter answer
+/// with it, so a future that went on polling `Pending` would wait for ever on
+/// an answer that already came and went.
+#[test]
+fn a_refused_reply_buffer_fails_the_open_instead_of_hanging_it() {
+    let mut open = WebGpuInstanceOpen::start();
+    let channel = open.channel();
+    // Sequences 0 and 1 are the open's two questions; 7 is nobody's.
+    feed(&channel, |w| {
+        w.adapter(0, &granted_adapter());
+        w.surface_caps(7, &browser_canvas_caps());
+    });
+    let Poll::Ready(Err(HalError::Backend(reason))) = Pin::new(&mut open).poll(&mut noop_context())
+    else {
+        panic!("a refused reply buffer must settle the open future to an Err");
+    };
+    assert!(names_the_refused_sequence(&reason, 7), "{reason}");
 }
 
 // ── (b) surface caps ───────────────────────────────────────────────────────
@@ -483,6 +510,27 @@ fn a_device_request_polls_ready_on_a_device_reply() {
         matches!(pending.poll(), Err(HalError::InvalidDescriptor(_))),
         "a poll after completion is refused"
     );
+}
+
+/// The device request's poll is the open future's shape, and a refused buffer
+/// is its `Err` for the open future's reason.
+#[test]
+fn a_refused_reply_buffer_fails_the_device_request_instead_of_hanging_it() {
+    let instance = opened_instance();
+    let channel = instance.channel();
+    let desc = DeviceDesc::for_adapter(AdapterId(0));
+    let mut pending = instance.open_device(&desc).expect("the request encodes");
+    let sequence = pending.sequence().expect("a fresh request waits");
+
+    let stray = sequence + 5;
+    feed(&channel, |w| {
+        w.device(sequence, &device_caps());
+        w.device(stray, &device_caps());
+    });
+    let Err(HalError::Backend(reason)) = pending.poll() else {
+        panic!("a refused reply buffer must fail the device request");
+    };
+    assert!(names_the_refused_sequence(&reason, stray), "{reason}");
 }
 
 #[test]
@@ -1959,6 +2007,69 @@ fn take_error_asks_again_after_a_reply_of_the_wrong_shape() {
         w.device_errors(1, &["a real message".to_string()]);
     });
     assert_eq!(device.take_error().as_deref(), Some("a real message"));
+}
+
+/// **The device's drain reports a refused buffer through `take_error`**, which
+/// is the call `crcbl::engine`'s `GpuContext::acquire` makes every frame. The
+/// ask's own answer was in the refused buffer, so what arrives is the refusal
+/// and not the message the replayer sent.
+#[test]
+fn take_error_reports_a_refused_reply_buffer() {
+    let (channel, device) = device_on_fresh_channel();
+    assert_eq!(
+        device.take_error(),
+        None,
+        "the first call asks, as sequence 0"
+    );
+
+    feed(&channel, |w| {
+        w.device_errors(0, &["lost with the buffer".to_string()]);
+        w.no_adapter(9, "nobody asked for this");
+    });
+    let reported = device
+        .take_error()
+        .expect("a refused reply buffer is an error the caller hears about");
+    assert!(names_the_refused_sequence(&reported, 9), "{reported}");
+}
+
+/// A readback poll drains through the same pump, so a buffer refused there
+/// reaches `take_error` too — `poll_readback` answers for one readback and has
+/// nowhere of its own to put a refusal that may have been any waiter's.
+#[test]
+fn a_reply_buffer_refused_under_a_readback_poll_reaches_take_error() {
+    let (channel, device) = device_on_fresh_channel();
+    // `a_readback_polls_ready_on_a_readback_reply`'s set-up: CreateBuffer is
+    // sequence 0, request_readback 1 (not awaited), the poll 2.
+    let source = device
+        .create_buffer(&buffer_desc())
+        .expect("a source buffer");
+    let desc = ReadbackDesc {
+        label: None,
+        buffer: source,
+        offset: 0,
+        size: 4,
+        after: None,
+    };
+    let readback = device.request_readback(&desc).expect("a readback handle");
+    let mut out = [0u8; 4];
+    assert_eq!(
+        device.poll_readback(readback, &mut out).expect("poll"),
+        ReadbackState::Pending,
+    );
+
+    feed(&channel, |w| {
+        w.readback_ready(2, readback, &[1, 2, 3, 4]);
+        w.readback_ready(6, readback, &[5, 6, 7, 8]);
+    });
+    assert_eq!(
+        device.poll_readback(readback, &mut out).expect("poll"),
+        ReadbackState::Pending,
+        "the bytes went with the refused buffer",
+    );
+    let reported = device
+        .take_error()
+        .expect("the refusal the readback poll drained is queued for take_error");
+    assert!(names_the_refused_sequence(&reported, 6), "{reported}");
 }
 
 // ── (f) an unwired op fails loudly at finish ───────────────────────────────

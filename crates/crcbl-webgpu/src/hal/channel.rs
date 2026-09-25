@@ -4,6 +4,7 @@
 
 use crcbl_core::Handle;
 
+use crate::DecodeError;
 use crate::web::StreamChannel;
 
 // ── SharedChannel ──────────────────────────────────────────────────────────
@@ -125,6 +126,19 @@ impl SharedChannel {
             true
         }
     }
+}
+
+/// What a caller is told when
+/// [`drain_replies`](StreamChannel::drain_replies) refused a reply buffer.
+///
+/// **Reported rather than dropped, because it is never transient.** The two
+/// halves of the reply format are hand-written, so a buffer that will not decode
+/// — or answers a sequence nobody asked — is a bug in one of them, and the
+/// refusal takes the buffer's real answers with it: a probe waiting on one of
+/// those would otherwise wait for ever with nothing said. Every drain in this
+/// module words it through here so every one says the same thing.
+pub(super) fn refused_replies(error: &DecodeError) -> String {
+    format!("the WebGPU reply buffer was refused, and every answer in it with it: {error}")
 }
 
 // ── HandlePool ─────────────────────────────────────────────────────────────

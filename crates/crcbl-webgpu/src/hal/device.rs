@@ -53,7 +53,7 @@ use crcbl_hal::{
 use crate::device::DeviceProbe;
 use crate::reply::Reply;
 
-use super::channel::{HandlePool, SharedChannel};
+use super::channel::{HandlePool, SharedChannel, refused_replies};
 use super::encoder::{NO_COUNT_BUFFER_DRAW, NO_MESH_STAGE, WebGpuCommandEncoder};
 
 // ── WebGpuPendingDevice ────────────────────────────────────────────────────
@@ -104,8 +104,14 @@ impl PendingDevice for WebGpuPendingDevice {
                 "this WebGPU device request already produced its device".to_string(),
             ));
         }
-        if let Some(Ok(replies)) = self.channel.with(crate::web::StreamChannel::drain_replies) {
-            self.probe.absorb(&replies);
+        // A refused buffer is the open future's arm: the device's answer may
+        // have been in it, and a request left `Pending` would wait for ever.
+        match self.channel.with(crate::web::StreamChannel::drain_replies) {
+            Some(Ok(replies)) => {
+                self.probe.absorb(&replies);
+            }
+            Some(Err(error)) => return Err(HalError::Backend(refused_replies(&error))),
+            None => {}
         }
         match &self.probe {
             DeviceProbe::Opened { caps } => {
@@ -202,7 +208,11 @@ struct ErrorQueue {
     ///
     /// Bounded by [`tag::MAX_DEVICE_ERRORS`](crate::tag::MAX_DEVICE_ERRORS)
     /// without a check of its own: a reply carries at most that many, and
-    /// another is only asked for once this is empty.
+    /// another is only asked for once this is empty. The one other thing
+    /// queued here is a refused reply buffer, one entry per buffer; the
+    /// channel commits at most one buffer between drains, and every
+    /// `take_error` hands one entry out, so a caller asking once a frame keeps
+    /// pace with them.
     arrived: VecDeque<String>,
     /// Sequence of the ask whose answer has not arrived, or `None` when none is
     /// out.
@@ -587,17 +597,35 @@ impl WebGpuDevice {
     /// **Only one place may drain per frame**, or a reply one tracker needed is
     /// taken by another and its command waits for ever — so every poll-shaped
     /// method comes through here, and a second call in the same frame drains an
-    /// empty buffer and changes nothing. A decode error or a borrowed inbox is
-    /// left for the next frame; nothing here is the place to report one.
+    /// empty buffer and changes nothing. A borrowed inbox is left for the next
+    /// frame.
     ///
     /// **Every waiter is offered every reply**, for the same reason: the buffer
     /// is drained once, so a reply this frame carried for the error queue is
     /// gone by the time [`take_error`](Device::take_error) next runs unless it is
     /// dispatched here. Each waiter picks out the sequence it is waiting on and
     /// ignores the rest.
+    ///
+    /// **A refused buffer goes on the error queue**, because it belongs to no
+    /// one caller: the answers that went with it may have been any waiter's,
+    /// and whichever poll-shaped method drained it answers for its own. Queued,
+    /// it is what the next [`take_error`](Device::take_error) hands out — and
+    /// `crcbl::engine`'s `GpuContext::acquire` asks that every frame and stops
+    /// recording on an answer. The waiters whose answers it carried are not
+    /// re-asked: a refusal is a bug in one half of the format, not a condition
+    /// to recover from.
     fn pump(&self) {
-        let Some(Ok(replies)) = self.channel.with(crate::web::StreamChannel::drain_replies) else {
-            return;
+        let replies = match self.channel.with(crate::web::StreamChannel::drain_replies) {
+            Some(Ok(replies)) => replies,
+            Some(Err(error)) => {
+                self.errors
+                    .lock()
+                    .expect("the device error queue was poisoned")
+                    .arrived
+                    .push_back(refused_replies(&error));
+                return;
+            }
+            None => return,
         };
         if replies.is_empty() {
             return;

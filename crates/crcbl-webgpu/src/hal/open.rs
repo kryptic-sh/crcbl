@@ -30,16 +30,16 @@ use crcbl_hal::HalError;
 
 use crate::instance::{AdapterProbe, SurfaceCapsProbe};
 
-use super::channel::{HandlePool, SharedChannel};
+use super::channel::{HandlePool, SharedChannel, refused_replies};
 use super::instance::WebGpuInstance;
 
 /// The instance-open future.
 ///
 /// Resolves to a [`WebGpuInstance`] once the browser grants an adapter and says
-/// what a canvas accepts, or to a [`HalError`] when it grants no adapter. A
-/// drain per poll, dispatched into both probes, exactly as the browser gate
-/// polls its own: the engine's `PendingInstance` re-polls it each frame, which
-/// is the executor this future is written for.
+/// what a canvas accepts, or to a [`HalError`] when it grants no adapter or a
+/// reply buffer is refused. A drain per poll, dispatched into both probes,
+/// exactly as the browser gate polls its own: the engine's `PendingInstance`
+/// re-polls it each frame, which is the executor this future is written for.
 #[derive(Debug)]
 pub struct WebGpuInstanceOpen {
     channel: SharedChannel,
@@ -95,10 +95,18 @@ impl Future for WebGpuInstanceOpen {
         // One drain per poll, dispatched into both probes — the buffer holds
         // whichever answers the browser had ready, in either order and not
         // necessarily together. A frame with no answer for a probe's sequence
-        // leaves that probe waiting, which is `Pending`.
-        if let Some(Ok(replies)) = this.channel.with(crate::web::StreamChannel::drain_replies) {
-            this.probe.absorb(&replies);
-            this.canvas.absorb(&replies);
+        // leaves that probe waiting, which is `Pending`. A refused buffer ends
+        // the open: the answers it carried are gone, so waiting would be for
+        // ever.
+        match this.channel.with(crate::web::StreamChannel::drain_replies) {
+            Some(Ok(replies)) => {
+                this.probe.absorb(&replies);
+                this.canvas.absorb(&replies);
+            }
+            Some(Err(error)) => {
+                return Poll::Ready(Err(HalError::Backend(refused_replies(&error))));
+            }
+            None => {}
         }
         // A refused canvas query is *not* an arm here: `surface_caps` has an
         // `Err` of its own and the offscreen surfaces do not depend on the

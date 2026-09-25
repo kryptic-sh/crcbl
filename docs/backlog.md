@@ -14884,24 +14884,6 @@ go) and read at the end. Not attempted. Verified by reading
 the teardown frame carries exactly one `TakeError` whose reply the browser could
 not deliver.
 
-### A refused reply buffer is swallowed rather than reported
-
-`StreamChannel::drain_replies` returns `Result<_, DecodeError>` and every caller
-throws the `Err` away: `crates/crcbl-webgpu/src/hal/open.rs`'s
-`WebGpuInstanceOpen::poll` matches `if let Some(Ok(replies))`, and
-`crates/crcbl-webgpu/src/hal/device.rs` does the same in `pump` and in the
-readback poll. A `DecodeError::UnexpectedSequence` — which refuses the _whole_
-buffer, real answers included — therefore reaches nobody, and the probe waiting
-on one of those answers waits for ever.
-
-That is what made the stale-reply bug fixed alongside this entry cost 600 frames
-and print nothing: the failure was already detected, in the right place, with
-the sequence in hand, and then dropped on the floor. A decode error here is
-never transient — the two halves of the format are hand-written, so it is a bug
-in one of them — so the open future should resolve `Err` on it and the device
-pump should route it to `take_error`'s queue. Not done here: it changes what
-three poll paths return, and this task was the hang rather than the diagnosis.
-
 ### One present-path hazard is ours and one is the layer's
 
 `CRCBL_VK_SYNC_VALIDATION` is set by the `vk e2e (lavapipe)` job and by nothing

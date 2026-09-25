@@ -2730,6 +2730,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`crcbl-webgpu` reports a refused reply buffer instead of waiting on it for
+  ever.** `StreamChannel::drain_replies` refuses a whole buffer when it will not
+  decode or answers a sequence nothing asked
+  (`DecodeError::UnexpectedSequence`), and every caller dropped that `Err`, so
+  the answers the buffer carried were lost silently and whatever waited on them
+  hung. `WebGpuInstanceOpen` and `WebGpuPendingDevice::poll` now fail with
+  `HalError::Backend` naming the decode error, and `WebGpuDevice`'s drain —
+  under `take_error`, `poll_readback` and `query_results` — queues it for the
+  next `take_error`, which `GpuContext::acquire` asks every frame and stops
+  recording on.
 - **`GpuContext` now honours `CRCBL_ADAPTER`.** `GpuContext::open`,
   `open_offscreen` and `request_open` walked every enumerated adapter and took
   the first that could present, whatever the variable said, so a windowed or
