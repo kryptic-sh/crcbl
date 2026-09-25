@@ -159,6 +159,15 @@ not shrink worker stacks from isolated execution or write-residue results.
 
 Cold-cache native readback investigation remains open:
 
+**It is repeating (2026-09-25).** The same two grass-shell tests timed out the
+same way in the dx12 software-adapter job on main's `355c9460` (run 36125308321;
+the failed-job rerun is the one EW waits on) and on the `deps/slang-2026.18`
+branch (run 36125489672), whose DXIL is unchanged from main's. So it is no
+longer one cold-cache run in a hundred. The next step is the measurement below,
+not a longer deadline: have the timeout report the requested and completed fence
+values, so the log says whether the GPU never finished the frame or the host
+never saw it finish.
+
 The HMAC production branch's initial full CI run
 [35351870875](https://github.com/kryptic-sh/crcbl/actions/runs/35351870875) at
 `4055c703ea6072fddd77b27cf7da9269a5d49221` failed the WARP render step.
