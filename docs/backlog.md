@@ -19609,30 +19609,13 @@ same heading. What is not fixed:
 the six interpreted crates that runs for seconds natively can push this job past
 its timeout, and the only thing that would say so is the weekly run itself.
 
-**What is still open is the other five crates**, which stay weekly for the
-reason `cron.yml` gives: interpreting the full list is minutes per PR. So the
-failure mode that produced this entry is unchanged for them — the job can go red
-and stay red until somebody types `gh workflow run cron.yml`. The options, none
-taken:
-
-- **Open an issue on failure.** A `if: failure()` step running `gh issue create`
-  turns a silent red into something with a notification behind it. Cheap, and it
-  needs a decision about issue noise and about a token with `issues: write`.
-  **Decided 2026-09-25: this one** — a weekly job opens at most one issue a
-  week, and a silent red went unnoticed twice. The job gets
-  `permissions: issues: write` for `GITHUB_TOKEN`; no new secret. Not built.
-- **Move the whole census per-PR.** Measured at about three and a half minutes
-  of interpretation on top of a cold compile, so it is not obviously too
-  expensive any more — and the crcbl-jobs job that did move takes **1.4 min end
-  to end on a cold cache**, which is the honest scale to reason from —
-  `crcbl-core` 81 s, `crcbl-store` 58 s, `crcbl-ui` 17 s, `crcbl-ecs` 6 s,
-  `crcbl-hal` 2 s, from `cron.yml`'s own note. Against: those five have no
-  concurrent unsafe, so the per-commit value really is concentrated where it has
-  already been moved.
-- **Run the cron nightly instead of weekly.** Shortens the blind window without
-  answering the question, since nobody watches a nightly job either.
-- **Accept it** and treat "trigger it deliberately after anything lands near it"
-  as the rule, which is what the file says today and what did not happen twice.
+**The other five crates stay weekly**, for the reason `cron.yml` gives:
+interpreting the full list is minutes per PR. What changed on 2026-09-25 is that
+a red scheduled run is no longer silent: `cron.yml`'s `report` job opens an
+issue titled "Cron: a weekly check failed", or comments on the open one, so a
+failure reaches a notification. Chosen over moving the census per-PR, running it
+nightly, or accepting it. Not yet seen to fire: it needs a scheduled run that
+fails.
 
 ## What the scaffold's gate does not cover
 

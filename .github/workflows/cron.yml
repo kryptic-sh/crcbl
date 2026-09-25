@@ -176,3 +176,35 @@ jobs:
         run: >-
           cargo miri test --tests -p crcbl-core -p crcbl-hal -p crcbl-ecs -p
           crcbl-store -p crcbl-ui -p crcbl-jobs
+
+  # A scheduled run nobody is watching went red and stayed red twice before
+  # anyone typed `gh workflow run cron.yml`, so a failure here opens an issue,
+  # which is the notification a weekly job otherwise lacks. One issue at a
+  # time: a later failure comments on the open one. Not for a run dispatched by
+  # hand, whose author is already watching it.
+  report:
+    name: open an issue when a weekly check fails
+    needs: [deny, miri]
+    if: failure() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL:
+            ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{
+            github.run_id }}
+        run: |
+          title="Cron: a weekly check failed"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open \
+            --search "\"$title\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$open" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" \
+              --body "Failed again: $RUN_URL"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The scheduled cron run failed: $RUN_URL. Its jobs are cargo-deny against a fresh advisory database and miri over the crates without FFI; the failing job's log says which."
+          fi
