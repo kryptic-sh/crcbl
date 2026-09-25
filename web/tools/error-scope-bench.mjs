@@ -67,7 +67,9 @@ import {
   launch,
   openPage,
   pause,
+  say,
   stopEverything,
+  warn,
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
@@ -78,7 +80,7 @@ const RUN_TIMEOUT_MS = 300_000;
 const SWEEP_TIMEOUT_MS = 300_000;
 
 function fail(message) {
-  console.error(`error-scope-bench: ${message}`);
+  warn(`error-scope-bench: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -462,10 +464,10 @@ const binary = findBrowser(fail);
 let browser = null;
 
 try {
-  console.log(`error-scope-bench: browser ${binary}`);
-  console.log(`error-scope-bench: serving ${SITE} at ${server.origin}`);
-  console.log(`error-scope-bench: adapter ${ADAPTER}`);
-  console.log(
+  say(`error-scope-bench: browser ${binary}`);
+  say(`error-scope-bench: serving ${SITE} at ${server.origin}`);
+  say(`error-scope-bench: adapter ${ADAPTER}`);
+  say(
     `error-scope-bench: ${RUNS} run(s) per arm, ${FRAMES} frame(s) per sweep point`
   );
 
@@ -506,7 +508,7 @@ try {
         await pause(100);
       }
       if (!done) {
-        console.error(pageErrors.slice(0, 3).join('\n'));
+        warn(pageErrors.slice(0, 3).join('\n'));
         fail(`arm "${arm}" did not finish within ${RUN_TIMEOUT_MS} ms`);
       }
       // The pops of the last flush are still in flight when the harness stops,
@@ -555,8 +557,8 @@ try {
   // The report
   // -------------------------------------------------------------------------
 
-  console.log('\nerror-scope-bench: the real stream (apps/render-harness)');
-  console.log(
+  say('\nerror-scope-bench: the real stream (apps/render-harness)');
+  say(
     '  arm      runs  scenes  cmds/run  cmds/frame  replay ms/run              run ms                        pops/run  settle ms'
   );
   for (const arm of ARMS) {
@@ -573,7 +575,7 @@ try {
     // without ever showing up there — so the wall time of driving all eleven
     // scenes is reported beside it.
     const run = spread(runs.map((r) => r.finishedAt - r.startedAt));
-    console.log(
+    say(
       `  ${arm.padEnd(8)} ${String(runs.length).padStart(4)}  ` +
         `${String(runs[0]?.rendered ?? 0).padStart(2)}/${String(runs[0]?.scenes ?? 0).padEnd(3)} ` +
         `${String(commands).padStart(8)}  ` +
@@ -590,46 +592,46 @@ try {
     const runs = armRuns[arm];
     const unresolved = runs.filter((r) => r.pops !== r.popsResolved).length;
     if (unresolved > 0) {
-      console.log(
+      say(
         `  note: ${unresolved}/${runs.length} "${arm}" run(s) still had pops in flight when read`
       );
     }
     const captured = runs.reduce((n, r) => n + r.captured, 0);
     const errors = runs.reduce((n, r) => n + r.deviceErrors, 0);
-    console.log(
+    say(
       `  ${arm.padEnd(8)} captured ${captured} scope error(s); the harness's own log saw ${errors}`
     );
   }
 
-  console.log(
+  say(
     '\nerror-scope-bench: the sweep — one submit per frame, plus N scope pairs'
   );
   if (sweep.provocation) {
     // First, and before any timing is read: a browser that had quietly ignored
     // the scope calls would produce the same table as one that honoured them,
     // and this is the line that tells the two apart.
-    console.log(
+    say(
       `  a deliberately invalid create inside a scope popped: ${sweep.provocation}`
     );
   }
   if (sweep.fatal) {
-    console.log(`  the sweep could not run: ${sweep.fatal}`);
+    say(`  the sweep could not run: ${sweep.fatal}`);
   } else {
     // HOW TO READ `pairs` AGAINST A COMMAND COUNT. A pair here is one
     // `pushErrorScope`/`popErrorScope` on the `'validation'` filter. Covering
     // what a flush covers takes one pair per `GPUErrorFilter`, so a per-command
     // arm over a frame of C commands is C times as many pairs as that filter
     // list is long — read the row for that number, not for C.
-    console.log(
+    say(
       '  pairs   sync ms/frame (min/med/p95/max)      settle ms/frame (min/med/p95/max)'
     );
-    console.log(
+    say(
       '  (a pair is one validation scope; per-command coverage needs one per GPUErrorFilter)'
     );
     for (const p of sweep.points) {
       const sync = spread(p.sync);
       const settle = spread(p.settle);
-      console.log(
+      say(
         `  ${String(p.pairs).padStart(5)}   ` +
           `${ms(sync.min)}/${ms(sync.median)}/${ms(sync.p95)}/${ms(sync.max)}`.padEnd(
             36
@@ -639,7 +641,7 @@ try {
     }
   }
 } catch (error) {
-  console.error(`error-scope-bench: ${error.message}`);
+  warn(`error-scope-bench: ${error.message}`);
   browser?.stop();
   await server.close();
   process.exit(2);

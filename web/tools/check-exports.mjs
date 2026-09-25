@@ -58,6 +58,7 @@ import { readFile, readdir, stat } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { say, warn } from './browser-launch.mjs';
 import { importedMemoryLimits } from '../engine/wasm-memory.js';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -136,8 +137,8 @@ async function collect(roots, keep, pattern) {
 function list(label, names) {
   const sorted = [...names].sort();
   if (sorted.length === 0) return;
-  console.log(`\n${label} (${sorted.length}):`);
-  for (const name of sorted) console.log(`  ${name}`);
+  say(`\n${label} (${sorted.length}):`);
+  for (const name of sorted) say(`  ${name}`);
 }
 
 /**
@@ -328,7 +329,7 @@ async function main() {
   const wasmPath = positional.find((a) => a !== args[sampleFlag + 1]);
   const sample = sampleFlag >= 0 ? args[sampleFlag + 1] : undefined;
   if (!wasmPath || !sample) {
-    console.error(
+    warn(
       'usage: node web/tools/check-exports.mjs <path-to.wasm> --sample <name> [--quiet] [--threads]'
     );
     process.exit(2);
@@ -336,8 +337,8 @@ async function main() {
   try {
     await stat(wasmPath);
   } catch {
-    console.error(`check-exports: no such artifact: ${wasmPath}`);
-    console.error('build it first: web/build.sh');
+    warn(`check-exports: no such artifact: ${wasmPath}`);
+    warn('build it first: web/build.sh');
     process.exit(2);
   }
 
@@ -432,16 +433,16 @@ async function main() {
   }
 
   if (!quiet) {
-    console.log(`artifact:        ${wasmPath}  (sample: ${sample})`);
-    console.log(
+    say(`artifact:        ${wasmPath}  (sample: ${sample})`);
+    say(
       `exports:         ${exported.size} total, ${[...exported].filter((n) => n.startsWith('__crcbl_')).length} __crcbl_*`
     );
-    console.log(
+    say(
       `imports:         ${imports.length} from ${[...new Set(imports.map((i) => i.module))].join(', ')}`
     );
-    for (const note of notes) console.log(note);
-    console.log(`declared in Rust: ${declared.size}`);
-    console.log(`called by the shim: ${used.size}`);
+    for (const note of notes) say(note);
+    say(`declared in Rust: ${declared.size}`);
+    say(`called by the shim: ${used.size}`);
     list(
       'exported but never called by the shim',
       [...declared.keys()].filter((n) => !used.has(n))
@@ -449,11 +450,11 @@ async function main() {
   }
 
   if (failures.length > 0) {
-    console.error('\ncheck-exports: FAILED');
-    for (const failure of failures) console.error(`  - ${failure}`);
+    warn('\ncheck-exports: FAILED');
+    for (const failure of failures) warn(`  - ${failure}`);
     process.exit(1);
   }
-  console.log('\ncheck-exports: OK');
+  say('\ncheck-exports: OK');
 }
 
 await main();

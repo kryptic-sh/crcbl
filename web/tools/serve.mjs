@@ -56,6 +56,8 @@ import { createServer } from 'node:http';
 import { join, normalize, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { say, warn } from './browser-launch.mjs';
+
 /**
  * The pair that buys `SharedArrayBuffer`. Removing either one makes
  * `crossOriginIsolated` false, which the browser e2e asserts against.
@@ -198,7 +200,7 @@ if (
   const argv = process.argv.slice(2);
   const root = argv.find((a) => !a.startsWith('--'));
   if (!root) {
-    console.error('usage: serve.mjs <root> [--port 8000] [--no-isolation]');
+    warn('usage: serve.mjs <root> [--port 8000] [--no-isolation]');
     process.exit(2);
   }
   const flag = argv.indexOf('--port');
@@ -209,8 +211,8 @@ if (
   // thing this server exists to provide would be silently absent there while
   // the page still loaded.
   const site = await serve(root, { port, host: '127.0.0.1', isolated });
-  console.log(`serving ${resolve(root)} at ${site.origin}/`);
-  console.log(
+  say(`serving ${resolve(root)} at ${site.origin}/`);
+  say(
     site.isolated
       ? `cross-origin isolated: ${Object.entries(ISOLATION_HEADERS)
           .map(([name, value]) => `${name}: ${value}`)

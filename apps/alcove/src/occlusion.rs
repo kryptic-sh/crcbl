@@ -556,6 +556,32 @@ mod tests {
         assert_eq!(seam(), None, "a second press takes the comparison away");
     }
 
+    /// **The centre `web/tools/browser-e2e.mjs` holds the slider against is
+    /// where the button puts the seam**, spelled as the heartbeat prints it.
+    ///
+    /// The gate asks that the slider moves the seam *off* `knobs.centre`. A
+    /// [`SEAM_CENTRE`] moved here and not there makes that literal match no
+    /// reading at all, the inequality holds on every line, and a slider wired
+    /// to nothing passes. Read through [`toggle_seam`] and [`Knobs::seam_row`]
+    /// rather than formatted here, so a changed row spelling reddens this as
+    /// surely as a changed constant.
+    #[test]
+    fn the_browser_gates_seam_centre_is_where_the_button_puts_it() {
+        let _held = held();
+        toggle_seam();
+        let row = Knobs::read().seam_row();
+        let printed = row
+            .split_whitespace()
+            .next()
+            .expect("a raised seam's row is not empty");
+        assert_eq!(
+            crcbl_sample_test::browser_gate_demo_expectation("alcove", &["knobs", "centre"]),
+            format!("'{printed}'"),
+            "the browser gate's alcove seam centre is not the heartbeat's reading of \
+             toggle_seam"
+        );
+    }
+
     /// **The panel says which technique each side of the seam is running**, and
     /// says there is no far side when there is no seam.
     ///

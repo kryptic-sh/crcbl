@@ -56,6 +56,7 @@
 
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { inspect } from 'node:util';
 
 import {
   evaluate,
@@ -63,7 +64,9 @@ import {
   launch,
   openPage,
   pause,
+  say,
   stopEverything,
+  warn,
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
@@ -82,7 +85,7 @@ const STALL_TIMEOUT_MS = 120_000;
 // It is called here as well as from those hooks so that this path says at the
 // point of the exit what it leaves behind: nothing.
 function fail(message) {
-  console.error(`render-harness-e2e: ${message}`);
+  warn(`render-harness-e2e: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -130,10 +133,10 @@ function pad(text, width) {
 
 function printTable(scenes) {
   const nameWidth = Math.max(5, ...scenes.map((s) => s.scene.length));
-  console.log(
+  say(
     `\n${pad('scene', nameWidth)}  rendered  state     frame              detail`
   );
-  console.log('-'.repeat(nameWidth + 2 + 8 + 2 + 8 + 2 + 18 + 2 + 40));
+  say('-'.repeat(nameWidth + 2 + 8 + 2 + 8 + 2 + 18 + 2 + 40));
   for (const scene of scenes) {
     // The fatal comes first: a scene that aborted the module has no state worth
     // reading, and it is the only line that says why.
@@ -155,7 +158,7 @@ function printTable(scenes) {
     const frame = scene.rendered
       ? `${scene.width}x${scene.height} ${scene.order}`
       : '-';
-    console.log(
+    say(
       `${pad(scene.scene, nameWidth)}  ${pad(scene.rendered ? 'yes' : 'no', 8)}  ${pad(
         scene.stateName,
         8
@@ -248,7 +251,7 @@ async function main() {
   // comparison downstream means.** A run that quietly changed adapter would
   // change the meaning of every scene's verdict without saying so, which is the
   // whole reason there is no `auto` here.
-  console.log(`render-harness-e2e: adapter ${ADAPTER}`);
+  say(`render-harness-e2e: adapter ${ADAPTER}`);
 
   const server = await serve(site, { host: '127.0.0.1' });
   const browser = await launch({
@@ -304,7 +307,7 @@ async function main() {
     const result = await evaluate(page, 'window.harnessResult');
     if (!result || !result.started) {
       const reason = result?.fatal ?? 'the harness never started';
-      console.error(browser.stderr.slice(-20).join('\n'));
+      warn(browser.stderr.slice(-20).join('\n'));
       fail(`the harness could not run: ${reason}`);
     }
 
@@ -338,7 +341,7 @@ async function main() {
     printTable(scenes);
 
     const rendered = scenes.filter((s) => s.rendered).length;
-    console.log(
+    say(
       `\nrender-harness-e2e: ${rendered}/${scenes.length} scene(s) rendered and saved to ${readbackDir}`
     );
 
@@ -348,11 +351,11 @@ async function main() {
     // like a silent nothing — the reason was reachable only by reading
     // `window.harnessResult` over the DevTools protocol by hand.
     if (result.fatal) {
-      console.error(`\nrender-harness-e2e: fatal: ${result.fatal}`);
+      warn(`\nrender-harness-e2e: fatal: ${result.fatal}`);
     }
 
     if (scenes.length === 0) {
-      console.error('render-harness-e2e: no scenes were driven');
+      warn('render-harness-e2e: no scenes were driven');
       process.exitCode = 1;
       return;
     }
@@ -363,15 +366,15 @@ async function main() {
     // a backend whose every draw was rejected.
     const refused = scenes.filter((s) => (s.deviceErrors ?? []).length > 0);
     if (refused.length > 0) {
-      console.error(
+      warn(
         `\nrender-harness-e2e: ${refused.length} scene(s) reported device errors:`
       );
       for (const scene of refused) {
         for (const error of scene.deviceErrors) {
-          console.error(`  ${scene.scene}: ${error}`);
+          warn(`  ${scene.scene}: ${error}`);
         }
         if (scene.deviceErrorsDropped > 0) {
-          console.error(
+          warn(
             `  ${scene.scene}: and ${scene.deviceErrorsDropped} further error(s), not recorded`
           );
         }
@@ -389,14 +392,14 @@ async function main() {
         scenes.find((s) => s.error)?.error ??
         scenes.find((s) => s.replayFailure)?.replayFailure ??
         'no error text';
-      console.error(
+      warn(
         `render-harness-e2e: ${scenes.length - rendered} scene(s) did not render. First crack: ${firstError}`
       );
       process.exitCode = 1;
       return;
     }
     if (refused.length === 0) {
-      console.log(
+      say(
         'render-harness-e2e: every scene rendered through the browser backend; ' +
           'compare-readback decides whether the pixels are right'
       );
@@ -435,7 +438,7 @@ main()
     // written. Whatever is holding it, the answer is not to wait: the work is
     // done, so say so and go.
     const watchdog = setTimeout(() => {
-      console.error(
+      warn(
         'render-harness-e2e: teardown finished but something is still holding ' +
           'the event loop open; exiting rather than hanging'
       );
@@ -444,6 +447,6 @@ main()
     watchdog.unref();
   })
   .catch((error) => {
-    console.error(error);
+    warn(inspect(error));
     process.exit(2);
   });

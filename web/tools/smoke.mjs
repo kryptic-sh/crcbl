@@ -31,6 +31,8 @@
 
 import { readFile } from 'node:fs/promises';
 
+import { say, warn } from './browser-launch.mjs';
+
 /** Mirrors `STATUS_*` in `apps/<sample>/src/web.rs`. */
 const STATUS_PREPARED = 1;
 const STATUS_BOOTING = 2;
@@ -46,9 +48,9 @@ const failures = [];
  * @param {string} what
  */
 function check(condition, what) {
-  if (condition) console.log(`  ok   ${what}`);
+  if (condition) say(`  ok   ${what}`);
   else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -98,9 +100,7 @@ async function main() {
   const sample = sampleFlag >= 0 ? args[sampleFlag + 1] : undefined;
   const wasmPath = args.find((a) => !a.startsWith('--') && a !== sample);
   if (!wasmPath || !sample) {
-    console.error(
-      'usage: node web/tools/smoke.mjs <path-to.wasm> --sample <name>'
-    );
+    warn('usage: node web/tools/smoke.mjs <path-to.wasm> --sample <name>');
     process.exit(2);
   }
   // The sample's export prefix. Every `${P}…` below is one symbol of the ABI
@@ -124,7 +124,7 @@ async function main() {
     }
   }
 
-  console.log(`smoke: ${wasmPath}  (sample: ${sample})`);
+  say(`smoke: ${wasmPath}  (sample: ${sample})`);
 
   // ---- before `prepare`, every storage export answers 0 ------------------
   check(ex[`${P}status`]() === 0, 'status is IDLE before prepare');
@@ -234,10 +234,10 @@ async function main() {
   check(ex[`${P}shutdown`]() === 1, 'shutdown tears down a booting loop');
 
   if (failures.length > 0) {
-    console.error(`\nsmoke: FAILED (${failures.length})`);
+    warn(`\nsmoke: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\nsmoke: OK');
+  say('\nsmoke: OK');
 }
 
 await main();

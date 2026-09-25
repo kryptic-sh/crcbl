@@ -116,6 +116,7 @@
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
+import { say, warn } from './browser-launch.mjs';
 import { DEVICE_TYPE, FORMAT, ReplyWriter } from '../engine/gpu-reply.js';
 import {
   HandleTable,
@@ -252,9 +253,9 @@ const failures = [];
  * @param {string} what
  */
 function check(condition, what) {
-  if (condition) console.log(`  ok   ${what}`);
+  if (condition) say(`  ok   ${what}`);
   else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -1942,11 +1943,11 @@ async function main() {
     commands = decodeStream(fixture);
   } catch (error) {
     check(false, `the fixture decodes at all (threw ${String(error)})`);
-    console.error(`\ngpu-replay: FAILED (${failures.length})`);
+    warn(`\ngpu-replay: FAILED (${failures.length})`);
     process.exit(1);
   }
 
-  console.log(
+  say(
     `gpu-replay: ${override ?? FIXTURE.pathname} (${commands.length} commands)`
   );
 
@@ -10894,10 +10895,10 @@ async function main() {
   }
 
   if (failures.length > 0) {
-    console.error(`\ngpu-replay: FAILED (${failures.length})`);
+    warn(`\ngpu-replay: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\ngpu-replay: OK');
+  say('\ngpu-replay: OK');
 }
 
 await main();

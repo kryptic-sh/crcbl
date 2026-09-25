@@ -56,6 +56,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { inspect } from 'node:util';
 
 import {
   evaluate,
@@ -63,7 +64,9 @@ import {
   launch,
   openPage,
   pause,
+  say,
   stopEverything,
+  warn,
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
@@ -104,7 +107,7 @@ function check(condition, what) {
 }
 
 function fail(message) {
-  console.error(`horde-threads-e2e: ${message}`);
+  warn(`horde-threads-e2e: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -219,7 +222,7 @@ async function main() {
 
     const search = [`prefill=${prefill}`, query].filter(Boolean).join('&');
     const url = `${server.origin}/demos/horde/?${search}`;
-    console.log(`horde-threads-e2e: ${url}`);
+    say(`horde-threads-e2e: ${url}`);
     await page.send('Page.navigate', { url });
 
     // One loop for the whole run: it stops as soon as a second thread has taken
@@ -242,18 +245,17 @@ async function main() {
     }
     if (snap === null) fail('the page was never evaluated');
 
-    console.log(`  status:      ${snap.status} — ${snap.statusText}`);
-    if (snap.detail) console.log(`  detail:      ${snap.detail}`);
-    console.log(
+    say(`  status:      ${snap.status} — ${snap.statusText}`);
+    if (snap.detail) say(`  detail:      ${snap.detail}`);
+    say(
       `  loader:      threaded=${snap.threadedArtifact}, ` +
         `announced=${snap.announced}, workers up=${snap.up}`
     );
-    console.log(
+    say(
       `  steering:    ${snap.simThreads} thread(s), pool of ${snap.simWorkers} worker(s)`
     );
-    for (const error of snap.workerErrors)
-      console.log(`  worker error: ${error}`);
-    for (const error of pageErrors) console.log(`  page error:  ${error}`);
+    for (const error of snap.workerErrors) say(`  worker error: ${error}`);
+    for (const error of pageErrors) say(`  page error:  ${error}`);
 
     check(snap.isolated, 'the document is cross-origin isolated');
     check(played, 'the demo booted a GPU device and started playing');
@@ -287,19 +289,15 @@ async function main() {
     check(pageErrors.length === 0, 'the page reported no uncaught exception');
 
     for (const { name, ok } of checks) {
-      console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}`);
+      say(`  ${ok ? 'ok  ' : 'FAIL'} ${name}`);
     }
     const passed = checks.filter((c) => c.ok).length;
-    console.log(
-      `\nhorde-threads-e2e: ${passed}/${checks.length} checks passed`
-    );
+    say(`\nhorde-threads-e2e: ${passed}/${checks.length} checks passed`);
 
     // The guard every harness here carries: a run that checked nothing must not
     // be able to report success.
     if (checks.length === 0) {
-      console.error(
-        'horde-threads-e2e: no checks ran — the gate is not gating'
-      );
+      warn('horde-threads-e2e: no checks ran — the gate is not gating');
       process.exitCode = 1;
       return;
     }
@@ -307,7 +305,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    console.log(
+    say(
       "horde-threads-e2e: horde's steering pass ran on a Web Worker in a real " +
         'browser'
     );
@@ -326,7 +324,7 @@ const EXIT_DEADLINE_MS = 60_000;
 main()
   .then(() => {
     const watchdog = setTimeout(() => {
-      console.error(
+      warn(
         'horde-threads-e2e: teardown finished but something is still holding ' +
           'the event loop open; exiting rather than hanging'
       );
@@ -335,6 +333,6 @@ main()
     watchdog.unref();
   })
   .catch((error) => {
-    console.error(error);
+    warn(inspect(error));
     process.exit(2);
   });

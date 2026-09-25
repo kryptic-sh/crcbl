@@ -38,6 +38,9 @@ crcbl = { workspace = true, features = ["scene"] }
 # reaches no shipped binary.
 [dev-dependencies]
 crcbl-golden = { workspace = true }
+# `browser_gate_demo_expectation`, which holds the browser gate's copy of the
+# seam's centre against this crate's own. A dev-dependency for the same rule.
+crcbl-sample-test = { workspace = true }
 
 [lints]
 workspace = true

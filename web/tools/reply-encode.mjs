@@ -44,6 +44,7 @@
 
 import { readFile } from 'node:fs/promises';
 
+import { say, warn } from './browser-launch.mjs';
 import {
   COMPOSITE_ALPHA,
   DEVICE_TYPE,
@@ -82,9 +83,9 @@ const failures = [];
  * @param {string} what
  */
 function check(condition, what) {
-  if (condition) console.log(`  ok   ${what}`);
+  if (condition) say(`  ok   ${what}`);
   else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -486,7 +487,7 @@ async function main() {
   const path = override === undefined ? FIXTURE : override;
   const committed = new Uint8Array(await readFile(path));
 
-  console.log(
+  say(
     `reply-encode: ${override ?? FIXTURE.pathname} (${committed.length} bytes)`
   );
 
@@ -880,10 +881,10 @@ async function main() {
   }
 
   if (failures.length > 0) {
-    console.error(`\nreply-encode: FAILED (${failures.length})`);
+    warn(`\nreply-encode: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\nreply-encode: OK');
+  say('\nreply-encode: OK');
 }
 
 await main();

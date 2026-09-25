@@ -2159,4 +2159,35 @@ mod tests {
         assert_eq!(facing.range, None);
         assert_eq!(facing.step, Some(0.01));
     }
+
+    /// **The two step heights `web/tools/browser-e2e.mjs` walks against are
+    /// this map's.**
+    ///
+    /// `walk.highStep` is the gate's *refusal* control: the highest the feet
+    /// ever get must stay under it. Raised there and not here, the bound stops
+    /// bounding, and "it gets onto the low step and no further" passes on a
+    /// character that climbed both. `it_gets_onto_the_low_step_and_no_further`
+    /// asserts the same pair against these constants and never reads the
+    /// driver, so it pins nothing there.
+    ///
+    /// Compared as numbers rather than as spellings: [`HIGH_STEP_TOP`] is a sum,
+    /// and its `f64` is not the decimal the driver writes.
+    #[test]
+    fn the_browser_gates_step_heights_are_this_maps() {
+        /// Far under anything the gate's own walk tolerance could tell apart,
+        /// and far over the rounding a sum of two decimals picks up.
+        const MIRROR_TOLERANCE_M: f64 = 1e-9;
+
+        for (field, metres) in [("lowStep", LOW_STEP_TOP), ("highStep", HIGH_STEP_TOP)] {
+            let written =
+                crcbl_sample_test::browser_gate_demo_expectation("puppet", &["walk", field]);
+            let parsed: f64 = written
+                .parse()
+                .unwrap_or_else(|_| panic!("the gate's walk.{field} is `{written}`, not a number"));
+            assert!(
+                (parsed - metres).abs() < MIRROR_TOLERANCE_M,
+                "the browser gate's puppet walk.{field} is {written} m and this map's is {metres} m"
+            );
+        }
+    }
 }

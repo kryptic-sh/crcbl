@@ -112,3 +112,54 @@ pub use menu::{
     CAMERA_ID, CameraMode, FREEZE_ID, FREEZE_KEY, HEATMAP_ID, LOD_VIEW_ID, Menus, QuarryAction,
     action_for, menus, pause_menu,
 };
+
+#[cfg(test)]
+mod tests {
+    use crcbl::console::{Kind, Value};
+    use crcbl::render::r_ssao_slices;
+
+    /// **The render variable `web/tools/browser-e2e.mjs` seeds into quarry's
+    /// `autoexec.cfg` is set to a value it does not already hold.**
+    ///
+    /// The gate's claim is that a line of the file *took*, and its evidence is
+    /// the line the console prints after the set. A value equal to the
+    /// variable's declared default prints that same line whether the set took
+    /// or not, and the check passes on a file that did nothing. A value outside
+    /// the declared range would be refused, which reddens the gate loudly rather
+    /// than hollowing it; this pins it anyway, so the failure names the variable
+    /// rather than a browser row.
+    #[test]
+    fn the_browser_gates_autoexec_moves_a_render_variable_off_its_default() {
+        let written = crcbl_sample_test::browser_gate_expectation("autoexec", "knob");
+        let (name, value) = written
+            .trim_matches('\'')
+            .split_once(" = ")
+            .unwrap_or_else(|| {
+                panic!("the gate's autoexec.knob is `{written}`, not `name = value`")
+            });
+        assert_eq!(
+            name,
+            r_ssao_slices.name(),
+            "the gate's autoexec knob names another variable"
+        );
+        let value: i64 = value
+            .parse()
+            .unwrap_or_else(|_| panic!("the gate's autoexec knob sets `{value}`, not a count"));
+
+        let Value::Int(default) = *r_ssao_slices.default() else {
+            unreachable!("`r_ssao_slices` is declared as an integer")
+        };
+        assert_ne!(
+            value, default,
+            "the gate's autoexec sets r_ssao_slices to its own default, so the line it reads back \
+             cannot tell a set that took from one that did not"
+        );
+        let Kind::Int { min, max } = r_ssao_slices.kind() else {
+            unreachable!("`r_ssao_slices` is declared as an integer")
+        };
+        assert!(
+            (min..=max).contains(&value),
+            "the gate's autoexec sets r_ssao_slices to {value}, outside {min} ..= {max}"
+        );
+    }
+}

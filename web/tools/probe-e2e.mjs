@@ -99,8 +99,10 @@ import {
   findBrowser,
   launch,
   openPage,
+  say,
   stopEverything,
   until as pollUntil,
+  warn,
 } from './browser-launch.mjs';
 import { runProbeGroups } from './probe-groups.mjs';
 import { serve } from './serve.mjs';
@@ -110,7 +112,7 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // `stopEverything` and the exit hooks that call it are in
 // `web/tools/browser-launch.mjs`, with the launch that registers each browser.
 function fail(message) {
-  console.error(`probe e2e: ${message}`);
+  warn(`probe e2e: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -257,14 +259,12 @@ const checks = [];
 
 function check(group, name, ok, detail = '') {
   checks.push({ group, name, ok: Boolean(ok), detail });
-  console.log(
-    `  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`
-  );
+  say(`  ${ok ? 'ok  ' : 'FAIL'} ${name}${detail ? ` — ${detail}` : ''}`);
   return Boolean(ok);
 }
 
 function group(name) {
-  console.log(`\nprobe e2e: ${name}`);
+  say(`\nprobe e2e: ${name}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -293,19 +293,19 @@ let browser = null;
 let exitCode = 1;
 
 try {
-  console.log(`probe e2e: browser ${binary}`);
-  console.log(`probe e2e: serving ${SITE} at ${site.origin}`);
+  say(`probe e2e: browser ${binary}`);
+  say(`probe e2e: serving ${SITE} at ${site.origin}`);
   // Named on its own line, and with what `auto` resolved to rather than the word
   // `auto`: on a red run from a platform nobody here has, which adapter the
   // browser was actually asked for is the first thing to know.
-  console.log(
+  say(
     `probe e2e: adapter mode "${MODE}"` +
       `${ADAPTER === 'auto' ? ` (auto on ${process.platform})` : ''}`
   );
   // Said before the run as well as after it. A reader who stops at the top of a
   // green log has to be able to see what this run's verdict does not cover.
   if (EXPECT_FAIL.length) {
-    console.log(
+    say(
       `probe e2e: --expect-fail ${EXPECT_FAIL.join(' ')} — those groups still run, ` +
         'and a pass from any of them fails this run as a stale list'
     );
@@ -317,7 +317,7 @@ try {
     profilePrefix: 'crcbl-probe-e2e-',
     fail,
   });
-  console.log(
+  say(
     `probe e2e: flags ${browser.flags.filter((f) => !f.startsWith('--user-data-dir')).join(' ')}`
   );
 
@@ -368,7 +368,7 @@ try {
             `${pageErrors.length ? ` — ${pageErrors[0]}` : ''}`
     );
   }
-  console.log(`probe e2e: ${url} is pumping, with no engine on it`);
+  say(`probe e2e: ${url} is pumping, with no engine on it`);
 
   await runProbeGroups({ page, evaluate, until, check, group, TIMEOUT_MS });
 
@@ -527,7 +527,7 @@ try {
   page.close();
   exitCode = 0;
 } catch (error) {
-  console.error(`\nprobe e2e: ${error.message}`);
+  warn(`\nprobe e2e: ${error.message}`);
   exitCode = 1;
 } finally {
   browser?.stop();
@@ -540,13 +540,12 @@ try {
 
 const failed = checks.filter((c) => !c.ok);
 
-console.log('');
+say('');
 if (checks.length === 0) {
   // The trap `docs/notes/process.md` names: a harness that checked nothing and
   // said so quietly is worse than no harness.
-  console.error('probe e2e: ZERO CHECKS RAN — the gate is not gating.');
-  if (browser?.stderr.length)
-    console.error(browser.stderr.slice(-40).join('\n'));
+  warn('probe e2e: ZERO CHECKS RAN — the gate is not gating.');
+  if (browser?.stderr.length) warn(browser.stderr.slice(-40).join('\n'));
   process.exit(1);
 }
 
@@ -554,8 +553,8 @@ if (checks.length === 0) {
 // that silently ran only some of them is the failure mode here, and a bare
 // "n/m checks passed" cannot show it: the letters can.
 const letters = [...new Set(checks.map((c) => c.group))];
-console.log(`probe e2e: groups ${letters.join(' ')}`);
-console.log(
+say(`probe e2e: groups ${letters.join(' ')}`);
+say(
   `probe e2e: ${checks.length - failed.length}/${checks.length} checks passed`
 );
 
@@ -577,23 +576,19 @@ if (EXPECT_FAIL.length) {
   // On a green run too, and check by check rather than only by letter: "the run
   // passed" and "these four claims were not made" have to be readable off the
   // same log, or the second one is not really said.
-  console.log(
-    `probe e2e: expected to fail on this platform: ${EXPECT_FAIL.join(' ')}`
-  );
+  say(`probe e2e: expected to fail on this platform: ${EXPECT_FAIL.join(' ')}`);
   for (const c of excused)
-    console.log(
-      `  excused ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`
-    );
+    say(`  excused ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
 }
 
 if (unexpected.length) {
-  console.error('\nprobe e2e: FAILED');
+  warn('\nprobe e2e: FAILED');
   for (const c of unexpected)
-    console.error(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
+    warn(`  ${c.group}: ${c.name}${c.detail ? ` — ${c.detail}` : ''}`);
   if (deviceErrors.length) {
-    console.error('\nprobe e2e: WebGPU device errors, in full:');
+    warn('\nprobe e2e: WebGPU device errors, in full:');
     for (const message of deviceErrors.slice(0, 4)) {
-      console.error(
+      warn(
         message
           .split('\n')
           .map((line) => `    ${line}`)
@@ -601,12 +596,11 @@ if (unexpected.length) {
       );
     }
     if (deviceErrors.length > 4)
-      console.error(`    … and ${deviceErrors.length - 4} more`);
+      warn(`    … and ${deviceErrors.length - 4} more`);
   }
   if (consoleLines.length) {
-    console.error('\nprobe e2e: the last of the page log:');
-    for (const line of consoleLines.slice(-CONSOLE_TAIL))
-      console.error(`    ${line}`);
+    warn('\nprobe e2e: the last of the page log:');
+    for (const line of consoleLines.slice(-CONSOLE_TAIL)) warn(`    ${line}`);
   }
 }
 
@@ -614,16 +608,14 @@ if (unexpected.length) {
 // has both says both: a stale entry and a regression arriving together is
 // exactly the case where seeing only one sends the reader to the wrong half.
 if (stale.length || absent.length) {
-  console.error(
-    '\nprobe e2e: THE EXPECTED-FAIL LIST NO LONGER DESCRIBES THIS RUN'
-  );
+  warn('\nprobe e2e: THE EXPECTED-FAIL LIST NO LONGER DESCRIBES THIS RUN');
   for (const letter of stale)
-    console.error(
+    warn(
       `  ${letter}: every check in it passed, and --expect-fail names it. ` +
         'Drop it from the list — this platform serves that group now.'
     );
   for (const letter of absent)
-    console.error(
+    warn(
       `  ${letter}: --expect-fail names it and it recorded no checks at all. ` +
         'Either it is not a group letter, or the run never reached it.'
     );

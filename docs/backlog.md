@@ -7982,21 +7982,6 @@ run. Until then the seam's only macOS evidence is `ci.yml`'s `mtl-e2e` job and
 the golden-harness matrix's macOS leg, neither of which drives a browser through
 group E.
 
-### Seven gates in `web/tools/` still print through `console` (2026-08-28)
-
-`probe-e2e.mjs`, `render-harness-e2e.mjs`, `horde-threads-e2e.mjs`,
-`jobs-e2e.mjs`, `worker-gate.mjs`, `smoke.mjs` and `check-exports.mjs` are all
-run from CI steps under a job cap or a step one, and all of them still use
-`console.log` — so the last line of any of their logs is not necessarily the
-last line the run wrote, which is the thing that cost three wrong diagnoses
-above. `say` and `warn` are exported from `web/tools/browser-launch.mjs` and the
-conversion is mechanical.
-
-The part worth having is the guard: nothing stops a `console.log` coming back
-into `browser-e2e.mjs` either, and this is a property that reads as fine right
-up to the moment a job is killed. The `shell (e2e harness guards)` job in
-`.github/workflows/ci.yml` is where a check for it would sit.
-
 ### The browser gate's cap says "out of time", never "too slow" (2026-08-28)
 
 The record behind this — the argument, the options and the measurements — is in
@@ -12891,49 +12876,28 @@ settings screen's menu is up on every frame, so the assertion itself is one line
 once a frame can be driven. Three hand-written lines, per the
 `scripted`/`headless` decision recorded in `docs/notes/samples.md`.
 
-### Seven of the browser gate's mirrored constants make a check vacuous when they drift (2026-09-10)
+### sparks' heartbeat is half a second and the browser gate reads it as one (2026-09-25)
 
-`web/tools/browser-e2e.mjs`'s `EXPECTATIONS` was read end to end on 2026-09-10
-(all of it; the rest of the file was not). Two demos pin their constants with
-`crcbl_sample_test::browser_gate_expectation` — shard's nine fields and breach's
-bot count — and about forty other literals in that object are copies of values
-the Rust owns. Most of those redden loudly when they drift. **These seven do
-not**: the check goes on passing while the thing it was written to catch stops
-being caught.
+`apps/sparks/src/app.rs` logs its heartbeat every `HEARTBEAT_TICKS` (30) ticks
+at `show::TICK_HZ` (60), half a second, and its doc block says why: the gate
+reads the smoke puff's count on both sides of a stop and wants the samples.
+`web/tools/browser-e2e.mjs`'s `sparks` block carries no `beatMs` row (read
+2026-09-25), so group B divides the observed half-second beat by
+`NOMINAL_BEAT_MS` and reports the machine as twice as quick as it is. The
+`Math.max(1, …)` clamp keeps the factor from shrinking budgets below the
+desktop's, so the damage is on a slow runner: a machine running the demo at half
+speed reads 1x and gets no stretch at all. Not verified against a CI log.
 
-- **alcove `knobs.centre` and sundial `knobs.centre` (`'0.50'`)** mirror
-  `occlusion::SEAM_CENTRE` and `filter::SEAM_CENTRE`. Re-verified: the consumer
-  asks `seamNow !== knobs.centre`, so a moved default makes the literal match
-  nothing, the inequality is trivially true, and "a press and a drag raise the
-  seam and move it" passes on a slider wired to nothing.
-- **quarry `autoexec.knob` (`'r_ssao_slices = 4'`)** has already drifted.
-  Re-verified: `r_ssao_slices` is declared `in 2 ..= 4 = 4`, and the gate's own
-  comment beside the literal still says "whose default is 2". The autoexec now
-  sets the variable to the value it already holds, so the check no longer
-  separates "the set took" from "it was already there".
-- **shard `beatMs` (250) and breach `beatMs` (500)** are `HEARTBEAT_TICKS` over
-  `DEFAULT_TICK_HZ`. They are not an assertion: every budget in the run is
-  scaled by them, so a wrong denominator inflates or shrinks every timeout
-  invisibly.
-- **towers `loop.tickHz` (60)** mirrors `game::DEFAULT_TICK_HZ` and is used to
-  compute when a wave is due. A _lowered_ tick rate inflates the due tick and
-  "the wave key sends the wave sooner than the table had it due" becomes
-  vacuous; a raised one reddens.
-- **puppet `walk.highStep` (0.9)** mirrors `map::HIGH_STEP_TOP`
-  (`LOW_STEP_TOP + HIGH_STEP_RISE`). It is the _refusal_ control: raised, the
-  bound stops bounding. `it_gets_onto_the_low_step_and_no_further` asserts the
-  same pair against the Rust constants and does not read the JS, so it pins
-  nothing here.
-
-All seven were re-verified against the Rust and the consumer site on 2026-09-10:
-shard's and breach's beats are `HEARTBEAT_TICKS` over `DEFAULT_TICK_HZ` against
-`NOMINAL_BEAT_MS`, whose own doc block says the ratio scales every budget in the
-file; towers' is `loop.tickHz` inside the wave's due tick; puppet's is
-`LOW_STEP_TOP + HIGH_STEP_RISE` against the `top < walk.highStep - tolerance`
-refusal. **What it would take:** `browser_gate_expectation` already exists, so
-each is a test in the owning crate like shard's; the quarry row needs its knob
-value and its comment corrected as well, which is a change to a row another
-slice is editing this hour and so is not done here.
+The fix is a `beatMs` row and a test beside `HEARTBEAT_TICKS` in the shape of
+`apps/shard/src/game.rs`'s `the_browser_gates_beat_is_this_samples_heartbeat`,
+which reads the row through `crcbl_sample_test::browser_gate_demo_expectation`.
+It would also want a sweep of the rest: every demo with no `beatMs` row is
+assumed to log once a second, and nothing holds any of them to it. A grep for
+`HEARTBEAT_TICKS` on 2026-09-25 found every other declaring sample at 60 ticks,
+but breakout, flappy, asteroids and horde declare no such constant and were not
+read, and a grep is a reading, not a guard. Found while pinning shard's and
+breach's `beatMs` and left for its own change, since it adds a row to the gate
+rather than holding an existing one.
 
 ## The sample plans — what they still owe
 

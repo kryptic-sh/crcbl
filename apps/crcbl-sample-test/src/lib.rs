@@ -308,6 +308,92 @@ pub fn browser_gate_expectation(block: &str, field: &str) -> String {
     line.strip_suffix(',').unwrap_or(line).to_string()
 }
 
+/// What the browser gate's `EXPECTATIONS` writes for one demo, at `path` under
+/// that demo's own block, as the JavaScript spells it.
+///
+/// [`browser_gate_expectation`] finds a sub-block by its name alone, which is
+/// only an answer while one demo has a block of that name. `knobs` is not such
+/// a name — alcove, sundial and tide each carry one — and a demo's own
+/// top-level fields (`beatMs`) sit in no sub-block at all. So this starts from
+/// the demo and walks down: `("puppet", &["walk", "highStep"])` reads
+/// `EXPECTATIONS.puppet.walk.highStep`, and `("shard", &["beatMs"])` reads
+/// `EXPECTATIONS.shard.beatMs`.
+///
+/// **The search is bounded by each block's closing brace**, so a field this
+/// demo does not have panics rather than answering with the next demo's. The
+/// value comes back as [`browser_gate_expectation`] returns it: the rest of the
+/// line, trimmed, without its trailing comma.
+///
+/// # Panics
+///
+/// When `path` is empty, when the demo or a block on the path is missing,
+/// appears more than once, or is written on one line, or when the last block
+/// has no such field — each of which means the gate was restructured and the
+/// mirror this reads for is no longer where it was.
+#[must_use]
+pub fn browser_gate_demo_expectation(demo: &str, path: &[&str]) -> String {
+    demo_expectation_in(BROWSER_E2E_MJS, demo, path)
+}
+
+/// [`browser_gate_demo_expectation`] over any text, so its bounds can be held
+/// against a driver written for the purpose.
+fn demo_expectation_in(driver: &str, demo: &str, path: &[&str]) -> String {
+    let (field, blocks) = path
+        .split_last()
+        .expect("a path names at least the field to read");
+    let mut indent = "  ".to_string();
+    let mut scope = gate_block(driver, &indent, demo);
+    for block in blocks {
+        indent.push_str("  ");
+        scope = gate_block(scope, &indent, block);
+    }
+    indent.push_str("  ");
+    let key = format!("\n{indent}{field}: ");
+    let mut found = scope.match_indices(&key).map(|(at, _)| at);
+    let at = found
+        .next()
+        .unwrap_or_else(|| panic!("EXPECTATIONS.{demo} has no {}", path.join(".")));
+    assert!(
+        found.next().is_none(),
+        "EXPECTATIONS.{demo} writes {} more than once",
+        path.join(".")
+    );
+    let line = scope[at + key.len()..]
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim();
+    line.strip_suffix(',').unwrap_or(line).to_string()
+}
+
+/// The body of the one block called `name` at `indent` inside `text`, from its
+/// opening line to the line before its closing brace.
+///
+/// Matched on the newline and the opening brace only, never on the line ending
+/// after it, for the CRLF reason [`browser_gate_expectation`] gives.
+fn gate_block<'a>(text: &'a str, indent: &str, name: &str) -> &'a str {
+    let opening = format!("\n{indent}{name}: {{");
+    let mut blocks = text.match_indices(&opening).map(|(at, _)| at);
+    let at = blocks
+        .next()
+        .unwrap_or_else(|| panic!("web/tools/browser-e2e.mjs has no {name} block here"));
+    assert!(
+        blocks.next().is_none(),
+        "web/tools/browser-e2e.mjs has more than one {name} block here, so this would read \
+         whichever comes first"
+    );
+    let body = &text[at + opening.len()..];
+    assert!(
+        body.lines().next().unwrap_or_default().trim().is_empty(),
+        "the {name} block is written on one line, so it has no closing line to stop at"
+    );
+    let closing = format!("\n{indent}}}");
+    let end = body
+        .find(&closing)
+        .unwrap_or_else(|| panic!("the {name} block never closes at its own indentation"));
+    &body[..end]
+}
+
 /// A frame, read in blocks of a fixed half-extent.
 ///
 /// A block rather than a pixel, because a single pixel is a sample of the
@@ -687,5 +773,50 @@ impl SampleRun<'_> {
             self.name,
             comparison.summary()
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::demo_expectation_in;
+
+    /// Two demos in the shape `web/tools/browser-e2e.mjs` writes them: each
+    /// with a `knobs` block, and only the second with a `beatMs`.
+    const DRIVER: &str = "const EXPECTATIONS = {\n  first: {\n    key: null,\n    knobs: {\n      \
+                          centre: '0.50',\n    },\n  },\n  second: {\n    beatMs: 500,\n    \
+                          knobs: {\n      centre: '0.25',\n    },\n  },\n};\n";
+
+    #[test]
+    fn a_path_reads_the_named_demos_block_and_not_a_same_named_one_elsewhere() {
+        assert_eq!(
+            demo_expectation_in(DRIVER, "first", &["knobs", "centre"]),
+            "'0.50'"
+        );
+        assert_eq!(
+            demo_expectation_in(DRIVER, "second", &["knobs", "centre"]),
+            "'0.25'"
+        );
+        assert_eq!(demo_expectation_in(DRIVER, "second", &["beatMs"]), "500");
+    }
+
+    /// **The bound is the point.** An unbounded search from `first` finds
+    /// `second`'s `beatMs` and answers with it, which is a mirror test passing
+    /// against the wrong demo's number.
+    #[test]
+    #[should_panic(expected = "EXPECTATIONS.first has no beatMs")]
+    fn a_field_the_demo_does_not_write_is_not_read_from_the_next_demo() {
+        let _ = demo_expectation_in(DRIVER, "first", &["beatMs"]);
+    }
+
+    /// The same text with CRLF line endings, which is what a Windows checkout
+    /// hands `include_str!`.
+    #[test]
+    fn a_crlf_driver_reads_the_same() {
+        let crlf = DRIVER.replace('\n', "\r\n");
+        assert_eq!(
+            demo_expectation_in(&crlf, "second", &["knobs", "centre"]),
+            "'0.25'"
+        );
+        assert_eq!(demo_expectation_in(&crlf, "second", &["beatMs"]), "500");
     }
 }

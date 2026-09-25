@@ -46,6 +46,7 @@
 
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { inspect } from 'node:util';
 
 import {
   evaluate,
@@ -53,7 +54,9 @@ import {
   launch,
   openPage,
   pause,
+  say,
   stopEverything,
+  warn,
 } from './browser-launch.mjs';
 import { serve } from './serve.mjs';
 
@@ -64,7 +67,7 @@ const RUN_TIMEOUT_MS = 120_000;
 const POLL_MS = 100;
 
 function fail(message) {
-  console.error(`jobs-e2e: ${message}`);
+  warn(`jobs-e2e: ${message}`);
   stopEverything();
   process.exit(2);
 }
@@ -147,7 +150,7 @@ async function main() {
     });
 
     const url = `${server.origin}/jobs/index.html${query ? `?${query}` : ''}`;
-    console.log(
+    say(
       `jobs-e2e: ${url}` +
         (server.isolated ? '' : ' (served without COOP/COEP)')
     );
@@ -164,8 +167,8 @@ async function main() {
       await pause(POLL_MS);
     }
     if (!done) {
-      for (const error of pageErrors) console.error(`  page error: ${error}`);
-      console.error(browser.stderr.slice(-20).join('\n'));
+      for (const error of pageErrors) warn(`  page error: ${error}`);
+      warn(browser.stderr.slice(-20).join('\n'));
       fail(`the page did not finish within ${timeout} ms`);
     }
 
@@ -174,25 +177,22 @@ async function main() {
       fail('the page finished without publishing a result');
     }
 
-    for (const line of result.notes ?? []) console.log(`  ${line}`);
+    for (const line of result.notes ?? []) say(`  ${line}`);
     for (const { name, ok } of result.checks) {
-      console.log(`  ${ok ? 'ok  ' : 'FAIL'} ${name}`);
+      say(`  ${ok ? 'ok  ' : 'FAIL'} ${name}`);
     }
     // A page that threw part-way through has checked less than it looks like.
     // Printed after the list so the last thing on screen is the reason.
-    if (result.fatal) console.error(`\njobs-e2e: fatal: ${result.fatal}`);
-    for (const error of pageErrors)
-      console.error(`jobs-e2e: page error: ${error}`);
+    if (result.fatal) warn(`\njobs-e2e: fatal: ${result.fatal}`);
+    for (const error of pageErrors) warn(`jobs-e2e: page error: ${error}`);
 
     const passed = result.checks.filter((c) => c.ok).length;
-    console.log(`\njobs-e2e: ${passed}/${result.checks.length} checks passed`);
+    say(`\njobs-e2e: ${passed}/${result.checks.length} checks passed`);
 
     // The guard every harness here carries: a run that checked nothing must not
     // be able to report success.
     if (result.checks.length === 0) {
-      console.error(
-        'jobs-e2e: the page ran no checks — the gate is not gating'
-      );
+      warn('jobs-e2e: the page ran no checks — the gate is not gating');
       process.exitCode = 1;
       return;
     }
@@ -200,7 +200,7 @@ async function main() {
       process.exitCode = 1;
       return;
     }
-    console.log(
+    say(
       server.isolated
         ? 'jobs-e2e: a Web Worker brought up through the spawn ABI ran Rust on ' +
             'a stack and a thread-local of its own'
@@ -223,7 +223,7 @@ const EXIT_DEADLINE_MS = 60_000;
 main()
   .then(() => {
     const watchdog = setTimeout(() => {
-      console.error(
+      warn(
         'jobs-e2e: teardown finished but something is still holding the event ' +
           'loop open; exiting rather than hanging'
       );
@@ -232,6 +232,6 @@ main()
     watchdog.unref();
   })
   .catch((error) => {
-    console.error(error);
+    warn(inspect(error));
     process.exit(2);
   });

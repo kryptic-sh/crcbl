@@ -152,6 +152,15 @@ jobs:
       - name: No string literal lost the backslash that joins its halves
         run: ./tools/check-wrapped-strings.sh
 
+      # The browser gates and every other Node tool under `web/tools/` run
+      # piped under a step or job cap, and a `console.log` line can still be
+      # queued when the cap kills the process — so the last line of the log is
+      # not the last line the run reached, and a hang is diagnosed from the
+      # wrong place. `say` and `warn` write synchronously; this keeps
+      # `console` from coming back.
+      - name: No web tool prints through console
+        run: ./tools/check-gate-printing.sh
+
   clippy:
     name: clippy (linux)
     runs-on: ubuntu-latest

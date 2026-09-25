@@ -47,6 +47,8 @@
 
 import { readFileSync } from 'node:fs';
 
+import { say, warn } from './browser-launch.mjs';
+
 /** Scene names are the `golden_names()` basenames: lower snake case. */
 const SCENE_NAME = /^[a-z][a-z0-9_]*$/;
 
@@ -57,7 +59,7 @@ const TABLE_HEADER = /^scene\s+matched\s+detail\s*$/;
 const TABLE_ROW = /^(\S+)\s{2,}(yes|no)\s{2,}(.*)$/;
 
 function bail(message) {
-  console.error(`render-harness-verdict: ${message}`);
+  warn(`render-harness-verdict: ${message}`);
   process.exit(2);
 }
 
@@ -274,20 +276,18 @@ const gated = scenes.filter(
 
 const nameWidth = Math.max(5, ...scenes.map((scene) => scene.scene.length));
 const pad = (text) => String(text).padEnd(nameWidth);
-console.log(`\n${pad('scene')}  verdict   detail`);
-console.log('-'.repeat(nameWidth + 2 + 9 + 2 + 40));
+say(`\n${pad('scene')}  verdict   detail`);
+say('-'.repeat(nameWidth + 2 + 9 + 2 + 40));
 for (const scene of scenes) {
   const state = scene.ok
     ? 'pass'
     : expectFail.includes(scene.scene)
       ? 'excused'
       : 'FAIL';
-  console.log(
-    `${pad(scene.scene)}  ${state.padEnd(9)}  ${scene.why.join('; ')}`
-  );
+  say(`${pad(scene.scene)}  ${state.padEnd(9)}  ${scene.why.join('; ')}`);
 }
 
-console.log(
+say(
   `\nrender-harness-verdict: ${scenes.length - failing.length}/${scenes.length} ` +
     'scene(s) rendered through the browser backend and matched their golden'
 );
@@ -296,11 +296,11 @@ console.log(
 // names: "the run passed" and "these two claims were not made" have to be
 // readable off the same log, or the second one is not really said.
 if (expectFail.length) {
-  console.log(
+  say(
     `render-harness-verdict: expected to fail on this platform: ${expectFail.join(' ')}`
   );
   for (const scene of excused) {
-    console.log(`  excused ${scene.scene}: ${scene.why.join('; ')}`);
+    say(`  excused ${scene.scene}: ${scene.why.join('; ')}`);
   }
 }
 
@@ -308,15 +308,15 @@ if (driver.fatal) {
   // Never excusable, and separate from any scene: the wasm module aborted under
   // the page, so every scene after it was driven against a poisoned module and
   // no per-scene verdict from this run means what it says.
-  console.error(
+  warn(
     `\nrender-harness-verdict: the harness reported a fatal: ${String(driver.fatal).split('\n')[0]}`
   );
 }
 
 if (unexpected.length) {
-  console.error('\nrender-harness-verdict: FAILED');
+  warn('\nrender-harness-verdict: FAILED');
   for (const scene of unexpected) {
-    console.error(`  ${scene.scene}: ${scene.why.join('; ')}`);
+    warn(`  ${scene.scene}: ${scene.why.join('; ')}`);
   }
 }
 
@@ -324,17 +324,17 @@ if (unexpected.length) {
 // regression arriving together is exactly the run where seeing only one sends
 // the reader to the wrong half.
 if (stale.length || absent.length) {
-  console.error(
+  warn(
     '\nrender-harness-verdict: THE EXPECTED-FAIL LIST NO LONGER DESCRIBES THIS RUN'
   );
   for (const name of stale) {
-    console.error(
+    warn(
       `  ${name}: it rendered and matched its golden, and --expect-fail names it. ` +
         'Drop it from the list — this platform draws that scene right now.'
     );
   }
   for (const name of absent) {
-    console.error(
+    warn(
       `  ${name}: --expect-fail names it and this run has no such scene. ` +
         'Either it is not a golden scene name, or the run never reached it.'
     );
@@ -342,7 +342,7 @@ if (stale.length || absent.length) {
 }
 
 if (scenes.length === 0) {
-  console.error(
+  warn(
     '\nrender-harness-verdict: ZERO SCENES WERE COMPARED — the gate is not gating.'
   );
   process.exit(1);
@@ -350,7 +350,7 @@ if (scenes.length === 0) {
 if (gated.length === 0) {
   // The trap the whole mechanism has to be immune to: a list long enough to
   // cover everything left standing turns a run that proved nothing into a pass.
-  console.error(
+  warn(
     '\nrender-harness-verdict: NOTHING WAS GATED — every scene either failed or ' +
       'is on the expected-fail list, so this run made no claim at all.'
   );
@@ -362,12 +362,12 @@ if (unexpected.length || stale.length || absent.length || driver.fatal) {
 }
 
 if (expectFail.length) {
-  console.log(
+  say(
     `render-harness-verdict: ${gated.length} scene(s) drew the golden picture in a browser; ` +
       `${expectFail.join(' ')} are excused here, and this run would have failed had any of them passed`
   );
 } else {
-  console.log(
+  say(
     'render-harness-verdict: every golden scene drew the golden picture in a browser'
   );
 }

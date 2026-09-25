@@ -29,6 +29,7 @@
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
+import { say, warn } from './browser-launch.mjs';
 import {
   StreamDecodeError,
   StreamReader,
@@ -76,9 +77,9 @@ const failures = [];
  * @param {string} what
  */
 function check(condition, what) {
-  if (condition) console.log(`  ok   ${what}`);
+  if (condition) say(`  ok   ${what}`);
   else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -1592,7 +1593,7 @@ async function main() {
   const path = override === undefined ? FIXTURE : override;
   const fixture = new Uint8Array(await readFile(path));
 
-  console.log(
+  say(
     `stream-decode: ${override ?? FIXTURE.pathname} (${fixture.length} bytes)`
   );
 
@@ -1606,7 +1607,7 @@ async function main() {
     // outright, and nothing below this line means anything once it has. Caught
     // so that lands as a failing check rather than as a stack trace.
     check(false, `the fixture decodes at all (threw ${String(error)})`);
-    console.error(`\nstream-decode: FAILED (${failures.length})`);
+    warn(`\nstream-decode: FAILED (${failures.length})`);
     process.exit(1);
   }
   check(
@@ -2438,10 +2439,10 @@ async function main() {
   );
 
   if (failures.length > 0) {
-    console.error(`\nstream-decode: FAILED (${failures.length})`);
+    warn(`\nstream-decode: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\nstream-decode: OK');
+  say('\nstream-decode: OK');
 }
 
 await main();

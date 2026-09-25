@@ -38,6 +38,7 @@
 import { readFile } from 'node:fs/promises';
 import { deepStrictEqual } from 'node:assert/strict';
 
+import { say, warn } from './browser-launch.mjs';
 import { putReplyStream, takeCommandStream } from '../engine/gpu-transport.js';
 import { StreamDecodeError } from '../engine/gpu-stream.js';
 import { ReplyWriter } from '../engine/gpu-reply.js';
@@ -76,9 +77,9 @@ const failures = [];
  * @param {string} what
  */
 function check(condition, what) {
-  if (condition) console.log(`  ok   ${what}`);
+  if (condition) say(`  ok   ${what}`);
   else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -309,7 +310,7 @@ async function main() {
   const path = override === undefined ? FIXTURE : override;
   const fixture = new Uint8Array(await readFile(path));
 
-  console.log(
+  say(
     `stream-transport: ${override ?? FIXTURE.pathname} (${fixture.length} bytes)`
   );
 
@@ -330,7 +331,7 @@ async function main() {
   }
   if (frame === null) {
     if (!threw) check(false, 'a waiting frame is taken (got null instead)');
-    console.error(`\nstream-transport: FAILED (${failures.length})`);
+    warn(`\nstream-transport: FAILED (${failures.length})`);
     process.exit(1);
   }
   check(
@@ -594,10 +595,10 @@ async function main() {
   );
 
   if (failures.length > 0) {
-    console.error(`\nstream-transport: FAILED (${failures.length})`);
+    warn(`\nstream-transport: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\nstream-transport: OK');
+  say('\nstream-transport: OK');
 }
 
 await main();

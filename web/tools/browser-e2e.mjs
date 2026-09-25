@@ -1028,6 +1028,8 @@ const EXPECTATIONS = {
       // Where `occlusion::SEAM_CENTRE` puts the seam when the button raises it,
       // as the heartbeat prints it. The slider has to move it off this, or a
       // slider wired to nothing would pass on the button's own work.
+      // `apps/alcove`'s
+      // `the_browser_gates_seam_centre_is_where_the_button_puts_it` holds it.
       centre: '0.50',
     },
   },
@@ -1117,6 +1119,8 @@ const EXPECTATIONS = {
       // Where `crate::filter::SEAM_CENTRE` puts the seam when the button raises
       // it, as the heartbeat prints it. The slider has to move it off this, or a
       // slider wired to nothing would pass on the button's own work.
+      // `apps/sundial`'s
+      // `the_browser_gates_seam_centre_is_where_the_button_puts_it` holds it.
       centre: '0.50',
       // **AND THE CLOCK, WHICH IS THE CONTROL NO OTHER DEMO HAS.** The filter
       // and the seam are console cells; the sun's tick and its run flag live on
@@ -1383,7 +1387,7 @@ const EXPECTATIONS = {
       lines: [
         '// seeded by web/tools/browser-e2e.mjs',
         'debug_view ambient occlusion',
-        'r_ssao_slices 4',
+        'r_ssao_slices 2',
       ],
       // `run_text`'s last line: the file saying how much of it ran, and the
       // only line in the log that is the *file* speaking rather than one of its
@@ -1400,8 +1404,11 @@ const EXPECTATIONS = {
       // and `crcbl_core::log::console::print` puts that line in the page's log.
       // This is the knob the browser tier of the ambient-occlusion rung has to
       // be able to move before a frame is timed —
-      // `crcbl_render::ssao::r_ssao_slices`, whose default is 2.
-      knob: 'r_ssao_slices = 4',
+      // `crcbl_render::ssao::r_ssao_slices`. **Set off its declared default**:
+      // a file that set the value the variable already holds prints this same
+      // line whether the set took or not. `apps/quarry/src/lib.rs` holds this
+      // against the variable's own default and range.
+      knob: 'r_ssao_slices = 2',
     },
   },
   // **The sample whose subject does not move.** viewer is a tool rather than a
@@ -1568,7 +1575,8 @@ const EXPECTATIONS = {
       // rather than standing near it.
       climbed: /\bclimbed: (\d+)/,
       blocked: /\bblocked: (\d+)/,
-      // `map::LOW_STEP_TOP` and `map::HIGH_STEP_TOP`, in metres.
+      // `map::LOW_STEP_TOP` and `map::HIGH_STEP_TOP`, in metres, held to them
+      // by `apps/puppet`'s `the_browser_gates_step_heights_are_this_maps`.
       lowStep: 0.3,
       highStep: 0.9,
       // **And the locomotion blend, which is milestone 2.** These three come
@@ -1661,7 +1669,8 @@ const EXPECTATIONS = {
     // number of heartbeats, so the period is what the step costs. Declared here
     // because group B divides by it to work out how far behind real time this
     // machine is running the demo, and a wrong denominator there shrinks every
-    // budget that reading scales.
+    // budget that reading scales. `apps/breach/src/game.rs`'s
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds it to that.
     beatMs: 500,
     // Read off the *first* line, and it asks three things a page that merely
     // booted cannot say. `ground: yes` is `MoveOutcome::grounded`, which no run
@@ -1843,7 +1852,8 @@ const EXPECTATIONS = {
     // argues it, and the argument is this gate: shard is the heaviest scene
     // here, so every wait measured in beats is what its browser step costs.
     // Group B divides by this to work out how far behind real time the machine
-    // is running the demo.
+    // is running the demo. `apps/shard/src/game.rs`'s
+    // `the_browser_gates_beat_is_this_samples_heartbeat` holds it to that.
     beatMs: 250,
     // Read off the *first* line. `ground: yes` is `MoveOutcome::grounded`, which
     // no run that failed to sweep a capsule against the colliders

@@ -1499,6 +1499,30 @@ mod tests {
     /// One tick at the default rate.
     const DT: f64 = 1.0 / DEFAULT_TICK_HZ as f64;
 
+    /// **The beat `web/tools/browser-e2e.mjs` divides by is this sample's
+    /// heartbeat**: [`HEARTBEAT_TICKS`] at [`DEFAULT_TICK_HZ`], in milliseconds.
+    ///
+    /// Not an assertion in the gate but its denominator. Group B reads the
+    /// observed beat against `beatMs` to work out how far behind real time the
+    /// machine is running the demo, and scales every later budget by that, so a
+    /// period changed here and not there stretches or shrinks every timeout in
+    /// the run and nothing reddens.
+    #[test]
+    fn the_browser_gates_beat_is_this_samples_heartbeat() {
+        let millis = HEARTBEAT_TICKS * 1_000;
+        let hz = u64::from(DEFAULT_TICK_HZ);
+        assert_eq!(
+            millis % hz,
+            0,
+            "the heartbeat is not a whole number of milliseconds, which `beatMs` cannot spell"
+        );
+        assert_eq!(
+            crcbl_sample_test::browser_gate_demo_expectation("breach", &["beatMs"]),
+            (millis / hz).to_string(),
+            "the browser gate's breach beatMs is not HEARTBEAT_TICKS at DEFAULT_TICK_HZ"
+        );
+    }
+
     /// A range that has already found the floor, with the warm-up switched off
     /// so a test drives it, squared up down the near lane.
     fn ready() -> Stage {

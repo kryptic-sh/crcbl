@@ -14,6 +14,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
+ "crcbl-sample-test",
 ]
 
 [[package]]
@@ -1801,6 +1802,7 @@ version = "0.1.0"
 dependencies = [
  "crcbl",
  "crcbl-golden",
+ "crcbl-sample-test",
 ]
 
 [[package]]

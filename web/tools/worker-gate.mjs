@@ -64,6 +64,7 @@
 import { readFile } from 'node:fs/promises';
 import { Worker } from 'node:worker_threads';
 
+import { say, warn } from './browser-launch.mjs';
 import { importedMemoryLimits } from '../engine/wasm-memory.js';
 
 /** How long to keep driving `par_for` while waiting for a worker to steal. */
@@ -106,9 +107,9 @@ let quiet = false;
  */
 function check(condition, what) {
   if (condition) {
-    if (!quiet) console.log(`  ok   ${what}`);
+    if (!quiet) say(`  ok   ${what}`);
   } else {
-    console.log(`  FAIL ${what}`);
+    say(`  FAIL ${what}`);
     failures.push(what);
   }
 }
@@ -145,7 +146,7 @@ async function main() {
   const count = workersFlag >= 0 ? args[workersFlag + 1] : undefined;
   const wasmPath = args.find((a) => !a.startsWith('--') && a !== count);
   if (!wasmPath || !Number.isInteger(requested) || requested < 1) {
-    console.error(
+    warn(
       'usage: node web/tools/worker-gate.mjs <path-to.wasm> [--workers N] ' +
         '[--no-stack-pointer] [--no-init-tls] [--quiet]'
     );
@@ -155,7 +156,7 @@ async function main() {
   const bytes = await readFile(wasmPath);
   const limits = importedMemoryLimits(bytes);
   if (limits === undefined || !limits.shared) {
-    console.error(
+    warn(
       `worker-gate: ${wasmPath} does not import a shared \`env.memory\`.\n` +
         '    Build it with `web/build.sh --threads`; ' +
         '`check-exports.mjs --threads` names the missing link argument.'
@@ -176,17 +177,17 @@ async function main() {
   const globalValue = (/** @type {string} */ name) =>
     /** @type {WebAssembly.Global} */ (exports[name]).value;
 
-  console.log(`worker-gate: ${wasmPath}`);
-  console.log(
+  say(`worker-gate: ${wasmPath}`);
+  say(
     `  memory:  ${limits.minimum}..${limits.maximum ?? 'unbounded'} pages, ` +
       `buffer is a ${memory.buffer.constructor.name}`
   );
-  console.log(
+  say(
     `  tls:     __tls_size=${globalValue('__tls_size')}, ` +
       `__tls_align=${globalValue('__tls_align')}`
   );
-  if (skipStackPointer) console.log('  RED CHECK: skipping __stack_pointer');
-  if (skipInitTls) console.log('  RED CHECK: skipping __wasm_init_tls');
+  if (skipStackPointer) say('  RED CHECK: skipping __stack_pointer');
+  if (skipInitTls) say('  RED CHECK: skipping __wasm_init_tls');
 
   // ---- before the host says anything --------------------------------------
   check(ex.gate_threaded() === 0, 'threaded() is false before the host speaks');
@@ -364,12 +365,10 @@ async function main() {
   }
 
   const threads = ex.gate_threads();
-  console.log(
-    `  drove ${runs} par_for call(s); ${threads} thread(s) ran chunks`
-  );
-  for (const error of workerErrors) console.log(`  worker error: ${error}`);
+  say(`  drove ${runs} par_for call(s); ${threads} thread(s) ran chunks`);
+  for (const error of workerErrors) say(`  worker error: ${error}`);
 
-  for (const trap of traps) console.log(`  trapped: ${trap}`);
+  for (const trap of traps) say(`  trapped: ${trap}`);
 
   check(traps.length === 0, 'no run trapped');
   check(threads >= 2, 'a chunk ran on a thread that is not the driver');
@@ -387,10 +386,10 @@ async function main() {
   );
 
   if (failures.length > 0) {
-    console.error(`\nworker-gate: FAILED (${failures.length})`);
+    warn(`\nworker-gate: FAILED (${failures.length})`);
     process.exit(1);
   }
-  console.log('\nworker-gate: OK');
+  say('\nworker-gate: OK');
   // The pool's workers never return, so nothing here can be awaited into an
   // exit. Terminating them is the whole of the teardown.
   await Promise.all(running.map((worker) => worker.terminate()));
