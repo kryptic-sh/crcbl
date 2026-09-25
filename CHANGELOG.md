@@ -16,6 +16,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`DrawCommand::Glyphs` carries the text it spells**, as
+  `text: Option<Arc<str>>`: a UI tree span in a parsed font fills it with what
+  it displays, after any `text-overflow` cut, through the new
+  `DrawList::text_glyphs`, and `DrawList::glyphs` leaves it `None` for a run
+  built from glyph ids. The renderer ignores it; a test holding only a frame's
+  `DrawList` reads a parsed-font span as it reads a `DrawCommand::Text`. A
+  pattern naming every field of `Glyphs` needs `text` or `..`.
 - **`crcbl_ui::tree::NodeStyle` has `white_space` and `text_overflow` fields and
   `crcbl_ui::style::Declaration` `WhiteSpace` and `TextOverflow` members**, for
   the new properties below, so an exhaustive match, or a struct literal without

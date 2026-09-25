@@ -81,12 +81,13 @@ impl Ui {
                             wrap,
                         );
                         layout.align(content_max.x - content_min.x, style.text_align);
-                        list.glyphs(
+                        list.text_glyphs(
                             content_min,
                             font,
                             style.font_size,
                             style.color,
                             layout.glyphs(),
+                            text,
                         );
                     }
                 }

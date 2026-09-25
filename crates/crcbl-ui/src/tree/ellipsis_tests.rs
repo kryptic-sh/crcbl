@@ -423,3 +423,39 @@ fn text_is_none_for_anything_but_a_laid_out_span() {
     assert_eq!(again, spans, "the spans kept their keys");
     assert_eq!(ui.text(spans[0]), None, "a span read before its layout");
 }
+
+/// **A span's glyph run carries the text it displays**, cut or whole, so a
+/// test holding only the frame's [`DrawList`] reads a parsed-font span as it
+/// reads a bitmap one; a run built from glyph ids by hand carries none.
+#[test]
+fn a_spans_glyph_run_carries_the_text_it_shows() {
+    let mut ui = tree();
+    for width in [400.0, 60.0] {
+        let selector = format!(".line{}", Family::Registered.class());
+        let (key, list) = card(&mut ui, width, &selector, ACTION);
+        let carried: Vec<Option<&str>> = list
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                DrawCommand::Glyphs { text, .. } => Some(text.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(carried, [ui.text(key)], "at {width} px");
+    }
+    let (_, cut) = card(&mut ui, 60.0, ".line.roboto", ACTION);
+    assert!(
+        cut.commands().iter().any(|command| matches!(
+            command,
+            DrawCommand::Glyphs { text: Some(text), .. } if text.ends_with(ELLIPSIS_FALLBACK)
+        )),
+        "the cut run carries its ellipsis"
+    );
+
+    let mut by_hand = DrawList::new();
+    by_hand.glyphs(Vec2::ZERO, roboto(), 20.0, [1.0; 4], Vec::new());
+    assert!(matches!(
+        by_hand.commands(),
+        [DrawCommand::Glyphs { text: None, .. }]
+    ));
+}

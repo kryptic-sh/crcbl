@@ -34,6 +34,7 @@ use crate::text::GLYPH_HEIGHT;
 use crate::widget::SkinInsets;
 use core::fmt;
 use glam::Vec2;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Vertex
@@ -345,6 +346,12 @@ pub enum DrawCommand {
         color: [f32; 4],
         /// The glyphs and their pen positions.
         glyphs: Vec<PositionedGlyph>,
+        /// The text the glyphs spell, when they were laid out from text —
+        /// what a UI tree span displayed, after any `text-overflow` cut — and
+        /// `None` for a run built from glyph ids by hand. The renderer never
+        /// reads it: it is how a test of a whole frame reads what a
+        /// parsed-font run says, as it reads [`DrawCommand::Text`]'s `text`.
+        text: Option<Arc<str>>,
     },
     /// A rectangle of the image atlas, stretched to a screen rectangle.
     ///
@@ -522,6 +529,28 @@ impl DrawList {
             size,
             color,
             glyphs: glyphs.into(),
+            text: None,
+        });
+    }
+
+    /// [`DrawList::glyphs`] for a run laid out from `text`, which the command
+    /// carries alongside its glyphs so the frame can be read back as text.
+    pub fn text_glyphs(
+        &mut self,
+        origin: Vec2,
+        font: &'static Font,
+        size: f32,
+        color: [f32; 4],
+        glyphs: impl Into<Vec<PositionedGlyph>>,
+        text: &str,
+    ) {
+        self.push(DrawCommand::Glyphs {
+            origin,
+            font,
+            size,
+            color,
+            glyphs: glyphs.into(),
+            text: Some(Arc::from(text)),
         });
     }
 
@@ -1003,6 +1032,7 @@ fn expand(
             size,
             color,
             glyphs,
+            text: _,
         } => {
             if let Some(glyph_atlas) = glyph_atlas {
                 push_glyphs(
