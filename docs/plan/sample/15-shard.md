@@ -294,8 +294,9 @@ run over.
   agreed across this machine's hardware adapter, local SwiftShader and CI's
   SwiftShader to the byte, at **18.6 MiB** — so the ceiling is 1.7× the reading
   rather than the trebling this section's figure argued, and the growth from
-  10.9 MiB is not attributed. The decision that leaves is in `docs/backlog.md`,
-  _shard's wasm heap: the ceiling's own figure is stale_.
+  10.9 MiB is not attributed. The ceiling stays at 32 MiB (decided 2026-09-25;
+  the argument is on `WASM_HEAP_CEILING`), and attributing the growth is in
+  `docs/backlog.md`.
 
 - ✅ The inventory kit used without a single engine change made on its behalf;
   anything it needed filed as a topic 34 finding instead. Met 2026-09-07: the

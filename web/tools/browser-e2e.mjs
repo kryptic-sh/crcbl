@@ -3353,14 +3353,17 @@ const HEAP_LINE = /\[MEM\] wasm heap: (\d+) bytes/;
 /**
  * The most of the wasm32 address space a demo on this site may end a run in.
  *
- * **Measured, then trebled.** shard — the heaviest page here and the only one
- * that opts in — peaked at 11 403 264 bytes, 10.9 MiB, on this machine's
- * hardware adapter on 2026-09-07, and it peaked at exactly that on all four of
- * the page loads that run makes: the linear memory holds game state, the CPU
- * side of the zone's meshes and the two stream buffers, none of which is a
- * function of the rasteriser underneath. So 32 MiB is close enough to have
- * teeth against content that trebles and far enough that a page load with one
- * more zone in it is not a red CI run.
+ * **Measured, with room for a zone more.** shard — the heaviest page here and
+ * the only one that opts in — peaked at 11 403 264 bytes, 10.9 MiB, on
+ * 2026-09-07, and at 18.6 MiB by 2026-09-16, identical to the byte on this
+ * machine's hardware adapter, local SwiftShader and CI's SwiftShader: the
+ * linear memory holds game state, the CPU side of the zone's meshes and the two
+ * stream buffers, none of which is a function of the rasteriser underneath.
+ * The ceiling was set at about three times the first reading and is 1.7 times
+ * the second; kept there on 2026-09-25 because that is still close enough to
+ * catch the 41 MiB regression the GPU-zeroed atlas pages fixed, and far enough
+ * that a page load with one more zone in it is not a red CI run. The growth
+ * from 10.9 to 18.6 MiB is not attributed; `docs/backlog.md` carries that.
  *
  * **And it is a budget rather than the limit.** A wasm32 module's address
  * space ends at 4 GiB, which is 128 times this and therefore says nothing about

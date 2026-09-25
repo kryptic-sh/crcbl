@@ -14074,18 +14074,12 @@ left out:
 atlas pages fixed) and 18.6 MiB after the fix, on this machine's hardware
 adapter, local SwiftShader and CI's SwiftShader alike.
 
-- **Decided below: the ceiling's doc comment and `docs/plan/sample/15-shard.md`
-  argue from 10.9 MiB (2026-09-07), and the build now peaks at 18.6 MiB**, so
-  the ceiling is 1.7× the reading rather than the trebling it describes. The
-  growth from 10.9 to 18.4 MiB between 2026-09-07 and `8892e1a` is not
-  attributed; part of it is the forward renderer's start-up frame, which leaves
-  4 173 166 bytes on the command stream in a 7 536 640-byte buffer the stream
-  never releases. Options: attribute and cut it, or restate the comment and keep
-  or move the ceiling. **Decided 2026-09-25: restate the comment and the plan
-  from the 18.6 MiB reading and keep the 32 MiB ceiling** (1.7× headroom still
-  catches the 41 MiB kind of regression). Attributing the growth — the start-up
-  frame's 4 MB left on the command stream first — is performance work, filed as
-  that rather than as a reason to move the ceiling.
+- **The heap grew from 10.9 MiB (2026-09-07) to 18.6 MiB and the growth is not
+  attributed.** Part of it is the forward renderer's start-up frame, which
+  leaves 4 173 166 bytes on the command stream in a 7 536 640-byte buffer the
+  stream never releases. Attributing and cutting it is performance work. The
+  ceiling stays at 32 MiB (decided 2026-09-25), and `WASM_HEAP_CEILING` and the
+  shard plan now argue from 18.6 MiB.
 - **`ImageAtlas` keeps a 4 MiB CPU page and `GlyphAtlas` 1 MiB per open page for
   the renderer's life**, pixels the GPU already holds. `ImageAtlas::pixels`
   exists so `region()` can stage one union dirty rectangle. It does not move
