@@ -3211,6 +3211,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- The Metal backend states its floor, macOS 11 (`crcbl_mtl::MACOS_FLOOR`), and
+  checks it: `MetalInstance::open` answers `None`, logging the system's version,
+  on anything older, where the selectors it sends would raise an exception.
+
 - Dependencies are on their latest compatible releases, among them `glam`
   0.33.10. glam 0.33.8 changed the `Mat3` determinant and inverse and its SIMD
   arithmetic, so matrix results can differ in the last bits from before:

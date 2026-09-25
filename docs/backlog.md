@@ -21058,10 +21058,10 @@ no longer exists. Nothing is left to decide.
   11; `objc2` does not gate on availability, so an older system raises an
   unrecognised-selector exception rather than answering wrongly. Loud, but
   undecided — the same question the AppKit shell backend has been carrying
-  unstated since P5C. **Decided 2026-09-25: macOS 11 is the floor**, the one
-  `supportsBCTextureCompression` already sets; owed is saying so — in the crate
-  docs and as `LSMinimumSystemVersion` in a packaged bundle — so an older system
-  is refused by the loader instead of by an exception.
+  unstated since P5C. **Decided 2026-09-25: macOS 11 is the floor**, and
+  `crcbl_mtl::MACOS_FLOOR` states it and `MetalInstance::open` checks it. Still
+  owed: `LSMinimumSystemVersion` in a packaged bundle, once the engine packages
+  one.
 - **`DeviceType::Virtual` is unreachable on Metal.** There is no virtualisation
   query, so a paravirtual GPU answers every question exactly as the built-in one
   and enumerates as `Integrated`. Stated as a gap, not fixed.

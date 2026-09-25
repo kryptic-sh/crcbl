@@ -26,10 +26,11 @@
 //! Every selector this module sends has been in `MTLDevice` since macOS 11,
 //! `supportsBCTextureCompression` being the newest of them; `objc2` does not
 //! gate on availability, so an older system would raise an
-//! unrecognised-selector exception rather than return a wrong answer. That is
-//! the loud failure mode, and the runner this backend is tested on is far
-//! newer — but it is the reason a selector is not added here without checking
-//! when it landed.
+//! unrecognised-selector exception rather than return a wrong answer. So the
+//! floor is checked, not assumed: [`MetalInstance::open`](crate::MetalInstance::open)
+//! answers `None` on a system older than [`MACOS_FLOOR`], logging why, before
+//! any selector is sent — and it is the reason a selector is not added here
+//! without checking when it landed.
 
 use std::ptr::NonNull;
 
@@ -38,7 +39,7 @@ use crcbl_hal::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSProcessInfo, NSUInteger};
+use objc2_foundation::{NSInteger, NSOperatingSystemVersion, NSProcessInfo, NSUInteger};
 use objc2_metal::{
     MTLCommonCounterSetStatistic, MTLCommonCounterSetTimestamp, MTLCounterSamplingPoint,
     MTLCounterSet, MTLDevice, MTLDeviceLocation, MTLGPUFamily, MTLTimestamp,
@@ -129,6 +130,16 @@ pub(crate) fn counter_set(
 /// is a power of two because a sample count is a *mask* in the API underneath —
 /// see [`Limits::max_sample_count`], which rejects anything else.
 const PROBED_SAMPLE_COUNTS: [u32; 7] = [64, 32, 16, 8, 4, 2, 1];
+
+/// The oldest macOS this backend runs on, as a major version: 11, the
+/// release every selector this crate sends dates from (see the module's
+/// _macOS floor_).
+pub const MACOS_FLOOR: NSInteger = 11;
+
+/// Whether `version` is at or past [`MACOS_FLOOR`].
+pub(crate) fn meets_floor(version: NSOperatingSystemVersion) -> bool {
+    version.majorVersion >= MACOS_FLOOR
+}
 
 /// What Metal reports as its version, which is the operating system's.
 ///
@@ -696,6 +707,22 @@ fn to_u64(value: NSUInteger) -> u64 {
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
+
+    /// **The floor is macOS 11**: 10.15 is refused and 11.0 and the runner's
+    /// own system are not.
+    #[test]
+    fn the_macos_floor_refuses_catalina_and_admits_big_sur_and_this_system() {
+        let version = |major, minor| NSOperatingSystemVersion {
+            majorVersion: major,
+            minorVersion: minor,
+            patchVersion: 0,
+        };
+        assert!(!meets_floor(version(10, 15)));
+        assert!(meets_floor(version(11, 0)));
+        assert!(meets_floor(
+            NSProcessInfo::processInfo().operatingSystemVersion()
+        ));
+    }
 
     use crcbl_hal::MemoryLocation;
     use objc2_metal::{

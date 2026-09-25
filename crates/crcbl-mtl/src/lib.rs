@@ -443,6 +443,8 @@ mod quirk;
 mod swapchain;
 
 #[cfg(target_os = "macos")]
+pub use adapter::MACOS_FLOOR;
+#[cfg(target_os = "macos")]
 pub use device::MetalDevice;
 #[cfg(target_os = "macos")]
 pub use instance::MetalInstance;

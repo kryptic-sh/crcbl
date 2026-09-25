@@ -168,8 +168,22 @@ impl MetalInstance {
     /// choice of GPU to the application without switching devices, which is
     /// exactly the property enumeration needs: asking what exists must not
     /// change what is in use.
+    ///
+    /// Also `None` on a system older than [`MACOS_FLOOR`](crate::MACOS_FLOOR), logged:
+    /// the selectors this crate sends raise an exception there rather than
+    /// answering.
     #[must_use]
     pub fn open() -> Option<Self> {
+        let version = objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersion();
+        if !adapter::meets_floor(version) {
+            crcbl_core::log::warn!(
+                "crcbl-mtl: macOS {}.{} is older than the macOS {} this backend needs",
+                version.majorVersion,
+                version.minorVersion,
+                adapter::MACOS_FLOOR
+            );
+            return None;
+        }
         let driver = adapter::driver_string();
         let devices = MTLCopyAllDevices();
         let adapters: Vec<AdapterRecord> = devices
