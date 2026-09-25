@@ -124,6 +124,14 @@ impl SteamTransport {
     }
 
     /// Why the connection ended, once a receive has seen it end.
+    ///
+    /// **Steam's reason for the link, not the session's.** A `crcbl-server`
+    /// host closes a link by dropping it, and a dropped `SteamTransport`
+    /// closes with [`EndReason::ShuttingDown`] whatever the host meant — a
+    /// host that left or kicked this peer included. The session's own reason
+    /// arrives first, sealed, and a joiner reads it from
+    /// `crcbl_client::Client::ended()`; this answer is for a link that ended
+    /// without one.
     #[must_use]
     pub const fn end_reason(&self) -> Option<EndReason> {
         self.end

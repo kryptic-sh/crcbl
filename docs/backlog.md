@@ -11690,8 +11690,8 @@ own app id or under 480 as far as 480 allows.
   it and document the session end as the signal. **Decided 2026-09-25: leave it,
   and document the sealed session end as the signal** — `Client::ended()`
   already carries the real reason, and a close hook would touch the `Transport`
-  trait on every backend for a second copy of it. The doc line on
-  `SteamTransport::end_reason` is owed.
+  trait on every backend for a second copy of it. `SteamTransport::end_reason`'s
+  doc says so (2026-09-25).
 - **Slice 7b's manual steps have not run**: whether app 480 honours
   `SetInputActionManifestFilePath` at all (R3); the Deck run, which is also the
   check of the stick's Y sign (passed through on the belief that `joystick_move`
