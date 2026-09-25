@@ -60,7 +60,9 @@ pub const CHECK_TICK: u64 = 600;
 
 /// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-25
 /// after sleep began judging a body by its farthest point's speed as well as
-/// its angular speed, which keeps a long turning body awake for longer. Before
+/// its angular speed, which keeps a long turning body awake for longer; CI's
+/// x86-64 Linux and Windows and aarch64 macOS jobs and the browser gate all
+/// agreed on it (runs on `ee3cffa1`). Before
 /// it (`0xb06b_0027_3d78_81d5`, the same day) `glam` went 0.33.7 → 0.33.10,
 /// whose 0.33.8 changed its matrix and SIMD arithmetic; every CI target and
 /// the browser agreed on that value. Before that (`0xc0fd_27f2_94da_418b`,
