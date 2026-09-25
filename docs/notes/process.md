@@ -403,8 +403,9 @@ sample's error type is in fact a type alias for
   wants ten"; no RenderDoc capture is recorded anywhere in the tree.
 - Whether the depth prepass took the `GreaterOrEqual` overdraw win or kept the
   zero-risk clearing fallback was not checked against the shipped
-  `crcbl_render::forward`; `18-render-features.md` describes both and says the
-  fallback is taken by saying so in the code.
+  `crcbl_render::forward`; `docs/notes/rendering.md` (_What the deleted
+  46-ambient-occlusion plan left behind_) describes both and says the fallback
+  is taken by saying so in the code.
 - `apps/breach` and `web/demos/breach/` were untracked working-tree additions
   during this audit and were not read, so nothing here accounts for them.
 

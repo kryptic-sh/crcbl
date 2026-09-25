@@ -73,8 +73,9 @@ syn = "3.0.5"
 # wasm32, which is the whole point of the seam.
 rand_chacha = { version = "0.9", default-features = false }
 rand_core = { version = "0.9", default-features = false }
-# RON, the format stage 6's scene rules (`docs/notes/tooling.md`) and
-# `docs/plan/18-render-features.md` write entity and render-stack data in.
+# RON, the format stage 6's scene rules (`docs/notes/tooling.md`) and the
+# camera-stack rules (`docs/notes/rendering.md`, _What the deleted
+# 48-post-processing plan left behind_) write entity and render-stack data in.
 # Approved 2026-08-30 as a user decision recorded in `docs/backlog.md`, and
 # added here by the slice that first reads a file: `crcbl_render::stack`, the
 # per-camera render stack. Default features are `std` alone; what a deterministic

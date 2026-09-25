@@ -1,7 +1,7 @@
 //! Where each shadow map looks, and how far: the sun's cascades, a spot light's
 //! cone and a point light's six faces.
 //!
-//! `docs/plan/18-render-features.md`'s shadow section, arithmetic half. This
+//! Topic 45's shadows (`docs/notes/rendering.md`), arithmetic half. This
 //! module owns the matrices and the tile budget; [`crate::forward`] owns the
 //! atlas, the depth-only pipeline and the per-tile cull that fills them. The
 //! split is where the testable part is: a cascade matrix is a pure function of a

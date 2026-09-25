@@ -463,7 +463,7 @@ struct GpuLight
     /// `SHADOW_POINT_FACES` tiles from here, and `point_visibility` adds the face
     /// it selected. The atlas holds `SHADOW_LIGHT_TILES` of them and a scene may
     /// want more than they hold, so a row saying "no tile" is the ordinary case:
-    /// `docs/plan/18-render-features.md`'s rule is that such a light still lights
+    /// Topic 45's third decision is that such a light still lights
     /// and simply does not occlude.
     uint shadow_tile;
     /// What this light may contribute: `FLAG_FILL`, or zero for an ordinary one.

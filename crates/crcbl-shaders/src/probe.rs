@@ -8,7 +8,7 @@
 //!
 //! # What a row holds, and why evaluating it is three dot products
 //!
-//! `docs/plan/18-render-features.md`'s irradiance-probe design: a static grid of
+//! Topic 50's irradiance-probe design (`docs/notes/rendering.md`): a grid of
 //! **L1 spherical-harmonic** probes, trilinearly interpolated, added to the flat
 //! ambient term. Four coefficients per channel, packed so that the irradiance a
 //! normal receives is `dot(sh, float4(N, 1))` — no `pow` and no trigonometry,
@@ -259,8 +259,8 @@ impl GpuProbe {
     /// literature's alternative is [an ambient
     /// cube](https://web.archive.org/web/20200417075719/https://steamcdn-a.akamaihd.net/apps/valve/2004/GDC2004_Half-Life2_Shading.pdf),
     /// which never rings and costs six coefficients per channel to L1's four;
-    /// `docs/plan/18-render-features.md` records it as the drop-in if one
-    /// `max` ever stops being enough.
+    /// `docs/backlog.md` (_Considered and declined for the probe volume_)
+    /// records it as the drop-in if one `max` ever stops being enough.
     #[must_use]
     pub fn irradiance(&self, normal: [f32; 3]) -> [f32; 3] {
         let channel = |sh: &[f32; 4]| {
@@ -392,7 +392,8 @@ pub type ProbeSteps = [[i32; 3]; PROBE_LEVELS];
 /// `struct FrameUniforms` in `shaders/mesh.slang`.
 ///
 /// A uniform grid rather than a 3D texture, and the reason is in
-/// `docs/plan/18-render-features.md`: hardware trilinear filter weights are
+/// `docs/backlog.md` (_Considered and declined for the probe volume_): hardware
+/// trilinear filter weights are
 /// vendor tables, which is the exact class of filtered read the occlusion and
 /// reflection designs spent their determinism arguments avoiding. An eight-tap
 /// manual interpolation over a storage buffer costs less and risks nothing.

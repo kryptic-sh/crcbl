@@ -1,5 +1,5 @@
-//! `docs/plan/18-render-features.md`'s bloom: the threshold-free down/upsample
-//! chain between the reflection composite and the tonemap.
+//! Topic 48's bloom (`docs/notes/rendering.md`): the threshold-free
+//! down/upsample chain between the reflection composite and the tonemap.
 //!
 //! ```text
 //! scene ──▶ bloom-down-1 ──▶ bloom-down-2 ──▶ … ──▶ bloom-down-N

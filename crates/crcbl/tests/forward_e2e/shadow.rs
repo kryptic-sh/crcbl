@@ -3131,7 +3131,7 @@ fn the_atlas_view_borders_the_quarter_a_released_tile_merged_back_into() {
 // The shadowed spot
 // ---------------------------------------------------------------------------
 //
-// `docs/plan/18-render-features.md`'s 2026-08-13 slice: a light other than the
+// Topic 45's 2026-08-13 slice: a light other than the
 // sun that occludes. The scene is `crcbl::screenshot`'s `Scene::SpotShadow` in
 // every number that matters — the same floor, the same light, the same camera —
 // so a failure here and a moved golden there are the same failure seen twice
@@ -3441,7 +3441,7 @@ fn a_spots_shadow_follows_its_caster() {
 // The shadowed point light
 // ---------------------------------------------------------------------------
 //
-// `docs/plan/18-render-features.md`'s six-tiles decision: one light, six atlas
+// Topic 45's first decision, six tiles: one light, six atlas
 // tiles, and a face picked per fragment out of the direction to the light. The
 // scene is `crcbl::screenshot`'s `Scene::PointShadow` in every number that
 // matters, so a failure here and a moved golden there are the same failure seen
@@ -3724,7 +3724,7 @@ fn a_point_lights_shadow_follows_its_caster_from_one_face_to_another() {
 // A point light and a spot in one atlas
 // ---------------------------------------------------------------------------
 //
-// `docs/plan/18-render-features.md`'s 2026-08-23 slice: the light region grew
+// The 2026-08-23 shadow slice: the light region grew
 // from a point light's cube to one tile past it, so a frame can shadow a point
 // light and a spot at the same time. `crcbl_render::shadow`'s own tests cover
 // the arithmetic that hands the runs out; the two below are what says the pair

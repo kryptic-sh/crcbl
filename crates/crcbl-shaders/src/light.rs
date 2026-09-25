@@ -1,11 +1,11 @@
 //! The light list and the froxel grid `light_cluster.slang` fills, in the byte
 //! layouts those shaders declare.
 //!
-//! `docs/plan/18-render-features.md`'s "Many lights" section, both halves: "a
-//! light is a row" in a storage buffer exactly as [`GpuInstance`] and
-//! [`GpuMaterial`] already are, and "a compute pass assigns them to a froxel
+//! Topic 44's "Many lights" rule (`docs/notes/rendering.md`), both halves: a
+//! light is a row in a storage buffer exactly as [`GpuInstance`] and
+//! [`GpuMaterial`] already are, and a compute pass assigns the rows to a froxel
 //! grid — screen tiles by depth slices — which the fragment stage indexes by its
-//! own position".
+//! own position.
 //!
 //! # The sun is a row like any other
 //!
@@ -99,8 +99,7 @@ pub const CLUSTER_DEPTH_SLICES: u32 = 24;
 ///
 /// A froxel that wants more keeps the first this many, in light-list order, and
 /// counts the rest into [`CLUSTER_OVERFLOW_WORD`] — never silently dropping
-/// them, which is `docs/plan/18-render-features.md`'s requirement on this
-/// number.
+/// them, which is topic 44's requirement on this number.
 pub const CLUSTER_LIGHT_CAPACITY: u32 = 16;
 
 /// Words one froxel occupies in the grid buffer: its light count, then
@@ -303,8 +302,7 @@ pub struct GpuLight {
     /// An index into [`FrameUniforms::light_view_proj`](crate::mesh::FrameUniforms::light_view_proj),
     /// and through `crcbl_render::shadow::light_tile` the atlas tile the map was
     /// rendered into. `crcbl_render::shadow::Selection` is what fills it and
-    /// `docs/plan/18-render-features.md`'s 2026-08-13 decision is the rule it
-    /// applies.
+    /// topic 45's third decision (2026-08-13) is the rule it applies.
     ///
     /// **The first, because a light may own more than one.** A spot owns this
     /// tile alone; a point light owns the

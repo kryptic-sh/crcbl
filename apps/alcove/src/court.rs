@@ -443,9 +443,10 @@ const RIM_LIFT: f32 = 0.9;
 ///
 /// The far wall is two metres behind the sphere — four times the shipped
 /// occlusion radius — so nothing on the sphere may darken this point. It is
-/// where `docs/plan/18-render-features.md`'s escalation clause becomes visible:
-/// normals reconstructed from depth are exact on a plane and wrong on the one
-/// pixel of wall next to a silhouette, and a halo is what that looks like.
+/// where the escalation clause in `docs/notes/rendering.md` (_What the deleted
+/// 47-reflections plan left behind_) becomes visible: normals reconstructed
+/// from depth are exact on a plane and wrong on the one pixel of wall next to a
+/// silhouette, and a halo is what that looks like.
 ///
 /// Derived rather than written down, so it follows the sphere and the camera:
 /// the sphere's centre pushed `RIM_CLEARANCE` past its own limb along

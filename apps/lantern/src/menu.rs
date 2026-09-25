@@ -11,7 +11,7 @@
 //! there is a panel at all, and it is the same reason there is this: a sample
 //! that cannot show the engine's menu is a finding about the menu.
 //!
-//! The rest are `docs/plan/18-render-features.md`'s effects, one row each, which
+//! The rest are the render effects, one row each, which
 //! is the charter's milestone 4: the three switches `--no-shadows`, `--no-ao`
 //! and `--no-reflections` set, reachable with the room on screen. Holding a lit
 //! room against an unlit one is then a keypress rather than a restart, and the
@@ -189,8 +189,8 @@ pub fn toggled_effect(
 /// The **resolved** answer rather than the requested one, and `UNAVAILABLE`
 /// rather than `OFF` where the device is what turned it off: a row ticking a
 /// request the device clamped away would be a switch that does nothing, which is
-/// the defect `docs/plan/18-render-features.md` records against the first AO
-/// off-switch.
+/// the defect `docs/notes/rendering.md` records against the first AO off-switch
+/// (_What the deleted 46-ambient-occlusion plan left behind_).
 fn effect_state(
     effect: RenderEffects,
     resolved: RenderEffects,
@@ -513,7 +513,7 @@ mod tests {
     /// The two are one missing bit in the resolved set and a reviewer has to be
     /// able to tell them apart: a row showing `OFF` for a clamped effect is a
     /// switch that does nothing, which is the AO off-switch defect
-    /// `docs/plan/18-render-features.md` records.
+    /// `docs/notes/rendering.md` records.
     #[test]
     fn a_row_the_device_cannot_draw_reads_as_unavailable() {
         let device = RenderEffects::all().difference(RenderEffects::REFLECTIONS);

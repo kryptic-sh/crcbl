@@ -1,4 +1,4 @@
-//! `docs/plan/18-render-features.md`'s Hi-Z pyramid: the depth reduction
+//! Topic 47's Hi-Z pyramid (`docs/notes/rendering.md`): the depth reduction
 //! `crate::ssr`'s march climbs instead of stepping at a fixed stride.
 //!
 //! ```text

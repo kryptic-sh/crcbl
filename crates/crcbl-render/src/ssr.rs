@@ -1,4 +1,4 @@
-//! `docs/plan/18-render-features.md`'s screen-space reflections: the two
+//! Topic 47's screen-space reflections (`docs/notes/rendering.md`): the two
 //! full-screen passes between the forward pass and the tonemap.
 //!
 //! ```text

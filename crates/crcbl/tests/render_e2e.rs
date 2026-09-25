@@ -718,7 +718,7 @@ fn the_cube_scene_drew_its_geometry_and_every_material_column(image: &Image) {
 /// golden holds for both. `crcbl-vk`'s
 /// `the_two_geometry_paths_agree_about_how_fine_the_dunes_patch_is` is where
 /// that claim is made in numbers instead of in pixels.
-/// `docs/plan/18-render-features.md`'s light list, drawn.
+/// Topic 44's light list, drawn.
 ///
 /// The same geometry as the cube scene under three coloured point lights and a
 /// sun turned right down, so the two goldens differ in the light list alone.
@@ -809,7 +809,7 @@ fn the_lights_scene_draws_the_same_frame_on_every_geometry_path() {
     );
 }
 
-/// `docs/plan/18-render-features.md`'s **spot** light, drawn — the one light
+/// Topic 44's **spot** light, drawn — the one light
 /// kind in the list that had no rendered pixel anywhere in the tree.
 ///
 /// `crcbl_render::Light::row`'s unit tests already pin the conversion, including
@@ -978,7 +978,7 @@ fn the_spot_cone_is_a_lit_core_a_varying_penumbra_and_dark_floor(image: &Image) 
     );
 }
 
-/// `docs/plan/18-render-features.md`'s **shadowed spot**, drawn — the first
+/// Topic 45's **shadowed spot**, drawn — the first
 /// light in this engine other than the sun that occludes.
 ///
 /// The golden is not the evidence and cannot be: a spot whose shadow lookup
@@ -1117,7 +1117,7 @@ fn the_caster_darkens_the_floor_behind_it_and_not_beside_it(image: &Image) {
     );
 }
 
-/// `docs/plan/18-render-features.md`'s **shadowed point light**, drawn — one
+/// Topic 45's **shadowed point light**, drawn — one
 /// light occluding in two directions at once.
 ///
 /// The golden is not the evidence and cannot be, on
@@ -6579,7 +6579,7 @@ fn compare_scene_frames(
 /// one, out of the frame's 196608, on llvmpipe alone.
 ///
 /// `PointShadow` is the second exception, and it arrived with
-/// `docs/plan/18-render-features.md`'s reflection march. That scene's caster
+/// topic 47's reflection march. That scene's caster
 /// carries the tinted material row, whose roughness is the only one in the demo
 /// scene under `ssr.slang`'s cutoff — so it is the one object in the suite whose
 /// pixels are decided by a *march over the depth buffer* rather than by shading
@@ -6997,8 +6997,8 @@ const PYRAMID_UNDERSIDE_LIT_FLOOR: f32 = 10.0;
 /// The far plane has no surface, so `ssao.slang` writes "fully unoccluded" over
 /// every pixel the geometry never covered. A box blur then averages that value
 /// into the occlusion of the pixels along a silhouette, which draws a bright
-/// fringe exactly one kernel deep around everything in the frame — the halo
-/// `docs/plan/18-render-features.md` records. A kernel weighted on view-space
+/// fringe exactly one kernel deep around everything in the frame — a halo. A
+/// kernel weighted on view-space
 /// depth gives those taps no weight, so the rim keeps its own occlusion.
 ///
 /// **No golden could make this claim.** A halo is a plausible picture: a smooth,

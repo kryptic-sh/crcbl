@@ -18,7 +18,7 @@
 // `ssr.slang`'s [`ROUGHNESS_CUTOFF`] is the statement that a single ray stands
 // for a narrow lobe. This kernel is what widens that a little — enough for a
 // rough conductor to reflect faintly rather than not at all — and
-// `docs/plan/18-render-features.md` refuses the alternative in as many words:
+// `docs/backlog.md` holds the alternative back in as many words:
 // cone tracing over a colour mip chain is the better technique and needs a
 // `SampleLevel` at a computed LOD, which is a filtered read whose level four
 // rasterisers select arithmetic for. Upgrading is contained to this file.

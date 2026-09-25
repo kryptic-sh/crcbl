@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s antialiasing row, cheap rung: FXAA 3.11
+// Topic 49's antialiasing row (`docs/notes/rendering.md`), cheap rung: FXAA 3.11
 // over the tonemapped image, resolving into the swapchain.
 //
 // # Where it sits, and why that is after the tonemap

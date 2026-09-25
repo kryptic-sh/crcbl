@@ -1599,8 +1599,9 @@ const RIM_BENT_STRADDLE: f32 = 50.0;
 ///
 /// [`the_silhouette_does_not_print_on_the_wall_behind_it`] makes the charter's
 /// rim claim about the occlusion channel's scalar. This is the same claim about
-/// the direction beside it, and `docs/plan/18-render-features.md`'s escalation
-/// clause is why both are worth making: the gather is handed no normal buffer
+/// the direction beside it, and the escalation clause in
+/// `docs/notes/rendering.md` (_What the deleted 47-reflections plan left
+/// behind_) is why both are worth making: the gather is handed no normal buffer
 /// and reconstructs a normal from depth, which is exact on a plane and wrong on
 /// the pixel of wall next to a silhouette. The scalar puts that error through a
 /// `saturate` and a blur; the bent direction is the channel where a wrong normal

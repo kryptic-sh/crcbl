@@ -406,11 +406,11 @@ const STONE_ROUGHNESS: f32 = 0.85;
 /// How rough the flagged floor is.
 ///
 /// **The one surface in the zone that is deliberately smooth enough to reflect
-/// something.** `docs/plan/18-render-features.md`'s screen-space reflections
-/// need a surface whose roughness lets the march contribute at all, and a zone
-/// of uniformly matte stone would run the pass over a frame that could not show
-/// its result. The braziers stand on this floor, so what it reflects is the
-/// thing that moves.
+/// something.** The screen-space reflections (`docs/notes/rendering.md`, _What
+/// the deleted 47-reflections plan left behind_) need a surface whose roughness
+/// lets the march contribute at all, and a zone of uniformly matte stone would
+/// run the pass over a frame that could not show its result. The braziers stand
+/// on this floor, so what it reflects is the thing that moves.
 const FLOOR_ROUGHNESS: f32 = 0.34;
 
 /// How rough iron is.

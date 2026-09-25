@@ -17,27 +17,30 @@ Each technique now owns a document; what stayed here is the part that belongs to
 none of them — how the techniques interact, when each slice lands, and what is
 at risk across all of them.
 
-Nothing was rewritten in the move. **A citation that names this file still lands
-somewhere useful**: the table below is the one hop from here to the section it
-meant, and the code and test comments that name
-`docs/plan/18-render-features.md` were deliberately left alone rather than
-churned in a move commit.
+Nothing was rewritten in the move. Topics 44 to 51 were then folded away on
+2026-09-24 as their work was built: each one's rules are a section of the
+[rendering notes](../notes/rendering.md) titled _What the deleted NN-name plan
+left behind_, whose table resolves the section, rung and decision numbers code
+cites ("topic 45's third decision"), and what each left unbuilt is in
+`docs/backlog.md`. The table below is the one hop from here to either. A comment
+that names this file cites what it still holds — the interactions, the delivery
+table and the risks.
 
-| Technique                                                               | Document                                                                                                                                  |
-| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| Lighting paths, the light list, clustered forward, BRDF, the PBR ladder | built but for the ray-traced path and area-light shapes; rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md` |
-| Shadows: cascades, atlas tiles, bias, filter ladder                     | built but for static caching and ray-traced shadows; rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`     |
-| Ambient occlusion: SSAO, its blur, GTAO                                 | done; rules in [rendering notes](../notes/rendering.md)                                                                                   |
-| Screen-space reflections: the march, roughness                          | SSR built; rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`                                               |
-| The post-processing stack: order, HDR, tonemap, bloom                   | stack built; rules in [rendering notes](../notes/rendering.md), grading and fusion in `docs/backlog.md`                                   |
-| Antialiasing: FXAA, CMAA2, TAA, MSAA                                    | FXAA, CMAA2 built; rules in [rendering notes](../notes/rendering.md), MSAA and TAA in `docs/backlog.md`                                   |
-| Irradiance probes: the L1 grid                                          | grid, visibility, RSM updater, scroll built; rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`             |
-| Volumetrics: height fog, the froxel column, light shafts                | rungs 1–2 built; rules in [rendering notes](../notes/rendering.md), the rest in `docs/backlog.md`                                         |
-| Blended transparency: the sorted pass and its keys                      | [53-transparency.md](53-transparency.md)                                                                                                  |
-| Water: the surface pass, waves, foam, underwater                        | [55-water.md](55-water.md)                                                                                                                |
-| Grass and vegetation wind: cards, blades, shells, trees                 | [57-grass.md](57-grass.md)                                                                                                                |
-| Hair and fur: shells, cards, strands and their shading                  | [58-hair.md](58-hair.md)                                                                                                                  |
-| Tessellation: baked displacement, run-time pattern tables               | [59-tessellation.md](59-tessellation.md)                                                                                                  |
+| Technique                                                               | Where it lives now                                                                                                                                                                                                                                    |
+| ----------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Lighting paths, the light list, clustered forward, BRDF, the PBR ladder | Topic 44: [rendering notes](../notes/rendering.md), _What the deleted 44-lighting plan left behind_; the ray-traced path and area-light shapes in `docs/backlog.md`, _Ray-traced lighting (P7C) is not built_ and _What the LTC area-light rung left_ |
+| Shadows: cascades, atlas tiles, bias, filter ladder                     | Topic 45: [rendering notes](../notes/rendering.md), _What the deleted 45-shadows plan left behind_; static caching and ray-traced shadows in `docs/backlog.md`, _What the deleted 45-shadows plan left unbuilt_                                       |
+| Ambient occlusion: SSAO, its blur, GTAO                                 | Topic 46, done: [rendering notes](../notes/rendering.md), _What the deleted 46-ambient-occlusion plan left behind_                                                                                                                                    |
+| Screen-space reflections: the march, roughness                          | Topic 47: [rendering notes](../notes/rendering.md), _What the deleted 47-reflections plan left behind_; the upper rungs in `docs/backlog.md`, _The reflection ladder's upper rungs are unbuilt_                                                       |
+| The post-processing stack: order, HDR, tonemap, bloom                   | Topic 48: [rendering notes](../notes/rendering.md), _What the deleted 48-post-processing plan left behind_; grading and fusion in `docs/backlog.md`, _Colour grading, the post-tonemap LUT, is specified and unbuilt_ and _Pass fusion_               |
+| Antialiasing: FXAA, CMAA2, TAA, MSAA                                    | Topic 49: [rendering notes](../notes/rendering.md), _What the deleted 49-antialiasing plan left behind_; MSAA and TAA in `docs/backlog.md`, _MSAA was reopened rather than reversed_ and _TAA is unbuilt_                                             |
+| Irradiance probes: the L1 grid                                          | Topic 50: [rendering notes](../notes/rendering.md), _What the deleted 50-irradiance-probes plan left behind_; the traced updater and relocation in `docs/backlog.md`, _What the deleted 50-irradiance-probes plan left unbuilt_                       |
+| Volumetrics: height fog, the froxel column, light shafts                | Topic 51: [rendering notes](../notes/rendering.md), _What the deleted 51-volumetrics plan left behind_; the rest in `docs/backlog.md`, _The froxel column casts its shaft_ and _Froxel rungs 3 and 4_                                                 |
+| Blended transparency: the sorted pass and its keys                      | [53-transparency.md](53-transparency.md)                                                                                                                                                                                                              |
+| Water: the surface pass, waves, foam, underwater                        | [55-water.md](55-water.md)                                                                                                                                                                                                                            |
+| Grass and vegetation wind: cards, blades, shells, trees                 | [57-grass.md](57-grass.md)                                                                                                                                                                                                                            |
+| Hair and fur: shells, cards, strands and their shading                  | [58-hair.md](58-hair.md)                                                                                                                                                                                                                              |
+| Tessellation: baked displacement, run-time pattern tables               | [59-tessellation.md](59-tessellation.md)                                                                                                                                                                                                              |
 
 **What this engine does not do at all** is a different question from how well it
 does these. The gap survey that answered it was deleted on 2026-09-24: its rules
@@ -66,16 +69,16 @@ are in the [rendering notes](../notes/rendering.md) (_What the deleted
 
 ## Delivery
 
-| Slice                                                                                                                                                                                | Phase                                                                                                                                                                                                                                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Sun CSM (culling-integrated; the 3×3 PCF became the disc below)                                                                                                                      | P7 — the **cascade debug overlay** landed 2026-09-04 as `DebugView::Cascades`, and the **atlas viewer** beside it as `DebugView::ShadowAtlas`                                                                                                                            |
-| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                                                                | P7C                                                                                                                                                                                                                                                                      |
-| Ray-traced shadows + AO                                                                                                                                                              | P7C                                                                                                                                                                                                                                                                      |
-| Ray-traced reflections                                                                                                                                                               | P7C                                                                                                                                                                                                                                                                      |
-| Ray-traced global illumination                                                                                                                                                       | P7C                                                                                                                                                                                                                                                                      |
-| The render quality pass: ~~CMAA2~~, ~~GTAO + bent normals~~, **Hi-Z + cone-traced SSR**, ~~shadow cross-fade → rotated Poisson PCF → PCSS~~                                          | P10, with the bloom chain, because the profiler HUD is what shows a quality rung's cost honestly. Each rung's section above says what it costs and what it refuses. **The Hi-Z half of the SSR rung is built (2026-08-27)**; the cone trace over a colour pyramid is not |
-| MSAA                                                                                                                                                                                 | **No phase, and not a rejection** — viable and priced by the seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                                                                                                        |
-| TAA (jitter and the resolve — ~~motion vectors~~ landed 2026-08-30); temporal SSR; ~~shadow atlases~~ (pulled forward 2026-08-30; rules in [rendering notes](../notes/rendering.md)) | post-MVP. Auto-exposure left this row on 2026-08-29 (post stack)                                                                                                                                                                                                         |
+| Slice                                                                                                                                                                                | Phase                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sun CSM (culling-integrated; the 3×3 PCF became the disc below)                                                                                                                      | P7 — the **cascade debug overlay** landed 2026-09-04 as `DebugView::Cascades`, and the **atlas viewer** beside it as `DebugView::ShadowAtlas`                                                                                                                                            |
+| Acceleration structures: BLAS bake/load, TLAS refit, `crcbl as stats`                                                                                                                | P7C                                                                                                                                                                                                                                                                                      |
+| Ray-traced shadows + AO                                                                                                                                                              | P7C                                                                                                                                                                                                                                                                                      |
+| Ray-traced reflections                                                                                                                                                               | P7C                                                                                                                                                                                                                                                                                      |
+| Ray-traced global illumination                                                                                                                                                       | P7C                                                                                                                                                                                                                                                                                      |
+| The render quality pass: ~~CMAA2~~, ~~GTAO + bent normals~~, **Hi-Z + cone-traced SSR**, ~~shadow cross-fade → rotated Poisson PCF → PCSS~~                                          | P10, with the bloom chain, because the profiler HUD is what shows a quality rung's cost honestly. Each rung's record in the rendering notes says what it costs and what it refuses. **The Hi-Z half of the SSR rung is built (2026-08-27)**; the cone trace over a colour pyramid is not |
+| MSAA                                                                                                                                                                                 | **No phase, and not a rejection** — viable and priced by topic 49's seventh decision, and not the default for exactly as long as SSAO and SSR read a single-sample depth                                                                                                                 |
+| TAA (jitter and the resolve — ~~motion vectors~~ landed 2026-08-30); temporal SSR; ~~shadow atlases~~ (pulled forward 2026-08-30; rules in [rendering notes](../notes/rendering.md)) | post-MVP. Auto-exposure left this row on 2026-08-29 (post stack)                                                                                                                                                                                                                         |
 
 **P7B and P7C are new phases** carrying the raster twin and the ray-traced path
 respectively; the roadmap's phase table is authoritative for their ordering. The
@@ -92,16 +95,18 @@ under both paths side by side. Exit criteria of the other samples inherit
 ## Risks
 
 - **CSM artifact whack-a-mole** (peter-panning, acne, cascade seams): this risk
-  arrived, and the fifth through eighth decisions above are the record of
-  fighting it — bias denominated in tile texels, slope read off the geometric
-  normal rather than the shading one, the slope term moved off the light's axis
-  onto the receiver's own normal, the cascade switch itself blended over a band
-  rather than taken as a step, the box filter under all of it replaced by a
-  rotated disc, and that disc's width taken from a blocker search rather than
-  held constant. Stable snapping and the golden frames did the work; the debug
-  overlay that was supposed to help is still unbuilt. What is left is the fringe
-  the seventh decision traded lantern's wall-foot strip for, at one silhouette,
-  which `docs/backlog.md` still carries.
+  arrived, and topic 45's fifth through tenth decisions (rendering notes, _What
+  the deleted 45-shadows plan left behind_) are the record of fighting it — bias
+  denominated in tile texels, slope read off the geometric normal rather than
+  the shading one, the slope term moved off the light's axis onto the receiver's
+  own normal, the cascade switch itself blended over a band rather than taken as
+  a step, the box filter under all of it replaced by a rotated disc, and that
+  disc's width taken from a blocker search rather than held constant. Stable
+  snapping and the golden frames did the work; the debug overlay that was
+  supposed to help came last, on 2026-09-04. What is left is the fringe the
+  seventh decision traded lantern's wall-foot strip for, at one silhouette,
+  which `docs/backlog.md` still carries (_The normal offset scallops one
+  silhouette's foot_).
 - **Post-stack perf in a browser**: each pass is simple, but measure — the horde
   web demo budget (S3) includes the stack. The quality pass adds passes to it:
   CMAA2 is five where FXAA is one, and a Hi-Z march builds a pyramid before it
@@ -113,9 +118,10 @@ under both paths side by side. Exit criteria of the other samples inherit
   rather than a scene at a time.
 - **A Hi-Z pyramid puts a reduction underneath the reflection goldens.** Every
   level is float arithmetic four rasterisers perform independently, where the
-  fixed-stride march read the prepass directly. The SSR section's standing rule
-  — structural ratios rather than tolerances, and never a per-driver re-bless —
-  is what had to absorb it, and it was written before this rung was scheduled.
+  fixed-stride march read the prepass directly. The SSR determinism rule in the
+  rendering notes (_What the deleted 47-reflections plan left behind_) —
+  structural ratios rather than tolerances, and never a per-driver re-bless — is
+  what had to absorb it, and it was written before this rung was scheduled.
 - **The occlusion cull reads a second pyramid, not this one** (2026-09-17). SSR
   wants each texel's nearest depth (`max` under reversed-Z); a cull wants the
   farthest (`min`), or it hides what a single uncovered pixel still shows.

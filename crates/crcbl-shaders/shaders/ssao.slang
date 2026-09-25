@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s screen-space ambient occlusion: the pass
+// Topic 46's screen-space ambient occlusion (`docs/notes/rendering.md`): the pass
 // that reads the depth prepass and writes the `Rgba8Unorm` channel the forward
 // pass modulates and steers its **ambient** term with.
 //

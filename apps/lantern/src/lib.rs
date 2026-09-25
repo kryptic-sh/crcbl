@@ -27,19 +27,19 @@
 //! # What is not here, and where it is written down
 //!
 //! Ray tracing is out of scope for this milestone and recorded in
-//! `docs/backlog.md`. One thing
-//! is visible in the picture rather than merely absent from it: **a fully
-//! metallic surface has no ambient term, so a reflection is the whole of what
-//! lights it**. Both halves of `docs/plan/18-render-features.md`'s probe design
-//! are built now — the volume [`bounce`] places is the diffuse half, and a
-//! screen-space reflection that finds nothing returns that same volume as its
-//! environment — so neither metal surface is black any more. What stands there
-//! instead is a probe volume rather than a trace of the room, and above
+//! `docs/backlog.md`. One thing is visible in the picture rather than merely
+//! absent from it: **a fully metallic surface has no ambient term, so a
+//! reflection is the whole of what lights it**. Both halves of the probe design
+//! (`docs/notes/rendering.md`, _What the deleted 50-irradiance-probes plan left
+//! behind_) are built now — the volume [`bounce`] places is the diffuse half,
+//! and a screen-space reflection that finds nothing returns that same volume as
+//! its environment — so neither metal surface is black any more. What stands
+//! there instead is a probe volume rather than a trace of the room, and above
 //! the mirror panel's reflecting band it is the whole of what the face shows:
 //! `tests/golden.rs`'s `zero_probes_only_remove_the_ssr_and_rough_fallbacks`
 //! zeroes the probe rows and takes that point to nothing while the panel's real
-//! screen-space hit stays where it was. Ray tracing is what replaces it, and the
-//! debug panel's `ray tracing` row says which path this frame took.
+//! screen-space hit stays where it was. Ray tracing is what replaces it, and
+//! the debug panel's `ray tracing` row says which path this frame took.
 //!
 //! **The room bounces the sun**, which it did not before [`bounce`]: that
 //! module places the probe volume the scene carries and leaves its rows at zero,
@@ -60,9 +60,9 @@
 //! the *view* asked for, and a frame with one view in it can never show that
 //! layer doing anything. [`room::View`] is the two views, [`room::MONITOR_STACK`]
 //! is what the monitor's asks for — every effect except the reflections, which
-//! `docs/plan/18-render-features.md` names as the thing a render-to-texture
-//! camera does not want — and the debug panel's `paths` section prints what each
-//! of them resolved to.
+//! `docs/notes/rendering.md` (_What the deleted 48-post-processing plan left
+//! behind_) names as a thing a render-to-texture camera does not want — and the
+//! debug panel's `paths` section prints what each of them resolved to.
 //!
 //! **The monitor does not reflect itself**, by two mechanisms that answer
 //! different questions. [`room::monitor_camera`] stands on the screen's own face

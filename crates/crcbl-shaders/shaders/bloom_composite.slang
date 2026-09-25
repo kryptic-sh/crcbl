@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s bloom chain, last pass: the final tent
+// Topic 48's bloom chain (`docs/notes/rendering.md`), last pass: the final tent
 // upsample of mip 1 and the add that puts the whole chain back into the scene.
 //
 // # It is the last upsample *and* the composite, in one pass

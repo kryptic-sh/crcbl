@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s bloom chain, upsampling half: the 3×3 tent
+// Topic 48's bloom chain (`docs/notes/rendering.md`), upsampling half: the 3×3 tent
 // filter that carries one mip of the chain onto the next larger one, **added**
 // rather than written.
 //

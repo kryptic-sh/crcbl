@@ -1,9 +1,10 @@
 # Sample 17 — mirrors (S4D, gates P7B–P7C)
 
-Reflection acceptance test, and the fixture that makes the reflection ladder in
-[18-render-features.md](../18-render-features.md) comparable rather than merely
-implemented. One scene, one camera, several reflection techniques drawn from the
-same frame — and a human has looked at them next to each other.
+Reflection acceptance test, and the fixture that makes the reflection ladder —
+topic 47's, whose rules are in the [rendering notes](../../notes/rendering.md) —
+comparable rather than merely implemented. One scene, one camera, several
+reflection techniques drawn from the same frame — and a human has looked at them
+next to each other.
 
 **This is the sample that stops a technique upgrade being a claim.**
 Screen-space reflections have a failure mode nobody notices from a single

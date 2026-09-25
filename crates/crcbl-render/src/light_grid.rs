@@ -10,9 +10,9 @@
 //!                          the caller's render pass ◀────┘  ShaderRead
 //! ```
 //!
-//! `docs/plan/18-render-features.md`'s clustered forward, on the same discipline
-//! as [`crate::draw_gen`]: a compute pass produces a compacted list, the draw
-//! reads it, the CPU uploads deltas and nothing else.
+//! Topic 44's clustered forward (`docs/notes/rendering.md`), on the same
+//! discipline as [`crate::draw_gen`]: a compute pass produces a compacted list,
+//! the draw reads it, the CPU uploads deltas and nothing else.
 //!
 //! # The grid is device-local, and that is a seam rule rather than a preference
 //!

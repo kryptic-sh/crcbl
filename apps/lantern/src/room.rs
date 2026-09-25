@@ -32,17 +32,18 @@
 //! every light's specular reach has nothing left to shade with. What fills it in
 //! is a reflection, and both of them now get one.
 //!
-//! `docs/plan/18-render-features.md`'s screen-space reflections light **the foot
-//! of the mirror panel**, and only the foot: the panel faces the camera, so a
-//! ray leaving it goes back past the eye and only the lowest part of the face
-//! sends one that reaches the floor while still on screen — see [`MIRROR_FOOT`].
-//! Everywhere else on that face the march finds nothing and returns the
-//! irradiance volume [`crate::bounce`] places as its environment, so the face is
-//! dim rather than black — see [`MIRROR_MISSES`]. The rough metal block receives
-//! that same environment directly because its roughness is above the cutoff a
-//! single ray is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never
-//! fakes a sharp screen-space hit, and most of what lights it is the sun's own
-//! specular with the environment on top. `apps/lantern/tests/golden.rs`'s
+//! The screen-space reflections (`docs/notes/rendering.md`, _What the deleted
+//! 47-reflections plan left behind_) light **the foot of the mirror panel**,
+//! and only the foot: the panel faces the camera, so a ray leaving it goes back
+//! past the eye and only the lowest part of the face sends one that reaches the
+//! floor while still on screen — see [`MIRROR_FOOT`]. Everywhere else on that
+//! face the march finds nothing and returns the irradiance volume
+//! [`crate::bounce`] places as its environment, so the face is dim rather than
+//! black — see [`MIRROR_MISSES`]. The rough metal block receives that same
+//! environment directly because its roughness is above the cutoff a single ray
+//! is honest at ([`crcbl::shaders::ssr::ROUGHNESS_CUTOFF`]); it never fakes a
+//! sharp screen-space hit, and most of what lights it is the sun's own specular
+//! with the environment on top. `apps/lantern/tests/golden.rs`'s
 //! `zero_probes_only_remove_the_ssr_and_rough_fallbacks` is what measures each
 //! share, by zeroing the probe rows and reading the difference at
 //! [`MIRROR_MISSES`], [`MIRROR_FOOT`] and [`BRASS_AT`]. That the environment is
@@ -434,11 +435,12 @@ pub const MONITOR_EXTENT: (u32, u32) = (PAGE_EXTENT, PAGE_EXTENT);
 /// topic 39's resolution order.
 ///
 /// [`RenderEffects::DEFAULT_STACK`](crcbl::render::RenderEffects::DEFAULT_STACK)
-/// less the reflections, which are
-/// `docs/plan/18-render-features.md`'s own example of what a render-to-texture
-/// camera does not want: a screen-space march in a view that is *about* to be
-/// pasted onto a surface standing in the same room is a frame's worth of work
-/// spent on the one thing the view cannot afford to be right about.
+/// less the reflections, which are the camera-layer rule's own example
+/// (`docs/notes/rendering.md`, _What the deleted 48-post-processing plan left
+/// behind_) of what a render-to-texture camera does not want: a screen-space
+/// march in a view that is *about* to be pasted onto a surface standing in the
+/// same room is a frame's worth of work spent on the one thing the view cannot
+/// afford to be right about.
 ///
 /// It is the camera's layer and not the programmatic one on purpose. The
 /// programmatic layer is what the pause menu and the `--no-*` flags drive, and a
@@ -1512,8 +1514,8 @@ const SPOT_INTENSITY: f32 = 5.0;
 /// being readable.
 const SPOT_COLOR: Vec3 = Vec3::new(0.72, 0.82, 1.0);
 
-/// The corner downlight: `docs/plan/18-render-features.md`'s **spot**, in the
-/// sample.
+/// The corner downlight: topic 44's **spot** (`docs/notes/rendering.md`, _What
+/// the deleted 44-lighting plan left behind_), in the sample.
 ///
 /// A cone is the one thing neither of this room's other lights has. The sun is
 /// directional and unbounded, [`lamp`] falls off with distance and in no other

@@ -8,7 +8,7 @@
 //!                                            mesh.slang's fragment ◀─┘
 //! ```
 //!
-//! `docs/plan/18-render-features.md`'s "Many lights": a light is a row in a
+//! Topic 44's "Many lights" (`docs/notes/rendering.md`): a light is a row in a
 //! storage buffer, the sun included. The sun keeps a type of its own on this
 //! side — it is the light that owns the ambient term and the shadow cascades,
 //! and [`ForwardRenderer::begin_frame`] has always taken one — but it stops
@@ -24,7 +24,7 @@ use crate::camera::DirectionalLight;
 /// A light that lives somewhere, as distinct from the sun, which does not.
 ///
 /// Three variants and one row: the shader loop shades all four kinds with one
-/// BRDF, which is `docs/plan/18-render-features.md`'s "one material model, one
+/// BRDF, which is topic 44's "one material table, one
 /// BRDF, one set of inputs" holding by construction rather than by four copies
 /// of it agreeing.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,7 +232,7 @@ impl Light {
     /// `None` is a light with no map of its own, which is the ordinary case: the
     /// atlas holds [`shadow::LIGHT_TILES`](crate::shadow::LIGHT_TILES) light
     /// tiles and a scene may want more than they hold. Such a light still lights
-    /// and simply does not occlude — `docs/plan/18-render-features.md`'s honest
+    /// and simply does not occlude — topic 45's honest
     /// degradation, and the reason the budget is a quality knob rather than a
     /// correctness cliff.
     #[must_use]
@@ -313,8 +313,8 @@ impl Light {
     }
 }
 
-/// The sun as a row: `docs/plan/18-render-features.md`'s "a directional light is
-/// a row too, flagged as affecting every cluster".
+/// The sun as a row: topic 44's "a light is a row, and so is the sun" — "a
+/// directional light is flagged as affecting every cluster".
 ///
 /// The direction is normalised here and nowhere else, which is what lets
 /// `mesh.slang`'s `normalize` of it be the same arithmetic the single-light form

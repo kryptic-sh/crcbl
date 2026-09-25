@@ -244,7 +244,7 @@ pub enum Scene {
     Dunes,
     /// Four sprites over three [`SpriteRenderer`] batches: `sprite.slang`.
     Sprite,
-    /// `docs/plan/18-render-features.md`'s light list: the cube scene's geometry
+    /// Topic 44's light list: the cube scene's geometry
     /// under three coloured **point** lights and a sun turned down far enough
     /// that they are what is lighting it.
     ///
@@ -253,8 +253,8 @@ pub enum Scene {
     /// list and in nothing else, so a diff between them is the feature rather
     /// than a new arrangement of objects.
     Lights,
-    /// `docs/plan/18-render-features.md`'s **spot** light: one cone of light on
-    /// a flat floor, seen from straight above.
+    /// Topic 44's **spot** light: one cone of light on a flat floor, seen from
+    /// straight above.
     ///
     /// **The only frame in the tree that draws a cone.** [`Scene::Lights`] is
     /// three point lights, so `mesh.slang`'s `spot_cone` compiled to all four
@@ -269,7 +269,7 @@ pub enum Scene {
     /// why the camera looks straight down and `SPOT_HEIGHT` for what the light's
     /// height buys the pixel assertions.
     Spot,
-    /// `docs/plan/18-render-features.md`'s **shadowed spot**: [`Scene::Spot`]'s
+    /// Topic 45's **shadowed spot**: [`Scene::Spot`]'s
     /// floor and cone with an object standing in the light.
     ///
     /// **The only frame in the tree where a light other than the sun occludes.**
@@ -291,7 +291,7 @@ pub enum Scene {
     /// overhead the shadow hides under the object that casts it. See
     /// `spot_shadow_camera` and `SPOT_SHADOW_LIGHT_AT`.
     SpotShadow,
-    /// `docs/plan/18-render-features.md`'s **shadowed point light**: one light
+    /// Topic 45's **shadowed point light**: one light
     /// low over a floor with a caster on either side of it, seen from above.
     ///
     /// **The only frame in the tree where one light occludes in more than one
@@ -557,7 +557,7 @@ pub enum Scene {
     ///
     /// [`crcbl_shaders::ssr::ROUGHNESS_CUTOFF`]: crate::shaders::ssr::ROUGHNESS_CUTOFF
     SpecularAa,
-    /// `docs/plan/18-render-features.md`'s **screen-space ambient occlusion**:
+    /// Topic 46's **screen-space ambient occlusion**:
     /// the inside of a box, looked straight down into, lit almost entirely by
     /// ambient.
     ///
@@ -583,7 +583,7 @@ pub enum Scene {
     /// view is straight down and `AO_RUN` for why the trough is not a square
     /// room.
     Ao,
-    /// `docs/plan/18-render-features.md`'s **screen-space reflections**: a
+    /// Topic 47's **screen-space reflections**: a
     /// smooth floor with the plain pyramid standing on it, seen from just above
     /// the floor.
     ///
@@ -678,7 +678,7 @@ pub enum Scene {
     /// What is left in a floor pixel is `sky_prefiltered × (f0·scale + bias)`,
     /// which `tests/render_e2e.rs` predicts absolutely.
     GradientMirror,
-    /// `docs/plan/18-render-features.md`'s **bloom chain**: a flat floor with
+    /// Topic 48's **bloom chain**: a flat floor with
     /// one small, very bright patch on it, looked straight down at.
     ///
     /// **The only frame in the tree with content above the display range that is
@@ -706,7 +706,7 @@ pub enum Scene {
     /// See `bloom_camera` for the framing and `BLOOM_BAND_AT` for where the
     /// bands sit.
     Bloom,
-    /// `docs/plan/18-render-features.md`'s **antialiasing resolve**: one flat
+    /// Topic 49's **antialiasing resolve**: one flat
     /// slab turned about the view axis, so its silhouette runs diagonally across
     /// a dark frame.
     ///
@@ -729,7 +729,7 @@ pub enum Scene {
     /// resolved. [`Scene::Bloom`] is the contrast — the lens is *not* in the
     /// default stack, so a fixture that wants it has to add it.
     Aa,
-    /// `docs/plan/18-render-features.md`'s **irradiance probes**: the inside of
+    /// Topic 50's **irradiance probes**: the inside of
     /// a room, looked straight down into, lit by the probe grid and by nothing
     /// else at all.
     ///
@@ -1513,7 +1513,7 @@ fn bloom_sun() -> crcbl_render::DirectionalLight {
 /// The render stack [`Scene::Bloom`] draws through, as a file would hold it.
 ///
 /// **The fixture composes its camera layer from RON**, which is the shape
-/// `docs/plan/18-render-features.md` asks for and the reason
+/// topic 48's camera layer asks for and the reason
 /// `crcbl_render::stack` exists: what a view asks for is data, so the thing a
 /// golden is blessed from can be read rather than recompiled. Written out here
 /// rather than loaded from a path because a fixture that reached the filesystem
@@ -9059,7 +9059,7 @@ mod tests {
                     passes.push(("compute", "light-cluster"));
                 }
             }
-            // `docs/plan/18-render-features.md`'s occlusion slice added the
+            // Topic 46's occlusion slice added the
             // middle four, in this order and no other: the prepass has to write
             // the depth `ssao` reads, `ssao-blur` has to have raw occlusion to
             // blur, `ssao-upsample` has to have a blurred half-resolution
@@ -9278,10 +9278,9 @@ mod tests {
             // costs a frame: `crcbl_render::shadow::Selection` gave this scene's
             // spot a tile, so the shadow pass runs a cull against the light's own
             // frustum before drawing into it. A scene whose light was refused a
-            // tile records the cube scene's list unchanged — which is
-            // `docs/plan/18-render-features.md`'s "still lights, does not
-            // occlude" visible in the frame's shape rather than only in its
-            // pixels.
+            // tile records the cube scene's list unchanged — which is topic
+            // 45's third decision, "still lights, does not occlude", visible in
+            // the frame's shape rather than only in its pixels.
             (Scene::SpotShadow, &spot_shadow_passes),
             // **One triple, not six.** A point light's six faces are six
             // viewports and six matrices over *one* cull — topic 18's fourth

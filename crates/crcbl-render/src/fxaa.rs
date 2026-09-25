@@ -1,5 +1,5 @@
-//! `docs/plan/18-render-features.md`'s antialiasing row, cheap rung: the FXAA
-//! pass that resolves the tonemapped frame into the target.
+//! Topic 49's antialiasing row (`docs/notes/rendering.md`), cheap rung: the
+//! FXAA pass that resolves the tonemapped frame into the target.
 //!
 //! # It is the only pass in this crate that reads what another pass presented
 //!

@@ -35,7 +35,7 @@ entry-points = computeMain:glcompute
 
 [bloom_composite]
 source = shaders/bloom_composite.slang
-source-sha256 = 8eaa318a2cf5caad5a796b8c5ed878a17e5ee35ca72140c6b1b8d8395b509a84
+source-sha256 = 484dfa04bc027af5bf32660f0a39d4cd1c66d39e86dba348b2923474bf54e228
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/bloom_composite.spv
 spirv-sha256 = 3e9d132a5a88e308e29e4482125ac96f0a28edb9eb1a3c30d8de7c1af47d71c6
@@ -49,7 +49,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [bloom_down]
 source = shaders/bloom_down.slang
-source-sha256 = 332e2d36cc9aacc8e788368b786e5a96d4f018af79b19b66dd3c9f089fd1fca1
+source-sha256 = 2221c3edc6a5e9483bac14197a4d20c5f9faa99074f610a873f80f6c220835ec
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/bloom_down.spv
 spirv-sha256 = 267429e90a54fe021ef04ca4e7923ad9c4d0313a4a81366fffb8ec70c39d94c9
@@ -63,7 +63,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [bloom_up]
 source = shaders/bloom_up.slang
-source-sha256 = 4abd6b481839f7af2d7420cb43039e930ab14852199b4e50bb897bc4b788c3ea
+source-sha256 = 9639ecace257ff741da2d2ca4332e54abd7f96ab8da19d36659c1ec323e46580
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/bloom_up.spv
 spirv-sha256 = 60d168d0c035353ba693dcf79f6c08447eea0732efb8f9dc81eaa76e47c2df80
@@ -218,7 +218,7 @@ entry-points = clearMain:glcompute, reduceMain:glcompute, histogramMain:glcomput
 
 [fxaa]
 source = shaders/fxaa.slang
-source-sha256 = 02c350dd5811b2b9e4c56bff94b393216b28f7c9e76159b218bab0751c60502c
+source-sha256 = 0fb2aa70557021f644c54591534a7dae04272b1c8cabd738772a3965fda2db04
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/fxaa.spv
 spirv-sha256 = f57966b6f99198817bd1cbd937d35d13a6616b65bfd50fe67e07732a24f32a5b
@@ -232,7 +232,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [grass]
 source = shaders/grass.slang
-source-sha256 = 4d864b25435485ad24387c12fbac3d9e4249c01a21cec65acb17fd15af2589ad
+source-sha256 = c190971f742b59bae9d4b15d78a5e3c1fe06fb13c3f363a13c925d6d28095451
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/grass.spv
 spirv-sha256 = b4e42d109d885c12e4c19af7a1612dba9d0f79f26f6c1eb6af57e62baa480011
@@ -280,7 +280,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [hiz]
 source = shaders/hiz.slang
-source-sha256 = 41a12dfae4dee8353adbac870e50ebc94927a13dba58ce1ed4bf4dee2548a889
+source-sha256 = 2565b8f98b472dc61f158956219ca67062d1cd5a98905482560aaff01199af4a
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/hiz.spv
 spirv-sha256 = cb28fd28b532324ede1350c27f07e92f0b6042c404d8034d12c7a902b4a9da3d
@@ -305,7 +305,7 @@ entry-points = computeMain:glcompute
 
 [light_cluster]
 source = shaders/light_cluster.slang
-source-sha256 = b9811aee0f5a553596e5337b8e68cb4b6532e8d08e3933c78515b653df0a6cc5
+source-sha256 = 65491513a590b5b961b016bf381e7a91ed6a17e35a3d4d30bf8873a0b3dfbe63
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/light_cluster.spv
 spirv-sha256 = c0298e90c679291fd0428cd1258e9eb9acb54692f81810c20706ac705871d6b3
@@ -318,7 +318,7 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 574efc1ab8c0f37077fd432410be7e0c81cafec0894e3a72087f324631756bea
+source-sha256 = 83ece34853df20c6b918f28413d0f7c4cf1d0b5e4871665e594d580000d0bb9b
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
 spirv-sha256 = 4de11bb0a2f5fa2b5290c5708752995b90dff126761368c2f4c9205caaef1697
@@ -473,7 +473,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssao]
 source = shaders/ssao.slang
-source-sha256 = a98112c17d69ac11ef9396151d96416a235a07a3516ff92b45fd752f27afc3b7
+source-sha256 = 3efa6170ee7090f7687253cfcd55733ced0fde18d5b802725b845512f482fb25
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssao.spv
 spirv-sha256 = 17db5e7351ca2628ae0da05f3d8b288a64aac317d2262771c131684d369b8772
@@ -529,7 +529,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = 5d014b362564d9083914fc4106c34fedb197a00d4970e2b4ffe5f80b9765161d
+source-sha256 = 302e87b60a0b4ff605c004eb3b20552a730ef4678f29da49947ca248d133e993
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
 spirv-sha256 = f15dfc0ec15c6bd55ba303d1eec499e787e53e928d6fd050d556b382010c8e07
@@ -543,7 +543,7 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr_blur]
 source = shaders/ssr_blur.slang
-source-sha256 = 2db6297f0dfe3a6aab987c5f73cb4ada86e3e808509f5e3bff7d72e02bf2d516
+source-sha256 = e096d5778710a5f37c8ed86653eb4583db5081844b055fe0d167354a37d37915
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr_blur.spv
 spirv-sha256 = 3c2740349d534a5963b8c1222839f596b781e599236111ba470ea39880ae7300

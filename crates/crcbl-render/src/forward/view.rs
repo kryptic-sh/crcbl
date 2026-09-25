@@ -814,18 +814,18 @@ pub(super) struct View {
     /// identity or a zero here would put every pixel of the first frame in
     /// motion.
     pub(super) previous_view_projection: Option<Mat4>,
-    /// `docs/plan/18-render-features.md`'s occlusion pair — see [`crate::ssao`].
+    /// Topic 46's occlusion pair — see [`crate::ssao`].
     pub(super) ssao: Ssao,
     /// Topic 45's contact-shadow march — see
     /// [`crate::contact_shadows`].
     pub(super) contact_shadows: ContactShadows,
-    /// `docs/plan/18-render-features.md`'s depth pyramid, which the reflection
+    /// Topic 47's depth pyramid, which the reflection
     /// march climbs — see [`crate::hiz`].
     pub(super) hiz: Hiz,
     /// Topic 03 §3.3's farthest-depth pyramid,
     /// which the occlusion cull reads — see [`crate::occlusion_cull`].
     pub(super) occlusion_pyramid: OcclusionPyramid,
-    /// `docs/plan/18-render-features.md`'s reflection march — see
+    /// Topic 47's reflection march — see
     /// [`crate::ssr`].
     pub(super) ssr: Ssr,
     /// The froxel volume and its composite — see
@@ -835,7 +835,7 @@ pub(super) struct View {
     /// [`crate::exposure`]. Named for what it owns rather than for the value:
     /// [`ForwardRenderer::exposure`] is the number a caller set.
     pub(super) auto_exposure: Exposure,
-    /// `docs/plan/18-render-features.md`'s bloom chain — see [`crate::bloom`].
+    /// Topic 48's bloom chain — see [`crate::bloom`].
     pub(super) bloom: Bloom,
     /// The cheap antialiasing tier — see
     /// [`crate::fxaa`].
@@ -1736,7 +1736,7 @@ impl View {
             .to_bytes(),
         )?;
 
-        // `docs/plan/18-render-features.md`'s occlusion block. **The projection
+        // Topic 46's occlusion block. **The projection
         // alone, not the view-projection**: the occlusion integral asks what is
         // near a surface, and view space is where "near" is isotropic and the eye
         // is at the origin — a world-space reconstruction would put the camera
@@ -2327,7 +2327,7 @@ impl View {
         };
         // --- the depth prepass ---
         //
-        // `docs/plan/18-render-features.md`'s prepass, and it is unusually cheap:
+        // Topic 46's prepass, and it is unusually cheap:
         // the depth-only pipeline is already the shadow cascades' own, built from
         // the same modules and the same layout as the colour pipeline, so driven
         // with the camera's draws and a copy of the camera's bind group it *is* a
@@ -2462,7 +2462,7 @@ impl View {
             });
         }
 
-        // `docs/plan/18-render-features.md`'s occlusion pair, or the one texel
+        // Topic 46's occlusion pair, or the one texel
         // that stands for "no occlusion was computed" where it is switched off.
         //
         // # The switched-off arm is the 1×1 placeholder, and the shader is what
@@ -2791,7 +2791,7 @@ impl View {
             None => (scene_color, None),
         };
 
-        // `docs/plan/18-render-features.md`'s reflection march and its blur, and
+        // Topic 47's reflection march and its blur, and
         // **the second of them is the composite**: the march reads the scene
         // colour, the depth prepass and the reflectivity attachment and writes
         // the reflection alone, and the blur filters that and adds it to the
@@ -2885,7 +2885,7 @@ impl View {
             );
         }
 
-        // `docs/plan/18-render-features.md`'s bloom chain, and it slots in
+        // Topic 48's bloom chain, and it slots in
         // exactly where the reflection composite left off: it reads whatever the
         // tonemap was about to read, writes a new full-resolution image, and the
         // tonemap reads that instead. A frame that does not add it hands the

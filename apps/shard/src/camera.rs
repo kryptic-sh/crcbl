@@ -54,7 +54,7 @@
 //! * The projection is **perspective** rather than orthographic, at a narrow
 //!   [`FOV_Y`] that flattens it into something axonometric. That is deliberate:
 //!   the froxel grid the many-lights path clusters into and the ray march
-//!   `docs/plan/18-render-features.md`'s screen-space reflections walk are both
+//!   the screen-space reflections walk are both
 //!   parametrised over a perspective divide, and a sample whose subject is those
 //!   two would be exercising the unusual path if it drew them under an
 //!   orthographic camera.

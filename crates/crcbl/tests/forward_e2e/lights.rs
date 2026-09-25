@@ -1,4 +1,4 @@
-//! `docs/plan/18-render-features.md`'s light list, on whichever backend
+//! Topic 44's light list, on whichever backend
 //! `CRCBL_GPU` names.
 //!
 //! Two things a golden image cannot say, and this module exists for both:

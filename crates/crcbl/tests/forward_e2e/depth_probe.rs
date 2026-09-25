@@ -16,7 +16,7 @@
 //! which convention is in force.
 //!
 //! **The reflectivity attachment carries the row it was told to.**
-//! `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and a
+//! Topic 47's screen-space reflections read `F0` and a
 //! roughness out of a second colour target the forward pass writes, and nothing
 //! in a rendered picture shows what is in it — a wrong channel, a wrong row or a
 //! target that was never written all produce exactly the frame the goldens
@@ -1313,7 +1313,7 @@ const _: () = assert!(
 /// identically and the only difference between them is their albedo.
 ///
 /// The same direction and colour this probe carried in the frame block before
-/// `docs/plan/18-render-features.md`'s light list existed, so its depth answers
+/// topic 44's light list existed, so its depth answers
 /// are the answers it recorded then.
 fn probe_sun() -> crcbl::shaders::light::GpuLight {
     crcbl::shaders::light::GpuLight {
@@ -1850,7 +1850,7 @@ fn reversed_z_puts_the_nearer_surface_in_front_and_standard_z_would_not() {
 
 /// **The second colour attachment carries the material row the instance named.**
 ///
-/// `docs/plan/18-render-features.md`'s screen-space reflections read `F0` and
+/// Topic 47's screen-space reflections read `F0` and
 /// roughness out of a target the forward pass writes beside its colour, and
 /// **nothing in a rendered picture shows what is in it**: a wrong channel, a
 /// wrong row, or a target the fragment stage never wrote all leave the frame
@@ -1948,7 +1948,7 @@ fn the_reflectivity_target_carries_the_bound_material_row_and_no_reflection_wher
     assert_eq!(
         corner, no_reflection,
         "a pixel no geometry covered must hold `NO_REFLECTION` — no `F0`, fully \
-         rough: it has no material, and `docs/plan/18-render-features.md` asks \
+         rough: it has no material, and `docs/notes/rendering.md` asks \
          for the clear that says so rather than one a later march would read as \
          a reflective surface, which a zero alpha now is. Got {corner:?}."
     );

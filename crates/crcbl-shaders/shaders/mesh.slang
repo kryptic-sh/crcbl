@@ -299,7 +299,7 @@ struct MeshVertex
 /// How many cascades the sun's shadow map is split into, matching
 /// `crcbl_shaders::mesh::SHADOW_CASCADES`.
 ///
-/// `docs/plan/18-render-features.md`'s shadow section asks for "2–3 cascades".
+/// The shadow design this engine started from asked for "2–3 cascades".
 /// It is one number here and one on the CPU, checked against each other by that
 /// module's `the_cascade_count_matches_the_one_mesh_slang_declares`, because a
 /// shader reading three matrices out of a block the CPU wrote two into reads the
@@ -313,7 +313,7 @@ static const uint SHADOW_CASCADES = 2;
 /// How many **tiles** the atlas has for shadowed lights beside the cascades,
 /// matching `crcbl_shaders::mesh::SHADOW_LIGHT_TILES`.
 ///
-/// `docs/plan/18-render-features.md`'s 2026-08-13 decision: the atlas is a fixed
+/// Topic 45's third decision (2026-08-13): the atlas is a fixed
 /// tile grid, the cascades take the first tiles, the rest go one per shadowed
 /// spot and `SHADOW_POINT_FACES` per shadowed point, and a light that gets none
 /// still lights without occluding. Sizes `FrameUniforms::light_view_proj`, so
@@ -1242,7 +1242,7 @@ float3 double_sided_normal(GpuMaterial material, float3 normal, bool front_facin
 
 /// One irradiance probe, matching `crcbl_shaders::probe::GpuProbe`.
 ///
-/// `docs/plan/18-render-features.md`'s L1 spherical-harmonic probe: four
+/// Topic 50's L1 spherical-harmonic probe: four
 /// coefficients per colour channel, packed `(L1x, L1y, L1z, L0)` so that the
 /// irradiance a normal receives is `dot(sh, float4(N, 1))` and nothing else. No
 /// `pow` and no trigonometry — the rule `ggx_lobe` is already held to.
@@ -1287,7 +1287,7 @@ struct GpuLight
     /// `SHADOW_POINT_FACES` tiles from here, and `point_visibility` adds the face
     /// it selected. The atlas holds `SHADOW_LIGHT_TILES` of them and a scene may
     /// want more than they hold, so a row saying "no tile" is the ordinary case:
-    /// `docs/plan/18-render-features.md`'s rule is that such a light still lights
+    /// Topic 45's third decision is that such a light still lights
     /// and simply does not occlude.
     uint shadow_tile;
     /// What this light may contribute: `FLAG_FILL`, or zero for an ordinary one.
@@ -1596,7 +1596,7 @@ DepthTexture2D shadow_atlas D3D12_REGISTER(t15, space0);
 [[vk::binding(16, 0)]]
 SamplerComparisonState shadow_sampler D3D12_REGISTER(s16, space0);
 
-/// `docs/plan/18-render-features.md`'s light list: every light in the frame, one
+/// Topic 44's light list: every light in the frame, one
 /// row each, **the sun included**.
 ///
 /// The sun was `FrameUniforms::light_direction` and `light_color` until the list
@@ -1620,7 +1620,7 @@ StructuredBuffer<GpuLight> lights D3D12_REGISTER(t20, space0);
 [[vk::binding(21, 0)]]
 StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t21, space0);
 
-/// `docs/plan/18-render-features.md`'s screen-space ambient occlusion, as
+/// Topic 46's screen-space ambient occlusion, as
 /// `ssao_upsample.slang` left it: one `Rgba8Unorm` channel the size of the
 /// frame, `r` the visibility — `1.0` where nothing occludes — and `gba` the
 /// **bent direction**, in world space and encoded `xyz * 0.5 + 0.5`.
@@ -1672,7 +1672,7 @@ StructuredBuffer<uint> cluster_lights D3D12_REGISTER(t21, space0);
 [[vk::binding(22, 0)]]
 Texture2D<float4> ambient_occlusion D3D12_REGISTER(t22, space0);
 
-/// `docs/plan/18-render-features.md`'s irradiance grid, row by row — the
+/// Topic 50's irradiance grid, row by row — the
 /// `FrameUniforms::probe_*` header above says where they are.
 ///
 /// **Appended after the occlusion channel, never inserted**, which is the same
@@ -4664,7 +4664,7 @@ WeightedProbe probe_corner(uint level, uint3 cell, float3 origin, float3 spacing
     return corner;
 }
 
-/// The irradiance one clipmap level of `docs/plan/18-render-features.md`'s probe
+/// The irradiance one clipmap level of topic 50's probe
 /// grid gives a surface at `world_position` facing `normal`, in linear RGB.
 ///
 /// Mirrored on the host by `crcbl_shaders::probe::level_irradiance_at`, which is
@@ -4896,7 +4896,7 @@ float3 sky_irradiance(float3 normal)
 
 /// The forward pass's two colour attachments, one field per target.
 ///
-/// This was a bare `float4` until `docs/plan/18-render-features.md`'s
+/// This was a bare `float4` until topic 47's
 /// screen-space reflections, which run after this pass and therefore have only
 /// the depth buffer and the scene colour to work from — neither of which says
 /// which surfaces reflect or how sharply. **Both of the numbers that do are
@@ -4908,7 +4908,7 @@ float3 sky_irradiance(float3 normal)
 /// A struct return is not a second fragment stage: `fragmentMain` is named by
 /// the vertex pipeline and by the mesh-shader pipeline alike, and both gained
 /// one element in the same `ColorTargetState` array. That is the design's own
-/// claim in `docs/plan/18-render-features.md` — the AO section's refusal of an
+/// claim in `docs/notes/rendering.md` — the AO section's refusal of an
 /// attachment was about the depth *prepass*, which has no fragment stage and no
 /// colour target at all — and it holds here rather than being assumed.
 struct FragmentOutput
@@ -5800,7 +5800,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
         // gave it and a point light through whichever of its six the surface is
         // on; a light with no tile — every light past the budget — keeps the
         // `reach` its falloff and cone already produced, which is
-        // `docs/plan/18-render-features.md`'s "still lights, just does not
+        // topic 45's "still lights, just does not
         // occlude" holding by construction.
         //
         // The sun *replaces* `reach` where a spot *multiplies* it, and the
@@ -5876,7 +5876,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // already occluded by the shadow maps above — and applying it to `gloss`
     // would dim a highlight, which is a mirror image of the light rather than of
     // the room. Multiplying the tonemap pass's input instead is the same mistake
-    // one pass later and is refused in `docs/plan/18-render-features.md` in
+    // one pass later and is refused in `docs/notes/rendering.md` in
     // writing, because the one-line feature row invites it.
     //
     // **The fetch is clamped to the image's extent**, which is what makes the
@@ -5902,7 +5902,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // exactly — so converting the sun from a field to a row is arithmetically a
     // no-op and the goldens are what say so.
     //
-    // `docs/plan/18-render-features.md`'s irradiance grid, **added** to the flat
+    // Topic 50's irradiance grid, **added** to the flat
     // term rather than replacing it: the sum starts at the ambient and a grid of
     // nothing contributes exactly zero, so the whole feature is data and there
     // is no branch anywhere selecting it. An author who wants the probes to be

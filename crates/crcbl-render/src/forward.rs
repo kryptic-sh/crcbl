@@ -1240,7 +1240,7 @@ const FULLSCREEN_DRAWS: u64 = 1;
 /// the tonemap, always, and each switched-on effect's passes beside it.
 ///
 /// **A function of the frame rather than a constant**, since
-/// `docs/plan/18-render-features.md`'s toggles: it was the tonemap alone, then
+/// topic 48's toggles: it was the tonemap alone, then
 /// five, and either written down is a number that stops matching the frame. The
 /// tonemap is the one that is not conditional — a frame has to reach the
 /// swapchain.
@@ -1517,7 +1517,7 @@ pub struct ForwardRenderer {
     /// by accident, which is a material and only *happens* to be the untinted
     /// one.
     material_ids: Vec<u32>,
-    /// `docs/plan/18-render-features.md`'s irradiance grid, row by row.
+    /// Topic 50's irradiance grid, row by row.
     ///
     /// One buffer shared by every frame's bind group, like the material table
     /// and for a stronger version of its reason: a probe is written when the
@@ -1599,7 +1599,7 @@ pub struct ForwardRenderer {
     ///
     /// Kept rather than recomputed because the shadow pass's share is the number
     /// of **occupied** tiles, which [`ForwardRenderer::add_shadow_pass`] works
-    /// out from `docs/plan/18-render-features.md`'s slot allocation and nothing outside
+    /// out from topic 45's tile allocation and nothing outside
     /// it can restate without becoming the second copy that drifts.
     recorded_draws: u64,
     /// Which call the forward pass records — the device's [`GeometryPath`],
@@ -2435,20 +2435,20 @@ struct Rollback {
     /// three buffers — and which clean themselves up on their own failure path,
     /// so this only carries one that was built.
     lights: Option<LightGrid>,
-    /// `docs/plan/18-render-features.md`'s occlusion pair, which owns two
+    /// Topic 46's occlusion pair, which owns two
     /// pipelines, two layouts and a ring of blocks.
     ssao: Option<Ssao>,
     /// Topic 45's contact-shadow march, which owns one
     /// pipeline, one layout and a ring of blocks.
     contact_shadows: Option<ContactShadows>,
-    /// `docs/plan/18-render-features.md`'s depth pyramid, which owns one
+    /// Topic 47's depth pyramid, which owns one
     /// pipeline, one layout and a ring of blocks per level.
     hiz: Option<Hiz>,
     /// Topic 03 §3.3's farthest-depth pyramid,
     /// which owns one pipeline, one layout and — once a frame culled — a chain
     /// of level images.
     occlusion_pyramid: Option<OcclusionPyramid>,
-    /// `docs/plan/18-render-features.md`'s reflection march, which owns one
+    /// Topic 47's reflection march, which owns one
     /// pipeline, one layout and a ring of blocks.
     ssr: Option<Ssr>,
     /// The froxel volume, which owns three
@@ -2457,7 +2457,7 @@ struct Rollback {
     /// Topic 43 §6's auto-exposure, which owns three
     /// pipelines, one layout and three rings of buffers.
     exposure: Option<Exposure>,
-    /// `docs/plan/18-render-features.md`'s bloom chain, which owns three
+    /// Topic 48's bloom chain, which owns three
     /// pipelines, two layouts, a sampler and a ring of blocks.
     bloom: Option<Bloom>,
     /// The cheap antialiasing tier, which owns one
@@ -3752,9 +3752,9 @@ impl ForwardRenderer {
         let material_buffer = materials.buffer();
         rollback.materials = Some(materials);
 
-        // `docs/plan/18-render-features.md`'s irradiance grid, filled once and
-        // never again — see [`crate::probe`], which is where that decision
-        // lives. **Created even for a description with no probes**, because
+        // Topic 50's irradiance grid: the table is created here once, and
+        // `crate::probe_gather`'s compute pass rewrites its rows every frame —
+        // see [`crate::probe`]. **Created even for a description with no probes**, because
         // every group of this layout has to fill [`PROBE_TABLE_BINDING`] and the
         // honest filler for "no probes were authored" is the zeroed row the
         // shader's clamp lands on.
@@ -4473,7 +4473,7 @@ impl ForwardRenderer {
             count: 1,
             flags: BindingFlags::empty(),
         });
-        // `docs/plan/18-render-features.md`'s occlusion channel, last of the set
+        // Topic 46's occlusion channel, last of the set
         // — see [`AMBIENT_OCCLUSION_BINDING`] on why last is structural rather
         // than tidy.
         //
@@ -6973,7 +6973,7 @@ impl ForwardRenderer {
     /// The lights in the frame **beside the sun**, which
     /// [`begin_frame`](Self::begin_frame) still takes on its own.
     ///
-    /// `docs/plan/18-render-features.md`'s light list, minus its first row: the
+    /// Topic 44's light list, minus its first row: the
     /// sun is row 0 of every frame's list and the ones set here follow it, in
     /// the order given. That order is the one a froxel keeps a prefix of when it
     /// runs out of budget — see [`ForwardRenderer::light_capacity`] and the
@@ -10926,7 +10926,7 @@ struct ClusterStages {
 
 impl MeshModules {
     /// **Three targets, one fragment stage.** `mesh.slang`'s `FragmentOutput`
-    /// writes the shaded colour, then `docs/plan/18-render-features.md`'s
+    /// writes the shaded colour, then topic 47's
     /// reflectivity channel, then topic 43 §9's motion
     /// vector — and both pipeline shapes name that same entry point, so each
     /// target is one more element of this array and not a second pipeline, a

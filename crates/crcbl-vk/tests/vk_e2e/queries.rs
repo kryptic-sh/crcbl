@@ -368,7 +368,7 @@ fn per_pass_gpu_timers_report_real_numbers() {
     let timings = timers.latest();
     eprintln!("vk e2e: {}", timings.report());
     // The camera's cull triple, then one per shadow cascade, then the shadow
-    // atlas's depth-only pass, `docs/plan/18-render-features.md`'s depth prepass
+    // atlas's depth-only pass, topic 46's depth prepass
     // and occlusion pair, and the two colour passes that follow them. Built from
     // `crcbl_render::shadow::CASCADES` rather than written out, so a cascade
     // whose passes stopped being recorded is a failure here and not a shorter

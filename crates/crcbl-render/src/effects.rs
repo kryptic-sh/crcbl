@@ -1,5 +1,5 @@
-//! Which of `docs/plan/18-render-features.md`'s effects a frame draws, and
-//! topic 39's four-layer order that decides it.
+//! Which render effects a frame draws, and topic 39's four-layer order that
+//! decides it.
 //!
 //! ```text
 //! camera stack (RON) declares what the view wants
@@ -96,7 +96,7 @@
 //! [`ForwardRenderer::device_effects`]: crate::ForwardRenderer::device_effects
 
 bitflags::bitflags! {
-    /// The effects `docs/plan/18-render-features.md` ships, one bit each.
+    /// The render effects, one bit each.
     ///
     /// One bit per effect and **not** one per pass: the occlusion pass and its
     /// blur are one switch because the blur is not optional (`crate::ssao` says

@@ -72,9 +72,10 @@ The Unreal material/material-instance split, minus the graph:
 - `standard_pbr`'s first three parameters already exist in that row and are
   already shaded: `crcbl_shaders::mesh::GpuMaterial` carries `base_color`,
   `metallic` and `roughness`, and `mesh.slang` runs one GGX lobe on them — see
-  `docs/plan/18-render-features.md`'s BRDF decision. This topic owns how a
-  parameter block is _declared and authored_, not which parameters the row
-  holds; a template that adds one is what makes the row grow.
+  the BRDF decision in the [rendering notes](../notes/rendering.md) (_What the
+  deleted 44-lighting plan left behind_). This topic owns how a parameter block
+  is _declared and authored_, not which parameters the row holds; a template
+  that adds one is what makes the row grow.
 - glTF import (6) emits instances of `standard_pbr` — imported content and
   hand-authored content are the same kind of asset from that moment on.
 

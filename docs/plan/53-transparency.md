@@ -185,12 +185,13 @@ Every symbol named here exists today unless the line says it is new.
 
 The second is what makes decision 4's SSR half enforceable rather than a
 convention. `MeshModules::COLOR_TARGETS` is three targets — the shaded colour,
-[18-render-features.md](18-render-features.md)'s reflectivity channel, and the
-gap survey's §9 motion vector — and a pipeline must declare all three because
-the attachments are all three. The blended pipeline declares the same three and
-writes only the first: reflectivity stays the opaque surface's `F0` behind the
-glass, and the motion vector stays the opaque surface's, which is what the
-passes reading them were written against.
+the reflectivity channel ([rendering notes](../notes/rendering.md), _What the
+deleted 47-reflections plan left behind_), and the gap survey's §9 motion vector
+— and a pipeline must declare all three because the attachments are all three.
+The blended pipeline declares the same three and writes only the first:
+reflectivity stays the opaque surface's `F0` behind the glass, and the motion
+vector stays the opaque surface's, which is what the passes reading them were
+written against.
 
 No new capability. Blending on a single colour target is core on all four
 backends and needs no `Features` bit.

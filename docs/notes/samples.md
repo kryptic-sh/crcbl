@@ -746,12 +746,13 @@ on 2026-09-25**; each names the test or command that reproduces it.
   claim about the room rather than about the sampling.
 - **Neither metal surface has an ambient term, and that is the model.** Ambient
   scales the diffuse albedo and a conductor has none; reflection is the metals'
-  only fill (argued in `docs/plan/18-render-features.md`). The mirror panel's
-  foot is a real screen-space hit; the rest of that face, and the rough block
-  above `ROUGHNESS_CUTOFF`, take the irradiance-probe environment. The probe
-  grid is a blurry low-frequency field and the only answer the raster path has
-  for anything outside the frame; ray tracing is what replaces it, and the
-  panel's `unbuilt` section says so rather than faking it.
+  only fill (argued in `docs/notes/rendering.md`, _What the deleted 44-lighting
+  plan left behind_). The mirror panel's foot is a real screen-space hit; the
+  rest of that face, and the rough block above `ROUGHNESS_CUTOFF`, take the
+  irradiance-probe environment. The probe grid is a blurry low-frequency field
+  and the only answer the raster path has for anything outside the frame; ray
+  tracing is what replaces it, and the panel's `unbuilt` section says so rather
+  than faking it.
 - **The probes are the engine's, filled every frame.** `crcbl_lantern::bounce`
   only places them from the room's own dimensions and ships their rows zeroed
   with `ProbeUpdate::EveryFrame`; `crcbl_render`'s reflective-shadow-map updater

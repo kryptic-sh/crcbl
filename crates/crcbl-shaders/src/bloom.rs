@@ -52,8 +52,8 @@ pub const KARIS_OFF: f32 = 0.0;
 /// bit, and a bright emitter grows a halo that is plainly visible against it.
 ///
 /// There is deliberately **no setter** for it. A knob with no caller is surface
-/// this codebase rejects, and the per-camera render stack
-/// `docs/plan/18-render-features.md` describes is where a real one belongs — so
+/// this codebase rejects, and the per-camera render stack topic 48 describes
+/// (`docs/notes/rendering.md`) is where a real one belongs — so
 /// the number stays here until something asks for it.
 pub const DEFAULT_STRENGTH: f32 = 0.05;
 

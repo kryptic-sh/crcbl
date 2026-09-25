@@ -70,7 +70,7 @@ pub const VERTEX_STRIDE: usize = POSITION_STRIDE + ATTRIBUTE_STRIDE;
 
 /// How many cascades the sun's shadow map is split into.
 ///
-/// `docs/plan/18-render-features.md`'s shadow section asks for 2–3 cascades.
+/// The shadow design this engine started from asked for 2–3 cascades.
 /// The same number is `static const uint SHADOW_CASCADES` in
 /// `shaders/mesh.slang` and `shaders/mesh_cluster.slang`, and this module's
 /// `the_cascade_count_matches_the_one_the_shaders_declare` is what keeps the
@@ -84,7 +84,7 @@ pub const SHADOW_CASCADES: usize = 2;
 
 /// How many **tiles** the atlas has for shadowed lights, beside the cascades.
 ///
-/// `docs/plan/18-render-features.md`'s 2026-08-13 decision: the atlas is a fixed
+/// Topic 45's third decision (2026-08-13): the atlas is a fixed
 /// tile grid, the sun's cascades take the first tiles, and the rest are handed
 /// out one per shadowed spot and six per shadowed point. A light that gets no
 /// tiles still lights and simply does not occlude.
@@ -110,7 +110,7 @@ pub const SHADOW_LIGHT_TILES: usize = 14;
 
 /// Tiles one point light's shadow map is: the six faces of a cube.
 ///
-/// `docs/plan/18-render-features.md`: six atlas tiles rather than a cube map, so
+/// Topic 45's first decision: six atlas tiles rather than a cube map, so
 /// one image, one sampler, one barrier story and one allocator serve the sun,
 /// the spots and the points alike. The face order is `+X, -X, +Y, -Y, +Z, -Z`
 /// — the cube-map convention — and `crcbl_render::shadow::face_axis` is the one
@@ -630,7 +630,7 @@ pub struct FrameUniforms {
     /// **Not a light and not a row.** It stands in for the bounces the direct
     /// terms do not carry, so it has no position, no froxel and no shadow. The
     /// sun sat beside it here as a direction and a colour until
-    /// `docs/plan/18-render-features.md`'s light list existed; it is
+    /// topic 44's light list existed; it is
     /// [`GpuLight`](crate::light::GpuLight) row now, and the shader has no
     /// special case for it.
     ///
@@ -706,7 +706,7 @@ pub struct FrameUniforms {
     /// no existing member's offset — which is what let the cascade goldens stay
     /// byte-identical across the change that introduced it.
     pub light_view_proj: [[f32; 16]; SHADOW_LIGHT_TILES],
-    /// `docs/plan/18-render-features.md`'s irradiance grid: where the probes
+    /// Topic 50's irradiance grid: where the probes
     /// are, how far apart, and how many.
     ///
     /// The rows themselves are a storage buffer of
@@ -1803,8 +1803,8 @@ pub struct GpuMaterial {
     /// its environment, so a fully metallic surface out of every light's reach
     /// is the environment rather than black. It is black only under a zeroed
     /// probe volume with nothing on screen to reflect. That is the model being
-    /// right rather than the shader being wrong — see
-    /// `docs/plan/18-render-features.md`.
+    /// right rather than the shader being wrong — see topic 44's BRDF decision
+    /// in `docs/notes/rendering.md`.
     pub metallic: f32,
     /// How rough the surface is: `0.0` a mirror, `1.0` fully diffuse.
     ///

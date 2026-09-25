@@ -61,8 +61,9 @@
 //! [`DirectionalLight`] whose directional term is nearly black: a sun would be
 //! occluded by [`CEILING_Y`]'s slab and the room would be lit by the ambient
 //! alone. What lights it instead is [`lamps`] — a row of point lights under the
-//! ceiling, on `docs/plan/18-render-features.md`'s many-lights path — and the
-//! sun row is kept for the one thing only it carries, which is the ambient.
+//! ceiling, on the many-lights path (`docs/notes/rendering.md`, _What the
+//! deleted 44-lighting plan left behind_) — and the sun row is kept for the one
+//! thing only it carries, which is the ambient.
 
 use std::borrow::Cow;
 
@@ -712,9 +713,9 @@ const LAMP_Z: [f64; 4] = [SPAWN_Z, LANE_LIST[0].z, LANE_LIST[1].z, LANE_LIST[2].
 
 /// The room's fittings: a row of point lights under the ceiling.
 ///
-/// `docs/plan/18-render-features.md`'s light list, which is what an indoor
-/// scene with a ceiling actually needs — see the module docs for why the sun
-/// row cannot do this job.
+/// The light list of topic 44's "Many lights" rule (`docs/notes/rendering.md`),
+/// which is what an indoor scene with a ceiling actually needs — see the module
+/// docs for why the sun row cannot do this job.
 #[must_use]
 pub fn lamps() -> Vec<Light> {
     LAMP_Z

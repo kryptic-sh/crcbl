@@ -1,12 +1,14 @@
-//! The irradiance probe table: one storage-buffer row per probe, filled once
-//! from the scene description.
+//! The irradiance probe table: one storage-buffer row per probe, created and
+//! cleared from the scene description, its rows rewritten every frame by
+//! [`crate::probe_gather`]'s compute pass.
 //!
 //! ```text
 //!  SceneDesc::probes ──▶ ProbeTable::new (cleared) ──▶ fill(rows) ──▶ binding 23
 //!                        └─▶ ProbeGrid::volume rides in mesh::FrameUniforms
 //! ```
 //!
-//! `docs/plan/18-render-features.md`'s irradiance probes: a static grid in a
+//! Topic 50's irradiance probes (`docs/notes/rendering.md`): a grid, following
+//! the camera, in a
 //! storage buffer, trilinearly interpolated by `mesh.slang` and added to the
 //! flat ambient term. [`crcbl_shaders::probe::GpuProbe`] is the row and
 //! [`crcbl_shaders::probe::ProbeVolume`] is the header that says where the rows

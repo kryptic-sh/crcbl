@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s Hi-Z pyramid: one reduction step of the
+// Topic 47's Hi-Z pyramid (`docs/notes/rendering.md`): one reduction step of the
 // depth prepass, and the structure `ssr.slang`'s march climbs instead of
 // stepping at a fixed stride.
 //

@@ -5956,17 +5956,17 @@ slice did not do:
   direction does **not** lean: the far wall is four occlusion radii behind the
   sphere, nothing on it is inside the wall's gather, and a depth-reconstructed
   normal's error at the silhouette never reaches the picture — the same reason
-  the scalar's halo is zero there. `docs/plan/18-render-features.md`'s
-  escalation clause is therefore still unwitnessed by any bent-direction
-  reading, and a pose that would witness it needs an occluder within one
-  occlusion radius of the surface behind it, which this court does not have
-  anywhere the fixed or the rim camera can see. Separately, `bent-normal.png` is
-  still the only checked-in bent picture: the rim's bent frame is held by its
-  two readings and by nothing else, and the sentinel arms —
-  `r_ssao_bent_normals` off, the occlusion pass out, and the `hemisphere` gather
-  — are held by the whole-frame scan. Blessing the rim's is a fifth entry in
-  `the_court_matches_its_goldens` and was left because the readings, not a
-  picture, are what say it is right.
+  the scalar's halo is zero there. The escalation clause in
+  `docs/notes/rendering.md` (_What the deleted 47-reflections plan left behind_)
+  is therefore still unwitnessed by any bent-direction reading, and a pose that
+  would witness it needs an occluder within one occlusion radius of the surface
+  behind it, which this court does not have anywhere the fixed or the rim camera
+  can see. Separately, `bent-normal.png` is still the only checked-in bent
+  picture: the rim's bent frame is held by its two readings and by nothing else,
+  and the sentinel arms — `r_ssao_bent_normals` off, the occlusion pass out, and
+  the `hemisphere` gather — are held by the whole-frame scan. Blessing the rim's
+  is a fifth entry in `the_court_matches_its_goldens` and was left because the
+  readings, not a picture, are what say it is right.
 - **Alcove's frame-visible flags are gated now; the ones whose effect is not a
   picture are not.** `apps/alcove/tests/run-alcove-views.sh` draws six frames
   and holds five flags end to end — argument, console cell, presented frame:
@@ -8790,30 +8790,6 @@ behind_.
   overwrites the opaque `F0` behind it.
 - **Jitter and binary-search refinement in the march**: see the determinism rule
   in the notes.
-
-### Code comments still cite `18-render-features.md` by a section it no longer holds (2026-08-27)
-
-That topic was split into one document per technique — topic 44, lighting,
-through topic 50, the irradiance probes, with `18-render-features.md` kept as
-the index that holds the interactions, the delivery table and the risks. A
-hundred and twenty-eight citations in forty-eight files (re-counted 2026-09-06;
-120 in 40 on 2026-08-29, and it grows with each rung) — doc comments, shader
-headers and test headers across `crcbl-shaders`, `crcbl-render`, `crcbl`,
-`crcbl-vk`, `apps/lantern`, `apps/shard` and `apps/breach` name
-`docs/plan/18-render-features.md` and then name a section — "'s shadow section",
-"'s screen-space reflections", "'s irradiance grid" — that now lives elsewhere.
-
-**Nothing is broken**: the path still resolves, `tools/check-doc-citations.sh`
-passes, and topic 18's index table is one hop from any of those citations to the
-document it meant. They were left alone deliberately, on the rule that a move
-commit should be reviewable as a move: repointing them is a forty-file diff
-whose every hunk is a string, and mixing it into the split would have buried the
-split.
-
-**What it would take:** a mechanical pass mapping each citation's named section
-to the new topic number. The mapping is topic 18's own index table. Worth doing
-in one commit that touches nothing else, and worth doing before the next
-technique's ladder lands, because each new rung adds citations to the old path.
 
 ### `apps/quarry`'s mesh-path goldens have no local dx12 run (2026-09-25)
 
@@ -23861,8 +23837,10 @@ Also recorded from the hand-authored import slice:
 Foundation (b) — `crcbl_render::stack`, `apps/lantern/assets/camera.ron`,
 `ForwardRenderer::set_camera_stack` — landed with these gaps, deliberately.
 
-**A pass carries no parameters.** `docs/plan/18-render-features.md` asks for
-"which passes, parameters"; only the first half is built. Every pass type in
+**A pass carries no parameters.** The camera stack was specified as "which
+passes, parameters"; only the first half is built, and the rule for the second
+is in `docs/notes/rendering.md` (_What the deleted 48-post-processing plan left
+behind_): a pass parameter is a field on that pass's type. Every pass type in
 `crcbl_render::stack` but `AntialiasingPass` is field-less, and each one's doc
 says what it would carry. What is missing is a serialized form for the types the
 renderer's own setters already take, which is a decision per type rather than
@@ -24457,8 +24435,9 @@ under the same heading.
 (`MATERIAL_STRIDE` was 32 then and is 64 now), `mesh.slang` shades with one
 Cook-Torrance GGX lobe driven by them, and `SPECULAR_POWER`/`SPECULAR_STRENGTH`
 are gone. The decision and its two consequences are written up in
-`docs/plan/18-render-features.md`. What this session did not finish, decided
-against, or found on the way:
+`docs/notes/rendering.md` (_The BRDF_, under _What the deleted 44-lighting plan
+left behind_). What this session did not finish, decided against, or found on
+the way:
 
 - **A metal is black until something reflects in it, and that is the model.**
   Ambient scales the diffuse albedo and a conductor's is zero, so a fully
@@ -24500,9 +24479,9 @@ against, or found on the way:
   is a bare `albedo * N·L`, so the textbook normal distribution would sit a
   factor of `pi` under it. Folding the `pi` out of `ggx_lobe` is what puts the
   two lobes in one convention — argued in the shader and in
-  `docs/plan/18-render-features.md`. It was measured, not assumed: with the `pi`
-  in, `Scene::Lights`' green quadrant lost so much specular that the frame's
-  brightest pixel there stopped leading its own channel.
+  `docs/notes/rendering.md`'s BRDF decision. It was measured, not assumed: with
+  the `pi` in, `Scene::Lights`' green quadrant lost so much specular that the
+  frame's brightest pixel there stopped leading its own channel.
 
 ## Re-affirmed: shader artifacts stay committed (2026-08-13)
 

@@ -2494,12 +2494,12 @@ scene-dependent remains true and remains untested.
 ## Per-face granularity inside a point light's cube: declined (2026-08-31)
 
 The cadence's unit is the cull, so a point light's `POINT_FACES` faces are
-redrawn or held together. Splitting them would need six culls where
-`docs/plan/18-render-features.md`'s fourth decision gives one — the six faces'
-union is the light's sphere, which is what the cull tests against — so the
-saving would be six `DrawGen`s of device-local memory against half a light's
-draws. Declined; revisit only if a scene is measured spending most of a frame on
-one cube.
+redrawn or held together. Splitting them would need six culls where topic 45's
+fourth decision (_What the deleted 45-shadows plan left behind_ above) gives one
+— the six faces' union is the light's sphere, which is what the cull tests
+against — so the saving would be six `DrawGen`s of device-local memory against
+half a light's draws. Declined; revisit only if a scene is measured spending
+most of a frame on one cube.
 
 ### What the LTC area-light rung left (2026-08-31)
 
@@ -3797,8 +3797,8 @@ three `to_vec`s cost), so the mapping lives in one place.
 
 Record; the one coverage gap left is in `docs/backlog.md` under this heading.
 
-The design and its refusals are in `docs/plan/18-render-features.md`'s SSR
-section. This is the slice order and what each one's observable is.
+The design and its refusals are in _What the deleted 47-reflections plan left
+behind_ above. This is the slice order and what each one's observable is.
 
 **The attachment, march, blur, probe fallback and rough-surface integration have
 landed.** The cutoff remains at 0.5 because it gates marching rather than probe
@@ -3812,7 +3812,8 @@ before writing the next one:
   pixel stride and a fixed loop bound, which a first cut read as a fixed pixel
   _reach_ — and a reflection that shrinks as the window grows is the same defect
   the design refuses one level down. `ssr.slang`'s `REACH_FRACTION` is the fix
-  and `docs/plan/18-render-features.md` carries the amendment.
+  and _What the deleted 47-reflections plan left behind_ above carries the
+  amendment.
 - **The forward pass stores its depth now.** `PassBuilder::clear_depth` is
   `StoreOp::Discard`, and a discarded attachment is undefined rather than
   "whatever was written": radv and llvmpipe handed the values back and wgpu

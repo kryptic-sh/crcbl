@@ -619,10 +619,10 @@ pub enum ProbeUpdate {
     EveryFrame,
 }
 
-/// `docs/plan/18-render-features.md`'s irradiance volume: where the probes are,
-/// and what each of them holds.
+/// Topic 50's irradiance volume (`docs/notes/rendering.md`): where the probes
+/// are, and what each of them holds.
 ///
-/// The diffuse half of that topic's global-illumination row. `mesh.slang`
+/// The diffuse half of global illumination. `mesh.slang`
 /// interpolates the grid trilinearly and **adds** the result to the flat ambient
 /// term, so a description with no probes draws the frame it always did — see
 /// [`crcbl_shaders::probe`], which is where the spherical harmonics live and
@@ -845,7 +845,7 @@ pub struct SceneDesc<'a> {
     pub materials: Vec<mesh::GpuMaterial>,
     /// The base-colour page the rows above index.
     pub page: PageDesc<'a>,
-    /// `docs/plan/18-render-features.md`'s irradiance volume, **added** to the
+    /// Topic 50's irradiance volume, **added** to the
     /// flat ambient term wherever it covers.
     ///
     /// [`ProbeGrid::default`] is a grid of nothing and changes no pixel, which

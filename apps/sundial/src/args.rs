@@ -39,7 +39,7 @@ pub struct Options {
     pub camera: CameraMode,
     /// Which selectors the run asks to be held below the device's own.
     pub forced: ForcedPaths,
-    /// Which of `docs/plan/18-render-features.md`'s effects the run draws.
+    /// Which render effects the run draws.
     ///
     /// `--no-shadows` is the one flag that moves it, and it is the switch this
     /// fixture is about: with the shadow passes out, every surface is lit and

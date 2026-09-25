@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s clustered-forward assignment: one compute
+// Topic 44's clustered-forward assignment (`docs/notes/rendering.md`): one compute
 // pass that fills a **froxel grid** — screen tiles by depth slices — with the
 // lights each froxel touches, so the fragment stage loops over a handful of
 // lights rather than over the scene's.
@@ -453,7 +453,7 @@ void computeMain(uint3 thread: SV_DispatchThreadID)
         else
         {
             // **Counted, never silently dropped.** This is the number
-            // `docs/plan/18-render-features.md` asks a scene that outgrew the
+            // topic 44's "Many lights" rule asks a scene that outgrew the
             // budget to be able to state.
             dropped += 1;
         }

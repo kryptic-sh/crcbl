@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s bloom chain, downsampling half: one step
+// Topic 48's bloom chain (`docs/notes/rendering.md`), downsampling half: one step
 // of the thirteen-tap filter Jorge Jimenez presented as *Next Generation Post
 // Processing in Call of Duty: Advanced Warfare* (SIGGRAPH 2014), reading one mip
 // of the chain and writing the next.

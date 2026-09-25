@@ -1,9 +1,9 @@
 //! The camera layer of [`crate::effects`]' four-layer order, as a file.
 //!
 //! [`RenderEffects`] is what a frame draws; [`CameraStack`] is what a **view
-//! asks for**, written down. `docs/plan/18-render-features.md` says the post
-//! stack is "data-driven per camera (RON: which passes, parameters)" and the
-//! toggle layering `docs/notes/rendering.md` records puts that layer at the top
+//! asks for**, written down. Topic 48's camera layer (`docs/notes/rendering.md`)
+//! is per view and is a file naming which passes run and with what parameters,
+//! and the toggle layering the same notes record puts that layer at the top
 //! of the resolution order, above the player's `[engine.video]` clamp; this module is
 //! the reader and the writer of that file, and [`CameraStack::compile`] is the
 //! step that turns it into the bits [`EffectRequest::camera`] carries.

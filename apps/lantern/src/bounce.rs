@@ -7,10 +7,11 @@
 //!                                                              ProbeUpdate::EveryFrame)
 //! ```
 //!
-//! `docs/plan/18-render-features.md`'s irradiance-probe design asks an
-//! application for its own probes, "computed analytically from the room's own
-//! dimension constants so that moving a wall moves the probes". This is that
-//! placement, and every number in it comes from [`crate::room`].
+//! The irradiance-probe design (`docs/notes/rendering.md`, _What the deleted
+//! 50-irradiance-probes plan left behind_) asks an application to place its own
+//! probes, and these are computed analytically from the room's own dimension
+//! constants so that moving a wall moves the probes. This is that placement,
+//! and every number in it comes from [`crate::room`].
 //!
 //! # It places the probes and does not light them
 //!

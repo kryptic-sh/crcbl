@@ -1,6 +1,6 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
-// `docs/plan/18-render-features.md`'s screen-space reflections: the pass that
+// Topic 47's screen-space reflections (`docs/notes/rendering.md`): the pass that
 // marches the depth prepass in **screen space** and writes what it finds.
 //
 // # It is the reflection alone; `ssr_blur.slang` is the composite

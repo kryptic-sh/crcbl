@@ -1,4 +1,4 @@
-//! `docs/plan/18-render-features.md`'s screen-space ambient occlusion: the
+//! Topic 46's screen-space ambient occlusion (`docs/notes/rendering.md`): the
 //! full-screen passes between the depth prepass and the forward pass.
 //!
 //! ```text

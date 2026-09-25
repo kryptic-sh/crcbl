@@ -3037,7 +3037,7 @@ impl TransientImageDesc {
         }
     }
 
-    /// One level of `docs/plan/18-render-features.md`'s bloom chain:
+    /// One level of topic 48's bloom chain:
     /// `Rgba16Float`, rendered into and then sampled.
     ///
     /// [`scene_color`]'s description without the `TRANSFER_SRC` — nothing reads
@@ -3073,7 +3073,7 @@ impl TransientImageDesc {
     /// The depth buffer: `D32Float`, reversed-Z, written by the depth prepass
     /// and **sampled** by the screen-space occlusion pass.
     ///
-    /// `SAMPLED` since `docs/plan/18-render-features.md`'s AO slice, which is the
+    /// `SAMPLED` since topic 46's AO slice, which is the
     /// prepass that made this image something downstream reads. It costs nothing
     /// on a frame that adds no such pass: a usage flag is a promise about what
     /// the image may be bound as, not a copy or a layout.
@@ -3121,7 +3121,7 @@ impl TransientImageDesc {
     /// A screen-space occlusion channel: `Rgba8Unorm`, rendered into and then
     /// fetched.
     ///
-    /// `docs/plan/18-render-features.md`'s AO chain — `ssao.slang` writes one of
+    /// Topic 46's AO chain — `ssao.slang` writes one of
     /// these, `ssao_blur.slang` reads it and writes another and
     /// `ssao_upsample.slang` writes the last, which is why this is one
     /// description rather than three that agree today.
@@ -3165,7 +3165,7 @@ impl TransientImageDesc {
     /// The reflectivity channel: `Rgba8Unorm`, `rgb` the surface's `F0` and `a`
     /// its roughness, written by the forward pass beside its colour target.
     ///
-    /// `docs/plan/18-render-features.md`'s screen-space reflections run after
+    /// Topic 47's screen-space reflections run after
     /// that pass, so the only per-pixel data they would otherwise have are the
     /// depth buffer and the scene colour — neither of which says which surfaces
     /// reflect or how sharply. `mesh.slang`'s `FragmentOutput` is the other half
