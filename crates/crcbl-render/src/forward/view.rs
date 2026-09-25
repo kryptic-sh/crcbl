@@ -237,7 +237,7 @@ pub enum ViewLighting {
         ///
         /// **Specular only.** A uniform environment of radiance `L` would also
         /// reach a diffuse surface, as `π·L` — what [`Self::Scene`] adds for
-        /// a uniform [`Sky`](crate::Sky) of that radiance — but here that half
+        /// a uniform [`crate::Sky`] of that radiance — but here that half
         /// is the key's `ambient` and nothing else, so the two are never
         /// summed and the fill means what it meant before this field existed.
         /// A caller who wants the pair to describe one physical environment
