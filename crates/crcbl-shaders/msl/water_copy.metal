@@ -11,7 +11,7 @@ struct CopyOutput_0
 };
 
 
-#line 54
+#line 44
 struct KernelContext_0
 {
     texture2d<float, access::sample> source_color_0;
@@ -54,17 +54,17 @@ struct FullscreenOutput_0
 };
 
 
-#line 473 "core"
+#line 484 "core"
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> source_color_2 [[texture(0)]], depth2d<float, access::sample> source_depth_2 [[texture(1)]])
 {
 
-#line 473
+#line 484
     thread KernelContext_0 kernelContext_1;
 
-#line 473
+#line 484
     (&kernelContext_1)->source_color_0 = source_color_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->source_depth_0 = source_depth_2;
 
 #line 63 "shaders/water_copy.slang"

@@ -127,7 +127,7 @@ struct UiConstants_0
 };
 
 
-#line 69
+#line 134
 struct KernelContext_0
 {
     Vertex_natural_0 device* vertices_0;

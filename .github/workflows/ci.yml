@@ -2838,7 +2838,7 @@ jobs:
     # dominates the job's wall clock. See the install step.
     timeout-minutes: 20
     env:
-      SLANG_VERSION: '2026.14'
+      SLANG_VERSION: '2026.18.2'
       # Pinned in `crates/crcbl-shaders/tools/compile-shaders.sh` and repeated
       # here, exactly as the
       # Slang version is. The script checks what the binary *reports* rather

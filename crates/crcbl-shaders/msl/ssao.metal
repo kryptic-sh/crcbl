@@ -4,10 +4,10 @@
 using namespace metal;
 
 #line 487 "shaders/ssao.slang"
-constant array<float, int(16)> STEP_OFFSETS_0 = { 0.0625f, 0.5625f, 0.1875f, 0.6875f, 0.8125f, 0.3125f, 0.9375f, 0.4375f, 0.25f, 0.75f, 0.125f, 0.625f, 1.0f, 0.5f, 0.875f, 0.375f };
+constant array<float, int(16)> STEP_OFFSETS_0 = { { 0.0625f, 0.5625f, 0.1875f, 0.6875f, 0.8125f, 0.3125f, 0.9375f, 0.4375f, 0.25f, 0.75f, 0.125f, 0.625f, 1.0f, 0.5f, 0.875f, 0.375f } };
 
 #line 452
-constant array<float2, int(16)> SLICE_DIRECTIONS_0 = { float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(1.0f, 1.0f), float2(-1.0f, -1.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f), float2(1.0f, -1.0f), float2(-1.0f, 1.0f), float2(1.0f, 2.0f), float2(-1.0f, -2.0f), float2(2.0f, 1.0f), float2(-2.0f, -1.0f), float2(2.0f, -1.0f), float2(-2.0f, 1.0f), float2(1.0f, -2.0f), float2(-1.0f, 2.0f) };
+constant array<float2, int(16)> SLICE_DIRECTIONS_0 = { { float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(1.0f, 1.0f), float2(-1.0f, -1.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f), float2(1.0f, -1.0f), float2(-1.0f, 1.0f), float2(1.0f, 2.0f), float2(-1.0f, -2.0f), float2(2.0f, 1.0f), float2(-2.0f, -1.0f), float2(2.0f, -1.0f), float2(-2.0f, 1.0f), float2(1.0f, -2.0f), float2(-1.0f, 2.0f) } };
 
 #line 511
 int2 full_res_pixel_0(int2 pixel_0)
@@ -16,14 +16,14 @@ int2 full_res_pixel_0(int2 pixel_0)
 }
 
 
-#line 90 "core"
+#line 209
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 209
 struct SsaoParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -33,7 +33,7 @@ struct SsaoParams_natural_0
 };
 
 
-#line 1084
+#line 1095 "core"
 struct KernelContext_0
 {
     depth2d<float, access::sample> scene_depth_0;

@@ -4,10 +4,10 @@
 using namespace metal;
 
 #line 166 "shaders/ssao_hemisphere.slang"
-constant array<float3, int(8)> KERNEL_0 = { float3(0.875f, 0.0f, 0.25f), float3(-0.75f, 0.0f, 0.375f), float3(0.0f, 0.75f, 0.25f), float3(0.0f, -0.625f, 0.5f), float3(0.5f, 0.5f, 0.375f), float3(-0.5f, 0.5f, 0.625f), float3(0.375f, -0.375f, 0.75f), float3(-0.25f, -0.25f, 0.875f) };
+constant array<float3, int(8)> KERNEL_0 = { { float3(0.875f, 0.0f, 0.25f), float3(-0.75f, 0.0f, 0.375f), float3(0.0f, 0.75f, 0.25f), float3(0.0f, -0.625f, 0.5f), float3(0.5f, 0.5f, 0.375f), float3(-0.5f, 0.5f, 0.625f), float3(0.375f, -0.375f, 0.75f), float3(-0.25f, -0.25f, 0.875f) } };
 
 #line 194
-constant array<float2, int(16)> ROTATIONS_0 = { float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(1.0f, 1.0f), float2(-1.0f, -1.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f), float2(1.0f, -1.0f), float2(-1.0f, 1.0f), float2(1.0f, 2.0f), float2(-1.0f, -2.0f), float2(2.0f, 1.0f), float2(-2.0f, -1.0f), float2(2.0f, -1.0f), float2(-2.0f, 1.0f), float2(1.0f, -2.0f), float2(-1.0f, 2.0f) };
+constant array<float2, int(16)> ROTATIONS_0 = { { float2(2.0f, 0.0f), float2(-2.0f, 0.0f), float2(1.0f, 1.0f), float2(-1.0f, -1.0f), float2(0.0f, -2.0f), float2(0.0f, 2.0f), float2(1.0f, -1.0f), float2(-1.0f, 1.0f), float2(1.0f, 2.0f), float2(-1.0f, -2.0f), float2(2.0f, 1.0f), float2(-2.0f, -1.0f), float2(2.0f, -1.0f), float2(-2.0f, 1.0f), float2(1.0f, -2.0f), float2(-1.0f, 2.0f) } };
 
 #line 275
 int2 full_res_pixel_0(int2 pixel_0)
@@ -16,14 +16,14 @@ int2 full_res_pixel_0(int2 pixel_0)
 }
 
 
-#line 90 "core"
+#line 113
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 113
 struct SsaoParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inv_proj_0;
@@ -33,7 +33,7 @@ struct SsaoParams_natural_0
 };
 
 
-#line 1084
+#line 1095 "core"
 struct KernelContext_0
 {
     depth2d<float, access::sample> scene_depth_0;

@@ -133,7 +133,7 @@ CRATE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # Pinned in exactly one place, and read by CI. Bumping it is a deliberate act
 # that re-blesses every artifact in the same commit — which is also the moment
 # to re-bless any golden image the new codegen moved.
-SLANG_VERSION="2026.14"
+SLANG_VERSION="2026.18.2"
 # Vulkan 1.3 accepts SPIR-V 1.6; 1.5 is the floor every 1.3 driver has had
 # since launch and nothing here needs a 1.6 instruction.
 SLANG_PROFILE="spirv_1_5"

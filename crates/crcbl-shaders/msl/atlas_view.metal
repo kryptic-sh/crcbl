@@ -3,14 +3,14 @@
 #include <metal_texture>
 using namespace metal;
 
-#line 2580 "core.meta.slang"
+#line 2598 "core.meta.slang"
 struct pixelOutput_0
 {
     float4 output_0 [[color(0)]];
 };
 
 
-#line 2580
+#line 2598
 struct pixelInput_0
 {
     float2 uv_0 [[user(TEXCOORD)]];
@@ -26,7 +26,7 @@ struct AtlasViewParams_0
 };
 
 
-#line 1084 "core"
+#line 106
 struct KernelContext_0
 {
     AtlasViewParams_0 constant* params_0;
@@ -34,7 +34,7 @@ struct KernelContext_0
 };
 
 
-#line 172 "shaders/atlas_view.slang"
+#line 172
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_0 [[position]], AtlasViewParams_0 constant* params_1 [[buffer(0)]], depth2d<float, access::sample> shadow_atlas_1 [[texture(0)]])
 {
 

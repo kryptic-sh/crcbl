@@ -39,7 +39,7 @@ struct DebugConstants_natural_0
 };
 
 
-#line 90
+#line 68 "shaders/debug_draw.slang"
 struct KernelContext_0
 {
     DebugVertex_natural_0 device* vertices_0;
@@ -47,7 +47,7 @@ struct KernelContext_0
 };
 
 
-#line 88 "shaders/debug_draw.slang"
+#line 88
 [[fragment]] pixelOutput_0 fragmentMain(pixelInput_0 _S1 [[stage_in]], float4 position_1 [[position]], DebugVertex_natural_0 device* vertices_1 [[buffer(0)]], DebugConstants_natural_0 constant* constants_1 [[buffer(1)]])
 {
 

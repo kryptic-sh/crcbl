@@ -77,7 +77,7 @@ struct GatherParams_0
 };
 
 
-#line 195
+#line 297
 struct PunctualProducer_natural_0
 {
     packed_float4 position_0;

@@ -4,21 +4,21 @@
 using namespace metal;
 
 #line 755 "shaders/grass.slang"
-constant array<float2, int(16)> SHADOW_SEARCH_DISC_0 = { float2(0.17677700519561768f, 0.0f), float2(-0.22577199339866638f, 0.20682600140571594f), float2(0.0345579981803894f, -0.39377099275588989f), float2(0.28457099199295044f, 0.37117299437522888f), float2(-0.52222299575805664f, -0.09237399697303772f), float2(0.49469500780105591f, -0.31468498706817627f), float2(-0.16546599566936493f, 0.6155250072479248f), float2(-0.31556099653244019f, -0.60759401321411133f), float2(0.68464201688766479f, 0.25003001093864441f), float2(-0.71225601434707642f, 0.2940090000629425f), float2(0.3433539867401123f, -0.73372900485992432f), float2(0.25372999906539917f, 0.80893200635910034f), float2(-0.76474601030349731f, -0.44318601489067078f), float2(0.89713400602340698f, -0.19723199307918549f), float2(-0.54750698804855347f, 0.77877199649810791f), float2(-0.12648700177669525f, -0.97609001398086548f) };
+constant array<float2, int(16)> SHADOW_SEARCH_DISC_0 = { { float2(0.17677700519561768f, 0.0f), float2(-0.22577199339866638f, 0.20682600140571594f), float2(0.0345579981803894f, -0.39377099275588989f), float2(0.28457099199295044f, 0.37117299437522888f), float2(-0.52222299575805664f, -0.09237399697303772f), float2(0.49469500780105591f, -0.31468498706817627f), float2(-0.16546599566936493f, 0.6155250072479248f), float2(-0.31556099653244019f, -0.60759401321411133f), float2(0.68464201688766479f, 0.25003001093864441f), float2(-0.71225601434707642f, 0.2940090000629425f), float2(0.3433539867401123f, -0.73372900485992432f), float2(0.25372999906539917f, 0.80893200635910034f), float2(-0.76474601030349731f, -0.44318601489067078f), float2(0.89713400602340698f, -0.19723199307918549f), float2(-0.54750698804855347f, 0.77877199649810791f), float2(-0.12648700177669525f, -0.97609001398086548f) } };
 
 #line 709
-constant array<float2, int(32)> SHADOW_DISC_0 = { float2(0.125f, 0.0f), float2(-0.15964500606060028f, 0.14624799787998199f), float2(0.02443600073456764f, -0.27843800187110901f), float2(0.2012220025062561f, 0.26245900988578796f), float2(-0.36926800012588501f, -0.06531800329685211f), float2(0.34980198740959167f, -0.22251600027084351f), float2(-0.11700200289487839f, 0.43524199724197388f), float2(-0.22313599288463593f, -0.42963400483131409f), float2(0.48411500453948975f, 0.17679800093173981f), float2(-0.50364100933074951f, 0.20789599418640137f), float2(0.24278800189495087f, -0.51882398128509521f), float2(0.17941400408744812f, 0.57200098037719727f), float2(-0.54075700044631958f, -0.31338000297546387f), float2(0.63437002897262573f, -0.13946400582790375f), float2(-0.38714599609375f, 0.55067497491836548f), float2(-0.0894400030374527f, -0.69019997119903564f), float2(0.5490720272064209f, 0.46275800466537476f), float2(-0.73887801170349121f, 0.0305550005286932f), float2(0.5389549732208252f, -0.53633201122283936f), float2(-0.03605800122022629f, 0.77979201078414917f), float2(-0.51281797885894775f, -0.61452698707580566f), float2(0.81235998868942261f, 0.10930199921131134f), float2(-0.68831098079681396f, 0.47890898585319519f), float2(0.18808600306510925f, -0.83606100082397461f), float2(0.43503299355506897f, 0.75919097661972046f), float2(-0.85044801235198975f, -0.27131599187850952f), float2(0.82610201835632324f, -0.38168001174926758f), float2(-0.35788801312446594f, 0.85515600442886353f), float2(-0.31940698623657227f, -0.88803398609161377f), float2(0.84990900754928589f, 0.44668799638748169f), float2(-0.94403499364852905f, 0.24884499609470367f), float2(0.53659600019454956f, -0.83452999591827393f) };
+constant array<float2, int(32)> SHADOW_DISC_0 = { { float2(0.125f, 0.0f), float2(-0.15964500606060028f, 0.14624799787998199f), float2(0.02443600073456764f, -0.27843800187110901f), float2(0.2012220025062561f, 0.26245900988578796f), float2(-0.36926800012588501f, -0.06531800329685211f), float2(0.34980198740959167f, -0.22251600027084351f), float2(-0.11700200289487839f, 0.43524199724197388f), float2(-0.22313599288463593f, -0.42963400483131409f), float2(0.48411500453948975f, 0.17679800093173981f), float2(-0.50364100933074951f, 0.20789599418640137f), float2(0.24278800189495087f, -0.51882398128509521f), float2(0.17941400408744812f, 0.57200098037719727f), float2(-0.54075700044631958f, -0.31338000297546387f), float2(0.63437002897262573f, -0.13946400582790375f), float2(-0.38714599609375f, 0.55067497491836548f), float2(-0.0894400030374527f, -0.69019997119903564f), float2(0.5490720272064209f, 0.46275800466537476f), float2(-0.73887801170349121f, 0.0305550005286932f), float2(0.5389549732208252f, -0.53633201122283936f), float2(-0.03605800122022629f, 0.77979201078414917f), float2(-0.51281797885894775f, -0.61452698707580566f), float2(0.81235998868942261f, 0.10930199921131134f), float2(-0.68831098079681396f, 0.47890898585319519f), float2(0.18808600306510925f, -0.83606100082397461f), float2(0.43503299355506897f, 0.75919097661972046f), float2(-0.85044801235198975f, -0.27131599187850952f), float2(0.82610201835632324f, -0.38168001174926758f), float2(-0.35788801312446594f, 0.85515600442886353f), float2(-0.31940698623657227f, -0.88803398609161377f), float2(0.84990900754928589f, 0.44668799638748169f), float2(-0.94403499364852905f, 0.24884499609470367f), float2(0.53659600019454956f, -0.83452999591827393f) } };
 
 #line 730
-constant array<uint, int(5)> SHADOW_PROBE_INDEX_0 = { 0U, 23U, 25U, 27U, 29U };
+constant array<uint, int(5)> SHADOW_PROBE_INDEX_0 = { { 0U, 23U, 25U, 27U, 29U } };
 
-constant array<float2, int(16)> SHADOW_ROTATIONS_0 = { float2(1.0f, 0.0f), float2(0.92387998104095459f, 0.38268300890922546f), float2(0.70710700750350952f, 0.70710700750350952f), float2(0.38268300890922546f, 0.92387998104095459f), float2(0.0f, 1.0f), float2(-0.38268300890922546f, 0.92387998104095459f), float2(-0.70710700750350952f, 0.70710700750350952f), float2(-0.92387998104095459f, 0.38268300890922546f), float2(-1.0f, 0.0f), float2(-0.92387998104095459f, -0.38268300890922546f), float2(-0.70710700750350952f, -0.70710700750350952f), float2(-0.38268300890922546f, -0.92387998104095459f), float2(-0.0f, -1.0f), float2(0.38268300890922546f, -0.92387998104095459f), float2(0.70710700750350952f, -0.70710700750350952f), float2(0.92387998104095459f, -0.38268300890922546f) };
+constant array<float2, int(16)> SHADOW_ROTATIONS_0 = { { float2(1.0f, 0.0f), float2(0.92387998104095459f, 0.38268300890922546f), float2(0.70710700750350952f, 0.70710700750350952f), float2(0.38268300890922546f, 0.92387998104095459f), float2(0.0f, 1.0f), float2(-0.38268300890922546f, 0.92387998104095459f), float2(-0.70710700750350952f, 0.70710700750350952f), float2(-0.92387998104095459f, 0.38268300890922546f), float2(-1.0f, 0.0f), float2(-0.92387998104095459f, -0.38268300890922546f), float2(-0.70710700750350952f, -0.70710700750350952f), float2(-0.38268300890922546f, -0.92387998104095459f), float2(-0.0f, -1.0f), float2(0.38268300890922546f, -0.92387998104095459f), float2(0.70710700750350952f, -0.70710700750350952f), float2(0.92387998104095459f, -0.38268300890922546f) } };
 
 #line 743
-constant array<uint, int(16)> SHADOW_DITHER_0 = { 0U, 8U, 2U, 10U, 12U, 4U, 14U, 6U, 3U, 11U, 1U, 9U, 15U, 7U, 13U, 5U };
+constant array<uint, int(16)> SHADOW_DITHER_0 = { { 0U, 8U, 2U, 10U, 12U, 4U, 14U, 6U, 3U, 11U, 1U, 9U, 15U, 7U, 13U, 5U } };
 
 #line 897
-constant array<float2, int(6)> GRASS_CARD_CORNERS_0 = { float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f), float2(0.0f, 1.0f) };
+constant array<float2, int(6)> GRASS_CARD_CORNERS_0 = { { float2(0.0f, 0.0f), float2(1.0f, 0.0f), float2(0.0f, 1.0f), float2(1.0f, 0.0f), float2(1.0f, 1.0f), float2(0.0f, 1.0f) } };
 
 #line 505
 struct GrassBlade_0
@@ -51,7 +51,7 @@ struct GrassParams_0
 };
 
 
-#line 475
+#line 579
 struct GrassInstance_natural_0
 {
     packed_float4 root_0;
@@ -63,7 +63,7 @@ struct GrassInstance_natural_0
 };
 
 
-#line 475
+#line 583
 struct GrassBlade_natural_0
 {
     packed_float4 root_color_0;
@@ -78,21 +78,21 @@ struct GrassBlade_natural_0
 };
 
 
-#line 475
+#line 567
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 475
+#line 567
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(2)> data_1;
 };
 
 
-#line 475
+#line 567
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E14_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(14)> data_2;
@@ -141,7 +141,7 @@ struct GrassField_0
 };
 
 
-#line 1560
+#line 615
 struct GpuLight_natural_0
 {
     packed_float4 position_0;
@@ -171,7 +171,7 @@ struct WindParams_0
 };
 
 
-#line 664
+#line 655
 struct KernelContext_0
 {
     GrassTile_0 constant* tile_1;
@@ -3070,7 +3070,7 @@ struct vertexMain_Result_0
 
 
 #line 2193
-[[vertex]] vertexMain_Result_0 vertexMain(uint index_5 [[vertex_id]], uint instance_id_0 [[instance_id]], GrassTile_0 constant* tile_12 [[buffer(2)]], GrassParams_0 constant* grass_4 [[buffer(1)]], GrassInstance_natural_0 device* instances_4 [[buffer(3)]], GrassBlade_natural_0 device* blades_5 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_4 [[buffer(0)]], GrassField_0 constant* field_4 [[buffer(7)]], uint device* cluster_lights_4 [[buffer(6)]], GpuLight_natural_0 device* lights_4 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_4 [[texture(1)]], sampler shadow_sampler_4 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_4 [[texture(0)]], sampler grassCardSampler_4 [[sampler(0)]], texture2d<float, access::sample> grassGround_4 [[texture(2)]], WindParams_0 constant* wind_4 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_4 [[texture(3)]], sampler windSampler_4 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_4 [[texture(4)]], GrassInstance_natural_0 device* grassCells_4 [[buffer(8)]])
+[[vertex]] vertexMain_Result_0 vertexMain(uint index_5 [[vertex_id]], uint instance_id_0 [[instance_id]], uint base_instance_0 [[base_instance]], GrassTile_0 constant* tile_12 [[buffer(2)]], GrassParams_0 constant* grass_4 [[buffer(1)]], GrassInstance_natural_0 device* instances_4 [[buffer(3)]], GrassBlade_natural_0 device* blades_5 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_4 [[buffer(0)]], GrassField_0 constant* field_4 [[buffer(7)]], uint device* cluster_lights_4 [[buffer(6)]], GpuLight_natural_0 device* lights_4 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_4 [[texture(1)]], sampler shadow_sampler_4 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_4 [[texture(0)]], sampler grassCardSampler_4 [[sampler(0)]], texture2d<float, access::sample> grassGround_4 [[texture(2)]], WindParams_0 constant* wind_4 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_4 [[texture(3)]], sampler windSampler_4 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_4 [[texture(4)]], GrassInstance_natural_0 device* grassCells_4 [[buffer(8)]])
 {
 
 #line 2193
@@ -3131,7 +3131,7 @@ struct vertexMain_Result_0
     (&kernelContext_33)->grassCells_0 = grassCells_4;
 
 #line 1829
-    GrassInstance_natural_0 blade_4 = instances_4[tile_12->slot_0.x * grass_4->limits_0.x + instance_id_0];
+    GrassInstance_natural_0 blade_4 = instances_4[tile_12->slot_0.x * grass_4->limits_0.x + (instance_id_0 - base_instance_0)];
 
 #line 1829
     uint4 _S195 = uint4(blade_4.lanes_0) ;
@@ -3261,7 +3261,7 @@ struct bladeNearVertexMain_Result_0
 
 
 #line 1867
-[[vertex]] bladeNearVertexMain_Result_0 bladeNearVertexMain(uint index_6 [[vertex_id]], uint instance_id_1 [[instance_id]], GrassTile_0 constant* tile_13 [[buffer(2)]], GrassParams_0 constant* grass_5 [[buffer(1)]], GrassInstance_natural_0 device* instances_5 [[buffer(3)]], GrassBlade_natural_0 device* blades_6 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_5 [[buffer(0)]], GrassField_0 constant* field_5 [[buffer(7)]], uint device* cluster_lights_5 [[buffer(6)]], GpuLight_natural_0 device* lights_5 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_5 [[texture(1)]], sampler shadow_sampler_5 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_5 [[texture(0)]], sampler grassCardSampler_5 [[sampler(0)]], texture2d<float, access::sample> grassGround_5 [[texture(2)]], WindParams_0 constant* wind_5 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_5 [[texture(3)]], sampler windSampler_5 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_5 [[texture(4)]], GrassInstance_natural_0 device* grassCells_5 [[buffer(8)]])
+[[vertex]] bladeNearVertexMain_Result_0 bladeNearVertexMain(uint index_6 [[vertex_id]], uint instance_id_1 [[instance_id]], uint base_instance_1 [[base_instance]], GrassTile_0 constant* tile_13 [[buffer(2)]], GrassParams_0 constant* grass_5 [[buffer(1)]], GrassInstance_natural_0 device* instances_5 [[buffer(3)]], GrassBlade_natural_0 device* blades_6 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_5 [[buffer(0)]], GrassField_0 constant* field_5 [[buffer(7)]], uint device* cluster_lights_5 [[buffer(6)]], GpuLight_natural_0 device* lights_5 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_5 [[texture(1)]], sampler shadow_sampler_5 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_5 [[texture(0)]], sampler grassCardSampler_5 [[sampler(0)]], texture2d<float, access::sample> grassGround_5 [[texture(2)]], WindParams_0 constant* wind_5 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_5 [[texture(3)]], sampler windSampler_5 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_5 [[texture(4)]], GrassInstance_natural_0 device* grassCells_5 [[buffer(8)]])
 {
 
 #line 1867
@@ -3322,7 +3322,7 @@ struct bladeNearVertexMain_Result_0
     (&kernelContext_34)->grassCells_0 = grassCells_5;
 
 #line 1877
-    GrassInstance_natural_0 blade_5 = instances_5[(field_5->tiles_0.x * field_5->tiles_0.y + tile_13->slot_0.x) * grass_5->limits_0.x + instance_id_1];
+    GrassInstance_natural_0 blade_5 = instances_5[(field_5->tiles_0.x * field_5->tiles_0.y + tile_13->slot_0.x) * grass_5->limits_0.x + (instance_id_1 - base_instance_1)];
 
 #line 1877
     thread GrassInstance_natural_0 _S206 = blade_5;
@@ -3383,7 +3383,7 @@ struct bladeFarVertexMain_Result_0
 
 
 #line 1877
-[[vertex]] bladeFarVertexMain_Result_0 bladeFarVertexMain(uint index_7 [[vertex_id]], uint instance_id_2 [[instance_id]], GrassTile_0 constant* tile_14 [[buffer(2)]], GrassParams_0 constant* grass_6 [[buffer(1)]], GrassInstance_natural_0 device* instances_6 [[buffer(3)]], GrassBlade_natural_0 device* blades_7 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_6 [[buffer(0)]], GrassField_0 constant* field_6 [[buffer(7)]], uint device* cluster_lights_6 [[buffer(6)]], GpuLight_natural_0 device* lights_6 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_6 [[texture(1)]], sampler shadow_sampler_6 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_6 [[texture(0)]], sampler grassCardSampler_6 [[sampler(0)]], texture2d<float, access::sample> grassGround_6 [[texture(2)]], WindParams_0 constant* wind_6 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_6 [[texture(3)]], sampler windSampler_6 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_6 [[texture(4)]], GrassInstance_natural_0 device* grassCells_6 [[buffer(8)]])
+[[vertex]] bladeFarVertexMain_Result_0 bladeFarVertexMain(uint index_7 [[vertex_id]], uint instance_id_2 [[instance_id]], uint base_instance_2 [[base_instance]], GrassTile_0 constant* tile_14 [[buffer(2)]], GrassParams_0 constant* grass_6 [[buffer(1)]], GrassInstance_natural_0 device* instances_6 [[buffer(3)]], GrassBlade_natural_0 device* blades_7 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_6 [[buffer(0)]], GrassField_0 constant* field_6 [[buffer(7)]], uint device* cluster_lights_6 [[buffer(6)]], GpuLight_natural_0 device* lights_6 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_6 [[texture(1)]], sampler shadow_sampler_6 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_6 [[texture(0)]], sampler grassCardSampler_6 [[sampler(0)]], texture2d<float, access::sample> grassGround_6 [[texture(2)]], WindParams_0 constant* wind_6 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_6 [[texture(3)]], sampler windSampler_6 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_6 [[texture(4)]], GrassInstance_natural_0 device* grassCells_6 [[buffer(8)]])
 {
 
 #line 1877
@@ -3449,7 +3449,7 @@ struct bladeFarVertexMain_Result_0
     float2 _S210 = float2(1.0f, 1.0f);
 
 #line 1890
-    thread GrassInstance_natural_0 _S211 = instances_6[tile_14->slot_0.x * capacity_0 + capacity_0 - 1U - instance_id_2];
+    thread GrassInstance_natural_0 _S211 = instances_6[tile_14->slot_0.x * capacity_0 + capacity_0 - 1U - (instance_id_2 - base_instance_2)];
 
 #line 1890
     GrassVertex_0 _S212 = grass_blade_vertex_0(&_S211, index_7, 3U, _S210, &kernelContext_35);
@@ -3500,7 +3500,7 @@ struct shellVertexMain_Result_0
 
 
 #line 1890
-[[vertex]] shellVertexMain_Result_0 shellVertexMain(uint index_8 [[vertex_id]], uint instance_id_3 [[instance_id]], GrassTile_0 constant* tile_15 [[buffer(2)]], GrassParams_0 constant* grass_7 [[buffer(1)]], GrassInstance_natural_0 device* instances_7 [[buffer(3)]], GrassBlade_natural_0 device* blades_8 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_7 [[buffer(0)]], GrassField_0 constant* field_7 [[buffer(7)]], uint device* cluster_lights_7 [[buffer(6)]], GpuLight_natural_0 device* lights_7 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_7 [[texture(1)]], sampler shadow_sampler_7 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_7 [[texture(0)]], sampler grassCardSampler_7 [[sampler(0)]], texture2d<float, access::sample> grassGround_7 [[texture(2)]], WindParams_0 constant* wind_7 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_7 [[texture(3)]], sampler windSampler_7 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_7 [[texture(4)]], GrassInstance_natural_0 device* grassCells_7 [[buffer(8)]])
+[[vertex]] shellVertexMain_Result_0 shellVertexMain(uint index_8 [[vertex_id]], uint instance_id_3 [[instance_id]], uint base_instance_3 [[base_instance]], GrassTile_0 constant* tile_15 [[buffer(2)]], GrassParams_0 constant* grass_7 [[buffer(1)]], GrassInstance_natural_0 device* instances_7 [[buffer(3)]], GrassBlade_natural_0 device* blades_8 [[buffer(4)]], FrameUniforms_natural_0 constant* frame_7 [[buffer(0)]], GrassField_0 constant* field_7 [[buffer(7)]], uint device* cluster_lights_7 [[buffer(6)]], GpuLight_natural_0 device* lights_7 [[buffer(5)]], depth2d<float, access::sample> shadow_atlas_7 [[texture(1)]], sampler shadow_sampler_7 [[sampler(1)]], texture2d_array<float, access::sample> grassCard_7 [[texture(0)]], sampler grassCardSampler_7 [[sampler(0)]], texture2d<float, access::sample> grassGround_7 [[texture(2)]], WindParams_0 constant* wind_7 [[buffer(9)]], texture2d<float, access::sample> windDirectionLayer_7 [[texture(3)]], sampler windSampler_7 [[sampler(2)]], texture2d<float, access::sample> windIntensityLayer_7 [[texture(4)]], GrassInstance_natural_0 device* grassCells_7 [[buffer(8)]])
 {
 
 #line 1890
@@ -3561,41 +3561,44 @@ struct shellVertexMain_Result_0
     (&kernelContext_36)->grassCells_0 = grassCells_7;
 
 #line 1890
-    uint _S214 = grass_shell_count_0(&kernelContext_36);
+    uint _S214 = instance_id_3 - base_instance_3;
+
+#line 1890
+    uint _S215 = grass_shell_count_0(&kernelContext_36);
 
 #line 1986
-    uint _S215 = _S214 - 1U;
+    uint _S216 = _S215 - 1U;
     uint quad_0 = index_8 / 6U;
 
 #line 1987
-    GrassShellVertex_0 _S216 = grass_sheet_vertex_0((&kernelContext_36)->tile_1->tile_0.xy + (float2(float(quad_0 % 16U), float(quad_0 / 16U)) + GRASS_CARD_CORNERS_0[index_8 % 6U]) * float2(((&kernelContext_36)->tile_1->tile_0.z / 16.0f)) , (&kernelContext_36)->field_0->layers_0[_S215 - min(instance_id_3, _S215)].x, float4(0.0f, 1.0f, 0.0f, 0.0f), (&kernelContext_36)->field_0->layers_0[_S215 - min(instance_id_3, _S215)].y, &kernelContext_36);
+    GrassShellVertex_0 _S217 = grass_sheet_vertex_0((&kernelContext_36)->tile_1->tile_0.xy + (float2(float(quad_0 % 16U), float(quad_0 / 16U)) + GRASS_CARD_CORNERS_0[index_8 % 6U]) * float2(((&kernelContext_36)->tile_1->tile_0.z / 16.0f)) , (&kernelContext_36)->field_0->layers_0[_S216 - min(_S214, _S216)].x, float4(0.0f, 1.0f, 0.0f, 0.0f), (&kernelContext_36)->field_0->layers_0[_S216 - min(_S214, _S216)].y, &kernelContext_36);
 
 #line 1987
-    thread shellVertexMain_Result_0 _S217;
+    thread shellVertexMain_Result_0 _S218;
 
 #line 1987
-    (&_S217)->position_10 = _S216.position_5;
+    (&_S218)->position_10 = _S217.position_5;
 
 #line 1987
-    (&_S217)->world_position_14 = _S216.world_position_9;
+    (&_S218)->world_position_14 = _S217.world_position_9;
 
 #line 1987
-    (&_S217)->rest_3 = _S216.rest_0;
+    (&_S218)->rest_3 = _S217.rest_0;
 
 #line 1987
-    (&_S217)->normal_13 = _S216.normal_7;
+    (&_S218)->normal_13 = _S217.normal_7;
 
 #line 1987
-    (&_S217)->footprint_2 = _S216.footprint_0;
+    (&_S218)->footprint_2 = _S217.footprint_0;
 
 #line 1987
-    (&_S217)->occlusion_5 = _S216.occlusion_1;
+    (&_S218)->occlusion_5 = _S217.occlusion_1;
 
 #line 1987
-    (&_S217)->fin_3 = _S216.fin_0;
+    (&_S218)->fin_3 = _S217.fin_0;
 
 #line 1987
-    return _S217;
+    return _S218;
 }
 
 
@@ -3675,31 +3678,31 @@ struct finVertexMain_Result_0
 
 #line 2024
     uint quad_1 = index_9 / 6U;
-    uint _S218 = index_9 % 6U;
-    uint _S219 = max(field_8->tiles_0.z / 4U, 1U);
+    uint _S219 = index_9 % 6U;
+    uint _S220 = max(field_8->tiles_0.z / 4U, 1U);
 
-    uint _S220 = quad_1 / (_S219 * 64U);
+    uint _S221 = quad_1 / (_S220 * 64U);
 
 #line 2028
-    uint _S221 = min(_S220, 1U);
-    uint fin_line_0 = quad_1 / 64U % _S219;
+    uint _S222 = min(_S221, 1U);
+    uint fin_line_0 = quad_1 / 64U % _S220;
 
 
 
     float band_4 = 4.0f * (&kernelContext_37)->field_0->origin_0.w;
     float across_1 = (float(fin_line_0) + 0.5f) * band_4;
     float stride_0 = (&kernelContext_37)->tile_1->tile_0.z / 16.0f;
-    float _S222 = float(quad_1 / 4U % 16U);
+    float _S223 = float(quad_1 / 4U % 16U);
 
 #line 2036
-    float along_4 = (_S222 + GRASS_CARD_CORNERS_0[_S218].x) * stride_0;
-    float middle_along_0 = (_S222 + 0.5f) * stride_0;
-    float share_2 = (float(quad_1 % 4U) + GRASS_CARD_CORNERS_0[_S218].y) / 4.0f;
+    float along_4 = (_S223 + GRASS_CARD_CORNERS_0[_S219].x) * stride_0;
+    float middle_along_0 = (_S223 + 0.5f) * stride_0;
+    float share_2 = (float(quad_1 % 4U) + GRASS_CARD_CORNERS_0[_S219].y) / 4.0f;
 
 
 
-    bool along_z_1 = _S221 == 0U;
-    float2 _S223 = (&kernelContext_37)->tile_1->tile_0.xy;
+    bool along_z_1 = _S222 == 0U;
+    float2 _S224 = (&kernelContext_37)->tile_1->tile_0.xy;
 
 #line 2043
     float2 side_2;
@@ -3723,9 +3726,9 @@ struct finVertexMain_Result_0
     }
 
 #line 2043
-    float2 rest_5 = _S223 + side_2;
+    float2 rest_5 = _S224 + side_2;
 
-    float2 _S224 = (&kernelContext_37)->tile_1->tile_0.xy;
+    float2 _S225 = (&kernelContext_37)->tile_1->tile_0.xy;
 
 #line 2045
     if(along_z_1)
@@ -3746,7 +3749,7 @@ struct finVertexMain_Result_0
     }
 
 #line 2045
-    float2 middle_0 = _S224 + side_2;
+    float2 middle_0 = _S225 + side_2;
     if(along_z_1)
     {
 
@@ -3765,19 +3768,19 @@ struct finVertexMain_Result_0
     }
 
 #line 2046
-    GrassGround_0 _S225 = grass_ground_under_0(middle_0, &kernelContext_37);
+    GrassGround_0 _S226 = grass_ground_under_0(middle_0, &kernelContext_37);
 
 #line 2046
-    GrassGround_0 _S226 = grass_ground_under_0(middle_0 - side_2, &kernelContext_37);
+    GrassGround_0 _S227 = grass_ground_under_0(middle_0 - side_2, &kernelContext_37);
 
 #line 2046
-    GrassGround_0 _S227 = grass_ground_under_0(middle_0 + side_2, &kernelContext_37);
+    GrassGround_0 _S228 = grass_ground_under_0(middle_0 + side_2, &kernelContext_37);
 
 #line 2052
-    float3 eye_0 = (&kernelContext_37)->frame_0->camera_position_0.xyz - float3(middle_0.x, _S225.height_1 + 0.5f * (&kernelContext_37)->field_0->stack_0.x, middle_0.y);
+    float3 eye_0 = (&kernelContext_37)->frame_0->camera_position_0.xyz - float3(middle_0.x, _S226.height_1 + 0.5f * (&kernelContext_37)->field_0->stack_0.x, middle_0.y);
     float3 view_1 = eye_0 / float3(max(length(eye_0), 9.99999997475242708e-07f)) ;
-    float facing_near_0 = dot(_S226.normal_6, view_1);
-    float facing_far_0 = dot(_S227.normal_6, view_1);
+    float facing_near_0 = dot(_S227.normal_6, view_1);
+    float facing_far_0 = dot(_S228.normal_6, view_1);
 
 #line 2055
     float graze_0;
@@ -3819,25 +3822,25 @@ struct finVertexMain_Result_0
 #line 2062
     }
 
-    float4 _S228 = float4(float(_S221) + 1.0f, fade_2, graze_0 + across_1, 0.0f);
+    float4 _S229 = float4(float(_S222) + 1.0f, fade_2, graze_0 + across_1, 0.0f);
 
 #line 2064
-    float _S229 = grass_occlusion_at_0(share_2, &kernelContext_37);
+    float _S230 = grass_occlusion_at_0(share_2, &kernelContext_37);
 
 #line 2064
-    GrassShellVertex_0 _S230 = grass_sheet_vertex_0(rest_5, share_2, _S228, _S229, &kernelContext_37);
+    GrassShellVertex_0 _S231 = grass_sheet_vertex_0(rest_5, share_2, _S229, _S230, &kernelContext_37);
 
 #line 2063
-    thread GrassShellVertex_0 output_6 = _S230;
+    thread GrassShellVertex_0 output_6 = _S231;
 
 #line 2063
-    bool _S231;
+    bool _S232;
 
     if(fade_2 <= 0.0f)
     {
 
 #line 2065
-        _S231 = true;
+        _S232 = true;
 
 #line 2065
     }
@@ -3845,13 +3848,13 @@ struct finVertexMain_Result_0
     {
 
 #line 2065
-        _S231 = ((&kernelContext_37)->field_0->stack_0.z) <= 0.0f;
+        _S232 = ((&kernelContext_37)->field_0->stack_0.z) <= 0.0f;
 
 #line 2065
     }
 
 #line 2065
-    if(_S231)
+    if(_S232)
     {
 
 
@@ -3861,33 +3864,33 @@ struct finVertexMain_Result_0
     }
 
 #line 2071
-    GrassShellVertex_0 _S232 = output_6;
+    GrassShellVertex_0 _S233 = output_6;
 
 #line 2071
-    thread finVertexMain_Result_0 _S233;
+    thread finVertexMain_Result_0 _S234;
 
 #line 2071
-    (&_S233)->position_11 = _S232.position_5;
+    (&_S234)->position_11 = _S233.position_5;
 
 #line 2071
-    (&_S233)->world_position_15 = _S232.world_position_9;
+    (&_S234)->world_position_15 = _S233.world_position_9;
 
 #line 2071
-    (&_S233)->rest_4 = _S232.rest_0;
+    (&_S234)->rest_4 = _S233.rest_0;
 
 #line 2071
-    (&_S233)->normal_14 = _S232.normal_7;
+    (&_S234)->normal_14 = _S233.normal_7;
 
 #line 2071
-    (&_S233)->footprint_3 = _S232.footprint_0;
+    (&_S234)->footprint_3 = _S233.footprint_0;
 
 #line 2071
-    (&_S233)->occlusion_6 = _S232.occlusion_1;
+    (&_S234)->occlusion_6 = _S233.occlusion_1;
 
 #line 2071
-    (&_S233)->fin_4 = _S232.fin_0;
+    (&_S234)->fin_4 = _S233.fin_0;
 
 #line 2071
-    return _S233;
+    return _S234;
 }
 

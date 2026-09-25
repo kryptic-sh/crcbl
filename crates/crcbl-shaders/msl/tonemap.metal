@@ -49,7 +49,7 @@ struct TonemapParams_0
 };
 
 
-#line 233
+#line 175
 struct KernelContext_0
 {
     texture2d<float, access::sample> scene_0;
@@ -146,23 +146,23 @@ struct FullscreenOutput_0
 };
 
 
-#line 473 "core"
+#line 484 "core"
 [[vertex]] vertexMain_Result_0 vertexMain(uint index_0 [[vertex_id]], texture2d<float, access::sample> scene_2 [[texture(0)]], sampler sceneSampler_2 [[sampler(0)]], TonemapParams_0 constant* params_2 [[buffer(0)]], float device* measured_2 [[buffer(1)]])
 {
 
-#line 473
+#line 484
     thread KernelContext_0 kernelContext_1;
 
-#line 473
+#line 484
     (&kernelContext_1)->scene_0 = scene_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->sceneSampler_0 = sceneSampler_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->params_0 = params_2;
 
-#line 473
+#line 484
     (&kernelContext_1)->measured_0 = measured_2;
 
 #line 203 "shaders/tonemap.slang"

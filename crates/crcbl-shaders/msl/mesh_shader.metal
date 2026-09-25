@@ -57,9 +57,9 @@ struct Vertex_natural_0
     {
 
 #line 144
-        _slang_mesh.set_index(0U*3+0,(uint3(0U, 1U, 2U))[0]);
-        _slang_mesh.set_index(0U*3+1,(uint3(0U, 1U, 2U))[1]);
-        _slang_mesh.set_index(0U*3+2,(uint3(0U, 1U, 2U))[2]);
+        _slang_mesh.set_index(0U*3+0,uint3(0U, 1U, 2U)[0]);
+        _slang_mesh.set_index(0U*3+1,uint3(0U, 1U, 2U)[1]);
+        _slang_mesh.set_index(0U*3+2,uint3(0U, 1U, 2U)[2]);
         ;
 
 #line 144
@@ -107,9 +107,9 @@ struct Vertex_natural_0
     {
 
 #line 189
-        _slang_mesh.set_index(0U*3+0,(uint3(0U, 1U, 2U))[0]);
-        _slang_mesh.set_index(0U*3+1,(uint3(0U, 1U, 2U))[1]);
-        _slang_mesh.set_index(0U*3+2,(uint3(0U, 1U, 2U))[2]);
+        _slang_mesh.set_index(0U*3+0,uint3(0U, 1U, 2U)[0]);
+        _slang_mesh.set_index(0U*3+1,uint3(0U, 1U, 2U)[1]);
+        _slang_mesh.set_index(0U*3+2,uint3(0U, 1U, 2U)[2]);
         ;
 
 #line 189

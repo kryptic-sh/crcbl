@@ -10,7 +10,7 @@ struct Amplification_0
 };
 
 
-#line 155
+#line 129
 struct KernelContext_0
 {
     atomic<uint> device* count_0;

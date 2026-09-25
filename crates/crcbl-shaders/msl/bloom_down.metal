@@ -12,7 +12,7 @@ struct BloomParams_0
 };
 
 
-#line 1084 "core"
+#line 106
 struct KernelContext_0
 {
     BloomParams_0 constant* params_0;
@@ -21,7 +21,7 @@ struct KernelContext_0
 };
 
 
-#line 128 "shaders/bloom_down.slang"
+#line 128
 float3 tap_0(float2 uv_0, float2 offset_0, KernelContext_0 thread* kernelContext_0)
 {
     return ((kernelContext_0->source_0).sample((kernelContext_0->sourceSampler_0), (uv_0 + offset_0 * kernelContext_0->params_0->inv_source_0))).xyz;

@@ -10,7 +10,7 @@ struct Params_0
 };
 
 
-#line 84
+#line 61
 struct KernelContext_0
 {
     Params_0 constant* params_0;
