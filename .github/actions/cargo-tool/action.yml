@@ -1,0 +1,45 @@
+name: Install one pinned cargo tool, from the cache when it holds it
+description: >-
+  Installs `tool` (`name@version`) with `taiki-e/install-action`, unless the
+  binary is already in the cache under that exact name and version. A failed
+  download used to fail the job and skip its real steps; a cached binary never
+  touches the network.
+
+inputs:
+  tool:
+    description: One `name@version`, as `taiki-e/install-action` takes it.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # The binary's file name, which is the tool's name without its version.
+    # Read in a step rather than spelled in the paths below, for the reason
+    # `apt-packages` gives: an expression that resolves to nothing in a
+    # composite action keys the cache on an empty segment.
+    - id: name
+      shell: bash
+      env:
+        TOOL: ${{ inputs.tool }}
+      run: |
+        set -euo pipefail
+        name="${TOOL%@*}"
+        if [ -z "$name" ] || [ "$name" = "$TOOL" ]; then
+          echo "::error::cargo-tool wants name@version, got '$TOOL'"
+          exit 1
+        fi
+        echo "bin=$name" >> "$GITHUB_OUTPUT"
+    # Keyed on the exact version and the platform, with no `restore-keys`: a
+    # near miss here is a different tool, not a slightly stale one. Both
+    # spellings are listed so one key serves Windows (`.exe`) and the rest.
+    - id: cache
+      uses: actions/cache@v6
+      with:
+        path: |
+          ~/.cargo/bin/${{ steps.name.outputs.bin }}
+          ~/.cargo/bin/${{ steps.name.outputs.bin }}.exe
+        key: cargo-tool-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tool }}
+    - if: steps.cache.outputs.cache-hit != 'true'
+      uses: taiki-e/install-action@v2
+      with:
+        tool: ${{ inputs.tool }}

@@ -21,7 +21,11 @@ updates:
           - minor
 
   - package-ecosystem: github-actions
-    directory: /
+    # The workflows, and the local composite actions they use, which pin
+    # actions of their own that `directory: /` alone never looked at.
+    directories:
+      - /
+      - /.github/actions/*
     schedule:
       interval: weekly
       day: monday

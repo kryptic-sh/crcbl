@@ -57,7 +57,7 @@ runs:
     # changes how apt itself runs, which is not something this repository can
     # test anywhere but on a runner.
     - id: archive
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.cache/crcbl-apt-archives
         key:

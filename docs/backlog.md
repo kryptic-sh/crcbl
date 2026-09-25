@@ -50,7 +50,9 @@ main.
 - **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
   `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
   second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every
-  GitHub Action is already on its latest major.
+  GitHub Action is on its latest major; the one the first survey missed,
+  `actions/cache@v4` inside the local `apt-packages` action, went to v6, and
+  Dependabot's `github-actions` entry now reads `/.github/actions/*` as well.
 
 ## Performance review and execution priority (2026-09-17)
 
@@ -21144,13 +21146,12 @@ trade-off:
 exposure without adding a dependency, and the pinning that makes CI reproducible
 is exactly what makes the cache key sound.
 
-**Decided 2026-09-25: 2, the recommendation.** Option 1's third-party action is
-a new dependency and so the owner's; 2 needs none. Not built. The shape that
-does not depend on how `taiki-e/install-action` treats a binary already present
-(its README does not say, read 2026-09-25): an `actions/cache` step keyed on
-`tool@version` over that tool's file in `~/.cargo/bin`, and the install step
-skipped on `cache-hit`, written once as a local composite action under
-`.github/actions/` and used at each of the 17 sites.
+**Built 2026-09-25: option 2.** `.github/actions/cargo-tool` restores the pinned
+binary from `actions/cache` keyed on `tool@version` and the platform, and runs
+`taiki-e/install-action` only on a miss; all 17 install sites use it. Chosen
+over option 1, whose third-party retry action is a new dependency and so the
+owner's. Not yet seen on a cold and then a warm run, which is the check that it
+restores.
 
 **The shape worth naming**, because it recurs: a failed install leaves the real
 check **skipped**, and a skipped check is not a passed one. The Pages deploy did
