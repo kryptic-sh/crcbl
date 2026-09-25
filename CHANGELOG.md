@@ -911,7 +911,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `ui` context binds, pressed while the loop's menu or console has input, is
   cleared from the snapshots the game is handed until it is released, as a
   menu's keys are withheld; one already down for the game stays down, and the
-  sticks, the triggers and Start still reach it.
+  sticks, the triggers and Start still reach it. Nothing a pad does while the
+  window is unfocused reaches the game or the menus;
+  `crcbl::engine::Pending::focus` carries a batch's last focus change.
 - **The reserved `ui` context has a pad column**: `ui::MOVE` on the left stick
   through `ui::STICK_DEADZONE` and on the d-pad, `ui::NEXT`/`ui::PREV` on the
   right and left shoulders, `ui::ACCEPT` on South, `ui::BACK` on East.

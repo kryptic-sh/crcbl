@@ -3240,6 +3240,9 @@ pub struct Pending {
     /// [`ShellEvent::Focus`] documents and a loop discharges by releasing every
     /// key it forwarded.
     pub focus_lost: bool,
+    /// Whether the window has focus as of the last [`ShellEvent::Focus`] in
+    /// this batch, or `None` for a batch with none.
+    pub focus: Option<bool>,
     /// Where the pointer is, in framebuffer pixels, or `None` if it is outside
     /// the window.
     ///
@@ -3404,7 +3407,12 @@ impl Pending {
             }
             ShellEvent::CloseRequested { .. } => self.close_requested = true,
             ShellEvent::WindowDestroyed { .. } => self.destroyed = true,
-            ShellEvent::Focus { focused: false, .. } => self.focus_lost = true,
+            ShellEvent::Focus { focused, .. } => {
+                self.focus = Some(*focused);
+                if !focused {
+                    self.focus_lost = true;
+                }
+            }
             ShellEvent::PointerMotion { abs, raw_delta, .. } => {
                 let here = position(*abs);
                 // The unaccelerated delta wherever the backend has one, and the
@@ -6028,7 +6036,10 @@ pub trait HostedGame: Sized {
     /// Polled once a frame, after the shell's events and before the frame's
     /// ticks, so it arrives in the same phase [`key_event`](Self::key_event)'s
     /// keys do. A headless run has no source and never calls this; see
-    /// [`pads`] for which targets have one.
+    /// [`pads`] for which targets have one. **Nothing arrives while the window
+    /// is unfocused**: a pad reports regardless of focus, and a player who
+    /// switched away is not playing, so those events are polled and dropped,
+    /// for the menus as well as the game.
     ///
     /// **A menu's buttons are withheld while a panel has input**, as a menu's
     /// keys are. A button the `ui` context binds (the table in
@@ -6602,6 +6613,9 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// The pad buttons a menu has taken from the game — see
     /// [`HostedGame::gamepad_event`].
     pad_claims: pad_claims::PadClaims,
+    /// Whether the window has focus, as of the last focus event the shell
+    /// sent; a run starts focused. Pads are not delivered while it is false.
+    focused: bool,
     mode: ModeRequest,
     budget: FrameBudget,
     ticks: u64,
@@ -6713,6 +6727,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             cursor: Some(CursorIcon::Default),
             pads: pads::for_run(config.windowed),
             pad_claims: pad_claims::PadClaims::default(),
+            focused: true,
             mode: ModeRequest::new(),
             budget: FrameBudget::new(config.frames),
             ticks: 0,
@@ -6862,8 +6877,18 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // Each event goes to the menu's map and to the game once each, the
         // game's with the buttons the menu claimed cleared, and never to the
         // game's own map: see `HostedGame::gamepad_event`.
+        //
+        // **Not while the window is unfocused.** A pad reports whatever has
+        // focus, and a player who alt-tabbed away is not playing: the events
+        // are still polled, so none are left to arrive stale on refocus, and
+        // handed to nobody.
+        self.focused = pending.focus.unwrap_or(self.focused);
+        let focused = self.focused;
         if let Some(pads) = &mut self.pads {
             pads.poll(&mut |event| {
+                if !focused {
+                    return;
+                }
                 menu.observe_pad(&event);
                 game.gamepad_event(&pad_claims.for_game(&event, panel_has_input, menu_pad_buttons));
             });
@@ -15476,10 +15501,51 @@ mod tests {
         assert!(seen(&engine, PadButton::East), "a fresh East was withheld");
     }
 
-    /// **Focus loss releases what the pump pressed**, including a press in
-    /// the very batch the window lost focus in, and it stays released while
-    /// the pad keeps reporting it — until the player lets go and presses
-    /// again.
+    /// **An unfocused window hears no pad**: what a pad does while the player
+    /// is in another window reaches neither the game nor the pause panel, and
+    /// the pad is heard again once focus comes back.
+    #[test]
+    fn a_pad_is_not_heard_while_the_window_is_unfocused() {
+        use crate::input::PadButton;
+        let mut engine = playing();
+        let window = engine.window();
+        let pads = scripted_pads(&mut engine);
+        engine
+            .shell_mut()
+            .set_focus(window, false)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        let before = engine.game().pads.len();
+
+        pads.send(pad_holding(&[PadButton::West]));
+        pads.send(pad_holding(&[PAUSE_BUTTON]));
+        pads.send(pad_holding(&[]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(engine.game().pads.len(), before, "the game heard a pad");
+        let paused = engine.is_paused();
+
+        engine
+            .shell_mut()
+            .set_focus(window, true)
+            .expect("the window is live");
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.is_paused(),
+            paused,
+            "Start toggled the pause from the background"
+        );
+        pads.send(pad_holding(&[PadButton::West]));
+        engine.frame().expect("the fake never fails");
+        assert_eq!(
+            engine.game().pads.len(),
+            before + 1,
+            "the pad is heard again once focused"
+        );
+    }
+
+    /// **Focus loss releases what the pump pressed**, and it stays released
+    /// once focus is back while the pad keeps reporting it — until the player
+    /// lets go and presses again.
     #[test]
     fn focus_loss_releases_a_pad_button_the_pump_pressed() {
         use crate::input::PadButton;
@@ -15489,6 +15555,8 @@ mod tests {
         let pads = scripted_pads(&mut engine);
 
         pads.send(pad_holding(&[PadButton::West]));
+        engine.frame().expect("the fake never fails");
+        assert!(engine.game_mut().actions.0.button_held("pad_jump"));
         engine
             .shell_mut()
             .set_focus(window, false)
@@ -15496,10 +15564,15 @@ mod tests {
         engine.frame().expect("the fake never fails");
         assert!(
             !engine.game_mut().actions.0.button_held("pad_jump"),
-            "a press in the focus-loss batch survived it",
+            "a held pad button survived the focus loss",
         );
 
-        // Re-sent, as a backend does when anything else on the pad moves.
+        // Back, and re-sent as a backend does when anything else on the pad
+        // moves.
+        engine
+            .shell_mut()
+            .set_focus(window, true)
+            .expect("the window is live");
         pads.send(pad_holding(&[PadButton::West]));
         engine.frame().expect("the fake never fails");
         assert!(

@@ -11276,15 +11276,6 @@ deleted 19-input plan left behind_.
     headless), and the ui context has a pad column. Left open:
     - A d-pad held on one pad and its opposite on another cancel out, by the
       every-pad-drives-every-binding rule, until device assignment lands.
-    - **Needs a decision: pads drive the loop while the window is unfocused.**
-      XInput reports regardless of focus and the loop tracks only the focus-lost
-      edge, so a pad can resume a background window. Options: stop delivering
-      while unfocused (tracking focus gained too), or accept it. **Decided
-      2026-09-25: stop delivering while unfocused.** It is SDL's default
-      (`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS` off), keyboard and mouse
-      already stop, and a player alt-tabbed to a browser should not be steering
-      the game behind it. A game that wants background pads can ask for an
-      opt-in later. Not built yet.
     - A game that queues pad events for replay after its `begin_tick` can lose
       the focus-loss release; games feeding the map from the hook are fine and
       no sample queues pad events yet.
@@ -25448,8 +25439,8 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
   meeting the every-packet-sealed rule (with a guard test owed). To build:
-  Box2D's farthest-point sleep check, and no pad delivery while unfocused.
-  glam's bump is in the first-priority dependency entry at the top.
+  Box2D's farthest-point sleep check. glam's bump is in the first-priority
+  dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
