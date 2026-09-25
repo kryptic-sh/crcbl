@@ -158,6 +158,10 @@ pub struct Held<P> {
     from: GridCell,
     widget: WidgetId,
     grab: UVec2,
+    /// Whether the game changed the payload while it was held
+    /// ([`Held::payload_mut`], [`Held::turn_quarter`]), which makes a release
+    /// on the cell it started on a drop rather than a click.
+    changed: bool,
 }
 
 impl<P> Held<P> {
@@ -169,8 +173,21 @@ impl<P> Held<P> {
 
     /// What is being dragged, for a game that changes it mid-drag — an item
     /// turned by a rotate key while it is held.
+    ///
+    /// **Borrowing it marks the drag changed**: from then on a release on the
+    /// cell the drag started on is offered to `can_accept` as a drop, where an
+    /// unchanged payload let go there is a click that drops nothing. Read with
+    /// [`Held::payload`] to leave it unmarked.
     pub fn payload_mut(&mut self) -> &mut P {
+        self.changed = true;
         &mut self.payload
+    }
+
+    /// Whether the payload was changed while it was held — see
+    /// [`Held::payload_mut`].
+    #[must_use]
+    pub fn changed(&self) -> bool {
+        self.changed
     }
 
     /// The cell the press latched on.
@@ -194,6 +211,24 @@ impl<P> Held<P> {
     /// grabs at its origin.
     pub fn refit(&mut self, size: UVec2) {
         self.grab = self.grab.min(size.saturating_sub(UVec2::ONE));
+    }
+
+    /// Turns the grab a quarter with its footprint, for a payload turned a
+    /// quarter while it is held, so the same cell of it stays under the
+    /// pointer. `size_before` is the footprint before the turn, `w × h`; it
+    /// becomes `h × w`, and the grabbed cell `(column, row)` becomes
+    /// `(h − 1 − row, column)` — the turn clockwise on a grid whose rows run
+    /// down, as a rotate key turns an item.
+    ///
+    /// A `1×2` held by its top cell, `(0, 0)`, is held by `(1, 0)` once it lies
+    /// `2×1`. A grab outside `size_before` is first kept inside it, as
+    /// [`Held::refit`] keeps it. The drag is marked changed, as by
+    /// [`Held::payload_mut`].
+    pub fn turn_quarter(&mut self, size_before: UVec2) {
+        self.refit(size_before);
+        let (column, row) = (self.grab.x, self.grab.y);
+        self.grab = UVec2::new(size_before.y.saturating_sub(1) - row, column);
+        self.changed = true;
     }
 }
 
@@ -312,8 +347,10 @@ impl<P> DragFrame<'_, P> {
     /// [`Grip::origin`] below or right of the pressed cell, which no footprint
     /// covering that cell can have. `can_accept` is asked, while a drag is
     /// held, about the one cell under the pointer — never about the cell the
-    /// drag started on, and never when the grab offset puts the origin off the
-    /// grid's top or left edge. Each is called at most once a frame.
+    /// drag started on unless the game changed the payload while it was held
+    /// ([`Held::payload_mut`], [`Held::turn_quarter`]), and never when the grab
+    /// offset puts the origin off the grid's top or left edge. Each is called
+    /// at most once a frame.
     pub fn grid(
         &mut self,
         grid: &CellGrid,
@@ -363,6 +400,7 @@ impl<P> DragFrame<'_, P> {
                 },
                 widget: id,
                 grab,
+                changed: false,
             });
         }
 
@@ -373,7 +411,9 @@ impl<P> DragFrame<'_, P> {
             grid: grid.id_base,
             cell,
         };
-        if at == held.from {
+        // Let go where it started, unchanged, it is a click; changed — turned
+        // by a rotate key, say — it is a drop like any other.
+        if at == held.from && !held.changed {
             return response;
         }
         let accepted = cell.checked_sub(held.grab).is_some_and(|origin| {
@@ -675,6 +715,69 @@ mod tests {
     }
 
     /// **A turned payload keeps its grip inside its new footprint.**
+    /// **A quarter turn keeps the grabbed cell under the pointer.** Cell
+    /// `(column, row)` of a `w × h` footprint becomes `(h − 1 − row, column)`
+    /// of the `h × w` one: EW's `1×2` held by its top cell is held by `(1, 0)`
+    /// once it lies `2×1`, and four turns come back to where they began.
+    #[test]
+    fn a_quarter_turn_keeps_the_grabbed_cell() {
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        let mut frame = drag.frame(&mut ui, press(centre(&GRID, ORIGIN)));
+        frame.grid(&GRID, source, |_, _| true);
+        frame.finish();
+        let held = drag.held_mut().expect("the press took hold");
+        assert_eq!(held.grab(), UVec2::ZERO);
+        assert!(!held.changed());
+
+        held.turn_quarter(UVec2::new(1, 2));
+        assert_eq!(
+            held.grab(),
+            UVec2::new(1, 0),
+            "the 1x2's top cell, lying 2x1"
+        );
+        assert!(held.changed(), "a turn is a change");
+
+        // Taken as a 3×2 now, held by (1, 0): each turn follows the rule, and
+        // four turns of alternating sizes come back to where they began.
+        held.refit(UVec2::new(3, 2));
+        let start = held.grab();
+        let mut sizes = [UVec2::new(3, 2), UVec2::new(2, 3)].into_iter().cycle();
+        let mut grab = start;
+        for _ in 0..4 {
+            let size = sizes.next().expect("cycles");
+            let expected = UVec2::new(size.y - 1 - grab.y, grab.x);
+            held.turn_quarter(size);
+            grab = expected;
+            assert_eq!(held.grab(), grab);
+        }
+        assert_eq!(grab, start, "four quarter turns are a whole one");
+    }
+
+    /// **A payload changed while held drops where it started**; unchanged,
+    /// the same release there is a click. EW turns an item in place: press
+    /// it, turn it, let go on the same cell.
+    #[test]
+    fn a_changed_payload_released_where_it_began_is_a_drop() {
+        let cell = ORIGIN;
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        frame(&mut drag, &mut ui, press(centre(&GRID, cell)), true);
+        drag.held_mut().expect("held").payload_mut();
+        let (response, dropped) = frame(&mut drag, &mut ui, release(centre(&GRID, cell)), true);
+        let dropped = dropped.expect("a changed payload let go in place drops");
+        assert_eq!(dropped.to.at.cell, cell);
+        assert_eq!(dropped.to.origin, ORIGIN);
+        assert_eq!(response.cell(cell).drop, DropFeedback::Accepting);
+
+        // The control: the same press and release with nothing changed.
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        frame(&mut drag, &mut ui, press(centre(&GRID, cell)), true);
+        let (_, dropped) = frame(&mut drag, &mut ui, release(centre(&GRID, cell)), true);
+        assert_eq!(dropped, None, "an unchanged click dropped");
+    }
+
     #[test]
     fn a_refit_grip_stays_inside_the_footprint() {
         let mut drag = GridDrag::new();

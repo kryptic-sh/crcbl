@@ -301,6 +301,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A held grid drag turns with its payload, and a changed one drops in place.**
+  `grid_drag::Held::turn_quarter(size_before)` turns the grab offset a quarter
+  with the footprint, so the same cell of a turned item stays under the pointer
+  (`(column, row)` of `w × h` becomes `(h − 1 − row, column)` of `h × w`).
+  `Held::payload_mut` now marks the drag changed (`Held::changed`), and a
+  changed payload released on the cell it started on is offered to `can_accept`
+  as a drop, where an unchanged one there is still a click.
 - **A prone body in `crcbl-phys`: a fit check and a swept, ground-following
   move.** `LyingCapsule::new(head, yaw, radius, length)` describes a capsule
   lying on its side: `head` is the head end's hemisphere centre, the feet end's
