@@ -1356,7 +1356,7 @@ impl<T: Transport> Game<T> {
         let (score, lives, state, ball_pos, ticks_after) = {
             let mut logic = lock(&self.shared);
             self.sound_played_this_tick = !logic.sounds.is_empty();
-            for (id, x) in logic.sounds.drain(..).collect::<Vec<_>>() {
+            for (id, x) in std::mem::take(&mut logic.sounds) {
                 self.audio.play_at(id, DVec3::new(f64::from(x), 0.0, 0.0));
             }
             (

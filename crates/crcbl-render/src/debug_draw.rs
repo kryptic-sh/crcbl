@@ -755,7 +755,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{at:?} is not one of the corners"))
         };
         draw.vertices
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let (from, to) = (index(&pair[0]), index(&pair[1]));
                 (from.min(to), from.max(to))

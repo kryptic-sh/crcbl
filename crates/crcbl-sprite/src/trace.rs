@@ -187,7 +187,7 @@ pub fn trace(images: &[Image<'_>], options: &Options) -> Result<String, TraceErr
     // file and the palette reads roughly the way a person would have written it.
     let mut palette: Vec<[u8; 4]> = Vec::new();
     for image in images {
-        for pixel in image.rgba.chunks_exact(4) {
+        for pixel in image.rgba.as_chunks::<4>().0 {
             let colour = normalise([pixel[0], pixel[1], pixel[2], pixel[3]]);
             if !palette.contains(&colour) {
                 if palette.len() == MAX_COLOURS {
@@ -236,7 +236,7 @@ fn normalise(colour: [u8; 4]) -> [u8; 4] {
 fn count_colours(images: &[Image<'_>]) -> usize {
     let mut seen: Vec<[u8; 4]> = Vec::new();
     for image in images {
-        for pixel in image.rgba.chunks_exact(4) {
+        for pixel in image.rgba.as_chunks::<4>().0 {
             let colour = normalise([pixel[0], pixel[1], pixel[2], pixel[3]]);
             if !seen.contains(&colour) {
                 seen.push(colour);
@@ -384,7 +384,14 @@ mod tests {
     fn several_images_become_one_sheet_of_frames() {
         // Reversed by *pixel*, not by byte: reversing the bytes would put an
         // alpha where a red belongs and produce a fixture that is not an image.
-        let second: Vec<u8> = FOUR.chunks_exact(4).rev().flatten().copied().collect();
+        let second: Vec<u8> = FOUR
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .rev()
+            .flatten()
+            .copied()
+            .collect();
         let text = trace(
             &[image("up", &FOUR), image("down", &second)],
             &Options {

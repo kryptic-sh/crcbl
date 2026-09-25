@@ -828,7 +828,7 @@ impl MeshPool {
         let index_bytes: &[u8] = bytemuck::cast_slice(indices);
         let mut positions = Vec::with_capacity(vertices.len() / VERTEX_STRIDE * POSITION_STRIDE);
         let mut attributes = Vec::with_capacity(vertices.len() / VERTEX_STRIDE * ATTRIBUTE_STRIDE);
-        for vertex in vertices.chunks_exact(VERTEX_STRIDE) {
+        for vertex in vertices.as_chunks::<VERTEX_STRIDE>().0 {
             positions.extend_from_slice(&vertex[..POSITION_STRIDE]);
             attributes.extend_from_slice(&vertex[POSITION_STRIDE..]);
         }
@@ -1185,16 +1185,20 @@ fn local_bounds(vertices: &[u8]) -> Aabb {
 /// because the pool never builds one and a second decoder is a second thing
 /// that can disagree with the layout.
 pub(crate) fn vertex_positions(vertices: &[u8]) -> impl Iterator<Item = Vec3> + '_ {
-    vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
-        let float_at = |offset: usize| {
-            f32::from_le_bytes(
-                vertex[offset..offset + 4]
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("four bytes inside one vertex")),
-            )
-        };
-        Vec3::new(float_at(0), float_at(4), float_at(8))
-    })
+    vertices
+        .as_chunks::<VERTEX_STRIDE>()
+        .0
+        .iter()
+        .map(|vertex| {
+            let float_at = |offset: usize| {
+                f32::from_le_bytes(
+                    vertex[offset..offset + 4]
+                        .try_into()
+                        .unwrap_or_else(|_| unreachable!("four bytes inside one vertex")),
+                )
+            };
+            Vec3::new(float_at(0), float_at(4), float_at(8))
+        })
 }
 
 /// What [`MeshPool::write_and_submit`] needs that is not the device or the
@@ -1380,10 +1384,10 @@ mod tests {
             "the table must be one entry per mesh the pool can hold"
         );
         bytes
-            .chunks_exact(MESH_ENTRY_STRIDE)
-            .map(|entry| {
-                GpuMesh::from_bytes(entry.try_into().unwrap_or_else(|_| unreachable!("exact")))
-            })
+            .as_chunks::<MESH_ENTRY_STRIDE>()
+            .0
+            .iter()
+            .map(GpuMesh::from_bytes)
             .collect()
     }
 

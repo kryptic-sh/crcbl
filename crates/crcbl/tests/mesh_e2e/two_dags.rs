@@ -191,8 +191,10 @@ fn chosen_run(headless: &Headless, renderer: &ForwardRenderer, range: ClusterRan
     device.destroy_buffer(staging);
 
     words
-        .chunks_exact(4)
-        .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|word| u32::from_le_bytes(*word))
         .collect()
 }
 

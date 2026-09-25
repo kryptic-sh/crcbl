@@ -513,19 +513,17 @@ impl EntryPoint {
 ///
 /// If the length is not a multiple of four. `build.rs` hash-checks every
 /// artifact, so this cannot happen for a manifest that agrees with the tree —
-/// but `chunks_exact` would otherwise *drop* the trailing partial word of a
+/// but `as_chunks` would otherwise *drop* the trailing partial word of a
 /// truncated `.spv` and hand the driver a silently shortened module.
 fn decode_words(name: &str, bytes: &[u8]) -> Vec<u32> {
-    let chunks = bytes.chunks_exact(4);
+    let (words, remainder) = bytes.as_chunks::<4>();
     assert!(
-        chunks.remainder().is_empty(),
+        remainder.is_empty(),
         "shader `{name}`: the committed SPIR-V is {} bytes, which is not a whole number of \
          32-bit words — the artifact is truncated",
         bytes.len(),
     );
-    chunks
-        .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
-        .collect()
+    words.iter().map(|word| u32::from_le_bytes(*word)).collect()
 }
 
 /// A compiled shader, and where it came from.

@@ -299,7 +299,7 @@ fn read_u32_le(bytes: &[u8], pos: &mut usize) -> Result<u32, WavError> {
 
 fn decode_s16(data: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(data.len() / 2);
-    for chunk in data.chunks_exact(2) {
+    for chunk in data.as_chunks::<2>().0 {
         let raw = i16::from_le_bytes([chunk[0], chunk[1]]);
         out.push(f32::from(raw) / 32768.0);
     }
@@ -308,7 +308,7 @@ fn decode_s16(data: &[u8]) -> Vec<f32> {
 
 fn decode_s24(data: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(data.len() / 3);
-    for chunk in data.chunks_exact(3) {
+    for chunk in data.as_chunks::<3>().0 {
         // Sign-extend the 24-bit value into an i32.
         let raw = i32::from_le_bytes([
             chunk[0],
@@ -324,7 +324,7 @@ fn decode_s24(data: &[u8]) -> Vec<f32> {
 fn decode_s32(data: &[u8]) -> Vec<f32> {
     let scale = 2_147_483_648.0_f32; // 2^31
     let mut out = Vec::with_capacity(data.len() / 4);
-    for chunk in data.chunks_exact(4) {
+    for chunk in data.as_chunks::<4>().0 {
         let raw = i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         out.push(raw as f32 / scale);
     }
@@ -338,7 +338,7 @@ fn decode_s32(data: &[u8]) -> Vec<f32> {
 /// reaches a playhead calculation makes the voice immortal.
 fn decode_f32(data: &[u8]) -> Vec<f32> {
     let mut out = Vec::with_capacity(data.len() / 4);
-    for chunk in data.chunks_exact(4) {
+    for chunk in data.as_chunks::<4>().0 {
         let raw = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         out.push(if raw.is_finite() { raw } else { 0.0 });
     }

@@ -2565,7 +2565,9 @@ mod tests {
         // And the rows are not all one number, which is how an offset mistake
         // would pass a comparison this exact.
         assert!(
-            rows.chunks_exact(4)
+            rows.as_chunks::<4>()
+                .0
+                .iter()
                 .map(lane_of)
                 .collect::<std::collections::BTreeSet<u32>>()
                 .len()
@@ -2575,8 +2577,8 @@ mod tests {
     }
 
     /// One row lane's bits, for the distinctness count above.
-    fn lane_of(bytes: &[u8]) -> u32 {
-        u32::from_le_bytes(bytes.try_into().expect("four"))
+    fn lane_of(bytes: &[u8; 4]) -> u32 {
+        u32::from_le_bytes(*bytes)
     }
 
     /// `sky.slang` and `ssr.slang` read the LUT the way [`SkyView::sample`] and

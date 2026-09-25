@@ -185,7 +185,7 @@ const DREW_AT_ALL: f32 = 6.0;
 /// [`ENEMY_RED_LEVEL`].
 fn enemy_red_fraction(image: &Image) -> f32 {
     let mut red = 0u32;
-    for pixel in image.pixels().chunks_exact(4) {
+    for pixel in image.pixels().as_chunks::<4>().0 {
         let (r, g, b) = (
             f32::from(pixel[0]),
             f32::from(pixel[1]),

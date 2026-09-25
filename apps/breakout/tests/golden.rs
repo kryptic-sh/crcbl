@@ -188,7 +188,9 @@ fn a_uniformly_darkened_frame_is_refused_by_the_tolerance_the_golden_uses() {
         good.width(),
         good.height(),
         good.pixels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|pixel| {
                 let dim = |channel: u8| (f32::from(channel) * DARKENED_BY).round() as u8;
                 [dim(pixel[0]), dim(pixel[1]), dim(pixel[2]), pixel[3]]

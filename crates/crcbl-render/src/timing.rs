@@ -450,7 +450,7 @@ fn measured_span(nanos: &[u64]) -> Option<u64> {
     }
     let mut first = u64::MAX;
     let mut last = 0;
-    for pair in nanos.chunks_exact(2) {
+    for pair in nanos.as_chunks::<2>().0 {
         let (start, end) = (pair[0], pair[1]);
         if start == 0 || end < start {
             return None;

@@ -246,7 +246,7 @@ mod tests {
         ] {
             assert_eq!(data.len() % CHANNELS, 0, "{name} is not whole frames");
             assert!(!data.is_empty(), "{name} produced nothing");
-            for frame in data.chunks_exact(CHANNELS) {
+            for frame in data.as_chunks::<CHANNELS>().0 {
                 assert_eq!(frame[0], frame[1], "{name} differs between the ears");
             }
             assert!(
@@ -286,7 +286,9 @@ mod tests {
         );
 
         let mid = data[(frames / 2) * CHANNELS..]
-            .chunks_exact(CHANNELS)
+            .as_chunks::<CHANNELS>()
+            .0
+            .iter()
             .take(RATE as usize / 100)
             .map(|f| f[0].abs())
             .fold(0.0f32, f32::max);
@@ -575,7 +577,12 @@ mod tests {
     #[ignore = "rewrites the committed reference rather than checking it"]
     fn the_burst_reference_is_rewritten_from_the_generator() {
         let data = noise_burst(BURST_SECONDS, BURST_DECAY, BURST_SEED, RATE);
-        let left: Vec<AudioSample> = data.chunks_exact(CHANNELS).map(|frame| frame[0]).collect();
+        let left: Vec<AudioSample> = data
+            .as_chunks::<CHANNELS>()
+            .0
+            .iter()
+            .map(|frame| frame[0])
+            .collect();
         let bytes = crate::wav::encode(&crate::wav::WavFile {
             samples: left,
             sample_rate: RATE,

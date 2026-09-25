@@ -415,8 +415,10 @@ fn a_default_view_draws_the_primary_camera_s_picture_byte_for_byte() {
     let drawn = pictures.remove(0);
     let differing = primary
         .pixels()
-        .chunks_exact(4)
-        .zip(drawn.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(drawn.pixels().as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     eprintln!(
@@ -430,7 +432,9 @@ fn a_default_view_draws_the_primary_camera_s_picture_byte_for_byte() {
     assert!(
         drawn
             .pixels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|pixel| pixel[3] == COVERED),
         "and its alpha is opaque everywhere, as it always was"
     );
@@ -469,7 +473,7 @@ fn coverage(picture: &crcbl_golden::Image) -> Coverage {
         empty: 0,
         partial: 0,
     };
-    for pixel in picture.pixels().chunks_exact(4) {
+    for pixel in picture.pixels().as_chunks::<4>().0 {
         match pixel[3] {
             COVERED => counted.covered += 1,
             EMPTY => counted.empty += 1,
@@ -552,8 +556,10 @@ fn a_transparent_view_writes_coverage_into_alpha_and_the_opaque_colour_where_cov
     let mut lit_background = 0usize;
     for (ours, theirs) in clear
         .pixels()
-        .chunks_exact(4)
-        .zip(solid.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(solid.pixels().as_chunks::<4>().0)
     {
         if ours[3] == COVERED {
             let apart = (0..3)
@@ -592,7 +598,9 @@ fn a_transparent_view_writes_coverage_into_alpha_and_the_opaque_colour_where_cov
     assert!(
         solid
             .pixels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .all(|pixel| pixel[3] == COVERED),
         "the opaque twin is opaque everywhere"
     );
@@ -816,8 +824,10 @@ fn a_transparent_icon_copied_into_a_bgra_atlas_draws_over_what_is_behind_it() {
     let mut off_backdrop = 0usize;
     for (shown, texel) in frame
         .pixels()
-        .chunks_exact(4)
-        .zip(icon_picture.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(icon_picture.pixels().as_chunks::<4>().0)
     {
         let near = |a: &[u8], b: &[u8]| (0..3).all(|c| a[c].abs_diff(b[c]) <= 1);
         match texel[3] {
@@ -958,7 +968,13 @@ fn draw_icons(
 fn difference(a: &crcbl_golden::Image, b: &crcbl_golden::Image) -> (usize, u8) {
     let mut differing = 0usize;
     let mut worst = 0u8;
-    for (ours, theirs) in a.pixels().chunks_exact(4).zip(b.pixels().chunks_exact(4)) {
+    for (ours, theirs) in a
+        .pixels()
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.pixels().as_chunks::<4>().0)
+    {
         let apart = (0..4)
             .map(|c| ours[c].abs_diff(theirs[c]))
             .max()
@@ -1097,7 +1113,7 @@ fn glossy_scene() -> (crcbl::render::scene::SceneDesc<'static>, usize) {
 fn covered_mean(picture: &crcbl_golden::Image) -> f64 {
     let mut sum = 0u64;
     let mut count = 0u64;
-    for pixel in picture.pixels().chunks_exact(4) {
+    for pixel in picture.pixels().as_chunks::<4>().0 {
         if pixel[3] == COVERED {
             sum += pixel[..3].iter().map(|&c| u64::from(c)).sum::<u64>();
             count += 3;

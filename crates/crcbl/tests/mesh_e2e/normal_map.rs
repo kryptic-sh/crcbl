@@ -790,7 +790,7 @@ fn the_page_encodes_the_tilt_to_within_the_tolerance_the_frame_tests_allow() {
         "a layer is the page's extent squared in RGBA8"
     );
     let want = tilted_tangent_normal();
-    for (index, texel) in texels.chunks_exact(4).enumerate() {
+    for (index, texel) in texels.as_chunks::<4>().0.iter().enumerate() {
         let decoded: Vec<f32> = texel[..3]
             .iter()
             .map(|lane| f32::from(*lane) / 255.0 * 2.0 - 1.0)
@@ -822,8 +822,11 @@ fn the_mirrored_quad_is_a_mirror_and_its_frame_is_left_handed() {
     let Geometry::Flat { vertices, .. } = &mirrored_quad().geometry else {
         unreachable!("the quad is flat geometry")
     };
-    for record in vertices.chunks_exact(crcbl_shaders::mesh::VERTEX_STRIDE) {
-        let vertex = MeshVertex::from_bytes(record.try_into().expect("one record"));
+    for record in vertices
+        .as_chunks::<{ crcbl_shaders::mesh::VERTEX_STRIDE }>()
+        .0
+    {
+        let vertex = MeshVertex::from_bytes(record);
         assert_eq!(
             vertex.qtangent.handedness(),
             -1.0,
@@ -834,8 +837,11 @@ fn the_mirrored_quad_is_a_mirror_and_its_frame_is_left_handed() {
     let Geometry::Flat { vertices, .. } = &marked_quad().geometry else {
         unreachable!("the quad is flat geometry")
     };
-    for record in vertices.chunks_exact(crcbl_shaders::mesh::VERTEX_STRIDE) {
-        let vertex = MeshVertex::from_bytes(record.try_into().expect("one record"));
+    for record in vertices
+        .as_chunks::<{ crcbl_shaders::mesh::VERTEX_STRIDE }>()
+        .0
+    {
+        let vertex = MeshVertex::from_bytes(record);
         assert_eq!(vertex.qtangent.handedness(), 1.0);
     }
 }

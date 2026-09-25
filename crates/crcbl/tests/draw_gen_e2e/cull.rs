@@ -664,8 +664,10 @@ impl CullProbe {
         let mut bytes = poisoned((visible_bytes + 4) as usize);
         headless.readback(self.staging, visible_bytes + 4, &mut bytes);
         let words: Vec<u32> = bytes
-            .chunks_exact(4)
-            .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
             .collect();
         let (raw, tail) = words.split_at(self.capacity as usize);
         let count = tail[0];

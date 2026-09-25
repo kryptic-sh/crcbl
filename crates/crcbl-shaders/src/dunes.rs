@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn every_triangle_is_wound_counter_clockwise_seen_from_above() {
         let positions = positions();
-        for (face, corners) in indices().chunks_exact(3).enumerate() {
+        for (face, corners) in indices().as_chunks::<3>().0.iter().enumerate() {
             let point = |corner: usize| positions[corners[corner] as usize];
             let [a, b, c] = [point(0), point(1), point(2)];
             let edge = |to: [f32; 3], from: [f32; 3]| [0, 1, 2].map(|axis| to[axis] - from[axis]);

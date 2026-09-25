@@ -175,7 +175,7 @@ impl X11Shell {
         if pairs.is_empty() || !pairs.len().is_multiple_of(2) {
             return 0;
         }
-        for pair in pairs.chunks_exact_mut(2) {
+        for pair in pairs.as_chunks_mut::<2>().0 {
             let (target, into) = (pair[0], pair[1]);
             let converted = target != self.conn.atoms.multiple
                 && into != 0
@@ -380,7 +380,9 @@ impl X11Shell {
             let offered: Vec<u32> = value.map_or_else(Vec::new, |(_, format, bytes)| {
                 if format == 32 {
                     bytes
-                        .chunks_exact(4)
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
                         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
                         .collect()
                 } else {

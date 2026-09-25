@@ -373,8 +373,10 @@ impl ShadowFixture {
                 self.headless
                     .readback(atlas_staging, atlas_bytes, &mut atlas_raw);
                 Ok(atlas_raw
-                    .chunks_exact(4)
-                    .map(|word| f32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| f32::from_le_bytes(*word))
                     .collect())
             }
             // Either refusal means the same thing here — no atlas to read. The

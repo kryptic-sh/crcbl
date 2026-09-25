@@ -45,8 +45,10 @@ fn sun_from(x: f32) -> DirectionalLight {
 fn moved(a: &[u8], b: &[u8]) -> usize {
     assert_eq!(a.len(), b.len(), "two frames of one ring");
     assert!(!a.is_empty(), "a device that drew read back no pixels");
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
+    a.as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count()
 }

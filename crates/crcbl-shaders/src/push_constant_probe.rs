@@ -89,7 +89,7 @@ impl Constants {
     #[must_use]
     pub fn to_bytes(self) -> [u8; CONSTANTS_SIZE as usize] {
         let mut bytes = [0u8; CONSTANTS_SIZE as usize];
-        for (word, chunk) in self.values.iter().zip(bytes.chunks_exact_mut(4)) {
+        for (word, chunk) in self.values.iter().zip(bytes.as_chunks_mut::<4>().0) {
             chunk.copy_from_slice(&word.to_le_bytes());
         }
         bytes

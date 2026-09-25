@@ -1095,7 +1095,9 @@ fn cluster_triangles(clusters: &MeshClusters, cluster: usize) -> Vec<[u32; 3]> {
     let cluster = &clusters.clusters[cluster];
     let run = &clusters.vertices[cluster.vertex_offset as usize..][..cluster.vertex_count as usize];
     clusters.corners[cluster.triangle_offset as usize..][..cluster.triangle_count as usize * 3]
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .map(|face| [0, 1, 2].map(|corner| run[usize::from(face[corner])]))
         .collect()
 }
@@ -1126,7 +1128,7 @@ fn cut_edges(dag: &ClusterDag, drawn: &[ClusterAt]) -> BTreeMap<SharedEdge, Vec<
 /// the triangles.
 fn base_border(level: &DagLevel) -> BTreeSet<SharedEdge> {
     let mut uses: BTreeMap<SharedEdge, usize> = BTreeMap::new();
-    for face in level.indices().chunks_exact(3) {
+    for face in level.indices().as_chunks::<3>().0 {
         for corner in 0..3 {
             *uses
                 .entry(shared_edge(
@@ -1283,7 +1285,9 @@ mod tests {
             .flat_map(|cluster| cluster_triangles(&dag.levels[0].clusters, cluster))
             .collect();
         let mut expected: Vec<[u32; 3]> = dunes::indices()
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|face| [face[0], face[1], face[2]])
             .collect();
         decoded.sort_unstable();

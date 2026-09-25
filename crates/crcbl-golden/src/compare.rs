@@ -320,8 +320,10 @@ pub fn compare(reference: &Image, actual: &Image, tolerance: &Tolerance) -> Comp
 
     for (left, right) in reference
         .pixels()
-        .chunks_exact(4)
-        .zip(actual.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(actual.pixels().as_chunks::<4>().0)
     {
         let mut pixel_worst = 0u8;
         for channel in 0..4 {
@@ -456,7 +458,9 @@ pub fn ssim(reference: &Image, actual: &Image) -> f64 {
 fn luma(image: &Image) -> Vec<f64> {
     image
         .pixels()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|pixel| {
             0.299 * f64::from(pixel[0]) + 0.587 * f64::from(pixel[1]) + 0.114 * f64::from(pixel[2])
         })

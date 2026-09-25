@@ -546,7 +546,9 @@ impl Conn {
             return Vec::new();
         }
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
             .collect()
     }

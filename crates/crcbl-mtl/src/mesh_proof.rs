@@ -244,7 +244,7 @@ struct Payload {{ uint4 color; }};
         encoder.draw_mesh_tasks(1, 1, 1);
     });
     assert!(
-        culled.chunks_exact(4).all(|pixel| pixel == CLEAR_TEXEL),
+        culled.as_chunks::<4>().0.iter().all(|pixel| *pixel == CLEAR_TEXEL),
         "object stage with a zero mesh launch leaves every pixel clear"
     );
     let bytes = draw_canvas(&device, Format::Rgba8Unorm, |encoder| {
@@ -1029,8 +1029,8 @@ struct Payload {{ uint value; }};
         .unwrap();
     let bytes = drain(&device, request, 16);
     let words: Vec<_> = bytes
-        .chunks_exact(4)
-        .map(|word| u32::from_ne_bytes(word.try_into().unwrap()))
+        .as_chunks::<4>().0.iter()
+        .map(|word| u32::from_ne_bytes(*word))
         .collect();
     assert_eq!(
         words,

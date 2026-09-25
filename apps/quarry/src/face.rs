@@ -210,7 +210,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 /// what you get by not normalising before summing.
 pub(crate) fn normals_of(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
     let mut sums = vec![Vec3::ZERO; positions.len()];
-    for triangle in indices.chunks_exact(3) {
+    for triangle in indices.as_chunks::<3>().0 {
         let [a, b, c] =
             [triangle[0], triangle[1], triangle[2]].map(|i| Vec3::from(positions[i as usize]));
         let face = (b - a).cross(c - a);

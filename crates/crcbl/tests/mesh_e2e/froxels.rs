@@ -305,11 +305,15 @@ fn read_back(headless: &Headless, buffers: FroxelBuffers) -> Column {
             &params.try_into().expect("the block is its own size"),
         ),
         froxels: froxels
-            .chunks_exact(FROXEL_STRIDE)
+            .as_chunks::<FROXEL_STRIDE>()
+            .0
+            .iter()
             .map(|cell| core::array::from_fn(|lane| float_at(cell, lane * 4)))
             .collect(),
         lighting: lighting
-            .chunks_exact(LIGHTING_STRIDE)
+            .as_chunks::<LIGHTING_STRIDE>()
+            .0
+            .iter()
             .map(|cell| core::array::from_fn(|lane| float_at(cell, lane * 4)))
             .collect(),
     }

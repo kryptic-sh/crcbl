@@ -520,8 +520,8 @@ mod tests {
         let neutral = [0x80u8, 0x80, 0xFF, 0xFF];
         let level0 = neutral.repeat(4 * 4);
         for level in normal_chain(&level0, 4) {
-            for texel in level.chunks_exact(4) {
-                assert_eq!(texel, neutral, "a flat map stopped being flat");
+            for texel in level.as_chunks::<4>().0 {
+                assert_eq!(*texel, neutral, "a flat map stopped being flat");
             }
         }
 
@@ -537,7 +537,7 @@ mod tests {
             })
             .collect();
         for (index, level) in normal_chain(&leaning, 4).into_iter().enumerate() {
-            for texel in level.chunks_exact(4) {
+            for texel in level.as_chunks::<4>().0 {
                 let decoded = [
                     f32::from(texel[0]) / 255.0 * 2.0 - 1.0,
                     f32::from(texel[1]) / 255.0 * 2.0 - 1.0,
@@ -699,7 +699,7 @@ mod tests {
         let below = chain(&checker, 4);
         assert_eq!(below.len(), 2);
         for (index, level) in below.iter().enumerate() {
-            for texel in level.chunks_exact(4) {
+            for texel in level.as_chunks::<4>().0 {
                 assert_eq!(texel[3], 0xFF);
                 for channel in &texel[..3] {
                     assert!(

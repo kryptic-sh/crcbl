@@ -125,7 +125,7 @@ impl WindParams {
             self.intensity_uv_per_metre[1],
         ];
         let mut bytes = [0u8; PARAMS_SIZE];
-        for (word, slot) in words.into_iter().zip(bytes.chunks_exact_mut(4)) {
+        for (word, slot) in words.into_iter().zip(bytes.as_chunks_mut::<4>().0) {
             slot.copy_from_slice(&word.to_le_bytes());
         }
         bytes

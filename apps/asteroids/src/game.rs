@@ -2150,7 +2150,7 @@ impl Game {
         // the origin; see `crate::audio`.
         let cues: Vec<_> = {
             let mut logic = lock(&self.shared);
-            logic.cues.drain(..).collect()
+            std::mem::take(&mut logic.cues)
         };
         for (id, x, y) in cues {
             self.audio.play_at(id, DVec3::new(x, y, 0.0));

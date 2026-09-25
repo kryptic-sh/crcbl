@@ -1177,7 +1177,7 @@ impl Game {
             // Drained under the same lock the tick filled it under, so a frame
             // that ran two ticks plays both of their cues rather than the last
             // one's. `listener` is the camera's centre; see `crate::audio`.
-            let cues: Vec<_> = logic.cues.drain(..).collect();
+            let cues: Vec<_> = std::mem::take(&mut logic.cues);
             drop(logic);
             self.audio.set_listener(self.bird.x);
             for (id, x, y) in cues {

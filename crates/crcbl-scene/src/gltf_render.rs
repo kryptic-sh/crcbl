@@ -599,14 +599,16 @@ fn packed_layer(
         Some(image) if Some(image) == metallic_roughness => {}
         Some(image) => {
             for (texel, from) in level0
-                .chunks_exact_mut(4)
-                .zip(resampled(image).chunks_exact(4))
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .zip(resampled(image).as_chunks::<4>().0)
             {
                 texel[0] = from[0];
             }
         }
         None => {
-            for texel in level0.chunks_exact_mut(4) {
+            for texel in level0.as_chunks_mut::<4>().0 {
                 texel[0] = PACKED_NEUTRAL;
             }
         }
@@ -1009,7 +1011,7 @@ fn expand(primitive: &GltfPrimitive) -> Expanded {
     // are emitted and how often, and the range is the bounds of exactly those.
     let mut authored: Vec<([f32; 3], [f32; 2])> = Vec::with_capacity(primitive.indices().len());
     let mut sources = Vec::with_capacity(primitive.indices().len());
-    for corners in primitive.indices().chunks_exact(3) {
+    for corners in primitive.indices().as_chunks::<3>().0 {
         let corner = |at: usize| primitive.positions()[corners[at] as usize];
         let (a, b, c) = (
             Vec3::from(corner(0)),
@@ -1321,8 +1323,10 @@ mod tests {
             panic!("this module builds no DAGs");
         };
         vertices
-            .chunks_exact(VERTEX_STRIDE)
-            .map(|bytes| MeshVertex::from_bytes(bytes.try_into().expect("one record")))
+            .as_chunks::<VERTEX_STRIDE>()
+            .0
+            .iter()
+            .map(MeshVertex::from_bytes)
             .collect()
     }
 
@@ -1756,7 +1760,9 @@ mod tests {
         // block of it per texel.
         let occlusion = occlusion_side_texels();
         let want: Vec<u8> = base_side_texels()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
             .flat_map(|(index, texel)| {
                 let index = u32::try_from(index).expect("sixteen texels");

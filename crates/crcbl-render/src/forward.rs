@@ -13874,7 +13874,11 @@ mod tests {
         );
         let checker = &layers[scene::CHECKER_LAYER as usize];
         assert!(
-            checker.chunks_exact(4).any(|texel| texel != &checker[..4]),
+            checker
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|texel| texel != &checker[..4]),
             "a flat checker layer would shade the textured row exactly as the untextured \
              one shades, and the pair would prove nothing"
         );
@@ -15411,9 +15415,11 @@ mod tests {
             .expect("the table buffer is one of this recorder's buffers");
         let clusters_at = renderer.primary.draws.table_offsets().bucket_clusters_at as usize * 4;
         let clusters: Vec<u32> = table_bytes[clusters_at..]
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .take(renderer.bucket_constants.len())
-            .map(|word| u32::from_le_bytes(word.try_into().expect("a four-byte chunk")))
+            .map(|word| u32::from_le_bytes(*word))
             .collect();
 
         let mut dispatched = Vec::new();

@@ -1290,8 +1290,10 @@ mod tests {
         let half = (height / 2) as usize * row;
         let ground_pixels = (off.len() - half) / 4;
         let moved = off[half..]
-            .chunks_exact(4)
-            .zip(on[half..].chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(on[half..].as_chunks::<4>().0)
             .filter(|(before, after)| before != after)
             .count();
         assert!(
@@ -1587,7 +1589,9 @@ mod tests {
             dark.len(),
         );
         let unsaturated = bright
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|texel| texel[..3].iter().any(|byte| *byte < u8::MAX))
             .count();
         assert!(
@@ -1675,8 +1679,10 @@ mod tests {
 
         let covered = |frame: &[u8]| {
             frame
-                .chunks_exact(4)
-                .filter(|texel| *texel != background)
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .filter(|texel| **texel != background)
                 .count()
         };
         let total = filled.len() / 4;
@@ -1704,9 +1710,11 @@ mod tests {
         // still rules out is the geometry having moved, which would leave the two
         // sets nearly disjoint.
         let kept = filled
-            .chunks_exact(4)
-            .zip(lines.chunks_exact(4))
-            .filter(|(solid, line)| *line != background && *solid != background)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(lines.as_chunks::<4>().0)
+            .filter(|(solid, line)| **line != background && **solid != background)
             .count();
         assert!(
             kept * 2 > line_covered,
@@ -1835,15 +1843,17 @@ mod tests {
             let expected = normal * 0.5 + Vec3::splat(0.5);
             let mut covered = 0usize;
             for (at, (was, now)) in shaded
-                .chunks_exact(4)
-                .zip(normals.chunks_exact(4))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .zip(normals.as_chunks::<4>().0)
                 .enumerate()
             {
-                if was == background {
+                if *was == background {
                     // Nothing was drawn here, so the normals frame must not have
                     // drawn anything either — the geometry did not move.
                     assert_eq!(
-                        now, background,
+                        *now, background,
                         "the {} normals frame covers texel {at}, which the shaded frame did not",
                         face.name,
                     );

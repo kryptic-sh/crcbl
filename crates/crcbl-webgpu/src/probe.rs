@@ -19863,8 +19863,10 @@ mod tests {
         // back into wasm since it was read.
         let bytes = unsafe { core::slice::from_raw_parts(ptr, 16) };
         let ticks: Vec<u64> = bytes
-            .chunks_exact(8)
-            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| u64::from_le_bytes(*word))
             .collect();
         assert_eq!(ticks, vec![41, 99]);
     }
@@ -20104,8 +20106,10 @@ mod tests {
         // back into wasm since it was read.
         let bytes = unsafe { core::slice::from_raw_parts(ptr, len) };
         let read_back: Vec<u64> = bytes
-            .chunks_exact(8)
-            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| u64::from_le_bytes(*word))
             .collect();
         assert_eq!(read_back, ticks);
     }
@@ -20300,8 +20304,8 @@ mod tests {
         assert_eq!(prime.len() as u64, PROBE_MSAA_BYTES);
         assert_eq!(prime.len() as u64, probe_msaa_prime_buffer_desc().size);
         assert_eq!(prime.len() as u64, probe_msaa_buffer_desc().size);
-        for texel in prime.chunks_exact(4) {
-            assert_eq!(texel, PROBE_MSAA_POISON_BYTES);
+        for texel in prime.as_chunks::<4>().0 {
+            assert_eq!(*texel, PROBE_MSAA_POISON_BYTES);
         }
     }
 

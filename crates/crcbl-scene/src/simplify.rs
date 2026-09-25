@@ -518,12 +518,16 @@ impl Decimator {
             .map(|p| DVec3::new(f64::from(p[0]), f64::from(p[1]), f64::from(p[2])))
             .collect();
         let faces: Vec<Option<[u32; 3]>> = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|face| Some([face[0], face[1], face[2]]))
             .collect();
 
         let original_normals: Vec<DVec3> = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|face| {
                 let corners = [0, 1, 2].map(|corner| positions[face[corner] as usize]);
                 (corners[1] - corners[0])
@@ -883,7 +887,7 @@ pub(crate) mod tests {
     /// Every undirected edge of a triangle list and how many faces use it.
     fn edge_uses(indices: &[u32]) -> BTreeMap<[u32; 2], usize> {
         let mut uses = BTreeMap::new();
-        for face in indices.chunks_exact(3) {
+        for face in indices.as_chunks::<3>().0 {
             for corner in 0..3 {
                 *uses
                     .entry(undirected(face[corner], face[(corner + 1) % 3]))
@@ -986,7 +990,7 @@ pub(crate) mod tests {
         let (positions, indices) = mesh;
         let corner = |index: u32| DVec3::from(positions[index as usize].map(f64::from));
         let mut samples = Vec::new();
-        for face in indices.chunks_exact(3) {
+        for face in indices.as_chunks::<3>().0 {
             let corners = [corner(face[0]), corner(face[1]), corner(face[2])];
             for i in 0..=SAMPLE_ORDER {
                 for j in 0..=SAMPLE_ORDER - i {
@@ -1007,7 +1011,9 @@ pub(crate) mod tests {
         let (positions, indices) = to;
         let corner = |index: u32| DVec3::from(positions[index as usize].map(f64::from));
         let faces: Vec<[DVec3; 3]> = indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|face| [corner(face[0]), corner(face[1]), corner(face[2])])
             .collect();
         assert!(!faces.is_empty(), "no surface to measure against");
@@ -1628,7 +1634,7 @@ pub(crate) mod tests {
         let level = simplify(&positions, &indices, target).unwrap();
 
         assert_eq!(level.indices().len() / 3, target);
-        for face in level.indices().chunks_exact(3) {
+        for face in level.indices().as_chunks::<3>().0 {
             let corners = [0, 1, 2]
                 .map(|corner| DVec3::from(level.positions()[face[corner] as usize].map(f64::from)));
             let normal = (corners[1] - corners[0]).cross(corners[2] - corners[0]);

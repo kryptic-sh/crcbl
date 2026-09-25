@@ -5564,7 +5564,7 @@ mod tests {
         // Comfortably inside: the base's centre is on the base plane, so this
         // is lifted off it.
         let inside = [0.0f32, PYRAMID_BASE_Y + 0.1, 0.0];
-        for triangle in indices.chunks_exact(3) {
+        for triangle in indices.as_chunks::<3>().0 {
             let corner = |slot: usize| {
                 let position = vertices[triangle[slot] as usize].position;
                 [position[0], position[1], position[2]]
@@ -5677,7 +5677,7 @@ mod tests {
         let vertices = open_box_vertices();
         let indices = open_box_indices();
         let per_face = OPEN_BOX_QUADS_PER_FACE * 6;
-        for (triangle, corners) in indices.chunks_exact(3).enumerate() {
+        for (triangle, corners) in indices.as_chunks::<3>().0.iter().enumerate() {
             let face = &OPEN_BOX_FACES[triangle * 3 / per_face];
             let corner = |slot: usize| {
                 let position = vertices[corners[slot] as usize].position;

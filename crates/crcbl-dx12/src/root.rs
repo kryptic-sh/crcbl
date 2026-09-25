@@ -731,14 +731,14 @@ pub(crate) fn write(
     };
     for (word, chunk) in slots
         .iter_mut()
-        .zip(data.chunks_exact(BYTES_PER_WORD as usize))
+        .zip(data.as_chunks::<{ BYTES_PER_WORD as usize }>().0)
     {
         // Native, not little-endian: the runtime copies these words into the
         // constant buffer byte for byte, and the caller's bytes are already the
         // block's own layout. Reinterpreting them natively is what puts the same
         // bytes back; reading them as a little-endian *value* would byte-swap
         // them on a big-endian host.
-        *word = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        *word = u32::from_ne_bytes(*chunk);
     }
     Ok(Write {
         parameter: declared.parameter,

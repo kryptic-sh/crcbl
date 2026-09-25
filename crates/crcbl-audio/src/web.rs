@@ -798,7 +798,7 @@ mod tests {
                 sample_rate, INTERNAL_SAMPLE_RATE,
                 "the source is always driven at the engine's internal rate"
             );
-            for frame in buffer.chunks_exact_mut(CHANNELS) {
+            for frame in buffer.as_chunks_mut::<CHANNELS>().0 {
                 let n = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // Small enough to stay well inside the clip range.
                 let value = (n % 1000) as f32 / 1000.0;

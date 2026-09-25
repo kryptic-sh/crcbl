@@ -151,8 +151,10 @@ fn a_look_switch_leaves_the_blade_placement_bit_identical() {
             .count()
     };
     let cells: Vec<GrassInstance> = blade_cells
-        .chunks_exact(INSTANCE_STRIDE)
-        .map(|row| GrassInstance::from_bytes(row.try_into().expect("one row")))
+        .as_chunks::<INSTANCE_STRIDE>()
+        .0
+        .iter()
+        .map(GrassInstance::from_bytes)
         .collect();
     let grown = cells.iter().filter(|cell| cell.root[3] > 0.0).count();
     let (to_cards, to_shells) = (

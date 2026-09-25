@@ -112,12 +112,16 @@ fn mesh_table() -> Vec<GpuMesh> {
 /// The box holding every vertex position in `vertices` — the first three floats
 /// of each vertex.
 fn local_bounds(vertices: &[u8]) -> Aabb {
-    let positions = vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
-        let float_at = |offset: usize| {
-            f32::from_le_bytes(vertex[offset..offset + 4].try_into().expect("four bytes"))
-        };
-        Vec3::new(float_at(0), float_at(4), float_at(8))
-    });
+    let positions = vertices
+        .as_chunks::<VERTEX_STRIDE>()
+        .0
+        .iter()
+        .map(|vertex| {
+            let float_at = |offset: usize| {
+                f32::from_le_bytes(vertex[offset..offset + 4].try_into().expect("four bytes"))
+            };
+            Vec3::new(float_at(0), float_at(4), float_at(8))
+        });
     Aabb::from_points(positions).expect("neither mesh is empty")
 }
 

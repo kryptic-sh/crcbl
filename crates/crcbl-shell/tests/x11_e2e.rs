@@ -599,11 +599,12 @@ impl Drop for Session {
                 .peer
                 .window_property(root, "_NET_CLIENT_LIST")
                 .unwrap_or_default();
-            let still_there = xids.iter().any(|xid| {
-                listed
-                    .chunks_exact(4)
-                    .any(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]) == *xid)
-            });
+            let still_there =
+                xids.iter().any(|xid| {
+                    listed.as_chunks::<4>().0.iter().any(|word| {
+                        u32::from_ne_bytes([word[0], word[1], word[2], word[3]]) == *xid
+                    })
+                });
             if !still_there || Instant::now() >= deadline {
                 return;
             }
@@ -851,7 +852,9 @@ fn the_window_carries_the_properties_a_desktop_reads() {
         .window_property(xid, "WM_PROTOCOLS")
         .expect("WM_PROTOCOLS");
     let protocols: Vec<u32> = protocols
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
     assert!(protocols.contains(&delete), "{protocols:?}");
@@ -925,7 +928,9 @@ fn the_aspect_lock_is_written_into_wm_normal_hints() {
         "eighteen words, or it is ignored wholesale"
     );
     let words: Vec<i32> = bytes
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| i32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
 
@@ -2034,7 +2039,9 @@ fn our_selection_is_readable_by_another_client() {
         .expect("answered")
         .expect("targets");
     let targets: Vec<u32> = targets
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
     let expected = [
@@ -2110,7 +2117,9 @@ fn a_multiple_request_is_answered_pair_by_pair() {
         .expect("answered")
         .expect("targets");
     let targets: Vec<u32> = targets
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
     assert!(
@@ -2147,7 +2156,9 @@ fn a_multiple_request_is_answered_pair_by_pair() {
     );
 
     let words: Vec<u32> = list
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
     assert_eq!(words.len(), 6, "one pair per target asked for: {words:?}");
@@ -2222,7 +2233,9 @@ fn a_requestor_asking_past_the_pending_write_cap_is_refused_rather_than_held() {
         .expect("answered")
         .expect("the pair list comes back");
     let words: Vec<u32> = list
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]))
         .collect();
     assert_eq!(

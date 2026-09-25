@@ -511,7 +511,7 @@ impl Atlas {
     fn texels_from_rgba<'p>(&self, pixels: &'p [u8]) -> Cow<'p, [u8]> {
         if self.format == Format::Bgra8UnormSrgb {
             let mut swapped = pixels.to_vec();
-            for texel in swapped.chunks_exact_mut(TEXEL_BYTES as usize) {
+            for texel in swapped.as_chunks_mut::<{ TEXEL_BYTES as usize }>().0 {
                 texel.swap(0, 2);
             }
             Cow::Owned(swapped)
@@ -1495,7 +1495,9 @@ mod tests {
         let mut renderer = renderer(device.as_ref(), queue);
         let pixels = cell_pixels(9);
         let swapped: Vec<u8> = pixels
-            .chunks_exact(TEXEL_BYTES as usize)
+            .as_chunks::<{ TEXEL_BYTES as usize }>()
+            .0
+            .iter()
             .flat_map(|texel| [texel[2], texel[1], texel[0], texel[3]])
             .collect();
         for (format, expected) in [

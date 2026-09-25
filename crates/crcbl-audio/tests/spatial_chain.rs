@@ -145,7 +145,7 @@ fn centre_position_is_symmetric() {
     mixer.fill(&mut buf, sample_rate);
 
     // Left and right channels should be equal (symmetric, no pan).
-    for chunk in buf.chunks_exact(2) {
+    for chunk in buf.as_chunks::<2>().0 {
         assert!((chunk[0] - chunk[1]).abs() < 1e-6, "centre: left != right");
     }
 }
@@ -177,7 +177,7 @@ fn right_position_pans_to_right() {
 
     let mut left_sum = 0.0f64;
     let mut right_sum = 0.0f64;
-    for chunk in buf.chunks_exact(2) {
+    for chunk in buf.as_chunks::<2>().0 {
         left_sum += chunk[0] as f64;
         right_sum += chunk[1] as f64;
     }

@@ -404,7 +404,7 @@ mod tests {
         let data = rise(440.0, 880.0, seconds, SAMPLE_RATE);
         let frames = (SAMPLE_RATE as f32 * seconds) as usize;
         assert_eq!(data.len(), frames * 2, "rise is not stereo pairs");
-        for frame in data.chunks_exact(2) {
+        for frame in data.as_chunks::<2>().0 {
             assert_eq!(frame[0], frame[1], "rise is not the same in both ears");
         }
     }

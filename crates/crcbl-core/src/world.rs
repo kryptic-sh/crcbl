@@ -786,7 +786,7 @@ mod tests {
             steps in proptest::collection::vec(-1e6..1e6f64, 3..90),
         ) {
             let steps: Vec<DVec3> = steps
-                .chunks_exact(3)
+                .as_chunks::<3>().0.iter()
                 .map(|c| DVec3::new(c[0], c[1], c[2]))
                 .collect();
 

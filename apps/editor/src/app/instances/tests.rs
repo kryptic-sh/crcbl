@@ -223,8 +223,10 @@ fn filtered_editor_images_match_eager_writes_through_history() {
         assert_eq!(actual.pixels.len(), expected.pixels.len());
         let differing = actual
             .pixels
-            .chunks_exact(4)
-            .zip(expected.pixels.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(expected.pixels.as_chunks::<4>().0)
             .filter(|(actual, expected)| actual != expected)
             .count();
         println!("rendered frame {}: {differing} differing pixels", frame + 1);

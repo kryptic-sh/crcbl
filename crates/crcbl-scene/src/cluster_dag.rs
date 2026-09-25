@@ -627,7 +627,9 @@ fn coarsen(below: &DagLevel) -> Result<Option<(Vec<ClusterGroup>, DagLevel)>, Cl
     let mut faces_of = vec![Vec::new(); grouping.len()];
     for (face, &source) in simplified
         .indices()
-        .chunks_exact(3)
+        .as_chunks::<3>()
+        .0
+        .iter()
         .zip(simplified.source_faces())
     {
         faces_of[face_group[source as usize]].extend_from_slice(face);
@@ -724,7 +726,7 @@ fn cluster_error(clusters: &MeshletBuild, cluster: usize, vertex_errors: &[f32])
 fn group_boundary(indices: &[u32], face_group: &[usize]) -> Vec<[u32; 2]> {
     let mut owner: BTreeMap<[u32; 2], usize> = BTreeMap::new();
     let mut shared: BTreeSet<[u32; 2]> = BTreeSet::new();
-    for (face, &group) in indices.chunks_exact(3).zip(face_group) {
+    for (face, &group) in indices.as_chunks::<3>().0.iter().zip(face_group) {
         for corner in 0..3 {
             let edge = undirected(face[corner], face[(corner + 1) % 3]);
             match owner.get(&edge) {
@@ -832,7 +834,7 @@ fn cluster_adjacency(level: &DagLevel) -> Vec<BTreeMap<usize, usize>> {
     let count = level.clusters.clusters().len();
     let mut users: BTreeMap<[u32; 2], Vec<usize>> = BTreeMap::new();
     for cluster in 0..count {
-        for face in level.clusters.cluster_indices(cluster).chunks_exact(3) {
+        for face in level.clusters.cluster_indices(cluster).as_chunks::<3>().0 {
             for corner in 0..3 {
                 let edge = undirected(face[corner], face[(corner + 1) % 3]);
                 let sharing = users.entry(edge).or_default();
@@ -1092,7 +1094,7 @@ mod tests {
     /// *supposed* to leave with one face.
     fn base_border(positions: &[[f32; 3]], indices: &[u32]) -> BTreeSet<SharedEdge> {
         let mut uses: BTreeMap<SharedEdge, usize> = BTreeMap::new();
-        for face in indices.chunks_exact(3) {
+        for face in indices.as_chunks::<3>().0 {
             for corner in 0..3 {
                 *uses
                     .entry(shared_edge(positions, face[corner], face[(corner + 1) % 3]))

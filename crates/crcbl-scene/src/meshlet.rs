@@ -417,7 +417,7 @@ fn fresh_vertices(vertices: &[u32], face: &[u32]) -> usize {
 /// stopping dead at it.
 fn triangle_neighbours(indices: &[u32]) -> Vec<Vec<u32>> {
     let mut users: BTreeMap<[u32; 2], Vec<u32>> = BTreeMap::new();
-    for (triangle, face) in indices.chunks_exact(3).enumerate() {
+    for (triangle, face) in indices.as_chunks::<3>().0.iter().enumerate() {
         for corner in 0..3 {
             let sharing = users
                 .entry(undirected(face[corner], face[(corner + 1) % 3]))
@@ -673,7 +673,7 @@ fn cluster_bounds(positions: &[[f32; 3]], vertices: &[u32], corners: &[u8]) -> C
     // into it, so the cancellation test below is a ratio rather than a length.
     let mut sum = Vec3::ZERO;
     let mut weight = 0.0;
-    for triangle in corners.chunks_exact(3) {
+    for triangle in corners.as_chunks::<3>().0 {
         let normal = triangle_normal(
             corner(triangle[0]),
             corner(triangle[1]),
@@ -696,7 +696,7 @@ fn cluster_bounds(positions: &[[f32; 3]], vertices: &[u32], corners: &[u8]) -> C
     };
 
     let mut cutoff = 1.0f32;
-    for triangle in corners.chunks_exact(3) {
+    for triangle in corners.as_chunks::<3>().0 {
         // A zero-area triangle faces nowhere, so it constrains nothing. It
         // contributed nothing to `sum` either, so skipping it here keeps the
         // two halves of the cone consistent.
@@ -789,7 +789,9 @@ pub(crate) mod tests {
         );
         build
             .cluster_indices(cluster)
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triangle| [triangle[0], triangle[1], triangle[2]])
             .collect()
     }
@@ -797,7 +799,9 @@ pub(crate) mod tests {
     /// The input's triangles, to compare [`decoded`] against.
     pub(crate) fn triangles_of(indices: &[u32]) -> Vec<[u32; 3]> {
         indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triangle| [triangle[0], triangle[1], triangle[2]])
             .collect()
     }

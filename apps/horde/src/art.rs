@@ -1253,7 +1253,9 @@ mod tests {
         let clear = actors
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] == 0)
             .count();
         assert!(
@@ -1264,7 +1266,9 @@ mod tests {
         let clear = bolt
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] == 0)
             .count();
         assert!(
@@ -1315,7 +1319,9 @@ mod tests {
         let clear = terrain
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] != u8::MAX)
             .count();
         assert_eq!(
@@ -1400,7 +1406,9 @@ mod tests {
         let clear = props
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] == 0)
             .count();
         assert!(

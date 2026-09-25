@@ -734,7 +734,9 @@ mod tests {
             let clear = loaded
                 .image
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[3] == 0)
                 .count();
             let opaque = loaded.image.pixels.len() / 4 - clear;

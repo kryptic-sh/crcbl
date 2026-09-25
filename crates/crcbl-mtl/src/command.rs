@@ -3704,8 +3704,10 @@ mod timestamp_tests {
                 .expect("resolved samples");
             let bytes = data.to_vec();
             let values: Vec<u64> = bytes
-                .chunks_exact(8)
-                .map(|word| u64::from_ne_bytes(word.try_into().expect("one timestamp")))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|word| u64::from_ne_bytes(*word))
                 .collect();
             assert_eq!(values.len(), SAMPLES);
             assert!(values[1] > values[0], "draw={draw}: {values:?}");

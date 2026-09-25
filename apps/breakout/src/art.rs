@@ -468,7 +468,9 @@ mod tests {
             let clear = loaded
                 .image
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| p[3] == 0)
                 .count();
             (clear, loaded.image.pixels.len() / 4 - clear)
@@ -497,7 +499,7 @@ mod tests {
         for (index, frame) in frames.iter().enumerate() {
             assert_eq!(frame.len(), 24 * 8 * 4);
             assert!(
-                frame.chunks_exact(4).any(|p| p[3] != 0),
+                frame.as_chunks::<4>().0.iter().any(|p| p[3] != 0),
                 "row {index} has nothing drawn in it"
             );
         }

@@ -226,8 +226,10 @@ fn read_back(headless: &Headless, buffers: ExposureBuffers) -> (Vec<u32>, f32) {
     device.destroy_command_buffer(commands);
 
     (
-        bins.chunks_exact(BIN_STRIDE)
-            .map(|bin| u32::from_le_bytes(bin.try_into().expect("a bin is four bytes")))
+        bins.as_chunks::<BIN_STRIDE>()
+            .0
+            .iter()
+            .map(|bin| u32::from_le_bytes(*bin))
             .collect(),
         f32::from_le_bytes(exposure.try_into().expect("the exposure is four bytes")),
     )
@@ -236,7 +238,7 @@ fn read_back(headless: &Headless, buffers: ExposureBuffers) -> (Vec<u32>, f32) {
 /// The histogram the host builds from the same target, bin for bin.
 fn host_histogram(hdr: &HdrTarget) -> Vec<u32> {
     let mut bins = vec![0u32; BIN_COUNT as usize];
-    for pixel in hdr.0.chunks_exact(8) {
+    for pixel in hdr.0.as_chunks::<8>().0 {
         let rgb = core::array::from_fn(|channel| {
             let at = channel * 2;
             crcbl_shaders::ltc::half_value(u16::from_le_bytes([pixel[at], pixel[at + 1]]))

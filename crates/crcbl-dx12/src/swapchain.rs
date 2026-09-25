@@ -1340,7 +1340,7 @@ mod tests {
                 &bytes[..4]
             );
             assert!(
-                bytes.chunks_exact(4).all(|read| read == texel),
+                bytes.as_chunks::<4>().0.iter().all(|read| *read == texel),
                 "frame {id}'s clear did not reach every texel of the ring image"
             );
             device.destroy_readback(request);
@@ -1660,7 +1660,7 @@ mod tests {
                 &bytes[..4]
             );
             assert!(
-                bytes.chunks_exact(4).all(|read| read == texel),
+                bytes.as_chunks::<4>().0.iter().all(|read| *read == texel),
                 "frame {id}'s clear did not reach every texel of the ring image"
             );
             device.destroy_readback(request);

@@ -163,7 +163,7 @@ impl Image {
     ) -> Result<Self, ImageError> {
         let mut pixels = bytes.to_vec();
         if order == ChannelOrder::Bgra {
-            for pixel in pixels.chunks_exact_mut(4) {
+            for pixel in pixels.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
         }
@@ -214,7 +214,7 @@ impl Image {
     pub fn filled(width: u32, height: u32, color: [u8; 4]) -> Result<Self, ImageError> {
         let byte_count = checked_byte_count(width, height)?;
         let mut pixels = vec![0u8; byte_count];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&color);
         }
         Ok(Self {
@@ -231,7 +231,7 @@ impl Image {
     /// is no arithmetic left to overflow.
     pub(crate) fn filled_like(model: &Self, color: [u8; 4]) -> Self {
         let mut pixels = vec![0u8; model.pixels.len()];
-        for pixel in pixels.chunks_exact_mut(4) {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
             pixel.copy_from_slice(&color);
         }
         Self {
@@ -265,7 +265,7 @@ impl Image {
     #[must_use]
     pub fn distinct_colors(&self, ceiling: usize) -> usize {
         let mut seen: Vec<[u8; 4]> = Vec::new();
-        for pixel in self.pixels.chunks_exact(4) {
+        for pixel in self.pixels.as_chunks::<4>().0 {
             let color = [pixel[0], pixel[1], pixel[2], pixel[3]];
             if !seen.contains(&color) {
                 seen.push(color);
@@ -330,7 +330,9 @@ impl Image {
         let pixels = match (info.color_type, info.bit_depth) {
             (png::ColorType::Rgba, png::BitDepth::Eight) => buffer,
             (png::ColorType::Rgb, png::BitDepth::Eight) => buffer
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
                 .collect(),
             (color_type, depth) => {

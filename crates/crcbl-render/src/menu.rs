@@ -223,7 +223,9 @@ mod tests {
         let clear = art
             .image
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| p[3] == 0)
             .count();
         assert_eq!(clear, 0, "the menu art has holes in it");
@@ -321,7 +323,9 @@ mod tests {
         // and an inverted bevel swaps it.
         let brightness = |frame: &[u8], r: usize| -> u32 {
             frame[r * 16 * 4..(r + 1) * 16 * 4]
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|p| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]))
                 .sum()
         };

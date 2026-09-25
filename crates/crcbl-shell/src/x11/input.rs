@@ -756,7 +756,9 @@ fn raw_motion_delta(raw: &Raw, header: &ffi::XiRawEvent) -> Option<(f64, f64)> {
     let mask = raw.get(mask_start..mask_end)?;
 
     let set: u32 = mask
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_ne_bytes([word[0], word[1], word[2], word[3]]).count_ones())
         .sum();
     let set = set as usize;
@@ -765,7 +767,7 @@ fn raw_motion_delta(raw: &Raw, header: &ffi::XiRawEvent) -> Option<(f64, f64)> {
 
     let mut delta = (0.0, 0.0);
     let mut slot = 0usize;
-    for (word_index, word) in mask.chunks_exact(4).enumerate() {
+    for (word_index, word) in mask.as_chunks::<4>().0.iter().enumerate() {
         let bits = u32::from_ne_bytes([word[0], word[1], word[2], word[3]]);
         for bit in 0..32u32 {
             if bits & (1 << bit) == 0 {

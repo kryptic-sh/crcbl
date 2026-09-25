@@ -258,7 +258,7 @@ pub fn decode_png(bytes: &[u8]) -> Result<Rgba8, LoadError> {
         (png::ColorType::Rgba, png::BitDepth::Eight) => buffer,
         (png::ColorType::GrayscaleAlpha, png::BitDepth::Eight) => {
             let mut rgba = Vec::with_capacity(buffer.len() * 2);
-            for pair in buffer.chunks_exact(2) {
+            for pair in buffer.as_chunks::<2>().0 {
                 rgba.extend_from_slice(&[pair[0], pair[0], pair[0], pair[1]]);
             }
             rgba

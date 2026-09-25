@@ -488,7 +488,7 @@ mod tests {
         struct Split;
         impl AudioSource for Split {
             fn fill(&self, buffer: &mut [AudioSample], _rate: u32) {
-                for frame in buffer.chunks_exact_mut(CHANNELS) {
+                for frame in buffer.as_chunks_mut::<CHANNELS>().0 {
                     frame[0] += 0.25;
                     frame[1] += -0.5;
                 }
@@ -553,7 +553,7 @@ mod tests {
         let mut six_large = vec![7.0f32; 6 * 20];
         fill_audio(&mut six_large, 6, &source, 48_000, &mut scratch);
         for (name, data) in [("small", &six_small), ("large", &six_large)] {
-            for frame in data.chunks_exact(6) {
+            for frame in data.as_chunks::<6>().0 {
                 assert_eq!(frame[0], 0.25, "{name}: left channel: {frame:?}");
                 assert_eq!(frame[1], 0.25, "{name}: right channel: {frame:?}");
                 assert!(

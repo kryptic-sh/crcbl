@@ -87,7 +87,7 @@ impl Constants {
     pub fn to_bytes(self) -> [u8; CONSTANTS_SIZE as usize] {
         let mut bytes = [0u8; CONSTANTS_SIZE as usize];
         let values = self.color.into_iter().chain(self.rect);
-        for (value, chunk) in values.zip(bytes.chunks_exact_mut(4)) {
+        for (value, chunk) in values.zip(bytes.as_chunks_mut::<4>().0) {
             chunk.copy_from_slice(&value.to_le_bytes());
         }
         bytes

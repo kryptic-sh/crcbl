@@ -317,7 +317,9 @@ mod tests {
     /// vector, and a triangle facing up reads as having no normal at all.
     fn normals_y(mesh: &SurfaceMesh) -> Vec<f64> {
         mesh.indices
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|triangle| {
                 let [a, b, c] = [0, 1, 2].map(|i| mesh.positions[triangle[i] as usize]);
                 let (ab, ac) = (
@@ -447,7 +449,7 @@ mod tests {
         // points no `f32` holds exactly.
         assert!((area(&mesh) - 5.0).abs() < 1e-6, "{}", area(&mesh));
         // No triangle's centroid lies in the notch the L leaves out.
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             let centroid = triangle.iter().fold([0.0f32; 2], |sum, index| {
                 let p = mesh.positions[*index as usize];
                 [sum[0] + p[0] / 3.0, sum[1] + p[2] / 3.0]

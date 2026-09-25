@@ -1205,11 +1205,10 @@ mod tests {
             panic!("mesh {mesh} is not a flat mesh")
         };
         vertices
-            .chunks_exact(mesh::VERTEX_STRIDE)
-            .map(|chunk| {
-                let bytes: &[u8; mesh::VERTEX_STRIDE] = chunk
-                    .try_into()
-                    .unwrap_or_else(|_| unreachable!("exact chunk"));
+            .as_chunks::<{ mesh::VERTEX_STRIDE }>()
+            .0
+            .iter()
+            .map(|bytes| {
                 let at = MeshVertex::from_bytes(bytes).position;
                 Vec3::new(at[0], at[1], at[2])
             })

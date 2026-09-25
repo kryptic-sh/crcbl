@@ -520,7 +520,7 @@ impl Voice {
         let itd = self.itd_samples;
         let delay = [(-itd).max(0.0), itd.max(0.0)];
 
-        for (i, out) in buffer.chunks_exact_mut(CHANNELS).enumerate() {
+        for (i, out) in buffer.as_chunks_mut::<CHANNELS>().0.iter_mut().enumerate() {
             if pos as usize >= frames {
                 if self.looping {
                     pos %= frames as f64;
@@ -1445,7 +1445,7 @@ mod tests {
             "the ramp must end exactly at silence: {}",
             buf[buf.len() - CHANNELS],
         );
-        for frame in buf.chunks_exact(CHANNELS) {
+        for frame in buf.as_chunks::<CHANNELS>().0 {
             assert!(
                 (frame[0] - frame[1]).abs() < 1e-6,
                 "the ramp must stay in its channels: {frame:?}",
@@ -1454,7 +1454,7 @@ mod tests {
         // Monotone down along the block: the ramp never rises. Both channels
         // carry the same DC, so a per-frame magnitude is a single number.
         let mut last = f32::INFINITY;
-        for (i, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+        for (i, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let magnitude = (frame[0] * frame[0] + frame[1] * frame[1]).sqrt();
             assert!(
                 magnitude <= last + 1e-6,
@@ -1702,7 +1702,7 @@ mod tests {
 
         let mut buf = vec![0.0f32; 16 * CHANNELS];
         mixer.fill(&mut buf, 48_000);
-        for frame in buf.chunks_exact(CHANNELS) {
+        for frame in buf.as_chunks::<CHANNELS>().0 {
             assert!((frame[0] - 0.5).abs() < 1e-6, "left silent: {frame:?}");
             assert!(frame[1].abs() < 1e-6, "right should be muted: {frame:?}");
         }
@@ -1719,7 +1719,7 @@ mod tests {
 
         buf.fill(0.0);
         mixer.fill(&mut buf, 48_000);
-        for frame in buf.chunks_exact(CHANNELS) {
+        for frame in buf.as_chunks::<CHANNELS>().0 {
             assert!(frame[0].abs() < 1e-6, "left should be muted now: {frame:?}");
             assert!((frame[1] - 0.5).abs() < 1e-6, "right silent: {frame:?}");
         }
@@ -1956,7 +1956,7 @@ mod tests {
         let mut buf = vec![0.0f32; 32 * CHANNELS];
         assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
 
-        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+        for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let expected_right = if k >= 2 {
                 (1000.0 + (k - 2) as f32) * 0.5
             } else {
@@ -1987,7 +1987,7 @@ mod tests {
         let mut buf = vec![0.0f32; 32 * CHANNELS];
         assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
 
-        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+        for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let expected_left = if k >= 2 { (k - 2) as f32 * 0.5 } else { 0.0 };
             assert!(
                 (frame[0] - expected_left).abs() < 1e-6,
@@ -2014,7 +2014,7 @@ mod tests {
         let mut buf = vec![0.0f32; 32 * CHANNELS];
         assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
 
-        for (k, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+        for (k, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let prev = if k >= 1 { 1000.0 + (k - 1) as f32 } else { 0.0 };
             let expected_right = 0.5 * (1000.0 + k as f32) + 0.5 * prev;
             assert!(
@@ -2175,7 +2175,7 @@ mod tests {
         let mut buf = vec![0.0f32; 16 * CHANNELS];
         assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
 
-        for frame in buf.chunks_exact(CHANNELS) {
+        for frame in buf.as_chunks::<CHANNELS>().0 {
             assert!((frame[0] - 1.0).abs() < 1e-6, "left: {}", frame[0]);
             assert!((frame[1] + 1.0).abs() < 1e-6, "right: {}", frame[1]);
         }
@@ -2196,7 +2196,7 @@ mod tests {
         assert!(voice.mix_block(&mut buf, 48_000, 1.0, 1.0));
 
         // Output frame i must be input frame 2i.
-        for (i, frame) in buf.chunks_exact(CHANNELS).enumerate() {
+        for (i, frame) in buf.as_chunks::<CHANNELS>().0.iter().enumerate() {
             let expected = (2 * i) as f32 / frames as f32;
             assert!((frame[0] - expected).abs() < 1e-6, "frame {i}: {frame:?}");
         }

@@ -127,25 +127,26 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
     let whole = &data[..data.len() - remainder];
     for block in whole
-        .chunks_exact(64)
-        .chain(tail[..tail_len].chunks_exact(64))
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .chain(tail[..tail_len].as_chunks::<64>().0)
     {
         compress(&mut state, block);
     }
 
     let mut digest = [0u8; 32];
-    for (chunk, word) in digest.chunks_exact_mut(4).zip(state) {
-        chunk.copy_from_slice(&word.to_be_bytes());
+    for (chunk, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *chunk = word.to_be_bytes();
     }
     digest
 }
 
 /// One 64-byte block through the compression function (FIPS 180-4 §6.2.2).
-fn compress(state: &mut [u32; 8], block: &[u8]) {
-    debug_assert_eq!(block.len(), 64);
+fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (index, chunk) in block.chunks_exact(4).enumerate() {
-        w[index] = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    for (index, chunk) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[index] = u32::from_be_bytes(*chunk);
     }
     for index in 16..64 {
         let s0 =

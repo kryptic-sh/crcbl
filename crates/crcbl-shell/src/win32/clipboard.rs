@@ -238,7 +238,7 @@ pub fn utf16_nul_bytes(text: &str) -> Vec<u8> {
 #[must_use]
 pub fn utf8_from_utf16_bytes(bytes: &[u8]) -> Vec<u8> {
     let mut units = Vec::with_capacity(bytes.len() / 2);
-    for pair in bytes.chunks_exact(2) {
+    for pair in bytes.as_chunks::<2>().0 {
         let unit = u16::from_ne_bytes([pair[0], pair[1]]);
         if unit == 0 {
             break;

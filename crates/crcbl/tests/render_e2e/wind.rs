@@ -746,7 +746,9 @@ impl WindProbe {
 
         let mut read = poisoned(bytes as usize);
         headless.readback(self.staging, bytes, &mut read);
-        read.chunks_exact(16)
+        read.as_chunks::<16>()
+            .0
+            .iter()
             .map(|vector| {
                 let lane = |at: usize| {
                     f64::from(f32::from_le_bytes([

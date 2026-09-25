@@ -3173,6 +3173,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   the same. `rand_core` and `rand_chacha` stay on 0.9 while `proptest` depends
   on that line.
 
+- The pinned toolchain in `rust-toolchain.toml` is Rust 1.98.1. A game building
+  against the engine should match it; 1.98's new
+  `clippy::chunks_exact_to_as_chunks` lint is what moving up asks of its code.
+
 - The Win32 shell now gives each physical keyboard and mouse its own `DeviceId`
   on key, button, wheel and pointer events, instead of one constant per kind.
   Ids are keyed by the device's interface path, so a replugged device keeps its

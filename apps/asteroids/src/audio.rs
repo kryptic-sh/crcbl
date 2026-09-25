@@ -432,7 +432,7 @@ mod tests {
         let frames = data.len() / 2;
         assert_eq!(frames, 4_800, "a tenth of a second at {SAMPLE_RATE} Hz");
 
-        for (i, frame) in data.chunks_exact(2).enumerate() {
+        for (i, frame) in data.as_chunks::<2>().0.iter().enumerate() {
             let phase =
                 2.0 * std::f32::consts::PI * ENGINE_CYCLES as f32 * (i as f32 / frames as f32);
             let expected = 0.3 * phase.sin();
@@ -785,7 +785,9 @@ mod tests {
     /// The energy in each channel of an interleaved stereo block, left first.
     fn channel_energy(block: &[f32]) -> (f32, f32) {
         block
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .fold((0.0, 0.0), |(left, right), frame| {
                 (left + frame[0] * frame[0], right + frame[1] * frame[1])
             })

@@ -218,7 +218,9 @@ fn assignments(headless: &Headless, renderer: &crcbl::render::ForwardRenderer) -
     // The count is the first word of each froxel's record; the rest are the
     // indices it kept.
     bytes
-        .chunks_exact(CLUSTER_STRIDE as usize * 4)
+        .as_chunks::<{ CLUSTER_STRIDE as usize * 4 }>()
+        .0
+        .iter()
         .map(|froxel| u32::from_le_bytes(froxel[..4].try_into().expect("four bytes")))
         .sum()
 }

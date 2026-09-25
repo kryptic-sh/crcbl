@@ -469,7 +469,7 @@ fn frame_body(
         readback(quarry.ctx.device(), staging, bytes, &mut frame);
         let mut histogram: std::collections::HashMap<[u8; 4], usize> =
             std::collections::HashMap::new();
-        for pixel in frame.chunks_exact(4) {
+        for pixel in frame.as_chunks::<4>().0 {
             *histogram
                 .entry([pixel[0], pixel[1], pixel[2], pixel[3]])
                 .or_default() += 1;

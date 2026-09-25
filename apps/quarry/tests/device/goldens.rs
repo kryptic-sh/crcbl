@@ -189,7 +189,7 @@ fn overlay(path: GeometryPath, view: DebugView, budget: f32) -> Overlay {
         .expect("the readback is one RGBA8 frame of the ring's extent");
     let background = image.pixel(0, 0).expect("the frame has a top-left pixel");
     let (mut total, mut covered) = (0.0f64, 0usize);
-    for pixel in image.pixels().chunks_exact(4) {
+    for pixel in image.pixels().as_chunks::<4>().0 {
         if pixel[..4] == background[..] {
             continue;
         }

@@ -1343,8 +1343,10 @@ fn pixels_unlike_the_corner(frame: &crcbl_golden::Image) -> usize {
     };
     frame
         .pixels()
-        .chunks_exact(4)
-        .filter(|pixel| *pixel != corner)
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| **pixel != corner)
         .count()
 }
 

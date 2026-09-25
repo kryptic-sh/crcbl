@@ -304,7 +304,12 @@ fn decode<T>(
             found: pixels.len(),
         });
     }
-    Ok(pixels.chunks_exact(4).map(texel).collect())
+    Ok(pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|rgba| texel(rgba))
+        .collect())
 }
 
 /// One unorm byte as the `f32` a GPU's `rgba8unorm` fetch produces.

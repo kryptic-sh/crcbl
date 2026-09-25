@@ -392,7 +392,9 @@ fn listed_froxels(headless: &Headless, renderer: &ForwardRenderer, row: u32) -> 
         )
     };
     bytes
-        .chunks_exact(CLUSTER_STRIDE as usize * 4)
+        .as_chunks::<{ CLUSTER_STRIDE as usize * 4 }>()
+        .0
+        .iter()
         .map(|froxel| {
             // The count first, then the indices it kept — clamped exactly as
             // `mesh.slang` clamps it, so a corrupt count cannot walk past the

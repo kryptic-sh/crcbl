@@ -5292,9 +5292,11 @@ pub(crate) mod tests {
     /// would pass every one of them and fail here.
     fn assert_nothing_drawn(bytes: &[u8], what: &str) {
         if let Some((at, found)) = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .enumerate()
-            .find(|(_, texel)| *texel != CLEAR_TEXEL)
+            .find(|(_, texel)| **texel != CLEAR_TEXEL)
         {
             panic!(
                 "{what}: texel ({}, {}) is {found:?} rather than the clear colour, so something \
@@ -5661,8 +5663,10 @@ pub(crate) mod tests {
             let bytes = drain(device, request, SQUARE_BYTES);
             device.destroy_readback(request);
             bytes
-                .chunks_exact(size_of::<f32>())
-                .map(|word| f32::from_le_bytes(word.try_into().expect("four bytes")))
+                .as_chunks::<{ size_of::<f32>() }>()
+                .0
+                .iter()
+                .map(|word| f32::from_le_bytes(*word))
                 .collect()
         }
 
@@ -6969,7 +6973,9 @@ pub(crate) mod tests {
                 .expect("a readback of a HostReadback buffer");
             let read = drain(&device, request, bytes as usize);
             device.destroy_readback(request);
-            read.chunks_exact(size_of::<u32>())
+            read.as_chunks::<{ size_of::<u32>() }>()
+                .0
+                .iter()
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect()
         };
@@ -8136,7 +8142,9 @@ pub(crate) mod tests {
                 .expect("a readback of a HostReadback buffer");
             let out = drain(&device, request, bytes as usize);
             device.destroy_readback(request);
-            out.chunks_exact(size_of::<u32>())
+            out.as_chunks::<{ size_of::<u32>() }>()
+                .0
+                .iter()
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect()
         };
@@ -12048,8 +12056,10 @@ pub(crate) mod tests {
             encoder.resolve_query_set(set, 0..TIMED_QUERIES, resolved, 0);
         });
         let words: Vec<u64> = read_back(&device, resolved, BYTES as usize)
-            .chunks_exact(8)
-            .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|word| u64::from_le_bytes(*word))
             .collect();
         assert_ne!(
             words,
@@ -12932,7 +12942,9 @@ pub(crate) mod tests {
             let bytes = drain(device, request, probe_bytes() as usize);
             device.destroy_readback(request);
             bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect()
         }

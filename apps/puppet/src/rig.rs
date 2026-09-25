@@ -329,7 +329,7 @@ fn translated(geometry: Geometry<'static>, offset: Vec3) -> Geometry<'static> {
         panic!("crcbl::greybox's primitives are flat meshes, and this one was not")
     };
     let mut bytes = vertices.into_owned();
-    for vertex in bytes.chunks_exact_mut(VERTEX_STRIDE) {
+    for vertex in bytes.as_chunks_mut::<VERTEX_STRIDE>().0 {
         for (lane, delta) in [offset.x, offset.y, offset.z].into_iter().enumerate() {
             let at = lane * size_of::<f32>();
             let moved = read_f32(&bytes_at(vertex, at)) + delta;
@@ -378,13 +378,17 @@ fn positions<'a>(geometry: &'a Geometry<'static>) -> impl Iterator<Item = Vec3> 
     let Geometry::Flat { vertices, .. } = geometry else {
         panic!("crcbl::greybox's primitives are flat meshes, and this one was not")
     };
-    vertices.chunks_exact(VERTEX_STRIDE).map(|vertex| {
-        Vec3::new(
-            read_f32(&bytes_at(vertex, 0)),
-            read_f32(&bytes_at(vertex, size_of::<f32>())),
-            read_f32(&bytes_at(vertex, 2 * size_of::<f32>())),
-        )
-    })
+    vertices
+        .as_chunks::<VERTEX_STRIDE>()
+        .0
+        .iter()
+        .map(|vertex| {
+            Vec3::new(
+                read_f32(&bytes_at(vertex, 0)),
+                read_f32(&bytes_at(vertex, size_of::<f32>())),
+                read_f32(&bytes_at(vertex, 2 * size_of::<f32>())),
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -113,14 +113,10 @@ impl Occluders {
                     vertices, indices, ..
                 } => MeshTriangles {
                     positions: vertices
-                        .chunks_exact(mesh::VERTEX_STRIDE)
-                        .map(|record| {
-                            let bytes: &[u8; mesh::VERTEX_STRIDE] =
-                                record.try_into().unwrap_or_else(|_| {
-                                    unreachable!("chunks_exact yields whole records")
-                                });
-                            MeshVertex::from_bytes(bytes).position
-                        })
+                        .as_chunks::<{ mesh::VERTEX_STRIDE }>()
+                        .0
+                        .iter()
+                        .map(|record| MeshVertex::from_bytes(record).position)
                         .collect(),
                     indices: indices.to_vec(),
                 },
@@ -186,7 +182,7 @@ pub(crate) fn world_triangles(geometry: &Occluders, occluders: &[Occluder]) -> V
                     .to_array()
             })
             .collect();
-        for triangle in mesh.indices.chunks_exact(3) {
+        for triangle in mesh.indices.as_chunks::<3>().0 {
             let corner = |lane: usize| world.get(triangle[lane] as usize).copied();
             // A description whose indices run past its vertices is refused by
             // `MeshClusters::check` before it is made resident, so this is the

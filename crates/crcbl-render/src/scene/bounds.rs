@@ -539,7 +539,11 @@ mod tests {
                 panic!("the selected demo mesh is a DAG");
             };
             assert!(levels.len() > 1);
-            for vertex in levels[1].to_mut().chunks_exact_mut(mesh::VERTEX_STRIDE) {
+            for vertex in levels[1]
+                .to_mut()
+                .as_chunks_mut::<{ mesh::VERTEX_STRIDE }>()
+                .0
+            {
                 vertex[..12].copy_from_slice(
                     &[10_000.0_f32, 10_000.0, 10_000.0]
                         .map(f32::to_le_bytes)

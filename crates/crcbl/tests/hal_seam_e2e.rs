@@ -1196,7 +1196,7 @@ fn a_render_pass_clear_reaches_memory_with_the_colour_it_was_given() {
     // The whole attachment really was cleared, not just part of it.
     let first: [u8; 4] = bytes[0..4].try_into().expect("four bytes");
     assert!(
-        bytes.chunks_exact(4).all(|pixel| pixel == first),
+        bytes.as_chunks::<4>().0.iter().all(|pixel| *pixel == first),
         "the whole render area must be cleared uniformly; got {first:?} then {:?}",
         &bytes[4..8]
     );
@@ -1689,7 +1689,9 @@ impl ComputeProbe {
         let mut bytes = poisoned(probe_bytes() as usize);
         headless.readback(self.staging, probe_bytes(), &mut bytes);
         bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
             .collect()
     }
@@ -3806,7 +3808,9 @@ fn exercise_clear(headless: &Headless) -> Exercise {
             let mut bytes = poisoned(BYTES as usize);
             headless.readback(staging, BYTES, &mut bytes);
             let words: Vec<u32> = bytes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
                 .collect();
             if words.iter().all(|word| *word == 0) {
@@ -3919,8 +3923,10 @@ fn exercise_image_to_image_copy(headless: &Headless) -> Exercise {
     // exists to remove.
     assert!(
         pattern
-            .chunks_exact(4)
-            .all(|texel| texel != IMAGE_COPY_POISON.to_le_bytes()),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|texel| *texel != IMAGE_COPY_POISON.to_le_bytes()),
         "a texel of this exercise's pattern equals IMAGE_COPY_POISON ({IMAGE_COPY_POISON:#010x}), \
          so a copy that was dropped and one that ran are no longer distinguishable"
     );
@@ -4623,9 +4629,11 @@ fn exercise_msaa_resolve(headless: &Headless) -> Exercise {
                      readback landed, and this exercise proves nothing about the resolve either way"
                 );
             } else if let Some((index, texel)) = read
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .enumerate()
-                .find(|(_, texel)| off_by(texel))
+                .find(|(_, texel)| off_by(*texel))
             {
                 panic!(
                     "texel {index} of the resolve target came back as {texel:?} and a \
@@ -5078,8 +5086,10 @@ fn raster_texel(read: &[u8], column: u32, row: u32) -> [u8; 4] {
 /// draw that never happened.
 fn raster_drawn(read: &[u8]) -> usize {
     let background = raster_levels(RASTER_BACKGROUND);
-    read.chunks_exact(4)
-        .filter(|texel| !raster_texel_is(texel, background))
+    read.as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|texel| !raster_texel_is(*texel, background))
         .count()
 }
 
@@ -6545,7 +6555,9 @@ fn primed_dispatch(
     let mut read = poisoned(bytes as usize);
     headless.readback(staging, bytes, &mut read);
     Ok(read
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
         .collect())
 }
@@ -7019,7 +7031,9 @@ impl Destination {
         let mut bytes = poisoned(probe_bytes() as usize);
         headless.readback(self.staging, probe_bytes(), &mut bytes);
         let values: Vec<u32> = bytes
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|word| u32::from_le_bytes([word[0], word[1], word[2], word[3]]))
             .collect();
         // Before any caller compares it. A readback that came back short would
@@ -8159,8 +8173,10 @@ fn exercise_timestamp_resolve(
             let mut bytes = poisoned(BYTES as usize);
             headless.readback(staging, BYTES, &mut bytes);
             let words: Vec<u64> = bytes
-                .chunks_exact(8)
-                .map(|word| u64::from_le_bytes(word.try_into().expect("eight bytes")))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|word| u64::from_le_bytes(*word))
                 .collect();
             if words.iter().all(|word| *word == QUERY_POISON) {
                 Exercise::SilentlyIgnored
@@ -8839,7 +8855,9 @@ fn bindless_outcome(words: &[u32]) -> Exercise {
         .expect("the two agree word for word only on the arm above");
     let block = index as u32 / WORDS_PER_SOURCE;
     let flat = words
-        .chunks_exact(WORDS_PER_SOURCE as usize)
+        .as_chunks::<{ WORDS_PER_SOURCE as usize }>()
+        .0
+        .iter()
         .all(|chunk| chunk == &want[..WORDS_PER_SOURCE as usize]);
     panic!(
         "element {index} of the destination came back {:#010x} where {:#010x} was written into \

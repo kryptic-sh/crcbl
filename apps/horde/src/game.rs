@@ -3643,7 +3643,7 @@ impl Game {
         let (cues, listener) = {
             let mut logic = lock(&self.shared);
             let listener = logic.player_pos;
-            (logic.cues.drain(..).collect::<Vec<_>>(), listener)
+            (std::mem::take(&mut logic.cues), listener)
         };
         self.audio.set_listener(listener);
         for (id, at) in cues {

@@ -42,8 +42,10 @@ fn records(geometry: &Geometry<'_>) -> Vec<MeshVertex> {
         panic!("a greybox primitive is always Geometry::Flat");
     };
     vertices
-        .chunks_exact(VERTEX_STRIDE)
-        .map(|vertex| MeshVertex::from_bytes(vertex.try_into().expect("one whole record")))
+        .as_chunks::<VERTEX_STRIDE>()
+        .0
+        .iter()
+        .map(MeshVertex::from_bytes)
         .collect()
 }
 
@@ -174,7 +176,7 @@ fn every_triangle_is_wound_to_face_its_normals() {
     for (name, geometry) in every_primitive() {
         let positions = positions(&geometry);
         let normals = normals(&geometry);
-        for triangle in indices(&geometry).chunks_exact(3) {
+        for triangle in indices(&geometry).as_chunks::<3>().0 {
             let [a, b, c] = [
                 triangle[0] as usize,
                 triangle[1] as usize,
@@ -449,7 +451,9 @@ fn every_greybox_colour_tiles_by_physical_size_out_of_its_own_layer() {
         // A ruled tile is not a flat field: it has both line and field texels,
         // or there is no grid to read a size off.
         let distinct: std::collections::BTreeSet<[u8; 4]> = texels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|p| [p[0], p[1], p[2], p[3]])
             .collect();
         assert!(

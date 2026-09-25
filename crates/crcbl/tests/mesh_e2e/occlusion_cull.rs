@@ -443,8 +443,10 @@ pub(crate) fn read_back(
         results.push(match readable {
             Readable::Buffer { .. } => ReadBack::Words(
                 bytes
-                    .chunks_exact(4)
-                    .map(|word| u32::from_le_bytes(word.try_into().expect("four bytes")))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|word| u32::from_le_bytes(*word))
                     .collect(),
             ),
             Readable::Depth { extent, .. } => {
@@ -455,8 +457,10 @@ pub(crate) fn read_back(
                     let at = row * pitch;
                     texels.extend(
                         bytes[at..at + width * 4]
-                            .chunks_exact(4)
-                            .map(|texel| f32::from_le_bytes(texel.try_into().expect("four bytes"))),
+                            .as_chunks::<4>()
+                            .0
+                            .iter()
+                            .map(|texel| f32::from_le_bytes(*texel)),
                     );
                 }
                 ReadBack::Depth(texels)

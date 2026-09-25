@@ -36,7 +36,12 @@ fn a_glyph_run_expands_to_whole_pixel_quads_on_its_glyphs_texels() {
         atlas.begin_frame();
         let (vertices, indices) = dl.to_triangles(None, Some(&mut atlas), scale);
         assert_eq!(indices.len(), 12, "H and g, and nothing for the space");
-        for (quad, (c, x)) in vertices.chunks_exact(4).zip([('H', 0.3), ('g', 14.9)]) {
+        for (quad, (c, x)) in vertices
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip([('H', 0.3), ('g', 14.9)])
+        {
             let pen = Vec2::new(20.0 + x * scale, 30.0 + 14.6 * scale);
             let steps = (pen.x * 4.0).round();
             let whole = (steps / 4.0).floor();
@@ -335,7 +340,9 @@ fn rect_outline_covers_every_corner() {
 
     // Every point in the border ring must lie inside one of the four quads.
     let quads: Vec<(Vec2, Vec2)> = verts
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|q| {
             let xs = q.iter().map(|v| v.pos.x);
             let ys = q.iter().map(|v| v.pos.y);
@@ -376,7 +383,7 @@ fn rect_outline_thickness_is_clamped_to_half_the_extent() {
     dl.rect_outline(Vec2::ZERO, Vec2::splat(10.0), 8.0, [1.0; 4]);
     let (verts, _) = dl.to_triangles(None, None, 1.0);
 
-    for q in verts.chunks_exact(4) {
+    for q in verts.as_chunks::<4>().0 {
         let (x0, x1) = (q[3].pos.x, q[1].pos.x);
         let (y0, y1) = (q[3].pos.y, q[1].pos.y);
         assert!(
@@ -589,7 +596,7 @@ fn inside(point: Vec2, a: Vec2, b: Vec2, c: Vec2) -> bool {
 
 /// Whether any emitted triangle covers `point`.
 fn covered(point: Vec2, vertices: &[Vertex2d], indices: &[u32]) -> bool {
-    indices.chunks_exact(3).any(|t| {
+    indices.as_chunks::<3>().0.iter().any(|t| {
         inside(
             point,
             vertices[t[0] as usize].pos,
@@ -1285,7 +1292,12 @@ fn a_rounded_rect_with_no_area_draws_nothing() {
 
 fn clips_of(dl: &DrawList) -> Vec<[f32; 4]> {
     let (vertices, _) = dl.to_triangles(None, None, 1.0);
-    vertices.chunks_exact(4).map(|quad| quad[0].clip).collect()
+    vertices
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|quad| quad[0].clip)
+        .collect()
 }
 
 /// **Every vertex carries the clip its command went in under**, nested

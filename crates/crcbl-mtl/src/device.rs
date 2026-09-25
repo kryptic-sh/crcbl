@@ -1163,8 +1163,11 @@ impl MetalDevice {
             return;
         }
         let now = crate::adapter::sample_correlation(&self.inner.raw);
-        for (slot, chunk) in out.iter_mut().zip(bytes.chunks_exact(size_of::<u64>())) {
-            let sample = u64::from_ne_bytes(chunk.try_into().expect("chunks_exact of eight"));
+        for (slot, chunk) in out
+            .iter_mut()
+            .zip(bytes.as_chunks::<{ size_of::<u64>() }>().0)
+        {
+            let sample = u64::from_ne_bytes(*chunk);
             // The kind is tested rather than assumed. Only the timestamp kind
             // can reach here today — `query_results` refuses every kind whose
             // result is wider than a `u64`, and the occlusion kind is the other
@@ -7147,8 +7150,10 @@ using namespace metal;\n\
         assert_ink_triangle(&painted, Format::Rgba8Unorm);
 
         let differing = direct
-            .chunks_exact(4)
-            .zip(painted.chunks_exact(4))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .zip(painted.as_chunks::<4>().0)
             .filter(|(control, indirect)| control != indirect)
             .count();
         let (centre_x, centre_y) = (CANVAS.width / 2, CANVAS.height / 2);
@@ -7747,9 +7752,9 @@ struct EncodeTarget {
         // and no blending, every texel is exactly one of the two colours. This
         // is what rules out the poison pattern surviving anywhere, and any
         // stray content the point checks would step over.
-        for (index, texel) in bytes.chunks_exact(4).enumerate() {
+        for (index, texel) in bytes.as_chunks::<4>().0.iter().enumerate() {
             assert!(
-                texel == ink || texel == clear,
+                *texel == ink || *texel == clear,
                 "texel {index} is {texel:02X?}, which is neither the triangle nor the clear colour"
             );
         }

@@ -149,7 +149,7 @@ fn frame_with_at(view: DebugView, at: f32) -> crcbl_golden::Image {
 fn greys(image: &crcbl_golden::Image) -> (usize, usize) {
     let mut grey = 0;
     let mut darkened = 0;
-    for pixel in image.pixels().chunks_exact(4) {
+    for pixel in image.pixels().as_chunks::<4>().0 {
         if pixel[0] == pixel[1] && pixel[1] == pixel[2] {
             grey += 1;
             if pixel[0] < OCCLUDED_CEILING {
@@ -213,8 +213,10 @@ fn the_occlusion_view_draws_the_grey_channel_and_not_the_shaded_face() {
     let (occlusion_grey, occluded) = greys(&occlusion);
     let differing = shaded
         .pixels()
-        .chunks_exact(4)
-        .zip(occlusion.pixels().chunks_exact(4))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(occlusion.pixels().as_chunks::<4>().0)
         .filter(|(a, b)| a != b)
         .count();
     eprintln!(

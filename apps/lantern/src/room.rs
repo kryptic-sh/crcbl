@@ -591,7 +591,7 @@ fn checker(light: u8, dark: u8) -> Vec<u8> {
 /// Opaque, because the page's alpha is a material's alpha.
 fn no_signal_texels() -> Vec<u8> {
     let mut texels = vec![0x00u8; PAGE_LAYER_BYTES];
-    for texel in texels.chunks_exact_mut(4) {
+    for texel in texels.as_chunks_mut::<4>().0 {
         texel[3] = 0xFF;
     }
     texels
@@ -1814,7 +1814,7 @@ mod tests {
             let normal = |vertex: u32| Vec3::from_array(record(vertex).qtangent.decode().normal);
 
             assert!(!indices.is_empty(), "{}: no triangles", desc.label);
-            for triangle in indices.chunks_exact(3) {
+            for triangle in indices.as_chunks::<3>().0 {
                 let (a, b, c) = (triangle[0], triangle[1], triangle[2]);
                 let face = (position(b) - position(a)).cross(position(c) - position(a));
                 assert!(
@@ -2687,7 +2687,11 @@ mod tests {
         let floor = &page.layers(PageKind::BaseColor)[FLOOR_LAYER as usize];
         assert_eq!(floor.len(), PAGE_LAYER_BYTES);
         assert!(
-            floor.chunks_exact(4).any(|texel| texel != &floor[..4]),
+            floor
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|texel| texel != &floor[..4]),
             "a flat floor layer would pass with no texture coordinate at all"
         );
         // The floor's pattern is a count of cells, so raising the page's extent
@@ -2719,7 +2723,9 @@ mod tests {
         assert_eq!(monitor.len(), PAGE_LAYER_BYTES);
         assert!(
             monitor
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .all(|texel| texel[..3] == [0x00, 0x00, 0x00] && texel[3] == 0xFF),
             "an off screen has to be opaque black, or a monitor that never received a \
              frame reads as one that did"
