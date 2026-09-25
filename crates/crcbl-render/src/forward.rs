@@ -3427,7 +3427,8 @@ impl ForwardRenderer {
         // instances.
         if scene.meshes.is_empty() {
             return refuse(
-                "a scene description needs at least one mesh; one with meshes and no                  instances draws only the sky"
+                "a scene description needs at least one mesh; one with meshes and no \
+                 instances draws only the sky"
                     .to_owned(),
             );
         }
