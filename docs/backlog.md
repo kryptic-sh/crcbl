@@ -25536,8 +25536,12 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
   meeting the every-packet-sealed rule. Every one marked to build has shipped,
-  the farthest-point sleep check last. glam's bump is in the first-priority
-  dependency entry at the top.
+  the farthest-point sleep check last. The rest of this file's open decisions
+  were taken the same day, each marked "Decided 2026-09-25" where it stands; the
+  ones left to the owner are those that add a crates.io dependency
+  (`unicode-segmentation`, a browser clock, `wasmtime`/`wasmi`, `linkme`) or
+  cannot be taken back (cutting `v0.1.0`), each marked "Left to the owner".
+  glam's bump is in the first-priority dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
