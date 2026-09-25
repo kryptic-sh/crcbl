@@ -104,14 +104,26 @@ pub fn pin() -> Option<String> {
     }
 }
 
-/// Why [`select`] chose no adapter.
+/// Why [`select`] chose no adapter, or why the one it chose could not be used.
 ///
 /// The message is the whole value — which pin missed, and what was enumerated
 /// instead — because there is nothing a caller can do about it but report it:
 /// the variable is wrong, or the machine is not the one it describes.
+///
+/// The second half is `crate::engine`'s: a windowed open that pinned an adapter
+/// which then cannot present to the window refuses with one of these rather
+/// than walking on to an adapter nobody named.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("{0}")]
 pub struct PinMiss(String);
+
+impl PinMiss {
+    /// A refusal whose message is `message`, for a caller in this crate that
+    /// found the pinned adapter unusable after [`select`] had chosen it.
+    pub(crate) const fn new(message: String) -> Self {
+        Self(message)
+    }
+}
 
 /// The adapter [`ADAPTER_ENV_VAR`] names, or why it names none.
 ///

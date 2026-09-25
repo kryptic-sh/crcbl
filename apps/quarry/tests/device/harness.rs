@@ -27,9 +27,17 @@
 //! of the two ran is printed, because "not supported here" reported as "passed"
 //! is the shape this repo keeps removing.
 //!
+//! # Which adapter
+//!
+//! [`crcbl::adapter::select`]'s, through [`GpuContext::open_offscreen`], which
+//! resolves [`ADAPTER_ENV_VAR`] the way every other device suite here does: a
+//! device class, and a class this machine does not have fails the open rather
+//! than falling back. Unset takes the first adapter that can present.
+//!
 //! [`GpuContext::open_offscreen`]: crcbl::engine::GpuContext::open_offscreen
 //! [`ForwardRenderer`]: crcbl::render::ForwardRenderer
 
+use crcbl::adapter::{ADAPTER_ENV_VAR, device_type_from_name};
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{GpuContext, GpuContextDesc, SettingsSource};
 use crcbl::hal::{
@@ -91,9 +99,6 @@ const POISON: u8 = 0xA5;
 /// **`tests/run-quarry-e2e.sh` greps this**, so changing the string turns a
 /// green suite into a failed harness run rather than into nothing.
 pub(crate) const SUITE: &str = "crcbl quarry e2e";
-
-/// The variable naming which adapter to open, echoed on the line above.
-const ADAPTER_ENV_VAR: &str = "CRCBL_ADAPTER";
 
 /// Which backend to open, `Null` unless `CRCBL_GPU` names another.
 pub(crate) fn backend() -> GpuBackend {
@@ -246,13 +251,28 @@ impl Quarry {
         // greps this prefix: a green run that never said what it ran on is
         // evidence about nothing, and on a machine with three adapters the
         // answer is not guessable from the backend alone.
+        let adapter = ctx
+            .adapter()
+            .expect("the context's own adapter is enumerable");
         eprintln!(
-            "{SUITE}: device on adapter {:?} ({ADAPTER_ENV_VAR}={})",
-            ctx.adapter()
-                .expect("the context's own adapter is enumerable")
-                .name,
-            crcbl::adapter::pin().as_deref().unwrap_or("<unset>"),
+            "{SUITE}: device on adapter {id} {name:?} type={kind:?} ({ADAPTER_ENV_VAR}={pin})",
+            id = adapter.id.0,
+            name = adapter.name,
+            kind = adapter.device_type,
+            pin = crcbl::adapter::pin().as_deref().unwrap_or("<unset>"),
         );
+        // The engine refuses a pin it cannot honour, so this only fires if
+        // that stops being true — which is how this suite once drew on the
+        // GPU with `CRCBL_ADAPTER=cpu` printed beside it.
+        if let Some(requested) = crcbl::adapter::pin() {
+            let want = device_type_from_name(&requested)
+                .unwrap_or_else(|| panic!("{ADAPTER_ENV_VAR}={requested} is not a device class"));
+            assert_eq!(
+                adapter.device_type, want,
+                "{ADAPTER_ENV_VAR}={requested} was asked for and adapter {:?} drew the frame",
+                adapter.name
+            );
+        }
         eprintln!(
             "{SUITE}: {levels:?} at a {budget}px budget, {} triangles, geometry path {selected:?}, \
              format {:?}",

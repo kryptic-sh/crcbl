@@ -8796,29 +8796,20 @@ to the new topic number. The mapping is topic 18's own index table. Worth doing
 in one commit that touches nothing else, and worth doing before the next
 technique's ladder lands, because each new rung adds citations to the old path.
 
-### `apps/quarry`'s device harness ignores `CRCBL_ADAPTER` (2026-08-27)
+### `apps/quarry`'s mesh-path goldens have no local dx12 run (2026-09-25)
 
-`crcbl::engine`'s `GpuContextDesc` has no adapter field, so a suite built on
-`GpuContext` — which is `apps/quarry/tests/device/harness.rs` — opens whatever
-the backend enumerated first however the variable is set. The harness even
-prints the mismatch: its fixture line reports the adapter it opened beside
-`CRCBL_ADAPTER=cpu`, and on this machine that reads
-`"AMD Radeon RX 7900 XTX (RADV NAVI31)" (CRCBL_ADAPTER=cpu)`.
-
-**What it costs:** quarry's six goldens cannot be verified against the software
-path locally at all, which is the path CI compares them on. They were blessed on
-the discrete adapter — which is what their module docs ask for — and verified
-there only.
-
-**The fix** is to have `GpuContext` select through `crcbl::adapter::select`
-rather than to teach the harness a second mechanism, and **there are three
-precedents rather than the one this entry used to name** (re-checked
-2026-09-02): `crcbl::screenshot`'s `OffscreenSetup`,
-`crates/crcbl/tests/gpu_scene/harness.rs`'s `select_adapter` and
-`crates/crcbl/tests/hal_seam_e2e.rs` all resolve the pin that way, while
-`render_e2e.rs`, `tiling_e2e.rs`, `gltf_e2e.rs` and quarry's own harness read it
-only to print. Not taken here because it is a change to the engine's device
-opening and this was a rendering change.
+`GpuContext` now honours `CRCBL_ADAPTER`, and quarry's device suite on dx12
+opens `"Microsoft Basic Render Driver" type=Cpu` under `CRCBL_ADAPTER=cpu`. The
+four indirect-path goldens pass there (dolly start: 69.4 % of pixels differ, max
+channel delta 18, 5 over tolerance; dolly end: 23.6 % differ, max delta 1, none
+over), as they do on the RX 7900 XTX. The other 18 tests fail on dx12 on
+**both** adapters, before any pixel, with `UnsupportedFeatures` missing
+`MESH_SHADER`: `crcbl-dx12` does not report the feature (the pending "dx12 mesh
+flag" decision), and every quarry fixture that asks for
+`GeometryPath::MeshShader` stops there. So the two mesh-path goldens are still
+verified only where CI runs them, on lavapipe; that, and the rest of the suite
+on dx12, waits on the mesh flag. Not run: the suite on vk pinned to lavapipe
+through `CRCBL_VK_ICD`.
 
 ### MSAA was reopened rather than reversed (2026-08-27)
 
@@ -19829,16 +19820,23 @@ under the same heading, and it binds any Windows test written from now on.
     took 20.9 s, plus 21.8 s and 21.3 s for the two autoexec runs. Linux's
     `samples-windowed` step took **640 s** on CI (run 35721821179). A Windows
     runner is slower than this desktop and adds the layer and the self-test run,
-    so a lavapipe step is well past the five-minute budget. **WARP could not be
-    measured at all** (next point). Revisit if either number moves: a trial step
-    with `continue-on-error` on `dx12-e2e` would measure WARP in one round trip.
-  - **`CRCBL_ADAPTER` does not reach a windowed run.** Only
-    `crcbl::screenshot`'s offscreen setup calls `crcbl::adapter::select`. A
-    windowed (or `--headless`) sample opens the backend's first adapter, so on
-    this desktop `CRCBL_ADAPTER=cpu` with `--backend dx12` still opened the RX
-    7900 XTX. On `windows-latest` the first dx12 adapter should be the Microsoft
-    Basic Render Driver, but that has not been checked. Honouring the pin in the
-    windowed open is a Rust change and would make WARP measurable locally.
+    so a lavapipe step is well past the five-minute budget.
+  - **WARP, measured 2026-09-25 — the decision input for a dx12 step.**
+    `GpuContext` now honours `CRCBL_ADAPTER`, so
+    `CRCBL_ADAPTER=cpu tools/run-samples-windowed.ps1 -Backend dx12` runs every
+    sample on the Microsoft Basic Render Driver (each sample's `hal:` line read
+    `pinned by CRCBL_ADAPTER=cpu`). Same desktop, no D3D12 debug layer
+    installed, so validation was not checked: all 23 samples and both autoexec
+    runs passed, the 23-sample loop took **309.8 s** and the whole script,
+    including its build step, **422.9 s**. Per sample it ranged from 2.2 s
+    (`bare`) to **122.1 s (`shard`)**, then 40.4 s (`tumble`), 17.5 s
+    (`lantern`, plus 14.9 s and 15.5 s for the autoexec pair) and 16.5 s
+    (`quarry`); everything else was under 12 s. So WARP is slower than lavapipe
+    here (309.8 s against 196 s), and `shard` alone is over a third of the loop.
+    As it stands a WARP step is also past the five-minute budget; the options
+    are a step that skips or shortens `shard` (and `tumble`), or a trial step
+    with `continue-on-error` on `dx12-e2e` to measure a runner. Still unchecked:
+    that WARP is what `windows-latest` enumerates for dx12.
   - **dx12 runs check no validation.** The D3D12 debug layer's messages are read
     only by `crcbl-dx12`'s device tests (`debug::Validated`) and by
     `debug::diagnosis` on a removed device. A sample that runs to the end never
@@ -25440,14 +25438,12 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
 
 ## Session hand-off, 2026-09-23: work in flight
 
-- **Parked, unverified: `GpuContext` honouring `CRCBL_ADAPTER`.** On branch
-  `wip/gpucontext-adapter-pin` (pushed, not merged): `start_device` picks its
-  adapter through `crcbl::adapter::select`, and `apps/quarry`'s device harness
-  uses the same selection. Stopped at session end before the workspace suite,
-  the red/green unit test, the dx12 GPU suite and the WARP runs. Owed: finish
-  and verify it per "`apps/quarry`'s device harness ignores `CRCBL_ADAPTER`",
-  then time `tools/run-samples-windowed.ps1 -Backend dx12` with
-  `CRCBL_ADAPTER=cpu` to decide a WARP windowed-samples CI step.
+- **`GpuContext` honouring `CRCBL_ADAPTER` is finished and verified
+  (2026-09-25)** on top of `main`, from branch `wip/gpucontext-adapter-pin`
+  (`d105de02`). Once it lands, that branch is superseded and can be deleted.
+  What is left is in "`apps/quarry`'s mesh-path goldens have no local dx12 run",
+  and the WARP windowed timing is under "What the Win32 backend has and has not
+  been run against", "No sample-level pass in CI".
 - **The session's last pushes have since been seen green.** `ecf12489` (four
   small fixes), `a7abc741` (crcbl-render tests off wasm32) and `e1183f59` (stale
   docs), pushed on top of `8b14da89` (joints, the `TALL_STACK` removal, the

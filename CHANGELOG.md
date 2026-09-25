@@ -16,6 +16,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::engine::GpuError` has an `AdapterPin(crcbl::adapter::PinMiss)`
+  variant**, the refusal of a `CRCBL_ADAPTER` pin described under Fixed, so an
+  exhaustive match on it needs the new arm.
 - **`DrawCommand::Glyphs` carries the text it spells**, as
   `text: Option<Arc<str>>`: a UI tree span in a parsed font fills it with what
   it displays, after any `text-overflow` cut, through the new
@@ -2713,6 +2716,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **`GpuContext` now honours `CRCBL_ADAPTER`.** `GpuContext::open`,
+  `open_offscreen` and `request_open` walked every enumerated adapter and took
+  the first that could present, whatever the variable said, so a windowed or
+  `--headless` sample, and `apps/quarry`'s device suite, ran on the discrete GPU
+  under `CRCBL_ADAPTER=cpu` on a D3D12 desktop. They now choose through
+  `crcbl::adapter::select`, as `crcbl::screenshot` already did: a pin opens only
+  the adapter class it names, and a pinned adapter that is not there or cannot
+  present to the window fails the open with the new `GpuError::AdapterPin`
+  rather than falling back. Unset, the walk is unchanged. The `hal:` adapter log
+  line now says whether the adapter was pinned.
 - **The frame loop could overwrite a frame the GPU was still reading.**
   `GpuContext::submit_and_present` retired down to `FRAMES_IN_FLIGHT` (two)
   submissions, so the next frame recorded into the two-deep per-frame ring

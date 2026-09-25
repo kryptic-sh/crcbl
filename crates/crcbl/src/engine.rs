@@ -121,6 +121,7 @@ use crcbl_store::settings::{SETTINGS_FILE, SettingsStack};
 
 use crate::settings::VideoSettings;
 
+use crate::adapter::ADAPTER_ENV_VAR;
 use crate::backend::GpuBackend;
 
 pub mod console_button;
@@ -218,6 +219,12 @@ pub enum GpuError {
     NoBackend(crate::backend::GpuError),
     /// The backend has no adapter, no graphics queue, or no usable format.
     Unusable(&'static str),
+    /// [`ADAPTER_ENV_VAR`] named no adapter here, or named one that cannot
+    /// present to this window.
+    ///
+    /// Never a fallback, for the reason [`crate::adapter`] gives: a run on an
+    /// adapter nobody asked for is a green result about the wrong device.
+    AdapterPin(crate::adapter::PinMiss),
     /// A HAL call failed.
     Hal(HalError),
     /// A surface or swapchain call failed.
@@ -274,6 +281,7 @@ impl std::fmt::Display for GpuError {
                  no-op backend, which needs no driver."
             ),
             Self::Unusable(what) => write!(f, "the backend is unusable: {what}"),
+            Self::AdapterPin(error) => write!(f, "{error}"),
             Self::Hal(error) => write!(f, "{error}"),
             Self::Surface(error) => write!(f, "{error}"),
             Self::Graph(error) => write!(f, "render graph: {error}"),
@@ -293,6 +301,12 @@ impl From<crate::backend::GpuError> for GpuError {
 impl From<HalError> for GpuError {
     fn from(error: HalError) -> Self {
         Self::Hal(error)
+    }
+}
+
+impl From<crate::adapter::PinMiss> for GpuError {
+    fn from(error: crate::adapter::PinMiss) -> Self {
+        Self::AdapterPin(error)
     }
 }
 
@@ -1196,6 +1210,10 @@ pub struct PendingGpuContext {
     /// when it finishes: it touches storage, and a browser drives the polls
     /// below from a frame callback that has no time for one.
     video: VideoSettings,
+    /// [`crate::adapter::pin`], read when the open was started for the same
+    /// reason as `video`, and so a test can set it without touching the
+    /// process environment.
+    adapter_pin: Option<String>,
 }
 
 impl PendingGpuContext {
@@ -1204,7 +1222,9 @@ impl PendingGpuContext {
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
-    /// graphics queue or no surface format, or if any HAL call failed. Polling
+    /// graphics queue or no surface format, if
+    /// [`ADAPTER_ENV_VAR`] names an adapter that is not here or cannot present
+    /// (see [`GpuContext::open`]), or if any HAL call failed. Polling
     /// after the context was handed over is a caller bug and reports
     /// [`GpuError::Unusable`].
     pub fn poll(&mut self) -> Result<Option<GpuContext>, GpuError> {
@@ -1218,15 +1238,7 @@ impl PendingGpuContext {
                     // The stage is left `Done` if this fails, which is what
                     // makes a failed open stay failed rather than retrying a
                     // half-built context on the next frame.
-                    self.stage = GpuContext::start_device(
-                        instance,
-                        &self.target,
-                        self.extent,
-                        &self.label,
-                        self.required_features,
-                        self.optional_features,
-                        self.pacing,
-                    )?;
+                    self.stage = GpuContext::start_device(instance, self)?;
                 }
                 OpenStage::Device {
                     instance,
@@ -1272,6 +1284,28 @@ impl PendingGpuContext {
     }
 }
 
+/// The adapters [`GpuContext::start_device`] may walk, in the order it walks
+/// them.
+///
+/// Unpinned, that is every adapter in enumeration order, so the walk can step
+/// past a GPU that cannot present to the window. Pinned, it is the one adapter
+/// [`crate::adapter::select`] names and nothing else: a pin that fell through to
+/// the next adapter would be a run on a device nobody asked for, which is the
+/// outcome [`crate::adapter`] exists to refuse.
+///
+/// # Errors
+///
+/// [`crate::adapter::PinMiss`] when the pin names no adapter here.
+fn adapter_candidates<'a>(
+    pin: Option<&str>,
+    adapters: &'a [crcbl_hal::AdapterInfo],
+) -> Result<&'a [crcbl_hal::AdapterInfo], crate::adapter::PinMiss> {
+    match pin {
+        None => Ok(adapters),
+        Some(_) => crate::adapter::select(pin, adapters).map(core::slice::from_ref),
+    }
+}
+
 impl GpuContext {
     /// Creates an instance, a surface for `window`, a device and a swapchain.
     ///
@@ -1296,10 +1330,23 @@ impl GpuContext {
     /// `backend` module docs for the compile-error-over-run-time-error rule
     /// this is the single exception to.
     ///
+    /// # Which adapter
+    ///
+    /// [`crate::adapter::select`] decides, as it does for every other device
+    /// this crate opens. With [`ADAPTER_ENV_VAR`] unset, every adapter is
+    /// walked in enumeration order and the first that can present to the
+    /// window is taken — a GPU that cannot present is stepped past. Set, only
+    /// the adapter it names is tried, and one that cannot present fails the
+    /// open with [`GpuError::AdapterPin`] rather than falling back to an adapter
+    /// nobody named. The start-up log line says which adapter was taken and
+    /// which of the two chose it. [`open_offscreen`](Self::open_offscreen) and
+    /// [`request_open`](Self::request_open) choose the same way.
+    ///
     /// # Errors
     ///
     /// [`GpuError`] if no backend opened, if the backend exposes no adapter, no
-    /// graphics queue or no surface format, or if any HAL call fails.
+    /// graphics queue or no surface format, if [`ADAPTER_ENV_VAR`] names an
+    /// adapter that is not here or cannot present, or if any HAL call fails.
     pub fn open<S: Shell + ?Sized>(
         shell: &S,
         window: WindowId,
@@ -1353,6 +1400,7 @@ impl GpuContext {
             optional_features: desc.optional_features,
             pacing: desc.pacing,
             video: desc.settings.video(desc.label),
+            adapter_pin: crate::adapter::pin(),
         };
         loop {
             if let Some(context) = pending.poll()? {
@@ -1413,23 +1461,27 @@ impl GpuContext {
             optional_features: desc.optional_features,
             pacing: desc.pacing,
             video: desc.settings.video(desc.label),
+            adapter_pin: crate::adapter::pin(),
         })
     }
 
     /// Creates the surface, picks an adapter and starts the device request.
+    ///
+    /// `open` is the request being started, for the same reason
+    /// [`finish`](Self::finish) takes it.
     fn start_device(
         instance: Box<dyn Instance>,
-        target: &crcbl_hal::SurfaceTarget,
-        extent: (u32, u32),
-        label: &str,
-        required_features: Features,
-        optional_features: Features,
-        pacing: Pacing,
+        open: &PendingGpuContext,
     ) -> Result<OpenStage, GpuError> {
+        let (target, extent, label, pacing) = (&open.target, open.extent, &open.label, open.pacing);
         let adapters = instance.adapters();
         if adapters.is_empty() {
             return Err(GpuError::Unusable("no adapter"));
         }
+        // Resolved before the surface exists, so a pin that names nothing here
+        // leaves nothing to tear down.
+        let pin = open.adapter_pin.as_deref();
+        let candidates = adapter_candidates(pin, &adapters)?;
 
         // SAFETY: `target` was produced by the caller's shell for a window that
         // must still be live — `request_open` documents that obligation and it
@@ -1443,10 +1495,11 @@ impl GpuContext {
         // **Adapter selection is surface-aware, and has to be.** P1.1 found a
         // discrete radv GPU that enumerates first, is Tier A, and *cannot
         // present to an Xvfb window* — while the software rasteriser behind it
-        // can. An `Err` here means "not this one", not "give up".
+        // can. An `Err` here means "not this one", not "give up". A pin narrows
+        // the walk to one adapter, so there it does mean "give up".
         let mut chosen = None;
         let mut last_error = None;
-        for adapter in &adapters {
+        for adapter in candidates {
             match instance.surface_caps(surface, adapter.id) {
                 Ok(caps) if caps.preferred_format().is_some() => {
                     chosen = Some((adapter.clone(), caps));
@@ -1467,13 +1520,36 @@ impl GpuContext {
         }
         let Some((adapter, caps)) = chosen else {
             instance.destroy_surface(surface);
-            return Err(match last_error {
-                Some(error) => error.into(),
-                None => GpuError::Unusable("no adapter can present to this window"),
+            return Err(match (pin, candidates, last_error) {
+                (Some(pin), [pinned], error) => {
+                    let reason = error.map_or_else(
+                        || "it offers no usable surface format".to_owned(),
+                        |error| error.to_string(),
+                    );
+                    GpuError::AdapterPin(crate::adapter::PinMiss::new(format!(
+                        "{ADAPTER_ENV_VAR}={pin} chose adapter {id} {name:?} type={kind:?}, and it \
+                         cannot present to this window: {reason}. No other adapter is tried, \
+                         because that would be a run on a device nobody named; unset \
+                         {ADAPTER_ENV_VAR} to walk every adapter.",
+                        pin = pin.trim(),
+                        id = pinned.id.0,
+                        name = pinned.name,
+                        kind = pinned.device_type,
+                    )))
+                }
+                (_, _, Some(error)) => error.into(),
+                (_, _, None) => GpuError::Unusable("no adapter can present to this window"),
             });
         };
+        let why = match pin {
+            Some(pin) => format!("pinned by {ADAPTER_ENV_VAR}={}", pin.trim()),
+            None => format!(
+                "the first of {} enumerated that can present, {ADAPTER_ENV_VAR} unset",
+                adapters.len()
+            ),
+        };
         log::info!(
-            "hal: {} adapter {:?} ({:?}), geometry {:?}, binding {:?}, lighting {:?}",
+            "hal: {} adapter {:?} ({:?}), {why}, geometry {:?}, binding {:?}, lighting {:?}",
             instance.backend(),
             adapter.name,
             adapter.device_type,
@@ -1512,8 +1588,8 @@ impl GpuContext {
         let pending = instance.request_device(&DeviceDesc {
             label: Some(label),
             adapter: adapter.id,
-            required_features,
-            optional_features,
+            required_features: open.required_features,
+            optional_features: open.optional_features,
             compatible_surface: Some(surface),
         })?;
 
@@ -11135,18 +11211,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the headless window is still alive");
-        let stage = GpuContext::start_device(
-            Box::new(instance),
-            &target,
-            extent,
-            "downgrade test",
-            Features::empty(),
-            optional_features,
-            pacing,
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "downgrade test".to_string(),
@@ -11154,7 +11220,10 @@ mod tests {
             optional_features,
             pacing,
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(Box::new(instance), &pending)
+            .expect("the null backend opens everywhere");
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -11241,26 +11310,45 @@ mod tests {
     /// The debug line `start_device` writes for each adapter it passes over.
     const REFUSED_LINE: &str = "hal: adapter ";
 
-    /// Runs [`GpuContext::start_device`] against `instance` and hands back
-    /// whatever it refused with.
+    /// A start-up request for a headless window, with `adapter_pin` standing
+    /// in for [`crate::adapter::pin`] so no test touches the process
+    /// environment.
     ///
-    /// The shell is dropped on the way out, which is only safe because nothing
-    /// survived the call: a failed start-up destroys the surface it made before
-    /// returning, so no object outlives the window it was made for.
-    fn start_device_error(instance: crcbl_hal::null::NullInstance) -> GpuError {
+    /// The shell comes back with it because the request's surface target names
+    /// that shell's window.
+    fn adapter_walk_request(
+        adapter_pin: Option<&str>,
+    ) -> (crcbl_shell::HeadlessShell, PendingGpuContext) {
         let (shell, window) = shell();
         let target = shell
             .surface_target(window)
             .expect("the headless window is still alive");
-        match GpuContext::start_device(
-            Box::new(instance),
-            &target,
-            (320, 240),
-            "adapter walk test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::Off,
-        ) {
+        let pending = PendingGpuContext {
+            stage: OpenStage::Done,
+            target,
+            extent: (320, 240),
+            label: "adapter walk test".to_string(),
+            required_features: Features::empty(),
+            optional_features: Features::empty(),
+            pacing: Pacing::Off,
+            video: VideoSettings::unrestricted(),
+            adapter_pin: adapter_pin.map(str::to_owned),
+        };
+        (shell, pending)
+    }
+
+    /// Runs [`GpuContext::start_device`] against `instance` with `adapter_pin`
+    /// set, and hands back whatever it refused with.
+    ///
+    /// The shell is dropped on the way out, which is only safe because nothing
+    /// survived the call: a failed start-up destroys the surface it made before
+    /// returning, so no object outlives the window it was made for.
+    fn start_device_error(
+        instance: crcbl_hal::null::NullInstance,
+        adapter_pin: Option<&str>,
+    ) -> GpuError {
+        let (_shell, pending) = adapter_walk_request(adapter_pin);
+        match GpuContext::start_device(Box::new(instance), &pending) {
             Ok(_) => panic!("nothing could serve this surface, so start-up must not have"),
             Err(error) => error,
         }
@@ -11369,6 +11457,7 @@ mod tests {
             NullInstance::gpu_driven()
                 .with_adapters(2)
                 .with_recorder(recorder.clone()),
+            None,
         );
         assert!(
             matches!(
@@ -11395,7 +11484,7 @@ mod tests {
              open leaks one"
         );
 
-        let empty = start_device_error(NullInstance::gpu_driven().with_adapters(0));
+        let empty = start_device_error(NullInstance::gpu_driven().with_adapters(0), None);
         assert!(
             matches!(empty, GpuError::Unusable("no adapter")),
             "a machine with no GPU is not a window nothing can present to: {empty}"
@@ -11405,6 +11494,273 @@ mod tests {
             empty.to_string(),
             "the two causes must be readable apart in a log, not only in a `match`"
         );
+    }
+
+    /// One enumerated adapter of class `device_type` at position `index`.
+    ///
+    /// Built by hand because every null adapter is [`DeviceType::Cpu`]
+    /// (see [`NullInstance::with_adapters`](crcbl_hal::null::NullInstance::with_adapters)),
+    /// and a pin is only a choice on an enumeration with more than one class
+    /// in it.
+    fn fake_adapter(index: u32, device_type: crcbl_hal::DeviceType) -> crcbl_hal::AdapterInfo {
+        crcbl_hal::AdapterInfo {
+            id: crcbl_hal::AdapterId(index),
+            name: format!("{device_type:?} #{index}"),
+            vendor_id: 0x1002,
+            device_id: 0x744c,
+            device_type,
+            driver: "test".to_owned(),
+            backend: crcbl_hal::BackendKind::Null,
+            caps: crcbl_hal::DeviceCaps {
+                features: Features::empty(),
+                limits: crcbl_hal::Limits::minimum(),
+            },
+        }
+    }
+
+    /// **A pin narrows the walk to the adapter it names; no pin keeps the
+    /// enumeration's order.**
+    ///
+    /// The shape is the one `CRCBL_ADAPTER=cpu` met on the D3D12 desktop: the
+    /// GPU enumerates first and WARP is appended last, so a walk that ignored
+    /// the pin opened the GPU and said nothing about it. The unpinned half is
+    /// the other promise — every adapter, in the order the backend gave, because
+    /// that is what lets the surface-aware walk step past a GPU that cannot
+    /// present.
+    #[test]
+    fn a_pin_narrows_the_adapter_walk_to_the_class_it_names() {
+        use crcbl_hal::{AdapterId, DeviceType};
+
+        let adapters = [
+            fake_adapter(0, DeviceType::Discrete),
+            fake_adapter(1, DeviceType::Integrated),
+            fake_adapter(2, DeviceType::Cpu),
+        ];
+        let ids = |pin| {
+            adapter_candidates(pin, &adapters)
+                .map(|walk| walk.iter().map(|info| info.id).collect::<Vec<_>>())
+        };
+
+        assert_eq!(ids(Some("cpu")), Ok(vec![AdapterId(2)]));
+        assert_eq!(ids(Some("integrated")), Ok(vec![AdapterId(1)]));
+        assert_eq!(ids(Some("discrete")), Ok(vec![AdapterId(0)]));
+        assert_eq!(
+            ids(None),
+            Ok(vec![AdapterId(0), AdapterId(1), AdapterId(2)]),
+            "unpinned, the walk is today's: every adapter, first enumerated first"
+        );
+        let miss = ids(Some("virtual")).expect_err("there is no virtual adapter to name");
+        assert!(miss.to_string().contains("no Virtual adapter"), "{miss}");
+    }
+
+    /// **A pinned open takes the adapter and says it was pinned; an unpinned
+    /// one says it walked.**
+    ///
+    /// The adapter line is the only record a windowed run leaves of which
+    /// device drew it, and "which adapter" without "why that one" cannot tell a
+    /// pin that worked from a pin that was never read — the defect this line
+    /// exists to show.
+    #[test]
+    fn the_adapter_line_says_whether_the_adapter_was_pinned() {
+        use crcbl_hal::null::NullInstance;
+
+        for (pin, why) in [
+            (Some("cpu"), "pinned by CRCBL_ADAPTER=cpu"),
+            (None, "CRCBL_ADAPTER unset"),
+        ] {
+            let logs = crcbl_core::log::capture();
+            let (_shell, mut pending) = adapter_walk_request(pin);
+            pending.stage =
+                GpuContext::start_device(Box::new(NullInstance::gpu_driven()), &pending)
+                    .unwrap_or_else(|error| panic!("{pin:?}: the null adapter is a Cpu: {error}"));
+            let mut gpu = loop {
+                if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                    break context;
+                }
+            };
+
+            let records = logs.records();
+            let chosen: Vec<_> = records
+                .iter()
+                .filter(|record| record.message.contains(", geometry "))
+                .collect();
+            assert_eq!(chosen.len(), 1, "{pin:?}: {records:?}");
+            assert!(
+                chosen[0].message.contains(why),
+                "{pin:?}: the line says why this adapter: {}",
+                chosen[0].message
+            );
+
+            gpu.drain().expect("nothing was submitted");
+            gpu.destroy()
+                .expect("teardown is in the seam's stated order");
+        }
+    }
+
+    /// **A pinned adapter that cannot present is refused, naming the pin,
+    /// rather than walked past.**
+    ///
+    /// Unpinned, the same refusal is the adapter's own `HalError` and the walk
+    /// would have gone on to the next adapter (see
+    /// `the_adapter_walk_passes_over_one_that_cannot_present`). Pinned, going
+    /// on would open an adapter nobody named, so the error has to say which
+    /// pin chose the adapter that could not present — otherwise a run with
+    /// `CRCBL_ADAPTER` set reads as a broken window rather than a wrong pin.
+    #[test]
+    fn a_pinned_adapter_that_cannot_present_is_refused_naming_the_pin() {
+        use crcbl_hal::AdapterId;
+        use crcbl_hal::null::{NullInstance, ObjectKind, Recorder};
+
+        let recorder = Recorder::new();
+        recorder.refuse_surface_on(AdapterId(0));
+        let unpinned = start_device_error(
+            NullInstance::gpu_driven().with_recorder(recorder.clone()),
+            None,
+        );
+        let refused = start_device_error(
+            NullInstance::gpu_driven().with_recorder(recorder.clone()),
+            Some("cpu"),
+        );
+        let GpuError::AdapterPin(why) = &refused else {
+            panic!("the pin is what failed, not the backend: {refused}");
+        };
+        let why = why.to_string();
+        assert!(why.contains("CRCBL_ADAPTER=cpu"), "{why}");
+        assert!(why.contains("cannot present"), "{why}");
+        // The adapter's own reason rides along: it is the only thing that says
+        // *why* this adapter and this window do not pair.
+        assert!(
+            matches!(unpinned, GpuError::Hal(_)),
+            "unpinned, the adapter's refusal is the error: {unpinned}"
+        );
+        assert!(why.contains(&unpinned.to_string()), "{why}\n{unpinned}");
+        assert_eq!(
+            recorder.live_objects(ObjectKind::Surface),
+            0,
+            "the surface is destroyed on the way out"
+        );
+    }
+
+    /// **A pin that names no adapter here refuses before a surface exists.**
+    ///
+    /// The null backend enumerates only [`crcbl_hal::DeviceType::Cpu`]
+    /// adapters, so `discrete` names nothing — the `CRCBL_ADAPTER=cpu` on a
+    /// runner with no WARP case, turned around. Refusing is
+    /// [`crate::adapter::select`]'s decision; this is that the engine asks it.
+    #[test]
+    fn a_pin_that_names_no_adapter_here_refuses_the_open() {
+        use crcbl_hal::null::NullInstance;
+
+        let refused = start_device_error(NullInstance::gpu_driven(), Some("discrete"));
+        let GpuError::AdapterPin(why) = &refused else {
+            panic!("a pin that names nothing must not open anything: {refused}");
+        };
+        assert!(why.to_string().contains("no Discrete adapter"), "{refused}");
+    }
+
+    /// A [`crcbl_hal::null::NullInstance`] whose adapters report `classes`,
+    /// one each, in enumeration order.
+    ///
+    /// The null backend calls every adapter a [`crcbl_hal::DeviceType::Cpu`],
+    /// and it is right to: it has one set of capabilities. A pin is only a
+    /// choice on an enumeration that mixes classes, so this relabels the
+    /// enumeration and forwards everything else untouched.
+    #[derive(Debug)]
+    struct ClassedInstance {
+        inner: crcbl_hal::null::NullInstance,
+        classes: Vec<crcbl_hal::DeviceType>,
+    }
+
+    impl Instance for ClassedInstance {
+        fn backend(&self) -> crcbl_hal::BackendKind {
+            self.inner.backend()
+        }
+
+        fn adapters(&self) -> Vec<crcbl_hal::AdapterInfo> {
+            self.inner
+                .adapters()
+                .into_iter()
+                .zip(&self.classes)
+                .map(|(info, &device_type)| crcbl_hal::AdapterInfo {
+                    device_type,
+                    ..info
+                })
+                .collect()
+        }
+
+        unsafe fn create_surface(
+            &self,
+            target: &crcbl_hal::SurfaceTarget,
+        ) -> Result<SurfaceHandle, HalError> {
+            // SAFETY: forwarded unchanged, so the caller's obligation for
+            // `target` is the inner instance's.
+            unsafe { self.inner.create_surface(target) }
+        }
+
+        fn destroy_surface(&self, surface: SurfaceHandle) {
+            self.inner.destroy_surface(surface);
+        }
+
+        fn surface_caps(
+            &self,
+            surface: SurfaceHandle,
+            adapter: crcbl_hal::AdapterId,
+        ) -> Result<crcbl_hal::SurfaceCaps, HalError> {
+            self.inner.surface_caps(surface, adapter)
+        }
+
+        fn request_device(
+            &self,
+            desc: &DeviceDesc<'_>,
+        ) -> Result<Box<dyn crcbl_hal::PendingDevice>, HalError> {
+            self.inner.request_device(desc)
+        }
+    }
+
+    /// **The context opens on the adapter the pin names, and on the first one
+    /// without a pin.**
+    ///
+    /// The enumeration is D3D12's on this desktop: a GPU first, the software
+    /// rasteriser after it. Before the engine asked [`crate::adapter::select`],
+    /// `CRCBL_ADAPTER=cpu` opened the GPU here and the harness printed the
+    /// mismatch. The adapter is read back from the finished context rather
+    /// than from the walk, because the device is what the pin is about.
+    #[test]
+    fn the_context_opens_on_the_adapter_the_pin_names() {
+        use crcbl_hal::null::NullInstance;
+        use crcbl_hal::{AdapterId, DeviceType};
+
+        for (pin, want) in [
+            (Some("cpu"), (AdapterId(1), DeviceType::Cpu)),
+            (None, (AdapterId(0), DeviceType::Discrete)),
+        ] {
+            let (_shell, mut pending) = adapter_walk_request(pin);
+            let instance = ClassedInstance {
+                inner: NullInstance::gpu_driven().with_adapters(2),
+                classes: vec![DeviceType::Discrete, DeviceType::Cpu],
+            };
+            pending.stage = GpuContext::start_device(Box::new(instance), &pending)
+                .unwrap_or_else(|error| panic!("{pin:?}: both adapters can present: {error}"));
+            let mut gpu = loop {
+                if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
+                    break context;
+                }
+            };
+
+            let opened = gpu
+                .adapter()
+                .expect("the context's own adapter is enumerable");
+            assert_eq!(
+                (opened.id, opened.device_type),
+                want,
+                "{pin:?}: the context opened {:?}",
+                opened.name
+            );
+
+            gpu.drain().expect("nothing was submitted");
+            gpu.destroy()
+                .expect("teardown is in the seam's stated order");
+        }
     }
 
     /// The two halves of the present-feedback line [`GpuContext::finish`] logs,
@@ -11872,18 +12228,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            "present pacing test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::Vsync,
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "present pacing test".to_string(),
@@ -11894,7 +12240,10 @@ mod tests {
             // settings file would make this suite's answer depend on the
             // machine it ran on.
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -11984,18 +12333,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            "frames in flight test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::Off,
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "frames in flight test".to_string(),
@@ -12003,7 +12342,10 @@ mod tests {
             optional_features: Features::empty(),
             pacing: Pacing::Off,
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -12067,18 +12409,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            "pacing switch test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::default(),
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "pacing switch test".to_string(),
@@ -12086,7 +12418,10 @@ mod tests {
             optional_features: Features::empty(),
             pacing: Pacing::default(),
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -12197,18 +12532,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            "pacing rollback test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::default(),
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "pacing rollback test".to_string(),
@@ -12216,7 +12541,10 @@ mod tests {
             optional_features: Features::empty(),
             pacing: Pacing::default(),
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -12306,18 +12634,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            "device error test",
-            Features::empty(),
-            Features::empty(),
-            Pacing::default(),
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: "device error test".to_string(),
@@ -12325,7 +12643,10 @@ mod tests {
             optional_features: Features::empty(),
             pacing: Pacing::default(),
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let mut gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
@@ -12437,18 +12758,8 @@ mod tests {
         let target = shell
             .surface_target(window)
             .expect("the window is still alive");
-        let stage = GpuContext::start_device(
-            instance,
-            &target,
-            extent,
-            label,
-            Features::empty(),
-            optional,
-            pacing,
-        )
-        .expect("the null backend opens everywhere");
         let mut pending = PendingGpuContext {
-            stage,
+            stage: OpenStage::Done,
             target,
             extent,
             label: label.to_string(),
@@ -12456,7 +12767,10 @@ mod tests {
             optional_features: optional,
             pacing,
             video: VideoSettings::unrestricted(),
+            adapter_pin: None,
         };
+        pending.stage = GpuContext::start_device(instance, &pending)
+            .expect("the null backend opens everywhere");
         let gpu = loop {
             if let Some(context) = pending.poll().expect("the null backend cannot fail here") {
                 break context;
