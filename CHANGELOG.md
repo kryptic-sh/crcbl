@@ -34,9 +34,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   draw what they always drew.
 - **`crcbl_render::ViewDesc` has a `lighting` field and is no longer `Eq`**: a
   struct literal of it needs `lighting` (`ViewLighting::Scene` is what every
-  view was lit by), and `ViewLighting::Fixed` carries a `DirectionalLight`,
-  whose floats are not `Eq`. `ViewDesc::default()`, `ViewDesc::transparent()`
-  and literals built with `..` from either are unaffected.
+  view was lit by), and `ViewLighting::Fixed { key, environment }` carries a
+  `DirectionalLight` and a `Vec3`, whose floats are not `Eq`.
+  `ViewDesc::default()`, `ViewDesc::transparent()` and literals built with `..`
+  from either are unaffected.
 - **`crcbl_render::AtlasDesc` has a `format` field**, so every literal needs
   one: `ATLAS_FORMAT` (`Rgba8UnormSrgb`) is what every atlas was.
   `SheetError::SourceMismatch` carries the atlas's `format`, and `SheetError`
@@ -392,15 +393,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   background. Bloom and auto-exposure keep the alpha; `ViewDesc::transparent()`
   leaves auto-exposure out because it meters the background as black.
 - **Fixed lighting for a view, so an icon does not change with the level** —
-  `ViewDesc::lighting: ViewLighting::Fixed(DirectionalLight)` lights a secondary
-  view by that light's direction and colour as its only direct light and its
-  `ambient` as its only indirect one. The view ignores the frame's sun and every
-  `set_lights` row, the sky's irradiance, the irradiance probes and height fog,
-  shadows nothing (its frame block names no shadow map, so the key light is not
-  occluded by the frame's cascades), and drops `ViewLighting::SCENE_EFFECTS` —
-  reflections, volumetric fog and contact shadows — from its effects whatever it
-  asked for. The same model draws byte-identical pixels under any frame light.
-  The default, `ViewLighting::Scene`, lights a view exactly as before.
+  `ViewDesc::lighting: ViewLighting::Fixed { key, environment }` lights a
+  secondary view by the `key` light's direction and colour as its only direct
+  light, its `ambient` as its only diffuse fill, and `environment` — a uniform
+  radiance seen in every direction — as the only thing its reflections see, so a
+  dark glossy material keeps a sheen that rises towards grazing angles instead
+  of rendering flat black. The environment is specular only (`ambient` stays the
+  whole diffuse term; `π · environment` is the matching fill) and reaches a
+  surface through the reflection pass, so it needs `RenderEffects::REFLECTIONS`.
+  The view ignores the frame's sun and every `set_lights` row, the sky, the
+  irradiance probes (in its forward pass, reflections and water alike) and
+  height fog, shadows nothing (its frame block names no shadow map, so the key
+  light is not occluded by the frame's cascades), and drops
+  `ViewLighting::SCENE_EFFECTS` — volumetric fog and contact shadows — from its
+  effects whatever it asked for. The same model draws byte-identical pixels
+  under any frame light. The default, `ViewLighting::Scene`, lights a view
+  exactly as before.
 - **`BGRA` sprite atlases** — `AtlasDesc::format` takes `Rgba8UnormSrgb` or
   `Bgra8UnormSrgb` (`ATLAS_FORMATS`), so a swapchain-format view's target can be
   copied into a slot with `add_slot_copies`, which now checks a source against

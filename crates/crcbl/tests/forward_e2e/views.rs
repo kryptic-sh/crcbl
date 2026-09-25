@@ -882,13 +882,14 @@ struct Icons {
 }
 
 /// One frame of a renderer built over `scene`, lit by `sun` and whatever
-/// `setup` gives it, with the cube at the origin drawn through a fixed icon view
-/// and a scene-lit one — both transparent, through the same camera, into
-/// targets of one size.
+/// `setup` gives it, with the cube at the origin in `material` drawn through a
+/// view lit by `fixed` and a scene-lit one — both transparent, through the
+/// same camera, into targets of one size.
 fn draw_icons(
     headless: &Headless,
     scene: &crcbl::render::scene::SceneDesc<'_>,
     sun: &DirectionalLight,
+    (fixed, material): (ViewLighting, usize),
     setup: impl FnOnce(&mut ForwardRenderer),
 ) -> Icons {
     let device = headless.device.as_ref();
@@ -898,7 +899,7 @@ fn draw_icons(
     place(
         &mut renderer,
         crcbl::render::scene::DEMO_CUBE,
-        crcbl::render::scene::DEMO_UNTINTED,
+        material,
         Mat4::IDENTITY,
     );
     setup(&mut renderer);
@@ -907,7 +908,7 @@ fn draw_icons(
             device,
             headless.queue,
             &ViewDesc {
-                lighting: ViewLighting::Fixed(ICON_KEY),
+                lighting: fixed,
                 ..ViewDesc::transparent()
             },
         )
@@ -968,6 +969,42 @@ fn difference(a: &crcbl_golden::Image, b: &crcbl_golden::Image) -> (usize, u8) {
     (differing, worst)
 }
 
+/// [`draw_icons`] in the two worlds
+/// [`a_fixed_view_draws_the_same_icon_under_any_frame_light`] compares: `scene`
+/// under the default sun and nothing else, then `scene` with an irradiance grid
+/// over the origin, a sky, a point light beside the cube and a sun of another
+/// colour from another direction.
+fn draw_icons_in_both_worlds(
+    headless: &Headless,
+    scene: &crcbl::render::scene::SceneDesc<'_>,
+    icon: (ViewLighting, usize),
+) -> (Icons, Icons) {
+    let plain = draw_icons(headless, scene, &DirectionalLight::default(), icon, |_| {});
+    let mut probed = scene.clone();
+    probed.probes = crcbl::screenshot::probe_grid();
+    probed.capacities.probes = probed.probes.volume.total();
+    let lit = draw_icons(
+        headless,
+        &probed,
+        &DirectionalLight {
+            direction: Vec3::new(-0.7, 0.5, -0.2),
+            color: Vec3::new(2.4, 0.9, 0.4),
+            ambient: Vec3::new(0.02, 0.05, 0.12),
+        },
+        icon,
+        |renderer| {
+            renderer.set_sky(test_sky());
+            renderer.set_lights(&[crcbl::render::Light::Point(crcbl::render::PointLight {
+                position: Vec3::new(0.9, 0.8, 0.9),
+                radius: 4.0,
+                color: Vec3::new(0.2, 1.5, 0.3),
+                fill: false,
+            })]);
+        },
+    );
+    (plain, lit)
+}
+
 /// **A [`ViewLighting::Fixed`] icon is the same picture, byte for byte,
 /// whatever lights the world it is drawn in** — and a scene-lit icon of the
 /// same model is not, which is what says the two worlds differ where it
@@ -994,33 +1031,14 @@ fn difference(a: &crcbl_golden::Image, b: &crcbl_golden::Image) -> (usize, u8) {
 #[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
 fn a_fixed_view_draws_the_same_icon_under_any_frame_light() {
     let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
-    let plain = draw_icons(
-        &headless,
-        &crcbl::render::scene::demo(),
-        &DirectionalLight::default(),
-        |_| {},
-    );
-    let mut probed = crcbl::render::scene::demo();
-    probed.probes = crcbl::screenshot::probe_grid();
-    probed.capacities.probes = probed.probes.volume.total();
-    let lit = draw_icons(
-        &headless,
-        &probed,
-        &DirectionalLight {
-            direction: Vec3::new(-0.7, 0.5, -0.2),
-            color: Vec3::new(2.4, 0.9, 0.4),
-            ambient: Vec3::new(0.02, 0.05, 0.12),
+    let icon = (
+        ViewLighting::Fixed {
+            key: ICON_KEY,
+            environment: Vec3::ZERO,
         },
-        |renderer| {
-            renderer.set_sky(test_sky());
-            renderer.set_lights(&[crcbl::render::Light::Point(crcbl::render::PointLight {
-                position: Vec3::new(0.9, 0.8, 0.9),
-                radius: 4.0,
-                color: Vec3::new(0.2, 1.5, 0.3),
-                fill: false,
-            })]);
-        },
+        crcbl::render::scene::DEMO_UNTINTED,
     );
+    let (plain, lit) = draw_icons_in_both_worlds(&headless, &crcbl::render::scene::demo(), icon);
 
     let (fixed_differing, fixed_worst) = difference(&plain.fixed, &lit.fixed);
     let (scene_differing, scene_worst) = difference(&plain.scene_lit, &lit.scene_lit);
@@ -1047,6 +1065,168 @@ fn a_fixed_view_draws_the_same_icon_under_any_frame_light() {
     assert_eq!(
         fixed_differing, 0,
         "a fixed icon is the same picture whatever lights the world it is drawn in"
+    );
+    headless.finish();
+}
+
+/// The environment [`a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen`]
+/// lights its icon with: a neutral grey, the colour a caller picks when it
+/// wants a sheen and not a tint.
+const ICON_ENVIRONMENT: Vec3 = Vec3::new(1.0, 1.0, 1.0);
+
+/// The material of a black polymer magazine: a near-black dielectric, glossy
+/// enough that the reflection march takes it (under `ssr.slang`'s roughness
+/// cutoff) and far from the untinted row in both.
+const GLOSSY_BLACK: crcbl::shaders::mesh::GpuMaterial = crcbl::shaders::mesh::GpuMaterial {
+    base_color: [0.02, 0.02, 0.02, 1.0],
+    metallic: 0.0,
+    roughness: 0.2,
+    ..crcbl::shaders::mesh::GpuMaterial::UNTINTED
+};
+
+/// The demo scene with [`GLOSSY_BLACK`] appended, and the row it landed on.
+fn glossy_scene() -> (crcbl::render::scene::SceneDesc<'static>, usize) {
+    let mut scene = crcbl::render::scene::demo();
+    scene.materials.push(GLOSSY_BLACK);
+    let row = scene.materials.len() - 1;
+    (scene, row)
+}
+
+/// The mean of `picture`'s colour channels over the pixels it covers, on the
+/// 0–255 scale the target stores.
+fn covered_mean(picture: &crcbl_golden::Image) -> f64 {
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    for pixel in picture.pixels().chunks_exact(4) {
+        if pixel[3] == COVERED {
+            sum += pixel[..3].iter().map(|&c| u64::from(c)).sum::<u64>();
+            count += 3;
+        }
+    }
+    assert!(count > 0, "the picture covers something");
+    sum as f64 / count as f64
+}
+
+/// The mean colour channel of a 5 × 5 patch of `picture` around where the cube
+/// face with outward `normal` has its centre, and how directly the camera
+/// faces that face there — its `N·V`.
+fn face_patch(picture: &crcbl_golden::Image, camera: &Camera, normal: Vec3) -> (f64, f32) {
+    // The demo cube's half-extent — `crcbl_shaders::mesh`'s `H`.
+    let centre = normal * 0.5;
+    let aspect = VIEW_EXTENT.0 as f32 / VIEW_EXTENT.1 as f32;
+    let clip = camera.view_projection(aspect) * centre.extend(1.0);
+    let ndc = clip.truncate() / clip.w;
+    let x = ((ndc.x * 0.5 + 0.5) * VIEW_EXTENT.0 as f32) as i64;
+    let y = ((0.5 - ndc.y * 0.5) * VIEW_EXTENT.1 as f32) as i64;
+    let mut sum = 0u64;
+    let mut count = 0u64;
+    for dy in -2..=2 {
+        for dx in -2..=2 {
+            let pixel = picture
+                .pixel(
+                    u32::try_from(x + dx).expect("on screen"),
+                    u32::try_from(y + dy).expect("on screen"),
+                )
+                .expect("inside the frame");
+            assert_eq!(pixel[3], COVERED, "the patch is on the cube");
+            sum += pixel[..3].iter().map(|&c| u64::from(c)).sum::<u64>();
+            count += 3;
+        }
+    }
+    let facing = normal.dot((camera.eye - centre).normalize());
+    (sum as f64 / count as f64, facing)
+}
+
+/// **A fixed view's environment gives a dark glossy surface its sheen**, and
+/// the icon it draws is still the same picture in any world.
+///
+/// EW's black polymer magazines rendered flat black under a fixed light: the
+/// key's diffuse on a near-black base colour and the fill are next to nothing,
+/// and what makes such a surface read under a scene's light is what it
+/// reflects. So the cube, in [`GLOSSY_BLACK`] under [`ICON_KEY`], is drawn
+/// through a fixed view three times:
+///
+/// * **with no environment** it is near-black — the control, without which a
+///   lit icon below could be the key's doing;
+/// * **with [`ICON_ENVIRONMENT`]** it is visibly lit, and the faces the camera
+///   sees most obliquely are the brightest: the reflection rises with the
+///   split-sum Fresnel term towards grazing angles, which is what reads as the
+///   sheen along a model's edges. A key or a fill that brightened the cube
+///   would follow the light's direction instead of the camera's;
+/// * **in a second world** — probes, a sky, a point light and another sun —
+///   it is byte for byte the icon of the first, while a scene-lit icon of the
+///   same cube is not. The environment reaches the surface through the
+///   reflection march, whose fallback the frame's probes and sky would
+///   otherwise be.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    let (scene, glossy) = glossy_scene();
+    let dark = draw_icons(
+        &headless,
+        &scene,
+        &DirectionalLight::default(),
+        (
+            ViewLighting::Fixed {
+                key: ICON_KEY,
+                environment: Vec3::ZERO,
+            },
+            glossy,
+        ),
+        |_| {},
+    );
+    let (plain, lit) = draw_icons_in_both_worlds(
+        &headless,
+        &scene,
+        (
+            ViewLighting::Fixed {
+                key: ICON_KEY,
+                environment: ICON_ENVIRONMENT,
+            },
+            glossy,
+        ),
+    );
+
+    let camera = mesh_camera(crcbl::render::Projection::default());
+    let dark_mean = covered_mean(&dark.fixed);
+    let sheen_mean = covered_mean(&plain.fixed);
+    let mut faces =
+        [Vec3::X, Vec3::Y, Vec3::Z].map(|normal| face_patch(&plain.fixed, &camera, normal));
+    let dark_faces =
+        [Vec3::X, Vec3::Y, Vec3::Z].map(|normal| face_patch(&dark.fixed, &camera, normal));
+    let (fixed_differing, fixed_worst) = difference(&plain.fixed, &lit.fixed);
+    let (scene_differing, _) = difference(&plain.scene_lit, &lit.scene_lit);
+    eprintln!(
+        "crcbl forward e2e: views — glossy black icon: covered mean {dark_mean:.2} with no \
+         environment, {sheen_mean:.2} with one; faces (mean, N·V) {faces:?}, dark {dark_faces:?}; \
+         fixed icons differ between the worlds at {fixed_differing} pixels (by at most \
+         {fixed_worst}), scene-lit at {scene_differing}"
+    );
+
+    assert!(
+        dark_mean < 12.0,
+        "with no environment the glossy black cube is near-black (covered mean {dark_mean:.2})"
+    );
+    assert!(
+        sheen_mean > dark_mean + 20.0,
+        "the environment lights it visibly (covered mean {sheen_mean:.2} against \
+         {dark_mean:.2} without)"
+    );
+    // Most oblique first: the order a Fresnel term puts the faces in.
+    faces.sort_by(|a, b| a.1.total_cmp(&b.1));
+    assert!(
+        faces[0].0 > faces[1].0 + 10.0 && faces[1].0 > faces[2].0 + 10.0,
+        "the faces the camera sees at grazing angles reflect the most: (mean, N·V) {faces:?}"
+    );
+    assert!(
+        scene_differing > coverage(&plain.fixed).covered / 2,
+        "the two worlds light a scene-lit icon differently across most of the cube, or the \
+         equality below says nothing about the frame's light"
+    );
+    assert_eq!(
+        fixed_differing, 0,
+        "a fixed icon with an environment is the same picture whatever lights the world"
     );
     headless.finish();
 }

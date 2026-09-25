@@ -183,9 +183,10 @@ pub enum ViewLighting {
     /// is lit by, and what every view was lit by before this choice existed.
     #[default]
     Scene,
-    /// One constant light, whatever the frame is lit by: the
-    /// [`DirectionalLight`]'s direction and colour as the only direct light,
-    /// and its [`ambient`](DirectionalLight::ambient) as the only indirect one.
+    /// One constant light, whatever the frame is lit by: the key's direction
+    /// and colour as the only direct light, its
+    /// [`ambient`](DirectionalLight::ambient) as the only diffuse indirect one,
+    /// and `environment` as the only thing a reflection sees.
     ///
     /// For a picture that must not change with the world around it, such as a
     /// model rendered into an inventory icon: the same model under the same
@@ -205,38 +206,69 @@ pub enum ViewLighting {
     ///   the shaders read as a map never rendered and answer lit. The frame's
     ///   atlas is still drawn and the view's instances may still cast into it;
     ///   see [`ForwardRenderer::set_instance_casts_shadow`].
-    /// * **The sky's irradiance and the irradiance probes**: the view's frame
-    ///   block carries no sky rows and an empty probe header, and the view
-    ///   binds a probe table of one zeroed row in place of the scene's, so the
-    ///   ambient term is the fill alone.
-    /// * **Reflections and the air**: [`Self::SCENE_EFFECTS`] are dropped from
-    ///   the view's effects whatever [`ViewDesc::effects`] asked for, and the
-    ///   height fog is [`Fog::NONE`]. Screen-space reflections are the only
-    ///   specular the environment gives a surface, so a metal under this
-    ///   lighting has the key light's highlight and nothing else.
+    /// * **The sky and the irradiance probes**: the view's frame block carries
+    ///   no sky rows and an empty probe header, and the view binds a probe
+    ///   table of one zeroed row in place of the scene's — to the forward pass,
+    ///   the reflection march and the water surface alike — so the diffuse
+    ///   ambient is the fill alone and a reflection that finds no geometry
+    ///   sees `environment` alone.
+    /// * **The air**: [`Self::SCENE_EFFECTS`] are dropped from the view's
+    ///   effects whatever [`ViewDesc::effects`] asked for, and the height fog
+    ///   is [`Fog::NONE`].
     ///
     /// What it keeps is everything the view's own geometry decides: its
-    /// materials and emission, its ambient occlusion, and every effect after the
-    /// forward pass. The background is [`ViewDesc::background`]'s, so a view
-    /// asking for [`ViewBackground::Scene`] still draws the frame's sky behind
-    /// a model it does not light.
-    Fixed(DirectionalLight),
+    /// materials and emission, its ambient occlusion, its reflections of
+    /// itself, and every effect after the forward pass. The background is
+    /// [`ViewDesc::background`]'s, so a view asking for
+    /// [`ViewBackground::Scene`] still draws the frame's sky behind a model it
+    /// does not light.
+    Fixed {
+        /// The one direct light, and in its
+        /// [`ambient`](DirectionalLight::ambient) the diffuse fill.
+        key: DirectionalLight,
+        /// The radiance a reflection sees in every direction — a uniform
+        /// environment, in linear RGB, that **may exceed 1.0** like the key's
+        /// colour. It is what gives a dark glossy surface its sheen: a
+        /// near-black dielectric scatters almost none of the key and the fill,
+        /// and still reflects this at its `F0`, rising towards grazing angles
+        /// by the split-sum Fresnel term — so what the camera sees edge-on
+        /// reads brighter than what faces it. A metal reflects it tinted by
+        /// its base colour.
+        ///
+        /// **Specular only.** A uniform environment of radiance `L` would also
+        /// reach a diffuse surface, as `π·L` — what [`Self::Scene`] adds for
+        /// a uniform [`Sky`](crate::Sky) of that radiance — but here that half
+        /// is the key's `ambient` and nothing else, so the two are never
+        /// summed and the fill means what it meant before this field existed.
+        /// A caller who wants the pair to describe one physical environment
+        /// sets `ambient` to `π` times this.
+        ///
+        /// It reaches a surface through the reflection pass, so it needs
+        /// [`RenderEffects::REFLECTIONS`] in both the frame's effects and
+        /// [`ViewDesc::effects`]; a view drawn without it reflects nothing.
+        /// Zero is a view whose reflections find nothing but its own geometry.
+        environment: Vec3,
+    },
 }
 
 impl ViewLighting {
     /// The effects a [`ViewLighting::Fixed`] view never draws, because each
-    /// brings the frame's light into it: the reflection march falls back to
-    /// the probes and the sky, the froxel volume is lit by the sun and the
-    /// scene's lights, and the contact march shadows along the frame's sun.
-    pub const SCENE_EFFECTS: RenderEffects = RenderEffects::REFLECTIONS
-        .union(RenderEffects::VOLUMETRIC_FOG)
-        .union(RenderEffects::CONTACT_SHADOWS);
+    /// brings the frame's light into it: the froxel volume is lit by the sun
+    /// and the scene's lights, and the contact march shadows along the frame's
+    /// sun.
+    ///
+    /// Reflections are not among them. The march's fallback is the probe table
+    /// and the sky rows, and a fixed view hands it its own — the zeroed row and
+    /// a sky of `environment` in every direction — so what it reflects is the
+    /// view's own geometry and the fixed environment.
+    pub const SCENE_EFFECTS: RenderEffects =
+        RenderEffects::VOLUMETRIC_FOG.union(RenderEffects::CONTACT_SHADOWS);
 
     /// The effects this lighting takes out of a view's frame.
     pub(super) const fn dropped_effects(self) -> RenderEffects {
         match self {
             Self::Scene => RenderEffects::empty(),
-            Self::Fixed(_) => Self::SCENE_EFFECTS,
+            Self::Fixed { .. } => Self::SCENE_EFFECTS,
         }
     }
 }
@@ -652,9 +684,9 @@ pub(super) struct View {
     /// empty where there is no amplification stage to choose one. See
     /// [`ForwardRenderer::cluster_selection`].
     pub(super) cluster_selection: Vec<BufferHandle>,
-    /// The one zeroed probe row a [`ViewLighting::Fixed`] view's groups bind in
-    /// place of the scene's table, or `None` for a view lit by the scene — see
-    /// [`View::build`].
+    /// The one zeroed probe row a [`ViewLighting::Fixed`] view's groups, its
+    /// reflection march and its water surface bind in place of the scene's
+    /// table, or `None` for a view lit by the scene — see [`View::build`].
     pub(super) fixed_probes: Option<BufferHandle>,
     /// What [`begin_frame`](ForwardRenderer::begin_frame) last handed
     /// [`DrawGen::begin_frame`], kept so a reader can compute the same cut
@@ -964,9 +996,16 @@ impl View {
         // bound — which is zero for a scene with no probes only because that
         // scene's table is. Host-uploaded and read-only, on the light list's
         // terms, and written once: nothing ever changes a zero.
+        //
+        // **Zero even when the view has an environment**, which reaches the
+        // reflection march as its sky rows instead. A probe row is weighed by
+        // the frame's per-probe visibility map before it is divided back out,
+        // and `(a * w) / w` is not always `a` in floating point — so a lit row
+        // here could come back rounded differently from one level to the next.
+        // A zero comes back zero whatever it is weighed by.
         let fixed_probes = match inputs.lighting {
             ViewLighting::Scene => None,
-            ViewLighting::Fixed(_) => {
+            ViewLighting::Fixed { .. } => {
                 let buffer = device.create_buffer(&BufferDesc {
                     label: Some("fixed view probes"),
                     size: crcbl_shaders::probe::PROBE_STRIDE as u64,
@@ -1450,28 +1489,47 @@ impl View {
         // the atlas answers lit for an empty rectangle before it reads a texel
         // (`mesh.slang`'s `atlas_rect_is_empty`), and the key is the view's only
         // row, so nothing else could name a tile.
+        //
+        // **A fixed view's environment is the sky its reflections see**, and
+        // only its reflections: the gradient the march falls back to, with all
+        // three bands the one radiance and no atmosphere, while the frame
+        // block's L1 sky — the diffuse half — stays zero, so the fill is the
+        // whole diffuse ambient. A uniform gradient is that radiance along
+        // every direction and, to rounding, under every lobe the march
+        // prefilters. The background pass keeps the frame's gradient: the
+        // view's background is [`ViewDesc::background`]'s, not its lighting's.
         let key_row;
-        let (light, rows, probe_volume, sky, fog, atlas_rects) = match self.lighting {
-            ViewLighting::Scene => (
-                scene.light,
-                &scene.rows[..],
-                frame.probe_volume,
-                frame.sky_irradiance,
-                frame.fog,
-                scene.atlas_rects,
-            ),
-            ViewLighting::Fixed(key) => {
-                key_row = [sun_row(&key)];
-                (
-                    key,
-                    &key_row[..],
-                    crcbl_shaders::probe::ProbeVolume::default(),
-                    crcbl_shaders::probe::GpuProbe::ZERO,
-                    Fog::NONE,
-                    [[0.0; 4]; shadow::TILES],
-                )
-            }
-        };
+        let (light, rows, probe_volume, sky, fog, atlas_rects, reflected, reflected_air) =
+            match self.lighting {
+                ViewLighting::Scene => (
+                    scene.light,
+                    &scene.rows[..],
+                    frame.probe_volume,
+                    frame.sky_irradiance,
+                    frame.fog,
+                    scene.atlas_rects,
+                    frame.gradient,
+                    sky_view,
+                ),
+                ViewLighting::Fixed { key, environment } => {
+                    key_row = [sun_row(&key)];
+                    let band = environment.to_array();
+                    (
+                        key,
+                        &key_row[..],
+                        crcbl_shaders::probe::ProbeVolume::default(),
+                        crcbl_shaders::probe::GpuProbe::ZERO,
+                        Fog::NONE,
+                        [[0.0; 4]; shadow::TILES],
+                        crcbl_shaders::sky::SkyGradient {
+                            zenith: band,
+                            horizon: band,
+                            ground: band,
+                        },
+                        None,
+                    )
+                }
+            };
         self.begun = frame.serial;
         // The same matrix again for the ground grid, whose pass `add_passes`
         // records and which has no camera to ask.
@@ -1758,13 +1816,15 @@ impl View {
                 // direction and `Sky::gradient` is what has it exactly. A
                 // renderer nobody called `set_sky` on writes three zero rows,
                 // which the march adds to its probe fallback and changes
-                // nothing.
-                sky: gradient.rows(),
+                // nothing. A fixed view's is its environment — see `reflected`
+                // above.
+                sky: reflected.rows(),
                 // And the arm, on the background pass's terms below: an
                 // atmosphere frame hands the march the sun its LUT was built
-                // around, and every other frame the exactly-zero `w` that
-                // leaves `ssr.slang` evaluating the gradient it always did.
-                atmosphere: match sky_view {
+                // around, and every other frame — a fixed view's included —
+                // the exactly-zero `w` that leaves `ssr.slang` evaluating the
+                // gradient it always did.
+                atmosphere: match reflected_air {
                     Some(presented) => {
                         let sun = presented.view.sun_direction();
                         [sun[0], sun[1], sun[2], crcbl_shaders::sky::ATMOSPHERE_ON]
@@ -2042,7 +2102,11 @@ impl View {
         // [`ViewBackground::Transparent`].
         let transparent = self.background.is_transparent();
         let draws_sky = passes.draws_sky && !transparent;
-        let probe_buffer = passes.probe_buffer;
+        // The table the reflection march and the water surface fall back to:
+        // the scene's, or a fixed view's zeroed row — the one its forward
+        // groups were built naming, see [`View::fixed_probes`]. The graph read
+        // stays the scene's slot, which the frame wrote either way.
+        let probe_buffer = self.fixed_probes.unwrap_or(passes.probe_buffer);
         let probe_table = passes.probe_table;
         let occlusion_placeholder = passes.occlusion_placeholder;
         let contact_placeholder = passes.contact_placeholder;

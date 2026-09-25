@@ -3043,23 +3043,39 @@ the gaps below.
 
 ## What fixed view lighting left open (2026-09-25)
 
-`ViewDesc::lighting: ViewLighting::Fixed(DirectionalLight)` landed in
+`ViewDesc::lighting: ViewLighting::Fixed { key, environment }` landed in
 `crcbl-render/src/forward/view.rs` for EW's inventory icons, with the gaps
 below. It is host-side only: `View::begin_frame` resolves the view's light once
 — the key as the one light row, the fill as the ambient, an empty probe header,
-no sky rows, `Fog::NONE` and empty atlas rectangles (which every atlas sampler
-answers lit) — and drops `ViewLighting::SCENE_EFFECTS`, and `View::build` binds
-a one-row zeroed probe table (`View::fixed_probes`) in place of the scene's. No
-shader changed.
+no L1 sky rows, `Fog::NONE` and empty atlas rectangles (which every atlas
+sampler answers lit), and for the reflection march a uniform sky gradient of
+`environment` with the atmosphere arm off — and drops
+`ViewLighting::SCENE_EFFECTS` (volumetric fog, contact shadows). `View::build`
+makes a one-row zeroed probe table (`View::fixed_probes`) that the forward
+groups, the reflection march and the water surface bind in place of the scene's.
+No shader changed.
 
-- **A metal under fixed lighting has no environment specular.** Screen-space
-  reflections are the only ambient specular the engine has, and they are dropped
-  because their miss falls back to the frame's probes and sky. A metallic icon
-  shows the key light's highlight on an otherwise dark surface. The fix is a
-  constant specular environment for the view (the fill as an environment colour,
-  weighted by the split-sum `dfg` term already read in `fragmentMain`), which
-  needs a shader term and a switch in the frame block. Needs a decision on
-  whether EW's icons have metals at all.
+- **The environment's specular rides on the reflection pass.** `mesh.slang` has
+  no ambient specular term; the only one is `ssr.slang`'s fallback
+  (`probe_environment + sky_environment`, times the `dfg` split-sum), which
+  `ssr_blur.slang` adds to the scene colour for every surface, rough ones
+  included. So a fixed view with `RenderEffects::REFLECTIONS` off, in its own
+  `ViewDesc::effects` or in the frame's (a low preset, a device without it),
+  loses the sheen entirely, and an icon's look then depends on the quality tier.
+  A tier-independent version needs a constant specular term in `mesh.slang` (the
+  environment times the `dfg` pair `fragmentMain` already reads), which is the
+  `mesh.slang` edit the vk surprise below makes risky. Needs a decision on
+  whether EW ships a tier without reflections.
+- **Not verified on a metal.** The sheen e2e
+  (`a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen`) covers a
+  near-black dielectric only; a metallic icon should reflect the environment
+  tinted by its base colour through the same path, but no test draws one.
+- **Declined: the environment in the fixed probe row.** One lit row would reach
+  both the diffuse gather and the reflection fallback, but both weigh it by the
+  frame's probe visibility map layer 0 and divide back out, which could round
+  differently between levels and break the byte-identical icon. The sky rows
+  carry no weight, so they took the specular half and `ambient` kept the diffuse
+  half.
 - **The lighting is fixed at `create_view`.** Changing a view's key light means
   destroying and recreating the view; there is no `set_view_lighting`. The frame
   block half is read every `begin_frame`, but the zeroed probe table is bound
@@ -3068,12 +3084,10 @@ shader changed.
   near an icon's model is lighting it by accident, since icon models sit away
   from the world. A fixed rig of several lights would be a `Fixed` carrying rows
   rather than one `DirectionalLight`; not built until an icon needs rim light.
-- **Water under fixed lighting still reads the scene's probe table.** The water
-  pass binds `probe_buffer` (the scene's) with the view's frame block, whose
-  empty probe header `water.slang` evaluates as that table's first row — the
-  leak `View::fixed_probes` closes for the forward pass. Grass reads no probes.
-  Neither is drawn through a fixed view by any test; `water.slang`'s other frame
-  reads under a fixed view were not reviewed.
+- **Water under a fixed view is not tested.** It now binds `View::fixed_probes`
+  and reflects the view's environment through the march's block, but no test
+  draws water or grass through a fixed view, and `water.slang`'s other frame
+  reads under one were not reviewed.
 - **Surprise: any edit to `mesh.slang` moved the Vulkan cascade view on the 7900
   XTX.** A first cut added a light-row flag to the light loop (tried as an arm
   in front of the shadow walk and as a select after it) and an empty-header

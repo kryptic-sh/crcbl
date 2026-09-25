@@ -771,6 +771,17 @@ const KEY: DirectionalLight = DirectionalLight {
     ambient: Vec3::new(0.05, 0.02, 0.11),
 };
 
+/// The environment a fixed view's tests light it with: three distinct
+/// channels, none of them the frame's sky's, so a block carrying the frame's
+/// sky in its place, or a swapped channel, differs in every lane checked.
+const ENVIRONMENT: Vec3 = Vec3::new(0.3, 0.6, 0.9);
+
+/// [`KEY`] and [`ENVIRONMENT`] as a view's lighting.
+const FIXED: ViewLighting = ViewLighting::Fixed {
+    key: KEY,
+    environment: ENVIRONMENT,
+};
+
 /// A renderer whose frame carries every term a [`ViewLighting::Fixed`] view
 /// ignores — a probe grid, a sky, fog and a point light beside the sun — and
 /// asks for every effect that would bring one of them back in.
@@ -836,7 +847,7 @@ fn a_fixed_view_is_lit_by_its_key_light_and_nothing_of_the_frames() {
             device,
             queue,
             &ViewDesc {
-                lighting: ViewLighting::Fixed(KEY),
+                lighting: FIXED,
                 ..ViewDesc::transparent()
             },
         )
@@ -960,9 +971,117 @@ fn a_fixed_view_is_lit_by_its_key_light_and_nothing_of_the_frames() {
     renderer.destroy(device);
 }
 
+/// **A fixed view's reflection march sees its environment and nothing of the
+/// frame's**: the sky rows are the environment in all three bands, the
+/// atmosphere arm is off and the probe header is empty — where the primary
+/// camera's block, written in the same frame, carries the frame's gradient, its
+/// atmosphere and its probe grid.
+///
+/// And the forward pass's L1 sky stays zero, so the environment is the
+/// specular half alone and the fill the diffuse half alone.
+#[test]
+fn a_fixed_view_s_reflections_see_its_environment_and_nothing_of_the_frames() {
+    let (recorder, device, queue) = open();
+    let device = device.as_ref();
+    let mut renderer = renderer_lit_by_everything(device, queue);
+    renderer.set_atmosphere(Some(crate::camera::Atmosphere::NOON));
+    let view = renderer
+        .create_view(
+            device,
+            queue,
+            &ViewDesc {
+                lighting: FIXED,
+                ..ViewDesc::transparent()
+            },
+        )
+        .expect("built");
+    renderer
+        .begin_frame(
+            device,
+            &Camera::default(),
+            &DirectionalLight::default(),
+            (256, 192),
+        )
+        .expect("write");
+    renderer
+        .begin_view(device, view, &Camera::default(), (128, 128))
+        .expect("write");
+
+    let slot = renderer.frame;
+    let built = renderer.views[view.index() - 1].as_ref().expect("built");
+    let primary = recorder
+        .buffer_bytes(renderer.primary.ssr.uniforms(slot))
+        .expect("live");
+    let fixed = recorder
+        .buffer_bytes(built.ssr.uniforms(slot))
+        .expect("live");
+    assert_eq!(
+        fixed.len(),
+        crcbl_shaders::ssr::PARAMS_SIZE,
+        "the whole block"
+    );
+
+    // The sky's three rows and the atmosphere row close the block; the probe
+    // header follows the three matrices — see `ssr::SsrParams::to_bytes`.
+    let air = crcbl_shaders::ssr::PARAMS_SIZE - 16..crcbl_shaders::ssr::PARAMS_SIZE;
+    let sky = air.start - 48..air.start;
+    let probes = 192..192 + crcbl_shaders::probe::PROBE_VOLUME_SIZE;
+    let band = [ENVIRONMENT.x, ENVIRONMENT.y, ENVIRONMENT.z, 0.0];
+    let uniform: Vec<u8> = [band; 3]
+        .iter()
+        .flatten()
+        .flat_map(|value| value.to_le_bytes())
+        .collect();
+
+    assert_ne!(
+        primary[sky.clone()],
+        uniform[..],
+        "the frame's gradient is not the environment, or the check below proves nothing"
+    );
+    assert_eq!(
+        fixed[sky],
+        uniform[..],
+        "the fixed view's march sees the environment along every band"
+    );
+    assert_eq!(
+        f32::from_le_bytes(primary[air.end - 4..].try_into().expect("four bytes")),
+        crcbl_shaders::sky::ATMOSPHERE_ON,
+        "the frame's march reads the atmosphere, or the check below proves nothing"
+    );
+    assert_eq!(
+        fixed[air],
+        [0.0f32, 0.0, 0.0, crcbl_shaders::sky::ATMOSPHERE_OFF]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect::<Vec<_>>()[..],
+        "and the fixed view's reads the gradient alone"
+    );
+    assert_ne!(
+        primary[probes.clone()],
+        vec![0u8; probes.len()][..],
+        "the frame's march reads a probe grid, or the check below proves nothing"
+    );
+    assert_eq!(
+        fixed[probes.clone()],
+        vec![0u8; probes.len()][..],
+        "and the fixed view's reads none"
+    );
+
+    let frame_block = recorder.buffer_bytes(built.uniforms[slot]).expect("live");
+    let l1_sky = mesh::SKY_SH_R_OFFSET..mesh::SKY_SH_R_OFFSET + 48;
+    assert_eq!(
+        frame_block[l1_sky.clone()],
+        vec![0u8; l1_sky.len()][..],
+        "the environment is not the forward pass's diffuse sky"
+    );
+    renderer.destroy(device);
+}
+
 /// **A fixed view records none of [`ViewLighting::SCENE_EFFECTS`]' passes**,
 /// whatever its description asked for — while a scene-lit view with the same
-/// effects, in the same frame setup, records every one of them.
+/// effects, in the same frame setup, records every one of them. **It still
+/// records the reflection pair**, which is how its environment reaches a
+/// surface.
 #[test]
 fn a_fixed_view_records_no_pass_that_brings_the_frames_light_in() {
     let (_, device, queue) = open();
@@ -976,7 +1095,7 @@ fn a_fixed_view_records_no_pass_that_brings_the_frames_light_in() {
             device,
             queue,
             &ViewDesc {
-                lighting: ViewLighting::Fixed(KEY),
+                lighting: FIXED,
                 ..ViewDesc::default()
             },
         )
@@ -987,9 +1106,18 @@ fn a_fixed_view_records_no_pass_that_brings_the_frames_light_in() {
     let alone = frame_labels(device, queue, &mut renderer, None);
     let with_scene_lit = frame_labels(device, queue, &mut renderer, Some(scene_lit));
     let with_fixed = frame_labels(device, queue, &mut renderer, Some(fixed));
+    for label in ["ssr", "ssr-blur"] {
+        assert!(
+            count(&alone, label) > 0,
+            "the frame records `{label}`, or its presence below proves nothing"
+        );
+        assert_eq!(
+            count(&with_fixed, label),
+            2 * count(&alone, label),
+            "a fixed view records its own `{label}`"
+        );
+    }
     for label in [
-        "ssr",
-        "ssr-blur",
         "contact-shadows",
         "volumetric-scatter",
         "volumetric-composite",
@@ -1026,7 +1154,7 @@ fn a_fixed_view_releases_its_probe_row() {
     let mut renderer = ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
     let before = recorder.total_live_objects();
     let fixed = ViewDesc {
-        lighting: ViewLighting::Fixed(KEY),
+        lighting: FIXED,
         ..ViewDesc::transparent()
     };
     let view = renderer.create_view(device, queue, &fixed).expect("built");
