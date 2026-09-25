@@ -1167,10 +1167,17 @@ impl PhysicsSystem {
         let synced = read();
 
         if settings.sleep {
+            let records = &self.records;
             island::update_timers(
                 &mut self.awake,
                 settings.sleep_speed,
                 settings.sleep_angular_speed,
+                |id| {
+                    records
+                        .get(id)
+                        .and_then(|record| record.collider.as_ref())
+                        .map_or(0.0, |(_, collider)| collider.max_extent())
+                },
                 dt,
             );
             for &id in &events.stirred {

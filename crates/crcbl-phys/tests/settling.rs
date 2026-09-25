@@ -827,3 +827,34 @@ fn put_to_sleep_refuses_what_cannot_sleep() {
     assert!(!off.put_to_sleep(entity(0)), "sleep off");
     assert!(!off.is_sleeping(entity(0)));
 }
+
+/// **A body sleeps by the speed of its farthest point, not by its turn
+/// alone**: a 4 m bar and a 20 cm cube, both turning at 0.04 rad/s — under
+/// `sleep_angular_speed` — in empty space. The bar's ends move at 8 cm/s,
+/// over `sleep_speed`, so it stays awake; the cube's corners move at under
+/// 1 cm/s, so it sleeps once its half second is up.
+#[test]
+fn a_long_body_turning_slowly_stays_awake_while_its_ends_move() {
+    let mut phys = PhysicsSystem::with_contacts(ContactSettings::DEFAULT);
+    let bar = crate_(
+        &mut phys,
+        0,
+        DVec3::new(0.0, 5.0, 0.0),
+        DVec3::new(2.0, 0.05, 0.05),
+    );
+    let cube = crate_(&mut phys, 1, DVec3::new(10.0, 5.0, 0.0), DVec3::splat(0.1));
+    let spin = DVec3::new(0.0, 0.04, 0.0);
+    assert!(spin.length() < ContactSettings::DEFAULT.sleep_angular_speed);
+    for e in [bar, cube] {
+        phys.body_mut(e).expect("a body").angular_velocity = spin;
+    }
+    for _ in 0..60 {
+        phys.step(DT);
+    }
+    assert!(phys.is_sleeping(cube), "the small cube never slept");
+    assert!(
+        !phys.is_sleeping(bar),
+        "the bar slept with its ends moving at {} m/s",
+        2.0 * phys.body(bar).expect("a body").angular_velocity.length()
+    );
+}

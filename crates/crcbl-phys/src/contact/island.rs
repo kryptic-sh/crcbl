@@ -459,20 +459,36 @@ impl Islands {
 }
 
 /// Adds `dt` to the sleep timer of every awake dynamic body moving slower than
-/// `sleep_speed` and turning slower than `sleep_angular_speed`, and resets
-/// every other body's.
+/// `sleep_speed`, turning slower than `sleep_angular_speed`, and whose
+/// farthest point — `extent_of` its id, times its angular speed, on top of its
+/// linear speed — moves slower than `sleep_speed` too, and resets every other
+/// body's.
+///
+/// The last is Box2D v3's test (`b2FinalizeBodies`): it bounds the fastest
+/// point of a body whatever its size, where angular speed alone lets a body
+/// reaching well past a metre sleep while its rim still moves visibly. The
+/// angular threshold stays, so a body with no collider, which has no extent,
+/// cannot sleep while it spins.
 pub(crate) fn update_timers(
     awake: &mut AwakeSet,
     sleep_speed: f64,
     sleep_angular_speed: f64,
+    extent_of: impl Fn(BodyId) -> f64,
     dt: f64,
 ) {
     let speed = sleep_speed * sleep_speed;
     let turn = sleep_angular_speed * sleep_angular_speed;
-    for (body, time) in awake.bodies.iter().zip(awake.sleep_times.iter_mut()) {
+    for ((body, time), &id) in awake
+        .bodies
+        .iter()
+        .zip(awake.sleep_times.iter_mut())
+        .zip(&awake.ids)
+    {
         let slow = body.is_dynamic()
             && body.velocity.length_squared() < speed
-            && body.angular_velocity.length_squared() < turn;
+            && body.angular_velocity.length_squared() < turn
+            && body.velocity.length() + extent_of(id) * body.angular_velocity.length()
+                < sleep_speed;
         *time = if slow { *time + dt } else { 0.0 };
     }
 }

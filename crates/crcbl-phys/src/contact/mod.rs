@@ -216,12 +216,13 @@ impl ContactSettings {
     /// fast bodies swept.
     ///
     /// **The sleep thresholds.** Half a second under 5 cm/s is decision 4's,
-    /// and Box2D v3's `B2_TIME_TO_SLEEP` and default sleep threshold. Box2D
-    /// judges turning by the speed it gives the body's farthest point; this
-    /// judges it by angular speed, at 0.1 rad/s — the turn that moves a point
-    /// half a metre out at 5 cm/s, so for the half-metre props it is tuned for
-    /// the two agree. Angular speed has the merit that a body with no
-    /// collider, which has no farthest point, cannot sleep while it spins.
+    /// and Box2D v3's `B2_TIME_TO_SLEEP` and default sleep threshold. Turning
+    /// is judged twice: as Box2D judges it, by the speed it gives the body's
+    /// farthest point ([`crate::ColliderComponent::max_extent`]), which must
+    /// stay under the same 5 cm/s, and by angular speed, at 0.1 rad/s — the
+    /// turn that moves a point half a metre out at 5 cm/s. The first bounds a
+    /// large body's rim; the second keeps a body with no collider, which has
+    /// no farthest point, from sleeping while it spins.
     pub const DEFAULT: Self = Self {
         substeps: 4,
         contact_hertz: 30.0,

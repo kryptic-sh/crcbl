@@ -448,6 +448,57 @@ pub enum ColliderComponent {
 }
 
 impl ColliderComponent {
+    /// How far its farthest point is from the body's origin, which the body
+    /// turns about, in metres: what an angular speed is multiplied by to give
+    /// the fastest a point of the body moves.
+    ///
+    /// Exact for a sphere, a box and a compound (their farthest corners), and
+    /// for a capsule (the farther cap). A mesh answers the farthest vertex;
+    /// it is never on a dynamic body, which is the only kind that sleeps.
+    #[must_use]
+    pub fn max_extent(&self) -> f64 {
+        let farthest_corner = |centre: DVec3, rotation: DQuat, half: DVec3| {
+            let mut farthest: f64 = 0.0;
+            for x in [-half.x, half.x] {
+                for y in [-half.y, half.y] {
+                    for z in [-half.z, half.z] {
+                        farthest = farthest.max((centre + rotation * DVec3::new(x, y, z)).length());
+                    }
+                }
+            }
+            farthest
+        };
+        match self {
+            Self::Sphere { offset, radius, .. } => offset.length() + radius,
+            Self::Box {
+                offset,
+                half_extents,
+                ..
+            } => farthest_corner(*offset, DQuat::IDENTITY, *half_extents),
+            Self::Capsule {
+                offset,
+                radius,
+                half_height,
+                ..
+            } => {
+                let cap = DVec3::new(0.0, *half_height, 0.0);
+                (*offset + cap).length().max((*offset - cap).length()) + radius
+            }
+            Self::Compound { offset, shape, .. } => shape
+                .parts()
+                .iter()
+                .map(|part| {
+                    farthest_corner(*offset + part.centre, part.rotation, part.half_extents)
+                })
+                .fold(0.0, f64::max),
+            Self::Mesh { mesh, .. } => mesh
+                .vertices()
+                .iter()
+                .map(|vertex| vertex.length())
+                .fold(0.0, f64::max),
+        }
+    }
+
     /// How many shapes it is to the contact pipeline: its parts for a
     /// compound, its triangles for a mesh, one for anything else.
     #[must_use]
@@ -613,5 +664,43 @@ mod tests {
         };
         let c2 = c.clone();
         assert_eq!(c, c2);
+    }
+
+    /// **Each shape's farthest point from the body's origin**, checked
+    /// against values worked by hand.
+    #[test]
+    fn max_extent_is_the_farthest_point_of_each_shape() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        let sphere = ColliderComponent::Sphere {
+            offset: DVec3::new(3.0, 4.0, 0.0),
+            radius: 1.0,
+            is_trigger: false,
+        };
+        assert!(close(sphere.max_extent(), 6.0));
+        let cuboid = ColliderComponent::Box {
+            offset: DVec3::ZERO,
+            half_extents: DVec3::new(1.0, 2.0, 2.0),
+            is_trigger: false,
+        };
+        assert!(close(cuboid.max_extent(), 3.0));
+        let capsule = ColliderComponent::Capsule {
+            offset: DVec3::new(0.0, 1.0, 0.0),
+            radius: 0.5,
+            half_height: 1.0,
+            is_trigger: false,
+        };
+        assert!(close(capsule.max_extent(), 2.5), "the upper cap");
+        let shape = CompoundShape::from_aabbs(&[crate::collider::Aabb::from_centre_half(
+            DVec3::new(2.0, 0.0, 0.0),
+            DVec3::new(1.0, 2.0, 2.0),
+        )])
+        .expect("one part");
+        let compound = ColliderComponent::Compound {
+            offset: DVec3::new(1.0, 0.0, 0.0),
+            shape,
+            is_trigger: false,
+        };
+        // The corner at (1 + 2 + 1, 2, 2).
+        assert!(close(compound.max_extent(), 24.0_f64.sqrt()));
     }
 }

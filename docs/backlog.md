@@ -10621,15 +10621,6 @@ force providers_. From rung 2:
   - `PhysicsSystem::disturb` walks every contact; per-body contact lists
     (decision 8) would bound it.
   - Per-body sleep thresholds are not built (system-wide in `ContactSettings`).
-  - **The angular threshold (decided 2026-09-25: Box2D's farthest-point
-    check).** Plain angular speed lets a body reaching well past a metre sleep
-    while its rim moves faster than 5 cm/s; the options were keep it, add
-    Box2D's farthest-point check, or make it per body. **Why:** Box2D v3's
-    `b2FinalizeBodies` compares linear speed plus `maxExtent × angular speed`
-    against the sleep threshold, which bounds the fastest point's speed whatever
-    the body's size and needs no per-body tuning. Not built yet: it moves
-    tumble's pinned hash, which has to be re-pinned and re-proved by the
-    `pages.yml` browser gate in the same change.
   - A stack sleeps before it is still (the 2.4 mm above); a longer
     `time_to_sleep` or a lower speed threshold trades that against later sleep.
   - The island structure is not hashed, only each body's sleep state.
@@ -25447,8 +25438,9 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   `Menu` at its minimum size, the fixed-view sheen riding on reflections, no
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
-  meeting the every-packet-sealed rule. To build: Box2D's farthest-point sleep
-  check. glam's bump is in the first-priority dependency entry at the top.
+  meeting the every-packet-sealed rule. Every one marked to build has shipped,
+  the farthest-point sleep check last. glam's bump is in the first-priority
+  dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
