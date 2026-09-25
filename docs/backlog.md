@@ -39,11 +39,14 @@ main.
 
 **What is left:**
 
-- **Slang 2026.14 → 2026.18.2.** `SLANG_VERSION` in
-  `crates/crcbl-shaders/tools/compile-shaders.sh` and `ci.yml`, then every
-  artifact regenerated through CI's `regenerated-shaders` artifact (a local
-  Windows build reproduces SPIR-V only) and the goldens rerun. dxc v1.9.2607 is
-  already the latest.
+- **Slang 2026.14 → 2026.18.2: done 2026-09-25** (`7c536496`, `42fd36b0`),
+  through CI's `regenerated-shaders` artifact on branch `deps/slang-2026.18`,
+  which passed CI whole. The WGSL and DXIL came out unchanged; 46 Metal files
+  changed, mostly `#line` directives, as did nine SPIR-V modules, and
+  `crcbl-mtl`'s embedded copy of `indirect_count_args.metal` moved with them.
+  dxc v1.9.2607 is already the latest. The local `~/.local/opt` slangc on the
+  Windows machine is still 2026.14 and now warns; installing 2026.18.2 there
+  restores the byte check. The branch can be deleted once main is green.
 - **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
   `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
   second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every
