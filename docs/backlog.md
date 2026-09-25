@@ -26,16 +26,16 @@ update; EW asked for the same and matches crcbl's toolchain. Surveyed 2026-09-25
 with `cargo update --dry-run`, `cargo info` on every direct registry dependency
 and each action's latest release.
 
-**Done locally 2026-09-25, pending CI:** `cargo update` (27 packages, `glam`
-0.33.10 and `syn` 3.0.6 among them); CI's `cargo-nextest` 0.9.146, `cargo-deny`
-0.20.2, `cargo-llvm-cov` 0.9.1 and `cargo-fuzz` 0.13.2; Rust 1.98.1, whose new
-`clippy::chunks_exact_to_as_chunks` lint was applied across the workspace. glam
-0.33.8 moved tumble's pinned hash; CI's Linux, Windows and macOS jobs on
-Dependabot PR #23 all reported the same new value, which is pinned now. **The
-browser gate in `pages.yml` is what proves wasm32 agrees**; if it does not, glam
-goes back to `=0.33.7` with a Dependabot ignore, because the determinism rule in
-`docs/notes/simulation.md` needs every target on one hash. Close PR #23 once
-main carries its versions.
+**Done 2026-09-25** (pushed as `36533982` and `1f8e9b27`): `cargo update` (27
+packages, `glam` 0.33.10 and `syn` 3.0.6 among them); CI's `cargo-nextest`
+0.9.146, `cargo-deny` 0.20.2, `cargo-llvm-cov` 0.9.1 and `cargo-fuzz` 0.13.2;
+Rust 1.98.1, whose new `clippy::chunks_exact_to_as_chunks` lint was applied
+across the workspace. glam 0.33.8 moved tumble's pinned hash to
+`0xb06b_0027_3d78_81d5`, and **all four targets agree on it**: CI's x86-64 Linux
+and Windows and aarch64 macOS jobs, and wasm32 in the `pages.yml` browser gate
+(run 36125308431, "render tumble in a real browser"), so the determinism rule in
+`docs/notes/simulation.md` holds on 0.33.10. Dependabot PR #23 is superseded by
+main.
 
 **What is left:**
 
@@ -25448,10 +25448,22 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   respect enabled, modal and global contexts), registered fonts, Menu
   captions/fit/scroll, ellipsis and `Ui::text`, glyph runs carrying text,
   `Grid::can_move_within`, grid_drag turn/in-place drop/rectangular cells, and
-  the prone fit check and crawl. Owed to it next: the prone turn sweep and
-  stance switch (entry "A lying capsule for prone characters"). Rebind
-  persistence, which EW asked for on 2026-09-25, shipped the same day
-  (`Binding`'s text form and `ActionMap::overrides`/`apply_overrides`).
+  the prone fit check and crawl. Owed to it next, in this order: the prone turn
+  sweep and stance switch (entry "A lying capsule for prone characters"); **pad
+  chords**, asked 2026-09-25 — a
+  `Binding::PadChord { modifier: PadButton, button: PadButton }` with
+  `Binding::Chord`'s two rules (the more specific binding takes the button while
+  the modifier is held; the modifier is read, not consumed), since EW is out of
+  pad buttons for leans, fire mode, hold breath and its quickslots; and **a
+  scrolled `grid_drag::CellGrid`**, asked 2026-09-25 so EW's stash can move onto
+  `grid_drag`: a grid in content cells with a visible window (first visible row
+  and column plus the visible size), where `cell_at` answers content cells
+  inside the window and `None` outside it, `cell_bounds` covers the drawn cells,
+  grips and drop targets stay in content cells so an item partly scrolled off
+  can be grabbed by its visible part, and a held drag keeps working while the
+  grid scrolls under it. Rebind persistence, which EW asked for on 2026-09-25,
+  shipped the same day (`Binding`'s text form and
+  `ActionMap::overrides`/`apply_overrides`).
 - **Process:** push only after the previous push's CI and Pages finish (the
   concurrency group cancels older runs, and EW pins only green commits); run
   CI's exact wasm32 rustdoc and `tools/check-wrapped-strings.sh` before pushing;
