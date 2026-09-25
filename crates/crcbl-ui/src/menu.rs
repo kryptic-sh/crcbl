@@ -2037,7 +2037,8 @@ impl std::fmt::Display for MenuFitError {
                 room,
             } => write!(
                 f,
-                "the menu is {width}px wide at a {font_size}px font, the smallest                  it may shrink to, and the window has room for {room}px"
+                "the menu is {width}px wide at a {font_size}px font, the smallest it may \
+                 shrink to, and the window has room for {room}px"
             ),
             Self::TooShort {
                 font_size,
@@ -2045,7 +2046,8 @@ impl std::fmt::Display for MenuFitError {
                 room,
             } => write!(
                 f,
-                "the menu needs {height}px to show one row at a {font_size}px                  font, the smallest it may shrink to, and the window has room                  for {room}px"
+                "the menu needs {height}px to show one row at a {font_size}px font, the \
+                 smallest it may shrink to, and the window has room for {room}px"
             ),
         }
     }
