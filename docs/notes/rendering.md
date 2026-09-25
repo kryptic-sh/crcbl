@@ -854,8 +854,8 @@ texel-snapped cascades, spot and point maps as atlas tiles, `AtlasAllocator` in
 `shadow/atlas.rs`, the cadence's `schedule` in `shadow/cadence.rs`, the
 `r_shadow_filter` selector — `mesh.slang`'s bias, cross-fade and filter ladder,
 `DebugView::Cascades` and `DebugView::ShadowAtlas`, and the contact-shadow pass
-(`crcbl_render::contact_shadows`, `contact_shadows.slang`), which is parked
-outside `RenderEffects::DEFAULT_STACK`. What it left open is in
+(`crates/crcbl-render/src/contact_shadows.rs`, `contact_shadows.slang`), which
+is parked outside `RenderEffects::DEFAULT_STACK`. What it left open is in
 `docs/backlog.md` under _What the deleted 45-shadows plan left unbuilt_, which
 lists the entries that carry it. It was split out of
 `docs/plan/18-render-features.md` on 2026-08-27; `apps/sundial` is its
@@ -1115,9 +1115,10 @@ occlusion view left owed_, _What screen-space AO left owed_ and the raster
 lighting stack's bullet on the low tier's scalar pass. It specified the
 occlusion chain: a depth prepass, a gather at half resolution (GTAO in
 `ssao.slang`, or the eight-tap hemisphere in `ssao_hemisphere.slang`, chosen by
-`crcbl_render::ssao`'s `r_ssao_technique`), a depth-weighted blur, a depth-aware
-upsample and a consumer in `mesh.slang`. The shader headers describe the pass as
-it stands; what follows is the rules and their reasons, which live nowhere else.
+`crates/crcbl-render/src/ssao.rs`'s `r_ssao_technique`), a depth-weighted blur,
+a depth-aware upsample and a consumer in `mesh.slang`. The shader headers
+describe the pass as it stands; what follows is the rules and their reasons,
+which live nowhere else.
 
 - **The prepass is the shadow pipeline, and the forward pass trusts its depth.**
   `shadow_pipeline` is already the depth-only twin of the colour pipeline, so
@@ -2265,13 +2266,13 @@ lantern's old CPU bake, since both landed before this reading. The ratio is not:
 and its half-point is the AO defaults alone.
 
 **The industry answer is an AO intensity control, and it was built on
-2026-09-02** — `r_ssao_intensity`, a console variable in `crcbl_render::ssao`
-that `ssao_upsample.slang` raises its reconstructed visibility to, applied to
-the scalar occlusion before `mesh.slang` tints it. It is a power rather than a
-blend towards one, because a blend can only lift the answer back towards
-unoccluded and this knob exists to ask for more occlusion than the horizons
-found. Range `0.25 ..= 4.0`, argued from the curve's slope at an unoccluded
-surface.
+2026-09-02** — `r_ssao_intensity`, a console variable in
+`crates/crcbl-render/src/ssao.rs` that `ssao_upsample.slang` raises its
+reconstructed visibility to, applied to the scalar occlusion before `mesh.slang`
+tints it. It is a power rather than a blend towards one, because a blend can
+only lift the answer back towards unoccluded and this knob exists to ask for
+more occlusion than the horizons found. Range `0.25 ..= 4.0`, argued from the
+curve's slope at an unoccluded surface.
 
 **What that does _not_ do is restore the margin, and this entry stays open for
 that reason.** The default is 1.0 and is exactly identity, so every figure above
@@ -2336,14 +2337,15 @@ Decision record; the decision is in `docs/backlog.md`.
   the widening on _every_ tier, because
   `crcbl_render::TransientImageDesc::ambient_occlusion` is one format and a
   per-tier format means a second pipeline, a second bind-group layout and a
-  second `mesh.slang` binding type. `crcbl_render::ssao::r_ssao_bent_normals`
-  turns off the _arithmetic_ and nothing turns off the bandwidth. Whether low
-  should set it — and through what, since a console variable is not reachable
-  from a preset — was the same open question as the two knobs in this file's
-  HIGH PRIORITY entry and the contact-shadow entry. **Answered since:**
-  `crcbl::settings`' `SSAO_BENT_NORMALS_KEY` is the `[engine.video]` key, and
-  `crcbl::settings::presets` writes it `false` for Low and `true` for Medium and
-  High, so low pays the bandwidth and not the arithmetic.
+  second `mesh.slang` binding type. `r_ssao_bent_normals` in
+  `crates/crcbl-render/src/ssao.rs` turns off the _arithmetic_ and nothing turns
+  off the bandwidth. Whether low should set it — and through what, since a
+  console variable is not reachable from a preset — was the same open question
+  as the two knobs in this file's HIGH PRIORITY entry and the contact-shadow
+  entry. **Answered since:** `crcbl::settings`' `SSAO_BENT_NORMALS_KEY` is the
+  `[engine.video]` key, and `crcbl::settings::presets` writes it `false` for Low
+  and `true` for Medium and High, so low pays the bandwidth and not the
+  arithmetic.
 
 - **The direction is written in world space, not the view space the brief asked
   for.** Every other part of the encoding decision is as specified. The reason
@@ -2412,9 +2414,9 @@ reflection colour and a froxel lookup share neither that channel layout nor the
 far-plane fallback, so making it serve three readers is a generalisation with
 real design in it — a rung, not a binding somebody forgot to add.
 
-(This entry said `R8Unorm` until 2026-09-04, and so did `crcbl_render::ssao`'s
-own module header. The target widened to four channels when bent normals landed
-2026-09-02 — `ssao.rs`'s pipeline builds
+(This entry said `R8Unorm` until 2026-09-04, and so did
+`crates/crcbl-render/src/ssao.rs`'s own module header. The target widened to
+four channels when bent normals landed 2026-09-02 — `ssao.rs`'s pipeline builds
 `ColorTargetState::opaque(Format::Rgba8Unorm)` and the shader's `fragmentMain`
 returns a `float4`. The argument survives the correction and is stronger for it:
 a reflection colour is four channels too, and still not these four.)

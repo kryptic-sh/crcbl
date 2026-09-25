@@ -8142,19 +8142,20 @@ plan left behind_. What the slice deferred or turned up:
   **0.258 ms p50 / 0.263 ms p95**, 26.0% of a 0.990 ms p50 total, summed across
   both views. What is **not** measured is GTAO against the eight-tap hemisphere
   it replaced. That no longer needs a `git show`: the hemisphere came back on
-  2026-09-04 as `shaders/ssao_hemisphere.slang`, and `crcbl_render::ssao`'s
-  `r_ssao_technique` (`gtao` or `hemisphere`) selects which body each side of
-  the split seam runs. Finishing it means running
-  `lantern --headless --frames 400 --size 1920x1080` under `RUST_LOG=info` with
-  each technique on radv, lavapipe and in the browser, and reading the `ssao`,
-  `ssao-blur` and `ssao-upsample` rows off `crcbl_render::PassStats`. It is what
-  a quality seam would need in order to offer the cheaper rung honestly, and it
-  is the input to the low tier's open technique choice (_The raster lighting
-  stack: what its twelve calls left_). **Half-resolution AO retired the headline
-  on 2026-09-02**: the whole occlusion chain now measures 0.141 ms against the
-  forward pass's 0.254 ms at the same extent on the same card, so the forward
-  pass is the frame's most expensive. The 0.255 ms figures above stay as the
-  dated measurement of the pass this entry was written about.
+  2026-09-04 as `shaders/ssao_hemisphere.slang`, and
+  `crates/crcbl-render/src/ssao.rs`'s `r_ssao_technique` (`gtao` or
+  `hemisphere`) selects which body each side of the split seam runs. Finishing
+  it means running `lantern --headless --frames 400 --size 1920x1080` under
+  `RUST_LOG=info` with each technique on radv, lavapipe and in the browser, and
+  reading the `ssao`, `ssao-blur` and `ssao-upsample` rows off
+  `crcbl_render::PassStats`. It is what a quality seam would need in order to
+  offer the cheaper rung honestly, and it is the input to the low tier's open
+  technique choice (_The raster lighting stack: what its twelve calls left_).
+  **Half-resolution AO retired the headline on 2026-09-02**: the whole occlusion
+  chain now measures 0.141 ms against the forward pass's 0.254 ms at the same
+  extent on the same card, so the forward pass is the frame's most expensive.
+  The 0.255 ms figures above stay as the dated measurement of the pass this
+  entry was written about.
 - **GTAO made the depth buffer's last bits visible on a fourth scene.**
   `Scene::Probes` now needs an LSB budget in `path_lsb_channels`, joining
   `Dunes`, `PointShadow` and `Ssr` — two adjacent red channels, one level, on
@@ -18040,25 +18041,6 @@ pipeline, and the link block at the bottom of the file has never been exercised.
 **Left to the owner on 2026-09-25**, when the other open decisions were taken: a
 tag cannot be taken back, so this is the one decision here not made unasked. Not
 a blocker for anything.
-
-### Two `crcbl-render` modules are private and cited by crate path
-
-`crcbl-render/src/lib.rs` declares `mod ssao;` and `mod contact_shadows;`
-without `pub`, while `docs/notes/rendering.md` names items by paths like
-`crcbl_render::ssao::bent_normals` and `crcbl_render::contact_shadows`. Every
-item exists at those paths inside the crate and the console variables are
-reachable by their console names, so nothing is broken and
-`tools/check-doc-citations.sh` passes — but a reader following one of those
-paths from outside the crate finds nothing, and a rustdoc link to one would not
-resolve.
-
-**Decided 2026-09-25: make them `pub`**, as `hiz` is; the asymmetry looks
-accidental and the paths already read as public. Not built. Two ways out and no
-decision yet: make the modules `pub` — they are peers of `hiz`, which already
-is, so the asymmetry looks accidental — or reword the citations to name the
-console variable and the shader instead. Raised by the 2026-09-03 plan audit and
-not fixed, because which one is right depends on whether those modules are meant
-to be part of the crate's surface.
 
 ### The counted-claims sweep is done for `apps/*`; the wider one is not
 
