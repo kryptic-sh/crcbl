@@ -18,6 +18,37 @@ complete the required verification and shipping gates before starting the next
 production change. Authored interior and browser culling measurements, CPU
 draw-recording cost, and overlapping grass workloads remain open below.
 
+## First priority: every dependency on its latest stable release, CI green (2026-09-25)
+
+**Ahead of everything below.** The owner asked for the dependencies Dependabot
+tracks to be brought to their latest stable versions, with CI green after the
+update; EW asked for the same and matches crcbl's toolchain. Surveyed 2026-09-25
+with `cargo update --dry-run`, `cargo info` on every direct registry dependency
+and each action's latest release.
+
+**Done locally 2026-09-25, pending CI:** `cargo update` (27 packages, `glam`
+0.33.10 and `syn` 3.0.6 among them); CI's `cargo-nextest` 0.9.146, `cargo-deny`
+0.20.2, `cargo-llvm-cov` 0.9.1 and `cargo-fuzz` 0.13.2; Rust 1.98.1, whose new
+`clippy::chunks_exact_to_as_chunks` lint was applied across the workspace. glam
+0.33.8 moved tumble's pinned hash; CI's Linux, Windows and macOS jobs on
+Dependabot PR #23 all reported the same new value, which is pinned now. **The
+browser gate in `pages.yml` is what proves wasm32 agrees**; if it does not, glam
+goes back to `=0.33.7` with a Dependabot ignore, because the determinism rule in
+`docs/notes/simulation.md` needs every target on one hash. Close PR #23 once
+main carries its versions.
+
+**What is left:**
+
+- **Slang 2026.14 → 2026.18.2.** `SLANG_VERSION` in
+  `crates/crcbl-shaders/tools/compile-shaders.sh` and `ci.yml`, then every
+  artifact regenerated through CI's `regenerated-shaders` artifact (a local
+  Windows build reproduces SPIR-V only) and the goldens rerun. dxc v1.9.2607 is
+  already the latest.
+- **Held, with the reason:** `rand_core` and `rand_chacha` stay on 0.9, since
+  `proptest` 1.11 (its latest) still depends on that line and 0.10 would put a
+  second copy under `deny.toml`'s duplicate ban. Move when proptest does. Every
+  GitHub Action is already on its latest major.
+
 ## Performance review and execution priority (2026-09-17)
 
 Performance work takes priority over feature expansion. Complete the review and
@@ -3064,8 +3095,11 @@ No shader changed.
   loses the sheen entirely, and an icon's look then depends on the quality tier.
   A tier-independent version needs a constant specular term in `mesh.slang` (the
   environment times the `dfg` pair `fragmentMain` already reads), which is the
-  `mesh.slang` edit the vk surprise below makes risky. Needs a decision on
-  whether EW ships a tier without reflections.
+  `mesh.slang` edit the vk surprise below makes risky. **Decided 2026-09-25: no
+  shader change until a tier without reflections actually ships.** No consumer
+  has asked for one (EW's presets were not read from here); the owed part is
+  making the dependency visible, a sentence on `ViewLighting::Fixed` saying the
+  sheen needs `RenderEffects::REFLECTIONS` in the view's effects.
 - **Not verified on a metal.** The sheen e2e
   (`a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen`) covers a
   near-black dielectric only; a metallic icon should reflect the environment
@@ -3150,15 +3184,18 @@ interaction card, with the gaps below.
 (`MenuLayout::viewport`/`scroll`/`shows`, `Menu::scroll_wheel`) landed for EW's
 scene menu with the gaps below.
 
-- **Needs a decision: scroll at the smallest size, or at the largest that fits
-  the width.** Once even `MenuStyle::MIN_FONT_SIZE` is too tall, the list
-  scrolls at that minimum, which shows the most rows. The cost is a short, wide
-  window: by this rule a seventeen-row menu at 1440x400 scrolls in 8px text even
-  where its width would allow its ceiling's (reasoned from the rule, not run).
-  The alternative — scroll at the largest step whose _width_ fits — reads better
-  there and shows fewer rows everywhere. The tests' stand-in for EW's menu is
-  held near the minimum by its seventy-character descriptions at 480 wide
-  anyway, so at EW's smallest window the two differ little.
+- **Scroll at the smallest size, or at the largest that fits the width (decided
+  2026-09-25: the smallest, as built).** EW is the only consumer, and at EW's
+  smallest window the two rules differ little; the short, wide window that would
+  read better under the other rule is reasoned, not run. Revisit with a
+  screenshot of that case. Once even `MenuStyle::MIN_FONT_SIZE` is too tall, the
+  list scrolls at that minimum, which shows the most rows. The cost is a short,
+  wide window: by this rule a seventeen-row menu at 1440x400 scrolls in 8px text
+  even where its width would allow its ceiling's (reasoned from the rule, not
+  run). The alternative — scroll at the largest step whose _width_ fits — reads
+  better there and shows fewer rows everywhere. The tests' stand-in for EW's
+  menu is held near the minimum by its seventy-character descriptions at 480
+  wide anyway, so at EW's smallest window the two differ little.
 - **A keyboard-only caller sees the selection held at the list's edge.**
   `Menu::layout_with_font_fitted` is `&self`, so the scroll it settles on
   reaches the model only through `Menu::point` or `Menu::scroll_wheel`. A caller
@@ -3795,8 +3832,8 @@ green local run.
   `CRCBL_SLANGC=~/.local/bin/slangc CRCBL_DXC=~/.local/bin/dxc crates/crcbl-shaders/tools/compile-shaders.sh`,
   then again with `--check`; `CRCBL_DXC` has no PATH fallback, and Arch's
   `directx-shader-compiler` is a preview build the script refuses.
-- **`cargo-nextest` 0.9.140**, the version CI pins, from
-  `https://get.nexte.st/0.9.140/linux` extracted into `~/.cargo/bin`. Every
+- **`cargo-nextest` 0.9.146**, the version CI pins, from
+  `https://get.nexte.st/0.9.146/linux` extracted into `~/.cargo/bin`. Every
   `run-*-e2e.sh` needs it.
 - **The Khronos validation layer.** The suites refuse to run without it
   ("validation was not enabled, so this proves nothing"). Arch's
@@ -5174,26 +5211,6 @@ on that page while still skipping the fetch. Any `mesh.slang` edit needs every
 artifact regenerated (Slang 2026.14, DXC 1.9, SPIRV-Tools 2026.1); `dxc` is
 Linux-only, so a diagnostic Linux workflow is the route — the fork's
 `shader-regen` branch is the one this slice used.
-
-## Needs a decision: Dependabot's glam 0.33.8 bump breaks the pinned hashes (2026-09-25)
-
-Dependabot PR #23 bumps `glam` 0.33.7 to 0.33.8 (and `syn`). **Do not merge it
-as is.** Its CI fails on Linux, Windows, macOS and coverage in two tests:
-tumble's `scene::tests::the_hash_at_the_check_tick_is_the_pinned_one` and
-`crcbl-cli`'s `lod_stats_says_which_dag_levels_did_not_halve`. glam 0.33.8's
-changelog says why the numbers move: the `fast-math` feature is deprecated to a
-no-op and "the SIMD back-ends use fused multiply-add whenever the target
-supports it". That runs into the determinism decision recorded in
-`docs/notes/simulation.md` (sim crates ban FMA contraction), and FMA "whenever
-the target supports it" risks the native and wasm builds disagreeing, which is
-what tumble's pinned hash (checked in the browser by `pages.yml`) guards.
-
-The options: **pin `glam = "=0.33.7"`** in the workspace `Cargo.toml` and tell
-Dependabot to ignore 0.33.8 until glam offers a way to turn FMA off, keeping
-today's determinism; or **take the bump and re-pin the hashes**, which is safe
-only after proving x86-64, aarch64 and wasm32 produce the same state hash (the
-LOD stats change is a graphics-side number and would be re-blessed with it).
-Found by reading the PR's CI logs; nothing was changed in the tree.
 
 ## Two more Pages browser jobs timed out once and passed on rerun (2026-09-25)
 
@@ -10487,7 +10504,10 @@ force providers_. From rung 2:
   (solver time comparable with Box3D's benchmark, its own counters on the page)
   and the column with the dominoes. One system would show per-group substeps
   costing the rest nothing, but needs `page.rs` and `app.rs` to split one tally
-  per scene. Needs a decision.
+  per scene. **Decided 2026-09-25: keep two systems.** The split tally is page
+  work for a demo point that the column's own counters already make, and the
+  pyramid's counters stay comparable with Box3D's benchmark only while it runs
+  alone.
 - **A sleeping stack freezes mid-sway, by the sleep thresholds (a surprise, not
   a bug).** A tall column's slow sway sits under `ContactSettings::sleep_speed`,
   so the 14-cube column in `stacking.rs` falls asleep at tick 49 leaning 8.52
@@ -10502,31 +10522,40 @@ force providers_. From rung 2:
   (distance, revolute, prismatic, weld, spherical) with limits, motors, breaking
   and per-group substeps (`PhysicsSystem::set_substeps`); tumble's Bridge room
   on key 6. Open:
-  - **Needs a decision: the rotation rule is split.** Joint impulses turn bodies
-    in full (fixing a 21-plank bridge that gained 3.4 kJ and flew apart);
-    contact impulses keep the midpoint rule, because the full rule leaned the
-    14-cube column 4.9 cm where it holds to 1.8 mm. Unify if stacking is
-    retuned.
-  - **Needs a decision: a group's stiffness scales with its substeps** (our
-    choice, not Box2D's); the alternative is an explicit per-group stiffness.
+  - **The rotation rule is split (decided 2026-09-25: keep the split).** Joint
+    impulses turn bodies in full (fixing a 21-plank bridge that gained 3.4 kJ
+    and flew apart); contact impulses keep the midpoint rule, because the full
+    rule leaned the 14-cube column 4.9 cm where it holds to 1.8 mm. **Why
+    kept:** each rule is the measured better one in its own solve, and unifying
+    either way regresses a scene that works; unify when stacking is retuned, and
+    measure both scenes then.
+  - **A group's stiffness scales with its substeps (decided 2026-09-25: keep
+    it).** This is our choice, not Box2D's; the alternative was an explicit
+    per-group stiffness. **Why kept:** one knob (`set_substeps`) makes a column
+    stand, nothing has asked to tune the two apart, and an explicit stiffness
+    can be added later without changing what a caller already wrote.
   - Heavy loads on light chains (an 800 kg anvil on 5 kg planks, 160:1) stretch
     unbreakable hinges up to 8 cm for a few ticks: the sequential solver's
     mass-ratio limit, helped only partly by substeps.
-  - **Needs a decision: an island sleeps however deep its contacts are.** Sleep
-    reads only speed (`ContactSettings::sleep_speed`, `sleep_angular_speed`), so
-    a stack that reaches a still equilibrium while interpenetrated sleeps with
-    the overlap in it. Reported by EW 2026-09-25 (EW's authoring bug, since
-    fixed there): a light slug spawned about 1 cm inside an 11-part shotgun that
-    was lying on it, on a static table, slept with the two bodies 9–11 mm into
-    each other and the slug 2.7 mm into the table. Alone, the same slug rests
-    0.08 mm in, which is the contact spring's compression, verified in a scratch
-    reproduction. The depth under the heavy body is the soft contact's
-    mass-ratio limit, the same one the anvil-on-planks case above shows. The
-    option is to keep an island awake while any touching contact is deeper than
-    some bound (a few linear slops), so the push-out gets its chance. It would
-    cost a per-island depth check each tick, and in a genuinely heavy-on-light
-    stack it could hold an island awake forever. Not decided; nothing asks for
-    it.
+  - **An island sleeps however deep its contacts are (decided 2026-09-25: it
+    still may).** Sleep reads only speed (`ContactSettings::sleep_speed`,
+    `sleep_angular_speed`), so a stack that reaches a still equilibrium while
+    interpenetrated sleeps with the overlap in it. Reported by EW 2026-09-25
+    (EW's authoring bug, since fixed there): a light slug spawned about 1 cm
+    inside an 11-part shotgun that was lying on it, on a static table, slept
+    with the two bodies 9–11 mm into each other and the slug 2.7 mm into the
+    table. Alone, the same slug rests 0.08 mm in, which is the contact spring's
+    compression, verified in a scratch reproduction. The depth under the heavy
+    body is the soft contact's mass-ratio limit, the same one the
+    anvil-on-planks case above shows. The option is to keep an island awake
+    while any touching contact is deeper than some bound (a few linear slops),
+    so the push-out gets its chance. It would cost a per-island depth check each
+    tick, and in a genuinely heavy-on-light stack it could hold an island awake
+    forever. **Why no depth check:** the report was an authoring overlap EW has
+    fixed, a correctly placed body rests at the spring's compression, and the
+    check's failure mode (an island that never sleeps, costing solver time
+    forever) is worse than the one it removes. Revisit if a correctly authored
+    scene sleeps visibly interpenetrated.
   - Not built: the six-degree-of-freedom joint (L3's generic joint, with a lock,
     a limit and a motor per axis), the spherical joint's spring, the distance
     joint's spring force range. From the mesh half: no contact reduction across
@@ -10550,9 +10579,15 @@ force providers_. From rung 2:
   browser gate in `pages.yml` is what proves wasm matches it.
 - Not built: the Galton board (tumble milestone 4). Not reviewed: the Tower
   room's browser cost (245 more boxes a tick in wasm).
-- **Needs the user's review: test bounds widened across rungs 2 and 3
-  (2026-09-23).** Each was measured and explained, but the rule is that a
-  tolerance is not widened to make a change pass, so they wait for an OK:
+- **Test bounds widened across rungs 2 and 3 (2026-09-23; decided 2026-09-25:
+  all three accepted).** Each was measured and explained, but the rule is that a
+  tolerance is not widened to make a change pass, so they waited for an OK.
+  **Why accepted:** none of them hides a regression. The wall bound is 1 cm over
+  rung 1's and comes from two dropped bodies meeting, which no rung claims to
+  sweep; making the drops bullets would test a different scene, and sweeping
+  every dynamic pair is rung-6-sized work. The pyramid's 3 mm is a sleep
+  artefact, and the 1 mm claim is still held awake. The four sleep-off tests
+  measure the awake solver, which a sleeping stack would skip. The three:
   - `apps/tumble` wall penetration. Rung 2 widened the any-tick bound 4 → 8 cm
     and rung 3 to 10 cm, both from fast-spinning cubes tunnelling into pegs.
     Rung 4's sweeps (2026-09-23) brought the last-tick bound back to rung 1's 1
@@ -10577,9 +10612,15 @@ force providers_. From rung 2:
   - `PhysicsSystem::disturb` walks every contact; per-body contact lists
     (decision 8) would bound it.
   - Per-body sleep thresholds are not built (system-wide in `ContactSettings`).
-  - **Needs a decision: the angular threshold.** Plain angular speed lets a body
-    reaching well past a metre sleep while its rim moves faster than 5 cm/s;
-    options are keep it, add Box2D's farthest-point check, or make it per body.
+  - **The angular threshold (decided 2026-09-25: Box2D's farthest-point
+    check).** Plain angular speed lets a body reaching well past a metre sleep
+    while its rim moves faster than 5 cm/s; the options were keep it, add
+    Box2D's farthest-point check, or make it per body. **Why:** Box2D v3's
+    `b2FinalizeBodies` compares linear speed plus `maxExtent × angular speed`
+    against the sleep threshold, which bounds the fastest point's speed whatever
+    the body's size and needs no per-body tuning. Not built yet: it moves
+    tumble's pinned hash, which has to be re-pinned and re-proved by the
+    `pages.yml` browser gate in the same change.
   - A stack sleeps before it is still (the 2.4 mm above); a longer
     `time_to_sleep` or a lower speed threshold trades that against later sleep.
   - The island structure is not hashed, only each body's sleep state.
@@ -11168,12 +11209,13 @@ deleted 19-input plan left behind_.
   tell which spoke; a per-class grouping in the asset would be presentation over
   that list, not a change to it. `ron` has been a workspace dependency since
   2026-09-06, so what is owed is the binding asset's schema, not a reader.
-- **Rebind persistence.** `ActionMap::rebind` exists and is in-memory only — it
-  overwrites `slot.decl.bindings` and re-resolves. Nothing serialises it, and
-  `crcbl-store` has no profile or binding type. The rule it must meet: a
-  player's rebinds are stored as **diffs over the game's defaults**, never as a
-  copy of the whole set. Where the diff lives is a fork, set out under _The
-  plan-document audit of 2026-08-23_.
+- **Rebind persistence: the engine half shipped 2026-09-25.** `Binding`'s text
+  form (`crcbl_input::binding_text`) and `ActionMap::overrides` /
+  `apply_overrides` keep the rule that a player's rebinds are **diffs over the
+  game's defaults**; each game stores the list where it likes (EW in its
+  `settings.toml` under `[game.input]`). Not built: a `crcbl-store` profile type
+  for it, which nothing has asked for, and a binding's text inside the RON
+  binding asset above, once that asset has a schema.
 - **Glyph hints.** No glyph anything in `crcbl-input`. The design: a hint shows
   the binding for `ActionMap::last_device` (Ⓐ against `Space`, switching as the
   player does), and a pad's printed label comes from its family —
@@ -11239,11 +11281,20 @@ deleted 19-input plan left behind_.
       South accepting a panel also reaches the game. Keys are claimed per key; a
       snapshot covers the whole pad, so claiming means masking bound buttons out
       of what the game sees. Options: mask ui-bound buttons while a panel has
-      input, or leave it to games (`FrameInfo::paused`).
+      input, or leave it to games (`FrameInfo::paused`). **Decided 2026-09-25:
+      mask them.** Keys already work this way (a claimed key never reaches the
+      game), so a pad that behaves differently is a trap every game would
+      rediscover through South accepting a panel and also jumping. Not built
+      yet.
     - **Needs a decision: pads drive the loop while the window is unfocused.**
       XInput reports regardless of focus and the loop tracks only the focus-lost
       edge, so a pad can resume a background window. Options: stop delivering
-      while unfocused (tracking focus gained too), or accept it.
+      while unfocused (tracking focus gained too), or accept it. **Decided
+      2026-09-25: stop delivering while unfocused.** It is SDL's default
+      (`SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS` off), keyboard and mouse
+      already stop, and a player alt-tabbed to a browser should not be steering
+      the game behind it. A game that wants background pads can ask for an
+      opt-in later. Not built yet.
     - A game that queues pad events for replay after its `begin_tick` can lose
       the focus-loss release; games feeding the map from the hook are fine and
       no sample queues pad events yet.
@@ -11714,8 +11765,11 @@ own app id or under 480 as far as 480 allows.
   a 1023-byte one is read whole; after the change both would be read whole (the
   buffer grows), the refusal would move to a line past `MAX_TEXT_BYTES`, and
   `testing::fake_get_launch_command_line` would copy as Steam does (a byte
-  short, then the NUL) rather than strncpy-style. Left unchanged, since it
-  rewrites what an existing test asserts; the user's call.
+  short, then the NUL) rather than strncpy-style. **Decided 2026-09-25: take the
+  proposed change.** A line cut and returned as whole is the silent kind of
+  wrong the other string reads were built to refuse, and `grow` is already the
+  shared answer; the test's two assertions move with it as described. Not built
+  yet.
 - **The manifest has no default controller layouts.**
   `crates/crcbl-steam/assets/crcbl_pad.vdf`'s `configurations` block is empty,
   so until one is added a player binds every action in Steam's configurator
@@ -11746,32 +11800,12 @@ own app id or under 480 as far as 480 allows.
 decision, a real run, or is work of its own. What the review fixed is in
 `docs/notes/backends.md` under _What the deleted 42-steam plan left behind_.
 
-- **Needs a decision: `SyncedFile` can lose a confirmed write silently.** A
-  `save` writes the cloud blind, and a device drops its kept copy once a load
-  sees the cloud hold its write (`SyncedFile::confirm`). So: A and B hold v1; A
-  saves v2 and loads (confirmed, copy dropped); B, which never loaded v2, saves
-  on v1 and overwrites v2; A's next load has no kept write and reads B's version
-  as `FastForwarded`, and B's reads `Clean` — v2 is gone and nobody is told,
-  though the module promises every such case surfaces. Under Steam Cloud this
-  needs B's cache to take v2 mid-session (Dynamic Cloud Sync) or Steam's own
-  launch dialog, so it is rarer there than over a shared `StorageSource`.
-  **Proposed:** `save` reads the cloud first and, unless it holds the save's
-  base (or nothing), keeps the new payload in the shadow, writes nothing to the
-  cloud and answers a new `SyncError::Stale`, so the next load reports the
-  `Conflict`. **What it changes:**
-  `equal_generations_with_different_payloads_conflict`,
-  `a_cloud_version_on_another_base_conflicts` and
-  `resolving_writes_above_both_sides_and_the_next_load_is_clean` in
-  `crates/crcbl-store/src/synced/tests.rs` all make a second device save over a
-  version it never loaded and assert the save succeeds and the cloud kept it;
-  they would assert `Stale` instead. Left for the user, since it rewrites what
-  existing tests assert. **EW (2026-09-23): a must before EW puts `profile.ron`
-  on Steam Cloud** — its profile holds raid receipts, so a silently lost
-  confirmed write could lose extracted gear, the class of bug EW's no-merge
-  requirement exists to prevent. Related, lower: fast-forward is recognised one
-  generation deep only (`cloud.base == mine.version`), so a write taken up and
-  built on twice elsewhere reads as a `Conflict` whose `KeepLocal` discards the
-  newer versions; more ancestry in the header would fix it.
+- **`SyncedFile` fast-forwards one generation deep only**
+  (`cloud.base == mine.version`), so a write taken up and built on twice
+  elsewhere reads as a `Conflict` whose `KeepLocal` discards the newer versions;
+  more ancestry in the header would fix it. (The lost-confirmed-write fix EW
+  needed before putting `profile.ron` on Steam Cloud shipped 2026-09-25 as
+  `SyncError::Stale`.)
 - **Needs a decision: a repeated hello can livelock a client and hold a `Host`
   slot.** A client that hears nothing for `HANDSHAKE_TIMEOUT` sends a second
   token-less hello. `Host` admits the first and answers the second through
@@ -11782,7 +11816,9 @@ decision, a real run, or is work of its own. What the review fixed is in
   answer a token-less hello on a connected peer's own link with an `Accept`
   repeating its session and token for the new generation (the link is the
   credential), and end a session whose client never sends an authenticated
-  message within a deadline.
+  message within a deadline. **Decided 2026-09-25: take both halves.** The
+  repeated `Accept` ends the livelock at its cause, and the deadline frees a
+  slot a client abandoned for any reason, not only this one. Not built yet.
 - **Needs a real run: the Steam-virtual-pad filter only skips Valve's vendor.**
   With Steam Input on for an Xbox pad, Steam hides the physical pad from the
   game's XInput through the overlay's hook. Launched outside Steam, or without
@@ -12441,7 +12477,17 @@ encryption rule. It seals nothing itself — `crates/crcbl-steam/src/net/` never
 mentions encryption (grep, 2026-09-24) — so whatever confidentiality it has is
 Valve's networking layer's, which the rule as written does not cover and nothing
 here has verified. Either the rule names Steam's transport-level encryption as
-satisfying it, or the payload is sealed on top.
+satisfying it, or the payload is sealed on top. **Decided 2026-09-25: Steam's
+transport encryption satisfies the rule, on one condition.** Valve documents
+Steam Networking Sockets connections as authenticated and encrypted (AES-GCM,
+keyed through Steam-signed certificates) unless a caller sets the `Unencrypted`
+connection option, which `crcbl-steam` never sets: read 2026-09-25,
+`SteamTransport`'s `ConnectP2P` and `SteamListener::open`'s
+`CreateListenSocketP2P` both pass zero options and a null options pointer.
+Sealing again on top would pay twice for the same property. The condition, owed
+as work: the fake library recording each call's option count and a test failing
+on any non-zero one, so the premise is held rather than read. Not verified on
+the wire; Valve's documentation is the evidence.
 
 ### The channel table: four channels, and the seam has two (2026-08-27)
 
@@ -16718,7 +16764,11 @@ the hardware can run it; the fault is on the D3D12 side.
 
 ### What is owed, and the decision
 
-**Decision owed: when to report the flags on hardware.** The options:
+**Decided 2026-09-25: (a), withhold everywhere.** It is the only option that
+regresses nothing that draws today, and (c) needs measurements that do not exist
+yet. Revisit when either a newer AMD driver on the 7900 XTX or non-AMD D3D12
+hardware passes `the_cluster_shaders_dag_descent_draws_the_cut_it_chose` with
+the reporting re-applied. The options were:
 
 - (a) Withhold everywhere until the 7900 XTX draws. Honest, and what the tree
   does. Costs nothing that works today.
@@ -19777,7 +19827,12 @@ under the same heading, and it binds any Windows test written from now on.
     As it stands a WARP step is also past the five-minute budget; the options
     are a step that skips or shortens `shard` (and `tumble`), or a trial step
     with `continue-on-error` on `dx12-e2e` to measure a runner. Still unchecked:
-    that WARP is what `windows-latest` enumerates for dx12.
+    that WARP is what `windows-latest` enumerates for dx12. **Decided
+    2026-09-25: no windowed WARP step for now.** Skipping `shard` and `tumble`
+    would leave the step proving least where the samples are heaviest, and a
+    `continue-on-error` trial adds minutes to every push to produce a number
+    nobody gates on. The headless dx12 suites already run on WARP in CI; revisit
+    when the samples' own cost drops or a faster runner is available.
   - **dx12 runs check no validation.** The D3D12 debug layer's messages are read
     only by `crcbl-dx12`'s device tests (`debug::Validated`) and by
     `debug::diagnosis` on a removed device. A sample that runs to the end never
@@ -25245,7 +25300,11 @@ faders — and the mixer — from the player's own file. `menu::menus`,
   (verified 2026-09-24 against `NAMED_VIDEO_KEYS` in
   `crates/crcbl/src/settings.rs` and `menu::menus`). The criterion reads "every
   key in the settings catalogue appears on the screen, and any key with no
-  reader is labelled as such". **Needs a decision:** a read-only row per `Named`
+  reader is labelled as such". **Decided 2026-09-25: hold each key back until
+  its reader lands**, and read the criterion's "labelled" as met by the
+  catalogue's `KeyStatus::Named`, which `crcbl settings list` can show, rather
+  than by dead rows. A row that cannot be applied and observed is what the
+  screen's own rule refuses. The two options were: a read-only row per `Named`
   key captioned as read by nothing — which satisfies the criterion and is
   honest, but puts controls on the screen that do nothing — or holding each key
   back until its reader lands, which is what the screen does today and what the
@@ -25422,18 +25481,18 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   deleted). What is left is in "`apps/quarry`'s mesh-path goldens have no local
   dx12 run", and the WARP windowed timing is under "What the Win32 backend has
   and has not been run against", "No sample-level pass in CI".
-- **Decisions waiting on the owner**, each with its entry: Dependabot's glam
-  0.33.8 bump (pin 0.33.7, or re-pin the hashes after a cross-target proof; do
-  not merge PR #23 as is); the `SyncedFile` lost-write fix; the `Host` rehello
-  livelock fix; `Apps::launch_command_line` truncation; the dx12 mesh flag; the
-  widened physics test bounds; the joint/contact rotation-rule split; per-group
-  stiffness; the sleep angular threshold; whether an island may sleep deep in
-  penetration; the Tower room's two systems; the two gamepad questions; whether
-  Steam's own encryption satisfies the every-packet-sealed rule; `apps/options`'
-  eight unread catalogue keys; a scrolled `Menu`'s 8 px font against larger text
-  with fewer rows; whether a quality tier may ship without reflections (the
-  fixed-view sheen needs them); and a WARP windowed-samples CI step (309.8 s
-  over budget as it stands).
+- **The owner decisions listed here were taken 2026-09-25**, each recorded as
+  "Decided 2026-09-25" in its entry with the reason. Kept as they are: the split
+  rotation rule, substep-scaled group stiffness, islands sleeping at any depth,
+  the Tower room's two systems, the dx12 mesh flags withheld, the scrolled
+  `Menu` at its minimum size, the fixed-view sheen riding on reflections, no
+  windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
+  Accepted: the widened physics test bounds, and Steam's own encryption as
+  meeting the every-packet-sealed rule (with a guard test owed). To build: the
+  `Host` repeated `Accept` and authentication deadline, `launch_command_line`
+  through `grow`, Box2D's farthest-point sleep check, masking ui-bound pad
+  buttons, and no pad delivery while unfocused. glam's bump is in the
+  first-priority dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring
@@ -25442,8 +25501,9 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   captions/fit/scroll, ellipsis and `Ui::text`, glyph runs carrying text,
   `Grid::can_move_within`, grid_drag turn/in-place drop/rectangular cells, and
   the prone fit check and crawl. Owed to it next: the prone turn sweep and
-  stance switch (entry "A lying capsule for prone characters"), and RON binding
-  persistence for a keybinding screen.
+  stance switch (entry "A lying capsule for prone characters"). Rebind
+  persistence, which EW asked for on 2026-09-25, shipped the same day
+  (`Binding`'s text form and `ActionMap::overrides`/`apply_overrides`).
 - **Process:** push only after the previous push's CI and Pages finish (the
   concurrency group cancels older runs, and EW pins only green commits); run
   CI's exact wasm32 rustdoc and `tools/check-wrapped-strings.sh` before pushing;
