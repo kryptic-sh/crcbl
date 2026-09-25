@@ -158,6 +158,7 @@ fn cells(extent: (u32, u32)) -> CellGrid {
         columns: u32::from(loot::GRID_W),
         rows: u32::from(loot::GRID_H),
         id_base: CELL_ID_BASE,
+        window: None,
     }
 }
 

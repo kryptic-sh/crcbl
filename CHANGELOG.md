@@ -1023,10 +1023,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   included — for a game that says why a drop failed. One drag spans any number
   of grids, so a press on one grid and a release on another is one drop.
   `Held::payload_mut` and `Held::refit` let a game turn an item mid-drag and
-  keep the grip inside its new footprint. Shard's inventory panel and breach's
-  loadout panel now use it in place of their own copies, report a drop as the
-  stack's `SlotId` and the cell its origin lands on, and tint a refusing cell
-  while a drag is held over it.
+  keep the grip inside its new footprint. A grid that scrolls sets
+  `CellGrid::window` to a `GridWindow { first, size }`: only those cells are
+  drawn, from `origin`, and hit (`cell_at` answers a content cell inside the
+  window and `None` outside it; `shows` and `visible_cells` say which), while
+  ids, grips and drop targets stay in content cells, so an item partly scrolled
+  off is grabbed by the part that shows and a held drag follows the grid as it
+  scrolls. `window: None` draws the whole grid. Shard's inventory panel and
+  breach's loadout panel now use it in place of their own copies, report a drop
+  as the stack's `SlotId` and the cell its origin lands on, and tint a refusing
+  cell while a drag is held over it.
 - **A non-moving ground probe on `crcbl_phys::CharacterController`.**
   `probe_ground(world, distance)` and
   `probe_ground_at(world, position, distance)` sweep the controller's capsule

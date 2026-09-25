@@ -62,9 +62,20 @@ use crate::widget::{ButtonState, PointerInput, UiState, WidgetId};
 ///
 /// Cells are numbered from the top-left, `x` across and `y` down; the widget id
 /// of a cell is [`id_base`](Self::id_base) plus its row-major index.
+///
+/// # A grid that scrolls
+///
+/// A stash taller than its panel shows a [`window`](Self::window) of its
+/// cells. Every cell keeps its number — the grid's **content** cell, the one
+/// ids, grips, drop targets and [`GridCell`]s all name — and only the window
+/// is drawn, from [`origin`](Self::origin). So an item whose top row is
+/// scrolled off is grabbed by a row that shows, and its [`Grip::origin`] is
+/// still a cell of the grid; and a drag held while the grid scrolls under it
+/// reads the new window on the next frame's [`DragFrame::grid`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CellGrid {
-    /// The top-left corner of cell `(0, 0)`, in screen pixels.
+    /// Where the first cell drawn is: the top-left corner of cell `(0, 0)`,
+    /// or of the window's first cell for a grid that scrolls.
     pub origin: Vec2,
     /// One cell's width (`x`) and height (`y`), in screen pixels; use
     /// `Vec2::splat(side)` for square cells.
@@ -77,17 +88,42 @@ pub struct CellGrid {
     /// `id_base + columns * rows - 1` is this grid's, so it must not overlap
     /// another grid's range or any other widget's id.
     pub id_base: WidgetId,
+    /// The cells on screen, for a grid that scrolls; `None` draws them all.
+    pub window: Option<GridWindow>,
+}
+
+/// The part of a [`CellGrid`] on screen: see _A grid that scrolls_ there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GridWindow {
+    /// The first cell drawn, at the grid's [`origin`](CellGrid::origin): how
+    /// far the grid is scrolled, in cells.
+    pub first: UVec2,
+    /// How many cells are drawn across and down, from `first`.
+    pub size: UVec2,
 }
 
 impl CellGrid {
-    /// Where `cell` is drawn: its top-left and bottom-right corners.
+    /// The window's first cell and size: [`window`](Self::window), or the
+    /// whole grid.
+    fn shown(&self) -> GridWindow {
+        self.window.unwrap_or(GridWindow {
+            first: UVec2::ZERO,
+            size: UVec2::new(self.columns, self.rows),
+        })
+    }
+
+    /// Where `cell` is drawn: its top-left and bottom-right corners. For a
+    /// cell outside the [`window`](Self::window), where it would be drawn if
+    /// the window reached it.
     #[must_use]
     pub fn cell_bounds(&self, cell: UVec2) -> (Vec2, Vec2) {
-        let at = self.origin + cell.as_vec2() * self.cell;
+        let from_first = cell.as_ivec2() - self.shown().first.as_ivec2();
+        let at = self.origin + from_first.as_vec2() * self.cell;
         (at, at + self.cell)
     }
 
-    /// Which cell `pos` is over, or `None` for a point outside the grid.
+    /// Which cell `pos` is over, or `None` for a point outside the grid — or
+    /// outside its [`window`](Self::window), for a grid that scrolls.
     ///
     /// The hit test every drag on this grid uses, and the one a test should
     /// aim with, so a check that presses a cell is pressing the cell the frame
@@ -102,8 +138,24 @@ impl CellGrid {
         if local.x < 0.0 || local.y < 0.0 {
             return None;
         }
-        let cell = local.floor().as_uvec2();
+        let local = local.floor().as_uvec2();
+        let shown = self.shown();
+        if local.cmpge(shown.size).any() {
+            return None;
+        }
+        let cell = shown.first.saturating_add(local);
         (cell.x < self.columns && cell.y < self.rows).then_some(cell)
+    }
+
+    /// Whether `cell` is a cell of the grid inside its
+    /// [`window`](Self::window): one that is drawn.
+    #[must_use]
+    pub fn shows(&self, cell: UVec2) -> bool {
+        let shown = self.shown();
+        cell.x < self.columns
+            && cell.y < self.rows
+            && cell.cmpge(shown.first).all()
+            && (cell - shown.first).cmplt(shown.size).all()
     }
 
     /// The widget id of `cell`.
@@ -128,10 +180,16 @@ impl CellGrid {
         (y < self.rows).then_some(UVec2::new(x, y))
     }
 
-    /// Every cell, row by row from the top-left.
+    /// Every cell, row by row from the top-left, drawn or not.
     pub fn cells(&self) -> impl Iterator<Item = UVec2> {
         let columns = self.columns;
         (0..self.rows).flat_map(move |y| (0..columns).map(move |x| UVec2::new(x, y)))
+    }
+
+    /// The cells the [`window`](Self::window) shows, row by row: what a panel
+    /// draws.
+    pub fn visible_cells(&self) -> impl Iterator<Item = UVec2> + '_ {
+        self.cells().filter(|&cell| self.shows(cell))
     }
 }
 
@@ -585,6 +643,7 @@ mod tests {
         columns: 4,
         rows: 3,
         id_base: 0x1000,
+        window: None,
     };
 
     /// A second grid, beside the first, with its own ids.
@@ -594,6 +653,7 @@ mod tests {
         columns: 2,
         rows: 2,
         id_base: 0x2000,
+        window: None,
     };
 
     /// The payload the tests drag: an item name, anchored at `ORIGIN`.
@@ -805,6 +865,7 @@ mod tests {
             columns: 1,
             rows: 1,
             id_base: 0x3000,
+            window: None,
         };
         assert_eq!(
             slot.cell_bounds(UVec2::ZERO),
@@ -820,6 +881,7 @@ mod tests {
             columns: 4,
             rows: 3,
             id_base: 0x4000,
+            window: None,
         };
         for cell in wide.cells() {
             let (min, max) = wide.cell_bounds(cell);
@@ -862,6 +924,7 @@ mod tests {
             columns: 1,
             rows: 1,
             id_base: 0x5000,
+            window: None,
         };
         for (slot_first, slot_accepts) in
             [(true, true), (false, true), (true, false), (false, false)]
@@ -1119,5 +1182,130 @@ mod tests {
         let (_, dropped) =
             drag_between(&mut drag, &mut ui, UVec2::new(0, 2), UVec2::new(1, 0), true);
         assert_eq!(dropped, None);
+    }
+
+    /// A 3-wide, 10-row stash showing rows 4 to 6 at `(300, 50)`.
+    const STASH: CellGrid = CellGrid {
+        origin: Vec2::new(300.0, 50.0),
+        cell: Vec2::splat(10.0),
+        columns: 3,
+        rows: 10,
+        id_base: 0x3000,
+        window: Some(GridWindow {
+            first: UVec2::new(0, 4),
+            size: UVec2::new(3, 3),
+        }),
+    };
+
+    /// **A scrolled grid hits and draws in content cells, inside its window
+    /// only**: the window's first cell is drawn at the origin, and a point
+    /// below the window is over nothing though the grid goes on there.
+    #[test]
+    fn a_scrolled_grid_hits_content_cells_inside_its_window_only() {
+        assert_eq!(
+            STASH.cell_at(Vec2::new(305.0, 55.0)),
+            Some(UVec2::new(0, 4))
+        );
+        assert_eq!(
+            STASH.cell_at(Vec2::new(325.0, 75.0)),
+            Some(UVec2::new(2, 6))
+        );
+        assert_eq!(
+            STASH.cell_at(Vec2::new(305.0, 85.0)),
+            None,
+            "row 7 is scrolled off"
+        );
+        assert_eq!(
+            STASH.cell_at(Vec2::new(305.0, 45.0)),
+            None,
+            "row 3 is above the window"
+        );
+        assert_eq!(
+            STASH.cell_bounds(UVec2::new(1, 5)),
+            (Vec2::new(310.0, 60.0), Vec2::new(320.0, 70.0))
+        );
+        assert_eq!(
+            STASH.cell_bounds(UVec2::new(0, 2)).0,
+            Vec2::new(300.0, 30.0),
+            "a cell above the window, where it would be drawn"
+        );
+        let shown: Vec<UVec2> = STASH.visible_cells().collect();
+        assert_eq!(shown.len(), 9);
+        assert!(
+            shown
+                .iter()
+                .all(|&cell| STASH.cell_at(centre(&STASH, cell)) == Some(cell))
+        );
+        assert!(!STASH.shows(UVec2::new(0, 3)) && !STASH.shows(UVec2::new(0, 7)));
+    }
+
+    /// **An item partly scrolled off is grabbed by the part that shows**: a
+    /// `1×3` anchored on row 3, above the window, is pressed on row 4, and its
+    /// grab and drop stay in content cells.
+    #[test]
+    fn an_item_partly_scrolled_off_is_grabbed_by_its_visible_part() {
+        let anchor = UVec2::new(0, 3);
+        let tall = |cell: UVec2| {
+            (cell.x == 0 && (3..6).contains(&cell.y)).then_some(Grip {
+                payload: ITEM,
+                origin: anchor,
+            })
+        };
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        let mut dropped = None;
+        for pointer in [
+            press(centre(&STASH, UVec2::new(0, 4))),
+            press(centre(&STASH, UVec2::new(2, 5))),
+            release(centre(&STASH, UVec2::new(2, 5))),
+        ] {
+            let mut frame = drag.frame(&mut ui, pointer);
+            frame.grid(&STASH, tall, |_, _| true);
+            dropped = dropped.or(frame.finish());
+        }
+        let dropped = dropped.expect("the drop landed");
+        assert_eq!(dropped.from.cell, UVec2::new(0, 4));
+        assert_eq!(dropped.to.at.cell, UVec2::new(2, 5));
+        assert_eq!(dropped.to.origin, UVec2::new(2, 4), "grabbed one row down");
+    }
+
+    /// **A drag held while the grid scrolls under it follows the content**:
+    /// the pointer stays put, the window moves down a row, and the cell under
+    /// the pointer — and the drop — is the next row of the grid.
+    #[test]
+    fn a_held_drag_follows_the_grid_as_it_scrolls_under_the_pointer() {
+        let item = |cell: UVec2| {
+            (cell == UVec2::new(1, 4)).then_some(Grip {
+                payload: ITEM,
+                origin: cell,
+            })
+        };
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        let at = centre(&STASH, UVec2::new(0, 5));
+        let mut scrolled = STASH;
+        let mut frames = [
+            (STASH, press(centre(&STASH, UVec2::new(1, 4)))),
+            (STASH, press(at)),
+            (scrolled, press(at)),
+            (scrolled, release(at)),
+        ];
+        scrolled.window = Some(GridWindow {
+            first: UVec2::new(0, 5),
+            size: UVec2::new(3, 3),
+        });
+        frames[2].0 = scrolled;
+        frames[3].0 = scrolled;
+        let mut dropped = None;
+        for (grid, pointer) in frames {
+            let mut frame = drag.frame(&mut ui, pointer);
+            let response = frame.grid(&grid, item, |_, _| true);
+            if grid == scrolled {
+                assert_eq!(response.hovered, Some(UVec2::new(0, 6)));
+            }
+            dropped = dropped.or(frame.finish());
+        }
+        let dropped = dropped.expect("the drop landed");
+        assert_eq!(dropped.to.at.cell, UVec2::new(0, 6));
     }
 }

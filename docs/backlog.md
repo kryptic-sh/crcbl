@@ -25449,16 +25449,10 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   captions/fit/scroll, ellipsis and `Ui::text`, glyph runs carrying text,
   `Grid::can_move_within`, grid_drag turn/in-place drop/rectangular cells, and
   the prone fit check and crawl. Owed to it next, in this order: the prone turn
-  sweep and stance switch (entry "A lying capsule for prone characters"); **a
-  scrolled `grid_drag::CellGrid`**, asked 2026-09-25 so EW's stash can move onto
-  `grid_drag`: a grid in content cells with a visible window (first visible row
-  and column plus the visible size), where `cell_at` answers content cells
-  inside the window and `None` outside it, `cell_bounds` covers the drawn cells,
-  grips and drop targets stay in content cells so an item partly scrolled off
-  can be grabbed by its visible part, and a held drag keeps working while the
-  grid scrolls under it. Rebind persistence, which EW asked for on 2026-09-25,
-  shipped the same day (`Binding`'s text form and
-  `ActionMap::overrides`/`apply_overrides`).
+  sweep and stance switch (entry "A lying capsule for prone characters"). Its
+  three asks of 2026-09-25 shipped the same day: rebind persistence (`Binding`'s
+  text form and `ActionMap::overrides`/`apply_overrides`), pad chords
+  (`Binding::PadChord`) and a scrolled grid (`CellGrid::window`).
 - **Process:** push only after the previous push's CI and Pages finish (the
   concurrency group cancels older runs, and EW pins only green commits); run
   CI's exact wasm32 rustdoc and `tools/check-wrapped-strings.sh` before pushing;
