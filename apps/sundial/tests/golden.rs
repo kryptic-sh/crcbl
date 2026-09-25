@@ -2116,11 +2116,12 @@ const LIT_PAVEMENT: f32 = 120.0;
 ///
 /// The control on the reading itself: a statistic that counted this block's own
 /// texture, its dither, or the driver's rounding would count it at every sun
-/// angle. Under a sun 55° up the receiver's depth barely moves across a shadow
+/// angle. Under a steep sun the receiver's depth barely moves across a shadow
 /// texel and there is nothing for a bias to fail to cover, so the honest answer
 /// here is zero.
 ///
-/// **Swept**, at [`CLAIM_EXTENT`] over [`ACNE_HALF`]'s block, against the same
+/// **Swept** with the steep tick at [`sun::NOON_TICK`], before [`STEEP_TICK`]
+/// replaced it, at [`CLAIM_EXTENT`] over [`ACNE_HALF`]'s block, against the same
 /// frames drawn with both of `crcbl_render::shadow`'s sun bias constants set to
 /// zero:
 ///
@@ -2132,10 +2133,26 @@ const LIT_PAVEMENT: f32 = 120.0;
 /// | the block's mean at the grazing tick | `185.29` | `144.78` | `185.15` | `144.68` |
 /// | the block's mean at the steep tick | `252.46` | `194.13` | `252.46` | `193.89` |
 ///
-/// Both adapters count **no** dot at either tick with the shipped bias, so this
-/// is floored at about half of what the zero-bias steep frame draws rather than
+/// At [`STEEP_TICK`], 36.5° up, measured 2026-09-25 through Vulkan on an RX
+/// 7900 XTX: `0.0000%` dots grazing and steep with the shipped bias, the block
+/// at `196.68` and `246.32`; with both constants at zero, `43.1856%` and
+/// `31.6407%`, at `159.84` and `196.54`, and this test fails on the steep half.
+///
+/// No adapter counts a dot at either tick with the shipped bias, so this is
+/// floored at about a third of what the zero-bias steep frame draws rather than
 /// at a multiple of a healthy reading there is none of.
 const STEEP_SPECKLE_PERCENT: f32 = 10.0;
+
+/// The steep half of the acne pair: a fifth of the sweep, the sun about 36°
+/// up, well over twice [`sun::GRAZING_TICK`]'s elevation as the pair needs.
+///
+/// **Not [`sun::NOON_TICK`]**, which it was until 2026-09-25: the atmosphere's
+/// ambient added to the direct term clips the open pavement at 255 there under
+/// the scene-referred clamp, and a block reading 255 flat counts no dot however
+/// the bias is set, so the steep control could no longer fail. Moving the tick
+/// changes this fixture and not the sample's look, where turning
+/// `sun::INTENSITY` down would move every golden.
+const STEEP_TICK: u64 = sun::SWEEP_TICKS / 5;
 
 /// How many points rougher than the steep frame the grazing frame's block may
 /// be.
@@ -2305,10 +2322,7 @@ fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
     let camera = plaza::fixed_camera();
     let (centre, half) = acne_block(&camera, extent);
 
-    let (grazing_sky, steep_sky) = (
-        sun::Sky::at(sun::GRAZING_TICK),
-        sun::Sky::at(sun::NOON_TICK),
-    );
+    let (grazing_sky, steep_sky) = (sun::Sky::at(sun::GRAZING_TICK), sun::Sky::at(STEEP_TICK));
     assert!(
         steep_sky.elevation > grazing_sky.elevation * 2.0,
         "the two ticks put the sun {:.1}° and {:.1}° up. A comparison of a grazing sun with a \
@@ -2321,7 +2335,7 @@ fn the_grazing_sun_leaves_the_open_pavement_as_smooth_as_the_steep_one_does() {
     // values — see `Arm::scene_referred`.
     let smooth = Arm::shipped().scene_referred();
     let (grazing, paths, _) = draw(extent, smooth.at_tick(sun::GRAZING_TICK));
-    let (steep, _, _) = draw(extent, smooth.at_tick(sun::NOON_TICK));
+    let (steep, _, _) = draw(extent, smooth.at_tick(STEEP_TICK));
     assert!(
         grazing.pixels() != steep.pixels(),
         "the two ticks drew one frame, so every reading below is the same reading twice"

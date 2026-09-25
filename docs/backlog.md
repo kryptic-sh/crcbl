@@ -5713,17 +5713,18 @@ The sun disc half is done too — `sky.slang`'s `sun_disc` and
   find a dot however the shadow bias is set. The claim the test is actually
   about — the grazing sun — is unaffected and still reads 196.7/255.
 
-  **Decided 2026-09-25: move the steep arm off `NOON_TICK`**, to a tick whose
-  pavement is below the clamp — it changes the test's fixture and not the
-  sample's look, where turning `INTENSITY` down moves every sundial golden and
-  darkens the sky. Not built. The two ways out were: Turn `INTENSITY` down until
-  the clamp has headroom again, which also darkens the sky (the atmosphere's
-  illuminance is read off the same light) and moves every sundial golden a
-  second time; or move the acne pair's steep arm off `NOON_TICK` to a tick whose
-  pavement is not at the top. **Zeroing `crcbl_sundial::sun::AMBIENT` was tried
-  and does not fix it** — measured, the block still reads 255.00 with the flat
-  term gone, so the sky's ambient alone is over the top and removing the flat
-  one would only darken every shadow in the fixture.
+  **Done 2026-09-25: the steep arm moved off `NOON_TICK`** to `STEEP_TICK`, a
+  fifth of the sweep (36.5° up): the block reads 246.32 there, off the clamp,
+  and with the bias zeroed the steep half finds 31.64% dots and fails, so the
+  control has teeth again. The fixture moved and the sample's look did not. The
+  two ways out were: Turn `INTENSITY` down until the clamp has headroom again,
+  which also darkens the sky (the atmosphere's illuminance is read off the same
+  light) and moves every sundial golden a second time; or move the acne pair's
+  steep arm off `NOON_TICK` to a tick whose pavement is not at the top.
+  **Zeroing `crcbl_sundial::sun::AMBIENT` was tried and does not fix it** —
+  measured, the block still reads 255.00 with the flat term gone, so the sky's
+  ambient alone is over the top and removing the flat one would only darken
+  every shadow in the fixture.
 
 - **The seam comparison no longer draws through the shipped resolve.**
   `apps/sundial/tests/golden.rs`'s
