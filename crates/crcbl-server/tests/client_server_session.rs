@@ -666,3 +666,77 @@ fn physics_transforms_replicate_and_interpolate_end_to_end() {
         transform.position.x
     );
 }
+
+#[test]
+fn server_answers_a_token_less_hello_on_the_connected_link_with_the_session() {
+    let (server_transport, mut peer) = InMemoryTransport::pair();
+    let mut server = server(world_with_entities(1), server_transport);
+    let tick_dt = std::time::Duration::from_nanos(16_666_667);
+
+    send_hello_with_generation(&mut peer, 1, None);
+    server.update(std::time::Duration::ZERO);
+    server.update(tick_dt);
+    let crcbl_net::HandshakeResult::Accept {
+        session_id,
+        resume_token,
+        ..
+    } = recv_handshake_generation(&mut peer, 1)
+    else {
+        panic!("fresh handshake rejected");
+    };
+
+    // Traffic under the first key, so a counter that restarts without the
+    // server's reads as a replay.
+    let mut first = crcbl_net::SessionCrypto::from_token(&resume_token);
+    for _ in 0..3 {
+        let sealed = first
+            .seal(&crcbl_net::encode_ack(
+                crcbl_net::SectorId::ZERO,
+                TickId::ZERO,
+            ))
+            .unwrap();
+        crcbl_net::Transport::send_unreliable(&mut peer, crcbl_net::Message::unreliable(sealed))
+            .unwrap();
+    }
+    server.update(tick_dt * 2);
+    assert_eq!(server.auth_failure_count(), 0);
+
+    // A client that timed out its first hello says hello again without a
+    // token; refusing it left the client retrying for ever.
+    send_hello_with_generation(&mut peer, 2, None);
+    server.update(tick_dt * 3);
+    let again = recv_handshake_generation(&mut peer, 2);
+    assert!(
+        matches!(
+            again,
+            crcbl_net::HandshakeResult::Accept { session_id: same, resume_token: token, .. }
+                if same == session_id && token == resume_token
+        ),
+        "{again:?}"
+    );
+
+    // The client starts its key over on that Accept, and so does the server.
+    let mut crypto = crcbl_net::SessionCrypto::from_token(&resume_token);
+    let sealed = crypto
+        .seal(&crcbl_net::encode_ack(
+            crcbl_net::SectorId::ZERO,
+            TickId::ZERO,
+        ))
+        .unwrap();
+    crcbl_net::Transport::send_unreliable(&mut peer, crcbl_net::Message::unreliable(sealed))
+        .unwrap();
+    server.update(tick_dt * 4);
+    assert_eq!(server.auth_failure_count(), 0);
+    assert_eq!(server.session_state(), crcbl_net::SessionState::Connected);
+
+    send_hello_with_generation(
+        &mut peer,
+        3,
+        Some(crcbl_net::ResumeToken::from_bytes([7; 32])),
+    );
+    server.update(tick_dt * 5);
+    assert!(matches!(
+        recv_handshake_generation(&mut peer, 3),
+        crcbl_net::HandshakeResult::Reject { .. }
+    ));
+}

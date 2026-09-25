@@ -643,7 +643,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   delta-encoded per peer. A `HostModule` reads each peer's input under its
   `PeerId`, and `host.events()` yields `PeerEvent::Joined`, `Lost`, `Resumed`
   and `Left`. `host.kick(peer)` and `host.shutdown(reason)` tell the client why
-  before closing its link. `Server<T>` is unchanged for single-peer callers.
+  before closing its link. A hello on a connected peer's own link, with its
+  token or with none, is answered with its session again and restarts the
+  session key with the client's, so a client whose first `Accept` was lost takes
+  the session up on its retry; `Server<T>` now answers that hello the same way.
+  A connected peer that sends nothing under its session key within ten seconds
+  of being admitted or resumed is ended, and raises `Left`, so a session its
+  client never took up does not keep a place.
 - **`crcbl_store::synced`: a file kept in a cloud, with conflicts handed to the
   game** (`docs/plan/42-steam.md` slice 6).
   `SyncedFile::new(cloud, shadow, path)` over any two `StorageSource`s — the

@@ -32,6 +32,17 @@ use crate::peer::{self, Counters, PeerSession};
 /// handshake backoff; a transport that never speaks is what it removes.
 const PENDING_SILENCE_LIMIT: Duration = Duration::from_secs(20);
 
+/// How long an admitted peer may hold its place without one message that
+/// opens under its session key.
+///
+/// A client acknowledges the snapshots the host sends it every tick, so one
+/// that holds the key proves it within a round trip; the limit sits far beyond
+/// that. What it removes is a session its client never took up — one whose
+/// `Accept` the client dropped, or one it abandoned — which would otherwise
+/// keep one of [`HostConfig::max_peers`] places for as long as its link stays
+/// up.
+const AUTHENTICATION_DEADLINE: Duration = Duration::from_secs(10);
+
 /// A host's settings.
 #[derive(Debug, Clone, Copy)]
 pub struct HostConfig {
@@ -63,8 +74,10 @@ pub enum PeerEvent {
     Lost(PeerId),
     /// A lost peer came back within its grace period, to the same session.
     Resumed(PeerId),
-    /// A lost peer's grace period ran out and its session is gone. If it
-    /// comes back, it joins as a new peer.
+    /// The peer's session is gone: a lost peer's grace period ran out, or a
+    /// connected peer sent nothing under its session key for a while after
+    /// it was admitted or resumed (its client never took the session up). If
+    /// it comes back, it joins as a new peer.
     Left(PeerId),
 }
 
@@ -112,6 +125,9 @@ struct Peer {
     /// Whether the session was connected when the current tick began; only
     /// such a session is sent the tick's snapshot, as in `Server`.
     was_connected: bool,
+    /// When the peer's current session key was adopted, which starts the
+    /// [`AUTHENTICATION_DEADLINE`].
+    keyed_at: Duration,
 }
 
 impl Peer {
@@ -256,6 +272,13 @@ impl Host {
                                                 &hello,
                                                 tick,
                                             );
+                                            // The session's key starts over
+                                            // with the client's, which adopts
+                                            // it afresh on every Accept.
+                                            if matches!(result, HandshakeResult::Accept { .. }) {
+                                                peer.link.adopt_session_key();
+                                                peer.keyed_at = self.now;
+                                            }
                                             peer::send_handshake_result(
                                                 transport.as_mut(),
                                                 &result,
@@ -423,6 +446,7 @@ impl Host {
             transport: Some(pending.transport),
             link,
             was_connected: false,
+            keyed_at: self.now,
         });
         self.events.push(PeerEvent::Joined(id));
         None
@@ -487,6 +511,7 @@ impl Host {
             // replay counter space for the resumed session.
             peer.link.resume_token = rotated;
             peer.link.adopt_session_key();
+            peer.keyed_at = self.now;
             peer.transport = Some(pending.transport);
             let id = peer.id;
             self.events.push(PeerEvent::Resumed(id));
@@ -518,11 +543,34 @@ impl Host {
             peer.link.session.expire_if_timed_out(self.now);
         }
         self.remove_ended_sessions();
+        self.end_unauthenticated_sessions();
         let now = self.now;
         self.pending.retain(|pending| {
             pending.transport.is_connected()
                 && now.saturating_sub(pending.last_heard) < PENDING_SILENCE_LIMIT
         });
+    }
+
+    /// End every connected session whose client has not proved it holds the
+    /// session key within [`AUTHENTICATION_DEADLINE`], raising
+    /// [`PeerEvent::Left`] for each. The client is told it was kicked, though
+    /// one that never took the session up cannot read it.
+    fn end_unauthenticated_sessions(&mut self) {
+        let now = self.now;
+        let mut index = 0;
+        while index < self.peers.len() {
+            let peer = &self.peers[index];
+            if peer.is_connected()
+                && !peer.link.authenticated
+                && now.saturating_sub(peer.keyed_at) >= AUTHENTICATION_DEADLINE
+            {
+                let mut peer = self.peers.remove(index);
+                Self::end(&mut peer, SessionEndReason::KICKED, &mut self.counters);
+                self.events.push(PeerEvent::Left(peer.id));
+            } else {
+                index += 1;
+            }
+        }
     }
 
     /// Remove every session whose grace period ran out, raising
@@ -708,7 +756,14 @@ impl Host {
 }
 
 /// The answer to a hello on a connected peer's own link: the same session
-/// again for its own token, as `Server` answers one, and a refusal otherwise.
+/// again, as `Server` answers one, for its own token or for none — and a
+/// refusal for any other token.
+///
+/// **A token-less hello is answered with the session, because the link is the
+/// credential.** A client that hears nothing within its handshake timeout says
+/// hello again without a token; refusing that one while the client dropped the
+/// first `Accept` as an old generation left it retrying for ever, holding a
+/// place.
 fn rehello(
     gate: &HandshakeGate,
     link: &PeerSession,
@@ -717,9 +772,9 @@ fn rehello(
 ) -> HandshakeResult {
     let result = gate.validate(hello, link.session.session_id(), link.resume_token, tick);
     if matches!(result, HandshakeResult::Accept { .. })
-        && !hello
+        && hello
             .session_token
-            .is_some_and(|token| token == link.resume_token)
+            .is_some_and(|token| token != link.resume_token)
     {
         return peer::invalid_session_token(hello.generation, "session token does not match");
     }

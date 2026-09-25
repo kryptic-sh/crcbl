@@ -341,17 +341,19 @@ impl<T: Transport> Server<T> {
                         "handshake is already in progress",
                     );
                 }
-                SessionState::Connected => {
-                    if !hello
-                        .session_token
-                        .is_some_and(|token| token == expected_token)
-                    {
+                // Its own token, or none: the link is the credential, and a
+                // client that timed out its first hello says hello again
+                // without one. The session's key starts over with the
+                // client's, which adopts it afresh on every Accept.
+                SessionState::Connected => match hello.session_token {
+                    Some(token) if token != expected_token => {
                         result = peer::invalid_session_token(
                             hello.generation,
                             "session token does not match",
                         );
                     }
-                }
+                    _ => self.peer.adopt_session_key(),
+                },
             }
         }
         self.send_handshake_result(result);

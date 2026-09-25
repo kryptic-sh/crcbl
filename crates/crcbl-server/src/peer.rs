@@ -39,6 +39,10 @@ pub(crate) struct PeerSession {
     /// Authenticated channel for this session; `None` until a handshake is
     /// accepted, and replaced whenever the resume token rotates.
     pub(crate) session_crypto: Option<SessionCrypto>,
+    /// Whether a message sealed under the current key has opened: false
+    /// from each [`adopt_session_key`](Self::adopt_session_key) until the
+    /// client proves it holds that key.
+    pub(crate) authenticated: bool,
     /// One limiter per delivery channel: a flood of unreliable state must not
     /// consume the budget that reliable control traffic needs to be read at
     /// all, which is the whole point of having two channels.
@@ -69,6 +73,7 @@ impl PeerSession {
             session: SessionManager::new(session_id, config),
             resume_token,
             session_crypto: None,
+            authenticated: false,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, now),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, now),
             ticks_since_ack_progress: 0,
@@ -164,6 +169,7 @@ impl PeerSession {
                 return;
             }
         };
+        self.authenticated = true;
 
         match payload.first().copied() {
             Some(crcbl_net::codec::ACK_TAG) => match crcbl_net::decode_ack(&payload) {
@@ -196,6 +202,7 @@ impl PeerSession {
     /// Key this session's authenticated channel from the current resume token.
     pub(crate) fn adopt_session_key(&mut self) {
         self.session_crypto = Some(SessionCrypto::from_token(&self.resume_token));
+        self.authenticated = false;
     }
 
     /// Delta-encode `current` against this client's baseline, seal it, and

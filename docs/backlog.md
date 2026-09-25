@@ -11806,19 +11806,6 @@ decision, a real run, or is work of its own. What the review fixed is in
   more ancestry in the header would fix it. (The lost-confirmed-write fix EW
   needed before putting `profile.ron` on Steam Cloud shipped 2026-09-25 as
   `SyncError::Stale`.)
-- **Needs a decision: a repeated hello can livelock a client and hold a `Host`
-  slot.** A client that hears nothing for `HANDSHAKE_TIMEOUT` sends a second
-  token-less hello. `Host` admits the first and answers the second through
-  `rehello` with `INVALID_SESSION_TOKEN`; the client drops the first `Accept` as
-  a stale generation and retries on the reject forever, while the admitted peer
-  keeps one of `max_peers`. The single-peer `Server` on `main` answers the same
-  way, so this predates the branch; `Host` makes it cost a slot. **Proposed:**
-  answer a token-less hello on a connected peer's own link with an `Accept`
-  repeating its session and token for the new generation (the link is the
-  credential), and end a session whose client never sends an authenticated
-  message within a deadline. **Decided 2026-09-25: take both halves.** The
-  repeated `Accept` ends the livelock at its cause, and the deadline frees a
-  slot a client abandoned for any reason, not only this one. Not built yet.
 - **Needs a real run: the Steam-virtual-pad filter only skips Valve's vendor.**
   With Steam Input on for an Xbox pad, Steam hides the physical pad from the
   game's XInput through the overlay's hook. Launched outside Steam, or without
@@ -25488,11 +25475,10 @@ caller ever needs a thick world-space line, that is the argument to revisit, and
   `Menu` at its minimum size, the fixed-view sheen riding on reflections, no
   windowed WARP CI step, and `apps/options` holding back the keys nothing reads.
   Accepted: the widened physics test bounds, and Steam's own encryption as
-  meeting the every-packet-sealed rule (with a guard test owed). To build: the
-  `Host` repeated `Accept` and authentication deadline, `launch_command_line`
-  through `grow`, Box2D's farthest-point sleep check, masking ui-bound pad
-  buttons, and no pad delivery while unfocused. glam's bump is in the
-  first-priority dependency entry at the top.
+  meeting the every-packet-sealed rule (with a guard test owed). To build:
+  `launch_command_line` through `grow`, Box2D's farthest-point sleep check,
+  masking ui-bound pad buttons, and no pad delivery while unfocused. glam's bump
+  is in the first-priority dependency entry at the top.
 - **EW (the game session) is the engine's main consumer.** Its asks through
   2026-09-25 are all landed: body sleep restore, icon views (transparent, BGRA
   atlas, no-shadow, fixed lighting with an environment sheen), the frame ring

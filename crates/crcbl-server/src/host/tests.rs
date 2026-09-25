@@ -475,3 +475,180 @@ fn a_pending_link_is_held_to_the_inbound_budget() {
     assert_eq!(rig.host.processing_error_count(), 4, "four read");
     assert!(rig.host.rate_limited_message_count() > 0);
 }
+
+#[test]
+fn a_token_less_hello_on_a_peers_own_link_gets_its_session_again() {
+    let mut rig = Rig::new(4);
+    let mut owner = raw(&mut rig.host);
+    say_hello(&mut owner, 1, None);
+    rig.step();
+    let HandshakeResult::Accept {
+        resume_token,
+        session_id,
+        ..
+    } = reply(&mut owner)
+    else {
+        panic!("the owner is admitted");
+    };
+
+    say_hello(&mut owner, 2, None);
+    rig.step();
+    let again = reply(&mut owner);
+    assert!(
+        matches!(
+            again,
+            HandshakeResult::Accept { generation: 2, session_id: same, resume_token: token, .. }
+                if same == session_id && token == resume_token
+        ),
+        "{again:?}"
+    );
+    assert_eq!(rig.host.peer_count(), 1, "the same place, not a second one");
+}
+
+/// Messages between a real client and the host, carried by hand so one can
+/// be lost on the way.
+struct Relay {
+    client_side: InMemoryTransport,
+    host_side: InMemoryTransport,
+    /// How many of the host's handshake replies to lose.
+    lose_replies: usize,
+}
+
+impl Relay {
+    fn carry(&mut self) {
+        while let Some(msg) = self.client_side.recv().unwrap() {
+            forward(&mut self.host_side, msg);
+        }
+        while let Some(msg) = self.host_side.recv().unwrap() {
+            if self.lose_replies > 0 && crcbl_net::decode_handshake_result(&msg.payload).is_ok() {
+                self.lose_replies -= 1;
+                continue;
+            }
+            forward(&mut self.client_side, msg);
+        }
+    }
+}
+
+fn forward(to: &mut InMemoryTransport, msg: Message) {
+    match msg.kind {
+        crcbl_net::MessageKind::Reliable => to.send_reliable(msg).unwrap(),
+        crcbl_net::MessageKind::Unreliable => to.send_unreliable(msg).unwrap(),
+    }
+}
+
+#[test]
+fn a_client_whose_first_accept_was_lost_takes_the_session_up_on_its_retry() {
+    let mut host = Host::new(
+        world(),
+        HostConfig {
+            max_peers: 1,
+            tick_hz: TICK_HZ,
+            compatibility: COMPATIBILITY,
+        },
+    );
+    let (near, client_side) = InMemoryTransport::pair();
+    let (host_side, far) = InMemoryTransport::pair();
+    host.add(Box::new(far));
+    let mut client = client(near);
+    let mut relay = Relay {
+        client_side,
+        host_side,
+        lose_replies: 1,
+    };
+    let mut now = Duration::ZERO;
+    let mut step = |host: &mut Host, client: &mut Client<InMemoryTransport>, relay: &mut Relay| {
+        now += TICK;
+        client.update(now);
+        relay.carry();
+        host.update(now);
+        relay.carry();
+    };
+    // Past the client's handshake timeout, its token-less retry, and the
+    // host's authentication deadline.
+    let ticks = (AUTHENTICATION_DEADLINE + Duration::from_secs(5)).as_nanos() / TICK.as_nanos();
+    for _ in 0..ticks {
+        step(&mut host, &mut client, &mut relay);
+    }
+    assert_eq!(relay.lose_replies, 0, "the first Accept was lost");
+    assert!(
+        client.session_id().is_some(),
+        "the retry's Accept was taken"
+    );
+    assert_eq!(host.peer_count(), 1);
+    let id = host.peers().next().expect("one peer");
+    assert_eq!(host.peer_state(id), Some(SessionState::Connected));
+    assert!(
+        client.last_applied_tick() > TickId::ZERO,
+        "snapshots open under the session's key"
+    );
+    let left: Vec<_> = host
+        .events()
+        .filter(|event| matches!(event, PeerEvent::Left(_)))
+        .collect();
+    assert_eq!(left, [], "the session was taken up, so it stays");
+}
+
+#[test]
+fn a_session_its_client_never_takes_up_ends_at_the_deadline() {
+    let mut rig = Rig::new(1);
+    let mut owner = raw(&mut rig.host);
+    say_hello(&mut owner, 1, None);
+    rig.step();
+    assert!(matches!(reply(&mut owner), HandshakeResult::Accept { .. }));
+    let id = rig.host.peers().next().expect("admitted");
+    let _ = rig.host.events().count();
+
+    // Nothing sealed ever comes back.
+    let ticks = AUTHENTICATION_DEADLINE.as_nanos() / TICK.as_nanos();
+    rig.run(usize::try_from(ticks).expect("fits") - 2);
+    assert_eq!(rig.host.peer_count(), 1, "not yet");
+    rig.run(4);
+    assert_eq!(rig.host.peer_count(), 0, "the place is free again");
+    assert_eq!(rig.host.events().collect::<Vec<_>>(), [PeerEvent::Left(id)]);
+}
+
+#[test]
+fn clients_that_answer_under_their_key_are_never_ended_by_the_deadline() {
+    let mut rig = Rig::with_peers(2, 2);
+    let _ = rig.host.events().count();
+    let ticks = (AUTHENTICATION_DEADLINE * 2).as_nanos() / TICK.as_nanos();
+    rig.run(usize::try_from(ticks).expect("fits"));
+    assert_eq!(rig.host.peer_count(), 2);
+    assert_eq!(rig.host.events().collect::<Vec<_>>(), []);
+}
+
+#[test]
+fn a_session_accepted_again_opens_the_clients_restarted_key() {
+    let mut rig = Rig::new(1);
+    let mut owner = raw(&mut rig.host);
+    say_hello(&mut owner, 1, None);
+    rig.step();
+    let HandshakeResult::Accept { resume_token, .. } = reply(&mut owner) else {
+        panic!("admitted");
+    };
+    let seal_ack = |crypto: &mut crcbl_net::SessionCrypto, owner: &mut InMemoryTransport| {
+        let sealed = crypto
+            .seal(&crcbl_net::encode_ack(SectorId::ZERO, TickId::ZERO))
+            .unwrap();
+        owner.send_unreliable(Message::unreliable(sealed)).unwrap();
+    };
+    let mut first = crcbl_net::SessionCrypto::from_token(&resume_token);
+    for _ in 0..3 {
+        seal_ack(&mut first, &mut owner);
+    }
+    rig.step();
+    assert_eq!(rig.host.auth_failure_count(), 0);
+
+    // The client says hello again and, on the Accept, starts its key over.
+    say_hello(&mut owner, 2, None);
+    rig.step();
+    assert!(matches!(reply(&mut owner), HandshakeResult::Accept { .. }));
+    let mut restarted = crcbl_net::SessionCrypto::from_token(&resume_token);
+    seal_ack(&mut restarted, &mut owner);
+    rig.step();
+    assert_eq!(
+        rig.host.auth_failure_count(),
+        0,
+        "the restarted counter read as a replay"
+    );
+}
