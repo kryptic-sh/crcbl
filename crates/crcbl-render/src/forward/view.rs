@@ -120,7 +120,7 @@ impl ViewMask {
 const TRANSPARENT_CLEAR: [f32; 4] = [0.0; 4];
 
 /// What [`ForwardRenderer::create_view`] builds.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewDesc {
     /// The effects this view may draw — intersected, every frame, with what the
     /// frame resolved (see [`ForwardRenderer::resolved_effects`]), so a view
@@ -128,19 +128,24 @@ pub struct ViewDesc {
     ///
     /// [`RenderEffects::SHADOWS`] is not a view's to take away and is ignored
     /// here: the atlas is drawn once for the frame, and every view samples it
-    /// whenever the frame drew it.
+    /// whenever the frame drew it. A [`ViewLighting::Fixed`] view also never
+    /// draws [`ViewLighting::SCENE_EFFECTS`], whatever this asks for.
     pub effects: RenderEffects,
     /// What the view's picture holds where no geometry is — see
     /// [`ViewBackground`].
     pub background: ViewBackground,
+    /// What lights the view's surfaces — see [`ViewLighting`].
+    pub lighting: ViewLighting,
 }
 
 impl Default for ViewDesc {
-    /// Every effect the frame draws, over the frame's own background.
+    /// Every effect the frame draws, over the frame's own background, lit by
+    /// the frame's own light.
     fn default() -> Self {
         Self {
             effects: RenderEffects::all(),
             background: ViewBackground::Scene,
+            lighting: ViewLighting::Scene,
         }
     }
 }
@@ -164,6 +169,74 @@ impl ViewDesc {
                 ViewBackground::REFUSED_ON_TRANSPARENT.union(RenderEffects::AUTO_EXPOSURE),
             ),
             background: ViewBackground::Transparent,
+            lighting: ViewLighting::Scene,
+        }
+    }
+}
+
+/// What lights a view's surfaces — see [`ViewDesc::lighting`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub enum ViewLighting {
+    /// The frame's own light: the sun and every light row
+    /// [`ForwardRenderer::set_lights`] handed over, the sky's irradiance, the
+    /// irradiance probes, the reflections and the fog. What the primary camera
+    /// is lit by, and what every view was lit by before this choice existed.
+    #[default]
+    Scene,
+    /// One constant light, whatever the frame is lit by: the
+    /// [`DirectionalLight`]'s direction and colour as the only direct light,
+    /// and its [`ambient`](DirectionalLight::ambient) as the only indirect one.
+    ///
+    /// For a picture that must not change with the world around it, such as a
+    /// model rendered into an inventory icon: the same model under the same
+    /// fixed light draws the same pixels in a sunlit level and a dark one.
+    ///
+    /// # What it ignores
+    ///
+    /// * **The frame's sun and every light row** — a point, spot or rectangle
+    ///   light near the view's camera included. The key light is the view's
+    ///   one row, which is a choice rather than a limit: an icon's model is
+    ///   placed away from the world, so a local light that did reach it would
+    ///   be lighting it by accident.
+    /// * **Every shadow.** The key light is not occluded — not by the frame's
+    ///   cascades, which were fitted to the primary camera and cover whatever
+    ///   happens to be there, and not by contact shadows. The view's frame
+    ///   block names no shadow map: every atlas rectangle in it is empty, which
+    ///   the shaders read as a map never rendered and answer lit. The frame's
+    ///   atlas is still drawn and the view's instances may still cast into it;
+    ///   see [`ForwardRenderer::set_instance_casts_shadow`].
+    /// * **The sky's irradiance and the irradiance probes**: the view's frame
+    ///   block carries no sky rows and an empty probe header, and the view
+    ///   binds a probe table of one zeroed row in place of the scene's, so the
+    ///   ambient term is the fill alone.
+    /// * **Reflections and the air**: [`Self::SCENE_EFFECTS`] are dropped from
+    ///   the view's effects whatever [`ViewDesc::effects`] asked for, and the
+    ///   height fog is [`Fog::NONE`]. Screen-space reflections are the only
+    ///   specular the environment gives a surface, so a metal under this
+    ///   lighting has the key light's highlight and nothing else.
+    ///
+    /// What it keeps is everything the view's own geometry decides: its
+    /// materials and emission, its ambient occlusion, and every effect after the
+    /// forward pass. The background is [`ViewDesc::background`]'s, so a view
+    /// asking for [`ViewBackground::Scene`] still draws the frame's sky behind
+    /// a model it does not light.
+    Fixed(DirectionalLight),
+}
+
+impl ViewLighting {
+    /// The effects a [`ViewLighting::Fixed`] view never draws, because each
+    /// brings the frame's light into it: the reflection march falls back to
+    /// the probes and the sky, the froxel volume is lit by the sun and the
+    /// scene's lights, and the contact march shadows along the frame's sun.
+    pub const SCENE_EFFECTS: RenderEffects = RenderEffects::REFLECTIONS
+        .union(RenderEffects::VOLUMETRIC_FOG)
+        .union(RenderEffects::CONTACT_SHADOWS);
+
+    /// The effects this lighting takes out of a view's frame.
+    pub(super) const fn dropped_effects(self) -> RenderEffects {
+        match self {
+            Self::Scene => RenderEffects::empty(),
+            Self::Fixed(_) => Self::SCENE_EFFECTS,
         }
     }
 }
@@ -284,6 +357,8 @@ pub(super) struct ViewInputs<'a> {
     pub(super) effects: RenderEffects,
     /// What it draws where no geometry is — see [`ViewDesc::background`].
     pub(super) background: ViewBackground,
+    /// What lights it — see [`ViewDesc::lighting`].
+    pub(super) lighting: ViewLighting,
     /// The format the caller's target has, which the resolves and the upscale
     /// write.
     pub(super) target_format: Format,
@@ -560,6 +635,8 @@ pub(super) struct View {
     /// What this view draws where no geometry is, as
     /// [`ViewDesc::background`] asked for it.
     pub(super) background: ViewBackground,
+    /// What lights this view, as [`ViewDesc::lighting`] asked for it.
+    pub(super) lighting: ViewLighting,
     /// What this frame draws in this view: the frame's resolved effects under
     /// [`View::effects`], frozen by [`View::begin_frame`] so that the frame's
     /// two halves agree on it.
@@ -575,6 +652,10 @@ pub(super) struct View {
     /// empty where there is no amplification stage to choose one. See
     /// [`ForwardRenderer::cluster_selection`].
     pub(super) cluster_selection: Vec<BufferHandle>,
+    /// The one zeroed probe row a [`ViewLighting::Fixed`] view's groups bind in
+    /// place of the scene's table, or `None` for a view lit by the scene — see
+    /// [`View::build`].
+    pub(super) fixed_probes: Option<BufferHandle>,
     /// What [`begin_frame`](ForwardRenderer::begin_frame) last handed
     /// [`DrawGen::begin_frame`], kept so a reader can compute the same cut
     /// host-side without re-deriving it from the camera.
@@ -877,6 +958,27 @@ impl View {
         let lights = rollback.lights.as_ref().expect("just stored");
         let draws = rollback.draws.as_ref().expect("stored above");
 
+        // **A fixed view's probe table is one zeroed row**, bound in place of
+        // the scene's. Its frame block carries the empty probe header, and
+        // `mesh.slang` evaluates that header as row 0 of whatever table is
+        // bound — which is zero for a scene with no probes only because that
+        // scene's table is. Host-uploaded and read-only, on the light list's
+        // terms, and written once: nothing ever changes a zero.
+        let fixed_probes = match inputs.lighting {
+            ViewLighting::Scene => None,
+            ViewLighting::Fixed(_) => {
+                let buffer = device.create_buffer(&BufferDesc {
+                    label: Some("fixed view probes"),
+                    size: crcbl_shaders::probe::PROBE_STRIDE as u64,
+                    usage: BufferUsage::STORAGE,
+                    memory: MemoryLocation::HostUpload,
+                })?;
+                rollback.buffers.push(buffer);
+                device.write_buffer(buffer, 0, &crcbl_shaders::probe::GpuProbe::ZERO.to_bytes())?;
+                Some(buffer)
+            }
+        };
+
         let mut uniforms = Vec::with_capacity(frames);
         let mut mesh_groups = Vec::with_capacity(frames);
         let mut mesh_group_entries = Vec::with_capacity(frames);
@@ -902,7 +1004,7 @@ impl View {
                 shadow_sampler: inputs.shadow_sampler,
                 lights: lights.lights(frame),
                 light_grid: lights.grid(frame),
-                probes: inputs.probes[frame],
+                probes: fixed_probes.unwrap_or(inputs.probes[frame]),
                 tables: draws.tables(),
                 specular_dfg: inputs.specular_dfg,
                 ltc_table: inputs.ltc_table,
@@ -1207,6 +1309,7 @@ impl View {
             Self {
                 effects: inputs.effects,
                 background: inputs.background,
+                lighting: inputs.lighting,
                 // Replaced by every `begin_frame`, on `lod_params`' terms.
                 frame_effects: inputs.effects,
                 // No frame has begun it.
@@ -1215,6 +1318,7 @@ impl View {
                     unreachable!("draw generation was placed in the rollback above")
                 }),
                 cluster_selection,
+                fixed_probes,
                 // Overwritten by the first `begin_frame`, which is the only thing
                 // that can know the viewport. A zero scale with a budget of zero
                 // selects nothing at all, and there is no frame yet to select for.
@@ -1328,10 +1432,46 @@ impl View {
         let view_projection = camera.view_projection(frame.aspect);
         // What this frame draws here, frozen for the reason the frame's own
         // effects are: this call and the passes have to agree. The shadow bit is
-        // the frame's whatever this view asked for — see [`ViewDesc::effects`].
+        // the frame's whatever this view asked for — see [`ViewDesc::effects`] —
+        // and the effects that bring the frame's light in are this view's
+        // lighting's to take away — see [`ViewLighting::SCENE_EFFECTS`].
         self.frame_effects = frame
             .effects
-            .intersection(self.effects.union(RenderEffects::SHADOWS));
+            .intersection(self.effects.union(RenderEffects::SHADOWS))
+            .difference(self.lighting.dropped_effects());
+        // What lights this view: the frame's sun, rows, probes, sky, fog and
+        // shadow maps, or the one constant light its description fixed and
+        // nothing of the frame's. Resolved once here so every block below reads
+        // the same answer — a sun taken from one and a fill from the other
+        // would be a view lit by half of each.
+        //
+        // **A fixed view's atlas rectangles are all empty**, which is how its
+        // key light goes unshadowed with no shader of its own: every sampler of
+        // the atlas answers lit for an empty rectangle before it reads a texel
+        // (`mesh.slang`'s `atlas_rect_is_empty`), and the key is the view's only
+        // row, so nothing else could name a tile.
+        let key_row;
+        let (light, rows, probe_volume, sky, fog, atlas_rects) = match self.lighting {
+            ViewLighting::Scene => (
+                scene.light,
+                &scene.rows[..],
+                frame.probe_volume,
+                frame.sky_irradiance,
+                frame.fog,
+                scene.atlas_rects,
+            ),
+            ViewLighting::Fixed(key) => {
+                key_row = [sun_row(&key)];
+                (
+                    key,
+                    &key_row[..],
+                    crcbl_shaders::probe::ProbeVolume::default(),
+                    crcbl_shaders::probe::GpuProbe::ZERO,
+                    Fog::NONE,
+                    [[0.0; 4]; shadow::TILES],
+                )
+            }
+        };
         self.begun = frame.serial;
         // The same matrix again for the ground grid, whose pass `add_passes`
         // records and which has no camera to ask.
@@ -1358,7 +1498,7 @@ impl View {
         self.lights.begin_frame(
             device,
             slot,
-            &scene.rows,
+            rows,
             self.grid,
             FrameView {
                 extent,
@@ -1396,7 +1536,6 @@ impl View {
         )?;
 
         let gradient = frame.gradient;
-        let sky = frame.sky_irradiance;
         let uniforms = mesh::FrameUniforms {
             view_proj: view_projection.to_cols_array(),
             camera_position: camera.eye.extend(1.0).to_array(),
@@ -1404,7 +1543,7 @@ impl View {
             // `set_normals_view` and the constants it names. A renderer nobody
             // has called that on writes the `0.0` this line has always written,
             // which is what makes every golden image untouched by the feature.
-            ambient: scene.light.ambient.extend(frame.debug_view_lane).to_array(),
+            ambient: light.ambient.extend(frame.debug_view_lane).to_array(),
             // **The frame's cascades, whichever camera this is.** They were
             // fitted to the primary camera and drawn once; a secondary view
             // samples the same maps through the same matrices, which is
@@ -1418,7 +1557,7 @@ impl View {
             // probes are static and nothing here varies them per frame. A
             // description with no probes leaves the default, which evaluates to
             // exactly zero in the shader.
-            probes: frame.probe_volume,
+            probes: probe_volume,
             // The very numbers the draw-argument pass selected under, carried
             // into the geometry stage so the screen-error heatmap shades by the
             // metric the cut was chosen with rather than by a second derivation
@@ -1445,13 +1584,13 @@ impl View {
                 if self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG) {
                     0.0
                 } else {
-                    frame.fog.density
+                    fog.density
                 },
-                frame.fog.falloff,
-                frame.fog.reference_height,
+                fog.falloff,
+                fog.reference_height,
                 0.0,
             ],
-            fog_color: frame.fog.color.extend(0.0).to_array(),
+            fog_color: fog.color.extend(0.0).to_array(),
             sky_sh_r: sky.sh_r,
             sky_sh_g: sky.sh_g,
             sky_sh_b: sky.sh_b,
@@ -1473,7 +1612,8 @@ impl View {
             // `shadow::Selection::update` just spent — the *whole* of what the
             // sampling side knows about the atlas's shape, so a map is read
             // from the rectangle it was rendered into whatever size that was.
-            shadow_atlas_rect: scene.atlas_rects,
+            // None at all on a fixed view — see `atlas_rects` above.
+            shadow_atlas_rect: atlas_rects,
             // Which filter each side of the comparison seam samples through,
             // and where the seam falls — see `crate::split`, whose header
             // carries why a scene pass selects per pixel where a full-screen
@@ -1584,7 +1724,7 @@ impl View {
         // scene with no sun should draw.
         let to_light = camera
             .view()
-            .transform_vector3(scene.light.direction.normalize_or_zero())
+            .transform_vector3(light.direction.normalize_or_zero())
             .normalize_or_zero();
         self.contact_shadows.begin_frame(
             device,
@@ -1606,7 +1746,7 @@ impl View {
                 inv_proj: inv_projection.to_cols_array(),
                 proj: projection.to_cols_array(),
                 inv_view: camera.view().inverse().to_cols_array(),
-                probe_volume: frame.probe_volume,
+                probe_volume,
                 // How far up the pyramid the march may climb, which is the
                 // pyramid this extent has — `add_passes` records the reduction
                 // whenever it records the march, so the two never disagree. A
@@ -1656,13 +1796,8 @@ impl View {
             device,
             slot,
             crcbl_shaders::water::WaterParams {
-                sun_direction: scene
-                    .light
-                    .direction
-                    .normalize_or_zero()
-                    .extend(0.0)
-                    .to_array(),
-                sun_color: scene.light.color.extend(0.0).to_array(),
+                sun_direction: light.direction.normalize_or_zero().extend(0.0).to_array(),
+                sun_color: light.color.extend(0.0).to_array(),
                 froxels: self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG),
             },
         )?;
@@ -2983,6 +3118,9 @@ impl View {
         for buffer in self.cluster_selection {
             device.destroy_buffer(buffer);
         }
+        if let Some(buffer) = self.fixed_probes {
+            device.destroy_buffer(buffer);
+        }
         self.lights.destroy(device);
         self.draws.destroy(device);
     }
@@ -3053,6 +3191,7 @@ impl ForwardRenderer {
                 id,
                 effects: desc.effects,
                 background: desc.background,
+                lighting: desc.lighting,
                 target_format: self.target_format,
                 emit: self.emit,
                 instances: self.instances.buffers(),
@@ -3130,8 +3269,8 @@ impl ForwardRenderer {
     /// **After [`begin_frame`](Self::begin_frame), in the same frame**, which is
     /// what rotated the instance ring, skinned what moves and fitted the shadow
     /// maps: a view writes into the slot that call chose, lit by the sun it was
-    /// handed and shadowed through the maps the primary camera's frame draws. A
-    /// view begun and then not named in
+    /// handed and shadowed through the maps the primary camera's frame draws —
+    /// unless its [`ViewDesc::lighting`] fixes a light of its own. A view begun and then not named in
     /// [`add_passes_with_views`](Self::add_passes_with_views) records nothing.
     ///
     /// # Errors

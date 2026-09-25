@@ -18,8 +18,8 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
     AtlasDesc, Camera, DirectionalLight, EffectRequest, ForwardRenderer, FrameTargets,
     ImportedImage, InitialClaim, InstanceHandle, RenderEffects, RenderGraph, SampleMode, Sky,
-    SlotCopy, Sprite, SpriteRenderer, TransientPool, ViewBackground, ViewDesc, ViewId, ViewMask,
-    ViewTarget,
+    SlotCopy, Sprite, SpriteRenderer, TransientPool, ViewBackground, ViewDesc, ViewId,
+    ViewLighting, ViewMask, ViewTarget,
 };
 
 use crate::harness::{Headless, poisoned};
@@ -138,18 +138,30 @@ fn render_views(
     pool: &mut TransientPool,
     views: &[Drawn],
 ) -> (crcbl_golden::Image, Vec<crcbl_golden::Image>) {
+    render_views_lit(
+        headless,
+        renderer,
+        pool,
+        &DirectionalLight::default(),
+        views,
+    )
+}
+
+/// [`render_views`], with the frame lit by `sun` rather than the default one.
+fn render_views_lit(
+    headless: &Headless,
+    renderer: &mut ForwardRenderer,
+    pool: &mut TransientPool,
+    sun: &DirectionalLight,
+    views: &[Drawn],
+) -> (crcbl_golden::Image, Vec<crcbl_golden::Image>) {
     let device = headless.device.as_ref();
     let acquired = device
         .acquire_next_frame(headless.swapchain)
         .expect("the ring always has an image");
     let camera = mesh_camera(crcbl::render::Projection::default());
     renderer
-        .begin_frame(
-            device,
-            &camera,
-            &DirectionalLight::default(),
-            acquired.extent,
-        )
+        .begin_frame(device, &camera, sun, acquired.extent)
         .expect("the uniform buffers are writable");
     for drawn in views {
         renderer
@@ -849,5 +861,192 @@ fn a_transparent_icon_copied_into_a_bgra_atlas_draws_over_what_is_behind_it() {
         device.destroy_image(image);
     }
     pool.destroy(device);
+    headless.finish();
+}
+
+/// The light a fixed icon view is lit by in
+/// [`a_fixed_view_draws_the_same_icon_under_any_frame_light`]: from over the
+/// camera's shoulder, so the cube's visible faces are lit unevenly and a
+/// picture of it has more than one colour in it.
+const ICON_KEY: DirectionalLight = DirectionalLight {
+    direction: Vec3::new(0.5, 0.8, 0.3),
+    color: Vec3::new(1.2, 1.1, 1.0),
+    ambient: Vec3::new(0.15, 0.15, 0.18),
+};
+
+/// What one world's frame drew through its two icon views: the fixed one and
+/// its scene-lit twin.
+struct Icons {
+    fixed: crcbl_golden::Image,
+    scene_lit: crcbl_golden::Image,
+}
+
+/// One frame of a renderer built over `scene`, lit by `sun` and whatever
+/// `setup` gives it, with the cube at the origin drawn through a fixed icon view
+/// and a scene-lit one — both transparent, through the same camera, into
+/// targets of one size.
+fn draw_icons(
+    headless: &Headless,
+    scene: &crcbl::render::scene::SceneDesc<'_>,
+    sun: &DirectionalLight,
+    setup: impl FnOnce(&mut ForwardRenderer),
+) -> Icons {
+    let device = headless.device.as_ref();
+    let mut pool = TransientPool::new();
+    let mut renderer = ForwardRenderer::with_scene(device, headless.queue, headless.format, scene)
+        .expect("a forward renderer");
+    place(
+        &mut renderer,
+        crcbl::render::scene::DEMO_CUBE,
+        crcbl::render::scene::DEMO_UNTINTED,
+        Mat4::IDENTITY,
+    );
+    setup(&mut renderer);
+    let fixed = renderer
+        .create_view(
+            device,
+            headless.queue,
+            &ViewDesc {
+                lighting: ViewLighting::Fixed(ICON_KEY),
+                ..ViewDesc::transparent()
+            },
+        )
+        .expect("a fixed view");
+    let scene_lit = renderer
+        .create_view(device, headless.queue, &ViewDesc::transparent())
+        .expect("its scene-lit twin");
+    let fixed_target = target_image(headless, "fixed icon", VIEW_EXTENT);
+    let scene_target = target_image(headless, "scene-lit icon", VIEW_EXTENT);
+    let camera = mesh_camera(crcbl::render::Projection::default());
+    let (_, mut pictures) = render_views_lit(
+        headless,
+        &mut renderer,
+        &mut pool,
+        sun,
+        &[
+            Drawn {
+                view: fixed,
+                camera,
+                target: fixed_target,
+                extent: VIEW_EXTENT,
+            },
+            Drawn {
+                view: scene_lit,
+                camera,
+                target: scene_target,
+                extent: VIEW_EXTENT,
+            },
+        ],
+    );
+    device.wait_idle().expect("idle");
+    renderer.destroy(device);
+    for (image, view) in [fixed_target, scene_target] {
+        device.destroy_image_view(view);
+        device.destroy_image(image);
+    }
+    pool.destroy(device);
+    let scene_lit = pictures.remove(1);
+    Icons {
+        fixed: pictures.remove(0),
+        scene_lit,
+    }
+}
+
+/// How many pixels two pictures of one extent differ at, and by how much at
+/// most in any channel, alpha included.
+fn difference(a: &crcbl_golden::Image, b: &crcbl_golden::Image) -> (usize, u8) {
+    let mut differing = 0usize;
+    let mut worst = 0u8;
+    for (ours, theirs) in a.pixels().chunks_exact(4).zip(b.pixels().chunks_exact(4)) {
+        let apart = (0..4)
+            .map(|c| ours[c].abs_diff(theirs[c]))
+            .max()
+            .unwrap_or(0);
+        differing += usize::from(apart != 0);
+        worst = worst.max(apart);
+    }
+    (differing, worst)
+}
+
+/// **A [`ViewLighting::Fixed`] icon is the same picture, byte for byte,
+/// whatever lights the world it is drawn in** — and a scene-lit icon of the
+/// same model is not, which is what says the two worlds differ where it
+/// matters.
+///
+/// The first world is the demo scene under the default sun, with no sky, no
+/// probes and no other light. The second has an irradiance grid over the
+/// origin, a sky, a point light beside the cube and a sun of another colour
+/// from another direction. Each draws the cube at the origin through two
+/// transparent views — one fixed, one lit by the scene — and the check is
+/// between the worlds:
+///
+/// * the two fixed icons are **identical**, alpha included. Every term that
+///   differs between the worlds is one the fixed view does not read, so there
+///   is no arithmetic by which a byte may move, and the comparison has no
+///   tolerance;
+/// * the two scene-lit icons differ across most of the cube — the control,
+///   without which identical fixed icons could be two views that ignored the
+///   frame's light for some other reason, or two worlds that happened to light
+///   the cube alike;
+/// * the fixed icon has the cube in it, lit, so the equality is between two
+///   pictures of something.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-forward-e2e.sh"]
+fn a_fixed_view_draws_the_same_icon_under_any_frame_light() {
+    let headless = Headless::open_for_mesh_with(Features::GPU_DRIVEN);
+    let plain = draw_icons(
+        &headless,
+        &crcbl::render::scene::demo(),
+        &DirectionalLight::default(),
+        |_| {},
+    );
+    let mut probed = crcbl::render::scene::demo();
+    probed.probes = crcbl::screenshot::probe_grid();
+    probed.capacities.probes = probed.probes.volume.total();
+    let lit = draw_icons(
+        &headless,
+        &probed,
+        &DirectionalLight {
+            direction: Vec3::new(-0.7, 0.5, -0.2),
+            color: Vec3::new(2.4, 0.9, 0.4),
+            ambient: Vec3::new(0.02, 0.05, 0.12),
+        },
+        |renderer| {
+            renderer.set_sky(test_sky());
+            renderer.set_lights(&[crcbl::render::Light::Point(crcbl::render::PointLight {
+                position: Vec3::new(0.9, 0.8, 0.9),
+                radius: 4.0,
+                color: Vec3::new(0.2, 1.5, 0.3),
+                fill: false,
+            })]);
+        },
+    );
+
+    let (fixed_differing, fixed_worst) = difference(&plain.fixed, &lit.fixed);
+    let (scene_differing, scene_worst) = difference(&plain.scene_lit, &lit.scene_lit);
+    let counted = coverage(&plain.fixed);
+    let centre = plain
+        .fixed
+        .pixel(VIEW_EXTENT.0 / 2, VIEW_EXTENT.1 / 2)
+        .expect("inside the frame");
+    eprintln!(
+        "crcbl forward e2e: views — fixed icons differ between the worlds at {fixed_differing} \
+         pixels (by at most {fixed_worst}); scene-lit icons at {scene_differing} (by at most \
+         {scene_worst}); the fixed icon covers {} pixels, centre {centre:?}",
+        counted.covered
+    );
+    assert!(
+        counted.covered > 0 && centre[3] == COVERED && centre[..3] != [0, 0, 0],
+        "the fixed icon has the cube in it, lit"
+    );
+    assert!(
+        scene_differing > counted.covered / 2,
+        "the two worlds light a scene-lit icon differently across most of the cube, or the \
+         equality below says nothing about the frame's light"
+    );
+    assert_eq!(
+        fixed_differing, 0,
+        "a fixed icon is the same picture whatever lights the world it is drawn in"
+    );
     headless.finish();
 }

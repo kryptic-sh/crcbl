@@ -226,7 +226,7 @@ pub use fly::{Flyer, LOOK, SPEED, TURN};
 pub use forward::{
     DEFAULT_ANISOTROPY, DebugView, EXPOSURE_MAX, EXPOSURE_MIN, ForwardOverlayTargets,
     ForwardRenderer, FrameTargets, MAX_VIEWS, MIN_RENDER_SCALE, SCENE_CLEAR, SHADOW_LOD_BIAS,
-    SkinnedInstanceDesc, ViewBackground, ViewDesc, ViewId, ViewMask, ViewTarget,
+    SkinnedInstanceDesc, ViewBackground, ViewDesc, ViewId, ViewLighting, ViewMask, ViewTarget,
 };
 pub use graph::{
     Attachment, BufferId, CompiledGraph, CompiledPass, GraphBarriers, GraphBufferBarrier,

@@ -215,7 +215,9 @@ mod view;
 use bucket_draws::{BucketDraws, EmitTail, RegionStep};
 
 use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput};
-pub use view::{FrameTargets, MAX_VIEWS, ViewBackground, ViewDesc, ViewId, ViewMask, ViewTarget};
+pub use view::{
+    FrameTargets, MAX_VIEWS, ViewBackground, ViewDesc, ViewId, ViewLighting, ViewMask, ViewTarget,
+};
 
 /// The clear behind the mesh, in **linear** light.
 ///
@@ -4904,6 +4906,7 @@ impl ForwardRenderer {
                 id: ViewId::PRIMARY,
                 effects: RenderEffects::all(),
                 background: ViewBackground::Scene,
+                lighting: ViewLighting::Scene,
                 target_format,
                 emit,
                 instances: &instance_buffers,
