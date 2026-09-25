@@ -97,6 +97,15 @@ fn cloud_version(cloud: &Shared) -> Parsed {
     Parsed::parse(cloud.raw()).expect("a valid synced file")
 }
 
+/// `device` saves `payload` while the cloud refuses writes: the save is kept
+/// on the device and the cloud never takes it, so another device can write
+/// over the same base without seeing it.
+fn save_the_cloud_misses(cloud: &Shared, device: &mut SyncedFile, payload: &[u8]) {
+    cloud.refuse_writes(true);
+    assert!(matches!(device.save(payload), Err(SyncError::Storage(_))));
+    cloud.refuse_writes(false);
+}
+
 /// Two devices that both hold version `v1` of the file.
 fn two_devices_at_v1() -> (Shared, SyncedFile, SyncedFile) {
     let cloud = Shared::default();
@@ -152,7 +161,7 @@ fn a_write_built_on_this_devices_unconfirmed_write_fast_forwards() {
 #[test]
 fn equal_generations_with_different_payloads_conflict() {
     let (cloud, mut a, mut b) = two_devices_at_v1();
-    a.save(b"a").unwrap();
+    save_the_cloud_misses(&cloud, &mut a, b"a");
     b.save(b"b").unwrap();
     // Both wrote generation 2 on top of v1; the cloud kept `b`'s.
     assert_eq!(cloud_version(&cloud).version.generation, 2);
@@ -167,7 +176,7 @@ fn equal_generations_with_different_payloads_conflict() {
 #[test]
 fn a_cloud_version_on_another_base_conflicts() {
     let (cloud, mut a, mut b) = two_devices_at_v1();
-    a.save(b"a").unwrap();
+    save_the_cloud_misses(&cloud, &mut a, b"a");
     b.save(b"b1").unwrap();
     b.load().unwrap();
     b.save(b"b2").unwrap();
@@ -183,7 +192,7 @@ fn resolving_writes_above_both_sides_and_the_next_load_is_clean() {
         (Resolution::KeepRemote, &b"b2"[..]),
     ] {
         let (cloud, mut a, mut b) = two_devices_at_v1();
-        a.save(b"a").unwrap();
+        save_the_cloud_misses(&cloud, &mut a, b"a");
         b.save(b"b1").unwrap();
         b.load().unwrap();
         b.save(b"b2").unwrap();
@@ -202,6 +211,53 @@ fn resolving_writes_above_both_sides_and_the_next_load_is_clean() {
 }
 
 #[test]
+fn a_save_over_a_version_this_device_never_loaded_is_stale_and_kept() {
+    // The write this refusal exists for: `a` saves v2 and loads it, which
+    // drops `a`'s kept copy; `b`, still on v1, must not overwrite v2 unseen.
+    let (cloud, mut a, mut b) = two_devices_at_v1();
+    a.save(b"v2").unwrap();
+    assert_eq!(a.load().unwrap(), clean(b"v2"));
+    assert!(matches!(b.save(b"b on v1"), Err(SyncError::Stale)));
+    assert_eq!(
+        cloud_version(&cloud).payload(),
+        b"v2",
+        "the cloud untouched"
+    );
+    assert!(
+        matches!(b.save(b"again"), Err(SyncError::NotLoaded)),
+        "a stale save sends the device back to load"
+    );
+    // `b`'s save was kept, and the load sets it against v2.
+    assert_eq!(b.load().unwrap(), conflict(b"b on v1", b"v2"));
+    assert_eq!(a.load().unwrap(), clean(b"v2"));
+}
+
+#[test]
+fn a_resolution_over_a_cloud_that_moved_on_is_stale_and_kept() {
+    let (cloud, mut a, mut b) = two_devices_at_v1();
+    save_the_cloud_misses(&cloud, &mut a, b"a");
+    b.save(b"b").unwrap();
+    assert_eq!(a.load().unwrap(), conflict(b"a", b"b"));
+    // `b` writes again while `a` is deciding.
+    b.load().unwrap();
+    b.save(b"b2").unwrap();
+    assert!(matches!(
+        a.resolve(Resolution::KeepLocal),
+        Err(SyncError::Stale)
+    ));
+    assert_eq!(
+        cloud_version(&cloud).payload(),
+        b"b2",
+        "the cloud untouched"
+    );
+    assert!(matches!(
+        a.resolve(Resolution::KeepLocal),
+        Err(SyncError::NoConflict)
+    ));
+    assert_eq!(a.load().unwrap(), conflict(b"a", b"b2"));
+}
+
+#[test]
 fn a_save_needs_a_load_first() {
     let cloud = Shared::default();
     let mut a = device(&cloud);
@@ -212,7 +268,7 @@ fn a_save_needs_a_load_first() {
 #[test]
 fn a_failed_load_forgets_the_conflict_but_still_refuses_a_save() {
     let (cloud, mut a, mut b) = two_devices_at_v1();
-    a.save(b"a").unwrap();
+    save_the_cloud_misses(&cloud, &mut a, b"a");
     b.save(b"b").unwrap();
     assert_eq!(a.load().unwrap(), conflict(b"a", b"b"));
     cloud.refuse_reads(true);

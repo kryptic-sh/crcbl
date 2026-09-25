@@ -37,6 +37,15 @@
 //! device's own latest write. A save writes that copy first and the cloud
 //! second, so a write the cloud never received is still on the device.
 //!
+//! # Save
+//!
+//! A save reads the cloud before writing it, and writes only over the version
+//! the save was built on (or over nothing). Anything else means another device
+//! wrote since this one last loaded, and overwriting it would lose that write
+//! with nobody told. So the save is kept in the shadow, the cloud is left
+//! alone, and [`SyncError::Stale`] sends the game back to
+//! [`SyncedFile::load`], which reports the two as a `Conflict`.
+//!
 //! # Load
 //!
 //! | The cloud holds                            | This device's unconfirmed write | Outcome          |
@@ -154,6 +163,12 @@ pub enum SyncError {
     /// [`SyncedFile::resolve`] with no conflict to resolve.
     #[error("there is no conflict to resolve")]
     NoConflict,
+    /// [`SyncedFile::save`] found the cloud holding a version this device
+    /// has not loaded. The save is kept on this device and the cloud was
+    /// not written; the next [`SyncedFile::load`] reports the two as a
+    /// [`SyncOutcome::Conflict`].
+    #[error("the cloud holds a version this device has not loaded; load before saving")]
+    Stale,
 }
 
 /// A version's identity: generation and CRC together.
@@ -345,13 +360,16 @@ impl SyncedFile {
 
     /// Writes `payload` as a new version on top of this device's latest —
     /// its unconfirmed write if it has one, else the version it last saw in
-    /// the cloud: kept in the shadow first, then written to the cloud.
+    /// the cloud: kept in the shadow first, then written to the cloud if the
+    /// cloud still holds what it was built on (the [module docs](self)'
+    /// _Save_).
     ///
     /// # Errors
     ///
     /// [`SyncError::NotLoaded`] unless the last [`load`](Self::load)
     /// succeeded;
     /// [`SyncError::Unresolved`] while the last load's conflict stands;
+    /// [`SyncError::Stale`] when another device wrote since that load;
     /// otherwise as [`load`](Self::load).
     pub fn save(&mut self, payload: &[u8]) -> Result<(), SyncError> {
         if !self.loaded {
@@ -360,15 +378,26 @@ impl SyncedFile {
         if self.conflict.is_some() {
             return Err(SyncError::Unresolved);
         }
+        let pending = self.read_pending()?;
         // An unconfirmed write is always above the version it was built on,
         // so the base is also the highest version this device knows.
-        let base = match self.read_pending()? {
+        let base = match &pending {
             Some(mine) => Some(mine.version),
             None => self.read_seen()?,
         };
         let generation = base.map_or(0, |base| base.generation) + 1;
         let version = Parsed::build(generation, base, payload);
-        self.write_version(&version)
+        // The version it was built on, or — when that is this device's own
+        // write the cloud never took — the version that write was built on.
+        let mut over = vec![base];
+        if let Some(mine) = &pending {
+            over.push(mine.base);
+        }
+        let written = self.write_version(&version, &over);
+        if matches!(written, Err(SyncError::Stale)) {
+            self.loaded = false;
+        }
+        written
     }
 
     /// Settles the last load's conflict with the game's choice, written as a
@@ -378,7 +407,9 @@ impl SyncedFile {
     /// # Errors
     ///
     /// [`SyncError::NoConflict`] unless the last load was a conflict;
-    /// otherwise as [`save`](Self::save).
+    /// [`SyncError::Stale`] when the cloud moved on since that load, which
+    /// also ends the conflict (the resolution is kept for the next load to
+    /// weigh); otherwise as [`save`](Self::save).
     pub fn resolve(&mut self, choice: Resolution) -> Result<Vec<u8>, SyncError> {
         let Some(conflict) = self.conflict.take() else {
             return Err(SyncError::NoConflict);
@@ -396,15 +427,23 @@ impl SyncedFile {
             + 1;
         let version = Parsed::build(generation, Some(conflict.remote.version), &payload);
         // Written on top of the cloud's version, which this device has now
-        // seen.
-        if let Err(error) = self
+        // seen, and only while the cloud still holds it.
+        match self
             .write_seen(conflict.remote.version)
-            .and_then(|()| self.write_version(&version))
+            .and_then(|()| self.write_version(&version, &[Some(conflict.remote.version)]))
         {
-            self.conflict = Some(conflict);
-            return Err(error);
+            Ok(()) => Ok(payload),
+            // The conflict is out of date: the resolution is kept, and the
+            // next load sets it against what the cloud holds now.
+            Err(SyncError::Stale) => {
+                self.loaded = false;
+                Err(SyncError::Stale)
+            }
+            Err(error) => {
+                self.conflict = Some(conflict);
+                Err(error)
+            }
         }
-        Ok(payload)
     }
 
     /// Writes this device's kept write to the cloud again.
@@ -413,9 +452,19 @@ impl SyncedFile {
         Ok(SyncOutcome::Clean(mine.payload().to_vec()))
     }
 
-    /// Keeps `version` in the shadow, then writes it to the cloud.
-    fn write_version(&self, version: &Parsed) -> Result<(), SyncError> {
+    /// Keeps `version` in the shadow, then writes it to the cloud if the
+    /// cloud holds nothing or one of `over`; otherwise [`SyncError::Stale`],
+    /// with the cloud untouched.
+    fn write_version(&self, version: &Parsed, over: &[Option<Version>]) -> Result<(), SyncError> {
         self.shadow.write(&self.pending_path(), &version.bytes)?;
+        let cloud = match self.cloud.read(&self.path) {
+            Ok(bytes) => Some(parse(&self.path, bytes)?.version),
+            Err(StorageError::NotFound(_)) => None,
+            Err(error) => return Err(error.into()),
+        };
+        if cloud.is_some() && !over.contains(&cloud) {
+            return Err(SyncError::Stale);
+        }
         self.cloud.write(&self.path, &version.bytes)?;
         Ok(())
     }

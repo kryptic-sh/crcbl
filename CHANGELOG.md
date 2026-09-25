@@ -642,7 +642,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   above both. A write the cloud never took is kept in the shadow and sent again;
   a file that does not parse is `SyncError::Corrupt`, never read as empty;
   `save` refuses before a `load`, after one that failed, and while a conflict
-  stands. `crcbl_store::crc32` is the workspace's one CRC-32, now also behind
+  stands, and a `save` or `resolve` that finds the cloud holding a version this
+  device has not loaded is `SyncError::Stale`: kept on the device, the cloud
+  left alone, and reported as a `Conflict` by the next `load`.
+  `crcbl_store::crc32` is the workspace's one CRC-32, now also behind
   `crcbl-sprite`'s and `crcbl-golden`'s PNG test fixtures.
 - **A server can say why a session ended**: `crcbl_net::SessionEndReason`
   (`HOST_LEFT`, `KICKED`, `SHUTTING_DOWN`), sent sealed on the reliable channel
