@@ -787,17 +787,20 @@ impl Mixer {
         *self.lock_cue_grammar()
     }
 
-    /// The cue for an emitter at `emitter`, heard from this mixer's listener
-    /// and computed with this mixer's grammar.
+    /// The cue for an emitter at `emitter`, heard from this mixer's listener —
+    /// where it stands and the way it faces — and computed with this mixer's
+    /// grammar.
     ///
     /// The one call that reads both of those: [`compute_cue`] stays a pure
     /// function of two positions and a grammar, and this is what supplies
-    /// everything but the emitter. Feed the result to [`Voice::with_mix`]
+    /// everything but the emitter, turned into the listener's frame by
+    /// [`Listener::to_local`](crate::spatial::Listener::to_local). Feed the result to [`Voice::with_mix`]
     /// through [`VoiceMix::from`] when the sound starts, and to
     /// [`Mixer::set_mix`] on every frame it needs re-aiming after that.
     #[must_use]
     pub fn cue(&self, emitter: [f32; 3]) -> SpatialCue {
-        compute_cue(self.listener().position, emitter, &self.cue_grammar())
+        let local = self.listener().to_local(emitter);
+        compute_cue([0.0; 3], local, &self.cue_grammar())
     }
 
     /// Start a voice, and answer with the handle that steers it.
@@ -1803,6 +1806,24 @@ mod tests {
     /// hearing from the origin would leave these two mixes identical, which is
     /// what every assertion here is written against: same gains, same ITD, no
     /// side at all.
+    /// **Turning the listener turns the cue**: an emitter dead ahead of a
+    /// listener facing `+Z` is on the right of the same listener turned to
+    /// face `−X`, and the cue says so.
+    #[test]
+    fn turning_the_listener_turns_where_the_next_cue_is_heard() {
+        let mixer = Mixer::new();
+        let emitter = [0.0, 0.0, 5.0];
+        let ahead = mixer.cue(emitter);
+        assert!(
+            (ahead.gain_left - ahead.gain_right).abs() < 1e-6,
+            "{ahead:?}"
+        );
+        mixer.set_listener(Listener::facing([0.0; 3], [-1.0, 0.0, 0.0]));
+        let turned = mixer.cue(emitter);
+        assert!(turned.gain_right > turned.gain_left, "{turned:?}");
+        assert!(turned.itd_samples < 0.0, "the left ear hears it later");
+    }
+
     #[test]
     fn moving_the_listener_moves_where_the_next_cue_is_heard() {
         let emitter = [0.0, 0.0, 0.0];

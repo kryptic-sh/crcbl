@@ -21,8 +21,10 @@
 //! # Coordinate convention
 //!
 //! +X = right, +Y = up, +Z = forward (same as the engine's world space).
-//! The listener faces +Z.  Azimuth is measured from +Z in the XZ plane;
-//! elevation is measured from the XZ plane toward +Y.
+//! [`compute_cue`]'s listener faces +Z.  Azimuth is measured from +Z in the XZ
+//! plane; elevation is measured from the XZ plane toward +Y. A [`Listener`]
+//! that turns carries a [`forward`](Listener::forward), and
+//! [`Listener::to_local`] puts an emitter into that frame first.
 
 /// Tuneable parameters for the cue grammar.
 ///
@@ -130,6 +132,10 @@ impl SpatialCue {
 pub struct Listener {
     /// World-space position: `+X` right, `+Y` up, `+Z` forward.
     pub position: [f32; 3],
+    /// The way the listener faces, in world space; `+Y` stays up. Any length:
+    /// only the direction is read. A zero or non-finite one has no direction,
+    /// and the listener faces `+Z`, as [`Listener::new`] does.
+    pub forward: [f32; 3],
 }
 
 impl Listener {
@@ -142,8 +148,54 @@ impl Listener {
     /// A listener standing at `position`, facing `+Z`.
     #[must_use]
     pub const fn new(position: [f32; 3]) -> Self {
-        Self { position }
+        Self::facing(position, [0.0, 0.0, 1.0])
     }
+
+    /// A listener standing at `position`, facing `forward` — a first-person
+    /// game's view direction, so the ear turns with the camera.
+    #[must_use]
+    pub const fn facing(position: [f32; 3], forward: [f32; 3]) -> Self {
+        Self { position, forward }
+    }
+
+    /// `emitter` in the listener's own frame: relative to its position, with
+    /// `+Z` its forward, `+Y` its up and `+X` its right — the frame
+    /// [`compute_cue`] hears a listener at the origin facing `+Z` in.
+    ///
+    /// Right is world up crossed with forward, so a listener looking up or
+    /// down keeps its ears level; one looking straight up or down, where that
+    /// cross vanishes, takes world `+X` as right.
+    #[must_use]
+    pub fn to_local(&self, emitter: [f32; 3]) -> [f32; 3] {
+        let offset = sub(emitter, self.position);
+        let forward = normalized(self.forward).unwrap_or([0.0, 0.0, 1.0]);
+        let right = normalized(cross([0.0, 1.0, 0.0], forward)).unwrap_or([1.0, 0.0, 0.0]);
+        let up = cross(forward, right);
+        [dot(offset, right), dot(offset, up), dot(offset, forward)]
+    }
+}
+
+fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
+/// `v` scaled to unit length, or `None` for one with no direction.
+fn normalized(v: [f32; 3]) -> Option<[f32; 3]> {
+    let length = dot(v, v).sqrt();
+    (length.is_finite() && length > f32::EPSILON)
+        .then(|| [v[0] / length, v[1] / length, v[2] / length])
 }
 
 /// Computes a spatial cue for `emitter` relative to `listener`.
@@ -428,5 +480,57 @@ mod tests {
             "right source → negative ITD (delay left)"
         );
         assert!(cue.itd_samples > -grammar().max_itd_samples);
+    }
+
+    fn close(a: [f32; 3], b: [f32; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
+    }
+
+    /// **A listener facing `+Z` hears the world as it is**, so every caller of
+    /// [`Listener::new`] gets the cue it got before the facing existed.
+    #[test]
+    fn a_listener_facing_plus_z_leaves_the_world_as_it_is() {
+        let listener = Listener::new([1.0, 2.0, 3.0]);
+        assert_eq!(listener.forward, [0.0, 0.0, 1.0]);
+        assert_eq!(listener.to_local([4.0, 6.0, 8.0]), [3.0, 4.0, 5.0]);
+    }
+
+    /// **A turned listener hears in its own frame**: facing `+X`, what is at
+    /// `+X` is ahead and what is at `−Z` is on its right.
+    #[test]
+    fn a_listener_turned_to_plus_x_hears_plus_x_ahead_and_minus_z_on_its_right() {
+        let listener = Listener::facing([0.0; 3], [2.0, 0.0, 0.0]);
+        assert!(close(listener.to_local([5.0, 0.0, 0.0]), [0.0, 0.0, 5.0]));
+        assert!(close(listener.to_local([0.0, 0.0, -5.0]), [5.0, 0.0, 0.0]));
+        assert!(close(listener.to_local([0.0, 3.0, 0.0]), [0.0, 3.0, 0.0]));
+        let right = compute_cue([0.0; 3], listener.to_local([0.0, 0.0, -5.0]), &grammar());
+        assert!(right.gain_right > right.gain_left, "{right:?}");
+    }
+
+    /// **Looking up keeps the ears level, and a facing with no direction
+    /// faces `+Z`.**
+    #[test]
+    fn a_listener_looking_up_keeps_level_ears_and_a_zero_forward_faces_plus_z() {
+        let up = Listener::facing([0.0; 3], [0.0, 1.0, 0.0]);
+        assert!(
+            close(up.to_local([0.0, 4.0, 0.0]), [0.0, 0.0, 4.0]),
+            "straight up is ahead"
+        );
+        assert!(
+            close(up.to_local([4.0, 0.0, 0.0]), [4.0, 0.0, 0.0]),
+            "+X stays right"
+        );
+        let tilted = Listener::facing([0.0; 3], [0.0, 1.0, 1.0]);
+        assert!(
+            close(tilted.to_local([3.0, 0.0, 0.0]), [3.0, 0.0, 0.0]),
+            "ears level"
+        );
+        for forward in [[0.0; 3], [f32::NAN, 0.0, 1.0]] {
+            let lost = Listener::facing([0.0; 3], forward);
+            assert!(
+                close(lost.to_local([1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]),
+                "{forward:?}"
+            );
+        }
     }
 }

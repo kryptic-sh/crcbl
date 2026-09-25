@@ -8702,7 +8702,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Listener::new(position)` — and `Mixer` gained `set_listener`, `listener` and
   `cue(emitter, grammar)`. `compute_cue` is unchanged and still takes an
   explicit listener: it is a pure function, and `Mixer::cue` is what supplies
-  the remembered one.
+  the remembered one. A listener also faces somewhere: `Listener::forward`, set
+  with `Listener::facing(position, forward)` (`+Y` stays up, and `Listener::new`
+  still faces `+Z`), so a first-person game's ear turns with its view.
+  `Mixer::cue` hears an emitter in that frame, through `Listener::to_local`.
 
   It exists because the engine had no listener at all, which left every game
   inventing where the ear was: the four samples spelled the same call three
