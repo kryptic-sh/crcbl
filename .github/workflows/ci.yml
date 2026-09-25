@@ -322,7 +322,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      # Pinned, like `cargo-fuzz@0.13.1` and `SLANG_VERSION` below: a tool
+      # Pinned, like `cargo-fuzz@0.13.2` and `SLANG_VERSION` below: a tool
       # installed as "latest" changes what CI enforces without a commit, and a
       # new `cargo-machete` heuristic turning a green repo red is indistinguish-
       # able from a regression.
@@ -377,7 +377,7 @@ jobs:
       # gate is calibrated against what this version reports.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.19.7
+          tool: cargo-deny@0.20.2
       - run: cargo deny --all-features check
 
   # The only job that compiles the `cfg(target_arch = "wasm32")` code at all.
@@ -661,7 +661,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # ALSA headers for `cpal`; see the action for why it retries.
       - name: Install the ALSA headers cpal links against
         timeout-minutes: 8
@@ -775,7 +775,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       - run: cargo build --workspace --locked
       # Clippy runs here too, not just on Linux: `cfg`-gated platform code is
       # invisible to the Linux lint pass, so a macOS/Windows-only backend would
@@ -914,7 +914,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # `libwayland-client0` and `libxkbcommon0`, not their `-dev` packages:
       # the backend resolves both with `dlopen` at runtime rather than linking
       # them, so the runtime packages are all it needs — and the fact that this
@@ -971,7 +971,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # Runtime packages, not their `-dev` counterparts: the backend resolves
       # every one of these with `dlopen` rather than linking them, so the
       # runtime packages are all it needs — and the fact that this job passes
@@ -1112,7 +1112,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # The `x11-e2e` job's list, unchanged and for the same reasons — including
       # `libxcb-xtest0`, which the suite's peer client needs to drive the resize
       # the `oldSwapchain` test is about, and `openbox` for the second pass.
@@ -1169,7 +1169,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # Runs the `#[ignore]`d suite with `--features win32-e2e`, serialised
       # because the foreground window, the cursor and the clipboard are one of
       # each per session, and fails when the reported test count is zero or
@@ -1246,7 +1246,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # `shell: bash` is Git Bash, which `windows-latest` ships; the harness
       # needs `mktemp`, `tee`, `sed` and `grep` and nothing a Windows shell
       # lacks. Its header argues the choice against `run-win32-e2e.ps1`'s.
@@ -1488,7 +1488,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # `crcbl` re-exports `crcbl-audio` as of the umbrella slice, so the CLI —
       # and every project it scaffolds — links cpal and ALSA. This job did not
       # compile `crcbl-audio` before and does now. See the `clippy (linux)` job
@@ -1568,7 +1568,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # `libvulkan1` is the loader — which `crcbl-vk` `dlopen`s rather than
       # links, so its absence is a clean `OpenError::NoLoader` and not a dead
       # process. `mesa-vulkan-drivers` brings lavapipe. `vulkan-tools` is only
@@ -2282,7 +2282,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # Installs to `C:\VulkanSDK\<version>`, exports `VULKAN_SDK`, and puts the
       # SDK's `bin` on `PATH`. It sets `VK_LAYER_PATH` on Linux and macOS only —
       # on Windows it leaves layer discovery to the registry keys the installer
@@ -2570,7 +2570,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # API logging accommodates intentional empty-encoder probes; shader
       # validation remains enabled by the hardware harness.
       #
@@ -2649,7 +2649,7 @@ jobs:
           shared-key: test
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.140
+          tool: cargo-nextest@0.9.146
       # # The renderer on Metal
       #
       # `crates/crcbl/tests/render_e2e.rs` draws one frame of each of the cube,
@@ -2980,7 +2980,7 @@ jobs:
           workspaces: crates/crcbl-net/fuzz -> target
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-fuzz@0.13.1
+          tool: cargo-fuzz@0.13.2
       # ALSA headers for `cpal`; see the `clippy` job for why. The fuzz target
       # is `crcbl-net`'s, but `cargo test` on its manifest builds the workspace
       # dependency graph that reaches `crcbl-audio`.
@@ -3001,7 +3001,7 @@ jobs:
       # `--target` is spelled out because `cargo fuzz` defaults it to the triple
       # **cargo-fuzz itself was built for**, and the binary that lands here is
       # the prebuilt `x86_64-unknown-linux-musl` one (install-action has no
-      # recipe for cargo-fuzz@0.13.1 and falls back to cargo-binstall, which
+      # recipe for cargo-fuzz@0.13.2 and falls back to cargo-binstall, which
       # picks the static build). Without this the job asked the toolchain for a
       # musl std it does not have and reported it as "sanitizer is incompatible
       # with statically linked libc" — a message about a target nobody chose.
@@ -3048,7 +3048,7 @@ jobs:
           shared-key: coverage
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-llvm-cov@0.8.7,cargo-nextest@0.9.140
+          tool: cargo-llvm-cov@0.9.1,cargo-nextest@0.9.146
       # ALSA headers for `cpal`; see the `clippy` job for why.
       #
       # The Vulkan loader and lavapipe are here for a different reason: without

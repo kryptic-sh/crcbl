@@ -3165,6 +3165,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- Dependencies are on their latest compatible releases, among them `glam`
+  0.33.10. glam 0.33.8 changed the `Mat3` determinant and inverse and its SIMD
+  arithmetic, so matrix results can differ in the last bits from before:
+  tumble's pinned simulation hash moved (CI's Linux, Windows and macOS jobs
+  agree on the new one), and a game pinning its own float hashes should expect
+  the same. `rand_core` and `rand_chacha` stay on 0.9 while `proptest` depends
+  on that line.
+
 - The Win32 shell now gives each physical keyboard and mouse its own `DeviceId`
   on key, button, wheel and pointer events, instead of one constant per kind.
   Ids are keyed by the device's interface path, so a replugged device keeps its

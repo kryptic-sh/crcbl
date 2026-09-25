@@ -58,14 +58,17 @@ pub const TICK_HZ: u32 = 60;
 /// off the landing twice.
 pub const CHECK_TICK: u64 = 600;
 
-/// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-23,
-/// after the Tower room's column moved from a whole system at eight substeps
-/// and 90 Hz onto a group asking for its substeps in a system at the
+/// [`Scenes::hash`] at [`CHECK_TICK`], taken on x86-64 Windows on 2026-09-25
+/// after `glam` 0.33.7 → 0.33.10, whose 0.33.8 changed its matrix and SIMD
+/// arithmetic; CI's x86-64 Linux and Windows and aarch64 macOS jobs all
+/// reported this same value on that bump. Before it (`0xc0fd_27f2_94da_418b`,
+/// 2026-09-23) the Tower room's column moved from a whole system at eight
+/// substeps and 90 Hz onto a group asking for its substeps in a system at the
 /// defaults. Before that, rung 5's joints added the Bridge room and left the
 /// five rooms before it hashing to the value pinned before it
 /// (`0x810e_2250_7c7a_fc8f`), taken without the Bridge room's share: joints
 /// and solver groups left every scene without them bit for bit as it was.
-pub const PINNED_HASH: u64 = 0xc0fd_27f2_94da_418b;
+pub const PINNED_HASH: u64 = 0xb06b_0027_3d78_81d5;
 
 /// Standard gravity, in m/s².
 pub const GRAVITY: f64 = 9.81;

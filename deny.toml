@@ -58,12 +58,11 @@ skip = [
   # that crate resolved them upstream-of-us rather than by a skip. `cargo deny`
   # reports an unmatched skip as a warning, which is what caught all five.
   # `getrandom` 0.4 is the workspace's own pin (crcbl-rand's native entropy).
-  # 0.2 arrives under a transitive user that has not migrated, and 0.3 under
-  # `rand_core`'s `os_rng` feature — which `--all-features` turns on and cargo's
-  # feature unification then applies to the copy of `rand_core` that crcbl-rand's
-  # `rand_chacha` shares, even though crcbl-rand keeps `os_rng` off. None of
-  # these can be resolved from here, so the older two are skipped and 0.4 stands.
-  { crate = "getrandom@0.2.17", reason = "transitive; the workspace pins 0.4" },
+  # 0.3 arrives under `rand_core`'s `os_rng` feature — which `--all-features`
+  # turns on and cargo's feature unification then applies to the copy of
+  # `rand_core` that crcbl-rand's `rand_chacha` shares, even though crcbl-rand
+  # keeps `os_rng` off. It cannot be resolved from here, so it is skipped and
+  # 0.4 stands. (0.2 left the tree with the 2026-09-25 `cargo update`.)
   { crate = "getrandom@0.3.4", reason = "rand_core's os_rng under --all-features; the workspace pins 0.4" },
   # `r-efi` is getrandom's UEFI backend: 5.x under getrandom 0.3, 6.x under 0.4.
   # The duplicate follows the getrandom one above; skip the older with it.
@@ -74,6 +73,9 @@ skip = [
   { crate = "thiserror-impl@1.0.69", reason = "transitive; follows thiserror 1.x" },
   { crate = "jni-sys@0.3.1", reason = "transitive; the android backends of cpal/ndk" },
   { crate = "syn@2.0.119", reason = "transitive; proc-macro crates mid-migration to syn 3" },
+  # `png` 0.18.1 names `miniz_oxide` 0.8 itself and also reaches it through
+  # `flate2`, which moved to 0.9 in 1.1.10; the older copy is png's to drop.
+  { crate = "miniz_oxide@0.8.9", reason = "png 0.18.1's own pin; its flate2 is on 0.9" },
 ]
 
 [sources]

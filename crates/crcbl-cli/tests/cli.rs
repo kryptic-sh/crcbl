@@ -1216,8 +1216,9 @@ fn lod_stats_names_the_node_a_hand_authored_level_came_from() {
 fn lod_stats_says_which_dag_levels_did_not_halve() {
     let temporary = TempDir::new("lod-stall");
     // Wide enough that the top of the DAG runs out of interior to simplify;
-    // a fraction of a second even through the unoptimized binary.
-    let base = grid(56);
+    // a fraction of a second even through the unoptimized binary. glam 0.33.8's
+    // arithmetic lets a 56-wide grid halve at every level, so this is 64.
+    let base = grid(64);
     let file = write_gltf(temporary.path(), "wide", &[node("car", &base)]);
 
     let json = lod_json(temporary.path(), &["stats", arg(&file)]);

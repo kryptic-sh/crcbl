@@ -33,7 +33,7 @@ jobs:
       # `multiple-versions = "deny"` gate were written against.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny@0.19.7
+          tool: cargo-deny@0.20.2
       - run: cargo deny --all-features check
 
   # Miri: the undefined-behaviour interpreter, over the crates it can run.
