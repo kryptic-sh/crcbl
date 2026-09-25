@@ -1,4 +1,5 @@
-//! Moving a prone body: [`CharacterController::move_lying`].
+//! Moving a prone body, [`CharacterController::move_lying`], and turning
+//! one, [`CharacterController::turn_lying`].
 //!
 //! A lying body is a [`LyingCapsule`] whose head is the controller's
 //! position. It moves the way the upright capsule does — the same plane-set
@@ -19,21 +20,27 @@
 //! A lying body does not step up, and it is not dug out of what it starts
 //! inside: there is no penetration depth for a lying capsule to push it out
 //! by.
+//!
+//! A turn is not a move. It keeps the head where it is and swings the feet
+//! end about it, stopping where the body would first be inside something —
+//! you cannot turn prone into a wall — and leaves the settle to the next move.
+
+use std::f64::consts::{PI, TAU};
 
 use glam::DVec3;
 
 use super::{Body, CharacterController, GroundProbe, MIN_MOVE, UP};
 use crate::broadphase::Segment;
 use crate::collider::LyingCapsule;
-use crate::world::PhysicsWorld;
+use crate::world::{ColliderId, PhysicsWorld};
 
-/// The most poses a settle tries turning a body toward its resting line,
-/// each moving an end at most a radius, before it gives up stepping and
-/// bisects what is left.
+/// The most poses a turn tries — a settle's toward its resting line or a
+/// [`turn_lying`](CharacterController::turn_lying) — each moving an end at
+/// most a radius, before it gives up stepping and bisects what is left.
 const MAX_TURN_STEPS: u32 = 64;
 
-/// The most halvings a settle spends finding where a turning body first
-/// touches an edge. Each halves the gap left, so this many take any turn
+/// The most halvings a turn spends finding where a turning body first
+/// touches something. Each halves the gap left, so this many take any turn
 /// below a floating-point step.
 const MAX_BISECTIONS: u32 = 48;
 
@@ -42,9 +49,8 @@ const MAX_BISECTIONS: u32 = 48;
 pub struct LyingMoveOutcome {
     /// The body where the move left it: the head at the controller's new
     /// [`position`](CharacterController::position), the yaw it was given, and
-    /// the pitch the ground gave it. **Pass this to the next move**, turned if
-    /// the game has checked the turn with
-    /// [`lying_blocker`](CharacterController::lying_blocker).
+    /// the pitch the ground gave it. **Pass this to the next move**, or to
+    /// [`turn_lying`](CharacterController::turn_lying) first to turn it.
     pub body: LyingCapsule,
     /// How far the head moved, the settle included: the requested
     /// displacement minus whatever the world took away, as
@@ -61,6 +67,38 @@ pub struct LyingMoveOutcome {
     /// How many times the move was blocked and redirected. Zero means it went
     /// the whole way unobstructed.
     pub slides: u32,
+}
+
+/// What one [`CharacterController::turn_lying`] did.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LyingTurnOutcome {
+    /// The body turned as far as it could: the head exactly where it was, the
+    /// yaw reached — the one asked for, as given, when nothing stopped it —
+    /// and the pitch the ground under the head gives that yaw. **Pass this to
+    /// the next move**, which settles it.
+    pub body: LyingCapsule,
+    /// How far it turned, in radians, the way the yaw turns: positive is a
+    /// right-handed turn about `+Y`, to the left seen from above. Never more
+    /// than a half turn either way.
+    pub turned: f64,
+    /// The share of the turn asked for that it made, in `[0, 1]`: one when
+    /// nothing stopped it, including a turn of nothing.
+    pub fraction: f64,
+    /// The collider that stopped the turn, or `None` if it went the whole
+    /// way: the one the nearest blocked pose the turn tried is inside, or,
+    /// where that pose is inside several, the one
+    /// [`lying_blocker`](CharacterController::lying_blocker) names.
+    pub blocker: Option<ColliderId>,
+}
+
+/// How far a stepped turn got.
+#[derive(Debug, Clone, Copy)]
+struct TurnStop {
+    /// The last parameter whose pose was clear, or where the turn started if
+    /// none was.
+    reached: f64,
+    /// What the turn stopped short of, or `None` if it went the whole way.
+    blocker: Option<ColliderId>,
 }
 
 /// Which end of a body stays where it is while the body turns toward its
@@ -98,9 +136,8 @@ impl CharacterController {
     /// exactly as [`move_and_slide`](Self::move_and_slide) does. The whole
     /// capsule is swept along it, and each surface it meets is slid along with
     /// the same plane-set clip. **The body does not turn while it moves**: a
-    /// change of yaw is the caller's, checked beforehand with
-    /// [`lying_blocker`](Self::lying_blocker), and a change of pitch is the
-    /// settle's.
+    /// change of yaw is [`turn_lying`](Self::turn_lying)'s, made beforehand,
+    /// and a change of pitch is the settle's.
     ///
     /// A lying body does not step up. A riser low enough that the round end
     /// meets its edge on a walkable slope — below about
@@ -178,6 +215,147 @@ impl CharacterController {
             hit_wall: report.hit_wall,
             hit_ceiling: report.hit_ceiling,
             slides: report.slides,
+        }
+    }
+
+    /// Turn a body lying as `body` about its head toward `yaw`, stopping at
+    /// the first yaw where it would be inside something.
+    ///
+    /// A prone body cannot turn into a wall. **The turn pivots on the head**,
+    /// where a game's actor origin and first-person camera sit, so a wall
+    /// behind or beside the player limits how far the legs swing and never
+    /// moves the view: the head of the [`body`](LyingTurnOutcome::body)
+    /// returned is exactly `body`'s. The turn is a query, as
+    /// [`lying_blocker`](Self::lying_blocker) is: it moves nothing and records
+    /// nothing, and it sees what that sees, under this controller's
+    /// [self collider](Self::with_self_collider) and
+    /// [query mask](Self::with_query_mask). A pose touching something is
+    /// clear; only a penetration stops the turn.
+    ///
+    /// # Which way, and how far
+    ///
+    /// The turn goes **the shorter way round**, across the `±π` wrap where
+    /// that is shorter — from `3.0` to `-3.0` is a turn of about `+0.28` — and
+    /// a turn of exactly half a circle goes the positive way, which is to the
+    /// left. It is stepped so the feet end moves at most a radius a step, so
+    /// nothing thinner than the body is stepped over, and the first blocked
+    /// step is bisected until the feet end's last step is below half a
+    /// [`skin_width`](super::CharacterConfig::skin_width): a turn into a wall
+    /// stops with the body touching it, less than that short of it.
+    ///
+    /// A turn that nothing stops reaches `yaw` **as given**, not wrapped. One
+    /// that is stopped reports the yaw it reached as `body`'s yaw plus the
+    /// signed [`turned`](LyingTurnOutcome::turned), not wrapped either.
+    ///
+    /// # The pitch
+    ///
+    /// Turned at a fixed pitch, a body lying on a slope would swing its feet
+    /// into the slope — facing up it, its feet are lower than its head, and
+    /// the ground under them rises as they swing round — and the ground would
+    /// stop the turn. So while the body's head is this controller's
+    /// [`position`](Self::position) and the controller is
+    /// [grounded](Self::is_grounded), the pitch follows the plane of the
+    /// [`ground`](Self::ground) through the turn: each pose's pitch is
+    /// `body`'s plus how much that plane's slope along the new facing differs
+    /// from its slope along the old one. On a walkable plane the body lies on
+    /// it at every yaw, and a body the settle pitched off it — over a curb, or
+    /// clamped to the slope limit — keeps the difference. Otherwise the pitch
+    /// is held.
+    ///
+    /// **The turn does not settle.** The head stays put, and the next
+    /// [`move_lying`](Self::move_lying) — a move of nothing, if the game has
+    /// no other — lays the body on the ground under its turned feet, as it
+    /// does after every move.
+    ///
+    /// # From a pose already inside something
+    ///
+    /// A body the game has let into geometry — gone prone against a wall,
+    /// say — is not refused a turn for that, or it could never turn out.
+    /// Every blocked pose from the start is passed over until the first clear
+    /// one, and from there the turn stops at the first blocked pose as any
+    /// other does. A turn that never comes clear goes the whole way. There is
+    /// no penetration depth for a lying capsule, so what it passes over is not
+    /// told apart: a body inside one wall turns through a second one it meets
+    /// before it is clear of the first.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `yaw` or `body`'s yaw is not finite.
+    #[must_use]
+    pub fn turn_lying(
+        &self,
+        world: &mut PhysicsWorld,
+        body: &LyingCapsule,
+        yaw: f64,
+    ) -> LyingTurnOutcome {
+        assert!(
+            yaw.is_finite() && body.yaw.is_finite(),
+            "a lying body turns from a finite yaw to a finite yaw, not {} to {yaw}",
+            body.yaw,
+        );
+        // The shorter way, in `(-π, π]`. The remainder is exact in IEEE
+        // arithmetic and the rest is plain rounding, so this is the same on
+        // every target: no platform maths.
+        let whole = (yaw - body.yaw).rem_euclid(TAU);
+        let delta = if whole > PI { whole - TAU } else { whole };
+
+        let plane = self
+            .ground
+            .filter(|_| body.head == self.position)
+            .map(|ground| ground.normal);
+        // The sine of the slope along a facing of a plane whose upward normal
+        // is `normal`: its rise over its run, turned into a sine.
+        let slope_along = |normal: DVec3, yaw: f64| {
+            let facing = LyingCapsule { yaw, ..*body }.facing();
+            let gradient = -(normal.x * facing.x + normal.z * facing.z) / normal.y;
+            gradient / (1.0 + gradient * gradient).sqrt()
+        };
+        let pose = |turned: f64| {
+            let pitch_sine = plane.map_or(body.pitch_sine, |normal| {
+                let change = slope_along(normal, turned) - slope_along(normal, body.yaw);
+                (body.pitch_sine + change).clamp(-1.0, 1.0)
+            });
+            LyingCapsule {
+                yaw: turned,
+                pitch_sine,
+                ..*body
+            }
+        };
+
+        let full = LyingTurnOutcome {
+            body: LyingCapsule {
+                yaw,
+                ..pose(body.yaw + delta)
+            },
+            turned: delta,
+            fraction: 1.0,
+            blocker: None,
+        };
+        if delta == 0.0 {
+            return full;
+        }
+
+        // Level, the feet end swings `length · Δyaw`; following a plane, up
+        // to `1 / normal.y` times that, as a circle on the plane is an ellipse
+        // seen from above whose short axis is that much shorter.
+        let cosine = plane.map_or(1.0, |normal| normal.y);
+        let from_blocked = self.lying_blocker(world, body).is_some();
+        let stop = self.turn_until_blocked(
+            world,
+            (body.yaw, body.yaw + delta),
+            cosine,
+            from_blocked,
+            pose,
+        );
+        let Some(blocker) = stop.blocker else {
+            return full;
+        };
+        let turned = stop.reached - body.yaw;
+        LyingTurnOutcome {
+            body: pose(stop.reached),
+            turned,
+            fraction: (turned / delta).clamp(0.0, 1.0),
+            blocker: Some(blocker),
         }
     }
 
@@ -294,12 +472,8 @@ impl CharacterController {
     /// `resting`, which is blocked, turned about `pivot` until it is clear:
     /// from the other end raised as far as the slope limit allows, down, to
     /// the last pose short of touching. `None` if even that first pose is
-    /// blocked, or there is no turn to make.
-    ///
-    /// The turn is stepped so no end moves more than a radius from one pose to
-    /// the next — so nothing thinner than the body is stepped over — then the
-    /// first blocked step is bisected until the swinging end's travel is below
-    /// half a skin width.
+    /// blocked, or there is no turn to make. Stepped and bisected as
+    /// [`turn_until_blocked`](Self::turn_until_blocked) turns.
     fn turn_to_rest(
         &self,
         world: &mut PhysicsWorld,
@@ -332,37 +506,75 @@ impl CharacterController {
         // cosine is least at the steeper of the two ends of the turn.
         let steepest = top.abs().max(resting.pitch_sine.abs());
         let cosine = (1.0 - steepest * steepest).sqrt();
-        let steps = (resting.length * span.abs() / (resting.radius * cosine))
+        let stop = self.turn_until_blocked(world, (top, resting.pitch_sine), cosine, false, pose);
+        Some(pose(stop.reached))
+    }
+
+    /// Turn a body through the poses `pose` gives from `from` to `to` until
+    /// one would be inside something: the loop both
+    /// [`turn_lying`](Self::turn_lying) and the settle's turn onto an edge
+    /// run. The radius and length are `pose`'s own, and `cosine` bounds how
+    /// far an end travels: no more than `length · |Δ| / cosine` for a change
+    /// `Δ` of the parameter.
+    ///
+    /// The turn is stepped so no end moves more than a radius from one pose to
+    /// the next — so nothing thinner than the body is stepped over — then the
+    /// first blocked step is bisected until `length` times the parameter left
+    /// between it and the last clear one is below half a skin width.
+    ///
+    /// The pose at `from` is not checked: it is clear unless
+    /// `from_blocked` says it is not. From a blocked pose the steps pass over
+    /// every blocked pose until the first clear one, and only a blocked pose
+    /// after that stops the turn.
+    fn turn_until_blocked(
+        &self,
+        world: &mut PhysicsWorld,
+        (from, to): (f64, f64),
+        cosine: f64,
+        from_blocked: bool,
+        pose: impl Fn(f64) -> LyingCapsule,
+    ) -> TurnStop {
+        let shape = pose(from);
+        let span = to - from;
+        let steps = (shape.length * span.abs() / (shape.radius * cosine))
             .ceil()
             .clamp(1.0, f64::from(MAX_TURN_STEPS));
-        let (mut clear, mut blocked) = (top, None);
+        let (mut clear, mut stuck, mut blocked) = (from, from_blocked, None);
         for step in 1..=MAX_TURN_STEPS {
             let share = f64::from(step) / steps;
             if share > 1.0 {
                 break;
             }
-            let sine = top + span * share;
-            if self.lying_blocker(world, &pose(sine)).is_some() {
-                blocked = Some(sine);
-                break;
+            let at = from + span * share;
+            match self.lying_blocker(world, &pose(at)) {
+                Some(collider) if !stuck => {
+                    blocked = Some((at, collider));
+                    break;
+                }
+                Some(_) => {}
+                None => (clear, stuck) = (at, false),
             }
-            clear = sine;
         }
-        let Some(mut blocked) = blocked else {
-            return Some(pose(clear));
+        let Some((mut at, mut blocker)) = blocked else {
+            return TurnStop {
+                reached: clear,
+                blocker: None,
+            };
         };
         for _ in 0..MAX_BISECTIONS {
-            if resting.length * (blocked - clear).abs() <= 0.5 * self.config.skin_width {
+            if shape.length * (at - clear).abs() <= 0.5 * self.config.skin_width {
                 break;
             }
-            let middle = 0.5 * (clear + blocked);
-            if self.lying_blocker(world, &pose(middle)).is_some() {
-                blocked = middle;
-            } else {
-                clear = middle;
+            let middle = 0.5 * (clear + at);
+            match self.lying_blocker(world, &pose(middle)) {
+                Some(collider) => (at, blocker) = (middle, collider),
+                None => clear = middle,
             }
         }
-        Some(pose(clear))
+        TurnStop {
+            reached: clear,
+            blocker: Some(blocker),
+        }
     }
 
     /// Sweep a sphere of `radius` straight down `distance` from `centre`, as

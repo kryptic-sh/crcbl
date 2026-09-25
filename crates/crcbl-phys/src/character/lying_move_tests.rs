@@ -14,7 +14,7 @@ use crate::world::{ColliderId, PhysicsWorld};
 use super::{CharacterConfig, CharacterController, LyingMoveOutcome};
 
 /// How far behind the actor's origin a prone body's feet lie.
-const BODY: f64 = 1.6;
+pub(super) const BODY: f64 = 1.6;
 
 /// Where the obstacles behind a body lying at the origin begin: the body's
 /// back end reaches `BODY + radius = 1.9`, so this leaves 0.6 of room.
@@ -27,7 +27,7 @@ const SWEEP_TOLERANCE: f64 = 5e-3;
 
 /// A prone character as a game models one today: a controller with no
 /// cylindrical section, a sphere at the actor's origin.
-fn prone_config() -> CharacterConfig {
+pub(super) fn prone_config() -> CharacterConfig {
     CharacterConfig {
         half_height: 0.0,
         ..CharacterConfig::default()
@@ -42,7 +42,7 @@ fn limit() -> f64 {
 
 /// A floor whose top is `y = 0`, wide enough that nothing here reaches its
 /// edge.
-fn floor() -> PhysicsWorld {
+pub(super) fn floor() -> PhysicsWorld {
     let mut world = PhysicsWorld::new();
     world.add_box(BoxCollider::new(
         DVec3::new(0.0, -1.0, 0.0),
@@ -53,7 +53,7 @@ fn floor() -> PhysicsWorld {
 
 /// A prone character settled on `world`'s floor at `(x, 0, z)`, and its body
 /// lying back from it facing `yaw`, settled by a move of nothing.
-fn lying_at(
+pub(super) fn lying_at(
     world: &mut PhysicsWorld,
     x: f64,
     z: f64,
@@ -95,7 +95,7 @@ fn crawl(
 /// A plane through the origin rising `rise` for each unit run toward `-Z`,
 /// as a mesh wide enough that nothing here reaches its edge. Its upward
 /// normal is `(0, 1, rise)` normalised.
-fn slope(rise: f64) -> (PhysicsWorld, DVec3) {
+pub(super) fn slope(rise: f64) -> (PhysicsWorld, DVec3) {
     const HALF: f64 = 50.0;
     let mesh = TriangleMesh::new(
         &[
@@ -114,7 +114,7 @@ fn slope(rise: f64) -> (PhysicsWorld, DVec3) {
 
 /// How far a sphere of `radius` at `centre` is off the plane through the
 /// origin with `normal`: negative inside it.
-fn off_plane(centre: DVec3, radius: f64, normal: DVec3) -> f64 {
+pub(super) fn off_plane(centre: DVec3, radius: f64, normal: DVec3) -> f64 {
     centre.dot(normal) - radius
 }
 

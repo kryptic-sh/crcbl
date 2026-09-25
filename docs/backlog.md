@@ -3373,23 +3373,18 @@ EW after the engine implementation lands, then update EW's pinned revision.
 EW models a prone player as a `CharacterController` with a `half_height` of
 zero, a sphere at the actor origin, while the body lies about 1.6 m behind that
 point, so the legs pass through walls. EW asked for a lying capsule in four
-parts. Two shipped: the fit check (`LyingCapsule`,
-`PhysicsWorld::lying_capsule_blocker`, `CharacterController::lying_blocker`) and
+parts. Three shipped: the fit check (`LyingCapsule`,
+`PhysicsWorld::lying_capsule_blocker`, `CharacterController::lying_blocker`),
 the move (`CharacterController::move_lying`, in
 `crates/crcbl-phys/src/character/lying.rs`): the whole body swept with the
 walking slide, settled by a sphere probe under each end, pitched to follow the
-ground and clamped to the walkable slope, as EW decided on 2026-09-25. The pitch
-is `LyingCapsule::pitch_sine`, a sine and not an angle because the crate
-constructs no inverse trigonometry. Still owed:
+ground and clamped to the walkable slope, as EW decided on 2026-09-25; and the
+turn (`CharacterController::turn_lying`, same file), pivoting on the head as EW
+decided on 2026-09-25, stopping where the legs would first penetrate something
+and reporting the yaw reached, the fraction and the blocker. The pitch is
+`LyingCapsule::pitch_sine`, a sine and not an angle because the crate constructs
+no inverse trigonometry. Still owed:
 
-- **Turning a lying body, refusing a turn into geometry and reporting how far it
-  could turn.** The yaw is still a per-call input that EW checks with
-  `lying_blocker`. **Decided by EW (2026-09-25): the turn pivots on the head
-  end**, where EW's actor origin and first-person camera sit. Buildable from
-  what shipped: `turn_to_rest` in `character/lying.rs` already steps a pitch
-  turn so an end moves at most a radius per step and bisects the first blocked
-  step with the fit check; a yaw turn about the head is the same loop over yaw
-  (`length · Δyaw ≤ radius`), reporting the last clear yaw.
 - **Going prone on a slope.** `LyingCapsule::new` is level, and a level body
   facing downhill has its feet in the slope, so `lying_blocker` refuses it
   though a body pitched onto the slope would fit. `move_lying` settles a level
@@ -3409,11 +3404,12 @@ Behaviour to know, and gaps in what shipped:
 - **The settle is not swept.** Each end's probe is a sphere sweep, and the
   settled pose is checked with the fit check, but the pitch change and the
   vertical placement between them are not: a rail thinner than the body between
-  the slid pose and the settled one can be passed. Same for `turn_to_rest`,
-  whose steps bound an end's travel to a radius. A body that the slide left
-  inside something (it has no depenetration: there is no push-out for a lying
-  capsule) can be turned out of it by the settle in odd ways — seen in a
-  deliberately broken test, where the feet hopped a thin mesh wall.
+  the slid pose and the settled one can be passed. Same for `turn_to_rest` and
+  `turn_lying` (both run `turn_until_blocked`), whose steps bound an end's
+  travel to a radius. A body that the slide left inside something (it has no
+  depenetration: there is no push-out for a lying capsule) can be turned out of
+  it by the settle in odd ways — seen in a deliberately broken test, where the
+  feet hopped a thin mesh wall.
 - **Over an edge the body is a plank.** Crawling head first off a curb, the
   refused line makes the body turn about its feet (riding level, head out over
   the drop) until turning about the head is the smaller turn, then it tips in
@@ -3445,6 +3441,29 @@ Behaviour to know, and gaps in what shipped:
   the Y-growth sweeps, the penetrations, `ColliderComponent::Capsule` — is built
   on `centre` and `half_height`; a separate query shape kept this change
   additive. Revisit with "rotating query colliders" in the next section.
+- **The turn's pitch follows a plane, not the ground.** While the controller is
+  grounded and the body's head is its position, `turn_lying` pitches each pose
+  by how much the slope of the ground contact's plane along the new facing
+  differs from along the old; otherwise it holds the pitch. On a plane the body
+  stays on it, but on uneven ground (a curb beside the body, a ridge) the swung
+  feet can meet ground the plane does not predict, and that ground stops the
+  turn and is reported as its `blocker`. The alternative, settling every step of
+  the turn, was declined: it costs two probes a step, and the head would then
+  move with the settle, where EW wants the view fixed. The turn does not settle
+  at all; the next `move_lying` does.
+- **A turn from a blocked pose passes over what it starts in, and anything else
+  it meets before coming clear.** There is no penetration depth for a lying
+  capsule, so "only turns that do not deepen" cannot be asked, and the query
+  filter excludes one collider (the controller's own), so the start's blocker
+  cannot be left out either. `turn_lying` passes every blocked step until the
+  first clear one; a second wall met while still inside the first is turned
+  through. Needs a multi-exclusion filter or a depth to do better.
+- **The turn's steps bound the feet end's travel only while under
+  `MAX_TURN_STEPS`**: a body longer than
+  `MAX_TURN_STEPS · radius · normal.y / |Δyaw|` takes steps longer than a
+  radius, as the settle's turn already could. Its tolerance bounds
+  `length · Δyaw`, the feet end's horizontal travel; on a slope the end moves up
+  to `1 / normal.y` times that.
 - **Not verified:** nothing was run against EW itself; the pose EW computes from
   its actor (head at the settled origin) is assumed from its description.
 

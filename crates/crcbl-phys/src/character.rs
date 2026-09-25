@@ -9,7 +9,9 @@
 //!
 //! A prone body is the same controller moving a [`LyingCapsule`] whose head is
 //! its position instead: [`CharacterController::move_lying`] sweeps the whole
-//! body with the same slide and lays it along the ground.
+//! body with the same slide and lays it along the ground, and
+//! [`CharacterController::turn_lying`] turns it about its head as far as it
+//! fits.
 //!
 //! # It does not know which camera is watching
 //!
@@ -118,7 +120,7 @@ use crate::world::{ALL_LAYERS, ColliderId, PhysicsWorld, QueryFilter, SweptConta
 
 mod lying;
 
-pub use lying::LyingMoveOutcome;
+pub use lying::{LyingMoveOutcome, LyingTurnOutcome};
 
 /// The world's up axis. `crcbl` is right-handed with `+Y` up, and
 /// [`Capsule`] is Y-aligned, so a character controller has exactly one.
@@ -537,7 +539,8 @@ impl CharacterController {
     /// records nothing. The shape is the caller's and not this controller's
     /// [`config`](Self::config): a prone body is a different shape from the
     /// one the controller walks with, and this is the check to make before
-    /// letting a character lie down or turn while lying.
+    /// letting a character lie down; [`turn_lying`](Self::turn_lying) makes it
+    /// along a turn.
     ///
     /// A capsule whose [`head`](LyingCapsule::head) is this controller's
     /// settled [`position`](Self::position) with its radius sits a
@@ -1853,3 +1856,7 @@ mod lying_tests;
 #[cfg(test)]
 #[path = "character/lying_move_tests.rs"]
 mod lying_move_tests;
+
+#[cfg(test)]
+#[path = "character/lying_turn_tests.rs"]
+mod lying_turn_tests;

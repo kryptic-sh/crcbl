@@ -311,11 +311,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Held::payload_mut` now marks the drag changed (`Held::changed`), and a
   changed payload released on the cell it started on is offered to `can_accept`
   as a drop, where an unchanged one there is still a click.
-- **A prone body in `crcbl-phys`: a fit check and a swept, ground-following
-  move.** `LyingCapsule::new(head, yaw, radius, length)` describes a capsule
-  lying on its side: `head` is the head end's hemisphere centre, the feet end's
-  lies `length` behind it along the core, and `yaw` is the way the head faces —
-  a right-handed turn about `+Y` from `-Z`, so a quarter turn faces `-X`. Its
+- **A prone body in `crcbl-phys`: a fit check, a swept, ground-following move
+  and a turn that stops at walls.**
+  `LyingCapsule::new(head, yaw, radius, length)` describes a capsule lying on
+  its side: `head` is the head end's hemisphere centre, the feet end's lies
+  `length` behind it along the core, and `yaw` is the way the head faces — a
+  right-handed turn about `+Y` from `-Z`, so a quarter turn faces `-X`. Its
   `pitch_sine` field (zero from `new`; set with `with_pitch_sine`) tilts the
   core about the head: the sine of its angle above the horizontal, positive with
   the head end higher, a sine because the crate constructs no inverse
@@ -339,8 +340,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   or a crest, is refused and the body turned about its head or its feet onto the
   edge instead; a lying body does not step up, and a riser taller than its round
   end slides over is a wall it does not creep up. The move honours the
-  controller's own collider and query mask, and turns nothing: a change of yaw
-  is the caller's, checked with `lying_blocker`.
+  controller's own collider and query mask, and turns nothing.
+  `CharacterController::turn_lying(world, &body, yaw)` turns a body about its
+  head — the head stays exactly where it is — the shorter way round toward
+  `yaw`, stopping where the legs would first swing into something, and returns a
+  `LyingTurnOutcome`: the `body` turned (the yaw as given when nothing stopped
+  it), the signed angle `turned`, the `fraction` of the turn made and the
+  `blocker` that stopped it. It is stepped so the feet end moves at most a
+  radius a step and bisected to within half a skin width of the wall. While the
+  controller is grounded the pitch follows the plane under the head along each
+  facing, so turning on a slope is not stopped by the slope; the turn does not
+  settle, and the next `move_lying` does. A body that starts inside something
+  may turn until it comes clear, and is stopped by what it meets after that.
 - **`text-overflow: ellipsis` and `white-space: nowrap` in the UI tree's
   stylesheets.** `white-space: nowrap` (inherited, as in CSS) keeps a text span
   in a parsed font on one line under any width — explicit newlines still break.
