@@ -304,6 +304,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A player's rebinds can be saved and loaded, as a diff over the declared
+  defaults.** `Binding` implements `Display` and `FromStr` with a stable text
+  form (`KeyR`, `Alt+KeyR`, `ControlLeft+Scroll`, `Mouse:Left`, `Pad:South`,
+  `PadTrigger:Right>0.25`; `crcbl_input::binding_text` has every variant), built
+  on `KeyCode::as_str`/`from_name`; a name this build does not know is a
+  `BindingParseError`, never a panic. `ActionMap::overrides()` lists each action
+  whose bindings differ from its declaration as an `ActionOverride`, and
+  `ActionMap::apply_overrides(&list)` sets the map to its defaults with the list
+  on top through `rebind`, returning each override it had to skip (an action no
+  longer declared, an unusable dead zone) while the rest apply. An action added
+  to the game later reaches a player who never rebound it. Where the list is
+  stored is the game's choice.
+
 - **A held grid drag turns with its payload, and a changed one drops in place.**
   `grid_drag::Held::turn_quarter(size_before)` turns the grab offset a quarter
   with the footprint, so the same cell of a turned item stays under the pointer

@@ -38,6 +38,7 @@
 //! backend yet, and none has a stand-in that would report "no pads" as though
 //! it had looked.
 
+pub mod binding_text;
 mod context;
 mod device;
 // Linux-only: the `evdev` backend. Compiled into every target's tests too, so
@@ -57,6 +58,7 @@ mod float_axis;
 #[cfg(any(target_os = "macos", test))]
 pub mod game_controller;
 mod gamepad;
+mod overrides;
 mod patterns;
 // The name match the browser and GameController backends name a pad's family
 // from when they have no USB ids.
@@ -79,12 +81,14 @@ pub mod web_gamepad;
 #[cfg(any(windows, test))]
 pub mod xinput;
 
+pub use binding_text::BindingParseError;
 pub use context::{GAMEPLAY_CONTEXT, GLOBAL_CONTEXT};
 pub use device::Device;
 pub use gamepad::{
     GamepadEvent, GamepadId, GamepadSnapshot, PAD_ACTIVITY_THRESHOLD, PadAxis, PadButton,
     PadButtons, PadKind, Stick, Trigger,
 };
+pub use overrides::ActionOverride;
 pub use patterns::{DOUBLE_TAP_WINDOW, DoubleTap, HOLD_TIME, Hold, TAP_TIME, Tap};
 pub use repeat::{Cardinal, REPEAT_DELAY, REPEAT_INTERVAL, Repeat};
 
@@ -268,6 +272,9 @@ impl Modifier {
 /// is not enough.
 ///
 /// `PartialEq` and not `Eq`: a pad binding's dead zone is an `f32`.
+///
+/// Its `Display` and `FromStr` are a stable text form, `KeyR` or `Pad:South`,
+/// for a player's saved rebinds; [`binding_text`] has the spelling of each.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Binding {
     /// A single key.
@@ -569,6 +576,9 @@ pub struct ActionDecl {
 #[derive(Debug, Clone)]
 struct ActionSlot {
     decl: ActionDecl,
+    /// The bindings it was declared with, which [`ActionMap::rebind`] leaves
+    /// alone: the defaults a player's overrides are a diff over.
+    defaults: Vec<Binding>,
     /// Index into [`ActionMap::contexts`] of the context this action is in.
     context: usize,
     /// The repeat pattern, if one is attached — see [`ActionMap::set_repeat`].
@@ -599,6 +609,7 @@ impl ActionSlot {
             ActionKind::Axis2 => ActionValue::Axis2(Axis2Action::default()),
         };
         Self {
+            defaults: decl.bindings.clone(),
             decl,
             context,
             repeat: None,
