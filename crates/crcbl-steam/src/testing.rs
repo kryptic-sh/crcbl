@@ -1870,6 +1870,9 @@ pub(crate) struct FakeNet {
     pub(crate) connections: std::collections::BTreeMap<HSteamNetConnection, FakeConnection>,
     /// Every `(remote, port)` `ConnectP2P` was asked for.
     pub(crate) connects: Vec<(u64, i32)>,
+    /// Every `(call, option count, options pointer non-null)` the two P2P
+    /// calls were passed: what the encryption guard reads.
+    pub(crate) options: Vec<(&'static str, i32, bool)>,
     /// `ConnectP2P` and `CreateListenSocketP2P` answer the invalid handle.
     pub(crate) refuse: bool,
     pub(crate) listen_sockets: Vec<(HSteamListenSocket, i32)>,
@@ -2010,11 +2013,14 @@ unsafe extern "C" fn fake_get_relay_network_status(
 unsafe extern "C" fn fake_create_listen_socket_p2p(
     _: *mut ISteamNetworkingSockets,
     port: i32,
-    _: i32,
-    _: *const c_void,
+    count: i32,
+    options: *const c_void,
 ) -> HSteamListenSocket {
     net_call();
     script(|s| {
+        s.net
+            .options
+            .push(("CreateListenSocketP2P", count, !options.is_null()));
         if s.net.refuse {
             return 0;
         }
@@ -2028,10 +2034,15 @@ unsafe extern "C" fn fake_connect_p2p(
     _: *mut ISteamNetworkingSockets,
     identity: *const SteamNetworkingIdentity,
     port: i32,
-    _: i32,
-    _: *const c_void,
+    count: i32,
+    options: *const c_void,
 ) -> HSteamNetConnection {
     net_call();
+    script(|s| {
+        s.net
+            .options
+            .push(("ConnectP2P", count, !options.is_null()));
+    });
     // SAFETY: the caller passes a live identity; read unaligned (packed).
     let identity = unsafe { identity.read_unaligned() };
     let remote = crate::net::remote_of(&identity).map_or(0, |id| id.0);

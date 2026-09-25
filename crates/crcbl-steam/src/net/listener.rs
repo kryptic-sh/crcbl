@@ -241,6 +241,25 @@ mod tests {
         );
     }
 
+    /// **Neither P2P call passes Steam a connection option.** Steam's
+    /// networking seals every packet unless a caller sets its `Unencrypted`
+    /// option, and the every-packet-sealed rule rests on that (the decision
+    /// in `docs/backlog.md`), so an option added to either call has to come
+    /// past this first.
+    #[test]
+    fn no_p2p_call_passes_steam_a_connection_option() {
+        let (steam, _lobby, _listener) = host();
+        crate::net::SteamTransport::connect(&steam, SteamId(MEMBER), VirtualPort(7)).unwrap();
+        let options = script(|s| s.net.options.clone());
+        assert_eq!(
+            options,
+            [
+                ("CreateListenSocketP2P", 0, false),
+                ("ConnectP2P", 0, false)
+            ]
+        );
+    }
+
     #[test]
     fn an_allowed_user_is_admitted_outside_the_lobby() {
         let (mut steam, _lobby, mut listener) = host();
