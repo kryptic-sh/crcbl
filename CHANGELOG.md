@@ -2771,6 +2771,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- `ForwardRenderer::with_scene` refuses a scene description with no meshes as
+  `HalError::InvalidDescriptor`, naming what is missing, where it used to reach
+  the mesh table's sizing and panic. A scene that draws only the sky is one with
+  meshes and no instances.
+
 - **`crcbl-webgpu` reports a refused reply buffer instead of waiting on it for
   ever.** `StreamChannel::drain_replies` refuses a whole buffer when it will not
   decode or answers a sequence nothing asked

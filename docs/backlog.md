@@ -8595,20 +8595,6 @@ order:
   since it existed, and no golden has moved on it, so the odds are low — but a
   256-entry decode table and an exact encode would make the chain bit-identical
   everywhere and is the fix if a re-bless ever disagrees across hosts by one.
-- **A description with no meshes panics out of `with_scene`.** `check_scene`
-  accepts an empty mesh list, then `build`'s mesh-table sizing hits an
-  `unreachable!("check_scene refused an empty description")`, and lifting that
-  reaches `draw_gen.rs`'s "draw generation with no buckets would generate no
-  draws" assertion. `crcbl-scene`'s
-  `an_empty_document_yields_a_description_a_device_would_still_accept` asserts
-  only the capacities, so its name overstates what it proves. Found while the
-  page test tried the smallest scene; it uses a cube instead. Needs a decision:
-  refuse an empty mesh list by name in `check_scene` (and rename the glTF test),
-  or teach draw generation an empty bucket list so an empty document renders a
-  sky. Neither was taken. **Decided 2026-09-25: refuse it by name** in
-  `check_scene`, and rename the glTF test to what it proves. A sky alone is a
-  scene with meshes and no instances, which draws; teaching draw generation an
-  empty bucket list buys nothing that path does not. Not built.
 
 ### No fixture reflects a ray downward, so the SSR fallback's ground arm is untested (2026-08-27)
 

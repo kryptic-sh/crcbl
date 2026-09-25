@@ -2214,7 +2214,7 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_document_yields_a_description_a_device_would_still_accept() {
+    fn an_empty_document_yields_no_meshes_and_sized_pools() {
         let json = r#"{ "asset": { "version": "2.0" } }"#;
         let scene = import_glb(json).expect("a document of nothing is legal glTF");
         let converted = build_render_scene(&scene, Path::new(KEY));

@@ -3421,6 +3421,16 @@ impl ForwardRenderer {
     /// is wrong with it.
     fn check_scene(scene: &SceneDesc<'_>) -> Result<(), HalError> {
         let refuse = |what: String| Err(HalError::InvalidDescriptor(what));
+        // A renderer draws meshes, and every table below is sized from them:
+        // with none, the mesh table's sizing has no level to take a maximum
+        // of. A scene that draws only the sky is one with meshes and no
+        // instances.
+        if scene.meshes.is_empty() {
+            return refuse(
+                "a scene description needs at least one mesh; one with meshes and no                  instances draws only the sky"
+                    .to_owned(),
+            );
+        }
         // Every layer's length against its own kind's extent, and layers at no
         // extent at all. Checked by the type that owns the page rather than
         // here, because that is where a page can be built wrong and where the
@@ -13013,6 +13023,29 @@ mod tests {
     /// would show up as one arm leaking rather than as all of them — and each
     /// names a fragment of the message it must be refused *with*, or an arm
     /// would pass on some other check's answer.
+    /// **A description with no meshes is refused by name**, before anything
+    /// is created, rather than reaching the mesh table's sizing with nothing
+    /// to size it from.
+    #[test]
+    fn a_scene_with_no_meshes_is_refused_by_name() {
+        let (recorder, device, queue) = open();
+        let before = recorder.total_live_objects();
+        let mut scene = scene::demo();
+        scene.meshes.clear();
+        let error =
+            ForwardRenderer::with_scene(device.as_ref(), queue, Format::Rgba8UnormSrgb, &scene)
+                .expect_err("a scene of no meshes must be refused");
+        assert!(
+            error.to_string().contains("at least one mesh"),
+            "the refusal says what is missing: {error}"
+        );
+        assert_eq!(
+            recorder.total_live_objects(),
+            before,
+            "the refusal created something"
+        );
+    }
+
     #[test]
     fn a_refused_description_creates_nothing_at_all() {
         /// One way of writing a description the renderer cannot build, and the
