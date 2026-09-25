@@ -86,7 +86,7 @@ pub use draw_list::{
 };
 pub use grid_drag::{
     CellGrid, CellResponse, DragFrame, DropFeedback, DropTarget, Dropped, GridCell, GridDrag,
-    GridResponse, Grip, Held,
+    GridResponse, Grip, Held, Released,
 };
 pub use hud::Anchor;
 pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};

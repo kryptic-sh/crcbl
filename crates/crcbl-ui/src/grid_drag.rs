@@ -261,6 +261,27 @@ pub struct Dropped<P> {
     pub to: DropTarget,
 }
 
+/// How a held drag ended, from [`DragFrame::release`]: dropped or not, and
+/// where it was let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Released<P> {
+    /// What was dragged.
+    pub payload: P,
+    /// The cell the press latched on.
+    pub from: GridCell,
+    /// The cell it was let go over; `None` over no grid, or when the drag was
+    /// cancelled by its capture being cleared.
+    pub over: Option<GridCell>,
+    /// Where the payload's origin would have landed on [`over`](Self::over),
+    /// by the grab offset, as `can_accept` was asked: `None` when that puts
+    /// the origin off the grid's top or left edge, and for a click — a release
+    /// on the cell the drag started on with the payload unchanged.
+    pub target: Option<DropTarget>,
+    /// Whether `target`'s grid accepted it: a drop happened exactly when this
+    /// is `true`, and [`DragFrame::finish`] would have returned it.
+    pub accepted: bool,
+}
+
 /// What a hovered cell would do with the payload being dragged.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DropFeedback {
@@ -327,7 +348,7 @@ impl<P> GridDrag<P> {
             ui,
             pointer,
             captured,
-            target: None,
+            released: None,
         }
     }
 }
@@ -341,8 +362,16 @@ pub struct DragFrame<'a, P> {
     pointer: PointerInput,
     /// The capture as it was before any grid ran this frame.
     captured: Option<WidgetId>,
-    /// The accepted target the pointer was released over, if it was.
+    /// Where the pointer was released over a grid this frame, if it was.
+    released: Option<ReleaseSpot>,
+}
+
+/// What a grid answered about the cell a held drag was released over.
+#[derive(Debug, Clone, Copy)]
+struct ReleaseSpot {
+    over: GridCell,
     target: Option<DropTarget>,
+    accepted: bool,
 }
 
 impl<P> DragFrame<'_, P> {
@@ -420,16 +449,26 @@ impl<P> DragFrame<'_, P> {
         // Let go where it started, unchanged, it is a click; changed — turned
         // by a rotate key, say — it is a drop like any other.
         if at == held.from && !held.changed {
+            if pointer.released {
+                self.released = Some(ReleaseSpot {
+                    over: at,
+                    target: None,
+                    accepted: false,
+                });
+            }
             return response;
         }
-        let accepted = cell.checked_sub(held.grab).is_some_and(|origin| {
-            let target = DropTarget { at, origin };
-            let accepted = can_accept(&held.payload, &target);
-            if accepted && pointer.released {
-                self.target = Some(target);
-            }
-            accepted
-        });
+        let target = cell
+            .checked_sub(held.grab)
+            .map(|origin| DropTarget { at, origin });
+        let accepted = target.is_some_and(|target| can_accept(&held.payload, &target));
+        if pointer.released {
+            self.released = Some(ReleaseSpot {
+                over: at,
+                target,
+                accepted,
+            });
+        }
         response.drop = if accepted {
             DropFeedback::Accepting
         } else {
@@ -442,8 +481,23 @@ impl<P> DragFrame<'_, P> {
     /// accepted the payload.
     ///
     /// A release anywhere ends the drag, over an accepting cell or not — a
-    /// release over nothing is a cancel.
+    /// release over nothing is a cancel. [`DragFrame::release`] reports every
+    /// ending, refused ones included.
     pub fn finish(self) -> Option<Dropped<P>> {
+        let released = self.release()?;
+        let to = released.target.filter(|_| released.accepted)?;
+        Some(Dropped {
+            payload: released.payload,
+            from: released.from,
+            to,
+        })
+    }
+
+    /// Ends the frame: how a held drag ended, if it ended this frame — dropped,
+    /// refused, let go over nothing, or cancelled — for a game that tells the
+    /// player why a drop did not happen. `None` while the drag goes on, and
+    /// when nothing was held.
+    pub fn release(self) -> Option<Released<P>> {
         let ended = self.pointer.released
             || self
                 .drag
@@ -454,10 +508,13 @@ impl<P> DragFrame<'_, P> {
             return None;
         }
         let held = self.drag.held.take()?;
-        Some(Dropped {
+        let spot = self.released;
+        Some(Released {
             payload: held.payload,
             from: held.from,
-            to: self.target?,
+            over: spot.map(|spot| spot.over),
+            target: spot.and_then(|spot| spot.target),
+            accepted: spot.is_some_and(|spot| spot.accepted),
         })
     }
 }
@@ -764,6 +821,100 @@ mod tests {
             let degenerate = CellGrid { cell, ..wide };
             assert_eq!(degenerate.cell_at(Vec2::new(5.0, 5.0)), None, "{cell}");
         }
+    }
+
+    /// One frame over [`GRID`] ended with [`DragFrame::release`].
+    fn release_frame(
+        drag: &mut GridDrag<&'static str>,
+        ui: &mut UiState,
+        pointer: PointerInput,
+        accept: bool,
+    ) -> Option<Released<&'static str>> {
+        let mut frame = drag.frame(ui, pointer);
+        frame.grid(&GRID, source, |_, _| accept);
+        frame.release()
+    }
+
+    /// **Every way a held drag ends is reported by `release`**: dropped,
+    /// refused where the item would have landed, let go over no grid, let go
+    /// with the origin off the grid's edge, and a click — while a drag that
+    /// goes on, or no drag at all, reports nothing.
+    #[test]
+    fn release_reports_every_ending() {
+        let from = ORIGIN + UVec2::new(1, 1);
+        let to = UVec2::new(3, 2);
+        let begin = |drag: &mut GridDrag<&'static str>, ui: &mut UiState| {
+            assert_eq!(
+                release_frame(drag, ui, press(centre(&GRID, from)), true),
+                None,
+                "a drag that has just begun has not ended"
+            );
+        };
+        let expect_target = DropTarget {
+            at: GridCell {
+                grid: GRID.id_base,
+                cell: to,
+            },
+            origin: to - UVec2::ONE,
+        };
+
+        for accept in [true, false] {
+            let mut drag = GridDrag::new();
+            let mut ui = UiState::new();
+            begin(&mut drag, &mut ui);
+            let ended = release_frame(&mut drag, &mut ui, release(centre(&GRID, to)), accept)
+                .expect("a release ends the drag");
+            assert_eq!(ended.payload, ITEM);
+            assert_eq!(ended.from.cell, from);
+            assert_eq!(ended.over, Some(expect_target.at));
+            assert_eq!(
+                ended.target,
+                Some(expect_target),
+                "the refused target is kept"
+            );
+            assert_eq!(ended.accepted, accept);
+        }
+
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        begin(&mut drag, &mut ui);
+        let outside = release_frame(&mut drag, &mut ui, release(Vec2::new(-50.0, -50.0)), true)
+            .expect("let go over nothing still ends it");
+        assert_eq!(
+            (outside.over, outside.target, outside.accepted),
+            (None, None, false)
+        );
+
+        // Grabbed one cell in, let go on column 0: the origin would be off the
+        // left edge, so there is a cell but no target.
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        begin(&mut drag, &mut ui);
+        let edge = release_frame(
+            &mut drag,
+            &mut ui,
+            release(centre(&GRID, UVec2::new(0, 2))),
+            true,
+        )
+        .expect("ended");
+        assert!(edge.over.is_some());
+        assert_eq!((edge.target, edge.accepted), (None, false));
+
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        begin(&mut drag, &mut ui);
+        let click = release_frame(&mut drag, &mut ui, release(centre(&GRID, from)), true)
+            .expect("a click ends it too");
+        assert_eq!(click.over.map(|over| over.cell), Some(from));
+        assert_eq!((click.target, click.accepted), (None, false));
+
+        let mut drag = GridDrag::new();
+        let mut ui = UiState::new();
+        assert_eq!(
+            release_frame(&mut drag, &mut ui, release(centre(&GRID, to)), true),
+            None,
+            "nothing was held"
+        );
     }
 
     #[test]

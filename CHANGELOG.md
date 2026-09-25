@@ -984,13 +984,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   asked about the hovered cell only, and its answer comes back as a
   `DropFeedback` (`None`, `Accepting`, `Refusing`) on that cell's
   `CellResponse`, beside its `ButtonState`, for the panel to style. A release
-  where the drag began, over a refusing cell or over nothing drops nothing. One
-  drag spans any number of grids, so a press on one grid and a release on
-  another is one drop. `Held::payload_mut` and `Held::refit` let a game turn an
-  item mid-drag and keep the grip inside its new footprint. Shard's inventory
-  panel and breach's loadout panel now use it in place of their own copies,
-  report a drop as the stack's `SlotId` and the cell its origin lands on, and
-  tint a refusing cell while a drag is held over it.
+  where the drag began, over a refusing cell or over nothing drops nothing, and
+  `DragFrame::release` reports every ending as a
+  `Released { payload, from, over, target, accepted }` — the refused target
+  included — for a game that says why a drop failed. One drag spans any number
+  of grids, so a press on one grid and a release on another is one drop.
+  `Held::payload_mut` and `Held::refit` let a game turn an item mid-drag and
+  keep the grip inside its new footprint. Shard's inventory panel and breach's
+  loadout panel now use it in place of their own copies, report a drop as the
+  stack's `SlotId` and the cell its origin lands on, and tint a refusing cell
+  while a drag is held over it.
 - **A non-moving ground probe on `crcbl_phys::CharacterController`.**
   `probe_ground(world, distance)` and
   `probe_ground_at(world, position, distance)` sweep the controller's capsule
