@@ -5156,6 +5156,26 @@ artifact regenerated (Slang 2026.14, DXC 1.9, SPIRV-Tools 2026.1); `dxc` is
 Linux-only, so a diagnostic Linux workflow is the route — the fork's
 `shader-regen` branch is the one this slice used.
 
+## Needs a decision: Dependabot's glam 0.33.8 bump breaks the pinned hashes (2026-09-25)
+
+Dependabot PR #23 bumps `glam` 0.33.7 to 0.33.8 (and `syn`). **Do not merge it
+as is.** Its CI fails on Linux, Windows, macOS and coverage in two tests:
+tumble's `scene::tests::the_hash_at_the_check_tick_is_the_pinned_one` and
+`crcbl-cli`'s `lod_stats_says_which_dag_levels_did_not_halve`. glam 0.33.8's
+changelog says why the numbers move: the `fast-math` feature is deprecated to a
+no-op and "the SIMD back-ends use fused multiply-add whenever the target
+supports it". That runs into the determinism decision recorded in
+`docs/notes/simulation.md` (sim crates ban FMA contraction), and FMA "whenever
+the target supports it" risks the native and wasm builds disagreeing, which is
+what tumble's pinned hash (checked in the browser by `pages.yml`) guards.
+
+The options: **pin `glam = "=0.33.7"`** in the workspace `Cargo.toml` and tell
+Dependabot to ignore 0.33.8 until glam offers a way to turn FMA off, keeping
+today's determinism; or **take the bump and re-pin the hashes**, which is safe
+only after proving x86-64, aarch64 and wasm32 produce the same state hash (the
+LOD stats change is a graphics-side number and would be re-blessed with it).
+Found by reading the PR's CI logs; nothing was changed in the tree.
+
 ## Two more Pages browser jobs timed out once and passed on rerun (2026-09-25)
 
 Seen on consecutive pushes, each red once and green on a `--failed` rerun of the
