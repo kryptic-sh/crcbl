@@ -5062,6 +5062,20 @@ artifact regenerated (Slang 2026.14, DXC 1.9, SPIRV-Tools 2026.1); `dxc` is
 Linux-only, so a diagnostic Linux workflow is the route — the fork's
 `shader-regen` branch is the one this slice used.
 
+## Two more Pages browser jobs timed out once and passed on rerun (2026-09-25)
+
+Seen on consecutive pushes, each red once and green on a `--failed` rerun of the
+same run with no change: `render breakout in a real browser` on `8af6d42d` (run
+36071089453: the touch-console steps waited 122 s for "] echo it works" and for
+the console's answer, and neither came) and `render tumble in a real browser` on
+`ebd48a8d` (run 36075292483: "no heartbeat reached the check tick", the last at
+tick 540 of 600, with the check's 300 s wait spent). Both are waits that ran out
+on the runner rather than wrong answers — tumble's heartbeats before the cut-off
+were well formed and the rerun met the pinned hash — so, as with the shard entry
+below, the fixes on the table are longer waits or a faster path to the checked
+state, not a code change. Not reproduced locally; the rate is unknown beyond
+"twice in a day".
+
 ## The shard browser job can time out its own gameplay waits (2026-09-11)
 
 `pages.yml`'s `render shard in a real browser` failed once on PR #18 with two
