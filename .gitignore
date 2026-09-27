@@ -1,4 +1,5 @@
 /target
+.claude/
 
 # cargo-llvm-cov report output (nextest/JUnit output already lives in /target)
 /lcov.info
