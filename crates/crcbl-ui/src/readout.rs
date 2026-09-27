@@ -473,6 +473,7 @@ mod tests {
     /// **A stylesheet selecting the parsed font for the panel draws it in that
     /// font, and still ends every reading at the right margin** — to within the
     /// pixel a measured width is rounded up by.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn a_sheet_selecting_the_parsed_font_right_aligns_readings_in_it() {
         use crate::font::Font;

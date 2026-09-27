@@ -30,7 +30,10 @@ cli-e2e = []
 workspace = true
 
 [dependencies]
-crcbl = { workspace = true }
+# `parsed-font` because `crcbl screenshot` draws every golden scene, and
+# `ui_text` is drawn in the committed parsed font. A native tool, so the size
+# that feature costs a browser demo is nothing to it.
+crcbl = { workspace = true, features = ["parsed-font"] }
 crcbl-golden = { workspace = true }
 # `load`, not `bake`: `crpix` reads PNGs and writes text, so it needs the
 # decoder and nothing else. `bake` is the other direction — a `.crpix` out to a

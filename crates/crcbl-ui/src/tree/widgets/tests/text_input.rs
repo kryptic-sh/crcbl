@@ -7,7 +7,9 @@ use std::time::Duration;
 use super::*;
 use crate::console::CARET_BLINK;
 use crate::edit::{ClipboardOp, Edit, Motion};
+#[cfg(feature = "parsed-font")]
 use crate::font::Font;
+#[cfg(feature = "parsed-font")]
 use crate::font::layout::TextLayout;
 use crate::style::PseudoClasses;
 use crate::tree::{
@@ -332,6 +334,7 @@ fn a_click_places_the_caret_a_drag_selects_and_a_double_click_selects_a_word() {
 /// sits after the last typed glyph**, both measured against the atlas's own
 /// advances — in the bitmap font, and in a parsed font against where
 /// [`TextLayout`] draws each glyph, kerning included.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn the_selection_and_the_caret_sit_on_the_glyphs_they_name() {
     let (mut ui, mut values) = engaged_on("abcdef");

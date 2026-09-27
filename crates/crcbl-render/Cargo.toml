@@ -71,5 +71,15 @@ crcbl-phys = { workspace = true }
 [build-dependencies]
 crcbl-sprite = { workspace = true, features = ["bake"] }
 
+[features]
+# `crcbl-ui`'s parsed font — `skrifa` and the committed TTF — forwarded, **off
+# by default** for the reason that crate's manifest gives: a browser build pays
+# for it whether or not it draws a parsed glyph. The UI pass owns a `GlyphAtlas`
+# either way; without the feature nothing can reach it with a font, so it stays
+# empty. This crate draws no parsed text of its own, so
+# what turns on here is `ui_pass`'s glyph-page tests; `crcbl`'s `parsed-font`
+# forwards through this one as well as to `crcbl-ui` directly.
+parsed-font = ["crcbl-ui/parsed-font"]
+
 [lints]
 workspace = true

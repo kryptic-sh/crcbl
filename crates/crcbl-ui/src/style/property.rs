@@ -757,7 +757,9 @@ fn flex(input: &mut Parser<'_>, out: &mut Vec<Declaration>) -> Result<(), Invali
 /// before any built-in family is kept besides, as the [`FamilyName`]
 /// [`crate::tree::Ui::register_font`] looks fonts up by. One that is reserved —
 /// a generic family, a CSS-wide keyword, or an unquoted run of words starting
-/// with one — is skipped and not kept. Invalid when the list yields neither.
+/// with one — is skipped and not kept. Invalid when the list yields neither,
+/// and wherever it names the parsed font in a build without it (see
+/// [`parsed_family`]).
 fn font_family(
     input: &mut Parser<'_>,
 ) -> Result<(Option<FontFamily>, Option<FamilyName>), Invalid> {
@@ -768,7 +770,7 @@ fn font_family(
             input.try_parse(|input| input.expect_string().map(ToString::to_string))
         {
             let registrable = !is_reserved_family(&name);
-            (named_family(&name), registrable.then_some(name))
+            (named_family(&name)?, registrable.then_some(name))
         } else {
             let mut name = input.expect_ident()?.to_string();
             let registrable = !is_reserved_family(&name);
@@ -781,9 +783,9 @@ fn font_family(
             // The generic family is one bare identifier; quoted, or followed by
             // another word, it is a family name like any other.
             let family = if words == 1 && name.eq_ignore_ascii_case("sans-serif") {
-                Some(FontFamily::Sans)
+                Some(parsed_family()?)
             } else {
-                named_family(&name)
+                named_family(&name)?
             };
             (family, registrable.then_some(name))
         };
@@ -805,13 +807,36 @@ fn font_family(
 }
 
 /// The family a family name — quoted, or unquoted identifiers joined by
-/// single spaces — names, if this engine has it.
-fn named_family(name: &str) -> Option<FontFamily> {
-    Some(match_ignore_ascii_case! { name,
+/// single spaces — names, if this engine has it. Invalid where it names the
+/// parsed font and this build has none; see [`parsed_family`].
+fn named_family(name: &str) -> Result<Option<FontFamily>, Invalid> {
+    Ok(Some(match_ignore_ascii_case! { name,
         "bitmap" => FontFamily::Bitmap,
-        "atkinson hyperlegible" => FontFamily::Sans,
-        _ => return None,
-    })
+        "atkinson hyperlegible" => parsed_family()?,
+        _ => return Ok(None),
+    }))
+}
+
+/// The committed parsed font's family: `sans-serif` or
+/// `"Atkinson Hyperlegible"`.
+#[cfg(feature = "parsed-font")]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "without the `parsed-font` feature its twin refuses"
+)]
+const fn parsed_family() -> Result<FontFamily, Invalid> {
+    Ok(FontFamily::Sans)
+}
+
+/// Without the `parsed-font` feature there is no parsed font to name, and a
+/// declaration naming it **anywhere in its list** is refused — the warning
+/// every value `font-family` does not take gets — rather than falling back to
+/// another family in the list. `font-family: sans-serif, bitmap` drawing in the
+/// bitmap font, silently, is exactly what a build that forgot the feature
+/// would otherwise look like.
+#[cfg(not(feature = "parsed-font"))]
+fn parsed_family() -> Result<FontFamily, Invalid> {
+    invalid()
 }
 
 /// `outline`: `none`, or a width and a colour in either order.
@@ -1384,6 +1409,7 @@ mod tests {
     /// a registered font to answer to, quoted or bare and in any case; a name
     /// after the built-in one, or a reserved one, is not kept, and a list of
     /// such a name alone sets no built-in family.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn font_family_keeps_the_first_name_ahead_of_its_built_in_family() {
         let roboto = Some(FamilyName::new("roboto"));
@@ -1426,6 +1452,7 @@ mod tests {
 
     /// **`font-family` takes the first family in its list this engine has**,
     /// by generic name, quoted name or unquoted words, in any case.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn font_family_takes_the_first_family_it_has() {
         let cases = [

@@ -5,6 +5,7 @@ use glam::Vec2;
 
 use super::*;
 use crate::draw_list::{DrawCommand, DrawList};
+#[cfg(feature = "parsed-font")]
 use crate::style::Declaration;
 
 const fn px(value: f32) -> LengthAuto {
@@ -572,11 +573,13 @@ fn text_is_measured_once_and_an_unchanged_frame_measures_nothing() {
 }
 
 /// The paragraph the wrapping tests lay out.
+#[cfg(feature = "parsed-font")]
 const PARAGRAPH: &str = "Wrapped labels lay out under Taffy, one greedy line at a time.";
 
 /// A column `width` pixels wide with 4px of padding, holding [`PARAGRAPH`] in
 /// the parsed font at 16px on 20px lines, `align`ed; returns the column's and
 /// the span's keys.
+#[cfg(feature = "parsed-font")]
 fn wrapped(ui: &mut Ui, width: f32, align: &str) -> (NodeKey, NodeKey) {
     let mut span = None;
     let column = ui.block(
@@ -611,6 +614,7 @@ fn wrapped(ui: &mut Ui, width: f32, align: &str) -> (NodeKey, NodeKey) {
 /// **A wrapped span grows its block's height**: the column is as tall as the
 /// lines its width breaks the paragraph into, laid out independently, and a
 /// narrower column is taller.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn a_wrapped_span_grows_its_blocks_height() {
     use crate::font::Font;
@@ -642,6 +646,7 @@ fn a_wrapped_span_grows_its_blocks_height() {
 
 /// **A wrapped span emits one glyph run whose lines are the measured ones**,
 /// every glyph inside the content box and centred text centred in it.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn a_wrapped_span_emits_its_measured_lines_inside_its_box() {
     use crate::font::Font;
@@ -688,6 +693,7 @@ fn a_wrapped_span_emits_its_measured_lines_inside_its_box() {
 /// **Changing only a span's family or line height re-measures it**: the
 /// measurement is keyed by both, so a cached size from the other font is never
 /// reused.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn changing_a_spans_family_or_line_height_remeasures_it() {
     let build = |ui: &mut Ui, family: FontFamily, line: LineHeight| {
@@ -728,6 +734,7 @@ fn changing_a_spans_family_or_line_height_remeasures_it() {
 /// **Parsed-font text is measured once per width bucket**: widths a fraction
 /// of a pixel apart share one measurement, and a whole pixel narrower is a
 /// new one.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn parsed_font_text_is_measured_once_per_whole_pixel_of_width() {
     let mut ui = Ui::new();

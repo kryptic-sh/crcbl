@@ -103,6 +103,7 @@ mod ui_inspector;
 mod ui_layout;
 mod ui_primitives;
 mod ui_style;
+#[cfg(feature = "parsed-font")]
 mod ui_text;
 mod ui_text_input;
 mod ui_tree;
@@ -169,6 +170,7 @@ pub use ui_style::{
     UI_STYLE_MUTED, UI_STYLE_PANEL, UI_STYLE_PANEL_BORDER_WIDTH, UI_STYLE_TEXT, UiStyleLayout,
     ui_style_css, ui_style_draw_list, ui_style_layout,
 };
+#[cfg(feature = "parsed-font")]
 pub use ui_text::{
     UI_TEXT_CENTRED, UI_TEXT_CENTRED_FILL, UI_TEXT_CENTRED_SIZE, UI_TEXT_CENTRED_WIDTH,
     UI_TEXT_INK, UI_TEXT_LINE_HEIGHT, UI_TEXT_PAGE, UI_TEXT_PAIR, UI_TEXT_PAIR_LINE_HEIGHT,
@@ -887,8 +889,12 @@ pub enum Scene {
     /// UI rung 5's real fonts through [`UiRenderer`]:
     /// a paragraph wrapped to a fixed width, one word at two sizes, a kerned
     /// pair beside the same glyphs unkerned, and centred text, all in the
-    /// committed font through the glyph atlas. See [`ui_text_layout`] for what
+    /// committed font through the glyph atlas. See `ui_text_layout` for what
     /// each part is for.
+    ///
+    /// **Needs this crate's `parsed-font` feature**, which is what links the
+    /// committed font at all; without it the scene is refused when it opens,
+    /// with [`OffscreenError::Unusable`], rather than drawn in some other font.
     UiText,
     /// UI rung 6's focus through [`UiRenderer`]: a
     /// scripted pad walks a grid of buttons, opens a modal and scrolls a list
@@ -6142,6 +6148,7 @@ enum UiContent {
     /// [`Scene::UiStyle`]'s styled panel.
     Style,
     /// [`Scene::UiText`]'s text.
+    #[cfg(feature = "parsed-font")]
     Text,
     /// [`Scene::UiFocus`]'s focused page.
     Focus,
@@ -6876,11 +6883,19 @@ impl SceneState {
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Style,
             },
+            #[cfg(feature = "parsed-font")]
             Scene::UiText => Self::Ui {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
                 content: UiContent::Text,
             },
+            #[cfg(not(feature = "parsed-font"))]
+            Scene::UiText => {
+                return Err(OffscreenError::Unusable(
+                    "the ui_text scene draws the committed parsed font, which this build \
+                     leaves out: turn on crcbl's `parsed-font` feature",
+                ));
+            }
             Scene::UiFocus => Self::Ui {
                 renderer: Box::new(UiRenderer::new(device, queue, format)?),
                 atlas: FontAtlas::built_in(),
@@ -8104,6 +8119,7 @@ impl OffscreenSetup {
                         UiContent::Primitives(images) => ui_primitives_draw_list(extent, images),
                         UiContent::Tree => ui_tree_draw_list(extent),
                         UiContent::Style => ui_style_draw_list(extent),
+                        #[cfg(feature = "parsed-font")]
                         UiContent::Text => ui_text_draw_list(extent),
                         UiContent::Focus => ui_focus_draw_list(extent),
                         UiContent::WidgetSet => ui_widgets_draw_list(extent),
@@ -9388,6 +9404,25 @@ mod tests {
             let recorder = Recorder::new();
             let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
             let before = recorder.total_live_objects();
+
+            // Without the parsed font the text scene has nothing to draw, and
+            // is refused when it opens — by name, and leaking nothing.
+            #[cfg(not(feature = "parsed-font"))]
+            if scene == Scene::UiText {
+                let refused = OffscreenSetup::open_on(
+                    Box::new(instance),
+                    16,
+                    16,
+                    scene,
+                    OffscreenSetup::OPTIONAL_FEATURES,
+                );
+                assert!(
+                    matches!(refused, Err(OffscreenError::Unusable(why)) if why.contains("parsed-font")),
+                    "{scene:?}"
+                );
+                assert_eq!(recorder.total_live_objects(), before, "{scene:?}");
+                continue;
+            }
 
             let mut setup = OffscreenSetup::open_on(
                 Box::new(instance),

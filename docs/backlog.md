@@ -3258,14 +3258,21 @@ scene menu with the gaps below.
 
 `crcbl_ui::font` landed with the gaps below.
 
-- **Every browser demo grows by about 1.03 MB raw, 274 KB gzipped**, measured on
-  puppet and sparks, whether or not it draws a parsed font: `skrifa` and
-  `read-fonts` are linked into `crcbl-ui` unconditionally, and the font itself
-  is 54 KB of it. The automatic hinter is about 57 KB. Worth a size breakdown,
-  and a decision on gating the parsed font behind a feature a demo opts into.
-  **Decided 2026-09-25: gate it behind an opt-in feature**, which a demo that
-  draws a parsed font turns on; every other browser demo stops paying 274 KB
-  gzipped for text it never draws. Not built.
+- **What the `parsed-font` feature left open.** `FontFamily::Sans` exists only
+  with the feature, so a crate matching `FontFamily` exhaustively without it
+  breaks when another crate in the same build turns the feature on;
+  `#[non_exhaustive]` would close that and was not added. Without the feature a
+  stylesheet naming `sans-serif` gets the generic "`sans-serif` is not a value
+  `font-family` takes" warning, which does not name the feature: the value
+  parsers' error type (`style::property::Invalid`) carries no reason to word it
+  with. Only puppet and sparks were measured (about 1 MB raw, 267 KB gzipped
+  each, 2026-09-27); the other demos were not.
+- **`crcbl`'s default-feature rustdoc does not build, and CI cannot see it.**
+  `RUSTDOCFLAGS="-D warnings" cargo doc -p crcbl --no-deps` fails on `lib.rs`'s
+  links to `scene` and `scene::scn::chunk_of`, which exist only with the `scene`
+  feature; CI documents with `--all-features` alone. Found 2026-09-27 while
+  checking the `parsed-font` gate, whose own links were made to build both ways.
+  Fix the two links, then add a default-feature doc step.
 - **Light-on-dark text reads heavy** under linear-light blending; a contrast
   curve built without `pow` (a table from a rational fit) needs a decision.
   **Decided 2026-09-25: no curve for now.** It would move every text golden, and

@@ -57,16 +57,28 @@
 //! x-heights and horizontal stems to whole pixels — what keeps small UI text
 //! crisp — while leaving every advance and every horizontal position linear, so
 //! subpixel positioning and kerning mean what layout computed.
+//!
+//! # Without the `parsed-font` feature
+//!
+//! The atlas is still there — `crcbl-render`'s UI pass owns one whatever the
+//! build — and stays empty: every glyph comes from a [`Font`], and without the
+//! feature there is none to ask with. What reads outlines is compiled out, and
+//! the one path that would reach it matches on the font's uninhabited field.
 
 use std::collections::HashMap;
 
+#[cfg(feature = "parsed-font")]
 use glam::Vec2;
+#[cfg(feature = "parsed-font")]
 use skrifa::instance::{LocationRef, Size};
+#[cfg(feature = "parsed-font")]
 use skrifa::outline::{
     DrawSettings, HintingInstance, HintingOptions, OutlinePen, SmoothMode, Target,
 };
+#[cfg(feature = "parsed-font")]
 use skrifa::{FontRef, MetadataProvider};
 
+#[cfg(feature = "parsed-font")]
 use super::raster::Rasterizer;
 use super::{Font, FontId, GlyphId};
 use crate::image::TexelRect;
@@ -91,6 +103,7 @@ pub const GLYPH_GUTTER: u32 = 1;
 pub const SHELF_QUANTUM: u32 = 4;
 
 /// How many sizes' hinting instances the atlas keeps before dropping them all.
+#[cfg(feature = "parsed-font")]
 const HINTING_INSTANCES: usize = 16;
 
 /// What a glyph is cached under.
@@ -311,6 +324,7 @@ impl Page {
 }
 
 /// One outline element in mask pixels, y down.
+#[cfg(feature = "parsed-font")]
 #[derive(Clone, Copy, Debug)]
 enum Segment {
     Line(Vec2, Vec2),
@@ -320,6 +334,7 @@ enum Segment {
 
 /// Collects a drawn outline as [`Segment`]s, flipped to y down and shifted
 /// right by a subpixel offset, closing every contour.
+#[cfg(feature = "parsed-font")]
 struct Collect<'a> {
     segments: &'a mut Vec<Segment>,
     offset: f32,
@@ -327,6 +342,7 @@ struct Collect<'a> {
     current: Vec2,
 }
 
+#[cfg(feature = "parsed-font")]
 impl Collect<'_> {
     fn point(&self, x: f32, y: f32) -> Vec2 {
         Vec2::new(x + self.offset, -y)
@@ -340,6 +356,7 @@ impl Collect<'_> {
     }
 }
 
+#[cfg(feature = "parsed-font")]
 impl OutlinePen for Collect<'_> {
     fn move_to(&mut self, x: f32, y: f32) {
         self.close_contour();
@@ -377,6 +394,7 @@ impl OutlinePen for Collect<'_> {
 }
 
 /// The hinting every glyph is drawn with; see the module docs.
+#[cfg(feature = "parsed-font")]
 fn hinting_options() -> HintingOptions {
     HintingOptions::from(Target::Smooth {
         mode: SmoothMode::Light,
@@ -387,6 +405,7 @@ fn hinting_options() -> HintingOptions {
 
 /// `glyph`'s outline at `size`, shifted `offset` pixels right, into
 /// `segments`: hinted by `hinting` when given. Returns whether it drew.
+#[cfg(feature = "parsed-font")]
 fn draw_outline(
     font: &Font,
     glyph: GlyphId,
@@ -430,8 +449,11 @@ pub struct GlyphAtlas {
     frame: u64,
     stats: GlyphAtlasStats,
     /// Per font and size; `None` where the font could not be given one.
+    #[cfg(feature = "parsed-font")]
     hinting: HashMap<(FontId, u32), Option<HintingInstance>>,
+    #[cfg(feature = "parsed-font")]
     rasterizer: Rasterizer,
+    #[cfg(feature = "parsed-font")]
     segments: Vec<Segment>,
     mask: Vec<u8>,
 }
@@ -470,8 +492,11 @@ impl GlyphAtlas {
             entries: HashMap::new(),
             frame: 0,
             stats: GlyphAtlasStats::default(),
+            #[cfg(feature = "parsed-font")]
             hinting: HashMap::new(),
+            #[cfg(feature = "parsed-font")]
             rasterizer: Rasterizer::default(),
+            #[cfg(feature = "parsed-font")]
             segments: Vec::new(),
             mask: Vec::new(),
         }
@@ -602,8 +627,20 @@ impl GlyphAtlas {
         );
     }
 
+    /// Without the `parsed-font` feature there is no [`Font`] to call this
+    /// with.
+    #[cfg(not(feature = "parsed-font"))]
+    #[expect(
+        clippy::unused_self,
+        reason = "the feature-on twin draws into `self`'s scratch buffers"
+    )]
+    fn rasterize(&mut self, font: &Font, _key: GlyphKey) -> Option<(u32, u32, i32, i32)> {
+        match font.never {}
+    }
+
     /// Draws `key`'s outline into the mask scratch, returning its extent and
     /// its offset from the pen, or `None` for a glyph with no ink.
+    #[cfg(feature = "parsed-font")]
     fn rasterize(&mut self, font: &Font, key: GlyphKey) -> Option<(u32, u32, i32, i32)> {
         let size = f32::from_bits(key.size_bits);
         let hinting_key = (key.font, key.size_bits);
@@ -807,7 +844,7 @@ impl GlyphAtlas {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
     use crate::font::raster::coverage_byte;

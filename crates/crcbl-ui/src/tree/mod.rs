@@ -150,11 +150,11 @@
 //! `powf` or `mul_add` — so the result does not depend on a platform's libm.
 
 mod ellipsis;
-#[cfg(test)]
+#[cfg(all(test, feature = "parsed-font"))]
 mod ellipsis_tests;
 mod emit;
 pub mod focus;
-#[cfg(test)]
+#[cfg(all(test, feature = "parsed-font"))]
 mod font_tests;
 mod layout;
 mod resolve;

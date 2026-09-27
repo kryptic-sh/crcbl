@@ -16,6 +16,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui`'s parsed font is behind a new `parsed-font` cargo feature, off by
+  default** — `skrifa`, the committed Atkinson Hyperlegible
+  (`crcbl_ui::font::SANS_TTF`), `Font::sans` and `FontFamily::Sans` — so a
+  browser demo that draws no parsed text stops linking about 1 MB of wasm, 267
+  KB gzipped (puppet and sparks). Without it `Font` has no values, so layout,
+  the glyph atlas, `DrawList::glyphs` and `Ui::register_font` compile but cannot
+  be reached; `Font::parse` returns the new `FontError::ParsedFontOff`; a
+  stylesheet naming `sans-serif` or `"Atkinson Hyperlegible"` anywhere in a
+  `font-family` list gets the usual invalid-value warning and the declaration is
+  dropped, rather than falling back to the bitmap font; and
+  `crcbl::screenshot`'s `ui_text` scene is refused when it opens. An application
+  that draws a parsed font turns on `crcbl/parsed-font` (forwarded to `crcbl-ui`
+  and `crcbl-render`, which have a feature of the same name); `crcbl-cli`,
+  `apps/render-harness` and `crcbl`'s `render-e2e` suite do.
 - **`crcbl::engine::GpuError` has an `AdapterPin(crcbl::adapter::PinMiss)`
   variant**, the refusal of a `CRCBL_ADAPTER` pin described under Fixed, so an
   exhaustive match on it needs the new arm.

@@ -311,7 +311,7 @@ impl NodeStyle {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
 

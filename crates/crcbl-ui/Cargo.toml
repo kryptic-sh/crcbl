@@ -45,8 +45,27 @@ cssparser = { version = "0.38.0", default-features = false }
 # `skrifa::raw`, so the GPOS reader is always the version skrifa was built
 # against. Default features off: `autohint_shaping` feeds the automatic hinter,
 # and the committed font carries TrueType instructions the interpreter runs
-# instead. `std` stays on, because the other float backend is `libm`.
-skrifa ={ version = "0.47.0", default-features = false, features = ["std"] }
+# instead. `std` stays on, because the other float backend is `libm`. Behind
+# the `parsed-font` feature below.
+skrifa ={ version = "0.47.0", default-features = false, features = ["std"], optional = true }
+
+[features]
+# `crcbl_ui::font`'s parsed font: `skrifa`, the committed Atkinson Hyperlegible
+# (`font::SANS_TTF`), `Font::sans`, `Font::parse` and `FontFamily::Sans` — the
+# `sans-serif` a stylesheet names. **Off by default**, decided on
+# 2026-09-25: linked unconditionally they cost every browser demo about 1 MB of
+# wasm, 267 KB gzipped (puppet and sparks, measured 2026-09-27 with the feature
+# on and off), whether or not it draws a single parsed glyph, and none of the
+# samples does. An application that draws one turns it on, through `crcbl`'s
+# `parsed-font`, which forwards here.
+#
+# Off, the parsed font cannot exist rather than being documented away: `Font`
+# is uninhabited, so everything that takes one — layout, the glyph atlas,
+# `DrawList::glyphs`, `Ui::register_font` — still compiles and can never be
+# called; `Font::parse` returns `FontError::ParsedFontOff`; and a stylesheet
+# naming `sans-serif` or `"Atkinson Hyperlegible"` is refused with a warning
+# rather than drawn in the bitmap font.
+parsed-font = ["dep:skrifa"]
 
 [lints]
 workspace = true

@@ -2584,6 +2584,7 @@ mod tests {
     /// the atlas measures the atlas's width — and [`Menu::render`] draws that
     /// layout's label as a glyph run of the font. [`Menu::layout`] is what it
     /// was before, the font registered in the shared trees notwithstanding.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn a_menu_laid_out_in_a_font_measures_and_draws_its_text_in_it() {
         use crate::font::FontMetrics;
@@ -2753,6 +2754,7 @@ mod tests {
 
     /// A menu of captions and no rows has nothing to select or fire, and lays
     /// out, fitted or not, without an index to panic on.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn a_menu_of_only_captions_selects_nothing() {
         let mut menu = Menu::new("NOTICE", Vec::new());
@@ -2774,12 +2776,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Every glyph's advance in [`font_like_roboto`], in ems.
+    #[cfg(feature = "parsed-font")]
     const ADVANCE_EM: f32 = 0.55;
 
     /// A stand-in for a parsed UI font such as Roboto: every glyph
     /// [`ADVANCE_EM`] wide, on a line 1.172 em tall, as Roboto's own metrics
     /// give it. One parse per process, as an app's registered font is, so two
     /// layouts in it compare equal.
+    #[cfg(feature = "parsed-font")]
     fn font_like_roboto() -> &'static Font {
         use crate::font::FontMetrics;
         static FONT: std::sync::OnceLock<&'static Font> = std::sync::OnceLock::new();
@@ -2797,11 +2801,13 @@ mod tests {
     }
 
     /// The row count of [`scene_menu`].
+    #[cfg(feature = "parsed-font")]
     const SCENES: usize = 17;
 
     /// A stand-in for EW's scene menu: [`SCENES`] rows, each a label and a
     /// one-line description in the hint slot — the longest seventy
     /// characters — under a title and two captions.
+    #[cfg(feature = "parsed-font")]
     fn scene_menu() -> Menu {
         let items = (0..SCENES)
             .map(|index| {
@@ -2825,15 +2831,18 @@ mod tests {
     }
 
     /// The smallest window EW supports.
+    #[cfg(feature = "parsed-font")]
     const SMALL: (u32, u32) = (480, 360);
 
     /// The fitted layout of `menu` at `extent`, from EW's style.
+    #[cfg(feature = "parsed-font")]
     fn fitted(menu: &Menu, extent: (u32, u32)) -> MenuLayout {
         menu.layout_with_font_fitted(extent, &MenuStyle::pixel_art(2), font_like_roboto())
             .unwrap_or_else(|error| panic!("{extent:?}: {error}"))
     }
 
     /// Whether `inner` lies wholly inside `outer`.
+    #[cfg(feature = "parsed-font")]
     fn within(inner: (Vec2, Vec2), outer: (Vec2, Vec2)) -> bool {
         inner.0.x >= outer.0.x
             && inner.0.y >= outer.0.y
@@ -2849,6 +2858,7 @@ mod tests {
     /// the panel, every row drawn is inside the panel's width and reaches
     /// into the viewport, and the widest description ends inside its row.
     /// The same inputs lay out the same menu.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn a_seventeen_row_menu_fits_a_480_by_360_window() {
         let menu = scene_menu();
@@ -2908,6 +2918,7 @@ mod tests {
     /// fit without scrolling but too small for the ceiling, the chosen size
     /// fits and the next step up does not; and a window big enough for the
     /// ceiling gets the ceiling, unscrolled.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn the_fit_takes_the_largest_step_that_fits() {
         let menu = scene_menu();
@@ -2948,6 +2959,7 @@ mod tests {
     /// wide a menu, which scrolling cannot help; a window too short for the
     /// title, the captions and one row is too short. Neither is laid out at
     /// a smaller size than the minimum.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn the_fit_refuses_honestly_below_the_minimum() {
         let menu = scene_menu();
@@ -2986,6 +2998,7 @@ mod tests {
     /// caller that only lays out and draws and for one that also runs the
     /// pointer — which keeps the list still while the selection moves inside
     /// it, as a list does.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn scrolling_keeps_the_selected_row_in_view_down_and_up() {
         for with_pointer in [false, true] {
@@ -3032,6 +3045,7 @@ mod tests {
     /// placed hovers and fires nothing, a row in view still answers, and the
     /// draw list holds the title, the captions and the shown rows' text and
     /// frames and nothing of the others.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn rows_scrolled_out_of_view_are_neither_drawn_nor_hit() {
         let mut menu = scene_menu();
@@ -3104,6 +3118,7 @@ mod tests {
     /// selection, which stays where it was — a wheel off the panel, or past
     /// the end, reports nothing, and the next keyboard move scrolls its row
     /// back into view.
+    #[cfg(feature = "parsed-font")]
     #[test]
     fn the_wheel_scrolls_the_list_and_the_keyboard_takes_it_back() {
         let mut menu = scene_menu();

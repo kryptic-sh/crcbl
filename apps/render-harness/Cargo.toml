@@ -18,7 +18,11 @@ name = "crcbl_render_harness"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-crcbl = { workspace = true }
+# `parsed-font` because the harness draws every golden scene in the browser, and
+# `ui_text` is drawn in the committed parsed font. It is a gate, not a demo: the
+# wasm it builds is never published, so its size is not what the feature
+# guards.
+crcbl = { workspace = true, features = ["parsed-font"] }
 
 # The comparator half of the gate. A dev-dependency rather than a dependency
 # because `examples/compare-readback.rs` is the only thing that names it, and it

@@ -413,6 +413,50 @@ mod tests {
             .collect()
     }
 
+    /// **Without the `parsed-font` feature, naming the parsed font refuses the
+    /// whole declaration, loudly**: a warning at the declaration that quotes the
+    /// value, and no `font-family` set — wherever in the list the name is, so
+    /// neither `bitmap` nor a registered name behind or ahead of it is drawn
+    /// in its place. A list naming only fonts this build has still parses.
+    #[cfg(not(feature = "parsed-font"))]
+    #[test]
+    fn without_the_feature_a_sheet_naming_the_parsed_font_is_refused() {
+        use crate::font::{FamilyName, FontFamily};
+
+        for value in [
+            "sans-serif",
+            "\"Atkinson Hyperlegible\"",
+            "atkinson   HYPERLEGIBLE",
+            "sans-serif, bitmap",
+            "bitmap, sans-serif",
+            "Roboto, sans-serif",
+        ] {
+            let css = format!(".a {{ font-family: {value}; width: 1px }}");
+            let (sheet, diagnostics) = Stylesheet::parse("off.css", &css);
+            assert_eq!(diagnostics.len(), 1, "{value}: {diagnostics:#?}");
+            let warning = &diagnostics[0];
+            assert_eq!(warning.severity, Severity::Warning, "{value}");
+            assert_eq!((warning.line, warning.column), (1, 6), "{value}");
+            assert!(warning.message.contains(value.trim()), "{warning}");
+            assert_eq!(
+                set(&sheet.rules[0]),
+                [Declaration::Width(LengthAuto::Px(1.0))],
+                "{value}: the refused declaration still set something"
+            );
+        }
+
+        let (sheet, diagnostics) =
+            Stylesheet::parse("on.css", ".a { font-family: Roboto, bitmap }");
+        assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+        assert_eq!(
+            set(&sheet.rules[0]),
+            [
+                Declaration::FontFamily(FontFamily::Bitmap),
+                Declaration::FamilyName(Some(FamilyName::new("roboto"))),
+            ]
+        );
+    }
+
     /// **Comments anywhere, escapes in names and CRLF line endings parse** into
     /// the rules they spell.
     #[test]

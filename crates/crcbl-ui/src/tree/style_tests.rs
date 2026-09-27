@@ -122,6 +122,7 @@ fn the_cascade_orders_origin_then_tier_then_source_and_inline_wins() {
 /// **`color` and the text properties inherit and nothing else does; `unset` inherits,
 /// `initial` does not** — and a parent's inline colour changing reaches a child
 /// whose own inputs did not change.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn inherited_properties_reach_descendants_and_nothing_else_does() {
     let sheet = "

@@ -1111,6 +1111,7 @@ fn an_upload_that_was_never_recorded_is_staged_again() {
 // -----------------------------------------------------------------------
 
 /// A list drawing `text` in the committed font at 20px from (4, 4).
+#[cfg(feature = "parsed-font")]
 fn glyph_run(text: &str) -> DrawList {
     use crcbl_ui::font::Font;
     use crcbl_ui::font::layout::TextLayout;
@@ -1173,6 +1174,7 @@ fn the_glyph_pages_are_every_layer_uploaded_empty_at_start_up() {
 /// its layer, in a `ui-glyphs` pass ahead of the draw** — covering every
 /// glyph the frame drew — and the frame after it, drawing the same text,
 /// rasterises and copies nothing.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn rasterised_glyphs_are_copied_into_their_page_once_ahead_of_the_draw() {
     use crcbl_hal::null::Command;
@@ -1246,6 +1248,7 @@ fn rasterised_glyphs_are_copied_into_their_page_once_ahead_of_the_draw() {
 }
 
 /// A staged page copy whose frame never recorded it is staged again.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn a_glyph_upload_that_was_never_recorded_is_staged_again() {
     let (device, queue) = open();
@@ -1265,6 +1268,7 @@ fn a_glyph_upload_that_was_never_recorded_is_staged_again() {
 }
 
 /// Every glyph staging buffer is given back, by the ring or by `destroy`.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn glyph_uploads_leak_nothing() {
     let (recorder, device, queue) = open_recorded();

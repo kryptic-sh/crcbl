@@ -198,6 +198,14 @@ jobs:
       # builds when its siblings are on is a broken feature, and it is invisible
       # to a workspace that always turns them all on.
       - run: cargo build --workspace --locked --no-default-features
+      # **`crcbl-ui` and `crcbl` without `parsed-font`**, which is the build
+      # every browser demo links, and which neither line above compiles: one
+      # passes `--all-features`, and in the other the feature is unified back on
+      # by `crcbl-cli` and `apps/render-harness`, which draw the parsed-font
+      # golden. Naming the two packages alone resolves their features alone.
+      - run: >-
+          cargo clippy -p crcbl-ui -p crcbl --all-targets --locked -- -D
+          warnings
 
       # **The same check for the two backends this runner cannot build.**
       # `crcbl-mtl` and `crcbl-dx12` compile only on their own platform jobs, and
@@ -439,6 +447,13 @@ jobs:
       - run: >-
           cargo check --locked -p crcbl --features scn --target
           wasm32-unknown-unknown
+      # `crcbl-ui` as a browser demo links it — no `parsed-font` — linted, for
+      # the reason the `scn` line above gives: the `--all-features` sweep below
+      # turns the feature on and cannot say whether the crate builds without
+      # it.
+      - run: >-
+          cargo clippy --locked -p crcbl-ui --all-targets --target
+          wasm32-unknown-unknown -- -D warnings
       - run: >-
           cargo check --locked --workspace --exclude crcbl-vk --exclude
           crcbl-cli --target wasm32-unknown-unknown
@@ -690,6 +705,14 @@ jobs:
         timeout-minutes: 10
         run: ./tools/fetch-shelf.sh
       - run: cargo nextest run --workspace --all-features --locked --profile ci
+      # **The tests that only exist without `parsed-font`**: a stylesheet naming
+      # `sans-serif` refused, `Font::parse` refusing, the `ui_text` golden
+      # refused when it opens. The run above turns the feature on, and so would
+      # any workspace-wide run, through `crcbl-cli`; naming the two packages
+      # alone is what leaves it off. Default profile, so the JUnit report the
+      # run above wrote is not replaced.
+      - run: >-
+          cargo nextest run -p crcbl-ui -p crcbl --locked
       # nextest does not run doctests — without this step every `//!`/`///`
       # example in the engine is unexecuted documentation.
       - run: cargo test --doc --workspace --all-features --locked

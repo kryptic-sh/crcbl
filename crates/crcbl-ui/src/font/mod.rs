@@ -26,11 +26,26 @@
 //!
 //! [`FontFamily::Bitmap`] is [`crate::text::FontAtlas`], the built-in 8×13
 //! pixel font every panel, menu and console still draws with.
-//! [`FontFamily::Sans`] is [`Font::sans`]: Atkinson Hyperlegible Regular, by
+//! `FontFamily::Sans` is `Font::sans`: Atkinson Hyperlegible Regular, by
 //! the Braille Institute of America, under the SIL Open Font License 1.1 —
 //! `crates/crcbl-ui/fonts/OFL.txt` is its licence, committed beside
 //! `crates/crcbl-ui/fonts/AtkinsonHyperlegible-Regular.ttf` and embedded into
-//! every binary that links this crate.
+//! every binary that links this crate **with the `parsed-font` feature on**.
+//!
+//! # The `parsed-font` feature
+//!
+//! Everything here that reads a font's bytes — `skrifa`, `SANS_TTF`,
+//! `Font::sans`, [`Font::parse`]'s tables and the atlas's outlines — is behind
+//! the crate's `parsed-font` feature, off by default, because a browser build
+//! that links it pays for it whether or not it draws a parsed glyph. Off, the
+//! parsed font cannot exist: [`Font`] holds a field of an uninhabited type, so
+//! [`layout`], [`atlas`], [`DrawList::glyphs`](crate::draw_list::DrawList::glyphs)
+//! and [`Ui::register_font`](crate::tree::Ui::register_font) still compile —
+//! nothing that names a `Font` needs a `cfg` of its own — and can never be
+//! called, which the compiler says rather than a comment.
+//! [`Font::parse`] refuses with [`FontError::ParsedFontOff`], and
+//! `FontFamily::Sans` is not there to name, so a stylesheet naming it is
+//! refused as a value `font-family` does not take.
 //!
 //! # Fonts an application registers
 //!
@@ -38,7 +53,7 @@
 //! [`Ui::register_font`](crate::tree::Ui::register_font) under a
 //! [`FamilyName`]: a `font-family` list naming it before its first built-in
 //! family selects it, and a span in it is measured and emitted exactly as a
-//! [`FontFamily::Sans`] span is — [`layout::TextLayout`] and
+//! `FontFamily::Sans` span is — [`layout::TextLayout`] and
 //! [`DrawList::glyphs`](crate::draw_list::DrawList::glyphs) — so its glyphs
 //! reach the screen through the same [`atlas`] as the committed font's.
 //!
@@ -50,20 +65,26 @@
 //! right-to-left text.
 
 pub mod atlas;
+#[cfg(feature = "parsed-font")]
 mod kern;
 pub mod layout;
 pub mod raster;
 
 use core::fmt;
 use std::collections::HashMap;
+#[cfg(feature = "parsed-font")]
 use std::sync::OnceLock;
+#[cfg(feature = "parsed-font")]
 use std::sync::atomic::{AtomicU32, Ordering};
 
+#[cfg(feature = "parsed-font")]
 use skrifa::instance::{LocationRef, Size};
+#[cfg(feature = "parsed-font")]
 use skrifa::{FontRef, MetadataProvider};
 
 /// The committed UI font's bytes: Atkinson Hyperlegible Regular. See the module
 /// docs for its licence.
+#[cfg(feature = "parsed-font")]
 pub const SANS_TTF: &[u8] = include_bytes!("../../fonts/AtkinsonHyperlegible-Regular.ttf");
 
 /// Which font a text node draws in: `font-family` in a stylesheet.
@@ -75,7 +96,8 @@ pub enum FontFamily {
     #[default]
     Bitmap,
     /// [`Font::sans`] — `sans-serif` or `"Atkinson Hyperlegible"` in a
-    /// stylesheet.
+    /// stylesheet. Only with the `parsed-font` feature.
+    #[cfg(feature = "parsed-font")]
     Sans,
 }
 
@@ -85,6 +107,7 @@ impl FontFamily {
     pub fn font(self) -> Option<&'static Font> {
         match self {
             Self::Bitmap => None,
+            #[cfg(feature = "parsed-font")]
             Self::Sans => Some(Font::sans()),
         }
     }
@@ -187,6 +210,11 @@ pub enum FontError {
     /// The font's `head` table gives no units per em, so nothing in it can be
     /// scaled to a pixel size.
     NoUnitsPerEm,
+    /// This build has no parsed fonts: the crate's `parsed-font` feature is
+    /// off. What [`Font::parse`] returns in such a build, whatever the bytes.
+    /// The variant is there with the feature on too, so turning the feature on
+    /// from another crate never breaks a `match` written without it.
+    ParsedFontOff,
 }
 
 impl fmt::Display for FontError {
@@ -194,6 +222,9 @@ impl fmt::Display for FontError {
         match self {
             Self::Unreadable(why) => write!(f, "the font cannot be read: {why}"),
             Self::NoUnitsPerEm => f.write_str("the font's head table gives no units per em"),
+            Self::ParsedFontOff => f.write_str(
+                "crcbl-ui was built without its `parsed-font` feature, so it parses no fonts",
+            ),
         }
     }
 }
@@ -242,7 +273,14 @@ const LATIN1_END: u32 = 0x100;
 /// rasterises a glyph.
 ///
 /// Two fonts are equal when they are one parse: equality is [`Font::id`].
+///
+/// Without the `parsed-font` feature there is no value of this type: see the
+/// module docs.
 pub struct Font {
+    /// Uninhabited, so a build without the feature can name a `Font` and never
+    /// hold one: a body that reads the font's bytes matches on this instead.
+    #[cfg(not(feature = "parsed-font"))]
+    never: NoParsedFont,
     id: FontId,
     data: &'static [u8],
     metrics: FontMetrics,
@@ -276,7 +314,14 @@ impl PartialEq for Font {
 
 impl Eq for Font {}
 
+/// No value: what makes [`Font`] uninhabited without the `parsed-font`
+/// feature.
+#[cfg(not(feature = "parsed-font"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NoParsedFont {}
+
 /// The next parse's [`FontId`].
+#[cfg(feature = "parsed-font")]
 fn next_id() -> FontId {
     static NEXT_ID: AtomicU32 = AtomicU32::new(0);
     FontId(NEXT_ID.fetch_add(1, Ordering::Relaxed))
@@ -289,10 +334,21 @@ impl Font {
     ///
     /// If [`SANS_TTF`] does not parse, which the crate's own tests rule out:
     /// the bytes are compiled in, so they are the same bytes the tests read.
+    #[cfg(feature = "parsed-font")]
     #[must_use]
     pub fn sans() -> &'static Self {
         static SANS: OnceLock<Font> = OnceLock::new();
         SANS.get_or_init(|| Self::parse(SANS_TTF).expect("the committed UI font parses"))
+    }
+
+    /// Refuses `data`: this build has no parsed fonts. See the module docs.
+    ///
+    /// # Errors
+    ///
+    /// [`FontError::ParsedFontOff`], always.
+    #[cfg(not(feature = "parsed-font"))]
+    pub const fn parse(_data: &'static [u8]) -> Result<Self, FontError> {
+        Err(FontError::ParsedFontOff)
     }
 
     /// Parses `data`, which lives as long as the process.
@@ -305,6 +361,7 @@ impl Font {
     ///
     /// [`FontError`] when the table directory cannot be read or the font has
     /// no units per em.
+    #[cfg(feature = "parsed-font")]
     pub fn parse(data: &'static [u8]) -> Result<Self, FontError> {
         let font = FontRef::new(data).map_err(|error| FontError::Unreadable(error.to_string()))?;
         let unscaled = font.metrics(Size::unscaled(), LocationRef::default());
@@ -390,6 +447,9 @@ impl Font {
         if codepoint < LATIN1_END {
             return GlyphId(self.latin1[codepoint as usize]);
         }
+        #[cfg(not(feature = "parsed-font"))]
+        match self.never {}
+        #[cfg(feature = "parsed-font")]
         FontRef::new(self.data)
             .ok()
             .and_then(|font| font.charmap().map(codepoint))
@@ -419,8 +479,9 @@ impl Font {
 
     /// A font with `metrics` and no outlines, leaked for the process: every
     /// Latin-1 codepoint is glyph 1, `advance` font units wide, and nothing
-    /// kerns. What a test measures known widths in; it cannot be rasterised.
-    #[cfg(test)]
+    /// kerns. What a test measures known widths in; it cannot be rasterised,
+    /// and without the `parsed-font` feature it cannot be made.
+    #[cfg(all(test, feature = "parsed-font"))]
     pub(crate) fn fixed_pitch(metrics: FontMetrics, advance: f32) -> &'static Self {
         Box::leak(Box::new(Self {
             id: next_id(),
@@ -433,7 +494,24 @@ impl Font {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "parsed-font")))]
+mod off_tests {
+    use super::*;
+
+    /// **Without the feature, nothing parses** — not even the committed font's
+    /// own bytes, which a build with it on parses — and the refusal says why.
+    #[test]
+    fn without_the_feature_every_parse_is_refused_and_says_why() {
+        let bytes = include_bytes!("../../fonts/AtkinsonHyperlegible-Regular.ttf");
+        let refused = Font::parse(bytes);
+        assert!(matches!(refused, Err(FontError::ParsedFontOff)));
+        let message = FontError::ParsedFontOff.to_string();
+        assert!(message.contains("parsed-font"), "{message}");
+        assert_eq!(FontFamily::default().font(), None);
+    }
+}
+
+#[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
 

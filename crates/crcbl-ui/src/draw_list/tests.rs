@@ -7,6 +7,7 @@ const RED: [f32; 4] = [1.0, 0.0, 0.0, 1.0];
 /// split into a pixel and the nearest subpixel bin, its UVs exactly the
 /// glyph's texels on its page, and its page in the first shape lane; a
 /// space draws nothing, and with no glyph atlas nothing is drawn.
+#[cfg(feature = "parsed-font")]
 #[test]
 fn a_glyph_run_expands_to_whole_pixel_quads_on_its_glyphs_texels() {
     use crate::font::Font;

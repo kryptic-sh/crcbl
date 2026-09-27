@@ -264,7 +264,7 @@ impl TextLayout {
         Vec2::new(self.width().ceil(), self.height())
     }
 }
-#[cfg(test)]
+#[cfg(all(test, feature = "parsed-font"))]
 mod tests {
     use super::*;
 

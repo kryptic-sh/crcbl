@@ -232,7 +232,11 @@ workspace = true
 # The gate it closes is `docs/backlog.md`'s "The render layer has only ever run
 # on Vulkan and wgpu": until this existed, no Metal test had ever constructed a
 # `ForwardRenderer`.
-render-e2e = []
+#
+# It turns `parsed-font` on because one of its goldens, `ui_text`, is the
+# committed font through the glyph atlas: a suite that could be built without
+# the font would have a scene that refuses to open.
+render-e2e = ["parsed-font"]
 
 # `tests/hal_seam_e2e.rs` — `crcbl-hal`'s seam itself, on whichever backend
 # `CRCBL_GPU` names. Gated and `#[ignore]`d for exactly the reason `render-e2e`
@@ -343,6 +347,20 @@ mesh-e2e = []
 # nothing is needed, because the test resizes its own process's window with
 # `SetWindowPos`.
 windowed-e2e = ["crcbl-shell/x11-e2e"]
+
+# `crcbl-ui`'s parsed font — `skrifa`, the committed Atkinson Hyperlegible,
+# `Font::sans` and the `sans-serif` family — forwarded to it and to
+# `crcbl-render`. **Off by default**: linked unconditionally it cost every
+# browser demo the size `crcbl-ui`'s manifest records, for text none of them
+# draws — decided 2026-09-25 in `docs/backlog.md`.
+# An application that draws a parsed glyph — a stylesheet naming `sans-serif`,
+# a `Font` handed to `DrawList::glyphs` or `Ui::register_font` — turns it on;
+# without it the first cannot parse and the second cannot be made.
+#
+# Here it also decides `screenshot`'s `ui_text` scene, the one golden drawn in
+# the parsed font: with it off that scene is refused when it opens.
+# `crcbl-cli` and `apps/render-harness`, which draw every golden, turn it on.
+parsed-font = ["crcbl-ui/parsed-font", "crcbl-render/parsed-font"]
 
 # `crcbl::scene` — `crcbl-scene`, the bake side: glTF import, `build_meshlets`
 # and `build_cluster_dag`. **Off by default**, and the reason is the same one
