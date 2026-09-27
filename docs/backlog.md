@@ -15,8 +15,9 @@ priority order until the remaining planned work is complete. Keep the plans,
 backlog and changelog current as work ships, removing completed backlog entries.
 Profile relevant workloads, preserve correctness, measure each optimization, and
 complete the required verification and shipping gates before starting the next
-production change. Authored interior and browser culling measurements, CPU
-draw-recording cost, and overlapping grass workloads remain open below.
+production change. Browser culling measurements, CPU draw-recording cost, and
+overlapping grass workloads remain open below; the authored interior was priced
+on shard on 2026-09-27.
 
 ## First priority: every dependency on its latest stable release, CI green (2026-09-25)
 
@@ -71,8 +72,8 @@ decline. Source review coverage is complete at that package level; the measured
 workloads and verification gaps recorded below remain open. Profiling must
 establish which candidates deserve implementation; no speedup is implied by a
 source scan. Parallel occlusion bucket finalization passed CI and deployed.
-Authored interior and browser culling measurements, CPU draw-recording cost, and
-overlapping grass workloads remain open below.
+Browser culling measurements, CPU draw-recording cost, and overlapping grass
+workloads remain open below.
 
 Bind-group replacement-image comparisons and actual browser performance remain
 unverified. Native suite passes do not establish Metal or Direct3D image parity,
@@ -2644,12 +2645,28 @@ G2–G6 and T1–T2 are separate slices rather than gaps.
 
 ## What occlusion culling shipped without (2026-09-17)
 
-**Default remains a decision.** `r_occlusion_cull` is off. The original
-crate-and-wall fixture is too cheap to establish the default for detailed
-interiors. A controlled follow-up on 2026-09-17 kept
-`occluders_forward_on_path`'s walls, object bounds, materials and camera path,
-and replaced its crates with cubes tessellated on a regular grid per face. This
-isolates geometry processing cost; it is not an authored interior.
+**Decided 2026-09-27: off by default, turned on per scene.** `r_occlusion_cull`
+stays off. A scene with a lot of dense geometry hidden behind walls sets it,
+through `ForwardRenderer::set_occlusion_culling` or the console variable (which
+`--exec "r_occlusion_cull 1"` now reaches on a headless run). It is not a
+quality-tier knob, because whether it pays depends on the scene rather than the
+hardware: the same RX 7900 XTX loses 6% on the original fixture and gains 27%
+with the 49,152-triangle crates. The authored interior below loses. **Shard,
+priced 2026-09-27:** a release build, `--headless --frames 400 --size 1920x1080`
+under Vulkan, three interleaved runs of each. The summed pass p50 was
+1.562–1.566 ms with culling off and 1.588–1.596 ms with it on. The forward pass
+(0.413 and 0.412 ms) and the depth prepass (0.008 ms both ways) did not move, so
+nothing measurable was hidden. The added cost is the pyramid and late-phase
+passes. Shard's frame is dominated by screen-space passes (`ssr` 0.5 ms, `ssao`
+0.2 ms), not geometry. Caveats: the headless run holds shard's starting camera,
+so this is one view rather than a walk; CPU record and submit were not timed,
+because a headless run's frame clock is the fixed step; and the browser is still
+unpriced. Earlier record: The original crate-and-wall fixture is too cheap to
+establish the default for detailed interiors. A controlled follow-up on
+2026-09-17 kept `occluders_forward_on_path`'s walls, object bounds, materials
+and camera path, and replaced its crates with cubes tessellated on a regular
+grid per face. This isolates geometry processing cost; it is not an authored
+interior.
 
 The table reports the sum of GPU pass durations per frame on an RX 7900 XTX with
 Vulkan/radv: median of three runs, each with 400 recorded frames at 1920×1080.
@@ -2695,10 +2712,9 @@ lavapipe, including draw arguments, counts and extents; the single-workgroup
 sabotage made it fail. Its runtime verdict on other backends awaits CI, and
 performance beyond Vulkan remains unpriced.
 
-**Next:** price an authored interior such as shard, including CPU record and
-submit cost and browser time, then choose a global, tier-specific or per-scene
-default. Compact late-phase candidate lists and a fused pyramid build were not
-implemented or benchmarked.
+**Still open:** CPU record and submit cost on shard, and browser time. Compact
+late-phase candidate lists and a fused pyramid build were not implemented or
+benchmarked.
 
 - **Per-cluster occlusion** inside `mesh_cluster.slang`'s amplification stage is
   not built; the `MeshShader` path occlusion-culls whole instances only. Stage 3
