@@ -23,6 +23,10 @@
 //! * [`rand`] — deterministic values from an index, for simulations that
 //!   replay. Deliberately not a generator; see the module docs for why every
 //!   sample independently arrived at the same shape.
+//! * [`schedule`] — [`FixedRateSchedule`](schedule::FixedRateSchedule),
+//!   per-agent sampling at a fixed rate and a staggered phase, reporting each
+//!   sample at its exact time inside the tick. Sample times come from an
+//!   integer index, never an accumulated sum; see the module docs.
 //! * [`stats`] — [`percentile_of`](stats::percentile_of) and
 //!   [`MIN_PERCENTILE_SAMPLES`](stats::MIN_PERCENTILE_SAMPLES), the nearest-rank
 //!   arithmetic the debug panel's budget row and `crcbl bench` both report
@@ -45,6 +49,7 @@ pub mod handle;
 pub mod input;
 pub mod log;
 pub mod rand;
+pub mod schedule;
 pub mod stats;
 pub mod surface;
 pub mod time;

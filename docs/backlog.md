@@ -55,6 +55,26 @@ main.
   `actions/cache@v4` inside the local `apt-packages` action, went to v6, and
   Dependabot's `github-actions` entry now reads `/.github/actions/*` as well.
 
+## Wasm `--all-targets` builds fail, and CI does not build them (2026-09-28)
+
+**Found, not fixed.** Two crates' test targets do not compile for
+`wasm32-unknown-unknown`, which CI never sees because its wasm32 job builds
+libraries and `--lib` only.
+
+- `crcbl-core`: its `proptest` dev-dependency pulls in `getrandom` 0.3 (which
+  refuses `wasm32-unknown-unknown` without a backend feature) and
+  `wait-timeout`, so
+  `cargo clippy -p crcbl-core --all-targets --target wasm32-unknown-unknown`
+  fails before any crcbl code is checked.
+- `crcbl-shaders`: a `meshlet.rs` test builds a `MeshletTooLarge` with
+  `value: 5_000_000_000`, which is out of range for wasm's 32-bit `usize`. It
+  was seen on `main` before the aerial slice, which did not touch the file.
+
+**Needs a decision:** either gate those tests on non-wasm targets and add a wasm
+`--all-targets` step to CI, or state that crate tests are native-only and leave
+CI as it is. Nothing runs wasm tests today (no `wasm-bindgen-test`), so the
+second is the smaller change.
+
 ## EW's engine port requests (2026-09-27)
 
 EW asked for four features proven in its game code, none of which crcbl has.
@@ -72,7 +92,8 @@ migrates every caller and deletes its own copy in the same change.
   policy is scene-specific. Revisit when a second game needs it.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
-  "perception". Not built yet.
+  "perception". Shipped 2026-09-28 as
+  `crcbl::core::schedule::FixedRateSchedule`.
 - **Acoustic paths: accepted, into `crcbl-audio` as `acoustic_path`.** The
   material is a type parameter, because crcbl cannot know a game's materials,
   and the returned barrier and path types move with it. This supplies the

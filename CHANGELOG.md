@@ -327,6 +327,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_core::schedule`: fixed-rate sampling at exact sub-tick times,
+  staggered per agent, ported from EW**, reached through the umbrella as
+  `crcbl::core::schedule`. A `FixedRateSchedule` built by
+  `new(FixedRateScheduleConfig { interval_seconds }, phase_offset_seconds)` (or
+  `Default`: `DEFAULT_INTERVAL_SECONDS`, phase zero) reports every sample due in
+  an `advance(elapsed_seconds, emit)` call as a `FixedRateSample` with its
+  `scheduled_simulation_time_seconds`, `offset_within_update_seconds` and
+  `elapsed_since_previous_sample_seconds`, in increasing time; `skip_elapsed`
+  moves past time an agent was not running without emitting, keeping the phase.
+  A bad interval or phase is a `FixedRateScheduleConfigError`, a bad elapsed
+  time a `FixedRateScheduleAdvanceError`, and a rejected call changes nothing.
+  EW's `PerceptionSchedule`, `PerceptionScheduleConfig`,
+  `PerceptionScheduleConfigError`, `PerceptionScheduleAdvanceError` and
+  `PerceptionSampleEvent` are renamed as above; methods, fields, variants and
+  signatures are EW's own, and the error enums now also implement `Display` and
+  `Error`. One behaviour differs: sample `k` is scheduled at exactly
+  `phase + k * interval` from an integer index rather than by adding the
+  interval to the last sample, so a long run does not drift and a `skip_elapsed`
+  resumes on the same sample continuous advancing reaches. A sample within
+  `BOUNDARY_TOLERANCE_SCALE` of an update's end is due in that update, and
+  `skip_elapsed` refuses a jump past `MAX_SAMPLE_INDEX`, beyond which the index
+  no longer converts to time exactly.
+
 - **`crcbl-nav`, a new crate, and its `grid` module: ground-grid routing ported
   from EW**, reached through the umbrella as `crcbl::nav::grid`. A
   `GroundGridConfig` (origin, `cell_size_m`, `width`, `height`, `const fn new`)
