@@ -1,11 +1,37 @@
 // crcbl-targets: spirv, wgsl, msl, dxil
 
 // The other half of `volumetric.slang`: one fullscreen pass that puts the
-// froxel column onto the frame.
+// froxel column onto the frame — and, on a frame with an atmosphere, the air in
+// front of every surface under it.
 //
 // ```text
-// out = scene * (prefix.a * partial.a) + prefix.rgb + prefix.a * partial.rgb
+// behind = scene * air.a + air.rgb                                  (aerial)
+// out    = behind * (prefix.a * partial.a) + prefix.rgb + prefix.a * partial.rgb
 // ```
+//
+// # Two volumes, the air first
+//
+// `air` is `crcbl_shaders::atmosphere::AerialView` read along the pixel's ray
+// at the surface's distance — Hillaire's `float4(in-scatter, mean
+// transmittance)`, marched on the host beside the sky-view LUT and uploaded as
+// the `aerial` buffer below. It is composed **before** the local column,
+// `((scene * T_A + S_A) * T_F) + S_F`, because the local fog is the near medium:
+// its glow is between the eye and the kilometres of air behind it, and must
+// not be attenuated by them.
+//
+// The aerial term is **skipped where the depth is still the clear value**.
+// `sky.slang`'s `atmosphere_radiance` already integrates the whole of a view
+// ray that leaves the scene, first kilometres included, so charging a sky pixel
+// the air in front of it again would fog the sky twice. The local column does
+// fog the sky, on purpose and as it always has: the sky-view LUT knows nothing
+// of the scene's own fog.
+//
+// Each half has its own switch, so either runs alone: `aerial_params.w` for the
+// air, and `fog_params.w` for the column — zero, the value every frame before
+// the air existed wrote, composes the column, and
+// `crcbl_shaders::volumetric::LOCAL_COLUMN_OFF` skips it on a frame whose
+// scatter and scan did not run. A frame with no atmosphere writes zeroes into
+// `aerial_params`, so it composes the bytes it always composed.
 //
 // `prefix` is what the column in front of this pixel's slice did — the exclusive
 // scan `integrateMain` wrote — and `partial` is the part of that slice the pixel
@@ -154,8 +180,17 @@ struct VolumetricParams
     /// `FrameUniforms::shadow_atlas_rect` carries. `atlas_rect` reads it and
     /// `mesh.slang` is where the layout is argued.
     ///
-    /// **Last in the block**, so no member before it moved when it arrived.
+    /// **After the light matrices**, so no member before it moved when it
+    /// arrived.
     float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
+    /// The unit direction **towards** the sun the aerial LUT was marched for
+    /// in `xyz`, and in `w` whether this frame composes the air at all —
+    /// `crcbl_shaders::sky::ATMOSPHERE_ON` or `ATMOSPHERE_OFF`. Read by the
+    /// composite alone.
+    ///
+    /// **Last in the block**, so no member before it moved when it arrived,
+    /// and a frame with no atmosphere writes the zeroes that leave it off.
+    float4 aerial_params;
 };
 
 [[vk::binding(0, 0)]]
@@ -190,6 +225,38 @@ StructuredBuffer<float4> volumetrics D3D12_REGISTER(t3, space0);
 /// pixel on screen.
 [[vk::binding(4, 0)]]
 StructuredBuffer<float4> lighting D3D12_REGISTER(t4, space0);
+
+/// `crcbl_shaders::atmosphere::AerialView::rows` — the air in front of the
+/// scene for this frame's sun, one `float4` of in-scatter and mean
+/// transmittance per checkpoint, row slowest and slice fastest.
+///
+/// **A storage buffer with the trilinear read spelled out**, for the reason
+/// `sky.slang`'s `sky_view` is one: a hardware filter's weights are
+/// fixed-function arithmetic four rasterisers compute independently, and the
+/// goldens are compared across all four. Bound on every frame and read only
+/// where `aerial_params.w` says so; `crcbl_render::sky_pass` owns the ring.
+///
+/// **Appended past `lighting`, never inserted**, on `crcbl_render::sky_pass`'s
+/// Metal ordering rule: `crcbl-mtl` numbers a buffer by counting the layout's
+/// buffers in order and Slang numbers them by declaration order, so the two
+/// agree only while both ascend.
+[[vk::binding(5, 0)]]
+StructuredBuffer<float4> aerial D3D12_REGISTER(t5, space0);
+
+/// `crcbl_shaders::atmosphere::AERIAL_VIEW_WIDTH`, which is the azimuth away
+/// from the sun.
+static const uint AERIAL_VIEW_WIDTH = 32;
+
+/// `crcbl_shaders::atmosphere::AERIAL_VIEW_HEIGHT`, which is the direction's
+/// `y`.
+static const uint AERIAL_VIEW_HEIGHT = 32;
+
+/// `crcbl_shaders::atmosphere::AERIAL_VIEW_SLICES`, which is the distance.
+static const uint AERIAL_VIEW_SLICES = 32;
+
+/// `crcbl_shaders::atmosphere::AERIAL_MAX_DISTANCE`: how far the last
+/// checkpoint is from the eye, in world units.
+static const float AERIAL_MAX_DISTANCE = 1000.0;
 
 struct FullscreenOutput
 {
@@ -312,6 +379,83 @@ float3 volumetric_source(float3 view_direction, float4 lit)
     return params.fog_color.rgb + sun + lit.rgb;
 }
 
+/// The aerial LUT's two direction axes blended bilinearly at one checkpoint.
+///
+/// `crcbl_shaders::atmosphere::AerialView`'s `bilinear`, with the taps already
+/// found — `aerial_at` finds them once and reads two slices with them.
+float4 aerial_slice(uint x0, uint x1, float fx, uint y0, uint y1, float fy, uint slice)
+{
+    uint row0 = y0 * AERIAL_VIEW_WIDTH;
+    uint row1 = y1 * AERIAL_VIEW_WIDTH;
+    float4 top = aerial[(row0 + x0) * AERIAL_VIEW_SLICES + slice] * (1.0 - fx)
+               + aerial[(row0 + x1) * AERIAL_VIEW_SLICES + slice] * fx;
+    float4 bottom = aerial[(row1 + x0) * AERIAL_VIEW_SLICES + slice] * (1.0 - fx)
+                  + aerial[(row1 + x1) * AERIAL_VIEW_SLICES + slice] * fx;
+    return top * (1.0 - fy) + bottom * fy;
+}
+
+/// `crcbl_shaders::atmosphere::AerialView::sample`: the LUT read trilinearly at
+/// a direction's `y`, an azimuth cosine and a distance in world units.
+///
+/// The two direction axes are `sky.slang`'s `sky_view_at`'s two maps, with the
+/// texels on the ends of each axis rather than half a texel in —
+/// `crcbl_shaders::atmosphere`'s `aerial_axis_value` says why — so the scale is
+/// the texel count less one and there is no half-texel offset. The distance
+/// axis puts checkpoint `k` at `k + 1` slices out and the eye at
+/// zero — no in-scatter, full transmittance — so a surface inside the first
+/// slice blends from the identity, and one at `AERIAL_MAX_DISTANCE` or past it
+/// takes the last checkpoint exactly. Held to the host's spelling by
+/// `crcbl_shaders::atmosphere`'s
+/// `the_composite_reads_the_aerial_lut_the_way_the_host_does`.
+float4 aerial_at(float up, float azimuth_cosine, float distance)
+{
+    float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));
+    float clamped = clamp(up, -1.0, 1.0);
+    float root = sqrt(abs(clamped));
+    float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);
+
+    float across = clamp(u, 0.0, 1.0) * float(AERIAL_VIEW_WIDTH - 1);
+    float x0 = clamp(floor(across), 0.0, float(AERIAL_VIEW_WIDTH - 1));
+    float x1 = min(x0 + 1.0, float(AERIAL_VIEW_WIDTH - 1));
+    float fx = clamp(across - x0, 0.0, 1.0);
+
+    float down = clamp(v, 0.0, 1.0) * float(AERIAL_VIEW_HEIGHT - 1);
+    float y0 = clamp(floor(down), 0.0, float(AERIAL_VIEW_HEIGHT - 1));
+    float y1 = min(y0 + 1.0, float(AERIAL_VIEW_HEIGHT - 1));
+    float fy = clamp(down - y0, 0.0, 1.0);
+
+    float depth = clamp(distance / AERIAL_MAX_DISTANCE, 0.0, 1.0) * float(AERIAL_VIEW_SLICES);
+    float slice = min(floor(depth), float(AERIAL_VIEW_SLICES - 1));
+    float fz = clamp(depth - slice, 0.0, 1.0);
+
+    // The checkpoint before this slice's, which is the eye itself for the
+    // first slice: the identity, and not a texel.
+    float4 closer = float4(0.0, 0.0, 0.0, 1.0);
+    if (slice > 0.0)
+    {
+        closer = aerial_slice(uint(x0), uint(x1), fx, uint(y0), uint(y1), fy, uint(slice) - 1u);
+    }
+    float4 further = aerial_slice(uint(x0), uint(x1), fx, uint(y0), uint(y1), fy, uint(slice));
+    return closer * (1.0 - fz) + further * fz;
+}
+
+/// `crcbl_shaders::atmosphere::AerialView::along`: the air along a world
+/// direction out to `distance`, by turning the direction into the LUT's
+/// sun-relative coordinates exactly as `sky.slang`'s `atmosphere_radiance`
+/// does for the sky.
+float4 aerial_along(float3 direction, float distance)
+{
+    float3 sun = params.aerial_params.xyz;
+    float view_flat = sqrt(direction.x * direction.x + direction.z * direction.z);
+    float sun_flat = sqrt(sun.x * sun.x + sun.z * sun.z);
+    float cosine = 1.0;
+    if (view_flat > 0.0 && sun_flat > 0.0)
+    {
+        cosine = (direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat);
+    }
+    return aerial_at(direction.y, cosine, distance);
+}
+
 [shader("vertex")]
 FullscreenOutput vertexMain(uint index: SV_VertexID)
 {
@@ -383,9 +527,28 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     uint tile_x = min(uint(max(pixel.x, 0)) / tile_pixels, grid_x - 1);
     uint tile_y = min(uint(max(pixel.y, 0)) / tile_pixels, grid_y - 1);
     uint froxel = tile_x + tile_y * grid_x + slice * tiles;
-    if (froxel >= params.froxel_count)
+
+    // **The air first**: the surface with the atmosphere's air in front of it,
+    // and the scene colour itself wherever the air is not composed — see the
+    // header. Only where the depth is not the clear value, which is what keeps
+    // the air off the sky: `sky.slang` has already integrated the whole of a
+    // ray that leaves the scene.
+    float3 surface = scene.rgb;
+    if (params.aerial_params.w > 0.0 && depth > DEPTH_FAR)
     {
-        return scene;
+        float3 offset = volumetric_unproject(ndc, depth) - params.eye.xyz;
+        float distance = length(offset);
+        float3 direction = distance > 0.0 ? offset / distance : float3(0.0, 1.0, 0.0);
+        float4 air = aerial_along(direction, distance);
+        surface = surface * air.a + air.rgb;
+    }
+
+    // A frame whose scatter and scan did not run — an atmosphere with the fog
+    // effect off — has no column to read, and `volumetrics` holds whatever the
+    // last frame that ran them left there.
+    if (params.fog_params.w > 0.0 || froxel >= params.froxel_count)
+    {
+        return float4(surface, scene.a);
     }
     float4 prefix = volumetrics[froxel];
 
@@ -419,7 +582,7 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
     float3 partial_radiance =
         volumetric_source(view_direction, lighting[froxel]) * (1.0 - partial_survives);
 
-    float3 lit = scene.rgb * (prefix.a * partial_survives) + prefix.rgb
+    float3 lit = surface * (prefix.a * partial_survives) + prefix.rgb
                + prefix.a * partial_radiance;
     return float4(lit, scene.a);
 }

@@ -154,14 +154,15 @@ pub fn integrate_slice(source: f32, extinction: f32, thickness: f32) -> SliceInt
 ///
 /// One `float4x4` (64), [`crate::mesh::SHADOW_CASCADES`] more of them, eight
 /// `float4` (16 each), eight `uint`s (32), [`crate::mesh::SHADOW_LIGHT_TILES`]
-/// `float4x4` more after the pad and [`crate::mesh::SHADOW_ATLAS_TILES`]
-/// `float4` of atlas rectangles closing it.
+/// `float4x4` more after the pad, [`crate::mesh::SHADOW_ATLAS_TILES`] `float4`
+/// of atlas rectangles, and the aerial row closing it.
 pub const PARAMS_SIZE: usize = 64
     + crate::mesh::SHADOW_CASCADES * 64
     + 8 * 16
     + 8 * 4
     + crate::mesh::SHADOW_LIGHT_TILES * 64
-    + crate::mesh::SHADOW_ATLAS_TILES * 16;
+    + crate::mesh::SHADOW_ATLAS_TILES * 16
+    + 16;
 
 /// Bytes one froxel occupies in the column buffer: one `float4`.
 ///
@@ -213,9 +214,10 @@ pub struct VolumetricParams {
     /// depth — the row `crcbl_shaders::light::ClusterParams` is handed, from
     /// the same matrix.
     pub depth_row: [f32; 4],
-    /// Density, scale height, reference height, unused — the row
+    /// Density, scale height, reference height — the row
     /// `crcbl_shaders::mesh::FrameUniforms::fog_params` carries, handed to
-    /// exactly one of the two paths.
+    /// exactly one of the two paths — and in `w` whether the composite reads
+    /// the column at all: [`LOCAL_COLUMN_ON`] or [`LOCAL_COLUMN_OFF`].
     pub fog_params: [f32; 4],
     /// The radiance the medium scatters towards the eye in `rgb`; `w` unused.
     ///
@@ -302,9 +304,36 @@ pub struct VolumetricParams {
     ///
     /// [`crcbl_shaders::mesh::FrameUniforms::shadow_atlas_rect`]: crate::mesh::FrameUniforms::shadow_atlas_rect
     ///
-    /// **Last in the block**, so no field before it moved when it arrived.
+    /// **After the light matrices**, so no field before it moved when it
+    /// arrived.
     pub shadow_atlas_rect: [[f32; 4]; crate::mesh::SHADOW_ATLAS_TILES],
+    /// The unit direction **towards** the sun an
+    /// [`AerialView`](crate::atmosphere::AerialView) was marched for in `xyz`,
+    /// and in `w` whether the composite puts that air in front of the frame's
+    /// surfaces — [`crate::sky::ATMOSPHERE_ON`] or [`crate::sky::ATMOSPHERE_OFF`].
+    ///
+    /// The atmosphere's own sun and not [`Self::sun_direction`]'s light: the
+    /// two are usually one direction and nothing makes them so, and the LUT's
+    /// azimuth is measured from the one it was marched around.
+    ///
+    /// **Last in the block**, so no field before it moved when it arrived, and
+    /// a frame with no atmosphere writes the zeroes it wrote before.
+    pub aerial_params: [f32; 4],
 }
+
+/// [`VolumetricParams::fog_params`]' `w` on a frame whose froxel column was
+/// scattered and scanned: the composite composes it.
+///
+/// **Zero**, which is the value that lane held as padding before it was a
+/// switch, so every frame the fog effect drew before the air existed writes
+/// the bytes it always wrote.
+pub const LOCAL_COLUMN_ON: f32 = 0.0;
+
+/// [`VolumetricParams::fog_params`]' `w` on a frame whose scatter and scan did
+/// not run — an atmosphere with the fog effect off, where the composite runs
+/// for the air alone and the column buffer holds whatever the last frame that
+/// ran them left.
+pub const LOCAL_COLUMN_OFF: f32 = 1.0;
 
 impl VolumetricParams {
     /// The block as the bytes the shaders read.
@@ -348,6 +377,7 @@ impl VolumetricParams {
             .into_iter()
             .flatten()
             .chain(self.shadow_atlas_rect.into_iter().flatten())
+            .chain(self.aerial_params)
         {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -416,6 +446,7 @@ impl VolumetricParams {
                 core::array::from_fn(|_| floats(bytes, at))
             },
             shadow_atlas_rect: core::array::from_fn(|_| floats(bytes, at)),
+            aerial_params: floats(bytes, at),
         }
     }
 }
@@ -782,6 +813,7 @@ pub(crate) mod tests {
             froxel_count: 29,
             light_view_proj: [[11.5; 16]; crate::mesh::SHADOW_LIGHT_TILES],
             shadow_atlas_rect: [[12.5; 4]; crate::mesh::SHADOW_ATLAS_TILES],
+            aerial_params: [13.5; 4],
         };
         let bytes = params.to_bytes();
         assert_eq!(bytes.len(), PARAMS_SIZE);
@@ -827,12 +859,21 @@ pub(crate) mod tests {
             11.5,
             "the last light matrix's last cell"
         );
-        // And the rectangles past them, which is where the block now ends.
+        // And the rectangles past them.
         assert_eq!(float_at(rects), 12.5, "the first atlas rectangle");
+        let aerial = rects + 16 * crate::mesh::SHADOW_ATLAS_TILES;
         assert_eq!(
-            float_at(PARAMS_SIZE - 4),
+            float_at(aerial - 4),
             12.5,
             "the last atlas rectangle's last lane"
+        );
+        // And the aerial row after them, which is where the block now ends.
+        assert_eq!(float_at(aerial), 13.5, "the aerial row's first lane");
+        assert_eq!(aerial + 16, PARAMS_SIZE, "the aerial row closes the block");
+        assert_eq!(
+            float_at(PARAMS_SIZE - 4),
+            13.5,
+            "the aerial row's last lane"
         );
     }
 
@@ -873,6 +914,7 @@ pub(crate) mod tests {
             froxel_count: 29,
             light_view_proj: core::array::from_fn(|_| row(next, 128.0)),
             shadow_atlas_rect: core::array::from_fn(|_| row(next, 256.0)),
+            aerial_params: row(next, 512.0),
         };
         assert_eq!(
             VolumetricParams::from_bytes(&params.to_bytes()),

@@ -203,7 +203,7 @@ use crate::texture::{
 };
 use crate::transient::{TransientImageDesc, TransientPool};
 use crate::upscale::Upscale;
-use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages};
+use crate::volumetric::{FroxelBuffers, Medium, Volumetric, VolumetricImages, VolumetricReads};
 use crate::water::{Water, WaterBodies, WaterFrame, WaterImages, WaterInputs};
 use crcbl_shaders::atmosphere::{SKY_VIEW_BUILD_ROWS, SkyView, SkyViewBuild};
 
@@ -1302,10 +1302,12 @@ fn fullscreen_passes(
         passes += Fxaa::PASSES as u64;
     }
     if effects.contains(RenderEffects::VOLUMETRIC_FOG) {
-        // **One of [`Volumetric::PASSES`], not all three.** The scatter and the
-        // column scan are compute dispatches; what this function counts is
-        // full-screen *draws*, and only the composite is one.
-        passes += 1;
+        // **[`Volumetric::COMPOSITE_PASSES`], not [`Volumetric::PASSES`].** The
+        // scatter and the column scan are compute dispatches; what this
+        // function counts is full-screen *draws*, and only the composite is
+        // one. An atmosphere runs the composite without the effect, and the
+        // caller adds that one — it is not an effect bit.
+        passes += u64::from(Volumetric::COMPOSITE_PASSES);
     }
     // [`RenderEffects::AUTO_EXPOSURE`] adds none, and that is the whole of its
     // entry here: all three of its passes are compute dispatches, and the
@@ -1356,8 +1358,9 @@ pub struct SkinnedInstanceDesc<'a> {
 /// frame**, which is what makes a frame under a sun that has not moved do no
 /// host LUT work at all: both are functions of the LUT alone, and the LUT only
 /// changes when [`ForwardRenderer::refresh_sky_view`] swaps a finished build
-/// in. [`crate::sky_pass`] still encodes [`SkyView::rows`] per frame, because
-/// that is a write into the frame's own ring slot rather than a projection.
+/// in. [`crate::sky_pass`] still encodes [`SkyView::rows`] and its aerial LUT's
+/// rows per frame, because those are writes into the frame's own ring slots
+/// rather than projections.
 #[derive(Clone, Debug)]
 struct PresentedSky {
     /// The normalised sun and viewpoint the LUT was marched for, which is what
@@ -7735,6 +7738,17 @@ impl ForwardRenderer {
         self.recorded_fullscreen = fullscreen_passes(effects, extent, upscaling, self.frame_ssao_blurs)
                 + u64::from(self.ground_grid().is_some() && !draws_atlas_view)
                 + if draws_sky { SkyPass::PASSES } else { 0 }
+                // The composite on an atmosphere frame whose fog effect is off,
+                // on the sky's terms: it is there for the air in front of the
+                // scene, which the atmosphere decides and no effect bit does.
+                // With the effect on, `fullscreen_passes` already counted it.
+                + if self.primary.frame_aerial
+                    && !effects.contains(RenderEffects::VOLUMETRIC_FOG)
+                {
+                    u64::from(Volumetric::COMPOSITE_PASSES)
+                } else {
+                    0
+                }
                 // The water copy's triangle, on the sky's terms: content rather
                 // than an effect bit, so the bodies decide it.
                 + if water.is_some() { Water::FULLSCREEN_PASSES } else { 0 }
@@ -9018,6 +9032,12 @@ impl ForwardRenderer {
     /// the frame cost unbounded. A caller that wants the sky exact stops the
     /// sun on a value and leaves it there: the march then completes, and the
     /// frames it takes are `SKY_VIEW_HEIGHT` over [`SKY_VIEW_BUILD_ROWS`].
+    ///
+    /// **The aerial-perspective LUT is marched in the same steps** — see
+    /// [`SkyViewBuild`] — so the air in front of the scene arrives on the same
+    /// frame as the sky and lags the sun by the same frames, never a sun apart
+    /// from it. A change of [`Atmosphere::km_per_unit`] alone is a new march
+    /// on the same terms, since it is part of the parameters compared.
     fn refresh_sky_view(&mut self) {
         let Some(atmosphere) = self.atmosphere else {
             self.sky_view = None;
@@ -21941,17 +21961,31 @@ mod tests {
     /// advances by `SKY_VIEW_BUILD_ROWS` per frame, the bytes reaching the
     /// device meanwhile are the *previous* sun's rather than a half-marched
     /// sky, and the new sun's LUT arrives whole on the frame the march ends.
+    ///
+    /// **And the aerial-perspective LUT keeps the same pace**: it rides the
+    /// same stripes, so it too uploads the previous sun's air on every frame
+    /// of the march and the new sun's on the frame that ends it — the lag
+    /// behind a moving sun is [`MARCH_FRAMES`] for both, and the two never
+    /// reach the device a sun apart.
     #[test]
     fn a_moving_sun_is_marched_a_stripe_per_frame() {
         let (recorder, device, queue) = open();
         let (mut renderer, luts) =
             with_marched_atmosphere(device.as_ref(), queue, Atmosphere::NOON);
+        let aerials = renderer.primary.sky_pass.aerials().to_vec();
 
-        let before = SkyView::build(&Atmosphere::NOON.parameters()).rows();
-        let after = SkyView::build(&MOVED_SUN.parameters()).rows();
+        let before_view = SkyView::build(&Atmosphere::NOON.parameters());
+        let after_view = SkyView::build(&MOVED_SUN.parameters());
+        let before = before_view.rows();
+        let after = after_view.rows();
+        let (air_before, air_after) = (before_view.aerial().rows(), after_view.aerial().rows());
         assert_ne!(
             before, after,
             "the two suns march to the same LUT, so nothing below distinguishes them"
+        );
+        assert_ne!(
+            air_before, air_after,
+            "the two suns march to the same air, so nothing below distinguishes them"
         );
         assert!(
             renderer.sky_view_build.is_none(),
@@ -21961,6 +21995,11 @@ mod tests {
             presented_lut(&recorder, &luts),
             before,
             "the frame after `set_atmosphere` did not upload that sun's LUT"
+        );
+        assert_eq!(
+            presented_lut(&recorder, &aerials),
+            air_before,
+            "the frame after `set_atmosphere` did not upload that sun's air"
         );
 
         renderer.set_atmosphere(Some(MOVED_SUN));
@@ -21981,6 +22020,11 @@ mod tests {
                 "frame {step} of the march uploaded something other than the sky it is still \
                  drawing"
             );
+            assert_eq!(
+                presented_lut(&recorder, &aerials),
+                air_before,
+                "frame {step} of the march uploaded air other than the sky it is still drawing's"
+            );
         }
 
         atmosphere_frame(&mut renderer, device.as_ref());
@@ -21993,6 +22037,109 @@ mod tests {
             after,
             "the frame that finished the march did not upload the new sun's LUT"
         );
+        assert_eq!(
+            presented_lut(&recorder, &aerials),
+            air_after,
+            "the frame that finished the march did not upload the new sun's air"
+        );
+    }
+
+    /// An atmosphere adds the composite for its air whether or not the fog
+    /// effect is on, and the block tells the composite which halves to read.
+    ///
+    /// **The seam between the two volumes, on the renderer's side.** Three
+    /// frames of one renderer: no atmosphere and the default stack, which has
+    /// no fog effect in it — no composite at all, the frame drawn before the
+    /// air existed; an atmosphere and the same stack — the composite and
+    /// nothing of the column, and a block saying so; and an atmosphere with
+    /// the fog effect forced on — all three passes, and a block saying both.
+    /// The counters are held to the frame on the second: the composite is a
+    /// full-screen triangle, and a frame that drew it and did not count it
+    /// makes the debug panel's row disagree with the frame by one.
+    #[test]
+    fn an_atmosphere_composites_its_air_with_or_without_the_fog_effect() {
+        let _blurs = ssao_blur_switch();
+        let (recorder, device, queue) = open();
+        let device = device.as_ref();
+        let mut renderer =
+            ForwardRenderer::new(device, queue, Format::Rgba8UnormSrgb).expect("built");
+        let blocks: Vec<BufferHandle> = (0..FRAMES_IN_FLIGHT)
+            .map(|frame| renderer.primary.volumetric.buffers(frame).params)
+            .collect();
+        let imported = swapchain_image(device);
+        let mut pool = crate::TransientPool::new();
+        let block = |recorder: &Recorder| {
+            let bytes: [u8; crcbl_shaders::volumetric::PARAMS_SIZE] =
+                presented_lut(recorder, &blocks)
+                    .try_into()
+                    .expect("the block is its own size");
+            crcbl_shaders::volumetric::VolumetricParams::from_bytes(&bytes)
+        };
+        let column = ["volumetric-scatter", "volumetric-integrate"];
+
+        let bare = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        let before = renderer.counters();
+        assert!(
+            !bare.iter().any(|pass| pass.starts_with("volumetric")),
+            "a frame with neither fog nor an atmosphere records {bare:?}"
+        );
+        let off = block(&recorder);
+        assert_eq!(
+            off.aerial_params,
+            [0.0, 0.0, 0.0, crcbl_shaders::sky::ATMOSPHERE_OFF],
+            "a frame with no atmosphere writes something into the aerial row"
+        );
+
+        renderer.set_atmosphere(Some(Atmosphere::NOON));
+        let air = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert!(
+            air.iter().any(|pass| pass == "volumetric-composite")
+                && !air.iter().any(|pass| column.contains(&pass.as_str())),
+            "an atmosphere with the fog effect off records {air:?}, where it should composite its \
+             air and run nothing of the column"
+        );
+        let after = renderer.counters();
+        assert_eq!(
+            after.draws - before.draws,
+            (SkyPass::PASSES + u64::from(Volumetric::COMPOSITE_PASSES)) * FULLSCREEN_DRAWS,
+            "the atmosphere's two full-screen passes — the sky and the air — are not both counted"
+        );
+        let aerial_only = block(&recorder);
+        let sun = Atmosphere::NOON.parameters().sun_direction;
+        assert_eq!(
+            aerial_only.aerial_params,
+            [sun[0], sun[1], sun[2], crcbl_shaders::sky::ATMOSPHERE_ON],
+            "the aerial row does not carry the atmosphere's sun and its switch"
+        );
+        assert_eq!(
+            aerial_only.fog_params[3],
+            crcbl_shaders::volumetric::LOCAL_COLUMN_OFF,
+            "the block tells the composite to read a column no pass filled"
+        );
+
+        renderer.set_effect_request(EffectRequest {
+            programmatic: EffectOverride::none().force(RenderEffects::VOLUMETRIC_FOG, Some(true)),
+            ..EffectRequest::default()
+        });
+        let both = passes_in_a_frame(device, queue, &mut renderer, imported, &pool, TEST_EXTENT);
+        assert!(
+            column
+                .iter()
+                .chain(&["volumetric-composite"])
+                .all(|name| both.iter().any(|pass| pass == name)),
+            "an atmosphere with the fog effect on records {both:?}"
+        );
+        assert_eq!(
+            block(&recorder).fog_params[3],
+            crcbl_shaders::volumetric::LOCAL_COLUMN_ON,
+            "the block tells the composite to skip a column the frame filled"
+        );
+
+        renderer.destroy(device);
+        pool.destroy(device);
+        device.destroy_image_view(imported.view);
+        device.destroy_image(imported.image);
+        recorder.assert_valid();
     }
 
     /// A sun that moves while a march is in flight restarts it from row zero.

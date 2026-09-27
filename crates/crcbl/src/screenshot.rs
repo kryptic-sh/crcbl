@@ -95,6 +95,7 @@ use crate::render::{
 };
 use crate::ui::draw_list::DrawList;
 
+mod aerial;
 mod meadow;
 mod occluders;
 mod still_pool;
@@ -109,6 +110,10 @@ mod ui_text_input;
 mod ui_tree;
 mod ui_widgets;
 
+pub use aerial::{
+    AERIAL_EYE_UP, AERIAL_KM_PER_UNIT, aerial_camera, aerial_fog, aerial_forward, aerial_sky,
+    aerial_sun,
+};
 pub use meadow::{
     MEADOW_BLADE_LOD, MEADOW_BLADE_TILE_SIZE, MEADOW_BLADE_TILES, MEADOW_COVER_METRES_PER_TEXEL,
     MEADOW_DENSE, MEADOW_DIRECTION_METRES_PER_TEXEL, MEADOW_DIRECTION_TEXELS,
@@ -1805,6 +1810,7 @@ pub fn atmosphere_sky(index: usize) -> crcbl_render::Atmosphere {
         sun_direction: glam::Vec3::from_array(sun),
         sun_illuminance: glam::Vec3::splat(ATMOSPHERE_ILLUMINANCE),
         altitude_km: 0.0,
+        km_per_unit: crate::shaders::atmosphere::KM_PER_METRE,
     }
 }
 
@@ -1938,6 +1944,7 @@ pub fn sun_disc_sky() -> crcbl_render::Atmosphere {
         sun_direction: glam::Vec3::from_array(ATMOSPHERE_SUNS[SUN_DISC_SUN]),
         sun_illuminance: glam::Vec3::splat(SUN_DISC_ILLUMINANCE),
         altitude_km: 0.0,
+        km_per_unit: crate::shaders::atmosphere::KM_PER_METRE,
     }
 }
 
@@ -2077,6 +2084,7 @@ pub fn atmosphere_mirror_sky() -> crcbl_render::Atmosphere {
         sun_direction: glam::Vec3::from_array(ATMOSPHERE_MIRROR_SUN),
         sun_illuminance: glam::Vec3::splat(ATMOSPHERE_ILLUMINANCE),
         altitude_km: 0.0,
+        km_per_unit: crate::shaders::atmosphere::KM_PER_METRE,
     }
 }
 
@@ -7839,6 +7847,29 @@ impl OffscreenSetup {
         }
     }
 
+    /// Replaces the atmosphere this scene's forward renderer draws under, for
+    /// the frames drawn after this call — [`ForwardRenderer::set_atmosphere`].
+    ///
+    /// **What it exists for is the off-switch**, on [`Self::set_water`]'s
+    /// terms: an atmosphere removed from a scene that has already drawn under
+    /// it has to leave the frame the scene would have drawn without it — the
+    /// aerial LUT its ring slots still hold included — and the only way to
+    /// ask that of a scene built by this module is to change it between
+    /// frames.
+    ///
+    /// Returns whether it reached a renderer, on [`Self::set_tonemap_curve`]'s
+    /// terms: the sprite and UI scenes draw no sky.
+    #[must_use]
+    pub fn set_atmosphere(&mut self, atmosphere: Option<crate::render::Atmosphere>) -> bool {
+        match &mut self.scene {
+            SceneState::Forward { renderer, .. } => {
+                renderer.set_atmosphere(atmosphere);
+                true
+            }
+            SceneState::Sprite { .. } | SceneState::Ui { .. } => false,
+        }
+    }
+
     /// Replaces the field of grass this scene's forward renderer draws, for the
     /// frames drawn after this call — [`ForwardRenderer::set_grass`].
     ///
@@ -9224,6 +9255,22 @@ mod tests {
             ("render", "ssr-blur"),
             ("render", "tonemap"),
         ];
+        // **The same frame under an atmosphere composites its air**: the
+        // composite runs on every atmosphere frame, fog effect or not, and it
+        // sits after the sky and before the march — which is where
+        // `crcbl_render::forward` puts it, so the mirror reflects a floor the
+        // air is already in front of. Nothing of the local column runs: the
+        // fog effect is not in this scene's request.
+        let atmosphere_mirror_passes: Vec<(&str, &str)> = {
+            let mut passes = mirror_passes.to_vec();
+            let after_sky = passes
+                .iter()
+                .position(|(_, label)| *label == "sky")
+                .expect("the mirror frame draws a background")
+                + 1;
+            passes.insert(after_sky, ("render", "volumetric-composite"));
+            passes
+        };
         // **`Scene::StillPool` is the cube scene's list with the water pair
         // spliced in after the reflection composite**, and where it goes is the
         // claim: the surface draws into the image the bloom chain and the
@@ -9322,12 +9369,13 @@ mod tests {
             // march, which is where `crcbl_render::forward` puts it: a sky
             // composited after the reflection would be a background the mirror
             // never saw.
-            (Scene::AtmosphereMirror, mirror_passes),
-            // The same list, and that is a claim rather than a coincidence:
-            // `Scene::GradientMirror` is the row above with a gradient in
-            // place of the atmosphere, and a sky is data the same passes read
-            // rather than a pass of its own. The `sky` row is still here
-            // because a frame with either kind of sky draws a background.
+            (Scene::AtmosphereMirror, &atmosphere_mirror_passes),
+            // The row above less its composite, and that is a claim rather
+            // than a coincidence: `Scene::GradientMirror` is that row with a
+            // gradient in place of the atmosphere, and a sky is data the same
+            // passes read rather than a pass of its own — only an atmosphere
+            // has air to put in front of the floor. The `sky` row is still
+            // here because a frame with either kind of sky draws a background.
             (Scene::GradientMirror, mirror_passes),
             // The only row that is not one of the two lists above: every other
             // fixture draws `RenderEffects::DEFAULT_STACK`, which leaves the

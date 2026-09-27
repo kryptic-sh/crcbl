@@ -146,6 +146,7 @@ struct VolumetricParams
     uint pad0;
     float4x4 light_view_proj[SHADOW_LIGHT_TILES];
     float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
+    float4 aerial_params;
 };
 
 /// What this pass needs that no other block carries, matching

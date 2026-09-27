@@ -16,6 +16,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_render::Atmosphere` and `crcbl_shaders::atmosphere::Atmosphere` have
+  a `km_per_unit` field**, the scale the new aerial perspective marches a
+  scene's distances at, so a struct literal of either needs it:
+  `crcbl_shaders::atmosphere::KM_PER_METRE` is a scene laid out in metres and is
+  what `Atmosphere::NOON` carries. `crcbl_shaders::volumetric::VolumetricParams`
+  has an `aerial_params` row appended, `PARAMS_SIZE` grows by sixteen bytes, and
+  `fog_params`' fourth lane is now a switch (`LOCAL_COLUMN_ON`, the zero it
+  always held, or `LOCAL_COLUMN_OFF`).
+
 - **`crcbl_ui`'s parsed font is behind a new `parsed-font` cargo feature, off by
   default** — `skrifa`, the committed Atkinson Hyperlegible
   (`crcbl_ui::font::SANS_TTF`), `Font::sans` and `FontFamily::Sans` — so a
@@ -337,6 +346,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   alone and builds for the browser. The umbrella's UI join that held the
   `crcbl::nav` name moved to `crcbl::ui_nav`, so `crcbl::nav` is this crate, as
   every other engine crate is its own re-export.
+
+- **Aerial perspective: a frame under an atmosphere puts the air between the eye
+  and every surface in front of that surface.** It is Hillaire's third LUT on
+  the host rather than a GPU froxel pass:
+  `crcbl_shaders::atmosphere::AerialView`,
+  `float4(in-scatter, mean transmittance)` over the sky-view LUT's two direction
+  maps and 32 linear checkpoints out to `AERIAL_MAX_DISTANCE` (the local fog
+  column's far end), marched by the same integrator as the sky and striped by
+  the same `SkyViewBuild` steps, so a moving sun still waits 16 frames for both
+  and the two never arrive a sun apart. `SkyView::aerial` hands it out;
+  `crcbl_render::sky_pass` uploads it as a third ring beside the sky-view LUT,
+  and `volumetric_composite.slang` reads it with the trilinear blend spelled out
+  and composes it under the local fog,
+  `((scene · T_air + S_air) · T_fog) + S_fog`, sparing sky pixels. The composite
+  now runs on every atmosphere frame, fog effect or not — one more full-screen
+  pass, counted in `FrameCounters` — and the scatter and scan still run only
+  with the effect. Measured on the host in release: `SkyView::build` 28.6 ms
+  against 23.6 ms before (the aerial LUT alone 3.97 ms), one
+  `SKY_VIEW_BUILD_ROWS` step 1.76 ms against 1.44 ms. A scene in metres gets air
+  as thin as the physics says, which still moves `apps/sundial`'s plaza frames
+  by a few levels (every golden still passes); a scene wanting a visible haze
+  scales `km_per_unit` up. `crcbl::screenshot::aerial_forward` and
+  `OffscreenSetup::set_atmosphere` are the fixture and the hook `render_e2e`'s
+  `the_air_in_front_of_a_far_floor_is_the_host_aerial_lut` draws through.
 
 - **`--exec <LINE>`: console lines from the command line, run before the first
   frame on every run, `--headless` included.** Repeatable and run in the order

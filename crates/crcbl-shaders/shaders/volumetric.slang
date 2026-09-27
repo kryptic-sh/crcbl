@@ -269,8 +269,14 @@ struct VolumetricParams
     /// `FrameUniforms::shadow_atlas_rect` carries. `atlas_rect` reads it and
     /// `mesh.slang` is where the layout is argued.
     ///
-    /// **Last in the block**, so no member before it moved when it arrived.
+    /// **After the light matrices**, so no member before it moved when it
+    /// arrived.
     float4 shadow_atlas_rect[SHADOW_ATLAS_TILES];
+    /// The atmosphere's sun and its aerial perspective's switch. Declared and
+    /// not read: only `volumetric_composite.slang` composes the air.
+    ///
+    /// **Last in the block**, so no member before it moved when it arrived.
+    float4 aerial_params;
 };
 
 [[vk::binding(0, 0)]]

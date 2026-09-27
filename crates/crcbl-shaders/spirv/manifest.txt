@@ -625,44 +625,44 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [volumetric]
 source = shaders/volumetric.slang
-source-sha256 = ed478ac16bed643ef733a7cac857c759ba27d5abed458f38a1e9d800024f8731
+source-sha256 = 8631d7090e43c39144374f872aecd0d90d48e59c9534b2a896b755f881fb7da6
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric.spv
-spirv-sha256 = cdb1742b68346160688b86c511c0779c781664188ee1dd3e2753b72829a633ba
+spirv-sha256 = cac8fb22d486399d91f43abb65d4a29cf6a9479f6c765a10bbea722920fdf115
 wgsl = wgsl/volumetric.wgsl
-wgsl-sha256 = 8fe8e1a2bf27d6283823d27c937d1ebf72f4b44788266e19eea62a059086e726
+wgsl-sha256 = f3147585481cac0ea1cb2a15268d6ba1983e8c5dad12990f0e359a3c972a5a6a
 msl = msl/volumetric.metal
-msl-sha256 = 1b4d5887d2a8c0d3ca0ed8e578e8b37b1323bc5b3d3bdff0911b8f1e7a6c37b9
-dxil = scatterMain:dxil/volumetric.scatter.dxil:787a0899d46516342ab450355565fa1417e9980312871441dc5686ad0b23510f
-dxil = integrateMain:dxil/volumetric.integrate.dxil:9789733eb0d9db2e4d64751f14240f0d5f8c08549c29d93c05b898e8f41851d8
+msl-sha256 = a3c029b124d12452807ed003d51bd4dd348e043b9108117621022025236ef1b5
+dxil = scatterMain:dxil/volumetric.scatter.dxil:cdb83cc4fcb3ad6686834c76f0a68de3d89ded716c4e88caca364b69a9dc9830
+dxil = integrateMain:dxil/volumetric.integrate.dxil:e169d8a1e26ab68b3eaf6c9d0ff151cf90e3ada1c6cf6918c7c32d480448c465
 entry-points = scatterMain:glcompute, integrateMain:glcompute
 
 [volumetric_composite]
 source = shaders/volumetric_composite.slang
-source-sha256 = d00e14b19fd947d8262646a21feb6ddb5a909a8319daa1f1d633d50ee43dc8e1
+source-sha256 = cb9fdcd498a7d9b4a8f90e830d2de4597f54738feefb5e554be0a2a52231feb8
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/volumetric_composite.spv
-spirv-sha256 = 1aa3d2c9386eda6ce01fa4cddfc7ac119d01aceb4e3766e47b25cb639021e57d
+spirv-sha256 = 031c87571ed68fdc06afe062ede018c5de35a0d7de3f7285bf5981c30ae19ac8
 wgsl = wgsl/volumetric_composite.wgsl
-wgsl-sha256 = ddcf1147b0e80a14a8e10bcd2e0d3028ba913a63f31e36d5f57f001fa6eef7ef
+wgsl-sha256 = a2845320ff6404ca3bac4d1a507c1dfa6b062ebb26e96258a62edfd113353535
 msl = msl/volumetric_composite.metal
-msl-sha256 = 0d215e5a9ed5f79755d18a45441a44a792cf823f113f5d624a104d7e75709d9d
-dxil = vertexMain:dxil/volumetric_composite.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
-dxil = fragmentMain:dxil/volumetric_composite.fragment.dxil:564c2a234edf57e76e3a5974644482c830b3631f44f5909980b7ee83e62b97a1
+msl-sha256 = 5c20df2e866d08dadcaf832c53359484807853d5f82b64105d8b8f99815415af
+dxil = vertexMain:dxil/volumetric_composite.vertex.dxil:d97421435252118ee6afee8c11b21536c5df2d76a74777fd4aad6521991e82c7
+dxil = fragmentMain:dxil/volumetric_composite.fragment.dxil:6293e3aeaf731b429939b146abed7144a65ac184b0b3c1e6a3728e24cb51f430
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [water]
 source = shaders/water.slang
-source-sha256 = 1e1f9dcdcea972e67f00013b6220cfc0871b16d9bdd1c5fd4703e02666fb6401
+source-sha256 = 2ddee3e5d7e162db0bc53a46da1e34844f9b0861056f40963036f81871b26ae3
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/water.spv
-spirv-sha256 = 070f5f1e5291a6bc9c563813be9f33d7dd1c7513bc76aac8acbecb383cd61d68
+spirv-sha256 = 7a3a7b6a5ed6b7ee65bde123f0644d64455c1d0303b12af732a3148efc65228e
 wgsl = wgsl/water.wgsl
-wgsl-sha256 = 0396234310d98823e86d14cf68e4d821e3aec8ab63845a04e68ff590b89c35a7
+wgsl-sha256 = 75ccff5b48c7d5069594b4a55ee6799ae9ef601a45ced0447ce67c2ed27a3f06
 msl = msl/water.metal
-msl-sha256 = b2edfd52bdb9e0d8969d040febf4cdf096220abb2173bcc408a391bbc5949e1f
-dxil = vertexMain:dxil/water.vertex.dxil:fcc3595354c1daea484660f341c78ebbcd178728e0cb5de48b85919e4c348f91
-dxil = fragmentMain:dxil/water.fragment.dxil:5132632e068d3358f61eaaf503555b3cdaae0e11bd47a0624722c6e942aa2b5e
+msl-sha256 = 64d63dadaffc4214ddb42702bf957dc4227524b3e89b513a8c2cb6d917e7864f
+dxil = vertexMain:dxil/water.vertex.dxil:fdd0a5e9cdca5386c4bb924284dce866a14a217dad3946780cd7af3f55cb393e
+dxil = fragmentMain:dxil/water.fragment.dxil:d80245b7dcfb918c8c8690b9ed4ba98577db227afb9fa77a032fc79df542d271
 entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [water_copy]

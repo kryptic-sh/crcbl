@@ -673,6 +673,12 @@ pub(super) struct View {
     /// [`View::effects`], frozen by [`View::begin_frame`] so that the frame's
     /// two halves agree on it.
     pub(super) frame_effects: RenderEffects,
+    /// Whether this frame puts the atmosphere's air in front of this view's
+    /// surfaces — an atmosphere under [`ViewLighting::Scene`] — frozen by
+    /// [`View::begin_frame`] beside [`View::frame_effects`] and for its
+    /// reason: the block that switch writes and the composite
+    /// [`View::add_passes`] adds for it have to agree.
+    pub(super) frame_aerial: bool,
     /// The frame serial [`View::begin_frame`] last ran for — see
     /// [`ForwardRenderer::frame_serial`]. A secondary view records passes only
     /// in the frame it was begun for.
@@ -1351,6 +1357,8 @@ impl View {
                 lighting: inputs.lighting,
                 // Replaced by every `begin_frame`, on `lod_params`' terms.
                 frame_effects: inputs.effects,
+                // Replaced by every `begin_frame`, on `frame_effects`' terms.
+                frame_aerial: false,
                 // No frame has begun it.
                 begun: 0,
                 draws: rollback.draws.take().unwrap_or_else(|| {
@@ -1590,8 +1598,14 @@ impl View {
                 cascades: &scene.cascades,
                 light_view_proj: &scene.light_view_proj,
                 atlas_rects: &scene.atlas_rects,
+                local: self.frame_effects.contains(RenderEffects::VOLUMETRIC_FOG),
+                // The air follows the view's lighting, as the reflected sky
+                // does: a fixed view is lit by nothing of the frame's, and the
+                // atmosphere is the frame's.
+                aerial: reflected_air.map(|presented| presented.view.sun_direction()),
             },
         )?;
+        self.frame_aerial = reflected_air.is_some();
 
         let gradient = frame.gradient;
         let uniforms = mesh::FrameUniforms {
@@ -2217,8 +2231,11 @@ impl View {
         // writes is a physical image taken out of the pool for a pass that does
         // not exist. It is the scene target's description, because it stands in
         // for that image from here on.
-        let fogged = effects
-            .contains(RenderEffects::VOLUMETRIC_FOG)
+        //
+        // **The fog effect or an atmosphere**: the composite is also what puts
+        // the air in front of the scene — see [`crate::volumetric`] — so a
+        // frame with an atmosphere composites whether or not its fog does.
+        let fogged = (effects.contains(RenderEffects::VOLUMETRIC_FOG) || self.frame_aerial)
             .then(|| graph.create_image("scene-fogged", TransientImageDesc::scene_color(extent)));
         // The Hi-Z pyramid's levels, **conditional on the march** that is the
         // only thing that reads them: an image nobody samples is a physical
@@ -2772,8 +2789,15 @@ impl View {
         // it can see is fog the surface it bounced off could see. The reflection
         // the blur adds afterwards is still unfogged, which is the same gap the
         // analytic path has and `docs/backlog.md` carries.
+        //
+        // The atmosphere's air is composed in the same pass, and on the same
+        // side of the reflection march, for the same reason: the march reads
+        // what the surface it bounced off could see.
         let (scene_color, froxel_ids) = match fogged {
             Some(composited) => {
+                // Read before the split borrow below, on `sky_view_lut`'s
+                // terms: `self.volumetric` is taken mutably.
+                let aerial = self.sky_pass.aerial(frame);
                 let ids = self.volumetric.add_passes(
                     graph,
                     frame,
@@ -2784,7 +2808,11 @@ impl View {
                         composited,
                         shadow_atlas,
                     },
-                    light_grid,
+                    VolumetricReads {
+                        light_grid,
+                        local: effects.contains(RenderEffects::VOLUMETRIC_FOG),
+                        aerial,
+                    },
                 );
                 (composited, Some(ids))
             }

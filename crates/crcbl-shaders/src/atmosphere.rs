@@ -51,9 +51,18 @@
 //! **No sun disc.** The LUT holds the scattered sky alone, as the paper's does;
 //! the sun itself is a directional light the forward pass already shades with.
 //!
-//! **No aerial perspective.** The paper's third LUT — the froxel volume that
-//! puts the air *in front of* a surface — is not built here.
-//! `crate::volumetric` owns the froxel column this engine has.
+//! **Aerial perspective is a host LUT, not a camera froxel volume.** The
+//! paper's third LUT — the air *in front of* a surface — is a 32×32×32 volume
+//! over the camera's frustum that a GPU pass rebuilds every frame. Here it is
+//! [`AerialView`]: the same `float4(in-scatter, mean transmittance)`, over the
+//! sky-view LUT's own two direction maps and a linear distance, marched by the
+//! same [`SkyViewBuild`] that marches the sky and uploaded beside it.
+//! Aerial perspective is a function of a ray's direction and of how far along
+//! it the surface is, and not of where the eye happens to look, so the
+//! parameterisation loses nothing at scene scale; what it loses is the
+//! viewpoint's altitude moving between rebuilds, which the sky-view LUT
+//! already ignores. `docs/notes/rendering.md`'s "Aerial perspective" carries
+//! the argument and `crate::volumetric` the froxel column it is composed with.
 //!
 //! **The ground is black below the horizon.** A view ray that meets the planet
 //! stops there and contributes only the air in front of it, so
@@ -756,11 +765,30 @@ pub struct Atmosphere {
     /// is Hillaire's own approximation: a frame's camera moves far less than
     /// the atmosphere's scale height, so one LUT serves the whole frame.
     pub altitude_km: f32,
+    /// How many kilometres one world unit is — the scale [`AerialView`]
+    /// marches a scene's distances at.
+    ///
+    /// **The one conversion between the engine's units and this module's.**
+    /// Every coefficient here is per kilometre and the engine's unit is the
+    /// metre, so a scene laid out in metres passes [`KM_PER_METRE`] and its
+    /// air is exactly as thick as the physics says: over a 25 m plaza the
+    /// blue channel's optical depth is under a thousandth. A scene built at
+    /// another scale — or a fixture that wants a hundred units of floor to span
+    /// tens of kilometres of air — passes its own. Zero is no air in front of anything; a
+    /// negative value is taken as zero.
+    ///
+    /// The sky-view LUT does not read it: a view ray that leaves the scene
+    /// travels to the top of the atmosphere whatever a world unit is.
+    pub km_per_unit: f32,
 }
+
+/// Kilometres in a metre: [`Atmosphere::km_per_unit`] for a scene laid out in
+/// the engine's own unit.
+pub const KM_PER_METRE: f32 = 0.001;
 
 impl Atmosphere {
     /// A midday sun overhead and a little south, at sea level, normalised so
-    /// the sun's illuminance is one in every channel.
+    /// the sun's illuminance is one in every channel, over a scene in metres.
     ///
     /// The fixture the tests and the render harness build from. A caller who
     /// wants a physical exposure scales [`Self::sun_illuminance`]; the sky's
@@ -769,12 +797,24 @@ impl Atmosphere {
         sun_direction: [0.0, 1.0, 0.0],
         sun_illuminance: [1.0, 1.0, 1.0],
         altitude_km: 0.0,
+        km_per_unit: KM_PER_METRE,
     };
 
     /// This atmosphere's viewpoint, in kilometres from the planet's centre.
     #[must_use]
     pub fn view_radius_km(&self) -> f32 {
         (GROUND_RADIUS_KM + self.altitude_km).clamp(GROUND_RADIUS_KM, TOP_RADIUS_KM)
+    }
+
+    /// How far from the eye [`AerialView`]'s last checkpoint stands, in
+    /// kilometres: [`AERIAL_MAX_DISTANCE`] world units at
+    /// [`Self::km_per_unit`], floored at zero.
+    ///
+    /// `f32::max` rather than a comparison, so a `NaN` scale is no air at all
+    /// rather than a LUT of `NaN`s.
+    #[must_use]
+    pub fn aerial_max_km(&self) -> f32 {
+        AERIAL_MAX_DISTANCE * self.km_per_unit.max(0.0)
     }
 }
 
@@ -802,6 +842,9 @@ pub struct SkyView {
     /// [`SUN_LIMB_MEAN`], reddened by the transmittance along the sun's own
     /// direction, and none of those depend on which way a ray points.
     sun_disc: [f32; 3],
+    /// The aerial-perspective LUT marched beside this one — see
+    /// [`Self::aerial`].
+    aerial: AerialView,
 }
 
 impl SkyView {
@@ -824,11 +867,25 @@ impl SkyView {
     /// **The whole LUT in one call**, which is what a caller that has no frame
     /// to fit it into wants. A caller that does — the renderer — steps a
     /// [`SkyViewBuild`] instead and gets the same bytes out of it.
+    ///
+    /// The [`AerialView`] is marched in the same call — see [`Self::aerial`].
     #[must_use]
     pub fn build(atmosphere: &Atmosphere) -> Self {
         let mut build = SkyViewBuild::start(atmosphere);
         build.step(SKY_VIEW_HEIGHT);
         build.finish()
+    }
+
+    /// The aerial-perspective LUT for the same sun, viewpoint and
+    /// [`Atmosphere::km_per_unit`].
+    ///
+    /// **Inside the sky-view LUT rather than beside it**, because the two are
+    /// one march: [`SkyViewBuild`] steps both, so a caller holding a finished
+    /// sky holds the air in front of the scene for the same sun and can never
+    /// hold one of them a sun behind the other.
+    #[must_use]
+    pub fn aerial(&self) -> &AerialView {
+        &self.aerial
     }
 
     /// The stored radiance at `(column, row)`.
@@ -948,17 +1005,7 @@ impl SkyView {
     /// column falls back to the one facing the sun's azimuth.
     #[must_use]
     pub fn radiance(&self, direction: [f32; 3]) -> [f32; 3] {
-        let view_flat = (direction[0] * direction[0] + direction[2] * direction[2]).sqrt();
-        let sun_flat = (self.sun_direction[0] * self.sun_direction[0]
-            + self.sun_direction[2] * self.sun_direction[2])
-            .sqrt();
-        let cosine = if view_flat > 0.0 && sun_flat > 0.0 {
-            (direction[0] * self.sun_direction[0] + direction[2] * self.sun_direction[2])
-                / (view_flat * sun_flat)
-        } else {
-            1.0
-        };
-        self.sample(direction[1], cosine)
+        self.sample(direction[1], azimuth_cosine(direction, self.sun_direction))
     }
 
     /// This sky projected onto the L1 irradiance basis, ready to be added to
@@ -1098,6 +1145,260 @@ impl SkyView {
     }
 }
 
+/// The cosine between the horizontal projections of `direction` and of
+/// `sun_direction`: the column a sky-view or aerial-perspective LUT reads a
+/// world direction from.
+///
+/// A sun straight overhead — or a direction straight up or down — leaves it
+/// undefined, and the field is azimuthally symmetric exactly then, so it falls
+/// back to the column facing the sun's azimuth. Both shaders' spellings are
+/// held to this one: `sky.slang`'s `atmosphere_radiance` by
+/// `the_shader_reads_the_lut_the_way_the_host_does`, and
+/// `volumetric_composite.slang`'s `aerial_along` by
+/// `the_composite_reads_the_aerial_lut_the_way_the_host_does`.
+fn azimuth_cosine(direction: [f32; 3], sun_direction: [f32; 3]) -> f32 {
+    let view_flat = (direction[0] * direction[0] + direction[2] * direction[2]).sqrt();
+    let sun_flat =
+        (sun_direction[0] * sun_direction[0] + sun_direction[2] * sun_direction[2]).sqrt();
+    if view_flat > 0.0 && sun_flat > 0.0 {
+        (direction[0] * sun_direction[0] + direction[2] * sun_direction[2]) / (view_flat * sun_flat)
+    } else {
+        1.0
+    }
+}
+
+/// The direction a LUT texel stands for, in the LUT's own frame — the sun's
+/// azimuth along `+x`, up along `+y` — from the row's `up` and `side` and the
+/// column's azimuth `cosine`.
+///
+/// One function for both LUTs, because both are laid out on the same two maps
+/// and a point on those maps names one ray whichever LUT's texel stands
+/// there.
+fn texel_direction(up: f32, side: f32, cosine: f32) -> [f32; 3] {
+    let across = side * (1.0 - cosine * cosine).max(0.0).sqrt();
+    [side * cosine, up, across]
+}
+
+/// Texels across [`AerialView`] — the azimuth away from the sun, through the
+/// sky-view LUT's own [`sky_view_cosine_of`].
+///
+/// Hillaire's froxel volume is 32 on each of its axes and so is this one.
+/// `the_aerial_view_has_converged_at_the_shipped_size` prints how far the
+/// shipped grid's read misses a direct march; the field is far smoother than
+/// the sky's — it is the sky's own first kilometres, with no horizon feature
+/// and no aureole sharper than the phase function makes it — so it is coarser
+/// than [`SKY_VIEW_WIDTH`] and [`SKY_VIEW_HEIGHT`] on both direction axes.
+pub const AERIAL_VIEW_WIDTH: usize = 32;
+
+/// Texels down [`AerialView`] — the direction's `y`, through
+/// [`sky_view_up_of`]. See [`AERIAL_VIEW_WIDTH`].
+pub const AERIAL_VIEW_HEIGHT: usize = 32;
+
+/// Checkpoints along each of [`AerialView`]'s rays, spaced linearly out to
+/// [`AERIAL_MAX_DISTANCE`].
+///
+/// **Linear, as Hillaire's are**, and not the local froxel column's
+/// exponential split: that split exists to spend resolution near the eye,
+/// where a lamp's glow changes fastest, and the air's extinction is nearly
+/// constant over any distance a scene spans — its scale heights are
+/// kilometres. Checkpoint `k` is the air from the eye to
+/// `(k + 1) / AERIAL_VIEW_SLICES` of the way out, so the eye itself is the one
+/// point that needs no texel: it is
+/// the identity, no in-scatter and full transmittance, and a read between the
+/// eye and the first checkpoint blends towards it rather than charging a
+/// surface at the eye for half a slice of air.
+pub const AERIAL_VIEW_SLICES: usize = 32;
+
+/// How far from the eye [`AerialView`] reaches, in **world units**.
+///
+/// `crate::light::CLUSTER_FAR`, the far end the local froxel column already
+/// stops at, so the two volumes end at one number. A surface past it takes the
+/// last checkpoint's value and is under-fogged there, which is the column's own
+/// behaviour at the same distance. The kilometres this is depends on
+/// [`Atmosphere::km_per_unit`] — see [`Atmosphere::aerial_max_km`].
+pub const AERIAL_MAX_DISTANCE: f32 = crate::light::CLUSTER_FAR;
+
+/// Bytes one checkpoint of [`AerialView::rows`] occupies: a `float4`.
+pub const AERIAL_VIEW_ROW_BYTES: usize = 16;
+
+/// The length of [`AerialView::rows`], and the size of the buffer
+/// `crcbl_render::sky_pass` binds for it.
+pub const AERIAL_VIEW_BUFFER_BYTES: usize =
+    AERIAL_VIEW_WIDTH * AERIAL_VIEW_HEIGHT * AERIAL_VIEW_SLICES * AERIAL_VIEW_ROW_BYTES;
+
+/// Checkpoints in one row of [`AerialView`]: every column's every slice.
+const AERIAL_ROW_ENTRIES: usize = AERIAL_VIEW_WIDTH * AERIAL_VIEW_SLICES;
+
+/// Where along one of [`AerialView`]'s direction axes of `texels` texels the
+/// texel at `index` sits: **on the ends**, so the first texel is `0` and the
+/// last is `1`.
+///
+/// **Not [`axis_value`]'s centres**, and the sweep is why. The sky-view LUT's
+/// two maps put `0` and `1` at the poles and at the sun's own azimuth and its
+/// opposite, and a centred texel stands half a texel in from each — so a read
+/// of the zenith or of the anti-solar horizon clamps to a texel that is a
+/// different ray. At this LUT's size the top row is ~20° off the zenith, and
+/// the air's in-scatter is the phase function's shape, so the read there was a
+/// quarter off a direct march where the sky-view LUT's finer grid makes the
+/// same clamp a few per cent. On the ends, every direction there is lies
+/// between two texels and the read blends rather than clamps.
+fn aerial_axis_value(index: usize, texels: usize) -> f32 {
+    index as f32 / (texels - 1) as f32
+}
+
+/// [`axis_taps`] for [`aerial_axis_value`]'s texels: the two texels and the
+/// weight between them, for `value` in `[0, 1]`, with texel `i` at
+/// `i / (texels − 1)`.
+fn aerial_axis_taps(value: f32, texels: usize) -> (usize, usize, f32) {
+    let scaled = value.clamp(0.0, 1.0) * (texels - 1) as f32;
+    let low = scaled.floor().clamp(0.0, (texels - 1) as f32);
+    let high = (low + 1.0).min((texels - 1) as f32);
+    (low as usize, high as usize, (scaled - low).clamp(0.0, 1.0))
+}
+
+/// The aerial-perspective LUT: the air between the eye and a surface, for one
+/// sun, as Hillaire's `float4(in-scatter, mean transmittance)`.
+///
+/// Built beside the [`SkyView`] it belongs to — see [`SkyView::aerial`] —
+/// uploaded by `crcbl_render::sky_pass` as the `float4` storage buffer
+/// [`Self::rows`] lays out, and read by `shaders/volumetric_composite.slang`
+/// with the trilinear blend [`Self::sample`] spells, so a surface at distance
+/// `d` along `direction` composes as `scene * a + rgb`.
+///
+/// **The transmittance is the mean of the three channels**, which is
+/// Hillaire's own compromise and worth saying rather than inheriting: it loses
+/// chromatic extinction — the reddening of a far surface under a low sun —
+/// where the chromatic in-scatter keeps the blue haze, which is what dominates
+/// at scene scale. It is also what lets the composite fold this into the local
+/// fog's `scene * a + rgb` with one arithmetic.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AerialView {
+    /// `[(row * AERIAL_VIEW_WIDTH + column) * AERIAL_VIEW_SLICES + slice]`:
+    /// the in-scattered radiance in `0..3` and the mean transmittance in `3`.
+    ///
+    /// Row slowest and slice fastest, which is the order a striped march
+    /// produces them in: [`SkyViewBuild`] appends whole rows, and a whole row
+    /// is every column's every checkpoint.
+    entries: Vec<[f32; 4]>,
+    /// The sun this was built for, for [`Self::along`]'s azimuth.
+    sun_direction: [f32; 3],
+}
+
+impl AerialView {
+    /// The checkpoint at `(column, row, slice)`: the air from the eye to
+    /// `(slice + 1) / AERIAL_VIEW_SLICES` of [`AERIAL_MAX_DISTANCE`] along
+    /// that texel's ray.
+    ///
+    /// # Panics
+    ///
+    /// If any index is outside the LUT.
+    #[must_use]
+    pub fn entry(&self, column: usize, row: usize, slice: usize) -> [f32; 4] {
+        assert!(
+            column < AERIAL_VIEW_WIDTH && row < AERIAL_VIEW_HEIGHT && slice < AERIAL_VIEW_SLICES,
+            "({column}, {row}, {slice}) is outside a \
+             {AERIAL_VIEW_WIDTH}x{AERIAL_VIEW_HEIGHT}x{AERIAL_VIEW_SLICES} LUT"
+        );
+        self.entries[(row * AERIAL_VIEW_WIDTH + column) * AERIAL_VIEW_SLICES + slice]
+    }
+
+    /// The two direction axes' clamped bilinear blend at one slice — or the
+    /// eye's identity when `slice` is the one before the first.
+    fn bilinear(
+        &self,
+        columns: (usize, usize, f32),
+        rows: (usize, usize, f32),
+        slice: Option<usize>,
+    ) -> [f32; 4] {
+        let Some(slice) = slice else {
+            return [0.0, 0.0, 0.0, 1.0];
+        };
+        let (x0, x1, fx) = columns;
+        let (y0, y1, fy) = rows;
+        let mut out = [0.0f32; 4];
+        for (lane, slot) in out.iter_mut().enumerate() {
+            let top =
+                self.entry(x0, y0, slice)[lane] * (1.0 - fx) + self.entry(x1, y0, slice)[lane] * fx;
+            let bottom =
+                self.entry(x0, y1, slice)[lane] * (1.0 - fx) + self.entry(x1, y1, slice)[lane] * fx;
+            *slot = top * (1.0 - fy) + bottom * fy;
+        }
+        out
+    }
+
+    /// The LUT read trilinearly at a direction's `y`, an azimuth cosine and a
+    /// distance in world units, the way `volumetric_composite.slang`'s
+    /// `aerial_at` reads it.
+    ///
+    /// The two direction axes are [`SkyView::sample`]'s maps, with the texels
+    /// on the ends of each axis — `aerial_axis_value` says why. The distance
+    /// axis puts checkpoint `k` at `k + 1` slices out and the eye at zero, so a
+    /// read inside the first slice blends from the identity and a read at
+    /// [`AERIAL_MAX_DISTANCE`] or past it is the last checkpoint exactly. **Spelled out rather than asked of a sampler** for
+    /// [`SkyView::rows`]' reason: a hardware filter's weights are
+    /// fixed-function arithmetic four rasterisers compute independently.
+    #[must_use]
+    pub fn sample(&self, up: f32, azimuth_cosine: f32, distance: f32) -> [f32; 4] {
+        let columns = aerial_axis_taps(sky_view_u_of(azimuth_cosine), AERIAL_VIEW_WIDTH);
+        let rows = aerial_axis_taps(sky_view_v_of(up), AERIAL_VIEW_HEIGHT);
+        let depth = (distance / AERIAL_MAX_DISTANCE).clamp(0.0, 1.0) * AERIAL_VIEW_SLICES as f32;
+        let slice = depth.floor().min((AERIAL_VIEW_SLICES - 1) as f32);
+        let fz = (depth - slice).clamp(0.0, 1.0);
+        let slice = slice as usize;
+        let near = self.bilinear(columns, rows, slice.checked_sub(1));
+        let far = self.bilinear(columns, rows, Some(slice));
+        let mut out = [0.0f32; 4];
+        for (lane, slot) in out.iter_mut().enumerate() {
+            *slot = near[lane] * (1.0 - fz) + far[lane] * fz;
+        }
+        out
+    }
+
+    /// The air along a world `direction` out to `distance` world units:
+    /// [`Self::sample`] at the direction's own `y` and its azimuth from the
+    /// sun, the way [`SkyView::radiance`] reads its LUT.
+    ///
+    /// `direction` should be unit length.
+    #[must_use]
+    pub fn along(&self, direction: [f32; 3], distance: f32) -> [f32; 4] {
+        self.sample(
+            direction[1],
+            azimuth_cosine(direction, self.sun_direction),
+            distance,
+        )
+    }
+
+    /// What `volumetric_composite.slang` makes of a surface of radiance
+    /// `scene` at `distance` along `direction`: `scene * a + rgb`, in that
+    /// order, before the local fog is composed over it.
+    #[must_use]
+    pub fn composite(&self, scene: [f32; 3], direction: [f32; 3], distance: f32) -> [f32; 3] {
+        let air = self.along(direction, distance);
+        let mut out = [0.0f32; 3];
+        for (channel, slot) in out.iter_mut().enumerate() {
+            *slot = scene[channel] * air[3] + air[channel];
+        }
+        out
+    }
+
+    /// The LUT as the bytes `volumetric_composite.slang` reads it out of: one
+    /// `float4` per checkpoint, in [`Self::entry`]'s order.
+    ///
+    /// A storage buffer rather than a 3D image for [`SkyView::rows`]' reasons,
+    /// and a third one of its own: the renderer has no 3D image anywhere, and
+    /// this would be the first on four backends.
+    #[must_use]
+    pub fn rows(&self) -> Vec<u8> {
+        let mut rows = Vec::with_capacity(AERIAL_VIEW_BUFFER_BYTES);
+        for entry in &self.entries {
+            for lane in entry {
+                rows.extend_from_slice(&lane.to_le_bytes());
+            }
+        }
+        rows
+    }
+}
+
 /// Rows [`SkyViewBuild::step`] marches per call.
 ///
 /// **The renderer's frame budget is what picks it**, so it is a fraction of
@@ -1123,7 +1424,22 @@ const _: () = assert!(
     "SKY_VIEW_BUILD_ROWS must be a proper divisor of SKY_VIEW_HEIGHT"
 );
 
-/// A sky-view LUT part way through its march.
+/// Every [`SkyViewBuild::step`] of [`SKY_VIEW_BUILD_ROWS`] marches the same
+/// whole number of [`AerialView`] rows.
+///
+/// The aerial LUT is marched in proportion to the sky's — a step that reaches
+/// sky row `r` reaches aerial row `r · AERIAL_VIEW_HEIGHT / SKY_VIEW_HEIGHT` —
+/// so the two finish on the same step whatever the stripe. This is what makes
+/// that proportion a whole number at the renderer's stripe, so no frame of a
+/// moving sun pays an aerial row more than the frame beside it.
+const _: () = assert!(
+    (SKY_VIEW_BUILD_ROWS * AERIAL_VIEW_HEIGHT).is_multiple_of(SKY_VIEW_HEIGHT)
+        && AERIAL_VIEW_HEIGHT <= SKY_VIEW_HEIGHT,
+    "a SKY_VIEW_BUILD_ROWS stripe must march a whole number of AerialView rows"
+);
+
+/// A sky-view LUT part way through its march, with its [`AerialView`] marched
+/// alongside.
 ///
 /// [`SkyView::build`] is this stepped straight to the end. A caller with a
 /// frame to fit the march into steps it [`SKY_VIEW_BUILD_ROWS`] rows at a time
@@ -1135,6 +1451,12 @@ const _: () = assert!(
 /// stopped between two rows and resumed produce the same bytes as one that ran
 /// straight through — `a_striped_build_is_the_one_shot_build` asserts it at
 /// three stripe widths, one of them not a divisor.
+///
+/// **The aerial rows ride the same steps**, in proportion — see the assertion
+/// above this type — so the two LUTs complete on the same call and a moving
+/// sun lags no further behind than it did before the aerial LUT existed. What
+/// a step costs does grow, by the aerial rows' share;
+/// `the_amortised_step_is_a_fraction_of_the_whole_build` prints both.
 #[derive(Clone, Debug)]
 pub struct SkyViewBuild {
     /// The sun and viewpoint this march was started from.
@@ -1165,6 +1487,13 @@ pub struct SkyViewBuild {
     /// Its length is [`Self::rows_done`] times [`SKY_VIEW_WIDTH`], which is why
     /// there is no second counter to disagree with it.
     radiance: Vec<[f32; 3]>,
+    /// How far [`AerialView`]'s last checkpoint is, in kilometres —
+    /// [`Atmosphere::aerial_max_km`], on [`Self::sun_side`]'s terms.
+    aerial_max_km: f32,
+    /// The aerial rows marched so far, in [`AerialView::entry`]'s order, on
+    /// [`Self::radiance`]'s terms: its length is [`Self::aerial_rows_done`]
+    /// times a row's checkpoints.
+    aerial: Vec<[f32; 4]>,
 }
 
 impl SkyViewBuild {
@@ -1199,6 +1528,8 @@ impl SkyViewBuild {
             view_radius,
             sun_disc,
             radiance: Vec::with_capacity(SKY_VIEW_WIDTH * SKY_VIEW_HEIGHT),
+            aerial_max_km: atmosphere.aerial_max_km(),
+            aerial: Vec::with_capacity(AERIAL_ROW_ENTRIES * AERIAL_VIEW_HEIGHT),
         }
     }
 
@@ -1214,28 +1545,41 @@ impl SkyViewBuild {
         self.radiance.len() / SKY_VIEW_WIDTH
     }
 
-    /// Whether every row is marched, so [`Self::finish`] will not panic.
+    /// How many rows of the [`AerialView`] are marched.
+    #[must_use]
+    pub fn aerial_rows_done(&self) -> usize {
+        self.aerial.len() / AERIAL_ROW_ENTRIES
+    }
+
+    /// Whether every row of both LUTs is marched, so [`Self::finish`] will not
+    /// panic.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.rows_done() == SKY_VIEW_HEIGHT
+        self.rows_done() == SKY_VIEW_HEIGHT && self.aerial_rows_done() == AERIAL_VIEW_HEIGHT
     }
 
     /// Marches the next `rows` rows — or what is left of the LUT, if that is
-    /// fewer — and returns [`Self::is_complete`].
+    /// fewer — and the [`AerialView`] rows that keep pace with them, and
+    /// returns [`Self::is_complete`].
     ///
     /// A `rows` past the end is clamped rather than refused, so a caller may
     /// step a build it does not know the progress of and a last short stripe
     /// needs no arithmetic at the call site.
     pub fn step(&mut self, rows: usize) -> bool {
-        let from = self.rows_done();
-        let until = from.saturating_add(rows).min(SKY_VIEW_HEIGHT);
-        for row in from..until {
+        let until = self.rows_done().saturating_add(rows).min(SKY_VIEW_HEIGHT);
+        self.march_sky_rows(until);
+        self.march_aerial_rows(until * AERIAL_VIEW_HEIGHT / SKY_VIEW_HEIGHT);
+        self.is_complete()
+    }
+
+    /// Marches the sky-view LUT's rows up to, not including, `until`.
+    fn march_sky_rows(&mut self, until: usize) {
+        for row in self.rows_done()..until {
             let up = sky_view_up_of(axis_value(row, SKY_VIEW_HEIGHT));
             let side = (1.0 - up * up).max(0.0).sqrt();
             for column in 0..SKY_VIEW_WIDTH {
                 let cosine = sky_view_cosine_of(axis_value(column, SKY_VIEW_WIDTH));
-                let across = side * (1.0 - cosine * cosine).max(0.0).sqrt();
-                let direction = [side * cosine, up, across];
+                let direction = texel_direction(up, side, cosine);
                 // The scattering cosine: the view direction against the sun,
                 // both in the LUT's frame where the sun has no `z`.
                 let sun_cosine = direction[0] * self.sun_side + up * self.sun_up;
@@ -1254,29 +1598,73 @@ impl SkyViewBuild {
                 self.radiance.push(lit);
             }
         }
-        self.is_complete()
     }
 
-    /// The finished LUT.
+    /// Marches the [`AerialView`]'s rows up to, not including, `until`.
+    ///
+    /// The sky's texel geometry on the aerial LUT's grid, and one
+    /// [`march_checkpoints`] per texel instead of one [`march`]: a checkpoint
+    /// every [`AERIAL_VIEW_SLICES`]th of [`Self::aerial_max_km`], each one the
+    /// in-scatter and mean transmittance the march has accumulated so far.
+    fn march_aerial_rows(&mut self, until: usize) {
+        for row in self.aerial_rows_done()..until {
+            let up = sky_view_up_of(aerial_axis_value(row, AERIAL_VIEW_HEIGHT));
+            let side = (1.0 - up * up).max(0.0).sqrt();
+            for column in 0..AERIAL_VIEW_WIDTH {
+                let cosine = sky_view_cosine_of(aerial_axis_value(column, AERIAL_VIEW_WIDTH));
+                let direction = texel_direction(up, side, cosine);
+                let sun_cosine = direction[0] * self.sun_side + up * self.sun_up;
+                let illuminance = self.atmosphere.sun_illuminance;
+                let aerial = &mut self.aerial;
+                march_checkpoints(
+                    ViewRay::new(
+                        self.view_radius,
+                        direction,
+                        self.sun_side,
+                        self.sun_up,
+                        sun_cosine,
+                    ),
+                    self.aerial_max_km,
+                    AERIAL_VIEW_SLICES,
+                    |radiance, transmittance| {
+                        aerial.push([
+                            radiance[0] * illuminance[0],
+                            radiance[1] * illuminance[1],
+                            radiance[2] * illuminance[2],
+                            (transmittance[0] + transmittance[1] + transmittance[2]) / 3.0,
+                        ]);
+                    },
+                );
+            }
+        }
+    }
+
+    /// The finished LUT, with its [`AerialView`].
     ///
     /// # Panics
     ///
-    /// If any row is still unmarched. A LUT short of rows is not a stale sky
-    /// but a broken one — [`SkyView::rows`] would encode fewer bytes than
-    /// [`SKY_VIEW_BUFFER_BYTES`] and the buffer's tail would keep whatever was
-    /// there — so this is loud rather than padded: a caller steps until
-    /// [`Self::step`] says the march is done.
+    /// If any row of either LUT is still unmarched. A LUT short of rows is not
+    /// a stale sky but a broken one — [`SkyView::rows`] would encode fewer
+    /// bytes than [`SKY_VIEW_BUFFER_BYTES`] and the buffer's tail would keep
+    /// whatever was there — so this is loud rather than padded: a caller steps
+    /// until [`Self::step`] says the march is done.
     #[must_use]
     pub fn finish(self) -> SkyView {
         assert!(
             self.is_complete(),
-            "{} of {SKY_VIEW_HEIGHT} rows are marched, so this LUT is not a sky yet",
-            self.rows_done()
+            "{} of {SKY_VIEW_HEIGHT} sky rows and {} of {AERIAL_VIEW_HEIGHT} aerial rows are \
+             marched, so this LUT is not a sky yet",
+            self.rows_done(),
+            self.aerial_rows_done()
         );
         SkyView {
             radiance: self.radiance,
             sun_direction: self.atmosphere.sun_direction,
             sun_disc: self.sun_disc,
+            aerial: AerialView {
+                entries: self.aerial,
+                sun_direction: self.atmosphere.sun_direction,
+            },
         }
     }
 }
@@ -1322,10 +1710,8 @@ fn march(
     sun_cosine: f32,
     steps: usize,
 ) -> [f32; 3] {
-    let up = direction[1];
-    let end = distance_to_end(radius_km, up);
-    let rayleigh = rayleigh_phase(sun_cosine);
-    let mie = mie_phase(sun_cosine);
+    let end = distance_to_end(radius_km, direction[1]);
+    let ray = ViewRay::new(radius_km, direction, sun_side, sun_up, sun_cosine);
 
     let mut transmittance = [1.0f32; 3];
     let mut radiance = [0.0f32; 3];
@@ -1342,6 +1728,103 @@ fn march(
         let far = (slice + 1) as f32 / steps as f32;
         let from = near * near * end;
         let step = far * far * end - from;
+        ray.integrate(from, step, &mut transmittance, &mut radiance);
+    }
+    radiance
+}
+
+/// One view ray's march, from the eye out to `max_km`, stopping at `slices`
+/// evenly spaced checkpoints: `visit` is handed the in-scattered radiance — for
+/// a sun of unit illuminance — and the per-channel transmittance accumulated
+/// from the eye to each one, nearest first.
+///
+/// **The same integrator as [`march`], cut differently**, which is the whole
+/// of what makes [`AerialView`] the sky's own air rather than a second model of
+/// it: [`march`] cuts a ray to the top of the atmosphere quadratically and
+/// keeps only the end, and this cuts a ray of a scene's length linearly and
+/// keeps every checkpoint. Linearly for [`AERIAL_VIEW_SLICES`]' reason.
+///
+/// **The ray does not stop at the ground.** A scene's floor is its own
+/// geometry, not the idealised sphere's, and a surface a few kilometres off
+/// along a direction that dips below the horizon is still in front of the eye
+/// with air between them — so a sample under the sphere is taken at the
+/// ground's own density, which is what [`ViewRay::integrate`]'s clamp of the
+/// sample radius already does.
+fn march_checkpoints(
+    ray: ViewRay,
+    max_km: f32,
+    slices: usize,
+    mut visit: impl FnMut(&[f32; 3], &[f32; 3]),
+) {
+    let step = max_km / slices as f32;
+    let mut transmittance = [1.0f32; 3];
+    let mut radiance = [0.0f32; 3];
+    for slice in 0..slices {
+        ray.integrate(slice as f32 * step, step, &mut transmittance, &mut radiance);
+        visit(&radiance, &transmittance);
+    }
+}
+
+/// One view ray through the atmosphere, with everything about it that does not
+/// change along it resolved once: where it starts, where it points, the sun in
+/// its frame, and the two phase functions at its scattering cosine.
+///
+/// [`march`]'s arguments, held so a march can be cut into slices by more than
+/// one caller — [`march`] and [`march_checkpoints`] — with one integrator
+/// between them.
+#[derive(Clone, Copy, Debug)]
+struct ViewRay {
+    /// Where the ray starts, in kilometres from the planet's centre.
+    radius_km: f32,
+    /// Where it points, in the LUT's frame: the sun's azimuth along `+x`, up
+    /// along `+y`.
+    direction: [f32; 3],
+    /// The sun's horizontal component in that frame.
+    sun_side: f32,
+    /// The sun's vertical component in that frame.
+    sun_up: f32,
+    /// [`rayleigh_phase`] at the ray's scattering cosine.
+    rayleigh: f32,
+    /// [`mie_phase`] at the ray's scattering cosine.
+    mie: f32,
+}
+
+impl ViewRay {
+    /// The ray from `radius_km` along `direction`, under the sun at
+    /// `sun_side` and `sun_up`, whose scattering cosine against the ray the
+    /// caller has already formed as `sun_cosine`.
+    fn new(
+        radius_km: f32,
+        direction: [f32; 3],
+        sun_side: f32,
+        sun_up: f32,
+        sun_cosine: f32,
+    ) -> Self {
+        Self {
+            radius_km,
+            direction,
+            sun_side,
+            sun_up,
+            rayleigh: rayleigh_phase(sun_cosine),
+            mie: mie_phase(sun_cosine),
+        }
+    }
+
+    /// Integrates the slice of the ray from `from` to `from + step` kilometres
+    /// into `radiance`, and multiplies its transmittance into `transmittance`.
+    ///
+    /// One sample, at [`SAMPLE_SEGMENT`] of the slice, of the medium and the
+    /// sun's light there, with the slice's own attenuation taken in closed
+    /// form.
+    fn integrate(
+        &self,
+        from: f32,
+        step: f32,
+        transmittance: &mut [f32; 3],
+        radiance: &mut [f32; 3],
+    ) {
+        let radius_km = self.radius_km;
+        let up = self.direction[1];
         let distance = from + step * SAMPLE_SEGMENT;
         // The sample's distance from the planet's centre, by the cosine rule.
         let sample_radius =
@@ -1357,8 +1840,8 @@ fn march(
 
         // The sun's zenith cosine where this sample sits: the local up is the
         // sample's own position, and the sun has no `z` in this frame.
-        let sun_zenith = (distance * direction[0] * sun_side
-            + (radius_km + distance * up) * sun_up)
+        let sun_zenith = (distance * self.direction[0] * self.sun_side
+            + (radius_km + distance * up) * self.sun_up)
             / sample_radius;
         let sun_transmittance = if meets_the_ground(sample_radius, sun_zenith) {
             [0.0f32; 3]
@@ -1372,7 +1855,7 @@ fn march(
             let extinction = rayleigh_scattering
                 + MIE_EXTINCTION_PER_KM * mie_density
                 + OZONE_ABSORPTION_PER_KM[channel] * ozone_density;
-            let scattered = (rayleigh_scattering * rayleigh + mie_scattering * mie)
+            let scattered = (rayleigh_scattering * self.rayleigh + mie_scattering * self.mie)
                 * sun_transmittance[channel]
                 + (rayleigh_scattering + mie_scattering) * multiscatter[channel];
             // The slice's integral in closed form: `∫₀^step e^{-σt} dt` is
@@ -1385,7 +1868,6 @@ fn march(
             transmittance[channel] *= exp_neg(optical_depth);
         }
     }
-    radiance
 }
 
 // ---------------------------------------------------------------------------
@@ -1724,6 +2206,7 @@ mod tests {
         sun_direction: [0.984_807_7, 0.173_648_18, 0.0],
         sun_illuminance: [1.0, 1.0, 1.0],
         altitude_km: 0.0,
+        km_per_unit: KM_PER_METRE,
     };
 
     /// The optical depth of a **vertical** ray from the ground, in closed form.
@@ -2057,6 +2540,16 @@ mod tests {
             first.rows().iter().any(|byte| *byte != 0),
             "the LUT is all zeroes, so the equality above says nothing"
         );
+        // The aerial LUT is uploaded on the same terms, so it owes the same.
+        assert_eq!(
+            first.aerial().rows(),
+            second.aerial().rows(),
+            "two builds of one atmosphere disagree about the air in front of the scene"
+        );
+        assert!(
+            first.aerial().rows().iter().any(|byte| *byte != 0),
+            "the aerial LUT is all zeroes, so the equality above says nothing"
+        );
     }
 
     /// A build marched in stripes is the build marched in one call.
@@ -2071,20 +2564,30 @@ mod tests {
     /// whole LUT in one step.
     #[test]
     fn a_striped_build_is_the_one_shot_build() {
-        let whole = SkyView::build(&LOW_SUN).rows();
+        let one_shot = SkyView::build(&LOW_SUN);
+        let whole = one_shot.rows();
+        let whole_aerial = one_shot.aerial().rows();
         assert!(
-            whole.iter().any(|byte| *byte != 0),
-            "the reference LUT is all zeroes, so the equalities below say nothing"
+            whole.iter().any(|byte| *byte != 0) && whole_aerial.iter().any(|byte| *byte != 0),
+            "a reference LUT is all zeroes, so the equalities below say nothing"
         );
         for stripe in [1usize, 7, SKY_VIEW_HEIGHT] {
             let mut build = SkyViewBuild::start(&LOW_SUN);
             let mut steps = 0usize;
             while !build.step(stripe) {
                 steps += 1;
+                let rows = (steps * stripe).min(SKY_VIEW_HEIGHT);
                 assert_eq!(
                     build.rows_done(),
-                    (steps * stripe).min(SKY_VIEW_HEIGHT),
+                    rows,
                     "a {stripe}-row step left the march somewhere other than where it says"
+                );
+                // The aerial rows keep pace in proportion, which is what lets
+                // the two finish on one step.
+                assert_eq!(
+                    build.aerial_rows_done(),
+                    rows * AERIAL_VIEW_HEIGHT / SKY_VIEW_HEIGHT,
+                    "a {stripe}-row step left the aerial march out of step with the sky's"
                 );
             }
             assert_eq!(
@@ -2092,16 +2595,24 @@ mod tests {
                 SKY_VIEW_HEIGHT,
                 "a completed {stripe}-row build has not marched the whole LUT"
             );
+            let finished = build.finish();
             assert_eq!(
-                build.finish().rows(),
+                finished.rows(),
                 whole,
                 "a build marched {stripe} rows at a time is not the build marched in one go"
+            );
+            assert_eq!(
+                finished.aerial().rows(),
+                whole_aerial,
+                "an aerial LUT marched {stripe} sky rows at a time is not the one marched in one go"
             );
         }
     }
 
     /// Prints what a whole [`SkyView::build`] costs and what one
-    /// [`SkyViewBuild::step`] of [`SKY_VIEW_BUILD_ROWS`] costs beside it:
+    /// [`SkyViewBuild::step`] of [`SKY_VIEW_BUILD_ROWS`] costs beside it — both
+    /// with the [`AerialView`] in them — and the aerial LUT's own share, its
+    /// upload's encode, and how many steps a sun that moved waits for both:
     ///
     /// ```text
     /// cargo test -p crcbl-shaders --release --lib -- --ignored --nocapture \
@@ -2177,9 +2688,45 @@ mod tests {
                 })
                 .collect(),
         );
+        // The aerial LUT's own share of the whole march, timed alone: the
+        // sky's rows and the aerial rows are two loops of one step, so either
+        // one can be run without the other on a fresh build.
+        let aerial = median(
+            (0..runs)
+                .map(|_| {
+                    let mut build = SkyViewBuild::start(&LOW_SUN);
+                    let at = Instant::now();
+                    build.march_aerial_rows(AERIAL_VIEW_HEIGHT);
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    assert_eq!(build.aerial_rows_done(), AERIAL_VIEW_HEIGHT);
+                    elapsed
+                })
+                .collect(),
+        );
+        // And its per-frame upload encode, on `rows`' terms above.
+        let aerial_encode = median(
+            (0..runs)
+                .map(|_| {
+                    let at = Instant::now();
+                    let rows = built.aerial().rows();
+                    let elapsed = at.elapsed().as_secs_f64() * 1.0e3;
+                    assert_eq!(rows.len(), AERIAL_VIEW_BUFFER_BYTES);
+                    elapsed
+                })
+                .collect(),
+        );
+        // How many frames a sun that moved and then stopped waits for both
+        // LUTs: `crcbl_render::forward` takes one step per frame.
+        let mut build = SkyViewBuild::start(&LOW_SUN);
+        let mut lag = 1;
+        while !build.step(SKY_VIEW_BUILD_ROWS) {
+            lag += 1;
+        }
         println!(
-            "SkyView::build {whole:.2} ms, one {SKY_VIEW_BUILD_ROWS}-row step {stripe:.3} ms, \
-             gradient_fit + irradiance {projections:.3} ms, rows {encode:.3} ms"
+            "SkyView::build {whole:.2} ms (of which the AerialView alone {aerial:.2} ms), one \
+             {SKY_VIEW_BUILD_ROWS}-row step {stripe:.3} ms, gradient_fit + irradiance \
+             {projections:.3} ms, rows {encode:.3} ms, aerial rows {aerial_encode:.3} ms, a moved \
+             sun is fully marched after {lag} steps"
         );
     }
 
@@ -2261,6 +2808,11 @@ mod tests {
             // No disc: this is a claim about the quadrature weights, and a sun
             // in the field would be a second thing the projection is reading.
             sun_disc: [0.0; 3],
+            // The projection never reads the air in front of the scene.
+            aerial: AerialView {
+                entries: Vec::new(),
+                sun_direction: LOW_SUN.sun_direction,
+            },
         };
         let probe = uniform.irradiance();
         let mut worst = 0.0f32;
@@ -3203,4 +3755,613 @@ mod tests {
             "sky.slang clamps at {ceiling} where this module's mirror clamps at {MAX_RADIANCE}"
         );
     }
+
+    /// A world unit a scene might be built at when it wants its air thick, so
+    /// [`AERIAL_MAX_DISTANCE`] is hundreds of kilometres and a hundred units of
+    /// floor is tens of them — the scale `crcbl::screenshot::AERIAL_KM_PER_UNIT`
+    /// draws its aerial fixture at, spelled here again because this crate
+    /// cannot name that one.
+    const FAR_KM_PER_UNIT: f32 = 0.2;
+
+    /// [`LOW_SUN`] over a scene at [`FAR_KM_PER_UNIT`].
+    const FAR_LOW_SUN: Atmosphere = Atmosphere {
+        km_per_unit: FAR_KM_PER_UNIT,
+        ..LOW_SUN
+    };
+
+    /// The air along `direction` — in the LUT's own frame, which is the world's
+    /// for a sun with no `z` like [`LOW_SUN`]'s — out to `distance_km`, marched
+    /// directly in `steps` linear slices rather than read from an
+    /// [`AerialView`], as `float4(in-scatter, mean transmittance)` for the
+    /// atmosphere's own illuminance.
+    fn direct_air(
+        atmosphere: &Atmosphere,
+        direction: [f32; 3],
+        distance_km: f32,
+        steps: usize,
+    ) -> [f32; 4] {
+        let build = SkyViewBuild::start(atmosphere);
+        let sun_cosine = direction[0] * build.sun_side + direction[1] * build.sun_up;
+        let ray = ViewRay::new(
+            build.view_radius,
+            direction,
+            build.sun_side,
+            build.sun_up,
+            sun_cosine,
+        );
+        let mut last = [0.0f32; 4];
+        march_checkpoints(ray, distance_km, steps, |radiance, transmittance| {
+            last = [
+                radiance[0] * atmosphere.sun_illuminance[0],
+                radiance[1] * atmosphere.sun_illuminance[1],
+                radiance[2] * atmosphere.sun_illuminance[2],
+                (transmittance[0] + transmittance[1] + transmittance[2]) / 3.0,
+            ];
+        });
+        last
+    }
+
+    /// Directions [`AerialView`] is checked along, in the LUT's frame: the
+    /// horizon towards and away from [`LOW_SUN`], across it, straight up, a
+    /// little down, and one off every texel on both axes.
+    const AERIAL_RAYS: [[f32; 3]; 6] = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 1.0, 0.0],
+        [0.6, -0.1, 0.793_725_4],
+        [0.301_511_35, 0.301_511_35, 0.904_534_06],
+    ];
+
+    /// A surface at the eye has no air in front of it: no in-scatter and
+    /// every photon through, exactly.
+    ///
+    /// **Exactly, and not to a tolerance**, because the eye is not a texel:
+    /// [`AerialView::sample`] blends the first slice from the identity rather
+    /// than from a checkpoint, so a read at zero is that identity with nothing
+    /// rounded into it. A read that blended from checkpoint zero instead would
+    /// charge a surface at the eye a slice's worth of air — which is what this
+    /// catches.
+    ///
+    /// And a scene at a scale of zero kilometres per unit has no air anywhere,
+    /// which is what makes [`Atmosphere::km_per_unit`] an off position.
+    #[test]
+    fn the_air_at_the_eye_is_the_identity() {
+        let sky = SkyView::build(&FAR_LOW_SUN);
+        let aerial = sky.aerial();
+        for direction in AERIAL_RAYS {
+            assert_eq!(
+                aerial.along(direction, 0.0),
+                [0.0, 0.0, 0.0, 1.0],
+                "a surface at the eye along {direction:?} is charged for air"
+            );
+            // And the same direction further out is not the identity, which is
+            // what stops the equality above passing on a LUT of nothing.
+            let far = aerial.along(direction, 0.5 * AERIAL_MAX_DISTANCE);
+            assert!(
+                far[3] < 1.0 && far[2] > 0.0,
+                "half way out along {direction:?} the air reads {far:?}, which is no air at all"
+            );
+        }
+
+        let none = SkyView::build(&Atmosphere {
+            km_per_unit: 0.0,
+            ..LOW_SUN
+        });
+        for row in 0..AERIAL_VIEW_HEIGHT {
+            for column in 0..AERIAL_VIEW_WIDTH {
+                for slice in 0..AERIAL_VIEW_SLICES {
+                    assert_eq!(
+                        none.aerial().entry(column, row, slice),
+                        [0.0, 0.0, 0.0, 1.0],
+                        "({column}, {row}, {slice}) holds air at zero kilometres per unit"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Along every texel's ray, the transmittance falls and the in-scatter
+    /// grows at every checkpoint.
+    ///
+    /// **Strictly at the metre's scale**, which is what gives this teeth: the
+    /// far end is a kilometre out, so every slice of every ray is in the
+    /// densest air there is and every checkpoint is further into it than the
+    /// last. A march that restarted its transmittance at each checkpoint — the
+    /// shape a slice loop cut from a whole-ray march is exposed to — leaves it
+    /// flat, and one that visited its checkpoints out of order breaks the
+    /// ordering outright.
+    ///
+    /// **Only never backwards at [`FAR_KM_PER_UNIT`]**, where the far end is
+    /// hundreds of kilometres out and a ray climbing towards the zenith leaves
+    /// the atmosphere well before it: past the top there is no air to thicken,
+    /// and the checkpoints there are rightly equal to the last `f32`.
+    #[test]
+    fn the_air_thickens_with_distance() {
+        for (atmosphere, strict) in [(LOW_SUN, true), (FAR_LOW_SUN, false)] {
+            let sky = SkyView::build(&atmosphere);
+            let aerial = sky.aerial();
+            let scale = atmosphere.km_per_unit;
+            for row in 0..AERIAL_VIEW_HEIGHT {
+                for column in 0..AERIAL_VIEW_WIDTH {
+                    let mut before = [0.0, 0.0, 0.0, 1.0];
+                    for slice in 0..AERIAL_VIEW_SLICES {
+                        let entry = aerial.entry(column, row, slice);
+                        let thinner = if strict {
+                            entry[3] < before[3]
+                        } else {
+                            entry[3] <= before[3]
+                        };
+                        assert!(
+                            thinner,
+                            "at {scale} km per unit ({column}, {row}) transmits {} at checkpoint \
+                             {slice} and {} before it",
+                            entry[3], before[3]
+                        );
+                        for channel in 0..3 {
+                            let brighter = if strict {
+                                entry[channel] > before[channel]
+                            } else {
+                                entry[channel] >= before[channel]
+                            };
+                            assert!(
+                                brighter,
+                                "at {scale} km per unit ({column}, {row}) scatters {} in channel \
+                                 {channel} at checkpoint {slice} and {} before it",
+                                entry[channel], before[channel]
+                            );
+                        }
+                        before = entry;
+                    }
+                }
+            }
+        }
+    }
+
+    /// The last checkpoint is the air out to the far end, marched directly.
+    ///
+    /// Two oracles, one of them independent of this module's integrator:
+    ///
+    /// * **A level ray at the ground is a closed form.** At [`KM_PER_METRE`]
+    ///   the far end is a kilometre out, and the row just under the horizon
+    ///   stays under the idealised sphere all the way there, so every sample is
+    ///   taken at the ground's own density: the transmittance is `e^{−σ₀ d}`
+    ///   per channel with `σ₀` the sea-level extinction. That is what catches
+    ///   the scale — a `km_per_unit` applied twice, or not at all, or
+    ///   [`AERIAL_MAX_DISTANCE`] read as kilometres.
+    /// * **Every other ray is its own march, far finer.** At
+    ///   [`FAR_KM_PER_UNIT`] the far end is hundreds of kilometres out and the
+    ///   planet curves away under it, which no closed form follows; a direct
+    ///   march at [`FINE_AIR_FACTOR`] times the slices is what the LUT's last
+    ///   checkpoint has to agree with. The tolerance is what one sample per
+    ///   slice costs against that, printed and measured rather than chosen.
+    #[test]
+    fn the_last_checkpoint_is_a_direct_march_to_the_far_end() {
+        let near = SkyView::build(&LOW_SUN);
+        let under = AERIAL_VIEW_HEIGHT / 2 - 1;
+        assert!(
+            sky_view_up_of(axis_value(under, AERIAL_VIEW_HEIGHT)) < 0.0,
+            "the row under the horizon is not under it"
+        );
+        let distance_km = f64::from(LOW_SUN.aerial_max_km());
+        let mut closed = 0.0f64;
+        for channel in 0..3 {
+            let sea_level = f64::from(extinction(0.0)[channel]);
+            closed += (-sea_level * distance_km).exp() / 3.0;
+        }
+        let mut worst_level = 0.0f64;
+        for column in 0..AERIAL_VIEW_WIDTH {
+            let marched = f64::from(near.aerial().entry(column, under, AERIAL_VIEW_SLICES - 1)[3]);
+            let miss = relative(marched, closed);
+            worst_level = worst_level.max(miss);
+            assert!(
+                miss <= MAX_LEVEL_AIR_ERROR,
+                "the level ray in column {column} transmits {marched} over {distance_km} km \
+                 where the sea-level closed form gives {closed}, a miss of {miss}"
+            );
+        }
+
+        let far = SkyView::build(&FAR_LOW_SUN);
+        let mut worst_scatter = 0.0f32;
+        let mut worst_transmittance = 0.0f32;
+        for row in [
+            0,
+            under,
+            under + 1,
+            AERIAL_VIEW_HEIGHT * 3 / 4,
+            AERIAL_VIEW_HEIGHT - 1,
+        ] {
+            let up = sky_view_up_of(aerial_axis_value(row, AERIAL_VIEW_HEIGHT));
+            let side = (1.0 - up * up).max(0.0).sqrt();
+            for column in [0, AERIAL_VIEW_WIDTH / 2, AERIAL_VIEW_WIDTH - 1] {
+                let cosine = sky_view_cosine_of(aerial_axis_value(column, AERIAL_VIEW_WIDTH));
+                let direction = texel_direction(up, side, cosine);
+                let stored = far.aerial().entry(column, row, AERIAL_VIEW_SLICES - 1);
+                let direct = direct_air(
+                    &FAR_LOW_SUN,
+                    direction,
+                    FAR_LOW_SUN.aerial_max_km(),
+                    AERIAL_VIEW_SLICES * FINE_AIR_FACTOR,
+                );
+                worst_transmittance = worst_transmittance.max(air_miss(stored[3], direct[3], 3));
+                for channel in 0..3 {
+                    worst_scatter =
+                        worst_scatter.max(air_miss(stored[channel], direct[channel], channel));
+                }
+            }
+        }
+        assert!(
+            worst_scatter <= MAX_FAR_SCATTER_ERROR && worst_transmittance <= MAX_FAR_AIR_ERROR,
+            "the last checkpoint misses a march {FINE_AIR_FACTOR} times finer by {worst_scatter} \
+             of its in-scatter and {worst_transmittance} of transmittance"
+        );
+        eprintln!(
+            "crcbl-shaders atmosphere: the level ray's last checkpoint tracks its closed form to \
+             {worst_level:.2e}; at {FAR_KM_PER_UNIT} km per unit the last checkpoint misses a \
+             march {FINE_AIR_FACTOR} times finer by {:.3}% of its in-scatter and \
+             {worst_transmittance:.2e} of transmittance at worst",
+            worst_scatter * 100.0,
+        );
+    }
+
+    /// How many times finer than the LUT the direct march it is held to cuts
+    /// its ray.
+    const FINE_AIR_FACTOR: usize = 64;
+
+    /// The largest share of the sea-level closed form a level ray's last
+    /// checkpoint may miss it by — `f32` accumulation over the slices and
+    /// [`crate::fog::exp_neg`]'s own error, and nothing else, since the
+    /// density along that ray is exactly the ground's.
+    const MAX_LEVEL_AIR_ERROR: f64 = 1.0e-5;
+
+    /// The largest share of a far finer march's in-scatter the last checkpoint
+    /// may miss it by at [`FAR_KM_PER_UNIT`]. Twice what
+    /// `the_last_checkpoint_is_a_direct_march_to_the_far_end` printed.
+    const MAX_FAR_SCATTER_ERROR: f32 = 0.11;
+
+    /// The largest transmittance the last checkpoint may miss a far finer
+    /// march's by at [`FAR_KM_PER_UNIT`]. Twice what
+    /// `the_last_checkpoint_is_a_direct_march_to_the_far_end` printed.
+    const MAX_FAR_AIR_ERROR: f32 = 0.012;
+
+    /// The uploaded rows are the aerial LUT, exactly, in the order the
+    /// composite indexes them — [`the_rows_carry_the_lut_they_encode`]'s claim
+    /// for the second buffer.
+    #[test]
+    fn the_aerial_rows_carry_the_lut_they_encode() {
+        let sky = SkyView::build(&FAR_LOW_SUN);
+        let aerial = sky.aerial();
+        let rows = aerial.rows();
+        assert_eq!(rows.len(), AERIAL_VIEW_BUFFER_BYTES);
+        let lane = |at: usize| f32::from_le_bytes(rows[at..at + 4].try_into().expect("four"));
+        for row in 0..AERIAL_VIEW_HEIGHT {
+            for column in 0..AERIAL_VIEW_WIDTH {
+                for slice in 0..AERIAL_VIEW_SLICES {
+                    let at = ((row * AERIAL_VIEW_WIDTH + column) * AERIAL_VIEW_SLICES + slice)
+                        * AERIAL_VIEW_ROW_BYTES;
+                    for (index, value) in aerial.entry(column, row, slice).into_iter().enumerate() {
+                        assert_eq!(
+                            lane(at + index * 4),
+                            value,
+                            "({column}, {row}, {slice}) lane {index}"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            rows.as_chunks::<4>()
+                .0
+                .iter()
+                .map(lane_of)
+                .collect::<std::collections::BTreeSet<u32>>()
+                .len()
+                > 1000,
+            "the aerial LUT holds too few distinct values for this comparison to mean anything"
+        );
+    }
+
+    /// `volumetric_composite.slang` reads the aerial LUT the way
+    /// [`AerialView::sample`] and [`AerialView::along`] do, and composes it
+    /// the way [`AerialView::composite`] does.
+    ///
+    /// [`the_shader_reads_the_lut_the_way_the_host_does`]' claim for the third
+    /// LUT: the dimensions and the far end are compared as numbers, because a
+    /// LUT read at the wrong size or scale is air that is smoothly and
+    /// plausibly wrong; the rest are the lines whose absence would change what
+    /// the shader computes. The composite's own order — the air first, the
+    /// local fog over it, the sky pixel spared — is held here too.
+    #[test]
+    fn the_composite_reads_the_aerial_lut_the_way_the_host_does() {
+        let source = include_str!("../shaders/volumetric_composite.slang");
+        let declared = |name: &str| {
+            source
+                .split_once(&format!("static const uint {name} = "))
+                .unwrap_or_else(|| panic!("the composite declares `{name}`"))
+                .1
+                .split_once(';')
+                .expect("the constant ends")
+                .0
+                .trim()
+                .parse::<usize>()
+                .expect("the constant is a literal")
+        };
+        assert_eq!(declared("AERIAL_VIEW_WIDTH"), AERIAL_VIEW_WIDTH);
+        assert_eq!(declared("AERIAL_VIEW_HEIGHT"), AERIAL_VIEW_HEIGHT);
+        assert_eq!(declared("AERIAL_VIEW_SLICES"), AERIAL_VIEW_SLICES);
+        assert_eq!(
+            crate::volumetric::tests::shader_scalar(source, "AERIAL_MAX_DISTANCE"),
+            AERIAL_MAX_DISTANCE,
+            "the composite's far end is not this module's"
+        );
+
+        let body = |signature: &str| {
+            source
+                .split_once(signature)
+                .unwrap_or_else(|| panic!("the composite declares `{signature}`"))
+                .1
+                .split_once("\n}")
+                .expect("the function has a body")
+                .0
+        };
+        let slice = body(
+            "float4 aerial_slice(uint x0, uint x1, float fx, uint y0, uint y1, float fy, uint \
+             slice)\n{",
+        );
+        for line in [
+            // `entry`'s order: row slowest, slice fastest.
+            "aerial[(row0 + x0) * AERIAL_VIEW_SLICES + slice] * (1.0 - fx)",
+            "aerial[(row1 + x1) * AERIAL_VIEW_SLICES + slice] * fx;",
+            // The two-ended blend `bilinear` uses.
+            "return top * (1.0 - fy) + bottom * fy;",
+        ] {
+            assert!(
+                slice.contains(line),
+                "the composite's `aerial_slice` no longer contains `{line}`"
+            );
+        }
+        let at = body("float4 aerial_at(float up, float azimuth_cosine, float distance)\n{");
+        for line in [
+            // The sky-view LUT's two maps, unchanged.
+            "float u = sqrt(max(0.0, (1.0 - clamp(azimuth_cosine, -1.0, 1.0)) * 0.5));",
+            "float v = 0.5 + 0.5 * (clamped >= 0.0 ? root : -root);",
+            "float across = clamp(u, 0.0, 1.0) * float(AERIAL_VIEW_WIDTH - 1);",
+            "float down = clamp(v, 0.0, 1.0) * float(AERIAL_VIEW_HEIGHT - 1);",
+            // The distance axis: checkpoint `k` at `k + 1` slices, clamped.
+            "float depth = clamp(distance / AERIAL_MAX_DISTANCE, 0.0, 1.0) * \
+             float(AERIAL_VIEW_SLICES);",
+            "float slice = min(floor(depth), float(AERIAL_VIEW_SLICES - 1));",
+            "float fz = clamp(depth - slice, 0.0, 1.0);",
+            // The eye is the identity, not a texel.
+            "float4 closer = float4(0.0, 0.0, 0.0, 1.0);",
+            "return closer * (1.0 - fz) + further * fz;",
+        ] {
+            assert!(
+                at.contains(line),
+                "the composite's `aerial_at` no longer contains `{line}`, so it and \
+                 `AerialView::sample` are reading different air"
+            );
+        }
+        let along = body("float4 aerial_along(float3 direction, float distance)\n{");
+        for line in [
+            "(direction.x * sun.x + direction.z * sun.z) / (view_flat * sun_flat)",
+            "return aerial_at(direction.y, cosine, distance);",
+        ] {
+            assert!(
+                along.contains(line),
+                "the composite's `aerial_along` no longer contains `{line}`"
+            );
+        }
+        let main = source
+            .split_once("float4 fragmentMain(FullscreenOutput input) : SV_Target\n{")
+            .expect("the composite declares its fragment stage")
+            .1;
+        for line in [
+            // `composite`'s order: the air over the surface first...
+            "surface = surface * air.a + air.rgb;",
+            // ...and the local column over that.
+            "float3 lit = surface * (prefix.a * partial_survives) + prefix.rgb",
+            // The column's own switch, read as `LOCAL_COLUMN_OFF` is written.
+            "if (params.fog_params.w > 0.0 || froxel >= params.froxel_count)",
+        ] {
+            assert!(
+                main.contains(line),
+                "the composite's fragment stage no longer contains `{line}`"
+            );
+        }
+        // The air is composed only inside the branch that reads the switch —
+        // as `ATMOSPHERE_ON` is written — and that a sky pixel never enters.
+        let covered = main
+            .split_once("if (params.aerial_params.w > 0.0 && depth > DEPTH_FAR)\n    {")
+            .expect("the composite composes the air behind its switch and the clear depth")
+            .1
+            .split_once("\n    }")
+            .expect("the branch closes")
+            .0;
+        assert!(
+            covered.contains("aerial_along(") && main.matches("aerial_along(").count() == 1,
+            "the composite reads the air outside the branch that spares the sky"
+        );
+        const {
+            assert!(
+                crate::sky::ATMOSPHERE_ON > 0.0 && crate::sky::ATMOSPHERE_OFF <= 0.0,
+                "the switch's two values no longer fall either side of the shader's test"
+            );
+        };
+        const {
+            assert!(
+                crate::volumetric::LOCAL_COLUMN_OFF > 0.0
+                    && crate::volumetric::LOCAL_COLUMN_ON <= 0.0,
+                "the column switch's two values no longer fall either side of the shader's test"
+            );
+        };
+    }
+
+    /// What a finer [`AerialView`] would move a read by, printed as a sweep
+    /// and asserted at the shipped size, at two scales.
+    ///
+    /// **The distance axis** is swept: at each slice count, a read between two
+    /// checkpoints is the linear blend of the two, and it is compared against a
+    /// direct march to the read's own distance along [`AERIAL_RAYS`]. **The
+    /// direction axes** are measured at the shipped size only — the LUT's size
+    /// is a constant — by reading the built LUT between texels and comparing
+    /// that against the same direct march, which is the whole trilinear read's
+    /// error.
+    ///
+    /// **Two scales, because the slices are world units and the air is
+    /// kilometres.** At [`KM_PER_METRE`] a slice is a few dozen metres and the
+    /// read is the air to a fraction of a per cent. At [`FAR_KM_PER_UNIT`] a
+    /// slice is kilometres long, and one sample per slice is no longer the
+    /// integral: inside the first slice the linear blend from the eye's
+    /// identity bends away from an in-scatter that is not linear over that
+    /// length, and a ray climbing towards the zenith crosses several of the
+    /// aerosol's scale heights inside one slice. Both bounds are twice what
+    /// this printed when it was written; the second is a regression guard on
+    /// a known coarseness rather than a claim of accuracy, and
+    /// `docs/backlog.md` carries the gap.
+    #[test]
+    fn the_aerial_view_has_converged_at_the_shipped_size() {
+        let mut printed = String::new();
+        for (atmosphere, slice_bound, read_bound) in [
+            (LOW_SUN, MAX_AIR_SLICE_ERROR, MAX_AIR_READ_ERROR),
+            (FAR_LOW_SUN, MAX_FAR_SLICE_ERROR, MAX_FAR_READ_ERROR),
+        ] {
+            let (row, shipped) = distance_axis_sweep(&atmosphere);
+            let between = read_between_texels(&atmosphere);
+            printed.push_str(&format!(
+                "\n  at {} km per unit the distance axis misses a direct march by —{row} — and the \
+                 shipped LUT read between texels by {:.2}%",
+                atmosphere.km_per_unit,
+                between * 100.0
+            ));
+            assert!(
+                shipped > 0.0 && shipped <= slice_bound,
+                "at {} km per unit the shipped distance axis misses a direct march by \
+                 {shipped}, past {slice_bound}",
+                atmosphere.km_per_unit
+            );
+            assert!(
+                between <= read_bound,
+                "at {} km per unit the shipped LUT read between texels misses a direct march by \
+                 {between}, past {read_bound}",
+                atmosphere.km_per_unit
+            );
+        }
+        eprintln!("crcbl-shaders atmosphere:{printed}");
+    }
+
+    /// Distances between checkpoints the convergence test reads at, as shares
+    /// of the far end: one inside the first slice, the rest scattered.
+    const AIR_REACH: [f32; 5] = [0.013, 0.1, 0.27, 0.5, 0.77];
+
+    /// The distance axis's miss against a direct march at each of a sweep of
+    /// slice counts along [`AERIAL_RAYS`] — the printed row and the shipped
+    /// count's own figure.
+    fn distance_axis_sweep(atmosphere: &Atmosphere) -> (String, f32) {
+        let max_km = atmosphere.aerial_max_km();
+        let sweep = [8usize, 16, 32, 64];
+        assert!(
+            sweep.contains(&AERIAL_VIEW_SLICES),
+            "the sweep no longer covers the shipped slice count, so it measures nothing about it"
+        );
+        let build = SkyViewBuild::start(atmosphere);
+        let mut row = String::new();
+        let mut shipped = 0.0f32;
+        for slices in sweep {
+            let mut worst = 0.0f32;
+            for direction in AERIAL_RAYS {
+                let mut checkpoints = vec![[0.0f32, 0.0, 0.0, 1.0]];
+                let sun_cosine = direction[0] * build.sun_side + direction[1] * build.sun_up;
+                march_checkpoints(
+                    ViewRay::new(
+                        build.view_radius,
+                        direction,
+                        build.sun_side,
+                        build.sun_up,
+                        sun_cosine,
+                    ),
+                    max_km,
+                    slices,
+                    |radiance, transmittance| {
+                        checkpoints.push([
+                            radiance[0] * atmosphere.sun_illuminance[0],
+                            radiance[1] * atmosphere.sun_illuminance[1],
+                            radiance[2] * atmosphere.sun_illuminance[2],
+                            (transmittance[0] + transmittance[1] + transmittance[2]) / 3.0,
+                        ]);
+                    },
+                );
+                for share in AIR_REACH {
+                    let depth = share * slices as f32;
+                    let low = depth.floor() as usize;
+                    let weight = depth - low as f32;
+                    let direct = direct_air(
+                        atmosphere,
+                        direction,
+                        share * max_km,
+                        slices * FINE_AIR_FACTOR,
+                    );
+                    for (lane, value) in direct.into_iter().enumerate() {
+                        let read = checkpoints[low][lane] * (1.0 - weight)
+                            + checkpoints[low + 1][lane] * weight;
+                        worst = worst.max(air_miss(read, value, lane));
+                    }
+                }
+            }
+            row.push_str(&format!(" {slices}:{:.2}%", worst * 100.0));
+            if slices == AERIAL_VIEW_SLICES {
+                shipped = worst;
+            }
+        }
+        (row, shipped)
+    }
+
+    /// The shipped LUT's whole trilinear read, along [`AERIAL_RAYS`] — none of
+    /// which is a texel's own direction — against a direct march.
+    fn read_between_texels(atmosphere: &Atmosphere) -> f32 {
+        let max_km = atmosphere.aerial_max_km();
+        let sky = SkyView::build(atmosphere);
+        let mut worst = 0.0f32;
+        for direction in AERIAL_RAYS {
+            for share in AIR_REACH {
+                let read = sky.aerial().along(direction, share * AERIAL_MAX_DISTANCE);
+                let direct = direct_air(
+                    atmosphere,
+                    direction,
+                    share * max_km,
+                    AERIAL_VIEW_SLICES * FINE_AIR_FACTOR,
+                );
+                for (lane, value) in direct.into_iter().enumerate() {
+                    worst = worst.max(air_miss(read[lane], value, lane));
+                }
+            }
+        }
+        worst
+    }
+
+    /// How far a read of the air misses a direct march on `lane`: a share of
+    /// the in-scatter on the three colour lanes, and an absolute transmittance
+    /// on the fourth, which is already a share.
+    fn air_miss(read: f32, direct: f32, lane: usize) -> f32 {
+        if lane == 3 {
+            (read - direct).abs()
+        } else {
+            (read - direct).abs() / direct.max(1.0e-9)
+        }
+    }
+
+    /// The largest miss the shipped slice count's linear blend may have
+    /// against a direct march at [`KM_PER_METRE`], in [`air_miss`]'s terms.
+    const MAX_AIR_SLICE_ERROR: f32 = 0.004;
+
+    /// The largest miss the shipped LUT's whole trilinear read may have against
+    /// a direct march along a direction between its texels at [`KM_PER_METRE`],
+    /// in [`air_miss`]'s terms.
+    const MAX_AIR_READ_ERROR: f32 = 0.004;
+
+    /// [`MAX_AIR_SLICE_ERROR`] at [`FAR_KM_PER_UNIT`].
+    const MAX_FAR_SLICE_ERROR: f32 = 0.5;
+
+    /// [`MAX_AIR_READ_ERROR`] at [`FAR_KM_PER_UNIT`].
+    const MAX_FAR_READ_ERROR: f32 = 0.5;
 }

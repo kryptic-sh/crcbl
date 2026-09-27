@@ -247,7 +247,12 @@ impl Sky {
     /// exists to make impossible: the sky would keep drawing a sunset while the
     /// shadows pointed somewhere else, and no golden reads both.
     ///
-    /// The plaza stands at sea level, so the viewpoint's altitude is zero.
+    /// The plaza stands at sea level, so the viewpoint's altitude is zero, and
+    /// it is laid out in metres, so its air is as thin as a plaza's is: an
+    /// optical depth under a thousandth across the whole of it. Thin is not
+    /// nothing — it moves pixels by a level or a few on the one adapter it was
+    /// measured on, and `docs/notes/rendering.md`'s "Aerial perspective" has
+    /// the numbers.
     #[must_use]
     pub fn atmosphere(self) -> Atmosphere {
         let light = self.light();
@@ -255,6 +260,7 @@ impl Sky {
             sun_direction: light.direction,
             sun_illuminance: light.color,
             altitude_km: 0.0,
+            km_per_unit: crcbl::shaders::atmosphere::KM_PER_METRE,
         }
     }
 

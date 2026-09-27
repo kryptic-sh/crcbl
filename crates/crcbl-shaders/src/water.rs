@@ -674,9 +674,11 @@ mod tests {
             );
         }
         // And the composite's own sum, split into the two halves the surface
-        // applies to the light it adds.
+        // applies to the light it adds. The composite's `surface` is the scene
+        // with the atmosphere's air in front of it, which the water surface
+        // does not take — `docs/backlog.md` carries that gap.
         assert!(COMPOSITE.contains(
-            "float3 lit = scene.rgb * (prefix.a * partial_survives) + prefix.rgb\n               \
+            "float3 lit = surface * (prefix.a * partial_survives) + prefix.rgb\n               \
              + prefix.a * partial_radiance;"
         ));
         assert!(WATER.contains("air.survives = prefix.a * partial_survives;"));

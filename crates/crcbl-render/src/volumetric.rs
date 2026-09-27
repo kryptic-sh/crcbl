@@ -9,7 +9,26 @@
 //!                          shadow-atlas + light grid ──▶ lighting[frame]
 //!             ── compute "volumetric-integrate" ──▶ froxels[frame]     (per tile)
 //!             ── render  "volumetric-composite" scene-color ──▶ fogged
+//!                          sky_pass's aerial[frame] ──┘
 //! ```
+//!
+//! # The composite also puts the atmosphere's air in front of the scene
+//!
+//! On a frame with an atmosphere the composite reads
+//! [`crcbl_shaders::atmosphere::AerialView`] — `crate::sky_pass` owns its ring
+//! — and composes it **before** the column, so the scene is
+//! `((scene · T_air + S_air) · T_fog) + S_fog`: the local fog is the near
+//! medium and its glow must not be attenuated by the kilometres of air behind
+//! it. Sky pixels are spared, because the sky-view LUT has already integrated
+//! the whole of their ray.
+//!
+//! **The two halves switch independently.** The column's scatter and scan run
+//! with the fog effect and nowhere else, and the composite runs on every frame
+//! with the effect *or* an atmosphere — so a frame with an atmosphere and no
+//! fog effect adds the composite alone, and the block's `fog_params.w` —
+//! [`crcbl_shaders::volumetric::LOCAL_COLUMN_OFF`] — is what stops it reading a
+//! column nothing filled. A frame with the fog effect and no atmosphere writes
+//! the block it always wrote and composes the bytes it always composed.
 //!
 //! A module of its own on [`crate::ssr`]'s terms exactly: two pipelines, a
 //! buffer ring and the pass group, none of it reachable from the geometry
@@ -75,8 +94,10 @@ use crcbl_hal::{
     PipelineLayoutDesc, PipelineLayoutHandle, ResourceState, SampleType, SamplerHandle,
     ShaderStages, StoreOp, check_portable_storage_buffers,
 };
+use crcbl_shaders::sky::{ATMOSPHERE_OFF, ATMOSPHERE_ON};
 use crcbl_shaders::volumetric::{
-    FROXEL_STRIDE, LIGHTING_STRIDE, PARAMS_SIZE, VolumetricParams, WORKGROUP_SIZE,
+    FROXEL_STRIDE, LIGHTING_STRIDE, LOCAL_COLUMN_OFF, LOCAL_COLUMN_ON, PARAMS_SIZE,
+    VolumetricParams, WORKGROUP_SIZE,
 };
 use crcbl_shaders::{VOLUMETRIC, VOLUMETRIC_COMPOSITE};
 
@@ -113,6 +134,29 @@ pub(crate) struct VolumetricImages {
     /// declaring it is what moves the atlas from the depth attachment the
     /// shadow pass wrote into a layout a compute stage can sample.
     pub(crate) shadow_atlas: ImageId,
+}
+
+/// What [`Volumetric::add_passes`] reads besides the images, and which of its
+/// passes it adds.
+///
+/// One struct rather than three more arguments, on [`VolumetricImages`]'
+/// terms.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct VolumetricReads {
+    /// The froxel list the clustering pass filled this frame, as the graph
+    /// knows it: the scatter pass declares the read, which is what orders it
+    /// after that dispatch.
+    pub(crate) light_grid: BufferId,
+    /// Whether the fog effect is on, and so whether the scatter and scan run.
+    ///
+    /// It must be what [`Volumetric::begin_frame`] was handed as
+    /// [`Medium::local`]: the block's switch is what stops the composite
+    /// reading a column no pass filled.
+    pub(crate) local: bool,
+    /// [`crate::sky_pass::SkyPass::aerial`]'s slot for this frame, bound
+    /// whether or not the frame has an atmosphere — the block's other switch
+    /// decides whether it is read.
+    pub(crate) aerial: BufferHandle,
 }
 
 /// The buffers one frame's froxel column lives in.
@@ -175,6 +219,13 @@ pub(crate) struct Medium<'a> {
     /// rectangle from one frame and a matrix from another would sample the
     /// right map's place for the wrong map.
     pub(crate) atlas_rects: &'a [[f32; 4]; shadow::TILES],
+    /// Whether this frame's scatter and scan run — the fog effect — and so
+    /// whether the composite reads the column they fill.
+    pub(crate) local: bool,
+    /// The sun the frame's [`crcbl_shaders::atmosphere::AerialView`] was
+    /// marched around, or `None` on a frame with no atmosphere — whose
+    /// composite then puts no air in front of anything.
+    pub(crate) aerial: Option<[f32; 3]>,
 }
 
 /// Everything the froxel volume owns.
@@ -216,12 +267,23 @@ pub(crate) struct Volumetric {
 }
 
 impl Volumetric {
-    /// Passes [`Volumetric::add_passes`] adds to a frame.
+    /// Passes [`Volumetric::add_passes`] adds to a frame at most: the column's
+    /// and the composite's.
+    ///
+    /// A ceiling since the air arrived: a frame whose fog effect is off and
+    /// whose atmosphere is not adds the composite alone.
+    pub(crate) const PASSES: u32 = Self::COLUMN_PASSES + Self::COMPOSITE_PASSES;
+
+    /// The column's compute passes — the scatter and the scan — which run
+    /// exactly when the fog effect does.
     ///
     /// Exact rather than a ceiling: a frame always has froxels — [`Grid`] floors
-    /// every extent at one tile and one slice — so none of the three ever drops
-    /// out.
-    pub(crate) const PASSES: u32 = 3;
+    /// every extent at one tile and one slice — so neither ever drops out.
+    pub(crate) const COLUMN_PASSES: u32 = 2;
+
+    /// The composite, which runs on every frame with the fog effect or an
+    /// atmosphere, and the only full-screen draw among them.
+    pub(crate) const COMPOSITE_PASSES: u32 = 1;
 
     /// Builds both pipelines, the buffer rings and the compute groups.
     ///
@@ -393,6 +455,19 @@ impl Volumetric {
                 count: 1,
                 flags: BindingFlags::empty(),
             },
+            BindGroupLayoutEntry {
+                binding: 5,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::StorageBuffer {
+                    // The air in front of the scene — `crate::sky_pass`'s
+                    // aerial ring, written on the host and only read here.
+                    read_only: true,
+                    dynamic: false,
+                    stride: crcbl_shaders::atmosphere::AERIAL_VIEW_ROW_BYTES as u32,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            },
         ];
         let composite_desc = BindGroupLayoutDesc {
             label: Some("volumetric composite"),
@@ -527,6 +602,8 @@ impl Volumetric {
             cascades,
             light_view_proj,
             atlas_rects,
+            local,
+            aerial,
         } = medium;
         // Row 3 of the view-projection, so a shader can take a point's view
         // depth with one dot product — [`crate::light_grid`]'s block carries the
@@ -545,7 +622,18 @@ impl Volumetric {
                 inverse_view_proj: view.view_projection.inverse().to_cols_array(),
                 eye: view.eye.extend(1.0).to_array(),
                 depth_row,
-                fog_params: [fog.density, fog.falloff, fog.reference_height, 0.0],
+                // The column's switch in `w`: on — the zero this lane held as
+                // padding — wherever the scatter and scan run.
+                fog_params: [
+                    fog.density,
+                    fog.falloff,
+                    fog.reference_height,
+                    if local {
+                        LOCAL_COLUMN_ON
+                    } else {
+                        LOCAL_COLUMN_OFF
+                    },
+                ],
                 fog_color: fog.color.extend(0.0).to_array(),
                 // Towards the sun, which is `mesh.slang`'s `to_light` and the
                 // opposite of the direction its light travels — the phase
@@ -582,6 +670,14 @@ impl Volumetric {
                 froxel_count: grid.froxels(),
                 light_view_proj: *light_view_proj,
                 shadow_atlas_rect: *atlas_rects,
+                // The atmosphere's own sun, which the LUT's azimuth is measured
+                // from, and the switch. All zeroes on a frame with no
+                // atmosphere, which is the row every frame before the air
+                // existed wrote nothing into.
+                aerial_params: match aerial {
+                    Some(sun) => [sun[0], sun[1], sun[2], ATMOSPHERE_ON],
+                    None => [0.0, 0.0, 0.0, ATMOSPHERE_OFF],
+                },
             }
             .to_bytes(),
         )
@@ -600,11 +696,8 @@ impl Volumetric {
         }
     }
 
-    /// Adds the scatter, integrate and composite passes, in that order.
-    ///
-    /// `light_grid` is the froxel list the clustering pass filled this frame,
-    /// as the graph knows it: the scatter pass declares the read, which is
-    /// what orders it after that dispatch.
+    /// Adds the scatter, integrate and composite passes, in that order — or
+    /// the composite alone where [`VolumetricReads::local`] is false.
     ///
     /// [`VolumetricImages::composited`] is what the caller must go on to use:
     /// the medium is *in* it, and the scene colour it was composited over is not
@@ -623,8 +716,13 @@ impl Volumetric {
         frame: usize,
         grid: Grid,
         images: VolumetricImages,
-        light_grid: BufferId,
+        reads: VolumetricReads,
     ) -> (BufferId, BufferId) {
+        let VolumetricReads {
+            light_grid,
+            local,
+            aerial,
+        } = reads;
         let VolumetricImages {
             depth,
             color,
@@ -659,52 +757,60 @@ impl Volumetric {
         let scatter = self.scatter;
         let integrate = self.integrate;
 
-        // One invocation per froxel, and never zero: `Grid::for_frame` floors
-        // every extent at one tile and one slice, and Metal rejects an empty
-        // dispatch outright rather than treating it as a no-op.
-        let froxel_groups = grid.froxels().div_ceil(WORKGROUP_SIZE);
-        graph
-            .add_compute_pass("volumetric-scatter")
-            // `ShaderReadWrite` rather than a write-only state, on the light
-            // grid's terms: a storage-buffer descriptor permits reads whatever
-            // the shader does with it.
-            .use_buffer(volume, ResourceState::ShaderReadWrite)
-            .use_buffer(seen, ResourceState::ShaderReadWrite)
-            // The cascades this pass looks a froxel up in. A read rather than a
-            // write, and it is what orders this dispatch after the shadow pass
-            // that filled them.
-            .read_image(shadow_atlas)
-            // And the froxel lists it walks, on the mesh pass's terms: the
-            // clustering pass left them in `ShaderReadWrite`, and declaring the
-            // read is what orders this dispatch after it.
-            .read_buffer(light_grid)
-            .execute(move |ctx| {
-                let encoder = ctx.encoder();
-                encoder.bind_compute_pipeline(scatter);
-                encoder.bind_group(0, compute_group, &[], compute_layout);
-                encoder.dispatch(froxel_groups, 1, 1);
-            });
+        // **The column only where the fog effect runs.** An atmosphere frame
+        // with the effect off adds the composite alone, for the air — and the
+        // block's `fog_params.w` is what tells it the column is not there, so
+        // this branch and that switch are one decision made in two places,
+        // both off the caller's `local`.
+        if local {
+            // One invocation per froxel, and never zero: `Grid::for_frame`
+            // floors every extent at one tile and one slice, and Metal rejects
+            // an empty dispatch outright rather than treating it as a no-op.
+            let froxel_groups = grid.froxels().div_ceil(WORKGROUP_SIZE);
+            graph
+                .add_compute_pass("volumetric-scatter")
+                // `ShaderReadWrite` rather than a write-only state, on the
+                // light grid's terms: a storage-buffer descriptor permits reads
+                // whatever the shader does with it.
+                .use_buffer(volume, ResourceState::ShaderReadWrite)
+                .use_buffer(seen, ResourceState::ShaderReadWrite)
+                // The cascades this pass looks a froxel up in. A read rather
+                // than a write, and it is what orders this dispatch after the
+                // shadow pass that filled them.
+                .read_image(shadow_atlas)
+                // And the froxel lists it walks, on the mesh pass's terms: the
+                // clustering pass left them in `ShaderReadWrite`, and declaring
+                // the read is what orders this dispatch after it.
+                .read_buffer(light_grid)
+                .execute(move |ctx| {
+                    let encoder = ctx.encoder();
+                    encoder.bind_compute_pipeline(scatter);
+                    encoder.bind_group(0, compute_group, &[], compute_layout);
+                    encoder.dispatch(froxel_groups, 1, 1);
+                });
 
-        // One invocation per **tile**, not per froxel: this pass walks a column
-        // front to back and turns each froxel into the exclusive prefix of the
-        // ones in front of it, which is a serial scan over the slice axis.
-        let tile_groups = grid
-            .x
-            .max(1)
-            .saturating_mul(grid.y.max(1))
-            .div_ceil(WORKGROUP_SIZE);
-        graph
-            .add_compute_pass("volumetric-integrate")
-            // The scatter's own output, read and overwritten in place — the
-            // graph's barrier between the two comes from both declaring this
-            // one id.
-            .use_buffer(volume, ResourceState::ShaderReadWrite)
-            .execute(move |ctx| {
-                let encoder = ctx.encoder();
-                encoder.bind_compute_pipeline(integrate);
-                encoder.bind_group(0, compute_group, &[], compute_layout);
-                encoder.dispatch(tile_groups, 1, 1);
-            });
+            // One invocation per **tile**, not per froxel: this pass walks a
+            // column front to back and turns each froxel into the exclusive
+            // prefix of the ones in front of it, which is a serial scan over
+            // the slice axis.
+            let tile_groups = grid
+                .x
+                .max(1)
+                .saturating_mul(grid.y.max(1))
+                .div_ceil(WORKGROUP_SIZE);
+            graph
+                .add_compute_pass("volumetric-integrate")
+                // The scatter's own output, read and overwritten in place — the
+                // graph's barrier between the two comes from both declaring
+                // this one id.
+                .use_buffer(volume, ResourceState::ShaderReadWrite)
+                .execute(move |ctx| {
+                    let encoder = ctx.encoder();
+                    encoder.bind_compute_pipeline(integrate);
+                    encoder.bind_group(0, compute_group, &[], compute_layout);
+                    encoder.dispatch(tile_groups, 1, 1);
+                });
+        }
 
         let pipeline = self.composite_pipeline;
         let pipeline_layout = self.composite_pipeline_layout;
@@ -727,6 +833,10 @@ impl Volumetric {
             // prepass left the depth in `DepthStencilWrite`. Declaring the reads
             // is what moves each into a shader-readable layout, and without them
             // every backend reads whatever the last writer left behind.
+            //
+            // The column's two are declared on a frame that did not fill them
+            // too: the buffers are bound either way, and a read of a buffer
+            // already in `ShaderRead` is no barrier at all.
             .read_image(color)
             .read_image(depth)
             .read_buffer(volume)
@@ -763,6 +873,14 @@ impl Volumetric {
                         binding: 4,
                         array_index: 0,
                         resource: BindingResource::whole_buffer(lighting),
+                    },
+                    // The aerial ring's slot for this frame, which is the same
+                    // handle every time this slot comes round — so the cache
+                    // below, keyed on the two views alone, stays right.
+                    BindGroupEntry {
+                        binding: 5,
+                        array_index: 0,
+                        resource: BindingResource::whole_buffer(aerial),
                     },
                 ];
                 let Some(group) = cached_group(

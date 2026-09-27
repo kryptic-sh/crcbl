@@ -46,6 +46,13 @@
 //! sky is a gradient or which have none: a binding that came and went with the
 //! arm would be two pipeline layouts and two pipelines.
 //!
+//! **The aerial-perspective LUT's ring lives here too**, though this pass never
+//! reads it: [`crcbl_shaders::atmosphere::AerialView`] is marched in the same
+//! stripes as the sky-view LUT and uploaded by the same
+//! [`SkyPass::begin_frame`], and `volumetric_composite.slang` is what binds it
+//! — see [`SkyPass::aerial`]. It is a storage buffer with the trilinear read
+//! spelled out in that shader, for the filter argument above.
+//!
 //! # It is a caller's opt-in and not a [`RenderEffects`](crate::RenderEffects)
 //! bit
 //!
@@ -99,6 +106,22 @@ pub(crate) struct SkyPass {
     /// zeroes otherwise — `crcbl_shaders::atmosphere::SKY_VIEW_BUFFER_BYTES` is
     /// under a hundred kilobytes, which is a memory copy rather than a cost.
     luts: Vec<BufferHandle>,
+    /// `[frame]`: the aerial-perspective LUT —
+    /// [`atmosphere::AerialView::rows`] — one per frame in flight for
+    /// [`SkyPass::uniforms`]' reason exactly.
+    ///
+    /// **Owned here and read elsewhere**: this pass never binds it.
+    /// [`crate::volumetric`]'s composite is what puts the air in front of the
+    /// scene, and it binds this ring's slot the way [`crate::ssr`] binds
+    /// [`SkyPass::luts`]' — see [`SkyPass::aerial`]. It lives beside the
+    /// sky-view ring because the two are one march's output, uploaded by one
+    /// call on the same frames, so they cannot be a sun apart.
+    ///
+    /// Written whole on every atmosphere frame, on [`SkyPass::luts`]' terms,
+    /// and it is the larger of the two by the LUT's third axis —
+    /// [`atmosphere::AERIAL_VIEW_BUFFER_BYTES`] against
+    /// [`atmosphere::SKY_VIEW_BUFFER_BYTES`].
+    aerials: Vec<BufferHandle>,
     /// `[frame]`: the group naming [`SkyPass::uniforms`] and [`SkyPass::luts`]
     /// at the same index.
     groups: Vec<BindGroupHandle>,
@@ -189,6 +212,7 @@ impl SkyPass {
 
         let mut uniforms = Vec::with_capacity(frames);
         let mut luts = Vec::with_capacity(frames);
+        let mut aerials = Vec::with_capacity(frames);
         let mut groups = Vec::with_capacity(frames);
         for _ in 0..frames {
             let buffer = device.create_buffer(&BufferDesc {
@@ -211,6 +235,17 @@ impl SkyPass {
             // both have something to say about.
             device.write_buffer(lut, 0, &vec![0u8; atmosphere::SKY_VIEW_BUFFER_BYTES])?;
             luts.push(lut);
+            let aerial = device.create_buffer(&BufferDesc {
+                label: Some("aerial view lut"),
+                size: atmosphere::AERIAL_VIEW_BUFFER_BYTES as u64,
+                usage: BufferUsage::STORAGE,
+                memory: MemoryLocation::HostUpload,
+            })?;
+            // Zeroed for the sky-view LUT's reason: the composite reads it only
+            // where the block's aerial switch is on, which a frame with no
+            // atmosphere leaves off.
+            device.write_buffer(aerial, 0, &vec![0u8; atmosphere::AERIAL_VIEW_BUFFER_BYTES])?;
+            aerials.push(aerial);
             groups.push(device.create_bind_group(&BindGroupDesc {
                 label: Some("sky"),
                 layout,
@@ -233,6 +268,7 @@ impl SkyPass {
         Ok(Self {
             uniforms,
             luts,
+            aerials,
             groups,
             layout,
             pipeline_layout,
@@ -249,9 +285,11 @@ impl SkyPass {
     /// feeds both passes.
     ///
     /// `sky_view` is `None` on a gradient frame, and then the block's sun row
-    /// is [`sky::ATMOSPHERE_OFF`], its disc row is zero and the LUT buffer is
-    /// left alone — so a frame blessed before an atmosphere existed writes
-    /// exactly the bytes it used to.
+    /// is [`sky::ATMOSPHERE_OFF`], its disc row is zero and both LUT buffers
+    /// are left alone — so a frame blessed before an atmosphere existed writes
+    /// exactly the bytes it used to. On an atmosphere frame the
+    /// [`atmosphere::AerialView`] is written into [`SkyPass::aerial`]'s slot
+    /// beside the sky's own.
     ///
     /// **The LUT is written on every atmosphere frame** rather than only when
     /// it changes, which is a memory copy of
@@ -307,8 +345,24 @@ impl SkyPass {
         device.write_buffer(self.uniforms[frame], 0, &params.to_bytes())?;
         if let Some(view) = sky_view {
             device.write_buffer(self.luts[frame], 0, &view.rows())?;
+            device.write_buffer(self.aerials[frame], 0, &view.aerial().rows())?;
         }
         Ok(())
+    }
+
+    /// The aerial-perspective LUT this frame's slot holds — the buffer
+    /// [`SkyPass::begin_frame`] writes [`atmosphere::AerialView::rows`] into.
+    ///
+    /// **Handed to [`crate::volumetric`]'s composite rather than bound here**,
+    /// on [`SkyPass::lut`]'s terms: nothing on the device writes it, both
+    /// sides only read, so there is no barrier for the graph to be told about
+    /// and the composite does not declare it.
+    ///
+    /// # Panics
+    ///
+    /// If `frame` is not a slot this was built with.
+    pub(crate) fn aerial(&self, frame: usize) -> BufferHandle {
+        self.aerials[frame]
     }
 
     /// The sky-view LUT this frame's slot holds — the buffer
@@ -339,6 +393,14 @@ impl SkyPass {
     #[cfg(all(test, not(target_arch = "wasm32")))]
     pub(crate) fn luts(&self) -> &[BufferHandle] {
         &self.luts
+    }
+
+    /// The aerial-perspective LUT buffers, one per frame in flight, in slot
+    /// order — [`SkyPass::luts`]' window onto the second ring, for the same
+    /// test.
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn aerials(&self) -> &[BufferHandle] {
+        &self.aerials
     }
 
     /// Adds the `sky` pass, drawing into `color` where `depth` is still the far
@@ -384,7 +446,12 @@ impl SkyPass {
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.layout);
-        for buffer in self.uniforms.into_iter().chain(self.luts) {
+        for buffer in self
+            .uniforms
+            .into_iter()
+            .chain(self.luts)
+            .chain(self.aerials)
+        {
             device.destroy_buffer(buffer);
         }
     }

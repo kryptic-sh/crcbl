@@ -181,6 +181,11 @@ mod harness;
 #[path = "render_e2e/still_pool.rs"]
 mod still_pool;
 
+// The atmosphere's aerial perspective against the host's `AerialView`, in a
+// file of its own on `still_pool`'s terms.
+#[path = "render_e2e/aerial.rs"]
+mod aerial;
+
 // `docs/plan/56-wind.md` rung W1's CPU–GPU agreement: the wind field's shader
 // against the authoritative CPU copy, at fixed points. Here rather than in a
 // suite of its own because this is the runner that goes round both a software

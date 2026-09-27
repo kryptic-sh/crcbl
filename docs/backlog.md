@@ -5574,79 +5574,50 @@ The record behind this — the argument, the options and the measurements — is
 `crcbl_shaders::atmosphere` and `crcbl_render::ForwardRenderer::set_atmosphere`
 landed with the rendering-gap survey's §8 sky. What they left:
 
-**DECIDED 2026-09-06 —** aerial perspective is Hillaire's third LUT — a 32×32×32
-camera froxel volume of transmittance and in-scatter — built by the atmosphere
-module and composed in `volumetric-composite` beside the local fog. That is the
-shipped form in Unreal's `SkyAtmosphere` and in Hillaire 2020, and Unreal
-likewise keeps the two volumes separate and composes them rather than merging
-them. The rest — ground black, the rough lobe's azimuth, the ramp share, Metal
-and D3D12 — stays as recorded.
+**Aerial perspective shipped 2026-09-27 as option (B)**, decided 2026-09-25:
+`crcbl_shaders::atmosphere::AerialView`, Hillaire's third LUT marched on the
+host beside the sky-view LUT in the same `SkyViewBuild` steps, uploaded by
+`crcbl_render::sky_pass` and composed under the local fog in
+`volumetric_composite.slang`. The record — the design as built, where it left
+the draft, and every number — is `docs/notes/rendering.md`'s "Aerial
+perspective, as built". Measured: the host build grew from 23.6 to 28.6 ms (the
+aerial LUT alone 3.97 ms) and a stripe from 1.44 to 1.76 ms; the lag behind a
+moving sun is unchanged at 16 frames. What it left:
 
-**Decided 2026-09-25: (B), the host-side `AerialView`**, the draft's own
-recommendation — a fifth of (A)'s work, no new pass or binding kind, and the
-industry's precomputed answer. Its lag behind a moving sun is unmeasured and is
-the first thing to measure once built. The original question: **OPEN 2026-09-07
-— where the third LUT is marched, and the user's call before it is built.** A
-read of the tree ahead of the slice found the decision's "camera froxel volume"
-pulling against a fact it was taken without: the atmosphere here is marched on
-the host. `crcbl_shaders::atmosphere`'s transmittance and multiple-scattering
-tables are `include_bytes!` host data that `TRANSMITTANCE_WIDTH`'s doc says is
-never uploaded, and the sky-view LUT is `SkyView::build` on the CPU, striped by
-`SkyViewBuild::step` and uploaded as a storage buffer that `sky.slang` filters
-by hand — `crcbl_render::sky_pass`'s header argues that a hardware filter's
-weights differ per rasteriser and the goldens are compared across four. A camera
-froxel volume is camera-dependent, so it is rebuilt every frame, so it is a GPU
-pass — which means uploading both tables, spelling `sample_transmittance`,
-`sample_multiscatter`, both phase functions and the three density profiles a
-second time in Slang (each is held to the host by a source-text test today), and
-either the renderer's first 3D storage image on four backends (no `.slang` in
-the tree declares an `RWTexture`; the froxel ladder reserves that first for its
-rung 3, under _Froxel rungs 3 and 4_ below) or a 32768-entry storage buffer with
-the trilinear read spelled out.
-
-- **(A) As decided:** the camera froxel volume, as a compute pass `aerial-march`
-  writing a storage buffer (not a 3D image, for the filter argument above).
-  Hillaire's and Unreal's shape exactly. Cost: the Slang re-spelling of the
-  march and the two table uploads, a new shader and pass on four backends and
-  the browser, and the pricing rows for all of them. The volume is per frame, so
-  it never lags the sun.
-- **(B) The same LUT on the host:** an `AerialView` beside `SkyView` — 32×32×32
-  over the sky-view LUT's own two direction axes and a linear distance axis to
-  `AERIAL_MAX_DISTANCE`, marched by the existing `march` split to emit
-  transmittance and radiance at each of 32 checkpoints instead of discarding the
-  transmittance at the end, striped by `SkyViewBuild` alongside the sky-view
-  rows, uploaded as a fourth 512 KB ring in `sky_pass` and read by
-  `volumetric_composite.slang` with the trilinear blend spelled out. Aerial
-  perspective is a function of direction and distance from the eye and not of
-  where the eye looks, so the parameterisation loses nothing at scene scale;
-  what it loses is altitude, which the sky-view LUT already ignores between
-  rebuilds. No new pass, binding kind, shader file or browser work. It inherits
-  the striped march's lag behind a moving sun, which is unmeasured (below).
-  Estimated at a fifth of (A)'s work; the host build is estimated at about 4 ms
-  per sun move by scaling `SkyView::build`'s measured 24.57 ms by sample count —
-  an estimate, not a measurement.
-
-Everything else in the draft is common to both — Hillaire's
-`float4(in-scatter, mean transmittance)` stored as the transmittance itself so
-it composes with `volumetric_composite.slang`'s existing `scene * a + rgb`; a
-`km_per_unit` on `Atmosphere` because the engine's unit is the metre and every
-coefficient is per kilometre, which also says the plaza's 25 m is an optical
-depth of 8e-4 and no sundial golden should move; the air composed first and the
-local fog over it; the sky pixel excluded because `sky.slang` already integrates
-the whole ray; a five-assertion render_e2e test whose fixture turns
-`km_per_unit` up so a 100-unit plate spans tens of kilometres. The
-recommendation is **(B)**: it is the industry's answer (Bruneton's precomputed
-scattering yields aerial perspective from the same tables; Hillaire's froxels
-are screen-shaped because a GPU pass is, not because the physics asks) and it
-lands none of (A)'s firsts. The rest of the draft is `docs/notes/rendering.md`'s
-"Aerial perspective, drafted and not built"; nothing is built until this is
-answered.
+- **The device cost is unpriced.** Plan 43's protocol —
+  `apps/lantern --headless --frames 400 --size 1920x1080`, medians of three p50s
+  off `PassStats`, with a temporary `set_atmosphere` in lantern — was not run,
+  so what the composite costs on an atmosphere frame without the fog effect, and
+  the frame with and without, are unknown. The browser's per-demo slowdown table
+  in `docs/notes/browser.md` has not moved either.
+- **The `plaza-*` goldens moved, inside their tolerances.** The draft predicted
+  they would not. On this machine's RX 7900 XTX every sundial frame changed —
+  `plaza-disc` and `plaza-pcss` from a largest delta of 20 and 19 to 33, the
+  1280×960 comparison-seam frame by up to 45 levels against the parent commit —
+  and `render_e2e`'s `atmosphere_mirror` went from 7 differing pixels to 468.
+  Nothing was re-blessed and every suite is green. The seam frame's 45 was not
+  investigated; the goldens have not been re-run on lavapipe, which is where
+  they were blessed.
+- **Coarse at large scales.** One sample per slice, and the slices are world
+  units: at 0.2 km per unit the read is 25% off a direct march inside the first
+  slice and along the zenith, against 0.19% at the metre. Sub-steps per slice,
+  or a far end in kilometres rather than world units, would fix it; nothing in
+  the tree draws at such a scale except the fixture.
+- **Water and reflections are not under the air.** The water surface draws after
+  the composite, and the SSR blur adds its reflection after it, so neither gets
+  the air in front of it — the latter the same gap the local fog has.
+- **Chromatic extinction is lost** to the scalar mean transmittance, Hillaire's
+  own compromise: a far surface under a low sun is not reddened.
+- **Only one adapter has drawn it.** The fixture and the three changed shaders
+  (`volumetric`, `volumetric_composite`, `water`) have run on the AMD
+  proprietary Vulkan driver alone; lavapipe, Metal, D3D12 and the browser are
+  unverified.
 
 The demo half of that decision is done: **`apps/sundial` draws under the
 atmosphere**, `crcbl_sundial::sun::Sky::atmosphere` is where its sun becomes
 one, five of its goldens were re-blessed on lavapipe and the suite is green on
 both adapters and in the browser gate. It is the only app that drives one, so it
-is where the third LUT will be looked at.
+is where the third LUT is looked at.
 
 The sun disc half is done too — `sky.slang`'s `sun_disc` and
 `crcbl_shaders::atmosphere::SkyView::disc_radiance`, `docs/notes/rendering.md`'s

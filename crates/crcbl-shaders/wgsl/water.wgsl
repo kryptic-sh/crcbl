@@ -83,6 +83,7 @@ struct VolumetricParams_std140_0
     @align(4) pad0_0 : u32,
     @align(16) light_view_proj_1 : _Array_std140_matrixx3Cfloatx2C4x2C4x3E14_0,
     @align(16) shadow_atlas_rect_1 : array<vec4<f32>, i32(16)>,
+    @align(16) aerial_params_0 : vec4<f32>,
 };
 
 @binding(3) @group(0) var<uniform> params_0 : VolumetricParams_std140_0;

@@ -673,11 +673,15 @@ impl Default for Sky {
 /// # What it costs
 ///
 /// The sky-view LUT is marched on the **host** — see
-/// [`crcbl_shaders::atmosphere::SkyView::build`] — so a frame's device cost is
-/// four buffer loads and a blend, the same as the gradient's. What is not free
+/// [`crcbl_shaders::atmosphere::SkyView::build`] — so the sky's device cost is
+/// four buffer loads and a blend, the same as the gradient's. The air in front
+/// of the scene is one more full-screen pass, `volumetric-composite`, which an
+/// atmosphere frame runs whether or not the fog effect is on: one trilinear
+/// read per covered pixel and no march. What is not free
 /// is changing this value: the first [`ForwardRenderer::begin_frame`] after an
-/// atmosphere is set marches the whole LUT, which is tens of milliseconds of
-/// CPU. Every later move of the sun is marched
+/// atmosphere is set marches the whole LUT and the aerial-perspective LUT
+/// beside it, which is tens of milliseconds of CPU. Every later move of the sun
+/// — or change of [`Self::km_per_unit`] — is marched
 /// [`crcbl_shaders::atmosphere::SKY_VIEW_BUILD_ROWS`] rows per frame with the
 /// last finished LUT still drawn, so a scene that sweeps the sun pays a stripe
 /// per frame and sees a sky that lags — `ForwardRenderer::refresh_sky_view`
@@ -709,11 +713,24 @@ pub struct Atmosphere {
     /// units. A scene at ground level passes zero; the LUT is built for one
     /// height per sun, which is Hillaire's own approximation.
     pub altitude_km: f32,
+    /// How many kilometres one world unit is — the scale the air in front of
+    /// the scene is marched at.
+    ///
+    /// **Aerial perspective**: a frame drawn under an atmosphere puts the air
+    /// between the eye and every surface in front of that surface, out of
+    /// [`crcbl_shaders::atmosphere::AerialView`], and how much air a surface
+    /// fifty units away has in front of it is this times fifty kilometres.
+    /// The engine's unit is the metre, so a scene laid out in metres passes
+    /// [`crcbl_shaders::atmosphere::KM_PER_METRE`] — which is what
+    /// [`Self::NOON`] carries — and its air is as thin as the physics says: a
+    /// plaza's worth of it is an optical depth under a thousandth. A scene
+    /// built at another scale passes its own, and zero is no air at all.
+    pub km_per_unit: f32,
 }
 
 impl Atmosphere {
     /// A sun overhead at sea level, normalised so its illuminance is one in
-    /// every channel.
+    /// every channel, over a scene laid out in metres.
     ///
     /// The fixture the render tests build from, and the value a caller starts
     /// from before pointing the sun somewhere and scaling it.
@@ -721,6 +738,7 @@ impl Atmosphere {
         sun_direction: Vec3::Y,
         sun_illuminance: Vec3::ONE,
         altitude_km: 0.0,
+        km_per_unit: crcbl_shaders::atmosphere::KM_PER_METRE,
     };
 
     /// This atmosphere in the form [`crcbl_shaders::atmosphere`] marches.
@@ -742,6 +760,7 @@ impl Atmosphere {
             sun_direction: direction.to_array(),
             sun_illuminance: self.sun_illuminance.to_array(),
             altitude_km: self.altitude_km,
+            km_per_unit: self.km_per_unit,
         }
     }
 }
