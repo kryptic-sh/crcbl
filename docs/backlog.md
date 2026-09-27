@@ -3267,12 +3267,6 @@ scene menu with the gaps below.
   parsers' error type (`style::property::Invalid`) carries no reason to word it
   with. Only puppet and sparks were measured (about 1 MB raw, 267 KB gzipped
   each, 2026-09-27); the other demos were not.
-- **`crcbl`'s default-feature rustdoc does not build, and CI cannot see it.**
-  `RUSTDOCFLAGS="-D warnings" cargo doc -p crcbl --no-deps` fails on `lib.rs`'s
-  links to `scene` and `scene::scn::chunk_of`, which exist only with the `scene`
-  feature; CI documents with `--all-features` alone. Found 2026-09-27 while
-  checking the `parsed-font` gate, whose own links were made to build both ways.
-  Fix the two links, then add a default-feature doc step.
 - **Light-on-dark text reads heavy** under linear-light blending; a contrast
   curve built without `pow` (a table from a rational fit) needs a decision.
   **Decided 2026-09-25: no curve for now.** It would move every text golden, and

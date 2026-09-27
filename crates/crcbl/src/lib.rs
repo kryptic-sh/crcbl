@@ -83,7 +83,7 @@
 /// (both owed in `docs/backlog.md`), and GPU skinning is [`render`]'s. It
 /// depends on `glam` alone, so re-exporting it adds no crate to a game's graph
 /// beyond the one; in particular it does **not** drag in the glTF importer,
-/// which stays behind [`scene`]'s feature where it belongs.
+/// which stays behind `crcbl::scene`'s feature where it belongs.
 pub use crcbl_anim as anim;
 /// [`crcbl-assets`](crcbl_assets): the IO seam — [`AssetSource`], the
 /// [`DirSource`] over a directory, and the registry above them.
@@ -334,7 +334,7 @@ pub use glam as math;
 pub use ron;
 
 /// [`serde`]: the traits a component derives to be a row of a `.scn/` chunk
-/// file, which [`scene::scn::chunk_of`] bounds
+/// file, which `crcbl::scene::scn::chunk_of` bounds
 /// its component type by.
 ///
 /// Re-exported for [`math`]'s reason: the derive has to name the one `serde`

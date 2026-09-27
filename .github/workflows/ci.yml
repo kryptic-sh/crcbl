@@ -311,6 +311,14 @@ jobs:
       - run:
           cargo doc --locked -p crcbl-scene --no-default-features --no-deps
           --document-private-items
+      # **`crcbl`, `crcbl-ui` and `crcbl-render` with default features**, for
+      # the same reason: `scene` and `parsed-font` are off there, and a link to
+      # what they gate breaks only in that build. Named packages alone, because
+      # `--workspace` unifies both features back on through `crcbl-cli`. The
+      # first run of this found two such links in `crcbl`'s `lib.rs`.
+      - run:
+          cargo doc --locked -p crcbl -p crcbl-ui -p crcbl-render --no-deps
+          --document-private-items
       # **The one target the two passes above cannot reach.**
       # `crates/crcbl-cli`'s binary sets `doc = false`, because it and the
       # `crcbl` umbrella library would both write `target/doc/crcbl/index.html`
