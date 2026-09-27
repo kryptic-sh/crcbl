@@ -461,6 +461,8 @@ pub fn with_shell<S: Shell + ?Sized>(
             debug_overlay: options.debug_overlay_visible(),
             windowed: !options.headless,
             limit: options.limit,
+            // Sandbox parses its own flags and offers no `--exec`.
+            exec: Vec::new(),
         },
     );
     if steam_pads.is_some() {

@@ -103,6 +103,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.
     --camera <C>         Which camera to start on: 'fixed' (the dolly's start
                          pose, the one the goldens are taken from, held still),
                          'dolly' (that same run down the face and back, on the

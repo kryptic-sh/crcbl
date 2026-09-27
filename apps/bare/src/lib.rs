@@ -380,6 +380,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'

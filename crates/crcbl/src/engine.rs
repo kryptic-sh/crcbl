@@ -6417,7 +6417,7 @@ pub trait HostedGame: Sized {
 }
 
 /// The parts of a loop that come from the command line rather than the game.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LoopConfig {
     /// The fixed timestep, in hertz.
     pub tick_hz: u32,
@@ -6441,6 +6441,15 @@ pub struct LoopConfig {
     /// the loop runs at. A player who capped the rate lower keeps their cap and
     /// one who wrote nothing changes nothing; see [`FrameLimit::clamped_to`].
     pub limit: FrameLimit,
+    /// Console lines [`Loop::new`] runs before the first frame, after the
+    /// player's `autoexec.cfg` — [`Common::exec`](crate::args::Common::exec),
+    /// which says why they exist.
+    ///
+    /// Run whatever this run's [`SettingsSource`] is, headless included: the
+    /// autoexec is gated on a settings file because nobody asked for it, and
+    /// these were asked for by name. A browser build has no command line and
+    /// passes none.
+    pub exec: Vec<String>,
 }
 
 /// The frame, owned by the engine.
@@ -6697,6 +6706,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // run with nothing to read runs nothing and says nothing; see
         // `console_config::run_autoexec`.
         console.run_autoexec();
+        // **Then the command line's `--exec` lines**, after the file so that
+        // what was typed for this run wins over what the player saved, as it
+        // does in Source — and past the gate above, because a headless run
+        // reads no autoexec and these are the only lines it can be given.
+        console.run_exec(&config.exec);
         Self {
             shell: booted.shell,
             window: booted.window,
@@ -13870,6 +13884,7 @@ mod tests {
             debug_overlay: false,
             windowed: false,
             limit: FrameLimit::fps(FrameLimit::DEFAULT_FPS),
+            exec: Vec::new(),
         }
     }
 
@@ -13921,6 +13936,46 @@ mod tests {
             vec![(800, 450)],
             "the frame after a resize has to run at the new extent; running it at (640, 480)              means the resize landed after the frame it belongs to"
         );
+    }
+
+    /// **`--exec` lines run in [`Loop::new`], on a headless run, before the
+    /// first frame.**
+    ///
+    /// The headless half is the point: a headless run reads no settings file
+    /// and so runs no autoexec, and these lines are the only way such a run —
+    /// a frame-budget measurement — can set a console variable. So the check
+    /// runs over [`hosted_config`], which is headless, and reads the console
+    /// log with no frame stepped: a loop that ran them lazily on its first
+    /// frame, or not at all without a settings file, fails here.
+    #[test]
+    fn exec_lines_run_on_a_headless_run_before_the_first_frame() {
+        let logs = crcbl_core::log::capture();
+        let mut shell = crcbl_shell::HeadlessShell::new();
+        let window = shell
+            .create_window(&crcbl_shell::WindowDesc::default())
+            .expect("headless always creates a window");
+        let engine: Loop<_, FakeGame> = Loop::new(
+            Booted {
+                shell: Box::new(shell),
+                window,
+                gpu: FakeGpu::at((640, 480)),
+                clock_source: Clock::new(true),
+                events: 0,
+            },
+            FakeGame::default(),
+            LoopConfig {
+                exec: vec!["echo from the command line".to_owned()],
+                ..hosted_config(Some(1))
+            },
+        );
+        assert!(engine.game.draws.is_empty(), "no frame has run yet");
+        let printed: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.target == crcbl_core::log::console::CONSOLE_TARGET)
+            .map(|record| record.message)
+            .collect();
+        assert_eq!(printed, ["from the command line", "--exec: 1 line"]);
     }
 
     /// A loop hosting [`FakeGame`] on a headless shell.

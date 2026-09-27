@@ -868,10 +868,30 @@ impl Console {
     /// Everything the file printed does reach the log, faults included: a
     /// start-up that half-applied says so in the panel and on stderr.
     pub fn run_autoexec(&mut self) -> crate::console_config::Autoexec {
+        self.run_unechoed(crate::console_config::run_autoexec)
+    }
+
+    /// Runs the command line's `--exec` lines through this console, in order.
+    ///
+    /// [`Loop::new`](crate::engine::Loop::new) calls this once, straight after
+    /// [`run_autoexec`](Self::run_autoexec) and before the first frame, on
+    /// every run: `console_config::run_exec` is the half that runs them, and
+    /// this is [`run_autoexec`](Self::run_autoexec)'s console half again — the
+    /// same registry, host and log, no echoed prompt — so a variable a line
+    /// sets is set for the run.
+    pub fn run_exec(&mut self, lines: &[String]) {
+        self.run_unechoed(|cx| crate::console_config::run_exec(cx, lines));
+    }
+
+    /// Runs `run` over this console's registry and host with no echoed
+    /// prompt, then prints what it printed into the log and honours a `clear`
+    /// it asked for: the boot-time half [`run_autoexec`](Self::run_autoexec)
+    /// and [`run_exec`](Self::run_exec) share.
+    fn run_unechoed<R>(&mut self, run: impl FnOnce(&mut Context<'_>) -> R) -> R {
         let (did, lines, clear) = {
             let Self { registry, host, .. } = self;
             let mut cx = Context::new(registry, host);
-            let did = crate::console_config::run_autoexec(&mut cx);
+            let did = run(&mut cx);
             let clear = cx.clear_requested();
             (did, cx.into_lines(), clear)
         };
@@ -1084,5 +1104,39 @@ mod tests {
             .map(|record| record.message)
             .collect();
         assert!(printed.is_empty(), "{printed:?}");
+    }
+
+    /// **The same console that ran no autoexec still runs `--exec`**, and
+    /// through its log.
+    ///
+    /// The pair `Loop::new` makes on a headless run: the autoexec's gate is
+    /// shut, and the command line's lines must not have been put behind it.
+    /// Asserted over a real [`Console`] because `run_exec` here is the only way
+    /// `Loop::new` reaches `console_config::run_exec`, so a method that
+    /// forwarded nothing, or printed into a context nobody reads, is caught
+    /// here and nowhere else.
+    #[test]
+    fn the_console_runs_exec_lines_for_a_run_with_no_settings_file() {
+        let logs = crcbl_core::log::capture();
+        let tables: Vec<Table> = engine_tables()
+            .into_iter()
+            .map(|(_, table)| table)
+            .collect();
+        let host = ConsoleHost::new(crcbl_store::settings::SettingsStack::new());
+        let mut console = Console::new(&tables, host);
+
+        assert_eq!(
+            console.run_autoexec(),
+            crate::console_config::Autoexec::NoSettingsFile
+        );
+        console.run_exec(&["echo set before the first frame".to_owned()]);
+
+        let printed: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.target == crcbl_core::log::console::CONSOLE_TARGET)
+            .map(|record| record.message)
+            .collect();
+        assert_eq!(printed, ["set before the first frame", "--exec: 1 line"]);
     }
 }

@@ -57,6 +57,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.
     --seed <N>           Population seed. The same seed is the same ladder.
     --players <N>        How many synthetic players queue against each other
                          (default 64, and at least two — a matchmaker with one

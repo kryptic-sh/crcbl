@@ -318,6 +318,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`--exec <LINE>`: console lines from the command line, run before the first
+  frame on every run, `--headless` included.** Repeatable and run in the order
+  given, straight after the player's `autoexec.cfg` so the command line wins
+  over the file, through the same path the autoexec takes: a line that faults
+  prints `--exec:2: <what went wrong>` and the rest still run, and the run logs
+  `--exec: 3 lines, 1 of them failed`. It exists because a headless run reads no
+  settings file and so no autoexec, which left a frame-budget measurement no way
+  to set a console variable — `shard --headless --exec "r_occlusion_cull 1"` is
+  now one. Every sample built on `crcbl::args::Common` takes it (`Common::exec`,
+  listed in `COMMON_OPTIONS_HELP`); a value holding a line break is refused.
+  `LoopConfig` carries the lines as `exec: Vec<String>` and is no longer `Copy`,
+  so a hand-built `LoopConfig` names the field — `apps/sandbox` passes an empty
+  list.
+
 - **`crcbl_scene::QuadMesh`: a flat-shaded mesh built quad by quad**, for
   geometry written out by hand. Unshared corners, faces counter-clockwise from
   their normal's side and checked to be (a face wound the other way panics

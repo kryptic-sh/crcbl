@@ -65,7 +65,11 @@ pub const COMMON_OPTIONS_HELP: &str =
                          this rarely fires.
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
-                         which is what makes a scale measurement reproducible.";
+                         which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.";
 
 /// The `--screenshot` line, for the samples that have wired it up.
 ///
@@ -366,6 +370,27 @@ pub struct Common {
     /// 1920x1080` produce a 1920 × 1080 headless offscreen ring on every
     /// machine; on a HiDPI display the compositor scales the request.
     pub size: Option<crcbl_shell::PhysicalSize>,
+    /// Console lines to run before the first frame, one per `--exec`, in the
+    /// order they were given.
+    ///
+    /// **Why a flag and not only the player's `autoexec.cfg`**: a headless run
+    /// reads no settings file, and so no autoexec either —
+    /// [`SettingsSource::for_run`](crate::engine::SettingsSource::for_run) is
+    /// the rule — which left a frame-budget measurement no way to set a console
+    /// variable at all. These run after the autoexec, so the command line wins
+    /// over the file as it does in Source, and on every run whatever its
+    /// settings source: they were asked for by name, and a golden run that
+    /// passes none runs none.
+    ///
+    /// **Spelled `--exec` rather than Source's `+name value`** because Steam
+    /// launches a game with `+connect_lobby <id>` on this same command line
+    /// (see `crcbl-steam`'s `apps`), and a `+` console grammar would claim
+    /// that argument before the lobby join could.
+    ///
+    /// One entry is one line: [`consume`](Self::consume) refuses a value that
+    /// holds a line break, so a fault's `--exec:2` label names the second flag
+    /// rather than the second line of some flag's value.
+    pub exec: Vec<String>,
 }
 
 impl Common {
@@ -390,6 +415,7 @@ impl Common {
             #[cfg(not(target_arch = "wasm32"))]
             screenshot: None,
             size: None,
+            exec: Vec::new(),
         }
     }
 
@@ -454,6 +480,7 @@ impl Common {
             // otherwise sleep its way through its frame budget.
             windowed: !self.headless,
             limit: self.limit,
+            exec: self.exec.clone(),
         }
     }
 
@@ -572,6 +599,20 @@ impl Common {
                 Ok(size) => self.size = Some(size),
                 Err(message) => return Consumed::Bad(message),
             },
+            "--exec" => {
+                let Some(line) = rest.next() else {
+                    return Consumed::Bad("--exec needs a console line".into());
+                };
+                // Refused rather than split: the lines are run as one text, and
+                // a break inside a value would shift every later `--exec:N`
+                // label off the flag it names.
+                if line.contains(['\n', '\r']) {
+                    return Consumed::Bad(format!(
+                        "--exec takes one console line, not several: {line:?}"
+                    ));
+                }
+                self.exec.push(line);
+            }
             // `headless` is set here rather than checked after the parse,
             // because a check would have to run somewhere every game
             // remembered to put it and this cannot be forgotten. The two orders
@@ -942,6 +983,42 @@ mod tests {
         assert!(rejected(&["--pacing"]).contains("--pacing"));
     }
 
+    /// **`--exec` is repeatable, keeps its order, and reaches the loop.**
+    ///
+    /// Order is the observable that matters: `--exec "r_x 0" --exec "r_x 1"` is
+    /// a run that ends with the variable on, and a parse that kept only the
+    /// last value, or sorted them, would still pass a check of the count.
+    #[test]
+    fn the_exec_flag_is_repeatable_and_keeps_its_order_into_the_loop() {
+        let common = parsed(&[
+            "--exec",
+            "r_occlusion_cull 1",
+            "--headless",
+            "--exec",
+            "echo second",
+        ]);
+        assert_eq!(common.exec, ["r_occlusion_cull 1", "echo second"]);
+        assert_eq!(
+            common.loop_config().exec,
+            common.exec,
+            "the lines have to reach the loop that runs them, not stop at the parse",
+        );
+        assert!(
+            Common::new(60).exec.is_empty(),
+            "a run that passed no --exec runs no line"
+        );
+    }
+
+    /// A missing value is refused in the parser's own words, and so is a value
+    /// holding a line break — which would otherwise run as two lines under
+    /// labels that no longer name the flag they came from.
+    #[test]
+    fn the_exec_flag_refuses_a_missing_line_and_a_line_break() {
+        assert!(rejected(&["--exec"]).contains("--exec"));
+        let refused = rejected(&["--exec", "echo a\necho b"]);
+        assert!(refused.contains("one console line"), "{refused}");
+    }
+
     /// Zero is unlimited, and a rate too large for the field is refused rather
     /// than truncated into a plausible one.
     #[test]
@@ -1257,6 +1334,7 @@ mod tests {
             "--pacing",
             "--fps",
             "--size",
+            "--exec",
             "--debug-overlay",
             "--no-debug-overlay",
             "-h",

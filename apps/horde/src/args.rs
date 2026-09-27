@@ -50,6 +50,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.
     --seed <N>           Run seed. The same seed is the same horde.
     --max-enemies <N>    Ceiling on live enemies (default 1500). The plan's
                          target is 10000; raising it is what the scale

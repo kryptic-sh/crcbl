@@ -149,6 +149,10 @@ OPTIONS:
     --size <WxH>         Window size in pixels, WxH (default 960x720). The
                          headless offscreen ring renders at exactly this extent,
                          which is what makes a scale measurement reproducible.
+    --exec <LINE>        Run a console line before the first frame, after the
+                         player's autoexec.cfg. Repeatable; the lines run in
+                         the order given. The one way to set a console variable
+                         on a --headless run, which reads no autoexec.cfg.
     --screenshot <PATH>  Write the run's last presented frame to PATH as a PNG.
                          Turns --headless on: the frame is read back off the
                          offscreen ring, which is the only surface every backend

@@ -66,6 +66,14 @@
 //! `autoexec.cfg` — which is almost every machine — says nothing at all. What it
 //! does *not* swallow is a file that is there and would not run: that is
 //! printed, and the boot carries on.
+//!
+//! # The lines the command line brings
+//!
+//! That gate leaves a headless run — the frame-budget measurement this file
+//! exists for — with no autoexec at all, so the command line's `--exec` lines
+//! (`crate::args::Common::exec`) run straight after it through `run_exec`:
+//! the same `run_text`, under [`EXEC_LABEL`], on every run that passed any.
+//! After the file, so what was typed for this run wins over what was saved.
 
 use std::cell::RefCell;
 use std::path::Path;
@@ -87,6 +95,13 @@ pub const CONFIG_SUFFIX: &str = ".cfg";
 /// `config` reads from — so it is a config file like any other and
 /// `config autoexec` runs the same lines again by hand. See `run_autoexec`.
 pub const AUTOEXEC: &str = "autoexec";
+
+/// The name `--exec` lines run under, in place of a file's.
+///
+/// So a fault reads `--exec:2: <what went wrong>` — the second `--exec` on the
+/// command line, the way `name.cfg:2` is a file's second line — and the
+/// summary `run_text` ends with names the flag the lines came from.
+pub const EXEC_LABEL: &str = "--exec";
 
 /// How many config files may be running at once.
 ///
@@ -378,6 +393,29 @@ pub(crate) fn run_autoexec(cx: &mut Context<'_>) -> Autoexec {
     let file = format!("{AUTOEXEC}{CONFIG_SUFFIX}");
     let read = read_file(&app_name, &file);
     run_read(cx, &file, read)
+}
+
+/// Run the command line's `--exec` lines, in order, as one text.
+///
+/// [`Loop::new`](crate::engine::Loop::new) calls this through
+/// [`Console::run_exec`](crate::debug_console::Console::run_exec) straight after
+/// [`run_autoexec`], and **with no gate**: the autoexec's is there because
+/// nobody asked for that file, and every one of these lines was asked for.
+/// Joined into a text so they go through [`run_text`] like a file's — one
+/// execution path, one fault label, one summary line — and the parser refuses
+/// a value holding a line break, so line `N` of the text is the `N`th flag.
+///
+/// No lines is silence rather than `run_text`'s "holds nothing to run": a run
+/// that passed no `--exec` did not ask for anything to be reported.
+pub(crate) fn run_exec(cx: &mut Context<'_>, lines: &[String]) {
+    if lines.is_empty() {
+        return;
+    }
+    // The nesting guard is the only way this faults, and nothing is running
+    // at boot — but a flag that quietly ran nothing is the failure to print.
+    if let Err(fault) = run_text(cx, EXEC_LABEL, &lines.join("\n")) {
+        cx.print(fault.to_string());
+    }
 }
 
 /// What the boot does with whatever the read of `file` answered.
@@ -1010,5 +1048,53 @@ mod tests {
             fault.message(),
             "`video.cfg` could not be read: path not found: video.cfg"
         );
+    }
+
+    /// Run [`run_exec`] over `lines` on the fixture host, answering what the
+    /// host ended up holding and what was printed.
+    fn exec(lines: &[&str]) -> (Host, Vec<String>) {
+        let registry = registry();
+        let mut host = Host::default();
+        let mut cx = Context::new(&registry, &mut host);
+        let lines: Vec<String> = lines.iter().map(|line| (*line).to_owned()).collect();
+        run_exec(&mut cx, &lines);
+        let printed = cx.into_lines();
+        (host, printed)
+    }
+
+    /// **`--exec` lines run in order, land on the host, and a line that faults
+    /// is named by its flag and stepped over.**
+    ///
+    /// The host is the observable for "ran" — a variable the second `gain`
+    /// set reads back, which it could not if the lines ran on a scratch
+    /// context or stopped at the fault — and the exact printed lines are the
+    /// one for the label: `--exec:2` is the second flag, as `name.cfg:2` is a
+    /// file's second line.
+    #[test]
+    fn exec_lines_run_in_order_and_a_fault_is_named_and_stepped_over() {
+        let (host, printed) = exec(&["gain 3", "no_such_command", "gain 7"]);
+        assert_eq!(
+            host,
+            Host { gain: 7 },
+            "the line after the fault ran, and ran after the one before it",
+        );
+        assert_eq!(printed.len(), 4, "{printed:?}");
+        assert_eq!(printed[0], "gain = 3");
+        assert!(
+            printed[1].starts_with("--exec:2: ") && printed[1].contains("unknown command"),
+            "{printed:?}"
+        );
+        assert_eq!(printed[2], "gain = 7");
+        assert_eq!(printed[3], "--exec: 3 lines, 1 of them failed");
+    }
+
+    /// **A run that passed no `--exec` prints nothing.** Every golden run is
+    /// one, and `run_text`'s "holds nothing to run" in each of their logs would
+    /// be a report of a request nobody made.
+    #[test]
+    fn no_exec_lines_is_silence() {
+        let (host, printed) = exec(&[]);
+        assert!(printed.is_empty(), "{printed:?}");
+        assert_eq!(host, Host::default());
     }
 }
