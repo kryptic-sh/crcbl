@@ -304,6 +304,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_scene::QuadMesh`: a flat-shaded mesh built quad by quad**, for
+  geometry written out by hand. Unshared corners, faces counter-clockwise from
+  their normal's side and checked to be (a face wound the other way panics
+  naming its corners), axis quads by `Facing`, `box_outward` and a turned
+  `box_frame`, per-corner normals and triangles for curved surfaces, and
+  `finish(label)` clustering through `build_meshlets` into a `MeshDesc`.
+  `QuadMesh::textured` carries texture coordinates and `untextured` a degenerate
+  range; `corners()` reads back what was built. Alcove, lantern, sundial and
+  tide now use it in place of four copies of their own, and every mesh they
+  build is byte-for-byte what it was.
+
 - **Contact shadows have a settings key, and the low quality tier turns them
   off.** `[engine.video] contact_shadows` (`crcbl::settings::TIER_VIDEO_KEYS`)
   is read, written, catalogued and bound to the console like the other effect

@@ -1,7 +1,7 @@
 //! The room, as data an application hands the engine.
 //!
 //! ```text
-//!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
+//!  QuadMesh ────▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
 //!  PageDesc (floor + monitor) ─────────────────────────┘
 //!  place() ──▶ add_instance ×N
@@ -88,16 +88,13 @@
 //! `POST_MIN` corner post, and [`SPOT_LIT`] and [`SPOT_SHADOWED`] are the pair
 //! of points on one wall its shadow divides.
 
-use std::borrow::Cow;
-
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
-    Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, Light, MeshDesc, PageDesc, PageKind, PointLight, Projection, RenderEffects,
-    SceneDesc, SpotLight,
+    Camera, Capacities, DirectionalLight, ForwardRenderer, InstanceDesc, InstancePoolError, Light,
+    MeshDesc, PageDesc, PageKind, PointLight, Projection, RenderEffects, SceneDesc, SpotLight,
 };
-use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
-use crcbl::shaders::vertex::UvRange;
+use crcbl::scene::QuadMesh;
+use crcbl::shaders::mesh::GpuMaterial;
 
 // ---------------------------------------------------------------------------
 // The room's dimensions
@@ -624,7 +621,7 @@ pub const MONITOR_LAYER: u32 = 1;
 
 /// The walls', ceiling's and plinth's row: white plaster, and **row 0**.
 ///
-/// Row 0 is what [`mesh::GpuInstance::default`] names, so it is what an object
+/// Row 0 is what [`mesh::GpuInstance::default`](crcbl::shaders::mesh::GpuInstance::default) names, so it is what an object
 /// placed without a material id shades through — see
 /// [`SceneDesc::materials`]. Everything in this room names its row explicitly,
 /// and the row that would be inherited by omission is still the one a reader
@@ -757,214 +754,35 @@ pub const MONITOR_SCREEN_MESH: usize = 10;
 /// The corner post standing in the downlight's cone.
 pub const POST_MESH: usize = 11;
 
-/// Which way a quad faces along the axis its plane is perpendicular to.
+/// The monitor's screen: a `+Z`-facing quad in the plane `z`, with `v`
+/// running **down** the wall.
 ///
-/// The engine culls back faces and calls counter-clockwise front, so a quad's
-/// corner order decides whether it is a wall or a hole. Naming the direction
-/// rather than writing four coordinates per quad is what keeps that decision in
-/// one place: [`MeshBuilder`]'s three quad methods are the only code in this
-/// sample that knows the winding rule.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Facing {
-    /// The face's normal points along `+axis`.
-    Positive,
-    /// The face's normal points along `-axis`.
-    Negative,
-}
-
-/// A triangle list under construction, and the positions `build_meshlets` needs
-/// beside it.
+/// The one place in this sample that cares which way up a texture is. Every
+/// other layer of the page is a pattern that reads the same either way; this
+/// one is a framebuffer copied straight out of a render target, and a frame
+/// pasted on upside down is a perfectly plausible picture of a room.
 ///
-/// Four vertices per quad, never shared with a neighbour, for the reason
-/// `crcbl_shaders::mesh::OPEN_BOX_VERTEX_COUNT` records: a shared corner gets an
-/// averaged normal, which is the opposite of what a flat face wants.
-#[derive(Debug, Default)]
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    /// The vertices as authored — floats, because a `unorm16` UV lane needs the
-    /// range of every coordinate the mesh carries and a builder is not finished
-    /// being handed coordinates until [`MeshBuilder::finish`].
-    vertices: Vec<RawVertex>,
-    indices: Vec<u32>,
-}
-
-/// One vertex on the way to a `crcbl::shaders::mesh::MeshVertex`.
-#[derive(Clone, Copy, Debug)]
-struct RawVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-    uv: [f32; 2],
-}
-
-/// The texture coordinates of a quad's four corners, in the order the quad
-/// methods below emit them — `crcbl_shaders::mesh`'s `QUAD_UV`, which is not
-/// public, spelled once here.
-const QUAD_UV: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-
-impl MeshBuilder {
-    /// Appends one quad, given its corners already in counter-clockwise order
-    /// seen from `normal`'s side, and two triangles over them.
-    ///
-    /// **The one place the winding rule lives.** `0 1 2, 0 2 3` preserves the
-    /// corner order, exactly as `crcbl_shaders::mesh::cube_indices` does.
-    fn quad(&mut self, corners: [Vec3; 4], normal: Vec3) {
-        self.quad_uv(corners, normal, QUAD_UV);
-    }
-
-    /// [`MeshBuilder::quad`] with the texture coordinates written out.
-    ///
-    /// One surface in this room needs its own: [`QUAD_UV`] pairs `v = 0` with
-    /// the corner the quad methods emit first, which is the one at the minimum
-    /// `y` — right for a pattern, upside down for a **frame**, whose first row
-    /// is its top. See [`MeshBuilder::screen_quad`].
-    fn quad_uv(&mut self, corners: [Vec3; 4], normal: Vec3, uvs: [[f32; 2]; 4]) {
-        let base = u32::try_from(self.vertices.len())
-            .unwrap_or_else(|_| unreachable!("a room of a few hundred vertices"));
-        for (corner, uv) in corners.iter().zip(&uvs) {
-            self.positions.push([corner.x, corner.y, corner.z]);
-            self.vertices.push(RawVertex {
-                position: [corner.x, corner.y, corner.z],
-                normal: [normal.x, normal.y, normal.z],
-                uv: *uv,
-            });
-        }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    /// A quad in the plane `x`, spanning `y` and `z`.
-    fn quad_x(&mut self, x: f32, facing: Facing, y: (f32, f32), z: (f32, f32)) {
-        let at = |y: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(y.0, z.1), at(y.0, z.0), at(y.1, z.0), at(y.1, z.1)],
-                Vec3::X,
-            ),
-            Facing::Negative => self.quad(
-                [at(y.0, z.0), at(y.0, z.1), at(y.1, z.1), at(y.1, z.0)],
-                Vec3::NEG_X,
-            ),
-        }
-    }
-
-    /// A quad in the plane `y`, spanning `x` and `z`.
-    fn quad_y(&mut self, y: f32, facing: Facing, x: (f32, f32), z: (f32, f32)) {
-        let at = |x: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, z.1), at(x.1, z.1), at(x.1, z.0), at(x.0, z.0)],
-                Vec3::Y,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.0, z.0), at(x.1, z.0), at(x.1, z.1), at(x.0, z.1)],
-                Vec3::NEG_Y,
-            ),
-        }
-    }
-
-    /// A quad in the plane `z`, spanning `x` and `y`.
-    fn quad_z(&mut self, z: f32, facing: Facing, x: (f32, f32), y: (f32, f32)) {
-        let at = |x: f32, y: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
-                Vec3::Z,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.1, y.0), at(x.0, y.0), at(x.0, y.1), at(x.1, y.1)],
-                Vec3::NEG_Z,
-            ),
-        }
-    }
-
-    /// The monitor's screen: a `+Z`-facing quad in the plane `z`, with `v`
-    /// running **down** the wall.
-    ///
-    /// The one place in this sample that cares which way up a texture is. Every
-    /// other layer of the page is a pattern that reads the same either way; this
-    /// one is a framebuffer copied straight out of a render target, and a frame
-    /// pasted on upside down is a perfectly plausible picture of a room.
-    ///
-    /// A single quad rather than a slab, unlike everything else here: the reason
-    /// [`SHELL`] gives for slabs is that the *sun* has to see a surface, and a
-    /// screen mounted flat on a bezel casts no shadow anybody could look for. It
-    /// stands [`SCREEN_PROUD`] in front of the bezel's own face, so it is
-    /// coplanar with nothing.
-    fn screen_quad(&mut self, z: f32, x: (f32, f32), y: (f32, f32)) {
-        let at = |x: f32, y: f32| Vec3::new(x, y, z);
-        self.quad_uv(
-            [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
-            Vec3::Z,
-            [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
-        );
-    }
-
-    /// A closed box between `min` and `max`, every face pointing **out**.
-    fn box_outward(&mut self, min: Vec3, max: Vec3) {
-        let (x, y, z) = ((min.x, max.x), (min.y, max.y), (min.z, max.z));
-        self.quad_x(max.x, Facing::Positive, y, z);
-        self.quad_x(min.x, Facing::Negative, y, z);
-        self.quad_y(max.y, Facing::Positive, x, z);
-        self.quad_y(min.y, Facing::Negative, x, z);
-        self.quad_z(max.z, Facing::Positive, x, y);
-        self.quad_z(min.z, Facing::Negative, x, y);
-    }
-
-    /// The mesh this builder describes, clustered.
-    ///
-    /// # Panics
-    ///
-    /// If [`crcbl::scene::build_meshlets`] refuses the triangle list, which for
-    /// literals written in this file would be a mistake in this file rather than
-    /// a condition a run can be in — every quad above emits a whole number of
-    /// triangles over indices it has just pushed.
-    fn finish(self, label: &'static str) -> MeshDesc<'static> {
-        let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
-            .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
-            .into_clusters();
-        let uvs: Vec<[f32; 2]> = self.vertices.iter().map(|vertex| vertex.uv).collect();
-        let uv_range = UvRange::from_uvs(&uvs);
-        let vertices: Vec<MeshVertex> = self
-            .vertices
-            .iter()
-            .map(|vertex| {
-                MeshVertex::from_normal(
-                    vertex.position,
-                    vertex.normal,
-                    // White, so the **material row** is what colours a surface.
-                    // The engine's own demo carries a diagnostic hue per face
-                    // instead; this sample's subject is the material table and
-                    // the light, and a vertex colour under both would be a
-                    // third factor in every product a reader is trying to
-                    // attribute.
-                    [1.0, 1.0, 1.0, 1.0],
-                    vertex.uv,
-                    &uv_range,
-                )
-            })
-            .collect();
-        MeshDesc {
-            label: Cow::Borrowed(label),
-            geometry: Geometry::Flat {
-                vertices: Cow::Owned(mesh::vertex_bytes(&vertices)),
-                uv_range,
-                indices: Cow::Owned(self.indices),
-                clusters,
-                // No `MESH_AUTHORED_TANGENTS`: `MeshVertex::from_normal` above
-                // fills the frame with `orthonormal_basis`' stand-in, which
-                // agrees with no UV parameterisation, so the room has no
-                // authored tangent to claim.
-                flags: 0,
-            },
-        }
-    }
+/// A single quad rather than a slab, unlike everything else here: the reason
+/// [`SHELL`] gives for slabs is that the *sun* has to see a surface, and a
+/// screen mounted flat on a bezel casts no shadow anybody could look for. It
+/// stands [`SCREEN_PROUD`] in front of the bezel's own face, so it is
+/// coplanar with nothing.
+fn screen_quad(builder: &mut QuadMesh, z: f32, x: (f32, f32), y: (f32, f32)) {
+    let at = |x: f32, y: f32| Vec3::new(x, y, z);
+    builder.quad_uv(
+        [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
+        Vec3::Z,
+        [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
+    );
 }
 
 /// One mesh built by `fill`.
-fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc<'static> {
-    let mut builder = MeshBuilder::default();
+fn mesh_of(label: &'static str, fill: impl FnOnce(&mut QuadMesh)) -> MeshDesc<'static> {
+    let mut builder = QuadMesh::textured();
     fill(&mut builder);
-    builder.finish(label)
+    builder
+        .finish(label)
+        .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
 }
 
 /// The `-x` wall, with a rectangular opening in it.
@@ -973,8 +791,8 @@ fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc
 /// because the sun has to come **through** it: a hole in the geometry is a hole
 /// in the shadow map, and the bright quadrilateral on the floor is the shadow
 /// pass's own evidence rather than a decal.
-fn window_wall(builder: &mut MeshBuilder) {
-    let slab = |builder: &mut MeshBuilder, y: (f32, f32), z: (f32, f32)| {
+fn window_wall(builder: &mut QuadMesh) {
+    let slab = |builder: &mut QuadMesh, y: (f32, f32), z: (f32, f32)| {
         builder.box_outward(
             Vec3::new(-HALF_WIDTH - SHELL, y.0, z.0),
             Vec3::new(-HALF_WIDTH, y.1, z.1),
@@ -1078,7 +896,8 @@ pub fn room() -> SceneDesc<'static> {
                 b.box_outward(MONITOR_MIN, MONITOR_MAX);
             }),
             mesh_of("monitor screen", |b| {
-                b.screen_quad(
+                screen_quad(
+                    b,
                     SCREEN_FACE_Z,
                     (SCREEN_MIN.x, SCREEN_MAX.x),
                     (SCREEN_MIN.y, SCREEN_MAX.y),
@@ -1623,6 +1442,9 @@ pub fn fixed_camera() -> Camera {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::render::Geometry;
+    use crcbl::shaders::mesh::{self, MeshVertex};
+
     use super::*;
 
     /// **Every mesh the description makes resident is placed**, and every row it
@@ -1840,11 +1662,15 @@ mod tests {
     #[test]
     fn the_window_is_an_opening_and_not_a_painted_rectangle() {
         const MARGIN: f32 = 1e-3;
-        let mut builder = MeshBuilder::default();
+        let mut builder = QuadMesh::textured();
         window_wall(&mut builder);
-        assert!(!builder.positions.is_empty(), "the wall has no geometry");
+        let positions: Vec<[f32; 3]> = builder
+            .corners()
+            .map(|corner| corner.position.to_array())
+            .collect();
+        assert!(!positions.is_empty(), "the wall has no geometry");
 
-        for corner in &builder.positions {
+        for corner in &positions {
             let inside = corner[1] > WINDOW_SILL + MARGIN
                 && corner[1] < WINDOW_HEAD - MARGIN
                 && corner[2].abs() < WINDOW_HALF - MARGIN;
@@ -1855,8 +1681,7 @@ mod tests {
         // still be outside the opening.
         for edge in [-WINDOW_HALF, WINDOW_HALF] {
             assert!(
-                builder
-                    .positions
+                positions
                     .iter()
                     .any(|corner| (corner[2] - edge).abs() < MARGIN),
                 "nothing reaches the opening's edge at z = {edge}"
@@ -1864,8 +1689,7 @@ mod tests {
         }
         for edge in [WINDOW_SILL, WINDOW_HEAD] {
             assert!(
-                builder
-                    .positions
+                positions
                     .iter()
                     .any(|corner| (corner[1] - edge).abs() < MARGIN),
                 "nothing reaches the opening's edge at y = {edge}"
@@ -2743,14 +2567,15 @@ mod tests {
     /// backend pin and a binary run.
     #[test]
     fn the_screens_texture_runs_the_way_a_frame_does() {
-        let mut builder = MeshBuilder::default();
-        builder.screen_quad(
+        let mut builder = QuadMesh::textured();
+        screen_quad(
+            &mut builder,
             SCREEN_FACE_Z,
             (SCREEN_MIN.x, SCREEN_MAX.x),
             (SCREEN_MIN.y, SCREEN_MAX.y),
         );
-        assert_eq!(builder.vertices.len(), 4, "the screen is one quad");
-        for vertex in &builder.vertices {
+        assert_eq!(builder.corners().len(), 4, "the screen is one quad");
+        for vertex in builder.corners() {
             let top = (vertex.position[1] - SCREEN_MAX.y).abs() < 1e-6;
             assert_eq!(
                 vertex.uv[1],

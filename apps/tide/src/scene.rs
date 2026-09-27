@@ -3,7 +3,7 @@
 //! three it does not.
 //!
 //! ```text
-//!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
+//!  QuadMesh ────▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
 //!  PageDesc::empty ────────────────────────────────────┘
 //!  Stage::show ──▶ add_instance / remove_instance, set_water
@@ -51,16 +51,14 @@
 //! so a switch is a picture that changes and a frame that still draws; and no
 //! water at all, so a stub draws no water pass and prices none.
 
-use std::borrow::Cow;
-
 use crcbl::hal::{Device, Format, GeometryPath, HalError, QueueHandle};
 use crcbl::math::Vec3;
 use crcbl::render::{
-    Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc, InstanceHandle,
-    MeshDesc, PageDesc, Projection, SceneDesc, Sky, WaterBody,
+    Camera, Capacities, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, MeshDesc,
+    PageDesc, Projection, SceneDesc, Sky, WaterBody,
 };
-use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
-use crcbl::shaders::vertex::UvRange;
+use crcbl::scene::{Facing, QuadMesh};
+use crcbl::shaders::mesh::GpuMaterial;
 
 use crate::medium::Preset;
 
@@ -292,141 +290,32 @@ const COURTYARD_OBJECTS: [(usize, usize); 4] = [
 /// A stub room's one object.
 const ROOM_OBJECTS: [(usize, usize); 1] = [(ROOM_MESH, ROOM_MATERIAL)];
 
-/// Which way a quad faces along the axis its plane is perpendicular to —
-/// `apps/sundial/src/plaza.rs`' `Facing`, for its reason: the engine culls back
-/// faces, so corner order decides whether a quad is a wall or a hole.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Facing {
-    /// The face's normal points along `+axis`.
-    Positive,
-    /// The face's normal points along `-axis`.
-    Negative,
-}
-
-/// A triangle list under construction, and the positions `build_meshlets` needs
-/// beside it.
-#[derive(Debug, Default)]
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    normals: Vec<[f32; 3]>,
-    indices: Vec<u32>,
-}
-
-impl MeshBuilder {
-    /// Appends one quad, corners counter-clockwise seen from `normal`'s side.
-    fn quad(&mut self, corners: [Vec3; 4], normal: Vec3) {
-        let base = u32::try_from(self.positions.len())
-            .unwrap_or_else(|_| unreachable!("a courtyard of a few hundred vertices"));
-        for corner in corners {
-            self.positions.push(corner.to_array());
-            self.normals.push(normal.to_array());
-        }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    /// A quad in the plane `x`, spanning `y` and `z`.
-    fn quad_x(&mut self, x: f32, facing: Facing, y: (f32, f32), z: (f32, f32)) {
-        let at = |y: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(y.0, z.1), at(y.0, z.0), at(y.1, z.0), at(y.1, z.1)],
-                Vec3::X,
-            ),
-            Facing::Negative => self.quad(
-                [at(y.0, z.0), at(y.0, z.1), at(y.1, z.1), at(y.1, z.0)],
-                Vec3::NEG_X,
-            ),
-        }
-    }
-
-    /// An upward quad in the plane `y`, spanning `x` and `z`. Nothing here is
-    /// seen from below, so there is no downward one.
-    fn floor(&mut self, y: f32, x: (f32, f32), z: (f32, f32)) {
-        let at = |x: f32, z: f32| Vec3::new(x, y, z);
-        self.quad(
-            [at(x.0, z.1), at(x.1, z.1), at(x.1, z.0), at(x.0, z.0)],
-            Vec3::Y,
-        );
-    }
-
-    /// A quad in the plane `z`, spanning `x` and `y`.
-    fn quad_z(&mut self, z: f32, facing: Facing, x: (f32, f32), y: (f32, f32)) {
-        let at = |x: f32, y: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
-                Vec3::Z,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.1, y.0), at(x.0, y.0), at(x.0, y.1), at(x.1, y.1)],
-                Vec3::NEG_Z,
-            ),
-        }
-    }
-
-    /// The mesh this builder describes, clustered.
-    ///
-    /// # Panics
-    ///
-    /// If [`crcbl::scene::build_meshlets`] refuses the triangle list, which for
-    /// literals written in this file would be a mistake in this file rather than
-    /// a condition a run can be in.
-    fn finish(self, label: &'static str) -> MeshDesc<'static> {
-        let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
-            .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
-            .into_clusters();
-        // No surface samples a page — every row names `GpuMaterial::NO_PAGE` —
-        // so every vertex carries one texture coordinate and the range is
-        // degenerate on purpose.
-        let uv_range = UvRange::from_uvs(&[[0.0, 0.0]]);
-        let vertices: Vec<MeshVertex> = self
-            .positions
-            .iter()
-            .zip(&self.normals)
-            .map(|(position, normal)| {
-                // White, so the material row is the whole of what colours a
-                // surface.
-                MeshVertex::from_normal(*position, *normal, [1.0; 4], [0.0, 0.0], &uv_range)
-            })
-            .collect();
-        MeshDesc {
-            label: Cow::Borrowed(label),
-            geometry: Geometry::Flat {
-                vertices: Cow::Owned(mesh::vertex_bytes(&vertices)),
-                uv_range,
-                indices: Cow::Owned(self.indices),
-                clusters,
-                flags: 0,
-            },
-        }
-    }
-}
-
 /// One mesh built by `fill`.
-fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc<'static> {
-    let mut builder = MeshBuilder::default();
+fn mesh_of(label: &'static str, fill: impl FnOnce(&mut QuadMesh)) -> MeshDesc<'static> {
+    let mut builder = QuadMesh::untextured();
     fill(&mut builder);
-    builder.finish(label)
+    builder
+        .finish(label)
+        .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
 }
 
 /// A flat ring between an inner and an outer rectangle at height `y`, as four
 /// quads: the two long sides whole, the two ends between them.
-fn ring(builder: &mut MeshBuilder, y: f32, inner: [f32; 4], outer: [f32; 4]) {
+fn ring(builder: &mut QuadMesh, y: f32, inner: [f32; 4], outer: [f32; 4]) {
     let [ix0, ix1, iz0, iz1] = inner;
     let [ox0, ox1, oz0, oz1] = outer;
-    builder.floor(y, (ox0, ox1), (iz1, oz1));
-    builder.floor(y, (ox0, ox1), (oz0, iz0));
-    builder.floor(y, (ox0, ix0), (iz0, iz1));
-    builder.floor(y, (ix1, ox1), (iz0, iz1));
+    builder.quad_y(y, Facing::Positive, (ox0, ox1), (iz1, oz1));
+    builder.quad_y(y, Facing::Positive, (ox0, ox1), (oz0, iz0));
+    builder.quad_y(y, Facing::Positive, (ox0, ix0), (iz0, iz1));
+    builder.quad_y(y, Facing::Positive, (ix1, ox1), (iz0, iz1));
 }
 
 /// The pool's inside: the two floors, the walls that climb from each to the
 /// coping, and the step face the deep end shows the shallow end's floor on.
-fn basin(builder: &mut MeshBuilder) {
+fn basin(builder: &mut QuadMesh) {
     let length = POOL_HALF_LENGTH;
     for (x, floor) in [((-length, 0.0), DEEP_FLOOR), ((0.0, length), SHALLOW_FLOOR)] {
-        builder.floor(floor, x, (POOL_FAR, POOL_NEAR));
+        builder.quad_y(floor, Facing::Positive, x, (POOL_FAR, POOL_NEAR));
         // The far wall faces the camera and the near one faces away from it.
         builder.quad_z(POOL_FAR, Facing::Positive, x, (floor, 0.0));
         builder.quad_z(POOL_NEAR, Facing::Negative, x, (floor, 0.0));
@@ -452,19 +341,19 @@ fn basin(builder: &mut MeshBuilder) {
 }
 
 /// The lane line, one strip per end at that end's floor.
-fn lane(builder: &mut MeshBuilder) {
+fn lane(builder: &mut QuadMesh) {
     let z = (LANE_Z - LANE_HALF_WIDTH, LANE_Z + LANE_HALF_WIDTH);
     let reach = POOL_HALF_LENGTH - LANE_END_GAP;
-    builder.floor(DEEP_FLOOR + LANE_LIFT, (-reach, 0.0), z);
-    builder.floor(SHALLOW_FLOOR + LANE_LIFT, (0.0, reach), z);
+    builder.quad_y(DEEP_FLOOR + LANE_LIFT, Facing::Positive, (-reach, 0.0), z);
+    builder.quad_y(SHALLOW_FLOOR + LANE_LIFT, Facing::Positive, (0.0, reach), z);
 }
 
 /// A stub room: a floor and four walls facing in.
-fn room(builder: &mut MeshBuilder) {
+fn room(builder: &mut QuadMesh) {
     let x = (-ROOM_HALF_WIDTH, ROOM_HALF_WIDTH);
     let (far, near) = ROOM_Z;
     let y = (0.0, ROOM_HEIGHT);
-    builder.floor(0.0, x, (far, near));
+    builder.quad_y(0.0, Facing::Positive, x, (far, near));
     builder.quad_z(far, Facing::Positive, x, y);
     builder.quad_z(near, Facing::Negative, x, y);
     builder.quad_x(x.0, Facing::Positive, y, (far, near));
@@ -747,6 +636,9 @@ pub fn orbit_camera(tick: u64) -> Camera {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::render::Geometry;
+    use crcbl::shaders::mesh::MeshVertex;
+
     use super::*;
 
     /// **The halves differ only in depth**: the camera and the sun have no `x`

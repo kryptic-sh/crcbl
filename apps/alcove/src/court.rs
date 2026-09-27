@@ -1,7 +1,7 @@
 //! The court, as data an application hands the engine.
 //!
 //! ```text
-//!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
+//!  QuadMesh ────▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
 //!  PageDesc::empty ────────────────────────────────────┘
 //!  place() ──▶ add_instance ×N
@@ -57,15 +57,13 @@
 //!
 //! [`PageDesc::empty`]: crcbl::render::scene::PageDesc::empty
 
-use std::borrow::Cow;
-
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
-    Camera, Capacities, DirectionalLight, ForwardRenderer, Geometry, InstanceDesc,
-    InstancePoolError, MeshDesc, PageDesc, Projection, SceneDesc,
+    Camera, Capacities, DirectionalLight, ForwardRenderer, InstanceDesc, InstancePoolError,
+    MeshDesc, PageDesc, Projection, SceneDesc,
 };
-use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
-use crcbl::shaders::vertex::UvRange;
+use crcbl::scene::QuadMesh;
+use crcbl::shaders::mesh::GpuMaterial;
 
 // ---------------------------------------------------------------------------
 // The court's dimensions
@@ -486,7 +484,7 @@ pub fn rim_far() -> Vec3 {
 
 /// The shell's row: the floor, the walls, the alcove, the stair and the slot.
 ///
-/// **Row 0**, which is what [`mesh::GpuInstance::default`] names, so it is the
+/// **Row 0**, which is what [`mesh::GpuInstance::default`](crcbl::shaders::mesh::GpuInstance::default) names, so it is the
 /// row an object placed without a material id shades through.
 pub const SHELL_MATERIAL: usize = 0;
 
@@ -545,313 +543,122 @@ pub const PEDESTAL_MESH: usize = 11;
 /// The sphere.
 pub const SPHERE_MESH: usize = 12;
 
-/// A triangle list under construction, and the positions `build_meshlets` needs
-/// beside it.
-#[derive(Debug, Default)]
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    vertices: Vec<RawVertex>,
-    indices: Vec<u32>,
+/// A closed box between `min` and `max`, every face pointing **out**.
+///
+/// Through [`QuadMesh::box_frame`] about the box's centre rather than
+/// [`QuadMesh::box_outward`]: the court's goldens were blessed with corners at
+/// `centre ± half`, which is not bit-identical to `min` and `max`.
+fn box_outward(builder: &mut QuadMesh, min: Vec3, max: Vec3) {
+    builder.box_frame(
+        (min + max) * 0.5,
+        [Vec3::X, Vec3::Y, Vec3::Z],
+        (max - min) * 0.5,
+    );
 }
 
-/// One vertex on the way to a [`MeshVertex`].
-#[derive(Clone, Copy, Debug)]
-struct RawVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
+/// A box of `half` extents about `centre`, turned so its local `+x` runs
+/// along `along` and its `+y` stays up.
+///
+/// The one thing in this court that is not axis-aligned, and it has to be:
+/// the slot's walls run along [`slot_axis`], which is the sun's own azimuth
+/// and therefore not a coordinate axis.
+fn box_along(builder: &mut QuadMesh, centre: Vec3, along: Vec3, half: Vec3) {
+    let forward = along.normalize();
+    let up = Vec3::Y;
+    let side = forward.cross(up).normalize();
+    builder.box_frame(centre, [forward, up, side], half);
 }
 
-impl MeshBuilder {
-    /// Appends one quad, given its corners already in counter-clockwise order
-    /// seen from `normal`'s side, and two triangles over them.
-    fn quad(&mut self, corners: [Vec3; 4], normal: Vec3) {
-        self.quad_shaded(corners, [normal; 4]);
-    }
-
-    /// [`MeshBuilder::quad`] with a normal per corner.
-    ///
-    /// The one thing a curved surface needs that a box does not: a sphere's
-    /// facets share their corners' directions with their neighbours, and a face
-    /// normal repeated four times would draw a polyhedron rather than the ball
-    /// alcove's scope asks for.
-    fn quad_shaded(&mut self, corners: [Vec3; 4], normals: [Vec3; 4]) {
-        Self::facing_its_normals(&[corners[0], corners[1], corners[2]], &normals);
-        let base = self.push_corners(&corners, &normals);
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    /// Refuses a face whose winding disagrees with the normals it claims.
-    ///
-    /// **The contract every builder above states, enforced rather than
-    /// trusted**: a face is counter-clockwise seen from its normals' side, which
-    /// is what `CullMode::Back` culls the other side of. A face wound the wrong
-    /// way carries a plausible normal, lights plausibly, and is simply not
-    /// there from outside — the slot's walls drew that way for a day before a
-    /// person looked at them from above. So the geometric normal of the first
-    /// triangle is held to the same hemisphere as every authored normal, and a
-    /// court that disagrees does not build.
-    ///
-    /// # Panics
-    ///
-    /// If any of `normals` points away from the side `corners` wind
-    /// counter-clockwise from.
-    fn facing_its_normals(corners: &[Vec3; 3], normals: &[Vec3]) {
-        let geometric = (corners[1] - corners[0]).cross(corners[2] - corners[0]);
-        for normal in normals {
-            assert!(
-                geometric.dot(*normal) > 0.0,
-                "a face at {corners:?} winds clockwise seen from its normal {normal:?}, so it \
-                 would be culled from the side it claims to face"
-            );
-        }
-    }
-
-    /// Appends one triangle, counter-clockwise seen from its normals' side.
-    ///
-    /// The sphere's two pole rings and nothing else: a quad there would have two
-    /// coincident corners and a zero-area triangle in it.
-    fn tri(&mut self, corners: [Vec3; 3], normals: [Vec3; 3]) {
-        Self::facing_its_normals(&corners, &normals);
-        let base = self.push_corners(&corners, &normals);
-        self.indices.extend_from_slice(&[base, base + 1, base + 2]);
-    }
-
-    /// Pushes the corners and returns the index the first one landed at.
-    fn push_corners(&mut self, corners: &[Vec3], normals: &[Vec3]) -> u32 {
-        let base = u32::try_from(self.vertices.len())
-            .unwrap_or_else(|_| unreachable!("a court of a few thousand vertices"));
-        for (corner, normal) in corners.iter().zip(normals) {
-            self.positions.push([corner.x, corner.y, corner.z]);
-            self.vertices.push(RawVertex {
-                position: [corner.x, corner.y, corner.z],
-                normal: [normal.x, normal.y, normal.z],
-            });
-        }
-        base
-    }
-
-    /// A closed box between `min` and `max`, every face pointing **out**.
-    fn box_outward(&mut self, min: Vec3, max: Vec3) {
-        self.box_frame(
-            (min + max) * 0.5,
-            [Vec3::X, Vec3::Y, Vec3::Z],
-            (max - min) * 0.5,
-        );
-    }
-
-    /// A box of `half` extents about `centre`, turned so its local `+x` runs
-    /// along `along` and its `+y` stays up.
-    ///
-    /// The one thing in this court that is not axis-aligned, and it has to be:
-    /// the slot's walls run along [`slot_axis`], which is the sun's own azimuth
-    /// and therefore not a coordinate axis.
-    fn box_along(&mut self, centre: Vec3, along: Vec3, half: Vec3) {
-        let forward = along.normalize();
-        let up = Vec3::Y;
-        let side = forward.cross(up).normalize();
-        self.box_frame(centre, [forward, up, side], half);
-    }
-
-    /// A closed box about `centre` in the right-handed frame `axes`, `half`
-    /// along each axis, every face pointing **out**.
-    ///
-    /// **One corner order for both boxes.** [`box_outward`](Self::box_outward)
-    /// and [`box_along`](Self::box_along) used to spell their six faces
-    /// separately, and the turned copy had four of them wound the other way —
-    /// the slot's walls were there from inside and culled from outside, which
-    /// is what a person looking down into the slot reported on 2026-09-04.
-    /// Each face below is the axis-aligned one's order with `x`, `y` and `z`
-    /// read as the frame's three axes, and
-    /// [`facing_its_normals`](Self::facing_its_normals) is what now refuses a
-    /// transcription that disagrees with itself.
-    fn box_frame(&mut self, centre: Vec3, axes: [Vec3; 3], half: Vec3) {
-        let [x, y, z] = axes;
-        let at = |sx: f32, sy: f32, sz: f32| {
-            centre + x * (half.x * sx) + y * (half.y * sy) + z * (half.z * sz)
-        };
-        // Each face counter-clockwise seen from outside: `+x`, `-x`, `+y`,
-        // `-y`, `+z`, `-z`.
-        self.quad(
-            [
-                at(1.0, -1.0, 1.0),
-                at(1.0, -1.0, -1.0),
-                at(1.0, 1.0, -1.0),
-                at(1.0, 1.0, 1.0),
-            ],
-            x,
-        );
-        self.quad(
-            [
-                at(-1.0, -1.0, -1.0),
-                at(-1.0, -1.0, 1.0),
-                at(-1.0, 1.0, 1.0),
-                at(-1.0, 1.0, -1.0),
-            ],
-            -x,
-        );
-        self.quad(
-            [
-                at(-1.0, 1.0, 1.0),
-                at(1.0, 1.0, 1.0),
-                at(1.0, 1.0, -1.0),
-                at(-1.0, 1.0, -1.0),
-            ],
-            y,
-        );
-        self.quad(
-            [
-                at(-1.0, -1.0, -1.0),
-                at(1.0, -1.0, -1.0),
-                at(1.0, -1.0, 1.0),
-                at(-1.0, -1.0, 1.0),
-            ],
-            -y,
-        );
-        self.quad(
-            [
-                at(-1.0, -1.0, 1.0),
-                at(1.0, -1.0, 1.0),
-                at(1.0, 1.0, 1.0),
-                at(-1.0, 1.0, 1.0),
-            ],
-            z,
-        );
-        self.quad(
-            [
-                at(1.0, -1.0, -1.0),
-                at(-1.0, -1.0, -1.0),
-                at(-1.0, 1.0, -1.0),
-                at(1.0, 1.0, -1.0),
-            ],
-            -z,
-        );
-    }
-
-    /// A sphere of `radius` about `centre`, with smooth normals.
-    ///
-    /// Quads between the rings and triangles at the two poles, where a quad
-    /// would have two coincident corners. `rings` counts the bands from pole to
-    /// pole and `segments` the sweeps around the axis.
-    fn sphere(&mut self, centre: Vec3, radius: f32, segments: usize, rings: usize) {
-        let point = |segment: usize, ring: usize| {
-            #[allow(clippy::cast_precision_loss)]
-            let theta = core::f32::consts::TAU * segment as f32 / segments as f32;
-            #[allow(clippy::cast_precision_loss)]
-            let phi = core::f32::consts::PI * ring as f32 / rings as f32;
-            let direction = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
-            (centre + direction * radius, direction)
-        };
-        for segment in 0..segments {
-            let next = segment + 1;
-            for ring in 0..rings {
-                let (a, an) = point(segment, ring);
-                let (b, bn) = point(next, ring);
-                let (c, cn) = point(next, ring + 1);
-                let (d, dn) = point(segment, ring + 1);
-                if ring == 0 {
-                    self.tri([a, c, d], [an, cn, dn]);
-                } else if ring + 1 == rings {
-                    self.tri([a, b, c], [an, bn, cn]);
-                } else {
-                    self.quad_shaded([a, b, c, d], [an, bn, cn, dn]);
-                }
+/// A sphere of `radius` about `centre`, with smooth normals.
+///
+/// Quads between the rings and triangles at the two poles, where a quad
+/// would have two coincident corners. `rings` counts the bands from pole to
+/// pole and `segments` the sweeps around the axis.
+fn sphere(builder: &mut QuadMesh, centre: Vec3, radius: f32, segments: usize, rings: usize) {
+    let point = |segment: usize, ring: usize| {
+        #[allow(clippy::cast_precision_loss)]
+        let theta = core::f32::consts::TAU * segment as f32 / segments as f32;
+        #[allow(clippy::cast_precision_loss)]
+        let phi = core::f32::consts::PI * ring as f32 / rings as f32;
+        let direction = Vec3::new(phi.sin() * theta.cos(), phi.cos(), phi.sin() * theta.sin());
+        (centre + direction * radius, direction)
+    };
+    for segment in 0..segments {
+        let next = segment + 1;
+        for ring in 0..rings {
+            let (a, an) = point(segment, ring);
+            let (b, bn) = point(next, ring);
+            let (c, cn) = point(next, ring + 1);
+            let (d, dn) = point(segment, ring + 1);
+            if ring == 0 {
+                builder.tri([a, c, d], [an, cn, dn]);
+            } else if ring + 1 == rings {
+                builder.tri([a, b, c], [an, bn, cn]);
+            } else {
+                builder.quad_shaded([a, b, c, d], [an, bn, cn, dn]);
             }
-        }
-    }
-
-    /// The mesh this builder describes, clustered.
-    ///
-    /// # Panics
-    ///
-    /// If [`crcbl::scene::build_meshlets`] refuses the triangle list, which for
-    /// literals written in this file would be a mistake in this file rather than
-    /// a condition a run can be in.
-    fn finish(self, label: &'static str) -> MeshDesc<'static> {
-        let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
-            .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
-            .into_clusters();
-        // No surface here samples a page at all — every material row names
-        // `GpuMaterial::NO_PAGE` — so every vertex carries the same texture
-        // coordinate and the range is degenerate on purpose.
-        let uv_range = UvRange::from_uvs(&[[0.0, 0.0]]);
-        let vertices: Vec<MeshVertex> = self
-            .vertices
-            .iter()
-            .map(|vertex| {
-                MeshVertex::from_normal(
-                    vertex.position,
-                    vertex.normal,
-                    // White, so the **material row** is the whole of what
-                    // colours a surface.
-                    [1.0, 1.0, 1.0, 1.0],
-                    [0.0, 0.0],
-                    &uv_range,
-                )
-            })
-            .collect();
-        MeshDesc {
-            label: Cow::Borrowed(label),
-            geometry: Geometry::Flat {
-                vertices: Cow::Owned(mesh::vertex_bytes(&vertices)),
-                uv_range,
-                indices: Cow::Owned(self.indices),
-                clusters,
-                // No `MESH_AUTHORED_TANGENTS`: nothing here samples a normal map,
-                // so the court has no authored tangent to claim.
-                flags: 0,
-            },
         }
     }
 }
 
 /// One mesh built by `fill`.
-fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc<'static> {
-    let mut builder = MeshBuilder::default();
+fn mesh_of(label: &'static str, fill: impl FnOnce(&mut QuadMesh)) -> MeshDesc<'static> {
+    let mut builder = QuadMesh::untextured();
     fill(&mut builder);
-    builder.finish(label)
+    builder
+        .finish(label)
+        .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
 }
 
 /// A slab of the shell between two corners, as its own mesh.
 fn slab(label: &'static str, min: Vec3, max: Vec3) -> MeshDesc<'static> {
-    mesh_of(label, |builder| builder.box_outward(min, max))
+    mesh_of(label, |builder| box_outward(builder, min, max))
 }
 
 /// The alcove block: five slabs around a recess whose mouth faces `+z`.
-fn alcove(builder: &mut MeshBuilder) {
+fn alcove(builder: &mut QuadMesh) {
     let mouth_z = ALCOVE_MAX.z;
     let back_z = mouth_z - ALCOVE_RECESS;
     // Behind the recess: the whole footprint, floor to head.
-    builder.box_outward(ALCOVE_MIN, Vec3::new(ALCOVE_MAX.x, ALCOVE_MAX.y, back_z));
+    box_outward(
+        builder,
+        ALCOVE_MIN,
+        Vec3::new(ALCOVE_MAX.x, ALCOVE_MAX.y, back_z),
+    );
     // The sill and the head, spanning the mouth's own width.
     let mouth = (ALCOVE_MOUTH_X.0, ALCOVE_MOUTH_X.1);
-    builder.box_outward(
+    box_outward(
+        builder,
         Vec3::new(mouth.0, ALCOVE_MIN.y, back_z),
         Vec3::new(mouth.1, ALCOVE_MOUTH_Y.0, mouth_z),
     );
-    builder.box_outward(
+    box_outward(
+        builder,
         Vec3::new(mouth.0, ALCOVE_MOUTH_Y.1, back_z),
         Vec3::new(mouth.1, ALCOVE_MAX.y, mouth_z),
     );
     // The two jambs, between sill and head.
-    builder.box_outward(
+    box_outward(
+        builder,
         Vec3::new(ALCOVE_MIN.x, ALCOVE_MOUTH_Y.0, back_z),
         Vec3::new(mouth.0, ALCOVE_MOUTH_Y.1, mouth_z),
     );
-    builder.box_outward(
+    box_outward(
+        builder,
         Vec3::new(mouth.1, ALCOVE_MOUTH_Y.0, back_z),
         Vec3::new(ALCOVE_MAX.x, ALCOVE_MOUTH_Y.1, mouth_z),
     );
 }
 
 /// The flight: [`STAIR_TREADS`] slabs cantilevered from the far wall.
-fn stair(builder: &mut MeshBuilder) {
+fn stair(builder: &mut QuadMesh) {
     for tread in 0..STAIR_TREADS {
         #[allow(clippy::cast_precision_loss)]
         let step = tread as f32;
         let x0 = STAIR_X0 + step * STAIR_RUN;
         let y0 = step * STAIR_RISE;
-        builder.box_outward(
+        box_outward(
+            builder,
             Vec3::new(x0, y0, -HALF_DEPTH),
             Vec3::new(
                 x0 + STAIR_RUN,
@@ -863,7 +670,7 @@ fn stair(builder: &mut MeshBuilder) {
 }
 
 /// The slot: two walls either side of [`slot_axis`], `SLOT_GAP` apart.
-fn slot(builder: &mut MeshBuilder) {
+fn slot(builder: &mut QuadMesh) {
     let axis = slot_axis();
     let centre = SLOT_NEAR + axis * (SLOT_LENGTH * 0.5);
     let side = axis.cross(Vec3::Y).normalize();
@@ -874,7 +681,8 @@ fn slot(builder: &mut MeshBuilder) {
         SLOT_WALL_THICKNESS * 0.5,
     );
     for sign in [-1.0f32, 1.0] {
-        builder.box_along(
+        box_along(
+            builder,
             centre + side * (offset * sign) + Vec3::Y * (SLOT_WALL_HEIGHT * 0.5),
             axis,
             half,
@@ -928,16 +736,22 @@ pub fn court() -> SceneDesc<'static> {
             mesh_of("alcove", alcove),
             mesh_of("stair", stair),
             mesh_of("slot", slot),
-            mesh_of("box", |builder| builder.box_outward(BOX_MIN, BOX_MAX)),
-            mesh_of("post", |builder| builder.box_outward(POST_MIN, POST_MAX)),
+            mesh_of("box", |builder| box_outward(builder, BOX_MIN, BOX_MAX)),
+            mesh_of("post", |builder| box_outward(builder, POST_MIN, POST_MAX)),
             mesh_of("low box", |builder| {
-                builder.box_outward(LOW_BOX_MIN, LOW_BOX_MAX);
+                box_outward(builder, LOW_BOX_MIN, LOW_BOX_MAX);
             }),
             mesh_of("pedestal", |builder| {
-                builder.box_outward(PEDESTAL_MIN, PEDESTAL_MAX);
+                box_outward(builder, PEDESTAL_MIN, PEDESTAL_MAX);
             }),
             mesh_of("sphere", |builder| {
-                builder.sphere(SPHERE_CENTRE, SPHERE_RADIUS, SPHERE_SEGMENTS, SPHERE_RINGS);
+                sphere(
+                    builder,
+                    SPHERE_CENTRE,
+                    SPHERE_RADIUS,
+                    SPHERE_SEGMENTS,
+                    SPHERE_RINGS,
+                );
             }),
         ],
         materials: vec![
@@ -1082,6 +896,9 @@ pub fn fixed_camera() -> Camera {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::render::Geometry;
+    use crcbl::shaders::mesh::{self, MeshVertex};
+
     use super::*;
 
     /// **The description fits the pools it reserves**, with no GPU in the room.

@@ -1,7 +1,7 @@
 //! The plaza, as data an application hands the engine.
 //!
 //! ```text
-//!  MeshBuilder ──▶ build_meshlets ──▶ Geometry::Flat ──┐
+//!  QuadMesh ────▶ build_meshlets ──▶ Geometry::Flat ──┐
 //!  GpuMaterial rows ───────────────────────────────────┼─▶ SceneDesc ──▶ with_scene
 //!  PageDesc::empty ────────────────────────────────────┘
 //!  place() ──▶ add_instance ×N
@@ -62,15 +62,13 @@
 //!
 //! [`PageDesc::empty`]: crcbl::render::scene::PageDesc::empty
 
-use std::borrow::Cow;
-
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::{
-    Camera, Capacities, ForwardRenderer, Geometry, InstanceDesc, InstancePoolError, Light,
-    MeshDesc, PageDesc, PointLight, Projection, SceneDesc, SpotLight,
+    Camera, Capacities, ForwardRenderer, InstanceDesc, InstancePoolError, Light, MeshDesc,
+    PageDesc, PointLight, Projection, SceneDesc, SpotLight,
 };
-use crcbl::shaders::mesh::{self, GpuMaterial, MeshVertex};
-use crcbl::shaders::vertex::UvRange;
+use crcbl::scene::QuadMesh;
+use crcbl::shaders::mesh::GpuMaterial;
 
 // ---------------------------------------------------------------------------
 // The pavement
@@ -397,7 +395,7 @@ pub fn lights() -> [Light; 3] {
 
 /// The pavement's, the colonnade's and the parapet's row.
 ///
-/// **Row 0**, which is what [`mesh::GpuInstance::default`] names, so it is the
+/// **Row 0**, which is what [`mesh::GpuInstance::default`](crcbl::shaders::mesh::GpuInstance::default) names, so it is the
 /// row an object placed without a material id shades through.
 pub const GROUND_MATERIAL: usize = 0;
 
@@ -440,168 +438,17 @@ pub const PLINTH_MESH: usize = 3;
 /// The three counters.
 pub const COUNTERS_MESH: usize = 4;
 
-/// Which way a quad faces along the axis its plane is perpendicular to.
-///
-/// The engine culls back faces and calls counter-clockwise front, so a quad's
-/// corner order decides whether it is a wall or a hole. Naming the direction
-/// rather than writing four coordinates per quad keeps that decision in one
-/// place.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Facing {
-    /// The face's normal points along `+axis`.
-    Positive,
-    /// The face's normal points along `-axis`.
-    Negative,
-}
-
-/// A triangle list under construction, and the positions `build_meshlets` needs
-/// beside it.
-#[derive(Debug, Default)]
-struct MeshBuilder {
-    positions: Vec<[f32; 3]>,
-    vertices: Vec<RawVertex>,
-    indices: Vec<u32>,
-}
-
-/// One vertex on the way to a [`MeshVertex`].
-#[derive(Clone, Copy, Debug)]
-struct RawVertex {
-    position: [f32; 3],
-    normal: [f32; 3],
-}
-
-impl MeshBuilder {
-    /// Appends one quad, given its corners already in counter-clockwise order
-    /// seen from `normal`'s side, and two triangles over them.
-    fn quad(&mut self, corners: [Vec3; 4], normal: Vec3) {
-        let base = u32::try_from(self.vertices.len())
-            .unwrap_or_else(|_| unreachable!("a plaza of a few hundred vertices"));
-        for corner in corners {
-            self.positions.push([corner.x, corner.y, corner.z]);
-            self.vertices.push(RawVertex {
-                position: [corner.x, corner.y, corner.z],
-                normal: [normal.x, normal.y, normal.z],
-            });
-        }
-        self.indices
-            .extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-    }
-
-    /// A quad in the plane `x`, spanning `y` and `z`.
-    fn quad_x(&mut self, x: f32, facing: Facing, y: (f32, f32), z: (f32, f32)) {
-        let at = |y: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(y.0, z.1), at(y.0, z.0), at(y.1, z.0), at(y.1, z.1)],
-                Vec3::X,
-            ),
-            Facing::Negative => self.quad(
-                [at(y.0, z.0), at(y.0, z.1), at(y.1, z.1), at(y.1, z.0)],
-                Vec3::NEG_X,
-            ),
-        }
-    }
-
-    /// A quad in the plane `y`, spanning `x` and `z`.
-    fn quad_y(&mut self, y: f32, facing: Facing, x: (f32, f32), z: (f32, f32)) {
-        let at = |x: f32, z: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, z.1), at(x.1, z.1), at(x.1, z.0), at(x.0, z.0)],
-                Vec3::Y,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.0, z.0), at(x.1, z.0), at(x.1, z.1), at(x.0, z.1)],
-                Vec3::NEG_Y,
-            ),
-        }
-    }
-
-    /// A quad in the plane `z`, spanning `x` and `y`.
-    fn quad_z(&mut self, z: f32, facing: Facing, x: (f32, f32), y: (f32, f32)) {
-        let at = |x: f32, y: f32| Vec3::new(x, y, z);
-        match facing {
-            Facing::Positive => self.quad(
-                [at(x.0, y.0), at(x.1, y.0), at(x.1, y.1), at(x.0, y.1)],
-                Vec3::Z,
-            ),
-            Facing::Negative => self.quad(
-                [at(x.1, y.0), at(x.0, y.0), at(x.0, y.1), at(x.1, y.1)],
-                Vec3::NEG_Z,
-            ),
-        }
-    }
-
-    /// A closed box between `min` and `max`, every face pointing **out**.
-    fn box_outward(&mut self, min: Vec3, max: Vec3) {
-        let (x, y, z) = ((min.x, max.x), (min.y, max.y), (min.z, max.z));
-        self.quad_x(max.x, Facing::Positive, y, z);
-        self.quad_x(min.x, Facing::Negative, y, z);
-        self.quad_y(max.y, Facing::Positive, x, z);
-        self.quad_y(min.y, Facing::Negative, x, z);
-        self.quad_z(max.z, Facing::Positive, x, y);
-        self.quad_z(min.z, Facing::Negative, x, y);
-    }
-
-    /// A box of `half` extents about `centre`, axis-aligned.
-    fn cube(&mut self, centre: Vec3, half: Vec3) {
-        self.box_outward(centre - half, centre + half);
-    }
-
-    /// The mesh this builder describes, clustered.
-    ///
-    /// # Panics
-    ///
-    /// If [`crcbl::scene::build_meshlets`] refuses the triangle list, which for
-    /// literals written in this file would be a mistake in this file rather than
-    /// a condition a run can be in.
-    fn finish(self, label: &'static str) -> MeshDesc<'static> {
-        let clusters = crcbl::scene::build_meshlets(&self.positions, &self.indices)
-            .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
-            .into_clusters();
-        // No surface here samples a page at all — every material row names
-        // `GpuMaterial::NO_PAGE` — so every vertex carries the same texture
-        // coordinate and the range is degenerate on purpose.
-        let uv_range = UvRange::from_uvs(&[[0.0, 0.0]]);
-        let vertices: Vec<MeshVertex> = self
-            .vertices
-            .iter()
-            .map(|vertex| {
-                MeshVertex::from_normal(
-                    vertex.position,
-                    vertex.normal,
-                    // White, so the **material row** is the whole of what
-                    // colours a surface.
-                    [1.0, 1.0, 1.0, 1.0],
-                    [0.0, 0.0],
-                    &uv_range,
-                )
-            })
-            .collect();
-        MeshDesc {
-            label: Cow::Borrowed(label),
-            geometry: Geometry::Flat {
-                vertices: Cow::Owned(mesh::vertex_bytes(&vertices)),
-                uv_range,
-                indices: Cow::Owned(self.indices),
-                clusters,
-                // No `MESH_AUTHORED_TANGENTS`: nothing here samples a normal map,
-                // so the plaza has no authored tangent to claim.
-                flags: 0,
-            },
-        }
-    }
-}
-
 /// One mesh built by `fill`.
-fn mesh_of(label: &'static str, fill: impl FnOnce(&mut MeshBuilder)) -> MeshDesc<'static> {
-    let mut builder = MeshBuilder::default();
+fn mesh_of(label: &'static str, fill: impl FnOnce(&mut QuadMesh)) -> MeshDesc<'static> {
+    let mut builder = QuadMesh::untextured();
     fill(&mut builder);
-    builder.finish(label)
+    builder
+        .finish(label)
+        .unwrap_or_else(|why| panic!("{label} is a whole number of triangles: {why}"))
 }
 
 /// The colonnade: [`COLONNADE_COUNT`] columns marching away from the camera.
-fn colonnade(builder: &mut MeshBuilder) {
+fn colonnade(builder: &mut QuadMesh) {
     for index in 0..COLONNADE_COUNT {
         let (min, max) = column_box(index);
         builder.box_outward(min, max);
@@ -609,9 +456,10 @@ fn colonnade(builder: &mut MeshBuilder) {
 }
 
 /// The three counters, hanging.
-fn counters(builder: &mut MeshBuilder) {
+fn counters(builder: &mut QuadMesh) {
     for index in 0..COUNTERS.len() {
-        builder.cube(counter_centre(index), Vec3::splat(COUNTER_HALF));
+        let (centre, half) = (counter_centre(index), Vec3::splat(COUNTER_HALF));
+        builder.box_outward(centre - half, centre + half);
     }
 }
 
@@ -1025,6 +873,9 @@ pub fn cascade_split(camera: &Camera, sky: crate::sun::Sky) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    use crcbl::render::Geometry;
+    use crcbl::shaders::mesh;
+
     use super::*;
     use crate::sun::{FIXTURE_TICK, NOON_TICK, SWEEP_TICKS, Sky};
 

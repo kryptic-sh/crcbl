@@ -3687,16 +3687,6 @@ Tessellation is planned, nothing built:
 - **The near coping's margin is thin**: the sabotage that floods the water over
   the coping moved the near coping only 2.00 levels against a 1.0 tolerance; the
   far coping, at 18.56, carries that claim.
-- **Four samples carry their own quad builder** — alcove, lantern, sundial and
-  tide each have a `MeshBuilder`. **Decided 2026-09-25: hoist one into
-  `crcbl-scene`, beside `build_meshlets`.** (First recorded as `crcbl-greybox`,
-  and corrected on reading it: greybox builds its own clusters so as not to
-  depend on `crcbl-scene`, and the four samples cluster through
-  `build_meshlets`, so hosting it there would either add that dependency or
-  change their clusters.) The four agree on explicit winding, one normal per
-  quad and degenerate UVs; alcove adds per-vertex normals and triangles and
-  lantern a UV quad, which the shared builder takes as methods. Each sample's
-  goldens must come out unchanged. Not built.
 - **Rule 12 is not exercised for tide**: its CI golden step draws the path the
   runner selects and forces no lesser one. Sundial's step was not checked for
   the same gap.

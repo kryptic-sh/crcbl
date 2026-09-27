@@ -78,6 +78,8 @@ pub mod lod;
 #[cfg(feature = "gltf")]
 pub mod lod_resolve;
 pub mod meshlet;
+#[cfg(feature = "render")]
+pub mod quad_mesh;
 pub mod scn;
 pub mod simplify;
 
@@ -95,5 +97,7 @@ pub use lod::{DEFAULT_LOD_RATIOS, LodError, LodLevel, build_lod_chain};
 #[cfg(feature = "gltf")]
 pub use lod_resolve::{HandLodLink, LodOrigin, LodResolveError, MeshLod, resolve_lod};
 pub use meshlet::{ClusterBounds, Meshlet, MeshletBuild, MeshletError, build_meshlets};
+#[cfg(feature = "render")]
+pub use quad_mesh::{Corner, Facing, QuadMesh};
 pub use scn::{Env, EnvCamera, IdMap, Scene, SceneEntityId, ScnError, SystemChunk, chunk_of};
 pub use simplify::{Simplified, SimplifyError, simplify, simplify_with_locked_edges};
