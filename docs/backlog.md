@@ -55,6 +55,31 @@ main.
   `actions/cache@v4` inside the local `apt-packages` action, went to v6, and
   Dependabot's `github-actions` entry now reads `/.github/actions/*` as well.
 
+## EW's engine port requests (2026-09-27)
+
+EW asked for four features proven in its game code, none of which crcbl has.
+Decided 2026-09-27, in EW's order, one green hash per API. EW then pins it,
+migrates every caller and deletes its own copy in the same change.
+
+- **Ground-grid routing: accepted, as a new `crcbl-nav` crate (module `grid`).**
+  This is EW's `GroundGrid`: deterministic four-neighbour A\* and a bounded
+  flood fill over walkable and blocked cells. `docs/plan/24-navigation.md`'s
+  Recast-lineage navmesh is still the plan. The grid is the rung below it, not a
+  replacement. Not built yet. **Declined: building the grid from a
+  `PhysicsWorld`** (ground and clearance probes per cell). EW is its only user,
+  and the probe policy is scene-specific. Revisit when a second game needs it.
+- **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
+  `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
+  "perception". Not built yet.
+- **Acoustic paths: accepted, into `crcbl-audio` as `acoustic_path`.** The
+  material is a type parameter, because crcbl cannot know a game's materials,
+  and the returned barrier and path types move with it. This supplies the
+  obstruction half that `Mixer`'s distance rolloff lacks. Not built yet.
+- **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
+  routing stay with the game, what remains is a distance accumulator modulo a
+  stride: a few lines with no second consumer, since no crcbl sample emits
+  footsteps. Revisit when a sample or a second game needs contact events.
+
 ## Performance review and execution priority (2026-09-17)
 
 Performance work takes priority over feature expansion. Complete the review and
