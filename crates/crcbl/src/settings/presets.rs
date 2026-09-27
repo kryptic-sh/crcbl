@@ -25,13 +25,14 @@
 //! # What a tier covers, and what it is silent about
 //!
 //! What a tier writes is [`QualityValues`]: the render scale, the antialiasing
-//! tier, the shadow filter, the volumetric fog switch and the three SSAO keys
-//! (slices, blur passes, bent normals). Those are the table's
+//! tier, the shadow filter, the volumetric fog and contact-shadow switches and
+//! the three SSAO keys (slices, blur passes, bent normals). Those are the table's
 //! rows this tree has an `[engine.video]` key for; every other row names an
 //! amount of something with no key and often no renderer half — the shadow
-//! atlas's size and light budget, the probe volume's levels, SSR's resolution,
-//! contact shadows and ray tracing. A preset writes what it can and is silent
-//! about the rest; `docs/backlog.md` carries the list.
+//! atlas's size and light budget, the probe volume's levels, SSR's resolution
+//! and ray tracing. Contact shadows are covered through their
+//! [`TIER_VIDEO_KEYS`] switch, off on the low tier. A preset writes what it can
+//! and is silent about the rest; `docs/backlog.md` carries the list.
 //!
 //! **A knob that is a console variable and not a settings key is not something
 //! a tier can reach**, and that is the shape of the road rather than a gap in
@@ -82,8 +83,8 @@ use crcbl_store::settings::SettingsStack;
 
 use super::{
     ANTIALIASING_KEY, Applied, ConsoleHost, RENDER_SCALE_KEY, SHADOW_FILTER_KEY,
-    SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY, Stage, VIDEO_KEYS,
-    VIDEO_NAMESPACE, antialiasing_or_default, apply, render_scale, shadow_filter,
+    SSAO_BENT_NORMALS_KEY, SSAO_BLUR_PASSES_KEY, SSAO_SLICES_KEY, Stage, TIER_VIDEO_KEYS,
+    VIDEO_KEYS, VIDEO_NAMESPACE, antialiasing_or_default, apply, render_scale, shadow_filter,
     ssao_bent_normals, ssao_blur_passes, ssao_slices, video_effects,
 };
 
@@ -104,6 +105,15 @@ const FOG_ROW: usize = 4;
 /// The `[engine.video]` key of the fog switch, taken from the one table that
 /// spells it.
 const FOG_KEY: &str = VIDEO_KEYS[FOG_ROW].0;
+
+/// The `[engine.video]` key of the contact-shadow switch, from the table that
+/// spells it, held to its effect below as [`FOG_KEY`] is.
+const CONTACT_SHADOWS_KEY: &str = TIER_VIDEO_KEYS[0].0;
+
+const _: () = assert!(
+    TIER_VIDEO_KEYS[0].1.bits() == RenderEffects::CONTACT_SHADOWS.bits(),
+    "TIER_VIDEO_KEYS[0] no longer names the contact-shadow switch"
+);
 
 const _: () = assert!(
     VIDEO_KEYS[FOG_ROW].1.bits() == RenderEffects::VOLUMETRIC_FOG.bits(),
@@ -164,6 +174,8 @@ impl QualityPreset {
                 ssao_slices: 2,
                 ssao_blur_passes: 1,
                 ssao_bent_normals: false,
+                // "Contact shadows off", topic 45's low-tier clear.
+                contact_shadows: false,
             },
             // "Render scale 1.0 | Volumetric fog on, half-res froxels" — the
             // half-res froxel grid is its own unbuilt rung, so the switch is all
@@ -179,6 +191,7 @@ impl QualityPreset {
                 ssao_slices: 4,
                 ssao_blur_passes: 2,
                 ssao_bent_normals: true,
+                contact_shadows: true,
             },
             Self::High => QualityValues {
                 render_scale: 1.0,
@@ -188,6 +201,7 @@ impl QualityPreset {
                 ssao_slices: 4,
                 ssao_blur_passes: 2,
                 ssao_bent_normals: true,
+                contact_shadows: true,
             },
         }
     }
@@ -216,6 +230,8 @@ pub struct QualityValues {
     pub ssao_blur_passes: i64,
     /// [`super::SSAO_BENT_NORMALS_KEY`].
     pub ssao_bent_normals: bool,
+    /// The [`super::TIER_VIDEO_KEYS`] contact-shadow switch.
+    pub contact_shadows: bool,
 }
 
 /// What the engine's own readers answer for the keys a tier covers.
@@ -234,6 +250,7 @@ pub fn current_values(stack: &SettingsStack) -> QualityValues {
         ssao_slices: ssao_slices(stack),
         ssao_blur_passes: ssao_blur_passes(stack),
         ssao_bent_normals: ssao_bent_normals(stack),
+        contact_shadows: video_effects(stack).contains(RenderEffects::CONTACT_SHADOWS),
     }
 }
 
@@ -302,6 +319,7 @@ pub fn select(
         (SSAO_SLICES_KEY, Value::Int(values.ssao_slices)),
         (SSAO_BLUR_PASSES_KEY, Value::Int(values.ssao_blur_passes)),
         (SSAO_BENT_NORMALS_KEY, Value::Bool(values.ssao_bent_normals)),
+        (CONTACT_SHADOWS_KEY, Value::Bool(values.contact_shadows)),
     ] {
         let key = format!("{VIDEO_NAMESPACE}.{name}");
         if apply(stack, &key, &value, stage)? == Applied::NextStart {
@@ -314,7 +332,7 @@ pub fn select(
 /// One line describing what the covered keys hold.
 fn values_line(values: QualityValues) -> String {
     format!(
-        "{RENDER_SCALE_KEY} = {}, {ANTIALIASING_KEY} = {}, {SHADOW_FILTER_KEY} = {}, {FOG_KEY} = {}, {SSAO_SLICES_KEY} = {}, {SSAO_BLUR_PASSES_KEY} = {}, {SSAO_BENT_NORMALS_KEY} = {}",
+        "{RENDER_SCALE_KEY} = {}, {ANTIALIASING_KEY} = {}, {SHADOW_FILTER_KEY} = {}, {FOG_KEY} = {}, {SSAO_SLICES_KEY} = {}, {SSAO_BLUR_PASSES_KEY} = {}, {SSAO_BENT_NORMALS_KEY} = {}, {CONTACT_SHADOWS_KEY} = {}",
         values.render_scale,
         values.antialiasing.name(),
         values.shadow_filter.label(),
@@ -322,6 +340,7 @@ fn values_line(values: QualityValues) -> String {
         values.ssao_slices,
         values.ssao_blur_passes,
         values.ssao_bent_normals,
+        values.contact_shadows,
     )
 }
 

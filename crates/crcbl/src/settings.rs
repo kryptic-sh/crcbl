@@ -168,6 +168,23 @@ pub const VIDEO_KEYS: [(&str, RenderEffects); 6] = [
     ("auto_exposure", RenderEffects::AUTO_EXPOSURE),
 ];
 
+/// The effect switches a quality tier writes and a settings screen does not
+/// show: [`VIDEO_KEYS`]' twin for an effect topic 45 made "not a settings row of
+/// its own but a tier item" (2026-08-30, `docs/notes/rendering.md`).
+///
+/// Read, written, catalogued and bound to the console exactly as
+/// [`VIDEO_KEYS`] are — a preset clears a bit by writing its key, and a bit
+/// with no key is one no preset can reach — and absent from that table only
+/// because `apps/options` builds its effect rows from it.
+pub const TIER_VIDEO_KEYS: [(&str, RenderEffects); 1] =
+    [("contact_shadows", RenderEffects::CONTACT_SHADOWS)];
+
+/// Every effect switch of `[engine.video]`: [`VIDEO_KEYS`], then
+/// [`TIER_VIDEO_KEYS`].
+fn effect_keys() -> impl Iterator<Item = (&'static str, RenderEffects)> {
+    VIDEO_KEYS.into_iter().chain(TIER_VIDEO_KEYS)
+}
+
 /// What the player's `[engine.video]` section allows, for
 /// [`EffectRequest::video`](crcbl_render::EffectRequest::video).
 ///
@@ -186,7 +203,7 @@ pub const VIDEO_KEYS: [(&str, RenderEffects); 6] = [
 #[must_use]
 pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
     let mut allowed = RenderEffects::all();
-    for (key, effect) in VIDEO_KEYS {
+    for (key, effect) in effect_keys() {
         let dotted = format!("{VIDEO_NAMESPACE}.{key}");
         match stack.get::<bool>(&dotted) {
             Some(false) => allowed.remove(effect),
@@ -736,7 +753,8 @@ pub fn set_shadow_filter(stack: &mut SettingsStack, filter: Filter) -> Result<()
     )
 }
 
-/// Write the effect rows of `[engine.video]`, one key per [`VIDEO_KEYS`] entry.
+/// Write the effect rows of `[engine.video]`, one key per [`VIDEO_KEYS`] and
+/// [`TIER_VIDEO_KEYS`] entry.
 ///
 /// # Errors
 ///
@@ -745,7 +763,7 @@ pub fn set_video_effects(
     stack: &mut SettingsStack,
     allowed: RenderEffects,
 ) -> Result<(), StorageError> {
-    for (key, effect) in VIDEO_KEYS {
+    for (key, effect) in effect_keys() {
         stack.set(
             &format!("{VIDEO_NAMESPACE}.{key}"),
             &allowed.contains(effect),
@@ -1142,8 +1160,7 @@ pub fn catalogue() -> Vec<CatalogueKey> {
         help,
         status: KeyStatus::Read,
     };
-    let mut keys: Vec<CatalogueKey> = VIDEO_KEYS
-        .iter()
+    let mut keys: Vec<CatalogueKey> = effect_keys()
         .map(|(key, _)| read(VIDEO_NAMESPACE, key, Kind::Bool, EFFECT_HELP))
         .collect();
     keys.push(read(
@@ -1531,7 +1548,7 @@ pub fn apply(
             set_anisotropic_filtering(stack, anisotropy).map_err(storage)?;
             Ok(reached(stage.apply_video(&video(stack))))
         }
-        // Every remaining `Read` key is one of `VIDEO_KEYS`, whose entry in the
+        // Every remaining `Read` key is an effect switch, whose entry in the
         // catalogue is derived from that table — so a name that reaches here and
         // matches nothing is a key catalogued as read with no writer, which the
         // catalogue tests already refuse.
@@ -1539,8 +1556,7 @@ pub fn apply(
             let Value::Bool(on) = *value else {
                 unreachable!("an effect key is a bool kind, which `check` has held it to")
             };
-            let (_, effect) = VIDEO_KEYS
-                .into_iter()
+            let (_, effect) = effect_keys()
                 .find(|(candidate, _)| *candidate == name)
                 .expect("every `Read` video key not matched above is an effect switch");
             let mut effects = video_effects(stack);
@@ -2013,10 +2029,7 @@ fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
         SSAO_BENT_NORMALS_KEY => Value::Bool(ssao_bent_normals(stack)),
         RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
         ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
-        _ => match VIDEO_KEYS
-            .into_iter()
-            .find(|(candidate, _)| *candidate == name)
-        {
+        _ => match effect_keys().find(|(candidate, _)| *candidate == name) {
             Some((_, effect)) => Value::Bool(video_effects(stack).contains(effect)),
             // A `Named` key: nothing reads it, so there is nothing to read it
             // back through. Its binding is `READ_ONLY`, and this is what `help`
@@ -2113,6 +2126,7 @@ settings_bindings! {
     BLOOM: VIDEO_NAMESPACE, VIDEO_KEYS[3].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
     VOLUMETRIC_FOG: VIDEO_NAMESPACE, VIDEO_KEYS[4].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
     AUTO_EXPOSURE: VIDEO_NAMESPACE, VIDEO_KEYS[5].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
+    CONTACT_SHADOWS: VIDEO_NAMESPACE, TIER_VIDEO_KEYS[0].0, Kind::Bool, Flags::ARCHIVE, EFFECT_HELP;
 
     ANTIALIASING: VIDEO_NAMESPACE, ANTIALIASING_KEY, Kind::Enum(&ANTIALIASING_NAMES),
         Flags::ARCHIVE, ANTIALIASING_HELP;
@@ -2429,8 +2443,7 @@ mod tests {
             .map(|entry| entry.key)
             .collect();
 
-        let mut wanted: Vec<String> = VIDEO_KEYS
-            .iter()
+        let mut wanted: Vec<String> = effect_keys()
             .map(|(key, _)| format!("{VIDEO_NAMESPACE}.{key}"))
             .collect();
         wanted.push(format!("{VIDEO_NAMESPACE}.{ANTIALIASING_KEY}"));
@@ -2646,27 +2659,18 @@ mod tests {
     /// be **out** of the boolean table: a `cmaa2 = false` row a player could
     /// still write is a row nothing reads.
     ///
-    /// # The second exception, and it is an open question rather than a design
+    /// # Contact shadows have a key and no menu row
     ///
     /// Topic 45's 2026-08-30 decision made
     /// [`RenderEffects::CONTACT_SHADOWS`] "not a settings row of its own but a
-    /// tier item", so it is deliberately absent from [`VIDEO_KEYS`] and named in
-    /// [`TIER_ONLY`] here. **What that leaves owed is real**: the same decision
-    /// says the low quality preset clears the bit, and
-    /// [`crate::settings::presets`] clears an effect by writing its
-    /// [`VIDEO_KEYS`] row — `FOG_KEY` is how the froxel switch is spelled there
-    /// — so a bit with no row is a bit no preset can clear. Either this grows a
-    /// row or the presets grow a way to clear a bit without one;
-    /// `docs/backlog.md` carries the question.
+    /// tier item", and the low preset clears it; a preset clears a bit by
+    /// writing its key, so the bit has one in [`TIER_VIDEO_KEYS`], which
+    /// `apps/options` does not draw rows from. It is covered here like any
+    /// other switch.
     #[test]
     fn every_effect_has_a_key_and_no_two_share_one() {
-        /// Effects topic 39's tiers own and a player's
-        /// file does not — see this test's header, which is where the one
-        /// member of this set is argued and what it still owes is stated.
-        const TIER_ONLY: RenderEffects = RenderEffects::CONTACT_SHADOWS;
-
         let mut covered = RenderEffects::empty();
-        for (key, effect) in VIDEO_KEYS {
+        for (key, effect) in effect_keys() {
             assert!(
                 !covered.intersects(effect),
                 "{key} names an effect another key already names"
@@ -2681,13 +2685,8 @@ mod tests {
             !covered.intersects(slot),
             "the resolve slot is a boolean row as well as a ladder rung"
         );
-        assert!(
-            !covered.intersects(TIER_ONLY),
-            "a tier-only effect with a boolean row is a row a player can write and \
-             nothing decided to offer"
-        );
         assert_eq!(
-            covered.union(slot).union(TIER_ONLY),
+            covered.union(slot),
             RenderEffects::all(),
             "an effect with no [engine.video] key, no ladder rung and no place in the tier \
              set is one nothing can reach"
@@ -3461,9 +3460,9 @@ mod tests {
                 checked += 1;
             }
         }
-        // Six switches, eight video rows and six gains, two ends each bar the
+        // Seven switches, eight video rows and six gains, two ends each bar the
         // antialiasing tier's three rungs.
-        assert_eq!(checked, 42, "the sweep did not cover the read catalogue");
+        assert_eq!(checked, 44, "the sweep did not cover the read catalogue");
     }
 
     /// **A value outside a key's kind is refused before it reaches the file.**

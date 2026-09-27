@@ -304,6 +304,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **Contact shadows have a settings key, and the low quality tier turns them
+  off.** `[engine.video] contact_shadows` (`crcbl::settings::TIER_VIDEO_KEYS`)
+  is read, written, catalogued and bound to the console like the other effect
+  switches, and `QualityPreset::Low` writes it `false`. It is not in
+  `VIDEO_KEYS`, so a settings screen built from that table, `apps/options` among
+  them, shows no row for it.
+
 - **`Binding::PadChord { modifier, button }`: a held pad button gives the others
   a second layer**, the pad's `Binding::Chord`. While `modifier` is held, a
   plain `PadButton` binding on `button` in the context that owns it reads up, so
