@@ -392,11 +392,12 @@ open):
   pipeline cache. `Exposure::new` calls `compute_pipeline_entry` for each entry
   point of its shared shader; that helper creates and destroys a module for each
   pipeline. Price renderer construction and viewer reloads before considering
-  builder-scoped module reuse or a device pipeline cache. These inspected calls
-  do not establish steady-state frame work. Preserve entry-point, storage-stride
-  and workgroup checks, failure cleanup and backend lifetime contracts.
-  Persistent driver caches also need device/driver identity and corrupt-cache
-  recovery; they follow the measured frame-path candidates.
+  builder-scoped module reuse. A device pipeline cache was priced and declined
+  on 2026-09-27; see _The Vulkan pipeline cache is not persisted_. These
+  inspected calls do not establish steady-state frame work. Preserve
+  entry-point, storage-stride and workgroup checks, failure cleanup and backend
+  lifetime contracts. Persistent driver caches also need device/driver identity
+  and corrupt-cache recovery; they follow the measured frame-path candidates.
 - Bracket's `page::ladder` calls `Sim::ladder` on every draw; that method
   allocates the complete population order and sorts by rating with an id tie
   break. Measure paused and tick-active pages before retaining scratch or
@@ -9655,27 +9656,43 @@ own; the suballocator lands when that trigger fires.
 
 ### The Vulkan pipeline cache is not persisted (2026-09-24)
 
-**Not built.** Stage 2 §2.3 asked for a pipeline cache persisted to disk.
-`crcbl-vk`'s `pipeline.rs` creates every compute and graphics pipeline against
-`vk::PipelineCache::null()`, so every run compiles every pipeline from SPIR-V
-again. Verified at both call sites (`create_compute_pipelines` and
-`create_graphics_pipelines`).
+**Decided 2026-09-27: declined, because the driver already caches it.** Stage 2
+§2.3 asked for a pipeline cache persisted to disk; `crcbl-vk`'s `pipeline.rs`
+still passes `vk::PipelineCache::null()` to both `create_compute_pipelines` and
+`create_graphics_pipelines`. Priced on the RX 7900 XTX by timing
+`ForwardRenderer::with_scene_serviced` over `scene::demo()` in a probe test in
+the `forward-e2e` harness under `CRCBL_GPU=vk`. The probe logged each `service`
+step's source line and each creation call's time, and was deleted afterwards.
 
-**What it would take:** a `VkPipelineCache` owned by the device and passed to
+- **Cold:** the first run of a new executable path took 2.3–2.5 s, spent in the
+  steps that create pipelines. A rebuilt binary at the same path, and every
+  later process, stayed warm, so AMD's driver cache looks keyed per application.
+  That was observed, not read from AMD documentation.
+- **Warm:** 211–228 ms in a debug build with validation, and 178–184 ms in a
+  release build with `CRCBL_VK_VALIDATION=0`. The 49 compute and 35 graphics
+  pipelines took 3–5 ms of that together (debug, validation on).
+
+A persisted `VkPipelineCache` could therefore save only a few warm milliseconds.
+The cold case is a first launch, which an application cache misses as well. The
+drivers crcbl targets (AMD, NVIDIA, Mesa, Intel) all keep a disk cache. Revisit
+if a driver without one turns up, or if a patched game is shown to start cold.
+
+**If it is ever built:** a `VkPipelineCache` owned by the device and passed to
 both creation calls; loaded at device creation from a per-adapter file and
 written back at shutdown through `crcbl-store`'s platform storage. Key the file
-by vendor id, device id and driver version, and treat a cache the driver
-refuses, or a truncated file, as empty rather than as an error — the header
-validation is the driver's (`VkPipelineCacheHeaderVersionOne` carries the
-vendor, device and `pipelineCacheUUID`). No other backend has a counterpart yet,
-and the browser has none at all (a row of the browser boundary in
-`docs/notes/browser.md`).
+by vendor id, device id and driver version, and treat a refused or truncated
+cache as empty rather than as an error.
 
-**Price it first.** The related performance entry above ("passes a null Vulkan
-pipeline cache") already says to measure renderer construction and viewer
-reloads before considering a device pipeline cache, and that persistent driver
-caches need device/driver identity and corrupt-cache recovery. Nothing has
-measured what a warm cache would save; this is start-up cost, not frame cost.
+**Where the warm construction goes instead** (release, no validation, one
+round): the six shadow `DrawGen::new` calls in the loop that pushes
+`rollback.shadow_draws` took 53 ms, about 9 ms each; the step of texture uploads
+ending with the DFG and LTC tables took 19 ms; the per-frame shadow-view bind
+groups (the loop filling `shadow_groups`) took 19 ms; and the rest was spread
+over about fifty steps of 1–10 ms. Each `DrawGen` blocks on `fill_at_start_up`,
+which submits and waits for the device to go idle, but nothing has timed that
+wait on its own. This is start-up cost, not frame cost. Batching the start-up
+fills behind one wait is the candidate if construction time ever matters. Time
+the waits first.
 
 ### D3D12 is the one target still held against a golden alone (2026-08-27)
 
