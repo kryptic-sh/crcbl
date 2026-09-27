@@ -293,7 +293,7 @@ mod tests {
     fn env() -> Env {
         Env {
             camera: EnvCamera {
-                position: [0.0, 0.0, -crate::audio::LISTENER_STANDOFF],
+                position: [0.0, 0.0, crate::audio::LISTENER_STANDOFF],
                 look_at: [0.0, 0.0, 0.0],
             },
             ambient: [

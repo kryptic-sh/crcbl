@@ -340,6 +340,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "crcbl-core",
+ "glam",
 ]
 
 [[package]]

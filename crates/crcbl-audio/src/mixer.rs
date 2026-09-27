@@ -1806,13 +1806,13 @@ mod tests {
     /// hearing from the origin would leave these two mixes identical, which is
     /// what every assertion here is written against: same gains, same ITD, no
     /// side at all.
-    /// **Turning the listener turns the cue**: an emitter dead ahead of a
-    /// listener facing `+Z` is on the right of the same listener turned to
-    /// face `−X`, and the cue says so.
+    /// **Turning the listener turns the cue**: an emitter dead ahead of the
+    /// default listener, which faces `−Z`, is on the right of the same
+    /// listener turned to face `−X`, and the cue says so.
     #[test]
     fn turning_the_listener_turns_where_the_next_cue_is_heard() {
         let mixer = Mixer::new();
-        let emitter = [0.0, 0.0, 5.0];
+        let emitter = [0.0, 0.0, -5.0];
         let ahead = mixer.cue(emitter);
         assert!(
             (ahead.gain_left - ahead.gain_right).abs() < 1e-6,
@@ -1895,18 +1895,21 @@ mod tests {
         let emitter = [5.0, 2.0, -3.0];
         let mixer = Mixer::new();
 
+        // At the origin, facing `−Z` with `+X` on its right: the emitter's
+        // depth is negated and nothing else moves.
+        let heard = [5.0, 2.0, 3.0];
         assert_eq!(mixer.listener(), Listener::ORIGIN);
         assert_eq!(Listener::ORIGIN.position, [0.0; 3]);
         assert_eq!(
             mixer.cue(emitter),
-            compute_cue([0.0, 0.0, 0.0], emitter, &grammar),
+            compute_cue([0.0, 0.0, 0.0], heard, &grammar),
             "a fresh mixer cued from somewhere other than the origin",
         );
 
         mixer.set_listener(Listener::ORIGIN);
         assert_eq!(
             mixer.cue(emitter),
-            compute_cue([0.0, 0.0, 0.0], emitter, &grammar),
+            compute_cue([0.0, 0.0, 0.0], heard, &grammar),
             "saying the origin out loud changed the answer",
         );
     }

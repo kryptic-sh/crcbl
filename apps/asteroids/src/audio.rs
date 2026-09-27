@@ -8,7 +8,7 @@
 //!
 //! # Where the listener stands, and why this game finally makes it matter
 //!
-//! At the middle of the field, [`LISTENER_STANDOFF`] back from the play plane,
+//! At the middle of the field, [`LISTENER_STANDOFF`] out on `+Z` from the play plane,
 //! which is where the camera sits — see `crate::gpu`'s `camera`, which is fixed
 //! there and never moves. Being fixed, it is placed on the [`Mixer`] once in
 //! [`Audio::new`] and the frame never touches it again.
@@ -79,11 +79,11 @@ const MASTER_GAIN: f32 = 0.5;
 /// level sits on top of the gun rather than under it.
 const ENGINE_GAIN: f32 = 0.25;
 
-/// How far behind the play plane the listener stands. See breakout's.
+/// How far out of the play plane, on the camera's `+Z` side, the listener stands. See breakout's.
 const LISTENER_STANDOFF: f32 = 1.0;
 
 /// The camera, nailed to the middle of the field. See the module docs.
-const LISTENER: Listener = Listener::new([0.0, 0.0, -LISTENER_STANDOFF]);
+const LISTENER: Listener = Listener::new([0.0, 0.0, LISTENER_STANDOFF]);
 
 /// Owns the cues and the output stream.
 #[derive(Debug)]
@@ -471,7 +471,7 @@ mod tests {
         assert_eq!(audio.mixer.listener(), LISTENER);
         assert_eq!(
             audio.mixer.listener().position,
-            [0.0, 0.0, -LISTENER_STANDOFF],
+            [0.0, 0.0, LISTENER_STANDOFF],
         );
     }
 

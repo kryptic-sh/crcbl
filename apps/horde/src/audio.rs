@@ -90,7 +90,7 @@ const SOUND_COUNT: usize = 6;
 /// How loud a cue is against the volume the grammar asks for. See breakout's.
 const MASTER_GAIN: f32 = 0.5;
 
-/// How far behind the play plane the listener stands. See breakout's.
+/// How far out of the play plane, on the camera's `+Z` side, the listener stands. See breakout's.
 const LISTENER_STANDOFF: f32 = 1.0;
 
 /// How many voices may be sounding at once: the [`Mixer`]'s voice budget.
@@ -231,7 +231,7 @@ impl Audio {
         self.mixer.set_listener(Listener::new([
             at.x as f32,
             at.y as f32,
-            at.z as f32 - LISTENER_STANDOFF,
+            at.z as f32 + LISTENER_STANDOFF,
         ]));
     }
 
@@ -600,18 +600,18 @@ mod tests {
     /// which sits *in* the play plane and so answers a cue on top of it with no
     /// direction.
     #[test]
-    fn the_listener_is_behind_the_play_plane_from_the_first_cue() {
+    fn the_listener_stands_out_of_the_play_plane_from_the_first_cue() {
         let audio = Audio::new(true);
         assert_eq!(
             audio.mixer.listener().position,
-            [0.0, 0.0, -LISTENER_STANDOFF],
+            [0.0, 0.0, LISTENER_STANDOFF],
         );
 
         // …and it follows the player rather than staying put.
         audio.set_listener(DVec3::new(-7.0, 3.0, 0.0));
         assert_eq!(
             audio.mixer.listener().position,
-            [-7.0, 3.0, -LISTENER_STANDOFF],
+            [-7.0, 3.0, LISTENER_STANDOFF],
         );
     }
 

@@ -50,7 +50,7 @@ pub const SOUND_DEATH: u32 = 2;
 /// How loud a cue is against the volume the grammar asks for. See breakout's.
 const MASTER_GAIN: f32 = 0.5;
 
-/// How far behind the play plane the listener stands. See breakout's.
+/// How far out of the play plane, on the camera's `+Z` side, the listener stands. See breakout's.
 const LISTENER_STANDOFF: f32 = 1.0;
 
 /// Owns the cues and the output stream.
@@ -122,7 +122,7 @@ impl Audio {
     /// Called once a frame, before the frame's cues are played.
     pub fn set_listener(&self, x: f64) {
         self.mixer
-            .set_listener(Listener::new([x as f32, 0.0, -LISTENER_STANDOFF]));
+            .set_listener(Listener::new([x as f32, 0.0, LISTENER_STANDOFF]));
     }
 
     /// Moves `bus`'s gain stage to `gain` on the mixer already playing.
@@ -356,11 +356,11 @@ mod tests {
     /// not be computed against the mixer's default at the origin, which sits
     /// *in* the play plane and so answers a cue on top of it with no direction.
     #[test]
-    fn the_listener_is_behind_the_play_plane_from_the_first_cue() {
+    fn the_listener_stands_out_of_the_play_plane_from_the_first_cue() {
         let audio = Audio::new(true);
         assert_eq!(
             audio.mixer.listener().position,
-            [0.0, 0.0, -LISTENER_STANDOFF],
+            [0.0, 0.0, LISTENER_STANDOFF],
         );
     }
 

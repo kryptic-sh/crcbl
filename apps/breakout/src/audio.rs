@@ -7,7 +7,7 @@
 //!
 //! # Where the listener stands
 //!
-//! At the screen centre, [`LISTENER_STANDOFF`] behind the play plane, which is
+//! At the screen centre, [`LISTENER_STANDOFF`] out on `+Z` from the play plane, which is
 //! where the camera is. It never moves, so it is set on the [`Mixer`] once in
 //! [`Audio::new`] and nothing in the frame touches it again: the whole listener
 //! convention of this sample is that one line. Only the emitter's X moves, so
@@ -54,7 +54,7 @@ pub const SOUND_BRICK: u32 = 2;
 /// of the listener, and several cues overlapping at full scale clip.
 const MASTER_GAIN: f32 = 0.5;
 
-/// How far behind the play plane the listener stands, in world units.
+/// How far out of the play plane, on the camera's `+Z` side, the listener stands, in world units.
 ///
 /// The game happens at `z = 0`, so a listener in that plane would hear a cue
 /// raised on top of it as a zero-length direction — no side, no distance, and
@@ -71,7 +71,7 @@ const MASTER_GAIN: f32 = 0.5;
 pub(crate) const LISTENER_STANDOFF: f32 = 1.0;
 
 /// The camera, at the screen centre. See the module docs.
-const LISTENER: Listener = Listener::new([0.0, 0.0, -LISTENER_STANDOFF]);
+const LISTENER: Listener = Listener::new([0.0, 0.0, LISTENER_STANDOFF]);
 
 /// The settings directory this sample reads its volumes out of.
 ///
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(audio.mixer.listener(), LISTENER);
         assert_eq!(
             audio.mixer.listener().position,
-            [0.0, 0.0, -LISTENER_STANDOFF],
+            [0.0, 0.0, LISTENER_STANDOFF],
         );
     }
 

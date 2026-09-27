@@ -8738,9 +8738,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `cue(emitter, grammar)`. `compute_cue` is unchanged and still takes an
   explicit listener: it is a pure function, and `Mixer::cue` is what supplies
   the remembered one. A listener also faces somewhere: `Listener::forward`, set
-  with `Listener::facing(position, forward)` (`+Y` stays up, and `Listener::new`
-  still faces `+Z`), so a first-person game's ear turns with its view.
-  `Mixer::cue` hears an emitter in that frame, through `Listener::to_local`.
+  with `Listener::facing(position, forward)` (`+Y` stays up), so a first-person
+  game's ear turns with its view. `Mixer::cue` hears an emitter in that frame,
+  through `Listener::to_local`. The frame is right-handed, like the renderer's
+  `Camera::view`: right is `forward × up`, and `Listener::new` and
+  `Listener::ORIGIN` face `−Z` with `+X` on the right, so an ear placed at a
+  camera and facing where it looks hears the camera's right on its right. The
+  samples' listeners stand `LISTENER_STANDOFF` out on `+Z`, the side their
+  cameras sit on, as does breakout's `env.ron` camera.
 
   It exists because the engine had no listener at all, which left every game
   inventing where the ear was: the four samples spelled the same call three

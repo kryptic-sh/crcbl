@@ -39,3 +39,9 @@ crcbl-core = { workspace = true }
 # build graph at *zero* third-party crates.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 cpal = "0.18.1"
+
+# The listener tests build a camera with `glam::camera::rh`, the construction the
+# renderer's `Camera::view` uses, to prove the ears match the eyes. `glam` is
+# already in this crate's graph through `crcbl-core`.
+[dev-dependencies]
+glam = { workspace = true }

@@ -18675,11 +18675,6 @@ retrospective on the three sample findings lists says which seam closed each.
   it are load-bearing. Nothing constructs one outside `crcbl-render` today.
   Noted, not investigated.
 
-- **`Listener` has a position and no orientation**, so `compute_cue` still
-  hard-codes "the listener faces +Z" and its module docs say so. That is the
-  field the type was made `#[non_exhaustive]` to be able to gain; nothing needs
-  it until a game turns its camera.
-
 - **Nothing has listened to the migrated cues on a real device.** Every sample's
   audio was rewritten onto `crcbl_audio::mixer` and the checks are all
   structural: buffer shapes, pan ordering, voice counts, loop seams. Two

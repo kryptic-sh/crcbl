@@ -20,11 +20,16 @@
 //!
 //! # Coordinate convention
 //!
-//! +X = right, +Y = up, +Z = forward (same as the engine's world space).
-//! [`compute_cue`]'s listener faces +Z.  Azimuth is measured from +Z in the XZ
-//! plane; elevation is measured from the XZ plane toward +Y. A [`Listener`]
-//! that turns carries a [`forward`](Listener::forward), and
-//! [`Listener::to_local`] puts an emitter into that frame first.
+//! [`compute_cue`] works in **listener space**: +X to the listener's right, +Y
+//! up, +Z ahead. Azimuth is measured from +Z in the XZ plane; elevation from
+//! the XZ plane toward +Y.
+//!
+//! The engine's world is **right-handed**, like `crcbl_render::Camera::view`, so
+//! a listener facing world `−Z` — a default camera's look — has world `+X` on
+//! its right, and [`Listener::to_local`] is what carries a world position into
+//! listener space: right is forward × up, and up is right × forward. Listener
+//! space itself is left-handed (+X right with +Z ahead); it is a frame of
+//! reference for the ear, not a world.
 
 /// Tuneable parameters for the cue grammar.
 ///
@@ -116,12 +121,10 @@ impl SpatialCue {
 ///
 /// # Why this is a type and not three floats
 ///
-/// The coordinate convention above says the listener **faces `+Z`**, and
-/// [`compute_cue`] takes it at its word: azimuth is the angle from `+Z` in the
-/// XZ plane, so `nz` is "how far ahead" and `nx` is "how far right" with nothing
-/// in between to turn them. A listener that can *rotate* needs a forward vector,
-/// and this type is what can gain that field — every existing caller keeps
-/// working, because `new` fixes the orientation it fixes today.
+/// [`compute_cue`] hears in listener space, where `nz` is "how far ahead" and
+/// `nx` is "how far right" with nothing in between to turn them. A listener in
+/// the world stands somewhere and faces somewhere, and this type carries both
+/// into that space through [`Listener::to_local`].
 ///
 /// `#[non_exhaustive]`, so a caller outside this crate cannot write the struct
 /// literal or use functional-update syntax, which is what makes that field a
@@ -132,23 +135,24 @@ impl SpatialCue {
 pub struct Listener {
     /// World-space position: `+X` right, `+Y` up, `+Z` forward.
     pub position: [f32; 3],
-    /// The way the listener faces, in world space; `+Y` stays up. Any length:
-    /// only the direction is read. A zero or non-finite one has no direction,
-    /// and the listener faces `+Z`, as [`Listener::new`] does.
+    /// The way the listener faces, in the right-handed world; `+Y` stays up.
+    /// Any length: only the direction is read. A zero or non-finite one has no
+    /// direction, and the listener faces `−Z`, as [`Listener::new`] does.
     pub forward: [f32; 3],
 }
 
 impl Listener {
-    /// The world origin, facing `+Z`.
+    /// The world origin, facing `−Z`.
     ///
     /// What a [`Mixer`](crate::mixer::Mixer) hears from until something calls
     /// [`Mixer::set_listener`](crate::mixer::Mixer::set_listener).
     pub const ORIGIN: Self = Self::new([0.0; 3]);
 
-    /// A listener standing at `position`, facing `+Z`.
+    /// A listener standing at `position`, facing `−Z`: the way a default
+    /// camera looks, so world `+X` is on its right.
     #[must_use]
     pub const fn new(position: [f32; 3]) -> Self {
-        Self::facing(position, [0.0, 0.0, 1.0])
+        Self::facing(position, [0.0, 0.0, -1.0])
     }
 
     /// A listener standing at `position`, facing `forward` — a first-person
@@ -158,19 +162,20 @@ impl Listener {
         Self { position, forward }
     }
 
-    /// `emitter` in the listener's own frame: relative to its position, with
-    /// `+Z` its forward, `+Y` its up and `+X` its right — the frame
-    /// [`compute_cue`] hears a listener at the origin facing `+Z` in.
+    /// `emitter` in listener space: relative to the listener's position, with
+    /// `+X` its right, `+Y` its up and `+Z` ahead — what [`compute_cue`] hears
+    /// from the origin. The offset keeps its length, so the cue's distance
+    /// rolloff still reads it.
     ///
-    /// Right is world up crossed with forward, so a listener looking up or
-    /// down keeps its ears level; one looking straight up or down, where that
-    /// cross vanishes, takes world `+X` as right.
+    /// Right is forward crossed with world up, as in a right-handed world, so a
+    /// listener looking up or down keeps its ears level; one looking straight up
+    /// or down, where that cross vanishes, takes world `+X` as right.
     #[must_use]
     pub fn to_local(&self, emitter: [f32; 3]) -> [f32; 3] {
         let offset = sub(emitter, self.position);
-        let forward = normalized(self.forward).unwrap_or([0.0, 0.0, 1.0]);
-        let right = normalized(cross([0.0, 1.0, 0.0], forward)).unwrap_or([1.0, 0.0, 0.0]);
-        let up = cross(forward, right);
+        let forward = normalized(self.forward).unwrap_or([0.0, 0.0, -1.0]);
+        let right = normalized(cross(forward, [0.0, 1.0, 0.0])).unwrap_or([1.0, 0.0, 0.0]);
+        let up = cross(right, forward);
         [dot(offset, right), dot(offset, up), dot(offset, forward)]
     }
 }
@@ -486,31 +491,61 @@ mod tests {
         a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-5)
     }
 
-    /// **A listener facing `+Z` hears the world as it is**, so every caller of
-    /// [`Listener::new`] gets the cue it got before the facing existed.
+    /// **The default listener faces where a default camera looks**, `−Z`, with
+    /// world `+X` on its right: the offset keeps its length, `+Z` is behind.
     #[test]
-    fn a_listener_facing_plus_z_leaves_the_world_as_it_is() {
+    fn the_default_listener_faces_minus_z_with_plus_x_on_its_right() {
         let listener = Listener::new([1.0, 2.0, 3.0]);
-        assert_eq!(listener.forward, [0.0, 0.0, 1.0]);
-        assert_eq!(listener.to_local([4.0, 6.0, 8.0]), [3.0, 4.0, 5.0]);
+        assert_eq!(listener.forward, [0.0, 0.0, -1.0]);
+        assert!(close(listener.to_local([4.0, 6.0, 8.0]), [3.0, 4.0, -5.0]));
+    }
+
+    /// **A listener hears the side a right-handed camera sees.** For each
+    /// direction a camera built by `look_at_mat4` — what the renderer's
+    /// `Camera::view` is — can face, the point on the camera's right is on the
+    /// listener's right, and the point it looks at is ahead.
+    #[test]
+    fn a_listener_facing_a_cameras_look_hears_the_cameras_right_on_its_right() {
+        let eye = glam::Vec3::new(2.0, 1.5, -3.0);
+        for forward in [
+            glam::Vec3::NEG_Z,
+            glam::Vec3::Z,
+            glam::Vec3::X,
+            glam::Vec3::new(-1.0, 0.3, 2.0),
+        ] {
+            let view = glam::camera::rh::view::look_at_mat4(eye, eye + forward, glam::Vec3::Y);
+            let right = view.row(0).truncate();
+            let listener = Listener::facing(eye.to_array(), forward.to_array());
+            let heard = listener.to_local((eye + right * 5.0).to_array());
+            assert!(
+                heard[0] > 4.9,
+                "{forward}: the camera's right is at {heard:?}"
+            );
+            let ahead = listener.to_local((eye + forward.normalize() * 5.0).to_array());
+            assert!(
+                ahead[2] > 4.9,
+                "{forward}: what it looks at is at {ahead:?}"
+            );
+            let cue = compute_cue([0.0; 3], heard, &grammar());
+            assert!(cue.gain_right > cue.gain_left, "{forward}: {cue:?}");
+        }
     }
 
     /// **A turned listener hears in its own frame**: facing `+X`, what is at
-    /// `+X` is ahead and what is at `−Z` is on its right.
+    /// `+X` is ahead, `+Z` is on its right and `−Z` on its left.
     #[test]
-    fn a_listener_turned_to_plus_x_hears_plus_x_ahead_and_minus_z_on_its_right() {
+    fn a_listener_turned_to_plus_x_hears_plus_z_on_its_right() {
         let listener = Listener::facing([0.0; 3], [2.0, 0.0, 0.0]);
         assert!(close(listener.to_local([5.0, 0.0, 0.0]), [0.0, 0.0, 5.0]));
-        assert!(close(listener.to_local([0.0, 0.0, -5.0]), [5.0, 0.0, 0.0]));
+        assert!(close(listener.to_local([0.0, 0.0, 5.0]), [5.0, 0.0, 0.0]));
+        assert!(close(listener.to_local([0.0, 0.0, -5.0]), [-5.0, 0.0, 0.0]));
         assert!(close(listener.to_local([0.0, 3.0, 0.0]), [0.0, 3.0, 0.0]));
-        let right = compute_cue([0.0; 3], listener.to_local([0.0, 0.0, -5.0]), &grammar());
-        assert!(right.gain_right > right.gain_left, "{right:?}");
     }
 
     /// **Looking up keeps the ears level, and a facing with no direction
-    /// faces `+Z`.**
+    /// faces `−Z`**, as the default listener does.
     #[test]
-    fn a_listener_looking_up_keeps_level_ears_and_a_zero_forward_faces_plus_z() {
+    fn a_listener_looking_up_keeps_level_ears_and_a_zero_forward_faces_minus_z() {
         let up = Listener::facing([0.0; 3], [0.0, 1.0, 0.0]);
         assert!(
             close(up.to_local([0.0, 4.0, 0.0]), [0.0, 0.0, 4.0]),
@@ -520,15 +555,16 @@ mod tests {
             close(up.to_local([4.0, 0.0, 0.0]), [4.0, 0.0, 0.0]),
             "+X stays right"
         );
+        // Tipped up from facing `+Z`, whose right is `−X`.
         let tilted = Listener::facing([0.0; 3], [0.0, 1.0, 1.0]);
         assert!(
-            close(tilted.to_local([3.0, 0.0, 0.0]), [3.0, 0.0, 0.0]),
+            close(tilted.to_local([3.0, 0.0, 0.0]), [-3.0, 0.0, 0.0]),
             "ears level"
         );
         for forward in [[0.0; 3], [f32::NAN, 0.0, 1.0]] {
             let lost = Listener::facing([0.0; 3], forward);
             assert!(
-                close(lost.to_local([1.0, 2.0, 3.0]), [1.0, 2.0, 3.0]),
+                close(lost.to_local([1.0, 2.0, 3.0]), [1.0, 2.0, -3.0]),
                 "{forward:?}"
             );
         }
