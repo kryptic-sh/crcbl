@@ -4,33 +4,33 @@
 using namespace metal;
 
 #line 120 "shaders/volumetric_composite.slang"
-constant array<float, int(5)> FOG_RATIO_KERNEL_0 = { 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f };
+constant array<float, int(5)> FOG_RATIO_KERNEL_0 = { { 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f } };
 
 #line 115
-constant array<float, int(8)> FOG_KERNEL_0 = { 1.0f, 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f, 0.00138888892251998f, 0.0001984127011383f };
+constant array<float, int(8)> FOG_KERNEL_0 = { { 1.0f, 1.0f, 0.5f, 0.1666666716337204f, 0.0416666679084301f, 0.00833333376795053f, 0.00138888892251998f, 0.0001984127011383f } };
 
-#line 90 "core"
+#line 197
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<float4, int(4)> data_0;
 };
 
 
-#line 90
+#line 197
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(2)> data_1;
 };
 
 
-#line 90
+#line 197
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E14_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_0, int(14)> data_2;
 };
 
 
-#line 144 "shaders/volumetric_composite.slang"
+#line 144
 struct VolumetricParams_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 inverse_view_proj_0;
@@ -57,7 +57,7 @@ struct VolumetricParams_natural_0
 };
 
 
-#line 144
+#line 227
 struct KernelContext_0
 {
     texture2d<float, access::sample> scene_color_0;
