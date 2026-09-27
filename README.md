@@ -298,6 +298,7 @@ crates/crcbl-shaders    Slang sources, the SPIR-V, WGSL, MSL and DXIL built from
 crates/crcbl-wl-scanner the Wayland protocol code generator, run at build time
 crates/crcbl-vfx        particle simulation: pooled effects, a fixed modifier menu
 crates/crcbl-inventory  the grid-inventory kit: one container, footprints, stacking
+crates/crcbl-nav        ground-grid routing and bounded reach; the navmesh is still a plan
 crates/crcbl-water      water bodies, their media, and the surface mesh a pass draws
 crates/crcbl-wind       the wind field: two authored layers, a weather state, one gust offset
 crates/crcbl-steam      Steamworks over the SDK's flat C API, loaded at runtime

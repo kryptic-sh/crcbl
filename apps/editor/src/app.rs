@@ -473,7 +473,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let pointer = self.pointer_state.resolve(&pending);
         let input = PanelInput {
             pointer,
-            nav: crcbl::nav::nav_input(&self.actions),
+            nav: crcbl::ui_nav::nav_input(&self.actions),
             text: self.text_pump.frame(dt),
             extent: self.extent(),
             select: select_mode(self.modifiers),

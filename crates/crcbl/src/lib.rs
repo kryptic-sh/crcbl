@@ -19,6 +19,7 @@
 //! crcbl::inventory → crcbl-inventory grids, items, placement and stacking (feature `inventory`)
 //! crcbl::ecs       → crcbl-ecs       the world, components, systems, the schedule
 //! crcbl::anim      → crcbl-anim      skeletons, clips, pose sampling, joint palettes
+//! crcbl::nav       → crcbl-nav       ground-grid routing and bounded reach
 //! crcbl::phys      → crcbl-phys      rigid bodies, colliders, forces, queries
 //! crcbl::net       → crcbl-net       the transport seam and the wire protocol
 //! crcbl::server    → crcbl-server    the authoritative simulation and its hash
@@ -34,7 +35,7 @@
 //! crcbl::backend   → (this crate)    runtime GPU backend selection
 //! crcbl::adapter   → (this crate)    which adapter inside that backend
 //! crcbl::engine    → (this crate)    the shell↔HAL join every sample repeats
-//! crcbl::nav       → (this crate)    the `ui` actions as the UI tree's NavInput
+//! crcbl::ui_nav    → (this crate)    the `ui` actions as the UI tree's NavInput
 //! ```
 //!
 //! # One dependency is the whole point, and it took until S3 to mean it
@@ -180,6 +181,12 @@ pub use crcbl_inventory as inventory;
 /// browser-versus-native question is answered — a sample writing that `cfg`
 /// itself is exactly what the seam exists to prevent.
 pub use crcbl_jobs as jobs;
+/// [`crcbl-nav`](crcbl_nav): routing across the ground — today the grid router
+/// and its bounded flood fill, the rung below the navmesh
+/// `docs/plan/24-navigation.md` plans. It depends on `glam` and `thiserror`
+/// alone, both already in every game's graph, so it is re-exported
+/// unconditionally.
+pub use crcbl_nav as nav;
 /// [`crcbl-net`](crcbl_net): the transport seam, the wire protocol and the
 /// in-memory transport a single-player session is built on.
 pub use crcbl_net as net;
@@ -377,8 +384,6 @@ pub mod engine;
 
 pub mod knob;
 
-pub mod nav;
-
 pub mod perf;
 
 #[cfg(any(feature = "scene", feature = "scn"))]
@@ -389,6 +394,8 @@ pub mod session;
 pub mod settings;
 
 pub mod text_input;
+
+pub mod ui_nav;
 
 /// Everything this crate exposes to the debug console.
 ///

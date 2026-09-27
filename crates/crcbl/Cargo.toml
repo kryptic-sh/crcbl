@@ -49,6 +49,12 @@ crcbl-client = { workspace = true }
 crcbl-ecs = { workspace = true }
 crcbl-input = { workspace = true }
 crcbl-jobs = { workspace = true }
+# The ground-grid router, reached as `crcbl::nav::grid` beside this crate's own
+# UI navigation join in `src/nav.rs`. Unconditional rather than behind a
+# feature, on `crcbl-anim`'s terms: it depends on `glam` and `thiserror`, both
+# already in this crate's tree, so the arrow adds one compilation unit and no
+# third-party crate on any target.
+crcbl-nav = { workspace = true }
 crcbl-net = { workspace = true }
 crcbl-reflect = { workspace = true }
 crcbl-phys = { workspace = true }

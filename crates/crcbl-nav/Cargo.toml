@@ -1,0 +1,28 @@
+[package]
+name = "crcbl-nav"
+description = "Crucible navigation: deterministic ground-grid routing and bounded reach"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# `glam` and `thiserror`, and nothing else. The grid is arithmetic over cell
+# indices and one `DVec3` per waypoint, so there is no IO, no clock and no
+# `crcbl-core` here — which is what lets a server that draws nothing, a browser
+# build and a game's own tests all link the same router. `DVec3` is spelled in
+# `glam` because that is what `crcbl::math` is: a game passing its feet position
+# in hands this crate the type it already holds.
+#
+# **`crcbl-phys` is deliberately absent.** Building a grid *from* a physics
+# world — a ground and clearance probe per cell — was declined on 2026-09-27
+# (`docs/backlog.md`, _EW's engine port requests_): the probe policy is a
+# scene's, and EW is its only user. A caller fills the cell map however it
+# likes and hands it over.
+[dependencies]
+glam = { workspace = true }
+# The two error enums are returned across the crate boundary, so they need
+# `Display` and `Error` without a macro of this crate's own.
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

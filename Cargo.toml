@@ -160,6 +160,11 @@ crcbl-wind = { path = "crates/crcbl-wind", version = "0.1.0" }
 # the simulation and no more, and the server and the client can link the same
 # placement code without agreeing on a renderer.
 crcbl-inventory = { path = "crates/crcbl-inventory", version = "0.1.0" }
+# Ground navigation: the grid router EW proved before the engine had one, and
+# the rung below `docs/plan/24-navigation.md`'s navmesh. `glam` and `thiserror`
+# and nothing else, so the arrow into it costs a browser build the router and
+# no more — see that crate's own manifest.
+crcbl-nav = { path = "crates/crcbl-nav", version = "0.1.0" }
 # The console registry: the variable and command vocabulary the UI, the engine
 # and the CLI all speak. It depends on nothing but `core`/`std`, so the arrow
 # into it costs every target the same nothing — see that crate's own manifest.

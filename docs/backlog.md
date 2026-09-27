@@ -62,12 +62,14 @@ Decided 2026-09-27, in EW's order, one green hash per API. EW then pins it,
 migrates every caller and deletes its own copy in the same change.
 
 - **Ground-grid routing: accepted, as a new `crcbl-nav` crate (module `grid`).**
-  This is EW's `GroundGrid`: deterministic four-neighbour A\* and a bounded
-  flood fill over walkable and blocked cells. `docs/plan/24-navigation.md`'s
-  Recast-lineage navmesh is still the plan. The grid is the rung below it, not a
-  replacement. Not built yet. **Declined: building the grid from a
-  `PhysicsWorld`** (ground and clearance probes per cell). EW is its only user,
-  and the probe policy is scene-specific. Revisit when a second game needs it.
+  This is EW's `GroundGrid`: deterministic four-neighbour breadth-first search
+  (EW's `plan` is not A\*: every step costs the same, so it is still shortest)
+  and a bounded flood fill over walkable and blocked cells.
+  `docs/plan/24-navigation.md`'s Recast-lineage navmesh is still the plan. The
+  grid is the rung below it, not a replacement. Shipped 2026-09-27 as
+  `crcbl::nav::grid`. **Declined: building the grid from a `PhysicsWorld`**
+  (ground and clearance probes per cell). EW is its only user, and the probe
+  policy is scene-specific. Revisit when a second game needs it.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Not built yet.
@@ -2601,15 +2603,16 @@ and was measured at 0.005 ms at 1080p on 2026-08-07 against the 0.5 ms budget
 `crcbl_ui::tree`'s focus landed with the gaps below.
 
 - **The reserved `ui` context is declared and pushed by nobody.**
-  `crcbl_input::ui::declare` and `crcbl::nav::nav_input` exist and are exercised
-  by `screenshot::ui_focus`'s test, which holds the golden's scripted pad to
-  what keys produce through them. `Loop` hosts no tree, and its `Menu` reads raw
-  keys through `MenuPump`, so the pause menu does not push `ui`: a paused frame
-  runs no game tick (`crcbl::engine::run_ticks` drains and discards), so game
-  actions already cannot fire under it, and pushing would change nothing a
-  sample does. Pushing lands when `Menu` moves onto the tree; the samples then
-  stop handling menu keys directly, per the reserved-action rule in
-  `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left behind_).
+  `crcbl_input::ui::declare` and `crcbl::ui_nav::nav_input` exist and are
+  exercised by `screenshot::ui_focus`'s test, which holds the golden's scripted
+  pad to what keys produce through them. `Loop` hosts no tree, and its `Menu`
+  reads raw keys through `MenuPump`, so the pause menu does not push `ui`: a
+  paused frame runs no game tick (`crcbl::engine::run_ticks` drains and
+  discards), so game actions already cannot fire under it, and pushing would
+  change nothing a sample does. Pushing lands when `Menu` moves onto the tree;
+  the samples then stop handling menu keys directly, per the reserved-action
+  rule in `docs/notes/tooling.md` (_What the deleted 07-ui-debug plan left
+  behind_).
 - **No gamepad bindings on the `ui` actions**: `Binding` has no gamepad member
   and there is no backend, so the plan's dpad, stick, shoulder, South and East
   column is undeclared.

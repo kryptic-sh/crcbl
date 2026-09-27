@@ -318,6 +318,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl-nav`, a new crate, and its `grid` module: ground-grid routing ported
+  from EW**, reached through the umbrella as `crcbl::nav::grid`. A
+  `GroundGridConfig` (origin, `cell_size_m`, `width`, `height`, `const fn new`)
+  plus one `GridCell::{Walkable, Blocked}` per cell make a `GroundGrid`;
+  `GroundGrid::new` refuses a non-finite origin, a cell size that is not finite
+  and positive, a zero dimension, more than `MAX_GRID_CELL_COUNT` cells and a
+  cell map of the wrong length, as `GroundGridConfigError`. `plan(start, goal)`
+  returns a `GroundRoute` whose `waypoints` are the cell centres of a shortest
+  four-neighbour walk, excluding the start cell, and
+  `reachable_within(start, max_steps)` returns every walkable cell centre within
+  the budget with its step count, start first. Both are breadth-first and
+  deterministic: equally short routes are broken by the fixed +Z, +X, -Z, -X
+  neighbour order. A bad position, one outside the grid, a blocked end or no
+  route is a `GroundRouteError`. Names, signatures and error variants are EW's
+  own, so EW migrates by changing its imports; the error enums now also
+  implement `Display` and `Error`. The crate depends on `glam` and `thiserror`
+  alone and builds for the browser. The umbrella's UI join that held the
+  `crcbl::nav` name moved to `crcbl::ui_nav`, so `crcbl::nav` is this crate, as
+  every other engine crate is its own re-export.
+
 - **`--exec <LINE>`: console lines from the command line, run before the first
   frame on every run, `--headless` included.** Repeatable and run in the order
   given, straight after the player's `autoexec.cfg` so the command line wins
@@ -1474,7 +1494,7 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `ActionMap::cardinal`; `ActionMap::last_device` names the `Device` that last
   spoke. `crcbl_input::ui::declare` adds the reserved `ui_move`, `ui_next`,
   `ui_prev` (Shift+Tab), `ui_accept` and `ui_back` actions, off the stack, and
-  `crcbl::nav::nav_input` turns them into the tree's `NavInput`. No sample's
+  `crcbl::ui_nav::nav_input` turns them into the tree's `NavInput`. No sample's
   bindings changed and nothing in `Loop` pushes the context yet.
 - **Focus, navigation and the engaged state in `crcbl_ui::tree`.**
   `Ui::begin_frame_with` takes a `NavInput` (a direction, next and previous,

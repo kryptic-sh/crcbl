@@ -4309,7 +4309,7 @@ impl<G> MenuAction<G> {
 ///
 /// Every key goes into the loop's own [`menu_actions`] map, which has
 /// [`crate::input::ui::CONTEXT`] pushed while a menu is showing and popped
-/// otherwise, and the menu moves on what [`crate::nav::nav_input`] reads out
+/// otherwise, and the menu moves on what [`crate::ui_nav::nav_input`] reads out
 /// of it: a step for the selection or a value row, accept for the press, and
 /// the accept action's release for the commit. So the context stack decides
 /// what the menu hears, which gives it two guarantees the raw keys never
@@ -4518,7 +4518,7 @@ impl<'a, K: Copy + Eq> MenuPump<'a, K> {
         if self.console {
             return;
         }
-        let nav = crate::nav::nav_input(self.actions);
+        let nav = crate::ui_nav::nav_input(self.actions);
         match nav.direction {
             Some(crcbl_ui::tree::Direction::Up) => self.menus.select_previous(),
             Some(crcbl_ui::tree::Direction::Down) => self.menus.select_next(),

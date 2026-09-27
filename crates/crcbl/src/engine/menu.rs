@@ -87,7 +87,7 @@ pub fn pause_only<K: Copy + Eq>(none: K, paused: K) -> MenuSet<K> {
 /// horde keep theirs in `game.rs` and replay [`HostedGame::key_event`] into it
 /// at the start of a tick — and several games have none
 /// ([`HostedGame::actions`] is optional). A paused frame runs no tick, which
-/// is exactly when the pause panel has input, and [`crate::nav::nav_input`]
+/// is exactly when the pause panel has input, and [`crate::ui_nav::nav_input`]
 /// wants a map ticked once per frame. So the loop owns this one and feeds it
 /// every key the pump sees; the game's map never hears of the `ui` context.
 ///

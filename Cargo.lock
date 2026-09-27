@@ -292,6 +292,7 @@ dependencies = [
  "crcbl-inventory",
  "crcbl-jobs",
  "crcbl-mtl",
+ "crcbl-nav",
  "crcbl-net",
  "crcbl-phys",
  "crcbl-reflect",
@@ -463,6 +464,14 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "objc2-quartz-core",
+]
+
+[[package]]
+name = "crcbl-nav"
+version = "0.1.0"
+dependencies = [
+ "glam",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

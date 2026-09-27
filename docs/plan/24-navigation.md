@@ -7,13 +7,16 @@ simulation (AI movement is gameplay), deterministic like everything else.
 Post-MVP wave 2; **arena's bots are the forcing function** (they're already
 planned as headless load-test clients — this is how they walk).
 
-**Nothing here is built**: there is no `crcbl-nav` crate, no bake step, no query
-API and no arena sample. One dependency is worth stating before the work is
-scheduled, because it is not obvious from this document: step 1 below voxelizes
-**physics colliders**. `crcbl-phys` gained the static `TriangleMesh` a walkable
-world is made of on 2026-09-23; the heightfield form is still owed
-(`docs/backlog.md`, _Static trimesh / heightfield colliders with a BVH
-midphase_).
+**Almost nothing here is built.** `crcbl-nav` exists, but holds only `grid`:
+EW's deterministic four-neighbour router and bounded flood fill over
+caller-authored walkable and blocked cells, ported 2026-09-27. That is the rung
+below this document's navmesh, not a replacement for it. The navmesh, the bake
+step, the query API and the arena sample are all still unbuilt. One dependency
+is worth stating before the work is scheduled, because it is not obvious from
+this document: step 1 below voxelizes **physics colliders**. `crcbl-phys` gained
+the static `TriangleMesh` a walkable world is made of on 2026-09-23; the
+heightfield form is still owed (`docs/backlog.md`, _Static trimesh / heightfield
+colliders with a BVH midphase_).
 
 ## Pipeline: colliders → navmesh (Recast-lineage, ours)
 

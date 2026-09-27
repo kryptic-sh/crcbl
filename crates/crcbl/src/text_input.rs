@@ -2,7 +2,7 @@
 //! committed text become the tree's [`TextInput`], and the tree's clipboard
 //! requests become the shell's clipboard calls.
 //!
-//! Here, in the umbrella, for [`crate::nav`]'s reason: the tree names no shell
+//! Here, in the umbrella, for [`crate::ui_nav`]'s reason: the tree names no shell
 //! and no action map, and the shell knows nothing of a tree.
 //!
 //! # How a caller drives it
@@ -181,12 +181,12 @@ mod tests {
     use super::*;
     use crate::core::input::{KeyCode, Modifiers};
     use crate::input::{ActionDecl, ActionKind, ActionMap, Binding, text, ui};
-    use crate::nav::nav_input;
     use crate::shell::{HeadlessShell, ShellCaps, WindowDesc};
     use crate::ui::draw_list::{DrawCommand, DrawList};
     use crate::ui::text::FontAtlas;
     use crate::ui::tree::{AvailableSpace, Direction, NavInput, Ui};
     use crate::ui::widget::PointerInput;
+    use crate::ui_nav::nav_input;
 
     const FRAME: Duration = Duration::from_millis(16);
     const TICK: f32 = 1.0 / 60.0;

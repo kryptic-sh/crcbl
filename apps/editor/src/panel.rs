@@ -142,7 +142,7 @@ const REVEAL_MARGIN: f32 = OUTLINER_ROW_HEIGHT;
 pub struct PanelInput {
     /// Where the pointer is and what its primary button is doing.
     pub pointer: PointerInput,
-    /// This frame's navigation edges, from [`crcbl::nav::nav_input`].
+    /// This frame's navigation edges, from [`crcbl::ui_nav::nav_input`].
     pub nav: NavInput,
     /// This frame's typing, from [`crcbl::text_input::TextPump::frame`].
     pub text: TextInput,

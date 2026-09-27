@@ -320,7 +320,7 @@ mod tests {
 
     /// **The scripted pad is what a keyboard produces through the reserved
     /// `ui` context**: the same eleven frames, from key events fed to an action
-    /// map and read back by [`crate::nav::nav_input`] — so the golden this
+    /// map and read back by [`crate::ui_nav::nav_input`] — so the golden this
     /// scene commits is a frame the real input path reaches, including five
     /// steps down from one held arrow on the repeat schedule.
     #[test]
@@ -366,7 +366,7 @@ mod tests {
                 for &(key, pressed) in *keys {
                     actions.key_event(key, pressed);
                 }
-                crate::nav::nav_input(&actions)
+                crate::ui_nav::nav_input(&actions)
             })
             .collect();
         assert_eq!(produced, SCRIPT);

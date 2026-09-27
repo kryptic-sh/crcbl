@@ -205,6 +205,11 @@ browser's own gate and the demo site's deploy.
   `apps/breach` its second: the rig a first-person player carries, with the
   trigger gated on the rig holding a weapon. Neither took an engine change to be
   one.
+- **`crcbl-nav`** — navigation, so far only `grid`: EW's ground-grid router, a
+  deterministic shortest four-neighbour route and a bounded flood fill over
+  caller-authored walkable and blocked cells. It is the rung below
+  [24-navigation.md](24-navigation.md)'s navmesh, which is unbuilt. Reached as
+  `crcbl::nav::grid`.
 - **`crcbl-ui`** — the immediate-mode draw list with rect/text/outline commands,
   CPU triangulation into screen-space vertex and index buffers, a baked-in
   monospace glyph atlas, `FontAtlas` text layout, `Label`/`Button` widgets,
