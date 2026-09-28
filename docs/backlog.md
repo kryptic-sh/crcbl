@@ -152,10 +152,11 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial: finish the sans-layout word-scratch production gate,
-then evaluate retained layout storage only if the remaining measured emission
-cost justifies persistent state. Keep startup-only and unexercised candidates
-behind measured frame-path work.
+Next performance trial (updated 2026-09-28): the sans-layout word scratch
+shipped, and P22's shadow cache is fixed. The next frame-path candidate is P21,
+one indirect draw per bucket per pass per view (about ten thousand calls a frame
+at 938 buckets), priced first by timing CPU recording on that scene. Keep
+startup-only and unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -524,53 +525,15 @@ open):
   found no application consumer of `AssetRegistry`; the inspected constructions
   are examples and tests. This is latent work until an actual loading path
   adopts the registry, rather than a current sample-frame priority.
-- `crcbl_ui::tree::emit::Ui::emit_node` constructs a fresh `TextLayout` for sans
-  text on every emission, including unchanged labels. The original
-  `TextLayout::new` path owned separate glyph, line and word vectors.
-  Measurement in `tree::layout` already caches sizes by content and width;
-  `GlyphAtlas::glyph` returns cached glyphs before rasterization, so neither is
-  evidence for rerasterizing every label. Price emission separately on a large
-  unchanged sans panel. Consider retained layout storage or a layout cache only
-  if it removes measured cost; preserve unrounded wrap widths, rounded-box
-  alignment, font metrics, text changes and clipping. Bitmap labels take a
-  different path and need separate measurements. A standalone release
-  construction-only probe reused outer result storage and constructed the same
-  unwrapped sans label at each iteration. p50/p95 was 0.016/0.016 ms for 32
-  labels, 0.100/0.112 ms for 256, and 0.407/0.432 ms for 1024. Every layout
-  matched the complete reference outside the timer; changing the reference text
-  made the check fail before restoring and repeating the run. Validation, result
-  destruction, tree traversal, wrapping, alignment, glyph-run copying and
-  triangle expansion were excluded. This is an isolated baseline, not an
-  editor-frame measurement or demonstrated cache speedup. An actual production
-  unchanged sans panel now separates build, cached layout and emission while
-  checking complete triangles on every frame and requiring zero warmed glyph
-  rasterization. At 32, 256 and 1024 rows, the original emission p50/p95
-  microseconds were 21.030/21.310, 163.579/166.404 and 638.376/641.232 in the
-  forward run, then 20.569/20.750, 166.815/169.621 and 654.738/658.364 in
-  reverse. Build and cached-layout prices were recorded separately and were much
-  smaller for this unchanged fixture. Triangle expansion, comparison and GPU
-  work stayed outside the timers.
-
-  The production candidate writes each word directly into the final glyph vector
-  and repositions that range only when it wraps, removing the temporary word
-  vector without retaining layout state. Its two middle runs reported emission
-  p50/p95 microseconds of 17.944/18.115 and 18.125/18.305 at 32 rows,
-  142.319/145.164 and 141.567/144.152 at 256, and 570.829/574.426 and
-  584.314/587.010 at 1024. Build and cached-layout results were mixed, so the
-  supported claim is the repeated emission path. DHAT on the same production
-  path at 32 rows observed the original word scratch in 115200 blocks and
-  8601600 allocated bytes and no matching candidate trace; feeding the original
-  profile to the elimination observer failed. The source-copy screen matched
-  complete glyphs, line ranges, widths, baselines and left/center/right
-  alignment across empty text, spaces, newlines, Unicode, long words, sizes and
-  wrap widths; a changed glyph position failed before restoration. Targeted
-  layout tests and the rebuilt release workspace pass. The locked all-feature
-  build, Clippy, nextest, doctests, rustdoc and dependency audits pass. Hardware
-  Vulkan matched all render goldens, and both X11 window-manager configurations
-  passed under owned CPU contention. Browser and shipping gates remain open;
-  retain this entry until publication. A retained layout cache remains a
-  separate, higher-state candidate after this bounded change.
-
+- **Sans emission's word scratch: shipped as `ce8894c4` (2026-09-19).**
+  `TextLayout::new` writes each word straight into the final glyph vector and
+  moves that range only when it wraps. On an unchanged production sans panel,
+  emission p50 went from 21.0 to 17.9–18.1 µs at 32 rows, 163.6–166.8 to
+  141.6–142.3 µs at 256, and 638.4–654.7 to 570.8–584.3 µs at 1024. DHAT showed
+  the old scratch's 115,200 allocations gone. It has passed every browser gate
+  since. **A retained layout cache is still only a candidate**, to be priced
+  against the emission cost that remains. It carries the state that sank the
+  retained-geometry trial above, so it needs a measured win before it is built.
 - `tree::layout::MeasureCache::text` keys bitmap measurements by width even
   though its bitmap branch never wraps. `MeasureCache::retain` removes entries
   only when their content hash disappears from `Ui::live_text`, so previously
