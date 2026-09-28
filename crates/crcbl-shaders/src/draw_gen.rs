@@ -36,8 +36,21 @@
 /// `scatterMain` only scatters, so `visible_capacity.div_ceil(WORKGROUP_SIZE)`.
 /// `lateFinishMain` owns one bucket per invocation, so it needs
 /// `buckets.div_ceil(WORKGROUP_SIZE)` groups.
-/// `startsMain` is one invocation and declares `[numthreads(1, 1, 1)]`.
+/// `startsMain` is one workgroup of [`STARTS_WORKGROUP_SIZE`].
 pub const WORKGROUP_SIZE: u32 = 64;
+
+/// Invocations in `startsMain`'s one workgroup, matching that entry point's
+/// `numthreads` and `STARTS_WORKGROUP_SIZE` in `shaders/draw_gen.slang`.
+///
+/// The prefix sum is one workgroup whatever the bucket count — each invocation
+/// sums a contiguous chunk of the table and the chunk totals are scanned in
+/// workgroup memory — so a caller dispatches exactly one group of it. The most
+/// invocations a workgroup may have on WebGPU's default limits, which
+/// `crcbl_hal::Limits::minimum` repeats and `crcbl_render::DrawGen` asserts
+/// against. A power of two, which the shader's scan relies on.
+pub const STARTS_WORKGROUP_SIZE: u32 = 256;
+
+const _: () = assert!(STARTS_WORKGROUP_SIZE.is_power_of_two());
 
 /// Bytes of the uniform block.
 ///
@@ -661,10 +674,18 @@ mod tests {
                  the shader"
             );
         }
+        let starts = format!(
+            "[numthreads({STARTS_WORKGROUP_SIZE}, 1, 1)]\nvoid startsMain(uint3 thread: SV_GroupThreadID)"
+        );
         assert!(
-            source.contains("[numthreads(1, 1, 1)]\nvoid startsMain()"),
-            "draw_gen.slang's prefix sum is not one invocation, and `crcbl_render::DrawGen` \
-             dispatches exactly one"
+            source.contains(&starts),
+            "draw_gen.slang does not declare `{starts}`; STARTS_WORKGROUP_SIZE has drifted from \
+             the shader"
+        );
+        let scan = format!("static const uint STARTS_WORKGROUP_SIZE = {STARTS_WORKGROUP_SIZE};");
+        assert!(
+            source.contains(&scan),
+            "draw_gen.slang does not declare `{scan}`, which sizes its chunks and its scan"
         );
     }
 

@@ -3440,6 +3440,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The draw generator's run starts are a parallel prefix sum.**
+  `draw_gen.slang`'s `startsMain` — the `draw-starts` pass — was one invocation
+  walking every bucket, and every region in occlusion or point-light-face mode,
+  in turn; it is now one workgroup of `draw_gen::STARTS_WORKGROUP_SIZE`
+  invocations that each sum a contiguous chunk of the table and scan the chunk
+  totals in workgroup memory, still one dispatch and one pass. Every start and
+  draw count it writes is bit-identical to the serial walk's, which
+  `draw_gen_e2e`'s `the_parallel_starts_are_the_serial_walks_word_for_word`
+  checks word for word in every mode from 0 to 16,385 buckets. Measured on
+  Vulkan, RX 7900 XTX, release, validation off, 17,219 instances at 1920x1080
+  over 240 frames (`mesh_e2e`'s `the_price_of_one_call_per_bucket`): GPU
+  `draw-starts` p50 0.912 → 0.018 ms a frame at 938 buckets (0.004 → 0.005 ms at
+  two), and because the price test's record time includes the wait for the GPU,
+  the ranged tails' CPU record p50 at 938 buckets 1.55 → 0.83 ms on
+  `IndirectCount`, 1.49 → 0.87 ms on `IndirectPerBatch` and 3.84 → 2.98 ms on
+  the mesh tail — the first two now level with their two-bucket rows.
+  `draw-args` (0.142 ms at 938 buckets) is unchanged.
+
 - **Every geometry tail draws a range of buckets per call on Vulkan.** Where a
   device grants `Features::DRAW_INDEX` and `MULTI_DRAW_INDIRECT`, the depth
   prepass, the colour pass, every shadow view and both reflective shadow maps

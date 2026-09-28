@@ -189,6 +189,15 @@ use glam::Mat4;
 use crate::cull::{FacePlanes, Frustum};
 use crate::graph::{BufferId, ImageId, ImportedBuffer, RenderGraph};
 
+// `startsMain` is one workgroup of this size on every device, so it has to fit
+// the smallest workgroup any backend promises.
+const _: () = assert!(
+    draw_gen::STARTS_WORKGROUP_SIZE
+        <= crcbl_hal::Limits::minimum().max_compute_invocations_per_workgroup
+        && draw_gen::STARTS_WORKGROUP_SIZE
+            <= crcbl_hal::Limits::minimum().max_compute_workgroup_size[0]
+);
+
 /// How large a [`DrawGen`] is, and what it draws.
 #[derive(Clone, Copy, Debug)]
 pub struct DrawGenDesc<'a> {
@@ -989,9 +998,10 @@ impl DrawGen {
             &DRAW_GEN,
             "startsMain",
             gen_pipeline_layout,
-            // One invocation for the whole prefix sum, on the shader's own
-            // terms: every start depends on the one before it.
-            1,
+            // One workgroup for the whole prefix sum, dispatched once by
+            // `record_passes`: its invocations split the table into chunks
+            // and scan the chunk totals in workgroup memory.
+            draw_gen::STARTS_WORKGROUP_SIZE,
         )?;
         rollback.pipelines.push(starts_pipeline);
         let scatter_pipeline = compute_pipeline_entry(

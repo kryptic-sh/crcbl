@@ -1081,10 +1081,13 @@ mod tests {
                 "binMain",
                 crcbl_shaders::draw_gen::WORKGROUP_SIZE,
             ),
-            // The prefix sum is one invocation, and `crcbl-shaders` pins its
-            // `[numthreads(1, 1, 1)]` beside `WORKGROUP_SIZE` — so the literal
-            // here is the shader's number, not a second one.
-            ("draw_gen", &crcbl_shaders::DRAW_GEN, "startsMain", 1),
+            // The prefix sum is one workgroup of its own size.
+            (
+                "draw_gen",
+                &crcbl_shaders::DRAW_GEN,
+                "startsMain",
+                crcbl_shaders::draw_gen::STARTS_WORKGROUP_SIZE,
+            ),
             (
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,

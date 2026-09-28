@@ -200,15 +200,17 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial (updated 2026-09-28): P21's ranged draws shipped on every
+Next performance trial (updated 2026-09-29): P21's ranged draws shipped on every
 tail, the mesh one included, with runs shorter than a measured threshold kept a
-call per bucket behind a task stage. The next is the mesh tail's task-stage cost
-(P21's first open item), the best-measured frame-path cost left: on this card's
-default path at 938 buckets the ranged mesh tail records for 3.92 ms and spends
-2.45 ms on the GPU, against 1.68 ms and 0.37 ms for the same ranged calls
-without a task stage. P20, P11, P12 and P13 are frame-path too but unpriced, so
-they rank behind it until measured. Keep startup-only and unexercised candidates
-behind measured frame-path work.
+call per bucket behind a task stage, and `draw-starts` is a parallel scan. The
+next is the mesh tail's task-stage cost (P21's first open item), the
+best-measured frame-path cost left: on this card's default path at 938 buckets
+the ranged mesh tail records for 2.98 ms and spends 2.45 ms on the GPU, against
+0.37 ms of GPU for the same ranged calls without a task stage (whose 1.68 ms
+record was measured before the scan). P20 is priced now, at 0.142 ms of GPU a
+frame at 938 buckets, below it; P11, P12 and P13 are frame-path too but
+unpriced, so they rank behind it until measured. Keep startup-only and
+unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -4187,9 +4189,12 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `draw_gen.slang::binMain` walks the bucket table until `(mesh_id, mode)`
   matches, then writes a route that scatter consumes. The old description of a
   repeated scatter search is stale; the routing cost remains proportional to
-  survivors times the bucket-table prefix searched. Price `draw-bin` on a
-  many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
-  table. Preserve material-mode and LOD routing, empty buckets and `NO_BUCKET`.
+  survivors times the bucket-table prefix searched. Priced 2026-09-29 with
+  `mesh_e2e`'s `the_price_of_one_call_per_bucket` (the pass is labelled
+  `draw-args`): GPU p50 0.142 ms a frame at 938 buckets against 0.009 ms at two,
+  17,219 instances, RX 7900 XTX. Consider a build-time
+  `(level mesh, mode) → bucket` table. Preserve material-mode and LOD routing,
+  empty buckets and `NO_BUCKET`.
 - **P21 — what is left of one call per bucket per pass per view.** Every tail
   now records one bind and one multi-draw per run of consecutive buckets on a
   device granting `Features::DRAW_INDEX` (Vulkan only): the SPIR-V vertex stages
@@ -4253,31 +4258,22 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
       stage's per-cluster cull costs more than it saves (ranged `depth-prepass`
       0.69 ms with it, 0.031 ms without).
 
-  - **The ranged tails' bucket-scaling "record" time is GPU time, and
-    `draw-starts` pays it.** Reproduced (ranged record p50 1.60 ms at 938
-    buckets against 0.86 ms at two on `IndirectCount`, 3.98 against 1.44 ms on
-    `MeshShader`), then split with temporary per-pass `Instant`s inside
-    `CompiledGraph::execute`: every pass body, `realise`, the handover and
-    `finish` recorded within 0.01 ms of each other in the two rows, and the
-    whole difference was `PassTimers::begin_frame` (0.62 ms on `IndirectCount`,
-    0.53 `IndirectPerBatch`, 2.50 `MeshShader`). That call reads the reused slot
-    through `Device::query_results`, which on Vulkan waits on the retire
-    timeline for the slot's last submission — the only throttle an offscreen
-    ring has, so the price test's "record" is where a GPU-bound frame's wait
-    lands (and why a small row's record moves with the row beside it). The GPU
-    side, summed over every pass the timers see: 1.78 against 0.70 ms per frame
-    on `IndirectCount` ranged, of which `draw-starts` is 0.90 against 0.004 ms
-    and `draw-args` 0.14 against 0.009 ms. `draw-starts` is `draw_gen.slang`'s
-    `startsMain`, `[numthreads(1, 1, 1)]`: one invocation walking every bucket
-    (and, in occlusion or faces mode, every region) with a dependent load and
-    stores per bucket — the header's "the table is small" no longer holds at 938
-    buckets. The fix is a shader change, not built: a one-workgroup parallel
-    scan (e.g. 256 invocations, each summing a contiguous chunk, a
-    workgroup-shared scan of the chunk sums, then each writing its chunk's
-    starts and count words) keeps it one dispatch and one pass; then re-price
-    with this test and confirm the ranged rows' record converges. Separately,
-    the price test would say this itself if it timed `PassTimers`' readback
-    apart from recording — not built either.
+  - **The price test's "record" includes the wait for the GPU.**
+    `PassTimers::begin_frame` reads the reused slot through
+    `Device::query_results`, which on Vulkan waits on the retire timeline for
+    the slot's last submission — the only throttle an offscreen ring has — so a
+    GPU-bound frame's wait lands in the row's record time, and a small row's
+    record moves with the row beside it. That is how the ranged tails'
+    bucket-scaling record time was traced to `draw-starts`, whose one-invocation
+    walk is now a one-workgroup scan (GPU p50 0.912 → 0.018 ms a frame at 938
+    buckets); the ranged record p50 at 938 buckets fell to 0.83 ms on
+    `IndirectCount` and 0.87 ms on `IndirectPerBatch`, level with their
+    two-bucket rows (0.90 and 0.95 ms). The mesh tail's ranged row still records
+    2.98 against 1.48 ms, which is its own GPU time — the task-stage item above.
+    `draw-args` at 0.142 ms is P20's. Not built: timing `PassTimers`' readback
+    apart from recording, so the record column would be CPU alone, and printing
+    `draw-args` and `draw-starts` among the test's `PRICED` passes (added only
+    temporarily to measure this).
   - **Not measured** on lavapipe, radv or any Vulkan device without mesh shaders
     — the devices that take the ranged tail by default.
   - **`forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`

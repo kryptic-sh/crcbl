@@ -65,6 +65,7 @@ pub(crate) const SUITE: &str = "crcbl draw gen e2e";
 mod cull;
 mod cull_stats;
 mod draw_gen;
+mod starts;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because
 // `tests/forward_e2e/` and `tests/sprite_e2e/` open the same device against the
