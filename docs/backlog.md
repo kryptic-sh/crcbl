@@ -77,6 +77,21 @@ step while executing nothing. The browser gate (`pages.yml`), which renders
 every demo in a real browser, is what verifies wasm. Revisit if a wasm test
 runner is ever adopted: its first step would be making these two targets build.
 
+## The Metal e2e job's suites grew to half an hour (2026-09-28)
+
+**Found; the cap was raised, the cause is not fixed.** `ci.yml`'s
+`mtl e2e (macos-15)` measured 6 minutes 19 seconds when its cap was set. On
+2026-09-28 it took 31 to 42 minutes on green runs: mesh 911 s, render 886 s and
+forward 364 s in one of them. One run on `main` (`246a7329`) was cancelled at
+the 45-minute cap with nothing failing. The cap is now 60 minutes. Each suite
+grows a test at a time and each test is cheap natively, so the growth is only
+visible on this runner, under Metal's API and shader validation. **Next:** take
+the per-test times from a Metal run's nextest output and find the few tests that
+dominate. The render suite's per-path equivalence tests and the mesh suite's
+price tests are the likely ones, and could run a smaller scene on this runner.
+The shape follows `bucket_price.rs`, whose suite run was cut for the same
+reason.
+
 ## EW's engine port requests (2026-09-27)
 
 EW asked for four features proven in its game code, none of which crcbl has.

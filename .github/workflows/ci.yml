@@ -2627,11 +2627,15 @@ jobs:
     # dump, and while the backend re-bound what was already bound the mesh step
     # alone took 22 to 37 minutes and the job blew a 45-minute cap with every
     # step green (2026-09-06). `crcbl-mtl`'s bind cache removed that class and
-    # the whole job measured 6 minutes 19 seconds on its first run; the cap is
-    # seven times that. What the layer still reports, and what would let the
-    # mode move to `assert`, is in `docs/backlog.md` under "Metal's debug layer
-    # warns on every bind, and the mesh suite pays for it".
-    timeout-minutes: 45
+    # the whole job measured 6 minutes 19 seconds on its first run. The suites
+    # have grown since: on 2026-09-28 the mesh step took 911 s, the render step
+    # 886 s and the forward step 364 s, the job 31 to 42 minutes, and one run on
+    # main crossed the old 45-minute cap. What the layer still reports, and what
+    # would let the mode move to `assert`, is in `docs/backlog.md` under
+    # "Metal's debug layer warns on every bind, and the mesh suite pays for it";
+    # the growth itself is under "The Metal e2e job's suites grew to half an
+    # hour".
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       # **The MSL half of the fourth shader portability rule** (in
