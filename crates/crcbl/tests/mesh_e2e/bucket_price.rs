@@ -65,6 +65,21 @@ const INSTANCES: u32 = 17_219;
 /// for the measured scene with `CRCBL_PRICE_FRAMES`.
 const GATE_MANY: u32 = 64;
 
+/// The frames a suite run records per row, after [`gate_warmup`]'s.
+///
+/// A suite run asserts call counts, which every frame after the warm-up
+/// records identically, so it needs a few frames rather than the percentile
+/// floor [`price_frame`] enforces. On the macOS runner, under Metal's API and
+/// shader validation, two rows of that many frames alone outlasted nextest's
+/// per-test limit.
+const GATE_FRAMES: usize = 4;
+
+/// The frames a suite run draws and discards first: enough for every frame in
+/// flight to have been through the ring once, and the draw counts to settle.
+const fn gate_warmup() -> usize {
+    crcbl::render::forward::FRAMES_IN_FLIGHT + 2
+}
+
 /// Whether this run is a price run, asked for with `CRCBL_PRICE_FRAMES`.
 fn priced() -> bool {
     std::env::var_os("CRCBL_PRICE_FRAMES").is_some()
@@ -233,10 +248,15 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
     let headless = Headless::open_at(extent, asked);
     let device = headless.device.as_ref();
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let warmup = if priced() {
+        PRICE_WARMUP
+    } else {
+        gate_warmup()
+    };
     let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, path, timed));
     let camera = camera();
 
-    for index in 0..PRICE_WARMUP + frames {
+    for index in 0..warmup + frames {
         for row in &mut rows {
             row.renderer.set_lights(&[lamp(index)]);
             let acquired = device
@@ -290,7 +310,7 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
                 )
                 .expect("present");
             row.commands.push(commands);
-            if index >= PRICE_WARMUP {
+            if index >= warmup {
                 row.begin.push(begin);
                 row.build.push(build);
                 row.record.push(record);
@@ -357,7 +377,11 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
 #[ignore = "needs a real GPU; see this file's header for the release command"]
 fn the_price_of_one_call_per_bucket() {
     let buckets = many();
-    let (extent, frames) = price_frame();
+    let (extent, frames) = if priced() {
+        price_frame()
+    } else {
+        (price_frame().0, GATE_FRAMES)
+    };
     let features = {
         let headless =
             Headless::open_at(extent, crcbl::screenshot::OffscreenSetup::OPTIONAL_FEATURES);
