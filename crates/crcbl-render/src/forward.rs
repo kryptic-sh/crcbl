@@ -2037,6 +2037,32 @@ pub struct ForwardRenderer {
     /// So "the image already holds this" is one integer comparison, which is
     /// what lets the pass body below carry the answer out of the graph.
     shadow_group_id: Vec<u64>,
+    /// `[group]`: how many instance writes that group's cull could have seen,
+    /// over the renderer's life — the per-group stand-in for
+    /// [`InstancePool::revision`] in
+    /// [`ForwardRenderer::shadow_group_record`], moved by
+    /// [`ForwardRenderer::note_caster_writes`].
+    shadow_group_writes: Vec<u64>,
+    /// `[element]`: where each element of the instance array could draw into a
+    /// shadow map, as of the last [`ForwardRenderer::note_caster_writes`] —
+    /// which is what a write's *before* is read from. Grows to the highest
+    /// element written; an element past its end has never been written and is
+    /// [`shadow_inputs::CasterFootprint::Nowhere`].
+    shadow_footprints: Vec<shadow_inputs::CasterFootprint>,
+    /// The live elements whose mesh has a DAG, and so whose level the selection
+    /// eye chooses — the ones that put the eye into a light group's record.
+    shadow_dag_elements: std::collections::BTreeSet<u32>,
+    /// Scratch for [`InstancePool::take_written`], kept so a frame that moved
+    /// an instance does not allocate its list.
+    shadow_written: Vec<u32>,
+    /// This frame's written elements' footprints, before and after the write,
+    /// from [`ForwardRenderer::note_caster_writes`] for
+    /// [`shadow_inputs::shadow_groups_reached`]. Empty on a frame nothing was
+    /// written in.
+    shadow_moved: Vec<(
+        shadow_inputs::CasterFootprint,
+        shadow_inputs::CasterFootprint,
+    )>,
     /// The number given to the shadow pass this renderer recorded last.
     ///
     /// Moves once per recorded pass, so the body below can say *which* pass ran
@@ -5609,6 +5635,11 @@ impl ForwardRenderer {
             // the zero below it.
             shadow_group_inputs: vec![Vec::new(); SHADOW_CULLS],
             shadow_group_id: vec![0; SHADOW_CULLS],
+            shadow_group_writes: vec![0; SHADOW_CULLS],
+            shadow_footprints: Vec::new(),
+            shadow_dag_elements: std::collections::BTreeSet::new(),
+            shadow_written: Vec::new(),
+            shadow_moved: Vec::new(),
             shadow_pass_id: 0,
             shadow_pass_ran: Arc::new(AtomicU64::new(0)),
             shadow_pending: None,
@@ -6407,8 +6438,9 @@ impl ForwardRenderer {
     /// see it: see [`ViewBackground::Transparent`] and
     /// [`set_instance_views`](Self::set_instance_views).
     ///
-    /// A change redraws every shadow map the atlas had cached, because it moves
-    /// [`InstancePool::revision`]. Not a move, on
+    /// A change redraws every shadow map whose cull the instance could be kept
+    /// by, because it is a write [`InstancePool::take_written`] names. Not a
+    /// move, on
     /// [`set_instance_views`](Self::set_instance_views)' terms, and a stale
     /// handle is ignored.
     pub fn set_instance_casts_shadow(&mut self, handle: InstanceHandle, casts: bool) {
@@ -11641,6 +11673,7 @@ fn rebuilt_with_sampler(
 mod tests {
     mod instance_upload;
     mod load_service;
+    mod shadow_reach;
 
     use super::*;
     use crate::effects::{Antialiasing, EffectOverride};
@@ -16250,7 +16283,13 @@ mod tests {
             );
         }
         for (step, view) in [0, 1, shadow_view(0, 0)].into_iter().enumerate() {
+            // The spot moves for its own view and the camera for the cascades',
+            // which are fitted to it: a moved spot alone is no input of theirs.
             renderer.set_lights(&[shadowable_spot(-2.0 - step as f32)]);
+            let camera = Camera {
+                eye: camera.eye + Vec3::X * 0.1 * (step + 1) as f32,
+                ..camera
+            };
             let slot = (renderer.frame + 1) % FRAMES_IN_FLIGHT;
             let short = device
                 .create_buffer(&BufferDesc {
@@ -16687,6 +16726,13 @@ mod tests {
                 eye: Camera::default().eye + Vec3::X * 0.02 * step as f32,
                 ..Camera::default()
             };
+            // The spot drifts too: its map is not fitted to the camera, so a
+            // moving eye alone leaves it up to date and asking for nothing.
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a handful of frames, and the step is what is wanted"
+            )]
+            renderer.set_lights(&[shadowable_spot(-1.0 + 0.01 * step as f32)]);
             let drawn = frame_seen_from(device, &mut renderer, queue, &camera, &sun);
             assert!(
                 renderer.shadow_faces_redrawn() <= BUDGET,
@@ -16869,14 +16915,17 @@ mod tests {
     ///
     /// The camera is in here because it is not obvious: a shadow map is drawn
     /// from a light, not from the eye. But a cascade is fitted to the camera's
-    /// own frustum, and every shadow cull selects detail at the camera's pixels
-    /// — `SHADOW_LOD_BIAS` — so a moved eye is a different atlas.
+    /// own frustum, and every shadow cull selects a DAG's detail at the camera's
+    /// pixels — `SHADOW_LOD_BIAS` — so a moved eye is a different cascade, and a
+    /// different light map wherever a DAG is in the light's cull.
+    /// `shadow_reach`'s tests are the other half: what a moved eye or a moved
+    /// caster must *not* redraw.
     ///
     /// `settles` is how many still frames it takes to go quiet again, and it is
     /// two for exactly one arm: `InstancePool`'s carry-forward puts a moved
     /// instance's `previous_transform` back at rest on the frame *after* the
     /// move, and that is a write, which is a change this record cannot tell
-    /// from any other. See `InstancePool::revision`, which says so.
+    /// from any other. See `InstancePool::take_written`, which says so.
     #[test]
     fn each_thing_the_atlas_is_drawn_from_redraws_it() {
         let camera = Camera::default();

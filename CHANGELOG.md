@@ -3388,6 +3388,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **A shadowed point or spot light keeps its maps while the camera moves, and a
+  moving instance redraws only the maps it can be seen in.** The shadow atlas's
+  per-group record used to carry the global `InstancePool::revision` and the
+  camera's selection eye for every group, and each view block whole — cascade
+  matrices, froxel grid, probes, fog and sky among it — so any camera move or
+  any instance write redrew every light's tiles. A group's record now holds only
+  what the depth pass reads of its blocks (`view_proj`, `previous_view_proj`,
+  `camera_position`, `lod_params`, `ambient.w`, `vertex_pool`); the eye only for
+  a cascade, or for a light whose cull a live DAG instance can reach, since
+  `draw_gen.slang` chooses a DAG's level from it; and a per-group count of
+  instance writes whose element's bounds, before or after the write, reach that
+  group's frustum. `InstancePool::take_written` (which elements were written
+  since it was last asked) and `InstancePool::record` (an element's record by
+  index) are new for it. Skinned frames and the probe updater still redraw every
+  group. Measured with `mesh_e2e`'s `a_moving_camera_prices_the_shadow_pass` — a
+  turning camera over a still field of pyramids under the sun, three shadowed
+  spots and a shadowed point light, 1920x1080, 480 frames, release, Vulkan on an
+  RX 7900 XTX: groups redrawn a frame **6.00 → 2.00** and tiles **11.00 →
+  2.00**, `shadow` pass p50 **0.021–0.024 → 0.005 ms**; with one caster nudged
+  inside one spot's cone every frame, **6.00 → 3.00** groups, **11.00 → 3.00**
+  tiles and **0.021 → 0.007 ms**. Every golden image is unchanged.
+
 - The Metal backend states its floor, macOS 11 (`crcbl_mtl::MACOS_FLOOR`), and
   checks it: `MetalInstance::open` answers `None`, logging the system's version,
   on anything older, where the selectors it sends would raise an exception.

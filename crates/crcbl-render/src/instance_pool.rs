@@ -230,6 +230,12 @@ pub struct InstancePool {
     high_water: u32,
     /// How many times the mirror has been written — [`InstancePool::revision`].
     revision: u64,
+    /// Elements written since the last [`InstancePool::take_written`], each
+    /// once, in the order they were first written.
+    written_since_taken: Vec<u32>,
+    /// Whether each element is already in `written_since_taken`. Indexed by
+    /// element, `capacity` long.
+    written_since_taken_mark: Vec<bool>,
 }
 
 impl InstancePool {
@@ -318,6 +324,8 @@ impl InstancePool {
             capacity: desc.capacity,
             high_water: 0,
             revision: 0,
+            written_since_taken: Vec::new(),
+            written_since_taken_mark: vec![false; desc.capacity as usize],
         })
     }
 
@@ -369,8 +377,9 @@ impl InstancePool {
     /// — two readings that differ say the instances a pass draws are not the
     /// ones it drew last time it looked, and two that agree say they are. What
     /// wants that is a consumer whose output is a function of the array and can
-    /// be kept instead of recomputed: `ForwardRenderer`'s shadow atlas is the
-    /// one there is, and topic 45's static-caching rung is why.
+    /// be kept instead of recomputed. `ForwardRenderer`'s shadow atlas was the
+    /// one there was, and it now asks [`take_written`](Self::take_written)
+    /// instead, which says which elements moved rather than that one did.
     ///
     /// It moves on **every** write, including ones no draw could see: a rewrite
     /// with identical bytes (which [`set`](Self::set) deliberately does not
@@ -385,6 +394,41 @@ impl InstancePool {
     #[must_use]
     pub const fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// Appends every element written since the last call to `into`, each once
+    /// and in the order it was first written, and forgets them here.
+    ///
+    /// [`revision`](Self::revision) says *that* the array changed; this says
+    /// **which elements** did, on the same terms — every write counts,
+    /// including a rewrite with identical bytes, a re-point of a skinned
+    /// object's bases and the settling of a `previous_transform`, so an element
+    /// is left out only when nothing wrote it. What wants that is a consumer
+    /// that can tell which of its outputs an element could reach:
+    /// `ForwardRenderer`'s shadow atlas tests each written element's bounds,
+    /// before and after, against each shadow group's cull, so one moving
+    /// instance redraws the maps it can be seen in rather than every map.
+    ///
+    /// The log is bounded by [`capacity`](Self::capacity), because an element
+    /// already in it is not added again — a pool nobody drains costs at most
+    /// one entry per element.
+    pub fn take_written(&mut self, into: &mut Vec<u32>) {
+        for index in self.written_since_taken.drain(..) {
+            self.written_since_taken_mark[index as usize] = false;
+            into.push(index);
+        }
+    }
+
+    /// What element `index` holds, live or not, decoded from the host mirror,
+    /// or [`None`] at or past [`slot_count`](Self::slot_count).
+    ///
+    /// By element rather than by handle, for a caller that learned the index
+    /// from [`take_written`](Self::take_written): a removed instance's element
+    /// still holds its last transform and mesh with
+    /// [`GpuInstance::LIVE`] cleared, which is what says it draws nothing now.
+    #[must_use]
+    pub fn record(&self, index: u32) -> Option<GpuInstance> {
+        (index < self.high_water).then(|| self.read(index))
     }
 
     #[must_use]
@@ -793,12 +837,17 @@ impl InstancePool {
     /// slot's range set.
     ///
     /// **The only thing that ever changes the mirror**, which is what makes
-    /// [`revision`](Self::revision) a total answer rather than a count of the
-    /// paths somebody remembered to instrument.
+    /// [`revision`](Self::revision) and [`take_written`](Self::take_written)
+    /// total answers rather than counts of the paths somebody remembered to
+    /// instrument.
     fn write(&mut self, index: u32, instance: &GpuInstance) {
         let at = index as usize * INSTANCE_STRIDE;
         self.mirror[at..at + INSTANCE_STRIDE].copy_from_slice(&instance.to_bytes());
         self.revision = self.revision.wrapping_add(1);
+        if !self.written_since_taken_mark[index as usize] {
+            self.written_since_taken_mark[index as usize] = true;
+            self.written_since_taken.push(index);
+        }
         for dirty in &mut self.dirty {
             dirty.mark(index);
         }
@@ -1193,6 +1242,82 @@ mod tests {
             "a removal did not move the revision, so an instance that left the scene would go \
              on casting a shadow"
         );
+
+        pool.destroy(device);
+        recorder.assert_valid();
+    }
+
+    /// **Every path that changes an element puts it in the written log, once,
+    /// and a still frame puts nothing there.**
+    ///
+    /// [`InstancePool::take_written`]'s contract, which `ForwardRenderer`'s
+    /// shadow atlas now bets a frame's correctness on in place of the revision:
+    /// an element missing from the log is a caster that moved under a map
+    /// nothing redrew. Every mutator this type has, as the revision's test
+    /// above lists them.
+    #[test]
+    fn every_write_names_its_element_once_and_a_still_frame_names_none() {
+        let (recorder, device) = open();
+        let device = device.as_ref();
+        let mut pool = pool(device, 16);
+        let taken = |pool: &mut InstancePool| {
+            let mut into = Vec::new();
+            pool.take_written(&mut into);
+            into
+        };
+
+        let first = pool.insert(&instance(1)).expect("room");
+        let second = pool.insert(&instance(2)).expect("room");
+        assert!(pool.set(first, &instance(3)), "the handle is live");
+        assert_eq!(
+            taken(&mut pool),
+            [0, 1],
+            "two inserts and a rewrite of the first name each element once, first write first"
+        );
+        assert!(taken(&mut pool).is_empty(), "a taken log is forgotten");
+
+        assert!(pool.set(second, &instance(2)), "the handle is live");
+        assert_eq!(
+            taken(&mut pool),
+            [1],
+            "a same-bytes rewrite is still a write"
+        );
+        assert!(pool.set_bases(first, 4, 8), "the handle is live");
+        assert_eq!(taken(&mut pool), [0], "a re-point is a write");
+        assert!(pool.set_flags(second, 1 << 8), "the handle is live");
+        assert_eq!(taken(&mut pool), [1], "a flag is a write");
+        pool.clear_flags(1 << 8);
+        assert_eq!(
+            taken(&mut pool),
+            [1],
+            "clearing a flag writes what carried it"
+        );
+
+        // The first element moved above, so the frame after its move puts its
+        // `previous_transform` back at rest — a write the log reports.
+        settle(&mut pool, device);
+        assert_eq!(
+            taken(&mut pool),
+            [0],
+            "the carry-forward wrote the mirror without naming the element"
+        );
+        for _ in 0..FRAMES * 3 {
+            pool.begin_frame(device).expect("the null device writes");
+        }
+        assert!(
+            taken(&mut pool).is_empty(),
+            "a run of frames nobody wrote in named an element"
+        );
+
+        assert!(pool.remove(first), "the handle is live");
+        assert_eq!(taken(&mut pool), [0], "a removal is a write");
+        let record = pool.record(0).expect("below the high-water mark");
+        assert_eq!(
+            record.flags & GpuInstance::LIVE,
+            0,
+            "a removed element reads back dead"
+        );
+        assert!(pool.record(2).is_none(), "past the high-water mark");
 
         pool.destroy(device);
         recorder.assert_valid();

@@ -747,13 +747,16 @@ fn an_instance_keeps_casting_no_shadow_through_a_rewrite() {
     );
     assert_eq!(renderer.instance_views(cube), Some(ViewMask::only(view)));
 
-    let revision = renderer.instances.revision();
+    let mut written = Vec::new();
+    renderer.instances.take_written(&mut written);
+    written.clear();
     renderer.set_instance_casts_shadow(cube, true);
     assert_eq!(renderer.instance_casts_shadow(cube), Some(true));
-    assert_ne!(
-        renderer.instances.revision(),
-        revision,
-        "a change moves the revision every cached shadow map is keyed on"
+    renderer.instances.take_written(&mut written);
+    assert_eq!(
+        written,
+        [renderer.instances.index(cube).expect("a live handle")],
+        "a change names the element every cached shadow map's footprint test reads"
     );
 
     renderer.remove_instance(cube);

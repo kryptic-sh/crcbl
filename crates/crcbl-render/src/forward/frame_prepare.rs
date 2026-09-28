@@ -295,6 +295,12 @@ impl ForwardRenderer {
             // [`ForwardRenderer::shadow_atlas_record`] for what the comparison
             // covers and what it deliberately does not.
             let shadows = self.frame_effects.contains(RenderEffects::SHADOWS);
+            // The instance writes since the last frame, and where each written
+            // element could cast before and after — every frame, shadows or not,
+            // so a footprint is never older than one frame's writes. Taken here,
+            // ahead of the closure below that holds one of this renderer's
+            // fields; the groups they reach are worked out once the culls exist.
+            self.note_caster_writes();
             // The cascades select for the camera, so they take the camera's
             // selection eye — pinned along with the colour pass's, or a frozen cut
             // would draw under a shadow silhouette that was still following the
@@ -490,6 +496,14 @@ impl ForwardRenderer {
             // a frame clears everything and redraws every group, with no cadence and
             // no budget deciding otherwise.
             let relaid = self.shadow_atlas_layout.as_ref() != Some(&layout);
+
+            // Which groups the instance writes since the last frame could reach,
+            // against the culls just fitted.
+            shadow_inputs::shadow_groups_reached(
+                &mut self.shadow_group_writes,
+                &self.shadow_moved,
+                &culls,
+            );
 
             // What each group would be drawn from, and which of them the image is
             // already holding.

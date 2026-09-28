@@ -32,8 +32,8 @@ use crcbl::hal::Features;
 use crcbl::math::{Mat4, Vec3};
 use crcbl::render::shadow::Cadence;
 use crcbl::render::{
-    Camera, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, Light, Projection,
-    SpotLight, TransientPool,
+    Camera, DirectionalLight, ForwardRenderer, InstanceDesc, InstanceHandle, Light, PointLight,
+    Projection, SpotLight, TransientPool,
 };
 
 /// The frame this file renders at.
@@ -268,8 +268,9 @@ fn a_cached_atlas_draws_the_frame_it_would_have_drawn() {
     // of the instance pool rather than of this rung: `InstancePool`'s
     // carry-forward puts a moved record's `previous_transform` back at rest on
     // the frame *after* the move, which is a write, and a write is a change the
-    // atlas's record cannot tell from any other. See `InstancePool::revision`,
-    // which says so. The second frame is the one the cache actually answers.
+    // atlas's record cannot tell from any other. See
+    // `InstancePool::take_written`, which says so. The second frame is the one
+    // the cache actually answers.
     let settling = render_mesh_lit(&headless, &mut moved, &mut moved_pool, &camera, &sun, None);
     let drew_while_settling = !moved.shadow_atlas_cached();
     let held = render_mesh_lit(&headless, &mut moved, &mut moved_pool, &camera, &sun, None);
@@ -491,6 +492,473 @@ fn a_frame_that_kept_a_tile_draws_the_map_it_redrew() {
             lagging > 0,
             "the frame that held the lamp's map drew the reference exactly, so the map was \
              redrawn after all and the cadence held nothing"
+        );
+    }));
+
+    teardown(headless, vec![(moved, moved_pool), (fresh, fresh_pool)]);
+    if let Err(panic) = verdict {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// Pyramids along one side of the field the moving-camera price is drawn over.
+const PRICE_FIELD: usize = 5;
+
+/// How far apart the field's pyramids stand, in world units.
+const PRICE_SPACING: f32 = 3.0;
+
+/// How far the camera turns about the field each frame of the price, in
+/// radians.
+///
+/// Small enough that no light's tile changes size from one frame to the next —
+/// a relaid atlas redraws every map, which is a different question — and large
+/// enough that the cascades, which are fitted to the eye, are out of date on
+/// every frame.
+const PRICE_TURN: f32 = 0.002;
+
+/// What one run of [`moving_camera_price`] saw.
+struct MovingCameraPrice {
+    /// The `shadow` pass's p50 and p95 in nanoseconds, or [`None`] where the
+    /// device cannot time a pass.
+    price: Option<(u64, u64)>,
+    /// Shadow groups — cascades and light slots — redrawn, summed over the
+    /// recorded frames.
+    groups: u64,
+    /// Of those, the light slots' alone.
+    light_groups: u64,
+    /// Tiles redrawn, summed over the recorded frames.
+    faces: u64,
+}
+
+/// The shadow pass under a camera that turns about a still field lit by three
+/// shadowed spots and a shadowed point light, with the sun's cascades beside
+/// them — and, with `stirred`, one pyramid inside the first spot's cone nudged
+/// every frame.
+///
+/// What it prices is the atlas cache's reach: a light's maps do not depend on
+/// the camera, so a cache keyed on what they are drawn from holds them while
+/// the cascades, which are fitted to the eye, redraw.
+fn moving_camera_price(extent: (u32, u32), frames: usize, stirred: bool) -> MovingCameraPrice {
+    use crate::area_light::PRICE_WARMUP;
+    use crcbl::hal::{CommandEncoderDesc, PresentInfo, ResourceState, SubmitInfo};
+
+    let headless = Headless::open_at(
+        extent,
+        Features::GPU_DRIVEN | Features::TIMESTAMP_QUERY | Features::DEBUG_MARKERS,
+    );
+    let device = headless.device.as_ref();
+    let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
+    let mut renderer =
+        ForwardRenderer::new(device, headless.queue, headless.format).expect("the renderer builds");
+    // Every map that is out of date redrawn on the frame it went out of date,
+    // so the counts below are the cache's alone and not a budget's.
+    renderer.set_shadow_cadence(Some(Cadence::EVERY_FRAME));
+    let mut pool = TransientPool::new();
+    place(
+        &mut renderer,
+        crcbl::render::scene::DEMO_CUBE,
+        crcbl::render::scene::DEMO_UNTINTED,
+        Mat4::from_translation(Vec3::new(0.0, -0.5 * FLOOR, 0.0))
+            * Mat4::from_scale(Vec3::splat(FLOOR)),
+    );
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a field of a few pyramids a side"
+    )]
+    let first = -(PRICE_FIELD as f32 - 1.0) / 2.0 * PRICE_SPACING;
+    let mut casters = Vec::new();
+    for row in 0..PRICE_FIELD {
+        for column in 0..PRICE_FIELD {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a field of a few pyramids a side"
+            )]
+            let at = Vec3::new(
+                first + column as f32 * PRICE_SPACING,
+                0.0,
+                first + row as f32 * PRICE_SPACING,
+            );
+            casters.push((
+                at,
+                place(
+                    &mut renderer,
+                    crcbl::render::scene::DEMO_PYRAMID,
+                    crcbl::render::scene::DEMO_UNTINTED,
+                    caster_at(at),
+                ),
+            ));
+        }
+    }
+    renderer.set_lights(&price_lights());
+    // The pyramid in the field's first corner, which is inside the first spot's
+    // cone.
+    let (stir_at, stir) = casters[0];
+    let sun = DirectionalLight::default();
+
+    let mut timers = timed.then(|| {
+        crcbl::render::PassTimers::new(
+            device,
+            crcbl::render::forward::FRAMES_IN_FLIGHT,
+            crcbl::render::MAX_TIMED_PASSES,
+        )
+        .expect("a device reporting TIMESTAMP_QUERY gives out timer sets")
+    });
+    let mut stats = crcbl::render::PassStats::new();
+    let mut recorded = Vec::new();
+    let mut price = MovingCameraPrice {
+        price: None,
+        groups: 0,
+        light_groups: 0,
+        faces: 0,
+    };
+    for index in 0..PRICE_WARMUP + frames {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a few hundred frames, and the angle is what is wanted"
+        )]
+        let angle = index as f32 * PRICE_TURN;
+        let camera = price_camera(angle);
+        if stirred {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "a few hundred frames against a drift measured in millimetres"
+            )]
+            let drift = Vec3::X * (index as f32 * 1.0e-3);
+            renderer.set_instance(
+                stir,
+                &InstanceDesc {
+                    mesh: crcbl::render::scene::DEMO_PYRAMID,
+                    material: crcbl::render::scene::DEMO_UNTINTED,
+                    transform: caster_at(stir_at + drift),
+                },
+            );
+        }
+        let acquired = device
+            .acquire_next_frame(headless.swapchain)
+            .expect("the ring always has an image");
+        renderer
+            .begin_frame(device, &camera, &sun, extent)
+            .expect("the uniform buffer is writable");
+        if index >= PRICE_WARMUP {
+            let cascades = (0..crcbl::render::shadow::CASCADES)
+                .filter(|cascade| renderer.shadow_cascade_redrawn(*cascade))
+                .count();
+            let lights = (0..crcbl::render::shadow::LIGHT_SLOTS)
+                .filter(|slot| renderer.shadow_slot_redrawn(*slot))
+                .count();
+            price.groups += (cascades + lights) as u64;
+            price.light_groups += lights as u64;
+            price.faces += u64::from(renderer.shadow_faces_redrawn());
+        }
+        let compiled = {
+            let mut graph = crcbl::render::RenderGraph::new(headless.queue);
+            let target = graph.import_image(
+                "swapchain",
+                crcbl::render::ImportedImage {
+                    image: acquired.image,
+                    view: acquired.view,
+                    format: headless.format,
+                    extent,
+                    initial: ResourceState::Undefined,
+                    claim: crcbl::render::InitialClaim::Acquired,
+                    final_state: ResourceState::Present,
+                },
+            );
+            renderer.add_passes(&mut graph, &pool, target, extent);
+            graph.compile(&pool).expect("a legal frame")
+        };
+        let mut encoder = device.create_command_encoder(&CommandEncoderDesc {
+            label: Some("moving camera shadow frame"),
+            queue: headless.queue,
+        });
+        compiled
+            .execute(device, &mut pool, encoder.as_mut(), timers.as_mut())
+            .expect("the graph executed");
+        let commands = encoder.finish().expect("recording succeeded");
+        device
+            .submit(headless.queue, &SubmitInfo::new(&[commands]))
+            .expect("submit");
+        device
+            .present(
+                headless.queue,
+                &PresentInfo {
+                    swapchain: headless.swapchain,
+                    waits: acquired.present_semaphore.as_slice(),
+                    present_id: None,
+                },
+            )
+            .expect("present");
+        recorded.push(commands);
+        // Against the frame the timings came from, which is what `FrameTimings`
+        // itself says — `shadow_tiles.rs`'s price explains the lag.
+        if let Some(timers) = timers.as_ref() {
+            let timings = timers.latest();
+            let Some(drawn) = usize::try_from(timings.frame)
+                .ok()
+                .and_then(|frame| frame.checked_sub(1))
+            else {
+                continue;
+            };
+            if drawn >= PRICE_WARMUP {
+                stats.record(timings);
+            }
+        }
+    }
+
+    device.wait_idle().expect("idle");
+    price.price = timed.then(|| {
+        stats
+            .percentiles("shadow")
+            .expect("the shadow pass is timed and the window is past its floor")
+    });
+    if let Some(mut timers) = timers.take() {
+        timers.destroy(device);
+    }
+    for commands in recorded {
+        device.destroy_command_buffer(commands);
+    }
+    renderer.destroy(device);
+    pool.destroy(device);
+    headless.finish();
+    price
+}
+
+/// The camera for the moving-camera price and check: `angle` radians round
+/// the field, up and back, looking at its middle.
+fn price_camera(angle: f32) -> Camera {
+    Camera {
+        eye: Vec3::new(18.0 * angle.sin(), 12.0, 18.0 * angle.cos()),
+        target: Vec3::ZERO,
+        up: Vec3::Y,
+        projection: Projection::default(),
+    }
+}
+
+/// Three shadowed spots over three corners of the field and a shadowed point
+/// light over the fourth — every light slot the atlas has, and both kinds of
+/// light group.
+fn price_lights() -> Vec<Light> {
+    let spot = |pool: Vec3| {
+        let position = pool + Vec3::new(0.0, 5.0, 1.0);
+        Light::Spot(SpotLight {
+            position,
+            color: Vec3::new(1.0, 0.97, 0.94) * 30.0,
+            radius: REACH,
+            direction: pool - position,
+            inner_angle: 0.4,
+            outer_angle: 0.6,
+            fill: false,
+        })
+    };
+    vec![
+        spot(Vec3::new(-6.0, 0.0, -6.0)),
+        spot(Vec3::new(6.0, 0.0, -6.0)),
+        spot(Vec3::new(-6.0, 0.0, 6.0)),
+        Light::Point(PointLight {
+            position: Vec3::new(6.0, 3.0, 6.0),
+            radius: 6.0,
+            color: Vec3::splat(20.0),
+            fill: false,
+        }),
+    ]
+}
+
+/// **The price of a moving camera over shadowed local lights**: how many shadow
+/// groups each frame redraws and what the `shadow` pass costs, over a still
+/// field and over the same field with one caster nudged inside one spot's cone.
+///
+/// Prints rather than asserts a duration, on `shadow_tiles.rs`'s terms: a
+/// millisecond figure is a property of the machine it was measured on.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_moving_camera_prices_the_shadow_pass() {
+    let (extent, frames) = crate::area_light::price_frame();
+    for stirred in [false, true] {
+        let price = moving_camera_price(extent, frames, stirred);
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "counts over a few hundred frames, printed as averages"
+        )]
+        let per_frame = |count: u64| count as f64 / frames as f64;
+        let groups = per_frame(price.groups);
+        let lights = per_frame(price.light_groups);
+        let faces = per_frame(price.faces);
+        let arm = if stirred { ", one caster stirred" } else { "" };
+        match price.price {
+            Some((p50, p95)) => eprintln!(
+                "{}: moving camera{arm} at {extent:?} over {frames} frames — {groups:.2} groups \
+                 ({lights:.2} light slots) and {faces:.2} tiles redrawn a frame, shadow pass p50 \
+                 {:.3} ms p95 {:.3} ms",
+                crate::SUITE,
+                p50 as f64 / 1e6,
+                p95 as f64 / 1e6,
+            ),
+            None => eprintln!(
+                "{}: moving camera{arm} at {extent:?} over {frames} frames — {groups:.2} groups \
+                 ({lights:.2} light slots) and {faces:.2} tiles redrawn a frame; this backend \
+                 cannot time a pass",
+                crate::SUITE,
+            ),
+        }
+    }
+}
+
+/// How many frames the camera turns for in
+/// [`a_moving_camera_holds_the_lights_maps_and_draws_the_frame_it_would_have_drawn`].
+const TURNING_FRAMES: usize = 8;
+
+/// **A moving camera redraws the cascades, holds every light's maps, and the
+/// frame it then draws is the frame a renderer meeting the scene draws.**
+///
+/// A light's map is drawn from the light, so a cache keyed on what it is
+/// drawn from holds it while the eye moves — and the picture is the proof that
+/// holding it was right: the maps a turned camera samples were drawn from where
+/// the camera stood on the first frame, and a renderer with no history draws
+/// them from where it stands now. A light map that depended on the eye after
+/// all — a cut chosen from it, a camera-fitted field the depth pass reads —
+/// differs between the two.
+///
+/// A far caster is moved on every frame too, outside every light's reach, so
+/// the lights holding is also a moved instance they cannot see redrawing
+/// nothing.
+#[test]
+#[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
+fn a_moving_camera_holds_the_lights_maps_and_draws_the_frame_it_would_have_drawn() {
+    let headless = Headless::open_at(EXTENT, Features::GPU_DRIVEN | Features::DEBUG_MARKERS);
+    let sun = DirectionalLight::default();
+    let far_caster = |step: usize| {
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a handful of frames, and the step is what is wanted"
+        )]
+        let along = step as f32 * 0.1;
+        caster_at(Vec3::new(60.0 + along, 0.0, 0.0))
+    };
+    let scene = |headless: &Headless| {
+        let mut renderer =
+            ForwardRenderer::new(headless.device.as_ref(), headless.queue, headless.format)
+                .expect("the forward renderer builds");
+        renderer.set_shadow_cadence(Some(Cadence::EVERY_FRAME));
+        place(
+            &mut renderer,
+            crcbl::render::scene::DEMO_CUBE,
+            crcbl::render::scene::DEMO_UNTINTED,
+            Mat4::from_translation(Vec3::new(0.0, -0.5 * FLOOR, 0.0))
+                * Mat4::from_scale(Vec3::splat(FLOOR)),
+        );
+        for at in [
+            Vec3::new(-6.0, 0.0, -6.0),
+            Vec3::new(6.0, 0.0, -6.0),
+            Vec3::new(-6.0, 0.0, 6.0),
+            Vec3::new(6.0, 0.0, 6.0),
+            Vec3::ZERO,
+        ] {
+            place(
+                &mut renderer,
+                crcbl::render::scene::DEMO_PYRAMID,
+                crcbl::render::scene::DEMO_UNTINTED,
+                caster_at(at),
+            );
+        }
+        renderer.set_lights(&price_lights());
+        renderer
+    };
+
+    let mut moved = scene(&headless);
+    let far = place(
+        &mut moved,
+        crcbl::render::scene::DEMO_PYRAMID,
+        crcbl::render::scene::DEMO_UNTINTED,
+        far_caster(0),
+    );
+    let mut moved_pool = TransientPool::new();
+    // Two frames, so the atlas is drawn and the instance writes the placing
+    // made have settled.
+    for _ in 0..2 {
+        render_mesh_lit(
+            &headless,
+            &mut moved,
+            &mut moved_pool,
+            &price_camera(0.0),
+            &sun,
+            None,
+        );
+    }
+    let occupied = (0..crcbl::render::shadow::LIGHT_SLOTS)
+        .filter(|slot| moved.shadow_lights().base_of(*slot).is_some())
+        .count();
+    let mut run = Vec::with_capacity(TURNING_FRAMES);
+    for step in 1..=TURNING_FRAMES {
+        moved.set_instance(
+            far,
+            &InstanceDesc {
+                mesh: crcbl::render::scene::DEMO_PYRAMID,
+                material: crcbl::render::scene::DEMO_UNTINTED,
+                transform: far_caster(step),
+            },
+        );
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a handful of frames, and the angle is what is wanted"
+        )]
+        let camera = price_camera(step as f32 * 0.05);
+        render_mesh_lit(&headless, &mut moved, &mut moved_pool, &camera, &sun, None);
+        run.push((
+            (0..crcbl::render::shadow::CASCADES)
+                .all(|cascade| moved.shadow_cascade_redrawn(cascade)),
+            (0..crcbl::render::shadow::LIGHT_SLOTS)
+                .filter(|slot| moved.shadow_slot_redrawn(*slot))
+                .count(),
+        ));
+    }
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a handful of frames, and the angle is what is wanted"
+    )]
+    let last = price_camera(TURNING_FRAMES as f32 * 0.05);
+    // One more frame at the last camera, so neither renderer's frame carries a
+    // camera motion the other's does not.
+    let held = render_mesh_lit(&headless, &mut moved, &mut moved_pool, &last, &sun, None);
+
+    // The reference: the same scene met for the first time at the last camera,
+    // with the far caster where the run left it.
+    let mut fresh = scene(&headless);
+    place(
+        &mut fresh,
+        crcbl::render::scene::DEMO_PYRAMID,
+        crcbl::render::scene::DEMO_UNTINTED,
+        far_caster(TURNING_FRAMES),
+    );
+    let mut fresh_pool = TransientPool::new();
+    let reference = render_mesh_lit(&headless, &mut fresh, &mut fresh_pool, &last, &sun, None);
+
+    let verdict = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        assert_eq!(
+            occupied,
+            crcbl::render::shadow::LIGHT_SLOTS,
+            "every light must hold a slot, or the holds below are about fewer maps than it says"
+        );
+        for (step, (cascades, lights)) in run.iter().enumerate() {
+            assert!(
+                *cascades,
+                "frame {step} of the turn held a cascade, which is fitted to the eye"
+            );
+            assert_eq!(
+                *lights, 0,
+                "frame {step} of the turn redrew {lights} light map(s): nothing any light is \
+                 drawn from moved"
+            );
+        }
+        let against_reference = differing(&held, &reference);
+        eprintln!(
+            "{}: the turned camera's frame differs from the reference in {against_reference} \
+             pixels",
+            crate::SUITE
+        );
+        assert_eq!(
+            against_reference, 0,
+            "the frame drawn through light maps held across a turning camera differs from the \
+             frame a renderer meeting the scene draws, so a held light map depended on the eye"
         );
     }));
 

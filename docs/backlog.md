@@ -4183,14 +4183,34 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   the per-bucket constants moved out of the dynamic uniform. WebGPU needs
   `indirect-first-instance`; the current path stays as the fallback, and the
   one-call-per-bucket tests change.
-- **P22 — the shadow cache breaks on any camera move or any instance change.**
-  `shadow_group_record` hashes the global `InstancePool::revision` and the
-  camera's selection eye for every group, so light maps that do not depend on
-  the camera redraw as it moves and one mover redraws every tile; holds are also
-  off while anything skins or the probe updater runs. **Fix:** key the eye only
-  where DAG LOD reads it, quantised; per-group dirtiness from moved instances'
-  bounds against each group's frustum; consider `r_shadow_cadence = 2` for tier
-  one and up.
+- **P22 — what is left of the shadow cache's reach.** The record is now per
+  group: the depth-read fields of its blocks (`depth_pass_reads` in
+  `forward/shadow_inputs.rs`), the eye only for cascades and for lights whose
+  cull a live DAG element reaches, and a per-group count of instance writes
+  whose old or new footprint reaches the group's frustum (`note_caster_writes`,
+  `shadow_groups_reached`). Measured on Vulkan, RX 7900 XTX, `mesh_e2e`'s
+  `a_moving_camera_prices_the_shadow_pass` at 1920x1080 over 480 frames: 6.00 →
+  2.00 groups and 11.00 → 2.00 tiles a frame, `shadow` p50 0.021–0.024 → 0.005
+  ms; with one caster stirred in one spot, 6.00 → 3.00 groups and 0.021 → 0.007
+  ms. Still open:
+  - **Declined 2026-09-28: `r_shadow_cadence = 2` for tier one and up.** Now
+    that local lights hold their maps, a moving camera redraws only the two
+    cascades, at 0.005 ms p50 in the measurement above. Halving that saves
+    almost nothing and makes every sun shadow lag a frame behind a moving
+    camera. Revisit with a scene whose cascade redraws are shown to cost.
+  - **Not measured** on D3D12, Metal, WebGPU or lavapipe, and the host cost of
+    the footprint tests (one `MeshPool::table_entries` decode and an AABB test
+    per written element per group, on frames with writes) is unpriced.
+  - **Deliberately kept:** `frame_skins` and the probe updater still veto every
+    hold; a light a live DAG instance can reach still redraws on every eye move;
+    growing `InstancePool::slot_count` (an insert above the high-water mark)
+    redraws every group, because the instance count is in every record.
+  - **Declined: quantising the eye.** Any eye move can carry a DAG group across
+    its budget, so a held map under a quantum is a cut the cull would not have
+    chosen — a different picture, not a cheaper one.
+  - **`depth_pass_reads` is read off the shaders by hand.** A depth-path shader
+    change that reads another `FrameUniforms` field has to add it there, or a
+    map drawn from a stale value of it is held; nothing checks the two agree.
 - **P23 — probe gathers still run for an empty volume.** Revalidated
   `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
   corners even when `frame.probe_counts` describes the zeroed placeholder.

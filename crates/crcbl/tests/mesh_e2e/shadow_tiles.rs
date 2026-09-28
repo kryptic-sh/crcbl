@@ -532,7 +532,7 @@ const PRICE_EYES: [f32; 2] = [22.0, 88.0];
 /// overlay shows.
 const PRICED_PASS: &str = "shadow";
 
-/// How far one patch of the field is moved per frame while a price is being
+/// How far each patch of the field is moved per frame while a price is being
 /// measured with `stirred` set, in world units.
 ///
 /// Small enough that no map's contents change in any way a picture would show,
@@ -628,23 +628,23 @@ fn shadow_pass_prices(
     let mut pool = TransientPool::new();
     let step = 2.0 * DUNES_EXTENT;
     let first = -(PRICE_FIELD as f32 - 1.0) / 2.0;
-    let mut stir = None;
+    let mut patches = Vec::with_capacity(PRICE_FIELD * PRICE_FIELD);
     for row in 0..PRICE_FIELD {
         for column in 0..PRICE_FIELD {
+            let at = Vec3::new(
+                (first + column as f32) * step,
+                0.0,
+                (first + row as f32) * step,
+            );
             let patch = place(
                 &mut renderer,
                 crcbl::render::scene::DEMO_DUNES,
                 crcbl::render::scene::DEMO_UNTINTED,
-                Mat4::from_translation(Vec3::new(
-                    (first + column as f32) * step,
-                    0.0,
-                    (first + row as f32) * step,
-                )),
+                Mat4::from_translation(at),
             );
-            stir.get_or_insert(patch);
+            patches.push((patch, at));
         }
     }
-    let stir = stir.expect("a field of at least one patch");
     renderer.set_lights(&price_lights());
     let cameras = arms.map(|arm| price_camera(arm.eye));
     let sun = no_sun();
@@ -679,28 +679,27 @@ fn shadow_pass_prices(
         renderer.set_shadow_cadence(arms[eye].cadence);
         // **A scene where everything moves at once**, which is the case the
         // budget exists to bound and the only one in which a held map is
-        // holding anything: `InstancePool::revision` reaches every group's
-        // record, so one nudged patch makes every map out of date on every
-        // frame. Without it the arms alternate over a still scene, the atlas
-        // caches, and the pass this function is timing is not recorded at all.
+        // holding anything: every patch is nudged, and a write reaches every
+        // group whose cull the patch is in, so every map is out of date on
+        // every frame. Without it the arms alternate over a still scene, the
+        // atlas caches, and the pass this function is timing is not recorded
+        // at all.
         if stirred {
             #[expect(
                 clippy::cast_precision_loss,
                 reason = "a few hundred frames against a drift measured in millimetres"
             )]
             let drift = index as f32 * STIR_STEP;
-            renderer.set_instance(
-                stir,
-                &crcbl::render::InstanceDesc {
-                    mesh: crcbl::render::scene::DEMO_DUNES,
-                    material: crcbl::render::scene::DEMO_UNTINTED,
-                    transform: Mat4::from_translation(Vec3::new(
-                        first * step + drift,
-                        0.0,
-                        first * step,
-                    )),
-                },
-            );
+            for (patch, at) in &patches {
+                renderer.set_instance(
+                    *patch,
+                    &crcbl::render::InstanceDesc {
+                        mesh: crcbl::render::scene::DEMO_DUNES,
+                        material: crcbl::render::scene::DEMO_UNTINTED,
+                        transform: Mat4::from_translation(*at + Vec3::X * drift),
+                    },
+                );
+            }
         }
         renderer
             .begin_frame(device, &cameras[eye], &sun, extent)
