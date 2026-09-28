@@ -70,10 +70,12 @@ libraries and `--lib` only.
   `value: 5_000_000_000`, which is out of range for wasm's 32-bit `usize`. It
   was seen on `main` before the aerial slice, which did not touch the file.
 
-**Needs a decision:** either gate those tests on non-wasm targets and add a wasm
-`--all-targets` step to CI, or state that crate tests are native-only and leave
-CI as it is. Nothing runs wasm tests today (no `wasm-bindgen-test`), so the
-second is the smaller change.
+**Decided 2026-09-28: crate tests are native-only, and CI stays as it is.**
+Nothing runs a test on wasm (there is no `wasm-bindgen-test` and no wasm test
+runner), so making test targets compile there would add `cfg` gates and a CI
+step while executing nothing. The browser gate (`pages.yml`), which renders
+every demo in a real browser, is what verifies wasm. Revisit if a wasm test
+runner is ever adopted: its first step would be making these two targets build.
 
 ## EW's engine port requests (2026-09-27)
 
