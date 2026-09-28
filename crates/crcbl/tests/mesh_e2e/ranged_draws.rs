@@ -2,7 +2,7 @@
 //! call per bucket**, whether its runs are long enough to become one
 //! multi-draw call or are kept a call per bucket.
 //!
-//! `render_e2e`'s `a_call_per_range_draws_every_scene_as_a_call_per_bucket_does`
+//! `render_e2e`'s `a_call_per_range_on_the_mesh_tail_draws_as_a_call_per_bucket_does`
 //! draws the builtin scenes, whose runs of buckets are all shorter than the
 //! mesh tail's threshold behind a task stage — so on that arm it compares the
 //! split path against the call per bucket, and never draws a multi-draw

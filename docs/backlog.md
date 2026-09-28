@@ -4263,7 +4263,8 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     47.0), the `mesh.slang` edit sensitivity recorded under "What fixed view
     lighting left open"; every golden and the byte-for-byte ranged versus
     per-bucket comparison (`render_e2e`'s
-    `a_call_per_range_draws_every_scene_as_a_call_per_bucket_does`) held.
+    `a_call_per_range_on_*_draws_as_a_call_per_bucket_does`, one test per tail)
+    held.
 
 - **P22 — what is left of the shadow cache's reach.** The record is now per
   group: the depth-read fields of its blocks (`depth_pass_reads` in

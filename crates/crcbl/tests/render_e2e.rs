@@ -6443,9 +6443,14 @@ fn draw_scene_on_every_geometry_path_measuring(
 ///
 /// A backend that does not declare the feature — every one but Vulkan — has
 /// nothing to compare, and says so rather than passing quietly.
-#[test]
-#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
-fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
+///
+/// **One test per tail**, each calling this, because the four together drew
+/// over a hundred and twenty frames and outlasted nextest's per-test limit on
+/// lavapipe; apart, each fits and they run side by side.
+fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
+    path: GeometryPath,
+    dropped: Features,
+) {
     crcbl_core::log::init_logging();
     let probe = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
         .unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
@@ -6460,16 +6465,9 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
         );
         return;
     }
-    // Each arm is a tail and the features its devices are *not* asked for, on
+    // The arm is a tail and the features its devices are *not* asked for, on
     // top of the draw index the call-per-bucket half drops.
-    let arms = [
-        (GeometryPath::IndirectCount, Features::empty()),
-        (GeometryPath::IndirectPerBatch, Features::empty()),
-        (GeometryPath::MeshShader, Features::empty()),
-        (GeometryPath::MeshShader, Features::TASK_SHADER),
-    ]
-    .into_iter()
-    .filter(|(path, dropped)| match path {
+    let drawable = match path {
         GeometryPath::IndirectCount => features.contains(Features::DRAW_INDIRECT_COUNT),
         GeometryPath::IndirectPerBatch => true,
         GeometryPath::MeshShader => {
@@ -6477,72 +6475,112 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
                 && (dropped.contains(Features::TASK_SHADER)
                     || features.contains(Features::TASK_SHADER))
         }
-    });
+    };
+    if !drawable {
+        eprintln!(
+            "crcbl render e2e: {backend} cannot draw {path:?} dropping {dropped:?}, so there is \
+             no frame to compare"
+        );
+        return;
+    }
     let mut compared = 0;
-    for (path, dropped) in arms {
-        for scene in [
-            Scene::Cube,
-            Scene::Lights,
-            Scene::Spot,
-            Scene::SpotShadow,
-            Scene::PointShadow,
-            Scene::AreaLight,
-            Scene::FillLight,
-            Scene::AlphaMask,
-            Scene::DoubleSided,
-            Scene::SpecularAa,
-            Scene::Ao,
-            Scene::Ssr,
-            Scene::Bloom,
-            Scene::Aa,
-            Scene::Probes,
-            Scene::Dunes,
-        ] {
-            if matches!(scene, Scene::Dunes) && dropped.contains(Features::TASK_SHADER) {
-                continue;
-            }
-            let frames = [false, true].map(|ranged| {
-                let asked = OffscreenSetup::OPTIONAL_FEATURES.difference(dropped);
-                let asked = if ranged {
-                    asked
-                } else {
-                    asked.difference(Features::DRAW_INDEX)
-                };
-                let setup =
-                    OffscreenSetup::open_on_path_with(EXTENT.0, EXTENT.1, scene, path, asked)
-                        .unwrap_or_else(|why| panic!("{scene:?} opens on {path:?}: {why}"));
-                let mut setup = Offscreen::guard(SUITE, setup);
-                assert_eq!(setup.geometry_path(), Some(path));
-                assert_eq!(
-                    setup.caps().features.contains(Features::DRAW_INDEX),
-                    ranged,
-                    "{scene:?} on {path:?}: the device was not granted what the arm asked for"
-                );
-                assert!(
-                    !setup.caps().features.intersects(dropped),
-                    "{scene:?} on {path:?}: the device was granted {dropped:?}, which the arm \
-                     dropped"
-                );
-                let format = setup.format();
-                let ((width, height), pixels) = setup
-                    .draw_and_readback()
-                    .unwrap_or_else(|why| panic!("{scene:?} renders on {path:?}: {why}"));
-                setup.finish();
-                Image::from_readback(width, height, &pixels, channel_order(format))
-                    .expect("the readback is exactly one image")
-            });
-            let (differing, worst, named) = channels_differing(&frames[0], &frames[1]);
-            assert_eq!(
-                differing, 0,
-                "{scene:?} on {path:?}, dropping {dropped:?}: a call per range differs from a \
-                 call per bucket in {differing} channels (worst {worst}), first at {named:?}"
-            );
-            compared += 1;
+    for scene in [
+        Scene::Cube,
+        Scene::Lights,
+        Scene::Spot,
+        Scene::SpotShadow,
+        Scene::PointShadow,
+        Scene::AreaLight,
+        Scene::FillLight,
+        Scene::AlphaMask,
+        Scene::DoubleSided,
+        Scene::SpecularAa,
+        Scene::Ao,
+        Scene::Ssr,
+        Scene::Bloom,
+        Scene::Aa,
+        Scene::Probes,
+        Scene::Dunes,
+    ] {
+        if matches!(scene, Scene::Dunes) && dropped.contains(Features::TASK_SHADER) {
+            continue;
         }
+        let frames = [false, true].map(|ranged| {
+            let asked = OffscreenSetup::OPTIONAL_FEATURES.difference(dropped);
+            let asked = if ranged {
+                asked
+            } else {
+                asked.difference(Features::DRAW_INDEX)
+            };
+            let setup = OffscreenSetup::open_on_path_with(EXTENT.0, EXTENT.1, scene, path, asked)
+                .unwrap_or_else(|why| panic!("{scene:?} opens on {path:?}: {why}"));
+            let mut setup = Offscreen::guard(SUITE, setup);
+            assert_eq!(setup.geometry_path(), Some(path));
+            assert_eq!(
+                setup.caps().features.contains(Features::DRAW_INDEX),
+                ranged,
+                "{scene:?} on {path:?}: the device was not granted what the arm asked for"
+            );
+            assert!(
+                !setup.caps().features.intersects(dropped),
+                "{scene:?} on {path:?}: the device was granted {dropped:?}, which the arm \
+                 dropped"
+            );
+            let format = setup.format();
+            let ((width, height), pixels) = setup
+                .draw_and_readback()
+                .unwrap_or_else(|why| panic!("{scene:?} renders on {path:?}: {why}"));
+            setup.finish();
+            Image::from_readback(width, height, &pixels, channel_order(format))
+                .expect("the readback is exactly one image")
+        });
+        let (differing, worst, named) = channels_differing(&frames[0], &frames[1]);
+        assert_eq!(
+            differing, 0,
+            "{scene:?} on {path:?}, dropping {dropped:?}: a call per range differs from a \
+             call per bucket in {differing} channels (worst {worst}), first at {named:?}"
+        );
+        compared += 1;
     }
     eprintln!(
-        "crcbl render e2e: {compared} scene frames drawn a call per range match their call-per-\
-         bucket frames on {backend}"
+        "crcbl render e2e: {compared} scene frames drawn a call per range on {path:?}, dropping \
+         {dropped:?}, match their call-per-bucket frames on {backend}"
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_call_per_range_on_the_count_tail_draws_as_a_call_per_bucket_does() {
+    a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
+        GeometryPath::IndirectCount,
+        Features::empty(),
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_call_per_range_on_the_batch_tail_draws_as_a_call_per_bucket_does() {
+    a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
+        GeometryPath::IndirectPerBatch,
+        Features::empty(),
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_call_per_range_on_the_mesh_tail_draws_as_a_call_per_bucket_does() {
+    a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
+        GeometryPath::MeshShader,
+        Features::empty(),
+    );
+}
+
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_call_per_range_on_an_unamplified_mesh_tail_draws_as_a_call_per_bucket_does() {
+    a_call_per_range_draws_every_scene_as_a_call_per_bucket_does(
+        GeometryPath::MeshShader,
+        Features::TASK_SHADER,
     );
 }
 
