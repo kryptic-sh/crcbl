@@ -50,8 +50,30 @@ const MANY: u32 = 938;
 /// The comparison row's bucket count: every instance in one of two buckets.
 const FEW: u32 = 2;
 
-/// The measured `ew` scene's instance count.
+/// The measured `ew` scene's instance count, drawn on a price run.
 const INSTANCES: u32 = 17_219;
+
+/// The instance count an ordinary suite run draws: two per bucket of the many
+/// row, so every bucket still holds an instance and the call counts this test
+/// asserts are the price run's own.
+///
+/// **Why a suite run draws fewer.** The suite runs on CI's software adapters
+/// too, where [`INSTANCES`] over three geometry paths outlasted nextest's
+/// per-test limit on lavapipe, WARP and the macOS runner alike. What this test
+/// asserts is how many calls a frame records, which the bucket count decides
+/// and the instance count does not; the milliseconds only mean something on a
+/// price run, which asks for them with `CRCBL_PRICE_FRAMES`.
+const GATE_INSTANCES: u32 = MANY * 2;
+
+/// How many instances this run draws: [`INSTANCES`] on a price run,
+/// [`GATE_INSTANCES`] otherwise.
+fn instances() -> u32 {
+    if std::env::var_os("CRCBL_PRICE_FRAMES").is_some() {
+        INSTANCES
+    } else {
+        GATE_INSTANCES
+    }
+}
 
 /// Instances a row of the field holds.
 const ROW: u32 = 131;
@@ -89,14 +111,14 @@ fn median(samples: &[u64]) -> u64 {
 }
 
 /// The demo scene with its cube repeated into `buckets` meshes, and room for
-/// [`INSTANCES`] of them.
+/// [`instances`] of them.
 fn scene(buckets: u32) -> crcbl::render::scene::SceneDesc<'static> {
     let mut scene = crcbl::render::scene::demo();
     scene.meshes = vec![scene.meshes[crcbl::render::scene::DEMO_CUBE].clone(); buckets as usize];
     scene.capacities.meshes = buckets;
     scene.capacities.vertices = buckets * crcbl::shaders::mesh::CUBE_VERTEX_COUNT as u32;
     scene.capacities.indices = buckets * crcbl::shaders::mesh::CUBE_INDEX_COUNT as u32;
-    scene.capacities.instances = INSTANCES;
+    scene.capacities.instances = instances();
     scene
 }
 
@@ -150,7 +172,7 @@ fn row(headless: &Headless, buckets: u32, path: GeometryPath, timed: bool) -> Ro
     )
     .expect("the priced renderer builds");
     renderer.set_shadow_cadence(Some(Cadence::EVERY_FRAME));
-    for index in 0..INSTANCES {
+    for index in 0..instances() {
         renderer
             .add_instance(&InstanceDesc {
                 mesh: (index % buckets) as usize,
@@ -289,12 +311,13 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
             })
             .collect();
         eprintln!(
-            "{}: {path:?}{}, {} buckets, {INSTANCES} instances at {}x{} over {frames} frames: {} \
+            "{}: {path:?}{}, {} buckets, {} instances at {}x{} over {frames} frames: {} \
              calls a frame; cpu p50 begin {:.3} ms, build {:.3} ms, record {:.3} ms, submit \
              {:.3} ms; gpu passes (p50/p95 ms): {}",
             crate::SUITE,
             if ranged { " ranged" } else { "" },
             row.buckets,
+            instances(),
             extent.0,
             extent.1,
             row.draws / frames as u64,
