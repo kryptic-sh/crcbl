@@ -53,26 +53,33 @@ const FEW: u32 = 2;
 /// The measured `ew` scene's instance count, drawn on a price run.
 const INSTANCES: u32 = 17_219;
 
-/// The instance count an ordinary suite run draws: two per bucket of the many
-/// row, so every bucket still holds an instance and the call counts this test
-/// asserts are the price run's own.
+/// The bucket count an ordinary suite run spreads its instances over.
 ///
-/// **Why a suite run draws fewer.** The suite runs on CI's software adapters
-/// too, where [`INSTANCES`] over three geometry paths outlasted nextest's
-/// per-test limit on lavapipe, WARP and the macOS runner alike. What this test
-/// asserts is how many calls a frame records, which the bucket count decides
-/// and the instance count does not; the milliseconds only mean something on a
-/// price run, which asks for them with `CRCBL_PRICE_FRAMES`.
-const GATE_INSTANCES: u32 = MANY * 2;
+/// **Why a suite run draws a smaller scene.** The suite runs on CI's software
+/// adapters too, where a frame recorded at [`MANY`] buckets — thousands of
+/// calls, each validated — outlasted nextest's per-test limit on lavapipe, WARP
+/// and the macOS runner, even with the instances cut. What this test asserts
+/// is that many buckets record more calls than [`FEW`], and that the ranged
+/// tails record the same number either way; any count well above [`FEW`]
+/// shows both. The milliseconds only mean something on a price run, which asks
+/// for the measured scene with `CRCBL_PRICE_FRAMES`.
+const GATE_MANY: u32 = 64;
 
-/// How many instances this run draws: [`INSTANCES`] on a price run,
-/// [`GATE_INSTANCES`] otherwise.
+/// Whether this run is a price run, asked for with `CRCBL_PRICE_FRAMES`.
+fn priced() -> bool {
+    std::env::var_os("CRCBL_PRICE_FRAMES").is_some()
+}
+
+/// The many row's bucket count: [`MANY`] on a price run, [`GATE_MANY`]
+/// otherwise.
+fn many() -> u32 {
+    if priced() { MANY } else { GATE_MANY }
+}
+
+/// How many instances this run draws: [`INSTANCES`] on a price run, and two per
+/// bucket of the many row otherwise, so every bucket holds an instance.
 fn instances() -> u32 {
-    if std::env::var_os("CRCBL_PRICE_FRAMES").is_some() {
-        INSTANCES
-    } else {
-        GATE_INSTANCES
-    }
+    if priced() { INSTANCES } else { GATE_MANY * 2 }
 }
 
 /// Instances a row of the field holds.
@@ -226,7 +233,7 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
     let headless = Headless::open_at(extent, asked);
     let device = headless.device.as_ref();
     let timed = device.caps().features.contains(Features::TIMESTAMP_QUERY);
-    let mut rows = [MANY, FEW].map(|buckets| row(&headless, buckets, path, timed));
+    let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, path, timed));
     let camera = camera();
 
     for index in 0..PRICE_WARMUP + frames {
@@ -349,6 +356,7 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
 #[test]
 #[ignore = "needs a real GPU; see this file's header for the release command"]
 fn the_price_of_one_call_per_bucket() {
+    let buckets = many();
     let (extent, frames) = price_frame();
     let features = {
         let headless =
@@ -372,7 +380,7 @@ fn the_price_of_one_call_per_bucket() {
         let (many, few) = price(path, false, extent, frames);
         assert!(
             many > few,
-            "{path:?}: {MANY} buckets recorded {many} calls a frame and {FEW} recorded {few}, so \
+            "{path:?}: {buckets} buckets recorded {many} calls a frame and {FEW} recorded {few}, so \
              the rows do not differ in what this prices"
         );
         // A device that can draw a range of buckets per call does, on both
@@ -384,7 +392,7 @@ fn the_price_of_one_call_per_bucket() {
             let (many, few) = price(path, true, extent, frames);
             assert_eq!(
                 many, few,
-                "{path:?} with a draw index: {MANY} buckets recorded {many} calls a frame and \
+                "{path:?} with a draw index: {buckets} buckets recorded {many} calls a frame and \
                  {FEW} recorded {few}, so the calls still grow with the buckets"
             );
         } else {
