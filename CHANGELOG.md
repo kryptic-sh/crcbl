@@ -327,6 +327,29 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::acoustic_path`: which barriers a sound crosses and how far it
+  travels, ported from EW.** `build_acoustic_path(config, route, obstacles)`
+  walks an `AcousticRoute { source, waypoints, listener }` against
+  `AcousticObstacle<M> { bounds: crcbl_phys::Aabb, barrier: M }`s and returns a
+  `BuiltAcousticPath<M> { total_distance_m, barriers }`: the polyline's length
+  and each crossed obstacle's barrier once, in the order the route first enters
+  it, with equal entries in input order. `as_sound_path` lends it as a
+  `SoundPath<'_, M> { distance_m, barriers }`. `AcousticPathConfig` caps
+  obstacles and waypoints (`DEFAULT_MAXIMUM_OBSTACLES`,
+  `DEFAULT_MAXIMUM_WAYPOINTS`); a zero cap, a call over a cap, a non-finite
+  position and a non-finite or empty obstacle are refused as
+  `AcousticPathConfigError` or `AcousticPathBuildError`, never as a partial
+  path. The one shape change from EW is the material: EW's `AcousticBarrier`
+  enum is no longer the barrier type but the type argument `M`, since the engine
+  cannot know a game's materials, and the builder asks only `M: Clone`. EW's
+  `SoundPath<'_>` becomes `SoundPath<'_, AcousticBarrier>`; every other name,
+  field, variant and limit is EW's own, and the error enums now also implement
+  `Display` and `Error`. The module docs say how `total_distance_m` relates to
+  `spatial::compute_cue`'s rolloff, so a game does not attenuate for distance
+  twice. It lives in the umbrella, not `crcbl-audio`, because it joins physics'
+  boxes to the audio cue grammar, and neither crate takes the other as a
+  dependency.
+
 - **`crcbl_core::schedule`: fixed-rate sampling at exact sub-tick times,
   staggered per agent, ported from EW**, reached through the umbrella as
   `crcbl::core::schedule`. A `FixedRateSchedule` built by

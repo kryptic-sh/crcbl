@@ -34,6 +34,7 @@
 //! crcbl::log       → log             the logging facade the engine records through
 //! crcbl::backend   → (this crate)    runtime GPU backend selection
 //! crcbl::adapter   → (this crate)    which adapter inside that backend
+//! crcbl::acoustic_path → (this crate) the barriers a sound's route crosses
 //! crcbl::engine    → (this crate)    the shell↔HAL join every sample repeats
 //! crcbl::ui_nav    → (this crate)    the `ui` actions as the UI tree's NavInput
 //! ```
@@ -367,6 +368,8 @@ pub use crcbl_ui as ui;
 /// effects links no pool for them.
 #[cfg(feature = "vfx")]
 pub use crcbl_vfx as vfx;
+
+pub mod acoustic_path;
 
 pub mod adapter;
 

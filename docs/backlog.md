@@ -94,26 +94,19 @@ migrates every caller and deletes its own copy in the same change.
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Shipped 2026-09-28 as
   `crcbl::core::schedule::FixedRateSchedule`.
-- **Acoustic paths: accepted, into `crcbl-audio` as `acoustic_path`.** The
-  material is a type parameter, because crcbl cannot know a game's materials,
-  and the returned barrier and path types move with it. This supplies the
-  obstruction half that `Mixer`'s distance rolloff lacks. Not built yet. Source:
-  EW's `src/acoustic_path.rs` and `src/acoustic_path_tests.rs`, and the
-  `AcousticBarrier` and `SoundPath` types in its `src/sound.rs`. EW's tests are
-  the behaviour to keep.
+- **Acoustic paths: accepted, and shipped 2026-09-28 as
+  `crcbl::acoustic_path`.** The material is a type parameter, because crcbl
+  cannot know a game's materials. **Decided 2026-09-28: the umbrella, not
+  `crcbl-audio`.** Its obstacles are `crcbl_phys::Aabb`, tested with that box's
+  own slab test. Putting it in `crcbl-audio` would make pure DSP depend on
+  physics, and a local box type would copy the slab test. The umbrella already
+  names both crates, which is how `crcbl::ui_nav` joins input and UI.
 - **A console for a host that is not `engine::Loop`: accepted 2026-09-27, after
   the ports.** EW runs its own `Runner`, so it hosts no console, and neither
   `autoexec.cfg` nor `--exec` runs there; EW refuses `--exec` until this lands.
   The planned shape is a public way to build a `Console` over the engine's
   tables and a `ConsoleHost` for a named app, plus the two boot calls EW makes
   itself (`run_autoexec`, `run_exec`): what `Loop::new` does today. Not built.
-- **Hashes owed to EW:** the grid router (`e508bd59`) and `FixedRateSchedule`
-  were pushed at the end of the 2026-09-28 session; EW has not yet been sent a
-  green hash for either. Send the first green `main` hash that carries both,
-  with the import paths `crcbl::nav::grid` and `crcbl::core::schedule`. EW's
-  migration note: the renames are listed in the changelog entry, and EW's
-  schedule tests that read the private `next_sample_time_seconds` field go away
-  with its copy, since crcbl now carries them.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits
