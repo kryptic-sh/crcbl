@@ -229,6 +229,17 @@ pub fn video_effects(stack: &SettingsStack) -> RenderEffects {
 /// back still go through one spelling.
 pub const RENDER_SCALE_KEY: &str = "render_scale";
 
+/// The `[engine.video]` key that multiplies the UI's scale.
+///
+/// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by [`ui_scale`].
+pub const UI_SCALE_KEY: &str = "ui_scale";
+
+/// The smallest multiplier [`ui_scale`] reads: a quarter of the base scale.
+pub const MIN_UI_SCALE: f32 = 0.25;
+
+/// The largest multiplier [`ui_scale`] reads: four times the base scale.
+pub const MAX_UI_SCALE: f32 = 4.0;
+
 /// The `[engine.video]` key that caps the loop's frame rate.
 ///
 /// Spelled here for [`RENDER_SCALE_KEY`]'s reason, and read by
@@ -590,6 +601,48 @@ pub fn render_scale(stack: &SettingsStack) -> f32 {
     }
 }
 
+/// The multiplier the player puts over the UI's base scale, for
+/// [`DrawList::set_scale`](crcbl_ui::draw_list::DrawList::set_scale).
+///
+/// The base is the host's to choose — the window's own scale factor
+/// ([`crate::ui_scale::window_scale_factor`]) or a game's fit to a reference
+/// window ([`crate::ui_scale::fit_scale`]) — and the list is drawn at the base
+/// times this. `1.0` for a stack that says nothing, and otherwise the file's
+/// value clamped to `MIN_UI_SCALE..=MAX_UI_SCALE`.
+///
+/// **Not in [`VideoSettings`]**, which is what the renderer is handed: nothing
+/// in a renderer draws the UI at a scale, so the host that lays the UI out
+/// reads this itself.
+///
+/// # A line that does nothing says so
+///
+/// On [`render_scale`]'s terms exactly: a value this cannot use — a string,
+/// `nan`, `inf` — leaves the multiplier at `1.0` and **warns**, naming the key,
+/// and a finite value outside the range is clamped without a word.
+#[must_use]
+pub fn ui_scale(stack: &SettingsStack) -> f32 {
+    let dotted = format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}");
+    let unreadable = || {
+        crcbl_core::log::warn!(
+            "settings: `{dotted}` is not a usable number, so it does nothing; \
+             the UI is drawn at its base scale"
+        );
+        1.0
+    };
+    match stack.get::<f64>(&dotted) {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "clamped to [MIN_UI_SCALE, MAX_UI_SCALE], where every f64 has an f32 within an ulp"
+        )]
+        // The finite check first, for `render_scale`'s reason: `clamp` answers
+        // NaN for NaN, and a NaN scale would draw no UI at all.
+        Some(scale) if scale.is_finite() => (scale as f32).clamp(MIN_UI_SCALE, MAX_UI_SCALE),
+        Some(_) => unreadable(),
+        None if stack.contains(&dotted) => unreadable(),
+        None => 1.0,
+    }
+}
+
 /// The anisotropy the player wants the base-colour page sampled with, for
 /// [`ForwardRenderer::set_anisotropy`](crcbl_render::ForwardRenderer::set_anisotropy).
 ///
@@ -796,6 +849,25 @@ pub fn set_render_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), Sto
         )));
     }
     stack.set(&dotted, &f64::from(scale.clamp(MIN_RENDER_SCALE, 1.0)))
+}
+
+/// Write `[engine.video] ui_scale`, clamped to what [`ui_scale`] reads.
+///
+/// Clamped on the way in on [`set_render_scale`]'s terms, so the file holds the
+/// multiplier the next read will actually answer.
+///
+/// # Errors
+///
+/// [`set_video`]'s, and a value that is not finite, for [`set_render_scale`]'s
+/// reason.
+pub fn set_ui_scale(stack: &mut SettingsStack, scale: f32) -> Result<(), StorageError> {
+    let dotted = format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}");
+    if !scale.is_finite() {
+        return Err(StorageError::Other(format!(
+            "settings: `{dotted}` cannot be written as {scale}"
+        )));
+    }
+    stack.set(&dotted, &f64::from(scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE)))
 }
 
 /// Write `[engine.video] anisotropic_filtering`, clamped to what
@@ -1035,6 +1107,10 @@ const RENDER_SCALE_HELP: &str = "fraction of the surface extent the frame is dra
 const ANISOTROPIC_FILTERING_HELP: &str = "how the base-colour page is filtered; the low end is off, and the \
      device's own ceiling clamps it";
 
+/// [`UI_SCALE_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
+const UI_SCALE_HELP: &str = "a multiplier over the UI's base scale: the window's scale factor, or a \
+     game's fit-to-reference factor";
+
 /// [`FRAME_LIMIT_KEY`]'s help line, for [`catalogue`] and its [`Binding`].
 const FRAME_LIMIT_HELP: &str = "frames a second the loop is held under; zero is unlimited";
 
@@ -1063,14 +1139,13 @@ const NAMED_FLAGS: Flags = Flags::ARCHIVE.union(Flags::READ_ONLY);
 /// words debug-console decision 3 (`docs/notes/tooling.md`) asks the console to
 /// print, because that is the fact a person reading `help` needs before the
 /// rest of the line is worth anything.
-const NAMED_HELP: [&str; 8] = [
+const NAMED_HELP: [&str; 7] = [
     "nothing reads this yet — how the window sits on the desktop",
     "nothing reads this yet — monitor name; absent means wherever the window is",
     "nothing reads this yet — [width, height] in device pixels, as a TOML array",
     "nothing reads this yet — how the swapchain paces presentation",
     "nothing reads this yet — a scalar multiplier applied in the tonemap pass",
     "nothing reads this yet — whether the swapchain asks for an HDR format",
-    "nothing reads this yet — a multiplier over the window's own scale factor",
     "nothing reads this yet — the vertical field of view in degrees",
 ];
 
@@ -1092,7 +1167,7 @@ const NAMED_HELP: [&str; 8] = [
 /// `resolution` is [`Kind::Text`] rather than a pair, because it is a TOML array
 /// and the console's domain type spells no array; `monitor` is text because a
 /// monitor name is text.
-const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 8] = [
+const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 7] = [
     (
         "display_mode",
         Kind::Enum(&["windowed", "borderless"]),
@@ -1112,20 +1187,12 @@ const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 8] = [
     ),
     ("hdr_output", Kind::Bool, NAMED_HELP[5]),
     (
-        "ui_scale",
-        Kind::Float {
-            min: 0.25,
-            max: 4.0,
-        },
-        NAMED_HELP[6],
-    ),
-    (
         "fov",
         Kind::Float {
             min: 1.0,
             max: 179.0,
         },
-        NAMED_HELP[7],
+        NAMED_HELP[6],
     ),
 ];
 
@@ -1134,7 +1201,7 @@ const NAMED_VIDEO_KEYS: [(&str, Kind, &str); 8] = [
 /// **Derived from the readers wherever there is a reader**, so a key cannot
 /// appear here under one spelling and be read under another: the effect rows
 /// come from [`VIDEO_KEYS`], the antialiasing row from [`ANTIALIASING_KEY`], the
-/// scale row from [`RENDER_SCALE_KEY`], the anisotropy row from
+/// scale rows from [`RENDER_SCALE_KEY`] and [`UI_SCALE_KEY`], the anisotropy row from
 /// [`ANISOTROPIC_FILTERING_KEY`], and the volume rows from
 /// [`Bus::settings_key`]. Only the rows with no reader are
 /// written out, because there is nothing to derive them from.
@@ -1210,6 +1277,15 @@ pub fn catalogue() -> Vec<CatalogueKey> {
             max: MAX_ANISOTROPIC_FILTERING,
         },
         ANISOTROPIC_FILTERING_HELP,
+    ));
+    keys.push(read(
+        VIDEO_NAMESPACE,
+        UI_SCALE_KEY,
+        Kind::Float {
+            min: MIN_UI_SCALE,
+            max: MAX_UI_SCALE,
+        },
+        UI_SCALE_HELP,
     ));
     keys.push(read(
         VIDEO_NAMESPACE,
@@ -1547,6 +1623,15 @@ pub fn apply(
             };
             set_anisotropic_filtering(stack, anisotropy).map_err(storage)?;
             Ok(reached(stage.apply_video(&video(stack))))
+        }
+        // No seam: the renderer does not draw the UI at a scale, and the host
+        // that does reads the key itself — so this host has nothing to tell.
+        UI_SCALE_KEY => {
+            let Value::Float(scale) = *value else {
+                unreachable!("the UI scale is a float kind, which `check` has held it to")
+            };
+            set_ui_scale(stack, scale).map_err(storage)?;
+            Ok(Applied::NextStart)
         }
         // Every remaining `Read` key is an effect switch, whose entry in the
         // catalogue is derived from that table — so a name that reaches here and
@@ -2029,6 +2114,7 @@ fn read(host: &dyn Any, namespace: &str, name: &str, kind: Kind) -> Value {
         SSAO_BENT_NORMALS_KEY => Value::Bool(ssao_bent_normals(stack)),
         RENDER_SCALE_KEY => Value::Float(render_scale(stack)),
         ANISOTROPIC_FILTERING_KEY => Value::Float(anisotropic_filtering(stack)),
+        UI_SCALE_KEY => Value::Float(ui_scale(stack)),
         _ => match effect_keys().find(|(candidate, _)| *candidate == name) {
             Some((_, effect)) => Value::Bool(video_effects(stack).contains(effect)),
             // A `Named` key: nothing reads it, so there is nothing to read it
@@ -2145,6 +2231,8 @@ settings_bindings! {
         ANISOTROPIC_FILTERING_HELP;
     FRAME_LIMIT: VIDEO_NAMESPACE, FRAME_LIMIT_KEY,
         Kind::Int { min: 0, max: FRAME_LIMIT_CEILING }, Flags::ARCHIVE, FRAME_LIMIT_HELP;
+    UI_SCALE: VIDEO_NAMESPACE, UI_SCALE_KEY,
+        Kind::Float { min: MIN_UI_SCALE, max: MAX_UI_SCALE }, Flags::ARCHIVE, UI_SCALE_HELP;
 
     DISPLAY_MODE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[0].0, NAMED_VIDEO_KEYS[0].1,
         NAMED_FLAGS, NAMED_HELP[0];
@@ -2158,10 +2246,8 @@ settings_bindings! {
         NAMED_FLAGS, NAMED_HELP[4];
     HDR_OUTPUT: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[5].0, NAMED_VIDEO_KEYS[5].1,
         NAMED_FLAGS, NAMED_HELP[5];
-    UI_SCALE: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[6].0, NAMED_VIDEO_KEYS[6].1,
+    FOV: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[6].0, NAMED_VIDEO_KEYS[6].1,
         NAMED_FLAGS, NAMED_HELP[6];
-    FOV: VIDEO_NAMESPACE, NAMED_VIDEO_KEYS[7].0, NAMED_VIDEO_KEYS[7].1,
-        NAMED_FLAGS, NAMED_HELP[7];
 
     MASTER_VOLUME: AUDIO_NAMESPACE, Bus::ALL[0].settings_key(), GAIN_KIND,
         Flags::ARCHIVE, GAIN_HELP;
@@ -2454,6 +2540,7 @@ mod tests {
         wanted.push(format!("{VIDEO_NAMESPACE}.{RENDER_SCALE_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{ANISOTROPIC_FILTERING_KEY}"));
         wanted.push(format!("{VIDEO_NAMESPACE}.{FRAME_LIMIT_KEY}"));
+        wanted.push(format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}"));
         wanted.extend(Bus::ALL.map(|bus| format!("{AUDIO_NAMESPACE}.{}", bus.settings_key())));
 
         for key in &wanted {
@@ -2949,6 +3036,75 @@ mod tests {
         let key = format!("[{VIDEO_NAMESPACE}]\n{RENDER_SCALE_KEY} = ");
         assert!((scale_of(&format!("{key}1\n")) - 1.0).abs() < f32::EPSILON);
         assert!((scale_of(&format!("{key}0\n")) - MIN_RENDER_SCALE).abs() < f32::EPSILON);
+    }
+
+    /// The UI multiplier the reader answers off a file holding `toml`.
+    fn ui_scale_of(toml: &str) -> f32 {
+        ui_scale(&stack_from(toml))
+    }
+
+    /// **The UI multiplier is one when the file says nothing, and otherwise
+    /// the file's value clamped to the catalogue's range** — both ends, and a
+    /// whole number read as a multiplier.
+    #[test]
+    fn a_ui_scale_is_read_and_clamped_to_its_range() {
+        assert_eq!(ui_scale_of(""), 1.0);
+        let key = format!("[{VIDEO_NAMESPACE}]\n{UI_SCALE_KEY} = ");
+        assert_eq!(ui_scale_of(&format!("{key}1.25\n")), 1.25);
+        assert_eq!(ui_scale_of(&format!("{key}2\n")), 2.0);
+        assert_eq!(ui_scale_of(&format!("{key}9.0\n")), MAX_UI_SCALE);
+        assert_eq!(ui_scale_of(&format!("{key}0.1\n")), MIN_UI_SCALE);
+        assert_eq!(ui_scale_of(&format!("{key}-1.0\n")), MIN_UI_SCALE);
+        let Kind::Float { min, max } = catalogued(&format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}"))
+            .expect("the UI scale is catalogued")
+            .kind
+        else {
+            panic!("the UI scale is not a float kind");
+        };
+        assert_eq!((min, max), (MIN_UI_SCALE, MAX_UI_SCALE));
+    }
+
+    /// **A UI multiplier that is not a usable number is one, and warns once,
+    /// naming the key.**
+    #[test]
+    fn a_ui_scale_that_is_not_a_usable_number_warns_and_is_one() {
+        let dotted = format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}");
+        for value in ["\"big\"", "nan", "inf", "-inf"] {
+            let capture = crcbl_core::log::capture();
+            let scale = ui_scale_of(&format!("[{VIDEO_NAMESPACE}]\n{UI_SCALE_KEY} = {value}\n"));
+            assert_eq!(scale, 1.0, "`{value}` was read as {scale}");
+            let warned: Vec<_> = capture
+                .records()
+                .into_iter()
+                .filter(|record| record.message.contains(&dotted))
+                .collect();
+            assert_eq!(warned.len(), 1, "`{value}`: {:?}", capture.records());
+            assert_eq!(warned[0].level, crcbl_core::log::Level::Warn);
+        }
+    }
+
+    /// **The UI multiplier is stored clamped, refuses a non-number, and a write
+    /// through [`apply`] lands in the file and says the host has no seam.**
+    #[test]
+    fn a_ui_scale_is_written_clamped_and_applies_next_start() {
+        let (reloaded, written) = round_trip(|stack| {
+            set_ui_scale(stack, 10.0).expect("a fresh user layer accepts every key");
+        });
+        assert_eq!(ui_scale(&reloaded), MAX_UI_SCALE);
+        assert!(!written.contains("10"), "the unclamped ask:\n{written}");
+
+        let mut stack = stack_from("");
+        assert!(set_ui_scale(&mut stack, f32::NAN).is_err());
+        let key = format!("{VIDEO_NAMESPACE}.{UI_SCALE_KEY}");
+        assert!(!stack.contains(&key), "a refused write reached the stack");
+
+        let mut stage = Recorder::default();
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(1.5), &mut stage),
+            Ok(Applied::NextStart)
+        );
+        assert_eq!(ui_scale(&stack), 1.5);
+        assert!(stage.video.is_empty(), "the renderer was told about the UI");
     }
 
     /// The anisotropy the reader answers off a file holding `toml`.
@@ -3460,9 +3616,9 @@ mod tests {
                 checked += 1;
             }
         }
-        // Seven switches, eight video rows and six gains, two ends each bar the
+        // Seven switches, nine video rows and six gains, two ends each bar the
         // antialiasing tier's three rungs.
-        assert_eq!(checked, 44, "the sweep did not cover the read catalogue");
+        assert_eq!(checked, 46, "the sweep did not cover the read catalogue");
     }
 
     /// **A value outside a key's kind is refused before it reaches the file.**

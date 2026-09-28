@@ -7326,6 +7326,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // overlay and the console stay legible on top of it. See
         // `crcbl_ui::draw_list::DrawList::begin_overlay`.
         self.draw_list.begin_overlay();
+        // The engine's own UI lays out and hit-tests in window pixels, so a
+        // scale the game set for its UI must not carry over into it.
+        self.draw_list.set_scale(1.0);
         self.draw_menu();
         self.draw_debug_overlay();
         // **Last, so nothing covers it** — debug-console decision 6. The
@@ -13615,6 +13618,8 @@ mod tests {
         /// `None` — the default — is every sample but `apps/options`, and is
         /// what leaves the loop opening a stack of its own.
         settings: Option<crate::settings::SharedSettings>,
+        /// The scale this game draws its HUD at, when a test gives it one.
+        ui_scale: Option<f32>,
     }
 
     /// The fixture's mixer.
@@ -13799,6 +13804,9 @@ mod tests {
             frame: FrameInfo,
         ) {
             self.draws.push(frame);
+            if let Some(scale) = self.ui_scale {
+                draw_list.set_scale(scale);
+            }
             // Stands in for a HUD, so a test can tell the game's geometry from
             // the menu's.
             draw_list.rect(
@@ -18125,6 +18133,50 @@ mod tests {
             above.contains(&"frame"),
             "and so must the debug panel: {above:?}",
         );
+    }
+
+    /// **A game's UI scale stops at the overlay cut**: the HUD it drew is
+    /// scaled, and the menu and debug panel the loop draws over it are exactly
+    /// what they are under a game that set no scale.
+    #[test]
+    fn a_games_ui_scale_does_not_reach_the_loops_own_drawing() {
+        let paused_frame = |ui_scale| {
+            let mut engine = hosted_game(FakeGame {
+                ui_scale,
+                ..FakeGame::default()
+            });
+            engine.debug.toggle();
+            tap(&mut engine, PAUSE_KEY);
+            step(&mut engine);
+            assert!(engine.paused, "the frame under test is a paused one");
+            let list = &engine.gpu.draw_list;
+            let hud = match list.base_commands() {
+                [crcbl_ui::draw_list::DrawCommand::Rect { max, .. }] => *max,
+                other => panic!("the game drew one rectangle, not {other:?}"),
+            };
+            // The debug panel's own rows move with the frame's timings, so the
+            // menu's commands and the overlay's clips are what is compared.
+            let menu: Vec<String> = list
+                .overlay_commands()
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command,
+                        crcbl_ui::draw_list::DrawCommand::Image { .. }
+                            | crcbl_ui::draw_list::DrawCommand::Text { .. }
+                    )
+                })
+                .map(|command| format!("{command:?}"))
+                .filter(|command| command.contains("PAUSED") || command.contains("Image"))
+                .collect();
+            (hud, menu, list.scale())
+        };
+        let (plain_hud, plain_menu, _) = paused_frame(None);
+        let (scaled_hud, scaled_menu, scale_after) = paused_frame(Some(2.0));
+        assert_eq!(scaled_hud, plain_hud * 2.0, "the game's HUD was not scaled");
+        assert!(!plain_menu.is_empty(), "no menu to compare");
+        assert_eq!(scaled_menu, plain_menu, "the game's scale reached the menu");
+        assert_eq!(scale_after, 1.0);
     }
 
     /// **The console is drawn last, so nothing covers it** — debug-console

@@ -202,3 +202,47 @@ fn registering_a_name_again_replaces_its_font_and_reserved_names_are_refused() {
         );
     }
 }
+
+/// **A span's glyph run emitted into a scaled list is the same run in window
+/// pixels**: its origin, its size and every pen offset times the scale, the
+/// glyphs and the text as they were — so the run is rasterised at the scaled
+/// size, not stretched from the logical one.
+#[test]
+fn a_tree_glyph_run_scales_its_origin_size_and_pen_offsets() {
+    let css = ".s { font-family: sans-serif; }";
+    let mut ui = Ui::new();
+    let (_, logical) = span_in(&mut ui, css, ".s");
+    let mut scaled = DrawList::new();
+    scaled.set_scale(1.5);
+    ui.emit(&mut scaled);
+
+    let run = |list: &DrawList| {
+        list.commands()
+            .iter()
+            .find_map(|command| match command {
+                DrawCommand::Glyphs {
+                    origin,
+                    size,
+                    glyphs,
+                    text,
+                    ..
+                } => Some((*origin, *size, glyphs.clone(), text.clone())),
+                _ => None,
+            })
+            .expect("the span draws a glyph run")
+    };
+    let (origin, size, glyphs, text) = run(&logical);
+    let (scaled_origin, scaled_size, scaled_glyphs, scaled_text) = run(&scaled);
+    assert_eq!(scaled_origin, origin * 1.5);
+    assert_eq!(scaled_size, size * 1.5);
+    assert_eq!(scaled_text, text);
+    assert_eq!(scaled_glyphs.len(), glyphs.len());
+    for (scaled, glyph) in scaled_glyphs.iter().zip(&glyphs) {
+        assert_eq!(scaled.glyph, glyph.glyph);
+        assert_eq!(scaled.offset, glyph.offset * 1.5);
+    }
+    assert!(
+        glyphs.iter().any(|glyph| glyph.offset.x > 0.0),
+        "every pen at zero would pass a missing offset scale"
+    );
+}

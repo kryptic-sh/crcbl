@@ -331,6 +331,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **UI scale: a `DrawList` records logical pixels in window pixels.**
+  `DrawList::set_scale(f32)` (read back with `scale()`) converts everything
+  pushed after it as it is recorded — positions, sizes, stroke and border
+  widths, corner radii, clips, text sizes, and a glyph run's origin, size and
+  every pen offset, so text is rasterised at the scaled size and stays crisp.
+  `DrawList::to_logical` maps a pointer back for hit tests. A scale of one
+  records exactly what it did before. The base factor comes from the new
+  `crcbl::ui_scale`: `fit_scale(extent, reference)` fits a reference window
+  (usually `crcbl::engine::DEFAULT_WINDOW_SIZE`) inside the swapchain, and
+  `window_scale_factor(shell, window)` is the window's own DPI scale.
+  `[engine.video] ui_scale` is now read, as a multiplier over that base:
+  `crcbl::settings::ui_scale` clamps it to `MIN_UI_SCALE..=MAX_UI_SCALE` (0.25
+  to 4) and warns and answers 1.0 on a value that is not a number, and
+  `set_ui_scale` writes it; the console's `ui_scale` is no longer read-only. The
+  engine's own menu, debug overlay and console still draw at 1.0, and a scale a
+  game sets stops at the overlay cut. Asked for by EW, which rebuilt its
+  finished list in window pixels every frame.
+
 - **`Binding::ButtonChord { modifier, button }`: a keyboard modifier held gives
   a mouse button a second layer**, the mouse's `Binding::Chord`. While
   `modifier` is held, a plain `MouseButton` binding on `button` in the context

@@ -400,6 +400,8 @@ pub mod text_input;
 
 pub mod ui_nav;
 
+pub mod ui_scale;
+
 /// Everything this crate exposes to the debug console.
 ///
 /// One list per crate, gathered by the engine at one seam — debug-console

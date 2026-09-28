@@ -24,6 +24,25 @@
 //! is per draw, so a list that clipped two panels differently would be two
 //! draws, and the UI's rendering rules (`docs/notes/tooling.md`) keep batching
 //! as the reason.
+//!
+//! # Logical pixels, recorded in window pixels
+//!
+//! A game can lay its UI out in **logical** pixels — for a reference window,
+//! say — and have it drawn at the window's size.
+//! [`set_scale`](DrawList::set_scale) says how many window pixels one logical
+//! pixel covers, and every push from then on converts as it records: positions,
+//! sizes, stroke and border widths, corner radii, clips, text sizes, and a glyph
+//! run's origin, size and every pen offset. The list itself only ever holds
+//! window pixels, so the renderer, the clip lanes and the overlay cut never
+//! see the scale.
+//!
+//! **At record time, not afterwards.** A glyph run recorded at the scaled size
+//! is rasterised at that size, so text stays crisp; scaling the finished
+//! vertices in a shader would stretch masks rasterised at the logical size, and
+//! rebuilding the finished list at the window's size would cost a second list
+//! every frame. A pointer position goes the other way through
+//! [`to_logical`](DrawList::to_logical), so hit tests stay in the units the
+//! layout was made in. At a scale of one nothing is converted at all.
 
 use crate::font::Font;
 use crate::font::atlas::{GlyphAtlas, SUBPIXEL_BINS};
@@ -182,6 +201,28 @@ impl ClipRect {
         let min = self.min.max(other.min);
         let max = self.max.min(other.max).max(min);
         Self { min, max }
+    }
+
+    /// This clip in window pixels, from logical pixels at `scale`.
+    ///
+    /// A side at [`NONE`](Self::NONE)'s bound is not a coordinate but "no
+    /// bound", and stays one: scaled, it would overflow to infinity or shrink to
+    /// a finite edge, and neither is the clip the caller asked for.
+    fn scaled(self, scale: f32) -> Self {
+        if scale == 1.0 {
+            return self;
+        }
+        let side = |value: f32| {
+            if value.abs() == f32::MAX {
+                value
+            } else {
+                value * scale
+            }
+        };
+        Self {
+            min: Vec2::new(side(self.min.x), side(self.min.y)),
+            max: Vec2::new(side(self.max.x), side(self.max.y)),
+        }
     }
 
     /// The four floats [`Vertex2d::clip`] carries.
@@ -386,6 +427,126 @@ pub enum DrawCommand {
     },
 }
 
+impl DrawCommand {
+    /// This command in window pixels, from logical pixels at `scale`.
+    ///
+    /// Every length scales — positions, sizes, strokes, radii, the border's
+    /// width, a text size, a glyph run's size and each pen offset — and nothing
+    /// else does: colours, UVs, the text and the glyph ids are not lengths.
+    fn scaled(self, scale: f32) -> Self {
+        match self {
+            Self::Rect { min, max, color } => Self::Rect {
+                min: min * scale,
+                max: max * scale,
+                color,
+            },
+            Self::RectOutline {
+                min,
+                max,
+                thickness,
+                color,
+            } => Self::RectOutline {
+                min: min * scale,
+                max: max * scale,
+                thickness: thickness * scale,
+                color,
+            },
+            Self::Line {
+                from,
+                to,
+                thickness,
+                color,
+            } => Self::Line {
+                from: from * scale,
+                to: to * scale,
+                thickness: thickness * scale,
+                color,
+            },
+            Self::Polyline {
+                mut points,
+                thickness,
+                closed,
+                color,
+            } => {
+                for point in &mut points {
+                    *point *= scale;
+                }
+                Self::Polyline {
+                    points,
+                    thickness: thickness * scale,
+                    closed,
+                    color,
+                }
+            }
+            Self::Text {
+                pos,
+                text,
+                color,
+                size,
+            } => Self::Text {
+                pos: pos * scale,
+                text,
+                color,
+                size: size * scale,
+            },
+            Self::Glyphs {
+                origin,
+                font,
+                size,
+                color,
+                mut glyphs,
+                text,
+            } => {
+                for glyph in &mut glyphs {
+                    glyph.offset *= scale;
+                }
+                Self::Glyphs {
+                    origin: origin * scale,
+                    font,
+                    size: size * scale,
+                    color,
+                    glyphs,
+                    text,
+                }
+            }
+            Self::Image {
+                min,
+                max,
+                uv_min,
+                uv_max,
+                tint,
+            } => Self::Image {
+                min: min * scale,
+                max: max * scale,
+                uv_min,
+                uv_max,
+                tint,
+            },
+            Self::RoundedRect {
+                min,
+                max,
+                radii,
+                color,
+                border,
+            } => Self::RoundedRect {
+                min: min * scale,
+                max: max * scale,
+                radii: CornerRadii {
+                    top_left: radii.top_left * scale,
+                    top_right: radii.top_right * scale,
+                    bottom_right: radii.bottom_right * scale,
+                    bottom_left: radii.bottom_left * scale,
+                },
+                color,
+                border: Border {
+                    width: border.width * scale,
+                    color: border.color,
+                },
+            },
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // DrawList
 // ---------------------------------------------------------------------------
@@ -401,7 +562,14 @@ pub enum DrawCommand {
 /// what has to stay on top of a menu — the menu itself, the debug overlay and
 /// the console. The renderer draws the halves as two passes; a list nobody cut
 /// is one layer and draws exactly as it used to.
-#[derive(Debug, Clone, Default)]
+///
+/// # Its scale
+///
+/// Commands are pushed in logical pixels and held in window pixels, converted
+/// at [`scale`](DrawList::scale) as they go in; see the
+/// [module docs](self#logical-pixels-recorded-in-window-pixels). A new list is
+/// at a scale of one, where the two are the same.
+#[derive(Debug, Clone)]
 pub struct DrawList {
     commands: Vec<DrawCommand>,
     /// The clip each command was pushed under, one per command.
@@ -413,6 +581,15 @@ pub struct DrawList {
     ///
     /// `None` on a list nobody cut, which puts every command below the cut.
     overlay_start: Option<usize>,
+    /// Window pixels per logical pixel, applied to every command and clip as it
+    /// is pushed. Always positive and finite; see [`DrawList::set_scale`].
+    scale: f32,
+}
+
+impl Default for DrawList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// A draw list expanded to triangles, with the overlay cut carried through.
@@ -441,7 +618,40 @@ impl DrawList {
             clips: Vec::new(),
             clip_stack: Vec::new(),
             overlay_start: None,
+            scale: 1.0,
         }
+    }
+
+    /// Records everything pushed from here on at `scale` window pixels per
+    /// logical pixel — commands and clips alike.
+    ///
+    /// What is already in the list stays as it was recorded, so one list can
+    /// hold a game's UI at one scale and the engine's overlay at another. A
+    /// scale that is not a positive finite number records at one: the
+    /// conversion means nothing for it, and [`to_logical`](Self::to_logical)
+    /// would divide by it.
+    ///
+    /// [`clear`](Self::clear) keeps the scale — it says where the list is
+    /// drawn, not what was drawn in it.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = if scale.is_finite() && scale > 0.0 {
+            scale
+        } else {
+            1.0
+        };
+    }
+
+    /// Window pixels per logical pixel: what a push is multiplied by.
+    #[must_use]
+    pub const fn scale(&self) -> f32 {
+        self.scale
+    }
+
+    /// A point in window pixels — the pointer's, say — in the logical pixels
+    /// this list is being pushed in, where hit tests are made.
+    #[must_use]
+    pub fn to_logical(&self, point: Vec2) -> Vec2 {
+        point / self.scale
     }
 
     /// Appends one command under the current clip and overlay state.
@@ -450,11 +660,25 @@ impl DrawList {
     /// losing primitive parameters. The source command's clip and overlay are
     /// not part of the command; restore them with [`Self::push_clip`] and
     /// [`Self::begin_overlay`] before appending it.
+    ///
+    /// The command is in logical pixels and is scaled like every other push, so
+    /// a command copied out of a list at a scale of one lands where it would
+    /// have been drawn into this one.
     pub fn push_command(&mut self, command: DrawCommand) {
         self.push(command);
     }
 
+    /// Records `command`, converted to window pixels, under the current clip.
+    ///
+    /// **Every command goes in through here**, which is what makes the scale
+    /// impossible to skip: the list's commands are private, and each public
+    /// push forwards to this.
     fn push(&mut self, command: DrawCommand) {
+        let command = if self.scale == 1.0 {
+            command
+        } else {
+            command.scaled(self.scale)
+        };
         self.commands.push(command);
         self.clips.push(self.clip());
     }
@@ -569,8 +793,9 @@ impl DrawList {
     /// Push `sliced` drawn into `min..max` as a nine-slice: up to nine
     /// [`DrawCommand::Image`]s, corners fixed, edges and centre stretched.
     ///
-    /// `scale` is screen pixels per texel of the fixed bands, so a four-texel
-    /// corner at a scale of three is twelve pixels across. The stretched bands
+    /// `scale` is logical pixels per texel of the fixed bands, so a four-texel
+    /// corner at a scale of three is twelve pixels across — before the list's
+    /// own [`scale`](Self::scale) converts it like any other length. The stretched bands
     /// take whatever is left.
     ///
     /// # What comes out
@@ -698,8 +923,12 @@ impl DrawList {
     /// [`pop_clip`](Self::pop_clip).
     ///
     /// Nested clips intersect: a panel inside a scroll view is clipped by both.
+    /// `min..max` is in logical pixels, converted at [`scale`](Self::scale)
+    /// like a command; a side at [`ClipRect::NONE`]'s bound stays unbounded.
     pub fn push_clip(&mut self, min: Vec2, max: Vec2) {
-        let clip = self.clip().intersect(ClipRect { min, max });
+        let clip = self
+            .clip()
+            .intersect(ClipRect { min, max }.scaled(self.scale));
         self.clip_stack.push(clip);
     }
 
@@ -715,7 +944,7 @@ impl DrawList {
         self.clip_stack.pop().map(|_| ()).ok_or(ClipUnderflow)
     }
 
-    /// The clip a command pushed now would be drawn under.
+    /// The clip a command pushed now would be drawn under, in window pixels.
     #[must_use]
     pub fn clip(&self) -> ClipRect {
         self.clip_stack.last().copied().unwrap_or(ClipRect::NONE)
@@ -1367,5 +1596,7 @@ unsafe impl bytemuck::Zeroable for Vertex2d {}
 // Tests
 // ---------------------------------------------------------------------------
 
+#[cfg(test)]
+mod scale_tests;
 #[cfg(test)]
 mod tests;

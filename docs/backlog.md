@@ -77,6 +77,18 @@ step while executing nothing. The browser gate (`pages.yml`), which renders
 every demo in a real browser, is what verifies wasm. Revisit if a wasm test
 runner is ever adopted: its first step would be making these two targets build.
 
+## `crates/crcbl/src/settings.rs` has grown past 4,000 lines (2026-09-28)
+
+**Found, not split.** It holds the settings stack's readers and writers for
+every section, the console catalogue, the console host and their tests.
+`settings/presets.rs` already sits beside it. Each new key adds a reader, a
+writer, a catalogue row and tests in the same file, as `ui_scale` did on
+2026-09-28. Split it along the seams it already has: one module per settings
+section (`video`, `audio`, `input`), the catalogue, and the console host, with
+the public paths re-exported from `settings`. Move the code in one commit and
+change behaviour in another. Not started, because it is a refactor of its own
+rather than part of any slice that touched the file.
+
 ## EW's engine port requests (2026-09-27)
 
 EW asked for four features proven in its game code, none of which crcbl has.
@@ -111,6 +123,21 @@ migrates every caller and deletes its own copy in the same change.
   variant beside `Chord` and `PadChord`, and its hand-over reuses the key
   chord's rule rather than copying it. `Binding` is not `#[non_exhaustive]`, so
   the variant breaks an exhaustive `match`; it is listed under Breaking.
+- **UI scale: shipped 2026-09-28 as `DrawList::set_scale`**, which converts
+  logical pixels to window pixels as each command and clip is recorded, with
+  `DrawList::to_logical` for pointers. The base is the host's:
+  `crcbl::ui_scale::fit_scale` against a reference window, or
+  `crcbl::ui_scale::window_scale_factor`, and `[engine.video] ui_scale`
+  (`crcbl::settings::ui_scale`) multiplies it. **Declined: a shader transform**,
+  which would stretch glyph masks rasterised at the logical size, and **a
+  rebuild of the finished list** (EW's `UiScale::to_window`), which costs a
+  second list every frame. **Follow-up, not done: the engine's own UI at base
+  DPI × `ui_scale`.** `engine::Loop` sets its list back to 1.0 at the overlay
+  cut. Scaling its menu, debug overlay, console and console button also needs
+  their layout extent and every pointer they hit-test mapped through the scale.
+  That is several call sites in `engine.rs`, not a one-line change. A `ui_scale`
+  write through `settings::apply` answers `Applied::NextStart`, because no
+  engine seam shows it yet.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits
