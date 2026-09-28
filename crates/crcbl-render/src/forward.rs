@@ -1610,6 +1610,10 @@ pub struct ForwardRenderer {
     /// Which call the forward pass records — the device's [`GeometryPath`],
     /// resolved once.
     emit: EmitTail,
+    /// The most buckets one call of the geometry passes draws, or `None` where
+    /// they record a call per bucket — [`EmitTail::range_limit`], resolved at
+    /// build with [`emit`](Self::emit) and for its reason.
+    range_limit: Option<u32>,
     /// §3.5's clusters, and **only on [`EmitTail::Mesh`]**: the two indirect
     /// tails draw the same geometry out of the index pool and read none of
     /// this. `None` is therefore the ordinary state on most devices rather than
@@ -3659,6 +3663,10 @@ impl ForwardRenderer {
         // frame came out of the mesh stage" a fact about the object graph
         // rather than a claim about a branch.
         let emit = EmitTail::from_path(geometry_path);
+        // And whether that tail draws a range of buckets per call, which only
+        // changes what the passes record — the constant blocks carry the words
+        // both shapes read — so it decides nothing about what is created.
+        let range_limit = emit.range_limit(&device.caps());
         // **A second capability, asked separately.** `Features::TASK_SHADER` is
         // not implied by `MESH_SHADER`, so §3.5's per-cluster cull is an
         // amplification stage this renderer builds where the device has one and
@@ -5058,6 +5066,7 @@ impl ForwardRenderer {
                 mesh::DrawConstants {
                     start_at,
                     mesh: bucket_meshes[index],
+                    mesh_at: draws.bucket_mesh_word(bucket),
                 }
                 .to_bytes()
                 .to_vec()
@@ -5525,6 +5534,7 @@ impl ForwardRenderer {
             // than reporting the count a frame *would* have.
             recorded_draws: 0,
             emit,
+            range_limit,
             clusters: rollback.clusters.take(),
             culls_clusters,
             draw_constants,
@@ -7760,10 +7770,13 @@ impl ForwardRenderer {
                 })
                 .collect(),
             region_step: self.region_step,
+            // Packed per partition, where the partition's buckets are known.
+            ranges: None,
         };
 
-        // Every draw this frame records: the shadow pass's, one per bucket in
-        // **each** of the depth prepass and the forward pass, and one full-screen
+        // Every draw this frame records: the shadow pass's, one per bucket — or
+        // per range of buckets — in **each** of the depth prepass and the
+        // forward pass, and one full-screen
         // triangle per full-screen pass. Assigned before the passes below borrow
         // the fields they need, so it is the count for the frame being built
         // rather than the one before it — and off this frame's resolved effects
@@ -7823,7 +7836,7 @@ impl ForwardRenderer {
         self.recorded_grass_draws = grass.as_ref().map_or(0, |grass: &GrassFrame| {
             u64::from(grass.slots) * u64::from(grass.draws_per_slot())
         });
-        // The late depth prepass is a third call per bucket, on a frame whose
+        // The late depth prepass is a third list of calls, on a frame whose
         // camera culls in two phases.
         let camera_passes: u64 = if self.primary.draws.frame_mode(frame)
             == crcbl_shaders::draw_gen::DrawMode::Occlusion
@@ -7832,8 +7845,23 @@ impl ForwardRenderer {
         } else {
             2
         };
+        let prepass_partitions = self.depth_partitions(&bucket_draws);
+        // And the colour pass's own split, which is by **side** alone: its
+        // pipeline has a fragment stage either way, so an alpha mask is nothing
+        // it has to route around and a cull mode is. The wireframe twin pair
+        // substitutes for the shaded one here exactly as the single pipeline
+        // used to.
+        let color_partitions =
+            self.sided_partitions(&bucket_draws, wireframe.unwrap_or(self.mesh_pipeline));
+        // Off the partitions the passes below record, because where a call
+        // draws a range of buckets the two splits pack into different numbers
+        // of ranges — see [`BucketDraws::call_count`].
+        let calls = |partitions: &[BucketDraws]| -> u64 {
+            partitions.iter().map(BucketDraws::call_count).sum()
+        };
         self.recorded_draws = shadow_draws
-            + camera_passes * bucket_draws.calls.len() as u64
+            + (camera_passes - 1) * calls(&prepass_partitions)
+            + calls(&color_partitions)
             + self.recorded_grass_draws
             + self.direct_draws();
 
@@ -7861,16 +7889,6 @@ impl ForwardRenderer {
             _ => self.probe_visibility_placeholder.view,
         };
         let frame = self.frame;
-        // Resolved before the gather takes its mutable borrow of `self`, and it
-        // is the one thing below that has to ask the renderer a question.
-        let prepass_partitions = self.depth_partitions(&bucket_draws);
-        // And the colour pass's own split, which is by **side** alone: its
-        // pipeline has a fragment stage either way, so an alpha mask is nothing
-        // it has to route around and a cull mode is. The wireframe twin pair
-        // substitutes for the shaded one here exactly as the single pipeline
-        // used to.
-        let color_partitions =
-            self.sided_partitions(&bucket_draws, wireframe.unwrap_or(self.mesh_pipeline));
         if let Some((gather, images)) = self.probe_gather.as_mut().zip(rsm_images) {
             gather.add_pass(graph, frame, images, probe_visibility_view, probe_table);
         }
@@ -8368,6 +8386,8 @@ impl ForwardRenderer {
                 })
                 .collect(),
             region_step: self.region_step,
+            // Packed per partition, where the partition's buckets are known.
+            ranges: None,
         };
         // Kept back for the reflective shadow map below, which is the same
         // per-bucket call list under a different pipeline — the depth prepass
@@ -8376,15 +8396,19 @@ impl ForwardRenderer {
         let bucket_calls = bucket_draws.clone();
         // The atlas's own split by material mode: an opaque bucket's tile is
         // drawn with no fragment stage in a scene that has a cutout in it. Every
-        // view draws every partition, so the recorded count below is unchanged —
-        // one call per bucket per view, under a pipeline per mode.
+        // view draws every partition — one call per bucket, or per range of
+        // buckets, per view, under a pipeline per mode.
         let tile_partitions = self.depth_partitions(&bucket_draws);
 
         // Counted off the two loops the body below runs, before it takes them:
-        // one call per bucket per occupied view. `ForwardRenderer::counters` is
-        // what reports it, and reading it back off the same `Vec`s is what makes
-        // it move when the tile allocation does.
-        let recorded = (views.len() * bucket_draws.calls.len()) as u64;
+        // every partition's calls per occupied view. `ForwardRenderer::counters`
+        // is what reports it, and reading it back off the same `Vec`s is what
+        // makes it move when the tile allocation does.
+        let recorded = views.len() as u64
+            * tile_partitions
+                .iter()
+                .map(BucketDraws::call_count)
+                .sum::<u64>();
         // And the tile resets beside them, which are direct draws of one
         // instance rather than indirect ones: a frame that cleared the whole
         // attachment records none, and a frame that loaded it records one per
@@ -8505,10 +8529,7 @@ impl ForwardRenderer {
         // mask itself, so the only thing it cannot say inside the fragment stage
         // is which faces the rasteriser keeps.
         let rsm_partitions = self.sided_partitions(&bucket_calls, self.rsm_pipeline);
-        let rsm_recorded: u64 = rsm_partitions
-            .iter()
-            .map(|partition| partition.calls.len() as u64)
-            .sum();
+        let rsm_recorded: u64 = rsm_partitions.iter().map(BucketDraws::call_count).sum();
         rsm.execute(move |ctx| {
             let encoder = ctx.encoder();
             for partition in &rsm_partitions {
@@ -8573,11 +8594,11 @@ impl ForwardRenderer {
             punctual_pass = read_draw_sources(punctual_pass, draws, self.emit);
         }
         let punctual_partitions = self.sided_partitions(&bucket_calls, self.rsm_pipeline);
-        let punctual_recorded = (punctual_views.len()
+        let punctual_recorded = punctual_views.len() as u64
             * punctual_partitions
                 .iter()
-                .map(|partition| partition.calls.len())
-                .sum::<usize>()) as u64;
+                .map(BucketDraws::call_count)
+                .sum::<u64>();
         punctual_pass.execute(move |ctx| {
             let encoder = ctx.encoder();
             // The partition is **outside** the view loop, on the shadow atlas's
@@ -11802,6 +11823,89 @@ mod tests {
                 .any(|command| matches!(command, crcbl_hal::null::Command::DrawIndexedIndirect(_)))
         );
         rendered.finish(device.as_ref(), exact);
+    }
+
+    /// **A device with a draw index draws a range of buckets per call, and one
+    /// without it a call per bucket** — both indirect tails, read off the
+    /// recorded stream of a whole frame.
+    ///
+    /// The ranged frame records one bind and one multi-draw per range in the
+    /// depth prepass, whose draws together cover every bucket exactly once,
+    /// and no count draw anywhere; the per-bucket frame records the call per
+    /// bucket it always did. Both frames' counters are what they recorded.
+    #[test]
+    fn a_draw_index_puts_the_geometry_passes_on_a_call_per_range() {
+        use crcbl_hal::null::Command;
+
+        for path in [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch] {
+            for ranged in [false, true] {
+                let optional = if ranged {
+                    Features::GPU_DRIVEN | Features::DRAW_INDEX
+                } else {
+                    DeviceDesc::for_adapter(crcbl_hal::AdapterId(0)).optional_features
+                };
+                let (recorder, device, queue) = open_with(optional);
+                let mut renderer = ForwardRenderer::with_scene_on_path(
+                    device.as_ref(),
+                    queue,
+                    Format::Rgba8UnormSrgb,
+                    &scene::demo(),
+                    path,
+                )
+                .expect("the demo scene builds");
+                assert_eq!(renderer.range_limit.is_some(), ranged, "{path:?}");
+                let buckets = renderer.bucket_modes.len();
+                assert!(buckets > 1, "one bucket packs into one call either way");
+                let rendered = frame(device.as_ref(), &mut renderer, queue);
+
+                let commands = commands_in_pass(&recorder, "depth-prepass");
+                let binds = commands
+                    .iter()
+                    .filter(|command| matches!(command, Command::BindGroup { slot: 0, .. }))
+                    .count();
+                let draws: Vec<u32> = commands
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::DrawIndexedIndirect(draw) => Some(draw.draw_count),
+                        Command::DrawIndexedIndirectCount(draw) => {
+                            assert!(!ranged, "{path:?}: a ranged pass records no count draw");
+                            assert_eq!(draw.max_draw_count, 1);
+                            Some(1)
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(binds, draws.len(), "{path:?}: one bind per call");
+                assert_eq!(
+                    draws.iter().sum::<u32>() as usize,
+                    buckets,
+                    "{path:?}: every bucket drawn once"
+                );
+                if ranged {
+                    assert!(
+                        draws.len() < buckets,
+                        "{path:?}: {draws:?} is a call per bucket over {buckets} buckets"
+                    );
+                } else {
+                    assert_eq!(draws, vec![1; buckets], "{path:?}");
+                }
+                assert!(
+                    !recorder
+                        .commands()
+                        .iter()
+                        .any(|command| ranged
+                            && matches!(command, Command::DrawIndexedIndirectCount(_))),
+                    "{path:?}: a ranged frame records no count draw"
+                );
+                assert_eq!(
+                    renderer.counters().draws,
+                    recorded_draws(&recorder) as u64,
+                    "{path:?}, ranged {ranged}"
+                );
+                rendered.finish(device.as_ref(), renderer);
+                recorder.assert_valid();
+            }
+        }
     }
 
     #[test]

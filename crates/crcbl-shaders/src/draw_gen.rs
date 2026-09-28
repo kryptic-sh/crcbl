@@ -380,15 +380,16 @@ pub const NO_BUCKET: u32 = u32::MAX;
 /// The first word of the run region in the buffer `draw_gen.slang` binds as
 /// `visible_instances` — where the first bucket's run starts in every frame.
 ///
-/// That buffer is four regions, with `C` for `visible_capacity` and `B` for the
-/// bucket count, and this module's three functions are where each begins:
+/// That buffer is six regions, with `C` for `visible_capacity` and `B` for the
+/// bucket count, and this module's functions are where each begins:
 ///
 /// | region | words |
 /// |---|---|
 /// | `cull.slang`'s survivor list | `0..C` |
 /// | each survivor's route — its bucket, or [`NO_BUCKET`] | `C..runs_at(C)` |
 /// | every bucket's run, end to end | `runs_at(C)..run_start_word(C, B, 0, 0)` |
-/// | each region's bucket run starts this frame | `run_start_word(C, B, 0, 0)..face_runs_at(C, B)` |
+/// | each region's bucket run starts this frame | `run_start_word(C, B, 0, 0)..bucket_mesh_word(C, B, 0)` |
+/// | each bucket's mesh | `bucket_mesh_word(C, B, 0)..face_runs_at(C, B)` |
 /// | a point light's face runs, where built | `face_runs_at(C, B)..runs_words(C, B, true)` |
 ///
 /// **The runs share one region of `C` words**, because a survivor lands in one
@@ -418,16 +419,29 @@ pub const fn run_start_word(
     3 * visible_capacity + region * bucket_count + bucket
 }
 
+/// Which word of the same buffer holds bucket `bucket`'s mesh — the word
+/// [`DrawConstants::mesh_at`](crate::mesh::DrawConstants::mesh_at) names.
+///
+/// Behind every region's starts, one word a bucket, so consecutive buckets'
+/// meshes are consecutive words as their starts are: that is what lets one
+/// multi-draw call stand for a range of buckets, each draw reading the words
+/// its draw index past the first bucket's. `draw_gen.slang`'s `binMain` writes
+/// them every frame from the bucket table. See [`runs_at`] for the layout.
+#[must_use]
+pub const fn bucket_mesh_word(visible_capacity: u32, bucket_count: u32, bucket: u32) -> u32 {
+    run_start_word(visible_capacity, bucket_count, DRAW_REGIONS, bucket)
+}
+
 /// Where a point-light generator's face runs start: behind every region's
-/// starts.
+/// starts and the buckets' meshes.
 #[must_use]
 pub const fn face_runs_at(visible_capacity: u32, bucket_count: u32) -> u32 {
-    3 * visible_capacity + DRAW_REGIONS * bucket_count
+    3 * visible_capacity + (DRAW_REGIONS + 1) * bucket_count
 }
 
 /// Words the whole buffer holds: the regions [`runs_at`] lays out, and so **one
 /// capacity of runs however many buckets there are**, plus [`DRAW_REGIONS`]
-/// words of start per bucket.
+/// words of start and one of mesh per bucket.
 ///
 /// `faces` adds a point light's face runs behind the starts: six capacities —
 /// a survivor can reach every face — and one word more, so a face whose runs
@@ -441,7 +455,7 @@ pub const fn face_runs_at(visible_capacity: u32, bucket_count: u32) -> u32 {
 pub fn runs_words(visible_capacity: u32, bucket_count: u32, faces: bool) -> Option<u32> {
     let starts = visible_capacity
         .checked_mul(3)?
-        .checked_add(bucket_count.checked_mul(DRAW_REGIONS)?)?;
+        .checked_add(bucket_count.checked_mul(DRAW_REGIONS + 1)?)?;
     if faces {
         let face_runs = u32::try_from(crate::cull::FACE_COUNT)
             .ok()?
@@ -847,12 +861,16 @@ mod tests {
                 "uint run_start_word(uint region, uint bucket)",
                 "return 3 * gen.visible_capacity + draw_slot(region, bucket);",
             ),
+            (
+                "uint bucket_mesh_word(uint bucket)",
+                "return run_start_word(DRAW_REGIONS, bucket);",
+            ),
         ] {
             let spelled = format!("{accessor}\n{{\n    {body}\n}}");
             assert!(
                 source.contains(&spelled),
                 "draw_gen.slang does not define `{accessor}` as `{body}`, which is the layout \
-                 `run_start_word` and `runs_at` here describe"
+                 `run_start_word`, `bucket_mesh_word` and `runs_at` here describe"
             );
         }
         let declaration = format!("static const uint NO_BUCKET = {NO_BUCKET:#x};");
@@ -880,14 +898,24 @@ mod tests {
             "each region's starts directly behind the one before"
         );
         assert_eq!(
+            bucket_mesh_word(capacity, 5, 0),
+            run_start_word(capacity, 5, DRAW_REGIONS - 1, 4) + 1,
+            "the buckets' meshes directly behind the last region's starts"
+        );
+        assert_eq!(
+            bucket_mesh_word(capacity, 5, 4),
+            bucket_mesh_word(capacity, 5, 0) + 4,
+            "a word a bucket, in bucket order"
+        );
+        assert_eq!(
             runs_words(capacity, 5, false),
-            Some(run_start_word(capacity, 5, DRAW_REGIONS, 0)),
-            "and the buffer ends behind the last region's last start"
+            Some(bucket_mesh_word(capacity, 5, 4) + 1),
+            "and the buffer ends behind the last bucket's mesh"
         );
         assert_eq!(
             face_runs_at(capacity, 5),
-            run_start_word(capacity, 5, DRAW_REGIONS, 0),
-            "a point light's face runs start where the starts end"
+            bucket_mesh_word(capacity, 5, 4) + 1,
+            "a point light's face runs start where the meshes end"
         );
         assert_eq!(
             runs_words(capacity, 5, true),

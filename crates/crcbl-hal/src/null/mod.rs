@@ -226,8 +226,14 @@ impl NullInstance {
 
     /// A full desktop device: everything in [`Features::GPU_DRIVEN`] —
     /// bindless, buffer device address, `draw_indirect_count`, multi-draw,
-    /// compute, timeline semaphores — plus push constants, timestamps and the
-    /// other query kinds.
+    /// compute, timeline semaphores — plus push constants, timestamps, the
+    /// other query kinds and a draw index.
+    ///
+    /// [`Features::DRAW_INDEX`] is outside the default request, like
+    /// [`Features::POLYGON_MODE_LINE`]: a device opened with
+    /// [`DeviceDesc::for_adapter`](crate::DeviceDesc::for_adapter) is not
+    /// granted it, and a test that wants a renderer drawing a range of buckets
+    /// per call asks for it by name.
     ///
     /// Not mesh shaders and not ray tracing: those are separate selector axes,
     /// and a preset that held every flag would leave
@@ -249,7 +255,8 @@ impl NullInstance {
                 | Features::POLYGON_MODE_LINE
                 | Features::TEXTURE_COMPRESSION_BC
                 | Features::SAMPLER_ANISOTROPY
-                | Features::DEBUG_MARKERS,
+                | Features::DEBUG_MARKERS
+                | Features::DRAW_INDEX,
             limits: Limits::desktop(),
         })
     }

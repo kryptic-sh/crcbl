@@ -10335,15 +10335,20 @@ async function main() {
         `${name} survives both directions of the mapping`
       );
     }
-    // Nineteen of the seam's twenty-seven flags have nothing behind them in
+    // Twenty of the seam's twenty-eight flags have nothing behind them in
     // WebGPU. Each comes back as unsatisfiable rather than as silence, which is
     // what lets a *required* one fail the request.
     const unmappable =
-      (1n << 9n) | (1n << 0n) | (1n << 22n) | (1n << 24n) | (1n << 12n);
+      (1n << 9n) |
+      (1n << 0n) |
+      (1n << 22n) |
+      (1n << 24n) |
+      (1n << 12n) |
+      (1n << 27n);
     checkEqual(
       webgpuFeaturesFor(unmappable),
       { names: [], unsatisfiable: unmappable },
-      'TIMELINE_SEMAPHORE, DESCRIPTOR_INDEXING, MESH_SHADER, RAY_QUERY and PUSH_CONSTANTS have no WebGPU name'
+      'TIMELINE_SEMAPHORE, DESCRIPTOR_INDEXING, MESH_SHADER, RAY_QUERY, PUSH_CONSTANTS and DRAW_INDEX have no WebGPU name'
     );
     checkEqual(
       webgpuFeaturesFor(CORE | (1n << 5n) | (1n << 9n)),

@@ -1380,9 +1380,18 @@ struct DrawConstants
     /// on naming level 0 because that is the entry the cull pass reads a
     /// bounding box out of.
     uint mesh;
+    /// The word of `visible_instances` holding this draw's bucket's mesh —
+    /// `draw_gen.slang`'s `bucket_mesh_word`, which `binMain` fills with the
+    /// number `mesh` above carries.
+    ///
+    /// **What a draw that is not the first of its call reads instead of `mesh`**,
+    /// on SPIR-V alone: see `draw_source` below. One block is bound for a whole
+    /// range of consecutive buckets there, and the buckets after the first are
+    /// the words after this one, exactly as their starts are the words after
+    /// `start_at`.
+    uint mesh_at;
     /// Pads the block to a multiple of 16 bytes, which `std140` requires of a
     /// uniform buffer's size and which naga enforces where a driver would not.
-    uint pad0;
     uint pad1;
 };
 
@@ -1442,6 +1451,53 @@ StructuredBuffer<GpuMesh> meshes D3D12_REGISTER(t4, space0);
 /// Read-only here: this stage picks its instance out of a run and edits nothing.
 [[vk::binding(5, 0)]]
 StructuredBuffer<uint> visible_instances D3D12_REGISTER(t5, space0);
+
+// # One call for a range of buckets, on SPIR-V
+//
+// A device reporting `crcbl_hal::Features::DRAW_INDEX` draws a whole range of
+// consecutive buckets with **one** multi-draw call and one bind of the first
+// bucket's `DrawConstants` — `crcbl_render::forward`'s ranged tail — instead of
+// a bind and a call per bucket. Each draw of such a call is one bucket, and
+// SPIR-V's `DrawIndex` says which: the call's first bucket plus that many. So
+// the words this stage reads for draw `d` are the ones `d` words past the
+// block's: a bucket's start word and its mesh word are both laid out a bucket
+// apart (`crcbl_shaders::draw_gen::run_start_word` and `bucket_mesh_word`).
+//
+// Only SPIR-V has the index — WGSL, MSL and HLSL have no builtin for it — so
+// every other target reads the block exactly as it always did, and a device on
+// those records a call per bucket. On SPIR-V a call per bucket reads a draw
+// index of zero, which is the same words.
+#if defined(CRCBL_TARGET_SPIRV)
+#define DRAW_INDEX_PARAMETER , uint draw_index: SV_DrawIndex
+#define DRAW_INDEX draw_index
+#else
+#define DRAW_INDEX_PARAMETER
+#define DRAW_INDEX 0u
+#endif
+
+/// Where one draw's run of instances starts this frame, and which mesh it
+/// draws.
+struct DrawSource
+{
+    /// The first word of the draw's run in `visible_instances`.
+    uint run;
+    /// The draw's bucket's mesh, as an index into `meshes`.
+    uint mesh;
+};
+
+/// Draw `draw_index` of the call's `DrawSource` — see the section above.
+DrawSource draw_source(uint draw_index)
+{
+    DrawSource source;
+#if defined(CRCBL_TARGET_SPIRV)
+    source.run = visible_instances[draw.start_at + draw_index];
+    source.mesh = visible_instances[draw.mesh_at + draw_index];
+#else
+    source.run = visible_instances[draw.start_at];
+    source.mesh = draw.mesh;
+#endif
+    return source;
+}
 
 /// The material table §3.2 asks for, indexed by `GpuInstance::material`.
 ///
@@ -2187,16 +2243,17 @@ uint frame_word(uint mesh_flags, TangentFrame basis)
 }
 
 [shader("vertex")]
-VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID)
+VertexOutput vertexMain(
+    uint index: SV_VertexID, uint instance_id: SV_InstanceID DRAW_INDEX_PARAMETER)
 {
-    uint run = visible_instances[draw.start_at];
-    GpuInstance instance = instances[visible_instances[run + instance_id]];
+    DrawSource source = draw_source(DRAW_INDEX);
+    GpuInstance instance = instances[visible_instances[source.run + instance_id]];
     // The mesh names its vertices, and it is the bucket's mesh — the same entry
     // `draw_gen.slang` took this draw's index range from, so the base vertex and
     // the indices cannot come from two different meshes. Nothing on this path
     // came from the draw call itself, which is what §3.3's cull pass needs in
     // order to emit draws the CPU never looked at.
-    GpuMesh mesh = meshes[draw.mesh];
+    GpuMesh mesh = meshes[source.mesh];
     // **Unless the instance overrides it.** A skinned instance's vertices are a
     // run of the pool a compute dispatch deformed them into, which belongs to no
     // mesh entry and changes every frame, so the instance carries the base and
@@ -2298,11 +2355,12 @@ VertexOutput vertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID
 /// own rung — that module emits the varyings one `VertexOutput` declares, and
 /// splitting it splits the declaration too.
 [shader("vertex")]
-float4 depthVertexMain(uint index: SV_VertexID, uint instance_id: SV_InstanceID) : SV_Position
+float4 depthVertexMain(
+    uint index: SV_VertexID, uint instance_id: SV_InstanceID DRAW_INDEX_PARAMETER) : SV_Position
 {
-    uint run = visible_instances[draw.start_at];
-    GpuInstance instance = instances[visible_instances[run + instance_id]];
-    GpuMesh mesh = meshes[draw.mesh];
+    DrawSource source = draw_source(DRAW_INDEX);
+    GpuInstance instance = instances[visible_instances[source.run + instance_id]];
+    GpuMesh mesh = meshes[source.mesh];
     // `vertexMain`'s base-vertex rule, and it must stay the same rule: a skinned
     // instance's vertices are the run this frame's dispatch deformed them into,
     // which belongs to no mesh entry, so the instance carries the base and the

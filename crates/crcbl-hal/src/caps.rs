@@ -295,6 +295,20 @@ bitflags::bitflags! {
         /// from the two ray flags because it is the half that costs memory and
         /// build time whether or not anything traces against it.
         const ACCELERATION_STRUCTURE = 1 << 26;
+        /// A vertex shader can read **which draw of a multi-draw indirect
+        /// call** it belongs to — SPIR-V's `DrawIndex`, Vulkan 1.1
+        /// `shaderDrawParameters`. With
+        /// [`MULTI_DRAW_INDIRECT`](Self::MULTI_DRAW_INDIRECT) it is what lets
+        /// one call draw a range of buckets that each read their own data:
+        /// `crcbl-render`'s forward passes record a call per range rather than
+        /// a bind and a call per bucket where a device has both.
+        ///
+        /// Vulkan only. WGSL, MSL and HLSL have no builtin for it — D3D12's
+        /// `ExecuteIndirect` and Metal's indirect draws carry no draw index to
+        /// a shader — so no other backend reports it. Optional and **not** part
+        /// of [`GPU_DRIVEN`](Self::GPU_DRIVEN): a device without it draws the
+        /// same frames with a call per bucket.
+        const DRAW_INDEX = 1 << 27;
 
         /// The feature set the full GPU-driven path uses.
         ///
@@ -983,6 +997,10 @@ mod tests {
         assert!(!Features::GPU_DRIVEN.contains(Features::MESH_SHADER));
         assert!(!Features::GPU_DRIVEN.contains(Features::RAY_QUERY));
         assert!(!Features::GPU_DRIVEN.contains(Features::ACCELERATION_STRUCTURE));
+        // Nor the draw index: three of the four backends cannot have it, and a
+        // bundle three backends cannot hold would make them all report it
+        // missing.
+        assert!(!Features::GPU_DRIVEN.contains(Features::DRAW_INDEX));
     }
 
     #[test]

@@ -77,6 +77,7 @@ pub(crate) const SUITE: &str = "crcbl mesh e2e";
 // named `mesh_e2e` and every `mod` here resolves beside the root.
 mod area_light;
 mod base_color_page;
+mod bucket_price;
 mod cmaa2;
 mod debug_draw;
 mod depth_only;

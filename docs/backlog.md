@@ -184,10 +184,10 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial (updated 2026-09-28): the sans-layout word scratch
-shipped, and P22's shadow cache is fixed. The next frame-path candidate is P21,
-one indirect draw per bucket per pass per view (about ten thousand calls a frame
-at 938 buckets), priced first by timing CPU recording on that scene. Keep
+Next performance trial (updated 2026-09-28): P21's ranged draws shipped on the
+two indirect tails. The next is ranging the mesh tail (P21's first open item):
+at 938 buckets it records for 11.8 ms and spends 6.69 ms in `shadow` on the RX
+7900 XTX, against 1.58 ms and 0.045 ms on the ranged count tail. Keep
 startup-only and unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
@@ -4170,14 +4170,42 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   survivors times the bucket-table prefix searched. Price `draw-bin` on a
   many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
   table. Preserve material-mode and LOD routing, empty buckets and `NO_BUCKET`.
-- **P21 — one bind and one indirect call per bucket per pass per view.**
-  `BucketDraws::record` issues a call for every bucket, empty or not, in the
-  prepass, the forward pass and every shadow view — about ten thousand calls a
-  frame with 938 buckets and a point light. **Fix (Vulkan first):** contiguous
-  bucket ranges per partition and one `DrawIndexedIndirectCount` per range, with
-  the per-bucket constants moved out of the dynamic uniform. WebGPU needs
-  `indirect-first-instance`; the current path stays as the fallback, and the
-  one-call-per-bucket tests change.
+- **P21 — what is left of one call per bucket per pass per view.** The two
+  indirect tails now record one bind and one multi-draw per run of consecutive
+  buckets on a device granting `Features::DRAW_INDEX` (Vulkan only): the SPIR-V
+  vertex stages add `DrawIndex` to the bound block's start word and to its new
+  mesh word (`bucket_mesh_word`, written by `binMain`). Measured with
+  `mesh_e2e`'s `the_price_of_one_call_per_bucket` (release, validation off, RX
+  7900 XTX, 17,219 instances, 938 buckets, 1920x1080, 240 frames): 9,393 → 23
+  calls a frame; CPU record p50 3.16 → 1.58 ms (`IndirectCount`) and 2.96 → 1.61
+  ms (`IndirectPerBatch`); GPU `shadow` 0.797 → 0.045 ms. Still open:
+  - **The mesh tail, which is this device's default path, still records a call
+    per bucket**: record p50 11.8 ms against 0.86 ms for the same instances in
+    two buckets, and GPU `depth-prepass` 1.42, `forward` 1.45 and `shadow` 6.69
+    ms against 0.12, 0.23 and 0.80 ms on the per-bucket count tail. So on this
+    AMD card the mesh tail is the slowest path for a many-bucket scene on both
+    sides. Ranging it needs `draw_mesh_tasks_indirect` with `draw_count > 1` and
+    `DrawIndex` in `mesh_cluster.slang`'s task and mesh stages, and a per-bucket
+    table for `ClusterDrawConstants`' `cluster_base`, `cluster_count` and
+    `bucket`, which no block can index today. **Decided 2026-09-28: range the
+    mesh tail**, rather than pick `IndirectCount` over `MeshShader` when a scene
+    has many buckets. Mesh shading is the plan's primary geometry path, a
+    bucket-count heuristic would have two paths drawing the same scene depending
+    on content, and the 6.69 ms shadow cost is per-call dispatch work that
+    ranging removes. It is the next performance trial. Price the GPU side again
+    after it, since the mesh tail's per-bucket GPU cost may not be dispatch
+    overhead alone.
+  - **About 0.75 ms of recording still scales with the bucket count on the
+    ranged tails** (1.58 ms at 938 buckets against 0.85 ms at two, same calls).
+    Not found: nothing profiled which pass pays it.
+  - **Not measured** on lavapipe, radv or any Vulkan device without mesh shaders
+    — the devices that take the ranged tail by default.
+  - **`forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`
+    goes red on `CRCBL_GPU=vk` on the 7900 XTX with this change** (band reading
+    47.0), the `mesh.slang` edit sensitivity recorded under "What fixed view
+    lighting left open"; every golden and the byte-for-byte ranged versus
+    per-bucket comparison (`render_e2e`'s
+    `a_call_per_range_draws_every_scene_as_a_call_per_bucket_does`) held.
 - **P22 — what is left of the shadow cache's reach.** The record is now per
   group: the depth-read fields of its blocks (`depth_pass_reads` in
   `forward/shadow_inputs.rs`), the eye only for cascades and for lights whose

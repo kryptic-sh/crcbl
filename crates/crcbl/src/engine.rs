@@ -777,7 +777,11 @@ impl Default for GpuContextDesc<'_> {
                 // What `ForwardRenderer::anisotropy_for` reads: a device opened
                 // without it samples the page isotropically on hardware that
                 // could do better, and the frame says nothing about the omission.
-                | Features::SAMPLER_ANISOTROPY,
+                | Features::SAMPLER_ANISOTROPY
+                // What lets the renderer's indirect tails draw a range of buckets
+                // per call rather than a bind and a call per bucket — Vulkan
+                // only, and a device without it draws the same frame.
+                | Features::DRAW_INDEX,
             pacing: Pacing::default(),
             settings: SettingsSource::default(),
         }

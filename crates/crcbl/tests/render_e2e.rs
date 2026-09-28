@@ -6414,6 +6414,103 @@ fn draw_scene_on_every_geometry_path_measuring(
     }
 }
 
+/// **A range of buckets per call draws the frame a call per bucket draws,
+/// byte for byte**, on both indirect tails and every scene that draws forward
+/// geometry.
+///
+/// The two arms are one scene on one exact tail, on devices asked for the same
+/// features but for [`Features::DRAW_INDEX`] — which is what moves
+/// `ForwardRenderer`'s prepass, colour pass and every shadow view from a bind
+/// and a call per bucket onto one bind and one multi-draw per range, each draw
+/// finding its bucket's run and mesh through SPIR-V's `DrawIndex`. Same
+/// adapter, same driver, same shaders: no pixel may differ. A draw of a range
+/// that read its first bucket's words for every bucket moves every mesh but the
+/// first of each range onto another's geometry, which the scenes with more than
+/// one mesh show at once.
+///
+/// A backend that does not declare the feature — every one but Vulkan — has
+/// nothing to compare, and says so rather than passing quietly.
+#[test]
+#[ignore = "needs a real GPU and a backend pin; run tests/run-render-e2e.sh"]
+fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
+    crcbl_core::log::init_logging();
+    let probe = OffscreenSetup::open(EXTENT.0, EXTENT.1, Scene::Cube)
+        .unwrap_or_else(|why| panic!("a GPU backend opens: {why}"));
+    let probe = Offscreen::guard(SUITE, probe);
+    let features = probe.caps().features;
+    let backend = probe.backend();
+    probe.finish();
+    if !features.contains(Features::DRAW_INDEX | Features::MULTI_DRAW_INDIRECT) {
+        eprintln!(
+            "crcbl render e2e: {backend} declares no draw index, so every tail records a call \
+             per bucket and there is no ranged frame to compare"
+        );
+        return;
+    }
+    let paths = [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch]
+        .into_iter()
+        .filter(|path| {
+            *path != GeometryPath::IndirectCount || features.contains(Features::DRAW_INDIRECT_COUNT)
+        });
+    let mut compared = 0;
+    for path in paths {
+        for scene in [
+            Scene::Cube,
+            Scene::Lights,
+            Scene::Spot,
+            Scene::SpotShadow,
+            Scene::PointShadow,
+            Scene::AreaLight,
+            Scene::FillLight,
+            Scene::AlphaMask,
+            Scene::DoubleSided,
+            Scene::SpecularAa,
+            Scene::Ao,
+            Scene::Ssr,
+            Scene::Bloom,
+            Scene::Aa,
+            Scene::Probes,
+            Scene::Dunes,
+        ] {
+            let frames = [false, true].map(|ranged| {
+                let asked = if ranged {
+                    OffscreenSetup::OPTIONAL_FEATURES
+                } else {
+                    OffscreenSetup::OPTIONAL_FEATURES.difference(Features::DRAW_INDEX)
+                };
+                let setup =
+                    OffscreenSetup::open_on_path_with(EXTENT.0, EXTENT.1, scene, path, asked)
+                        .unwrap_or_else(|why| panic!("{scene:?} opens on {path:?}: {why}"));
+                let mut setup = Offscreen::guard(SUITE, setup);
+                assert_eq!(setup.geometry_path(), Some(path));
+                assert_eq!(
+                    setup.caps().features.contains(Features::DRAW_INDEX),
+                    ranged,
+                    "{scene:?} on {path:?}: the device was not granted what the arm asked for"
+                );
+                let format = setup.format();
+                let ((width, height), pixels) = setup
+                    .draw_and_readback()
+                    .unwrap_or_else(|why| panic!("{scene:?} renders on {path:?}: {why}"));
+                setup.finish();
+                Image::from_readback(width, height, &pixels, channel_order(format))
+                    .expect("the readback is exactly one image")
+            });
+            let (differing, worst, named) = channels_differing(&frames[0], &frames[1]);
+            assert_eq!(
+                differing, 0,
+                "{scene:?} on {path:?}: a call per range differs from a call per bucket in \
+                 {differing} channels (worst {worst}), first at {named:?}"
+            );
+            compared += 1;
+        }
+    }
+    eprintln!(
+        "crcbl render e2e: {compared} scene frames drawn a call per range match their call-per-\
+         bucket frames on {backend}"
+    );
+}
+
 /// Sprite/UI do not consume the forward geometry selector. This preserves their
 /// image check under feature requests and reports whether the device negotiated
 /// any difference, including native backends that keep both requests identical.

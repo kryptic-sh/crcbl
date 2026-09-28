@@ -669,7 +669,7 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t4, space0);
 /// `cull.slang`'s compacted survivors, each survivor's route, the per-bucket runs
 /// of instance indices the geometry stages read, and where each run starts.
 ///
-/// **Four regions in one buffer, and read *and* written through one
+/// **Six regions in one buffer, and read *and* written through one
 /// descriptor.** With `C` for `gen.visible_capacity` and `B` for
 /// `gen.bucket_count`:
 ///
@@ -679,11 +679,12 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t4, space0);
 /// | routes: survivor `i`'s bucket | `C..2C` | `binMain` | `scatterMain` |
 /// | runs, every bucket's end to end | `2C..3C` | `scatterMain`, `lateScatterMain` | geometry stages |
 /// | starts: region `r` bucket `b`'s first run word | `3C..3C+RB` | `startsMain` | the scatters, geometry stages |
+/// | meshes: bucket `b`'s mesh | `3C+RB..3C+(R+1)B` | `binMain` | SPIR-V geometry stages |
 /// | face runs, every face's buckets end to end | `face_runs_at..+6C+1` | `scatterMain` | geometry stages |
 ///
-/// `R` is `DrawGenParams::draw_regions`. The face runs exist only in a generator
-/// built for a point light's faces, and end with one spare word for the reason
-/// the next paragraph gives.
+/// `R` is `DRAW_REGIONS`, whatever `DrawGenParams::draw_regions` this generator
+/// fills. The face runs exist only in a generator built for a point light's
+/// faces, and end with one spare word for the reason the next paragraph gives.
 ///
 /// The survivors are in whatever order `cull.slang`'s atomic handed slots out,
 /// and each run in whatever order `scatterMain`'s did — nothing here depends on
@@ -903,6 +904,20 @@ uint run_start_word(uint region, uint bucket)
     return 3 * gen.visible_capacity + draw_slot(region, bucket);
 }
 
+/// Which word of `visible_instances` holds bucket `bucket`'s mesh, behind every
+/// region's starts: one word a bucket, so a range of consecutive buckets has
+/// its meshes in consecutive words exactly as it has its starts.
+///
+/// The same arithmetic `crcbl_shaders::draw_gen::bucket_mesh_word` performs,
+/// and the word `mesh.slang`'s `DrawConstants::mesh_at` names. `binMain` fills
+/// it every frame from the bucket table; the SPIR-V vertex stages read it for
+/// every draw of a multi-draw call after the first — see `mesh.slang`'s "One
+/// call for a range of buckets".
+uint bucket_mesh_word(uint bucket)
+{
+    return run_start_word(DRAW_REGIONS, bucket);
+}
+
 /// Which word of `counts_and_mesh_args` holds bucket `bucket`'s draw count in
 /// region `region`. A region is one draw count and three extent words per
 /// bucket, so region 0 is the layout the buffer always had.
@@ -1109,6 +1124,11 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     if (index < gen.bucket_count)
     {
         GpuMesh mesh = meshes[bucket_mesh(index)];
+        // The mesh itself, where a geometry stage drawing a range of buckets in
+        // one call finds it — see `bucket_mesh_word`. Written every frame rather
+        // than once, so a bucket table rebuilt when a mesh became resident is
+        // what the next frame's draws read, with no upload of its own.
+        visible_instances[bucket_mesh_word(index)] = bucket_mesh(index);
         // Every region's copy: a region draws the same mesh through the same
         // index range, and only the instance counts differ between them.
         for (uint region = 0; region < gen.draw_regions; ++region)

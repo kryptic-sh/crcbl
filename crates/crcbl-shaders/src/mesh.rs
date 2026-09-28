@@ -2270,6 +2270,17 @@ pub struct DrawConstants {
     /// the instance goes on naming level 0 — the entry the cull pass reads a
     /// bounding box out of.
     pub mesh: u32,
+    /// The word of the same buffer [`start_at`](Self::start_at) names that
+    /// holds [`mesh`](Self::mesh) —
+    /// [`draw_gen::bucket_mesh_word`](crate::draw_gen::bucket_mesh_word),
+    /// which `draw_gen.slang`'s `binMain` fills every frame.
+    ///
+    /// **What the SPIR-V vertex stages read the mesh from**, so that one block
+    /// can stand for a whole range of consecutive buckets drawn by one
+    /// multi-draw call: draw `d` of that call reads the word `d` past this one,
+    /// as it reads the start `d` past `start_at`. See `mesh.slang`'s "One call
+    /// for a range of buckets".
+    pub mesh_at: u32,
 }
 
 impl DrawConstants {
@@ -2279,7 +2290,8 @@ impl DrawConstants {
         let mut bytes = [0u8; DRAW_CONSTANTS_SIZE];
         bytes[0..4].copy_from_slice(&self.start_at.to_le_bytes());
         bytes[4..8].copy_from_slice(&self.mesh.to_le_bytes());
-        // The two trailing `uint`s are padding and stay zero.
+        bytes[8..12].copy_from_slice(&self.mesh_at.to_le_bytes());
+        // The trailing `uint` is padding and stays zero.
         bytes
     }
 }
@@ -4966,19 +4978,15 @@ mod tests {
         let bytes = DrawConstants {
             start_at: 1,
             mesh: 2,
+            mesh_at: 3,
         }
         .to_bytes();
         let uint_at =
             |offset: usize| u32::from_le_bytes(bytes[offset..offset + 4].try_into().expect("4"));
         assert_eq!(uint_at(0), 1, "start_at at offset 0");
         assert_eq!(uint_at(4), 2, "mesh at offset 4");
-        for pad in [8, 12] {
-            assert_eq!(
-                uint_at(pad),
-                0,
-                "the pad at {pad} is written, and it is zero"
-            );
-        }
+        assert_eq!(uint_at(8), 3, "mesh_at at offset 8");
+        assert_eq!(uint_at(12), 0, "the pad at 12 is written, and it is zero");
     }
 
     /// The offsets and the stride `slangc` actually emitted for `GpuMesh`, read

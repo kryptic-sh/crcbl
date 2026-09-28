@@ -7327,6 +7327,10 @@ impl OffscreenSetup {
         // sampled isotropically on hardware that could do better, and the frame
         // says nothing about the omission.
         .union(Features::SAMPLER_ANISOTROPY)
+        // What lets `ForwardRenderer`'s indirect tails draw a range of buckets
+        // per call instead of a bind and a call per bucket. Not in
+        // `GPU_DRIVEN` for `MESH_SHADER`'s reason, and only Vulkan has it.
+        .union(Features::DRAW_INDEX)
         .union(Features::DEBUG_MARKERS);
 
     /// Opens the auto-selected GPU backend, creates an offscreen surface,
@@ -7437,6 +7441,31 @@ impl OffscreenSetup {
         path: crate::hal::GeometryPath,
     ) -> Result<Self, OffscreenError> {
         Self::block_open(Self::request_on_path(width, height, scene, path)?)
+    }
+
+    /// [`Self::open_on_path`] asking the device for `optional_features` instead
+    /// of [`Self::OPTIONAL_FEATURES`]: an exact tail on a device granted a
+    /// chosen feature set, which is how one tail is drawn with and without a
+    /// feature that changes how it records — `tests/render_e2e.rs` draws each
+    /// indirect tail with and without [`Features::DRAW_INDEX`].
+    ///
+    /// # Errors
+    ///
+    /// The same as [`Self::open_on_path`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_on_path_with(
+        width: u32,
+        height: u32,
+        scene: Scene,
+        path: crate::hal::GeometryPath,
+        optional_features: Features,
+    ) -> Result<Self, OffscreenError> {
+        Self::block_open(Self::request_built(
+            width,
+            height,
+            optional_features,
+            builtin_scene_build(scene, Some(path))?,
+        )?)
     }
 
     /// [`Self::open`] asking the device for `optional_features` instead of

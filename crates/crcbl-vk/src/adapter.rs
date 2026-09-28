@@ -301,6 +301,22 @@ fn device_type(raw: vk::PhysicalDeviceType) -> DeviceType {
     }
 }
 
+/// [`Features::DRAW_INDEX`] where the device has `shaderDrawParameters`, which
+/// is what declares SPIR-V's `DrawIndex` builtin legal.
+///
+/// Apart from [`features_of`] because it is the one answer read from the
+/// Vulkan 1.1 struct. `device.rs` enables the feature on every device it opens
+/// — `SV_VertexID` lowers through the same capability — so a device reporting
+/// this has it enabled whether or not the caller asked.
+#[must_use]
+pub(crate) fn draw_index_of(vulkan_1_1: &vk::PhysicalDeviceVulkan11Features<'_>) -> Features {
+    if vulkan_1_1.shader_draw_parameters == vk::TRUE {
+        Features::DRAW_INDEX
+    } else {
+        Features::empty()
+    }
+}
+
 /// Everything the seam's [`Features`] asks about, answered from the real
 /// feature structs.
 ///
@@ -767,7 +783,7 @@ fn describe(
         &properties.limits,
         families,
         extensions,
-    );
+    ) | draw_index_of(&vulkan_1_1);
     let limits = limits_of(&properties.limits, &vulkan_1_2_props, features);
 
     let name = properties.device_name_as_c_str().map_or_else(
@@ -994,6 +1010,27 @@ mod tests {
         // satisfies the bundle.
         assert!(!features.contains(Features::PRESENT_FEEDBACK));
         assert!(!Features::GPU_DRIVEN.contains(Features::PRESENT_FEEDBACK));
+    }
+
+    /// **This backend declares [`Features::DRAW_INDEX`]**, from
+    /// `shaderDrawParameters` and from nothing else — the one backend of the
+    /// four that can, which is what puts a Vulkan device's forward passes on a
+    /// call per range of buckets. A device without the 1.1 feature reports
+    /// none, and [`features_of`] never reports it at all.
+    #[test]
+    fn the_draw_index_is_declared_from_shader_draw_parameters() {
+        let with = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
+        assert_eq!(draw_index_of(&with), Features::DRAW_INDEX);
+        let without = vk::PhysicalDeviceVulkan11Features::default();
+        assert_eq!(draw_index_of(&without), Features::empty());
+        let everything_else = features_of(
+            &vk::PhysicalDeviceFeatures::default().multi_draw_indirect(true),
+            &fully_featured_vulkan_1_2(),
+            &desktop_limits(),
+            QueueFamilies::select(&[family(GRAPHICS, 1)]),
+            ExtensionSupport::default(),
+        );
+        assert!(!everything_else.contains(Features::DRAW_INDEX));
     }
 
     /// Occlusion queries are core Vulkan, so every device this backend opens

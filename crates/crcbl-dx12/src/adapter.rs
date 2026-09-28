@@ -1188,6 +1188,27 @@ mod tests {
         }
     }
 
+    /// **This backend never declares [`Features::DRAW_INDEX`]**, however able
+    /// the adapter: `ExecuteIndirect` hands a shader no draw index, and HLSL has
+    /// no builtin for one. Declaring it would put `crcbl-render`'s forward
+    /// passes on a call per range of buckets whose draws all read the first
+    /// bucket's data.
+    #[test]
+    fn no_adapter_declares_a_draw_index() {
+        let raw = RawCaps {
+            binding_tier: D3D12_RESOURCE_BINDING_TIER_3,
+            shader_model: D3D_SHADER_MODEL_6_9,
+            software: false,
+            unified_memory: false,
+            luid: 0,
+            block_compression: true,
+            raytracing_tier: D3D12_RAYTRACING_TIER_1_1,
+        };
+        let features = features_of(&raw);
+        assert!(features.contains(Features::MULTI_DRAW_INDIRECT));
+        assert!(!features.contains(Features::DRAW_INDEX));
+    }
+
     /// **The software test does not depend on the flag being set**, because on
     /// the runner it is not.
     ///

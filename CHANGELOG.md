@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::mesh::DrawConstants` has a `mesh_at` field**, the word of
+  the runs buffer holding the bucket's mesh, which the SPIR-V vertex stages now
+  read; a struct literal needs it. The runs buffer behind it grows by one word
+  per bucket: `crcbl_shaders::draw_gen::bucket_mesh_word` is new, `face_runs_at`
+  moves one bucket count further in and `runs_words` is one bucket count larger.
+
 - **`crcbl_input::Binding` has a `ButtonChord { modifier, button }` variant**
   (see Added). `Binding` is not `#[non_exhaustive]`, so an exhaustive `match` on
   it needs the new arm.
@@ -357,6 +363,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   factor of one with `ui_scale` unset, every frame is recorded exactly as
   before. Asked for by EW, which rebuilt its finished list in window pixels
   every frame.
+
+- **`crcbl_hal::Features::DRAW_INDEX`**: a vertex shader can read which draw of
+  a multi-draw indirect call it belongs to (SPIR-V `DrawIndex`). `crcbl-vk`
+  declares it from `shaderDrawParameters`; D3D12, Metal and WebGPU cannot and do
+  not. It is optional and outside `GPU_DRIVEN`, and `GpuContextDesc::default()`
+  and `OffscreenSetup::OPTIONAL_FEATURES` ask for it.
+  `OffscreenSetup::open_on_path_with` opens a builtin scene on an exact geometry
+  tail with a chosen feature request.
 
 - **`Binding::ButtonChord { modifier, button }`: a keyboard modifier held gives
   a mouse button a second layer**, the mouse's `Binding::Chord`. While
@@ -3414,6 +3428,21 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The indirect geometry tails draw a range of buckets per call on Vulkan.**
+  Where a device grants `Features::DRAW_INDEX` and `MULTI_DRAW_INDIRECT`, the
+  depth prepass, the colour pass, every shadow view and both reflective shadow
+  maps record one bind of the first bucket's constant block and one
+  `draw_indexed_indirect` per run of consecutive buckets in a material-mode
+  partition, instead of a bind and a call per bucket; each draw finds its run
+  and its mesh through `DrawIndex`. Measured on Vulkan, RX 7900 XTX, release,
+  validation off, 17,219 instances in 938 buckets under a turning sun and a
+  moving point light at 1920x1080 over 240 frames (`mesh_e2e`'s
+  `the_price_of_one_call_per_bucket`): 9,393 → 23 calls a frame; CPU record p50
+  3.16 → 1.58 ms on `IndirectCount` and 2.96 → 1.61 ms on `IndirectPerBatch`;
+  GPU `depth-prepass` 0.125 → 0.024 ms and `shadow` 0.797 → 0.045 ms on
+  `IndirectCount`. Frames are byte-identical to the per-bucket tail. The
+  mesh-shader tail, D3D12, Metal and WebGPU keep a call per bucket.
 
 - **A shadowed point or spot light keeps its maps while the camera moves, and a
   moving instance redraws only the maps it can be seen in.** The shadow atlas's

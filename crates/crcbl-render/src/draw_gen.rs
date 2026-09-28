@@ -1224,6 +1224,17 @@ impl DrawGen {
         draw_gen::run_start_word(self.capacity, self.bucket_count, region, bucket)
     }
 
+    /// Which word of [`DrawGen::runs`] holds bucket `bucket`'s mesh, as the
+    /// number `mesh.slang`'s `DrawConstants::mesh_at` carries — filled every
+    /// frame by the draw-argument pass from the bucket table.
+    ///
+    /// The same for every generator one renderer builds, for
+    /// [`region_start_word`](Self::region_start_word)'s reason.
+    #[must_use]
+    pub const fn bucket_mesh_word(&self, bucket: u32) -> u32 {
+        draw_gen::bucket_mesh_word(self.capacity, self.bucket_count, bucket)
+    }
+
     /// How far region `region`'s argument structures sit behind region 0's, in
     /// bytes — what a draw of that region adds to
     /// [`args_offset`](Self::args_offset).
@@ -2407,8 +2418,8 @@ mod tests {
         .expect("the null backend builds a generator")
     }
 
-    /// **The runs buffer costs a word per bucket per draw region, not a capacity
-    /// per bucket.**
+    /// **The runs buffer costs a word per bucket per draw region, and one for
+    /// the bucket's mesh, not a capacity per bucket.**
     ///
     /// Two generators of one capacity and very different bucket counts, and the
     /// size the device was actually asked for — read off the allocation rather
@@ -2432,15 +2443,15 @@ mod tests {
         let regions = u64::from(draw_gen::DRAW_REGIONS);
         assert_eq!(
             size(&many) - size(&few),
-            u64::from(many.bucket_count() - few.bucket_count()) * regions * 4,
-            "sixty-three more buckets cost sixty-three more words of run start a region, and \
-             nothing else"
+            u64::from(many.bucket_count() - few.bucket_count()) * (regions + 1) * 4,
+            "sixty-three more buckets cost sixty-three more words of run start a region and of \
+             mesh, and nothing else"
         );
         assert_eq!(
             size(&few),
-            (3 * u64::from(CAPACITY) + regions) * 4,
-            "one bucket's generator holds the survivors, their routes, one capacity of runs and \
-             one start per region"
+            (3 * u64::from(CAPACITY) + regions + 1) * 4,
+            "one bucket's generator holds the survivors, their routes, one capacity of runs, \
+             one start per region and its mesh"
         );
         for draws in [&few, &many] {
             assert_eq!(
@@ -2461,7 +2472,7 @@ mod tests {
     /// The words a constant block names are fixed at build and read by the
     /// geometry stages every frame, so two buckets sharing one would draw one
     /// bucket's run twice, and a word past the end is a read of nothing. The
-    /// last bucket's word is the buffer's last.
+    /// last bucket's mesh word, behind every start, is the buffer's last.
     #[test]
     fn every_bucket_start_is_a_word_of_its_own_behind_the_runs() {
         const CAPACITY: u32 = 100;
@@ -2490,11 +2501,14 @@ mod tests {
             "region 1's starts directly behind region 0's"
         );
         assert_eq!(
-            u64::from(
-                draws.region_start_word(draw_gen::DRAW_REGIONS - 1, draws.bucket_count() - 1) + 1
-            ) * 4,
+            draws.bucket_mesh_word(0),
+            draws.region_start_word(draw_gen::DRAW_REGIONS - 1, draws.bucket_count() - 1) + 1,
+            "the buckets' meshes directly behind the last region's starts"
+        );
+        assert_eq!(
+            u64::from(draws.bucket_mesh_word(draws.bucket_count() - 1) + 1) * 4,
             draws.runs_size(),
-            "and the last region's last start is the buffer's last word"
+            "and the last bucket's mesh is the buffer's last word"
         );
 
         draws.destroy(device);
@@ -2521,8 +2535,9 @@ mod tests {
             "61.7 MiB a buffer, as measured"
         );
         assert_eq!(
-            shared_runs, 232_892,
-            "227.4 KiB a buffer, with a start word per bucket for every draw region"
+            shared_runs, 236_644,
+            "231.1 KiB a buffer, with a start word per bucket for every draw region and a mesh \
+             word per bucket"
         );
     }
 
@@ -2552,12 +2567,12 @@ mod tests {
         let [plain, occlusion, faces] =
             [DrawMode::Plain, DrawMode::Occlusion, DrawMode::Faces].map(per_frame);
         assert_eq!(
-            plain, 266_660,
+            plain, 270_412,
             "runs, one region of arguments and one of counts"
         );
-        assert_eq!(occlusion, 334_196, "three regions of arguments and counts");
+        assert_eq!(occlusion, 337_948, "three regions of arguments and counts");
         assert_eq!(
-            faces, 882_528,
+            faces, 886_280,
             "seven regions and six capacities of face runs"
         );
         // What a generator cost before there were regions: the runs with one
@@ -2571,8 +2586,8 @@ mod tests {
         let renderer_after = occlusion + plain * cascades + faces * slots;
         assert_eq!(renderer_before, 1_709_036);
         assert_eq!(
-            renderer_after, 4_397_628,
-            "4.19 MiB a frame in flight, against 1.63 MiB before"
+            renderer_after, 4_423_892,
+            "4.22 MiB a frame in flight, against 1.63 MiB before"
         );
         recorder.assert_valid();
     }

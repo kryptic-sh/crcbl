@@ -250,7 +250,7 @@ const FEATURE_MAP = Object.freeze({
 
 // WHAT CAN NEVER BE SET, and why — the other half of the lossiness, spelled out
 // so an absence here is read as "WebGPU has no such thing" rather than as "this
-// browser declined". Nineteen of the seam's twenty-seven flags:
+// browser declined". Twenty of the seam's twenty-eight flags:
 //
 //   DESCRIPTOR_INDEXING, BUFFER_DEVICE_ADDRESS   WebGPU has no bindless model
 //                                                and no raw GPU pointers.
@@ -279,6 +279,9 @@ const FEATURE_MAP = Object.freeze({
 //   MESH_SHADER, TASK_SHADER                     no mesh pipeline.
 //   RAY_QUERY, RAY_TRACING_PIPELINE,             no ray tracing of any kind.
 //   ACCELERATION_STRUCTURE
+//   DRAW_INDEX                                   WGSL has no draw-index
+//                                                builtin, and no multi-draw
+//                                                for one to index.
 
 /**
  * `crcbl_hal::Limits`, as `gpu-reply.js` wants it.
@@ -537,7 +540,7 @@ export function halFeaturesFor(source) {
  *   * bits in `CORE_FEATURES`, which core WebGPU grants with no name behind
  *     them, so they need nothing in `requiredFeatures` and are dropped here;
  *   * bits in `FEATURE_MAP`, which become their `GPUFeatureName`;
- *   * everything else — nineteen of the seam's twenty-seven flags, listed above
+ *   * everything else — twenty of the seam's twenty-eight flags, listed above
  *     — which come back in `unsatisfiable`.
  *
  * The caller decides what that means, and the two words in a `DeviceDesc` decide
@@ -583,7 +586,7 @@ function featuresFromNames(names) {
  * with.
  *
  * For a message a person reads. The flag *names* are `crcbl_hal::Features`'s
- * and stay there: a twenty-seven row copy of them here would be a second thing
+ * and stay there: a twenty-eight row copy of them here would be a second thing
  * to keep in step for the sake of one string, and the reply carries the word
  * itself so the Rust side can print the names.
  *

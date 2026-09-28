@@ -3,8 +3,8 @@
 use super::ForwardRenderer;
 use crate::draw_gen::GeneratedDraws;
 use crcbl_hal::{
-    BindGroupHandle, BufferHandle, DrawIndirect, DrawIndirectCount, GeometryPath,
-    GraphicsPipelineHandle, IndexFormat, PipelineLayoutHandle,
+    BindGroupHandle, BufferHandle, DeviceCaps, DrawIndirect, DrawIndirectCount, Features,
+    GeometryPath, GraphicsPipelineHandle, IndexFormat, PipelineLayoutHandle,
 };
 
 /// Which indirect call the forward pass records per bucket.
@@ -49,6 +49,62 @@ impl EmitTail {
     pub(super) const fn is_mesh(self) -> bool {
         matches!(self, Self::Mesh)
     }
+
+    /// The most buckets one call may draw on `caps`, or `None` where this tail
+    /// records a call per bucket.
+    ///
+    /// **A range of buckets per call** needs both indirect tails' one argument
+    /// structure per bucket to be drawable `draw_count` at a time —
+    /// [`Features::MULTI_DRAW_INDIRECT`] — and each of those draws to know which
+    /// bucket it is — [`Features::DRAW_INDEX`], which `mesh.slang`'s SPIR-V
+    /// vertex stages add to the one bound block's words. Either missing, and
+    /// the tail keeps its call per bucket, which draws the same picture. The
+    /// mesh tail keeps it always: its dispatch reads a whole
+    /// `ClusterDrawConstants` block per bucket, and nothing indexes those.
+    pub(super) fn range_limit(self, caps: &DeviceCaps) -> Option<u32> {
+        let needs = Features::MULTI_DRAW_INDIRECT | Features::DRAW_INDEX;
+        (!self.is_mesh()
+            && caps.features.contains(needs)
+            && caps.limits.max_draw_indirect_count > 1)
+            .then_some(caps.limits.max_draw_indirect_count)
+    }
+}
+
+/// One multi-draw call: `count` consecutive buckets, starting at the bucket of
+/// [`BucketDraws::calls`] element `first`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct DrawRange {
+    pub(super) first: usize,
+    pub(super) count: u32,
+}
+
+impl DrawRange {
+    /// `buckets` — the bucket index of each call, in call order — packed into
+    /// runs of consecutive buckets of at most `limit` each.
+    ///
+    /// **Consecutive buckets and nothing looser**, because that is what one
+    /// call can stand for: its draws step through the argument structures one
+    /// stride at a time and its vertex stages through the start and mesh words
+    /// one word at a time, and both are laid out in bucket order. A bucket of
+    /// another partition between two of this one's ends the range, and so does
+    /// the device's own ceiling on draws per call.
+    pub(super) fn pack(buckets: impl IntoIterator<Item = u32>, limit: u32) -> Vec<Self> {
+        let mut ranges: Vec<Self> = Vec::new();
+        let mut last = None;
+        for (index, bucket) in buckets.into_iter().enumerate() {
+            match ranges.last_mut() {
+                Some(range) if last == bucket.checked_sub(1) && range.count < limit => {
+                    range.count += 1;
+                }
+                _ => ranges.push(Self {
+                    first: index,
+                    count: 1,
+                }),
+            }
+            last = Some(bucket);
+        }
+        ranges
+    }
 }
 
 /// Everything a geometry pass needs to record one indirect call per bucket.
@@ -76,6 +132,11 @@ pub(super) struct BucketDraws {
     /// the counts and extents — which share a buffer, a region apart — by one
     /// region of both. See [`crcbl_shaders::draw_gen::DRAW_REGIONS`].
     pub(super) region_step: RegionStep,
+    /// `Some` where a call draws a range of consecutive buckets rather than one
+    /// — [`EmitTail::range_limit`] — with the ranges [`calls`](Self::calls)
+    /// packs into. `None` records a call per bucket, which is also the correct
+    /// answer for any list, so a list that was never packed draws right.
+    pub(super) ranges: Option<Vec<DrawRange>>,
 }
 
 /// [`BucketDraws::region_step`]: what one draw region adds to a call's offsets.
@@ -105,11 +166,19 @@ impl BucketDraws {
         }
     }
 
-    /// Records one call per bucket, drawing `group`'s view of `draws`.
+    /// How many calls [`record`](Self::record) records for this list: one per
+    /// range where it has them, one per bucket where it does not.
+    pub(super) fn call_count(&self) -> u64 {
+        self.ranges.as_ref().map_or(self.calls.len(), Vec::len) as u64
+    }
+
+    /// Records this list's calls, drawing `group`'s view of `draws`.
     ///
-    /// One call per bucket **always** — the number the CPU records does not depend
-    /// on what is in the scene, which is the whole of what topic 03 §3.3 asks for.
-    /// An empty bucket's arguments carry an instance count of zero.
+    /// One call per bucket, or one per range of buckets where
+    /// [`ranges`](Self::ranges) is set — either way the number the CPU records
+    /// does not depend on what is in the scene, which is the whole of what
+    /// topic 03 §3.3 asks for. An empty bucket's arguments carry an instance
+    /// count of zero, and a draw of a range with nothing in it draws nothing.
     pub(super) fn record(
         &self,
         encoder: &mut dyn crcbl_hal::CommandEncoder,
@@ -133,6 +202,35 @@ impl BucketDraws {
         let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
         let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
         let step = self.region_step;
+        if let Some(ranges) = &self.ranges {
+            debug_assert!(
+                !self.emit.is_mesh(),
+                "EmitTail::range_limit refuses the mesh tail"
+            );
+            for range in ranges {
+                let (constant_offset, args_offset, _, _) = self.calls[range.first];
+                // The range's first bucket's block, and nothing else bound for
+                // the rest of it: draw `d` of the call reads the start and mesh
+                // words `d` past the ones this block names — `mesh.slang`'s
+                // "One call for a range of buckets".
+                encoder.bind_group(
+                    0,
+                    group,
+                    &[constant_offset + region * step.constants],
+                    self.layout,
+                );
+                // Every structure of the range, read unconditionally, on
+                // `PerBatch`'s terms below: an instance count of zero draws
+                // nothing, so no count word is needed to skip one.
+                encoder.draw_indexed_indirect(&DrawIndirect {
+                    args: draws.args,
+                    offset: args_offset + u64::from(region) * step.args,
+                    draw_count: range.count,
+                    stride,
+                });
+            }
+            return;
+        }
         for &(constant_offset, args_offset, count_offset, mesh_args_offset) in &self.calls {
             let constant_offset = &(constant_offset + region * step.constants);
             let args_offset = &(args_offset + u64::from(region) * step.args);
@@ -226,6 +324,12 @@ impl ForwardRenderer {
     /// that bucket's draws are dropped from the pass entirely — the two callers
     /// below are what make that total, and both are exhaustive over
     /// [`super::DEPTH_MODES`] masked by their own `key`.
+    ///
+    /// `draws` is the whole table, a call per bucket in bucket order. Where the
+    /// renderer draws a range of buckets per call — [`EmitTail::range_limit`] —
+    /// each partition's buckets are packed into [`DrawRange`]s here, which is
+    /// where a bucket of another mode between two of this partition's splits a
+    /// range.
     pub(super) fn partitions(
         &self,
         draws: &BucketDraws,
@@ -235,20 +339,29 @@ impl ForwardRenderer {
         pipelines
             .iter()
             .filter_map(|(mode, pipeline)| {
-                let calls: Vec<(u32, u64, u64, u64)> = draws
+                let (buckets, calls): (Vec<u32>, Vec<_>) = draws
                     .calls
                     .iter()
                     .zip(&self.bucket_modes)
-                    .filter(|(_, bucket)| (**bucket & key) == *mode)
-                    .map(|(call, _)| *call)
-                    .collect();
-                (!calls.is_empty()).then_some(BucketDraws {
+                    .enumerate()
+                    .filter(|(_, (_, bucket))| (**bucket & key) == *mode)
+                    .map(|(bucket, (call, _))| {
+                        let bucket = u32::try_from(bucket)
+                            .unwrap_or_else(|_| unreachable!("a table of u32-indexed buckets"));
+                        (bucket, *call)
+                    })
+                    .unzip();
+                (!calls.is_empty()).then(|| BucketDraws {
                     pipeline: *pipeline,
                     layout: draws.layout,
                     indices: draws.indices,
                     emit: draws.emit,
                     calls,
                     region_step: draws.region_step,
+                    ranges: self
+                        .range_limit
+                        .filter(|_| !draws.emit.is_mesh())
+                        .map(|limit| DrawRange::pack(buckets, limit)),
                 })
             })
             .collect()
@@ -309,10 +422,10 @@ mod tests {
                     (masked, masked_pipeline),
                 ],
                 vec![
-                    (both_pipeline, vec![3, 6]),
-                    (opaque_pipeline, vec![0, 5]),
-                    (double_pipeline, vec![2]),
-                    (masked_pipeline, vec![1, 4]),
+                    (both_pipeline, vec![3, 6], vec![(0, 1), (1, 1)]),
+                    (opaque_pipeline, vec![0, 5], vec![(0, 1), (1, 1)]),
+                    (double_pipeline, vec![2], vec![(0, 1)]),
+                    (masked_pipeline, vec![1, 4], vec![(0, 1), (1, 1)]),
                 ],
             ),
             (
@@ -323,17 +436,28 @@ mod tests {
                     (0, opaque_pipeline),
                 ],
                 vec![
-                    (double_pipeline, vec![2, 3, 6]),
-                    (opaque_pipeline, vec![0, 1, 4, 5]),
+                    (double_pipeline, vec![2, 3, 6], vec![(0, 2), (2, 1)]),
+                    (opaque_pipeline, vec![0, 1, 4, 5], vec![(0, 2), (2, 2)]),
                 ],
             ),
             (
                 0,
                 vec![(unused, unused_pipeline), (0, opaque_pipeline)],
-                vec![(opaque_pipeline, vec![0, 1, 2, 3, 4, 5, 6])],
+                vec![(
+                    opaque_pipeline,
+                    vec![0, 1, 2, 3, 4, 5, 6],
+                    // Seven consecutive buckets, three to a call.
+                    vec![(0, 3), (3, 3), (6, 1)],
+                )],
             ),
         ];
-        for emit in [EmitTail::Count, EmitTail::PerBatch, EmitTail::Mesh] {
+        // The default request grants no draw index, so nothing is packed until
+        // the limit is set below.
+        assert_eq!(renderer.range_limit, None);
+        for (limit, emit) in [None, Some(3)].into_iter().flat_map(|limit| {
+            [EmitTail::Count, EmitTail::PerBatch, EmitTail::Mesh].map(|emit| (limit, emit))
+        }) {
+            renderer.range_limit = limit;
             let source = BucketDraws {
                 pipeline: renderer.mesh_pipeline.single,
                 layout: renderer.tonemap_pipeline_layout,
@@ -345,12 +469,13 @@ mod tests {
                     args: 1024,
                     counts: 64,
                 },
+                ranges: None,
             };
             assert_ne!(source.layout, renderer.mesh_pipeline_layout);
             for (key, pipelines, expected) in &cases {
                 let partitions = renderer.partitions(&source, *key, pipelines);
                 assert_eq!(partitions.len(), expected.len());
-                for (partition, (pipeline, selected)) in partitions.iter().zip(expected) {
+                for (partition, (pipeline, selected, ranges)) in partitions.iter().zip(expected) {
                     assert_eq!(partition.pipeline, *pipeline);
                     assert_eq!(partition.layout, source.layout);
                     assert_eq!(partition.indices, source.indices);
@@ -362,6 +487,19 @@ mod tests {
                             .iter()
                             .map(|&index| calls[index])
                             .collect::<Vec<_>>()
+                    );
+                    // Packed only where a limit is set and never on the mesh
+                    // tail, whose dispatch indexes no range.
+                    let packed = limit.filter(|_| !emit.is_mesh()).map(|_| {
+                        ranges
+                            .iter()
+                            .map(|&(first, count)| DrawRange { first, count })
+                            .collect::<Vec<_>>()
+                    });
+                    assert_eq!(partition.ranges, packed, "{emit:?} at {limit:?}");
+                    assert_eq!(
+                        partition.call_count(),
+                        packed.as_ref().map_or(selected.len(), Vec::len) as u64
                     );
                 }
                 assert_eq!(source.calls, calls);
@@ -375,10 +513,88 @@ mod tests {
             emit: EmitTail::Count,
             calls: Vec::new(),
             region_step: RegionStep::default(),
+            ranges: None,
         };
         assert!(renderer.partitions(&empty, both, &cases[0].1).is_empty());
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
         assert_eq!(recorder.total_live_objects(), 0);
+    }
+
+    /// **Consecutive buckets pack into one call, and anything else splits
+    /// it**: a gap where another partition's bucket stands, and the device's
+    /// ceiling on draws per call. Each range starts at the call index of its
+    /// first bucket, which is what [`BucketDraws::record`] binds the block of.
+    #[test]
+    fn ranges_pack_consecutive_buckets_and_split_at_gaps_and_the_limit() {
+        let ranges = |buckets: &[u32], limit| {
+            DrawRange::pack(buckets.iter().copied(), limit)
+                .into_iter()
+                .map(|range| (range.first, range.count))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ranges(&[], 8), []);
+        assert_eq!(ranges(&[0, 1, 2, 3], u32::MAX), [(0, 4)]);
+        assert_eq!(
+            ranges(&[0, 1, 2, 4, 5, 7], 8),
+            [(0, 3), (3, 2), (5, 1)],
+            "a bucket missing from the list ends the range before it"
+        );
+        assert_eq!(
+            ranges(&[0, 1, 2, 3, 4], 2),
+            [(0, 2), (2, 2), (4, 1)],
+            "and the limit ends a range of consecutive buckets"
+        );
+        assert_eq!(
+            ranges(&[5, 6, 1, 2], 8),
+            [(0, 2), (2, 2)],
+            "a bucket before the last one starts a range of its own"
+        );
+        assert_eq!(ranges(&[3, 3], 8), [(0, 1), (1, 1)], "and so does a repeat");
+        assert_eq!(ranges(&[0, 1, 2], 1), [(0, 1), (1, 1), (2, 1)]);
+    }
+
+    /// **Which tail draws a range of buckets per call, from the capabilities
+    /// alone**: both indirect tails, where the device has a draw index and
+    /// multi-draw and lets a call draw more than one; the mesh tail never.
+    #[test]
+    fn a_tail_draws_ranges_only_with_a_draw_index_and_multi_draw() {
+        let caps = |features: Features, max_draw_indirect_count: u32| DeviceCaps {
+            features,
+            limits: crcbl_hal::Limits {
+                max_draw_indirect_count,
+                ..crcbl_hal::Limits::desktop()
+            },
+        };
+        let both = Features::MULTI_DRAW_INDIRECT | Features::DRAW_INDEX;
+        for emit in [EmitTail::Count, EmitTail::PerBatch] {
+            assert_eq!(emit.range_limit(&caps(both, 4096)), Some(4096), "{emit:?}");
+            assert_eq!(
+                emit.range_limit(&caps(Features::GPU_DRIVEN | Features::DRAW_INDEX, 9)),
+                Some(9),
+                "{emit:?}"
+            );
+            for lacking in [
+                Features::MULTI_DRAW_INDIRECT,
+                Features::DRAW_INDEX,
+                Features::GPU_DRIVEN,
+                Features::empty(),
+            ] {
+                assert_eq!(
+                    emit.range_limit(&caps(lacking, 4096)),
+                    None,
+                    "{emit:?} {lacking:?}"
+                );
+            }
+            assert_eq!(
+                emit.range_limit(&caps(both, 1)),
+                None,
+                "one draw a call is no range"
+            );
+        }
+        assert_eq!(
+            EmitTail::Mesh.range_limit(&caps(Features::all(), 4096)),
+            None
+        );
     }
 }

@@ -1282,7 +1282,7 @@ const EXPECTED = [
     // `Features::all()` — every bit the seam claims, and what pins the
     // claimed-bit mask in `gpu-stream.js`: a mask narrower than Rust's refuses
     // this command outright.
-    optionalFeatures: 0x7ffffffn,
+    optionalFeatures: 0xfffffffn,
     compatibleSurface: null,
   },
   // The readback path, in the order a frame records it — every number distinct
