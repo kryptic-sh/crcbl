@@ -16,6 +16,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_input::Binding` has a `ButtonChord { modifier, button }` variant**
+  (see Added). `Binding` is not `#[non_exhaustive]`, so an exhaustive `match` on
+  it needs the new arm.
+
 - **`crcbl_render::Atmosphere` and `crcbl_shaders::atmosphere::Atmosphere` have
   a `km_per_unit` field**, the scale the new aerial perspective marches a
   scene's distances at, so a struct literal of either needs it:
@@ -326,6 +330,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **`Binding::ButtonChord { modifier, button }`: a keyboard modifier held gives
+  a mouse button a second layer**, the mouse's `Binding::Chord`. While
+  `modifier` is held, a plain `MouseButton` binding on `button` in the context
+  that owns it reads up, so a right click that aims and an Alt+right click that
+  zooms never both fire; pressing the modifier over a held button hands the
+  button to the chord, and letting it go first hands it back. `modifier` is
+  read, not consumed, and keeps any plain binding of its own. Its text form is
+  `Alt+Mouse:Right` (a `Chord`'s modifier, then a `MouseButton`'s text), so it
+  saves and loads through `overrides`/`apply_overrides`, and the debug console
+  names it. Asked for by EW, whose optic and sight binds on Alt and Ctrl + right
+  click read raw modifiers outside the `ActionMap` and could not be rebound.
 
 - **`crcbl::debug_console::Console::boot`: the engine's console for a game that
   runs its own loop.** `boot(app_name, source, settings, game_tables, exec)`

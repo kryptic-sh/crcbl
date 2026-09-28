@@ -372,6 +372,7 @@ fn binding_name(binding: &Binding) -> String {
     match binding {
         Binding::Key(key) => key.as_str().to_owned(),
         Binding::MouseButton(button) => format!("mouse {button:?}"),
+        Binding::ButtonChord { modifier, button } => format!("{modifier:?}+mouse {button:?}"),
         Binding::MouseMotion => "mouse motion".to_owned(),
         Binding::MouseScroll => "mouse wheel".to_owned(),
         Binding::ScrollChord { held } => format!("{}+mouse wheel", held.as_str()),
@@ -1107,6 +1108,11 @@ mod tests {
             key: KeyCode::Tab,
         };
         assert_eq!(binding_name(&chord), "Shift+Tab");
+        let button_chord = Binding::ButtonChord {
+            modifier: crcbl_input::Modifier::Alt,
+            button: crcbl_core::input::PointerButton::Right,
+        };
+        assert_eq!(binding_name(&button_chord), "Alt+mouse Right");
     }
 
     #[test]

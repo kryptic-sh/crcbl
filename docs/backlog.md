@@ -105,16 +105,12 @@ migrates every caller and deletes its own copy in the same change.
   names both crates, which is how `crcbl::ui_nav` joins input and UI.
 - **A console for a host that is not `engine::Loop`: shipped 2026-09-28 as
   `Console::boot`**, which `Loop::new` now calls too.
-- **Queued for EW: `Binding::ButtonChord { modifier, button }`** (accepted
-  2026-09-28). EW binds Alt + right click and Ctrl + right click to sight
-  actions while a plain right click is ADS, and today reads raw modifiers
-  outside the `ActionMap`, so those binds cannot be rebound or reached from a
-  pad. Shape: a new variant beside `Chord` and `PadChord`, the precedent
-  `PadChord` set, additive so no existing `match` breaks. Same semantics as a
-  key `Chord`: while the chord owns the button, the plain `MouseButton` binding
-  on it is withheld; the same hand-over rules apply when the modifier lifts
-  first or is pressed mid-hold; it works in a pushed context; and it has a text
-  form (`Alt+MouseRight`) for `apply_overrides`. Not built.
+- **EW's mouse-button chord: shipped 2026-09-28 as
+  `Binding::ButtonChord { modifier, button }`**, with text form
+  `Alt+Mouse:Right`: the `Chord` and `MouseButton` spellings joined. It is a new
+  variant beside `Chord` and `PadChord`, and its hand-over reuses the key
+  chord's rule rather than copying it. `Binding` is not `#[non_exhaustive]`, so
+  the variant breaks an exhaustive `match`; it is listed under Breaking.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits

@@ -263,4 +263,44 @@ mod tests {
         assert_eq!(fresh.apply_overrides(&read), []);
         assert_eq!(fresh.overrides(), map.overrides());
     }
+
+    /// A button chord saved as text comes back as the chord, and still takes
+    /// its button from the plain binding once applied.
+    #[test]
+    fn a_button_chord_override_round_trips_and_still_shadows() {
+        use crcbl_core::input::PointerButton;
+
+        let mut map = map();
+        map.declare(ActionDecl {
+            name: "aim".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::MouseButton(PointerButton::Right)],
+        });
+        let chord = Binding::ButtonChord {
+            modifier: crate::Modifier::Alt,
+            button: PointerButton::Right,
+        };
+        map.rebind("use", vec![chord.clone()]).unwrap();
+        let written: Vec<String> = map.overrides()[0]
+            .bindings
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(written, ["Alt+Mouse:Right"]);
+
+        let mut fresh = self::tests::map();
+        fresh.declare(ActionDecl {
+            name: "aim".to_owned(),
+            kind: ActionKind::Button,
+            bindings: vec![Binding::MouseButton(PointerButton::Right)],
+        });
+        let read = one("use", written.iter().map(|t| t.parse().unwrap()).collect());
+        assert_eq!(fresh.apply_overrides(&[read]), []);
+        assert_eq!(fresh.bindings("use"), Some(&[chord][..]));
+
+        fresh.key_event(KeyCode::AltLeft, true);
+        fresh.mouse_button(PointerButton::Right, true);
+        assert!(fresh.button_held("use"));
+        assert!(!fresh.button_held("aim"), "the loaded chord did not shadow");
+    }
 }

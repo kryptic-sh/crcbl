@@ -219,7 +219,8 @@ pub enum PointerAxis {
     Y,
 }
 
-/// The modifier a [`Binding::Chord`] waits for: either of its two keys.
+/// The modifier a [`Binding::Chord`] or a [`Binding::ButtonChord`] waits for:
+/// either of its two keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Modifier {
     /// [`KeyCode::ShiftLeft`] or [`KeyCode::ShiftRight`].
@@ -348,6 +349,28 @@ pub enum Binding {
         modifier: Modifier,
         /// The key the chord owns.
         key: KeyCode,
+    },
+    /// A mouse button that counts only while a [`Modifier`] is held —
+    /// Alt+right click beside a plain right click. The mouse's
+    /// [`Binding::Chord`], on the same two rules, and read as
+    /// [`Binding::MouseButton`] is: down on an [`ActionKind::Button`], inert
+    /// on the other kinds.
+    ///
+    /// **The more specific binding takes the button.** While the modifier is
+    /// held, every plain [`Binding::MouseButton`] on the same button, in the
+    /// context that owns the button, reads it as up — so an aim on the right
+    /// button and a zoom on Alt+right never both fire. Holding the button and
+    /// then pressing the modifier releases the one and presses the other;
+    /// letting the modifier go first hands the button back.
+    ///
+    /// **The modifier is read, not consumed**: a button chord owns its
+    /// `button` and nothing else, so a lean bound to Alt still sees every
+    /// press of Alt, chorded or not.
+    ButtonChord {
+        /// The modifier that must be held.
+        modifier: Modifier,
+        /// The mouse button the chord owns.
+        button: PointerButton,
     },
     /// The mouse wheel, read only while `held` is down — Z+wheel, Ctrl+wheel.
     ///
@@ -511,6 +534,7 @@ impl Binding {
                 visit(*right);
             }
             Self::MouseButton(_)
+            | Self::ButtonChord { .. }
             | Self::MouseMotion
             | Self::MouseScroll
             | Self::ScrollChord { .. }
@@ -527,6 +551,16 @@ impl Binding {
     /// Whether this binding reads the mouse wheel.
     const fn reads_wheel(&self) -> bool {
         matches!(self, Self::MouseScroll | Self::ScrollChord { .. })
+    }
+
+    /// The mouse button this binding owns, if it reads one: a
+    /// [`Binding::ButtonChord`]'s button as much as a
+    /// [`Binding::MouseButton`]'s.
+    const fn mouse_button(&self) -> Option<PointerButton> {
+        match *self {
+            Self::MouseButton(button) | Self::ButtonChord { button, .. } => Some(button),
+            _ => None,
+        }
     }
 
     /// Whether this binding reads a gamepad.
@@ -986,8 +1020,10 @@ impl ActionMap {
         let wheel = self.routes.is_scroll_chord_key(key);
         if Modifier::of(key).is_some() {
             // A modifier can press or release any chord, and shadow or unshadow
-            // any plain key a chord shares.
-            self.resolve_matching(|b| b.reads_keyboard() || (wheel && b.reads_wheel()));
+            // any plain key or mouse button a chord shares.
+            self.resolve_matching(|b| {
+                b.reads_keyboard() || b.mouse_button().is_some() || (wheel && b.reads_wheel())
+            });
         } else {
             self.resolve_matching(|b| b.owns_key(key) || (wheel && b.reads_wheel()));
         }
@@ -1002,7 +1038,7 @@ impl ActionMap {
             self.held_buttons.remove(&button);
             self.suppressed.buttons.remove(&button);
         }
-        self.resolve_matching(|b| matches!(b, Binding::MouseButton(b2) if *b2 == button));
+        self.resolve_matching(|b| b.mouse_button() == Some(button));
     }
 
     /// Feed mouse motion (delta in pixels since the last event).
@@ -1318,6 +1354,9 @@ impl ActionMap {
                     Binding::Key(k) => view.key(*k),
                     Binding::Chord { modifier, key } => view.chord(*modifier, *key),
                     Binding::MouseButton(b) => view.button(*b),
+                    Binding::ButtonChord { modifier, button } => {
+                        view.button_chord(*modifier, *button)
+                    }
                     Binding::Virtual(id) => view.control(id),
                     Binding::PadButton(button) => view.pad_button(*button),
                     Binding::PadChord { modifier, button } => view.pad_chord(*modifier, *button),

@@ -25,7 +25,8 @@
 //! but the pointer's position and motion. "Binds" is by binding, not by enabled flag: a
 //! disabled action is silenced, and its keys stay its context's until
 //! [`ActionMap::rebind`] moves them. Inputs are keys (the keys a
-//! [`Binding::Chord`] owns, not its modifier), pointer buttons, on-screen
+//! [`Binding::Chord`] owns, not its modifier), pointer buttons (the button a
+//! [`Binding::ButtonChord`] owns, not its modifier), on-screen
 //! controls by id, the pointer's position, motion and wheel each as one input
 //! (the wheel taken by a [`Binding::ScrollChord`] as by a
 //! [`Binding::MouseScroll`], and not its held key), and pad buttons, sticks
@@ -118,6 +119,9 @@ pub(crate) struct Routes {
     /// For each pad button, the modifiers of the pad chords its **owner**
     /// binds on it — [`Self::chords`] for the pad.
     pad_chords: HashMap<PadButton, Vec<PadButton>>,
+    /// For each pointer button, the modifiers of the button chords its
+    /// **owner** binds on it — [`Self::chords`] for the mouse.
+    button_chords: HashMap<PointerButton, Vec<Modifier>>,
     buttons: HashMap<PointerButton, usize>,
     controls: HashMap<String, usize>,
     motion: Option<usize>,
@@ -165,7 +169,9 @@ impl Suppressed {
         binding.visit_keys(|owned| key |= self.keys.contains(&owned));
         key || match binding {
             Binding::ScrollChord { held } => self.keys.contains(held),
-            Binding::MouseButton(button) => self.buttons.contains(button),
+            Binding::MouseButton(button) | Binding::ButtonChord { button, .. } => {
+                self.buttons.contains(button)
+            }
             Binding::Virtual(id) => {
                 self.controls.contains(id.as_str()) || self.control_sticks.contains(id.as_str())
             }
@@ -210,12 +216,15 @@ impl View<'_> {
 
     /// A plain binding's read of `key`: down unless a chord on it is satisfied.
     pub(crate) fn key(&self, key: KeyCode) -> bool {
-        self.owns_held(key)
-            && !self
-                .routes
-                .chords
-                .get(&key)
-                .is_some_and(|modifiers| modifiers.iter().any(|m| m.held(self.held_keys)))
+        self.owns_held(key) && !self.any_held(self.routes.chords.get(&key))
+    }
+
+    /// Whether any of `modifiers` — the modifiers of the chords an input's
+    /// owner binds on it — is held, which shadows that owner's plain bindings
+    /// on the input. What [`Self::key`] and [`Self::button`] both ask, so a
+    /// key chord and a button chord hand their input over on one rule.
+    fn any_held(&self, modifiers: Option<&Vec<Modifier>>) -> bool {
+        modifiers.is_some_and(|modifiers| modifiers.iter().any(|m| m.held(self.held_keys)))
     }
 
     /// A [`Binding::Chord`]'s read: its key, and its modifier read raw.
@@ -223,10 +232,24 @@ impl View<'_> {
         self.owns_held(key) && modifier.held(self.held_keys)
     }
 
-    pub(crate) fn button(&self, button: PointerButton) -> bool {
+    /// The pointer button is held, this context owns it, and it is not
+    /// withheld.
+    fn owns_held_button(&self, button: PointerButton) -> bool {
         self.held_buttons.contains(&button)
             && !self.suppressed.buttons.contains(&button)
             && self.routes.buttons.get(&button) == Some(&self.context)
+    }
+
+    /// A plain [`Binding::MouseButton`]'s read: down unless a button chord on
+    /// it is satisfied.
+    pub(crate) fn button(&self, button: PointerButton) -> bool {
+        self.owns_held_button(button) && !self.any_held(self.routes.button_chords.get(&button))
+    }
+
+    /// A [`Binding::ButtonChord`]'s read: its button, and its modifier read
+    /// raw.
+    pub(crate) fn button_chord(&self, modifier: Modifier, button: PointerButton) -> bool {
+        self.owns_held_button(button) && modifier.held(self.held_keys)
     }
 
     pub(crate) fn control(&self, id: &str) -> bool {
@@ -359,7 +382,7 @@ impl Routes {
                     routes.keys.entry(key).or_insert(context);
                 });
                 match binding {
-                    Binding::MouseButton(button) => {
+                    Binding::MouseButton(button) | Binding::ButtonChord { button, .. } => {
                         routes.buttons.entry(*button).or_insert(context);
                     }
                     Binding::Virtual(id) => {
@@ -412,18 +435,17 @@ impl Routes {
                         Binding::Chord { modifier, key }
                             if routes.keys.get(key) == Some(&context) =>
                         {
-                            let modifiers = routes.chords.entry(*key).or_default();
-                            if !modifiers.contains(modifier) {
-                                modifiers.push(*modifier);
-                            }
+                            add_chord(&mut routes.chords, *key, *modifier);
+                        }
+                        Binding::ButtonChord { modifier, button }
+                            if routes.buttons.get(button) == Some(&context) =>
+                        {
+                            add_chord(&mut routes.button_chords, *button, *modifier);
                         }
                         Binding::PadChord { modifier, button }
                             if routes.pad_buttons.get(button) == Some(&context) =>
                         {
-                            let modifiers = routes.pad_chords.entry(*button).or_default();
-                            if !modifiers.contains(modifier) {
-                                modifiers.push(*modifier);
-                            }
+                            add_chord(&mut routes.pad_chords, *button, *modifier);
                         }
                         Binding::ScrollChord { held }
                             if slot.enabled
@@ -439,6 +461,20 @@ impl Routes {
             below_modal = map.modal.contains(&context);
         }
         routes
+    }
+}
+
+/// Record that `input`'s owner binds a chord on it held by `modifier`, once
+/// per modifier: the table [`View`] reads to shadow that owner's plain
+/// bindings on the input, for a key, a mouse button and a pad button alike.
+fn add_chord<I: Eq + std::hash::Hash, M: PartialEq>(
+    chords: &mut HashMap<I, Vec<M>>,
+    input: I,
+    modifier: M,
+) {
+    let modifiers = chords.entry(input).or_default();
+    if !modifiers.contains(&modifier) {
+        modifiers.push(modifier);
     }
 }
 
@@ -644,7 +680,9 @@ impl ActionMap {
             Binding::ScrollChord { held } if self.held_keys.contains_key(held) => {
                 withheld.keys.insert(*held);
             }
-            Binding::MouseButton(button) if self.held_buttons.contains(button) => {
+            Binding::MouseButton(button) | Binding::ButtonChord { button, .. }
+                if self.held_buttons.contains(button) =>
+            {
                 withheld.buttons.insert(*button);
             }
             Binding::Virtual(id) => {
@@ -1190,6 +1228,95 @@ mod tests {
         assert!(!map.button_held("prev") && map.button_held("next"));
     }
 
+    fn alt_right() -> Binding {
+        Binding::ButtonChord {
+            modifier: Modifier::Alt,
+            button: PointerButton::Right,
+        }
+    }
+
+    /// `aim` on the right button, `zoom` on Alt+right and `lean` on Alt alone,
+    /// all in gameplay.
+    fn sights() -> ActionMap {
+        let mut map = ActionMap::new();
+        map.declare(button(
+            "aim",
+            vec![Binding::MouseButton(PointerButton::Right)],
+        ));
+        map.declare(button("zoom", vec![alt_right()]));
+        map.declare(button("lean", vec![Binding::Key(KeyCode::AltLeft)]));
+        map
+    }
+
+    /// **A button chord takes the button from the plain binding on it**, and
+    /// leaves its modifier alone: a right click aims, Alt+right click zooms
+    /// and does not aim, and Alt's own binding sees Alt either way.
+    #[test]
+    fn a_button_chord_shadows_the_plain_button_and_leaves_its_modifier_alone() {
+        let mut map = sights();
+        map.begin_tick(TICK);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.button_held("aim") && !map.button_held("zoom"));
+
+        map.mouse_button(PointerButton::Right, false);
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::AltLeft, true);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.just_pressed("zoom"));
+        assert!(!map.button_held("aim"), "the plain binding fired too");
+        assert!(map.button_held("lean"), "the modifier was consumed");
+    }
+
+    /// **The modifier hands the held button over both ways**, as a key
+    /// chord's does: pressed over a held right button it releases the aim and
+    /// presses the zoom, and let go first it hands the button back.
+    #[test]
+    fn a_modifier_hands_a_held_mouse_button_to_the_chord_and_back() {
+        let mut map = sights();
+        map.begin_tick(TICK);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.just_pressed("aim"));
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::AltRight, true);
+        assert!(
+            map.just_released("aim"),
+            "Alt turns the held right button into Alt+right"
+        );
+        assert!(map.just_pressed("zoom"));
+
+        map.begin_tick(TICK);
+        map.key_event(KeyCode::AltRight, false);
+        assert!(map.just_released("zoom"));
+        assert!(map.just_pressed("aim"), "the button went back to the aim");
+    }
+
+    /// **A button chord shadows plain bindings only in the context that owns
+    /// the button**: declared in a context off the stack, it leaves the right
+    /// button with gameplay; pushed, it takes it.
+    #[test]
+    fn a_button_chord_shadows_only_in_the_context_that_owns_its_button() {
+        let mut map = ActionMap::new();
+        map.declare(button(
+            "aim",
+            vec![Binding::MouseButton(PointerButton::Right)],
+        ));
+        map.declare_in("optic", button("magnify", vec![alt_right()]));
+        map.key_event(KeyCode::AltLeft, true);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(
+            map.button_held("aim"),
+            "a chord off the stack shadowed the button"
+        );
+        assert!(!map.button_held("magnify"));
+
+        map.mouse_button(PointerButton::Right, false);
+        map.push_context("optic").expect("declared");
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.button_held("magnify"));
+        assert!(!map.button_held("aim"));
+    }
+
     fn axis(name: &str, kind: ActionKind, bindings: Vec<Binding>) -> ActionDecl {
         ActionDecl {
             name: name.to_owned(),
@@ -1328,6 +1455,22 @@ mod tests {
         map.key_event(KeyCode::KeyS, false);
         map.key_event(KeyCode::KeyS, true);
         assert!(map.just_pressed("save"), "Ctrl never let go");
+    }
+
+    /// A button chord is withheld through its button, as a key chord is
+    /// through its key: clicked again with the modifier still down, it reads
+    /// again.
+    #[test]
+    fn suppress_held_withholds_a_button_chord_until_its_button_is_pressed_again() {
+        let mut map = sights();
+        map.key_event(KeyCode::AltLeft, true);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.button_held("zoom"));
+        map.suppress_held();
+        assert!(!map.button_held("zoom"));
+        map.mouse_button(PointerButton::Right, false);
+        map.mouse_button(PointerButton::Right, true);
+        assert!(map.just_pressed("zoom"), "Alt never let go");
     }
 
     /// Pointer buttons, on-screen buttons and on-screen sticks are withheld

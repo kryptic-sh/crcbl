@@ -13,6 +13,7 @@
 //! | `Chord`                | `Alt+KeyR` (`Shift`, `Control`, `Alt`, `Super`) |
 //! | `ScrollChord`          | `ControlLeft+Scroll`                   |
 //! | `MouseButton`          | `Mouse:Left`, `Mouse:Back`, `Mouse:9`  |
+//! | `ButtonChord`          | `Alt+Mouse:Right` (a `Chord`'s modifier, a `MouseButton`'s button) |
 //! | `MouseMotion`          | `MouseMotion`                          |
 //! | `MouseScroll`          | `MouseScroll`                          |
 //! | `PointerPosition`      | `Pointer:X`, `Pointer:Y`               |
@@ -67,10 +68,11 @@ impl fmt::Display for Binding {
                 write!(f, "{}+{}", modifier_name(*modifier), key.as_str())
             }
             Self::ScrollChord { held } => write!(f, "{}+Scroll", held.as_str()),
-            Self::MouseButton(button) => match button {
-                PointerButton::Other(index) => write!(f, "Mouse:{index}"),
-                named => write!(f, "Mouse:{}", pointer_button_name(*named)),
-            },
+            Self::MouseButton(button) => write_mouse_button(f, *button),
+            Self::ButtonChord { modifier, button } => {
+                write!(f, "{}+", modifier_name(*modifier))?;
+                write_mouse_button(f, *button)
+            }
             Self::MouseMotion => f.write_str("MouseMotion"),
             Self::MouseScroll => f.write_str("MouseScroll"),
             Self::PointerPosition { axis } => match axis {
@@ -127,12 +129,14 @@ impl FromStr for Binding {
             _ => {}
         }
         if let Some((kind, rest)) = text.split_once(':') {
+            if let Some(modifier) = kind.strip_suffix("+Mouse") {
+                let modifier = modifier_named(modifier).ok_or_else(|| fail("no such modifier"))?;
+                let button =
+                    mouse_button_named(rest).ok_or_else(|| fail("no such mouse button"))?;
+                return Ok(Self::ButtonChord { modifier, button });
+            }
             return match kind {
-                "Mouse" => rest
-                    .parse()
-                    .map(PointerButton::Other)
-                    .ok()
-                    .or_else(|| pointer_button_named(rest))
+                "Mouse" => mouse_button_named(rest)
                     .map(Self::MouseButton)
                     .ok_or_else(|| fail("no such mouse button")),
                 "Pointer" => match rest {
@@ -232,6 +236,24 @@ fn modifier_named(name: &str) -> Option<Modifier> {
     ]
     .into_iter()
     .find(|modifier| modifier_name(*modifier) == name)
+}
+
+/// A mouse button's text, `Mouse:Right` or `Mouse:9` — a
+/// [`Binding::MouseButton`]'s whole form, and a [`Binding::ButtonChord`]'s
+/// after its modifier.
+fn write_mouse_button(f: &mut fmt::Formatter<'_>, button: PointerButton) -> fmt::Result {
+    match button {
+        PointerButton::Other(index) => write!(f, "Mouse:{index}"),
+        named => write!(f, "Mouse:{}", pointer_button_name(named)),
+    }
+}
+
+/// The button after `Mouse:`: an index for `Other`, a name for the rest.
+fn mouse_button_named(text: &str) -> Option<PointerButton> {
+    text.parse()
+        .map(PointerButton::Other)
+        .ok()
+        .or_else(|| pointer_button_named(text))
 }
 
 /// A named [`PointerButton`]'s name; `Other` prints as its index instead.
@@ -368,6 +390,27 @@ mod tests {
             ]
             .map(Binding::MouseButton),
         );
+        for button in [
+            PointerButton::Left,
+            PointerButton::Right,
+            PointerButton::Middle,
+            PointerButton::Back,
+            PointerButton::Forward,
+            PointerButton::Other(9),
+        ] {
+            all.push(Binding::ButtonChord {
+                modifier: Modifier::Alt,
+                button,
+            });
+        }
+        all.extend(
+            [Modifier::Shift, Modifier::Control, Modifier::Super].map(|modifier| {
+                Binding::ButtonChord {
+                    modifier,
+                    button: PointerButton::Right,
+                }
+            }),
+        );
         all.extend(PadButton::ALL.map(Binding::PadButton));
         all.extend(PadButton::ALL.map(|button| Binding::PadChord {
             modifier: PadButton::LeftShoulder,
@@ -402,7 +445,7 @@ mod tests {
         // Every variant was reached: a new one fails to compile the `match`
         // in `Display`, and this makes sure the list tests each one we have.
         let kinds: std::collections::HashSet<_> = all.iter().map(std::mem::discriminant).collect();
-        assert_eq!(kinds.len(), 15, "one of each Binding variant");
+        assert_eq!(kinds.len(), 16, "one of each Binding variant");
     }
 
     #[test]
@@ -423,6 +466,20 @@ mod tests {
                 "ControlLeft+Scroll",
             ),
             (Binding::MouseButton(PointerButton::Left), "Mouse:Left"),
+            (
+                Binding::ButtonChord {
+                    modifier: Modifier::Alt,
+                    button: PointerButton::Right,
+                },
+                "Alt+Mouse:Right",
+            ),
+            (
+                Binding::ButtonChord {
+                    modifier: Modifier::Control,
+                    button: PointerButton::Other(9),
+                },
+                "Control+Mouse:9",
+            ),
             (Binding::PadButton(PadButton::South), "Pad:South"),
             (
                 Binding::PadChord {
@@ -469,6 +526,10 @@ mod tests {
             "NotAKey+Scroll",
             "Mouse:Thumb3",
             "Mouse:-1",
+            "Alt+Mouse:Thumb3",
+            "Hyper+Mouse:Right",
+            "+Mouse:Right",
+            "AltMouse:Right",
             "Pointer:Z",
             "KeyAxis:KeyS",
             "KeyAxis:KeyS,KeyW,KeyA",
