@@ -77,18 +77,6 @@ step while executing nothing. The browser gate (`pages.yml`), which renders
 every demo in a real browser, is what verifies wasm. Revisit if a wasm test
 runner is ever adopted: its first step would be making these two targets build.
 
-## `crates/crcbl/src/settings.rs` has grown past 4,000 lines (2026-09-28)
-
-**Found, not split.** It holds the settings stack's readers and writers for
-every section, the console catalogue, the console host and their tests.
-`settings/presets.rs` already sits beside it. Each new key adds a reader, a
-writer, a catalogue row and tests in the same file, as `ui_scale` did on
-2026-09-28. Split it along the seams it already has: one module per settings
-section (`video`, `audio`, `input`), the catalogue, and the console host, with
-the public paths re-exported from `settings`. Move the code in one commit and
-change behaviour in another. Not started, because it is a refactor of its own
-rather than part of any slice that touched the file.
-
 ## EW's engine port requests (2026-09-27)
 
 EW asked for four features proven in its game code, none of which crcbl has.
@@ -9097,11 +9085,12 @@ behind_ sections.
 ### The settings catalogue's named keys have no reader
 
 **The heading used to say "mostly keys with no reader" and that is no longer
-true, re-measured 2026-09-02.** `crates/crcbl/src/settings.rs`'s `VIDEO_KEYS`
-maps a `RenderEffects` bit for each of `shadows`, `ambient_occlusion`,
-`reflections`, `bloom`, `volumetric_fog` and `auto_exposure`; `catalogue()`
-emits those beside the antialiasing, render-scale, anisotropy and frame-limit
-keys and the six `[engine.audio]` bus gains, so most of what it names is read.
+true, re-measured 2026-09-02.** `crates/crcbl/src/settings/engine_video.rs`'s
+`VIDEO_KEYS` maps a `RenderEffects` bit for each of `shadows`,
+`ambient_occlusion`, `reflections`, `bloom`, `volumetric_fog` and
+`auto_exposure`; `catalogue()` emits those beside the antialiasing,
+render-scale, anisotropy and frame-limit keys and the six `[engine.audio]` bus
+gains, so most of what it names is read.
 
 What is still owed is the `Named` half — `NAMED_VIDEO_KEYS`: display mode,
 monitor, resolution, present mode, brightness, HDR output, UI scale and field of
@@ -25366,10 +25355,10 @@ faders — and the mixer — from the player's own file. `menu::menus`,
   resolution, present mode, brightness, HDR output, UI scale and field of view —
   as `KeyStatus::Named`, and `apps/options` lays out no row for any of them
   (verified 2026-09-24 against `NAMED_VIDEO_KEYS` in
-  `crates/crcbl/src/settings.rs` and `menu::menus`). The criterion reads "every
-  key in the settings catalogue appears on the screen, and any key with no
-  reader is labelled as such". **Decided 2026-09-25: hold each key back until
-  its reader lands**, and read the criterion's "labelled" as met by the
+  `crates/crcbl/src/settings/key_catalogue.rs` and `menu::menus`). The criterion
+  reads "every key in the settings catalogue appears on the screen, and any key
+  with no reader is labelled as such". **Decided 2026-09-25: hold each key back
+  until its reader lands**, and read the criterion's "labelled" as met by the
   catalogue's `KeyStatus::Named`, which `crcbl settings list` can show, rather
   than by dead rows. A row that cannot be applied and observed is what the
   screen's own rule refuses. The two options were: a read-only row per `Named`
