@@ -92,6 +92,19 @@ price tests are the likely ones, and could run a smaller scene on this runner.
 The shape follows `bucket_price.rs`, whose suite run was cut for the same
 reason.
 
+**Ranked 2026-09-29** from `a7cc23f9`'s Metal job: 333 tests, about 3,280 s of
+test time each in mesh and render and 1,280 s in forward, run in parallel. The
+slowest were `shadow_block_reads` (205 s, since cut to one combined frame per
+path in `e83139fe`), `grass_shells::the_levers_restyle_cards_and_shells_alike`
+(121 s), `occlusion_culling_draws_the_same_frames_along_the_path` (121 s),
+`grass::the_price_of_the_blade_passes` (99 s),
+`rect_bound::how_much_of_a_rectangle_s_sphere_falls_behind_the_rectangle` (98
+s), `bucket_price` (98 s, even at its small scene: its renderers cost more than
+its frames here), and then a long tail of 60–90 s per-path equivalence tests
+(the `…_draws_the_same_frame_on_every_geometry_path` family, grass blades). None
+was near the per-test limit except `shadow_block_reads`. The job's length is the
+tail's sum, not one outlier.
+
 ## EW's engine port requests (2026-09-27)
 
 EW asked for four features proven in its game code, none of which crcbl has.
