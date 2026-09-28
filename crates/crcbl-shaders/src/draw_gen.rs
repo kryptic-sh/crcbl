@@ -287,6 +287,17 @@ pub struct TableOffsets {
     pub level_groups_at: u32,
     /// [`Params::level_meshes_at`].
     pub level_meshes_at: u32,
+    /// Where the per-bucket **cluster bases** start: bucket `b`'s mesh's first
+    /// cluster, one word a bucket.
+    ///
+    /// **Not a [`Params`] field, because `draw_gen.slang` never reads it.** It
+    /// is the region `mesh_cluster.slang`'s SPIR-V stages read a cluster base
+    /// out of when one multi-draw call stands for a range of buckets —
+    /// [`ClusterDrawConstants::cluster_base_at`](crate::meshlet::ClusterDrawConstants::cluster_base_at)
+    /// names bucket `b`'s word, and the range's later buckets are the words
+    /// after it. Packed last, so every region that pass reads starts where it
+    /// did before this one existed.
+    pub bucket_cluster_bases_at: u32,
 }
 
 /// Packs every host-written table `draw_gen.slang` reads into one buffer.
@@ -296,7 +307,8 @@ pub struct TableOffsets {
 /// then the per-bucket cluster counts, then the per-mesh
 /// [`MeshLevels`](crate::level_select::MeshLevels) records, then the
 /// [`LevelGroup`](crate::level_select::LevelGroup) records, then the level →
-/// mesh id table. **One buffer because a WebGPU device guarantees only eight
+/// mesh id table. Then one region that shader does not read: the per-bucket
+/// cluster bases, for [`TableOffsets::bucket_cluster_bases_at`]'s reader. **One buffer because a WebGPU device guarantees only eight
 /// storage buffers per shader stage** and the pass bound fourteen; the tables
 /// were chosen for the merge because they are written together, when a mesh
 /// becomes resident, and never per frame.
@@ -317,6 +329,7 @@ pub fn pack_tables(
     bucket_meshes: &[u32],
     bucket_modes: &[u32],
     bucket_clusters: &[u32],
+    bucket_cluster_bases: &[u32],
     mesh_levels: &[crate::level_select::MeshLevels],
     level_groups: &[crate::level_select::LevelGroup],
     level_meshes: &[u32],
@@ -355,6 +368,8 @@ pub fn pack_tables(
     ));
     let level_meshes_at = offset(&bytes)?;
     bytes.extend_from_slice(&padded(words(level_meshes), 4));
+    let bucket_cluster_bases_at = offset(&bytes)?;
+    bytes.extend_from_slice(&words(bucket_cluster_bases));
     // The whole buffer is bound as a descriptor, and a zero-length one is not a
     // descriptor any backend takes. The padding above guarantees it, and this is
     // what says so where a reader meets it.
@@ -368,6 +383,7 @@ pub fn pack_tables(
             mesh_levels_at,
             level_groups_at,
             level_meshes_at,
+            bucket_cluster_bases_at,
         },
     })
 }
@@ -729,6 +745,7 @@ mod tests {
         // set of words rather than the same ones.
         let bucket_modes = [0u32, 1, 0];
         let bucket_clusters = [70u32, 80, 90];
+        let bucket_cluster_bases = [700u32, 800, 900];
         let mesh_levels = [
             MeshLevels {
                 first_group: 0,
@@ -760,6 +777,7 @@ mod tests {
             &bucket_meshes,
             &bucket_modes,
             &bucket_clusters,
+            &bucket_cluster_bases,
             &mesh_levels,
             &level_groups,
             &level_meshes,
@@ -782,6 +800,11 @@ mod tests {
                 word_at(packed.offsets.bucket_clusters_at + bucket),
                 bucket_clusters[bucket as usize],
                 "cluster counts at bucket_clusters_at"
+            );
+            assert_eq!(
+                word_at(packed.offsets.bucket_cluster_bases_at + bucket),
+                bucket_cluster_bases[bucket as usize],
+                "cluster bases at bucket_cluster_bases_at"
             );
         }
         for (index, record) in mesh_levels.iter().enumerate() {
@@ -809,6 +832,11 @@ mod tests {
             let at = packed.offsets.level_meshes_at + u32::try_from(index).expect("small");
             assert_eq!(word_at(at), *mesh, "level table at level_meshes_at");
         }
+        assert_eq!(
+            packed.bytes.len(),
+            (packed.offsets.bucket_cluster_bases_at as usize + bucket_meshes.len()) * 4,
+            "the cluster bases last, and the buffer's last words"
+        );
     }
 
     /// A renderer whose meshes have no hierarchy is the ordinary case, and every
@@ -818,7 +846,7 @@ mod tests {
     /// so a region packed at zero length would put that read past the end.
     #[test]
     fn the_empty_selection_regions_are_padded_to_one_record() {
-        let packed = pack_tables(&[3], &[0], &[0], &[], &[], &[]).expect("addresses");
+        let packed = pack_tables(&[3], &[0], &[0], &[0], &[], &[], &[]).expect("addresses");
         let words = u32::try_from(packed.bytes.len() / 4).expect("small");
         assert!(
             packed.offsets.level_meshes_at < words,

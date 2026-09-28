@@ -376,18 +376,19 @@ impl Meshlet {
 
 /// Bytes in one bucket's cluster-draw constant block.
 ///
-/// Six `uint`s and the two `std140` rounds the block up by — a structure's size
-/// is a multiple of 16 whatever its members are, exactly as
-/// [`DrawConstants`](crate::mesh::DrawConstants) beside it records.
+/// Eight `uint`s, which is already a multiple of the 16 bytes `std140` rounds a
+/// structure up to — the two words it used to round six up by are now
+/// [`ClusterDrawConstants::cluster_base_at`] and
+/// [`ClusterDrawConstants::cluster_count_at`].
 pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 32;
 
 /// What one bucket tells the mesh stage about itself, matching
 /// `struct ClusterDrawConstants` in `shaders/mesh_cluster.slang`.
 ///
 /// A block of its own rather than [`DrawConstants`](crate::mesh::DrawConstants),
-/// because five of its six fields mean nothing to the raster path and a record
-/// carrying them there would be five unread words in every frame that does not
-/// use them.
+/// because all but its first field mean nothing to the raster path and a
+/// record carrying them there would be unread words in every frame that does
+/// not use them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ClusterDrawConstants {
     /// The word holding where this bucket's run of surviving instances starts
@@ -432,15 +433,30 @@ pub struct ClusterDrawConstants {
     /// the renderer besides: the host packs the table regions when a mesh
     /// becomes resident, never per frame.
     pub level_groups_at: u32,
+    /// The word of the shared table buffer holding
+    /// [`cluster_base`](Self::cluster_base) —
+    /// [`TableOffsets::bucket_cluster_bases_at`](crate::draw_gen::TableOffsets::bucket_cluster_bases_at)
+    /// plus this bucket.
+    ///
+    /// **What the SPIR-V task and mesh stages read the cluster base from**, so
+    /// that one block can stand for a whole range of consecutive buckets drawn
+    /// by one multi-draw `draw_mesh_tasks_indirect`: draw `d` of that call
+    /// reads the word `d` past this one, as it reads the start `d` past
+    /// [`start_at`](Self::start_at) and the argument structure `d` past
+    /// [`bucket`](Self::bucket). See `mesh_cluster.slang`'s "One call for a
+    /// range of buckets".
+    pub cluster_base_at: u32,
+    /// The word of the same buffer holding
+    /// [`cluster_count`](Self::cluster_count) —
+    /// [`TableOffsets::bucket_clusters_at`](crate::draw_gen::TableOffsets::bucket_clusters_at)
+    /// plus this bucket — on [`cluster_base_at`](Self::cluster_base_at)'s
+    /// terms.
+    pub cluster_count_at: u32,
 }
 
 impl ClusterDrawConstants {
-    /// The bytes one bucket's block holds, in `std140` order.
-    ///
-    /// The trailing padding is written rather than left alone, for the reason
-    /// [`crate::compute_probe::Params::to_bytes`] gives: a block is
-    /// [`CLUSTER_DRAW_CONSTANTS_SIZE`] bytes wide and a partial write leaves the
-    /// rest undefined.
+    /// The bytes one bucket's block holds, in `std140` order — every one of
+    /// them a field, so a block written whole leaves nothing undefined.
     #[must_use]
     pub fn to_bytes(&self) -> [u8; CLUSTER_DRAW_CONSTANTS_SIZE] {
         let mut bytes = [0u8; CLUSTER_DRAW_CONSTANTS_SIZE];
@@ -452,6 +468,8 @@ impl ClusterDrawConstants {
             self.bucket,
             self.group_stride,
             self.level_groups_at,
+            self.cluster_base_at,
+            self.cluster_count_at,
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -991,14 +1009,14 @@ mod tests {
     }
 
     /// The offsets `slangc` emitted for `ClusterDrawConstants`, read out of the
-    /// disassembly. Six `uint`s in a row permute silently — a bucket index read
-    /// as a cluster base draws another mesh's clusters — so each is pinned to
-    /// its byte.
+    /// disassembly. Eight `uint`s in a row permute silently — a bucket index
+    /// read as a cluster base draws another mesh's clusters — so each is pinned
+    /// to its byte.
     #[test]
     fn the_cluster_constants_match_the_offsets_slangc_emits() {
         // `OpMemberDecorate %ClusterDrawConstants_std140 n Offset …`: 0, 4, 8,
-        // 12, 16, 20, and a block size of 32 because `std140` rounds a
-        // structure up to a multiple of 16.
+        // 12, 16, 20, 24, 28, and a block size of 32, which `std140`'s
+        // multiple of 16 leaves as it is.
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 32);
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE % 16, 0);
 
@@ -1009,6 +1027,8 @@ mod tests {
             bucket: 4,
             group_stride: 5,
             level_groups_at: 6,
+            cluster_base_at: 7,
+            cluster_count_at: 8,
         }
         .to_bytes();
         let uint_at =
@@ -1019,10 +1039,8 @@ mod tests {
         assert_eq!(uint_at(12), 4, "bucket at offset 12");
         assert_eq!(uint_at(16), 5, "group_stride at offset 16");
         assert_eq!(uint_at(20), 6, "level_groups_at at offset 20");
-        assert!(
-            bytes[24..].iter().all(|&byte| byte == 0),
-            "the padding has to be written, not left to whatever the buffer held"
-        );
+        assert_eq!(uint_at(24), 7, "cluster_base_at at offset 24");
+        assert_eq!(uint_at(28), 8, "cluster_count_at at offset 28");
     }
 
     /// The narrowing refuses rather than wraps, and names the field it refused.

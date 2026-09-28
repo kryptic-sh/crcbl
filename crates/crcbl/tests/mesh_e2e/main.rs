@@ -96,6 +96,7 @@ mod normal_map;
 mod occlusion_cull;
 mod occlusion_finish;
 mod occlusion_price;
+mod ranged_draws;
 mod rect_bound;
 mod render_scale;
 mod resize;

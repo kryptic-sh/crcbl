@@ -227,6 +227,16 @@ pub struct DrawGenDesc<'a> {
     /// per bucket whatever the path, exactly as it writes one draw argument
     /// per bucket.
     pub bucket_clusters: &'a [u32],
+    /// Where each bucket's mesh's clusters start in the cluster pool, in the
+    /// same order — [`TableOffsets::bucket_cluster_bases_at`]'s region, which
+    /// this pass packs and never reads.
+    ///
+    /// **Zero on every geometry path with no mesh stage**, like
+    /// [`bucket_clusters`](Self::bucket_clusters), and the same length as
+    /// [`bucket_meshes`](Self::bucket_meshes).
+    ///
+    /// [`TableOffsets::bucket_cluster_bases_at`]: draw_gen::TableOffsets::bucket_cluster_bases_at
+    pub bucket_cluster_bases: &'a [u32],
     /// Where each mesh's cluster DAG is, **indexed by mesh id** — so this is
     /// parallel to the mesh table and long enough for every id an instance can
     /// name, not one entry per bucket.
@@ -566,6 +576,12 @@ impl DrawGen {
             "one cluster count per bucket: a shorter table would leave a bucket's mesh dispatch \
              reading a cluster count that belongs to another bucket, or to nothing"
         );
+        assert_eq!(
+            desc.bucket_cluster_bases.len(),
+            desc.bucket_meshes.len(),
+            "one cluster base per bucket: a shorter table would leave a range of buckets drawn \
+             in one call reading a cluster base that belongs to another bucket, or to nothing"
+        );
         let mut rollback = Rollback::default();
         match Self::build(device, queue, desc, &mut rollback) {
             Ok(built) => Ok(built),
@@ -633,6 +649,7 @@ impl DrawGen {
             desc.bucket_meshes,
             desc.bucket_modes,
             desc.bucket_clusters,
+            desc.bucket_cluster_bases,
             desc.mesh_levels,
             desc.level_groups,
             desc.level_meshes,
@@ -2407,6 +2424,7 @@ mod tests {
                 bucket_meshes: &bucket_meshes,
                 bucket_modes: &zeroes,
                 bucket_clusters: &zeroes,
+                bucket_cluster_bases: &zeroes,
                 mesh_levels: &mesh_levels,
                 level_groups: &[],
                 level_meshes: &bucket_meshes,

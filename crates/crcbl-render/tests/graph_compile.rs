@@ -2648,6 +2648,7 @@ fn nothing_the_draw_generation_lets_a_shader_write_is_host_visible() {
             bucket_meshes: &[0],
             bucket_modes: &[0],
             bucket_clusters: &[4],
+            bucket_cluster_bases: &[0],
             // One mesh, no hierarchy: what the hysteresis state is *sized* by is
             // not what this asserts about it, and a flat record keeps the
             // fixture to the one thing under test.

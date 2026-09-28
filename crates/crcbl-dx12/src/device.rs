@@ -7642,6 +7642,9 @@ pub(crate) mod tests {
             bucket: 0,
             group_stride: PROBE_DAG_GROUPS,
             level_groups_at: 0,
+            // Read by the SPIR-V stages alone, which this backend never runs.
+            cluster_base_at: 0,
+            cluster_count_at: 0,
         };
 
         // --- the resources ---

@@ -200,11 +200,15 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial (updated 2026-09-28): P21's ranged draws shipped on the
-two indirect tails. The next is ranging the mesh tail (P21's first open item):
-at 938 buckets it records for 11.8 ms and spends 6.69 ms in `shadow` on the RX
-7900 XTX, against 1.58 ms and 0.045 ms on the ranged count tail. Keep
-startup-only and unexercised candidates behind measured frame-path work.
+Next performance trial (updated 2026-09-28): P21's ranged draws shipped on every
+tail, the mesh one included, with runs shorter than a measured threshold kept a
+call per bucket behind a task stage. The next is the mesh tail's task-stage cost
+(P21's first open item), the best-measured frame-path cost left: on this card's
+default path at 938 buckets the ranged mesh tail records for 3.92 ms and spends
+2.45 ms on the GPU, against 1.68 ms and 0.37 ms for the same ranged calls
+without a task stage. P20, P11, P12 and P13 are frame-path too but unpriced, so
+they rank behind it until measured. Keep startup-only and unexercised candidates
+behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -4186,31 +4190,69 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   survivors times the bucket-table prefix searched. Price `draw-bin` on a
   many-bucket scene, then consider a build-time `(level mesh, mode) → bucket`
   table. Preserve material-mode and LOD routing, empty buckets and `NO_BUCKET`.
-- **P21 — what is left of one call per bucket per pass per view.** The two
-  indirect tails now record one bind and one multi-draw per run of consecutive
-  buckets on a device granting `Features::DRAW_INDEX` (Vulkan only): the SPIR-V
-  vertex stages add `DrawIndex` to the bound block's start word and to its new
-  mesh word (`bucket_mesh_word`, written by `binMain`). Measured with
-  `mesh_e2e`'s `the_price_of_one_call_per_bucket` (release, validation off, RX
-  7900 XTX, 17,219 instances, 938 buckets, 1920x1080, 240 frames): 9,393 → 23
-  calls a frame; CPU record p50 3.16 → 1.58 ms (`IndirectCount`) and 2.96 → 1.61
-  ms (`IndirectPerBatch`); GPU `shadow` 0.797 → 0.045 ms. Still open:
-  - **The mesh tail, which is this device's default path, still records a call
-    per bucket**: record p50 11.8 ms against 0.86 ms for the same instances in
-    two buckets, and GPU `depth-prepass` 1.42, `forward` 1.45 and `shadow` 6.69
-    ms against 0.12, 0.23 and 0.80 ms on the per-bucket count tail. So on this
-    AMD card the mesh tail is the slowest path for a many-bucket scene on both
-    sides. Ranging it needs `draw_mesh_tasks_indirect` with `draw_count > 1` and
-    `DrawIndex` in `mesh_cluster.slang`'s task and mesh stages, and a per-bucket
-    table for `ClusterDrawConstants`' `cluster_base`, `cluster_count` and
-    `bucket`, which no block can index today. **Decided 2026-09-28: range the
-    mesh tail**, rather than pick `IndirectCount` over `MeshShader` when a scene
-    has many buckets. Mesh shading is the plan's primary geometry path, a
-    bucket-count heuristic would have two paths drawing the same scene depending
-    on content, and the 6.69 ms shadow cost is per-call dispatch work that
-    ranging removes. It is the next performance trial. Price the GPU side again
-    after it, since the mesh tail's per-bucket GPU cost may not be dispatch
-    overhead alone.
+- **P21 — what is left of one call per bucket per pass per view.** Every tail
+  now records one bind and one multi-draw per run of consecutive buckets on a
+  device granting `Features::DRAW_INDEX` (Vulkan only): the SPIR-V vertex stages
+  add `DrawIndex` to the bound block's start word and to its mesh word
+  (`bucket_mesh_word`, written by `binMain`), and `mesh_cluster.slang`'s SPIR-V
+  task and mesh stages add it to the block's start word, argument structure and
+  two table words (`ClusterDrawConstants::cluster_base_at` and
+  `cluster_count_at`, over `TableOffsets::bucket_cluster_bases_at` and
+  `bucket_clusters_at`); `taskMain` hands the index to `amplifiedMeshMain` in
+  the payload, because a mesh stage behind a task stage may not declare it.
+  Measured with `mesh_e2e`'s `the_price_of_one_call_per_bucket` (release,
+  validation off, RX 7900 XTX, 17,219 instances, 938 buckets, 1920x1080, 240
+  frames): 9,393 → 23 calls a frame; CPU record p50 3.16 → 1.58 ms
+  (`IndirectCount`), 2.96 → 1.61 ms (`IndirectPerBatch`) and 12.0 → 3.95 ms
+  (`MeshShader`); GPU `shadow` 0.797 → 0.045 ms on `IndirectCount` and 6.87 →
+  1.02 ms on `MeshShader`, whose `depth-prepass` went 1.44 → 0.69 and `forward`
+  1.48 → 0.74 ms. Still open:
+  - **The mesh tail's task stage still costs per draw, on both sides.** A
+    multi-draw `vkCmdDrawMeshTasksIndirectEXT` through a task stage costs more
+    per call than a single draw on this AMD driver, so behind a task stage only
+    runs of at least `TASK_STAGE_SHORTEST_RANGE` buckets (in
+    `forward/bucket_draws.rs`, where the measurement is recorded) are drawn as
+    one call. Swept with the price test's many-row bucket count, which is every
+    range's length (task stage on, three alternating rounds each; GPU is
+    `depth-prepass` + `forward` + `shadow` p50):
+
+    | run | per-bucket record / GPU ms | ranged record / GPU ms |
+    | --- | -------------------------- | ---------------------- |
+    | 4   | 1.53 / 1.08                | 1.65 / 1.21            |
+    | 8   | 1.60 / 1.09                | 1.69 / 1.22            |
+    | 16  | 1.74 / 1.16                | 1.69 / 1.23            |
+    | 32  | 1.99 / 1.31                | 1.73 / 1.25            |
+    | 64  | 2.29 / 1.61                | 1.81 / 1.29            |
+    | 128 | 3.22 / 2.20                | 1.92 / 1.34            |
+    | 938 | 12.0 / 9.80                | 3.92 / 2.45            |
+
+    Without a task stage a range was never measurably worse at any run length
+    (938: 3.35 → 1.68 ms record, 2.15 → 0.37 ms GPU), so the threshold applies
+    behind one alone. What is left:
+    - **The threshold is a whole-frame crossover, not a per-pass one.** The
+      shadow views gained from ranging at every run length measured, while the
+      depth prepass and colour pass lost GPU time to it up to 64 (at 32:
+      `depth-prepass` 0.43 → 0.47 ms, `forward` 0.47 → 0.57 ms, `shadow` 0.42 →
+      0.21 ms). A per-pass threshold — the camera passes near 64 to 128, the
+      shadow views near 2 — would fit better; not built, and it would need the
+      sweep repeated per pass on a scene with a different view count.
+    - **Ranged at 938 buckets the mesh tail still records for 3.92 ms and spends
+      2.45 ms on the GPU**, against 1.68 ms and 0.37 ms for the same ranged
+      calls without a task stage. Which part of the driver pays is not profiled.
+      A flat dispatch per pass, one task workgroup per (bucket, cluster,
+      surviving instance) from a list `draw_gen.slang` writes, would take the
+      draw count out of both; not designed or priced.
+    - **The price test's CPU record for a small row depends on the row it is
+      interleaved with.** The same 33 per-bucket calls on the 2-bucket mesh row
+      recorded in 0.81 to 2.06 ms across runs whose other row had 4 to 938
+      buckets, and in 0.90 against 1.54 ms in one run where the two rows'
+      recorded commands were identical. The GPU numbers did not move. So a
+      small-row CPU difference under about 0.7 ms there is not evidence; the
+      table above compares rows priced in alternating rounds of one process.
+    - **Also seen, not a bug:** on this scene of single-cluster cubes the task
+      stage's per-cluster cull costs more than it saves (ranged `depth-prepass`
+      0.69 ms with it, 0.031 ms without).
+
   - **About 0.75 ms of recording still scales with the bucket count on the
     ranged tails** (1.58 ms at 938 buckets against 0.85 ms at two, same calls).
     Not found: nothing profiled which pass pays it.
@@ -4222,6 +4264,7 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     lighting left open"; every golden and the byte-for-byte ranged versus
     per-bucket comparison (`render_e2e`'s
     `a_call_per_range_draws_every_scene_as_a_call_per_bucket_does`) held.
+
 - **P22 — what is left of the shadow cache's reach.** The record is now per
   group: the depth-read fields of its blocks (`depth_pass_reads` in
   `forward/shadow_inputs.rs`), the eye only for cascades and for lights whose

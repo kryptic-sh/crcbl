@@ -1416,6 +1416,7 @@ struct FrameScene {
 struct DrawTables {
     bucket_meshes: Vec<u32>,
     bucket_clusters: Vec<u32>,
+    bucket_cluster_bases: Vec<u32>,
     mesh_levels: Vec<level_select::MeshLevels>,
     level_groups: Vec<level_select::LevelGroup>,
     level_meshes: Vec<u32>,
@@ -4969,6 +4970,7 @@ impl ForwardRenderer {
                 bucket_meshes: &bucket_meshes,
                 bucket_modes: &bucket_modes,
                 bucket_clusters: &bucket_clusters,
+                bucket_cluster_bases: &bucket_cluster_bases,
                 mesh_levels: &mesh_levels,
                 level_groups: &level_groups,
                 level_meshes: &level_meshes,
@@ -5054,6 +5056,13 @@ impl ForwardRenderer {
                     // reason: two spellings of one offset is an overlay reading
                     // another region's words as a group.
                     level_groups_at: draws.table_offsets().level_groups_at,
+                    // The same two numbers again as words of that buffer,
+                    // which is where a draw that is not the first of a ranged
+                    // call reads them — `mesh_cluster.slang`'s "One call for
+                    // a range of buckets". This bucket's, not the region's
+                    // argument structure's: the tables hold one word a bucket.
+                    cluster_base_at: draws.table_offsets().bucket_cluster_bases_at + bucket,
+                    cluster_count_at: draws.table_offsets().bucket_clusters_at + bucket,
                 }
                 .to_bytes()
                 .to_vec()
@@ -5117,6 +5126,7 @@ impl ForwardRenderer {
                     bucket_meshes: &bucket_meshes,
                     bucket_modes: &bucket_modes,
                     bucket_clusters: &bucket_clusters,
+                    bucket_cluster_bases: &bucket_cluster_bases,
                     mesh_levels: &mesh_levels,
                     level_groups: &level_groups,
                     level_meshes: &level_meshes,
@@ -5575,6 +5585,7 @@ impl ForwardRenderer {
             draw_tables: DrawTables {
                 bucket_meshes,
                 bucket_clusters,
+                bucket_cluster_bases,
                 mesh_levels,
                 level_groups,
                 level_meshes,
@@ -11908,6 +11919,227 @@ mod tests {
         }
     }
 
+    /// **The mesh tail draws a range of buckets per call on a device with a
+    /// draw index, and a call per bucket without one** — with and without an
+    /// amplification stage, read off the recorded stream of a whole frame.
+    ///
+    /// Behind an amplification stage only a run of at least
+    /// [`TASK_STAGE_SHORTEST_RANGE`](bucket_draws::TASK_STAGE_SHORTEST_RANGE)
+    /// buckets becomes one call: the demo scene's short runs, and a scene of
+    /// one bucket fewer than that, stay a call per bucket, while a scene of
+    /// exactly that many draws its buckets in one call. Without the stage every
+    /// run is one call.
+    ///
+    /// Whatever was recorded, the colour pass's calls, unrolled a structure at
+    /// a time, are exactly the per-bucket dispatches [`mesh_dispatch_calls`]
+    /// names — every bucket's own extents, each once — and the counters are
+    /// what the frame recorded.
+    #[test]
+    fn a_draw_index_puts_the_mesh_tail_on_a_call_per_range() {
+        use crcbl_hal::null::Command;
+
+        let shortest = bucket_draws::TASK_STAGE_SHORTEST_RANGE;
+        // `None` is the demo scene; `Some(n)` is `n` copies of its cube, one
+        // bucket each, in one material mode — so one run of `n` buckets.
+        for cubes in [None, Some(shortest - 1), Some(shortest)] {
+            for task in [Features::TASK_SHADER, Features::empty()] {
+                for ranged in [false, true] {
+                    let case = format!("{cubes:?} cubes, {task:?}, ranged {ranged}");
+                    let recorder = Recorder::new();
+                    let optional = if ranged {
+                        task | Features::DRAW_INDEX
+                    } else {
+                        task
+                    };
+                    let (device, queue) = open_mesh_path(&recorder, optional);
+                    let mut scene = scene::demo();
+                    if let Some(cubes) = cubes {
+                        scene.meshes = vec![scene.meshes[DEMO_CUBE].clone(); cubes as usize];
+                        scene.capacities.meshes = cubes;
+                        scene.capacities.vertices =
+                            cubes * crcbl_shaders::mesh::CUBE_VERTEX_COUNT as u32;
+                        scene.capacities.indices =
+                            cubes * crcbl_shaders::mesh::CUBE_INDEX_COUNT as u32;
+                    }
+                    let mut renderer = ForwardRenderer::with_scene_on_path(
+                        device.as_ref(),
+                        queue,
+                        Format::Rgba8UnormSrgb,
+                        &scene,
+                        GeometryPath::MeshShader,
+                    )
+                    .expect("the mesh renderer builds");
+                    assert_eq!(renderer.range_limit.is_some(), ranged, "{case}");
+                    let buckets = renderer.bucket_constants.len();
+                    assert!(buckets > 1, "one bucket packs into one call either way");
+                    let rendered = frame(device.as_ref(), &mut renderer, queue);
+
+                    let commands = commands_in_pass(&recorder, "forward");
+                    let binds = commands
+                        .iter()
+                        .filter(|command| matches!(command, Command::BindGroup { slot: 0, .. }))
+                        .count();
+                    let calls: Vec<DrawIndirect> = commands
+                        .iter()
+                        .filter_map(|command| match command {
+                            Command::DrawMeshTasksIndirect(draw) => Some(*draw),
+                            Command::DrawMeshTasks { .. }
+                            | Command::DrawIndexedIndirect(_)
+                            | Command::DrawIndexedIndirectCount(_) => {
+                                panic!("{case}: the mesh tail recorded {command:?}")
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(binds, calls.len(), "{case}: one bind per call");
+                    // Each call a structure at a time: what a call per bucket
+                    // would have recorded for the buckets it stands for.
+                    let mut unrolled: Vec<DrawIndirect> = calls
+                        .iter()
+                        .flat_map(|call| {
+                            (0..call.draw_count).map(|draw| DrawIndirect {
+                                offset: call.offset + u64::from(draw) * u64::from(call.stride),
+                                draw_count: 1,
+                                ..*call
+                            })
+                        })
+                        .collect();
+                    unrolled.sort_by_key(|draw| draw.offset);
+                    assert_eq!(
+                        unrolled,
+                        mesh_dispatch_calls(&renderer),
+                        "{case}: every bucket's own extents, each once"
+                    );
+                    assert!(
+                        calls
+                            .iter()
+                            .all(|call| call.stride
+                                == crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32),
+                        "{case}: a range steps one structure a bucket"
+                    );
+                    let counts: Vec<u32> = calls.iter().map(|call| call.draw_count).collect();
+                    let per_bucket = vec![1; buckets];
+                    match (ranged, task.is_empty(), cubes) {
+                        (false, _, _) => assert_eq!(counts, per_bucket, "{case}"),
+                        // Behind a task stage, a run shorter than the
+                        // threshold is its buckets one by one...
+                        (true, false, None) => assert_eq!(counts, per_bucket, "{case}"),
+                        (true, false, Some(cubes)) if cubes < shortest => {
+                            assert_eq!(counts, per_bucket, "{case}");
+                        }
+                        // ...and a run of it is one call; without the stage
+                        // every run is.
+                        (true, _, Some(cubes)) => assert_eq!(counts, vec![cubes], "{case}"),
+                        (true, true, None) => assert!(
+                            calls.len() < buckets,
+                            "{case}: {counts:?} is a call per bucket over {buckets} buckets"
+                        ),
+                    }
+                    assert_eq!(
+                        renderer.counters().draws,
+                        recorded_draws(&recorder) as u64,
+                        "{case}"
+                    );
+                    rendered.finish(device.as_ref(), renderer);
+                    recorder.assert_valid();
+                }
+            }
+        }
+    }
+
+    /// **Draw `d` of a ranged mesh call reads the words bucket `first + d`'s own
+    /// block carries**, in every draw region.
+    ///
+    /// The host half of `mesh_cluster.slang`'s "One call for a range of
+    /// buckets": a ranged call binds its first bucket's block alone, and the
+    /// SPIR-V stages add the draw index to its `start_at` and `bucket` and to
+    /// the two table words it names. So each bucket's block has to sit one word
+    /// past the one before in all four, and the table words have to hold the
+    /// bucket's own cluster base and count — read out of the bytes that reached
+    /// the device, since a block written wrong leaves the renderer's fields
+    /// right.
+    #[test]
+    fn a_mesh_block_names_the_words_a_ranged_draw_reads() {
+        let recorder = Recorder::new();
+        let (device, queue) = open_mesh_path(&recorder, Features::TASK_SHADER);
+        let renderer = ForwardRenderer::new(device.as_ref(), queue, Format::Rgba8UnormSrgb)
+            .expect("the mesh renderer builds");
+        let blocks = recorder
+            .buffer_bytes(renderer.draw_constants)
+            .expect("the blocks are live");
+        let tables = recorder
+            .buffer_bytes(renderer.primary.draws.tables())
+            .expect("the tables are live");
+        let word = |bytes: &[u8], at: usize| {
+            u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+        };
+        let buckets = renderer.bucket_constants.len();
+        assert!(buckets > 1, "a range needs two buckets to step between");
+        let bucket_count = u32::try_from(buckets).expect("a few buckets");
+        let stride = renderer.bucket_constants[1] - renderer.bucket_constants[0];
+        let block = |region: u32, bucket: u32| {
+            let at = ((region * bucket_count + bucket) * stride) as usize;
+            let field = |index: usize| word(&blocks, at + index * 4);
+            crcbl_shaders::meshlet::ClusterDrawConstants {
+                start_at: field(0),
+                cluster_base: field(1),
+                cluster_count: field(2),
+                bucket: field(3),
+                group_stride: field(4),
+                level_groups_at: field(5),
+                cluster_base_at: field(6),
+                cluster_count_at: field(7),
+            }
+        };
+        let mut bases = Vec::new();
+        for region in 0..crcbl_shaders::draw_gen::DRAW_REGIONS {
+            let first = block(region, 0);
+            for bucket in 0..bucket_count {
+                let own = block(region, bucket);
+                assert_eq!(
+                    word(&tables, own.cluster_base_at as usize * 4),
+                    own.cluster_base,
+                    "region {region} bucket {bucket}: the base word holds the base"
+                );
+                assert_eq!(
+                    word(&tables, own.cluster_count_at as usize * 4),
+                    own.cluster_count,
+                    "region {region} bucket {bucket}: the count word holds the count"
+                );
+                // What draw `bucket` of a call bound at bucket 0's block reads.
+                assert_eq!(
+                    (
+                        first.start_at + bucket,
+                        first.bucket + bucket,
+                        first.cluster_base_at + bucket,
+                        first.cluster_count_at + bucket,
+                        first.group_stride,
+                        first.level_groups_at,
+                    ),
+                    (
+                        own.start_at,
+                        own.bucket,
+                        own.cluster_base_at,
+                        own.cluster_count_at,
+                        own.group_stride,
+                        own.level_groups_at,
+                    ),
+                    "region {region} bucket {bucket}"
+                );
+                if region == 0 {
+                    bases.push(own.cluster_base);
+                }
+            }
+        }
+        assert!(
+            bases.windows(2).any(|pair| pair[0] != pair[1]),
+            "the buckets' meshes start at different clusters, so a range reading its \
+             first bucket's base for every draw would be seen: {bases:?}"
+        );
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
     #[test]
     fn exact_geometry_path_builds_supported_tails_and_refuses_missing_features_without_allocating()
     {
@@ -15180,9 +15412,16 @@ mod tests {
     /// Asked for rather than merely reported, because a device grants what it
     /// enabled: leaving mesh shaders out of the optional set opens a device on
     /// an indirect tail and tests nothing.
+    ///
+    /// The adapter has [`Features::DRAW_INDEX`] too, which a device is granted
+    /// only where `optional` asks for it — so a test that does not gets the
+    /// mesh tail's call per bucket.
     fn open_mesh_path(recorder: &Recorder, optional: Features) -> (Box<dyn Device>, QueueHandle) {
         let caps = crcbl_hal::DeviceCaps {
-            features: Features::GPU_DRIVEN | Features::MESH_SHADER | Features::TASK_SHADER,
+            features: Features::GPU_DRIVEN
+                | Features::MESH_SHADER
+                | Features::TASK_SHADER
+                | Features::DRAW_INDEX,
             limits: crcbl_hal::Limits::desktop(),
         };
         let instance = NullInstance::new(caps).with_recorder(recorder.clone());

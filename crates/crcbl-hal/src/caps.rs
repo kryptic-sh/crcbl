@@ -303,6 +303,12 @@ bitflags::bitflags! {
         /// `crcbl-render`'s forward passes record a call per range rather than
         /// a bind and a call per bucket where a device has both.
         ///
+        /// **On a device with [`MESH_SHADER`](Self::MESH_SHADER) it covers the
+        /// task and mesh stages too**: SPIR-V declares `DrawIndex` there under
+        /// `MeshShadingEXT`, and a multi-draw `draw_mesh_tasks_indirect` hands
+        /// each draw's workgroups its index, so the mesh tail ranges on the
+        /// same flag.
+        ///
         /// Vulkan only. WGSL, MSL and HLSL have no builtin for it — D3D12's
         /// `ExecuteIndirect` and Metal's indirect draws carry no draw index to
         /// a shader — so no other backend reports it. Optional and **not** part

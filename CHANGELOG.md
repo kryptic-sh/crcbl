@@ -22,6 +22,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   per bucket: `crcbl_shaders::draw_gen::bucket_mesh_word` is new, `face_runs_at`
   moves one bucket count further in and `runs_words` is one bucket count larger.
 
+- **`crcbl_shaders::meshlet::ClusterDrawConstants` has `cluster_base_at` and
+  `cluster_count_at` fields**, the table-buffer words holding the bucket's
+  cluster base and count, which the SPIR-V task and mesh stages now read; a
+  struct literal needs them. They fill the block's former padding, so
+  `CLUSTER_DRAW_CONSTANTS_SIZE` is unchanged. The table buffer behind them gains
+  a per-bucket cluster-base region: `crcbl_shaders::draw_gen::pack_tables` takes
+  a `bucket_cluster_bases` slice after `bucket_clusters`, `TableOffsets` has
+  `bucket_cluster_bases_at`, and `crcbl_render::DrawGenDesc` has a
+  `bucket_cluster_bases` field.
+
 - **`crcbl_input::Binding` has a `ButtonChord { modifier, button }` variant**
   (see Added). `Binding` is not `#[non_exhaustive]`, so an exhaustive `match` on
   it needs the new arm.
@@ -364,11 +374,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   before. Asked for by EW, which rebuilt its finished list in window pixels
   every frame.
 
-- **`crcbl_hal::Features::DRAW_INDEX`**: a vertex shader can read which draw of
-  a multi-draw indirect call it belongs to (SPIR-V `DrawIndex`). `crcbl-vk`
-  declares it from `shaderDrawParameters`; D3D12, Metal and WebGPU cannot and do
-  not. It is optional and outside `GPU_DRIVEN`, and `GpuContextDesc::default()`
-  and `OffscreenSetup::OPTIONAL_FEATURES` ask for it.
+- **`crcbl_hal::Features::DRAW_INDEX`**: a vertex shader — and, on a mesh
+  device, a task or mesh shader — can read which draw of a multi-draw indirect
+  call it belongs to (SPIR-V `DrawIndex`). `crcbl-vk` declares it from
+  `shaderDrawParameters`; D3D12, Metal and WebGPU cannot and do not. It is
+  optional and outside `GPU_DRIVEN`, and `GpuContextDesc::default()` and
+  `OffscreenSetup::OPTIONAL_FEATURES` ask for it.
   `OffscreenSetup::open_on_path_with` opens a builtin scene on an exact geometry
   tail with a chosen feature request.
 
@@ -3429,20 +3440,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
-- **The indirect geometry tails draw a range of buckets per call on Vulkan.**
-  Where a device grants `Features::DRAW_INDEX` and `MULTI_DRAW_INDIRECT`, the
-  depth prepass, the colour pass, every shadow view and both reflective shadow
-  maps record one bind of the first bucket's constant block and one
-  `draw_indexed_indirect` per run of consecutive buckets in a material-mode
-  partition, instead of a bind and a call per bucket; each draw finds its run
-  and its mesh through `DrawIndex`. Measured on Vulkan, RX 7900 XTX, release,
-  validation off, 17,219 instances in 938 buckets under a turning sun and a
-  moving point light at 1920x1080 over 240 frames (`mesh_e2e`'s
-  `the_price_of_one_call_per_bucket`): 9,393 → 23 calls a frame; CPU record p50
-  3.16 → 1.58 ms on `IndirectCount` and 2.96 → 1.61 ms on `IndirectPerBatch`;
-  GPU `depth-prepass` 0.125 → 0.024 ms and `shadow` 0.797 → 0.045 ms on
-  `IndirectCount`. Frames are byte-identical to the per-bucket tail. The
-  mesh-shader tail, D3D12, Metal and WebGPU keep a call per bucket.
+- **Every geometry tail draws a range of buckets per call on Vulkan.** Where a
+  device grants `Features::DRAW_INDEX` and `MULTI_DRAW_INDIRECT`, the depth
+  prepass, the colour pass, every shadow view and both reflective shadow maps
+  record one bind of the first bucket's constant block and one
+  `draw_indexed_indirect` — or, on the mesh tail, one `draw_mesh_tasks_indirect`
+  — per run of consecutive buckets in a material-mode partition, instead of a
+  bind and a call per bucket; each draw finds its bucket's words through
+  `DrawIndex`. Measured on Vulkan, RX 7900 XTX, release, validation off, 17,219
+  instances in 938 buckets under a turning sun and a moving point light at
+  1920x1080 over 240 frames (`mesh_e2e`'s `the_price_of_one_call_per_bucket`):
+  9,393 → 23 calls a frame; CPU record p50 3.16 → 1.58 ms on `IndirectCount` and
+  2.96 → 1.61 ms on `IndirectPerBatch`; GPU `depth-prepass` 0.125 → 0.024 ms and
+  `shadow` 0.797 → 0.045 ms on `IndirectCount`. On the mesh tail (task stage
+  on), the same scene: CPU record p50 12.0 → 3.95 ms; GPU `depth-prepass` 1.44 →
+  0.69 ms, `forward` 1.48 → 0.74 ms and `shadow` 6.87 → 1.02 ms. Behind a task
+  stage the mesh tail draws a run of buckets as one call only when it is at
+  least a measured length (`TASK_STAGE_SHORTEST_RANGE` in `crcbl-render`), and a
+  shorter run a call per bucket: on this card a multi-draw through the task
+  stage cost more than its buckets called one by one for short runs, so a scene
+  of a few buckets records and draws what it did before. Frames are
+  byte-identical to the per-bucket tail on every tail. D3D12, Metal and WebGPU
+  keep a call per bucket.
 
 - **A shadowed point or spot light keeps its maps while the camera moves, and a
   moving instance redraws only the maps it can be seen in.** The shadow atlas's

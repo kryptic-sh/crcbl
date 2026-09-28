@@ -6415,18 +6415,31 @@ fn draw_scene_on_every_geometry_path_measuring(
 }
 
 /// **A range of buckets per call draws the frame a call per bucket draws,
-/// byte for byte**, on both indirect tails and every scene that draws forward
+/// byte for byte**, on every tail — both indirect ones and the mesh one, with
+/// and without its amplification stage — and every scene that draws forward
 /// geometry.
 ///
 /// The two arms are one scene on one exact tail, on devices asked for the same
 /// features but for [`Features::DRAW_INDEX`] — which is what moves
 /// `ForwardRenderer`'s prepass, colour pass and every shadow view from a bind
 /// and a call per bucket onto one bind and one multi-draw per range, each draw
-/// finding its bucket's run and mesh through SPIR-V's `DrawIndex`. Same
-/// adapter, same driver, same shaders: no pixel may differ. A draw of a range
-/// that read its first bucket's words for every bucket moves every mesh but the
-/// first of each range onto another's geometry, which the scenes with more than
-/// one mesh show at once.
+/// finding its bucket's words through SPIR-V's `DrawIndex`: the run and mesh
+/// in the vertex stages, the run, clusters and argument structure in the task
+/// and mesh stages. Same adapter, same driver, same shaders: no pixel may
+/// differ. A draw of a range that read its first bucket's words for every
+/// bucket moves every mesh but the first of each range onto another's
+/// geometry, which the scenes with more than one mesh show at once.
+///
+/// The mesh tail is drawn twice because it reads the index in two places: the
+/// amplification stage hands it on in the payload, and `meshMain` — the stage
+/// a device without `TASK_SHADER` draws through — reads its own. That second
+/// arm skips [`Scene::Dunes`], whose hierarchy no un-amplified stage can draw.
+///
+/// **Behind a task stage these scenes' runs are all shorter than the shortest
+/// range the mesh tail draws in one call**, so that arm compares the split
+/// path — a call per bucket recorded out of a ranged list — against the plain
+/// one. `mesh_e2e`'s `a_ranged_mesh_field_draws_as_a_call_per_bucket_does`
+/// draws a run long enough to become one call through the task stage.
 ///
 /// A backend that does not declare the feature — every one but Vulkan — has
 /// nothing to compare, and says so rather than passing quietly.
@@ -6447,13 +6460,26 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
         );
         return;
     }
-    let paths = [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch]
-        .into_iter()
-        .filter(|path| {
-            *path != GeometryPath::IndirectCount || features.contains(Features::DRAW_INDIRECT_COUNT)
-        });
+    // Each arm is a tail and the features its devices are *not* asked for, on
+    // top of the draw index the call-per-bucket half drops.
+    let arms = [
+        (GeometryPath::IndirectCount, Features::empty()),
+        (GeometryPath::IndirectPerBatch, Features::empty()),
+        (GeometryPath::MeshShader, Features::empty()),
+        (GeometryPath::MeshShader, Features::TASK_SHADER),
+    ]
+    .into_iter()
+    .filter(|(path, dropped)| match path {
+        GeometryPath::IndirectCount => features.contains(Features::DRAW_INDIRECT_COUNT),
+        GeometryPath::IndirectPerBatch => true,
+        GeometryPath::MeshShader => {
+            features.contains(Features::MESH_SHADER)
+                && (dropped.contains(Features::TASK_SHADER)
+                    || features.contains(Features::TASK_SHADER))
+        }
+    });
     let mut compared = 0;
-    for path in paths {
+    for (path, dropped) in arms {
         for scene in [
             Scene::Cube,
             Scene::Lights,
@@ -6472,11 +6498,15 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
             Scene::Probes,
             Scene::Dunes,
         ] {
+            if matches!(scene, Scene::Dunes) && dropped.contains(Features::TASK_SHADER) {
+                continue;
+            }
             let frames = [false, true].map(|ranged| {
+                let asked = OffscreenSetup::OPTIONAL_FEATURES.difference(dropped);
                 let asked = if ranged {
-                    OffscreenSetup::OPTIONAL_FEATURES
+                    asked
                 } else {
-                    OffscreenSetup::OPTIONAL_FEATURES.difference(Features::DRAW_INDEX)
+                    asked.difference(Features::DRAW_INDEX)
                 };
                 let setup =
                     OffscreenSetup::open_on_path_with(EXTENT.0, EXTENT.1, scene, path, asked)
@@ -6487,6 +6517,11 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
                     setup.caps().features.contains(Features::DRAW_INDEX),
                     ranged,
                     "{scene:?} on {path:?}: the device was not granted what the arm asked for"
+                );
+                assert!(
+                    !setup.caps().features.intersects(dropped),
+                    "{scene:?} on {path:?}: the device was granted {dropped:?}, which the arm \
+                     dropped"
                 );
                 let format = setup.format();
                 let ((width, height), pixels) = setup
@@ -6499,8 +6534,8 @@ fn a_call_per_range_draws_every_scene_as_a_call_per_bucket_does() {
             let (differing, worst, named) = channels_differing(&frames[0], &frames[1]);
             assert_eq!(
                 differing, 0,
-                "{scene:?} on {path:?}: a call per range differs from a call per bucket in \
-                 {differing} channels (worst {worst}), first at {named:?}"
+                "{scene:?} on {path:?}, dropping {dropped:?}: a call per range differs from a \
+                 call per bucket in {differing} channels (worst {worst}), first at {named:?}"
             );
             compared += 1;
         }

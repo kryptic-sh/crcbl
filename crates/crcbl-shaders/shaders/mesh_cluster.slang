@@ -900,6 +900,14 @@ struct ClusterPayload
     /// The slot in this bucket's run of surviving instances, which is that
     /// group's `SV_GroupID.y`.
     uint instance;
+#if defined(CRCBL_TARGET_SPIRV)
+    /// Which draw of the task stage's multi-draw call this pair came from —
+    /// its `DrawIndex`, handed on because a mesh stage behind a task stage may
+    /// not read one itself (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631`).
+    /// SPIR-V only, like the rest of "One call for a range of buckets" below:
+    /// every other target's payload is the two words it always was.
+    uint draw_index;
+#endif
 };
 
 /// Where to find this bucket's run of visible instances, and which clusters its
@@ -944,6 +952,17 @@ struct ClusterDrawConstants
     /// exactly, and fixed for the life of the renderer besides: the host packs
     /// the regions when a mesh becomes resident, not per frame.
     uint level_groups_at;
+    /// The word of `tables` holding `cluster_base` — this bucket's entry of
+    /// the per-bucket cluster bases `crcbl_shaders::draw_gen::pack_tables`
+    /// packs.
+    ///
+    /// **What a SPIR-V draw reads instead of `cluster_base`**, so that one
+    /// block can stand for a range of consecutive buckets: see `cluster_source`
+    /// below. The buckets after the first are the words after this one.
+    uint cluster_base_at;
+    /// The word of `tables` holding `cluster_count` — `draw_gen.slang`'s
+    /// `bucket_clusters` region, at this bucket — on `cluster_base_at`'s terms.
+    uint cluster_count_at;
 };
 
 /// One group of a mesh's cluster DAG, matching `struct LevelGroup` in
@@ -1084,10 +1103,11 @@ StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t23, space0);
 /// Every host-written table `draw_gen.slang` reads, as one flat array of words —
 /// the same buffer and the same regions, described there in full.
 ///
-/// **Read here for one region only**: the `LevelGroup` records at
-/// `draw.level_groups_at`, through `level_group_at` below. The screen-error
-/// heatmap is the only reader, and what it wants is the group cost the cut was
-/// judged on rather than the cut itself, which arrives through `group_state`.
+/// **Read here for the `LevelGroup` records** at `draw.level_groups_at`,
+/// through `level_group_at` below. The screen-error heatmap is that reader,
+/// and what it wants is the group cost the cut was judged on rather than the
+/// cut itself, which arrives through `group_state`. On SPIR-V the per-bucket
+/// cluster bases and counts are read here too — see `cluster_source` below.
 ///
 /// **Bound wherever `clusters` is**, so both mesh entry points can read it: a
 /// device with no amplification stage still draws through `emit_cluster`, and a
@@ -1095,6 +1115,77 @@ StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t23, space0);
 /// read out of an empty slot.
 [[vk::binding(24, 0)]]
 StructuredBuffer<uint> tables D3D12_REGISTER(t24, space0);
+
+// # One call for a range of buckets, on SPIR-V
+//
+// `mesh.slang`'s section of the same name, for the mesh tail: a device
+// reporting `crcbl_hal::Features::DRAW_INDEX` draws a whole range of
+// consecutive buckets with **one** `draw_mesh_tasks_indirect` of `draw_count`
+// structures and one bind of the first bucket's `ClusterDrawConstants`, and
+// SPIR-V's `DrawIndex` says which draw — which bucket past the first — a
+// workgroup belongs to. The four per-bucket numbers are then each one word a
+// bucket past the block's:
+//
+//   * the run start — `start_at`, a start word a bucket
+//     (`crcbl_shaders::draw_gen::run_start_word`);
+//   * the argument structure — `bucket`, one a bucket in a region;
+//   * the cluster base and count — `cluster_base_at` and `cluster_count_at`,
+//     each a word a bucket of `tables`.
+//
+// `group_stride` and `level_groups_at` are the same in every block, so the
+// first bucket's serve the range.
+//
+// `DrawIndex` is legal in both mesh-shading stages under `MeshShadingEXT`, but
+// **a mesh stage behind a task stage may not declare it**
+// (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631`), so `taskMain` reads it
+// and hands it on in the payload, and `meshMain` — which has no task stage —
+// reads its own. Slang declares the `DrawParameters` capability for it too,
+// which `crcbl-vk` enables on every device it opens (`shaderDrawParameters`).
+//
+// Only SPIR-V has the index, so every other target reads the block exactly as
+// it always did, and a device on those records a call per bucket. On SPIR-V a
+// call per bucket reads a draw index of zero, which is the same words.
+#if defined(CRCBL_TARGET_SPIRV)
+#define DRAW_INDEX_PARAMETER , uint draw_index: SV_DrawIndex
+#define DRAW_INDEX draw_index
+#define PAYLOAD_DRAW_INDEX(payload) payload.draw_index
+#else
+#define DRAW_INDEX_PARAMETER
+#define DRAW_INDEX 0u
+#define PAYLOAD_DRAW_INDEX(payload) 0u
+#endif
+
+/// Which bucket one draw of the call is, as the four numbers a stage reads of
+/// it.
+struct ClusterSource
+{
+    /// The word of `visible_instances` holding where the draw's run starts.
+    uint start_at;
+    /// The draw's bucket's mesh's first cluster in `clusters`.
+    uint cluster_base;
+    /// How many clusters that mesh has.
+    uint cluster_count;
+    /// The element of `draw_args` holding the draw's instance count.
+    uint bucket;
+};
+
+/// Draw `draw_index` of the call's `ClusterSource` — see the section above.
+ClusterSource cluster_source(uint draw_index)
+{
+    ClusterSource source;
+#if defined(CRCBL_TARGET_SPIRV)
+    source.start_at = draw.start_at + draw_index;
+    source.cluster_base = tables[draw.cluster_base_at + draw_index];
+    source.cluster_count = tables[draw.cluster_count_at + draw_index];
+    source.bucket = draw.bucket + draw_index;
+#else
+    source.start_at = draw.start_at;
+    source.cluster_base = draw.cluster_base;
+    source.cluster_count = draw.cluster_count;
+    source.bucket = draw.bucket;
+#endif
+    return source;
+}
 
 /// Every resident mesh's clusters, back to back, in mesh order. A bucket's
 /// mesh names its own run with `draw.cluster_base` and `draw.cluster_count`.
@@ -1330,11 +1421,11 @@ float3 cluster_heat(uint cluster_index, float4x4 transform)
 /// Slang lowers every `?:` into an `if`/`else` pair. `min(1, max(a, b) - b)` is
 /// `1` exactly when `a > b`, and the `max` is what stops the unsigned
 /// subtraction wrapping.
-uint group_is_live(uint3 group)
+uint group_is_live(uint3 group, ClusterSource source)
 {
-    uint drawn = draw_args[draw.bucket].instance_count;
+    uint drawn = draw_args[source.bucket].instance_count;
     return min(1u, max(drawn, group.y) - group.y)
-         * min(1u, max(draw.cluster_count, group.x) - group.x);
+         * min(1u, max(source.cluster_count, group.x) - group.x);
 }
 
 /// How far a basis may be from carrying every angle across unchanged, relative
@@ -1557,12 +1648,16 @@ float3x3 normal_basis(float3x3 basis)
 /// `active` is `0` for a group with nothing to draw, which emits no vertices
 /// and no primitives. The amplification stage passes `1` unconditionally: a
 /// group it dispatched is one it kept.
+///
+/// `start_at` is the draw's `ClusterSource::start_at`: the word holding where
+/// its bucket's run starts.
 [ForceInline]
 void emit_cluster(
     uint lane,
     uint cluster_index,
     uint instance_slot,
     uint active,
+    uint start_at,
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
     out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
 {
@@ -1586,7 +1681,7 @@ void emit_cluster(
     // The instance names its mesh and the mesh names its vertices, exactly as
     // in `mesh.slang`: nothing on this path came from the dispatch, which is
     // what lets one bucket cover whatever culling left it.
-    uint run = visible_instances[draw.start_at];
+    uint run = visible_instances[start_at];
     GpuInstance instance = instances[visible_instances[run + instance_slot]];
     GpuMesh mesh = meshes[instance.mesh];
 
@@ -1714,10 +1809,12 @@ void meshMain(
     uint lane: SV_GroupThreadID,
     uint3 group: SV_GroupID,
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
-    out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
+    out indices uint3 tris[MAX_CLUSTER_TRIANGLES] DRAW_INDEX_PARAMETER)
 {
-    uint active = group_is_live(group);
-    emit_cluster(lane, draw.cluster_base + group.x * active, group.y, active, verts, tris);
+    ClusterSource source = cluster_source(DRAW_INDEX);
+    uint active = group_is_live(group, source);
+    emit_cluster(
+        lane, source.cluster_base + group.x * active, group.y, active, source.start_at, verts, tris);
 }
 
 /// §3.5's per-cluster cull: one workgroup per (cluster, instance slot), and a
@@ -1748,15 +1845,16 @@ void meshMain(
 /// reached unbranched.
 [shader("amplification")]
 [numthreads(1, 1, 1)]
-void taskMain(uint3 group: SV_GroupID)
+void taskMain(uint3 group: SV_GroupID DRAW_INDEX_PARAMETER)
 {
-    uint active = group_is_live(group);
-    Meshlet cluster = clusters[draw.cluster_base + group.x * active];
-    uint run = visible_instances[draw.start_at];
+    ClusterSource source = cluster_source(DRAW_INDEX);
+    uint active = group_is_live(group, source);
+    Meshlet cluster = clusters[source.cluster_base + group.x * active];
+    uint run = visible_instances[source.start_at];
     uint instance_index = visible_instances[run + group.y * active] * active;
     GpuInstance instance = instances[instance_index];
 
-    uint index = draw.cluster_base + group.x * active;
+    uint index = source.cluster_base + group.x * active;
     uint selected = cluster_is_selected(cluster_select[index], instance_index);
     // A skinned instance keeps its selected clusters. Their source-mesh sphere
     // and normal cone do not describe vertices fetched through the override.
@@ -1802,6 +1900,9 @@ void taskMain(uint3 group: SV_GroupID)
     ClusterPayload payload;
     payload.cluster = group.x;
     payload.instance = group.y;
+#if defined(CRCBL_TARGET_SPIRV)
+    payload.draw_index = DRAW_INDEX;
+#endif
     DispatchMesh(keep, 1, 1, payload);
 }
 
@@ -1820,11 +1921,13 @@ void amplifiedMeshMain(
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
     out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
 {
+    ClusterSource source = cluster_source(PAYLOAD_DRAW_INDEX(amplification));
     emit_cluster(
         lane,
-        draw.cluster_base + amplification.cluster,
+        source.cluster_base + amplification.cluster,
         amplification.instance,
         1u,
+        source.start_at,
         verts,
         tris);
 }
