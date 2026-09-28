@@ -344,10 +344,10 @@ spirv-entry = meshMain:spirv/mesh_cluster.mesh.spv:2cd08c6a90bf3ecde6cacd6940cb3
 spirv-entry = taskMain:spirv/mesh_cluster.task.spv:0f97454e332a82e8959fd29b554acf197e43c6f3e27e258115c6851d21635a9f
 spirv-entry = amplifiedMeshMain:spirv/mesh_cluster.amplified_mesh.spv:9ae742d279e04812655ac07697b8717276fcb1e035ac09b13e15f1e5e9d0ae3c
 msl = msl/mesh_cluster.metal
-msl-sha256 = cc4b4db62c021b7326c884342c1d7c60c411be198000db43dc78a1c7376fcefe
-dxil = meshMain:dxil/mesh_cluster.mesh.dxil:4e6380df54cf25f469c33b384bd67a3e5edd2e212bbd1bbb56416a496a5d9a62
-dxil = taskMain:dxil/mesh_cluster.task.dxil:b7cd0bc24ee82f195a554a498b6b7b28ef0333f1caacb6ccf5d7e13f0d915d5c
-dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:0906da760c136cb08a6f112f69310b092fd07b2bc60cf0f9598eb34652c34c70
+msl-sha256 = a8f31d9075c83938977c8ff2b4943ed70eee0d3acf962215ee9d9f206437dab2
+dxil = meshMain:dxil/mesh_cluster.mesh.dxil:7fda7320b1095e933aa58cdb0a5958a14e5770c6de87a805a542cd02d895af21
+dxil = taskMain:dxil/mesh_cluster.task.dxil:0c7c1a1be9332e22cb8734d38320b318f7b2e6abb2e4ca85fe3db192f5076238
+dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:a572bb5fb8e99ef9f7329e4578f89e32094e05d8b33b403c3f1229aab4babf0b
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext
 
 [mesh_shader]
