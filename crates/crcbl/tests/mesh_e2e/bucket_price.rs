@@ -365,10 +365,17 @@ fn the_price_of_one_call_per_bucket() {
         headless.finish();
         features
     };
+    // A suite run prices one path, the first this device has in the order
+    // below: the ranged tails first, because they are what this test is about.
+    // Every path builds its own renderers, and on the macOS runner, under
+    // Metal's API and shader validation, each one costs seconds, so three
+    // paths outlasted nextest's per-test limit even at `GATE_MANY` buckets.
+    // A price run prices them all.
+    let mut priced_paths = 0;
     for (path, needs) in [
-        (GeometryPath::MeshShader, Features::MESH_SHADER),
         (GeometryPath::IndirectCount, Features::DRAW_INDIRECT_COUNT),
         (GeometryPath::IndirectPerBatch, Features::empty()),
+        (GeometryPath::MeshShader, Features::MESH_SHADER),
     ] {
         if !features.contains(needs) {
             eprintln!(
@@ -377,6 +384,14 @@ fn the_price_of_one_call_per_bucket() {
             );
             continue;
         }
+        if priced_paths > 0 && !priced() {
+            eprintln!(
+                "{}: {path:?} is priced on a price run only; this is a suite run",
+                crate::SUITE
+            );
+            continue;
+        }
+        priced_paths += 1;
         let (many, few) = price(path, false, extent, frames);
         assert!(
             many > few,
@@ -402,4 +417,8 @@ fn the_price_of_one_call_per_bucket() {
             );
         }
     }
+    assert!(
+        priced_paths > 0,
+        "no geometry path was priced on this device"
+    );
 }
