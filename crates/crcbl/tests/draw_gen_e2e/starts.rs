@@ -209,6 +209,14 @@ struct StartsProbe {
     pipeline: crcbl::hal::ComputePipelineHandle,
 }
 
+/// The size of every buffer bound only because the layout names it.
+///
+/// `startsMain` reads none of them, but a backend still validates each
+/// binding: D3D12 binds storage as a structured view and refuses a buffer
+/// smaller than one element of its structure, so a placeholder must hold
+/// at least one of the largest, the instance record.
+const UNREAD_BINDING_BYTES: u64 = 4096;
+
 impl StartsProbe {
     fn new(headless: &Headless) -> Self {
         let device = headless.device.as_ref();
@@ -305,7 +313,7 @@ impl StartsProbe {
         let mut read = |label| {
             buffer(
                 label,
-                4 * 32,
+                UNREAD_BINDING_BYTES,
                 BufferUsage::STORAGE,
                 MemoryLocation::HostUpload,
             )
@@ -338,13 +346,14 @@ impl StartsProbe {
         // Bound because the layout names them; `startsMain` reads neither.
         let args = buffer(
             "starts probe args",
-            bytes_for(case.regions() as usize * case.buckets as usize * DRAW_ARGS_WORDS),
+            bytes_for(case.regions() as usize * case.buckets as usize * DRAW_ARGS_WORDS)
+                .max(UNREAD_BINDING_BYTES),
             BufferUsage::STORAGE,
             MemoryLocation::DeviceLocal,
         );
         let group_state = buffer(
             "starts probe group state",
-            4,
+            UNREAD_BINDING_BYTES,
             BufferUsage::STORAGE,
             MemoryLocation::DeviceLocal,
         );
