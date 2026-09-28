@@ -4195,6 +4195,21 @@ fn surface_pixels(at: glam::Vec2, extent: (u32, u32)) -> glam::Vec2 {
     )
 }
 
+/// `extent` window pixels in logical pixels at `scale` window pixels per
+/// logical pixel, each axis rounded to the nearest whole pixel: the layouts it
+/// feeds take whole pixels, and the rounding moves an edge by under one
+/// logical pixel. At a scale of one it is `extent` exactly.
+fn logical_extent(extent: (u32, u32), scale: f32) -> (u32, u32) {
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_precision_loss,
+        reason = "a window's pixel count over a positive scale, well inside both types"
+    )]
+    let logical = |pixels: u32| (pixels as f32 / scale).round() as u32;
+    (logical(extent.0), logical(extent.1))
+}
+
 /// Framebuffer pixels to the −1…1 the game binds against, +Y up.
 fn normalised(point: glam::Vec2, extent: (u32, u32)) -> glam::Vec2 {
     let width = extent.0.max(1) as f32;
@@ -6504,6 +6519,17 @@ pub struct Loop<S: Shell + ?Sized, G: HostedGame> {
     /// [`console_button`]. Drawn after the panel and hit-tested against
     /// contacts.
     console_button: ConsoleButton,
+    /// `[engine.video] ui_scale`: read off the console's stack at
+    /// [`Loop::new`], and moved by a console write when
+    /// [`Self::drain_console`] takes it.
+    ///
+    /// Kept rather than read each frame, because the read warns on a value it
+    /// cannot use and a warning a frame is not a warning.
+    ui_multiplier: f32,
+    /// Window pixels per logical pixel for the loop's own UI **this frame** —
+    /// the menus, the debug overlay, the console and its button. See
+    /// [`Loop::ui_scale`].
+    ui_scale: f32,
     /// The debug view this loop has already put into force, or [`None`] before
     /// the first frame has looked.
     ///
@@ -6680,13 +6706,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // rather than this block, because a game running its own loop boots
         // the same console through it; `Console::boot` says why each choice is
         // the one it is.
-        let console = crate::debug_console::Console::boot(
+        let mut console = crate::debug_console::Console::boot(
             G::NAME,
             source,
             game.settings(),
             [G::console_table()],
             &config.exec,
         );
+        let ui_multiplier = crate::settings::ui_scale(&console.host_mut().stack());
         Self {
             shell: booted.shell,
             window: booted.window,
@@ -6702,6 +6729,8 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             console,
             text_pump: crate::text_input::TextPump::new(),
             console_button: ConsoleButton::new(),
+            ui_multiplier,
+            ui_scale: 1.0,
             debug_view: None,
             passes: crcbl_render::PassStats::new(),
             paused: false,
@@ -6775,6 +6804,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
     fn frame_body(&mut self) -> Result<Flow, LoopError<G::Error>> {
         let _frame = crcbl_core::trace::span(crate::perf::FRAME_SPAN);
         let input = crcbl_core::trace::span(crate::perf::INPUT_SPAN);
+
+        // **One scale for the loop's own UI across the whole frame**, so the
+        // hit tests below and the drawing after the overlay cut agree about
+        // where every rectangle is. A console write to `ui_scale` in this
+        // frame is the next frame's.
+        self.ui_scale = self.window_ui_scale();
 
         // **Carrying the pointer, not defaulting it.** A batch with no pointer
         // event in it has not moved the cursor, and a menu whose hover state
@@ -6899,6 +6934,12 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // cursor as the player asking for something every frame.
         let pointer_moved = pending.pointer != self.pointer.at();
         let pointer_input = self.pointer.resolve(&pending);
+        // The same pointer in the logical pixels the loop's own UI is laid out
+        // in, which is what every hit test against it below is made with.
+        let ui_pointer = crcbl_ui::PointerInput {
+            pos: pointer_input.pos / self.ui_scale,
+            ..pointer_input
+        };
         // **A press that began before the panel did is not the panel's.**
         //
         // `UiState` latches a button while the pointer is *down* over it, so a
@@ -6926,14 +6967,14 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // belongs to the console rather than to a menu under it, and the panel
         // is the top `CONSOLE_HEIGHT_FRACTION` of the frame whichever frame you
         // ask on — a resize is the one case this is a frame behind.
-        let console_took_pointer = self.console.covers(pointer_input.pos);
+        let console_took_pointer = self.console.covers(ui_pointer.pos);
         let from_pointer = self.menus.point(
-            self.gpu.extent(),
+            self.ui_extent(),
             self.gpu.atlas(),
             crcbl_ui::PointerInput {
-                down: pointer_input.down && self.menu_owns_press && !console_took_pointer,
-                released: pointer_input.released && self.menu_owns_press && !console_took_pointer,
-                ..pointer_input
+                down: ui_pointer.down && self.menu_owns_press && !console_took_pointer,
+                released: ui_pointer.released && self.menu_owns_press && !console_took_pointer,
+                ..ui_pointer
             },
         );
         if pending.pointer_released {
@@ -6958,9 +6999,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // would never see a finger land.
         // **Where the console's own on-screen button is**, laid out from this
         // frame's extent so a contact in this batch is hit-tested against the
-        // rectangle the frame is about to draw rather than the last one's.
-        let extent = self.gpu.extent();
-        self.console_button.layout(extent, self.gpu.atlas());
+        // rectangle the frame is about to draw rather than the last one's. In
+        // logical pixels: a contact arrives normalised, so the button maps it
+        // onto the logical extent and needs no scale of its own.
+        self.console_button
+            .layout(self.ui_extent(), self.gpu.atlas());
         for touch in std::mem::take(&mut pending.touches) {
             let at = normalised(touch.at, self.gpu.extent());
             // Before the bookkeeping below moves it: the first contact of a
@@ -7125,9 +7168,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // the pointer submits reaches `drain_console` below on the frame it was
         // sent.
         self.console.frame(
-            self.gpu.extent(),
+            self.ui_extent(),
             self.gpu.atlas(),
-            pointer_input,
+            ui_pointer,
             self.text_pump.frame(self.frame_clock.render_dt()),
         );
         // Here rather than inside the pump: that closure was borrowing the
@@ -7319,6 +7362,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             render_dt: self.frame_clock.render_dt(),
         };
         self.draw_list.clear();
+        // **Every game's draw starts at one**, whichever list the bundle
+        // handed back: the loop's own UI leaves its scale behind, and a game
+        // that sets none draws in window pixels as it always has.
+        self.draw_list.set_scale(1.0);
         self.game.draw(&mut self.gpu, &mut self.draw_list, info);
         // **Everything after this line draws over the game.** The menu goes in
         // first — its scrim, its frame, its buttons, then its labels — so the
@@ -7326,9 +7373,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // overlay and the console stay legible on top of it. See
         // `crcbl_ui::draw_list::DrawList::begin_overlay`.
         self.draw_list.begin_overlay();
-        // The engine's own UI lays out and hit-tests in window pixels, so a
-        // scale the game set for its UI must not carry over into it.
-        self.draw_list.set_scale(1.0);
+        // The engine's own UI at its own scale — the window's scale factor
+        // times `ui_scale` — and not at whatever the game set for its UI.
+        self.draw_list.set_scale(self.ui_scale);
         self.draw_menu();
         self.draw_debug_overlay();
         // **Last, so nothing covers it** — debug-console decision 6. The
@@ -7555,8 +7602,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         }
     }
 
-    /// One contact's worth of input against this frame's menu, in the pixels it
-    /// is laid out in.
+    /// One contact's worth of input against this frame's menu: `at` is in
+    /// window pixels, and is mapped into the logical pixels the menu is laid
+    /// out in.
     ///
     /// The layout is the menu's own, recomputed per call for the reason
     /// [`MenuSet::point`](crcbl_ui::menu::MenuSet::point) recomputes it: it
@@ -7569,10 +7617,10 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         released: bool,
     ) -> Option<crcbl_ui::WidgetId> {
         self.menus.point(
-            self.gpu.extent(),
+            self.ui_extent(),
             self.gpu.atlas(),
             crcbl_ui::PointerInput {
-                pos: at,
+                pos: at / self.ui_scale,
                 down,
                 released,
             },
@@ -7625,7 +7673,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let layout = self
             .menus
             .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()));
+            .map(|menu| menu.layout(self.ui_extent(), self.gpu.atlas()));
         if let Some(layout) = &layout {
             let menu = self.menus.current().expect("a layout implies a menu");
             menu.render(&mut self.draw_list, layout, self.gpu.menu_skin());
@@ -7654,7 +7702,7 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         #[allow(clippy::cast_precision_loss)]
         self.debug.render(
             &mut self.draw_list,
-            glam::Vec2::new(width as f32, height as f32),
+            glam::Vec2::new(width as f32, height as f32) / self.ui_scale,
             self.gpu.atlas(),
         );
     }
@@ -7678,6 +7726,11 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         let video = pending.take_video();
         let gains = pending.take_gains();
         let limit = pending.take_frame_limit();
+        if let Some(multiplier) = pending.take_ui_scale() {
+            // Next frame's: this one's hit tests have already been made at
+            // the scale it started with.
+            self.ui_multiplier = multiplier;
+        }
         if let Some(video) = video {
             // `Unsupported` is not a failure: a bundle with no renderer — the
             // options screen, hud — has nothing to put a section into force on,
@@ -8059,11 +8112,52 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
 
     /// Where this frame's menu was laid out, so a scripted click lands on the
     /// button the player would have seen.
+    ///
+    /// In the loop's **logical** UI pixels: a click in window pixels is a
+    /// point here times [`ui_scale`](Self::ui_scale), which is one on a window
+    /// at a scale factor of one with `ui_scale` unset.
     #[must_use]
     pub fn menu_layout(&self) -> Option<crcbl_ui::menu::MenuLayout> {
         self.menus
             .current()
-            .map(|menu| menu.layout(self.gpu.extent(), self.gpu.atlas()))
+            .map(|menu| menu.layout(self.ui_extent(), self.gpu.atlas()))
+    }
+
+    /// Window pixels per logical pixel for the loop's own UI on the last
+    /// frame: its menus, the debug overlay, the console and the console's
+    /// on-screen button.
+    ///
+    /// The window's scale factor
+    /// ([`window_scale_factor`](crate::ui_scale::window_scale_factor)) times
+    /// `[engine.video] ui_scale`
+    /// ([`settings::ui_scale`](crate::settings::ui_scale)) — the desktop's
+    /// scale rather than a fit to a reference window, because this is tooling
+    /// and menu UI that should be the size the desktop's other windows are,
+    /// not stretch with this one. That UI is laid out over the swapchain's
+    /// extent divided by this, so it fills the same share of the window at any
+    /// scale, and every pointer and contact it hit-tests is divided by it too.
+    /// A game's own UI is the game's: its draw starts at one each frame, and
+    /// whatever it sets stops at the overlay cut.
+    #[must_use]
+    pub const fn ui_scale(&self) -> f32 {
+        self.ui_scale
+    }
+
+    /// The loop's own UI scale as of now: the window's scale factor times
+    /// `[engine.video] ui_scale`.
+    fn window_ui_scale(&self) -> f32 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a display's scale factor, which an f32 holds closely enough to draw with"
+        )]
+        let window = crate::ui_scale::window_scale_factor(self.shell.as_ref(), self.window) as f32;
+        window * self.ui_multiplier
+    }
+
+    /// The swapchain's extent in the logical pixels the loop's own UI is laid
+    /// out in — see [`logical_extent`].
+    fn ui_extent(&self) -> (u32, u32) {
+        logical_extent(self.gpu.extent(), self.ui_scale)
     }
 }
 
@@ -18177,6 +18271,248 @@ mod tests {
         assert!(!plain_menu.is_empty(), "no menu to compare");
         assert_eq!(scaled_menu, plain_menu, "the game's scale reached the menu");
         assert_eq!(scale_after, 1.0);
+    }
+
+    // ---- the loop's own UI at a scale ---------------------------------------
+
+    /// A loop whose stack says `ui_scale = multiplier`, on a window of `size`
+    /// logical units at a scale factor of one, with its swapchain settled and
+    /// its start menu put away.
+    fn at_ui_scale(multiplier: f32, size: crcbl_shell::LogicalSize) -> Hosted {
+        let stack = a_stack();
+        crate::settings::set_ui_scale(&mut stack.stack_mut(), multiplier)
+            .expect("memory storage takes every key");
+        let desc = crcbl_shell::WindowDesc {
+            size,
+            ..crcbl_shell::WindowDesc::default()
+        };
+        let mut engine = hosted_with(
+            &desc,
+            None,
+            FakeGame {
+                settings: Some(stack),
+                ..FakeGame::default()
+            },
+        );
+        serve(&mut engine);
+        engine
+    }
+
+    /// The fixture's window, and the window of half its size that the same
+    /// loop at a UI scale of two lays its own UI out over.
+    const FULL: crcbl_shell::LogicalSize = crcbl_shell::LogicalSize::new(1280.0, 720.0);
+    /// See [`FULL`].
+    const HALF: crcbl_shell::LogicalSize = crcbl_shell::LogicalSize::new(640.0, 360.0);
+
+    /// Each command's `Debug` text, which is how a list is compared here:
+    /// `DrawCommand` has no `PartialEq`.
+    fn spelled(commands: &[crcbl_ui::draw_list::DrawCommand]) -> Vec<String> {
+        commands
+            .iter()
+            .map(|command| format!("{command:?}"))
+            .collect()
+    }
+
+    /// `engine`'s menu drawn from `layout` into a list of its own at `scale`,
+    /// [`spelled`].
+    fn menu_drawn(engine: &Hosted, layout: &crcbl_ui::menu::MenuLayout, scale: f32) -> Vec<String> {
+        let mut list = crcbl_ui::draw_list::DrawList::new();
+        list.set_scale(scale);
+        engine.menus.current().expect("a menu is on screen").render(
+            &mut list,
+            layout,
+            engine.gpu().menu_skin(),
+        );
+        spelled(list.commands())
+    }
+
+    /// **The loop's own menu is laid out over the window divided by its UI
+    /// scale and recorded at that scale**: at two it is the menu a window of
+    /// half the size lays out, every command recorded twice the size, so it
+    /// fills the same share of the window.
+    #[test]
+    fn the_loops_own_menu_is_laid_out_logically_and_recorded_at_its_scale() {
+        let mut scaled = at_ui_scale(2.0, FULL);
+        let mut half = at_ui_scale(1.0, HALF);
+        pause_key(&mut scaled);
+        pause_key(&mut half);
+        assert_eq!(scaled.ui_scale(), 2.0);
+        assert_eq!(half.ui_scale(), 1.0);
+        assert_eq!(scaled.gpu().extent(), (1280, 720));
+        assert_eq!(half.gpu().extent(), (640, 360));
+
+        let layout = scaled.menu_layout().expect("the pause menu");
+        assert_eq!(
+            Some(&layout),
+            half.menu_layout().as_ref(),
+            "the menu was not laid out over the logical extent",
+        );
+        let recorded = spelled(scaled.gpu.draw_list.overlay_commands());
+        let at_two = menu_drawn(&scaled, &layout, 2.0);
+        assert!(
+            recorded.starts_with(&at_two),
+            "the menu was not recorded at the loop's UI scale",
+        );
+        let at_one = menu_drawn(&half, &layout, 1.0);
+        assert!(spelled(half.gpu.draw_list.overlay_commands()).starts_with(&at_one));
+        assert_ne!(at_two, at_one, "the scale changed nothing to compare");
+        // The game's HUD is the game's: it set no scale, so it is drawn at one
+        // under a loop whose own UI is at two.
+        assert_eq!(
+            spelled(scaled.gpu.draw_list.base_commands()),
+            spelled(half.gpu.draw_list.base_commands()),
+            "the loop's scale reached the game's draw",
+        );
+
+        // Known rectangles: the scrim covers the whole window at either
+        // scale, and RESUME's nine-slice starts at its logical corner on the
+        // half-size window and at twice that on the full one.
+        assert!(at_one[0].contains("min: Vec2(0.0, 0.0), max: Vec2(640.0, 360.0)"));
+        assert!(
+            recorded[0].contains("min: Vec2(0.0, 0.0), max: Vec2(1280.0, 720.0)"),
+            "the scrim does not cover the window: {}",
+            recorded[0],
+        );
+        let item = layout.items()[0];
+        let corners = |commands: &[String], min, max| {
+            commands
+                .iter()
+                .any(|command| command.contains(&format!("min: {min:?}")))
+                && commands
+                    .iter()
+                    .any(|command| command.contains(&format!("max: {max:?}")))
+        };
+        assert!(corners(&at_one, item.min, item.max));
+        assert!(
+            corners(&recorded, item.min * 2.0, item.max * 2.0),
+            "RESUME's button is not at twice its logical rectangle",
+        );
+    }
+
+    /// **A pointer on the loop's own menu is hit-tested in its logical
+    /// pixels**: a click at twice RESUME's logical centre fires it at a UI
+    /// scale of two, as a click at the centre does at one — and a second
+    /// finger's contact, which reaches the menu on its own path, likewise.
+    #[test]
+    fn a_click_on_the_loops_menu_is_mapped_through_its_scale() {
+        let mut half = at_ui_scale(1.0, HALF);
+        pause_key(&mut half);
+        let centre = menu_button(&half);
+        click(&mut half, centre);
+        assert!(!half.is_paused(), "RESUME at one did not resume");
+
+        let mut scaled = at_ui_scale(2.0, FULL);
+        pause_key(&mut scaled);
+        assert_eq!(menu_button(&scaled), centre, "the logical layouts differ");
+        click(&mut scaled, centre * 2.0);
+        assert!(
+            !scaled.is_paused(),
+            "a click on RESUME, in window pixels, missed it at a UI scale of two",
+        );
+
+        use crcbl_core::input::TouchPhase;
+        let mut scaled = at_ui_scale(2.0, FULL);
+        primary_finger(
+            &mut scaled,
+            1,
+            TouchPhase::Began,
+            glam::Vec2::new(40.0, 700.0),
+        );
+        pause_key(&mut scaled);
+        finger(&mut scaled, 2, TouchPhase::Began, centre * 2.0);
+        finger(&mut scaled, 2, TouchPhase::Ended, centre * 2.0);
+        assert!(
+            !scaled.is_paused(),
+            "a second finger on RESUME missed it at a UI scale of two",
+        );
+    }
+
+    /// **The console's button and its panel are hit-tested in the loop's
+    /// logical pixels too**: at a UI scale of two, a finger at twice the
+    /// button's logical centre opens the console, and taps at twice the
+    /// on-screen keyboard's logical keys spell a line — and the button is
+    /// drawn where it was tapped.
+    #[test]
+    fn the_console_and_its_button_are_mapped_through_the_loops_scale() {
+        let mut engine = at_ui_scale(2.0, FULL);
+        let logical = engine.ui_extent();
+        assert_eq!(logical, (640, 360));
+        glass(&mut engine, ConsoleButton::centre(logical) * 2.0);
+        assert!(
+            engine.console().is_open(),
+            "a tap on the console button, in window pixels, missed it",
+        );
+        // Drawn last, and exactly the button recorded at two — whose first
+        // rectangle is under the finger that tapped it.
+        let mut button = crcbl_ui::draw_list::DrawList::new();
+        button.set_scale(2.0);
+        engine
+            .console_button
+            .render(&mut button, engine.gpu().atlas());
+        let button = spelled(button.commands());
+        let recorded = spelled(engine.gpu.draw_list.overlay_commands());
+        assert!(
+            recorded.ends_with(&button),
+            "the console button was not recorded at the loop's UI scale",
+        );
+        let centre = ConsoleButton::centre(logical) * 2.0;
+        let crcbl_ui::draw_list::DrawCommand::Rect { min, max, .. } =
+            engine.gpu.draw_list.overlay_commands()[recorded.len() - button.len()]
+        else {
+            panic!("the button starts with its fill: {}", button[0]);
+        };
+        assert!(
+            min.cmple(centre).all() && centre.cmple(max).all(),
+            "the console button is not drawn where it was tapped: {min}..{max} misses {centre}",
+        );
+
+        for character in ['e', 'c', 'h', 'o'] {
+            let at = key_at(&engine, crcbl_ui::console::KeyCap::Type(character)) * 2.0;
+            glass(&mut engine, at);
+        }
+        step(&mut engine);
+        assert_eq!(
+            engine.console().panel().line(),
+            "echo",
+            "taps on the keyboard, in window pixels, missed its keys",
+        );
+        assert_eq!(presses(&engine), 0, "a tap on the console reached the game");
+    }
+
+    /// **At a UI scale of one the loop's own UI is recorded as it always
+    /// was**: the menu laid out over the swapchain's own extent, in a list at
+    /// one — the path the loop drew it through before it had a scale.
+    #[test]
+    fn at_a_scale_of_one_the_loops_ui_is_recorded_as_before() {
+        let mut engine = hosted(None);
+        serve(&mut engine);
+        pause_key(&mut engine);
+        assert_eq!(engine.ui_scale(), 1.0);
+        let layout = engine
+            .menus
+            .current()
+            .expect("the pause menu")
+            .layout(engine.gpu().extent(), engine.gpu().atlas());
+        assert_eq!(engine.menu_layout(), Some(layout.clone()));
+        let before = menu_drawn(&engine, &layout, 1.0);
+        assert!(
+            spelled(engine.gpu.draw_list.overlay_commands()).starts_with(&before),
+            "the menu at one is not what it was",
+        );
+        assert_eq!(engine.gpu.draw_list.scale(), 1.0);
+    }
+
+    /// **A `ui_scale` typed at the console is live, from the next frame**: the
+    /// frame the line ran in keeps the scale its hit tests were made at.
+    #[test]
+    fn a_ui_scale_typed_at_the_console_is_the_next_frames() {
+        let mut engine = with_console_open();
+        assert_eq!(engine.ui_scale(), 1.0);
+        run_line(&mut engine, "ui_scale 2");
+        assert_eq!(engine.ui_scale(), 1.0, "the frame the line ran in moved");
+        step(&mut engine);
+        assert_eq!(engine.ui_scale(), 2.0, "the console's write was not live");
+        assert_eq!(engine.gpu.draw_list.scale(), 2.0);
     }
 
     /// **The console is drawn last, so nothing covers it** — debug-console

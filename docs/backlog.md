@@ -131,13 +131,18 @@ migrates every caller and deletes its own copy in the same change.
   (`crcbl::settings::ui_scale`) multiplies it. **Declined: a shader transform**,
   which would stretch glyph masks rasterised at the logical size, and **a
   rebuild of the finished list** (EW's `UiScale::to_window`), which costs a
-  second list every frame. **Follow-up, not done: the engine's own UI at base
-  DPI × `ui_scale`.** `engine::Loop` sets its list back to 1.0 at the overlay
-  cut. Scaling its menu, debug overlay, console and console button also needs
-  their layout extent and every pointer they hit-test mapped through the scale.
-  That is several call sites in `engine.rs`, not a one-line change. A `ui_scale`
-  write through `settings::apply` answers `Applied::NextStart`, because no
-  engine seam shows it yet.
+  second list every frame. The engine's own UI draws at DPI × `ui_scale`
+  (2026-09-28). **Still open:** (1) a write to `ui_scale` through any `Stage`
+  but the console's `Deferred` (`GpuStage`, or a game's own settings screen;
+  `apps/options` has no `ui_scale` row today) answers `Applied::NextStart`, and
+  the running `Loop` does not see it until restart: the loop caches the
+  multiplier, and only its console's `Deferred` moves it. (2) Not verified: the
+  browser build at a `devicePixelRatio` above one, where the engine's UI now
+  draws larger; the browser gate in CI (`pages.yml`) is what would show it. (3)
+  At a fractional factor the logical extent (`engine::logical_extent`) rounds
+  each axis to a whole logical pixel, because the menu and console layouts take
+  `(u32, u32)`, so an edge can sit up to half a logical pixel off the window's
+  edge.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits

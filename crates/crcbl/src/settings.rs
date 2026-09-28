@@ -1402,6 +1402,19 @@ pub trait Stage {
         let _ = limit;
         Err(Unsupported)
     }
+
+    /// Draw the host's own UI at a new `[engine.video] ui_scale` multiplier,
+    /// already clamped as [`ui_scale`] reads it.
+    ///
+    /// # Errors
+    ///
+    /// [`Unsupported`] where this host draws no UI at a scale — every host but
+    /// the [`Loop`](crate::engine::Loop)'s console, whose [`Deferred`] carries
+    /// it to the loop's own menus, console and overlay.
+    fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
+        let _ = scale;
+        Err(Unsupported)
+    }
 }
 
 /// The [`Stage`] a GPU bundle is: `[engine.video]` reaches the renderer through
@@ -1439,6 +1452,7 @@ pub struct Deferred {
     video: Option<VideoSettings>,
     gains: [Option<f32>; Bus::ALL.len()],
     frame_limit: Option<FrameLimit>,
+    ui_scale: Option<f32>,
 }
 
 impl Deferred {
@@ -1449,6 +1463,7 @@ impl Deferred {
             video: None,
             gains: [None; Bus::ALL.len()],
             frame_limit: None,
+            ui_scale: None,
         }
     }
 
@@ -1467,10 +1482,18 @@ impl Deferred {
         self.frame_limit.take()
     }
 
+    /// The UI multiplier a write asked for, taken.
+    pub const fn take_ui_scale(&mut self) -> Option<f32> {
+        self.ui_scale.take()
+    }
+
     /// Whether anything is waiting to be applied.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.video.is_none() && self.frame_limit.is_none() && self.gains.iter().all(Option::is_none)
+        self.video.is_none()
+            && self.frame_limit.is_none()
+            && self.ui_scale.is_none()
+            && self.gains.iter().all(Option::is_none)
     }
 }
 
@@ -1487,6 +1510,11 @@ impl Stage for Deferred {
 
     fn set_frame_limit(&mut self, limit: FrameLimit) -> Result<(), Unsupported> {
         self.frame_limit = Some(limit);
+        Ok(())
+    }
+
+    fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
+        self.ui_scale = Some(scale);
         Ok(())
     }
 }
@@ -1624,14 +1652,14 @@ pub fn apply(
             set_anisotropic_filtering(stack, anisotropy).map_err(storage)?;
             Ok(reached(stage.apply_video(&video(stack))))
         }
-        // No seam: the renderer does not draw the UI at a scale, and the host
-        // that does reads the key itself — so this host has nothing to tell.
+        // Not the renderer's: the host that draws a UI at a scale is told,
+        // with the multiplier the file now reads back.
         UI_SCALE_KEY => {
             let Value::Float(scale) = *value else {
                 unreachable!("the UI scale is a float kind, which `check` has held it to")
             };
             set_ui_scale(stack, scale).map_err(storage)?;
-            Ok(Applied::NextStart)
+            Ok(reached(stage.set_ui_scale(ui_scale(stack))))
         }
         // Every remaining `Read` key is an effect switch, whose entry in the
         // catalogue is derived from that table — so a name that reaches here and
@@ -3084,9 +3112,10 @@ mod tests {
     }
 
     /// **The UI multiplier is stored clamped, refuses a non-number, and a write
-    /// through [`apply`] lands in the file and says the host has no seam.**
+    /// through [`apply`] lands in the file and reaches the host that draws the
+    /// UI** — live there, and next start on a host that draws none.
     #[test]
-    fn a_ui_scale_is_written_clamped_and_applies_next_start() {
+    fn a_ui_scale_is_written_clamped_and_reaches_the_host_that_draws_it() {
         let (reloaded, written) = round_trip(|stack| {
             set_ui_scale(stack, 10.0).expect("a fresh user layer accepts every key");
         });
@@ -3101,10 +3130,34 @@ mod tests {
         let mut stage = Recorder::default();
         assert_eq!(
             apply(&mut stack, &key, &Value::Float(1.5), &mut stage),
-            Ok(Applied::NextStart)
+            Ok(Applied::Live)
         );
         assert_eq!(ui_scale(&stack), 1.5);
+        assert_eq!(
+            stage.ui_scales,
+            [1.5],
+            "the host drawing the UI was not told"
+        );
         assert!(stage.video.is_empty(), "the renderer was told about the UI");
+
+        struct Nowhere;
+        impl Stage for Nowhere {}
+        assert_eq!(
+            apply(&mut stack, &key, &Value::Float(2.0), &mut Nowhere),
+            Ok(Applied::NextStart)
+        );
+        assert_eq!(ui_scale(&stack), 2.0, "a host with no seam still writes");
+
+        // The console's host records it for the loop to drain.
+        let mut host = ConsoleHost::new(stack_from(""));
+        binding_for(UI_SCALE_KEY)
+            .set(&mut host, &Value::Float(1.25))
+            .expect("inside the range");
+        assert_eq!(host.pending_mut().take_ui_scale(), Some(1.25));
+        assert!(
+            host.pending_mut().is_empty(),
+            "the drain left the ask behind"
+        );
     }
 
     /// The anisotropy the reader answers off a file holding `toml`.
@@ -3534,6 +3587,7 @@ mod tests {
         video: Vec<VideoSettings>,
         gains: Vec<(Bus, f32)>,
         limits: Vec<FrameLimit>,
+        ui_scales: Vec<f32>,
         /// Whether `set_frame_limit` has a clock behind it, so one test can turn
         /// the seam off and read [`Applied::NextStart`] back.
         has_clock: bool,
@@ -3555,6 +3609,11 @@ mod tests {
                 return Err(Unsupported);
             }
             self.limits.push(limit);
+            Ok(())
+        }
+
+        fn set_ui_scale(&mut self, scale: f32) -> Result<(), Unsupported> {
+            self.ui_scales.push(scale);
             Ok(())
         }
     }

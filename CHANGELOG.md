@@ -345,9 +345,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `crcbl::settings::ui_scale` clamps it to `MIN_UI_SCALE..=MAX_UI_SCALE` (0.25
   to 4) and warns and answers 1.0 on a value that is not a number, and
   `set_ui_scale` writes it; the console's `ui_scale` is no longer read-only. The
-  engine's own menu, debug overlay and console still draw at 1.0, and a scale a
-  game sets stops at the overlay cut. Asked for by EW, which rebuilt its
-  finished list in window pixels every frame.
+  engine's own UI — `engine::Loop`'s menus, debug overlay, debug console and
+  on-screen console button — draws at the window's scale factor times `ui_scale`
+  (`Loop::ui_scale`), laid out over the window divided by that factor so it
+  fills the same share of the screen, with every pointer and contact it
+  hit-tests mapped through it; `Loop::menu_layout` answers in those logical
+  pixels. A console write to `ui_scale` is live from the next frame, through the
+  new `settings::Stage::set_ui_scale`, so `settings::apply` answers
+  `Applied::Live` for it where the host has that seam. A game's own draw starts
+  at 1.0 each frame and a scale it sets stops at the overlay cut. At a scale
+  factor of one with `ui_scale` unset, every frame is recorded exactly as
+  before. Asked for by EW, which rebuilt its finished list in window pixels
+  every frame.
 
 - **`Binding::ButtonChord { modifier, button }`: a keyboard modifier held gives
   a mouse button a second layer**, the mouse's `Binding::Chord`. While
