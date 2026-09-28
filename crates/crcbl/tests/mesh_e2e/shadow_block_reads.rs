@@ -12,12 +12,14 @@
 //!
 //! [`crcbl::render::forward::FRAME_UNIFORMS_READERS`] is the split as a table,
 //! and `crcbl_render`'s own tests hold `depth_pass_reads` to it. This file holds
-//! the table to the shaders: for every entry the table calls colour-only, the
-//! atlas is drawn once as the frame built it and once with that field
-//! overwritten by garbage in every block the depth pass is fed —
+//! the table to the shaders: the atlas is drawn once as the frame built it and
+//! once with every field the table calls colour-only overwritten by garbage in
+//! every block the depth pass is fed —
 //! [`ForwardRenderer::set_shadow_view_tamper`] — and the two atlases are read
-//! back and compared **bit for bit**. Each through a renderer meeting the scene
-//! for the first time, so both frames redraw every map.
+//! back and compared **bit for bit**. Only when they differ is each field
+//! overwritten alone, to name the one the depth pass reads. Each frame is a
+//! renderer meeting the scene for the first time, so every frame redraws every
+//! map.
 //!
 //! **And the probe can see a read.** The same rewrite of `view_proj`, which the
 //! depth pass does read, has to move the atlas — otherwise every equality here
@@ -209,6 +211,17 @@ fn differing(left: &[u32], right: &[u32]) -> usize {
     left.iter().zip(right).filter(|(a, b)| a != b).count()
 }
 
+/// Overwrites every field [`FRAME_UNIFORMS_READERS`] calls colour-only: one
+/// frame that any colour-only read by the depth pass moves.
+fn overwrite_colour_only(uniforms: &mut FrameUniforms) {
+    for field in FRAME_UNIFORMS_READERS
+        .iter()
+        .filter(|field| field.reader == UniformsReader::ColourOnly)
+    {
+        (field.perturb)(uniforms);
+    }
+}
+
 /// The depth-read entry the positive control perturbs: a light's and a
 /// cascade's matrix, which every depth path reads.
 fn view_proj() -> &'static UniformsField {
@@ -309,29 +322,37 @@ fn the_depth_pass_reads_no_field_the_shadow_cache_record_zeroes() {
             ));
         }
 
-        for field in &colour_only {
-            let tampered = draw_atlas(&headless, path, None, Some(field.perturb));
-            if !tampered.redrew_everything {
-                failures.push(format!(
-                    "{path:?}: the frame with `{}` overwritten held a map",
-                    field.name
-                ));
+        // Every colour-only field overwritten in one frame, and a field-by-field
+        // bisection only when that frame moved: a read of any of them moves
+        // the combined frame, and the per-field frames are only there to name
+        // the culprit. A renderer per field per path took this test to 205 s
+        // on the macOS runner under Metal validation, against a 240 s limit.
+        let everything = draw_atlas(&headless, path, None, Some(overwrite_colour_only));
+        let changed = differing(&baseline.atlas, &everything.atlas);
+        if changed != 0 {
+            for field in &colour_only {
+                let tampered = draw_atlas(&headless, path, None, Some(field.perturb));
+                let moved = differing(&baseline.atlas, &tampered.atlas);
+                if moved != 0 {
+                    failures.push(format!(
+                        "{path:?}: overwriting `{}` in every shadow block moved {moved} texels \
+                         of the atlas: the depth pass reads it, so `depth_pass_reads` must keep \
+                         it and `FRAME_UNIFORMS_READERS` must call it a depth-pass field",
+                        field.name
+                    ));
+                }
             }
-            let changed = differing(&baseline.atlas, &tampered.atlas);
-            if changed != 0 {
-                failures.push(format!(
-                    "{path:?}: overwriting `{}` in every shadow block moved {changed} texels of \
-                     the atlas: the depth pass reads it, so `depth_pass_reads` must keep it and \
-                     `FRAME_UNIFORMS_READERS` must call it a depth-pass field",
-                    field.name
-                ));
-            }
+            failures.push(format!(
+                "{path:?}: overwriting every colour-only field at once moved {changed} texels of \
+                 the atlas"
+            ));
         }
         for (name, drawn) in [
             ("untampered", &baseline),
             ("repeated", &again),
             ("opaque", &opaque),
             ("view_proj", &control),
+            ("colour-only", &everything),
         ] {
             if !drawn.redrew_everything {
                 failures.push(format!("{path:?}: the {name} frame held a map"));
