@@ -625,11 +625,17 @@ impl ForwardRenderer {
                 if !redraw[*group] {
                     continue;
                 }
-                device.write_buffer(
-                    self.shadow_uniforms[self.frame][*view],
-                    0,
-                    &block.to_bytes(),
-                )?;
+                // A test's rewrite, after the record above was taken from the
+                // block as the frame built it — see `set_shadow_view_tamper`.
+                let bytes = match self.shadow_view_tamper {
+                    None => block.to_bytes(),
+                    Some(tamper) => {
+                        let mut tampered = *block;
+                        tamper(&mut tampered);
+                        tampered.to_bytes()
+                    }
+                };
+                device.write_buffer(self.shadow_uniforms[self.frame][*view], 0, &bytes)?;
             }
             for (cull, frustum) in &culls {
                 if !redraw[*cull] {

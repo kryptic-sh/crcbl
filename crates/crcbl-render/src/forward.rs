@@ -212,6 +212,8 @@ mod frame_prepare;
 mod shadow_inputs;
 mod view;
 
+pub use shadow_inputs::{FRAME_UNIFORMS_READERS, UniformsField, UniformsReader};
+
 use bucket_draws::{BucketDraws, EmitTail, RegionStep};
 
 use view::{FramePasses, Overlays, TonemapPipeline, View, ViewInputs, ViewOutput};
@@ -1713,6 +1715,11 @@ pub struct ForwardRenderer {
     /// Whether a point light's six faces cull separately — see
     /// [`set_point_face_culls`](ForwardRenderer::set_point_face_culls).
     point_face_culls: bool,
+    /// What a test asked every shadow view's uploaded block to be rewritten
+    /// with — see
+    /// [`set_shadow_view_tamper`](ForwardRenderer::set_shadow_view_tamper).
+    /// [`None`] outside a test.
+    shadow_view_tamper: Option<fn(&mut mesh::FrameUniforms)>,
     /// Whether [`begin_frame`](ForwardRenderer::begin_frame) writes
     /// [`FrameUniforms::NORMALS_VIEW_ON`] into the frame block, which makes
     /// `mesh.slang`'s fragment stage draw world-space normals instead of shading
@@ -5577,6 +5584,7 @@ impl ForwardRenderer {
             wireframe_on: false,
             occlusion_culling: OcclusionCulling::OFF,
             point_face_culls: true,
+            shadow_view_tamper: None,
             // Off, on the line above's terms: the normals view is opt-in, so a
             // caller that never asks for one draws the frame it drew before
             // `set_normals_view` existed. It builds nothing, so there is no
@@ -9504,6 +9512,23 @@ impl ForwardRenderer {
     /// price can be read off both.
     pub fn set_point_face_culls(&mut self, on: bool) {
         self.point_face_culls = on;
+    }
+
+    /// **A test hook**: from the next [`begin_frame`](Self::begin_frame),
+    /// rewrites every block the shadow atlas's depth pass is fed with `tamper`
+    /// on its way to the GPU, or stops doing so with [`None`] — the default,
+    /// and the only value a frame outside a test runs under.
+    ///
+    /// Applied **after** the atlas cache has read the blocks, so the rewrite is
+    /// invisible to the decision whether to redraw a map and visible only to the
+    /// depth pass that draws it. That is what makes it a probe of the shaders:
+    /// `crcbl`'s `mesh_e2e` `shadow_block_reads` draws the atlas with each
+    /// [`UniformsReader::ColourOnly`] entry of [`FRAME_UNIFORMS_READERS`]
+    /// perturbed through here and holds the depth to the untampered frame's, bit
+    /// for bit. It reaches the atlas's views alone — not the probe updater's
+    /// shadows-off writes, which draw nothing into the atlas.
+    pub fn set_shadow_view_tamper(&mut self, tamper: Option<fn(&mut mesh::FrameUniforms)>) {
+        self.shadow_view_tamper = tamper;
     }
 
     /// What [`set_occlusion_culling`](Self::set_occlusion_culling) last asked

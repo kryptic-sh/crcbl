@@ -98,6 +98,7 @@ mod occlusion_price;
 mod rect_bound;
 mod render_scale;
 mod resize;
+mod shadow_block_reads;
 mod shadow_cache;
 mod shadow_faces;
 mod shadow_tiles;

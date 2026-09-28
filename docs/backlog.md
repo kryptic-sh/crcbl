@@ -4205,12 +4205,18 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     hold; a light a live DAG instance can reach still redraws on every eye move;
     growing `InstancePool::slot_count` (an insert above the high-water mark)
     redraws every group, because the instance count is in every record.
+  - **`depth_pass_reads` is checked against the shaders, within one scene's
+    sight.** `FRAME_UNIFORMS_READERS` classifies every `FrameUniforms` field,
+    and `mesh_e2e`'s
+    `the_depth_pass_reads_no_field_the_shadow_cache_record_zeroes` overwrites
+    each colour-only field in every shadow block. It requires the atlas to be
+    bit-identical on all three geometry paths. It sees only a read that changes
+    that scene's atlas: moving `camera_position` 3 units there changed no texel.
+    A depth-path read of a colour-only field that happens not to affect the
+    fixture would pass it.
   - **Declined: quantising the eye.** Any eye move can carry a DAG group across
     its budget, so a held map under a quantum is a cut the cull would not have
     chosen — a different picture, not a cheaper one.
-  - **`depth_pass_reads` is read off the shaders by hand.** A depth-path shader
-    change that reads another `FrameUniforms` field has to add it there, or a
-    map drawn from a stale value of it is held; nothing checks the two agree.
 - **P23 — probe gathers still run for an empty volume.** Revalidated
   `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
   corners even when `frame.probe_counts` describes the zeroed placeholder.

@@ -51,7 +51,7 @@ const EXTENT: (u32, u32) = crate::mesh_scene::MESH_EXTENT;
 /// What every device here is opened with: the screenshot path's own list, so a
 /// device with a mesh stage builds the mesh path this file draws through too,
 /// and debug markers beside it.
-const OPTIONAL: Features =
+pub(crate) const OPTIONAL: Features =
     crcbl::screenshot::OffscreenSetup::OPTIONAL_FEATURES.union(Features::DEBUG_MARKERS);
 
 /// The share of the frustum's survivors the second phase has to keep hidden
@@ -81,7 +81,7 @@ fn occluders(
 }
 
 /// The geometry paths this device builds, the mesh path first.
-fn paths(headless: &Headless) -> Vec<GeometryPath> {
+pub(crate) fn paths(headless: &Headless) -> Vec<GeometryPath> {
     let features = headless.device.caps().features;
     [
         GeometryPath::MeshShader,

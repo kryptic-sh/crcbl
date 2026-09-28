@@ -110,6 +110,10 @@ impl CasterFootprint {
 ///
 /// A shader change that makes the depth pass read another field has to add it
 /// here, or a map drawn from a stale value of it will be held.
+/// [`FRAME_UNIFORMS_READERS`] is the same split as a table, and the two checks
+/// on it are what hold this function to the shaders: this module's tests hold
+/// the function to the table, and `crcbl`'s `mesh_e2e` `shadow_block_reads`
+/// holds the table to the atlas a device draws.
 fn depth_pass_reads(block: &mesh::FrameUniforms) -> mesh::FrameUniforms {
     mesh::FrameUniforms {
         view_proj: block.view_proj,
@@ -133,6 +137,183 @@ fn depth_pass_reads(block: &mesh::FrameUniforms) -> mesh::FrameUniforms {
         shadow_filter: [0; 4],
     }
 }
+
+/// Which pass reads a [`UniformsField`] of a shadow view's block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UniformsReader {
+    /// The atlas's depth pass reads it, so a held map's group record carries it
+    /// — `depth_pass_reads` keeps it.
+    DepthPass,
+    /// Only the colour pass reads it, so a change to it is no reason to redraw a
+    /// map — `depth_pass_reads` zeroes it.
+    ColourOnly,
+}
+
+/// One field of [`mesh::FrameUniforms`], or the lanes of one field that a
+/// single reader owns, as the shadow atlas's depth pass sees it.
+#[derive(Clone, Copy, Debug)]
+pub struct UniformsField {
+    /// The field's name, with the lanes after a dot where the field is split —
+    /// `ambient.xyz` and `ambient.w`.
+    pub name: &'static str,
+    /// Which pass reads it.
+    pub reader: UniformsReader,
+    /// Overwrites this field's lanes of a block with a value no frame writes
+    /// there, and leaves every other lane alone.
+    ///
+    /// A [`UniformsReader::DepthPass`] entry's overwrite is a *nudge* rather
+    /// than garbage — the view's depth pushed by a fraction, a lane toggled — so
+    /// that a device test perturbing it still draws geometry into the atlas to
+    /// compare.
+    pub perturb: fn(&mut mesh::FrameUniforms),
+}
+
+/// A matrix no view is drawn through: every element distinct, none of them a
+/// value a projection or an identity would hold.
+const GARBAGE_MATRIX: [f32; 16] = [
+    -279.375, 242.125, -204.875, 167.625, -130.375, 93.125, -55.875, 18.625, -18.625, 55.875,
+    -93.125, 130.375, -167.625, 204.875, -242.125, 279.375,
+];
+
+/// **Every field of a shadow view's block, and which pass reads it** — the
+/// split `depth_pass_reads` makes, as data a test can walk.
+///
+/// A test hook rather than anything the renderer runs: the renderer's own
+/// split is `depth_pass_reads`, and nothing in a frame reads this. Two tests
+/// do, and between them they close the loop that function's doc leaves to a
+/// reader of the shaders:
+///
+/// * **This module's tests** hold `depth_pass_reads` to the table — every
+///   depth-read entry moves its output, every colour-only one does not — and
+///   hold the table to the struct: every field is classified, a split field in
+///   every lane, and each entry's perturbation touches its own lanes alone.
+///   Adding a field to [`mesh::FrameUniforms`] stops them compiling until it is
+///   entered here.
+/// * **`crcbl`'s `mesh_e2e` `shadow_block_reads`** holds the table to the
+///   shaders: it draws the atlas on every geometry path with each colour-only
+///   entry perturbed in every block the depth pass is fed, through
+///   [`ForwardRenderer::set_shadow_view_tamper`], and asserts the depth it
+///   reads back is unchanged to the bit.
+///
+/// So a shader that starts reading a field listed as colour-only turns that
+/// device test red, and moving the field to the depth-read side here turns
+/// this module's test red until `depth_pass_reads` keeps it.
+pub const FRAME_UNIFORMS_READERS: &[UniformsField] = &[
+    UniformsField {
+        name: "view_proj",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.view_proj[14] += 0.0625,
+    },
+    UniformsField {
+        name: "camera_position",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.camera_position[0] += 3.0,
+    },
+    UniformsField {
+        name: "ambient.xyz",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| {
+            block.ambient[0] = -913.25;
+            block.ambient[1] = 4096.5;
+            block.ambient[2] = 0.007_812_5;
+        },
+    },
+    UniformsField {
+        name: "ambient.w",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.ambient[3] = 1.0 - block.ambient[3],
+    },
+    UniformsField {
+        name: "shadow_view_proj",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.shadow_view_proj = [GARBAGE_MATRIX; mesh::SHADOW_CASCADES],
+    },
+    UniformsField {
+        name: "cascade_far",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.cascade_far = [-1.5e6, 3.0e-7, 777.0, -0.0],
+    },
+    UniformsField {
+        name: "shadow_params",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.shadow_params = [123.0, -456.0, 7.0e5, -8.0e-5],
+    },
+    UniformsField {
+        name: "cluster_grid",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.cluster_grid = [0xDEAD_BEEF, 0x0BAD_F00D, 0xFEED_FACE, 0x1234_5678],
+    },
+    UniformsField {
+        name: "light_view_proj",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.light_view_proj = [GARBAGE_MATRIX; mesh::SHADOW_LIGHT_TILES],
+    },
+    UniformsField {
+        name: "probes",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| {
+            block.probes = crcbl_shaders::probe::ProbeVolume {
+                origin: [-321.5, 654.25, -987.0],
+                inv_spacing: [13.0, -0.5, 1.0e4],
+                counts: [0xDEAD, 3, 0xBEEF],
+                levels: 0xFFFF_FFF0,
+                steps: [[-77_777, 31_337, i32::MIN]; crcbl_shaders::probe::PROBE_LEVELS],
+            };
+        },
+    },
+    UniformsField {
+        name: "lod_params",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.lod_params[0] += 1.5,
+    },
+    UniformsField {
+        name: "fog_params",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.fog_params = [65_536.0, -2.5, 0.333, -1.0e-9],
+    },
+    UniformsField {
+        name: "fog_color",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.fog_color = [-4.0, 1.0e5, 0.125, -77.0],
+    },
+    UniformsField {
+        name: "sky_sh_r",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.sky_sh_r = [11.5, -22.5, 33.5, -44.5],
+    },
+    UniformsField {
+        name: "sky_sh_g",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.sky_sh_g = [-55.25, 66.25, -77.25, 88.25],
+    },
+    UniformsField {
+        name: "sky_sh_b",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.sky_sh_b = [99.0, -110.0, 121.0, -132.0],
+    },
+    UniformsField {
+        name: "previous_view_proj",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.previous_view_proj[14] += 0.0625,
+    },
+    UniformsField {
+        name: "vertex_pool",
+        reader: UniformsReader::DepthPass,
+        perturb: |block| block.vertex_pool[0] ^= 0x40,
+    },
+    UniformsField {
+        name: "shadow_atlas_rect",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| {
+            block.shadow_atlas_rect = [[-3.5, 9.25, 1000.0, -0.125]; mesh::SHADOW_ATLAS_TILES]
+        },
+    },
+    UniformsField {
+        name: "shadow_filter",
+        reader: UniformsReader::ColourOnly,
+        perturb: |block| block.shadow_filter = [0xFFFF_FFFF, 0xDEAD_BEEF, 77, 0x8000_0000],
+    },
+];
 
 /// Moves `writes[group]` for every group whose cull any of `moved`'s
 /// footprints, before or after its write, could have been kept by.
@@ -497,69 +678,40 @@ mod tests {
             renderer.shadow_group_record(LIGHT, &views, &culls, eye, count)
         );
 
-        // Every field the depth pass reads is in the record ...
-        type Field = fn(&mut mesh::FrameUniforms);
-        let read: [(&str, Field); 6] = [
-            ("view_proj", |block| block.view_proj[3] += 1.0),
-            ("previous_view_proj", |block| {
-                block.previous_view_proj[3] += 1.0;
-            }),
-            ("camera_position", |block| block.camera_position[0] += 1.0),
-            ("lod_params", |block| block.lod_params[1] += 1.0),
-            ("ambient.w", |block| block.ambient[3] += 1.0),
-            ("vertex_pool", |block| block.vertex_pool[0] += 1),
-        ];
-        for (name, change) in read {
+        // Every field the depth pass reads is in the record, and none of the
+        // colour pass's is — which is what lets a light hold its maps while the
+        // camera, which several of them follow, moves.
+        for field in FRAME_UNIFORMS_READERS {
             let saved = views[0].2;
-            change(&mut views[0].2);
-            assert_ne!(
-                original,
-                renderer.shadow_group_record(LIGHT, &views, &culls, eye, count),
-                "the depth pass reads `{name}` and the record did not change with it"
-            );
+            (field.perturb)(&mut views[0].2);
+            let record = renderer.shadow_group_record(LIGHT, &views, &culls, eye, count);
+            match field.reader {
+                UniformsReader::DepthPass => assert_ne!(
+                    original, record,
+                    "the depth pass reads `{}` and the record did not change with it",
+                    field.name
+                ),
+                UniformsReader::ColourOnly => assert_eq!(
+                    original, record,
+                    "the depth pass reads nothing of `{}` and the record moved with it",
+                    field.name
+                ),
+            }
             views[0].2 = saved;
         }
-        // ... and none of the colour pass's is, which is what lets a light hold
-        // its maps while the camera, which several of them follow, moves.
-        let unread: [(&str, Field); 13] = [
-            ("ambient.xyz", |block| block.ambient[0] += 1.0),
-            ("shadow_view_proj", |block| {
-                block.shadow_view_proj[0][3] += 1.0
-            }),
-            ("cascade_far", |block| block.cascade_far[0] += 1.0),
-            ("shadow_params", |block| block.shadow_params[0] += 1.0),
-            ("cluster_grid", |block| block.cluster_grid[0] += 1),
-            ("light_view_proj", |block| {
-                block.light_view_proj[0][3] += 1.0
-            }),
-            ("probes", |block| block.probes.counts[0] += 1),
-            ("fog_params", |block| block.fog_params[0] += 1.0),
-            ("fog_color", |block| block.fog_color[0] += 1.0),
-            ("sky_sh", |block| {
-                block.sky_sh_r[0] += 1.0;
-                block.sky_sh_g[0] += 1.0;
-                block.sky_sh_b[0] += 1.0;
-            }),
-            ("shadow_atlas_rect", |block| {
-                block.shadow_atlas_rect[0][0] += 1.0;
-            }),
-            ("shadow_filter", |block| block.shadow_filter[0] += 1),
-            ("everything at once", |block| {
-                block.ambient[1] += 1.0;
-                block.cascade_far[3] += 1.0;
-                block.fog_params[3] += 1.0;
-            }),
-        ];
-        for (name, change) in unread {
-            let saved = views[0].2;
-            change(&mut views[0].2);
-            assert_eq!(
-                original,
-                renderer.shadow_group_record(LIGHT, &views, &culls, eye, count),
-                "the depth pass reads nothing of `{name}` and the record moved with it"
-            );
-            views[0].2 = saved;
+        // And every colour-only field at once.
+        let saved = views[0].2;
+        for field in FRAME_UNIFORMS_READERS {
+            if field.reader == UniformsReader::ColourOnly {
+                (field.perturb)(&mut views[0].2);
+            }
         }
+        assert_eq!(
+            original,
+            renderer.shadow_group_record(LIGHT, &views, &culls, eye, count),
+            "every colour-only field moved at once, and the record moved with them"
+        );
+        views[0].2 = saved;
 
         views[0].1 += 1;
         assert_ne!(
@@ -621,6 +773,127 @@ mod tests {
         renderer.destroy(device.as_ref());
         recorder.assert_valid();
         assert_eq!(recorder.total_live_objects(), 0);
+    }
+
+    /// Each of a block's fields, or a split field's lanes, by the name
+    /// [`FRAME_UNIFORMS_READERS`] gives it, with its value spelled out.
+    ///
+    /// **Exhaustive on purpose**: the destructure names every field and has no
+    /// `..`, so a field added to [`mesh::FrameUniforms`] stops this compiling
+    /// until it is listed here — and then
+    /// [`every_frame_uniforms_field_is_classified_and_depth_pass_reads_agrees`]
+    /// fails until the table classifies it.
+    fn lanes(block: &mesh::FrameUniforms) -> Vec<(&'static str, String)> {
+        let mesh::FrameUniforms {
+            view_proj,
+            camera_position,
+            ambient,
+            shadow_view_proj,
+            cascade_far,
+            shadow_params,
+            cluster_grid,
+            light_view_proj,
+            probes,
+            lod_params,
+            fog_params,
+            fog_color,
+            sky_sh_r,
+            sky_sh_g,
+            sky_sh_b,
+            previous_view_proj,
+            vertex_pool,
+            shadow_atlas_rect,
+            shadow_filter,
+        } = block;
+        // `Debug` rather than `==`, so a NaN lane equals itself and `-0.0` is
+        // not `0.0`: the question is whether the bits a shader reads moved.
+        vec![
+            ("view_proj", format!("{view_proj:?}")),
+            ("camera_position", format!("{camera_position:?}")),
+            ("ambient.xyz", format!("{:?}", &ambient[..3])),
+            ("ambient.w", format!("{:?}", ambient[3])),
+            ("shadow_view_proj", format!("{shadow_view_proj:?}")),
+            ("cascade_far", format!("{cascade_far:?}")),
+            ("shadow_params", format!("{shadow_params:?}")),
+            ("cluster_grid", format!("{cluster_grid:?}")),
+            ("light_view_proj", format!("{light_view_proj:?}")),
+            ("probes", format!("{probes:?}")),
+            ("lod_params", format!("{lod_params:?}")),
+            ("fog_params", format!("{fog_params:?}")),
+            ("fog_color", format!("{fog_color:?}")),
+            ("sky_sh_r", format!("{sky_sh_r:?}")),
+            ("sky_sh_g", format!("{sky_sh_g:?}")),
+            ("sky_sh_b", format!("{sky_sh_b:?}")),
+            ("previous_view_proj", format!("{previous_view_proj:?}")),
+            ("vertex_pool", format!("{vertex_pool:?}")),
+            ("shadow_atlas_rect", format!("{shadow_atlas_rect:?}")),
+            ("shadow_filter", format!("{shadow_filter:?}")),
+        ]
+    }
+
+    /// **[`FRAME_UNIFORMS_READERS`] classifies every lane of a block exactly
+    /// once, each entry perturbs its own lanes and no others, and
+    /// [`depth_pass_reads`] keeps exactly the depth-read ones.**
+    ///
+    /// The table is what `crcbl`'s `mesh_e2e` `shadow_block_reads` holds to the
+    /// shaders on a device, so this is the half that ties the function the
+    /// record is built from to what that test checked.
+    #[test]
+    fn every_frame_uniforms_field_is_classified_and_depth_pass_reads_agrees() {
+        let block = filled_block(3, LIGHT);
+        let before = lanes(&block);
+        let names: Vec<&str> = before.iter().map(|(name, _)| *name).collect();
+        let mut listed: Vec<&str> = FRAME_UNIFORMS_READERS
+            .iter()
+            .map(|field| field.name)
+            .collect();
+        listed.sort_unstable();
+        let mut expected = names.clone();
+        expected.sort_unstable();
+        assert_eq!(
+            listed, expected,
+            "the table must name every lane group of `FrameUniforms` exactly once"
+        );
+
+        let kept_before = lanes(&depth_pass_reads(&block));
+        for field in FRAME_UNIFORMS_READERS {
+            let mut perturbed = block;
+            (field.perturb)(&mut perturbed);
+            let after = lanes(&perturbed);
+            for ((name, was), (_, is)) in before.iter().zip(&after) {
+                if *name == field.name {
+                    assert_ne!(was, is, "`{name}`'s perturbation left it as it was");
+                } else {
+                    assert_eq!(
+                        was, is,
+                        "`{}`'s perturbation also moved `{name}`, so the device test would \
+                         blame the wrong field",
+                        field.name
+                    );
+                }
+            }
+
+            let kept_after = lanes(&depth_pass_reads(&perturbed));
+            let lane = |of: &[(&str, String)]| {
+                of.iter()
+                    .find(|(name, _)| *name == field.name)
+                    .map(|(_, value)| value.clone())
+                    .expect("every table name is a lane")
+            };
+            match field.reader {
+                UniformsReader::DepthPass => assert_eq!(
+                    lane(&kept_after),
+                    lane(&after),
+                    "`{}` is read by the depth pass and `depth_pass_reads` does not keep it",
+                    field.name
+                ),
+                UniformsReader::ColourOnly => assert_eq!(
+                    kept_before, kept_after,
+                    "`{}` is the colour pass's alone and `depth_pass_reads` keeps it",
+                    field.name
+                ),
+            }
+        }
     }
 
     /// A footprint is the cull's own question: dead is nowhere, skinned is
