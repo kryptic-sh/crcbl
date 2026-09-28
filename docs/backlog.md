@@ -4253,9 +4253,31 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
       stage's per-cluster cull costs more than it saves (ranged `depth-prepass`
       0.69 ms with it, 0.031 ms without).
 
-  - **About 0.75 ms of recording still scales with the bucket count on the
-    ranged tails** (1.58 ms at 938 buckets against 0.85 ms at two, same calls).
-    Not found: nothing profiled which pass pays it.
+  - **The ranged tails' bucket-scaling "record" time is GPU time, and
+    `draw-starts` pays it.** Reproduced (ranged record p50 1.60 ms at 938
+    buckets against 0.86 ms at two on `IndirectCount`, 3.98 against 1.44 ms on
+    `MeshShader`), then split with temporary per-pass `Instant`s inside
+    `CompiledGraph::execute`: every pass body, `realise`, the handover and
+    `finish` recorded within 0.01 ms of each other in the two rows, and the
+    whole difference was `PassTimers::begin_frame` (0.62 ms on `IndirectCount`,
+    0.53 `IndirectPerBatch`, 2.50 `MeshShader`). That call reads the reused slot
+    through `Device::query_results`, which on Vulkan waits on the retire
+    timeline for the slot's last submission — the only throttle an offscreen
+    ring has, so the price test's "record" is where a GPU-bound frame's wait
+    lands (and why a small row's record moves with the row beside it). The GPU
+    side, summed over every pass the timers see: 1.78 against 0.70 ms per frame
+    on `IndirectCount` ranged, of which `draw-starts` is 0.90 against 0.004 ms
+    and `draw-args` 0.14 against 0.009 ms. `draw-starts` is `draw_gen.slang`'s
+    `startsMain`, `[numthreads(1, 1, 1)]`: one invocation walking every bucket
+    (and, in occlusion or faces mode, every region) with a dependent load and
+    stores per bucket — the header's "the table is small" no longer holds at 938
+    buckets. The fix is a shader change, not built: a one-workgroup parallel
+    scan (e.g. 256 invocations, each summing a contiguous chunk, a
+    workgroup-shared scan of the chunk sums, then each writing its chunk's
+    starts and count words) keeps it one dispatch and one pass; then re-price
+    with this test and confirm the ranged rows' record converges. Separately,
+    the price test would say this itself if it timed `PassTimers`' readback
+    apart from recording — not built either.
   - **Not measured** on lavapipe, radv or any Vulkan device without mesh shaders
     — the devices that take the ranged tail by default.
   - **`forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`
