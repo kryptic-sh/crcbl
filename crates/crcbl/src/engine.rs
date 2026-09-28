@@ -6674,43 +6674,19 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
         // neither: `SettingsSource::for_run` is the rule, stated once, and a run
         // with no file to read is a run with nowhere to save.
         let source = SettingsSource::for_run(!config.windowed);
-        // **The game's own stack where it has one**, so the console and a
-        // settings screen are two views of one file rather than two copies of
-        // it — see `HostedGame::settings`. A game with none gets the run's
-        // source, opened writable so that a console on a headless run is not
-        // read-only.
-        let stack = game
-            .settings()
-            .unwrap_or_else(|| crate::settings::SharedSettings::new(source.open_editable(G::NAME)));
-        let host = crate::settings::ConsoleHost::over(stack);
-        let host = match source {
-            // A run with nothing to read is a run with nowhere to save:
-            // `saving_as` is left unset, so `save` says so rather than
-            // persisting into whichever home directory a golden run executes
-            // in.
-            SettingsSource::None => host,
-            SettingsSource::Platform | SettingsSource::Source(_) => host.saving_as(G::NAME),
-        };
-        let tables: Vec<crcbl_console::Table> = crate::debug_console::engine_tables()
-            .into_iter()
-            .map(|(_, table)| table)
-            .chain(std::iter::once(G::console_table()))
-            .collect();
-        let mut console = crate::debug_console::Console::new(&tables, host);
-        // **The player's `autoexec.cfg`, before the first frame.** Here because
-        // this is where a console line can still be ahead of everything that
-        // reads a variable — a run with a frame budget is over before anybody
-        // could type one — and because the read is safe exactly here: the
-        // settings file was opened just above through the same storage, so this
-        // depends on no residency that call did not already depend on. A
-        // run with nothing to read runs nothing and says nothing; see
-        // `console_config::run_autoexec`.
-        console.run_autoexec();
-        // **Then the command line's `--exec` lines**, after the file so that
-        // what was typed for this run wins over what the player saved, as it
-        // does in Source — and past the gate above, because a headless run
-        // reads no autoexec and these are the only lines it can be given.
-        console.run_exec(&config.exec);
+        // The console, booted — the game's stack or the run's source, saving
+        // only where there is a file, the engine's tables and the game's, then
+        // `autoexec.cfg` and the command line's `--exec` lines. One function
+        // rather than this block, because a game running its own loop boots
+        // the same console through it; `Console::boot` says why each choice is
+        // the one it is.
+        let console = crate::debug_console::Console::boot(
+            G::NAME,
+            source,
+            game.settings(),
+            [G::console_table()],
+            &config.exec,
+        );
         Self {
             shell: booted.shell,
             window: booted.window,

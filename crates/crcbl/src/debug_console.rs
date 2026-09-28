@@ -60,7 +60,8 @@ use crcbl_ui::edit::Edit;
 use crcbl_ui::tree::{ClipboardRequest, TextInput};
 use crcbl_ui::{FontAtlas, PointerInput, UiState, draw_list::DrawList};
 
-use crate::settings::ConsoleHost;
+use crate::engine::SettingsSource;
+use crate::settings::{ConsoleHost, SharedSettings};
 
 /// Cycles the panel's own level filter, while the console is open.
 ///
@@ -124,7 +125,7 @@ const LEVELS: [crcbl_core::log::LevelFilter; 6] = [
 pub struct EngineLink {
     /// The name the settings file is saved under, or `None` for a run that must
     /// not write one — a golden run, a headless test. See
-    /// [`SettingsSource::None`](crate::engine::SettingsSource::None), which is
+    /// [`SettingsSource::None`], which is
     /// the same rule stated where the file is read.
     pub(crate) app_name: Option<String>,
     /// `pause` asked the loop to toggle the simulation.
@@ -509,6 +510,57 @@ impl Console {
             cycle_stem: String::new(),
             cycle_prefix: String::new(),
         }
+    }
+
+    /// The engine's console for app `app_name`, booted: over the engine's
+    /// tables and `game_tables`, with `autoexec.cfg` and then `exec` already
+    /// run — what [`Loop::new`](crate::engine::Loop::new) builds, for a host
+    /// that runs its own loop.
+    ///
+    /// **One boot, so a host outside `Loop` cannot drift from it.** Which
+    /// settings a console edits, whether `save` may write them, which tables it
+    /// gathers and the order the boot lines run in are each a policy `Loop`
+    /// settles, and a game with its own runner would otherwise re-derive every
+    /// one of them:
+    ///
+    /// - It edits `settings` where the game has a stack of its own, so the
+    ///   console and a settings screen are two views of one file rather than
+    ///   two copies of it, and otherwise the file `source` opens, writable so
+    ///   that a console on a run with no file is not read-only.
+    /// - It saves as `app_name` unless `source` is [`SettingsSource::None`]: a
+    ///   run with nothing to read has nowhere to save, and `save` says so
+    ///   rather than writing into whichever home directory a golden run
+    ///   executes in.
+    /// - `autoexec.cfg` runs before `exec`, so what was typed for this run wins
+    ///   over what the player saved; see `console_config`'s module docs for
+    ///   when each one runs at all.
+    ///
+    /// # Panics
+    ///
+    /// As [`new`](Self::new), if two tables claim one name.
+    #[must_use]
+    pub fn boot(
+        app_name: &str,
+        source: SettingsSource<'_>,
+        settings: Option<SharedSettings>,
+        game_tables: impl IntoIterator<Item = Table>,
+        exec: &[String],
+    ) -> Self {
+        let stack = settings.unwrap_or_else(|| SharedSettings::new(source.open_editable(app_name)));
+        let host = ConsoleHost::over(stack);
+        let host = match source {
+            SettingsSource::None => host,
+            SettingsSource::Platform | SettingsSource::Source(_) => host.saving_as(app_name),
+        };
+        let tables: Vec<Table> = engine_tables()
+            .into_iter()
+            .map(|(_, table)| table)
+            .chain(game_tables)
+            .collect();
+        let mut console = Self::new(&tables, host);
+        console.run_autoexec();
+        console.run_exec(exec);
+        console
     }
 
     /// Whether the panel is showing.
@@ -1138,5 +1190,48 @@ mod tests {
             .map(|record| record.message)
             .collect();
         assert_eq!(printed, ["set before the first frame", "--exec: 1 line"]);
+    }
+
+    /// **A console booted outside `Loop` is `Loop`'s**: the game's table is
+    /// gathered beside the engine's, the `--exec` lines have already run
+    /// through it, and a run with no settings file has nowhere to save.
+    ///
+    /// Asserted through what a line printed rather than through the console's
+    /// fields, because the lines are what a host outside `Loop` sees: a game
+    /// command that was not gathered, lines that were never run, or a host
+    /// saving as the app on a run that reads no file would each print
+    /// something else here.
+    #[test]
+    fn a_booted_console_gathers_the_game_runs_exec_and_saves_nowhere_on_no_source() {
+        fn run(cx: &mut Context<'_>, _args: &[&str]) -> Result<(), Fault> {
+            cx.print("the game's table answered");
+            Ok(())
+        }
+        static PING: crcbl_console::ConCommand =
+            crcbl_console::ConCommand::new("boot_ping", "Answer, from a game's table.", run);
+        static COMMANDS: &[&crcbl_console::ConCommand] = &[&PING];
+
+        let logs = crcbl_core::log::capture();
+        let _console = Console::boot(
+            "boot-test",
+            SettingsSource::None,
+            None,
+            [Table::new(&[], &[], COMMANDS)],
+            &["boot_ping".to_owned(), "save".to_owned()],
+        );
+
+        let printed: Vec<String> = logs
+            .records()
+            .into_iter()
+            .filter(|record| record.target == crcbl_core::log::console::CONSOLE_TARGET)
+            .map(|record| record.message)
+            .collect();
+        assert_eq!(printed.len(), 3, "{printed:?}");
+        assert_eq!(printed[0], "the game's table answered");
+        assert!(
+            printed[1].starts_with("--exec:2: ") && printed[1].contains("nowhere to save"),
+            "{printed:?}"
+        );
+        assert_eq!(printed[2], "--exec: 2 lines, 1 of them failed");
     }
 }

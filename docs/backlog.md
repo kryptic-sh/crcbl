@@ -101,12 +101,18 @@ migrates every caller and deletes its own copy in the same change.
   own slab test. Putting it in `crcbl-audio` would make pure DSP depend on
   physics, and a local box type would copy the slab test. The umbrella already
   names both crates, which is how `crcbl::ui_nav` joins input and UI.
-- **A console for a host that is not `engine::Loop`: accepted 2026-09-27, after
-  the ports.** EW runs its own `Runner`, so it hosts no console, and neither
-  `autoexec.cfg` nor `--exec` runs there; EW refuses `--exec` until this lands.
-  The planned shape is a public way to build a `Console` over the engine's
-  tables and a `ConsoleHost` for a named app, plus the two boot calls EW makes
-  itself (`run_autoexec`, `run_exec`): what `Loop::new` does today. Not built.
+- **A console for a host that is not `engine::Loop`: shipped 2026-09-28 as
+  `Console::boot`**, which `Loop::new` now calls too.
+- **Queued for EW: `Binding::ButtonChord { modifier, button }`** (accepted
+  2026-09-28). EW binds Alt + right click and Ctrl + right click to sight
+  actions while a plain right click is ADS, and today reads raw modifiers
+  outside the `ActionMap`, so those binds cannot be rebound or reached from a
+  pad. Shape: a new variant beside `Chord` and `PadChord`, the precedent
+  `PadChord` set, additive so no existing `match` breaks. Same semantics as a
+  key `Chord`: while the chord owns the button, the plain `MouseButton` binding
+  on it is withheld; the same hand-over rules apply when the modifier lifts
+  first or is pressed mid-hold; it works in a pushed context; and it has a text
+  form (`Alt+MouseRight`) for `apply_overrides`. Not built.
 - **Declined: the distance-phase footstep accumulator.** Once gait, surfaces and
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits

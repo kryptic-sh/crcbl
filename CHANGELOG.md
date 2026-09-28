@@ -327,6 +327,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl::debug_console::Console::boot`: the engine's console for a game that
+  runs its own loop.** `boot(app_name, source, settings, game_tables, exec)`
+  builds the console `Loop::new` builds and runs its boot lines. It uses the
+  game's `SharedSettings` if there are any, and otherwise the file `source`
+  opens. It saves as `app_name` unless `source` is `SettingsSource::None`. It
+  gathers the engine's tables and the game's, then runs `autoexec.cfg` and then
+  the `--exec` lines. `Loop::new` now calls it, so the two cannot drift. Asked
+  for by EW, whose own runner hosted no console, so neither `autoexec.cfg` nor
+  `--exec` ran there.
+
 - **`crcbl::acoustic_path`: which barriers a sound crosses and how far it
   travels, ported from EW.** `build_acoustic_path(config, route, obstacles)`
   walks an `AcousticRoute { source, waypoints, listener }` against
