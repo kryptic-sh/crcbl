@@ -202,7 +202,7 @@ impl UndoLog {
     }
 
     /// Records a command that has just been applied, and the inverse
-    /// [`EditCommand::apply`] handed back.
+    /// applying it handed back ([`crate::Document::apply`] is where both meet).
     ///
     /// Anything above the current position is dropped: it described a future
     /// that this command has replaced.
