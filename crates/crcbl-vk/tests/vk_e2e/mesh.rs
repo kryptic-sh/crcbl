@@ -1250,11 +1250,13 @@ fn generated_dispatch(
 ///
 /// What can is the buffer's contents, and this is three claims about them:
 ///
-/// * **Each bucket's y extent is that bucket's own survivor count**, equal to
-///   the `instance_count` the same pass wrote into the indexed-draw arguments —
-///   two words written by two atomic adds, which have to agree and are checked
-///   rather than assumed.
-/// * **They sum to the frame's surviving-instance count**, which is
+/// * **Each bucket's extents are its own clusters times its own survivors, in
+///   whole task chunks** — `draw_gen.slang` rewrites them behind a task stage
+///   to `ceil(clusters * survivors / TASK_LANES)` workgroups, held here to
+///   `crcbl_shaders::meshlet::task_extents`, the host twin of that arithmetic,
+///   over the survivor count the same pass wrote into the indexed-draw
+///   arguments.
+/// * **The survivor counts sum to the frame's surviving-instance count**, which is
 ///   `cull.slang`'s own counter and the one number here that neither half of
 ///   the draw-argument pass computed.
 /// * **They move when the scene does, per bucket.** The box is taken out and
@@ -1315,86 +1317,91 @@ fn the_mesh_dispatch_extent_is_the_culled_instance_count() {
         renderer.remove_instance(open_box);
         let without = generated_dispatch(&headless, &mut renderer, &mut pool, &camera);
 
-        for (label, produced) in [("with the box", &with), ("without it", &without)] {
-            let extents: Vec<u32> = produced
-                .mesh_args
-                .iter()
-                .map(|args| args.group_count_y)
-                .collect();
-            eprintln!("vk e2e: lap {lap}, {label}: y extents {extents:?}");
-
-            for (bucket, (mesh, args)) in produced.mesh_args.iter().zip(&produced.args).enumerate()
-            {
-                assert_eq!(
-                    mesh.group_count_y, args.instance_count,
-                    "lap {lap}, {label}: bucket {bucket}'s dispatch extent and its draw's \
-                     instance count are the same survivor count counted twice, and they \
-                     disagree"
-                );
-                assert_eq!(
-                    mesh.group_count_z, 1,
-                    "lap {lap}, {label}: bucket {bucket}'s z extent"
-                );
-            }
-            assert_eq!(
-                extents.iter().sum::<u32>(),
-                produced.survivors,
-                "lap {lap}, {label}: the extents must account for every instance the cull \
-                 pass counted, and no others"
-            );
-        }
-
-        // The x extents are each bucket's own mesh's cluster count, and two
-        // residents' are not one — so a table that handed every bucket the same
-        // number fails here. The dunes patch's is **every level of its DAG**,
-        // because one bucket covers the whole hierarchy and the amplification
-        // stage is what picks the cut out of it; that number is taken from the
-        // committed artifact rather than written down, so it follows a re-cook.
+        // The x extents' cluster counts, one per bucket: the cube and the
+        // pyramid are one cluster each, the open box is one per face, and the
+        // dunes patch is **every level of its DAG**, because one bucket covers
+        // the whole hierarchy and the amplification stage is what picks the cut
+        // out of it. The dunes number is taken from the committed artifact
+        // rather than written down, so it follows a re-cook.
         let dunes_clusters: u32 = crcbl_shaders::cluster_dag::dunes_dag()
             .levels
             .iter()
             .map(|level| u32::try_from(level.clusters.clusters.len()).expect("small"))
             .sum();
-        let x: Vec<u32> = with
-            .mesh_args
-            .iter()
-            .map(|args| args.group_count_x)
-            .collect();
-        assert_eq!(
-            x,
-            vec![1, 1, faces, dunes_clusters],
-            "lap {lap}: the cube and the pyramid are one cluster each, the open box is \
-             one per face, and the dunes patch is every cluster of every level"
-        );
+        let clusters = [1, 1, faces, dunes_clusters];
 
-        // **The extent tracks the scene, per bucket.** The box's goes to zero
+        for (label, produced) in [("with the box", &with), ("without it", &without)] {
+            let survivors: Vec<u32> = produced
+                .args
+                .iter()
+                .map(|args| args.instance_count)
+                .collect();
+            eprintln!("vk e2e: lap {lap}, {label}: bucket survivors {survivors:?}");
+
+            // **Behind a task stage a bucket's dispatch is its pairs in whole
+            // chunks**: `draw_gen.slang` rewrites the extents to
+            // `ceil(clusters * survivors / TASK_LANES)` task workgroups, and
+            // `task_extents` is the host twin of that arithmetic. So each
+            // bucket's extents are a function of its own cluster count and its
+            // own survivor count — a table that handed every bucket the same
+            // number, or a dispatch sized by the instance pool, fails here.
+            assert_eq!(
+                produced.mesh_args.len(),
+                clusters.len(),
+                "lap {lap}, {label}: one dispatch per bucket"
+            );
+            for (bucket, (mesh, survived)) in produced.mesh_args.iter().zip(&survivors).enumerate()
+            {
+                assert_eq!(
+                    [mesh.group_count_x, mesh.group_count_y, mesh.group_count_z],
+                    crcbl_shaders::meshlet::task_extents(
+                        clusters[bucket],
+                        *survived,
+                        crcbl_shaders::meshlet::TASK_LANES
+                    ),
+                    "lap {lap}, {label}: bucket {bucket}'s dispatch is not its {} cluster(s) \
+                     times its {survived} survivor(s) in whole task chunks",
+                    clusters[bucket]
+                );
+            }
+            assert_eq!(
+                survivors.iter().sum::<u32>(),
+                produced.survivors,
+                "lap {lap}, {label}: the buckets must account for every instance the cull \
+                 pass counted, and no others"
+            );
+        }
+
+        // **The count tracks the scene, per bucket.** The box's goes to zero
         // while the cube's stays one: a dispatch sized by the instance pool
-        // would be the same number for both, in both rounds.
-        // The open box's bucket, which the renderer builds third — no longer the
-        // last one, now that the dunes patch is behind it. Named against its own
-        // cluster count rather than against a position in the list, so a bucket
-        // table reordered under this test fails here instead of measuring the
-        // wrong mesh.
+        // would be the same number for both, in both rounds. The open box's
+        // bucket is the third the renderer builds, and its cluster count names
+        // it, so a bucket table reordered under this test fails here instead of
+        // measuring the wrong mesh.
         let box_bucket = 2;
         assert_eq!(
-            x[box_bucket], faces,
+            clusters[box_bucket], faces,
             "lap {lap}: bucket {box_bucket} is not the open box's"
         );
         assert_eq!(
-            with.mesh_args[box_bucket].group_count_y, 1,
+            with.args[box_bucket].instance_count, 1,
             "lap {lap}: the box is in the scene and in frame"
         );
         assert_eq!(
-            without.mesh_args[box_bucket].group_count_y, 0,
+            without.args[box_bucket].instance_count, 0,
             "lap {lap}: the box left the scene, so its bucket has nothing to dispatch"
         );
         assert_eq!(
-            with.mesh_args[0].group_count_y, without.mesh_args[0].group_count_y,
-            "lap {lap}: the cube did not move, so its extent must not have"
+            without.mesh_args[box_bucket].group_count_y, 0,
+            "lap {lap}: and its dispatch launches no task workgroup"
         );
         assert_eq!(
-            with.mesh_args[0].group_count_y, 1,
-            "lap {lap}: and the cube's extent is one instance, not the pool's slot count"
+            with.args[0].instance_count, without.args[0].instance_count,
+            "lap {lap}: the cube did not move, so its count must not have"
+        );
+        assert_eq!(
+            with.args[0].instance_count, 1,
+            "lap {lap}: and the cube's count is one instance, not the pool's slot count"
         );
     }
 
