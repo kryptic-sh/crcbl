@@ -13,16 +13,19 @@
 //! [`LoadOp::Clear`](crcbl_hal::LoadOp), and the clear happens because the pass
 //! loads that way.
 //!
-//! # One pool per encoder
+//! # One pool per encoder, recycled
 //!
-//! Simple and correct: a `VkCommandPool` is externally synchronised, and
-//! [`CommandEncoder`] is `Send` but not `Sync`, so a pool that belongs to
-//! exactly one encoder cannot be raced on by construction. It is also
-//! wasteful — a pool per frame is a driver allocation per frame — and
-//! stage 2 §2.2 asks for per-frame pools recycled by
-//! the frame loop instead. That belongs with the render graph at P1.3, which is
-//! the thing that will own the frame ring; doing it here first would mean
-//! guessing the ring's shape.
+//! A `VkCommandPool` is externally synchronised, and [`CommandEncoder`] is
+//! `Send` but not `Sync`, so a pool that belongs to exactly one encoder cannot
+//! be raced on by construction. A pool is only ever in one place — an encoder,
+//! a recorded command buffer in the device's table, or the device's free list —
+//! and it moves between them under the device's state lock. What changed is
+//! where it comes from: [`begin`](VkCommandEncoder::begin) takes a kept pool of
+//! its queue family whose last submission the retire timeline has passed and
+//! resets it, and creates one only when there is none. Destroying the command
+//! buffer, or dropping an encoder that never finished, gives the pool back.
+//! `crate::command_pools` has the rules and why a pool is not created per
+//! frame.
 //!
 //! # The encoder remembers the pipeline layout, because the seam does not
 //!
@@ -50,7 +53,7 @@ use crcbl_hal::{
 use crcbl_core::Handle;
 
 use crate::conv;
-use crate::device::{CommandBufferEntry, DeviceInner};
+use crate::device::{CommandBufferEntry, DeviceInner, KeptPool};
 
 /// Records into one command buffer, from one pool it owns.
 pub(crate) struct VkCommandEncoder {
@@ -135,25 +138,30 @@ impl VkCommandEncoder {
     fn begin(&mut self, desc: &CommandEncoderDesc<'_>) -> Result<(), HalError> {
         let family = self.device.queue_family(desc.queue)?;
         self.family = family;
-        let info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(family)
-            // Every buffer from this pool is recorded once and thrown away, so
-            // `TRANSIENT` is the honest hint and the one that lets a driver use
-            // a bump allocator.
-            .flags(vk::CommandPoolCreateFlags::TRANSIENT);
-        // SAFETY: `family` is a queue family this device created a queue on.
-        self.pool = unsafe { self.device.raw.create_command_pool(&info, None) }
-            .map_err(|error| conv::hal_error("vkCreateCommandPool", error))?;
-        self.device.set_object_name(self.pool, desc.label);
+        if let Some(kept) = self.device.take_command_pool(family) {
+            self.pool = kept.pool;
+            self.raw = kept.buffer;
+        } else {
+            let info = vk::CommandPoolCreateInfo::default()
+                .queue_family_index(family)
+                // Every buffer from this pool is recorded once and the whole
+                // pool reset after, so `TRANSIENT` is the honest hint and the
+                // one that lets a driver use a bump allocator.
+                .flags(vk::CommandPoolCreateFlags::TRANSIENT);
+            // SAFETY: `family` is a queue family this device created a queue on.
+            self.pool = unsafe { self.device.raw.create_command_pool(&info, None) }
+                .map_err(|error| conv::hal_error("vkCreateCommandPool", error))?;
 
-        let allocate = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.pool)
-            .level(vk::CommandBufferLevel::PRIMARY)
-            .command_buffer_count(1);
-        // SAFETY: `self.pool` was just created by this device.
-        let buffers = unsafe { self.device.raw.allocate_command_buffers(&allocate) }
-            .map_err(|error| conv::hal_error("vkAllocateCommandBuffers", error))?;
-        self.raw = buffers[0];
+            let allocate = vk::CommandBufferAllocateInfo::default()
+                .command_pool(self.pool)
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_buffer_count(1);
+            // SAFETY: `self.pool` was just created by this device.
+            let buffers = unsafe { self.device.raw.allocate_command_buffers(&allocate) }
+                .map_err(|error| conv::hal_error("vkAllocateCommandBuffers", error))?;
+            self.raw = buffers[0];
+        }
+        self.device.set_object_name(self.pool, desc.label);
         self.device.set_object_name(self.raw, desc.label);
 
         let begin = vk::CommandBufferBeginInfo::default()
@@ -1479,7 +1487,7 @@ impl CommandEncoder for VkCommandEncoder {
                         // Recorded, not submitted: until `submit` says
                         // otherwise, this recording holds everything it
                         // references in the deletion queue.
-                        submitted: false,
+                        submitted_at: None,
                     }),
             ))
     }
@@ -1492,11 +1500,23 @@ impl Drop for VkCommandEncoder {
         if self.pool == vk::CommandPool::null() {
             return;
         }
+        if self.raw == vk::CommandBuffer::null() {
+            // `begin` created the pool and failed to allocate from it, so there
+            // is nothing to reuse. Nothing was ever submitted from it, so
+            // freeing inline is safe.
+            // SAFETY: the pool was created by this device and holds nothing.
+            unsafe { self.device.raw.destroy_command_pool(self.pool, None) };
+            return;
+        }
         // Nothing was submitted — a command buffer that never reached a queue
-        // cannot be executing — so freeing inline is safe and immediate.
-        // SAFETY: the pool was created by this device and holds only this
-        // never-submitted buffer.
-        unsafe { self.device.raw.destroy_command_pool(self.pool, None) };
+        // cannot be executing — so the pool may be reset at once.
+        let kept = KeptPool {
+            pool: self.pool,
+            buffer: self.raw,
+        };
+        let mut state = self.device.state();
+        self.device
+            .keep_command_pool(&mut state, self.family, 0, kept);
     }
 }
 

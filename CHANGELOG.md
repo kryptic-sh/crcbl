@@ -3485,6 +3485,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Vulkan reuses command pools instead of creating one per encoder.**
+  `Device::destroy_command_buffer` and an encoder dropped unfinished now hand
+  the `VkCommandPool` (and its one primary buffer) to a per-device free list,
+  and the next `create_command_encoder` on the same queue family resets a kept
+  pool with `vkResetCommandPool` instead of calling `vkCreateCommandPool`. A
+  pool is reset only once the retire timeline has passed the last submission
+  that used it, so a caller that destroys a command buffer early gets a fresh
+  pool rather than a reset under running work; the list holds at most eight
+  pools, parks any extra in the deletion queue, and is freed at device teardown.
+  Measured on an RX 7900 XTX (AMD 25.10.36), release, validation off:
+  `mesh_e2e`'s `bucket_price.rs` at 1920x1080 over 240 frames, GPU drained and
+  the last frame's buffer destroyed before each frame, mesh tail at 938 buckets,
+  two runs each: creating the encoder 0.241–0.322 → 0.0018–0.0021 ms and
+  executing the graph into it 0.750–0.961 → 0.194–0.196 ms, the second being the
+  driver cost a fresh pool deferred into the frame's first large render pass;
+  `shard --headless --frames 400 --size 1920x1080`: encoder creation 0.249–0.252
+  → 0.0055–0.0056 ms and `execute` 0.816–0.839 → 0.345–0.351 ms. D3D12, Metal
+  and WebGPU are unchanged.
+
 - **Behind a task stage the mesh tail draws each pipeline partition with one
   call.** A pass recorded one `draw_mesh_tasks_indirect` per bucket, or on a
   device with a draw index one multi-draw per run of at least 32 buckets; it now

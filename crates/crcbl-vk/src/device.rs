@@ -52,6 +52,7 @@ use crcbl_hal::{
 
 use crate::adapter::AdapterRecord;
 use crate::command::VkCommandEncoder;
+use crate::command_pools::PoolFreeList;
 use crate::conv;
 use crate::debug::{self, VALIDATION_LAYER};
 use crate::deletion::RetireQueue;
@@ -229,14 +230,17 @@ pub(crate) struct CommandBufferEntry {
     /// parked, so an object destroyed after recording stays alive until the last
     /// submission referencing it completes.
     pub(crate) references: Vec<u64>,
-    /// Whether this command buffer has ever been handed to a queue.
+    /// The retire-timeline value of the latest submission that carried this
+    /// command buffer, or `None` while it has never been handed to a queue.
     ///
     /// Until it has, its [`references`](Self::references) are referenced by work
     /// no timeline value covers, so [`DeviceInner::poll_retire`] treats them as
     /// held and refuses to free them however far the timeline has run. `submit`
     /// sets this once the driver has taken the submission, which is the moment
-    /// the retire timeline starts describing this recording instead.
-    pub(crate) submitted: bool,
+    /// the retire timeline starts describing this recording instead. The value
+    /// is what the pool's reuse waits for once the buffer is destroyed — see
+    /// `crate::command_pools`.
+    pub(crate) submitted_at: Option<u64>,
 }
 
 /// An in-flight readback request.
@@ -293,6 +297,9 @@ pub(crate) enum Trash {
     PipelineLayout(vk::PipelineLayout),
     Pipeline(vk::Pipeline),
     Sampler(vk::Sampler),
+    /// A command pool, with the buffer allocated from it, that the free list
+    /// had no room for — see [`DeviceInner::keep_command_pool`].
+    CommandPool(vk::CommandPool),
     /// A whole swapchain, including the surface reference it holds. The surface
     /// release is what lets `Instance::destroy_surface` be honoured lazily —
     /// obligation 2.
@@ -325,6 +332,7 @@ fn trash_raw(item: &Trash) -> u64 {
         Trash::PipelineLayout(layout) => layout.as_raw(),
         Trash::Pipeline(pipeline) => pipeline.as_raw(),
         Trash::Sampler(sampler) => sampler.as_raw(),
+        Trash::CommandPool(pool) => pool.as_raw(),
         Trash::Swapchain(_) => u64::MAX,
     }
 }
@@ -362,6 +370,18 @@ pub(crate) struct DeviceState {
     pub(crate) pipelines: Pool<PipelineEntry>,
     pub(crate) samplers: Pool<SamplerEntry>,
     trash: RetireQueue<Trash>,
+    /// Command pools whose buffers were retired, waiting to be reset for the
+    /// next encoder of their queue family.
+    command_pools: PoolFreeList<KeptPool>,
+}
+
+/// A command pool kept for reuse, with the one primary buffer allocated from
+/// it — `vkResetCommandPool` returns that buffer to the initial state, so it is
+/// reused as well.
+#[derive(Debug)]
+pub(crate) struct KeptPool {
+    pub(crate) pool: vk::CommandPool,
+    pub(crate) buffer: vk::CommandBuffer,
 }
 
 impl DeviceState {
@@ -1210,9 +1230,7 @@ impl DeviceInner {
     /// `wait_semaphores`, which all report the same failure themselves — so
     /// this logs and returns.
     pub(crate) fn poll_retire(&self, state: &mut DeviceState) {
-        // SAFETY: `retire_timeline` is a live timeline semaphore of this device.
-        let completed = unsafe { self.raw.get_semaphore_counter_value(self.retire_timeline) };
-        let completed = match completed {
+        let completed = match self.retire_completed() {
             Ok(completed) => completed,
             Err(error) => {
                 crcbl_core::log::error!(
@@ -1236,7 +1254,7 @@ impl DeviceInner {
         let held: Vec<u64> = state
             .command_buffers
             .iter()
-            .filter(|(_, entry)| !entry.submitted)
+            .filter(|(_, entry)| entry.submitted_at.is_none())
             .flat_map(|(_, entry)| entry.references.iter().copied())
             .collect();
         let raw = &self.raw;
@@ -1254,6 +1272,65 @@ impl DeviceInner {
                 unsafe { destroy_trash(raw, swapchain_ext, instance, item) };
             },
         );
+    }
+
+    /// The retire timeline's current value: every submission up to it has
+    /// completed.
+    fn retire_completed(&self) -> Result<u64, vk::Result> {
+        // SAFETY: `retire_timeline` is a live timeline semaphore of this device.
+        unsafe { self.raw.get_semaphore_counter_value(self.retire_timeline) }
+    }
+
+    /// A kept command pool of `family` whose last submission has completed,
+    /// reset and ready to record into — or `None`, and the encoder creates one.
+    ///
+    /// The reset runs after the lock is released: the pool left the free list
+    /// under it, so nothing else can reach it. A pool whose reset fails is
+    /// destroyed rather than handed out, and the encoder creates a fresh one,
+    /// which reports the failure itself if the device is out of memory.
+    pub(crate) fn take_command_pool(&self, family: u32) -> Option<KeptPool> {
+        let kept = self.state().command_pools.take(family, || {
+            // A failed read hands out only pools that never reached a queue:
+            // zero is a value every submitted pool is past. The failure is
+            // `poll_retire`'s to report, at the next submit or wait.
+            self.retire_completed().unwrap_or(0)
+        })?;
+        // SAFETY: the pool was created by this device, and the timeline has
+        // passed the last submission that used any buffer from it — or none
+        // ever reached a queue — so none is pending.
+        match unsafe {
+            self.raw
+                .reset_command_pool(kept.pool, vk::CommandPoolResetFlags::empty())
+        } {
+            Ok(()) => Some(kept),
+            Err(error) => {
+                crcbl_core::log::warn!(
+                    "crcbl-vk: vkResetCommandPool failed ({error:?}); destroying the pool and \
+                     creating a fresh one"
+                );
+                // SAFETY: as above — nothing from this pool is pending.
+                unsafe { self.raw.destroy_command_pool(kept.pool, None) };
+                None
+            }
+        }
+    }
+
+    /// Returns a command pool of `family` to the free list, to be reset once
+    /// the timeline reaches `ready_at` — the last submission that used it, or
+    /// zero if none did.
+    ///
+    /// A pool the list has no room for is parked in the deletion queue rather
+    /// than destroyed here, so it is freed on the timeline too.
+    pub(crate) fn keep_command_pool(
+        &self,
+        state: &mut DeviceState,
+        family: u32,
+        ready_at: u64,
+        kept: KeptPool,
+    ) {
+        if let Err(kept) = state.command_pools.keep(family, ready_at, kept) {
+            self.park(state, Trash::CommandPool(kept.pool));
+        }
     }
 
     /// Parks a driver object until it is safe to free.
@@ -1495,6 +1572,8 @@ unsafe fn destroy_trash(
             Trash::PipelineLayout(layout) => raw.destroy_pipeline_layout(layout, None),
             Trash::Pipeline(pipeline) => raw.destroy_pipeline(pipeline, None),
             Trash::Sampler(sampler) => raw.destroy_sampler(sampler, None),
+            // Destroying the pool frees the buffer allocated from it.
+            Trash::CommandPool(pool) => raw.destroy_command_pool(pool, None),
             Trash::Swapchain(entry) => {
                 let TrashSwapchain {
                     swapchain,
@@ -2715,13 +2794,21 @@ impl Device for VkDevice {
         let Some(entry) = take_owned(&mut state.command_buffers, buffer, &self.inner) else {
             return;
         };
-        // The one object freed inline rather than parked: the seam says this
-        // "must not be called until the submission that used it has completed",
-        // so the caller has already done the waiting the deletion queue exists
-        // to avoid.
-        // SAFETY: the pool was created by this device, holds only this buffer,
-        // and the caller has guaranteed the submission using it is done.
-        unsafe { self.inner.raw.destroy_command_pool(entry.pool, None) };
+        // Kept for the next encoder of its family rather than destroyed. The
+        // seam says this "must not be called until the submission that used it
+        // has completed", but the pool is keyed on that submission anyway, so
+        // a caller that breaks the rule costs a fresh pool, not a reset under
+        // running work.
+        let ready_at = entry.submitted_at.unwrap_or(0);
+        self.inner.keep_command_pool(
+            &mut state,
+            entry.family,
+            ready_at,
+            KeptPool {
+                pool: entry.pool,
+                buffer: entry.raw,
+            },
+        );
     }
 
     fn submit(&self, queue: QueueHandle, submit: &SubmitInfo<'_>) -> Result<(), HalError> {
@@ -2865,7 +2952,7 @@ impl Device for VkDevice {
                 &self.inner,
             )
             .unwrap_or_else(|_| unreachable!("resolved twice above under this lock"));
-            entry.submitted = true;
+            entry.submitted_at = Some(value);
             // The pools this submission resets and writes, for
             // `query_results` to order its read after. Matched by raw handle,
             // as the deletion queue's extension above is.
@@ -4053,6 +4140,11 @@ impl Drop for DeviceInner {
             unsafe { self.raw.destroy_command_pool(entry.pool, None) };
         }
         state.command_buffers.clear();
+        for kept in state.command_pools.drain() {
+            // SAFETY: the device is idle, and a kept pool is owned by nothing
+            // else.
+            unsafe { self.raw.destroy_command_pool(kept.pool, None) };
+        }
 
         for (_, entry) in state.buffers.iter() {
             // SAFETY: mapped once in `create_buffer`, unmapped once here; the

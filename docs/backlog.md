@@ -225,18 +225,29 @@ P20's bucket lookup shipped too (`draw-args` 0.143 → 0.011 ms of GPU a frame a
 priced (2026-09-30, see their bullets) and parked: P11's locks and scans are
 about 0.01 ms of a shard frame with no resolvable A/B, P12's allocations about
 0.03 ms inside a 0.05–0.07 ms graph build, and P13's partitions 0.012–0.029 ms
-at 938 buckets. The same probes found the next trial: **P17**, the command pool
-created every frame, the largest CPU cost measured on the recording path. A
-throwaway pool free list cut `bucket_price`'s default-path encoder creation from
-0.229–0.246 to 0.003 ms and `execute` from 0.641–0.670 to 0.085–0.094 ms (a
-driver cost in the frame's first large `begin_render_pass`), and shard's encoder
-creation from 0.23 to 0.006 ms with `execute` 0.16–0.18 ms lighter — about
-0.4–0.8 ms of CPU a frame on this card. Two things surprised us and matter to
-anyone reading older `record` figures: `bucket_price`'s `record` includes
-`PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the ranged
-rows, because nothing throttles the offscreen ring) and P17's driver cost, so
-the pure recording CPU of a 23-call frame is 0.08–0.10 ms. Keep startup-only and
-unexercised candidates behind measured frame-path work.
+at 938 buckets. The same probes found **P17**, the command pool created every
+frame, and it has shipped on Vulkan (2026-09-30): `crate::command_pools` keeps
+retired pools per device and resets one once the retire timeline has passed its
+last submission. Measured with P11's protocol plus a probe that drains the GPU
+and destroys the last frame's buffer before each `bucket_price` frame, default
+path at 938 buckets, two runs each: creating the encoder 0.241–0.322 →
+0.0018–0.0021 ms and `execute` 0.750–0.961 → 0.194–0.196 ms; shard's encoder
+creation 0.249–0.252 → 0.0055–0.0056 ms and `execute` 0.816–0.839 → 0.345–0.351
+ms. P17's D3D12 remainder (a command allocator and list per encoder, the same
+shape, unmeasured) **waits on the D3D12 deferral** (`docs/plan/ROADMAP.md`,
+"Status"): performance work there is new implementation on a deferred backend.
+**Decided 2026-09-30: the next trial is the screen-space passes**, because the
+draw path is now priced small and they are where a real frame's GPU time is. In
+shard at 1920x1080 on 2026-09-27, `ssr` took 0.508 ms and `ssao` 0.210 ms of a
+1.56 ms summed pass p50, against 0.008 ms for the depth prepass. Price `ssr`,
+`ssao`, their blurs and upsample per pass on shard and lantern before choosing a
+change (resolution, tap count, early-outs, half-rate). One surprise still
+matters to anyone reading older `record` figures: `bucket_price`'s `record`
+includes `PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the
+ranged rows, because nothing throttles the offscreen ring), and before P17
+shipped it also included the fresh pool's driver cost, so the pure recording CPU
+of a 23-call frame is 0.08–0.10 ms. Keep startup-only and unexercised candidates
+behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -1798,20 +1809,17 @@ Backend and render-cache follow-up:
   order; price bulk retirement separately before choosing compaction. Call-site
   follow-up: retirement polling runs after a satisfied semaphore wait, on
   acquisition, after submission and after device idle. `GpuContext::retire_to`
-  waits before destroying completed command buffers; Vulkan destroys their pools
-  inline rather than putting them into the deletion queue. Command-buffer
-  turnover alone therefore does not establish a nonempty deletion queue. On
-  normal acquisition/submission boundaries with no unsubmitted recordings, the
-  collected `held` vector is empty and does not itself allocate heap storage; do
-  not price it as a mandatory allocation. Submission still clones each recorded
-  reference vector before checking parked objects. Measure actual queue
-  occupancy, timeline-query cost and reference-copy bytes in a warmed unchanged
-  scene before choosing the empty-queue guard or disjoint borrows.
+  waits before destroying completed command buffers; Vulkan keeps their pools in
+  `crate::command_pools`' free list, parking in the deletion queue only a pool
+  the full list has no room for. Command-buffer turnover alone therefore does
+  not establish a nonempty deletion queue. On normal acquisition/submission
+  boundaries with no unsubmitted recordings, the collected `held` vector is
+  empty and does not itself allocate heap storage; do not price it as a
+  mandatory allocation. Submission still clones each recorded reference vector
+  before checking parked objects. Measure actual queue occupancy, timeline-query
+  cost and reference-copy bytes in a warmed unchanged scene before choosing the
+  empty-queue guard or disjoint borrows.
 
-- Revalidated P17's pool creation in `VkCommandEncoder::begin` and destruction
-  in `VkDevice::destroy_command_buffer`. Reuse needs explicit completion and
-  queue-family ownership, so it carries more lifecycle risk than immutable
-  metadata or cache-hit allocation changes.
 - Native buffer-write inspection found mapped copying on Vulkan and Metal, and a
   map/copy/unmap on D3D12. A persistent D3D12 mapping is only a candidate; its
   runtime and dynamic-analysis verdict need a Windows host. WebGPU's
@@ -4233,27 +4241,21 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   writes); `flush` makes one locked `write_buffer` per run. Merge runs across
   small gaps, track dirtiness per slot as a bitset, and add a batched write with
   a per-call fallback.
-- **P17 — a command pool is created and destroyed every frame: priced, the
-  largest CPU cost measured on the recording path.** `VkCommandEncoder::begin`
-  creates a pool and `destroy_command_buffer` destroys it. Priced under P11's
-  protocol with a throwaway free list — `destroy_command_buffer` frees the
-  buffer and keeps the pool, `begin` resets a kept pool of the same device and
-  family instead of creating one. `bucket_price`, GPU drained and the previous
-  frame's command buffers destroyed before each frame, default path at 938
-  buckets, two runs each: creating the encoder 0.229–0.246 → 0.0027–0.0032 ms,
-  and `execute` 0.641–0.670 → 0.085–0.094 ms. The `execute` half is the driver,
-  not the graph: with a fresh pool the first large `begin_render_pass` of the
-  frame (the shadow atlas; `forward` on the rows where the shadow pass is small)
-  took 0.44–0.62 ms, and with a reused pool it vanished. Shard: creating the
-  encoder 0.230–0.237 → 0.0058–0.0059 ms, and `execute` less its timestamp wait
-  0.33–0.35 → 0.17 ms; its frame is GPU-bound headless, so the saving moved into
-  the wait in `submit`. Measured on this AMD Windows driver only; NVIDIA,
-  lavapipe, D3D12 and Metal are unmeasured. **Fix:** keep retired pools per
-  device and queue family and reset one at `begin`, or one pool per in-flight
-  slot reset once `retire_to` confirms completion; destroy kept pools at device
-  teardown. The seam already says `destroy_command_buffer` runs after the
-  submission completed, which is what makes a reset legal; the risk is a caller
-  that breaks that contract.
+- **P17 — D3D12 still creates a command allocator and list per encoder.**
+  Vulkan's half shipped (see the "Next performance trial" paragraph):
+  `VkCommandEncoder::begin` resets a pool from `crate::command_pools`' free
+  list, which `VkDevice::destroy_command_buffer` and an unfinished encoder's
+  `Drop` refill, keyed on the retire timeline. `Dx12CommandEncoder::new` calls
+  `DeviceInner::open_list` — `CreateCommandAllocator` and `CreateCommandList` —
+  every time, and `Device::destroy_command_buffer` parks both in the retire
+  queue. The same fix applies: keep retired allocator/list pairs per list type,
+  keyed on the fence value they were parked at, and `Reset` them at `new` once
+  the fence passes. Unmeasured: price encoder creation and `execute` on this
+  machine with `CRCBL_GPU=dx12` before building it. Metal
+  (`commandBufferWithDescriptor`) and WebGPU (`createCommandEncoder`) have no
+  pool to reuse; their per-frame objects are the API's own model. Vulkan's reuse
+  is measured on this AMD Windows driver only; NVIDIA and lavapipe are
+  unmeasured.
 - **P18 — smaller per-frame costs.** SipHash `HashMap`s in `TransientPool`
   looked up three times per transient; `submit` and `poll_retire` scanning the
   deletion queue per reference even when it is empty, and `RetireQueue::retire`

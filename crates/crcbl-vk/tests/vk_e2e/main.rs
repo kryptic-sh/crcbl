@@ -58,6 +58,7 @@
 // `Features::MESH_SHADER` and asserts on the path they selected, which no other
 // backend can reach. Two of its tests became two tests each, one per side. That
 // module's header says which, and why the others could not be split at all.
+mod command_pools;
 mod compute;
 mod device_request;
 mod draw_gen;

@@ -210,6 +210,7 @@ pub mod debug;
 
 pub(crate) mod adapter;
 pub(crate) mod command;
+pub(crate) mod command_pools;
 pub(crate) mod conv;
 pub(crate) mod deletion;
 pub(crate) mod device;
