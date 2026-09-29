@@ -3446,6 +3446,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The bucket table is numbered mode-major**, every mesh's levels for one
+  material mode and then for the next, in `DEPTH_MODES` order. It was mesh by
+  mesh, each mesh repeated once per mode the scene holds, so in a scene of two
+  modes every pipeline's buckets alternated and every range a device with a draw
+  index recorded was one bucket long. Now each pipeline's partition is one
+  contiguous run. With 17,219 instances of 938 meshes in two modes on the RX
+  7900 XTX, the ranged count tail went from 18,773 calls a frame and 5.46 ms of
+  CPU record to 33 calls and 0.94 ms. Frames are unchanged: `level_buckets`
+  still names a mesh's buckets in the first mode's run, and the
+  `(mesh, mode) → bucket` lookup follows the new numbering.
+
 - **The draw generator routes a survivor with one table read.**
   `draw_gen.slang`'s `binMain` — the `draw-args` pass — walked the bucket table
   for each survivor until its level mesh and material mode both matched; it now

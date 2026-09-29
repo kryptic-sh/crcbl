@@ -210,9 +210,10 @@ next is the mesh tail's task-stage cost (P21's first open item), the
 best-measured frame-path cost left: on this card's default path at 938 buckets
 the ranged mesh tail records for 2.98 ms and spends 2.45 ms on the GPU, against
 0.37 ms of GPU for the same ranged calls without a task stage (whose 1.68 ms
-record was measured before the scan). That work's first step is the host-only
-mode-major bucket order and its second the chunked-task prototype, priced by the
-steps and thresholds in `docs/notes/rendering.md`'s "Flat task dispatch per
+record was measured before the scan). That work's first step, the host-only
+mode-major bucket order, shipped (a two-mode scene's ranged count tail: 18,773 →
+33 calls a frame); its second, the chunked-task prototype, is next, priced by
+the steps and thresholds in `docs/notes/rendering.md`'s "Flat task dispatch per
 pass, drafted and not built". P20's bucket lookup shipped (`draw-args` 0.143 →
 0.011 ms of GPU a frame at 938 buckets); P11, P12 and P13 are frame-path too but
 unpriced, so they rank behind it until measured. Keep startup-only and
@@ -4250,9 +4251,10 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
       Designed 2026-09-29 in `docs/notes/rendering.md`, "Flat task dispatch per
       pass, drafted and not built": the sweep splits the gap into a per-draw
       term and a per-task-workgroup term (`taskMain` is one invocation per
-      pair), so the decision is three priced steps: mode-major bucket order,
-      then 32-pair task workgroups inside today's calls, then a flat
-      one-call-per-partition dispatch only if the draw-count term survives.
+      pair), so the decision is three priced steps: mode-major bucket order
+      (shipped 2026-09-29), then 32-pair task workgroups inside today's calls,
+      then a flat one-call-per-partition dispatch only if the draw-count term
+      survives.
     - **The price test's CPU record for a small row depends on the row it is
       interleaved with.** The same 33 per-bucket calls on the 2-bucket mesh row
       recorded in 0.81 to 2.06 ms across runs whose other row had 4 to 938

@@ -784,7 +784,7 @@ const fn buckets_for(levels: usize, emit: EmitTail) -> usize {
 }
 
 /// Every material mode this renderer routes a draw by, and the order the bucket
-/// table repeats a mesh's levels in.
+/// table lays its per-mode runs of every mesh's levels down in.
 ///
 /// [`GpuMaterial::mode`](mesh::GpuMaterial::mode)'s whole range, which is why
 /// the routing is total rather than checked: a row's mode is
@@ -1635,9 +1635,10 @@ pub struct ForwardRenderer {
     /// [`ForwardRenderer::level_buckets`].
     ///
     /// **The run for the scene's first material mode**, which is `OPAQUE`
-    /// wherever the scene has an opaque material at all: a mesh's buckets are
-    /// its levels once per mode the scene holds, and this names the first of
-    /// those runs. See [`ForwardRenderer::bucket_modes`].
+    /// wherever the scene has an opaque material at all: the table is every
+    /// mesh's levels once per mode the scene holds, mode by mode, and this
+    /// names a mesh's levels in the first of those runs. See
+    /// [`ForwardRenderer::bucket_modes`].
     mesh_level_buckets: Vec<Vec<u32>>,
     /// The pixel budget topic 25's descent compares a group's
     /// projected error against. [`LOD_ERROR_BUDGET`] until
@@ -3893,6 +3894,15 @@ impl ForwardRenderer {
         // an instance's mode picks a bucket exactly as its mesh does; see
         // [`ForwardRenderer::bucket_modes`].
         //
+        // **Mode-major: every mesh's run for one mode, then the next mode's.**
+        // A mode picks the pipeline a pass binds, so this makes each pipeline's
+        // partition — [`ForwardRenderer::depth_partitions`] and
+        // [`ForwardRenderer::sided_partitions`] — one contiguous run of
+        // buckets, which a device with a draw index records as one ranged call
+        // rather than a call per bucket. `DEPTH_MODES` order makes a sided
+        // partition one run too: opaque sits beside masked, and double-sided
+        // beside both.
+        //
         // **Once per mode the scene holds, not once per mode that exists.** A
         // scene whose materials are all opaque gets exactly the table it always
         // had — same length, same order, same bytes — so the twin costs nothing
@@ -3917,20 +3927,23 @@ impl ForwardRenderer {
                 held
             }
         };
-        let mut bucket_meshes: Vec<u32> = Vec::with_capacity(residents.len() * scene_modes.len());
-        // The mode each of those buckets draws, in step with it.
-        let mut bucket_modes: Vec<u32> = Vec::with_capacity(bucket_meshes.capacity());
-        // Where each description mesh's buckets start, so the tables below can
-        // be filled in mesh by mesh rather than by re-deriving the arithmetic.
-        // A mesh's run is its levels once per mode, mode by mode.
+        // One mode's run: every description mesh's levels, in description
+        // order. `bucket_bases` is where each mesh starts within it, so the
+        // tables below can be filled in mesh by mesh rather than by re-deriving
+        // the arithmetic; mode slot `s` of the mesh is `s` runs further on.
+        let mut mode_run: Vec<u32> = Vec::new();
         let mut bucket_bases: Vec<usize> = Vec::with_capacity(residents.len());
         for resident in &residents {
-            bucket_bases.push(bucket_meshes.len());
-            let levels = &resident.levels[..buckets_for(resident.levels.len(), emit)];
-            for mode in &scene_modes {
-                bucket_meshes.extend_from_slice(levels);
-                bucket_modes.extend(std::iter::repeat_n(*mode, levels.len()));
-            }
+            bucket_bases.push(mode_run.len());
+            mode_run
+                .extend_from_slice(&resident.levels[..buckets_for(resident.levels.len(), emit)]);
+        }
+        let mut bucket_meshes: Vec<u32> = Vec::with_capacity(mode_run.len() * scene_modes.len());
+        // The mode each of those buckets draws, in step with it.
+        let mut bucket_modes: Vec<u32> = Vec::with_capacity(bucket_meshes.capacity());
+        for mode in &scene_modes {
+            bucket_meshes.extend_from_slice(&mode_run);
+            bucket_modes.extend(std::iter::repeat_n(*mode, mode_run.len()));
         }
         let bucket_count = u32::try_from(bucket_meshes.len())
             .unwrap_or_else(|_| unreachable!("a table of a few buckets"));
@@ -4095,9 +4108,10 @@ impl ForwardRenderer {
                 // mode twin draws the same geometry, so it dispatches over the
                 // same clusters; a twin left at zero launches no workgroup and
                 // its instances vanish from the frame. One bucket per mode here,
-                // because the mesh path takes `buckets_for` of one.
+                // because the mesh path takes `buckets_for` of one, each a whole
+                // mode's run past the one before.
                 for slot in 0..scene_modes.len() {
-                    let bucket = bucket_bases[index] + slot;
+                    let bucket = slot * mode_run.len() + bucket_bases[index];
                     bucket_cluster_bases[bucket] = base;
                     bucket_clusters[bucket] = count;
                 }
@@ -7254,8 +7268,8 @@ impl ForwardRenderer {
     /// observable.
     ///
     /// **These are the buckets of the scene's first material mode** — `OPAQUE`
-    /// in any scene that has an opaque material, since a mesh's buckets are its
-    /// levels once per mode the scene holds and the modes are laid down in
+    /// in any scene that has an opaque material, since the table is every
+    /// mesh's levels once per mode the scene holds, mode by mode in
     /// `DEPTH_MODES` order. An instance of another mode selects the same level
     /// and lands in that level's bucket in its own mode's run, which this does
     /// not name; every scene in this tree that reads this accessor is all
@@ -11919,6 +11933,86 @@ mod tests {
         }
     }
 
+    /// **A scene holding every material mode draws each pipeline's buckets as
+    /// one ranged call**, because the bucket table is numbered mode-major: the
+    /// depth prepass records one call per depth pipeline and the colour pass
+    /// one per sided pipeline, on both indirect tails.
+    ///
+    /// Numbered mesh by mesh, the same scene alternates modes bucket by bucket
+    /// and every partition's runs are one bucket long, so the prepass would
+    /// record a call per bucket — the counts below are what tell the two
+    /// numberings apart, and the sums are what say every bucket still drew.
+    #[test]
+    fn every_mode_partition_of_a_ranged_frame_is_one_call() {
+        use crcbl_hal::null::Command;
+        use crcbl_shaders::mesh::GpuMaterial;
+
+        let scene = {
+            let mut scene = crate::scene::demo();
+            while scene.materials.len() < 4 {
+                scene.materials.push(GpuMaterial::UNTINTED);
+            }
+            let rows = [
+                0,
+                GpuMaterial::ALPHA_MODE_MASK,
+                GpuMaterial::DOUBLE_SIDED,
+                GpuMaterial::MODE_MASK,
+            ];
+            for (row, flags) in scene.materials.iter_mut().zip(rows) {
+                row.flags = flags;
+            }
+            scene
+        };
+        for path in [GeometryPath::IndirectCount, GeometryPath::IndirectPerBatch] {
+            let (recorder, device, queue) = open_with(Features::GPU_DRIVEN | Features::DRAW_INDEX);
+            let mut renderer = ForwardRenderer::with_scene_on_path(
+                device.as_ref(),
+                queue,
+                Format::Rgba8UnormSrgb,
+                &scene,
+                path,
+            )
+            .expect("the four-mode demo builds");
+            assert!(renderer.range_limit.is_some(), "{path:?}");
+            let buckets = renderer.bucket_modes.len();
+            let per_mode = buckets / DEPTH_MODES.len();
+            assert_eq!(
+                per_mode * DEPTH_MODES.len(),
+                buckets,
+                "{path:?}: four twins"
+            );
+            assert!(
+                per_mode > 1,
+                "{path:?}: a mode of one bucket is one call under either numbering"
+            );
+            let rendered = frame(device.as_ref(), &mut renderer, queue);
+
+            let draws = |label: &str| -> Vec<u32> {
+                commands_in_pass(&recorder, label)
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::DrawIndexedIndirect(draw) => Some(draw.draw_count),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let prepass = draws("depth-prepass");
+            assert_eq!(
+                prepass,
+                vec![u32::try_from(per_mode).expect("a few buckets"); DEPTH_MODES.len()],
+                "{path:?}: one call per depth pipeline, each a whole mode"
+            );
+            let forward = draws("forward");
+            assert_eq!(
+                forward,
+                vec![u32::try_from(2 * per_mode).expect("a few buckets"); 2],
+                "{path:?}: one call per sided pipeline, each two adjacent modes"
+            );
+            rendered.finish(device.as_ref(), renderer);
+            recorder.assert_valid();
+        }
+    }
+
     /// **The mesh tail draws a range of buckets per call on a device with a
     /// draw index, and a call per bucket without one** — with and without an
     /// amplification stage, read off the recorded stream of a whole frame.
@@ -14036,6 +14130,10 @@ mod tests {
             vec![0; levels],
             "and every one of them draws the OPAQUE mode"
         );
+        let opaque_meshes = renderer.draw_tables.bucket_meshes.clone();
+        let opaque_level_buckets: Vec<Vec<u32>> = (0..crate::scene::demo().meshes.len())
+            .map(|mesh| renderer.level_buckets(mesh).to_vec())
+            .collect();
         renderer.destroy(device);
         recorder.assert_valid();
 
@@ -14124,6 +14222,50 @@ mod tests {
                     levels,
                     "{what}: every mode present gets every mesh's levels once"
                 );
+            }
+            // **Mode-major**: each held mode is one contiguous run of the
+            // all-opaque table, in `DEPTH_MODES` order, so a pipeline's
+            // partition is one range of buckets.
+            let held_in_order: Vec<u32> = DEPTH_MODES
+                .into_iter()
+                .filter(|mode| held.contains(mode))
+                .collect();
+            assert_eq!(
+                twinned.bucket_modes,
+                held_in_order
+                    .iter()
+                    .flat_map(|mode| std::iter::repeat_n(*mode, levels))
+                    .collect::<Vec<_>>(),
+                "{what}: every bucket of one mode is contiguous, modes in DEPTH_MODES order"
+            );
+            assert_eq!(
+                twinned.draw_tables.bucket_meshes,
+                opaque_meshes.repeat(held_in_order.len()),
+                "{what}: each mode's run is the all-opaque table, mesh by mesh"
+            );
+            for (mesh, opaque) in opaque_level_buckets.iter().enumerate() {
+                assert_eq!(
+                    twinned.level_buckets(mesh),
+                    opaque.as_slice(),
+                    "{what}: mesh {mesh}'s level buckets are the first mode's run"
+                );
+            }
+            // And the `(mesh, mode) → bucket` lookup the scatter routes through
+            // sends every key to its mode's run, at the mesh's own offset.
+            let lookup = crcbl_shaders::draw_gen::bucket_lookup(
+                &twinned.draw_tables.bucket_meshes,
+                &twinned.bucket_modes,
+            )
+            .expect("a small lookup");
+            for (slot, mode) in held_in_order.iter().enumerate() {
+                for (offset, mesh) in opaque_meshes.iter().enumerate() {
+                    let key = 1 + (*mesh * crcbl_shaders::draw_gen::MATERIAL_MODES + *mode);
+                    assert_eq!(
+                        lookup[key as usize] as usize,
+                        slot * levels + offset,
+                        "{what}: mesh {mesh} in mode {mode}"
+                    );
+                }
             }
             twinned.destroy(device);
             recorder.assert_valid();

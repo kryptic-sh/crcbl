@@ -4608,14 +4608,17 @@ mesh-major, each mesh's levels repeated once per held mode. On the mesh path
 (one bucket per mesh through `buckets_for`), a scene holding two modes therefore
 alternates modes bucket by bucket. Every depth partition's runs are one bucket
 long, and behind a task stage `DrawRange::pack` records them one call per
-bucket. That is read from the code and not measured: the price scene uses one
-material. The fix is host-only: number buckets **mode-major** in `DEPTH_MODES`
-order (opaque, masked, double-sided, both). Then every depth partition is one
-segment, and each sided partition is two adjacent segments (opaque with masked,
-double-sided with both), which is also one segment. The ranged indirect tails
-get the same benefit, so this step ships first and alone. The
-`(mesh, mode) → bucket` lookup `pack_tables` builds absorbs the renumbering, so
-no shader changes for it.
+bucket. **Built 2026-09-29, step 1.** Measured on `bucket_price.rs`'s
+`two_material_modes_price_as_one` (938 meshes in two modes, 17,219 instances,
+1920x1080, release, validation off): the ranged count tail went from 18,773
+calls a frame and 5.46 ms of CPU record to 33 calls and 0.94 ms, and the ranged
+mesh tail's many row records 33 calls. The fix, host-only as drafted: number
+buckets **mode-major** in `DEPTH_MODES` order (opaque, masked, double-sided,
+both). Then every depth partition is one segment, and each sided partition is
+two adjacent segments (opaque with masked, double-sided with both), which is
+also one segment. The ranged indirect tails get the same benefit, so this step
+ships first and alone. The `(mesh, mode) → bucket` lookup `pack_tables` builds
+absorbs the renumbering, so no shader changes for it.
 
 **The constants.** A flat call binds one `ClusterDrawConstants` block, as a
 ranged call does, and the block is the segment's first bucket's block in that

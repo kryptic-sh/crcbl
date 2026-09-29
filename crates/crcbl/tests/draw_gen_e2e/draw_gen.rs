@@ -1010,12 +1010,17 @@ fn two_modes_of_one_mesh_scatter_into_two_buckets(mode: u32, what: &str) {
     );
     let cube_bucket = cube_buckets[0] as usize;
     let opaque_bucket = pyramid_buckets[0] as usize;
-    // A flat mesh's mode runs are one bucket long, so the marked twin is the
-    // next bucket. Held to what the device did, below.
-    let marked_bucket = opaque_bucket + 1;
 
     let camera = mesh_camera(Projection::default());
     let generated = generate(&headless, &mut renderer, &mut pool, &camera);
+
+    // The table is numbered mode-major — every mesh's run for the first mode,
+    // then every mesh's run for the second — and this scene holds exactly two
+    // modes, so the marked twin is the pyramid's bucket one whole run further
+    // on. Held to what the device did, below.
+    let buckets = generated.args.len();
+    assert_eq!(buckets % 2, 0, "two modes' runs of equal length");
+    let marked_bucket = opaque_bucket + buckets / 2;
 
     assert_eq!(
         generated.visible_count, 3,
@@ -1025,7 +1030,6 @@ fn two_modes_of_one_mesh_scatter_into_two_buckets(mode: u32, what: &str) {
 
     // The CPU oracle: one instance in the cube's bucket, one in each of the
     // pyramid's two, and nothing anywhere else.
-    let buckets = generated.args.len();
     let mut want = vec![0u32; buckets];
     want[cube_bucket] = 1;
     want[opaque_bucket] = 1;

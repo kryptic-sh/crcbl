@@ -18,6 +18,13 @@
 //! call per bucket, and on one that was — so one run prints the price and what
 //! the ranged tail took off it.
 //!
+//! [`two_material_modes_price_as_one`] prices the same rows with every mesh
+//! drawn by an opaque and a double-sided material, so each mesh is two buckets
+//! and every depth and colour pass binds two pipelines. The bucket table is
+//! numbered mode-major, so each pipeline's buckets are one run and a ranged row
+//! records a call per pipeline whatever its bucket count; numbered mesh by
+//! mesh, every run was one bucket long.
+//!
 //! Printed, not asserted, on `area_light.rs`'s terms: a millisecond is a
 //! property of the machine. What is asserted is that the many-bucket row
 //! recorded more calls than the few-bucket one without a draw index — the
@@ -135,10 +142,37 @@ fn median(samples: &[u64]) -> u64 {
     sorted.get(sorted.len() / 2).copied().unwrap_or(0)
 }
 
+/// Which materials a row's instances are drawn by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Modes {
+    /// Every instance by the demo's untinted opaque row: one bucket per mesh.
+    One,
+    /// Every mesh by that row and by a double-sided copy of it: two buckets
+    /// per mesh, under two pipelines in every pass.
+    Two,
+}
+
+/// The material row instance `index` of a `buckets` row draws with: the
+/// untinted one, or under [`Modes::Two`] the double-sided copy [`scene`]
+/// appends on every other lap of the meshes, so each mesh has instances in
+/// both modes.
+fn material(modes: Modes, buckets: u32, index: u32) -> usize {
+    match modes {
+        Modes::Two if (index / buckets) % 2 == 1 => crcbl::render::scene::demo().materials.len(),
+        _ => crcbl::render::scene::DEMO_UNTINTED,
+    }
+}
+
 /// The demo scene with its cube repeated into `buckets` meshes, and room for
-/// [`instances`] of them.
-fn scene(buckets: u32) -> crcbl::render::scene::SceneDesc<'static> {
+/// [`instances`] of them — and under [`Modes::Two`] a double-sided copy of the
+/// untinted material appended.
+fn scene(buckets: u32, modes: Modes) -> crcbl::render::scene::SceneDesc<'static> {
     let mut scene = crcbl::render::scene::demo();
+    if modes == Modes::Two {
+        let mut double = scene.materials[crcbl::render::scene::DEMO_UNTINTED];
+        double.flags |= crcbl::shaders::mesh::GpuMaterial::DOUBLE_SIDED;
+        scene.materials.push(double);
+    }
     scene.meshes = vec![scene.meshes[crcbl::render::scene::DEMO_CUBE].clone(); buckets as usize];
     scene.capacities.meshes = buckets;
     scene.capacities.vertices = buckets * crcbl::shaders::mesh::CUBE_VERTEX_COUNT as u32;
@@ -186,13 +220,13 @@ fn camera() -> Camera {
 }
 
 /// Builds the `buckets` row on `path`.
-fn row(headless: &Headless, buckets: u32, path: GeometryPath, timed: bool) -> Row {
+fn row(headless: &Headless, buckets: u32, modes: Modes, path: GeometryPath, timed: bool) -> Row {
     let device = headless.device.as_ref();
     let mut renderer = ForwardRenderer::with_scene_on_path(
         device,
         headless.queue,
         headless.format,
-        &scene(buckets),
+        &scene(buckets, modes),
         path,
     )
     .expect("the priced renderer builds");
@@ -201,7 +235,7 @@ fn row(headless: &Headless, buckets: u32, path: GeometryPath, timed: bool) -> Ro
         renderer
             .add_instance(&InstanceDesc {
                 mesh: (index % buckets) as usize,
-                material: crcbl::render::scene::DEMO_UNTINTED,
+                material: material(modes, buckets, index),
                 transform: placed(index),
             })
             .expect("the instance capacity");
@@ -239,7 +273,13 @@ fn lap(started: &mut Instant) -> u64 {
 /// Draws both rows on `path`, interleaved, and prints them — on a device asked
 /// for [`Features::DRAW_INDEX`] where `ranged`, and on one that was not
 /// otherwise. Returns the calls each row recorded a frame, many first.
-fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) -> (u64, u64) {
+fn price(
+    path: GeometryPath,
+    modes: Modes,
+    ranged: bool,
+    extent: (u32, u32),
+    frames: usize,
+) -> (u64, u64) {
     let asked = crcbl::screenshot::OffscreenSetup::OPTIONAL_FEATURES
         .union(Features::TIMESTAMP_QUERY)
         .union(Features::DEBUG_MARKERS);
@@ -256,7 +296,7 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
     } else {
         gate_warmup()
     };
-    let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, path, timed));
+    let mut rows = [many(), FEW].map(|buckets| row(&headless, buckets, modes, path, timed));
     let camera = camera();
 
     for index in 0..warmup + frames {
@@ -341,7 +381,7 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
             })
             .collect();
         eprintln!(
-            "{}: {path:?}{}, {} buckets, {} instances at {}x{} over {frames} frames: {} \
+            "{}: {path:?}{}, {modes:?} mode(s) of {} meshes, {} instances at {}x{} over {frames} frames: {} \
              calls a frame; cpu p50 begin {:.3} ms, build {:.3} ms, record {:.3} ms, submit \
              {:.3} ms; gpu passes (p50/p95 ms): {}",
             crate::SUITE,
@@ -379,6 +419,23 @@ fn price(path: GeometryPath, ranged: bool, extent: (u32, u32), frames: usize) ->
 #[test]
 #[ignore = "needs a real GPU; see this file's header for the release command"]
 fn the_price_of_one_call_per_bucket() {
+    price_paths(Modes::One);
+}
+
+/// **Two material modes keep a ranged row's calls independent of its mesh
+/// count**: the same rows with each mesh drawn in two modes, so every pass
+/// binds two pipelines and each pipeline's buckets are one run — what numbering
+/// the bucket table mode-major bought. Numbered mesh by mesh, the ranged many
+/// row recorded a call per bucket and the assertions below fail.
+#[test]
+#[ignore = "needs a real GPU; see this file's header for the release command"]
+fn two_material_modes_price_as_one() {
+    price_paths(Modes::Two);
+}
+
+/// Prices both rows under `modes` on every geometry path this device has — one
+/// path on a suite run — and asserts what the calls a frame must show.
+fn price_paths(modes: Modes) {
     let buckets = many();
     let (extent, frames) = if priced() {
         price_frame()
@@ -419,7 +476,7 @@ fn the_price_of_one_call_per_bucket() {
             continue;
         }
         priced_paths += 1;
-        let (many, few) = price(path, false, extent, frames);
+        let (many, few) = price(path, modes, false, extent, frames);
         assert!(
             many > few,
             "{path:?}: {buckets} buckets recorded {many} calls a frame and {FEW} recorded {few}, so \
@@ -430,7 +487,7 @@ fn the_price_of_one_call_per_bucket() {
         // frame records.
         let ranges = features.contains(Features::MULTI_DRAW_INDIRECT | Features::DRAW_INDEX);
         if ranges {
-            let (ranged_many, ranged_few) = price(path, true, extent, frames);
+            let (ranged_many, ranged_few) = price(path, modes, true, extent, frames);
             if path == GeometryPath::MeshShader && features.contains(Features::TASK_SHADER) {
                 assert_eq!(
                     ranged_few, few,
