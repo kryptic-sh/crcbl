@@ -320,7 +320,8 @@ impl BucketDraws {
             encoder.bind_group(0, group, &[*constant_offset], self.layout);
             match self.emit {
                 EmitTail::Mesh => {
-                    // One workgroup per (cluster, **surviving** instance), and
+                    // One workgroup per (cluster, **surviving** instance), or
+                    // behind the task stage one per chunk of those pairs, and
                     // neither extent is the CPU's: they are the three words the
                     // draw-argument pass wrote for this bucket.
                     //

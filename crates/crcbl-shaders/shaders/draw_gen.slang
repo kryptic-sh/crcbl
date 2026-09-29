@@ -163,6 +163,14 @@
 // pipeline reads `args` as data in the same pass, a resource is in one
 // resource state at a time, and `IndirectArgument` and a shader read are two.
 //
+// **Behind a task stage the extents are chunks, not pairs.** `binMain` writes
+// `(clusters, instances, 1)` — what `mesh_cluster.slang`'s un-amplified
+// `meshMain` launches one workgroup per pair from — and where
+// `DrawGenParams::task_lanes` is non-zero, `write_task_extents` rewrites each
+// region's words once its instance count is final: `startsMain` for every
+// region but occlusion's region 0 and late region, `lateFinishMain` for those.
+// `mesh_cluster.slang`'s `taskMain` then takes `task_lanes` pairs a workgroup.
+//
 // # A bucket's run cannot overflow, by arithmetic rather than by assertion
 //
 // Every routed survivor is counted into exactly one bucket by `binMain` and
@@ -619,6 +627,11 @@ struct DrawGenParams
     /// Where the `(mesh, mode) → bucket` lookup starts in `tables`, in words —
     /// see `bucket_for`. The word that was this block's tail padding.
     uint bucket_lookup_at;
+    /// How many (cluster, instance slot) pairs one task workgroup of
+    /// `mesh_cluster.slang` decides, or zero where no task stage reads these
+    /// extents — see `write_task_extents`. The host passes
+    /// `crcbl_shaders::meshlet::TASK_LANES` or zero; nothing else is valid.
+    uint task_lanes;
 };
 
 [[vk::binding(0, 0)]]
@@ -741,7 +754,9 @@ RWStructuredBuffer<Atomic<uint> > args D3D12_REGISTER(u6, space0);
 /// The extents follow at `gen.bucket_count`, `MESH_ARGS_WORDS` per bucket.
 /// **They are what makes the cluster cull skip work rather than only output**:
 /// `mesh_cluster.slang`'s stages run one workgroup per (cluster, surviving
-/// instance), and how many instances survived is a number only this pass has —
+/// instance), or behind a task stage one per chunk of those pairs — see
+/// `write_task_extents` — and how many instances survived is a number only this
+/// pass has —
 /// so a CPU-sized dispatch has to use the instance *pool's* slot count and let
 /// the groups past the survivors return early. Read from here instead, the
 /// groups are never launched.
@@ -809,7 +824,8 @@ uint instance_material_mode(GpuInstance instance)
 }
 
 /// How many clusters bucket `bucket`'s mesh has — the x extent of that bucket's
-/// mesh dispatch, and the one number in the extents that is not the GPU's.
+/// mesh dispatch until `write_task_extents` turns the pairs into chunks, and
+/// the one number in the extents that is not the GPU's.
 ///
 /// Zero on every geometry path with no mesh stage, where nothing reads the
 /// extents at all.
@@ -1297,6 +1313,41 @@ uint starts_slot_runs(uint slot)
         MESH_ARG_GROUP_Y)].load();
 }
 
+/// How many task workgroups one row of a bucket's chunked dispatch holds,
+/// matching `mesh_cluster.slang`'s constant of the same name and
+/// `crcbl_shaders::meshlet::TASK_CHUNKS_PER_ROW`: Vulkan's guaranteed minimum
+/// `maxTaskWorkGroupCount` per dimension.
+static const uint TASK_CHUNKS_PER_ROW = 65535;
+
+/// Rewrites region `region` bucket `bucket`'s mesh-dispatch extents for a task
+/// stage that decides `gen.task_lanes` pairs a workgroup, once `instances` —
+/// the bucket's y extent — is final. No-op where `gen.task_lanes` is zero,
+/// which leaves the `(clusters, instances, 1)` `meshMain` launches one
+/// workgroup per pair from.
+///
+/// The bucket's `clusters * instances` pairs become `ceil(pairs / lanes)`
+/// chunks, laid out in rows of `TASK_CHUNKS_PER_ROW`: x is the chunks up to a
+/// row, y the rows. The last row can launch chunks past the pairs, and every
+/// lane of those is past the bucket's instances, which `mesh_cluster.slang`'s
+/// bound refuses. The product is split as `(c / L) * n + ceil((c % L) * n / L)`
+/// so that nothing overflows short of the chunk count itself —
+/// `crcbl_shaders::meshlet::task_extents` is the host twin, tested against the
+/// exact quotient.
+void write_task_extents(uint region, uint bucket, uint instances)
+{
+    uint lanes = gen.task_lanes;
+    if (lanes == 0)
+    {
+        return;
+    }
+    uint clusters = bucket_clusters(bucket);
+    uint chunks = (clusters / lanes) * instances + ((clusters % lanes) * instances + lanes - 1) / lanes;
+    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_X)]
+        .store(min(chunks, TASK_CHUNKS_PER_ROW));
+    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)]
+        .store((chunks + TASK_CHUNKS_PER_ROW - 1) / TASK_CHUNKS_PER_ROW);
+}
+
 /// The second stage, the `draw-starts` pass: where every bucket's run starts
 /// this frame, and whether it draws at all.
 ///
@@ -1364,6 +1415,10 @@ void startsMain(uint3 thread: SV_GroupThreadID)
         {
             counts_and_mesh_args[count_word(region, bucket)].store(1);
         }
+        // Final here for every mode but occlusion's region 0, which
+        // `lateFinishMain` rewrites once the late phase has counted. Only this
+        // lane reads this slot's y extent from here on, and it has.
+        write_task_extents(region, bucket, runs);
         if (gen.mode == DRAW_MODE_OCCLUSION)
         {
             // The early run is the front of region 0's, and the late run starts
@@ -1377,6 +1432,7 @@ void startsMain(uint3 thread: SV_GroupThreadID)
             {
                 counts_and_mesh_args[count_word(EARLY_REGION, bucket)].store(1);
             }
+            write_task_extents(EARLY_REGION, bucket, early);
         }
         start += runs;
     }
@@ -1488,4 +1544,8 @@ void lateFinishMain(uint3 thread: SV_DispatchThreadID)
     args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
     counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
     counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
+    // Both regions' instance counts are final only now, so their task extents
+    // are too — over the y extents just stored.
+    write_task_extents(LATE_REGION, bucket, late);
+    write_task_extents(0, bucket, drawn);
 }

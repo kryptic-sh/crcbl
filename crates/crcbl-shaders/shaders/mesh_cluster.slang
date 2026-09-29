@@ -41,11 +41,17 @@
 //
 // # A cluster is the unit of work, and the CPU never counts them per frame
 //
-// One workgroup draws one cluster of one instance:
+// One mesh workgroup draws one cluster of one instance. `meshMain`'s dispatch
+// says which directly:
 //
 //   * `SV_GroupID.x` is the cluster, within the mesh this bucket draws.
 //   * `SV_GroupID.y` is the slot in the bucket's run of *surviving* instances,
 //     which `cull.slang` filled and `draw_gen.slang` compacted.
+//
+// Behind the task stage the same pairs are numbered one after another and cut
+// into chunks of `TASK_LANES`, one task workgroup each — see `taskMain` — so
+// there the extents count chunks, and the mesh stage learns its pair from the
+// payload.
 //
 // **Neither extent is the CPU's.** They are two of the three words
 // `draw_gen.slang` writes for this bucket, and the seam's
@@ -65,11 +71,11 @@
 // # Per-cluster culling lives in the amplification stage, and only there
 //
 // §3.5's second bullet — frustum and normal-cone rejection per cluster — is
-// `taskMain` below, which runs one workgroup per (cluster, instance slot) and
-// dispatches the mesh stage for the pairs that survive. **The instance cull is
-// unchanged and still runs first**: `cull.slang` decides which instances exist
-// at all, `draw_gen.slang` compacts them, and this rejects clusters *within* a
-// survivor.
+// `taskMain` below, which runs one workgroup per chunk of (cluster, instance
+// slot) pairs and dispatches the mesh stage for the pairs that survive. **The
+// instance cull is unchanged and still runs first**: `cull.slang` decides which
+// instances exist at all, `draw_gen.slang` compacts them, and this rejects
+// clusters *within* a survivor.
 //
 // `Features::TASK_SHADER` is a capability separate from `MESH_SHADER`, so a
 // device that has the mesh stage and not the amplification stage must keep
@@ -806,9 +812,10 @@ struct ClusterSelect
 ///
 /// Read here as **data** rather than executed as a draw: `instance_count` is
 /// how many instances survived culling into this bucket. The same number sizes
-/// this dispatch's y extent, out of `draw_gen.slang`'s separate mesh-argument
-/// structure — so what `group_is_live` does with it below is a range check
-/// rather than the filter it once was.
+/// this dispatch — `meshMain`'s y extent, or with the cluster count `taskMain`'s
+/// chunks — out of `draw_gen.slang`'s separate mesh-argument structure, so what
+/// `group_is_live` does with it below is a range check rather than the filter it
+/// once was.
 struct DrawIndexedArgs
 {
     uint index_count;
@@ -885,27 +892,42 @@ static const uint CLUSTER_FRUSTUM_REJECT_WORD = 3;
 /// rejected — the ones the frustum kept and that face away.
 static const uint CLUSTER_CONE_REJECT_WORD = 4;
 
-/// What `taskMain` hands `amplifiedMeshMain`: which pair of the dispatch
-/// survived.
+/// Invocations in one `taskMain` workgroup, and so how many (cluster, instance
+/// slot) pairs one task workgroup decides.
 ///
-/// The two group indices rather than a resolved cluster record, because a
-/// payload is per surviving group and the mesh stage can re-read what it needs
-/// from the same buffers — where a copied record would be a second layout to
-/// keep in step with `struct Meshlet` above.
+/// The same number as `crcbl_shaders::meshlet::TASK_LANES`, which is what the
+/// host hands `draw_gen.slang` to size each bucket's task dispatch by — held in
+/// step by that module's `the_shader_declares_the_same_task_chunk`. A dispatch
+/// sized for a different chunk than this stage decodes skips pairs or reads
+/// past them.
+static const uint TASK_LANES = 32;
+
+/// How many task workgroups one row of a bucket's dispatch holds before the
+/// next row starts: Vulkan's guaranteed minimum `maxTaskWorkGroupCount` per
+/// dimension. `draw_gen.slang` declares the same constant and
+/// `crcbl_shaders::meshlet::TASK_CHUNKS_PER_ROW` is the host's copy.
+static const uint TASK_CHUNKS_PER_ROW = 65535;
+
+/// What `taskMain` hands `amplifiedMeshMain`: which pairs of its chunk
+/// survived, compacted to the front.
+///
+/// Pair indices rather than resolved cluster records, because a payload is per
+/// task workgroup and the mesh stage can re-read what it needs from the same
+/// buffers — where a copied record would be a second layout to keep in step
+/// with `struct Meshlet` above.
 struct ClusterPayload
 {
-    /// The cluster's index within this bucket's mesh's run, which is
-    /// `SV_GroupID.x` of the task group that kept it.
-    uint cluster;
-    /// The slot in this bucket's run of surviving instances, which is that
-    /// group's `SV_GroupID.y`.
-    uint instance;
+    /// The kept pairs, `SV_GroupID.x` of the mesh workgroup indexing them. A
+    /// pair `p` is instance slot `p / cluster_count` and cluster
+    /// `p % cluster_count` of the bucket, which is the order the dispatch
+    /// extents enumerate them in — see `taskMain`. Entries past the kept count
+    /// are never read.
+    uint pairs[TASK_LANES];
 #if defined(CRCBL_TARGET_SPIRV)
-    /// Which draw of the task stage's multi-draw call this pair came from —
+    /// Which draw of the task stage's multi-draw call this chunk came from —
     /// its `DrawIndex`, handed on because a mesh stage behind a task stage may
     /// not read one itself (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631`).
-    /// SPIR-V only, like the rest of "One call for a range of buckets" below:
-    /// every other target's payload is the two words it always was.
+    /// SPIR-V only, like the rest of "One call for a range of buckets" below.
     uint draw_index;
 #endif
 };
@@ -927,7 +949,7 @@ struct ClusterDrawConstants
     uint start_at;
     /// This bucket's mesh's first cluster in `clusters`.
     uint cluster_base;
-    /// How many clusters that mesh has. The dispatch's x extent is this number
+    /// How many clusters that mesh has. `meshMain`'s x extent is this number
     /// too, reached through `draw_gen.slang`'s mesh-argument structure, and the
     /// bound is checked again here so an argument structure naming a larger one
     /// cannot draw another mesh's clusters.
@@ -1817,20 +1839,56 @@ void meshMain(
         lane, source.cluster_base + group.x * active, group.y, active, source.start_at, verts, tris);
 }
 
-/// §3.5's per-cluster cull: one workgroup per (cluster, instance slot), and a
-/// mesh workgroup only for the pairs that survive.
+/// The task stage's payload, built by every lane of the workgroup at once.
 ///
-/// One thread, because the decision is one cluster's and there is nothing to
-/// parallelise over. `DispatchMesh` is called **exactly once and unbranched**,
-/// with a group count of `1` or `0` — the DXIL rule `SetMeshOutputCounts` has,
-/// and the reason nothing above it is a branch either.
+/// **Module scope, and legal here**: Slang's Metal backend materialises a
+/// module-scope `groupshared` in every entry point of the module, which is
+/// illegal in a fragment function — `draw_gen.slang`'s `starts_chunk_runs`
+/// carries that account — and this file has no fragment entry point. Its mesh
+/// entry points take the variable unread.
+groupshared ClusterPayload task_payload;
+
+/// Each lane's keep flag, which the compaction in `taskMain` reads across
+/// lanes. Module scope for `task_payload`'s reason.
+groupshared uint task_kept[TASK_LANES];
+
+/// §3.5's per-cluster cull: one workgroup per chunk of `TASK_LANES` (cluster,
+/// instance slot) pairs, one lane per pair, and one mesh workgroup per pair
+/// that survives.
 ///
-/// A group past either bound — which the dispatch extents make unreachable, and
-/// a wrong argument structure would not — reads the bucket's first cluster and
-/// instance slot zero, which are in bounds and whose values it then multiplies
-/// away. That is what keeps `visible_instances` — whose slots past the survivor
-/// count hold whatever the buffer last had — from ever reaching `instances` as
-/// an index.
+/// # The chunk
+///
+/// A bucket's pairs are numbered `p = slot * cluster_count + cluster`, and
+/// workgroup `(x, y)` takes pairs `chunk * TASK_LANES + lane` with
+/// `chunk = y * TASK_CHUNKS_PER_ROW + x` — `draw_gen.slang`'s
+/// `write_task_extents` sizes the dispatch to cover every pair, and past the
+/// last pair only the rest of its chunk and of its row. So a single-cluster
+/// mesh puts `TASK_LANES` instances through one workgroup where it used to take
+/// one workgroup each, and that per-workgroup cost is what this shape exists to
+/// spread. The numbering is the one the old two-dimensional extents indexed,
+/// cluster fastest, and the compaction below keeps lane order within it.
+///
+/// # The compaction
+///
+/// Each lane writes its keep flag, and after the barrier counts the kept lanes
+/// in front of it and in the whole chunk — a scan over `TASK_LANES` words of
+/// workgroup memory rather than wave intrinsics, because `crcbl_hal::Limits`
+/// reports no subgroup size and a narrower subgroup would split the chunk. A kept lane writes its pair at its rank, so
+/// the payload is the kept pairs in lane order. `DispatchMesh` is then called
+/// **exactly once and unbranched** by every lane, with the kept count — the
+/// DXIL rule `SetMeshOutputCounts` has, and the reason nothing in front of it is
+/// a branch that skips it.
+///
+/// A lane past either bound — the tail of a bucket's last chunk, or a wrong
+/// argument structure — reads the bucket's first cluster and instance slot
+/// zero, which are in bounds and whose values it then multiplies away. That is
+/// what keeps `visible_instances` — whose slots past the survivor count hold
+/// whatever the buffer last had — from ever reaching `instances` as an index.
+///
+/// The pair index is a `uint`, which holds every pair the dispatch this
+/// replaced could name: that one launched a workgroup per pair, and Vulkan's
+/// `maxTaskWorkGroupTotalCount`, which bounds such a dispatch, is itself a
+/// 32-bit limit.
 ///
 /// Slot zero of a bucket that drew nothing is in bounds too, **and that is the
 /// layout's doing rather than this stage's**: such a bucket can start one word
@@ -1844,10 +1902,19 @@ void meshMain(
 /// in front of nothing the DXIL validator minds — `DispatchMesh` is below it and
 /// reached unbranched.
 [shader("amplification")]
-[numthreads(1, 1, 1)]
-void taskMain(uint3 group: SV_GroupID DRAW_INDEX_PARAMETER)
+[numthreads(TASK_LANES, 1, 1)]
+void taskMain(uint lane: SV_GroupThreadID, uint3 chunk_group: SV_GroupID DRAW_INDEX_PARAMETER)
 {
     ClusterSource source = cluster_source(DRAW_INDEX);
+    uint chunk = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;
+    uint pair = chunk * TASK_LANES + lane;
+    // A zero cluster count names no mesh a bucket can draw, and dividing by it
+    // is undefined; one keeps the arithmetic defined and `group_is_live` still
+    // refuses every pair of it.
+    uint cluster_count = max(source.cluster_count, 1u);
+    // The pair as the (cluster, instance slot) the old extents launched it as,
+    // so everything below reads exactly what one workgroup per pair read.
+    uint3 group = uint3(pair % cluster_count, pair / cluster_count, 0u);
     uint active = group_is_live(group, source);
     Meshlet cluster = clusters[source.cluster_base + group.x * active];
     uint run = visible_instances[source.start_at];
@@ -1897,35 +1964,60 @@ void taskMain(uint3 group: SV_GroupID DRAW_INDEX_PARAMETER)
         cluster_selection[index] = selected;
     }
 
-    ClusterPayload payload;
-    payload.cluster = group.x;
-    payload.instance = group.y;
+    // The compaction: every lane's flag, then each lane's rank among the kept
+    // ones and the chunk's kept total. The barrier is what makes every flag
+    // visible before any lane counts, and every lane reaches it — nothing above
+    // returns.
+    task_kept[lane] = keep;
+    GroupMemoryBarrierWithGroupSync();
+    uint rank = 0;
+    uint kept = 0;
+    for (uint other = 0; other < TASK_LANES; ++other)
+    {
+        uint flag = task_kept[other];
+        rank += other < lane ? flag : 0u;
+        kept += flag;
+    }
+    if (keep == 1u)
+    {
+        task_payload.pairs[rank] = pair;
+    }
 #if defined(CRCBL_TARGET_SPIRV)
-    payload.draw_index = DRAW_INDEX;
+    if (lane == 0u)
+    {
+        task_payload.draw_index = DRAW_INDEX;
+    }
 #endif
-    DispatchMesh(keep, 1, 1, payload);
+    // Every entry written before any lane hands the payload on.
+    GroupMemoryBarrierWithGroupSync();
+    DispatchMesh(kept, 1, 1, task_payload);
 }
 
 /// The mesh stage behind `taskMain`: `meshMain`'s body, for a pair the
 /// amplification stage already decided to keep.
 ///
-/// `SV_GroupID` here counts within the one workgroup `DispatchMesh` launched
-/// and says nothing about which cluster this is, which is what the payload is
-/// for.
+/// `SV_GroupID.x` counts the workgroups one `DispatchMesh` launched, so it is
+/// which entry of the payload's kept pairs this is — and the pair, not the
+/// group, says which cluster of which instance slot.
 [shader("mesh")]
 [outputtopology("triangle")]
 [numthreads(THREADS, 1, 1)]
 void amplifiedMeshMain(
     uint lane: SV_GroupThreadID,
+    uint3 group: SV_GroupID,
     in payload ClusterPayload amplification,
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
     out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
 {
     ClusterSource source = cluster_source(PAYLOAD_DRAW_INDEX(amplification));
+    uint pair = amplification.pairs[group.x];
+    // `taskMain`'s decode, on its terms: the task stage kept this pair, so the
+    // count is at least one, and the `max` only mirrors the stage that wrote it.
+    uint cluster_count = max(source.cluster_count, 1u);
     emit_cluster(
         lane,
-        source.cluster_base + amplification.cluster,
-        amplification.instance,
+        source.cluster_base + pair % cluster_count,
+        pair / cluster_count,
         1u,
         source.start_at,
         verts,

@@ -186,19 +186,19 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [draw_gen]
 source = shaders/draw_gen.slang
-source-sha256 = 920bfaf03ebd995975f040d926d09eaac9e884e655e2b760ee0976505d68c895
+source-sha256 = b6cb4db30b8b467b314993e33a68f9c335f7036d6df2e9b32dc8c5bb87a32bf7
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/draw_gen.spv
-spirv-sha256 = e3f23bb75ae49d04005779911c8b5b29640fe06a482e2bf31d5340770078f69b
+spirv-sha256 = 305efedb4aa23baff1f611ff0c6f748937b4c5331385ecdc91a0a52626305acc
 wgsl = wgsl/draw_gen.wgsl
-wgsl-sha256 = e67a70336cf06de37de370b830ac8b647bd2cc18f73fbf614d28a9ba2b73495a
+wgsl-sha256 = acf5fe09c3dd730cd61a4f98625bd6c6e6388daa7885d256f61ede395660ed5f
 msl = msl/draw_gen.metal
-msl-sha256 = f48ec3109993ad657471249ef722f5670eb4f1696113c4b165419b25724f515a
-dxil = binMain:dxil/draw_gen.bin.dxil:16c3ba73a9d42e6b0c7f25eb1b92ebd12ecb42207ae1217ffd6e0a82450399e5
-dxil = startsMain:dxil/draw_gen.starts.dxil:c7aa35c2359e2de3ddd6e2f87a4245fcf419bb354001a04f3826e141c20289c3
-dxil = scatterMain:dxil/draw_gen.scatter.dxil:9b900e330acf6622bc113290e790ac08856164f063ef20896a91ed674dbf3841
-dxil = lateScatterMain:dxil/draw_gen.late_scatter.dxil:f1932da4d42268ae0af27e225fe6ff5666a08e094a35ed1278d50dc289001b5d
-dxil = lateFinishMain:dxil/draw_gen.late_finish.dxil:c2994dca71a63eef2d67fc915f06df881e414b36a32e482e351e493a414fb070
+msl-sha256 = af7d3d26e9e7885ec4d005df3b80f6f2841492b22bae3c6a4da3b11cd220531c
+dxil = binMain:dxil/draw_gen.bin.dxil:98e148fb284c96d0b6fb7ce1f8f5b1d6512b602c4fa40779b7feea29548c9853
+dxil = startsMain:dxil/draw_gen.starts.dxil:6d4ea8339ffd4a53b057661cf0e24b87b669631af9b0f304d160775835955892
+dxil = scatterMain:dxil/draw_gen.scatter.dxil:958ff1464d9b8e7fc2059742387afb2e7b3e80bb061e290e436d64734d7e4828
+dxil = lateScatterMain:dxil/draw_gen.late_scatter.dxil:33af4d8cb752a010ae4860e6451fe3ff7e0f3e69077ffed28c7fe5ca8cb717ce
+dxil = lateFinishMain:dxil/draw_gen.late_finish.dxil:25a1bfe55fb218062c70829b4a28a99cfc26ca8335f7a76db71df951f7531abd
 entry-points = binMain:glcompute, startsMain:glcompute, scatterMain:glcompute, lateScatterMain:glcompute, lateFinishMain:glcompute
 
 [exposure]
@@ -336,18 +336,18 @@ entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:v
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 08eb2dbddcee5a74c9deac3f13648365836388682d07dc90df75e381d0d71897
+source-sha256 = d756353ae96fa60c687d1cca40313779775801b59188278dfbd68bd8501fae94
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
-spirv-sha256 = b088586659ef7555571034e6773eb20132fe1c957a8259c1bbd7a73b6d61beb7
+spirv-sha256 = 756a92fbb20944f5bdf26c56190056beff78bc83f778d02780d1a42a0bcffe66
 spirv-entry = meshMain:spirv/mesh_cluster.mesh.spv:2cd08c6a90bf3ecde6cacd6940cb300c6979b2666660d82aeb9b32d72a24c11d
-spirv-entry = taskMain:spirv/mesh_cluster.task.spv:0f97454e332a82e8959fd29b554acf197e43c6f3e27e258115c6851d21635a9f
-spirv-entry = amplifiedMeshMain:spirv/mesh_cluster.amplified_mesh.spv:9ae742d279e04812655ac07697b8717276fcb1e035ac09b13e15f1e5e9d0ae3c
+spirv-entry = taskMain:spirv/mesh_cluster.task.spv:99dff007d8198909f94a89383e8c5f20f707a2a2b6021ed40f47ad0dc2c28814
+spirv-entry = amplifiedMeshMain:spirv/mesh_cluster.amplified_mesh.spv:79301bfde2434c592012a739ee4dd4ef6e930ea18304844c99f09440007b934b
 msl = msl/mesh_cluster.metal
-msl-sha256 = a8f31d9075c83938977c8ff2b4943ed70eee0d3acf962215ee9d9f206437dab2
-dxil = meshMain:dxil/mesh_cluster.mesh.dxil:7fda7320b1095e933aa58cdb0a5958a14e5770c6de87a805a542cd02d895af21
-dxil = taskMain:dxil/mesh_cluster.task.dxil:0c7c1a1be9332e22cb8734d38320b318f7b2e6abb2e4ca85fe3db192f5076238
-dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:a572bb5fb8e99ef9f7329e4578f89e32094e05d8b33b403c3f1229aab4babf0b
+msl-sha256 = 94fbcd7e3d5083da0e8716a4bb9f5e908abfc1e02fc8bdafce935c5f7bc1d231
+dxil = meshMain:dxil/mesh_cluster.mesh.dxil:4e6380df54cf25f469c33b384bd67a3e5edd2e212bbd1bbb56416a496a5d9a62
+dxil = taskMain:dxil/mesh_cluster.task.dxil:307b376b50dcb17098518ad7c2160ae11a2f327ac5441bd4248fd838ec7fc08e
+dxil = amplifiedMeshMain:dxil/mesh_cluster.amplified_mesh.dxil:5baf5e818111da5d08892574ed02be610ebb0e2e1f11fc13945902c685e43fc8
 entry-points = meshMain:meshext, taskMain:taskext, amplifiedMeshMain:meshext
 
 [mesh_shader]

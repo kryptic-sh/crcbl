@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::draw_gen::Params` and `crcbl_render::DrawGenDesc` have a
+  `task_lanes` field**, how many (cluster, instance slot) pairs one task
+  workgroup decides: `crcbl_shaders::meshlet::TASK_LANES` for a generator whose
+  mesh tail runs behind the amplification stage, zero for every other one. A
+  struct literal of either needs it, and `draw_gen::PARAMS_SIZE` grows from 80
+  to 96 bytes. `meshlet::TASK_LANES`, `meshlet::TASK_CHUNKS_PER_ROW` and
+  `meshlet::task_extents` are new.
+
 - **`crcbl_shaders::draw_gen::Params` and `TableOffsets` have a
   `bucket_lookup_at` field**, where the new `(mesh, mode) → bucket` lookup
   starts in the table buffer (see Changed); a struct literal of either needs it.
@@ -3445,6 +3453,20 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The mesh tail's task stage decides 32 pairs a workgroup.**
+  `mesh_cluster.slang`'s `taskMain` was one invocation per (cluster, instance
+  slot) pair, launching zero or one mesh workgroup; it is now `TASK_LANES` (32)
+  lanes, one pair each, which compact the kept pairs and launch them with one
+  `DispatchMesh`, and `draw_gen.slang` rewrites each bucket's task dispatch to
+  `ceil(clusters × instances / 32)` workgroups once its instance count is final.
+  Measured with `mesh_e2e`'s `bucket_price.rs` on Vulkan, RX 7900 XTX, release,
+  validation off, 17,219 instances at 1920x1080, ranged mesh tail,
+  `depth-prepass` + `forward` + `shadow` GPU p50: 2.40 → 1.41 ms at 938 buckets
+  in one material mode, 3.46 → 2.68 ms in two, and 1.08 → 0.34 ms at 4 buckets,
+  with every run length from 4 to 128 faster; `draw-starts` rose 0.018 → 0.027
+  ms. Frames are unchanged. Devices without a task stage keep one `meshMain`
+  workgroup per pair.
 
 - **The bucket table is numbered mode-major**, every mesh's levels for one
   material mode and then for the next, in `DEPTH_MODES` order. It was mesh by

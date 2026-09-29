@@ -4991,6 +4991,7 @@ impl ForwardRenderer {
                 instance_capacity: scene.capacities.instances,
                 light_capacity: scene.capacities.lights,
                 clusters: rollback.clusters.as_ref(),
+                task_lanes: view::task_lanes(culls_clusters),
                 mesh_layout,
                 vertices,
                 draw_constants,
@@ -5160,6 +5161,7 @@ impl ForwardRenderer {
                     } else {
                         crcbl_shaders::draw_gen::DrawMode::Faces
                     },
+                    task_lanes: view::task_lanes(culls_clusters),
                 },
             )?;
             rollback.shadow_draws.push(draws);
@@ -11108,10 +11110,11 @@ impl MeshModules {
     const MESH_WORKGROUP_SIZE: [u32; 3] =
         [crcbl_shaders::meshlet::MAX_CLUSTER_VERTICES as u32, 1, 1];
 
-    /// Invocations per task workgroup: `taskMain` is `[numthreads(1, 1, 1)]`,
-    /// one invocation per cluster group, which is what lets the payload be a
-    /// plain local. See `mesh_cluster.slang`.
-    const TASK_WORKGROUP_SIZE: [u32; 3] = [1, 1, 1];
+    /// Invocations per task workgroup: `taskMain` is
+    /// `[numthreads(TASK_LANES, 1, 1)]`, one lane per (cluster, instance slot)
+    /// pair of its chunk. Taken from the crate that owns the shader, on
+    /// [`MESH_WORKGROUP_SIZE`](Self::MESH_WORKGROUP_SIZE)'s terms.
+    const TASK_WORKGROUP_SIZE: [u32; 3] = [crcbl_shaders::meshlet::TASK_LANES, 1, 1];
 
     /// Loads whichever modules `emit` needs and resolves their entry points.
     ///

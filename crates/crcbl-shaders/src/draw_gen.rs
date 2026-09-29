@@ -55,10 +55,11 @@ const _: () = assert!(STARTS_WORKGROUP_SIZE.is_power_of_two());
 /// Bytes of the uniform block.
 ///
 /// Eight `uint`, two `float4` — which `std140` puts at the next multiple of 16,
-/// offset 32, directly behind the eighth — and four `uint` more. Checked against
-/// the `Offset` decorations `slangc` emits by this module's
+/// offset 32, directly behind the eighth — and five `uint` more, the last of
+/// which `std140` pads out to the next multiple of 16. Checked against the
+/// `Offset` decorations `slangc` emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
-pub const PARAMS_SIZE: usize = 80;
+pub const PARAMS_SIZE: usize = 96;
 
 /// How many **draw regions** the per-bucket words are laid out for.
 ///
@@ -229,6 +230,18 @@ pub struct Params {
     /// The word the block's `std140` tail padding used to be, so the block is
     /// no wider for it.
     pub bucket_lookup_at: u32,
+    /// How many (cluster, instance slot) pairs one task workgroup of
+    /// `mesh_cluster.slang` decides: [`TASK_LANES`](crate::meshlet::TASK_LANES)
+    /// where the mesh tail runs behind that amplification stage, and zero
+    /// everywhere else.
+    ///
+    /// Non-zero, `draw_gen.slang` rewrites each bucket's mesh-dispatch extents
+    /// to [`task_extents`](crate::meshlet::task_extents) once its instance
+    /// count is final, so one task workgroup takes a chunk of pairs. Zero
+    /// leaves `(clusters, instances, 1)`, which is what the un-amplified
+    /// `meshMain` launches one workgroup per pair from — so a caller drawing
+    /// without the task stage must pass zero.
+    pub task_lanes: u32,
 }
 
 impl Params {
@@ -270,6 +283,7 @@ impl Params {
             self.draw_regions,
             self.face_runs_at,
             self.bucket_lookup_at,
+            self.task_lanes,
         ]
         .into_iter()
         .enumerate()
@@ -779,8 +793,8 @@ mod tests {
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
-        // 20, 24, 28, 32, 48, 64, 68, 72, 76.
-        assert_eq!(PARAMS_SIZE, 80);
+        // 20, 24, 28, 32, 48, 64, 68, 72, 76, 80.
+        assert_eq!(PARAMS_SIZE, 96);
         assert_eq!(
             PARAMS_SIZE % 16,
             0,
@@ -802,6 +816,7 @@ mod tests {
             draw_regions: DRAW_REGIONS,
             face_runs_at: 29,
             bucket_lookup_at: 31,
+            task_lanes: 37,
         }
         .to_bytes();
         let uint_at =
@@ -827,7 +842,12 @@ mod tests {
         assert_eq!(uint_at(68), DRAW_REGIONS, "draw_regions at offset 68");
         assert_eq!(uint_at(72), 29, "face_runs_at at offset 72");
         assert_eq!(uint_at(76), 31, "bucket_lookup_at at offset 76");
-        assert_eq!(bytes.len(), 80, "and the block ends behind it");
+        assert_eq!(uint_at(80), 37, "task_lanes at offset 80");
+        assert!(
+            bytes[84..].iter().all(|byte| *byte == 0),
+            "the std140 tail behind it is padding, and zero"
+        );
+        assert_eq!(bytes.len(), 96, "and the block ends there");
     }
 
     /// The regions [`pack_tables`] lays out are the ones the offsets it returns

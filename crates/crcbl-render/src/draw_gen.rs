@@ -295,6 +295,17 @@ pub struct DrawGenDesc<'a> {
     /// A frame may always run [`DrawMode::Plain`] instead — see
     /// [`DrawGen::begin_frame_with`].
     pub mode: DrawMode,
+    /// How many (cluster, instance slot) pairs one task workgroup of the mesh
+    /// tail decides — [`draw_gen::Params::task_lanes`].
+    ///
+    /// [`TASK_LANES`](crcbl_shaders::meshlet::TASK_LANES) for a caller drawing
+    /// behind `mesh_cluster.slang`'s amplification stage, which then reads
+    /// each bucket's mesh-dispatch extents as
+    /// [`task_extents`](crcbl_shaders::meshlet::task_extents). **Zero for every
+    /// other caller**, including a mesh path with no task stage: its
+    /// `meshMain` launches one workgroup per pair from the
+    /// `(clusters, instances, 1)` extents zero leaves in place.
+    pub task_lanes: u32,
 }
 
 /// [`DrawGen::frame_modes`]' word for a frame that dispatches the occlusion
@@ -389,7 +400,9 @@ pub struct GeneratedDraws {
     /// [`GeometryPath::IndirectCount`](crcbl_hal::GeometryPath::IndirectCount)'s
     /// call reads. At [`DrawGen::mesh_args_offset`]`(b)` are its
     /// [`draw_gen::MESH_ARGS_SIZE`] bytes of `(clusters, surviving instances,
-    /// 1)`, which is what
+    /// 1)` — or, where [`DrawGenDesc::task_lanes`] is non-zero,
+    /// [`task_extents`](crcbl_shaders::meshlet::task_extents) of those two —
+    /// which is what
     /// [`CommandEncoder::draw_mesh_tasks_indirect`](crcbl_hal::CommandEncoder::draw_mesh_tasks_indirect)
     /// reads on
     /// [`GeometryPath::MeshShader`](crcbl_hal::GeometryPath::MeshShader).
@@ -519,6 +532,8 @@ pub struct DrawGen {
     /// [`draw_gen::runs_words`], checked once at build.
     runs_words: u32,
     hidden_view: u32,
+    /// [`DrawGenDesc::task_lanes`], written into every frame's block.
+    task_lanes: u32,
     /// What [`DrawGenDesc::mode`] built this for.
     mode: DrawMode,
     /// `[frame]`: the mode [`DrawGen::begin_frame_with`] last wrote, as its
@@ -779,6 +794,7 @@ impl DrawGen {
                     level_groups_at: table_offsets.level_groups_at,
                     level_meshes_at: table_offsets.level_meshes_at,
                     bucket_lookup_at: table_offsets.bucket_lookup_at,
+                    task_lanes: desc.task_lanes,
                     ..draw_gen::Params::default()
                 }
                 .to_bytes(),
@@ -1119,6 +1135,7 @@ impl DrawGen {
             capacity,
             runs_words,
             hidden_view: desc.hidden_view,
+            task_lanes: desc.task_lanes,
             mode: desc.mode,
             frame_modes: (0..frames).map(|_| AtomicU32::new(0)).collect(),
             occlusion,
@@ -1674,6 +1691,7 @@ impl DrawGen {
                 draw_regions: self.mode.regions(),
                 face_runs_at: draw_gen::face_runs_at(self.capacity, self.bucket_count),
                 bucket_lookup_at: self.table_offsets.bucket_lookup_at,
+                task_lanes: self.task_lanes,
             }
             .to_bytes(),
         )?;
@@ -2444,6 +2462,7 @@ mod tests {
                 instance_capacity: capacity,
                 hidden_view: 0,
                 mode,
+                task_lanes: 0,
             },
         )
         .expect("the null backend builds a generator")

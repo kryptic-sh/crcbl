@@ -208,16 +208,20 @@ tail, the mesh one included, with runs shorter than a measured threshold kept a
 call per bucket behind a task stage, and `draw-starts` is a parallel scan. The
 next is the mesh tail's task-stage cost (P21's first open item), the
 best-measured frame-path cost left: on this card's default path at 938 buckets
-the ranged mesh tail records for 2.98 ms and spends 2.45 ms on the GPU, against
+the ranged mesh tail spent 2.45 ms on the GPU before the steps below, against
 0.37 ms of GPU for the same ranged calls without a task stage (whose 1.68 ms
 record was measured before the scan). That work's first step, the host-only
 mode-major bucket order, shipped (a two-mode scene's ranged count tail: 18,773 →
-33 calls a frame); its second, the chunked-task prototype, is next, priced by
-the steps and thresholds in `docs/notes/rendering.md`'s "Flat task dispatch per
-pass, drafted and not built". P20's bucket lookup shipped (`draw-args` 0.143 →
-0.011 ms of GPU a frame at 938 buckets); P11, P12 and P13 are frame-path too but
-unpriced, so they rank behind it until measured. Keep startup-only and
-unexercised candidates behind measured frame-path work.
+33 calls a frame); its second, 32-pair task workgroups, shipped too (938
+buckets: 2.40 → 1.41 ms of GPU, every run length from 4 to 128 faster). The
+draft's rule makes the third step next: the flat one-call-per-partition
+dispatch, because the 938-bucket row still exceeds the 4-bucket one by 1.07 ms,
+almost all of it `shadow`. See `docs/notes/rendering.md`'s "Flat task dispatch
+per pass, drafted and not built" and its "Step 2 built" section. P20's bucket
+lookup shipped (`draw-args` 0.143 → 0.011 ms of GPU a frame at 938 buckets);
+P11, P12 and P13 are frame-path too but unpriced, so they rank behind it until
+measured. Keep startup-only and unexercised candidates behind measured
+frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -4245,16 +4249,41 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
       0.21 ms). A per-pass threshold — the camera passes near 64 to 128, the
       shadow views near 2 — would fit better; not built, and it would need the
       sweep repeated per pass on a scene with a different view count.
-    - **Ranged at 938 buckets the mesh tail still records for 3.92 ms and spends
-      2.45 ms on the GPU**, against 1.68 ms and 0.37 ms for the same ranged
-      calls without a task stage. Which part of the driver pays is not profiled.
-      Designed 2026-09-29 in `docs/notes/rendering.md`, "Flat task dispatch per
-      pass, drafted and not built": the sweep splits the gap into a per-draw
-      term and a per-task-workgroup term (`taskMain` is one invocation per
-      pair), so the decision is three priced steps: mode-major bucket order
-      (shipped 2026-09-29), then 32-pair task workgroups inside today's calls,
-      then a flat one-call-per-partition dispatch only if the draw-count term
-      survives.
+    - **Ranged at 938 buckets the mesh tail still spends 1.41 ms on the GPU**
+      (`depth-prepass` 0.26, `forward` 0.31, `shadow` 0.85), against 0.34 ms at
+      4 buckets and 0.37 ms for the same ranged calls without a task stage.
+      Which part of the driver pays is not profiled. Designed 2026-09-29 in
+      `docs/notes/rendering.md`, "Flat task dispatch per pass, drafted and not
+      built", as three priced steps. Mode-major bucket order shipped. 32-pair
+      task workgroups inside today's calls shipped: 2.45 → 1.41 ms at 938
+      buckets, every run length from 4 to 128 faster, table in that section's
+      "Step 2 built". **Next, per the draft's rule: the flat
+      one-call-per-partition dispatch**, since the 938-bucket row still exceeds
+      the 4-bucket row by 1.07 ms, almost all of it in `shadow` (0.85 against
+      0.04 ms). The draft's constants change, `startsMain` chunk-start scan,
+      extra late pass and `BucketDraws` record path are all still to build. The
+      lane decode, compaction and payload carry over as built.
+    - **Left open by the chunked task stage** (`mesh_cluster.slang`'s
+      `taskMain`):
+      - `TASK_STAGE_SHORTEST_RANGE` was tuned on the one-invocation stage and
+        not re-swept. Runs of 4, 8 and 16 buckets still record a call per bucket
+        under it. The flat call would delete it, so re-sweep only if that step
+        is declined.
+      - **Not verified: the compaction barrier.** Removing it left every test
+        green on the RX 7900 XTX, where a 32-lane task workgroup is one wave. No
+        device here runs the task stage with subgroups narrower than 32.
+      - `TASK_LANES` = 32 was priced alone. 64 was not tried.
+      - The mesh stage and every task lane decode a pair with one integer divide
+        and remainder. The cost was not measured apart.
+      - On MSL every thread of the object function copies the whole
+        `groupshared` payload into the object payload (Slang's lowering), the
+        same words from every thread. That compiles and runs on no Metal device
+        here.
+      - **Surprising, not a bug:** single-sided, the task path and the
+        un-amplified `meshMain` path draw `task_chunks.rs`'s field 29 bytes
+        apart, before chunking as well as after (measured on the parent commit).
+        Cause not traced. The frame test uses a double-sided field for that
+        reason.
     - **The price test's CPU record for a small row depends on the row it is
       interleaved with.** The same 33 per-bucket calls on the 2-bucket mesh row
       recorded in 0.81 to 2.06 ms across runs whose other row had 4 to 938

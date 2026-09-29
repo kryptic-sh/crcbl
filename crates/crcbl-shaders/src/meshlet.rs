@@ -88,6 +88,49 @@ pub const MAX_CLUSTER_TRIANGLES: usize = 124;
 // ever stops being true.
 const _: () = assert!(MAX_CLUSTER_VERTICES <= u8::MAX as usize + 1);
 
+/// How many (cluster, instance slot) pairs one workgroup of
+/// `mesh_cluster.slang`'s amplification stage decides: one lane each, the
+/// kept ones compacted into one `DispatchMesh`.
+///
+/// What a renderer drawing behind that stage passes as
+/// [`draw_gen::Params::task_lanes`](crate::draw_gen::Params::task_lanes), so the
+/// dispatch `draw_gen.slang` sizes is the one the stage decodes. The shader
+/// declares the same number as its `numthreads` and its payload's length, and
+/// `the_shader_declares_the_same_task_chunk` holds the two in step.
+pub const TASK_LANES: u32 = 32;
+
+/// How many task workgroups one row of a bucket's chunked dispatch holds before
+/// the next row starts — Vulkan's guaranteed minimum `maxTaskWorkGroupCount`
+/// per dimension, which no HAL limit reports. Declared by both
+/// `mesh_cluster.slang` and `draw_gen.slang`, and held in step by the same test.
+pub const TASK_CHUNKS_PER_ROW: u32 = 65535;
+
+/// The mesh-dispatch extents `draw_gen.slang`'s `write_task_extents` writes for
+/// a bucket whose mesh has `clusters` clusters and `instances` surviving
+/// instances, drawn behind a task stage of `lanes` lanes a workgroup: the
+/// `ceil(clusters * instances / lanes)` chunks, in rows of
+/// [`TASK_CHUNKS_PER_ROW`].
+///
+/// The host twin of the shader's arithmetic, including its split of the product
+/// into `(c / L) * n + ceil((c % L) * n / L)`, so a test can hold the two to one
+/// answer — see `crcbl`'s `mesh_e2e` task-chunk tests.
+///
+/// # Panics
+///
+/// If `lanes` is zero, which is the shader's "no task stage" value and has no
+/// chunked extents.
+#[must_use]
+pub const fn task_extents(clusters: u32, instances: u32, lanes: u32) -> [u32; 3] {
+    assert!(lanes != 0, "a task stage has at least one lane");
+    let chunks = (clusters / lanes) * instances + ((clusters % lanes) * instances).div_ceil(lanes);
+    let row = if chunks < TASK_CHUNKS_PER_ROW {
+        chunks
+    } else {
+        TASK_CHUNKS_PER_ROW
+    };
+    [row, chunks.div_ceil(TASK_CHUNKS_PER_ROW), 1]
+}
+
 /// A cluster's bounding sphere and normal cone, matching
 /// `struct ClusterBounds` in `shaders/mesh_cluster.slang`.
 ///
@@ -1230,6 +1273,92 @@ mod tests {
             // D3D12's mesh-shader output cap, and the `maxMeshOutputPrimitives`
             // every driver here reports.
             assert!(MAX_CLUSTER_TRIANGLES <= 126);
+        }
+    }
+
+    /// Both shaders declare the chunk this crate sizes dispatches by, and the
+    /// task stage is as wide as the chunk.
+    ///
+    /// A `draw_gen.slang` sizing chunks of one width and a task stage decoding
+    /// another skips pairs or double-draws them, and nothing but a frame
+    /// comparison would notice.
+    #[test]
+    fn the_shader_declares_the_same_task_chunk() {
+        let cluster = include_str!("../shaders/mesh_cluster.slang");
+        let draw_gen = include_str!("../shaders/draw_gen.slang");
+        let lanes = format!("static const uint TASK_LANES = {TASK_LANES};");
+        let row = format!("static const uint TASK_CHUNKS_PER_ROW = {TASK_CHUNKS_PER_ROW};");
+        assert!(
+            cluster.contains(&lanes),
+            "mesh_cluster.slang must declare `{lanes}`"
+        );
+        assert!(
+            cluster.contains(&row),
+            "mesh_cluster.slang must declare `{row}`"
+        );
+        assert!(
+            draw_gen.contains(&row),
+            "draw_gen.slang must declare `{row}`"
+        );
+        for needle in [
+            "[numthreads(TASK_LANES, 1, 1)]\nvoid taskMain(",
+            "uint pairs[TASK_LANES];",
+            "uint chunk = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;",
+            "uint pair = chunk * TASK_LANES + lane;",
+        ] {
+            assert!(
+                cluster.contains(needle),
+                "mesh_cluster.slang's task stage must read `{needle}`"
+            );
+        }
+    }
+
+    /// [`task_extents`] is `ceil(clusters * instances / lanes)` chunks, exactly,
+    /// laid out in rows of [`TASK_CHUNKS_PER_ROW`] — checked against the
+    /// quotient computed wide, so the split that keeps the shader's product
+    /// from overflowing is held to the answer it stands for.
+    #[test]
+    fn the_task_extents_cover_every_pair_in_whole_chunks() {
+        // By hand: nothing survived, one instance of one cluster, a chunk
+        // exactly full, one pair over it, and a single-cluster bucket of the
+        // price scene's size.
+        assert_eq!(task_extents(1, 0, TASK_LANES), [0, 0, 1]);
+        assert_eq!(task_extents(1, 1, TASK_LANES), [1, 1, 1]);
+        assert_eq!(task_extents(1, 32, TASK_LANES), [1, 1, 1]);
+        assert_eq!(task_extents(1, 33, TASK_LANES), [2, 1, 1]);
+        assert_eq!(task_extents(3, 11, TASK_LANES), [2, 1, 1]);
+        assert_eq!(task_extents(1, 17_219, TASK_LANES), [539, 1, 1]);
+        // Past one row: 65,536 chunks is one full row and one chunk of the next.
+        assert_eq!(
+            task_extents(TASK_LANES, TASK_CHUNKS_PER_ROW + 1, TASK_LANES),
+            [TASK_CHUNKS_PER_ROW, 2, 1]
+        );
+        for clusters in [1u32, 2, 5, 31, 32, 33, 64, 100, 1_000, 4_095] {
+            for instances in [0u32, 1, 2, 7, 31, 32, 33, 1_000, 17_219, 100_000] {
+                let pairs = u64::from(clusters) * u64::from(instances);
+                let chunks = pairs.div_ceil(u64::from(TASK_LANES));
+                let [x, y, z] = task_extents(clusters, instances, TASK_LANES);
+                let launched = u64::from(x) * u64::from(y);
+                assert!(
+                    launched >= chunks,
+                    "{clusters} x {instances}: {launched} chunks cannot cover {chunks}"
+                );
+                assert!(
+                    launched - chunks < u64::from(TASK_CHUNKS_PER_ROW),
+                    "{clusters} x {instances}: more than a row's slack past {chunks} chunks"
+                );
+                assert_eq!(
+                    u64::from(x),
+                    chunks.min(u64::from(TASK_CHUNKS_PER_ROW)),
+                    "{clusters} x {instances}: x is the chunks up to a row"
+                );
+                assert_eq!(
+                    u64::from(y),
+                    chunks.div_ceil(u64::from(TASK_CHUNKS_PER_ROW)),
+                    "{clusters} x {instances}: y is the rows"
+                );
+                assert_eq!(z, 1);
+            }
         }
     }
 

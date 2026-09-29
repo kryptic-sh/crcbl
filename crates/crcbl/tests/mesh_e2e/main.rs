@@ -105,6 +105,7 @@ mod shadow_cache;
 mod shadow_faces;
 mod shadow_tiles;
 mod skinned_motion;
+mod task_chunks;
 mod two_dags;
 mod vertex_v2;
 mod water;

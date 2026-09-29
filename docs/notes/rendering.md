@@ -4780,6 +4780,89 @@ ranges) instead of adding it. Each step stands on its own if the next one fails
 to pay. (b) and (c) are declined above. (d) is declined unless the prototype
 comes back flat.
 
+### Step 2 built: task chunks inside today's calls (2026-09-29)
+
+**Kept.** `taskMain` is `[numthreads(TASK_LANES, 1, 1)]` with `TASK_LANES = 32`
+(`crcbl_shaders::meshlet::TASK_LANES`, held to the shader by
+`the_shader_declares_the_same_task_chunk`). Workgroup `(x, y)` takes pairs
+`chunk * 32 + lane`, `chunk = y * TASK_CHUNKS_PER_ROW + x`. A lane decodes its
+pair as cluster `p % c_b` and slot `p / c_b` and runs the old per-pair body
+unchanged. The workgroup then compacts: each lane stores its keep flag in
+`groupshared`, and after a barrier counts the kept lanes before it. Kept lanes
+write their pair at that rank into a `groupshared` payload
+`{ pairs[32], draw_index (SPIR-V) }`, and every lane calls
+`DispatchMesh(kept, 1, 1, payload)` once, unbranched. `amplifiedMeshMain` reads
+`pairs[SV_GroupID.x]` and decodes it the same way. On SPIR-V the payload
+variable is the `TaskPayloadWorkgroupEXT` one, written in place. On MSL every
+thread copies the whole `groupshared` payload into the object payload, the same
+words from every thread. MSL compiles and runs on no device here.
+
+Where the build differs from the draft:
+
+- **It needed a constants change after all, in `DrawGenParams`, not
+  `ClusterDrawConstants`.** `meshMain`, the entry point a device without
+  `Features::TASK_SHADER` draws through, reads the same extents and needs one
+  workgroup per pair. So the rewrite is switched by a new
+  `DrawGenParams::task_lanes` (`PARAMS_SIZE` 80 → 96), which the renderer sets
+  from `culls_clusters` for every generator. `write_task_extents` runs in
+  `startsMain` for every region but occlusion's region 0 and late region, and in
+  `lateFinishMain` for those two. That makes no new pass or buffer region.
+- **The 65,535-per-dimension limit is handled now.** The extents are
+  `(min(chunks, 65535), ceil(chunks / 65535), 1)`, and the chunk count is summed
+  as `(c / L) * n + ceil((c % L) * n / L)` so the product cannot overflow short
+  of the count itself. `meshlet::task_extents` is the host twin.
+- **The compaction uses `groupshared` and a 32-word scan, not wave intrinsics**,
+  so it needs no subgroup width.
+
+Priced on `bucket_price.rs`'s protocol: release, validation off, 240 frames,
+1920x1080, ranged mesh tail on the RX 7900 XTX, three alternating rounds of the
+parent commit and this one, which agreed to within 0.015 ms. The GPU column is
+`depth-prepass` + `forward` + `shadow` p50:
+
+| buckets        | before ms | after ms | `draw-starts` before → after |
+| -------------- | --------- | -------- | ---------------------------- |
+| 4              | 1.08      | 0.34     | 0.005 → 0.006                |
+| 8              | 1.09      | 0.38     | 0.005 → 0.006                |
+| 16             | 1.16      | 0.46     | 0.005 → 0.006                |
+| 32             | 1.26      | 0.38     | 0.005 → 0.006                |
+| 64             | 1.30      | 0.43     | 0.005 → 0.007                |
+| 128            | 1.34      | 0.51     | 0.006 → 0.008                |
+| 938            | 2.40      | 1.41     | 0.018 → 0.027                |
+| 938, two modes | 3.46      | 2.68     | 0.032 → 0.052                |
+
+Both thresholds hold with room to spare. The 938-bucket row fell by 0.99 ms,
+well over 0.2 ms, and so did every row from 4 to 128. At 938 buckets the prepass
+went 0.69 → 0.26 ms and the colour pass 0.74 → 0.31 ms, while the shadow views
+moved only 0.97 → 0.85 ms (two modes: 1.64 → 1.62). No DAG price fixture exists.
+`occlusion_price`'s occluders scene, the nearest multi-bucket occlusion frame,
+went from `depth-prepass` 0.024–0.025 → 0.009 ms and `shadow` 0.038–0.041 →
+0.016 ms over two rounds, and its meadow stayed flat.
+
+**What the rule says next: build the flat call.** With chunks in, the 938-bucket
+row (1.41 ms) still exceeds the 4-bucket row (0.34 ms) by 1.07 ms, far over the
+0.2 ms the Decision sets. The gap sits almost entirely in `shadow`, 0.85 against
+0.04 ms. So the per-draw cost was not mostly per-workgroup cost in disguise.
+
+**The mesh stage still decodes by division.** One integer divide and one
+remainder per mesh workgroup, and per task lane. Not measured apart.
+`TASK_STAGE_SHORTEST_RANGE` was tuned on the unchunked stage and was not
+re-swept: runs of 4, 8 and 16 buckets are still recorded a call per bucket under
+it (53, 93 and 173 calls a frame, against 23 from 32 up).
+
+Tests (`mesh_e2e`'s `task_chunks.rs`): the chunked frame against `meshMain`'s,
+one workgroup per pair, byte for byte, over a field whose buckets cross chunk
+boundaries (70 cubes, 32 pyramids, 13 five-cluster open boxes), with the
+occlusion cull off and on across a camera slide that rescues instances. The
+field is **double-sided** there. Single-sided, the two paths already differed by
+29 bytes on the parent commit, cause not traced, so the cone is not a
+pixel-neutral reference. The cull statistics are checked against
+`cluster_cull_verdict` over every pair, and a dunes instance's against its cut.
+The extents of the camera's three occlusion regions are checked against
+`task_extents`. An off-by-one in the lane decode, an off-by-one in the rank and
+a floored chunk count each turn at least one test red. **Removing the compaction
+barrier did not**: on this card a 32-lane task workgroup is one wave. Nothing
+here runs the task stage on a device whose subgroups are narrower than 32.
+
 ## CMAA2 blended the wrong side of every edge for a day (2026-09-07)
 
 The user reported the web demos drawing with no antialiasing. They were right,

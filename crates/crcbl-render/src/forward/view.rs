@@ -414,6 +414,10 @@ pub(super) struct ViewInputs<'a> {
     pub(super) light_capacity: u32,
     /// §3.5's clusters, on the mesh path only.
     pub(super) clusters: Option<&'a ClusterPool>,
+    /// [`DrawGenDesc::task_lanes`] for this view's generator: the task chunk
+    /// where the mesh tail runs behind the amplification stage, zero
+    /// everywhere else.
+    pub(super) task_lanes: u32,
     /// The mesh layout every group below is built against.
     pub(super) mesh_layout: BindGroupLayoutHandle,
     /// The scene's half of every group — see [`SharedBindings`]. The page
@@ -591,6 +595,18 @@ struct PrepassReads {
 /// Declares everything a depth prepass binds — the early one and, with the
 /// occlusion cull on, the late one, which bind the same group and draw from the
 /// same generator.
+/// [`DrawGenDesc::task_lanes`] for a renderer whose mesh pipeline does or does
+/// not carry the amplification stage — see
+/// [`ForwardRenderer::culls_clusters`]. Every generator of one renderer takes
+/// the same answer, because every pass draws through the same pipeline kind.
+pub(super) fn task_lanes(culls_clusters: bool) -> u32 {
+    if culls_clusters {
+        crcbl_shaders::meshlet::TASK_LANES
+    } else {
+        0
+    }
+}
+
 fn declare_prepass_reads<'g, 'a>(
     pass: PassBuilder<'g, 'a>,
     reads: &PrepassReads,
@@ -929,6 +945,7 @@ impl View {
                 // Every camera can cull by occlusion: the regions it adds are a
                 // few words a bucket, and the switch is per frame.
                 mode: crcbl_shaders::draw_gen::DrawMode::Occlusion,
+                task_lanes: inputs.task_lanes,
             },
         )?;
         let runs: Vec<BufferHandle> = (0..frames).map(|frame| draws.runs(frame)).collect();
@@ -3300,6 +3317,7 @@ impl ForwardRenderer {
                 instance_capacity: self.draw_tables.instance_capacity,
                 light_capacity: self.draw_tables.light_capacity,
                 clusters: self.clusters.as_ref(),
+                task_lanes: task_lanes(self.culls_clusters),
                 mesh_layout: self.mesh_layout,
                 vertices: self.pool.vertex_buffer(),
                 draw_constants: self.draw_constants,

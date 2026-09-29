@@ -8041,7 +8041,7 @@ pub(crate) mod tests {
                 // `mesh_cluster.slang`'s own numbers. D3D12 reads them out of
                 // the DXIL and ignores these; they are here because Metal
                 // cannot.
-                task_workgroup_size: [1, 1, 1],
+                task_workgroup_size: [crcbl_shaders::meshlet::TASK_LANES, 1, 1],
                 mesh: ShaderEntry {
                     module,
                     entry_point: "amplifiedMeshMain",
