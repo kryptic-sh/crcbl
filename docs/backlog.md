@@ -213,7 +213,7 @@ across callers while preserving invalid-pin refusal and loader-variable
 precedence. This is a harness contract mismatch, with no evidence of a renderer
 regression.
 
-Next performance trial (updated 2026-09-29): P21's mesh-tail task-stage cost,
+Next performance trial (updated 2026-09-30): P21's mesh-tail task-stage cost,
 the best-measured frame-path cost left, is closed. Its three steps shipped —
 mode-major bucket order, 32-pair task workgroups, and one flat call per pipeline
 partition behind a task stage — and the ranged mesh tail at 938 buckets went
@@ -221,10 +221,22 @@ from 2.45 ms of GPU to 0.37 ms, level with its 4-bucket row (see
 `docs/notes/rendering.md`'s "Flat task dispatch per pass, as built" and P21).
 P20's bucket lookup shipped too (`draw-args` 0.143 → 0.011 ms of GPU a frame at
 938 buckets). What this work left priced is small — its largest remainder is
-`draw-starts` at 0.052 ms a frame at 938 buckets — so the next trial is
-**pricing**: P11, P12 and P13 are frame-path but unpriced, and whichever
-measures largest goes next. Keep startup-only and unexercised candidates behind
-measured frame-path work.
+`draw-starts` at 0.052 ms a frame at 938 buckets. P11, P12 and P13 were then
+priced (2026-09-30, see their bullets) and parked: P11's locks and scans are
+about 0.01 ms of a shard frame with no resolvable A/B, P12's allocations about
+0.03 ms inside a 0.05–0.07 ms graph build, and P13's partitions 0.012–0.029 ms
+at 938 buckets. The same probes found the next trial: **P17**, the command pool
+created every frame, the largest CPU cost measured on the recording path. A
+throwaway pool free list cut `bucket_price`'s default-path encoder creation from
+0.229–0.246 to 0.003 ms and `execute` from 0.641–0.670 to 0.085–0.094 ms (a
+driver cost in the frame's first large `begin_render_pass`), and shard's encoder
+creation from 0.23 to 0.006 ms with `execute` 0.16–0.18 ms lighter — about
+0.4–0.8 ms of CPU a frame on this card. Two things surprised us and matter to
+anyone reading older `record` figures: `bucket_price`'s `record` includes
+`PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the ranged
+rows, because nothing throttles the offscreen ring) and P17's driver cost, so
+the pure recording CPU of a 23-call frame is 0.08–0.10 ms. Keep startup-only and
+unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -1750,14 +1762,10 @@ Backend and render-cache follow-up:
   auto-exposure/adaptation state before applying any broader inactive-pass
   guard; camera, wind, grass, cull and light-grid blocks have other consumers.
   Follow P14/P13 first rather than introducing a uniform cache on inspection.
-- Revalidated P11's `VkCommandEncoder::use_object` linear deduplication and
-  `bind_group`'s collection and sorting of dynamic binding kinds. Price the
-  recording path before moving immutable layout metadata to layout creation or
-  changing reference tracking. Handle validation and deferred destruction must
-  remain complete.
-- Revalidated P13’s partition building in `ForwardRenderer::partitions` and
-  per-frame call lists: material-mode metadata is fixed, while partitions and
-  call vectors are rebuilt. Price unchanged scenes before caching them; retain
+- P11's `use_object` deduplication and `bind_group`'s dynamic-kind collection,
+  and P13's partition building, are priced and parked under their own bullets in
+  "Render-path CPU" below, with the numbers that would reopen them. Handle
+  validation and deferred destruction must remain complete; retain
   pipeline/material mode separation and frame-specific region offsets.
 - `TransientPool` reuses matching images and buffers and retires idle GPU
   backing through `retire_unused`; do not treat graph reconstruction as
@@ -4132,34 +4140,77 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### Render-path CPU
 
-- **P11 — the Vulkan encoder pays a linear scan and a lock per bind and draw.**
-  `VkCommandEncoder::use_object` scans `references` on every bind, draw and
-  barrier; `bind_group` takes the device mutex, does three lookups and collects
-  the layout's dynamic entries into a fresh `Vec`; `resolve_pipeline`,
-  `indirect` and `indirect_count` take the mutex again. With one bind and draw
-  per bucket per view this is thousands of lock takes a frame. **Fix:** push
-  references unconditionally and sort/dedup at `finish`; store a layout's
-  dynamic kinds when the layout is created; cache handle → raw per encoder. The
-  deletion queue's completeness (VUID-03874) is the risk.
-- **P12 — the render graph allocates thousands of times a frame.** `String`
+- **P11 — the Vulkan encoder's linear scan and per-call lock: priced, declined
+  for now.** `VkCommandEncoder::use_object` still scans `references`, and
+  `bind_group`, `resolve_pipeline`, `indirect` and `indirect_count` still take
+  the device mutex — but the ranged draws and the flat task dispatch removed the
+  "thousands of lock takes" premise on the default path. Protocol (2026-09-30,
+  RX 7900 XTX, AMD driver 25.10.36, release,
+  `CRCBL_GPU=vk CRCBL_VK_VALIDATION=0`):
+  `crates/crcbl/tests/mesh_e2e/bucket_price.rs` at
+  `CRCBL_PRICE_FRAMES=240 CRCBL_PRICE_SIZE=1920x1080` (p50 of 240 frames), and
+  `shard --headless --frames 400 --size 1920x1080 --backend vk` (median of
+  frames 100–400), both with temporary probes since removed — per-phase laps, a
+  counting `#[global_allocator]`, and atomic counters on `DeviceInner::state`
+  and `VkCommandEncoder::use_object`. Per frame on `bucket_price`'s default path
+  (mesh tail, 938 buckets, 23 calls): 196–199 mutex takes while recording
+  (248–251 in the whole frame), 338–383 `use_object` calls over 153–179
+  references, 20,073–26,278 scan steps. Shard: 369 takes, 595 calls, 241
+  references. Only the per-bucket fallback (a device not granted
+  `Features::DRAW_INDEX`, 9,393 calls) is still large: 18,939 takes,
+  28,448–37,828 calls, 1.87–2.25 million scan steps. Throwaway A/B — push
+  unconditionally, sort and dedup at `finish` — three alternating runs of two
+  binaries: default-path `execute` 0.707/0.708/0.812 ms against
+  0.725/0.715/0.734 ms unchanged, no resolvable difference, and `finish` 0.003
+  ms dearer for the sort; the fallback's `execute` 3.09/3.08/3.04 against
+  3.40/3.16/3.05 ms, with `finish` 0.05–0.07 ms dearer, within run-to-run noise.
+  A hot-loop micro-benchmark on this machine put an uncontended `Mutex` lock and
+  unlock at 7.5 ns and `contains` over 241 references at 14 ns, so shard's takes
+  and scans are about 0.01 ms a frame. **Declined for now.** Reopen when a
+  shipped path records more than about 5,000 binds and draws a frame on Vulkan,
+  or an A/B of the fix above saves more than 0.1 ms of `record`. The fix if
+  reopened is unchanged: push references unconditionally and sort/dedup at
+  `finish`; store a layout's dynamic kinds when the layout is created; cache
+  handle → raw per encoder. The deletion queue's completeness (VUID-03874) is
+  the risk.
+- **P12 — the render graph's per-frame allocations: priced, deferred.** `String`
   labels per pass and image, a `Vec` per pass access list, `ImageTracker`
   transitions allocating per access, `emit` and `attachments` building `Vec`s
   per batch, `ordinal` quadratic and run twice, `timing.rs` copying labels, and
-  `format!` labels in `forward.rs` and `forward/view.rs`. **Fix:**
-  `&'static str` or `Cow` labels, reused scratch vectors, `SmallVec` accesses,
-  ordinals computed once. Later: cache a compiled plan keyed by the declarations
-  and the pool's ending states.
-- **P13 — price retained bucket partitions and per-view call storage.**
-  `ForwardRenderer::partitions` in `forward/bucket_draws.rs` still collects
-  filtered calls per pipeline; `add_frame_passes`, `add_shadow_pass` and
-  `View::add_passes` retain separate lists for graph ownership. Price actual
-  unchanged and changing scenes before caching them. Preserve pipeline/material
-  separation, call order, frame-specific region offsets and reflective/punctual
-  ownership. Broader retained partitions or bucket ranges need workload evidence
-  and lifecycle design. `MaterialTable::set` can change standalone row modes and
-  does not re-key existing instances; any future live renderer material editing
-  must invalidate routing together. Native/browser complete-frame gain remains
-  unmeasured; source metadata-copy allocation savings do not establish it.
+  `format!` labels in `forward.rs` and `forward/view.rs` are all still there.
+  Priced under P11's protocol: allocations a frame in `add_passes` / `compile` /
+  `execute` were 344 / 363 / 261 on `bucket_price`'s default path at 938 buckets
+  (292 / 357 / 261 on the ranged count tail) and 418 / 500 / 367 in shard (its
+  `add_passes` includes the UI's) — about 1,300, not "thousands". Building the
+  graph (`add_passes` plus `compile`) took 0.058–0.075 ms at 938 buckets and
+  0.028–0.040 ms at 2 in `bucket_price`, and 0.051 ms (0.023 + 0.028) in shard.
+  The hot-loop micro-benchmark put a small `Vec` allocation and free at 21 ns
+  and a `format!` label at 34 ns, so the allocations themselves are about 0.03
+  ms of a shard frame: the whole item is bounded by the build's 0.05–0.07 ms
+  plus a slice of `execute`. **Deferred.** Reopen when building the graph
+  exceeds 0.25 ms of a frame on a sample, the graph allocates more than 10,000
+  times a frame, or a browser profile shows allocator time in the graph. The fix
+  if reopened: `&'static str` or `Cow` labels, reused scratch vectors,
+  `SmallVec` accesses, ordinals computed once; later, a compiled plan cached by
+  the declarations and the pool's ending states.
+- **P13 — retained bucket partitions and per-view call storage: priced,
+  deferred.** `ForwardRenderer::partitions` in `forward/bucket_draws.rs` still
+  collects a bucket index and a call per bucket per pipeline;
+  `add_frame_passes`, `add_shadow_pass` and `View::add_passes` retain separate
+  lists for graph ownership. Priced under P11's protocol as what `add_passes`
+  costs at 938 buckets over 2, everything else equal: 0.046 against 0.017 ms on
+  the default path (0.022 against 0.011 ms in a run with the GPU drained before
+  each frame and pools reused), so 0.012–0.029 ms a frame, and 533,684 against
+  163,604 bytes allocated a frame — about 370 KB more in 48 more allocations.
+  **Deferred.** Reopen when a scene's `add_passes` exceeds its 2-bucket row by
+  more than 0.1 ms, or a browser profile shows that per-frame churn. Preserve
+  pipeline/material separation, call order, frame-specific region offsets and
+  reflective/punctual ownership. Broader retained partitions or bucket ranges
+  need workload evidence and lifecycle design. `MaterialTable::set` can change
+  standalone row modes and does not re-key existing instances; any future live
+  renderer material editing must invalidate routing together. Native/browser
+  complete-frame gain remains unmeasured; source metadata-copy allocation
+  savings do not establish it.
 - **P15 — sky LUT upload repeats despite cached construction.** Revalidated
   `SkyPass::begin_frame`: an atmosphere-backed frame calls `SkyView::rows` and
   writes the current slot's LUT buffer. In contrast,
@@ -4182,9 +4233,27 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   writes); `flush` makes one locked `write_buffer` per run. Merge runs across
   small gaps, track dirtiness per slot as a bitset, and add a batched write with
   a per-call fallback.
-- **P17 — a command pool is created and destroyed every frame.**
-  `VkCommandEncoder::begin` creates a pool and `destroy_command_buffer` destroys
-  it. One pool per in-flight slot, reset once `retire_to` confirms completion.
+- **P17 — a command pool is created and destroyed every frame: priced, the
+  largest CPU cost measured on the recording path.** `VkCommandEncoder::begin`
+  creates a pool and `destroy_command_buffer` destroys it. Priced under P11's
+  protocol with a throwaway free list — `destroy_command_buffer` frees the
+  buffer and keeps the pool, `begin` resets a kept pool of the same device and
+  family instead of creating one. `bucket_price`, GPU drained and the previous
+  frame's command buffers destroyed before each frame, default path at 938
+  buckets, two runs each: creating the encoder 0.229–0.246 → 0.0027–0.0032 ms,
+  and `execute` 0.641–0.670 → 0.085–0.094 ms. The `execute` half is the driver,
+  not the graph: with a fresh pool the first large `begin_render_pass` of the
+  frame (the shadow atlas; `forward` on the rows where the shadow pass is small)
+  took 0.44–0.62 ms, and with a reused pool it vanished. Shard: creating the
+  encoder 0.230–0.237 → 0.0058–0.0059 ms, and `execute` less its timestamp wait
+  0.33–0.35 → 0.17 ms; its frame is GPU-bound headless, so the saving moved into
+  the wait in `submit`. Measured on this AMD Windows driver only; NVIDIA,
+  lavapipe, D3D12 and Metal are unmeasured. **Fix:** keep retired pools per
+  device and queue family and reset one at `begin`, or one pool per in-flight
+  slot reset once `retire_to` confirms completion; destroy kept pools at device
+  teardown. The seam already says `destroy_command_buffer` runs after the
+  submission completed, which is what makes a reset legal; the risk is a caller
+  that breaks that contract.
 - **P18 — smaller per-frame costs.** SipHash `HashMap`s in `TransientPool`
   looked up three times per transient; `submit` and `poll_retire` scanning the
   deletion queue per reference even when it is empty, and `RetireQueue::retire`
