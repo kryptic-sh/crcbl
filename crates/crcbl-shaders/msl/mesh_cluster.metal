@@ -66,14 +66,14 @@ struct Meshlet_0
 };
 
 
-#line 1730
+#line 1085
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 1730
+#line 1085
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 transform_0;
@@ -109,14 +109,14 @@ struct GpuMesh_0
 };
 
 
-#line 1732
+#line 1051
 struct _MatrixStorage_float4x4_ColMajornatural_1
 {
     array<float4, int(4)> data_1;
 };
 
 
-#line 1732
+#line 1051
 struct _Array_natural_matrixx3Cfloatx2C4x2C4x3E2_0
 {
     array<_MatrixStorage_float4x4_ColMajornatural_1, int(2)> data_2;
@@ -191,7 +191,7 @@ struct CullParams_natural_0
 };
 
 
-#line 2032
+#line 1873
 struct KernelContext_0
 {
     ClusterDrawConstants_0 constant* draw_0;
@@ -981,9 +981,9 @@ struct VertexOutput_0
             uint _S37 = corner_at_0(corner_1 + 2U, &kernelContext_7);
 
 #line 1862
-            _slang_mesh.set_index(t_2*3+0,(uint3(_S35, _S36, _S37))[0]);
-            _slang_mesh.set_index(t_2*3+1,(uint3(_S35, _S36, _S37))[1]);
-            _slang_mesh.set_index(t_2*3+2,(uint3(_S35, _S36, _S37))[2]);
+            _slang_mesh.set_index(t_2*3+0,uint3(_S35, _S36, _S37)[0]);
+            _slang_mesh.set_index(t_2*3+1,uint3(_S35, _S36, _S37)[1]);
+            _slang_mesh.set_index(t_2*3+2,uint3(_S35, _S36, _S37)[2]);
             ;
 
 #line 1862
@@ -1344,7 +1344,7 @@ uint cluster_survives_0(const Meshlet_0 thread* cluster_1, matrix<float,int(4),i
 }
 
 
-#line 11866 "hlsl.meta.slang"
+#line 12161 "hlsl.meta.slang"
 uint instance_material_mode_0(uint _S46, KernelContext_0 thread* kernelContext_11)
 {
 
@@ -2061,9 +2061,9 @@ uint instance_material_mode_0(uint _S46, KernelContext_0 thread* kernelContext_1
             uint _S86 = corner_at_0(corner_2 + 2U, &kernelContext_13);
 
 #line 2083
-            _slang_mesh.set_index(t_3*3+0,(uint3(_S84, _S85, _S86))[0]);
-            _slang_mesh.set_index(t_3*3+1,(uint3(_S84, _S85, _S86))[1]);
-            _slang_mesh.set_index(t_3*3+2,(uint3(_S84, _S85, _S86))[2]);
+            _slang_mesh.set_index(t_3*3+0,uint3(_S84, _S85, _S86)[0]);
+            _slang_mesh.set_index(t_3*3+1,uint3(_S84, _S85, _S86)[1]);
+            _slang_mesh.set_index(t_3*3+2,uint3(_S84, _S85, _S86)[2]);
             ;
 
 #line 2083
