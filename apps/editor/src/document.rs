@@ -104,6 +104,10 @@ pub enum EditError {
     /// others, so the entity would be dropped by the next one.
     NoSystem(String),
 
+    /// A paste's text is not a clipping of entities — the ordinary case of
+    /// pasting something copied from anywhere else.
+    Paste(crcbl::ron::error::SpannedError),
+
     /// A file would not be written.
     Write {
         /// The scene-relative key that failed.
@@ -127,6 +131,7 @@ impl fmt::Display for EditError {
             Self::NoSystem(system) => {
                 write!(f, "the scene has no system `{system}` to put an entity in")
             }
+            Self::Paste(error) => write!(f, "the clipboard holds no entities: {error}"),
             Self::Write { key, source } => write!(f, "writing `{key}`: {source}"),
             Self::NoOrigin => f.write_str(
                 "this document was not opened from a directory, so there is nowhere to save \
@@ -474,6 +479,50 @@ impl Document {
         Ok(copy)
     }
 
+    /// The clipboard text for `id`: its system and row, in
+    /// [`crate::clipboard`]'s format.
+    ///
+    /// # Errors
+    ///
+    /// As [`duplicate`](Self::duplicate).
+    pub fn copy(&mut self, id: SceneEntityId) -> Result<String, EditError> {
+        Ok(crate::clipboard::encode(vec![self.row(id)?]))
+    }
+
+    /// Spawns every entity the clipboard text `text` names, under ids this
+    /// document hands out fresh, and returns them in the text's order.
+    ///
+    /// One [`EditCommand::Batch`], so one undo takes the whole paste back — and
+    /// a paste with one entity the scene cannot hold spawns none of them.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::Paste`] if the text is not a clipping, and otherwise as a
+    /// spawn: [`EditError::NoSystem`] for a system this scene does not list, or
+    /// [`EditError::Scene`] for a row that is not that system's component.
+    pub fn paste(&mut self, text: &str) -> Result<Vec<SceneEntityId>, EditError> {
+        let entities = crate::clipboard::decode(text).map_err(EditError::Paste)?;
+        let first = self.ids.next_id().0;
+        let (ids, spawns): (Vec<_>, Vec<_>) = (first..)
+            .map(SceneEntityId)
+            .zip(entities)
+            .map(|(id, (system, row))| {
+                (
+                    id,
+                    EditCommand::Spawn {
+                        entity: id,
+                        system,
+                        row,
+                    },
+                )
+            })
+            .unzip();
+        if !spawns.is_empty() {
+            self.apply(EditCommand::Batch(spawns))?;
+        }
+        Ok(ids)
+    }
+
     /// Steps back over the most recent applied command.
     ///
     /// Returns whether there was one. The inverse is applied and **not**
@@ -618,6 +667,23 @@ impl Document {
                 row,
             } => self.spawn(*id, system, row),
             EditCommand::Delete { entity: id } => self.remove(*id),
+            EditCommand::Batch(commands) => {
+                let mut undo = Vec::with_capacity(commands.len());
+                for command in commands {
+                    match self.perform(command) {
+                        Ok(inverse) => undo.push(inverse),
+                        Err(error) => {
+                            for inverse in undo.iter().rev() {
+                                self.perform(inverse)
+                                    .expect("an inverse produced a moment ago applies");
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                undo.reverse();
+                Ok(EditCommand::Batch(undo))
+            }
         }
     }
 

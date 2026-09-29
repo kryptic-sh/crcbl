@@ -101,6 +101,8 @@ EDITING:
     Page Up / Page Down  Nudge the selection along Z
     Delete               Remove the selection from the scene
     Ctrl+D               Duplicate the selection in place, and select the copy
+    Ctrl+C / Ctrl+V      Copy the selection to the clipboard as text, and paste
+                         the entities a clipboard holds as new ones
     Ctrl+Z / Ctrl+Y     Undo and redo. Ctrl+Shift+Z redoes too
     Ctrl+S               Save the scene back over the directory it came from
 

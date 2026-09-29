@@ -120,6 +120,13 @@ full-window draw under a hole in the panels is gone.
   hashes `Entity` bits, which a restored entity changes (the backlog records the
   decision). Restoring under a new id, skipping the sweep on delete, and
   skipping the collider on spawn each turned it or its neighbours red.
+- **Entity copy and paste** (feature 8's entity half): Ctrl+C offers the
+  selection as `apps/editor/src/clipboard.rs`'s clipping, the system and row per
+  entity, under both the engine's RON mime and plain text; Ctrl+V reads the
+  clipboard's text and spawns every entity it names under fresh ids as one
+  `EditCommand::Batch`, so one undo takes a paste back and a paste with one
+  entity the scene cannot hold spawns none. The field half of feature 8 is still
+  owed.
 - **Still owed from task 4's list**: rename (no entity names), attach and detach
   (one entity in two systems), and load/save markers (nothing for them to mean
   while a load replaces the log). The backlog's editor entry says what each

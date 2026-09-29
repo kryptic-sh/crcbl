@@ -397,11 +397,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
-- **The editor deletes and duplicates entities, undoably.** Delete removes the
-  selection and Ctrl+D copies it in place and selects the copy; undo brings a
-  deleted entity back under the id it had, so later history still finds it.
-  `apps/editor`'s `EditCommand` has `Spawn` and `Delete` variants, and
-  `Document::delete` and `Document::duplicate` build them. Underneath:
+- **The editor deletes, duplicates, copies and pastes entities, undoably.**
+  Delete removes the selection and Ctrl+D copies it in place and selects the
+  copy; undo brings a deleted entity back under the id it had, so later history
+  still finds it. Ctrl+C puts the selection on the system clipboard as RON text
+  (under both `application/x-crcbl+ron` and plain text) and Ctrl+V spawns what a
+  clipboard holds under fresh ids, one undo per paste. `apps/editor`'s
+  `EditCommand` has `Spawn`, `Delete` and `Batch` variants, and
+  `Document::delete`, `duplicate`, `copy` and `paste` build them. Underneath:
   `scn::IdMap::next_id`, `remove` and `restore` (a removed id is never handed
   out again); `SystemChunk::row` and `attach_row`; and
   `crcbl::registry::Registry::codec` and `system_of`, which resolve an entity to

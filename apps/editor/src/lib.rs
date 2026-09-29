@@ -21,6 +21,8 @@
 //!   [`Document::record_edit`] rewinds a panel's own edit with**, so that the
 //!   command it then applies records an exact inverse; every other mutation is
 //!   a command.
+//! * [`clipboard`] — entities as clipboard text, and the paste that waits for
+//!   the clipboard's answer.
 //! * [`document`] — the scene, the [`World`](crcbl::ecs::World) it loaded into,
 //!   the selection, the history and the save. Runs with no device and no
 //!   window, which is how the gates hold it.
@@ -45,15 +47,10 @@
 //! No server protocol or transport routing, no gizmos, no play mode, no asset
 //! listing, no file watcher, no multi-session editing, and no port of a
 //! sample's state into ECS. Each is named in the plan with what it waits on.
-//!
-//! And the viewport is a **hole the panels leave in a full-window render**
-//! rather than a view of its own: nothing in the tree can draw a GPU texture
-//! and nothing in the render graph can scissor a pass to a sub-rectangle, so
-//! `docs/plan/08-editor.md`'s open question about the viewport is still open.
-//! [`panel`]'s docs say what closing it would take.
 
 pub mod app;
 pub mod args;
+pub mod clipboard;
 pub mod command;
 pub mod document;
 pub mod keys;

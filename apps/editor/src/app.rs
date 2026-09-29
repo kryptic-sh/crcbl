@@ -78,12 +78,16 @@ use crcbl::render::{
     TransientImageDesc, TransientPool, UiRenderer, UiTexture, ViewRay,
 };
 use crcbl::scene::scn::SceneEntityId;
-use crcbl::shell::{ButtonState, DisplayMode, Shell, ShellEvent, WindowDesc, WindowId, open};
+use crcbl::shell::{
+    ButtonState, ClipboardContent, ClipboardOffer, DisplayMode, Shell, ShellEvent, WindowDesc,
+    WindowId, open,
+};
 use crcbl::store::settings::SettingsStack;
 use crcbl::text_input::TextPump;
 use crcbl::ui::tree::{DockLayout, SelectMode};
 
 use crate::args::Options;
+use crate::clipboard::Paste;
 use crate::command::EditCommand;
 use crate::document::{Document, EditError};
 use crate::keys::Action;
@@ -168,6 +172,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     actions: ActionMap,
     /// The typing and the clipboard, for the inspector's text fields.
     text_pump: TextPump,
+    /// An entity paste waiting on the clipboard's answer.
+    paste: Paste,
     /// Where the pointer is and whether its button is held.
     ///
     /// **Both halves of what the loop needs**: it carries the position into the
@@ -363,6 +369,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             ui,
             actions: crate::keys::map(),
             text_pump: TextPump::new(),
+            paste: Paste::default(),
             pointer_state: PointerCapture::new(),
             modifiers: Modifiers::empty(),
             settings,
@@ -439,6 +446,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             shell,
             actions,
             text_pump,
+            paste,
             modifiers,
             ..
         } = self;
@@ -456,6 +464,7 @@ impl<S: Shell + ?Sized> Editor<S> {
                     actions.key_event(key, state == ButtonState::Pressed);
                 }
                 text_pump.observe(&event, editing);
+                paste.observe(&event);
             }
         });
         self.events += pending.count;
@@ -513,6 +522,9 @@ impl<S: Shell + ?Sized> Editor<S> {
 
         for action in asked {
             self.act(&action);
+        }
+        if let Some(content) = self.paste.take() {
+            self.paste_content(&content);
         }
         self.update_title();
 
@@ -635,9 +647,49 @@ impl<S: Shell + ?Sized> Editor<S> {
                 document.select(Some(copy));
                 Ok(())
             }),
+            Action::Copy => self.copy(),
+            Action::Paste => {
+                if let Err(error) = self.paste.ask(self.shell.as_mut(), self.window) {
+                    crcbl::log::warn!("editor: the clipboard refused the paste — {error}");
+                }
+                Ok(())
+            }
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
+        }
+    }
+
+    /// Offers the selection to the clipboard, as the engine's RON and as text.
+    ///
+    /// A clipboard that refuses is logged: a backend with none, or a window
+    /// system that wants a recent input event first.
+    fn copy(&mut self) -> Result<(), EditError> {
+        let Some(id) = self.document.selected() else {
+            crcbl::log::info!("editor: nothing is selected");
+            return Ok(());
+        };
+        let text = self.document.copy(id)?;
+        let offers = [ClipboardOffer::ron(&text), ClipboardOffer::text(&text)];
+        if let Err(error) = self.shell.clipboard_offer(self.window, &offers) {
+            crcbl::log::warn!("editor: the clipboard refused the copy — {error}");
+        }
+        Ok(())
+    }
+
+    /// Spawns the entities a paste's answer names, and selects the first.
+    fn paste_content(&mut self, content: &ClipboardContent) {
+        let Some(text) = content.text() else {
+            crcbl::log::info!("editor: the clipboard holds no text to paste");
+            return;
+        };
+        match self.document.paste(text) {
+            Ok(pasted) => {
+                if let Some(&first) = pasted.first() {
+                    self.document.select(Some(first));
+                }
+            }
+            Err(error) => crcbl::log::warn!("editor: {error}"),
         }
     }
 
@@ -1183,6 +1235,44 @@ mod tests {
         assert_eq!(editor.document().entity_count(), count);
         assert!(!editor.document().is_dirty());
         assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+        editor.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A copy goes out through the shell's clipboard and a paste comes back
+    /// through it** — the read answered on a later frame, as every backend's
+    /// is, and the pasted entity selected.
+    #[test]
+    fn a_copied_entity_pastes_back_through_the_clipboard() {
+        let mut editor = Editor::start(&options(8)).expect("headless starts");
+        let count = editor.document().entity_count();
+        editor.document_mut().select(Some(SceneEntityId(2)));
+
+        editor.act(&Action::Copy);
+        editor.act(&Action::Paste);
+        assert_eq!(
+            editor.document().entity_count(),
+            count,
+            "the paste spawned before the clipboard answered",
+        );
+        for _ in 0..3 {
+            assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+        }
+        assert_eq!(editor.document().entity_count(), count + 1);
+        let pasted = editor.document().selected().expect("the paste is selected");
+        assert_ne!(pasted, SceneEntityId(2));
+        assert_eq!(
+            editor
+                .document_mut()
+                .read(pasted, "position.1")
+                .expect("pasted"),
+            editor
+                .document_mut()
+                .read(SceneEntityId(2), "position.1")
+                .expect("held"),
+        );
+
+        editor.act(&Action::Undo);
+        assert_eq!(editor.document().entity_count(), count);
         editor.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

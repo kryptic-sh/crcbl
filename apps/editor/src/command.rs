@@ -53,9 +53,11 @@
 //! [`crcbl::scene::scn::SystemChunk::row`] reads and `attach_row` rebuilds. So
 //! undoing a delete brings the entity back under the id it had, and a later
 //! command in the history that names it still finds it. A **duplicate** is not
-//! a third variant: it is a spawn whose row was read off the original and whose
-//! id is the next one the document would hand out
-//! ([`crate::Document::duplicate`]).
+//! a variant of its own: it is a spawn whose row was read off the original and
+//! whose id is the next one the document would hand out
+//! ([`crate::Document::duplicate`]). A **paste** is a
+//! [`Batch`](EditCommand::Batch) of spawns, one per entity the clipboard holds
+//! ([`crate::Document::paste`]), so one undo takes the whole paste back.
 //!
 //! # What task 4 does not have yet
 //!
@@ -121,18 +123,14 @@ pub enum EditCommand {
         /// Whose.
         entity: SceneEntityId,
     },
-}
 
-impl EditCommand {
-    /// Which entity this command is about.
-    #[must_use]
-    pub const fn entity(&self) -> SceneEntityId {
-        match self {
-            Self::SetProperty { entity, .. }
-            | Self::Spawn { entity, .. }
-            | Self::Delete { entity } => *entity,
-        }
-    }
+    /// Several commands applied in order as one entry of the log, so one undo
+    /// walks all of them back — a paste of several entities is the case.
+    ///
+    /// Its inverse is a batch of the inverses in reverse order. A batch whose
+    /// member is refused puts back the members before it and applies nothing
+    /// (`crate::Document::apply`).
+    Batch(Vec<EditCommand>),
 }
 
 /// Writes `value` into the leaf `path` names inside `component` — `entity`'s

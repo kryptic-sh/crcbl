@@ -11612,10 +11612,14 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   with no on-top mode or filled handles.
 - **The asset browser and drag-spawn**; `AssetSource` has `read` and no `list`.
 - **Play/stop** by reloading the scene (decided 2026-09-16).
-- **The other command variants** (spawn, delete, duplicate, rename, transform,
-  attach/detach system data, scene-load and save markers), and with them the
-  undo property test.
-- **Entity copy and paste** as dual-mime RON with ids re-minted on paste.
+- **The remaining command variants**: rename, attach/detach system data and
+  scene-load and save markers (_Task 4's commands_ above says what each waits
+  on). Spawn, delete, duplicate, batch and the undo property test landed
+  2026-09-30, and so did entity copy and paste (`apps/editor/src/clipboard.rs`:
+  dual-mime RON, ids re-minted on paste, one undo per paste). Feature 8's field
+  half — any inspector value copied as plain text and pasted through the scene's
+  serde path — is still owed, and needs the inspector to expose a field's value
+  as text.
 - **Towers' ECS port, then the dogfood pass**, which is towers' milestone 2.
 - **The exit criteria**: empty scene to play and stop without a text editor
   (owed), and the editor never linking `crcbl-vk` directly (kept so far:

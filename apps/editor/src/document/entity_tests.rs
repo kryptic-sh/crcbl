@@ -179,6 +179,79 @@ fn a_spawn_the_scene_cannot_hold_is_refused_and_leaves_nothing() {
     assert_eq!(document.files().expect("ids"), before);
 }
 
+/// One clipping holding every entity in `ids`, as a copy of several would.
+fn clipping_of(document: &mut Document, ids: &[SceneEntityId]) -> String {
+    let entities = ids
+        .iter()
+        .flat_map(|id| {
+            let text = document.copy(*id).expect("a held entity");
+            crate::clipboard::decode(&text).expect("its own copy")
+        })
+        .collect();
+    crate::clipboard::encode(entities)
+}
+
+/// **A paste spawns every entity the clipping names under fresh ids, and one
+/// undo takes all of them back.**
+#[test]
+fn a_paste_spawns_every_entity_and_one_undo_takes_them_back() {
+    let mut document = document();
+    let before = document.files().expect("ids");
+    let text = clipping_of(&mut document, &[SceneEntityId(1), SceneEntityId(3)]);
+
+    let pasted = document
+        .paste(&text)
+        .expect("a clipping of this scene's blocks");
+    assert_eq!(pasted, [SceneEntityId(4), SceneEntityId(5)]);
+    assert_eq!(document.entity_count(), 6);
+    for (copy, original) in [(4, 1), (5, 3)] {
+        assert_eq!(
+            document
+                .read(SceneEntityId(copy), "position.0")
+                .expect("pasted"),
+            document
+                .read(SceneEntityId(original), "position.0")
+                .expect("held"),
+        );
+    }
+    assert_eq!(document.log().len(), 1, "a paste is one entry");
+
+    assert!(document.undo().expect("the batch's inverse applies"));
+    assert_eq!(document.files().expect("ids"), before);
+}
+
+/// **A paste with one entity the scene cannot hold spawns none of them** —
+/// including the ones before it, which the batch puts back — and records
+/// nothing.
+#[test]
+fn a_paste_with_one_bad_entity_spawns_none() {
+    let mut document = document();
+    let before = document.files().expect("ids");
+    let good = document.copy(SceneEntityId(2)).expect("held");
+    let mut entities = crate::clipboard::decode(&good).expect("its own copy");
+    for bad in [
+        ("bricks".to_owned(), entities[0].1.clone()),
+        ("blocks".to_owned(), "(position:(0.0,0.0,0.0))".to_owned()),
+    ] {
+        entities.truncate(1);
+        entities.push(bad);
+        let text = crate::clipboard::encode(entities.clone());
+        document
+            .paste(&text)
+            .expect_err("the second entity cannot be spawned");
+        assert_eq!(
+            document.entity_count(),
+            4,
+            "the first entity was left behind"
+        );
+        assert_eq!(document.files().expect("ids"), before);
+        assert!(document.log().is_empty());
+    }
+
+    let error = document.paste("hello").expect_err("not a clipping");
+    assert!(matches!(error, EditError::Paste(_)), "{error}");
+}
+
 /// How many random histories [`random_histories_walk_back_through_every_state`]
 /// plays, and how long each one is.
 const HISTORIES: u64 = 48;
@@ -195,8 +268,9 @@ const HISTORY_LEN: u64 = 24;
 /// keyed by the id and prints every float through its shortest round trip, so
 /// two states that differ in any field or any row differ here.
 ///
-/// Each step is one of a nudge by an arbitrary float, a duplicate or a delete,
-/// of an entity chosen from those the document holds at that moment. The
+/// Each step is one of a nudge by an arbitrary float, a duplicate, a delete, or
+/// a paste of two entities as one batch, of entities chosen from those the
+/// document holds at that moment. The
 /// choices come from [`hash_u64`] over `(seed, index)`, so a failure names the
 /// history that produced it and replays exactly.
 #[test]
@@ -209,10 +283,15 @@ fn random_histories_walk_back_through_every_state() {
             let held = ids(&mut document);
             let len = u64::try_from(held.len()).expect("a handful of entities");
             let target = held[usize::try_from(draw(0) % len).expect("an index into held")];
-            match draw(1) % 4 {
+            match draw(1) % 5 {
                 0 if held.len() > 1 => document.delete(target).expect("a held entity"),
                 1 => {
                     document.duplicate(target).expect("a held entity");
+                }
+                2 => {
+                    let other = held[usize::try_from(draw(2) % len).expect("an index into held")];
+                    let text = clipping_of(&mut document, &[target, other]);
+                    assert_eq!(document.paste(&text).expect("a clipping").len(), 2);
                 }
                 _ => {
                     let axis = draw(2) % 3;

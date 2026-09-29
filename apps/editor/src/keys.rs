@@ -79,6 +79,12 @@ pub const DELETE: &str = "editor_delete";
 /// Copy the selection into a new entity, and select the copy.
 pub const DUPLICATE: &str = "editor_duplicate";
 
+/// Put the selection on the system clipboard.
+pub const COPY: &str = "editor_copy";
+
+/// Spawn whatever entities the system clipboard holds.
+pub const PASTE: &str = "editor_paste";
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -104,6 +110,10 @@ pub enum Action {
     Delete,
     /// Copy the selection into a new entity, and select the copy.
     Duplicate,
+    /// Put the selection on the system clipboard.
+    Copy,
+    /// Spawn whatever entities the system clipboard holds.
+    Paste,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -171,6 +181,20 @@ pub fn map() -> ActionMap {
         vec![Binding::Chord {
             modifier: Modifier::Control,
             key: KeyCode::KeyD,
+        }],
+    ));
+    map.declare(button(
+        COPY,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::KeyC,
+        }],
+    ));
+    map.declare(button(
+        PASTE,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::KeyV,
         }],
     ));
 
@@ -246,7 +270,9 @@ pub fn pop_ui(map: &mut ActionMap) {
 /// frame the arrow key it never saw come up is read.
 pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
-    for name in [MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE] {
+    for name in [
+        MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE,
+    ] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
         }
@@ -288,6 +314,12 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(DUPLICATE) {
         actions.push(Action::Duplicate);
+    }
+    if map.just_pressed(COPY) {
+        actions.push(Action::Copy);
+    }
+    if map.just_pressed(PASTE) {
+        actions.push(Action::Paste);
     }
     if ctrl {
         return actions;
@@ -494,6 +526,9 @@ mod tests {
             [Action::Delete]
         );
         assert_eq!(keys.tap(KeyCode::Delete, Modifiers::CTRL), []);
+        assert_eq!(keys.tap(KeyCode::KeyC, Modifiers::CTRL), [Action::Copy]);
+        assert_eq!(keys.tap(KeyCode::KeyV, Modifiers::CTRL), [Action::Paste]);
+        assert_eq!(keys.tap(KeyCode::KeyV, Modifiers::empty()), []);
     }
 
     /// A key this editor has no meaning for asks for nothing.
