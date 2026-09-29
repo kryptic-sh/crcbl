@@ -91,8 +91,9 @@ pub use grid_drag::{
 pub use hud::Anchor;
 pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};
 pub use menu::{
-    BUTTON_INSETS, Cycler, FIT_FONT_STEP, FIT_FRACTION, Menu, MenuFitError, MenuItem, MenuItemKind,
-    MenuItemLayout, MenuLayout, MenuSet, MenuSkin, MenuStyle, PANEL_INSETS, Slider,
+    BUTTON_INSETS, Caption, CaptionTone, Cycler, FIT_FONT_STEP, FIT_FRACTION, Menu, MenuFitError,
+    MenuItem, MenuItemKind, MenuItemLayout, MenuLayout, MenuSet, MenuSkin, MenuStyle, PANEL_INSETS,
+    Slider,
 };
 pub use readout::{NATURAL_SCALE, ReadoutPanel, ReadoutRow};
 pub use text::{

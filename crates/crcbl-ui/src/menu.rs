@@ -78,9 +78,10 @@
 //! # Captions
 //!
 //! [`Menu::subtitle`] is lines of text under the title — the controls, a
-//! warning — drawn in the hint's colour. They are not rows: nothing selects,
-//! hovers or fires them, so the selection, the pointer and every index into
-//! [`Menu::items`] are exactly what they were without them.
+//! warning — each a [`Caption`] in a [`CaptionTone`]: the hint's colour, or
+//! the warning's. They are not rows: nothing selects, hovers or fires them,
+//! so the selection, the pointer and every index into [`Menu::items`] are
+//! exactly what they were without them, whatever their tone.
 //!
 //! # Fitting a small window, then scrolling
 //!
@@ -204,9 +205,13 @@ pub struct MenuStyle {
     pub title_color: [f32; 4],
     /// An item label's colour. See [`MenuStyle::title_color`].
     pub label_color: [f32; 4],
-    /// A key hint's colour — dimmer than the label it belongs to. See
-    /// [`MenuStyle::title_color`].
+    /// A key hint's colour — dimmer than the label it belongs to — and a
+    /// [`CaptionTone::Hint`] caption's. See [`MenuStyle::title_color`].
     pub hint_color: [f32; 4],
+    /// A [`CaptionTone::Warning`] caption's colour: the console's amber for a
+    /// warning, so a line that warns reads as one. See
+    /// [`MenuStyle::title_color`].
+    pub warning_color: [f32; 4],
     /// A slider groove's colour, behind the part not filled in. See
     /// [`MenuStyle::title_color`].
     pub track_color: [f32; 4],
@@ -288,6 +293,7 @@ impl MenuStyle {
             title_color: [1.0, 0.94, 0.55, 1.0],
             label_color: [0.94, 0.95, 1.0, 1.0],
             hint_color: [0.62, 0.64, 0.82, 1.0],
+            warning_color: [1.0, 0.78, 0.35, 1.0],
             // The groove is the darkest of the three and the handle the
             // brightest, so the three read as recess, level and grip without
             // any art behind them.
@@ -648,6 +654,65 @@ impl MenuItem {
     }
 }
 
+/// How a [`Caption`] is drawn: which of [`MenuStyle`]'s colours it takes.
+///
+/// A tone per line rather than a separate warning field on [`Menu`], so a
+/// menu can warn on any of its lines and another tone is another variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaptionTone {
+    /// Explains — the controls, say — in [`MenuStyle::hint_color`].
+    #[default]
+    Hint,
+    /// Warns — of what a choice discards, say — in
+    /// [`MenuStyle::warning_color`].
+    Warning,
+}
+
+/// One line of a menu's [`Menu::subtitle`]: its text, and the tone it is
+/// drawn in.
+///
+/// A `&str` or a `String` converts into a [`CaptionTone::Hint`] caption, so a
+/// line that only explains is `"ARROWS MOVE".into()`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Caption {
+    /// The line, drawn centred under the title.
+    pub text: String,
+    /// Which colour it is drawn in.
+    pub tone: CaptionTone,
+}
+
+impl Caption {
+    /// A line in [`CaptionTone::Hint`].
+    #[must_use]
+    pub fn hint(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: CaptionTone::Hint,
+        }
+    }
+
+    /// A line in [`CaptionTone::Warning`].
+    #[must_use]
+    pub fn warning(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: CaptionTone::Warning,
+        }
+    }
+}
+
+impl From<&str> for Caption {
+    fn from(text: &str) -> Self {
+        Self::hint(text)
+    }
+}
+
+impl From<String> for Caption {
+    fn from(text: String) -> Self {
+        Self::hint(text)
+    }
+}
+
 /// A modal menu: a title, some items, and which one is selected.
 ///
 /// Retained across frames — unlike the rest of this crate — because a selection
@@ -657,10 +722,11 @@ impl MenuItem {
 pub struct Menu {
     /// The heading, drawn above the items.
     pub title: String,
-    /// Lines drawn under the title, centred and in the hint's colour, one
-    /// line each — see the module's *Captions*. Empty by default, which draws
-    /// exactly the menu there was before captions existed.
-    pub subtitle: Vec<String>,
+    /// Lines drawn under the title, centred and each in its
+    /// [`CaptionTone`]'s colour — see the module's *Captions*. Empty by
+    /// default, which draws exactly the menu there was before captions
+    /// existed.
+    pub subtitle: Vec<Caption>,
     items: Vec<MenuItem>,
     selected: usize,
     /// Whether the selected item is being held down.
@@ -1706,7 +1772,11 @@ impl Menu {
                     if !self.subtitle.is_empty() {
                         ui.block(".menu-captions", &[], |ui| {
                             for line in &self.subtitle {
-                                ui.span(".menu-caption", line.as_str(), &caption);
+                                let selector = match line.tone {
+                                    CaptionTone::Hint => ".menu-caption",
+                                    CaptionTone::Warning => ".menu-caption.menu-caption-warning",
+                                };
+                                ui.span(selector, line.text.as_str(), &caption);
                             }
                         });
                     }
@@ -2656,7 +2726,7 @@ mod tests {
     /// [`pause_menu`] with two lines under its title.
     fn captioned_menu() -> Menu {
         let mut menu = pause_menu();
-        menu.subtitle = vec!["ARROWS MOVE".to_owned(), "ENTER PICKS".to_owned()];
+        menu.subtitle = vec!["ARROWS MOVE".into(), "ENTER PICKS".into()];
         menu
     }
 
@@ -2752,13 +2822,138 @@ mod tests {
         assert_eq!(menu.selected(), 0);
     }
 
+    /// [`captioned_menu`] with a warning between its two hint lines.
+    fn warned_menu() -> Menu {
+        let mut menu = captioned_menu();
+        menu.subtitle
+            .insert(1, Caption::warning("PROGRESS WILL BE LOST"));
+        menu
+    }
+
+    /// **Each caption is drawn in its tone's colour**: a warning in the
+    /// style's warning colour and the hint lines round it in the hint's,
+    /// in the order given.
+    #[test]
+    fn a_warning_caption_is_drawn_in_the_warning_colour() {
+        let menu = warned_menu();
+        let layout = menu.layout((960, 720), &atlas());
+        let style = layout.style();
+        assert_ne!(style.warning_color, style.hint_color);
+        let mut dl = DrawList::new();
+        menu.render(&mut dl, &layout, &skin());
+        let captions: Vec<(String, [f32; 4])> = texts(&dl)
+            .into_iter()
+            .filter(|(text, ..)| menu.subtitle.iter().any(|line| &line.text == text))
+            .map(|(text, _, colour)| (text, colour))
+            .collect();
+        assert_eq!(
+            captions,
+            [
+                ("ARROWS MOVE".to_owned(), style.hint_color),
+                ("PROGRESS WILL BE LOST".to_owned(), style.warning_color),
+                ("ENTER PICKS".to_owned(), style.hint_color),
+            ]
+        );
+    }
+
+    /// **A caption's tone moves nothing but its colour.** The same lines
+    /// as hints and as warnings lay out alike, fitted in a font too; the
+    /// keyboard walks the same rows; and a pointer on a warning hits
+    /// nothing.
+    #[test]
+    fn a_captions_tone_changes_no_row_or_hit() {
+        let atlas = atlas();
+        let hinted = captioned_menu();
+        let mut warned = captioned_menu();
+        for line in &mut warned.subtitle {
+            line.tone = CaptionTone::Warning;
+        }
+        assert_eq!(
+            warned.layout((960, 720), &atlas),
+            hinted.layout((960, 720), &atlas)
+        );
+        #[cfg(feature = "parsed-font")]
+        assert_eq!(
+            warned.layout_with_font_fitted(
+                (480, 360),
+                &MenuStyle::pixel_art(2),
+                font_like_roboto()
+            ),
+            hinted.layout_with_font_fitted(
+                (480, 360),
+                &MenuStyle::pixel_art(2),
+                font_like_roboto()
+            ),
+        );
+
+        let mut fired = Vec::new();
+        for _ in 0..=warned.items().len() {
+            fired.push(warned.activate());
+            warned.select_next();
+        }
+        assert_eq!(fired, [Some(1), Some(2), Some(3), Some(1)]);
+        assert!(warned.select_id(1));
+
+        let layout = warned.layout((960, 720), &atlas);
+        let mut dl = DrawList::new();
+        warned.render(&mut dl, &layout, &skin());
+        let (_, caption, colour) = texts(&dl)
+            .into_iter()
+            .find(|(text, ..)| text == "ENTER PICKS")
+            .expect("the caption is drawn");
+        assert_eq!(colour, layout.style().warning_color);
+        let on_caption = caption + Vec2::new(2.0, 2.0);
+        let mut ui = UiState::new();
+        assert_eq!(warned.point(&layout, &mut ui, press_at(on_caption)), None);
+        assert_eq!(warned.point(&layout, &mut ui, release_at(on_caption)), None);
+        assert_eq!(warned.state(0), ButtonState::Hovered);
+        assert_eq!(warned.selected(), 0);
+    }
+
+    /// **A stylesheet's `.menu-caption-warning` rule sets a warning's
+    /// colour**, over `default.css`'s, and leaves the hint lines alone.
+    #[test]
+    fn a_stylesheet_rule_sets_the_warning_colour() {
+        let menu = warned_menu();
+        let style = MenuStyle::pixel_art(1);
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let mut ui = Ui::new();
+        ui.add_stylesheet(
+            "game",
+            ".menu-caption-warning { color: color(srgb-linear 1 0 0); }",
+        );
+        ui.begin_frame(PointerInput::hovering(OFF_SCREEN));
+        menu.build(
+            &mut ui,
+            Some(Vec2::new(960.0, 720.0)),
+            &style,
+            None,
+            &Setup::default(),
+        );
+        ui.layout(
+            Vec2::ZERO,
+            AvailableSpace::definite(Vec2::new(960.0, 720.0)),
+            &atlas(),
+        );
+        let mut dl = DrawList::new();
+        ui.emit(&mut dl);
+        let colour = |wanted: &str| {
+            texts(&dl)
+                .into_iter()
+                .find_map(|(text, _, colour)| (text == wanted).then_some(colour))
+                .unwrap_or_else(|| panic!("{wanted} is not drawn"))
+        };
+        assert_eq!(colour("PROGRESS WILL BE LOST"), red);
+        assert_eq!(colour("ARROWS MOVE"), style.hint_color);
+    }
+
     /// A menu of captions and no rows has nothing to select or fire, and lays
     /// out, fitted or not, without an index to panic on.
     #[cfg(feature = "parsed-font")]
     #[test]
     fn a_menu_of_only_captions_selects_nothing() {
         let mut menu = Menu::new("NOTICE", Vec::new());
-        menu.subtitle = vec!["NOTHING TO CHOOSE".to_owned()];
+        menu.subtitle = vec![Caption::warning("NOTHING TO CHOOSE")];
         menu.select_next();
         menu.select_previous();
         assert_eq!(menu.activate(), None);
@@ -2806,7 +3001,7 @@ mod tests {
 
     /// A stand-in for EW's scene menu: [`SCENES`] rows, each a label and a
     /// one-line description in the hint slot — the longest seventy
-    /// characters — under a title and two captions.
+    /// characters — under a title and two captions, the second a warning.
     #[cfg(feature = "parsed-font")]
     fn scene_menu() -> Menu {
         let items = (0..SCENES)
@@ -2824,8 +3019,8 @@ mod tests {
             .collect();
         let mut menu = Menu::new("SCENES", items);
         menu.subtitle = vec![
-            "UP/DOWN MOVES - ENTER LOADS - ESC CLOSES".to_owned(),
-            "LOADING A SCENE DISCARDS UNSAVED WORK".to_owned(),
+            "UP/DOWN MOVES - ENTER LOADS - ESC CLOSES".into(),
+            Caption::warning("LOADING A SCENE DISCARDS UNSAVED WORK"),
         ];
         menu
     }
@@ -4650,6 +4845,7 @@ mod tests {
         let skin = skin();
         let mut menu = slider_menu();
         menu.items.push(MenuItem::new(11, "QUIT", "Q"));
+        menu.subtitle = vec![Caption::warning("UNSAVED")];
         let layout = menu.layout((960, 720), &atlas);
         let style = layout.style();
         let mut dl = DrawList::new();
@@ -4667,6 +4863,7 @@ mod tests {
         assert_eq!(text_colour("OPTIONS"), style.title_color);
         assert_eq!(text_colour("BACK"), style.label_color);
         assert_eq!(text_colour("ESC"), style.hint_color);
+        assert_eq!(text_colour("UNSAVED"), style.warning_color);
         let rect_colours: Vec<[f32; 4]> = dl
             .commands()
             .iter()

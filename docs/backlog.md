@@ -166,6 +166,16 @@ migrates every caller and deletes its own copy in the same change.
   routing stay with the game, what remains is a distance accumulator modulo a
   stride: a few lines with no second consumer, since no crcbl sample emits
   footsteps. Revisit when a sample or a second game needs contact events.
+- **Menu caption tones: shipped 2026-09-29 as `Menu::subtitle: Vec<Caption>`**,
+  each line a `CaptionTone` (`Hint` or `Warning`), so EW's restart warning is
+  amber again. A tone per line rather than a `warning: Option<String>` field on
+  `Menu`: a warning can sit on any line, and a third tone is a new variant
+  rather than another field beside the list. **Found, not fixed: a game cannot
+  restyle the engine's menus.** They draw in private per-thread UI trees that
+  load `crcbl-ui`'s `default.css` alone, so none of the menu colours, the
+  warning one included, can be overridden from a game's own stylesheet.
+  `MenuStyle`'s fields only restate the sheet. Giving those trees the game's
+  sheets would fix it. Nobody has asked yet.
 
 ## Performance review and execution priority (2026-09-17)
 

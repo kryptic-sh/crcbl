@@ -24,6 +24,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   to 96 bytes. `meshlet::TASK_LANES`, `meshlet::TASK_CHUNKS_PER_ROW` and
   `meshlet::task_extents` are new.
 
+- **`crcbl_ui::Menu::subtitle` is a `Vec<Caption>`**, not a `Vec<String>`, so
+  each line under a menu's title carries a tone (see Added); EW asked for it to
+  draw its restart warning in amber. A `&str` or `String` converts into a hint
+  line, so `vec!["ARROWS MOVE".to_owned()]` becomes
+  `vec!["ARROWS MOVE".into()]`. `MenuStyle` has a `warning_color` field, which a
+  struct literal needs.
+
 - **`crcbl_shaders::draw_gen::Params` and `TableOffsets` have a
   `bucket_lookup_at` field**, where the new `(mesh, mode) → bucket` lookup
   starts in the table buffer (see Changed); a struct literal of either needs it.
@@ -360,6 +367,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Menu caption tones** (asked for by EW): `crcbl_ui::Caption { text, tone }`
+  and `crcbl_ui::CaptionTone::{Hint, Warning}`, built with `Caption::hint` and
+  `Caption::warning` or converted from a `&str` or `String` (a hint). A warning
+  line is drawn in `default.css`'s new `.menu-caption-warning` colour, the
+  console's warning amber, which `MenuStyle::warning_color` restates; a hint
+  line in the hint colour as before. The tone changes only the colour: the
+  layout, the fit and scroll, the selection and the hit tests are the same.
 
 - **UI scale: a `DrawList` records logical pixels in window pixels.**
   `DrawList::set_scale(f32)` (read back with `scale()`) converts everything

@@ -577,7 +577,8 @@ menu {
 }
 
 /* Lines under the title: the controls, a warning. They explain rather than
- * offer, so they are drawn in the hint's colour, below. */
+ * offer, so they are drawn in the hint's colour, below — or, for a line that
+ * warns, in the console's warning amber. */
 .menu-captions {
   flex-direction: column;
   align-items: center;
@@ -616,6 +617,12 @@ menu-item:active {
 .menu-hint,
 .menu-caption {
   color: color(srgb-linear 0.62 0.64 0.82);
+}
+
+/* A caption in `CaptionTone::Warning`: amber, as the console's warnings are.
+ * The node is `.menu-caption` too; this wins by coming after the rule above. */
+.menu-caption-warning {
+  color: color(srgb-linear 1 0.78 0.35);
 }
 
 /* What pushes a button row's hint against the row's right edge. */
