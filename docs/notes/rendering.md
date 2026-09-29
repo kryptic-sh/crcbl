@@ -4505,6 +4505,278 @@ decision. Nothing was re-blessed.
 - The aerial LUT is uploaded whole every atmosphere frame, like the sky-view
   LUT.
 
+## Flat task dispatch per pass, drafted and not built (2026-09-29)
+
+The backlog's P21 item "The mesh tail's task stage still costs per draw, on both
+sides" floated "a flat dispatch per pass, one task workgroup per (bucket,
+cluster, surviving instance) from a list `draw_gen.slang` writes". This is that
+idea designed against the tree at `ed182d9c`, the alternatives, how to price it,
+and the decision. Nothing here is built.
+
+**What the measurements already split.** All numbers are the backlog's
+(`mesh_e2e`'s `the_price_of_one_call_per_bucket`, RX 7900 XTX, 17,219 instances,
+summed `depth-prepass` + `forward` + `shadow` GPU p50). The price scene holds
+the instance count fixed and varies only the bucket count, so the ranged
+task-stage column separates two costs:
+
+- **Per draw:** ranged behind a task stage, 4 buckets cost 1.21 ms and 938 cost
+  2.45 ms for the same instances and the same workgroups. About 1.2 ms is the
+  draw count inside the multi-draw calls, which is what the backlog's flat
+  dispatch removes.
+- **Per task workgroup:** the 4-bucket row's 1.21 ms is still far above the 0.37
+  ms the same ranged calls cost at 938 buckets **without** a task stage, and on
+  this scene the prepass alone is 0.69 ms with the stage against 0.031 ms
+  without. No row measured the task-free path at 4 buckets, so this split is an
+  inference, not a measurement. But the cause is visible in the source:
+  `taskMain` is `[numthreads(1, 1, 1)]`, one workgroup per (cluster, instance
+  slot) that decides alone and calls `DispatchMesh` with a count of 0 or 1. Each
+  surviving pair pays for a whole task workgroup and a payload hand-off. The
+  backlog's form of the flat dispatch keeps exactly that: one workgroup per
+  triple.
+
+So a design that removes only the draw count leaves at least half of the gap.
+The design below removes both.
+
+### What changes
+
+**The unit of task work becomes a chunk of pairs, not one pair.** A bucket `b`
+in draw region `r` has `c_b` clusters (`tables[cluster_count_at + b]`, the
+`bucket_clusters` region) and `n_rb` surviving instances (`draw_args`'
+`instance_count`, which the task stage already reads as data). Number its
+(cluster, instance slot) pairs `p = slot * c_b + cluster`,
+`0 <= p < c_b * n_rb`, and cut them into chunks of `TASK_LANES` pairs (32 is the
+draft value, to be priced). A task workgroup of `TASK_LANES` invocations takes
+one chunk. Each lane runs today's per-pair body (DAG selection through
+`cluster_is_selected`, the skinned-instance exemption, `cluster_survives`, the
+`cull_stats` word, the slot-zero `cluster_selection` write). The workgroup then
+compacts its kept lanes and calls `DispatchMesh(kept, 1, 1, payload)` once,
+unbranched, as the DXIL rule in `taskMain`'s docs requires. A single-cluster
+mesh then puts 32 instances through one task workgroup instead of 32 workgroups.
+
+**The work list is implicit: per-bucket chunk starts, not per-entry records.**
+An explicit list of (bucket, cluster, instance) entries has no bound tied to
+anything the generator knows: it is `Σ c_b · n_rb` entries, which a many-cluster
+mesh multiplies past the instance capacity that sizes every other region of
+`visible_instances`. Instead the scan writes one word per (region, bucket): the
+exclusive prefix of `ceil(c_b · n_rb / TASK_LANES)` over the table. That is one
+more region of `visible_instances` behind the starts, `R · B` words.
+`visible_instances` is already bound writable to `draw_gen.slang` and readable
+to both mesh stages, so this adds no binding. The count matters: `draw_gen`
+compiles for WGSL and is held to eight storage buffers (see its header). A task
+workgroup `w` of a flat call finds its bucket by binary search of that region
+between the segment's two ends. The search is workgroup-uniform, about `log2(B)`
+loads, once per chunk. With one workgroup per pair it would be once per pair,
+which is another reason the backlog's granularity loses.
+
+**Who writes it.** `startsMain` already scans every (region, bucket) slot it
+owns in one workgroup, and it is where each y extent becomes final. It gains a
+second scan over the chunk counts, in the same workgroup and the same pass, for
+the regions it closes: region 0 under `DRAW_MODE_PLAIN`, `EARLY_REGION` under
+`DRAW_MODE_OCCLUSION`, and every face region under `DRAW_MODE_FACES`. The scan
+is global over its slots. A segment's chunk count is the difference of the
+prefix at its two ends, so segments need no scan of their own. The late region
+and region 0 of an occlusion frame are final only after `lateFinishMain`. That
+entry point is many workgroups of one bucket each, so the camera generator gains
+one more single-workgroup pass after `draw-late-finish` to scan those two
+regions. `DrawGen::LATE_PASSES` and `MAX_TIMED_PASSES` move with it. Cost:
+`draw-starts` priced at 0.018 ms a frame at 938 buckets as a one-workgroup scan,
+and the extra pass should cost the same, but that is unmeasured.
+
+**One call per (pass, view, region, partition), with `draw_count = 1`.** The
+flat call is `draw_mesh_tasks_indirect` with `draw_count: 1` over one three-word
+structure: x the segment's chunk count, y and z one. The scan writes it into
+`counts_and_mesh_args` behind the existing regions. It has to be that buffer,
+because the call's arguments must be in `IndirectArgument` and that buffer is
+the one the graph already transitions there. That buffer is not readable in the
+same pass, which is why the task stage reads counts from `draw_args` and the
+chunk starts from `visible_instances`. The one-call shape needs neither
+`Features::MULTI_DRAW_INDIRECT` nor `Features::DRAW_INDEX`. The flat task entry
+point reads the per-bucket table words (`cluster_base_at`, `cluster_count_at`)
+on every target, not behind `CRCBL_TARGET_SPIRV`. The bucket offset `d` it found
+by search stands where a ranged call's `DrawIndex` stands, so
+`cluster_source(d)` is the same arithmetic P21 already tests.
+
+**Partitions stay, and become contiguous.** Buckets differ in material mode, and
+mode picks the **pipeline**: `depth_partitions` binds one of four
+(`shadow_pipeline` / `depth_masked_pipeline`, each with a double-sided twin),
+and `sided_partitions` one of two for the colour pass, the RSMs and the
+wireframe. One flat dispatch per pass cannot draw two pipelines, so it is one
+per partition per pass per view (at most four in a depth pass, two in a sided
+one), and each needs its buckets to be **one contiguous segment** of the table.
+Today they are not. The table builder in `ForwardRenderer` numbers buckets
+mesh-major, each mesh's levels repeated once per held mode. On the mesh path
+(one bucket per mesh through `buckets_for`), a scene holding two modes therefore
+alternates modes bucket by bucket. Every depth partition's runs are one bucket
+long, and behind a task stage `DrawRange::pack` records them one call per
+bucket. That is read from the code and not measured: the price scene uses one
+material. The fix is host-only: number buckets **mode-major** in `DEPTH_MODES`
+order (opaque, masked, double-sided, both). Then every depth partition is one
+segment, and each sided partition is two adjacent segments (opaque with masked,
+double-sided with both), which is also one segment. The ranged indirect tails
+get the same benefit, so this step ships first and alone. The
+`(mesh, mode) → bucket` lookup `pack_tables` builds absorbs the renumbering, so
+no shader changes for it.
+
+**The constants.** A flat call binds one `ClusterDrawConstants` block, as a
+ranged call does, and the block is the segment's first bucket's block in that
+region, with two fields added: the segment's bucket count and `chunk_starts_at`,
+the word of the new region at the segment's first bucket, on `start_at`'s terms.
+The per-bucket blocks carry the two fields unread, or the flat blocks are
+appended after the per-bucket ones at one per (region, partition). The second
+keeps every existing offset. The struct is pinned by
+`crcbl_shaders::meshlet::ClusterDrawConstants` and its offset tests, so this is
+a layout change with artifact regeneration.
+
+**The payload.** Today it is `{cluster, instance, draw_index}` for one pair. It
+becomes `TASK_LANES` packed entries, one per kept lane: the bucket offset `d`
+(uniform for the workgroup, so stored once) and each kept pair's index `p`
+within the bucket. `amplifiedMeshMain` gains `SV_GroupID` and reads entry
+`SV_GroupID.x`. `emit_cluster` is unchanged. At 32 lanes the payload is a few
+hundred bytes, far under the 16 KiB Vulkan guarantees for a task payload.
+
+**Two things this draft does not settle.** (1) The compaction needs either
+`groupshared` or wave intrinsics in the task stage. `draw_gen.slang` records
+that Slang's Metal backend materialises a module-scope `groupshared` in every
+entry point of a module, which is illegal in a fragment function.
+`mesh_cluster.slang` has no fragment entry point (its fragment stage is
+`mesh.slang`'s), but nobody has checked that on MSL. Wave intrinsics need a
+subgroup at least `TASK_LANES` wide, and `crcbl_hal::Limits` carries no subgroup
+size. (2) The flat x extent is bounded by the device's task workgroup count per
+dimension (Vulkan's `maxTaskWorkGroupCount`, 65,535 at minimum), and the HAL
+exposes no mesh or task limits at all. Today's 2D extents keep each dimension
+small. A flat segment past the limit needs a 2D split (x capped, y the rows) and
+a bound check. Chunking by 32 makes that far less likely, which is another point
+against one workgroup per pair.
+
+**Shadow views and the occlusion phases.** Every view already has its own
+generator and region: the camera's is `DrawMode::Occlusion`, each cascade's
+`Plain`, each point-light slot's `Faces`, one region per face. The shadow pass
+records every partition for every view in turn under that view's viewport and
+bind group (`add_shadow_pass`), so the flat form is one call per view per
+partition. That is the same count a whole-table range records today, and it
+never splits. The early prepass draws `EARLY_REGION`, the late prepass
+`LATE_REGION` and the colour pass region 0, each through its own flat structure
+and segment. The chunk starts of those regions come from the two scans above.
+Hysteresis state and `cluster_selection` keep one writer, because the pair with
+instance slot 0 still does the write.
+
+**What the CPU records.** At 938 buckets in one mode the ranged tail already
+records one call per partition per view, so the call count does not move. The
+record time the backlog reports is almost all the wait on the GPU, not CPU work
+(see "The price test's 'record' includes the wait for the GPU"). In a multi-mode
+scene the flat path records the minimum, where today it records a call per
+bucket.
+
+### Alternatives
+
+- **(a) The flat dispatch as the backlog phrased it, one task workgroup per
+  (bucket, cluster, instance).** It removes the draw-count term (about 1.2 ms at
+  938 buckets) and keeps the per-workgroup term. It adds the same scans, layout
+  change and partition work as the design above, runs a bucket search per pair,
+  and puts every pair on the 65,535-per-dimension limit. **Loses** to the
+  chunked form: same complexity, about half the gain.
+- **(a′) The chunked flat dispatch above.** It targets both terms. Its cost is
+  the largest here: a `startsMain` scan, one more camera pass, a
+  `ClusterDrawConstants` layout change, a payload change, the two open questions
+  above, and a new record path in `BucketDraws` beside the per-bucket and ranged
+  ones. **Equivalence testing:** a flat-versus-per-bucket frame comparison on
+  the pattern of `render_e2e`'s
+  `a_call_per_range_on_*_draws_as_a_call_per_bucket_does`, byte for byte,
+  including a multi-mode scene and an occlusion frame. The three `cull_stats`
+  cluster words must match the per-bucket path exactly, because they are sums
+  and `apps/quarry`'s device suite asserts their arithmetic. Depth ties between
+  instances of different buckets can resolve in a different order, as they can
+  already within a bucket, whose scatter order is atomic. A failing comparison
+  needs that ruled out before it is read as a bug.
+- **(b) Drop the task stage for buckets whose mesh is one cluster.** A
+  per-bucket choice of `meshMain` (no task stage) or the task path. On the price
+  scene it would reach the 0.37 ms row, because every mesh there is a
+  single-cluster cube. Against it: it doubles the mesh pipelines (every depth
+  and sided pipeline, with and without the stage) and adds a partition key. It
+  splits ranges unless buckets are also sorted by class. It leaves both the
+  per-draw and the per-workgroup cost in place for every multi-cluster bucket,
+  which are the buckets the task stage exists for. And it changes what
+  `cull_stats` means: a `meshMain` bucket's clusters are never tested, so the
+  words stop summing to the cut. Pixels would not change: for one cluster the
+  instance cull already applied the frustum, and a back-facing triangle the cone
+  would have removed is removed by the rasteriser. The gain depends on the
+  scene's mix, and nobody has measured the mix of the `ew` scene the 938 comes
+  from. **Declined:** chunking puts 32 single-cluster instances through one task
+  workgroup, which takes away the reason for (b) without a second pipeline set.
+  Revisit only if the chunked prepass on single-cluster meshes still costs
+  several times the task-free one.
+- **(c) A per-pass threshold instead of the whole-frame
+  `TASK_STAGE_SHORTEST_RANGE`.** Cheap: a constant per caller of `partitions`.
+  It moves only runs between about 2 and 128 buckets (at 32: prepass and colour
+  pass together 0.14 ms worse ranged, shadows 0.21 ms better). It changes
+  nothing at 938, where every partition is one run. It adds two more tuned
+  constants from one AMD driver, and each needs the sweep repeated per pass on a
+  scene with a different view count. **Declined:** the flat path has no ranges
+  and no threshold, and `TASK_STAGE_SHORTEST_RANGE` is deleted when it ships.
+- **(d) Leave it.** At the measured bucket count on this card's default path,
+  the frame keeps about 2.1 ms of GPU over the task-free floor (2.45 against
+  0.37). That is the largest measured frame-path cost left in the backlog's
+  ranking. **Declined** while it is the best-measured cost, unless pricing
+  (below) shows the chunked form does not close it.
+
+**Backends without mesh shading pay nothing for any of these.** WebGPU has no
+mesh stage. `crcbl-dx12` reports neither `MESH_SHADER` nor `TASK_SHADER` and
+never `DRAW_INDEX`. Lavapipe, radv without the extension and every other Vulkan
+device without mesh shaders take the indirect tails. On those paths the only
+change is the mode-major bucket order, which helps their ranges. Metal reports
+mesh and task stages on Metal 3 devices. It is deferred by the owner
+(`docs/plan/ROADMAP.md`, "Status"), and CI's Paravirtual device answers no, so
+the flat entry points must compile for MSL (the file's `// crcbl-targets:` line)
+but run on no Metal device here.
+
+### How to price it before building
+
+**The protocol is `bucket_price.rs`'s, unchanged:** the command in its module
+docs, release, `CRCBL_VK_VALIDATION=0`, 240 frames, three alternating rounds,
+and the GPU column only. The record column is mostly the GPU wait, and a small
+row's record moves with its neighbour. Temporarily add `draw-starts` (and the
+new late scan) to `PRICED`, as was done to trace `draw-starts`, so any scan cost
+is counted against the saving. Run one sweep on the cube scene and one on a
+scene of multi-cluster (DAG) meshes. The cube scene is the chunked design's best
+case and (b)'s best case too, so it cannot tell them apart.
+
+**A cheap prototype gives the bigger number first: chunk the task stage inside
+today's calls.** Keep the per-bucket and ranged calls. Have `startsMain` rewrite
+each bucket's mesh extents from `(c_b, n_rb, 1)` to
+`(ceil(c_b · n_rb / TASK_LANES), 1, 1)` once the y extent is final. Make
+`taskMain` a `TASK_LANES`-wide workgroup that decodes `p` from
+`SV_GroupID.x · TASK_LANES + lane`, compacts and dispatches, and give the
+payload its array. That takes no new pass, no new region, no constants change
+and no partition work. It prices the per-workgroup term at every bucket count,
+and the lane decode, compaction and payload carry straight over into (a′).
+Priced beside the sweep above:
+
+- **Build the prototype into the tree** if the 938-bucket ranged row's summed
+  GPU falls by more than 0.2 ms with no row from 4 to 128 buckets getting worse.
+  The ranged rows at 4, 8 and 16 read 1.21, 1.22 and 1.23 ms, so 0.2 ms is well
+  clear of the spread.
+- **Then build the flat call** if, with the prototype in, the 938-bucket row
+  still exceeds the 4-bucket row by more than 0.2 ms. That gap is the draw-count
+  term, and it is all the flat call removes. If chunking closes most of it
+  (meaning the per-draw cost was mostly per-workgroup cost in disguise), stop:
+  the flat call's complexity would buy noise. Record the result either way.
+- **Build the mode-major bucket order regardless.** It is host-only, it helps
+  every tail in a multi-mode scene, and both halves of (a′) need it. Price it on
+  a two-mode scene: the depth passes' call counts are the observable, and they
+  should fall from one per bucket to one per range.
+
+### Decision
+
+**(a′), in three priced steps: mode-major bucket order, then task chunks inside
+today's calls, then the flat call only if the draw-count term survives
+chunking.** This is chosen for the long term because it is the only option that
+targets both costs the measurements separate. It keeps one geometry path per
+device, with no second set of mesh pipelines and no per-pass constants tuned to
+one driver. It deletes machinery (the threshold and, on the task path, the
+ranges) instead of adding it. Each step stands on its own if the next one fails
+to pay. (b) and (c) are declined above. (d) is declined unless the prototype
+comes back flat.
+
 ## CMAA2 blended the wrong side of every edge for a day (2026-09-07)
 
 The user reported the web demos drawing with no antialiasing. They were right,
