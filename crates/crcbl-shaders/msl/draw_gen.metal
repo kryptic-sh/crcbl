@@ -44,14 +44,14 @@ struct GpuMesh_0
 };
 
 
-#line 1177
+#line 644
 struct _MatrixStorage_float4x4_ColMajornatural_0
 {
     array<packed_float4, int(4)> data_0;
 };
 
 
-#line 1177
+#line 644
 struct GpuInstance_natural_0
 {
     _MatrixStorage_float4x4_ColMajornatural_0 transform_0;
