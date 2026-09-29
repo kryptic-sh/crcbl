@@ -416,6 +416,14 @@ pub struct GeneratedDraws {
     /// [`ResourceState::IndirectArgument`] — **once**, whichever region the
     /// pass reads.
     pub counts_id: BufferId,
+    /// Byte offset in [`counts`](Self::counts) of region 0's first flat task
+    /// dispatch: behind every region this generator allocates, one
+    /// [`draw_gen::MESH_ARGS_SIZE`] structure per
+    /// [flat segment](draw_gen::flat_segment) a region, which is where a flat
+    /// call's arguments are — see [`DrawGen::flat_args_offset`]. Per generator
+    /// rather than per renderer, because it sits behind however many regions
+    /// the generator was built with.
+    pub flat_args_offset: u64,
     /// `cull.slang`'s survivor list, each survivor's route, the per-bucket runs
     /// of surviving instance indices the vertex stage reads, and where each run
     /// starts this frame, in that order, in one buffer. Declare it as a shader
@@ -747,6 +755,9 @@ impl DrawGen {
         // argument layout — so the clearing shader never re-declares it. Every
         // region's structures, end to end.
         let args_words = draw_regions * bucket_count * draw_gen::DRAW_ARGS_WORDS as u32;
+        // The counts-and-extents buffer's: every region's counts and extents,
+        // then every region's flat task dispatches.
+        let counts_words = draw_gen::flat_args_word(bucket_count, draw_regions, draw_regions, 0, 0);
         device.write_buffer(
             clear_params,
             0,
@@ -754,12 +765,10 @@ impl DrawGen {
                 args_words,
                 counts_words: bucket_count,
                 stats_words: cull_shader::STATS_WORDS,
-                // Everything behind region 0's counts: its extents, and then
-                // every further region's counts and extents, which alternate.
-                mesh_args_words: draw_regions
-                    * bucket_count
-                    * (1 + draw_gen::MESH_ARGS_WORDS as u32)
-                    - bucket_count,
+                // Everything behind region 0's counts: its extents, then every
+                // further region's counts and extents, which alternate, and
+                // the flat task dispatches behind them all.
+                mesh_args_words: counts_words - bucket_count,
             }
             .to_bytes(),
         )?;
@@ -795,6 +804,7 @@ impl DrawGen {
                     level_meshes_at: table_offsets.level_meshes_at,
                     bucket_lookup_at: table_offsets.bucket_lookup_at,
                     task_lanes: desc.task_lanes,
+                    flat_segments_at: table_offsets.flat_segments_at,
                     ..draw_gen::Params::default()
                 }
                 .to_bytes(),
@@ -865,9 +875,7 @@ impl DrawGen {
             // module docs on why a binding had to go.
             counts.push(buffer(
                 &format!("draw counts and mesh dispatch args {frame}"),
-                u64::from(draw_regions)
-                    * u64::from(bucket_count)
-                    * (4 + draw_gen::MESH_ARGS_SIZE as u64),
+                u64::from(counts_words) * 4,
                 BufferUsage::STORAGE
                     | BufferUsage::INDIRECT
                     | BufferUsage::TRANSFER_SRC
@@ -1213,7 +1221,10 @@ impl DrawGen {
             &DRAW_GEN,
             "lateFinishMain",
             gen_pipeline_layout,
-            draw_gen::WORKGROUP_SIZE,
+            // One workgroup, on `startsMain`'s terms: its invocations split
+            // the buckets into chunks and scan the two closed regions' task
+            // chunks in workgroup memory.
+            draw_gen::STARTS_WORKGROUP_SIZE,
         )?;
         rollback.pipelines.push(late_finish);
         Ok(OcclusionPipelines {
@@ -1268,6 +1279,32 @@ impl DrawGen {
     #[must_use]
     pub const fn region_start_word(&self, region: u32, bucket: u32) -> u32 {
         draw_gen::run_start_word(self.capacity, self.bucket_count, region, bucket)
+    }
+
+    /// Which word of [`DrawGen::runs`] holds where bucket `bucket`'s task
+    /// chunks start in draw region `region` this frame —
+    /// [`draw_gen::chunk_start_word`], the number
+    /// [`ClusterDrawConstants::chunk_starts_at`](crcbl_shaders::meshlet::ClusterDrawConstants::chunk_starts_at)
+    /// carries. `bucket` may be [`bucket_count`](Self::bucket_count), the
+    /// region's end.
+    ///
+    /// The same for every generator one renderer builds, for
+    /// [`region_start_word`](Self::region_start_word)'s reason.
+    #[must_use]
+    pub const fn chunk_start_word(&self, region: u32, bucket: u32) -> u32 {
+        draw_gen::chunk_start_word(self.capacity, self.bucket_count, region, bucket)
+    }
+
+    /// Byte offset in [`DrawGen::counts`] of flat segment `segment`'s task
+    /// dispatch in draw region `region` — what a flat call's
+    /// [`DrawIndirect::offset`](crcbl_hal::DrawIndirect::offset) carries.
+    /// Behind every region this generator allocates, so it differs between
+    /// generators of one renderer; [`GeneratedDraws::flat_args_offset`] is
+    /// region 0's first, handed to the pass that draws them.
+    #[must_use]
+    pub const fn flat_args_offset(&self, region: u32, segment: u32) -> u64 {
+        draw_gen::flat_args_word(self.bucket_count, self.mode.regions(), region, segment, 0) as u64
+            * 4
     }
 
     /// Which word of [`DrawGen::runs`] holds bucket `bucket`'s mesh, as the
@@ -1692,6 +1729,7 @@ impl DrawGen {
                 face_runs_at: draw_gen::face_runs_at(self.capacity, self.bucket_count),
                 bucket_lookup_at: self.table_offsets.bucket_lookup_at,
                 task_lanes: self.task_lanes,
+                flat_segments_at: self.table_offsets.flat_segments_at,
             }
             .to_bytes(),
         )?;
@@ -1859,11 +1897,7 @@ impl DrawGen {
                 occlusion.late_scatter,
                 instance_count.div_ceil(draw_gen::WORKGROUP_SIZE),
             ),
-            (
-                "draw-late-finish",
-                occlusion.late_finish,
-                self.bucket_count.div_ceil(draw_gen::WORKGROUP_SIZE),
-            ),
+            ("draw-late-finish", occlusion.late_finish, 1),
         ] {
             if groups == 0 {
                 continue;
@@ -1963,12 +1997,20 @@ impl DrawGen {
         let clear_pipeline = self.clear_pipeline;
         let clear_layout = self.clear_pipeline_layout;
         let clear_group = self.clear_groups[frame];
-        // The longest of the three buffers, which is the arguments: one
-        // structure per bucket per region, and `new` refuses a table with no
+        // The longest of the three buffers: the arguments, one structure per
+        // bucket per region, or for a small table the counts and extents with
+        // the flat task dispatches behind them. `new` refuses a table with no
         // buckets, so this is never the empty dispatch Metal rejects.
-        let clear_groups =
-            (self.mode.regions() * self.bucket_count * draw_gen::DRAW_ARGS_WORDS as u32)
-                .div_ceil(clear_counters::WORKGROUP_SIZE);
+        let regions = self.mode.regions();
+        let clear_groups = (regions * self.bucket_count * draw_gen::DRAW_ARGS_WORDS as u32)
+            .max(draw_gen::flat_args_word(
+                self.bucket_count,
+                regions,
+                regions,
+                0,
+                0,
+            ))
+            .div_ceil(clear_counters::WORKGROUP_SIZE);
         graph
             .add_compute_pass("clear-counters")
             .use_buffer(visible_count, ResourceState::ShaderReadWrite)
@@ -2079,6 +2121,7 @@ impl DrawGen {
             args_id: args,
             counts: self.counts[frame],
             counts_id: counts,
+            flat_args_offset: self.flat_args_offset(0, 0),
             runs_id: runs,
             group_state_id: group_state,
             visible_count_id: visible_count,
@@ -2468,8 +2511,9 @@ mod tests {
         .expect("the null backend builds a generator")
     }
 
-    /// **The runs buffer costs a word per bucket per draw region, and one for
-    /// the bucket's mesh, not a capacity per bucket.**
+    /// **The runs buffer costs two words per bucket per draw region — its run
+    /// start and its task chunks' start — and one for the bucket's mesh, not a
+    /// capacity per bucket.**
     ///
     /// Two generators of one capacity and very different bucket counts, and the
     /// size the device was actually asked for — read off the allocation rather
@@ -2493,15 +2537,15 @@ mod tests {
         let regions = u64::from(draw_gen::DRAW_REGIONS);
         assert_eq!(
             size(&many) - size(&few),
-            u64::from(many.bucket_count() - few.bucket_count()) * (regions + 1) * 4,
-            "sixty-three more buckets cost sixty-three more words of run start a region and of \
-             mesh, and nothing else"
+            u64::from(many.bucket_count() - few.bucket_count()) * (2 * regions + 1) * 4,
+            "sixty-three more buckets cost sixty-three more words of run start and of chunk \
+             start a region, and of mesh, and nothing else"
         );
         assert_eq!(
             size(&few),
-            (3 * u64::from(CAPACITY) + regions + 1) * 4,
+            (3 * u64::from(CAPACITY) + regions + 1 + 2 * regions) * 4,
             "one bucket's generator holds the survivors, their routes, one capacity of runs, \
-             one start per region and its mesh"
+             one start per region, its mesh, and its chunk start and the region's end per region"
         );
         for draws in [&few, &many] {
             assert_eq!(
@@ -2522,7 +2566,8 @@ mod tests {
     /// The words a constant block names are fixed at build and read by the
     /// geometry stages every frame, so two buckets sharing one would draw one
     /// bucket's run twice, and a word past the end is a read of nothing. The
-    /// last bucket's mesh word, behind every start, is the buffer's last.
+    /// last region's chunk end, behind every start, mesh and chunk start, is
+    /// the buffer's last.
     #[test]
     fn every_bucket_start_is_a_word_of_its_own_behind_the_runs() {
         const CAPACITY: u32 = 100;
@@ -2556,9 +2601,20 @@ mod tests {
             "the buckets' meshes directly behind the last region's starts"
         );
         assert_eq!(
-            u64::from(draws.bucket_mesh_word(draws.bucket_count() - 1) + 1) * 4,
+            draws.chunk_start_word(0, 0),
+            draws.bucket_mesh_word(draws.bucket_count() - 1) + 1,
+            "the chunk starts directly behind the last bucket's mesh"
+        );
+        assert_eq!(
+            draws.chunk_start_word(1, 0),
+            draws.chunk_start_word(0, draws.bucket_count()) + 1,
+            "each region's chunk starts, its end word included, directly behind the one before"
+        );
+        assert_eq!(
+            u64::from(draws.chunk_start_word(draw_gen::DRAW_REGIONS - 1, draws.bucket_count()) + 1)
+                * 4,
             draws.runs_size(),
-            "and the last bucket's mesh is the buffer's last word"
+            "and the last region's chunk end is the buffer's last word"
         );
 
         draws.destroy(device);
@@ -2585,9 +2641,9 @@ mod tests {
             "61.7 MiB a buffer, as measured"
         );
         assert_eq!(
-            shared_runs, 236_644,
-            "231.1 KiB a buffer, with a start word per bucket for every draw region and a mesh \
-             word per bucket"
+            shared_runs, 262_936,
+            "256.8 KiB a buffer, with a run start and a chunk start per bucket for every draw \
+             region, a chunk end per region, and a mesh word per bucket"
         );
     }
 
@@ -2617,12 +2673,15 @@ mod tests {
         let [plain, occlusion, faces] =
             [DrawMode::Plain, DrawMode::Occlusion, DrawMode::Faces].map(per_frame);
         assert_eq!(
-            plain, 270_412,
-            "runs, one region of arguments and one of counts"
+            plain, 296_776,
+            "runs, one region of arguments and one of counts, and its flat dispatches"
         );
-        assert_eq!(occlusion, 337_948, "three regions of arguments and counts");
         assert_eq!(
-            faces, 886_280,
+            occlusion, 364_456,
+            "three regions of arguments, counts and flat dispatches"
+        );
+        assert_eq!(
+            faces, 913_076,
             "seven regions and six capacities of face runs"
         );
         // What a generator cost before there were regions: the runs with one
@@ -2636,8 +2695,8 @@ mod tests {
         let renderer_after = occlusion + plain * cascades + faces * slots;
         assert_eq!(renderer_before, 1_709_036);
         assert_eq!(
-            renderer_after, 4_423_892,
-            "4.22 MiB a frame in flight, against 1.63 MiB before"
+            renderer_after, 4_610_312,
+            "4.40 MiB a frame in flight, against 1.63 MiB before"
         );
         recorder.assert_valid();
     }

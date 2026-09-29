@@ -7267,6 +7267,12 @@ pub(crate) mod tests {
     /// unexpanded, which is what drops the cluster naming it as its container.
     const PROBE_DAG_GROUPS: u32 = 3;
 
+    /// Words the probe's `tables` spends on its group records before the
+    /// bucket's cluster base and count: [`PROBE_DAG_GROUPS`] records of
+    /// `LEVEL_GROUP_STRIDE` bytes.
+    const PROBE_TABLE_GROUP_WORDS: u32 =
+        PROBE_DAG_GROUPS * (crcbl_shaders::level_select::LEVEL_GROUP_STRIDE / 4) as u32;
+
     /// The clip-space depth every vertex the probe emits carries.
     ///
     /// The engine is reversed-Z — [`crcbl_hal::depth::CLEAR`] is `0.0` and
@@ -7445,7 +7451,6 @@ pub(crate) mod tests {
             STATS_WORDS,
         };
         use crcbl_shaders::draw_gen::DrawIndexedArgs;
-        use crcbl_shaders::level_select::LEVEL_GROUP_STRIDE;
         use crcbl_shaders::light::LIGHT_STRIDE;
         use crcbl_shaders::mesh::{
             FrameUniforms, GpuInstance, GpuMaterial, GpuMesh, POSITION_STRIDE, SHADOW_CASCADES,
@@ -7642,9 +7647,15 @@ pub(crate) mod tests {
             bucket: 0,
             group_stride: PROBE_DAG_GROUPS,
             level_groups_at: 0,
-            // Read by the SPIR-V stages alone, which this backend never runs.
-            cluster_base_at: 0,
-            cluster_count_at: 0,
+            // The task stage's flat search reads the bucket's cluster base and
+            // count out of `tables`, on every target: the two words behind the
+            // group records below.
+            cluster_base_at: PROBE_TABLE_GROUP_WORDS,
+            cluster_count_at: PROBE_TABLE_GROUP_WORDS + 1,
+            // One bucket's chunk starts behind the run's one word: it starts
+            // at chunk zero and the region ends one chunk later.
+            chunk_starts_at: 1,
+            chunk_starts_end: 2,
         };
 
         // --- the resources ---
@@ -7708,8 +7719,12 @@ pub(crate) mod tests {
             .to_bytes(),
         );
         // One word read twice: as the run's start, which `start_at` above names,
-        // and then as the run's only entry — instance 0 either way.
-        let visible_instances = read_storage("mesh_cluster visible instances", &0u32.to_le_bytes());
+        // and then as the run's only entry — instance 0 either way. Then the
+        // bucket's chunk starts, which the flat task stage searches: chunk zero,
+        // and the region's end one chunk on, since five clusters of one instance
+        // are one chunk.
+        let visible_instances =
+            read_storage("mesh_cluster visible instances", &pack_words(&[0, 0, 1]));
         let materials = read_storage("mesh_cluster materials", &GpuMaterial::UNTINTED.to_bytes());
         let cluster_bytes: Vec<u8> = clusters
             .iter()
@@ -7753,10 +7768,11 @@ pub(crate) mod tests {
         let lights = read_storage("mesh_cluster lights", &[0u8; LIGHT_STRIDE]);
         let cluster_lights = read_storage("mesh_cluster froxel grid", &pack_words(&[0, 0, 0, 0]));
         let probes = read_storage("mesh_cluster probes", &[0u8; PROBE_STRIDE]);
-        let tables = read_storage(
-            "mesh_cluster tables",
-            &vec![0u8; PROBE_DAG_GROUPS as usize * LEVEL_GROUP_STRIDE],
-        );
+        // The group records, read by nothing this probe draws, then the
+        // bucket's cluster base and count, which the task stage reads.
+        let mut table_words = vec![0u32; PROBE_TABLE_GROUP_WORDS as usize];
+        table_words.extend([0, PROBE_CLUSTERS]);
+        let tables = read_storage("mesh_cluster tables", &pack_words(&table_words));
 
         // The two written bindings. `DeviceLocal` because D3D12 admits an
         // unordered access view on no other heap — `crate::buffer`'s

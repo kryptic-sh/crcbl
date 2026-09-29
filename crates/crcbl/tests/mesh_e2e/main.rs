@@ -84,6 +84,7 @@ mod depth_only;
 mod emissive_page;
 mod exposure;
 mod fill_light;
+mod flat_tasks;
 mod froxels;
 mod goldens;
 mod grass;

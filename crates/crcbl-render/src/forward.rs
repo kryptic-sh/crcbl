@@ -3899,9 +3899,10 @@ impl ForwardRenderer {
         // partition — [`ForwardRenderer::depth_partitions`] and
         // [`ForwardRenderer::sided_partitions`] — one contiguous run of
         // buckets, which a device with a draw index records as one ranged call
-        // rather than a call per bucket. `DEPTH_MODES` order makes a sided
-        // partition one run too: opaque sits beside masked, and double-sided
-        // beside both.
+        // rather than a call per bucket — and which the mesh tail behind a
+        // task stage must have, because it draws each partition as one flat
+        // call of its run. `DEPTH_MODES` order makes a sided partition one run
+        // too: opaque sits beside masked, and double-sided beside both.
         //
         // **Once per mode the scene holds, not once per mode that exists.** A
         // scene whose materials are all opaque gets exactly the table it always
@@ -5078,6 +5079,12 @@ impl ForwardRenderer {
                     // argument structure's: the tables hold one word a bucket.
                     cluster_base_at: draws.table_offsets().bucket_cluster_bases_at + bucket,
                     cluster_count_at: draws.table_offsets().bucket_clusters_at + bucket,
+                    // Where this bucket's task chunks start in this region,
+                    // and where the region's end: what a flat call binding
+                    // this block searches between — `mesh_cluster.slang`'s
+                    // `taskMain`.
+                    chunk_starts_at: draws.chunk_start_word(region, bucket),
+                    chunk_starts_end: draws.chunk_start_word(region, bucket_count),
                 }
                 .to_bytes()
                 .to_vec()
@@ -7799,11 +7806,12 @@ impl ForwardRenderer {
             region_step: self.region_step,
             // Packed per partition, where the partition's buckets are known.
             ranges: None,
+            flat: None,
         };
 
         // Every draw this frame records: the shadow pass's, one per bucket — or
-        // per range of buckets — in **each** of the depth prepass and the
-        // forward pass, and one full-screen
+        // per range of buckets, or per partition behind a task stage — in
+        // **each** of the depth prepass and the forward pass, and one full-screen
         // triangle per full-screen pass. Assigned before the passes below borrow
         // the fields they need, so it is the count for the frame being built
         // rather than the one before it — and off this frame's resolved effects
@@ -8415,6 +8423,7 @@ impl ForwardRenderer {
             region_step: self.region_step,
             // Packed per partition, where the partition's buckets are known.
             ranges: None,
+            flat: None,
         };
         // Kept back for the reflective shadow map below, which is the same
         // per-bucket call list under a different pipeline — the depth prepass
@@ -8423,8 +8432,9 @@ impl ForwardRenderer {
         let bucket_calls = bucket_draws.clone();
         // The atlas's own split by material mode: an opaque bucket's tile is
         // drawn with no fragment stage in a scene that has a cutout in it. Every
-        // view draws every partition — one call per bucket, or per range of
-        // buckets, per view, under a pipeline per mode.
+        // view draws every partition — one call per bucket, per range of
+        // buckets, or behind a task stage one flat call, per view, under a
+        // pipeline per mode.
         let tile_partitions = self.depth_partitions(&bucket_draws);
 
         // Counted off the two loops the body below runs, before it takes them:
@@ -12016,29 +12026,26 @@ mod tests {
         }
     }
 
-    /// **The mesh tail draws a range of buckets per call on a device with a
-    /// draw index, and a call per bucket without one** — with and without an
-    /// amplification stage, read off the recorded stream of a whole frame.
+    /// **Behind an amplification stage the mesh tail records one flat call per
+    /// partition, and without one a range of buckets per call on a device with
+    /// a draw index and a call per bucket without** — read off the recorded
+    /// stream of a whole frame.
     ///
-    /// Behind an amplification stage only a run of at least
-    /// [`TASK_STAGE_SHORTEST_RANGE`](bucket_draws::TASK_STAGE_SHORTEST_RANGE)
-    /// buckets becomes one call: the demo scene's short runs, and a scene of
-    /// one bucket fewer than that, stay a call per bucket, while a scene of
-    /// exactly that many draws its buckets in one call. Without the stage every
-    /// run is one call.
-    ///
-    /// Whatever was recorded, the colour pass's calls, unrolled a structure at
-    /// a time, are exactly the per-bucket dispatches [`mesh_dispatch_calls`]
-    /// names — every bucket's own extents, each once — and the counters are
-    /// what the frame recorded.
+    /// The flat calls are [`flat_dispatch_calls`]: one structure each, the
+    /// colour pass's sided segments in region 0, under the segment's first
+    /// bucket's block — whatever the bucket count, and whether or not the
+    /// device granted a draw index, which the flat call does not read. Without
+    /// the stage the colour pass's calls, unrolled a structure at a time, are
+    /// exactly the per-bucket dispatches [`mesh_dispatch_calls`] names — every
+    /// bucket's own extents, each once. Either way the counters are what the
+    /// frame recorded.
     #[test]
-    fn a_draw_index_puts_the_mesh_tail_on_a_call_per_range() {
+    fn the_mesh_tail_records_a_flat_call_per_partition_behind_a_task_stage() {
         use crcbl_hal::null::Command;
 
-        let shortest = bucket_draws::TASK_STAGE_SHORTEST_RANGE;
         // `None` is the demo scene; `Some(n)` is `n` copies of its cube, one
         // bucket each, in one material mode — so one run of `n` buckets.
-        for cubes in [None, Some(shortest - 1), Some(shortest)] {
+        for cubes in [None, Some(4), Some(33)] {
             for task in [Features::TASK_SHADER, Features::empty()] {
                 for ranged in [false, true] {
                     let case = format!("{cubes:?} cubes, {task:?}, ranged {ranged}");
@@ -12067,15 +12074,23 @@ mod tests {
                     )
                     .expect("the mesh renderer builds");
                     assert_eq!(renderer.range_limit.is_some(), ranged, "{case}");
+                    assert_eq!(renderer.culls_clusters(), !task.is_empty(), "{case}");
                     let buckets = renderer.bucket_constants.len();
                     assert!(buckets > 1, "one bucket packs into one call either way");
                     let rendered = frame(device.as_ref(), &mut renderer, queue);
 
                     let commands = commands_in_pass(&recorder, "forward");
-                    let binds = commands
+                    let bound: Vec<u32> = commands
                         .iter()
-                        .filter(|command| matches!(command, Command::BindGroup { slot: 0, .. }))
-                        .count();
+                        .filter_map(|command| match command {
+                            Command::BindGroup {
+                                slot: 0,
+                                dynamic_offsets,
+                                ..
+                            } => Some(dynamic_offsets[0]),
+                            _ => None,
+                        })
+                        .collect();
                     let calls: Vec<DrawIndirect> = commands
                         .iter()
                         .filter_map(|command| match command {
@@ -12088,49 +12103,57 @@ mod tests {
                             _ => None,
                         })
                         .collect();
-                    assert_eq!(binds, calls.len(), "{case}: one bind per call");
-                    // Each call a structure at a time: what a call per bucket
-                    // would have recorded for the buckets it stands for.
-                    let mut unrolled: Vec<DrawIndirect> = calls
-                        .iter()
-                        .flat_map(|call| {
-                            (0..call.draw_count).map(|draw| DrawIndirect {
-                                offset: call.offset + u64::from(draw) * u64::from(call.stride),
-                                draw_count: 1,
-                                ..*call
-                            })
-                        })
-                        .collect();
-                    unrolled.sort_by_key(|draw| draw.offset);
-                    assert_eq!(
-                        unrolled,
-                        mesh_dispatch_calls(&renderer),
-                        "{case}: every bucket's own extents, each once"
-                    );
+                    assert_eq!(bound.len(), calls.len(), "{case}: one bind per call");
                     assert!(
                         calls
                             .iter()
                             .all(|call| call.stride
                                 == crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32),
-                        "{case}: a range steps one structure a bucket"
+                        "{case}: one structure a bucket, or a flat call's one"
                     );
-                    let counts: Vec<u32> = calls.iter().map(|call| call.draw_count).collect();
-                    let per_bucket = vec![1; buckets];
-                    match (ranged, task.is_empty(), cubes) {
-                        (false, _, _) => assert_eq!(counts, per_bucket, "{case}"),
-                        // Behind a task stage, a run shorter than the
-                        // threshold is its buckets one by one...
-                        (true, false, None) => assert_eq!(counts, per_bucket, "{case}"),
-                        (true, false, Some(cubes)) if cubes < shortest => {
-                            assert_eq!(counts, per_bucket, "{case}");
+                    if task.is_empty() {
+                        // Each call a structure at a time: what a call per
+                        // bucket would have recorded for the buckets it
+                        // stands for.
+                        let mut unrolled: Vec<DrawIndirect> = calls
+                            .iter()
+                            .flat_map(|call| {
+                                (0..call.draw_count).map(|draw| DrawIndirect {
+                                    offset: call.offset + u64::from(draw) * u64::from(call.stride),
+                                    draw_count: 1,
+                                    ..*call
+                                })
+                            })
+                            .collect();
+                        unrolled.sort_by_key(|draw| draw.offset);
+                        assert_eq!(
+                            unrolled,
+                            mesh_dispatch_calls(&renderer),
+                            "{case}: every bucket's own extents, each once"
+                        );
+                        let counts: Vec<u32> = calls.iter().map(|call| call.draw_count).collect();
+                        match (ranged, cubes) {
+                            (false, _) => assert_eq!(counts, vec![1; buckets], "{case}"),
+                            (true, Some(cubes)) => assert_eq!(counts, vec![cubes], "{case}"),
+                            (true, None) => assert!(
+                                calls.len() < buckets,
+                                "{case}: {counts:?} is a call per bucket over {buckets} buckets"
+                            ),
                         }
-                        // ...and a run of it is one call; without the stage
-                        // every run is.
-                        (true, _, Some(cubes)) => assert_eq!(counts, vec![cubes], "{case}"),
-                        (true, true, None) => assert!(
-                            calls.len() < buckets,
-                            "{case}: {counts:?} is a call per bucket over {buckets} buckets"
-                        ),
+                    } else {
+                        let (expected, firsts) = flat_dispatch_calls(
+                            &renderer,
+                            crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED,
+                        );
+                        assert_eq!(calls, expected, "{case}: one flat call per sided partition");
+                        assert_eq!(
+                            bound,
+                            firsts
+                                .iter()
+                                .map(|&bucket| renderer.bucket_constants[bucket as usize])
+                                .collect::<Vec<_>>(),
+                            "{case}: each under its segment's first bucket's block"
+                        );
                     }
                     assert_eq!(
                         renderer.counters().draws,
@@ -12186,6 +12209,8 @@ mod tests {
                 level_groups_at: field(5),
                 cluster_base_at: field(6),
                 cluster_count_at: field(7),
+                chunk_starts_at: field(8),
+                chunk_starts_end: field(9),
             }
         };
         let mut bases = Vec::new();
@@ -12203,7 +12228,10 @@ mod tests {
                     own.cluster_count,
                     "region {region} bucket {bucket}: the count word holds the count"
                 );
-                // What draw `bucket` of a call bound at bucket 0's block reads.
+                // What draw `bucket` of a call bound at bucket 0's block reads
+                // — and a flat call's workgroup that found bucket `bucket` by
+                // searching the chunk starts from bucket 0's word to the
+                // region's end.
                 assert_eq!(
                     (
                         first.start_at + bucket,
@@ -12212,6 +12240,8 @@ mod tests {
                         first.cluster_count_at + bucket,
                         first.group_stride,
                         first.level_groups_at,
+                        first.chunk_starts_at + bucket,
+                        first.chunk_starts_end,
                     ),
                     (
                         own.start_at,
@@ -12220,8 +12250,25 @@ mod tests {
                         own.cluster_count_at,
                         own.group_stride,
                         own.level_groups_at,
+                        own.chunk_starts_at,
+                        own.chunk_starts_end,
                     ),
                     "region {region} bucket {bucket}"
+                );
+                assert_eq!(
+                    own.chunk_starts_at,
+                    crcbl_shaders::draw_gen::chunk_start_word(
+                        renderer.primary.draws.visible_capacity(),
+                        bucket_count,
+                        region,
+                        bucket,
+                    ),
+                    "region {region} bucket {bucket}: the word draw_gen writes its chunks' start into"
+                );
+                assert_eq!(
+                    own.chunk_starts_end - own.chunk_starts_at,
+                    bucket_count - bucket,
+                    "region {region} bucket {bucket}: the search ends at the region's end word"
                 );
                 if region == 0 {
                     bases.push(own.cluster_base);
@@ -15853,11 +15900,11 @@ mod tests {
     /// * With the task stage, the renderer builds the amplification stage and
     ///   [`ForwardRenderer::culls_clusters`] says so. The null backend refuses a
     ///   task stage on a device without the flag, so an arm that computed this
-    ///   wrongly would fail to build rather than pass quietly.
+    ///   wrongly would fail to build rather than pass quietly. It records one
+    ///   flat call per partition — [`flat_dispatch_calls`].
     /// * Without it, the renderer builds `meshMain` — the un-amplified entry
-    ///   point — and draws every cluster of every surviving instance. That is
-    ///   the path that existed before this slice and it is unchanged, dispatch
-    ///   extents included.
+    ///   point — and draws every cluster of every surviving instance, one
+    ///   indirect dispatch per bucket reading its own extents.
     #[test]
     fn the_task_stage_is_built_only_where_the_device_has_one() {
         use crcbl_hal::null::Command;
@@ -15887,13 +15934,12 @@ mod tests {
             // After the frame, because the buffer named is the slot the frame
             // rotated to — asking before it names the previous slot's ring
             // entry and the comparison is against a buffer nothing drew from.
-            let expected = mesh_dispatch_calls(&renderer);
+            let expected = if expected {
+                flat_dispatch_calls(&renderer, crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED).0
+            } else {
+                mesh_dispatch_calls(&renderer)
+            };
 
-            // **The recorded stream is the same either way**, which is what
-            // makes the cull a rejection inside the existing shape rather than
-            // a second one: one indirect dispatch per bucket, reading that
-            // bucket's own arguments, and the amplification stage is what turns
-            // a group into no work.
             let dispatched: Vec<DrawIndirect> = commands_in_pass(&recorder, "forward")
                 .into_iter()
                 .filter_map(|command| match command {
@@ -15903,12 +15949,56 @@ mod tests {
                 .collect();
             assert_eq!(
                 dispatched, expected,
-                "one indirect dispatch per bucket on both arms, each reading its own \
-                 argument structure"
+                "a flat call per partition behind the stage, and a dispatch per bucket reading \
+                 its own extents without it"
             );
 
             frame.finish(device.as_ref(), renderer);
         }
+    }
+
+    /// The flat calls a pass splitting the bucket table by the material-mode
+    /// bits `key` records behind a task stage, in region 0, in partition order
+    /// — one per segment the table holds buckets of — and each segment's first
+    /// bucket, whose block the call binds.
+    ///
+    /// The offsets from [`crcbl_shaders::draw_gen::flat_args_word`] over the
+    /// camera generator's own region count rather than from
+    /// `DrawGen::flat_args_offset`, for [`mesh_dispatch_calls`]' reason.
+    fn flat_dispatch_calls(renderer: &ForwardRenderer, key: u32) -> (Vec<DrawIndirect>, Vec<u32>) {
+        let stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
+        let buckets = u32::try_from(renderer.bucket_constants.len()).expect("a few buckets");
+        let regions = renderer.primary.draws.mode().regions();
+        let segments = crcbl_shaders::draw_gen::flat_segments(&renderer.bucket_modes);
+        let values: Vec<u32> = if key == crcbl_shaders::mesh::GpuMaterial::DOUBLE_SIDED {
+            vec![0, key]
+        } else {
+            DEPTH_MODES.to_vec()
+        };
+        values
+            .into_iter()
+            .filter(|value| {
+                renderer
+                    .bucket_modes
+                    .iter()
+                    .any(|mode| mode & key == *value)
+            })
+            .map(|value| {
+                let segment = crcbl_shaders::draw_gen::flat_segment(key, value)
+                    .expect("a split every pass makes");
+                (
+                    DrawIndirect {
+                        args: renderer.primary.draws.mesh_args(renderer.frame),
+                        offset: u64::from(crcbl_shaders::draw_gen::flat_args_word(
+                            buckets, regions, 0, segment, 0,
+                        )) * 4,
+                        draw_count: 1,
+                        stride,
+                    },
+                    segments[segment as usize].0,
+                )
+            })
+            .unzip()
     }
 
     /// The [`DrawIndirect`] the mesh path must record for each bucket, in bucket

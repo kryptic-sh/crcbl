@@ -49,9 +49,10 @@
 //     which `cull.slang` filled and `draw_gen.slang` compacted.
 //
 // Behind the task stage the same pairs are numbered one after another and cut
-// into chunks of `TASK_LANES`, one task workgroup each — see `taskMain` — so
-// there the extents count chunks, and the mesh stage learns its pair from the
-// payload.
+// into chunks of `TASK_LANES`, one task workgroup each, and a pass draws each
+// pipeline partition's buckets with **one flat call** whose workgroups are
+// every chunk of every bucket of the partition, end to end — see `taskMain`,
+// which finds its bucket, and the mesh stage learns its pair from the payload.
 //
 // **Neither extent is the CPU's.** They are two of the three words
 // `draw_gen.slang` writes for this bucket, and the seam's
@@ -923,13 +924,11 @@ struct ClusterPayload
     /// extents enumerate them in — see `taskMain`. Entries past the kept count
     /// are never read.
     uint pairs[TASK_LANES];
-#if defined(CRCBL_TARGET_SPIRV)
-    /// Which draw of the task stage's multi-draw call this chunk came from —
-    /// its `DrawIndex`, handed on because a mesh stage behind a task stage may
-    /// not read one itself (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631`).
-    /// SPIR-V only, like the rest of "One call for a range of buckets" below.
-    uint draw_index;
-#endif
+    /// Which bucket of the flat call's segment this chunk belongs to, counted
+    /// from the segment's first — what `taskMain` found by searching the chunk
+    /// starts, handed on so the mesh stage reads the same bucket's words
+    /// through `cluster_source_at`.
+    uint bucket_offset;
 };
 
 /// Where to find this bucket's run of visible instances, and which clusters its
@@ -985,6 +984,16 @@ struct ClusterDrawConstants
     /// The word of `tables` holding `cluster_count` — `draw_gen.slang`'s
     /// `bucket_clusters` region, at this bucket — on `cluster_base_at`'s terms.
     uint cluster_count_at;
+    /// The word of `visible_instances` holding where this bucket's task chunks
+    /// start this frame in this block's region — `draw_gen.slang`'s
+    /// `chunk_start_word`. **What the flat call searches from**: `taskMain`
+    /// binds the segment's first bucket's block and finds its own bucket among
+    /// the words from here on.
+    uint chunk_starts_at;
+    /// The word of `visible_instances` holding where the region's task chunks
+    /// end — the chunk start one past its last bucket — which bounds that
+    /// search.
+    uint chunk_starts_end;
 };
 
 /// One group of a mesh's cluster DAG, matching `struct LevelGroup` in
@@ -1140,6 +1149,10 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t24, space0);
 
 // # One call for a range of buckets, on SPIR-V
 //
+// (Behind a task stage the flat call reads the same four words a bucket past
+// the block's, on every target — `cluster_source_at` — for a bucket offset it
+// searched for rather than a draw index.)
+//
 // `mesh.slang`'s section of the same name, for the mesh tail: a device
 // reporting `crcbl_hal::Features::DRAW_INDEX` draws a whole range of
 // consecutive buckets with **one** `draw_mesh_tasks_indirect` of `draw_count`
@@ -1157,12 +1170,14 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t24, space0);
 // `group_stride` and `level_groups_at` are the same in every block, so the
 // first bucket's serve the range.
 //
-// `DrawIndex` is legal in both mesh-shading stages under `MeshShadingEXT`, but
-// **a mesh stage behind a task stage may not declare it**
-// (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631`), so `taskMain` reads it
-// and hands it on in the payload, and `meshMain` — which has no task stage —
-// reads its own. Slang declares the `DrawParameters` capability for it too,
-// which `crcbl-vk` enables on every device it opens (`shaderDrawParameters`).
+// **Only `meshMain` reads it now**, the entry point of a device with no task
+// stage. Behind a task stage every partition is one flat call instead — see
+// `taskMain` — whose bucket offset is found by search rather than handed over
+// by the driver, so neither task-path stage declares the index.
+// (`VUID-VkGraphicsPipelineCreateInfo-pStages-09631` forbids it in a mesh stage
+// behind a task stage anyway.) Slang declares the `DrawParameters` capability
+// for it, which `crcbl-vk` enables on every device it opens
+// (`shaderDrawParameters`).
 //
 // Only SPIR-V has the index, so every other target reads the block exactly as
 // it always did, and a device on those records a call per bucket. On SPIR-V a
@@ -1170,11 +1185,9 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t24, space0);
 #if defined(CRCBL_TARGET_SPIRV)
 #define DRAW_INDEX_PARAMETER , uint draw_index: SV_DrawIndex
 #define DRAW_INDEX draw_index
-#define PAYLOAD_DRAW_INDEX(payload) payload.draw_index
 #else
 #define DRAW_INDEX_PARAMETER
 #define DRAW_INDEX 0u
-#define PAYLOAD_DRAW_INDEX(payload) 0u
 #endif
 
 /// Which bucket one draw of the call is, as the four numbers a stage reads of
@@ -1191,22 +1204,33 @@ struct ClusterSource
     uint bucket;
 };
 
+/// The `ClusterSource` of the bucket `offset` past the bound block's, on every
+/// target: each of the four numbers is one word a bucket past the block's —
+/// see the section above. What the flat task call reads, whose bucket offset
+/// `taskMain` searched for, and a ranged call's draw `offset` on SPIR-V.
+ClusterSource cluster_source_at(uint offset)
+{
+    ClusterSource source;
+    source.start_at = draw.start_at + offset;
+    source.cluster_base = tables[draw.cluster_base_at + offset];
+    source.cluster_count = tables[draw.cluster_count_at + offset];
+    source.bucket = draw.bucket + offset;
+    return source;
+}
+
 /// Draw `draw_index` of the call's `ClusterSource` — see the section above.
 ClusterSource cluster_source(uint draw_index)
 {
-    ClusterSource source;
 #if defined(CRCBL_TARGET_SPIRV)
-    source.start_at = draw.start_at + draw_index;
-    source.cluster_base = tables[draw.cluster_base_at + draw_index];
-    source.cluster_count = tables[draw.cluster_count_at + draw_index];
-    source.bucket = draw.bucket + draw_index;
+    return cluster_source_at(draw_index);
 #else
+    ClusterSource source;
     source.start_at = draw.start_at;
     source.cluster_base = draw.cluster_base;
     source.cluster_count = draw.cluster_count;
     source.bucket = draw.bucket;
-#endif
     return source;
+#endif
 }
 
 /// Every resident mesh's clusters, back to back, in mesh order. A bucket's
@@ -1859,14 +1883,30 @@ groupshared uint task_kept[TASK_LANES];
 /// # The chunk
 ///
 /// A bucket's pairs are numbered `p = slot * cluster_count + cluster`, and
-/// workgroup `(x, y)` takes pairs `chunk * TASK_LANES + lane` with
-/// `chunk = y * TASK_CHUNKS_PER_ROW + x` — `draw_gen.slang`'s
-/// `write_task_extents` sizes the dispatch to cover every pair, and past the
-/// last pair only the rest of its chunk and of its row. So a single-cluster
-/// mesh puts `TASK_LANES` instances through one workgroup where it used to take
-/// one workgroup each, and that per-workgroup cost is what this shape exists to
-/// spread. The numbering is the one the old two-dimensional extents indexed,
-/// cluster fastest, and the compaction below keeps lane order within it.
+/// chunk `c` of the bucket takes pairs `c * TASK_LANES + lane`. So a
+/// single-cluster mesh puts `TASK_LANES` instances through one workgroup where
+/// it used to take one workgroup each, and that per-workgroup cost is what this
+/// shape exists to spread. The numbering is the one the old two-dimensional
+/// extents indexed, cluster fastest, and the compaction below keeps lane order
+/// within it.
+///
+/// # The flat call: which bucket, and which chunk of it
+///
+/// **One call draws a whole pipeline partition** — a segment of consecutive
+/// buckets — rather than one bucket or a multi-draw range of them, because the
+/// driver's cost per draw of a multi-draw call through a task stage was the
+/// larger part of the mesh tail's frame (`docs/notes/rendering.md`, "Flat task
+/// dispatch per pass"). Its workgroups are every chunk of every bucket of the
+/// segment end to end: workgroup `w = y * TASK_CHUNKS_PER_ROW + x`, where
+/// `draw_gen.slang`'s `write_flat_args` sized the dispatch to the segment's
+/// chunks in rows of `TASK_CHUNKS_PER_ROW`. The bound block is the segment's
+/// first bucket's, and the work list is **implicit**: `draw_gen.slang` wrote
+/// each bucket's chunk start — a running sum over the region — into the words
+/// `chunk_starts_at` names, so the bucket is the last one whose start is at or
+/// before `starts[first] + w`, found by a binary search once per workgroup, and
+/// the chunk is how far past its start. Every other number of the bucket is
+/// the word that bucket's offset past the block's — `cluster_source_at`, the
+/// arithmetic a ranged call's draw index has always read.
 ///
 /// # The compaction
 ///
@@ -1903,10 +1943,38 @@ groupshared uint task_kept[TASK_LANES];
 /// reached unbranched.
 [shader("amplification")]
 [numthreads(TASK_LANES, 1, 1)]
-void taskMain(uint lane: SV_GroupThreadID, uint3 chunk_group: SV_GroupID DRAW_INDEX_PARAMETER)
+void taskMain(uint lane: SV_GroupThreadID, uint3 chunk_group: SV_GroupID)
 {
-    ClusterSource source = cluster_source(DRAW_INDEX);
-    uint chunk = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;
+    // Which bucket of the segment this workgroup is, and which chunk of it —
+    // the flat call's implicit work list. Workgroup `w` of the segment is chunk
+    // `first + w` of the running sum `draw_gen.slang` wrote over the region,
+    // and its bucket is the last one whose chunks start at or before that:
+    // `offset` holds `starts[offset] <= target` and `limit` holds
+    // `starts[limit] > target` for every workgroup inside the segment, so the
+    // loop narrows them to adjacent words. An empty bucket starts where the
+    // next one does, so it is never the answer. Every input is the same for
+    // the whole workgroup, so the loop is uniform. A workgroup past the
+    // segment's chunks — the last row's padding — lands on the region's last
+    // bucket with a chunk past its pairs, and the bound below refuses every
+    // lane of it.
+    uint workgroup = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;
+    uint target = visible_instances[draw.chunk_starts_at] + workgroup;
+    uint offset = 0;
+    uint limit = draw.chunk_starts_end - draw.chunk_starts_at;
+    while (limit - offset > 1u)
+    {
+        uint middle = (offset + limit) / 2u;
+        if (visible_instances[draw.chunk_starts_at + middle] <= target)
+        {
+            offset = middle;
+        }
+        else
+        {
+            limit = middle;
+        }
+    }
+    ClusterSource source = cluster_source_at(offset);
+    uint chunk = target - visible_instances[draw.chunk_starts_at + offset];
     uint pair = chunk * TASK_LANES + lane;
     // A zero cluster count names no mesh a bucket can draw, and dividing by it
     // is undefined; one keeps the arithmetic defined and `group_is_live` still
@@ -1982,12 +2050,10 @@ void taskMain(uint lane: SV_GroupThreadID, uint3 chunk_group: SV_GroupID DRAW_IN
     {
         task_payload.pairs[rank] = pair;
     }
-#if defined(CRCBL_TARGET_SPIRV)
     if (lane == 0u)
     {
-        task_payload.draw_index = DRAW_INDEX;
+        task_payload.bucket_offset = offset;
     }
-#endif
     // Every entry written before any lane hands the payload on.
     GroupMemoryBarrierWithGroupSync();
     DispatchMesh(kept, 1, 1, task_payload);
@@ -2009,7 +2075,7 @@ void amplifiedMeshMain(
     out vertices VertexOutput verts[MAX_CLUSTER_VERTICES],
     out indices uint3 tris[MAX_CLUSTER_TRIANGLES])
 {
-    ClusterSource source = cluster_source(PAYLOAD_DRAW_INDEX(amplification));
+    ClusterSource source = cluster_source_at(amplification.bucket_offset);
     uint pair = amplification.pairs[group.x];
     // `taskMain`'s decode, on its terms: the task stage kept this pair, so the
     // count is at least one, and the `max` only mirrors the stage that wrote it.

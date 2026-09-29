@@ -15,6 +15,7 @@ struct DrawGenParams_std140_0
     @align(8) face_runs_at_0 : u32,
     @align(4) bucket_lookup_at_0 : u32,
     @align(16) task_lanes_0 : u32,
+    @align(4) flat_segments_at_0 : u32,
 };
 
 @binding(0) @group(0) var<uniform> gen_0 : DrawGenParams_std140_0;
@@ -418,63 +419,44 @@ fn starts_slot_runs_0( slot_3 : u32) -> u32
     return _S30;
 }
 
-var<workgroup> starts_chunk_runs_0 : array<u32, i32(256)>;
+fn starts_slot_chunk_instances_0( slot_4 : u32) -> u32
+{
+    if((gen_0.mode_0) == u32(1))
+    {
+        var _S31 : u32 = starts_slot_bucket_0(slot_4);
+        var _S32 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(1), _S31, u32(1))]));
+        return _S32;
+    }
+    var _S33 : u32 = starts_slot_runs_0(slot_4);
+    return _S33;
+}
+
+fn task_chunks_0( bucket_7 : u32,  instances_1 : u32) -> u32
+{
+    var lanes_0 : u32 = gen_0.task_lanes_0;
+    if((gen_0.task_lanes_0) == u32(0))
+    {
+        return u32(0);
+    }
+    var clusters_0 : u32 = bucket_clusters_0(bucket_7);
+    var _S34 : u32 = clusters_0 / lanes_0;
+    var _S35 : u32 = _S34 * instances_1;
+    var _S36 : u32 = clusters_0 % lanes_0;
+    var _S37 : u32 = (_S36 * instances_1 + lanes_0 - u32(1)) / lanes_0;
+    return _S35 + _S37;
+}
 
 fn runs_at_0() -> u32
 {
     return u32(2) * gen_0.visible_capacity_0;
 }
 
-fn count_word_0( region_4 : u32,  bucket_7 : u32) -> u32
-{
-    return region_4 * u32(4) * gen_0.bucket_count_0 + bucket_7;
-}
+var<workgroup> starts_chunk_runs_0 : array<u32, i32(256)>;
 
-fn write_task_extents_0( region_5 : u32,  bucket_8 : u32,  instances_1 : u32)
+fn workgroup_exclusive_scan_0( lane_0 : u32,  value_0 : u32) -> u32
 {
-    var lanes_0 : u32 = gen_0.task_lanes_0;
-    if((gen_0.task_lanes_0) == u32(0))
-    {
-        return;
-    }
-    var clusters_0 : u32 = bucket_clusters_0(bucket_8);
-    var _S31 : u32 = clusters_0 / lanes_0;
-    var _S32 : u32 = _S31 * instances_1;
-    var _S33 : u32 = clusters_0 % lanes_0;
-    var _S34 : u32 = (_S33 * instances_1 + lanes_0 - u32(1)) / lanes_0;
-    var chunks_0 : u32 = _S32 + _S34;
-    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(region_5, bucket_8, u32(0))]), min(chunks_0, u32(65535)));
-    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(region_5, bucket_8, u32(1))]), (chunks_0 + u32(65535) - u32(1)) / u32(65535));
-    return;
-}
-
-@compute
-@workgroup_size(256, 1, 1)
-fn startsMain(@builtin(local_invocation_id) thread_1 : vec3<u32>)
-{
-    var behind_0 : u32;
-    var lane_0 : u32 = thread_1.x;
-    var slots_0 : u32 = starts_slot_count_0();
-    var chunk_0 : u32 = (slots_0 + u32(256) - u32(1)) / u32(256);
-    var _S35 : u32 = min(lane_0 * chunk_0, slots_0);
-    var _S36 : u32 = min(_S35 + chunk_0, slots_0);
-    var slot_4 : u32 = _S35;
-    var total_0 : u32 = u32(0);
-    for(;;)
-    {
-        if(slot_4 < _S36)
-        {
-        }
-        else
-        {
-            break;
-        }
-        var _S37 : u32 = starts_slot_runs_0(slot_4);
-        var total_1 : u32 = total_0 + _S37;
-        slot_4 = slot_4 + u32(1);
-        total_0 = total_1;
-    }
-    starts_chunk_runs_0[lane_0] = total_0;
+    workgroupBarrier();
+    starts_chunk_runs_0[lane_0] = value_0;
     workgroupBarrier();
     var reach_0 : u32 = u32(1);
     for(;;)
@@ -486,6 +468,7 @@ fn startsMain(@builtin(local_invocation_id) thread_1 : vec3<u32>)
         {
             break;
         }
+        var behind_0 : u32;
         if(lane_0 >= reach_0)
         {
             behind_0 = starts_chunk_runs_0[lane_0 - reach_0];
@@ -499,50 +482,208 @@ fn startsMain(@builtin(local_invocation_id) thread_1 : vec3<u32>)
         workgroupBarrier();
         reach_0 = (reach_0 << (u32(1)));
     }
-    if((gen_0.mode_0) == u32(2))
+    return starts_chunk_runs_0[lane_0] - value_0;
+}
+
+fn chunk_start_word_0( region_4 : u32,  bucket_8 : u32) -> u32
+{
+    return bucket_mesh_word_0(gen_0.bucket_count_0) + region_4 * (gen_0.bucket_count_0 + u32(1)) + bucket_8;
+}
+
+fn write_chunk_start_0( region_5 : u32,  bucket_9 : u32,  start_0 : u32,  chunks_0 : u32)
+{
+    if((gen_0.task_lanes_0) == u32(0))
     {
-        slot_4 = gen_0.face_runs_at_0;
+        return;
+    }
+    visible_instances_0[chunk_start_word_0(region_5, bucket_9)] = start_0;
+    if((bucket_9 + u32(1)) == (gen_0.bucket_count_0))
+    {
+        visible_instances_0[chunk_start_word_0(region_5, gen_0.bucket_count_0)] = start_0 + chunks_0;
+    }
+    return;
+}
+
+fn count_word_0( region_6 : u32,  bucket_10 : u32) -> u32
+{
+    return region_6 * u32(4) * gen_0.bucket_count_0 + bucket_10;
+}
+
+fn store_task_dispatch_0( at_3 : u32,  chunks_1 : u32)
+{
+    atomicStore(&(counts_and_mesh_args_0[at_3]), min(chunks_1, u32(65535)));
+    atomicStore(&(counts_and_mesh_args_0[at_3 + u32(1)]), (chunks_1 + u32(65535) - u32(1)) / u32(65535));
+    atomicStore(&(counts_and_mesh_args_0[at_3 + u32(2)]), u32(1));
+    return;
+}
+
+fn write_task_extents_0( region_7 : u32,  bucket_11 : u32,  instances_2 : u32)
+{
+    if((gen_0.task_lanes_0) == u32(0))
+    {
+        return;
+    }
+    var _S38 : u32 = mesh_arg_word_0(region_7, bucket_11, u32(0));
+    var _S39 : u32 = task_chunks_0(bucket_11, instances_2);
+    store_task_dispatch_0(_S38, _S39);
+    return;
+}
+
+fn flat_arg_word_0( region_8 : u32,  segment_0 : u32,  slot_5 : u32) -> u32
+{
+    return gen_0.draw_regions_0 * u32(4) * gen_0.bucket_count_0 + (region_8 * u32(6) + segment_0) * u32(3) + slot_5;
+}
+
+fn write_flat_args_0( lane_1 : u32,  first_region_0 : u32,  count_0 : u32,  stride_0 : u32)
+{
+    storageBarrier(); textureBarrier(); workgroupBarrier();;
+    var _S40 : bool;
+    if((gen_0.task_lanes_0) == u32(0))
+    {
+        _S40 = true;
     }
     else
     {
-        slot_4 = runs_at_0();
+        _S40 = lane_1 >= (count_0 * u32(6));
     }
-    var _S38 : u32 = slot_4 + starts_chunk_runs_0[lane_0] - total_0;
-    slot_4 = _S35;
-    behind_0 = _S38;
+    if(_S40)
+    {
+        return;
+    }
+    var region_9 : u32 = first_region_0 + lane_1 / u32(6) * stride_0;
+    var segment_1 : u32 = lane_1 % u32(6);
+    var _S41 : u32 = segment_1 * u32(2);
+    var first_0 : u32 = tables_0[gen_0.flat_segments_at_0 + _S41];
+    var end_0 : u32 = tables_0[gen_0.flat_segments_at_0 + _S41 + u32(1)];
+    var chunks_2 : u32;
+    if(first_0 < end_0)
+    {
+        chunks_2 = visible_instances_0[chunk_start_word_0(region_9, end_0)] - visible_instances_0[chunk_start_word_0(region_9, first_0)];
+    }
+    else
+    {
+        chunks_2 = u32(0);
+    }
+    store_task_dispatch_0(flat_arg_word_0(region_9, segment_1, u32(0)), chunks_2);
+    return;
+}
+
+@compute
+@workgroup_size(256, 1, 1)
+fn startsMain(@builtin(local_invocation_id) thread_1 : vec3<u32>)
+{
+    var lane_2 : u32 = thread_1.x;
+    var slots_0 : u32 = starts_slot_count_0();
+    var chunk_0 : u32 = (slots_0 + u32(256) - u32(1)) / u32(256);
+    var _S42 : u32 = min(lane_2 * chunk_0, slots_0);
+    var _S43 : u32 = min(_S42 + chunk_0, slots_0);
+    var slot_6 : u32 = _S42;
+    var total_0 : u32 = u32(0);
+    var tasks_0 : u32 = u32(0);
     for(;;)
     {
-        if(slot_4 < _S36)
+        if(slot_6 < _S43)
         {
         }
         else
         {
             break;
         }
-        var region_6 : u32 = starts_slot_region_0(slot_4);
-        var bucket_9 : u32 = starts_slot_bucket_0(slot_4);
-        var runs_0 : u32 = starts_slot_runs_0(slot_4);
-        visible_instances_0[run_start_word_0(region_6, bucket_9)] = behind_0;
-        if(runs_0 != u32(0))
+        var _S44 : u32 = starts_slot_runs_0(slot_6);
+        var total_1 : u32 = total_0 + _S44;
+        var _S45 : u32 = starts_slot_bucket_0(slot_6);
+        var _S46 : u32 = starts_slot_chunk_instances_0(slot_6);
+        var _S47 : u32 = task_chunks_0(_S45, _S46);
+        var tasks_1 : u32 = tasks_0 + _S47;
+        slot_6 = slot_6 + u32(1);
+        total_0 = total_1;
+        tasks_0 = tasks_1;
+    }
+    if((gen_0.mode_0) == u32(2))
+    {
+        slot_6 = gen_0.face_runs_at_0;
+    }
+    else
+    {
+        slot_6 = runs_at_0();
+    }
+    var _S48 : u32 = workgroup_exclusive_scan_0(lane_2, total_0);
+    var _S49 : u32 = slot_6 + _S48;
+    var _S50 : u32 = workgroup_exclusive_scan_0(lane_2, tasks_0);
+    slot_6 = _S42;
+    var task_start_0 : u32 = _S50;
+    var start_1 : u32 = _S49;
+    for(;;)
+    {
+        if(slot_6 < _S43)
         {
-            atomicStore(&(counts_and_mesh_args_0[count_word_0(region_6, bucket_9)]), u32(1));
         }
-        write_task_extents_0(region_6, bucket_9, runs_0);
+        else
+        {
+            break;
+        }
+        var region_10 : u32 = starts_slot_region_0(slot_6);
+        var bucket_12 : u32 = starts_slot_bucket_0(slot_6);
+        var runs_0 : u32 = starts_slot_runs_0(slot_6);
+        var _S51 : u32 = starts_slot_chunk_instances_0(slot_6);
+        var chunks_3 : u32 = task_chunks_0(bucket_12, _S51);
         if((gen_0.mode_0) == u32(1))
         {
-            var early_0 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(1), bucket_9, u32(1))]));
-            visible_instances_0[run_start_word_0(u32(1), bucket_9)] = behind_0;
-            visible_instances_0[run_start_word_0(u32(2), bucket_9)] = behind_0 + early_0;
+            total_0 = u32(1);
+        }
+        else
+        {
+            total_0 = region_10;
+        }
+        write_chunk_start_0(total_0, bucket_12, task_start_0, chunks_3);
+        var task_start_1 : u32 = task_start_0 + chunks_3;
+        visible_instances_0[run_start_word_0(region_10, bucket_12)] = start_1;
+        if(runs_0 != u32(0))
+        {
+            atomicStore(&(counts_and_mesh_args_0[count_word_0(region_10, bucket_12)]), u32(1));
+        }
+        write_task_extents_0(region_10, bucket_12, runs_0);
+        if((gen_0.mode_0) == u32(1))
+        {
+            var early_0 : u32 = atomicLoad(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(1), bucket_12, u32(1))]));
+            visible_instances_0[run_start_word_0(u32(1), bucket_12)] = start_1;
+            visible_instances_0[run_start_word_0(u32(2), bucket_12)] = start_1 + early_0;
             if(early_0 != u32(0))
             {
-                atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(1), bucket_9)]), u32(1));
+                atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(1), bucket_12)]), u32(1));
             }
-            write_task_extents_0(u32(1), bucket_9, early_0);
+            write_task_extents_0(u32(1), bucket_12, early_0);
         }
-        var start_0 : u32 = behind_0 + runs_0;
-        slot_4 = slot_4 + u32(1);
-        behind_0 = start_0;
+        var start_2 : u32 = start_1 + runs_0;
+        slot_6 = slot_6 + u32(1);
+        task_start_0 = task_start_1;
+        start_1 = start_2;
     }
+    var faces_0 : bool = (gen_0.mode_0) == u32(2);
+    if(faces_0)
+    {
+        slot_6 = u32(1);
+    }
+    else
+    {
+        if((gen_0.mode_0) == u32(1))
+        {
+            slot_6 = u32(1);
+        }
+        else
+        {
+            slot_6 = u32(0);
+        }
+    }
+    if(faces_0)
+    {
+        total_0 = u32(6);
+    }
+    else
+    {
+        total_0 = u32(1);
+    }
+    write_flat_args_0(lane_2, slot_6, total_0, u32(1));
     return;
 }
 
@@ -555,7 +696,7 @@ fn scatterMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
     {
         return;
     }
-    var bucket_10 : u32 = visible_instances_0[route_word_0(index_1)];
+    var bucket_13 : u32 = visible_instances_0[route_word_0(index_1)];
     if(visible_instances_0[route_word_0(index_1)] == u32(4294967295))
     {
         return;
@@ -580,23 +721,23 @@ fn scatterMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
                 face_1 = face_1 + u32(1);
                 continue;
             }
-            var region_7 : u32 = u32(1) + face_1;
-            var face_slot_0 : u32 = atomicAdd(&(args_0[arg_word_0(region_7, bucket_10, u32(1))]), u32(1));
-            visible_instances_0[visible_instances_0[run_start_word_0(region_7, bucket_10)] + face_slot_0] = instance_index_1;
+            var region_11 : u32 = u32(1) + face_1;
+            var face_slot_0 : u32 = atomicAdd(&(args_0[arg_word_0(region_11, bucket_13, u32(1))]), u32(1));
+            visible_instances_0[visible_instances_0[run_start_word_0(region_11, bucket_13)] + face_slot_0] = instance_index_1;
             face_1 = face_1 + u32(1);
         }
         return;
     }
-    var _S39 : bool;
+    var _S52 : bool;
     if((gen_0.mode_0) == u32(1))
     {
-        _S39 = ((entry_1 & (u32(2147483648)))) != u32(0);
+        _S52 = ((entry_1 & (u32(2147483648)))) != u32(0);
     }
     else
     {
-        _S39 = false;
+        _S52 = false;
     }
-    if(_S39)
+    if(_S52)
     {
         return;
     }
@@ -608,8 +749,8 @@ fn scatterMain(@builtin(global_invocation_id) thread_2 : vec3<u32>)
     {
         face_1 = u32(0);
     }
-    var slot_5 : u32 = atomicAdd(&(args_0[arg_word_0(face_1, bucket_10, u32(1))]), u32(1));
-    visible_instances_0[visible_instances_0[run_start_word_0(face_1, bucket_10)] + slot_5] = instance_index_1;
+    var slot_7 : u32 = atomicAdd(&(args_0[arg_word_0(face_1, bucket_13, u32(1))]), u32(1));
+    visible_instances_0[visible_instances_0[run_start_word_0(face_1, bucket_13)] + slot_7] = instance_index_1;
     return;
 }
 
@@ -627,47 +768,93 @@ fn lateScatterMain(@builtin(global_invocation_id) thread_3 : vec3<u32>)
     {
         return;
     }
-    var bucket_11 : u32 = visible_instances_0[route_word_0(index_2)];
+    var bucket_14 : u32 = visible_instances_0[route_word_0(index_2)];
     if(visible_instances_0[route_word_0(index_2)] == u32(4294967295))
     {
         return;
     }
-    var slot_6 : u32 = atomicAdd(&(args_0[arg_word_0(u32(2), bucket_11, u32(1))]), u32(1));
-    visible_instances_0[visible_instances_0[run_start_word_0(u32(2), bucket_11)] + slot_6] = (entry_2 & (u32(16777215)));
+    var slot_8 : u32 = atomicAdd(&(args_0[arg_word_0(u32(2), bucket_14, u32(1))]), u32(1));
+    visible_instances_0[visible_instances_0[run_start_word_0(u32(2), bucket_14)] + slot_8] = (entry_2 & (u32(16777215)));
     return;
 }
 
 @compute
-@workgroup_size(64, 1, 1)
-fn lateFinishMain(@builtin(global_invocation_id) thread_4 : vec3<u32>)
+@workgroup_size(256, 1, 1)
+fn lateFinishMain(@builtin(local_invocation_id) thread_4 : vec3<u32>)
 {
-    var bucket_12 : u32 = thread_4.x;
-    if(bucket_12 >= (gen_0.bucket_count_0))
+    var lane_3 : u32 = thread_4.x;
+    var chunk_1 : u32 = (gen_0.bucket_count_0 + u32(256) - u32(1)) / u32(256);
+    var _S53 : u32 = min(lane_3 * chunk_1, gen_0.bucket_count_0);
+    var _S54 : u32 = min(_S53 + chunk_1, gen_0.bucket_count_0);
+    var bucket_15 : u32 = _S53;
+    var drawn_tasks_0 : u32 = u32(0);
+    var late_tasks_0 : u32 = u32(0);
+    for(;;)
     {
-        return;
+        if(bucket_15 < _S54)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var early_1 : u32 = atomicLoad(&(args_0[arg_word_0(u32(1), bucket_15, u32(1))]));
+        var late_0 : u32 = atomicLoad(&(args_0[arg_word_0(u32(2), bucket_15, u32(1))]));
+        atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(2), bucket_15, u32(1))]), late_0);
+        if(late_0 != u32(0))
+        {
+            atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(2), bucket_15)]), u32(1));
+        }
+        var drawn_0 : u32 = early_1 + late_0;
+        atomicStore(&(args_0[arg_word_0(u32(0), bucket_15, u32(1))]), drawn_0);
+        atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), bucket_15, u32(1))]), drawn_0);
+        var _S55 : i32;
+        if(drawn_0 != u32(0))
+        {
+            _S55 = i32(1);
+        }
+        else
+        {
+            _S55 = i32(0);
+        }
+        atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_15)]), u32(_S55));
+        write_task_extents_0(u32(2), bucket_15, late_0);
+        write_task_extents_0(u32(0), bucket_15, drawn_0);
+        var _S56 : u32 = task_chunks_0(bucket_15, drawn_0);
+        var drawn_tasks_1 : u32 = drawn_tasks_0 + _S56;
+        var _S57 : u32 = task_chunks_0(bucket_15, late_0);
+        var late_tasks_1 : u32 = late_tasks_0 + _S57;
+        bucket_15 = bucket_15 + u32(1);
+        drawn_tasks_0 = drawn_tasks_1;
+        late_tasks_0 = late_tasks_1;
     }
-    var early_1 : u32 = atomicLoad(&(args_0[arg_word_0(u32(1), bucket_12, u32(1))]));
-    var late_0 : u32 = atomicLoad(&(args_0[arg_word_0(u32(2), bucket_12, u32(1))]));
-    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(2), bucket_12, u32(1))]), late_0);
-    if(late_0 != u32(0))
+    var _S58 : u32 = workgroup_exclusive_scan_0(lane_3, drawn_tasks_0);
+    var _S59 : u32 = workgroup_exclusive_scan_0(lane_3, late_tasks_0);
+    bucket_15 = _S53;
+    var drawn_start_0 : u32 = _S58;
+    var late_start_0 : u32 = _S59;
+    for(;;)
     {
-        atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(2), bucket_12)]), u32(1));
+        if(bucket_15 < _S54)
+        {
+        }
+        else
+        {
+            break;
+        }
+        var early_2 : u32 = atomicLoad(&(args_0[arg_word_0(u32(1), bucket_15, u32(1))]));
+        var late_1 : u32 = atomicLoad(&(args_0[arg_word_0(u32(2), bucket_15, u32(1))]));
+        var drawn_chunks_0 : u32 = task_chunks_0(bucket_15, early_2 + late_1);
+        var late_chunks_0 : u32 = task_chunks_0(bucket_15, late_1);
+        write_chunk_start_0(u32(0), bucket_15, drawn_start_0, drawn_chunks_0);
+        write_chunk_start_0(u32(2), bucket_15, late_start_0, late_chunks_0);
+        var drawn_start_1 : u32 = drawn_start_0 + drawn_chunks_0;
+        var late_start_1 : u32 = late_start_0 + late_chunks_0;
+        bucket_15 = bucket_15 + u32(1);
+        drawn_start_0 = drawn_start_1;
+        late_start_0 = late_start_1;
     }
-    var drawn_0 : u32 = early_1 + late_0;
-    atomicStore(&(args_0[arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
-    atomicStore(&(counts_and_mesh_args_0[mesh_arg_word_0(u32(0), bucket_12, u32(1))]), drawn_0);
-    var _S40 : i32;
-    if(drawn_0 != u32(0))
-    {
-        _S40 = i32(1);
-    }
-    else
-    {
-        _S40 = i32(0);
-    }
-    atomicStore(&(counts_and_mesh_args_0[count_word_0(u32(0), bucket_12)]), u32(_S40));
-    write_task_extents_0(u32(2), bucket_12, late_0);
-    write_task_extents_0(u32(0), bucket_12, drawn_0);
+    write_flat_args_0(lane_3, u32(0), u32(2), u32(2));
     return;
 }
 

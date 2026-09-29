@@ -4505,13 +4505,15 @@ decision. Nothing was re-blessed.
 - The aerial LUT is uploaded whole every atmosphere frame, like the sky-view
   LUT.
 
-## Flat task dispatch per pass, drafted and not built (2026-09-29)
+## Flat task dispatch per pass, as built (2026-09-29)
 
 The backlog's P21 item "The mesh tail's task stage still costs per draw, on both
 sides" floated "a flat dispatch per pass, one task workgroup per (bucket,
 cluster, surviving instance) from a list `draw_gen.slang` writes". This is that
 idea designed against the tree at `ed182d9c`, the alternatives, how to price it,
-and the decision. Nothing here is built.
+and the decision. All three steps are built: the draft below is kept as it was
+written, and "Step 2 built" and "Step 3 built" at the end record what the build
+changed and what it measured.
 
 **What the measurements already split.** All numbers are the backlog's
 (`mesh_e2e`'s `the_price_of_one_call_per_bucket`, RX 7900 XTX, 17,219 instances,
@@ -4862,6 +4864,124 @@ The extents of the camera's three occlusion regions are checked against
 a floored chunk count each turn at least one test red. **Removing the compaction
 barrier did not**: on this card a 32-lane task workgroup is one wave. Nothing
 here runs the task stage on a device whose subgroups are narrower than 32.
+
+### Step 3 built: one flat call per partition (2026-09-29)
+
+**Kept.** Behind a task stage every pipeline partition of every pass and view is
+one `draw_mesh_tasks_indirect` of one structure, on any device with the stage,
+whether or not it grants `Features::DRAW_INDEX`. `TASK_STAGE_SHORTEST_RANGE` and
+the task path's ranges are deleted, and so is the draw index in the task
+payload; `meshMain`, on a device without the stage, keeps its call per bucket or
+per range exactly as before.
+
+- **The work list** is the draft's: per (region, bucket) the running sum of
+  `task_chunks` over the region, written by `startsMain` in the same pass and
+  workgroup as the run starts, as a second `workgroup_exclusive_scan` of the
+  same slots. It is a region of `visible_instances` behind the buckets' meshes,
+  `chunk_start_word(region, bucket)`, `B + 1` words a region: the last is the
+  region's end, so a segment's chunk count is the difference of its two ends'
+  words and no segment needs a scan of its own. The values are one running sum
+  per scan (a point light's six faces are one scan end to end), so only a
+  difference within a region is a count.
+- **The flat dispatches** are `FLAT_SEGMENTS` = 6 `MeshTasksArgs` a region,
+  behind every region the generator allocates in `counts_and_mesh_args`
+  (`flat_args_word`), written by `write_flat_args` after an
+  `AllMemoryBarrierWithGroupSync` makes the other lanes' starts visible. A
+  segment is a partition's run of buckets, `(first, end)`, which the host lays
+  down in the table buffer at `flat_segments_at`: segments 0 to 3 are the depth
+  split's four modes, 4 and 5 the colour split's two sides
+  (`crcbl_shaders::draw_gen::flat_segment`). An empty one gets no workgroups.
+  The 2D split past 65,535 chunks is `store_task_dispatch`, the same rows as a
+  bucket's extents.
+- **The search** is `taskMain`'s, once per workgroup and uniform: the last
+  bucket whose chunk start is at or before `starts[first] + w`, so an empty
+  bucket, which starts where the next does, is never the answer. The payload's
+  `draw_index` became `bucket_offset`, on every target, and both task-path
+  stages read the bucket's four words through `cluster_source_at`, the
+  arithmetic a ranged call's draw index already used.
+- **The host** records the flat call under the segment's first bucket's block
+  (`BucketDraws::flat`), at `GeneratedDraws::flat_args_offset`, and
+  `ForwardRenderer::partitions` panics if a partition is not the one run
+  `flat_segments` laid down, which the mode-major table makes impossible.
+
+Where the build differs from the draft:
+
+- **No new pass.** The draft added a single-workgroup pass after
+  `draw-late-finish` to scan region 0 and the late region. `lateFinishMain`
+  itself became one workgroup of `STARTS_WORKGROUP_SIZE`, each lane owning a
+  contiguous chunk of buckets on `startsMain`'s terms, and does both scans after
+  its old per-bucket body. `DrawGen::LATE_PASSES` and `MAX_TIMED_PASSES` did not
+  move.
+- **The block carries the region's end word, not the segment's bucket count.** A
+  per-bucket block cannot know which segment it starts — bucket 0 starts both
+  the opaque depth segment and the single-sided colour one — so
+  `ClusterDrawConstants` gained `chunk_starts_at` and `chunk_starts_end`, and
+  the search runs from the segment's first bucket to the region's end. It cannot
+  leave the segment: every workgroup inside it has a target below the segment's
+  end word. `CLUSTER_DRAW_CONSTANTS_SIZE` went 32 → 48.
+- **`DrawGenParams` grew by one word of its tail padding**, `flat_segments_at`;
+  `PARAMS_SIZE` stayed 96.
+
+Priced on `bucket_price.rs`'s protocol: release, validation off, 240 frames,
+1920x1080, RX 7900 XTX, three alternating rounds of the parent commit and this
+tree, many-row bucket count swept as step 2's table was. GPU p50 medians over
+the rounds, `depth-prepass` + `forward` + `shadow`, and `draw-starts` beside
+them. Both columns are the ranged mesh tail; the flat column records the same
+calls without a draw index:
+
+| buckets        | before ms | after ms | `draw-starts` before → after |
+| -------------- | --------- | -------- | ---------------------------- |
+| 4              | 0.367     | 0.346    | 0.007 → 0.013                |
+| 8              | 0.404     | 0.345    | 0.006 → 0.012                |
+| 16             | 0.481     | 0.337    | 0.006 → 0.013                |
+| 32             | 0.401     | 0.328    | 0.006 → 0.012                |
+| 64             | 0.445     | 0.334    | 0.007 → 0.013                |
+| 128            | 0.529     | 0.337    | 0.008 → 0.015                |
+| 938            | 1.441     | 0.366    | 0.027 → 0.052                |
+| 938, two modes | 2.724     | 0.400    | 0.054 → 0.103                |
+
+**The rule is met with room to spare.** The 938-bucket row fell by 1.075 ms,
+over five times the 0.2 ms the Decision set, and by 1.05 ms with `draw-starts`
+counted against it. It now sits 0.02 ms above the 4-bucket row, where the draft
+expected it: the per-draw term is gone. At 938 buckets `depth-prepass` went
+0.264 → 0.031 ms and `shadow` 0.869 → 0.042 ms; `forward` barely moved (0.310 →
+0.294), since at 1920x1080 it is mostly shading. The scans cost what the draft
+guessed and a little more: `draw-starts` doubled, and `draw-late-finish` went
+0.001 → 0.003 ms on `occlusion_price`'s occluders scene and meadow over two
+rounds, the late prepass falling 0.005–0.006 → 0.001–0.004 ms beside it. The
+calls a frame did not move at 938 buckets (23 one mode, 33 two), as the draft
+said; the rows of 4, 8 and 16 buckets record 23 where they recorded 53, 93
+and 173.
+
+Tests (`mesh_e2e`'s `flat_tasks.rs`, beside `task_chunks.rs`, which now draws
+through the flat call): a field in two material modes — two depth pipelines, so
+two flat calls in every depth pass — with the sun's cascades and a shadowed
+point light's faces, drawn against `meshMain` byte for byte over a camera slide,
+occlusion off and on; and the chunk starts and flat dispatches of the camera's
+three regions, a cascade and the light's six faces, read back every frame and
+held to `meshlet::chunk_starts` and `task_dispatch`, on tables of 9 and 450
+buckets. An off-by-one in the search turned the frame comparisons red (16,161
+bytes), and a flat dispatch sized one bucket short turned both red. Host tests
+cover the search's transcription over empty buckets (`chunk_bucket`), the
+segments (`flat_segments`), and which call shape each tail records. Once, beside
+them: frames of single-sided and three-mode fields with a dunes DAG, occlusion
+off and on and 450 buckets, dumped from a build of the parent commit and of this
+tree, were identical byte for byte, cull statistics included.
+
+**Left open:**
+
+- **Not run past 65,535 chunks in one segment on a GPU.** The row split is
+  `store_task_dispatch` and held to `task_dispatch` on the host, and a padding
+  workgroup's refusal is held by `chunk_bucket`'s test; no test scene has 2.1
+  million pairs in one partition.
+- **`draw-starts` is now the mesh tail's largest scan**, 0.052 ms at 938 buckets
+  and 0.103 ms at 1,876. Its second scan recomputes each slot's chunks and the
+  flat dispatches wait on a device-memory barrier. Not profiled apart.
+- **The step 2 open items stand**: the compaction barrier is unverified on a
+  subgroup narrower than 32, `TASK_LANES` = 64 was not tried, and the lane
+  decode's divide was not priced apart. A search per workgroup joins them: about
+  `log2(B)` loads, not priced apart either.
+- **Not measured** on any device but the RX 7900 XTX.
 
 ## CMAA2 blended the wrong side of every edge for a day (2026-09-07)
 

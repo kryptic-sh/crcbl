@@ -29,9 +29,9 @@
 //! property of the machine. What is asserted is that the many-bucket row
 //! recorded more calls than the few-bucket one without a draw index — the
 //! difference the price is of — and exactly as many with one. Except on the
-//! mesh tail behind a task stage, whose [`FEW`]-bucket run is shorter than the
-//! shortest range it draws in one call: there the few row records what it did
-//! without a draw index, and the many row fewer calls than without one.
+//! mesh tail behind a task stage, which records one flat call per partition
+//! whatever the draw index: there the two rows record as many calls as each
+//! other, with a draw index and without.
 //!
 //! ```text
 //! CRCBL_GPU=vk CRCBL_VK_VALIDATION=0 CRCBL_PRICE_FRAMES=240 \
@@ -477,27 +477,34 @@ fn price_paths(modes: Modes) {
         }
         priced_paths += 1;
         let (many, few) = price(path, modes, false, extent, frames);
-        assert!(
-            many > few,
-            "{path:?}: {buckets} buckets recorded {many} calls a frame and {FEW} recorded {few}, so \
-             the rows do not differ in what this prices"
-        );
+        // Behind a task stage every partition is one flat call, which needs no
+        // draw index, so the bucket count never decides the calls.
+        let flat = path == GeometryPath::MeshShader && features.contains(Features::TASK_SHADER);
+        if flat {
+            assert_eq!(
+                many, few,
+                "{path:?} behind a task stage: {buckets} buckets recorded {many} calls a frame and \
+                 {FEW} recorded {few}, so the flat call grows with the buckets"
+            );
+        } else {
+            assert!(
+                many > few,
+                "{path:?}: {buckets} buckets recorded {many} calls a frame and {FEW} recorded \
+                 {few}, so the rows do not differ in what this prices"
+            );
+        }
         // A device that can draw a range of buckets per call does, on every
         // tail — and then the bucket count stops deciding how many calls a
         // frame records.
         let ranges = features.contains(Features::MULTI_DRAW_INDIRECT | Features::DRAW_INDEX);
         if ranges {
             let (ranged_many, ranged_few) = price(path, modes, true, extent, frames);
-            if path == GeometryPath::MeshShader && features.contains(Features::TASK_SHADER) {
+            if flat {
                 assert_eq!(
-                    ranged_few, few,
-                    "{path:?} behind a task stage: {FEW} buckets are a run too short to draw in \
-                     one call, so they record a call per bucket either way"
-                );
-                assert!(
-                    ranged_many < many,
-                    "{path:?} behind a task stage: {buckets} buckets recorded {ranged_many} calls \
-                     a frame with a draw index and {many} without"
+                    (ranged_many, ranged_few),
+                    (many, few),
+                    "{path:?} behind a task stage: the flat call reads no draw index, so granting \
+                     one changes no call"
                 );
             } else {
                 assert_eq!(

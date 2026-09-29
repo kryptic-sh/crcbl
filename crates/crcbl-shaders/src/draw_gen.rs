@@ -34,9 +34,8 @@
 /// instance `i` if there is one, so a caller dispatches
 /// `max(buckets, visible_capacity).div_ceil(WORKGROUP_SIZE)` groups of it;
 /// `scatterMain` only scatters, so `visible_capacity.div_ceil(WORKGROUP_SIZE)`.
-/// `lateFinishMain` owns one bucket per invocation, so it needs
-/// `buckets.div_ceil(WORKGROUP_SIZE)` groups.
-/// `startsMain` is one workgroup of [`STARTS_WORKGROUP_SIZE`].
+/// `startsMain` and `lateFinishMain` are one workgroup of
+/// [`STARTS_WORKGROUP_SIZE`] each.
 pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Invocations in `startsMain`'s one workgroup, matching that entry point's
@@ -55,7 +54,7 @@ const _: () = assert!(STARTS_WORKGROUP_SIZE.is_power_of_two());
 /// Bytes of the uniform block.
 ///
 /// Eight `uint`, two `float4` — which `std140` puts at the next multiple of 16,
-/// offset 32, directly behind the eighth — and five `uint` more, the last of
+/// offset 32, directly behind the eighth — and six `uint` more, the last of
 /// which `std140` pads out to the next multiple of 16. Checked against the
 /// `Offset` decorations `slangc` emits by this module's
 /// `the_draw_gen_params_block_matches_the_offsets_slangc_emits`.
@@ -241,7 +240,15 @@ pub struct Params {
     /// leaves `(clusters, instances, 1)`, which is what the un-amplified
     /// `meshMain` launches one workgroup per pair from — so a caller drawing
     /// without the task stage must pass zero.
+    ///
+    /// Non-zero also turns on the flat task dispatches: each region's
+    /// [chunk starts](chunk_start_word) and one [`MeshTasksArgs`] per
+    /// [flat segment](flat_segments) at [`flat_args_word`].
     pub task_lanes: u32,
+    /// Where the [flat segments](flat_segments) start, in words, in the table
+    /// buffer — [`TableOffsets::flat_segments_at`]. A word of the block's
+    /// `std140` tail padding, so the block is no wider for it.
+    pub flat_segments_at: u32,
 }
 
 impl Params {
@@ -284,6 +291,7 @@ impl Params {
             self.face_runs_at,
             self.bucket_lookup_at,
             self.task_lanes,
+            self.flat_segments_at,
         ]
         .into_iter()
         .enumerate()
@@ -338,9 +346,13 @@ pub struct TableOffsets {
     /// so each of those starts where it did before this one existed.
     pub bucket_cluster_bases_at: u32,
     /// [`Params::bucket_lookup_at`]: where [`bucket_lookup`]'s words start.
-    /// Packed last, behind the cluster bases, so no region in front of it
-    /// moved when it arrived.
+    /// Packed behind the cluster bases, so no region in front of it moved when
+    /// it arrived.
     pub bucket_lookup_at: u32,
+    /// [`Params::flat_segments_at`]: where [`flat_segments`]' pairs start.
+    /// Packed last, behind the lookup, so no region in front of it moved when
+    /// it arrived.
+    pub flat_segments_at: u32,
 }
 
 /// Packs every host-written table `draw_gen.slang` reads into one buffer.
@@ -417,6 +429,12 @@ pub fn pack_tables(
     bytes.extend_from_slice(&words(bucket_cluster_bases));
     let bucket_lookup_at = offset(&bytes)?;
     bytes.extend_from_slice(&words(&bucket_lookup(bucket_meshes, bucket_modes)?));
+    let flat_segments_at = offset(&bytes)?;
+    let segments: Vec<u32> = flat_segments(bucket_modes)
+        .into_iter()
+        .flat_map(|(first, end)| [first, end])
+        .collect();
+    bytes.extend_from_slice(&words(&segments));
     // The whole buffer is bound as a descriptor, and a zero-length one is not a
     // descriptor any backend takes. The padding above guarantees it, and this is
     // what says so where a reader meets it.
@@ -432,8 +450,70 @@ pub fn pack_tables(
             level_meshes_at,
             bucket_cluster_bases_at,
             bucket_lookup_at,
+            flat_segments_at,
         },
     })
+}
+
+/// How many pipeline partitions a pass can split the bucket table into — one
+/// per material mode for the depth passes' four pipelines, one per side for
+/// the colour pass's two — and so how many flat task dispatches each draw
+/// region has, matching `FLAT_SEGMENTS` in `draw_gen.slang`. [`flat_segment`]
+/// numbers them.
+pub const FLAT_SEGMENTS: u32 = 6;
+
+/// The flat segment a partition of the bucket table draws through: the buckets
+/// whose `mode & key` is `value`, where `key` is the material-mode bits the
+/// pass splits by. Every mode bit — the depth passes, a pipeline per mode — is
+/// segments 0 to 3, one per mode; the double-sided bit alone — the colour pass,
+/// a pipeline per side — is segments 4 and 5. `None` for any other split,
+/// which no pass records.
+#[must_use]
+pub const fn flat_segment(key: u32, value: u32) -> Option<u32> {
+    use crate::mesh::GpuMaterial;
+    if key == GpuMaterial::MODE_MASK && value <= GpuMaterial::MODE_MASK {
+        Some(value)
+    } else if key == GpuMaterial::DOUBLE_SIDED && value & !GpuMaterial::DOUBLE_SIDED == 0 {
+        Some(GpuMaterial::MODE_MASK + 1 + value / GpuMaterial::DOUBLE_SIDED)
+    } else {
+        None
+    }
+}
+
+/// Each [flat segment](flat_segment)'s run of buckets, `(first, end)`, as
+/// [`pack_tables`] lays them down for `draw_gen.slang`'s flat dispatches.
+///
+/// **A run, or nothing**: a segment whose buckets are not one contiguous run
+/// — a table not numbered mode-major — or that has none is `(0, 0)`, which the
+/// shader dispatches no workgroups for. One flat call can only stand for
+/// consecutive buckets, so a renderer drawing through these must build its
+/// table mode-major, and must check the partition it records is the run
+/// recorded here.
+#[must_use]
+pub fn flat_segments(bucket_modes: &[u32]) -> [(u32, u32); FLAT_SEGMENTS as usize] {
+    use crate::mesh::GpuMaterial;
+    let mut segments = [(0, 0); FLAT_SEGMENTS as usize];
+    for (key, values) in [
+        (GpuMaterial::MODE_MASK, 0..=GpuMaterial::MODE_MASK),
+        (GpuMaterial::DOUBLE_SIDED, 0..=GpuMaterial::DOUBLE_SIDED),
+    ] {
+        for value in values {
+            let Some(segment) = flat_segment(key, value) else {
+                continue;
+            };
+            let buckets: Vec<u32> = (0u32..)
+                .zip(bucket_modes)
+                .filter(|(_, mode)| **mode & key == value)
+                .map(|(bucket, _)| bucket)
+                .collect();
+            if let (Some(&first), Some(&last)) = (buckets.first(), buckets.last())
+                && usize::try_from(last - first + 1).ok() == Some(buckets.len())
+            {
+                segments[segment as usize] = (first, last + 1);
+            }
+        }
+    }
+    segments
 }
 
 /// How many material modes a bucket key can hold: every value
@@ -560,11 +640,53 @@ pub const fn bucket_mesh_word(visible_capacity: u32, bucket_count: u32, bucket: 
     run_start_word(visible_capacity, bucket_count, DRAW_REGIONS, bucket)
 }
 
+/// Which word of the same buffer holds where bucket `bucket`'s task chunks
+/// start in region `region` this frame — the word
+/// [`ClusterDrawConstants::chunk_starts_at`](crate::meshlet::ClusterDrawConstants::chunk_starts_at)
+/// names, behind every bucket's mesh.
+///
+/// `bucket_count + 1` words a region, so `bucket` may be `bucket_count`: that
+/// word holds where the region's chunks end, and a flat segment's chunk count
+/// is the difference of its two ends'. `draw_gen.slang`'s `startsMain` and
+/// `lateFinishMain` write them as one running sum per scan, where
+/// [`Params::task_lanes`] is non-zero — so only a difference within one region
+/// is a count. [`meshlet::chunk_starts`](crate::meshlet::chunk_starts) is the
+/// host twin of what a region holds.
+#[must_use]
+pub const fn chunk_start_word(
+    visible_capacity: u32,
+    bucket_count: u32,
+    region: u32,
+    bucket: u32,
+) -> u32 {
+    bucket_mesh_word(visible_capacity, bucket_count, bucket_count)
+        + region * (bucket_count + 1)
+        + bucket
+}
+
 /// Where a point-light generator's face runs start: behind every region's
-/// starts and the buckets' meshes.
+/// starts, the buckets' meshes and every region's chunk starts.
 #[must_use]
 pub const fn face_runs_at(visible_capacity: u32, bucket_count: u32) -> u32 {
-    3 * visible_capacity + (DRAW_REGIONS + 1) * bucket_count
+    chunk_start_word(visible_capacity, bucket_count, DRAW_REGIONS, 0)
+}
+
+/// Which word of the counts-and-extents buffer holds word `slot` of flat
+/// segment `segment`'s task dispatch in region `region`, in a generator that
+/// allocates `draw_regions` regions: behind all of them, [`FLAT_SEGMENTS`]
+/// [`MeshTasksArgs`] a region. The same arithmetic as `draw_gen.slang`'s
+/// `flat_arg_word`.
+#[must_use]
+pub const fn flat_args_word(
+    bucket_count: u32,
+    draw_regions: u32,
+    region: u32,
+    segment: u32,
+    slot: u32,
+) -> u32 {
+    draw_regions * 4 * bucket_count
+        + (region * FLAT_SEGMENTS + segment) * MESH_ARGS_WORDS as u32
+        + slot
 }
 
 /// Words the whole buffer holds: the regions [`runs_at`] lays out, and so **one
@@ -583,7 +705,8 @@ pub const fn face_runs_at(visible_capacity: u32, bucket_count: u32) -> u32 {
 pub fn runs_words(visible_capacity: u32, bucket_count: u32, faces: bool) -> Option<u32> {
     let starts = visible_capacity
         .checked_mul(3)?
-        .checked_add(bucket_count.checked_mul(DRAW_REGIONS + 1)?)?;
+        .checked_add(bucket_count.checked_mul(DRAW_REGIONS + 1)?)?
+        .checked_add(bucket_count.checked_add(1)?.checked_mul(DRAW_REGIONS)?)?;
     if faces {
         let face_runs = u32::try_from(crate::cull::FACE_COUNT)
             .ok()?
@@ -758,12 +881,7 @@ mod tests {
     #[test]
     fn the_workgroup_size_matches_the_numthreads_draw_gen_slang_declares() {
         let source = include_str!("../shaders/draw_gen.slang");
-        for entry in [
-            "binMain",
-            "scatterMain",
-            "lateScatterMain",
-            "lateFinishMain",
-        ] {
+        for entry in ["binMain", "scatterMain", "lateScatterMain"] {
             let declaration = format!(
                 "[numthreads({WORKGROUP_SIZE}, 1, 1)]\nvoid {entry}(uint3 thread: SV_DispatchThreadID)"
             );
@@ -773,14 +891,16 @@ mod tests {
                  the shader"
             );
         }
-        let starts = format!(
-            "[numthreads({STARTS_WORKGROUP_SIZE}, 1, 1)]\nvoid startsMain(uint3 thread: SV_GroupThreadID)"
-        );
-        assert!(
-            source.contains(&starts),
-            "draw_gen.slang does not declare `{starts}`; STARTS_WORKGROUP_SIZE has drifted from \
-             the shader"
-        );
+        for entry in ["startsMain", "lateFinishMain"] {
+            let declaration = format!(
+                "[numthreads({STARTS_WORKGROUP_SIZE}, 1, 1)]\nvoid {entry}(uint3 thread: SV_GroupThreadID)"
+            );
+            assert!(
+                source.contains(&declaration),
+                "draw_gen.slang does not declare `{declaration}`; STARTS_WORKGROUP_SIZE has \
+                 drifted from the shader"
+            );
+        }
         let scan = format!("static const uint STARTS_WORKGROUP_SIZE = {STARTS_WORKGROUP_SIZE};");
         assert!(
             source.contains(&scan),
@@ -793,7 +913,7 @@ mod tests {
     #[test]
     fn the_draw_gen_params_block_matches_the_offsets_slangc_emits() {
         // `OpMemberDecorate %DrawGenParams_std140 n Offset …`: 0, 4, 8, 12, 16,
-        // 20, 24, 28, 32, 48, 64, 68, 72, 76, 80.
+        // 20, 24, 28, 32, 48, 64, 68, 72, 76, 80, 84.
         assert_eq!(PARAMS_SIZE, 96);
         assert_eq!(
             PARAMS_SIZE % 16,
@@ -817,6 +937,7 @@ mod tests {
             face_runs_at: 29,
             bucket_lookup_at: 31,
             task_lanes: 37,
+            flat_segments_at: 41,
         }
         .to_bytes();
         let uint_at =
@@ -843,8 +964,9 @@ mod tests {
         assert_eq!(uint_at(72), 29, "face_runs_at at offset 72");
         assert_eq!(uint_at(76), 31, "bucket_lookup_at at offset 76");
         assert_eq!(uint_at(80), 37, "task_lanes at offset 80");
+        assert_eq!(uint_at(84), 41, "flat_segments_at at offset 84");
         assert!(
-            bytes[84..].iter().all(|byte| *byte == 0),
+            bytes[88..].iter().all(|byte| *byte == 0),
             "the std140 tail behind it is padding, and zero"
         );
         assert_eq!(bytes.len(), 96, "and the block ends there");
@@ -971,10 +1093,68 @@ mod tests {
             );
         }
         assert_eq!(
-            packed.bytes.len(),
-            (packed.offsets.bucket_lookup_at as usize + lookup.len()) * 4,
-            "the lookup last, and the buffer's last words"
+            packed.offsets.flat_segments_at as usize,
+            packed.offsets.bucket_lookup_at as usize + lookup.len(),
+            "the flat segments directly behind the lookup"
         );
+        // Modes 0, 1, 0: mode 1 is one run and mode 0 is not, and neither
+        // side is either — so every segment but the masked one is empty.
+        let segments: Vec<u32> = (0..FLAT_SEGMENTS * 2)
+            .map(|index| word_at(packed.offsets.flat_segments_at + index))
+            .collect();
+        assert_eq!(segments, [0, 0, 1, 2, 0, 0, 0, 0, 0, 3, 0, 0]);
+        assert_eq!(
+            packed.bytes.len(),
+            (packed.offsets.flat_segments_at + FLAT_SEGMENTS * 2) as usize * 4,
+            "the flat segments last, and the buffer's last words"
+        );
+    }
+
+    /// **Each flat segment is its partition's one run of buckets, or empty**:
+    /// the four modes for the depth split and the two sides for the colour
+    /// split, over a mode-major table and tables that are not.
+    #[test]
+    fn a_flat_segment_is_its_partition_s_run() {
+        use crate::mesh::GpuMaterial;
+        let masked = GpuMaterial::ALPHA_MODE_MASK;
+        let double = GpuMaterial::DOUBLE_SIDED;
+        let both = GpuMaterial::MODE_MASK;
+        for (value, segment) in [(0, 0), (masked, 1), (double, 2), (both, 3)] {
+            assert_eq!(flat_segment(GpuMaterial::MODE_MASK, value), Some(segment));
+        }
+        assert_eq!(flat_segment(double, 0), Some(4));
+        assert_eq!(flat_segment(double, double), Some(5));
+        assert_eq!(
+            flat_segment(double, masked),
+            None,
+            "a value outside the key"
+        );
+        assert_eq!(flat_segment(masked, 0), None, "a split no pass makes");
+        assert_eq!(flat_segment(GpuMaterial::MODE_MASK, both + 1), None);
+        assert_eq!(FLAT_SEGMENTS, 6);
+
+        // Mode-major, every mode held.
+        assert_eq!(
+            flat_segments(&[0, 0, masked, double, double, both]),
+            [(0, 2), (2, 3), (3, 5), (5, 6), (0, 3), (3, 6)]
+        );
+        // Two modes of one side: the side is both of them.
+        assert_eq!(
+            flat_segments(&[double, double, both]),
+            [(0, 0), (0, 0), (0, 2), (2, 3), (0, 0), (0, 3)]
+        );
+        // One mode: the whole table is its segment and its side's.
+        assert_eq!(
+            flat_segments(&[0; 4]),
+            [(0, 4), (0, 0), (0, 0), (0, 0), (0, 4), (0, 0)]
+        );
+        // Mesh-major: no mode is one run, so only what happens to be one is
+        // laid down, and a renderer drawing flat calls refuses the rest.
+        assert_eq!(
+            flat_segments(&[0, masked, 0, masked]),
+            [(0, 0), (0, 0), (0, 0), (0, 0), (0, 4), (0, 0)]
+        );
+        assert_eq!(flat_segments(&[]), [(0, 0); FLAT_SEGMENTS as usize]);
     }
 
     /// The walk `binMain` did before the lookup, transcribed: the first bucket
@@ -1181,6 +1361,10 @@ mod tests {
                 "uint bucket_mesh_word(uint bucket)",
                 "return run_start_word(DRAW_REGIONS, bucket);",
             ),
+            (
+                "uint chunk_start_word(uint region, uint bucket)",
+                "return bucket_mesh_word(gen.bucket_count) + region * (gen.bucket_count + 1) + bucket;",
+            ),
         ] {
             let spelled = format!("{accessor}\n{{\n    {body}\n}}");
             assert!(
@@ -1224,14 +1408,24 @@ mod tests {
             "a word a bucket, in bucket order"
         );
         assert_eq!(
+            chunk_start_word(capacity, 5, 0, 0),
+            bucket_mesh_word(capacity, 5, 4) + 1,
+            "the chunk starts directly behind the last bucket's mesh"
+        );
+        assert_eq!(
+            chunk_start_word(capacity, 5, 1, 0),
+            chunk_start_word(capacity, 5, 0, 5) + 1,
+            "a region's chunk starts are a bucket longer than its buckets, for its end"
+        );
+        assert_eq!(
             runs_words(capacity, 5, false),
-            Some(bucket_mesh_word(capacity, 5, 4) + 1),
-            "and the buffer ends behind the last bucket's mesh"
+            Some(chunk_start_word(capacity, 5, DRAW_REGIONS - 1, 5) + 1),
+            "and the buffer ends behind the last region's chunk end"
         );
         assert_eq!(
             face_runs_at(capacity, 5),
-            bucket_mesh_word(capacity, 5, 4) + 1,
-            "a point light's face runs start where the meshes end"
+            chunk_start_word(capacity, 5, DRAW_REGIONS - 1, 5) + 1,
+            "a point light's face runs start where the chunk starts end"
         );
         assert_eq!(
             runs_words(capacity, 5, true),
@@ -1438,6 +1632,10 @@ mod tests {
                 "uint arg_word(uint region, uint bucket, uint field)",
                 "return draw_slot(region, bucket) * DRAW_ARGS_WORDS + field;",
             ),
+            (
+                "uint flat_arg_word(uint region, uint segment, uint slot)",
+                "return gen.draw_regions * 4 * gen.bucket_count + (region * FLAT_SEGMENTS + segment) * MESH_ARGS_WORDS + slot;",
+            ),
         ] {
             let spelled = format!("{accessor}\n{{\n    {body}\n}}");
             assert!(
@@ -1456,5 +1654,25 @@ mod tests {
             "the camera's two phases are regions 1 and 2 beside region 0"
         );
         assert_eq!(DrawMode::Faces.regions(), DRAW_REGIONS);
+
+        // The flat dispatches behind every region a generator allocates, a
+        // region's segments end to end.
+        let flat = format!("static const uint FLAT_SEGMENTS = {FLAT_SEGMENTS};");
+        assert!(
+            source.contains(&flat),
+            "draw_gen.slang does not declare `{flat}`"
+        );
+        for regions in [DrawMode::Plain.regions(), DRAW_REGIONS] {
+            assert_eq!(
+                flat_args_word(5, regions, 0, 0, 0),
+                regions * 4 * 5,
+                "behind {regions} regions of counts and extents"
+            );
+            assert_eq!(
+                flat_args_word(5, regions, 1, 0, 0),
+                flat_args_word(5, regions, 0, FLAT_SEGMENTS - 1, 2) + 1,
+                "each region's segments directly behind the one before"
+            );
+        }
     }
 }

@@ -67,48 +67,16 @@ impl EmitTail {
     /// met by the layout rather than by the device: its extents are one
     /// [`MESH_ARGS_SIZE`](crcbl_shaders::draw_gen::MESH_ARGS_SIZE) structure a
     /// bucket, which is the smallest stride a multi-draw of them may step by.
+    ///
+    /// **Behind an amplification stage the mesh tail draws no ranges at all**:
+    /// each partition is one flat call — see [`BucketDraws::flat`] — which
+    /// needs neither feature. [`ForwardRenderer::partitions`] is what chooses.
     pub(super) fn range_limit(self, caps: &DeviceCaps) -> Option<u32> {
         let needs = Features::MULTI_DRAW_INDIRECT | Features::DRAW_INDEX;
         (caps.features.contains(needs) && caps.limits.max_draw_indirect_count > 1)
             .then_some(caps.limits.max_draw_indirect_count)
     }
-
-    /// The fewest consecutive buckets this tail draws with one multi-draw
-    /// call; a shorter run is recorded a call per bucket, exactly as a device
-    /// with no [`range_limit`](Self::range_limit) records it.
-    ///
-    /// [`TASK_STAGE_SHORTEST_RANGE`] on the mesh tail behind an amplification
-    /// stage — `culls_clusters` — and one everywhere else, where a range of
-    /// any length measured no worse than its calls one by one.
-    pub(super) const fn shortest_range(self, culls_clusters: bool) -> u32 {
-        if self.is_mesh() && culls_clusters {
-            TASK_STAGE_SHORTEST_RANGE
-        } else {
-            1
-        }
-    }
 }
-
-/// The fewest consecutive buckets the mesh tail draws with one multi-draw
-/// `draw_mesh_tasks_indirect` when an amplification stage is bound.
-///
-/// **Measured, on one driver.** A multi-draw of the mesh tail through a task
-/// stage costs more per call than a single draw does, on the CPU and in the
-/// camera passes' GPU time, so a short range records and draws slower than its
-/// buckets called one by one. `mesh_e2e`'s `the_price_of_one_call_per_bucket`,
-/// swept over its many-row bucket count — which is then every range's length —
-/// on the RX 7900 XTX (AMD 25.10.36, Vulkan, release, validation off,
-/// 1920x1080, 240 frames, three rounds each) put per-bucket calls ahead on
-/// both the CPU record and the summed GPU passes at runs of 2, 4 and 8, the
-/// two split at 16, and the range ahead on both from 32 up. Without a task
-/// stage a range was never measurably worse, which is why
-/// [`EmitTail::shortest_range`] asks for this only behind one.
-///
-/// The sums hide a split by pass: the shadow views gained from ranging at
-/// every length measured, while the depth prepass and colour pass lost GPU
-/// time to it up to 64. So this is the crossover for that scene's mix of one
-/// camera and its shadow views, not a per-pass optimum.
-pub(super) const TASK_STAGE_SHORTEST_RANGE: u32 = 32;
 
 /// One multi-draw call: `count` consecutive buckets, starting at the bucket of
 /// [`BucketDraws::calls`] element `first`.
@@ -120,8 +88,7 @@ pub(super) struct DrawRange {
 
 impl DrawRange {
     /// `buckets` — the bucket index of each call, in call order — packed into
-    /// runs of consecutive buckets of at most `limit` each, and every run of
-    /// fewer than `shortest` split back into a range per bucket.
+    /// runs of consecutive buckets of at most `limit` each.
     ///
     /// **Consecutive buckets and nothing looser**, because that is what one
     /// call can stand for: its draws step through the argument structures —
@@ -132,13 +99,8 @@ impl DrawRange {
     /// the device's own ceiling on draws per call.
     ///
     /// A range of one bucket records the call a list with no ranges records
-    /// for that bucket, so a run split by `shortest` draws exactly as the call
-    /// per bucket does — see [`EmitTail::shortest_range`] for why it is split.
-    pub(super) fn pack(
-        buckets: impl IntoIterator<Item = u32>,
-        limit: u32,
-        shortest: u32,
-    ) -> Vec<Self> {
+    /// for that bucket.
+    pub(super) fn pack(buckets: impl IntoIterator<Item = u32>, limit: u32) -> Vec<Self> {
         let mut ranges: Vec<Self> = Vec::new();
         let mut last = None;
         for (index, bucket) in buckets.into_iter().enumerate() {
@@ -154,22 +116,6 @@ impl DrawRange {
             last = Some(bucket);
         }
         ranges
-            .into_iter()
-            .flat_map(|range| {
-                let singles = if range.count < shortest {
-                    range.count
-                } else {
-                    0
-                };
-                let whole = (singles == 0).then_some(range);
-                (0..singles)
-                    .map(move |offset| Self {
-                        first: range.first + offset as usize,
-                        count: 1,
-                    })
-                    .chain(whole)
-            })
-            .collect()
     }
 }
 
@@ -203,6 +149,18 @@ pub(super) struct BucketDraws {
     /// packs into. `None` records a call per bucket, which is also the correct
     /// answer for any list, so a list that was never packed draws right.
     pub(super) ranges: Option<Vec<DrawRange>>,
+    /// `Some` where this list is one **flat task call** — the mesh tail behind
+    /// an amplification stage — with the
+    /// [flat segment](crcbl_shaders::draw_gen::flat_segment) whose dispatch it
+    /// reads. Takes precedence over [`ranges`](Self::ranges).
+    ///
+    /// One `draw_mesh_tasks_indirect` of one structure, which
+    /// `draw_gen.slang` sized to every task chunk of the segment's buckets,
+    /// under the first bucket's block: `mesh_cluster.slang`'s `taskMain` finds
+    /// each workgroup's bucket by searching the chunk starts that block names.
+    /// The list's buckets must be exactly the segment's run, which
+    /// [`ForwardRenderer::partitions`] checks.
+    pub(super) flat: Option<u32>,
 }
 
 /// [`BucketDraws::region_step`]: what one draw region adds to a call's offsets.
@@ -235,6 +193,9 @@ impl BucketDraws {
     /// How many calls [`record`](Self::record) records for this list: one per
     /// range where it has them, one per bucket where it does not.
     pub(super) fn call_count(&self) -> u64 {
+        if self.flat.is_some() {
+            return 1;
+        }
         self.ranges.as_ref().map_or(self.calls.len(), Vec::len) as u64
     }
 
@@ -268,6 +229,27 @@ impl BucketDraws {
         let stride = crcbl_shaders::draw_gen::DRAW_ARGS_SIZE as u32;
         let mesh_stride = crcbl_shaders::draw_gen::MESH_ARGS_SIZE as u32;
         let step = self.region_step;
+        if let (Some(segment), Some((constant_offset, ..))) = (self.flat, self.calls.first()) {
+            // The segment's first bucket's block in this region: its chunk
+            // starts are where `taskMain`'s search begins, and every other
+            // bucket's words are the ones after its own.
+            encoder.bind_group(
+                0,
+                group,
+                &[constant_offset + region * step.constants],
+                self.layout,
+            );
+            // One structure, sized on the GPU to every chunk of the segment,
+            // which an empty segment leaves as a dispatch of no workgroups.
+            let flat = u64::from(region * crcbl_shaders::draw_gen::FLAT_SEGMENTS + segment);
+            encoder.draw_mesh_tasks_indirect(&DrawIndirect {
+                args: draws.counts,
+                offset: draws.flat_args_offset + flat * u64::from(mesh_stride),
+                draw_count: 1,
+                stride: mesh_stride,
+            });
+            return;
+        }
         if let Some(ranges) = &self.ranges {
             for range in ranges {
                 let (constant_offset, args_offset, _, mesh_args_offset) = self.calls[range.first];
@@ -405,6 +387,16 @@ impl ForwardRenderer {
     /// each partition's buckets are packed into [`DrawRange`]s here, which is
     /// where a bucket of another mode between two of this partition's splits a
     /// range.
+    ///
+    /// **Behind an amplification stage each partition is one flat call
+    /// instead** — [`BucketDraws::flat`] — whatever the device's draw index,
+    /// since the call names its buckets through the chunk starts rather than
+    /// through a draw index. That needs the partition's buckets to be one
+    /// contiguous run — then it is the run
+    /// [`flat_segments`](crcbl_shaders::draw_gen::flat_segments) laid down for
+    /// its segment from the same modes — which the mode-major bucket table
+    /// makes true; a partition that is not is a table the flat call cannot
+    /// draw, and a panic rather than a frame missing its buckets.
     pub(super) fn partitions(
         &self,
         draws: &BucketDraws,
@@ -426,20 +418,38 @@ impl ForwardRenderer {
                         (bucket, *call)
                     })
                     .unzip();
-                (!calls.is_empty()).then(|| BucketDraws {
+                if calls.is_empty() {
+                    return None;
+                }
+                let flat = (draws.emit.is_mesh() && self.culls_clusters).then(|| {
+                    let segment =
+                        crcbl_shaders::draw_gen::flat_segment(key, *mode).unwrap_or_else(|| {
+                            unreachable!("a pass splits by every mode bit or by side")
+                        });
+                    // Every bucket of this key and value, so one run of them
+                    // is exactly the run `flat_segments` laid down for the
+                    // segment from the same modes.
+                    assert!(
+                        buckets.windows(2).all(|pair| pair[1] == pair[0] + 1),
+                        "the flat task call draws one run of buckets, and this partition's are \
+                         {buckets:?}: the bucket table is not numbered mode-major"
+                    );
+                    segment
+                });
+                Some(BucketDraws {
                     pipeline: *pipeline,
                     layout: draws.layout,
                     indices: draws.indices,
                     emit: draws.emit,
                     calls,
                     region_step: draws.region_step,
-                    ranges: self.range_limit.map(|limit| {
-                        DrawRange::pack(
-                            buckets,
-                            limit,
-                            draws.emit.shortest_range(self.culls_clusters),
-                        )
-                    }),
+                    ranges: if flat.is_some() {
+                        None
+                    } else {
+                        self.range_limit
+                            .map(|limit| DrawRange::pack(buckets, limit))
+                    },
+                    flat,
                 })
             })
             .collect()
@@ -548,6 +558,7 @@ mod tests {
                     counts: 64,
                 },
                 ranges: None,
+                flat: None,
             };
             assert_ne!(source.layout, renderer.mesh_pipeline_layout);
             for (key, pipelines, expected) in &cases {
@@ -591,6 +602,7 @@ mod tests {
             calls: Vec::new(),
             region_step: RegionStep::default(),
             ranges: None,
+            flat: None,
         };
         assert!(renderer.partitions(&empty, both, &cases[0].1).is_empty());
         renderer.destroy(device.as_ref());
@@ -605,7 +617,7 @@ mod tests {
     #[test]
     fn ranges_pack_consecutive_buckets_and_split_at_gaps_and_the_limit() {
         let ranges = |buckets: &[u32], limit| {
-            DrawRange::pack(buckets.iter().copied(), limit, 1)
+            DrawRange::pack(buckets.iter().copied(), limit)
                 .into_iter()
                 .map(|range| (range.first, range.count))
                 .collect::<Vec<_>>()
@@ -631,60 +643,147 @@ mod tests {
         assert_eq!(ranges(&[0, 1, 2], 1), [(0, 1), (1, 1), (2, 1)]);
     }
 
-    /// **A run shorter than `shortest` is split back into a range per bucket,
-    /// and a run of `shortest` stays one** — the threshold
-    /// [`EmitTail::shortest_range`] hands the mesh tail behind a task stage,
-    /// at its own value and around it. The split keeps every bucket once, in
-    /// order, each starting at its own call index.
+    /// **Behind an amplification stage every partition of the mesh tail is one
+    /// flat call of its segment**, whatever the device's draw index: the
+    /// depth split's four modes are segments 0 to 3, the colour split's two
+    /// sides segments 4 and 5, each list keeps its buckets' calls in order for
+    /// the first bucket's block, and no ranges are packed. The indirect tails
+    /// and a mesh tail without the stage keep their calls per bucket or per
+    /// range.
     #[test]
-    fn a_run_shorter_than_the_shortest_range_is_a_range_per_bucket() {
-        let shortest = TASK_STAGE_SHORTEST_RANGE;
-        let ranges = |buckets: &[u32], limit, shortest| {
-            DrawRange::pack(buckets.iter().copied(), limit, shortest)
-                .into_iter()
-                .map(|range| (range.first, range.count))
-                .collect::<Vec<_>>()
-        };
-        let run = |count: u32| (0..count).collect::<Vec<u32>>();
-        let singles = |count: u32| (0..count as usize).map(|at| (at, 1)).collect::<Vec<_>>();
-        assert_eq!(
-            ranges(&run(shortest - 1), u32::MAX, shortest),
-            singles(shortest - 1),
-            "one bucket short of the threshold is a call per bucket"
-        );
-        assert_eq!(
-            ranges(&run(shortest), u32::MAX, shortest),
-            [(0, shortest)],
-            "a run of the threshold is one call"
-        );
-        // A long run and a short one in one list, split by a gap: only the
-        // short one is broken up.
-        let mut mixed = run(shortest);
-        mixed.extend([shortest + 1, shortest + 2]);
-        let mut expected = vec![(0, shortest)];
-        expected.extend([(shortest as usize, 1), (shortest as usize + 1, 1)]);
-        assert_eq!(ranges(&mixed, u32::MAX, shortest), expected);
-        // The device's ceiling applies first: a run it cuts short is judged
-        // on what is left of it.
-        assert_eq!(
-            ranges(&run(shortest + 2), shortest, shortest),
-            [
-                (0, shortest),
-                (shortest as usize, 1),
-                (shortest as usize + 1, 1)
-            ]
-        );
-        // And the threshold is the task stage's alone.
-        assert_eq!(EmitTail::Mesh.shortest_range(true), shortest);
-        for (emit, culls_clusters) in [
-            (EmitTail::Mesh, false),
-            (EmitTail::Count, true),
-            (EmitTail::PerBatch, true),
-            (EmitTail::Count, false),
+    fn a_partition_behind_a_task_stage_is_one_flat_call_of_its_segment() {
+        let recorder = Recorder::new();
+        let instance = NullInstance::gpu_driven().with_recorder(recorder.clone());
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+            .unwrap();
+        let queue = device.queue(QueueKind::Graphics).unwrap();
+        let mut renderer = ForwardRenderer::with_scene(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+        )
+        .unwrap();
+        let masked = GpuMaterial::ALPHA_MODE_MASK;
+        let double = GpuMaterial::DOUBLE_SIDED;
+        let both = GpuMaterial::MODE_MASK;
+        // Mode-major, as the table builder numbers them.
+        renderer.bucket_modes = vec![0, 0, masked, masked, double, both, both];
+        let calls: Vec<(u32, u64, u64, u64)> = (0..7u32)
+            .map(|bucket| (bucket * 256, u64::from(bucket) * 20, 0, 0))
+            .collect();
+        let depth = [
+            (0, renderer.shadow_pipeline.single),
+            (masked, renderer.depth_masked_pipeline.single),
+            (double, renderer.shadow_pipeline.double),
+            (both, renderer.depth_masked_pipeline.double),
+        ];
+        let sided = [
+            (0, renderer.mesh_pipeline.single),
+            (double, renderer.mesh_pipeline.double),
+        ];
+        for (emit, culls_clusters, limit) in [
+            (EmitTail::Mesh, true, None),
+            (EmitTail::Mesh, true, Some(4096)),
+            (EmitTail::Mesh, false, Some(4096)),
+            (EmitTail::Count, true, Some(4096)),
         ] {
-            assert_eq!(emit.shortest_range(culls_clusters), 1, "{emit:?}");
+            renderer.culls_clusters = culls_clusters;
+            renderer.range_limit = limit;
+            let case = format!("{emit:?}, task stage {culls_clusters}, limit {limit:?}");
+            let source = BucketDraws {
+                pipeline: renderer.mesh_pipeline.single,
+                layout: renderer.mesh_pipeline_layout,
+                indices: renderer.pool.index_buffer(),
+                emit,
+                calls: calls.clone(),
+                region_step: RegionStep::default(),
+                ranges: None,
+                flat: None,
+            };
+            let flat = emit.is_mesh() && culls_clusters;
+            for (key, pipelines, expected) in [
+                (
+                    both,
+                    &depth[..],
+                    vec![
+                        (0, vec![0, 1]),
+                        (1, vec![2, 3]),
+                        (2, vec![4]),
+                        (3, vec![5, 6]),
+                    ],
+                ),
+                (
+                    double,
+                    &sided[..],
+                    vec![(4, vec![0, 1, 2, 3]), (5, vec![4, 5, 6])],
+                ),
+            ] {
+                let partitions = renderer.partitions(&source, key, pipelines);
+                assert_eq!(partitions.len(), expected.len(), "{case}");
+                for (partition, (segment, buckets)) in partitions.iter().zip(expected) {
+                    assert_eq!(
+                        partition.calls,
+                        buckets
+                            .iter()
+                            .map(|&bucket| calls[bucket])
+                            .collect::<Vec<_>>(),
+                        "{case}: the partition's calls, first bucket first"
+                    );
+                    if flat {
+                        assert_eq!(partition.flat, Some(segment), "{case}");
+                        assert_eq!(partition.ranges, None, "{case}: a flat call packs no range");
+                        assert_eq!(partition.call_count(), 1, "{case}");
+                    } else {
+                        assert_eq!(partition.flat, None, "{case}");
+                        assert_eq!(
+                            partition.call_count(),
+                            1,
+                            "{case}: one consecutive run is one ranged call"
+                        );
+                        assert!(partition.ranges.is_some(), "{case}");
+                    }
+                }
+            }
         }
-        assert!(shortest > 1, "a threshold of one would split nothing");
+        renderer.destroy(device.as_ref());
+        recorder.assert_valid();
+    }
+
+    /// **A flat call cannot stand for a partition whose buckets are not one
+    /// run**, so a table that is not numbered mode-major is a panic behind a
+    /// task stage rather than a frame drawing another mode's buckets under
+    /// this pipeline.
+    #[test]
+    #[should_panic(expected = "the bucket table is not numbered mode-major")]
+    fn a_partition_that_is_not_one_run_is_refused_behind_a_task_stage() {
+        let instance = NullInstance::gpu_driven();
+        let device = instance
+            .create_device(&DeviceDesc::for_adapter(AdapterId(0)))
+            .unwrap();
+        let queue = device.queue(QueueKind::Graphics).unwrap();
+        let mut renderer = ForwardRenderer::with_scene(
+            device.as_ref(),
+            queue,
+            Format::Rgba8UnormSrgb,
+            &scene::demo(),
+        )
+        .unwrap();
+        renderer.bucket_modes = vec![0, GpuMaterial::ALPHA_MODE_MASK, 0];
+        renderer.culls_clusters = true;
+        let source = BucketDraws {
+            pipeline: renderer.mesh_pipeline.single,
+            layout: renderer.mesh_pipeline_layout,
+            indices: renderer.pool.index_buffer(),
+            emit: EmitTail::Mesh,
+            calls: vec![(0, 0, 0, 0); 3],
+            region_step: RegionStep::default(),
+            ranges: None,
+            flat: None,
+        };
+        let opaque = renderer.shadow_pipeline.single;
+        let _ = renderer.partitions(&source, GpuMaterial::MODE_MASK, &[(0, opaque)]);
     }
 
     /// **Which tail draws a range of buckets per call, from the capabilities

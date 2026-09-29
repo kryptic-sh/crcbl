@@ -121,14 +121,94 @@ pub const TASK_CHUNKS_PER_ROW: u32 = 65535;
 /// chunked extents.
 #[must_use]
 pub const fn task_extents(clusters: u32, instances: u32, lanes: u32) -> [u32; 3] {
+    task_dispatch(task_chunks(clusters, instances, lanes))
+}
+
+/// How many task chunks a bucket of `clusters` clusters and `instances`
+/// surviving instances takes behind a task stage of `lanes` lanes:
+/// `ceil(clusters * instances / lanes)`, split as [`task_extents`] splits it.
+/// `draw_gen.slang`'s `task_chunks`.
+///
+/// # Panics
+///
+/// If `lanes` is zero, on [`task_extents`]' terms.
+#[must_use]
+pub const fn task_chunks(clusters: u32, instances: u32, lanes: u32) -> u32 {
     assert!(lanes != 0, "a task stage has at least one lane");
-    let chunks = (clusters / lanes) * instances + ((clusters % lanes) * instances).div_ceil(lanes);
+    (clusters / lanes) * instances + ((clusters % lanes) * instances).div_ceil(lanes)
+}
+
+/// A task dispatch of `chunks` workgroups as the three words
+/// `draw_gen.slang`'s `store_task_dispatch` writes: the chunks up to a row of
+/// [`TASK_CHUNKS_PER_ROW`], the rows, and one.
+#[must_use]
+pub const fn task_dispatch(chunks: u32) -> [u32; 3] {
     let row = if chunks < TASK_CHUNKS_PER_ROW {
         chunks
     } else {
         TASK_CHUNKS_PER_ROW
     };
     [row, chunks.div_ceil(TASK_CHUNKS_PER_ROW), 1]
+}
+
+/// One draw region's chunk starts, from each bucket's
+/// [`task_chunks`]: the running sum in front of each bucket, and one word more
+/// — the region's end — as `draw_gen.slang` lays them down at
+/// [`draw_gen::chunk_start_word`](crate::draw_gen::chunk_start_word), starting
+/// from `base`.
+///
+/// `base` is where the scan that wrote the region had got to: zero for every
+/// region but a point light's later faces, which one scan covers end to end.
+/// Only differences within the region are counts, so a reader comparing the
+/// GPU's words with these subtracts the first of each.
+///
+/// # Panics
+///
+/// If the sum passes `u32::MAX`, which the shader's `uint` sum would wrap at.
+#[must_use]
+pub fn chunk_starts(base: u32, chunks: &[u32]) -> Vec<u32> {
+    let mut starts = Vec::with_capacity(chunks.len() + 1);
+    let mut at = base;
+    starts.push(at);
+    for count in chunks {
+        at = at.checked_add(*count).expect("a region's chunks fit a u32");
+        starts.push(at);
+    }
+    starts
+}
+
+/// Which bucket of a flat call, and which chunk of that bucket, task workgroup
+/// `workgroup` is — `mesh_cluster.slang`'s `taskMain` search, transcribed.
+///
+/// `starts` is the region's chunk starts from the segment's first bucket on,
+/// through the region's end — [`chunk_starts`] sliced at that bucket — and the
+/// answer is the bucket's offset from the first. The last bucket whose chunks
+/// start at or before `starts[0] + workgroup`, so an empty bucket, which
+/// starts where the next one does, is never the answer; a workgroup past the
+/// region's chunks lands on its last bucket with a chunk past its pairs.
+///
+/// # Panics
+///
+/// If `starts` has fewer than two words — a region of no buckets, which no
+/// flat call draws.
+#[must_use]
+pub fn chunk_bucket(starts: &[u32], workgroup: u32) -> (u32, u32) {
+    assert!(starts.len() >= 2, "a flat call draws at least one bucket");
+    let target = starts[0] + workgroup;
+    let mut offset = 0usize;
+    let mut limit = starts.len() - 1;
+    while limit - offset > 1 {
+        let middle = usize::midpoint(offset, limit);
+        if starts[middle] <= target {
+            offset = middle;
+        } else {
+            limit = middle;
+        }
+    }
+    (
+        u32::try_from(offset).expect("a u32-indexed table"),
+        target - starts[offset],
+    )
 }
 
 /// A cluster's bounding sphere and normal cone, matching
@@ -419,11 +499,10 @@ impl Meshlet {
 
 /// Bytes in one bucket's cluster-draw constant block.
 ///
-/// Eight `uint`s, which is already a multiple of the 16 bytes `std140` rounds a
-/// structure up to — the two words it used to round six up by are now
-/// [`ClusterDrawConstants::cluster_base_at`] and
-/// [`ClusterDrawConstants::cluster_count_at`].
-pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 32;
+/// Ten `uint`s, which `std140` rounds up to the next multiple of 16 — the two
+/// words past the eighth are [`ClusterDrawConstants::chunk_starts_at`] and
+/// [`ClusterDrawConstants::chunk_starts_end`], and the last two are padding.
+pub const CLUSTER_DRAW_CONSTANTS_SIZE: usize = 48;
 
 /// What one bucket tells the mesh stage about itself, matching
 /// `struct ClusterDrawConstants` in `shaders/mesh_cluster.slang`.
@@ -495,6 +574,20 @@ pub struct ClusterDrawConstants {
     /// plus this bucket — on [`cluster_base_at`](Self::cluster_base_at)'s
     /// terms.
     pub cluster_count_at: u32,
+    /// The word of the visible-instances buffer holding where this bucket's
+    /// task chunks start this frame in this block's region —
+    /// [`draw_gen::chunk_start_word`](crate::draw_gen::chunk_start_word).
+    ///
+    /// **What a flat task call searches from.** Behind a task stage a pass
+    /// records one `draw_mesh_tasks_indirect` per pipeline partition, binding
+    /// the partition's first bucket's block, and `taskMain` finds which bucket
+    /// each workgroup belongs to among the words from this one on — then reads
+    /// that bucket's words as a ranged call's draw does. See
+    /// `mesh_cluster.slang`'s `taskMain`.
+    pub chunk_starts_at: u32,
+    /// The word holding where the block's region's chunks end — the chunk start
+    /// one past its last bucket — which bounds that search.
+    pub chunk_starts_end: u32,
 }
 
 impl ClusterDrawConstants {
@@ -513,6 +606,8 @@ impl ClusterDrawConstants {
             self.level_groups_at,
             self.cluster_base_at,
             self.cluster_count_at,
+            self.chunk_starts_at,
+            self.chunk_starts_end,
         ] {
             bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
             at += 4;
@@ -1052,15 +1147,15 @@ mod tests {
     }
 
     /// The offsets `slangc` emitted for `ClusterDrawConstants`, read out of the
-    /// disassembly. Eight `uint`s in a row permute silently — a bucket index
+    /// disassembly. Ten `uint`s in a row permute silently — a bucket index
     /// read as a cluster base draws another mesh's clusters — so each is pinned
     /// to its byte.
     #[test]
     fn the_cluster_constants_match_the_offsets_slangc_emits() {
         // `OpMemberDecorate %ClusterDrawConstants_std140 n Offset …`: 0, 4, 8,
-        // 12, 16, 20, 24, 28, and a block size of 32, which `std140`'s
-        // multiple of 16 leaves as it is.
-        assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 32);
+        // 12, 16, 20, 24, 28, 32, 36, and a block of 40 bytes, which `std140`
+        // rounds up to its multiple of 16.
+        assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE, 48);
         assert_eq!(CLUSTER_DRAW_CONSTANTS_SIZE % 16, 0);
 
         let bytes = ClusterDrawConstants {
@@ -1072,6 +1167,8 @@ mod tests {
             level_groups_at: 6,
             cluster_base_at: 7,
             cluster_count_at: 8,
+            chunk_starts_at: 9,
+            chunk_starts_end: 10,
         }
         .to_bytes();
         let uint_at =
@@ -1084,6 +1181,12 @@ mod tests {
         assert_eq!(uint_at(20), 6, "level_groups_at at offset 20");
         assert_eq!(uint_at(24), 7, "cluster_base_at at offset 24");
         assert_eq!(uint_at(28), 8, "cluster_count_at at offset 28");
+        assert_eq!(uint_at(32), 9, "chunk_starts_at at offset 32");
+        assert_eq!(uint_at(36), 10, "chunk_starts_end at offset 36");
+        assert!(
+            bytes[40..].iter().all(|byte| *byte == 0),
+            "the std140 tail is padding, and zero"
+        );
     }
 
     /// The narrowing refuses rather than wraps, and names the field it refused.
@@ -1303,7 +1406,7 @@ mod tests {
         for needle in [
             "[numthreads(TASK_LANES, 1, 1)]\nvoid taskMain(",
             "uint pairs[TASK_LANES];",
-            "uint chunk = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;",
+            "uint workgroup = chunk_group.y * TASK_CHUNKS_PER_ROW + chunk_group.x;",
             "uint pair = chunk * TASK_LANES + lane;",
         ] {
             assert!(
@@ -1358,6 +1461,78 @@ mod tests {
                     "{clusters} x {instances}: y is the rows"
                 );
                 assert_eq!(z, 1);
+            }
+        }
+    }
+
+    /// **The flat call's work list names every chunk of a segment exactly once,
+    /// and nothing else**: [`chunk_starts`] is the running sum a region holds,
+    /// and [`chunk_bucket`], `taskMain`'s search transcribed, answers each of
+    /// a segment's workgroups with the bucket and chunk a linear walk of the
+    /// counts finds — from every first bucket, over empty buckets at either
+    /// end and in runs, with a scan base that is not zero as a point light's
+    /// later faces have.
+    ///
+    /// A workgroup past the segment's chunks — the last row's padding — lands
+    /// on the region's last bucket with a chunk at or past its count, which
+    /// the task stage's bound refuses.
+    #[test]
+    fn the_flat_work_list_finds_every_chunk_of_a_segment_once() {
+        assert_eq!(chunk_starts(0, &[]), [0]);
+        assert_eq!(chunk_starts(0, &[2, 0, 3]), [0, 2, 2, 5]);
+        assert_eq!(chunk_starts(7, &[1, 1]), [7, 8, 9]);
+        assert_eq!(
+            task_chunks(5, 13, TASK_LANES),
+            3,
+            "65 pairs, one lane into a third chunk"
+        );
+        assert_eq!(task_chunks(1, 70, TASK_LANES), 3);
+        assert_eq!(task_dispatch(0), [0, 0, 1]);
+        assert_eq!(
+            task_dispatch(TASK_CHUNKS_PER_ROW + 1),
+            [TASK_CHUNKS_PER_ROW, 2, 1]
+        );
+
+        let tables: [&[u32]; 5] = [
+            &[3],
+            &[0, 0, 4, 0, 1, 0],
+            &[1, 1, 1, 1, 1, 1, 1],
+            &[5, 0, 0, 0, 2, 9, 0, 0],
+            &[0, 0, 0],
+        ];
+        for chunks in tables {
+            for base in [0, 1000] {
+                let starts = chunk_starts(base, chunks);
+                for first in 0..chunks.len() {
+                    let slice = &starts[first..];
+                    let total: u32 = chunks[first..].iter().sum();
+                    // The linear walk: which bucket each chunk belongs to.
+                    let mut walked = Vec::new();
+                    for (offset, count) in chunks[first..].iter().enumerate() {
+                        for chunk in 0..*count {
+                            walked.push((u32::try_from(offset).expect("small"), chunk));
+                        }
+                    }
+                    let searched: Vec<(u32, u32)> = (0..total)
+                        .map(|workgroup| chunk_bucket(slice, workgroup))
+                        .collect();
+                    assert_eq!(
+                        searched, walked,
+                        "{chunks:?} from bucket {first}, base {base}"
+                    );
+                    let last = u32::try_from(chunks.len() - 1 - first).expect("small");
+                    for past in total..total + 3 {
+                        let (offset, chunk) = chunk_bucket(slice, past);
+                        assert_eq!(
+                            offset, last,
+                            "{chunks:?} from {first}: padding workgroup {past}"
+                        );
+                        assert!(
+                            chunk >= chunks[chunks.len() - 1],
+                            "{chunks:?} from {first}: padding workgroup {past} names a real chunk"
+                        );
+                    }
+                }
             }
         }
     }

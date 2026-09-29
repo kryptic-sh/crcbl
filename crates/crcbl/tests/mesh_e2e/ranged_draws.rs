@@ -1,14 +1,14 @@
-//! **The mesh tail draws a field of many buckets byte for byte as it does a
-//! call per bucket**, whether its runs are long enough to become one
-//! multi-draw call or are kept a call per bucket.
+//! **The mesh tail draws a field of many buckets byte for byte whatever the
+//! device's draw index**: as one multi-draw call per run or a call per bucket
+//! without a task stage, and as one flat call per partition behind one.
 //!
 //! `render_e2e`'s `a_call_per_range_on_the_mesh_tail_draws_as_a_call_per_bucket_does`
-//! draws the builtin scenes, whose runs of buckets are all shorter than the
-//! mesh tail's threshold behind a task stage — so on that arm it compares the
-//! split path against the call per bucket, and never draws a multi-draw
-//! `draw_mesh_tasks_indirect` through a task stage at all. This is the field
-//! that does: [`MANY`] buckets in one run, and [`FEW`] beside it for the short
-//! run, each drawn with and without `Features::DRAW_INDEX`.
+//! draws the builtin scenes, whose runs are a handful of buckets. This is a
+//! field of [`MANY`] buckets in one run, and [`FEW`] beside it, each drawn with
+//! and without `Features::DRAW_INDEX`. Behind a task stage the flat call reads
+//! no draw index, so the two record the same calls — as many for [`FEW`]
+//! buckets as for [`MANY`] — and draw the same frame; `task_chunks.rs` and
+//! `flat_tasks.rs` hold the flat frame to `meshMain`'s.
 //!
 //! The meshes alternate between the demo's cube, pyramid and open box, so a
 //! draw of a range that read another bucket's clusters, run or arguments puts
@@ -22,12 +22,10 @@ use crcbl::math::{Mat4, Vec3};
 use crcbl::render::scene::{DEMO_CUBE, DEMO_OPEN_BOX, DEMO_PYRAMID, DEMO_UNTINTED};
 use crcbl::render::{Camera, ForwardRenderer, Projection, TransientPool};
 
-/// A run long enough to become one call on every tail — well past the mesh
-/// tail's task-stage threshold, which is private to `crcbl-render`.
+/// A run long enough that one call per bucket is far from one call per run.
 const MANY: u32 = 64;
 
-/// A run short enough to stay a call per bucket behind a task stage, and to
-/// become one call without one.
+/// A short run, which one call stands for as well.
 const FEW: u32 = 4;
 
 /// Instances per bucket, so every draw of a range has more than one.
@@ -116,15 +114,16 @@ fn draw(buckets: u32, asked: Features) -> (crcbl_golden::Image, u64, Features) {
     (image, calls, granted)
 }
 
-/// **A long run drawn as one call and a short one kept a call per bucket both
-/// draw the frame the call per bucket draws**, with and without a task stage.
+/// **A run drawn as one call draws the frame the call per bucket draws
+/// without a task stage, and behind one the flat call draws one frame whatever
+/// the draw index.**
 ///
 /// Per arm the two frames differ only in [`Features::DRAW_INDEX`]. The call
-/// counts say which path each took: [`MANY`] buckets always draw in fewer
-/// calls with a draw index, and [`FEW`] do too without a task stage, but not
-/// behind one — that run is shorter than the threshold and stays a call per
-/// bucket. A device without mesh shaders or a draw index has nothing to
-/// compare, and says so.
+/// counts say which path each took: without a task stage both run lengths draw
+/// in fewer calls with a draw index; behind one the flat call records a call
+/// per partition either way, and as many for [`FEW`] buckets as for [`MANY`].
+/// A device without mesh shaders or a draw index has nothing to compare, and
+/// says so.
 #[test]
 #[ignore = "needs a real GPU; run crates/crcbl/tests/run-mesh-e2e.sh"]
 fn a_ranged_mesh_field_draws_as_a_call_per_bucket_does() {
@@ -141,6 +140,7 @@ fn a_ranged_mesh_field_draws_as_a_call_per_bucket_does() {
     }
     let base = crcbl::screenshot::OffscreenSetup::OPTIONAL_FEATURES;
     let mut compared = 0;
+    let mut flat_calls = Vec::new();
     for task in [true, false] {
         if task && !offered.contains(Features::TASK_SHADER) {
             eprintln!("{SUITE}: no task stage on this device, so that arm is not drawn");
@@ -163,11 +163,12 @@ fn a_ranged_mesh_field_draws_as_a_call_per_bucket_does() {
                 "the device was not granted the task stage the arm asked for"
             );
             let case = format!("{buckets} buckets, task stage {task}");
-            if task && buckets == FEW {
+            if task {
                 assert_eq!(
                     ranged_calls, per_bucket_calls,
-                    "{case}: a run shorter than the threshold stays a call per bucket"
+                    "{case}: the flat call reads no draw index, so granting one changes nothing"
                 );
+                flat_calls.push(ranged_calls);
             } else {
                 assert!(
                     ranged_calls < per_bucket_calls,
@@ -201,5 +202,10 @@ fn a_ranged_mesh_field_draws_as_a_call_per_bucket_does() {
             compared += 1;
         }
     }
+    assert!(
+        flat_calls.windows(2).all(|pair| pair[0] == pair[1]),
+        "behind a task stage {FEW} and {MANY} buckets recorded {flat_calls:?} calls: a flat call \
+         per partition does not grow with the buckets"
+    );
     assert!(compared > 0, "no arm was drawn");
 }

@@ -1100,11 +1100,12 @@ mod tests {
                 "lateScatterMain",
                 crcbl_shaders::draw_gen::WORKGROUP_SIZE,
             ),
+            // And so is the late finish, which scans the two regions it closes.
             (
                 "draw_gen",
                 &crcbl_shaders::DRAW_GEN,
                 "lateFinishMain",
-                crcbl_shaders::draw_gen::WORKGROUP_SIZE,
+                crcbl_shaders::draw_gen::STARTS_WORKGROUP_SIZE,
             ),
         ];
         assert!(!compute.is_empty(), "nothing to check");

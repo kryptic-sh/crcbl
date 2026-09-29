@@ -95,7 +95,8 @@
 //    bucket it belongs to goes into the route region, and the bucket's mesh
 //    dispatch y extent counts it.
 // 2. `startsMain`, one workgroup: writes each bucket's start as the sum of the
-//    counts in front of it — a prefix sum.
+//    counts in front of it — a prefix sum — and, behind a task stage, its
+//    task chunks' start the same way.
 // 3. `scatterMain`, one invocation per survivor: reads its route and that
 //    bucket's start, takes a slot in the run, and writes the instance index.
 //
@@ -170,6 +171,15 @@
 // region's words once its instance count is final: `startsMain` for every
 // region but occlusion's region 0 and late region, `lateFinishMain` for those.
 // `mesh_cluster.slang`'s `taskMain` then takes `task_lanes` pairs a workgroup.
+//
+// **And behind a task stage a pass draws a partition with one flat call.** The
+// same two entry points, in the same workgroup, also scan every closed
+// region's task chunks into its **chunk starts** — one word a bucket and one
+// for the region's end, a region of `visible_instances` — and size one
+// dispatch per flat segment, a run of buckets one pipeline draws, behind every
+// region of `counts_and_mesh_args`: see `write_flat_args`. `taskMain` searches
+// the starts for its bucket. That is why `lateFinishMain` is one workgroup: a
+// scan across workgroups would be passes of its own.
 //
 // # A bucket's run cannot overflow, by arithmetic rather than by assertion
 //
@@ -632,6 +642,11 @@ struct DrawGenParams
     /// extents — see `write_task_extents`. The host passes
     /// `crcbl_shaders::meshlet::TASK_LANES` or zero; nothing else is valid.
     uint task_lanes;
+    /// Where the flat segments start in `tables`, in words: `FLAT_SEGMENTS`
+    /// pairs of (first bucket, end bucket), one per pipeline partition a pass
+    /// can record — see `write_flat_args`. Read only where `task_lanes` is
+    /// non-zero. A word of the block's tail padding, so the block is no wider.
+    uint flat_segments_at;
 };
 
 [[vk::binding(0, 0)]]
@@ -676,6 +691,7 @@ StructuredBuffer<uint> visible_count D3D12_REGISTER(t3, space0);
 /// | level → mesh id | `gen.level_meshes_at` | 1 | `MeshLevels::first_level + d` |
 /// | per-bucket cluster bases, which this pass never reads | host-only | 1 | bucket |
 /// | `(mesh, mode) → bucket`, behind its row count | `gen.bucket_lookup_at` | `MATERIAL_MODES` | level mesh id |
+/// | flat segments: (first, end) bucket pairs | `gen.flat_segments_at` | 2 | segment |
 ///
 /// Every one of them is written when a mesh becomes resident and not rewritten
 /// per frame, which is what lets them share one upload: they change together or
@@ -701,11 +717,14 @@ StructuredBuffer<uint> tables D3D12_REGISTER(t4, space0);
 /// | runs, every bucket's end to end | `2C..3C` | `scatterMain`, `lateScatterMain` | geometry stages |
 /// | starts: region `r` bucket `b`'s first run word | `3C..3C+RB` | `startsMain` | the scatters, geometry stages |
 /// | meshes: bucket `b`'s mesh | `3C+RB..3C+(R+1)B` | `binMain` | SPIR-V geometry stages |
+/// | chunk starts: region `r` bucket `b`'s first task chunk | `3C+(R+1)B..+R(B+1)` | `startsMain`, `lateFinishMain` | the task stage |
 /// | face runs, every face's buckets end to end | `face_runs_at..+6C+1` | `scatterMain` | geometry stages |
 ///
 /// `R` is `DRAW_REGIONS`, whatever `DrawGenParams::draw_regions` this generator
-/// fills. The face runs exist only in a generator built for a point light's
-/// faces, and end with one spare word for the reason the next paragraph gives.
+/// fills. The chunk starts are `B + 1` words a region, the last the region's
+/// end — see `chunk_start_word`. The face runs exist only in a generator built
+/// for a point light's faces, and end with one spare word for the reason the
+/// next paragraph gives.
 ///
 /// The survivors are in whatever order `cull.slang`'s atomic handed slots out,
 /// and each run in whatever order `scatterMain`'s did — nothing here depends on
@@ -979,6 +998,36 @@ uint mesh_arg_word(uint region, uint bucket, uint slot)
 uint arg_word(uint region, uint bucket, uint field)
 {
     return draw_slot(region, bucket) * DRAW_ARGS_WORDS + field;
+}
+
+/// How many pipeline partitions a pass can split the bucket table into, and so
+/// how many flat task dispatches a region has room for, matching
+/// `crcbl_shaders::draw_gen::FLAT_SEGMENTS`: one per material mode for the
+/// depth passes, and one per side for the colour pass's two.
+static const uint FLAT_SEGMENTS = 6;
+
+/// Which word of `visible_instances` holds where bucket `bucket`'s task chunks
+/// start in region `region`, behind every bucket's mesh word.
+///
+/// `B + 1` words a region, so `bucket` may be `gen.bucket_count`: that word is
+/// the region's end, and a segment's chunk count is the difference of its two
+/// ends' words. The values are one running sum over whatever `startsMain` or
+/// `lateFinishMain` scanned, so only differences within one region mean
+/// anything. The same arithmetic as `crcbl_shaders::draw_gen::chunk_start_word`,
+/// and the word `mesh_cluster.slang`'s `ClusterDrawConstants::chunk_starts_at`
+/// names.
+uint chunk_start_word(uint region, uint bucket)
+{
+    return bucket_mesh_word(gen.bucket_count) + region * (gen.bucket_count + 1) + bucket;
+}
+
+/// Which word of `counts_and_mesh_args` holds word `slot` of flat segment
+/// `segment`'s task dispatch in region `region`: behind every region this
+/// generator allocates, `FLAT_SEGMENTS` structures a region. The same
+/// arithmetic as `crcbl_shaders::draw_gen::flat_args_word`.
+uint flat_arg_word(uint region, uint segment, uint slot)
+{
+    return gen.draw_regions * 4 * gen.bucket_count + (region * FLAT_SEGMENTS + segment) * MESH_ARGS_WORDS + slot;
 }
 
 /// What `projected_error` answers for an eye inside the group's own sphere.
@@ -1335,17 +1384,104 @@ static const uint TASK_CHUNKS_PER_ROW = 65535;
 /// exact quotient.
 void write_task_extents(uint region, uint bucket, uint instances)
 {
-    uint lanes = gen.task_lanes;
-    if (lanes == 0)
+    if (gen.task_lanes == 0)
     {
         return;
     }
+    store_task_dispatch(mesh_arg_word(region, bucket, MESH_ARG_GROUP_X), task_chunks(bucket, instances));
+}
+
+/// How many task chunks bucket `bucket` takes with `instances` instances:
+/// `ceil(clusters * instances / gen.task_lanes)`, split so the product cannot
+/// overflow short of the count itself — see `write_task_extents`. Zero where
+/// `gen.task_lanes` is, which no task stage reads.
+uint task_chunks(uint bucket, uint instances)
+{
+    uint lanes = gen.task_lanes;
+    if (lanes == 0)
+    {
+        return 0;
+    }
     uint clusters = bucket_clusters(bucket);
-    uint chunks = (clusters / lanes) * instances + ((clusters % lanes) * instances + lanes - 1) / lanes;
-    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_X)]
-        .store(min(chunks, TASK_CHUNKS_PER_ROW));
-    counts_and_mesh_args[mesh_arg_word(region, bucket, MESH_ARG_GROUP_Y)]
+    return (clusters / lanes) * instances + ((clusters % lanes) * instances + lanes - 1) / lanes;
+}
+
+/// Stores a task dispatch of `chunks` workgroups at word `at` of
+/// `counts_and_mesh_args`, in rows of `TASK_CHUNKS_PER_ROW`: x the chunks up to
+/// a row, y the rows, z one.
+void store_task_dispatch(uint at, uint chunks)
+{
+    counts_and_mesh_args[at + MESH_ARG_GROUP_X].store(min(chunks, TASK_CHUNKS_PER_ROW));
+    counts_and_mesh_args[at + MESH_ARG_GROUP_Y]
         .store((chunks + TASK_CHUNKS_PER_ROW - 1) / TASK_CHUNKS_PER_ROW);
+    counts_and_mesh_args[at + MESH_ARG_GROUP_Z].store(1);
+}
+
+/// The exclusive prefix of every lane's `value` across one workgroup of
+/// `STARTS_WORKGROUP_SIZE`, through `starts_chunk_runs`: an inclusive scan
+/// doubling its reach each round, less the lane's own value. Every lane must
+/// call it, from uniform control flow — it is barriers end to end — and it may
+/// be called again: the first barrier holds every lane's read of the last
+/// result ahead of the next write.
+uint workgroup_exclusive_scan(uint lane, uint value)
+{
+    GroupMemoryBarrierWithGroupSync();
+    starts_chunk_runs[lane] = value;
+    GroupMemoryBarrierWithGroupSync();
+    for (uint reach = 1; reach < STARTS_WORKGROUP_SIZE; reach <<= 1)
+    {
+        uint behind = lane >= reach ? starts_chunk_runs[lane - reach] : 0;
+        GroupMemoryBarrierWithGroupSync();
+        starts_chunk_runs[lane] += behind;
+        GroupMemoryBarrierWithGroupSync();
+    }
+    return starts_chunk_runs[lane] - value;
+}
+
+/// Records where bucket `bucket`'s task chunks start in region `region` — and,
+/// for the region's last bucket, where they end — once `start` is its running
+/// sum. No-op where `gen.task_lanes` is zero.
+void write_chunk_start(uint region, uint bucket, uint start, uint chunks)
+{
+    if (gen.task_lanes == 0)
+    {
+        return;
+    }
+    visible_instances[chunk_start_word(region, bucket)] = start;
+    if (bucket + 1 == gen.bucket_count)
+    {
+        visible_instances[chunk_start_word(region, gen.bucket_count)] = start + chunks;
+    }
+}
+
+/// **The flat task dispatches**: for each of `count` regions, `first_region` and
+/// then every `stride` after it, one `draw_mesh_tasks_indirect` structure per
+/// flat segment, its workgroup count the segment's chunks — the difference of
+/// the chunk starts at its two ends. `mesh_cluster.slang`'s `taskMain` finds
+/// its bucket among them by searching the same words.
+///
+/// A segment is a run of consecutive buckets one pipeline draws, laid down by
+/// the host at `gen.flat_segments_at`; an empty one, `first == end`, gets no
+/// workgroups. Called by every lane after the chunk starts of those regions are
+/// written, from uniform control flow: the barrier at its front is what makes
+/// the other lanes' starts visible. No-op past that barrier where
+/// `gen.task_lanes` is zero.
+void write_flat_args(uint lane, uint first_region, uint count, uint stride)
+{
+    AllMemoryBarrierWithGroupSync();
+    if (gen.task_lanes == 0 || lane >= count * FLAT_SEGMENTS)
+    {
+        return;
+    }
+    uint region = first_region + (lane / FLAT_SEGMENTS) * stride;
+    uint segment = lane % FLAT_SEGMENTS;
+    uint first = tables[gen.flat_segments_at + segment * 2];
+    uint end = tables[gen.flat_segments_at + segment * 2 + 1];
+    uint chunks = first < end
+        ? visible_instances[chunk_start_word(region, end)]
+            - visible_instances[chunk_start_word(region, first)]
+        : 0;
+    store_task_dispatch(flat_arg_word(region, segment, 0), chunks);
 }
 
 /// The second stage, the `draw-starts` pass: where every bucket's run starts
@@ -1367,6 +1503,13 @@ void write_task_extents(uint region, uint bucket, uint instances)
 /// so each y extent is a total rather than a counter still moving — which is
 /// the whole reason this is a pass of its own.
 ///
+/// **The task chunks are a second scan of the same slots**, for the flat
+/// dispatches: each slot's `task_chunks` over the region this pass closes, the
+/// chunk totals scanned the same way, and each bucket's running sum written at
+/// its `chunk_start_word` — then `write_flat_args` sizes the region's flat
+/// dispatches from them. Where `DrawGenParams::task_lanes` is zero every count
+/// is zero and nothing is written but the scan's own workgroup memory.
+///
 /// Every barrier below is reached by every invocation: the loop bounds are
 /// uniform and nothing returns early.
 [shader("compute")]
@@ -1380,34 +1523,34 @@ void startsMain(uint3 thread: SV_GroupThreadID)
     uint end = min(first + chunk, slots);
 
     uint total = 0;
+    // The task chunks the region this pass closes takes, slot by slot — the
+    // flat dispatches' work list, scanned beside the runs. Under occlusion
+    // that is the early region, whose count is final here; region 0 and the
+    // late region are `lateFinishMain`'s.
+    uint tasks = 0;
     for (uint slot = first; slot < end; ++slot)
     {
         total += starts_slot_runs(slot);
-    }
-
-    // An inclusive scan of the chunk totals, doubling the reach each round.
-    // Every lane reads before any lane writes, which is what the first barrier
-    // of each round is for.
-    starts_chunk_runs[lane] = total;
-    GroupMemoryBarrierWithGroupSync();
-    for (uint reach = 1; reach < STARTS_WORKGROUP_SIZE; reach <<= 1)
-    {
-        uint behind = lane >= reach ? starts_chunk_runs[lane - reach] : 0;
-        GroupMemoryBarrierWithGroupSync();
-        starts_chunk_runs[lane] += behind;
-        GroupMemoryBarrierWithGroupSync();
+        tasks += task_chunks(starts_slot_bucket(slot), starts_slot_chunk_instances(slot));
     }
 
     // Each face's runs end to end, face by face, in their own region of the
     // buffer: a survivor can reach several faces, so the faces together can hold
     // more than one capacity of runs. Every other mode starts at the run region.
     uint start = (gen.mode == DRAW_MODE_FACES ? gen.face_runs_at : runs_at())
-        + starts_chunk_runs[lane] - total;
+        + workgroup_exclusive_scan(lane, total);
+    uint task_start = workgroup_exclusive_scan(lane, tasks);
     for (uint slot = first; slot < end; ++slot)
     {
         uint region = starts_slot_region(slot);
         uint bucket = starts_slot_bucket(slot);
         uint runs = starts_slot_runs(slot);
+        // Read before `write_task_extents` below rewrites the extents it is
+        // counted from.
+        uint chunks = task_chunks(bucket, starts_slot_chunk_instances(slot));
+        write_chunk_start(
+            gen.mode == DRAW_MODE_OCCLUSION ? EARLY_REGION : region, bucket, task_start, chunks);
+        task_start += chunks;
         visible_instances[run_start_word(region, bucket)] = start;
         // `1` for a bucket with something in it; an empty one keeps the zero
         // the clearing pass wrote, which is what `IndirectCount`'s call reads.
@@ -1436,6 +1579,28 @@ void startsMain(uint3 thread: SV_GroupThreadID)
         }
         start += runs;
     }
+
+    // The regions closed above: every face under `DRAW_MODE_FACES`, the early
+    // one under occlusion, and region 0 otherwise. One call, with no branch
+    // around the barrier it holds.
+    bool faces = gen.mode == DRAW_MODE_FACES;
+    write_flat_args(lane,
+                    faces ? FACE_REGION_BASE : (gen.mode == DRAW_MODE_OCCLUSION ? EARLY_REGION : 0),
+                    faces ? FACE_COUNT : 1,
+                    1);
+}
+
+/// The instance count slot `slot`'s task chunks are counted from: its own y
+/// extent, or under occlusion its bucket's early one — the region `startsMain`
+/// closes. Read before `write_task_extents` rewrites either.
+uint starts_slot_chunk_instances(uint slot)
+{
+    if (gen.mode == DRAW_MODE_OCCLUSION)
+    {
+        return counts_and_mesh_args[mesh_arg_word(EARLY_REGION, starts_slot_bucket(slot),
+            MESH_ARG_GROUP_Y)].load();
+    }
+    return starts_slot_runs(slot);
 }
 
 /// The third stage, the `draw-scatter` pass: every routed survivor's instance
@@ -1520,32 +1685,62 @@ void lateScatterMain(uint3 thread: SV_DispatchThreadID)
 /// Closes the two phases: the late region's draw counts and extents, and region
 /// 0 — the forward pass's — as the early and late regions together.
 ///
-/// Each invocation owns one bucket. The graph dependency on the late scatter
-/// makes both phase counts complete before this pass reads them.
-/// Region 0's count and y extent are stored over every routed survivor,
-/// including the ones never drawn.
+/// **One workgroup of `STARTS_WORKGROUP_SIZE`**, each invocation owning a
+/// contiguous chunk of the buckets on `startsMain`'s terms, because both
+/// regions' task chunks are final only here and the flat dispatches need them
+/// scanned — which one workgroup does in workgroup memory and many cannot. The
+/// graph dependency on the late scatter makes both phase counts complete
+/// before this pass reads them. Region 0's count and y extent are stored over
+/// every routed survivor, including the ones never drawn.
+///
+/// Every barrier is reached by every invocation: the loop bounds are uniform
+/// and nothing returns early.
 [shader("compute")]
-[numthreads(64, 1, 1)]
-void lateFinishMain(uint3 thread: SV_DispatchThreadID)
+[numthreads(256, 1, 1)]
+void lateFinishMain(uint3 thread: SV_GroupThreadID)
 {
-    uint bucket = thread.x;
-    if (bucket >= gen.bucket_count)
+    uint lane = thread.x;
+    uint chunk = (gen.bucket_count + STARTS_WORKGROUP_SIZE - 1) / STARTS_WORKGROUP_SIZE;
+    uint first = min(lane * chunk, gen.bucket_count);
+    uint end = min(first + chunk, gen.bucket_count);
+
+    uint drawn_tasks = 0;
+    uint late_tasks = 0;
+    for (uint bucket = first; bucket < end; ++bucket)
     {
-        return;
+        uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        counts_and_mesh_args[mesh_arg_word(LATE_REGION, bucket, MESH_ARG_GROUP_Y)].store(late);
+        if (late != 0)
+        {
+            counts_and_mesh_args[count_word(LATE_REGION, bucket)].store(1);
+        }
+        uint drawn = early + late;
+        args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
+        counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
+        counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
+        // Both regions' instance counts are final only now, so their task
+        // extents are too — over the y extents just stored.
+        write_task_extents(LATE_REGION, bucket, late);
+        write_task_extents(0, bucket, drawn);
+        drawn_tasks += task_chunks(bucket, drawn);
+        late_tasks += task_chunks(bucket, late);
     }
-    uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
-    uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
-    counts_and_mesh_args[mesh_arg_word(LATE_REGION, bucket, MESH_ARG_GROUP_Y)].store(late);
-    if (late != 0)
+
+    // The two regions' chunk starts, each its own scan, from the instance
+    // counts stored above — which this invocation wrote and reads back.
+    uint drawn_start = workgroup_exclusive_scan(lane, drawn_tasks);
+    uint late_start = workgroup_exclusive_scan(lane, late_tasks);
+    for (uint bucket = first; bucket < end; ++bucket)
     {
-        counts_and_mesh_args[count_word(LATE_REGION, bucket)].store(1);
+        uint early = args[arg_word(EARLY_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        uint late = args[arg_word(LATE_REGION, bucket, ARG_INSTANCE_COUNT)].load();
+        uint drawn_chunks = task_chunks(bucket, early + late);
+        uint late_chunks = task_chunks(bucket, late);
+        write_chunk_start(0, bucket, drawn_start, drawn_chunks);
+        write_chunk_start(LATE_REGION, bucket, late_start, late_chunks);
+        drawn_start += drawn_chunks;
+        late_start += late_chunks;
     }
-    uint drawn = early + late;
-    args[arg_word(0, bucket, ARG_INSTANCE_COUNT)].store(drawn);
-    counts_and_mesh_args[mesh_arg_word(0, bucket, MESH_ARG_GROUP_Y)].store(drawn);
-    counts_and_mesh_args[count_word(0, bucket)].store(drawn != 0 ? 1 : 0);
-    // Both regions' instance counts are final only now, so their task extents
-    // are too — over the y extents just stored.
-    write_task_extents(LATE_REGION, bucket, late);
-    write_task_extents(0, bucket, drawn);
+    write_flat_args(lane, 0, 2, LATE_REGION);
 }

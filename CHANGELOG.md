@@ -16,6 +16,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::meshlet::ClusterDrawConstants` has `chunk_starts_at` and
+  `chunk_starts_end` fields**, the runs-buffer words the flat task call searches
+  between (see Changed), so a struct literal needs them, and
+  `CLUSTER_DRAW_CONSTANTS_SIZE` grows from 32 to 48 bytes.
+  `crcbl_shaders::draw_gen::Params` and `TableOffsets` have a `flat_segments_at`
+  field, where the flat segments start in the table buffer; it fills the uniform
+  block's tail padding, so `PARAMS_SIZE` is unchanged.
+  `crcbl_render::GeneratedDraws` has a `flat_args_offset` field. The runs buffer
+  grows by `DRAW_REGIONS × (buckets + 1)` words of chunk starts behind the
+  buckets' meshes, so `draw_gen::face_runs_at` moves that far in and
+  `runs_words` is that much larger; the counts-and-extents buffer grows by
+  `FLAT_SEGMENTS` dispatches a region behind every region. New:
+  `draw_gen::FLAT_SEGMENTS`, `flat_segment`, `flat_segments`, `chunk_start_word`
+  and `flat_args_word`; `meshlet::task_chunks`, `task_dispatch`, `chunk_starts`
+  and `chunk_bucket`; and `DrawGen::chunk_start_word` and `flat_args_offset`.
+
 - **`crcbl_shaders::draw_gen::Params` and `crcbl_render::DrawGenDesc` have a
   `task_lanes` field**, how many (cluster, instance slot) pairs one task
   workgroup decides: `crcbl_shaders::meshlet::TASK_LANES` for a generator whose
@@ -3468,6 +3484,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **Behind a task stage the mesh tail draws each pipeline partition with one
+  call.** A pass recorded one `draw_mesh_tasks_indirect` per bucket, or on a
+  device with a draw index one multi-draw per run of at least 32 buckets; it now
+  records one call of one structure per partition per pass per view, on any
+  device with a task stage, draw index or not. `draw_gen.slang`'s `startsMain`
+  and `lateFinishMain` scan each closed region's task chunks into per-bucket
+  chunk starts and size a dispatch per flat segment from them, and
+  `mesh_cluster.slang`'s `taskMain` finds each workgroup's bucket by a binary
+  search of those starts. `lateFinishMain` is now one workgroup of 256, like
+  `startsMain`. Measured with `mesh_e2e`'s `bucket_price.rs` on Vulkan, RX 7900
+  XTX, release, validation off, 17,219 instances at 1920x1080, three alternating
+  rounds, `depth-prepass` + `forward` + `shadow` GPU p50: 1.44 → 0.37 ms at 938
+  buckets in one material mode, 2.72 → 0.40 ms in two, and 0.37 → 0.35 ms at 4
+  buckets, every run length from 4 to 128 faster; `draw-starts` rose 0.027 →
+  0.052 ms at 938 buckets (0.054 → 0.103 ms in two modes) and `draw-late-finish`
+  0.001 → 0.003 ms on the occluders scene. Frames are unchanged. Devices without
+  a task stage keep their calls per bucket or per range.
 
 - **The mesh tail's task stage decides 32 pairs a workgroup.**
   `mesh_cluster.slang`'s `taskMain` was one invocation per (cluster, instance
