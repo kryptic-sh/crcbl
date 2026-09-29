@@ -119,7 +119,10 @@ migrates every caller and deletes its own copy in the same change.
   grid is the rung below it, not a replacement. Shipped 2026-09-27 as
   `crcbl::nav::grid`. **Declined: building the grid from a `PhysicsWorld`**
   (ground and clearance probes per cell). EW is its only user, and the probe
-  policy is scene-specific. Revisit when a second game needs it.
+  policy is scene-specific. Revisit when a second game needs it. **Possible
+  next, not requested (EW, 2026-09-29):** a per-cell toggle on `GroundGrid` for
+  dynamic obstacles. EW's game-side doors currently route as passable, and the
+  toggle waits on them proving out.
 - **Fixed-rate staggered sampling: accepted, into `crcbl-core`**, as
   `FixedRateSchedule`. EW's `PerceptionSchedule` is generic, so the name drops
   "perception". Shipped 2026-09-28 as
