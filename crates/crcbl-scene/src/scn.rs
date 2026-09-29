@@ -158,6 +158,45 @@ impl IdMap {
         id
     }
 
+    /// The id [`assign`](Self::assign) would hand out next: one past the highest
+    /// the map has ever held, so it names no row a chunk file spells and no
+    /// entity [`remove`](Self::remove)d from this map.
+    ///
+    /// What a command that creates an entity carries, so that undoing it and
+    /// redoing it brings the entity back under the same id rather than a new
+    /// one — a later command in a history still names it.
+    #[must_use]
+    pub const fn next_id(&self) -> SceneEntityId {
+        SceneEntityId(self.next)
+    }
+
+    /// Forgets `id`, handing back the entity it named.
+    ///
+    /// The id is **not** handed out again by [`assign`](Self::assign): the map's
+    /// high-water mark stays where it is, so a history that still names the id
+    /// cannot come to mean a different entity. [`restore`](Self::restore) is how
+    /// it comes back.
+    pub fn remove(&mut self, id: SceneEntityId) -> Option<Entity> {
+        let entity = self.to_entity.remove(&id)?;
+        self.to_id.remove(&entity);
+        Some(entity)
+    }
+
+    /// Files `entity` under `id`, which a [`remove`](Self::remove) freed or
+    /// [`next_id`](Self::next_id) named — the undo of a delete, and the redo of
+    /// a spawn.
+    ///
+    /// Returns `false` and changes nothing if `id` names an entity already or
+    /// `entity` already has an id: either would drop one of the two out of the
+    /// map, and it would come back as a save that lost a row.
+    #[must_use]
+    pub fn restore(&mut self, id: SceneEntityId, entity: Entity) -> bool {
+        if self.to_id.contains_key(&entity) {
+            return false;
+        }
+        self.bind("", id, entity).is_ok()
+    }
+
     /// How many entities the scene named.
     #[must_use]
     pub fn len(&self) -> usize {
@@ -291,6 +330,30 @@ pub trait SystemChunk: fmt::Debug {
     /// never given a [`SceneEntityId`], or if the component's own `Serialize`
     /// fails.
     fn write(&self, world: &mut World, ids: &IdMap) -> Result<String, ScnError>;
+
+    /// `entity`'s component in this system as one row's text — the component
+    /// alone, in RON, without the id or the chunk around it — or [`None`] if
+    /// this system does not hold `entity`.
+    ///
+    /// What an edit that removes or copies an entity carries: a value that can
+    /// be recorded, sent or pasted, and given back to
+    /// [`attach_row`](Self::attach_row) to rebuild the same component.
+    ///
+    /// # Errors
+    ///
+    /// [`ScnError::NoSystem`] if the world holds no such system, or
+    /// [`ScnError::Write`] if the component's own `Serialize` fails.
+    fn row(&self, world: &mut World, entity: Entity) -> Result<Option<String>, ScnError>;
+
+    /// Attaches the component `text` spells — one [`row`](Self::row)'s text — to
+    /// `entity` in this system.
+    ///
+    /// # Errors
+    ///
+    /// [`ScnError::Parse`], keyed by the system's name, if the text is not this
+    /// system's component, or [`ScnError::NoSystem`] if the world holds no such
+    /// system. Nothing is attached when it refuses.
+    fn attach_row(&self, world: &mut World, entity: Entity, text: &str) -> Result<(), ScnError>;
 }
 
 /// The codec for a `System<T>` registered under `name`.
@@ -415,6 +478,25 @@ where
             system: name,
             message: error.to_string(),
         })
+    }
+
+    fn row(&self, world: &mut World, entity: Entity) -> Result<Option<String>, ScnError> {
+        let system = system_named::<T>(world, &self.name)?;
+        let Some(data) = system.get(entity) else {
+            return Ok(None);
+        };
+        ron::to_string(data)
+            .map(Some)
+            .map_err(|error| ScnError::Write {
+                system: self.name.clone(),
+                message: error.to_string(),
+            })
+    }
+
+    fn attach_row(&self, world: &mut World, entity: Entity, text: &str) -> Result<(), ScnError> {
+        let data: T = ron::from_str(text).map_err(|error| ScnError::parse(&self.name, &error))?;
+        system_named::<T>(world, &self.name)?.attach(entity, data);
+        Ok(())
     }
 }
 
@@ -1140,5 +1222,100 @@ mod tests {
         let text = format!("{:?}", chunk_of::<Mark>("marks"));
         assert!(text.contains("marks"), "{text}");
         assert!(text.contains("Mark"), "{text}");
+    }
+
+    /// **A removed id comes back under the same id, and is never handed out in
+    /// between** — the property an undone delete needs, since a later command
+    /// in the history still names it.
+    #[test]
+    fn a_removed_id_is_restored_and_never_reassigned() {
+        let (_, mut ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+        let first = ids.entity(SceneEntityId(0)).expect("the file's one row");
+        assert_eq!(ids.next_id(), SceneEntityId(1));
+
+        assert_eq!(ids.remove(SceneEntityId(0)), Some(first));
+        assert_eq!(ids.entity(SceneEntityId(0)), None);
+        assert_eq!(ids.id(first), None);
+        assert_eq!(ids.remove(SceneEntityId(0)), None, "already gone");
+
+        let other = world.spawn();
+        assert_eq!(
+            ids.assign(other),
+            SceneEntityId(1),
+            "a removed id is not handed out again",
+        );
+        assert!(
+            !ids.restore(SceneEntityId(1), first),
+            "an id in use is not taken over",
+        );
+        assert!(
+            !ids.restore(SceneEntityId(0), other),
+            "an entity with an id is not filed twice",
+        );
+        assert!(ids.restore(SceneEntityId(0), first));
+        assert_eq!(ids.entity(SceneEntityId(0)), Some(first));
+        assert_eq!(ids.id(first), Some(SceneEntityId(0)));
+        assert_eq!(ids.len(), 2);
+    }
+
+    /// Restoring an id past the high-water mark raises it, so the next
+    /// [`IdMap::assign`] does not hand the same id out twice.
+    #[test]
+    fn restoring_the_next_id_moves_the_mark_past_it() {
+        let mut world = World::new();
+        let mut ids = IdMap::new();
+        let next = ids.next_id();
+        let spawned = world.spawn();
+        assert!(ids.restore(next, spawned));
+        assert_ne!(ids.assign(world.spawn()), next);
+    }
+
+    /// **A row round-trips one component exactly**, which is what a deleted
+    /// entity's undo is rebuilt from.
+    #[test]
+    fn a_row_attaches_back_as_the_component_it_was_read_from() {
+        let (_, ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+        let codec = chunk_of::<Mark>("marks");
+        let first = ids.entity(SceneEntityId(0)).expect("the file's one row");
+        let row = codec
+            .row(&mut world, first)
+            .expect("the system is registered")
+            .expect("the system holds the file's row");
+
+        let copy = world.spawn();
+        codec
+            .attach_row(&mut world, copy, &row)
+            .expect("a row reads back");
+        let system = world.system_mut::<System<Mark>>().expect("registered");
+        assert_eq!(system.get(copy), system.get(first));
+        assert_eq!(
+            system.get(copy).map(|mark| mark.label.as_str()),
+            Some("first"),
+        );
+
+        let stranger = world.spawn();
+        assert_eq!(
+            codec.row(&mut world, stranger).expect("registered"),
+            None,
+            "an entity the system does not hold has no row",
+        );
+    }
+
+    /// Text that is not the component is refused by the system's name, and
+    /// nothing is attached.
+    #[test]
+    fn a_row_that_is_not_the_component_is_refused_and_attaches_nothing() {
+        let mut world = world_with_marks();
+        let codec = chunk_of::<Mark>("marks");
+        let entity = world.spawn();
+        let error = codec
+            .attach_row(&mut world, entity, "Mark(position: (1.0, 2.0, 3.0))")
+            .expect_err("a mark has a label");
+        assert!(
+            matches!(&error, ScnError::Parse { key, .. } if key == "marks"),
+            "{error}",
+        );
+        let system = world.system_mut::<System<Mark>>().expect("registered");
+        assert!(system.get(entity).is_none());
     }
 }

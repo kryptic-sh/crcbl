@@ -629,10 +629,28 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.frame_scene();
                 Ok(())
             }
+            Action::Delete => self.on_selection(|document, id| document.delete(id)),
+            Action::Duplicate => self.on_selection(|document, id| {
+                let copy = document.duplicate(id)?;
+                document.select(Some(copy));
+                Ok(())
+            }),
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
         }
+    }
+
+    /// Runs `edit` on the selected entity, or says nothing is selected.
+    fn on_selection(
+        &mut self,
+        edit: impl FnOnce(&mut Document, SceneEntityId) -> Result<(), EditError>,
+    ) -> Result<(), EditError> {
+        let Some(id) = self.document.selected() else {
+            crcbl::log::info!("editor: nothing is selected");
+            return Ok(());
+        };
+        edit(&mut self.document, id)
     }
 
     /// Builds and applies the [`EditCommand`] one arrow key means.
@@ -1136,6 +1154,35 @@ mod tests {
 
         editor.act(&Action::Undo);
         assert!(!editor.document().is_dirty());
+        editor.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **Delete and duplicate reach the document through the loop, and a frame
+    /// draws whatever the scene now holds** — one entity fewer, then a copy
+    /// selected in its place, and back again on undo.
+    #[test]
+    fn delete_and_duplicate_through_the_loop_change_what_a_frame_draws() {
+        let mut editor = Editor::start(&options(8)).expect("headless starts");
+        let count = editor.document().entity_count();
+        editor.document_mut().select(Some(SceneEntityId(2)));
+
+        editor.act(&Action::Delete);
+        assert_eq!(editor.document().entity_count(), count - 1);
+        assert_eq!(editor.document().selected(), None);
+        assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+
+        editor.act(&Action::Undo);
+        editor.document_mut().select(Some(SceneEntityId(2)));
+        editor.act(&Action::Duplicate);
+        assert_eq!(editor.document().entity_count(), count + 1);
+        let copy = editor.document().selected().expect("the copy is selected");
+        assert_ne!(copy, SceneEntityId(2));
+        assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+
+        editor.act(&Action::Undo);
+        assert_eq!(editor.document().entity_count(), count);
+        assert!(!editor.document().is_dirty());
+        assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
         editor.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

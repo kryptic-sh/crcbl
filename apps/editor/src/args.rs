@@ -99,7 +99,9 @@ EDITING:
                          (up/down), or walk the rows once a panel has the
                          keyboard
     Page Up / Page Down  Nudge the selection along Z
-    Ctrl+Z / Ctrl+Y      Undo and redo. Ctrl+Shift+Z redoes too
+    Delete               Remove the selection from the scene
+    Ctrl+D               Duplicate the selection in place, and select the copy
+    Ctrl+Z / Ctrl+Y     Undo and redo. Ctrl+Shift+Z redoes too
     Ctrl+S               Save the scene back over the directory it came from
 
     A click in the viewport takes the keyboard back from the panels, and none

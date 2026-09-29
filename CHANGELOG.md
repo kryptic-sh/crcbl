@@ -16,6 +16,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl::scene::scn::SystemChunk` has two more required methods**, `row` and
+  `attach_row`, which read one entity's component as a row's RON text and attach
+  one back (see Added). `chunk_of` implements both, so only a hand-written
+  `SystemChunk` needs them.
+
 - **`crcbl_ui::DrawCommand` has a `Texture` variant and
   `crcbl_ui::draw_list::Primitive` a `Texture` one**, so an exhaustive `match`
   on either needs an arm; `Primitive::ALL` is `[Primitive; 6]`.
@@ -391,6 +396,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **The editor deletes and duplicates entities, undoably.** Delete removes the
+  selection and Ctrl+D copies it in place and selects the copy; undo brings a
+  deleted entity back under the id it had, so later history still finds it.
+  `apps/editor`'s `EditCommand` has `Spawn` and `Delete` variants, and
+  `Document::delete` and `Document::duplicate` build them. Underneath:
+  `scn::IdMap::next_id`, `remove` and `restore` (a removed id is never handed
+  out again); `SystemChunk::row` and `attach_row`; and
+  `crcbl::registry::Registry::codec` and `system_of`, which resolve an entity to
+  the system holding it.
 
 - **A UI rectangle can draw a texture the renderer drew**, such as a second
   camera's view: picture-in-picture, a render-to-texture panel, the editor's

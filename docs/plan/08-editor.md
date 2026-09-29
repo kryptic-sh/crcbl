@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slice 4 2026-09-30, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 and 5 2026-09-30, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -99,6 +99,31 @@ full-window draw under a hole in the panels is gone.
 - **Not verified here**: the rebuilt `ui` shader on Metal, D3D12 and a browser.
   Its SPIR-V and WGSL were rebuilt locally; the MSL and DXIL come from CI's
   regenerated shaders, and nothing but CI has run them.
+
+**Slice 5, task 4's entity commands, landed 2026-09-30.** `EditCommand` gained
+`Spawn` and `Delete`, each the other's inverse, and a duplicate is a spawn:
+
+- **A spawn carries the id and the row.** The row is the component as one chunk
+  row's RON text, read by `SystemChunk::row` and rebuilt by `attach_row`, so a
+  command stays a value that could be sent or pasted. An undone delete files a
+  new entity under its **old** `SceneEntityId` (`IdMap::remove` and `restore`),
+  so a later command in the history that names it still finds it; `IdMap` never
+  hands a removed id out again. A duplicate is a spawn of the original's row
+  under `IdMap::next_id`, so its undo is the spawn's own inverse.
+- **A spawn the scene cannot hold is refused before anything is attached**: an
+  id in use, a system the manifest does not list (a save would drop it), or a
+  row that is not the system's component.
+- **Delete and Ctrl+D** act on the selection; the copy is selected.
+- **The property test** plays `entity_tests::HISTORIES` seeded random histories
+  of nudges, duplicates and deletes and walks each back and forward again,
+  comparing the saved scene text at every step. Not `World::hash_state`: it
+  hashes `Entity` bits, which a restored entity changes (the backlog records the
+  decision). Restoring under a new id, skipping the sweep on delete, and
+  skipping the collider on spawn each turned it or its neighbours red.
+- **Still owed from task 4's list**: rename (no entity names), attach and detach
+  (one entity in two systems), and load/save markers (nothing for them to mean
+  while a load replaces the log). The backlog's editor entry says what each
+  waits on.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -195,7 +220,7 @@ than the rest of this document suggests; each line was checked in the source.
 6. **The scene format cannot hold one entity in two systems**: each chunk row
    spawns its own entity, so the same id in two chunk files is a duplicate-id
    error. The "attach/detach system data" command needs that first. `IdMap` has
-   no removal, and there is no dirty tracking or per-chunk reload.
+   a removal since 2026-09-30; there is no dirty tracking or per-chunk reload.
 7. **Debug draw is not a gizmo layer**: lines only, depth-tested, off by default
    — no on-top mode, no filled handles, no constant screen size.
 8. **No screen-to-ray helper**, and only collider-bearing entities pick.
@@ -217,9 +242,9 @@ than the rest of this document suggests; each line was checked in the source.
 > **Re-checked 2026-09-25: slices 1 to 3 closed four of those lines.** Item 5's
 > editor panel is drawn (slice 3's inspector), item 8's helper is
 > `Camera::ray_through`, item 9's command log is `apps/editor`'s `EditCommand`
-> and `UndoLog` (in-process, one variant), and item 11 was already marked built.
-> The other nine still hold as written, except that the viewport's renderer half
-> now exists (see _Status_, above).
+> and `UndoLog` (in-process; property, spawn and delete since 2026-09-30), and
+> item 11 was already marked built. The other nine still hold as written, except
+> that the viewport's renderer half now exists (see _Status_, above).
 
 **The missing pieces, ranked, with owner and rough size**: the UI foundation
 (large, `crcbl-ui` and the UI pass); a viewport pane that samples a rendered

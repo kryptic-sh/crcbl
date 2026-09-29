@@ -295,6 +295,24 @@ impl Registry {
             .collect()
     }
 
+    /// The codec of the one system called `system`, or [`None`] for a name this
+    /// registry does not know.
+    ///
+    /// What an edit that removes, copies or rebuilds one entity reads and writes
+    /// its row through — [`SystemChunk::row`] and [`SystemChunk::attach_row`].
+    #[must_use]
+    pub fn codec(&self, system: &str) -> Option<Box<dyn SystemChunk>> {
+        self.entries.get(system).map(|entry| (entry.codec)(system))
+    }
+
+    /// The name of the registered system holding `entity`, or [`None`] for an
+    /// entity none of them holds — the first in name order, for
+    /// [`component`](Self::component)'s reason.
+    #[must_use]
+    pub fn system_of(&self, world: &mut World, entity: Entity) -> Option<String> {
+        self.holder(world, entity).map(|(system, _)| system)
+    }
+
     /// Registers one [`System<T>`](crcbl_ecs::System) per registered component,
     /// under the name its chunk file is spelled with.
     ///
@@ -484,7 +502,7 @@ mod tests {
 
     use crcbl_assets::MemorySource;
     use crcbl_reflect::{Value, get_path};
-    use crcbl_scene::scn::{Scene, ScnError};
+    use crcbl_scene::scn::{Scene, SceneEntityId, ScnError};
     use serde::Deserialize;
 
     use super::*;
@@ -625,6 +643,45 @@ mod tests {
             registry.entities(&mut world, &ids, "bricks").is_empty(),
             "a name this registry does not know holds nothing",
         );
+    }
+
+    /// **An entity resolves to the system holding it, and that system's codec
+    /// reads its row** — what a delete records so its undo can rebuild the
+    /// entity.
+    #[test]
+    fn an_entity_resolves_to_its_system_and_that_systems_row() {
+        let registry = registry();
+        let mut world = World::new();
+        registry.register_systems(&mut world);
+        let (_, ids) = Scene::load(
+            &scene_source(),
+            std::path::Path::new(""),
+            &registry.codecs(),
+            &mut world,
+        )
+        .expect("the scene loads");
+
+        let block = ids.entity(SceneEntityId(1)).expect("the second block");
+        let beacon = ids.entity(SceneEntityId(2)).expect("the beacon");
+        assert_eq!(
+            registry.system_of(&mut world, block).as_deref(),
+            Some("blocks")
+        );
+        assert_eq!(
+            registry.system_of(&mut world, beacon).as_deref(),
+            Some("beacons")
+        );
+        let stranger = world.spawn();
+        assert_eq!(registry.system_of(&mut world, stranger), None);
+
+        let row = registry
+            .codec("beacons")
+            .expect("beacons is registered")
+            .row(&mut world, beacon)
+            .expect("the system is in the world")
+            .expect("it holds the beacon");
+        assert_eq!(row, "(intensity:3.0)");
+        assert!(registry.codec("bricks").is_none());
     }
 
     /// **An unregistered system fails loudly, naming itself.** The failure this

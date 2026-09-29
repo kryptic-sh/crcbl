@@ -20,13 +20,13 @@
 //! A command names **the entity, the dotted path and the new value** — exactly
 //! what [`crcbl::reflect::set_path`] takes, which is why that crate's
 //! [`Value`] is the payload rather than a second one declared here. Applying a
-//! command reads the leaf first and hands back the command that puts it back:
+//! property reads the leaf first and hands back the command that puts it back:
 //! an inverse is produced, never derived later from a rule that could be wrong.
 //!
 //! ```
 //! use crcbl::reflect::{Reflect, Value};
 //! use crcbl::scene::scn::SceneEntityId;
-//! use crcbl_editor::command::EditCommand;
+//! use crcbl_editor::command::{EditCommand, set_property};
 //!
 //! #[derive(Reflect)]
 //! #[reflect(crate = "crcbl::reflect")]
@@ -35,28 +35,43 @@
 //! }
 //!
 //! let mut brick = Brick { position: [1.0, 2.0, 3.0] };
-//! let set = EditCommand::SetProperty {
-//!     entity: SceneEntityId(7),
-//!     path: "position.1".to_owned(),
-//!     value: Value::Float(9.0),
-//! };
-//!
-//! let inverse = set.apply(&mut brick).expect("a brick has a y");
+//! let inverse = set_property(&mut brick, SceneEntityId(7), "position.1", &Value::Float(9.0))
+//!     .expect("a brick has a y");
 //! assert_eq!(brick.position, [1.0, 9.0, 3.0]);
-//! inverse.apply(&mut brick).expect("and it still has one");
+//! let EditCommand::SetProperty { entity, path, value } = inverse else {
+//!     unreachable!("a property's inverse is a property");
+//! };
+//! set_property(&mut brick, entity, &path, &value).expect("and it still has one");
 //! assert_eq!(brick.position, [1.0, 2.0, 3.0]);
 //! ```
 //!
-//! # What slice 1 does not have
+//! # Creating and removing entities
 //!
-//! One variant, because one variant is what this slice issues. The plan's task
-//! 4 lists about ten for the MVP — spawn, delete, duplicate, rename,
-//! attach/detach system data, scene load/save markers — and each of them needs
-//! something the tree does not have yet: `IdMap` has no removal, the scene
-//! format cannot hold one entity in two systems, and an entity has no name to
-//! rename. Adding an arm that no key press produces would be an inverse nothing
-//! could show was right, which is the failure mode the plan's own property test
-//! exists to catch.
+//! [`Spawn`](EditCommand::Spawn) and [`Delete`](EditCommand::Delete) are each
+//! other's inverse, and a spawn carries **the id and the row** — the entity's
+//! component as one chunk row's RON text, which
+//! [`crcbl::scene::scn::SystemChunk::row`] reads and `attach_row` rebuilds. So
+//! undoing a delete brings the entity back under the id it had, and a later
+//! command in the history that names it still finds it. A **duplicate** is not
+//! a third variant: it is a spawn whose row was read off the original and whose
+//! id is the next one the document would hand out
+//! ([`crate::Document::duplicate`]).
+//!
+//! # What task 4 does not have yet
+//!
+//! The plan's task 4 lists about ten commands for the MVP. Three of them wait on
+//! something outside this crate, and an arm nothing could apply would be an
+//! inverse nothing could show was right:
+//!
+//! * **rename** — an entity has no name: the scene format files it under a bare
+//!   [`SceneEntityId`] and a component has no name field in common.
+//! * **attach and detach system data** — the format cannot hold one entity in
+//!   two systems, which is decided when the towers port first needs it
+//!   (`docs/plan/08-editor.md`, 2026-09-30).
+//! * **scene load and save markers** — the log's position against the position
+//!   of the last save already is the dirty marker, and a load replaces the
+//!   document and its log wholesale, so there is nothing in between for a
+//!   marker entry to mean yet.
 //!
 //! A **transform** command is not a second variant either, and that is not an
 //! omission: a brick's placement *is* `position`, a field its `#[derive(Reflect)]`
@@ -88,6 +103,24 @@ pub enum EditCommand {
         /// What the leaf is being set to.
         value: Value,
     },
+
+    /// Create `entity` in `system`, holding the component `row` spells.
+    Spawn {
+        /// The id the entity is filed under: one no entity holds, which is
+        /// [`crcbl::scene::scn::IdMap::next_id`] for a new one and the id it had
+        /// for one a delete removed.
+        entity: SceneEntityId,
+        /// The scene system whose chunk file it is written into.
+        system: String,
+        /// Its component, as one chunk row's RON text.
+        row: String,
+    },
+
+    /// Remove `entity` from the scene, component and all.
+    Delete {
+        /// Whose.
+        entity: SceneEntityId,
+    },
 }
 
 impl EditCommand {
@@ -95,41 +128,41 @@ impl EditCommand {
     #[must_use]
     pub const fn entity(&self) -> SceneEntityId {
         match self {
-            Self::SetProperty { entity, .. } => *entity,
+            Self::SetProperty { entity, .. }
+            | Self::Spawn { entity, .. }
+            | Self::Delete { entity } => *entity,
         }
     }
+}
 
-    /// Applies this command to `component` — the entity's component, which the
-    /// caller has already resolved — and hands back the command that undoes it.
-    ///
-    /// The inverse carries **the value that was replaced**, read out of the
-    /// component immediately before the write. So an undo restores the bits
-    /// that were there rather than a value computed from the command, which is
-    /// what makes a round trip byte-for-byte on floats.
-    ///
-    /// # Errors
-    ///
-    /// [`PathError`] if the path names nothing in this component, stops at
-    /// something that is not a leaf, or reaches a leaf that refuses the value.
-    /// Nothing is written when it does — [`get_path`] runs first, and
-    /// [`crcbl::reflect::Reflect::set`] leaves a refused leaf untouched.
-    pub fn apply(&self, component: &mut dyn Reflect) -> Result<Self, PathError> {
-        match self {
-            Self::SetProperty {
-                entity,
-                path,
-                value,
-            } => {
-                let replaced = get_path(component, path)?;
-                set_path(component, path, value)?;
-                Ok(Self::SetProperty {
-                    entity: *entity,
-                    path: path.clone(),
-                    value: replaced,
-                })
-            }
-        }
-    }
+/// Writes `value` into the leaf `path` names inside `component` — `entity`'s
+/// component, which the caller has already resolved — and hands back the
+/// [`EditCommand::SetProperty`] that undoes it.
+///
+/// The inverse carries **the value that was replaced**, read out of the
+/// component immediately before the write. So an undo restores the bits that
+/// were there rather than a value computed from the command, which is what
+/// makes a round trip byte-for-byte on floats.
+///
+/// # Errors
+///
+/// [`PathError`] if the path names nothing in this component, stops at
+/// something that is not a leaf, or reaches a leaf that refuses the value.
+/// Nothing is written when it does — [`get_path`] runs first, and
+/// [`crcbl::reflect::Reflect::set`] leaves a refused leaf untouched.
+pub fn set_property(
+    component: &mut dyn Reflect,
+    entity: SceneEntityId,
+    path: &str,
+    value: &Value,
+) -> Result<EditCommand, PathError> {
+    let replaced = get_path(component, path)?;
+    set_path(component, path, value)?;
+    Ok(EditCommand::SetProperty {
+        entity,
+        path: path.to_owned(),
+        value: replaced,
+    })
 }
 
 /// The document's history: what was done, what puts each one back, and where in
@@ -261,6 +294,26 @@ mod tests {
         }
     }
 
+    /// A property command applied through [`set_property`], so the tests below
+    /// read as "apply this command" — which is what the log's entries are.
+    trait Apply {
+        fn apply(&self, component: &mut dyn Reflect) -> Result<EditCommand, PathError>;
+    }
+
+    impl Apply for EditCommand {
+        fn apply(&self, component: &mut dyn Reflect) -> Result<EditCommand, PathError> {
+            let EditCommand::SetProperty {
+                entity,
+                path,
+                value,
+            } = self
+            else {
+                panic!("this module's tests apply property commands only: {self:?}");
+            };
+            set_property(component, *entity, path, value)
+        }
+    }
+
     /// **A command moves exactly the field its path names**, and nothing else.
     ///
     /// The assertion is on the *whole* component rather than on the one field:
@@ -357,6 +410,7 @@ mod tests {
             log.applied()
                 .map(|command| match command {
                     EditCommand::SetProperty { value, .. } => value.clone(),
+                    other => panic!("only properties were recorded: {other:?}"),
                 })
                 .collect::<Vec<_>>(),
             vec![Value::Float(1.0), Value::Float(2.0), Value::Float(3.0)],

@@ -40,7 +40,7 @@ use crcbl::render::ViewRay;
 use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
-use crate::command::{EditCommand, UndoLog};
+use crate::command::{EditCommand, UndoLog, set_property};
 
 /// A loaded scene and everything the editor knows about it.
 #[derive(Debug)]
@@ -91,6 +91,19 @@ pub enum EditError {
     /// a leaf a value it refused.
     Path(PathError),
 
+    /// A spawn named an id an entity already holds.
+    ///
+    /// Filing a second entity under it would drop one of the two out of the
+    /// scene's id map, and it would come back as a save that lost a row.
+    IdInUse(SceneEntityId),
+
+    /// A spawn named a system this scene's manifest does not list, or one the
+    /// document's vocabulary cannot read a row of.
+    ///
+    /// Refused rather than attached: a save writes the manifest's chunks and no
+    /// others, so the entity would be dropped by the next one.
+    NoSystem(String),
+
     /// A file would not be written.
     Write {
         /// The scene-relative key that failed.
@@ -110,6 +123,10 @@ impl fmt::Display for EditError {
             Self::Scene(error) => write!(f, "{error}"),
             Self::NoEntity(id) => write!(f, "the scene holds no entity {id}"),
             Self::Path(error) => write!(f, "{error}"),
+            Self::IdInUse(id) => write!(f, "the scene already holds an entity {id}"),
+            Self::NoSystem(system) => {
+                write!(f, "the scene has no system `{system}` to put an entity in")
+            }
             Self::Write { key, source } => write!(f, "writing `{key}`: {source}"),
             Self::NoOrigin => f.write_str(
                 "this document was not opened from a directory, so there is nowhere to save \
@@ -417,11 +434,44 @@ impl Document {
     /// [`EditError::Path`] carrying the component's own refusal — in which case
     /// nothing was written and nothing was recorded.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
-        let id = command.entity();
-        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        let undo = self.apply_to(entity, &command)?;
+        let undo = self.perform(&command)?;
         self.log.record(command, undo);
         Ok(())
+    }
+
+    /// Removes `id` from the scene, as an [`EditCommand::Delete`] — so an undo
+    /// brings it back under the same id, component and all.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoEntity`] for an id this document does not hold, in which
+    /// case nothing is recorded.
+    pub fn delete(&mut self, id: SceneEntityId) -> Result<(), EditError> {
+        self.apply(EditCommand::Delete { entity: id })
+    }
+
+    /// Copies `id` into a new entity of the same system, and returns the new
+    /// entity's id.
+    ///
+    /// An [`EditCommand::Spawn`] of the original's row under the next id the
+    /// document would hand out, so the copy is the original's component to the
+    /// bit and its undo is the spawn's own inverse — there is no duplicate
+    /// variant whose inverse could be wrong on its own. The copy stands where
+    /// the original does, which is what a caller moving it next expects.
+    ///
+    /// # Errors
+    ///
+    /// [`EditError::NoEntity`] for an id this document does not hold, or
+    /// [`EditError::Scene`] if the component would not serialise.
+    pub fn duplicate(&mut self, id: SceneEntityId) -> Result<SceneEntityId, EditError> {
+        let (system, row) = self.row(id)?;
+        let copy = self.ids.next_id();
+        self.apply(EditCommand::Spawn {
+            entity: copy,
+            system,
+            row,
+        })?;
+        Ok(copy)
     }
 
     /// Steps back over the most recent applied command.
@@ -432,10 +482,10 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError`] if the entity the entry names has gone away, which in this
-    /// slice cannot happen — nothing despawns — and which is still an error
-    /// rather than a panic because a later slice's delete command will make it
-    /// possible.
+    /// [`EditError`] if the entity the entry names is not where the log left
+    /// it. Every edit goes through the log, so that is a document whose history
+    /// was walked out of order — a condition a caller can report rather than a
+    /// panic.
     pub fn undo(&mut self) -> Result<bool, EditError> {
         let Some(command) = self.log.undo() else {
             return Ok(false);
@@ -543,29 +593,113 @@ impl Document {
         self.save_to(dir)
     }
 
-    /// Applies `command` to the component of the entity it names, without
-    /// touching the log — the body [`apply`](Self::apply) and
+    /// Performs `command` without touching the log, and hands back the command
+    /// that undoes it — the body [`apply`](Self::apply) and
     /// [`replay`](Self::replay) share.
-    fn apply_to(
+    fn perform(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
+        match command {
+            EditCommand::SetProperty {
+                entity: id,
+                path,
+                value,
+            } => {
+                let entity = self.ids.entity(*id).ok_or(EditError::NoEntity(*id))?;
+                let component = self
+                    .registry
+                    .component(&mut self.world, entity)
+                    .ok_or(EditError::NoEntity(*id))?;
+                let undo = set_property(component, *id, path, value)?;
+                sync_colliders(&self.registry, &mut self.world, [entity]);
+                Ok(undo)
+            }
+            EditCommand::Spawn {
+                entity: id,
+                system,
+                row,
+            } => self.spawn(*id, system, row),
+            EditCommand::Delete { entity: id } => self.remove(*id),
+        }
+    }
+
+    /// Creates `id` in `system` from `row`, and hands back the delete that
+    /// undoes it.
+    fn spawn(
         &mut self,
-        entity: Entity,
-        command: &EditCommand,
+        id: SceneEntityId,
+        system: &str,
+        row: &str,
     ) -> Result<EditCommand, EditError> {
-        let component = self
-            .registry
-            .component(&mut self.world, entity)
-            .ok_or_else(|| EditError::NoEntity(command.entity()))?;
-        let undo = command.apply(component)?;
+        if self.ids.entity(id).is_some() {
+            return Err(EditError::IdInUse(id));
+        }
+        let codec = self
+            .scene
+            .systems()
+            .iter()
+            .any(|listed| listed == system)
+            .then(|| self.registry.codec(system))
+            .flatten()
+            .ok_or_else(|| EditError::NoSystem(system.to_owned()))?;
+        let entity = self.world.spawn();
+        if let Err(error) = codec.attach_row(&mut self.world, entity, row) {
+            self.world.despawn(entity);
+            self.world.sweep();
+            return Err(error.into());
+        }
+        // The id was free a moment ago and the entity is this call's own, so
+        // both halves of the map are empty for them.
+        assert!(
+            self.ids.restore(id, entity),
+            "a fresh entity under a free id is always filed",
+        );
         sync_colliders(&self.registry, &mut self.world, [entity]);
-        Ok(undo)
+        Ok(EditCommand::Delete { entity: id })
+    }
+
+    /// Removes `id` from the scene, and hands back the spawn that undoes it: the
+    /// same id, the same system, and the component's row read immediately
+    /// before it went.
+    fn remove(&mut self, id: SceneEntityId) -> Result<EditCommand, EditError> {
+        let (system, row) = self.row(id)?;
+        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
+        self.world.despawn(entity);
+        // Swept now rather than at the end of a tick, because nothing here
+        // ticks: a despawned entity stays in every system until a sweep, drawn,
+        // picked and saved.
+        self.world.sweep();
+        self.ids.remove(id);
+        if self.selected == Some(id) {
+            self.selected = None;
+        }
+        Ok(EditCommand::Spawn {
+            entity: id,
+            system,
+            row,
+        })
+    }
+
+    /// The system holding `id` and its component as one row's text — what a
+    /// delete's undo and a duplicate are both built from.
+    fn row(&mut self, id: SceneEntityId) -> Result<(String, String), EditError> {
+        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
+        let system = self
+            .registry
+            .system_of(&mut self.world, entity)
+            .ok_or(EditError::NoEntity(id))?;
+        let codec = self
+            .registry
+            .codec(&system)
+            .ok_or_else(|| EditError::NoSystem(system.clone()))?;
+        let row = codec
+            .row(&mut self.world, entity)?
+            .ok_or(EditError::NoEntity(id))?;
+        Ok((system, row))
     }
 
     /// Applies a command the log handed back, discarding the inverse: the entry
     /// it came from is already holding the other half.
     fn replay(&mut self, command: &EditCommand) -> Result<(), EditError> {
-        let id = command.entity();
-        let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
-        self.apply_to(entity, command)?;
+        self.perform(command)?;
         Ok(())
     }
 }
@@ -635,6 +769,9 @@ fn narrow(value: DVec3) -> Vec3 {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod entity_tests;
 
 #[cfg(test)]
 mod tests {

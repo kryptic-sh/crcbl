@@ -1995,11 +1995,11 @@ move it ahead of the shipping Vulkan and WebGPU paths.
   from its ordered `VecDeque` front; it does not scan or shift the entire queue.
 - Reflection's `path::resolve` and `resolve_mut` iterate borrowed path segments;
   scalar reads return values directly, while `Reflect for String::get` owns a
-  clone and its setter uses `clone_from`. Editor `EditCommand::apply` reads the
-  replaced leaf and owns the inverse path for later undo, which is edit-driven
-  work rather than proof of an idle-frame allocation. Preserve exact undo
-  payloads and refusal semantics; do not prioritize borrowed reflection values
-  without measuring visible text properties or actual command throughput.
+  clone and its setter uses `clone_from`. Editor `command::set_property` reads
+  the replaced leaf and owns the inverse path for later undo, which is
+  edit-driven work rather than proof of an idle-frame allocation. Preserve exact
+  undo payloads and refusal semantics; do not prioritize borrowed reflection
+  values without measuring visible text properties or actual command throughput.
   Inspected path resolution, scalar/string implementations, command application
   and document reads. Derive expansion's `field_slice` emits constant field
   descriptions and enum access uses generated matches; its vector construction
@@ -11325,8 +11325,9 @@ _`crcbl save list|dump|diff|restore`_, _Golden audio buffers per sample, and
 **What it waits on**: the editor's server command handling —
 `ClientToServer::Command` is matched and dropped by `crcbl-server`, `Client` has
 no send path and a server hosts one session (`docs/plan/08-editor.md`, missing
-piece 1) — and more `EditCommand` variants than `SetProperty`. When the CLI
-reads commands it will have to parse input, which is the moment
+piece 1) — and `EditCommand` has only property, spawn and delete variants (the
+editor entry, _Task 4's commands_, lists what is owed). When the CLI reads
+commands it will have to parse input, which is the moment
 `crates/crcbl-cli/src/json.rs` says to reconsider hand-written JSON.
 
 **The exit criteria that hang on it**: a scripted `crcbl new` → `crcbl import` →
@@ -11380,8 +11381,8 @@ pipelines keyed by shader hash; `crcbl-shaders` computes the identity and
 nothing keys on it), and no per-chunk scene reload (the design: a changed
 `sys/<name>.ron` tears down and re-instantiates only that system's scene
 entities, server-side, with replication propagating the change, and the editor's
-revert reuses the same path — which needs `scn::IdMap` to gain a removal).
-Reload is dev-only and its bar is "doesn't crash, usually works".
+revert reuses the same path; `scn::IdMap::remove` and `restore` exist since
+2026-09-30). Reload is dev-only and its bar is "doesn't crash, usually works".
 `crates/crcbl-assets/src/registry.rs`'s module docs still describe hot reload as
 the thing that would reintroduce the `Unloaded` state, which the registry
 deliberately does not have because nothing can reach it today.
@@ -11465,13 +11466,27 @@ says what that cleared and what it did not. The allow-list entry in
   closure stored in the registry, which is a second thing to forget. The general
   answer is still `crcbl::phys::Transform` on the entity, which is the
   scene-format change and the user's open decision.
-- **One command variant.** `SetProperty` is what slice 1 issues; spawn, delete,
-  duplicate, rename and attach/detach each wait on something absent (`IdMap` has
-  no removal, the format cannot hold one entity in two systems, an entity has no
-  name). **The undo property test the exit criteria name** — a random command
-  sequence plus a full undo compared by `World::hash_state` — is owed with the
-  second variant; with one it would assert what the byte-for-byte round trip
-  already asserts.
+- **Task 4's commands (2026-09-30).** `EditCommand` has `SetProperty`, `Spawn`
+  and `Delete`; a duplicate is a `Spawn` of the original's row under
+  `IdMap::next_id`, and Delete and Ctrl+D drive them. The undo property test is
+  `document::entity_tests::random_histories_walk_back_through_every_state`.
+  Still owed, each waiting on something outside the editor:
+  - **Rename**: an entity has no name. It needs a name in the scene format (a
+    per-entity field or a names chunk), which is a format change; decide it with
+    the towers port's format change rather than separately.
+  - **Attach and detach system data**: the format cannot hold one entity in two
+    systems, decided 2026-09-30 to wait for towers.
+  - **Scene load and save markers**: the log's position against `saved_at` is
+    already the dirty marker, and a load replaces the document and its log, so a
+    marker entry has nothing to mean until the log outlives a load (the server
+    session's log will).
+  - **Decided 2026-09-30: the property test compares the saved scene text, not
+    `World::hash_state`.** The world hash folds in each `Entity`'s bits, and an
+    undone delete files a new `Entity` under the old `SceneEntityId`, so the
+    same scene hashes differently. The plan's exit criterion says "state hash";
+    the scene text is the state keyed by the id that survives, and it is
+    compared at every step down and back up. Revisit if a hash keyed by
+    `SceneEntityId` is wanted for the server's log.
 - **The viewport pane (slice 4, 2026-09-30): what it left.** The pane samples
   the scene through `DrawList::texture` and
   `UiRenderer::add_passes_with_textures`; `08-editor.md`'s _Status_ has the

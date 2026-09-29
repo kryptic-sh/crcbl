@@ -73,6 +73,12 @@ pub const SAVE: &str = "editor_save";
 /// Put the whole scene back in view.
 pub const FRAME: &str = "editor_frame";
 
+/// Remove the selection from the scene.
+pub const DELETE: &str = "editor_delete";
+
+/// Copy the selection into a new entity, and select the copy.
+pub const DUPLICATE: &str = "editor_duplicate";
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -94,6 +100,10 @@ pub enum Action {
     Save,
     /// Put the whole scene back in view.
     Frame,
+    /// Remove the selection from the scene.
+    Delete,
+    /// Copy the selection into a new entity, and select the copy.
+    Duplicate,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -155,6 +165,14 @@ pub fn map() -> ActionMap {
         }],
     ));
     map.declare(button(FRAME, vec![Binding::Key(KeyCode::KeyF)]));
+    map.declare(button(DELETE, vec![Binding::Key(KeyCode::Delete)]));
+    map.declare(button(
+        DUPLICATE,
+        vec![Binding::Chord {
+            modifier: Modifier::Control,
+            key: KeyCode::KeyD,
+        }],
+    ));
 
     // Holding a nudge key repeats it, which is how a coarse move is made — the
     // schedule the reserved navigation actions carry, so a held arrow moves an
@@ -228,7 +246,7 @@ pub fn pop_ui(map: &mut ActionMap) {
 /// frame the arrow key it never saw come up is read.
 pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
-    for name in [MOVE, LIFT, UNDO, REDO, SAVE, FRAME] {
+    for name in [MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
         }
@@ -268,6 +286,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     if map.just_pressed(SAVE) {
         actions.push(Action::Save);
     }
+    if map.just_pressed(DUPLICATE) {
+        actions.push(Action::Duplicate);
+    }
     if ctrl {
         return actions;
     }
@@ -294,6 +315,9 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(FRAME) {
         actions.push(Action::Frame);
+    }
+    if map.just_pressed(DELETE) {
+        actions.push(Action::Delete);
     }
     actions
 }
@@ -460,6 +484,16 @@ mod tests {
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::empty()), [Action::Frame]);
         assert_eq!(keys.tap(KeyCode::ArrowLeft, Modifiers::CTRL), []);
         assert_eq!(keys.tap(KeyCode::KeyF, Modifiers::CTRL), []);
+        assert_eq!(
+            keys.tap(KeyCode::KeyD, Modifiers::CTRL),
+            [Action::Duplicate]
+        );
+        assert_eq!(keys.tap(KeyCode::KeyD, Modifiers::empty()), []);
+        assert_eq!(
+            keys.tap(KeyCode::Delete, Modifiers::empty()),
+            [Action::Delete]
+        );
+        assert_eq!(keys.tap(KeyCode::Delete, Modifiers::CTRL), []);
     }
 
     /// A key this editor has no meaning for asks for nothing.
