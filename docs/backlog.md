@@ -252,15 +252,22 @@ candidate carries the numbers): a `Gather` pair reads the same texels as the
 four `Load`s at every point on Vulkan, D3D12 and WARP, but on D3D12 and WARP
 `dxc`'s `fast` reassociation lands the blend up to 1–2 ulp apart, and WebGPU
 needs a non-filtering sampler variant the seam lacks — so no shader moved.
-**Decided 2026-09-30: keep the `Load`s** (see P27). **The next trial is the AO
-depth chain** (_SSAO reads no depth pyramid_, at most about 0.07 ms). SSR's
-half-resolution march was decided against for now (see P27). One surprise still
-matters to anyone reading older `record` figures: `bucket_price`'s `record`
-includes `PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the
-ranged rows, because nothing throttles the offscreen ring), and before P17
-shipped it also included the fresh pool's driver cost, so the pure recording CPU
-of a 23-call frame is 0.08–0.10 ms. Keep startup-only and unexercised candidates
-behind measured frame-path work.
+**Decided 2026-09-30: keep the `Load`s** (see P27). **Decided 2026-09-30: the
+measured frame-path work is done for now, and work moves to the plans' priority
+order** (the goal paragraph above: performance first, then features). Every
+remaining priced candidate is under 0.1 ms a frame on this card, and the next,
+the AO depth chain (_SSAO reads no depth pyramid_, at most about 0.07 ms), would
+also move every AO golden, so it is deferred rather than built. Reopen the
+performance work on a slower GPU's frame budget, a browser profile, or a new
+workload whose price exceeds 0.1 ms. Next in the plans is
+`docs/plan/ ROADMAP.md`'s P12, the editor, unparked 2026-09-15 to follow the UI
+rungs. SSR's half-resolution march was decided against for now (see P27). One
+surprise still matters to anyone reading older `record` figures:
+`bucket_price`'s `record` includes `PassTimers::begin_frame`'s `query_results`
+wait (0.56–0.60 ms on the ranged rows, because nothing throttles the offscreen
+ring), and before P17 shipped it also included the fresh pool's driver cost, so
+the pure recording CPU of a 23-call frame is 0.08–0.10 ms. Keep startup-only and
+unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
