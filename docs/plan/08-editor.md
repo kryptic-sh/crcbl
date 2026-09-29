@@ -241,17 +241,27 @@ exists.
   is the workspace's first proc-macro dependency (`syn`, `quote`,
   `proc-macro2`), approved with the decision.
 
-**Decisions still open:**
+**Decided 2026-09-30** (the owner asked for open decisions to be taken for the
+long term and recorded):
 
-- **Docking**: splitters only, as the UI plan fixes, and whether tabs are in.
-- **The viewport**: a secondary view rendered to a texture a UI rect samples, or
-  the scene drawn full-window with UI panes around a scissored region.
-- **File dialogs**: native per backend, or an in-UI browser over
-  `StorageSource::list`.
-- **The scene format change** for entities spanning systems (the format is v0,
-  so a break is allowed).
-- **A file watcher dependency** for hot reload (`notify`), already open in the
-  backlog.
+- **The viewport is a secondary view rendered to a texture a UI rect samples.**
+  The renderer half exists (`ForwardRenderer::create_view`); what is missing is
+  a UI image command that can name a rendered target rather than an atlas region
+  filled from host bytes. It is the next slice. The full-window, scissored-hole
+  alternative is declined: it cannot show two views, and the render graph has no
+  sub-rect to scissor with.
+- **Docking is splitters only for now.** Tabs are added when a second panel
+  competes for one slot; nothing does yet.
+- **File dialogs are an in-UI browser over storage listing**, the same on every
+  backend including the browser, with no native dialog dependency. It needs
+  `AssetSource` to list, which it cannot yet.
+- **The scene format change for entities spanning systems** is decided when the
+  towers port first needs one entity in two systems. The format is v0, so the
+  break is allowed then.
+
+**Still the owner's:** a file watcher dependency for hot reload (`notify`),
+because adding a crates.io dependency is the owner's call by the workspace's
+rules. It stays open in the backlog.
 
 ## Architecture
 
