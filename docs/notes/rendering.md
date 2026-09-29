@@ -1691,6 +1691,16 @@ kept every lantern golden byte-identical.
   one, which leaves the diffuse test green). The specular fixture subtracts a
   draw without the reflection pair so only the SSR pass's output is compared.
 
+**The moments stay four `Load`s (2026-09-30).** A `Gather` pair per corner at
+the block's shared corner reads the same texels on Vulkan, D3D12 and WARP (a
+probe sweep of every reachable block, since removed), but it is not a drop-in:
+`dxc` compiles the blend as `fast` arithmetic and reassociates it differently
+around the two fetches (1–2 ulp apart on D3D12 and WARP), and WebGPU binds an
+`rg32float` image only beside a `'non-filtering'` sampler, which the seam cannot
+declare. A switch needs that seam variant and moves all four copies of
+`probe_moments` together, for a saving nobody has measured, so the `Load`s stay;
+`docs/backlog.md`'s P27 has the numbers and what would reopen it.
+
 **What the capture costs, measured**
 (`apps/lantern --headless --frames 400 --size 1920x1080`, radv on an RX 7900
 XTX, median of three): **0.93 ms for 60 probes against 12 occluders** at load,

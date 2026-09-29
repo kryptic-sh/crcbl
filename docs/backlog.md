@@ -247,16 +247,20 @@ moves pictures. **The next trial is the probe visibility weight**, because it is
 the largest cost the trial found and it is paid twice: forcing the weight to one
 took shard's `ssr` 0.460 → 0.331 ms and its `forward` 0.444 → 0.334 ms, and
 lantern's 0.184 → 0.113 and 0.352 → 0.265 ms (both views), about 0.24 and 0.16
-ms a frame. The first step is a determinism test of fetching the moments with a
-`Gather` pair per corner instead of four `Load`s, on every backend, before any
-picture moves (P27's candidate, P23). Behind it: the AO depth chain (at most
-about 0.07 ms). SSR's half-resolution march was decided against for now (see
-P27). One surprise still matters to anyone reading older `record` figures:
-`bucket_price`'s `record` includes `PassTimers::begin_frame`'s `query_results`
-wait (0.56–0.60 ms on the ranged rows, because nothing throttles the offscreen
-ring), and before P17 shipped it also included the fresh pool's driver cost, so
-the pure recording CPU of a 23-call frame is 0.08–0.10 ms. Keep startup-only and
-unexercised candidates behind measured frame-path work.
+ms a frame. **Its first step ran on 2026-09-30 and stopped the trial** (P27's
+candidate carries the numbers): a `Gather` pair reads the same texels as the
+four `Load`s at every point on Vulkan, D3D12 and WARP, but on D3D12 and WARP
+`dxc`'s `fast` reassociation lands the blend up to 1–2 ulp apart, and WebGPU
+needs a non-filtering sampler variant the seam lacks — so no shader moved.
+**Decided 2026-09-30: keep the `Load`s** (see P27). **The next trial is the AO
+depth chain** (_SSAO reads no depth pyramid_, at most about 0.07 ms). SSR's
+half-resolution march was decided against for now (see P27). One surprise still
+matters to anyone reading older `record` figures: `bucket_price`'s `record`
+includes `PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the
+ranged rows, because nothing throttles the offscreen ring), and before P17
+shipped it also included the fresh pool's driver cost, so the pure recording CPU
+of a 23-call frame is 0.08–0.10 ms. Keep startup-only and unexercised candidates
+behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -4420,7 +4424,9 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   adding uniform empty-volume branches or hoisting dimension queries. Preserve
   exact zero irradiance, captured visibility, clipmap blends and the sky
   fallback. Actual driver load counts have not been measured; shader source is
-  not a compiled-cost report.
+  not a compiled-cost report. The cheaper fetch for those per-corner moments — a
+  `Gather` pair instead of four `Load`s — stopped at its determinism test on
+  2026-09-30 (P27's candidate), so what this entry prices is unchanged.
 - **P24 — price PCSS blocker searches; fixed-radius probe reordering is not
   established as equivalent.** Revalidated `mesh.slang::cascade_visibility`: box
   and fixed-disc modes return before the blocker search; only the adaptive mode
@@ -4489,14 +4495,47 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     for moving the march into a function.
   - **Declined: fewer march steps.** It changes the picture wherever a ray
     needed them, for 0.02 ms at 48 steps.
-  - **Candidate, picture-changing: cheaper probe visibility.** The 0.13 ms is 32
-    `Load`s a pixel through a manual bilinear, which the SSR and AO designs
-    chose over filtered reads. A `Gather` pair per corner halves the fetches and
-    returns raw texels, but its texel choice is the sampler's coordinate
-    rounding on an 18-texel tile — a determinism question to test on every
-    backend first. `mesh.slang` pays the same weights for irradiance: forcing
-    them to one there took `forward` 0.444 → 0.334 ms on shard and 0.352 → 0.265
-    ms on lantern, so the pair is the next trial (see "Next performance trial").
+  - **Candidate, stopped at its determinism test (2026-09-30): cheaper probe
+    visibility.** The 0.13 ms is 32 `Load`s a pixel through a manual bilinear,
+    which the SSR and AO designs chose over filtered reads. A `Gather` pair per
+    corner halves the fetches and returns raw texels, but its texel choice is
+    the sampler's coordinate rounding on an 18-texel tile. `mesh.slang` pays the
+    same weights for irradiance: forcing them to one there took `forward` 0.444
+    → 0.334 ms on shard and 0.352 → 0.265 ms on lantern. A probe test (removed
+    after the run, since nothing shipped) read every reachable 2×2 block of a
+    7-layer 18×18 `Rg32Float` atlas both ways — edges, centres and an ulp either
+    side of each, points past the interior, a probe index past the last layer —
+    with a `GatherRed`/`GatherGreen` pair placed at the block's shared corner,
+    `(low + 1) / extent`, and nearest clamp-to-edge sampling. **The texels are
+    bit-identical everywhere tested; the blends are not on D3D12.** Vulkan (7900
+    XTX): 0 of 159,048 points apart in texels or blend. D3D12 (7900 XTX): texels
+    0 apart, blends apart at 19,281 points by at most 1 ulp; WARP: texels 0,
+    blends 19,336 by at most 2 ulp (first: `(0.5, 0.25)`, layer 0, second moment
+    1.9063061 by `Load`s against 1.9063063 by gathers). The one-texel off-switch
+    image matched on all three. The cause is `dxc`, not the sampler: it emits
+    the blend as `fast` arithmetic and reassociated the `Load` form's outer
+    `lerp` (`(c01 − low) + (c11 − c01)·w` then scaled) but not the gather
+    form's, so a D3D12 blend's bits depend on the code around it. Red proof:
+    moving the gather to `(low + 1.5) / extent` put 158,976 points apart in
+    texels on Vulkan. lavapipe, Metal and the browser are unmeasured (CI runs
+    the first two; the browser runs no `render_e2e`). **Not shipped, and no
+    shader moved**, by the rule that the trial stops on any backend that is not
+    bit-identical. Two more costs stand in front of a switch: every copy of
+    `probe_moments` moves together
+    (`the_shaders_weigh_a_probe_the_way_this_module_does` holds `mesh`, `ssr`,
+    `water` and `probe_gather`), each gaining a sampler binding appended past
+    its last one; and **WebGPU cannot bind it** — `rg32float` is
+    `unfilterable-float`, which WebGPU pairs only with a `'non-filtering'`
+    sampler, and the seam's `BindingKind::Sampler` has no such variant
+    (`web/engine/gpu-replay.js` maps it to `'filtering'` or `'comparison'`), so
+    a switch needs that variant through `crcbl-hal`, all four backends and the
+    replay first. **Decided 2026-09-30: keep the `Load`s.** The switch needs a
+    new sampler kind through the whole seam and four shader copies, and drifts
+    D3D12's moments by an ulp, for a saving nobody has measured: the 0.24 ms
+    above is what removing the visibility weight entirely saves, not what a
+    gather does. Reopen with a Vulkan-only timing prototype showing the gather
+    saves more than 0.1 ms a frame on shard, and then decide the D3D12 ulp
+    question with that number in hand.
   - **Decided 2026-09-30: no half-resolution march for now.**
     `docs/notes/rendering.md` refused it by measurement at lantern 960x720
     (`ssr` 6.3% of the frame); at 1920x1080 shard's `ssr` is 29.8% of the pass
