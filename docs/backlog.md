@@ -239,15 +239,24 @@ shape, unmeasured) **waits on the D3D12 deferral** (`docs/plan/ROADMAP.md`,
 **Decided 2026-09-30: the next trial is the screen-space passes**, because the
 draw path is now priced small and they are where a real frame's GPU time is. In
 shard at 1920x1080 on 2026-09-27, `ssr` took 0.508 ms and `ssao` 0.210 ms of a
-1.56 ms summed pass p50, against 0.008 ms for the depth prepass. Price `ssr`,
-`ssao`, their blurs and upsample per pass on shard and lantern before choosing a
-change (resolution, tap count, early-outs, half-rate). One surprise still
-matters to anyone reading older `record` figures: `bucket_price`'s `record`
-includes `PassTimers::begin_frame`'s `query_results` wait (0.56–0.60 ms on the
-ranged rows, because nothing throttles the offscreen ring), and before P17
-shipped it also included the fresh pool's driver cost, so the pure recording CPU
-of a 23-call frame is 0.08–0.10 ms. Keep startup-only and unexercised candidates
-behind measured frame-path work.
+1.56 ms summed pass p50, against 0.008 ms for the depth prepass. **That trial
+was run on 2026-09-30** (P27 and _SSAO reads no depth pyramid_ carry the
+tables): one byte-identical change shipped — the Hi-Z march loads every level
+and selects, shard's `ssr` 0.508 → 0.461 ms — and the rest of what it found
+moves pictures. **The next trial is the probe visibility weight**, because it is
+the largest cost the trial found and it is paid twice: forcing the weight to one
+took shard's `ssr` 0.460 → 0.331 ms and its `forward` 0.444 → 0.334 ms, and
+lantern's 0.184 → 0.113 and 0.352 → 0.265 ms (both views), about 0.24 and 0.16
+ms a frame. The first step is a determinism test of fetching the moments with a
+`Gather` pair per corner instead of four `Load`s, on every backend, before any
+picture moves (P27's candidate, P23). Behind it: the AO depth chain (at most
+about 0.07 ms). SSR's half-resolution march was decided against for now (see
+P27). One surprise still matters to anyone reading older `record` figures:
+`bucket_price`'s `record` includes `PassTimers::begin_frame`'s `query_results`
+wait (0.56–0.60 ms on the ranged rows, because nothing throttles the offscreen
+ring), and before P17 shipped it also included the fresh pool's driver cost, so
+the pure recording CPU of a 23-call frame is 0.08–0.10 ms. Keep startup-only and
+unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
 `perf/ui-geometry-reuse` production trial preserved complete original geometry,
@@ -4405,11 +4414,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
   `mesh.slang::probe_irradiance` and `probe_level_irradiance`: they blend
   corners even when `frame.probe_counts` describes the zeroed placeholder.
   `probe_moments` queries dimensions and reads visibility moments per corner.
-  `ssr.slang` builds `probe_environment` before its sharpness early-out. Price
-  forward and SSR passes with empty volumes before adding uniform empty-volume
-  branches or hoisting dimension queries. Preserve exact zero irradiance,
-  captured visibility, clipmap blends and the sky fallback. Actual driver load
-  counts have not been measured; shader source is not a compiled-cost report.
+  `ssr.slang` builds `probe_environment` before its sharpness early-out, but
+  that early-out returns the environment, so nothing is skipped there (measured
+  2026-09-30, see P27). Price forward and SSR passes with empty volumes before
+  adding uniform empty-volume branches or hoisting dimension queries. Preserve
+  exact zero irradiance, captured visibility, clipmap blends and the sky
+  fallback. Actual driver load counts have not been measured; shader source is
+  not a compiled-cost report.
 - **P24 — price PCSS blocker searches; fixed-radius probe reordering is not
   established as equivalent.** Revalidated `mesh.slang::cascade_visibility`: box
   and fixed-disc modes return before the blocker search; only the adaptive mode
@@ -4432,9 +4443,78 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 - **P26 — the probe updater regathers every probe every frame.** Round-robin a
   fraction per frame and regather only on change; while it is on nothing in the
   atlas is held. `rsm-punctual` records with zero faces.
-- **P27 — SSR marches at full resolution** (96 steps) and computes the
-  environment before its cheap exits. Half resolution with a depth-aware
-  upsample, and the early-outs first.
+- **P27 — SSR marches at full resolution; priced 2026-09-30, one part shipped.**
+  Protocol: headless release, `CRCBL_GPU=vk`, `CRCBL_VK_VALIDATION=0`,
+  `--size 1920x1080 --frames 400`, RX 7900 XTX, the `ssr` row's p50. Shard's
+  floor (`FLOOR_ROUGHNESS` 0.34) marches over most of the frame; lantern marches
+  little. Split by temporary edits to `ssr.slang`, each reverted:
+
+  | `ssr` p50, ms                         | shard         | lantern |
+  | ------------------------------------- | ------------- | ------- |
+  | as shipped before this slice          | 0.508         | 0.187   |
+  | environment zeroed (march only)       | 0.276         | 0.077   |
+  | march skipped (environment only)      | 0.181         | 0.165   |
+  | both removed                          | 0.022         | 0.017   |
+  | probe term zeroed, sky kept           | 0.288         | 0.090   |
+  | probe visibility weight forced to one | 0.331         | 0.113   |
+  | one clipmap level forced              | 0.462         | 0.184   |
+  | `MAX_STEPS` 48 / 24                   | 0.486 / 0.405 | —       |
+  | Hi-Z levels all loaded, unclamped     | 0.441         | 0.179   |
+
+  The four rows after the first edit the pre-change shader; the visibility and
+  clipmap rows edit the shipped change below (base 0.460 / 0.184 ms); the step
+  and unclamped rows edit a build with the environment moved after the march
+  (base 0.503 / 0.185 ms, declined below). So the two costs are the march (about
+  0.25 ms on shard) and the probe environment (about 0.16 ms), and 0.13 ms of
+  the latter is the per-corner Chebyshev visibility — `probe_moments`' four
+  `Load`s per corner. The second clipmap level costs nothing in these frames,
+  and most rays end well inside `MAX_STEPS`.
+  - **Shipped: `hiz_at` loads every level and selects one** instead of a
+    `switch`. The level varies per lane, so the `switch` serialised a load per
+    level present in the wave. Two alternated pairs: shard 0.507/0.508 →
+    0.462/0.460 ms, lantern 0.187/0.186 → 0.184/0.183 ms. Every load is clamped
+    into its own level's extent (`hiz_clamp`), which costs about 0.013 ms
+    against the unclamped probe above and keeps every read in bounds without
+    relying on robust image access. Frames are byte-identical: `--screenshot`
+    PNGs of shard and lantern at 1920x1080 and 960x720 compare equal to the
+    pre-change build's, and the same comparison goes red with `MAX_STEPS` at 8.
+    Measured on this RX 7900 XTX's Windows Vulkan driver only; lavapipe, WARP,
+    SwiftShader, Metal and browsers are unmeasured, and a wave-less software
+    rasteriser pays every level's load where it paid one.
+  - **Declined: moving the environment after the march.** P23 and this entry
+    said `ssr.slang` builds the environment before its cheap exits. It does, but
+    every exit except the far plane (already first) returns that environment, so
+    no work is skipped. The only gain is a shorter live range, and a built
+    version measured 0.508 → 0.503 ms on shard — within build-to-build noise,
+    for moving the march into a function.
+  - **Declined: fewer march steps.** It changes the picture wherever a ray
+    needed them, for 0.02 ms at 48 steps.
+  - **Candidate, picture-changing: cheaper probe visibility.** The 0.13 ms is 32
+    `Load`s a pixel through a manual bilinear, which the SSR and AO designs
+    chose over filtered reads. A `Gather` pair per corner halves the fetches and
+    returns raw texels, but its texel choice is the sampler's coordinate
+    rounding on an 18-texel tile — a determinism question to test on every
+    backend first. `mesh.slang` pays the same weights for irradiance: forcing
+    them to one there took `forward` 0.444 → 0.334 ms on shard and 0.352 → 0.265
+    ms on lantern, so the pair is the next trial (see "Next performance trial").
+  - **Decided 2026-09-30: no half-resolution march for now.**
+    `docs/notes/rendering.md` refused it by measurement at lantern 960x720
+    (`ssr` 6.3% of the frame); at 1920x1080 shard's `ssr` is 29.8% of the pass
+    sum after the change above. Expected price: the march's 0.25 ms to about a
+    quarter, plus an upsample like `ssao-upsample`'s 0.036 ms, so about 0.15 ms
+    saved on shard and almost nothing on lantern. It moves every SSR golden and
+    reverses a recorded decision, while the probe-visibility trial ahead of it
+    saves more (about 0.24 ms on shard), keeps the picture, and helps `forward`
+    too. Revisit it as a quality-tier knob (the Low tier's, beside the AO
+    bundle) once a frame budget on a slower GPU shows `ssr` on its critical
+    path, with the SSR goldens re-blessed under a visual review.
+  - **Candidate, structural: one mipped Hi-Z image.** A single `Load` at a level
+    would drop the select and the clamps. `crcbl_render::hiz`'s header says why
+    the chain is separate images (the graph cannot attach a mip; WebGPU
+    attachment views are one level), so it would need a compute reduction. Its
+    gain over the shipped select is unmeasured and bounded by what is left of
+    the march.
+
 - **P28 — light clustering redoes per-tile work per froxel, every frame.**
   Revalidated `light_cluster.slang::computeMain` and `slice_start`: corner
   unprojection and slice bounds precede the light loop, including when there are
@@ -6942,6 +7022,32 @@ with the goldens moved to a tolerance-based comparison, or keep bit-exact
 determinism and accept the tile. That is a design call about how this project
 verifies rendering, not an AO fix, and it is why the AO path was not touched in
 the session that found this.
+
+**Priced 2026-09-30, and the pyramid is the lever.** P27's protocol (headless
+release, `CRCBL_GPU=vk`, `CRCBL_VK_VALIDATION=0`, 1920x1080, 400 frames, RX 7900
+XTX), p50 in ms, with each console variable set by `--exec` on shard:
+
+| shard, ms                     | `ssao` | `ssao-blur` | `ssao-blur-2` | `ssao-upsample` |
+| ----------------------------- | ------ | ----------- | ------------- | --------------- |
+| shipped (4 slices, 2 blurs)   | 0.209  | 0.029       | 0.031         | 0.036           |
+| `r_ssao_slices 2`             | 0.109  | 0.027       | 0.028         | 0.035           |
+| `r_ssao_bent_normals 0`       | 0.210  | 0.026       | 0.027         | 0.034           |
+| `r_ssao_technique hemisphere` | 0.054  | 0.026       | 0.027         | 0.034           |
+| `r_ssao_blur_passes 1`        | 0.212  | 0.027       | —             | 0.035           |
+| `r_ssao_radius 0.25`          | 0.142  | 0.027       | 0.028         | 0.035           |
+
+Lantern, two views summed, shipped: `ssao` 0.211, the blurs 0.029 and 0.028,
+`ssao-upsample` 0.034. The gather runs at half resolution
+(`RESOLUTION_DIVISOR`), the blurs at half with a 4x4 kernel each, the upsample
+at full. The gather is linear in slices and bent normals are free. **Halving the
+radius takes a third off with the same tap count**, which says the pass is bound
+by how far apart its full-resolution depth taps land — the cache thrashing the
+pyramid item above describes. So the AO-shaped depth chain is the change worth
+building, not fewer taps. It moves the AO goldens (coarse taps are a different
+depth), so it was not built in this slice. Expected price: at most the 0.07 ms
+the radius probe removed, plus a reduction pass the size of `hiz`'s rows. The
+blurs and the upsample, about 0.1 ms together, are near what a full-screen pass
+of their footprint costs here, and nothing in them was worth a change.
 
 ## What the deleted 52-debug-console plan left unbuilt (2026-09-24)
 

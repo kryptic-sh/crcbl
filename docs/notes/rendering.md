@@ -1291,10 +1291,13 @@ follows is the rules and their reasons.
   256×192, was absent at 1280×960). Since 2026-08-27 the stride is hierarchical:
   a **`max`** Hi-Z pyramid (one value per texel, the nearest surface below it —
   a min-max pair would be a second image for a bound nothing reads), crossing a
-  whole empty cell per step. The segment is clipped to the viewport before the
-  walk and ends on a border ramp; the ray starts off the surface along the
-  normal, is clipped against the near plane, and fades when it points back at
-  the viewer.
+  whole empty cell per step. **The march reads every level and keeps one**
+  (since 2026-09-30): the level differs from lane to lane, and a `switch` over
+  the level bindings serialised one load per level present in a wave — shard's
+  `ssr` went 0.508 → 0.461 ms at 1920x1080 on the same frames, byte for byte.
+  The segment is clipped to the viewport before the walk and ends on a border
+  ramp; the ray starts off the surface along the normal, is clipped against the
+  near plane, and fades when it points back at the viewer.
 - **Behind a surface is no evidence.** A tap is a hit only within a thickness
   bound derived from the ray's own depth advance and floored by
   `THICKNESS_FLOOR`; past it the march continues. Treating any "behind" as a hit
@@ -1348,7 +1351,11 @@ follows is the rules and their reasons.
     `forward` 18.1% (17.4% without its fused clears). On a hardware browser
     (quarry, Chrome, 959x463, 2026-09-04) `ssr` was 0.053 ms, 7.2% of 0.737 ms.
     Quote a share and an absolute together: that frame grew from 1.27 ms as
-    passes landed, and the march's share fell while its cost rose.
+    passes landed, and the march's share fell while its cost rose. **The premise
+    has since moved**: at 1920x1080 on 2026-09-30, shard's `ssr` is 0.46 ms,
+    about 30% of its summed pass time, and about 0.25 ms of it is the march over
+    its reflective floor. Whether that reopens the refusal is an open question
+    in `docs/backlog.md` (P27), not a decision taken here.
   - **No `LightingPath` gate**, which still has no consumer.
 
 ## What the deleted 48-post-processing plan left behind (2026-09-24)

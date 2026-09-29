@@ -3485,6 +3485,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **The screen-space reflection march reads its Hi-Z levels without a
+  `switch`.** `ssr.slang`'s `hiz_at` now loads every pyramid level, each clamped
+  into its own extent, and keeps the one the ray is on; the `switch` it replaces
+  ran one load per level present in a wave, because each ray climbs and drops on
+  its own. The picture is unchanged byte for byte. Measured on an RX 7900 XTX
+  (Windows Vulkan driver), release, validation off,
+  `--headless --frames 400 --size 1920x1080`, two alternated runs each: shard's
+  `ssr` pass 0.507–0.508 → 0.460–0.462 ms p50, lantern's 0.186–0.187 →
+  0.183–0.184 ms. Other backends are unmeasured.
+
 - **Vulkan reuses command pools instead of creating one per encoder.**
   `Device::destroy_command_buffer` and an encoder dropped unfinished now hand
   the `VkCommandPool` (and its one primary buffer) to a per-device free list,

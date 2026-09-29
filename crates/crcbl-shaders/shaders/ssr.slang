@@ -236,7 +236,7 @@ StructuredBuffer<GpuProbe> probes D3D12_REGISTER(t4, space0);
 /// these are levels 1 to [`MAX_HIZ_LEVEL`], each half the extent of the one
 /// before it and each texel the nearest surface in the block it covers.
 ///
-/// Separate declarations and a `switch` in [`hiz_at`] rather than an array,
+/// Separate declarations, all read by [`hiz_at`], rather than an array,
 /// because WGSL has no arrays of textures and one image with mips is not
 /// something the render graph can attach a level of — `crcbl_render::bloom`'s
 /// header gives that second reason in full, and this pyramid is built the same
@@ -694,37 +694,56 @@ float thickness_at(float advance, float depth)
     return max(advance, abs(depth) * THICKNESS_FLOOR);
 }
 
-/// The nearest surface anywhere in the cell of `level` that `texel` falls in.
+/// `texel`, already inside the image, pulled into level `level`'s extent too.
+///
+/// For the level [`hiz_at`] keeps this is the identity, because the texel was
+/// clamped into that level first; for every other level it only keeps the read
+/// in bounds.
+int2 hiz_clamp(int2 texel, int2 extent, uint level)
+{
+    return min(texel, max(int2(extent.x >> level, extent.y >> level) - int2(1, 1), int2(0, 0)));
+}
+
+/// The nearest surface anywhere in the cell of `level` that `texel` falls in,
+/// where `extent` is level 0's and level `k`'s is that halved `k` times — how
+/// `crcbl_render::hiz` sizes the images.
 ///
 /// Level 0 is [`scene_depth`] and every level above it is one of the pyramid
-/// bindings; `extent` is that level's own extent, so the clamp is
-/// [`depth_at`]'s and for its reason — a fetch outside the image reads
+/// bindings. The texel is clamped into the level's own extent, which is
+/// [`depth_at`]'s clamp and for its reason — a fetch outside the image reads
 /// [`DEPTH_FAR`] on some targets and is undefined on others, and either would
 /// say "nothing here" along the border of every level.
 ///
-/// A `switch` and not an index, because the five levels are five declarations —
-/// see the bindings. The level is not uniform across a quad, and it does not
-/// have to be: every read here is a `Load`, which has no implicit derivative and
-/// no uniformity rule to break.
+/// **Every level is read and one is kept, rather than a `switch` reading the
+/// one asked for.** The level is not uniform across a wave — each ray climbs
+/// and drops on its own — so a `switch` ran its cases one after another for
+/// every level some lane was on, each a load the whole wave then waited for.
+/// Every level's load issued together and a select cost less than that,
+/// measured, and the value kept is the same load of the same texel the
+/// `switch` made. The
+/// others are clamped into their own level's extent too, so none of them is
+/// out of bounds; a slot bound to a larger image than its level — the deepest
+/// level repeated, or the prepass when there is no pyramid — is only ever
+/// clamped tighter than it needs.
+///
+/// Every read is a `Load`, which has no implicit derivative and no uniformity
+/// rule to break.
 float hiz_at(uint level, int2 texel, int2 extent)
 {
-    int2 clamped = clamp(texel, int2(0, 0), max(extent - int2(1, 1), int2(0, 0)));
-    int3 at = int3(clamped, 0);
-    switch (level)
-    {
-    case 0u:
-        return scene_depth.Load(at);
-    case 1u:
-        return hiz_1.Load(at);
-    case 2u:
-        return hiz_2.Load(at);
-    case 3u:
-        return hiz_3.Load(at);
-    case 4u:
-        return hiz_4.Load(at);
-    default:
-        return hiz_5.Load(at);
-    }
+    int2 last = max(int2(extent.x >> level, extent.y >> level) - int2(1, 1), int2(0, 0));
+    int2 clamped = clamp(texel, int2(0, 0), last);
+    float d0 = scene_depth.Load(int3(hiz_clamp(clamped, extent, 0u), 0));
+    float d1 = hiz_1.Load(int3(hiz_clamp(clamped, extent, 1u), 0));
+    float d2 = hiz_2.Load(int3(hiz_clamp(clamped, extent, 2u), 0));
+    float d3 = hiz_3.Load(int3(hiz_clamp(clamped, extent, 3u), 0));
+    float d4 = hiz_4.Load(int3(hiz_clamp(clamped, extent, 4u), 0));
+    float d5 = hiz_5.Load(int3(hiz_clamp(clamped, extent, 5u), 0));
+    return level == 0u ? d0
+         : level == 1u ? d1
+         : level == 2u ? d2
+         : level == 3u ? d3
+         : level == 4u ? d4
+         : d5;
 }
 
 /// View-space `z` of a point at reversed-Z depth `depth`.
@@ -1565,10 +1584,8 @@ float4 fragmentMain(FullscreenOutput input) : SV_Target
         float exit_z =
             lerp(over_w_start, over_w_end, along) / lerp(inverse_w_start, inverse_w_end, along);
 
-        // The level's own extent — the frame halved once per level, which is how
-        // `crcbl_render::hiz` sizes the images — and the cell this point is in.
-        int2 level_extent = int2(extent.x >> level, extent.y >> level);
-        float cell_depth = hiz_at(level, int2(floor(at / cell)), level_extent);
+        // The cell this point is in.
+        float cell_depth = hiz_at(level, int2(floor(at / cell)), extent);
         // The far plane has no surface, so a cell holding nothing else is a cell
         // the ray crosses whatever its own depth: a hole in the evidence rather
         // than the end of the ray.

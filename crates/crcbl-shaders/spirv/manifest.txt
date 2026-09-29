@@ -529,12 +529,12 @@ entry-points = vertexMain:vertex, fragmentMain:fragment
 
 [ssr]
 source = shaders/ssr.slang
-source-sha256 = 302e87b60a0b4ff605c004eb3b20552a730ef4678f29da49947ca248d133e993
+source-sha256 = 3ad75011b36ce4499a8c2156f6c4516b66307dfd56d2d1ee9720145a9094bc1a
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/ssr.spv
-spirv-sha256 = faeb662a2eb127841d309998973312627756851dd7f7d686f4f99ed876cc2c39
+spirv-sha256 = bd6bf8638843e88441b2aabf737b2d6c517a51638c51f052eaca8c2ca97ae7b9
 wgsl = wgsl/ssr.wgsl
-wgsl-sha256 = ded437c8d896cf6e07c63c3d01ad6bd0638acaf34cb0e0d6f8ac1f367c34977c
+wgsl-sha256 = ae7fa2562182cddf0b20d30c196a47345413526414d3e54a0b222020e96916ae
 msl = msl/ssr.metal
 msl-sha256 = cb701c4192b1bdaade01b50007acc07e40e9ea04c7d036255ce9d92b99a6ab84
 dxil = vertexMain:dxil/ssr.vertex.dxil:b8a3948984e0decc91b47b05998458eb1ff91d3fad351d9b153eab36869f7a97
