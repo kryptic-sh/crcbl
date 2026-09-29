@@ -15,6 +15,13 @@
 //! pipeline and one draw a half, so a menu frame, the text on it and a rounded
 //! panel beside it never break a batch.
 //!
+//! **A [`texture`](DrawList::texture) rectangle is the one exception**, and it
+//! breaks the batch on purpose: it samples a picture the renderer drew — a
+//! second camera's view — which is bound to a set of its own per draw, because
+//! the portable targets have no array of textures to index instead. The
+//! expansion reports each run of such quads as a [`TextureRun`], and everything
+//! between two runs is still one draw.
+//!
 //! # Clip rectangles travel on the vertex
 //!
 //! [`push_clip`](DrawList::push_clip) narrows everything pushed after it until
@@ -47,11 +54,12 @@
 use crate::font::Font;
 use crate::font::atlas::{GlyphAtlas, SUBPIXEL_BINS};
 use crate::font::layout::PositionedGlyph;
-use crate::image::{AtlasImage, NineSliceImage, slice_bands, slice_cuts};
+use crate::image::{AtlasImage, NineSliceImage, TextureId, slice_bands, slice_cuts};
 use crate::text::FontAtlas;
 use crate::text::GLYPH_HEIGHT;
 use crate::widget::SkinInsets;
 use core::fmt;
+use core::ops::Range;
 use glam::Vec2;
 use std::sync::Arc;
 
@@ -78,8 +86,9 @@ pub struct Vertex2d {
     /// Position in screen-space pixels.
     pub pos: Vec2,
     /// UV into the bitmap font for [`Primitive::Glyph`], into a glyph page for
-    /// [`Primitive::FontGlyph`] and into the image atlas for
-    /// [`Primitive::Image`]; zero for untextured primitives.
+    /// [`Primitive::FontGlyph`], into the image atlas for [`Primitive::Image`]
+    /// and into the named texture for [`Primitive::Texture`]; zero for
+    /// untextured primitives.
     ///
     /// For [`Primitive::RoundedRect`] it is not a UV at all: it is this vertex's
     /// offset from the rectangle's centre in pixels, which the fragment stage
@@ -147,16 +156,22 @@ pub enum Primitive {
     /// The vertex colour, its alpha multiplied by a [`GlyphAtlas`] page's
     /// coverage — the page in [`Vertex2d::shape`]'s first lane.
     FontGlyph,
+    /// A texture the renderer owns, sampled bilinear and multiplied by the
+    /// colour. [`Vertex2d::shape`]'s first lane holds the [`TextureId`], which
+    /// the shader never reads: the renderer binds the texture per
+    /// [`TextureRun`].
+    Texture,
 }
 
 impl Primitive {
     /// Every primitive, in lane order.
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::Solid,
         Self::Glyph,
         Self::Image,
         Self::RoundedRect,
         Self::FontGlyph,
+        Self::Texture,
     ];
 
     /// The value [`Vertex2d::shape`]'s last lane holds for this primitive.
@@ -168,6 +183,7 @@ impl Primitive {
             Self::Image => 2.0,
             Self::RoundedRect => 3.0,
             Self::FontGlyph => 4.0,
+            Self::Texture => 5.0,
         }
     }
 }
@@ -411,6 +427,23 @@ pub enum DrawCommand {
         /// Straight-alpha RGBA the sampled texel is multiplied by.
         tint: [f32; 4],
     },
+    /// A rectangle of a texture the renderer owns, stretched to a screen
+    /// rectangle — see [`TextureId`] and [`DrawList::texture`].
+    Texture {
+        /// Which texture: the caller's name for it, resolved by the renderer
+        /// when the frame is recorded.
+        texture: TextureId,
+        /// Top-left corner in screen-space.
+        min: Vec2,
+        /// Bottom-right corner in screen-space.
+        max: Vec2,
+        /// Texture UV drawn at `min`: `(0, 0)` is the texture's top-left.
+        uv_min: Vec2,
+        /// Texture UV drawn at `max`: `(1, 1)` is the texture's bottom-right.
+        uv_max: Vec2,
+        /// Straight-alpha RGBA the sampled texel is multiplied by.
+        tint: [f32; 4],
+    },
     /// A filled rectangle with rounded corners and an optional border,
     /// evaluated per fragment as a signed distance.
     RoundedRect {
@@ -522,6 +555,21 @@ impl DrawCommand {
                 uv_max,
                 tint,
             },
+            Self::Texture {
+                texture,
+                min,
+                max,
+                uv_min,
+                uv_max,
+                tint,
+            } => Self::Texture {
+                texture,
+                min: min * scale,
+                max: max * scale,
+                uv_min,
+                uv_max,
+                tint,
+            },
             Self::RoundedRect {
                 min,
                 max,
@@ -607,6 +655,21 @@ pub struct Triangles {
     /// and `indices[overlay..]` is the overlay half. Equal to `indices.len()`
     /// on a list with no overlay.
     pub overlay: usize,
+    /// The indices that sample a renderer-owned texture, in index order: one
+    /// run per stretch of consecutive [`DrawCommand::Texture`] quads naming the
+    /// same texture. Every other index samples only the atlases. A run never
+    /// straddles [`overlay`](Self::overlay): the cut ends one.
+    pub textures: Vec<TextureRun>,
+}
+
+/// A stretch of [`Triangles::indices`] that samples one renderer-owned texture:
+/// what a renderer binds that texture for before drawing it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureRun {
+    /// The texture its quads name.
+    pub texture: TextureId,
+    /// Its indices, as a range of [`Triangles::indices`].
+    pub indices: Range<u32>,
 }
 
 impl DrawList {
@@ -786,6 +849,32 @@ impl DrawList {
             max,
             uv_min: image.uv_min(),
             uv_max: image.uv_max(),
+            tint,
+        });
+    }
+
+    /// Push a rectangle of a texture the renderer owns — a view it rendered this
+    /// frame, say — stretched to `min..max` and multiplied by `tint`.
+    ///
+    /// `uv` is the part of the texture drawn, `(0, 0)` its top-left and
+    /// `(1, 1)` its bottom-right, so a whole view is `(Vec2::ZERO, Vec2::ONE)`.
+    /// The rectangle is clipped and scaled like every other push; which picture
+    /// `texture` is gets decided when the renderer records the frame — see
+    /// [`TextureId`].
+    pub fn texture(
+        &mut self,
+        min: Vec2,
+        max: Vec2,
+        texture: TextureId,
+        uv: (Vec2, Vec2),
+        tint: [f32; 4],
+    ) {
+        self.push(DrawCommand::Texture {
+            texture,
+            min,
+            max,
+            uv_min: uv.0,
+            uv_max: uv.1,
             tint,
         });
     }
@@ -1114,11 +1203,13 @@ impl DrawList {
 
         let cut = self.overlay_start();
         let mut overlay = 0;
+        let mut textures: Vec<TextureRun> = Vec::new();
         for (index, (cmd, clip)) in self.commands.iter().zip(&self.clips).enumerate() {
             if index == cut {
                 overlay = indices.len();
             }
             let first = vertices.len();
+            let first_index = indices.len() as u32;
             expand(
                 cmd,
                 atlas,
@@ -1130,6 +1221,25 @@ impl DrawList {
             for vertex in &mut vertices[first..] {
                 vertex.clip = clip.lane();
             }
+            if let DrawCommand::Texture { texture, .. } = cmd {
+                let end = indices.len() as u32;
+                // Extended only when nothing was drawn in between and the cut
+                // does not fall here, so one run is exactly one bind's worth.
+                match textures.last_mut() {
+                    Some(run)
+                        if run.texture == *texture
+                            && run.indices.end == first_index
+                            && index != cut =>
+                    {
+                        run.indices.end = end;
+                    }
+                    _ if end > first_index => textures.push(TextureRun {
+                        texture: *texture,
+                        indices: first_index..end,
+                    }),
+                    _ => {}
+                }
+            }
         }
         if cut == self.commands.len() {
             overlay = indices.len();
@@ -1138,6 +1248,7 @@ impl DrawList {
             vertices,
             indices,
             overlay,
+            textures,
         }
     }
 }
@@ -1290,6 +1401,28 @@ fn expand(
                 vertices,
                 indices,
             );
+        }
+        DrawCommand::Texture {
+            texture,
+            min,
+            max,
+            uv_min,
+            uv_max,
+            tint,
+        } => {
+            let first = vertices.len();
+            push_quad(
+                *min,
+                *max,
+                (*uv_min, *uv_max),
+                *tint,
+                Primitive::Texture,
+                vertices,
+                indices,
+            );
+            for vertex in &mut vertices[first..] {
+                vertex.shape[0] = texture.index() as f32;
+            }
         }
         DrawCommand::RoundedRect {
             min,
@@ -1600,3 +1733,5 @@ unsafe impl bytemuck::Zeroable for Vertex2d {}
 mod scale_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod texture_tests;

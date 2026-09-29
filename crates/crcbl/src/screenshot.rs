@@ -8782,6 +8782,7 @@ mod tests {
                     // — the primitives and text scenes are where those are
                     // drawn.
                     DrawCommand::Image { .. }
+                    | DrawCommand::Texture { .. }
                     | DrawCommand::RoundedRect { .. }
                     | DrawCommand::Glyphs { .. } => shapes += 1,
                     // The glyphs' extent is the atlas's business, so only the

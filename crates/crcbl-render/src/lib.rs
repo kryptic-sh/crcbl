@@ -275,7 +275,7 @@ pub use texture::{
 };
 pub use timing::{FrameTimings, MAX_TIMED_PASSES, PassTimers, PassTiming};
 pub use transient::{TransientBufferDesc, TransientImageDesc, TransientPool, TransientUse};
-pub use ui_pass::UiRenderer;
+pub use ui_pass::{UiRenderer, UiTexture};
 pub use volumetric::FroxelBuffers;
 
 /// Everything this crate exposes to the debug console.

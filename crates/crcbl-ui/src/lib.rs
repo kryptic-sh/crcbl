@@ -81,15 +81,17 @@ pub use debug::{
     DebugStyle, FrameStats,
 };
 pub use draw_list::{
-    Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, Triangles,
-    Vertex2d,
+    Border, ClipRect, ClipUnderflow, CornerRadii, DrawCommand, DrawList, Primitive, TextureRun,
+    Triangles, Vertex2d,
 };
 pub use grid_drag::{
     CellGrid, CellResponse, DragFrame, DropFeedback, DropTarget, Dropped, GridCell, GridDrag,
     GridResponse, Grip, Held, Released,
 };
 pub use hud::Anchor;
-pub use image::{AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect};
+pub use image::{
+    AtlasError, AtlasImage, ImageAtlas, ImageId, NineSliceImage, TexelRect, TextureId,
+};
 pub use menu::{
     BUTTON_INSETS, Caption, CaptionTone, Cycler, FIT_FONT_STEP, FIT_FRACTION, Menu, MenuFitError,
     MenuItem, MenuItemKind, MenuItemLayout, MenuLayout, MenuSet, MenuSkin, MenuStyle, PANEL_INSETS,

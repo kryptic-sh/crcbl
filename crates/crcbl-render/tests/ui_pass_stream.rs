@@ -185,8 +185,8 @@ fn names(stream: &[Command]) -> Vec<&'static str> {
 }
 
 /// **The pass binds its pipeline and its group, binds the index buffer and
-/// draws**, inside the graph's own pass scope, and records no `PushConstants` —
-/// on a device that has them.
+/// set 1's placeholder, and draws**, inside the graph's own pass scope, and
+/// records no `PushConstants` — on a device that has them.
 ///
 /// The viewport arrives through the bind group instead. Spelling the whole
 /// stream out rather than asserting the absence of one command is what would
@@ -207,6 +207,9 @@ fn the_pass_records_no_push_constant_even_where_they_exist() {
             "BindGraphicsPipeline",
             "BindGroup",
             "BindIndexBuffer",
+            // Set 1: the transparent 1x1 a draw that samples no
+            // renderer-owned texture binds there.
+            "BindGroup",
             "DrawIndexed",
             "EndRenderPass",
             "Barrier",

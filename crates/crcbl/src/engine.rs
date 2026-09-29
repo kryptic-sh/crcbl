@@ -18607,6 +18607,7 @@ mod tests {
                 crcbl_ui::draw_list::DrawCommand::Text { pos, .. } => inside(*pos),
                 crcbl_ui::draw_list::DrawCommand::Glyphs { origin, .. } => inside(*origin),
                 crcbl_ui::draw_list::DrawCommand::Image { min, max, .. }
+                | crcbl_ui::draw_list::DrawCommand::Texture { min, max, .. }
                 | crcbl_ui::draw_list::DrawCommand::RoundedRect { min, max, .. } => {
                     inside(*min) && inside(*max)
                 }

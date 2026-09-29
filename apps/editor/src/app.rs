@@ -28,12 +28,29 @@
 //! editor that did not switch it on would draw no selection and report nothing
 //! wrong.
 //!
-//! The panels are [`crate::panel`]'s, composited over that picture by
-//! [`UiRenderer`] in the same graph. **The scene is drawn over the whole
-//! window** and the viewport pane is the hole the panels leave in it — that
-//! module's docs say why it cannot yet be anything else — so the ray a click
-//! becomes is cast through the whole window, and a click outside the pane's own
-//! rectangle picks nothing.
+//! **The picture is drawn into the viewport pane, not the window.** The
+//! renderer's camera draws into a graph transient sized to the pane
+//! ([`Panels::viewport_extent`]), and the panels' draw list carries a
+//! rectangle naming that picture ([`crate::panel::VIEWPORT_TEXTURE`]), which
+//! [`UiRenderer::add_passes_with_textures`] samples in the same graph, added
+//! after the scene's passes — so the graph draws the scene first and puts the
+//! barrier between the two. The window itself is cleared and then covered by
+//! the panels and the pane.
+//!
+//! **The primary camera, not a second view.** `docs/plan/08-editor.md` decided
+//! on "a secondary view rendered to a texture a UI rect samples", and
+//! [`ForwardRenderer::create_view`] is the renderer half it named. A renderer
+//! always draws its primary camera, though, so a view of its own would leave
+//! the primary drawing a picture nobody sees; the editor has one camera, and
+//! drawing that camera into a target of the pane's size is the same picture
+//! without the wasted frame — a default view draws the primary camera's
+//! picture byte for byte, which `forward_e2e`'s `views` suite holds. A second
+//! pane would be a `create_view` target sampled the same way.
+//!
+//! A click is picked through that same camera: the ray goes through the
+//! click's position **inside the pane**, against the pane's extent, which is
+//! the matrix the picture was drawn with. A click outside the pane's rectangle
+//! picks nothing.
 //!
 //! # The keyboard is not read here
 //!
@@ -51,14 +68,14 @@ use crcbl::engine::{
     accept_close, open_window, wait_for_configure,
 };
 use crcbl::greybox::scene3d;
-use crcbl::hal::CommandEncoderDesc;
+use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
 use crcbl::math::{Vec2, Vec3};
 use crcbl::reflect::Value;
 use crcbl::render::grid::GridStyle;
 use crcbl::render::{
-    Aabb, DirectionalLight, ForwardRenderer, OrbitCamera, Projection, RenderGraph, TransientPool,
-    UiRenderer,
+    Aabb, DirectionalLight, ForwardRenderer, OrbitCamera, Projection, RenderGraph,
+    TransientImageDesc, TransientPool, UiRenderer, UiTexture, ViewRay,
 };
 use crcbl::scene::scn::SceneEntityId;
 use crcbl::shell::{ButtonState, DisplayMode, Shell, ShellEvent, WindowDesc, WindowId, open};
@@ -71,7 +88,7 @@ use crate::command::EditCommand;
 use crate::document::{Document, EditError};
 use crate::keys::Action;
 use crate::layout;
-use crate::panel::{PanelInput, Panels};
+use crate::panel::{PanelInput, Panels, VIEWPORT_TEXTURE};
 
 mod instances;
 
@@ -182,6 +199,9 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     /// changes — a title set every frame is a round trip to the window system
     /// for nothing.
     title: String,
+    /// The extent the last recorded frame drew the scene at: the viewport
+    /// pane's, in window pixels, and the size of the target the pane samples.
+    drawn_viewport: Option<(u32, u32)>,
     mode: ModeRequest,
 }
 
@@ -355,6 +375,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             budget: FrameBudget::new(options.common.frame_budget()),
             events,
             title,
+            drawn_viewport: None,
             mode: ModeRequest::new(),
         })
     }
@@ -546,7 +567,8 @@ impl<S: Shell + ?Sized> Editor<S> {
                     -motion.y * ORBIT_RADIANS_PER_PIXEL,
                 ),
                 Drag::Pan => {
-                    let height = self.extent().1.max(1) as f32;
+                    // The pane's height, which is what the picture spans.
+                    let height = self.panels.viewport_extent().1 as f32;
                     self.camera.pan(-motion.x / height, motion.y / height);
                 }
             }
@@ -567,26 +589,29 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// Selects whatever the left button landed on.
     ///
     /// Called only for a press inside the viewport pane — see
-    /// [`Editor::frame`]. The ray is cast through the **whole window** because
-    /// that is what the scene was drawn through: the pane is a hole in the
-    /// panels rather than a view of its own, so an unprojection against the
-    /// pane's own extent would use a different matrix from the picture.
+    /// [`Editor::frame`]. The ray is [`ray_at`](Self::ray_at)'s.
     fn pick(&mut self, pending: &Pending) {
         let Some(at) = pending.pointer else {
             return;
         };
-        let extent = self.extent();
-        if extent.0 == 0 || extent.1 == 0 {
-            return;
-        }
-        // Half a pixel, because `Camera::ray_through` takes a pixel's top-left
-        // corner and a click is about the pixel's middle.
-        let ray = self
-            .camera
-            .camera()
-            .ray_through(at + Vec2::splat(0.5), extent);
+        let ray = self.ray_at(at);
         let hit = self.document.pick_ray(&ray);
         self.document.select(hit);
+    }
+
+    /// The ray through the scene under `at`, a point in window pixels.
+    ///
+    /// **Through the pane, not the window**: the scene is drawn into a target
+    /// of the pane's extent, so the pixel under the cursor is `at` less the
+    /// pane's top-left, unprojected against that extent — the matrix the
+    /// picture was drawn with. Half a pixel is added, because
+    /// [`Camera::ray_through`](crcbl::render::Camera::ray_through) takes a
+    /// pixel's top-left corner and a click is about the pixel's middle.
+    fn ray_at(&self, at: Vec2) -> ViewRay {
+        let (min, _) = self.panels.viewport_pixels();
+        self.camera
+            .camera()
+            .ray_through(at - min + Vec2::splat(0.5), self.panels.viewport_extent())
     }
 
     /// Carries out one keyboard action.
@@ -633,13 +658,10 @@ impl<S: Shell + ?Sized> Editor<S> {
         })
     }
 
-    /// Puts the whole scene back in view, at the angle the camera is already
-    /// looking from.
+    /// Puts the whole scene back in view of the pane, at the angle the camera
+    /// is already looking from.
     fn frame_scene(&mut self) {
-        let extent = self.extent();
-        if extent.0 == 0 || extent.1 == 0 {
-            return;
-        }
+        let extent = self.panels.viewport_extent();
         let bounds = scene_bounds(&mut self.document);
         self.camera.frame(bounds, extent.0 as f32 / extent.1 as f32);
     }
@@ -670,9 +692,12 @@ impl<S: Shell + ?Sized> Editor<S> {
             self.renderer.debug_draw().aabb(min, max, SELECTION_COLOR);
         }
 
+        // The scene is drawn at the pane's extent — as the panels last laid it
+        // out, which is the rectangle this frame's draw list samples it into.
+        let viewport = self.panels.viewport_extent();
         let camera = self.camera.camera();
         self.renderer
-            .begin_frame(self.gpu.device(), &camera, &sun(), extent)
+            .begin_frame(self.gpu.device(), &camera, &sun(), viewport)
             .map_err(GpuError::Hal)?;
         // 1.0, because every size in the draw list is already this frame's
         // pixels: the tree was laid out against `extent` and a second
@@ -693,12 +718,38 @@ impl<S: Shell + ?Sized> Editor<S> {
                 "swapchain",
                 ForwardRenderer::present_target(acquired.image, acquired.view, format, extent),
             );
+            // A transient, so a pane that changes size is a target of the new
+            // size on the next frame and the old one is retired by the pool
+            // once no frame asks for it.
+            let scene = graph.create_image(
+                "editor viewport",
+                TransientImageDesc::new(
+                    viewport,
+                    format,
+                    ImageUsage::COLOR_ATTACHMENT | ImageUsage::SAMPLED,
+                ),
+            );
             let _hdr = self
                 .renderer
-                .add_passes(&mut graph, &self.pool, target, extent);
-            // The panels, over the scene the pass above just tonemapped onto
-            // the swapchain.
-            self.ui.add_passes(&mut graph, target, extent);
+                .add_passes(&mut graph, &self.pool, scene, viewport);
+            // Nothing else covers the whole window any more: the panels and
+            // the pane do, and whatever the dock leaves between them is this.
+            graph
+                .add_render_pass("editor background")
+                .clear_color(target, BACKGROUND)
+                .execute(|_| {});
+            // The panels, and the pane sampling the scene the passes above
+            // drew — declared as a read, so the graph puts the barrier
+            // between the two.
+            self.ui.add_passes_with_textures(
+                &mut graph,
+                target,
+                extent,
+                &[UiTexture {
+                    id: VIEWPORT_TEXTURE,
+                    image: scene,
+                }],
+            );
             graph.compile(&self.pool).map_err(GpuError::Graph)?
         };
 
@@ -715,6 +766,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         let command_buffer = encoder.finish().map_err(GpuError::Hal)?;
         let outcome = self.gpu.submit_and_present(&acquired, command_buffer)?;
         self.pool.retire_unused(self.gpu.device());
+        self.drawn_viewport = Some(viewport);
         Ok(outcome)
     }
 
@@ -786,6 +838,10 @@ impl<S: Shell + ?Sized> Editor<S> {
 
 /// The app id the window system matches this tool to its `.desktop` file by.
 const APP_ID: &str = "sh.kryptic.crcbl.editor";
+
+/// What the window is cleared to under the panels: the panels' own
+/// background, so a gap the dock leaves reads as part of them.
+const BACKGROUND: [f32; 4] = [0.078, 0.09, 0.114, 1.0];
 
 /// The colour the selection's bounds are drawn in: a warm amber, which is
 /// legible against the greybox grey in both the lit and the shadowed half.
@@ -923,7 +979,7 @@ mod tests {
 
     use crcbl::core::input::KeyCode;
     use crcbl::engine::FrameLimit;
-    use crcbl::shell::{HeadlessShell, PhysicalPoint};
+    use crcbl::shell::{HeadlessShell, PhysicalPoint, PhysicalSize};
     use crcbl::ui::tree::NodeKey;
 
     fn options(frames: u64) -> Options {
@@ -1127,9 +1183,10 @@ mod tests {
     }
 
     /// **A click in a panel picks nothing, and the same click in the viewport
-    /// picks.** The claim the viewport pane's rectangle exists for: the ray is
-    /// cast through the whole window, so without the gate a click on the
-    /// outliner would select whatever the scene happens to have behind it.
+    /// picks.** The claim the viewport pane's rectangle exists for: a click
+    /// outside it still unprojects to *some* ray through the pane's camera, so
+    /// without the gate a click on the outliner would select whatever that ray
+    /// happens to meet.
     ///
     /// The two clicks are at the **same scene depth** — the pane's own
     /// rectangle is the only difference — and the panel click is aimed at the
@@ -1140,15 +1197,13 @@ mod tests {
         let mut editor = headless(200);
         editor.frame().expect("a frame");
 
-        // The window's own middle: the scene was framed on the whole window at
-        // start-up, so that pixel looks at the middle of the scene — and it is
-        // inside the viewport pane, which the panels leave to the right of the
-        // side column.
-        let extent = editor.extent();
-        let middle = Vec2::new(extent.0 as f32, extent.1 as f32) * 0.5;
+        // The pane's own middle: the scene was framed on the pane at start-up,
+        // so that pixel looks at the middle of the scene.
+        let (pane_min, pane_max) = editor.panels.viewport_pixels();
+        let middle = ((pane_min + pane_max) * 0.5).floor();
         assert!(
             editor.panels.in_viewport(middle),
-            "the window's middle is not in the viewport pane: {:?}",
+            "the pane's middle is not in the viewport pane: {:?}",
             editor.panels.viewport(),
         );
         click(
@@ -1192,11 +1247,7 @@ mod tests {
         // framed, a ray through the panel misses everything and a test here
         // would pass with the gate deleted.
         let probe = |editor: &mut Editor<HeadlessShell>, at: Vec2| {
-            let extent = editor.extent();
-            let ray = editor
-                .camera
-                .camera()
-                .ray_through(at + Vec2::splat(0.5), extent);
+            let ray = editor.ray_at(at);
             editor.document_mut().pick_ray(&ray)
         };
         // 21 steps of 0.1 leave the camera about four metres out, which is
@@ -1338,6 +1389,133 @@ mod tests {
         assert!(
             editor.panels.text_editing(),
             "the field stopped editing part-way, so the keys were not all typed",
+        );
+        editor.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **A click in the pane picks through the pane's own camera**, measured
+    /// from the pane's corner and unprojected against the pane's extent —
+    /// which is the matrix the picture in it was drawn with.
+    ///
+    /// The pane is offset from the window's corner by the side column, so the
+    /// whole-window unprojection the editor used when the scene was drawn under
+    /// a hole in the panels answers a different question. The click is aimed
+    /// at a pixel where the two answers **differ**, found by asking both, so a
+    /// pick that went back to the window's matrix selects the wrong entity
+    /// rather than passing by coincidence.
+    #[test]
+    fn a_click_in_the_offset_pane_picks_through_the_panes_own_camera() {
+        let mut editor = headless(200);
+        editor.frame().expect("a frame");
+
+        let (min, max) = editor.panels.viewport_pixels();
+        assert!(
+            min.x > 0.0,
+            "the pane starts at the window's left edge, so an offset cannot be told from none"
+        );
+        let pane = editor.panels.viewport_extent();
+        let window = editor.extent();
+        let camera = editor.camera.camera();
+
+        // A grid over the pane, and the first pixel whose pane-relative pick
+        // hits something the whole-window pick does not.
+        let mut aimed = None;
+        'scan: for row in 1..16 {
+            for column in 1..16 {
+                let at = (min + (max - min) * Vec2::new(column as f32, row as f32) / 16.0).floor();
+                let through_pane = camera.ray_through(at - min + Vec2::splat(0.5), pane);
+                let through_window = camera.ray_through(at + Vec2::splat(0.5), window);
+                let expected = editor.document_mut().pick_ray(&through_pane);
+                let wrong = editor.document_mut().pick_ray(&through_window);
+                if expected.is_some() && expected != wrong {
+                    aimed = Some((at, expected));
+                    break 'scan;
+                }
+            }
+        }
+        let (at, expected) =
+            aimed.expect("no pixel of the pane tells the pane's camera from the window's");
+
+        click(
+            &mut editor,
+            PhysicalPoint {
+                x: f64::from(at.x),
+                y: f64::from(at.y),
+            },
+        );
+        assert_eq!(
+            editor.document().selected(),
+            expected,
+            "a click at {at:?} in a pane at {min:?} picked through some other camera",
+        );
+        editor.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// **The scene is drawn at the pane's size, and a pane that changes size
+    /// gets a target of its new size.**
+    ///
+    /// Read off what the frame did: the extent the scene was drawn at, the
+    /// rectangle the draw list samples it into, and the transient pool, which
+    /// allocates a target for the new size — and nothing on a steady frame.
+    #[test]
+    fn resizing_the_pane_reallocates_the_viewport_target() {
+        let mut editor = headless(200);
+        editor.frame().expect("a frame");
+        editor.frame().expect("a frame");
+
+        let drawn = |editor: &Editor<HeadlessShell>| {
+            let (min, max) = editor.panels.viewport_pixels();
+            let sampled = editor
+                .panels
+                .draw_list()
+                .commands()
+                .iter()
+                .find_map(|command| match command {
+                    crcbl::ui::DrawCommand::Texture {
+                        texture, min, max, ..
+                    } if *texture == VIEWPORT_TEXTURE => Some((*min, *max)),
+                    _ => None,
+                })
+                .expect("the panels sample the viewport's picture");
+            assert_eq!(
+                sampled,
+                (min, max),
+                "the picture is drawn over the pane exactly"
+            );
+            let size = (max - min).round();
+            assert_eq!(
+                editor.drawn_viewport,
+                Some((size.x as u32, size.y as u32)),
+                "the scene is drawn at the pane's size in window pixels",
+            );
+            editor.drawn_viewport.expect("a frame was drawn")
+        };
+
+        let before = drawn(&editor);
+        let pooled = editor.pool.image_count();
+        editor.frame().expect("a frame");
+        assert_eq!(
+            editor.pool.image_count(),
+            pooled,
+            "a steady frame allocates nothing"
+        );
+
+        let window = editor.window;
+        let (width, height) = editor.extent();
+        editor
+            .shell_mut()
+            .resize(window, PhysicalSize::new(width + 160, height + 96))
+            .expect("live");
+        // Two frames: the swapchain may be reconfigured on the first, which
+        // presents nothing, and the panels are laid out at the new size by
+        // the time the second is drawn.
+        editor.frame().expect("a frame");
+        editor.frame().expect("a frame");
+        let after = drawn(&editor);
+        assert_ne!(after, before, "the resize did not change the pane");
+        assert!(
+            editor.pool.image_count() > pooled,
+            "the pane's new size drew into the old target: nothing was allocated",
         );
         editor.finish(ExitReason::FrameBudget).expect("teardown");
     }

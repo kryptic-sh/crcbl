@@ -16,6 +16,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_ui::DrawCommand` has a `Texture` variant and
+  `crcbl_ui::draw_list::Primitive` a `Texture` one**, so an exhaustive `match`
+  on either needs an arm; `Primitive::ALL` is `[Primitive; 6]`.
+  `crcbl_ui::Triangles` has a `textures: Vec<TextureRun>` field, so a struct
+  literal needs it. `ui.slang` reads a texture at set 1, so the UI pass's
+  pipeline layout has two sets and every half binds set 1 once before it draws
+  (see Added).
+
 - **`crcbl_shaders::meshlet::ClusterDrawConstants` has `chunk_starts_at` and
   `chunk_starts_end` fields**, the runs-buffer words the flat task call searches
   between (see Changed), so a struct literal needs them, and
@@ -383,6 +391,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **A UI rectangle can draw a texture the renderer drew**, such as a second
+  camera's view: picture-in-picture, a render-to-texture panel, the editor's
+  viewport. `DrawList::texture(min, max, TextureId, (uv_min, uv_max), tint)`
+  pushes a `DrawCommand::Texture` naming a caller-chosen `crcbl_ui::TextureId`,
+  clipped and scaled like every other push, and
+  `crcbl_render::UiRenderer::add_passes_with_textures` takes a
+  `UiTexture { id, image }` per name, pairing it with any `ImageId` of the same
+  graph that can be sampled as filterable float — a view's target, a transient,
+  an import. The UI pass declares a read of each image it samples, so the graph
+  puts the barrier from the pass that drew it between the two; the caller adds
+  the view's passes first. `ui.slang` samples the texture at set 1, bilinear,
+  bound per run of texture quads (`crcbl_ui::TextureRun`, reported in
+  `Triangles::textures`) with a transparent 1×1 bound for everything else, so a
+  list with no texture is still one draw a half and a name the call was not
+  handed draws nothing. `add_passes` is `add_passes_with_textures` with none.
+  The `ui` shader's SPIR-V and WGSL are rebuilt; its MSL and DXIL come from CI's
+  regenerated shaders.
+
+- **The editor's viewport pane shows the scene drawn at the pane's size.** The
+  scene is drawn into a graph transient of the pane's extent in window pixels,
+  which the panels' draw list samples over the pane's rectangle, rather than
+  over the whole window under a hole in the panels; the window is cleared and
+  covered by the panels. A pane that changes size draws into a target of its new
+  size on the next frame. A click picks through the pane's own camera, from its
+  position inside the pane, and framing and panning measure the pane.
 
 - **Menu caption tones** (asked for by EW): `crcbl_ui::Caption { text, tone }`
   and `crcbl_ui::CaptionTone::{Hint, Warning}`, built with `Caption::hint` and

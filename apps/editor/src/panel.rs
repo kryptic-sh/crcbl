@@ -12,19 +12,21 @@
 //! # The three panes
 //!
 //! [`crate::layout`] names them and holds the [`DockLayout`] they are arranged
-//! by. Two are built here; the third, the viewport, is **built empty on
-//! purpose**. `docs/plan/08-editor.md` leaves the choice open between "a
-//! secondary view rendered to a texture a UI rect samples" and "the scene drawn
-//! full-window with UI panes around a scissored region", and the tree today can
-//! draw neither: a `DrawCommand::Image` names no texture, `crcbl-render`'s
-//! graph sets every pass's scissor from the whole attachment, and a secondary
-//! view renders to its own offscreen image with nothing that composites it.
-//! So the viewport pane is a **hole**: the scene is drawn over the whole
-//! window, the panels are composited on top of it, and the pane's rectangle is
-//! what a click has to land in to be a pick. That is why [`PanelFrame`] carries
-//! that rectangle and why the ray is still cast through the whole window — the
-//! picture under the cursor is the full-window one, so the unprojection must be
-//! too.
+//! by. Two are built here; the third, the viewport, is a block with nothing in
+//! it that the frame fills with **the scene's own picture**: a
+//! [`DrawList::texture`] rectangle over the pane's laid-out rectangle, naming
+//! [`VIEWPORT_TEXTURE`], which [`crate::app`] pairs with the target it drew the
+//! scene into — sized to [`Panels::viewport_pixels`] — when the frame's passes
+//! are added. That is `docs/plan/08-editor.md`'s decision of 2026-09-30: a view
+//! rendered to a texture a UI rect samples, rather than the scene drawn
+//! full-window under a hole in the panels.
+//!
+//! The rectangle is pushed **first**, under every panel, so a menu or a
+//! dragged divider drawn over the pane covers the picture rather than the other
+//! way round. It is also what a click has to land in to be a pick, which is
+//! why [`PanelFrame`] carries it — and the ray is cast through the pane's own
+//! camera from the click's position inside it, because that is the picture
+//! under the cursor.
 //!
 //! # Selection, in both directions
 //!
@@ -67,10 +69,19 @@ use crcbl::ui::tree::{
     NavInput, NodeKey, OUTLINER_ROW_HEIGHT, OutlinerId, OutlinerOptions, OutlinerState, Overrides,
     SelectMode, TextInput, Ui,
 };
-use crcbl::ui::{DrawList, FontAtlas, PointerInput};
+use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
 use crate::document::Document;
 use crate::layout::{self, PANE_MIN};
+
+/// The name the viewport pane's picture goes by in the panels' draw list —
+/// see the module docs. The only texture the editor draws, so the first
+/// number.
+pub const VIEWPORT_TEXTURE: TextureId = TextureId::new(0);
+
+/// The tint the viewport's picture is drawn with: none, so the pane shows the
+/// scene's pixels as the renderer wrote them.
+const UNTINTED: [f32; 4] = [1.0; 4];
 
 /// The editor's own stylesheet, over `crcbl-ui`'s `default.css`.
 ///
@@ -258,11 +269,36 @@ impl Panels {
         self.viewport
     }
 
-    /// Whether `at` is inside the viewport pane — whether, that is, a click
-    /// there is the scene's rather than a panel's.
+    /// The viewport pane's rectangle in **window** pixels: [`viewport`]'s,
+    /// converted at the draw list's [`scale`](DrawList::scale).
+    ///
+    /// What the scene's target is sized to and what a click is measured
+    /// against, so the picture is drawn one texel to one window pixel at any
+    /// scale and a click lands on the texel under it. At a scale of one — the
+    /// only one this editor lays out at today — it is [`viewport`] itself.
+    ///
+    /// [`viewport`]: Self::viewport
+    #[must_use]
+    pub fn viewport_pixels(&self) -> (Vec2, Vec2) {
+        let scale = self.list.scale();
+        (self.viewport.0 * scale, self.viewport.1 * scale)
+    }
+
+    /// The whole pixels [`viewport_pixels`](Self::viewport_pixels) covers,
+    /// never less than one on a side: the extent the scene is drawn at and a
+    /// click is unprojected against.
+    #[must_use]
+    pub fn viewport_extent(&self) -> (u32, u32) {
+        let (min, max) = self.viewport_pixels();
+        let size = (max - min).round().max(Vec2::ONE);
+        (size.x as u32, size.y as u32)
+    }
+
+    /// Whether `at`, in window pixels, is inside the viewport pane — whether,
+    /// that is, a click there is the scene's rather than a panel's.
     #[must_use]
     pub fn in_viewport(&self, at: Vec2) -> bool {
-        let (min, max) = self.viewport;
+        let (min, max) = self.viewport_pixels();
         at.x >= min.x && at.x < max.x && at.y >= min.y && at.y < max.y
     }
 
@@ -399,8 +435,8 @@ impl Panels {
             ],
             |ui| {
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
-                    // Built empty: the scene is drawn under it. See the module
-                    // docs.
+                    // Built empty: the scene's picture is pushed over its
+                    // rectangle once it is laid out. See the module docs.
                     layout::VIEWPORT => viewport = ui.current_key(),
                     layout::OUTLINER => {
                         outliner_key = Some(build_outliner(ui, outliner, &options, outline));
@@ -423,6 +459,16 @@ impl Panels {
         );
         ui.layout(Vec2::ZERO, AvailableSpace::definite(extent), atlas);
         list.clear();
+        // The scene's picture, under every panel: see the module docs.
+        if let Some((min, max)) = viewport.and_then(|key| ui.rect(key)) {
+            list.texture(
+                min,
+                max,
+                VIEWPORT_TEXTURE,
+                (Vec2::ZERO, Vec2::ONE),
+                UNTINTED,
+            );
+        }
         ui.emit(list);
 
         if let Some(rect) = viewport.and_then(|key| self.ui.rect(key)) {

@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slice 4 2026-09-30, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -65,22 +65,40 @@ selection _is_ the document's in both directions, every inspector edit is an
 player's `settings.toml` and read back. The editor's keys became an `ActionMap`
 with the reserved `ui` and `text` contexts pushed from what the panels report.
 
-**The viewport decision below is still open, and slice 3 took neither branch.**
-The tree can draw neither: `DrawCommand::Image` carries no texture identity,
-`ImageAtlas::register` takes host bytes, and the render graph sets every pass's
-scissor from the attachment's full extent with no sub-rect. So the scene is
-drawn full-window, the panels are composited over it, and the viewport pane is a
-hole whose rectangle gates picking. Closing it needs an image command that can
-name a rendered target, or a render area the graph takes from the caller.
+**Slice 4, the viewport, landed 2026-09-30** on the decision of the same day
+(below): the pane shows a rendered view that a UI rectangle samples, and the
+full-window draw under a hole in the panels is gone.
 
-> **Re-checked 2026-09-25: the renderer half of the first branch now exists.**
-> `ForwardRenderer::create_view` (2026-09-15, `crcbl_render::forward::view`)
-> draws the scene a renderer already holds through a second camera into a target
-> of its own, sharing every pool, page and shadow map, and `ViewDesc` takes a
-> transparent background and fixed lighting. What is still missing is the UI
-> half: `DrawCommand::Image` samples `crcbl_ui::image`'s atlas, which
-> `ImageAtlas::register` fills from host bytes, so no UI rect can show a view's
-> target yet.
+- **The UI half is general, not the editor's.** `DrawList::texture` pushes a
+  `DrawCommand::Texture` naming a caller-chosen `crcbl_ui::TextureId`, and
+  `UiRenderer::add_passes_with_textures` pairs each name with an `ImageId` of
+  the same graph. The UI pass declares a read of the image, so the graph puts
+  the barrier out of the pass that drew it; `ui.slang` samples it at set 1,
+  bound per run of texture quads with a transparent 1×1 for everything else,
+  because WebGPU has no texture array to index. A game's picture-in-picture is
+  the same call.
+- **The editor draws its primary camera into the pane, not a `create_view`
+  target.** A renderer always draws its primary camera, so a second view would
+  leave the primary drawing a full-window picture nobody sees. The primary into
+  a transient of the pane's extent is the same picture (a default view is the
+  primary's byte for byte, which `forward_e2e`'s `views` suite holds), and a
+  second pane is where `create_view` comes in. A pane that changes size gets a
+  target of the new size from the transient pool on the next frame.
+- **Picking goes through the pane's camera**: the click less the pane's
+  top-left, unprojected against the pane's extent, which is the matrix the
+  picture was drawn with. Framing and panning measure the pane too.
+- **Evidence.** Null-backend tests hold the draw split, the set-1 binds naming
+  the view's own image and the attachment-to-`ShaderRead` barrier between the
+  view pass and the UI pass (`crcbl_render::ui_pass::texture_tests`); the
+  editor's tests pick in the offset pane where the pane's and the window's
+  cameras disagree and resize the pane; `forward_e2e`'s
+  `views::ui::a_ui_rectangle_draws_the_view_it_names_texel_for_pixel` reads a
+  view back beside the frame the UI composited it into and finds the same pixels
+  on Vulkan (RX 7900 XTX). Binding the blank instead of the view, and dropping
+  the read declaration, each turned a test red.
+- **Not verified here**: the rebuilt `ui` shader on Metal, D3D12 and a browser.
+  Its SPIR-V and WGSL were rebuilt locally; the MSL and DXIL come from CI's
+  regenerated shaders, and nothing but CI has run them.
 
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
@@ -247,9 +265,9 @@ long term and recorded):
 - **The viewport is a secondary view rendered to a texture a UI rect samples.**
   The renderer half exists (`ForwardRenderer::create_view`); what is missing is
   a UI image command that can name a rendered target rather than an atlas region
-  filled from host bytes. It is the next slice. The full-window, scissored-hole
-  alternative is declined: it cannot show two views, and the render graph has no
-  sub-rect to scissor with.
+  filled from host bytes. It is the next slice (landed the same day; see
+  _Status_). The full-window, scissored-hole alternative is declined: it cannot
+  show two views, and the render graph has no sub-rect to scissor with.
 - **Docking is splitters only for now.** Tabs are added when a second panel
   competes for one slot; nothing does yet.
 - **File dialogs are an in-UI browser over storage listing**, the same on every

@@ -78,6 +78,39 @@ impl ImageId {
     }
 }
 
+/// Names a texture the **renderer** owns rather than this atlas: a picture
+/// the GPU drew this frame, such as a second camera's view, that a
+/// [`DrawList::texture`](crate::DrawList::texture) rectangle samples.
+///
+/// # A name, resolved when the frame is recorded
+///
+/// The list cannot hold the texture itself: this crate knows no GPU, and what a
+/// view renders into may be a render-graph transient that does not exist until
+/// the frame is built. So the caller picks a number, draws with it, and hands
+/// the renderer the same number beside the image it stands for when the frame's
+/// passes are added — `crcbl-render`'s `UiRenderer::add_passes_with_textures`.
+/// The number means nothing else: two lists may use the same one for different
+/// pictures, and one list may name as many as it likes.
+///
+/// A texture the frame names and the renderer is not handed is drawn
+/// transparent rather than with some other picture.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TextureId(u32);
+
+impl TextureId {
+    /// The texture the caller numbered `index`.
+    #[must_use]
+    pub const fn new(index: u32) -> Self {
+        Self(index)
+    }
+
+    /// The number the caller chose.
+    #[must_use]
+    pub const fn index(self) -> u32 {
+        self.0
+    }
+}
+
 /// Where one registered image sits on the page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AtlasImage {

@@ -17,7 +17,8 @@
 // glyph pages; the image atlas is `Rgba8UnormSrgb` multiplied by the vertex
 // colour. A primitive switch that is data rather than
 // a pipeline is what keeps a menu frame, its labels and a rounded panel in the
-// same batch.
+// same batch. The one primitive that breaks it is a renderer-owned texture — a
+// view drawn this frame — bound at set 1 for its own draw; see `boundTexture`.
 //
 // # One artifact, no tier split
 //
@@ -89,6 +90,7 @@ static const float PRIMITIVE_GLYPH = 1.0;
 static const float PRIMITIVE_IMAGE = 2.0;
 static const float PRIMITIVE_ROUNDED_RECT = 3.0;
 static const float PRIMITIVE_FONT_GLYPH = 4.0;
+static const float PRIMITIVE_TEXTURE = 5.0;
 
 // **Declaration order is binding order, and it is load-bearing on Metal.**
 // Slang's Metal target ignores `[[vk::binding]]` and assigns each resource an
@@ -132,6 +134,15 @@ SamplerState imageSampler D3D12_REGISTER(s5, space0);
 /// sample at each fragment centre reads exactly its own texel.
 [[vk::binding(6, 0)]]
 Texture2DArray<float> glyphPages D3D12_REGISTER(t6, space0);
+
+/// A texture the renderer owns — a view it drew this frame — for
+/// `crcbl_ui::draw_list::Primitive::Texture`, sampled bilinear through
+/// `imageSampler`. **Set 1**, alone: the renderer binds a group per run of
+/// texture quads and a transparent 1×1 everywhere else, which is the sprite
+/// pass's per-sheet shape and needs no texture array, which WebGPU lacks.
+/// Declared after every set-0 resource, so its Metal index follows theirs.
+[[vk::binding(0, 1)]]
+Texture2D<float4> boundTexture D3D12_REGISTER(t0, space1);
 
 struct UiOutput
 {
@@ -218,6 +229,9 @@ float4 fragmentMain(UiOutput input) : SV_Target
     imageAtlas.GetDimensions(imageWidth, imageHeight);
     float2 imageSize = float2(float(imageWidth), float(imageHeight));
     float4 texel = imageAtlas.Sample(imageSampler, sharpen(input.uv, imageSize));
+    // Plain bilinear: a view is drawn at whatever size its rectangle has, and
+    // at one texel per pixel a linear tap at a texel centre is that texel.
+    float4 bound = boundTexture.Sample(imageSampler, input.uv);
 
     float primitive = input.shape.w;
     // Layer zero for everything but a glyph-page glyph, whose first shape lane
@@ -234,6 +248,8 @@ float4 fragmentMain(UiOutput input) : SV_Target
 
     // An image multiplies the whole texel by the tint.
     color = primitive == PRIMITIVE_IMAGE ? texel * input.color : color;
+    // So does a renderer-owned texture.
+    color = primitive == PRIMITIVE_TEXTURE ? bound * input.color : color;
 
     // A rounded rect: coverage from the distance to its edge, and the border
     // from the distance to an edge `border width` further in, each ramped over

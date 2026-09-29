@@ -387,7 +387,9 @@ The rules, each with its _why_:
   texture at 4096.
 - **Batching is by stacking context, then texture, keeping CSS paint order.**
   RmlUi's lack of batching (thousands of draw calls) is its top performance
-  issue. Not built: there is one image page.
+  issue. Not built: there is one image page. The one texture that breaks a batch
+  is a renderer-owned one (`DrawList::texture`, a view drawn this frame), bound
+  per run of consecutive quads naming it, in paint order.
 - **Fonts: `skrifa` parses; rasterising and the atlas are this engine's** (the
   user's decision of 2026-09-15, superseding the 2026-07-27 design review's
   naming of `ttf-parser`, which is in maintenance mode and recommends the

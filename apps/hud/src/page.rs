@@ -126,7 +126,7 @@ pub struct PageStats {
     pub text: usize,
     /// Stroked lines and polylines.
     pub strokes: usize,
-    /// Image quads and rounded rectangles. This page draws neither, so the
+    /// Image and texture quads and rounded rectangles. This page draws none, so the
     /// panel has no row for them; they are counted so that [`total`](Self::total)
     /// stays every command the list holds if the page ever does.
     pub shapes: usize,
@@ -143,7 +143,9 @@ impl PageStats {
                 DrawCommand::RectOutline { .. } => stats.outlines += 1,
                 DrawCommand::Text { .. } | DrawCommand::Glyphs { .. } => stats.text += 1,
                 DrawCommand::Line { .. } | DrawCommand::Polyline { .. } => stats.strokes += 1,
-                DrawCommand::Image { .. } | DrawCommand::RoundedRect { .. } => stats.shapes += 1,
+                DrawCommand::Image { .. }
+                | DrawCommand::Texture { .. }
+                | DrawCommand::RoundedRect { .. } => stats.shapes += 1,
             }
         }
         stats
@@ -618,6 +620,7 @@ mod tests {
                     DrawCommand::Rect { min, max, .. }
                     | DrawCommand::RectOutline { min, max, .. }
                     | DrawCommand::Image { min, max, .. }
+                    | DrawCommand::Texture { min, max, .. }
                     | DrawCommand::RoundedRect { min, max, .. } => (*min, *max),
                     DrawCommand::Text { pos, .. } => (*pos, *pos),
                     DrawCommand::Glyphs { origin, .. } => (*origin, *origin),

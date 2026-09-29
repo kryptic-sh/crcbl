@@ -3524,10 +3524,11 @@ and `push_clip`, and the menu drawn through the UI pass — left these:
   each source alone and `build.rs` hashes each one. Folding them needs an
   include path in both and a rule for a module file that declares no targets.
 - **Image quads have one sampling mode and no pixel snap.** Every image is
-  sharp-bilinear, which is right for pixel art and wrong for a photo or a
-  rendered viewport pane; and quads are not rounded onto the pixel grid the way
-  the sprite pass rounds `SampleMode::Pixel` quads, so an image at a fractional
-  position crawls. Both are a primitive lane each when a caller needs them.
+  sharp-bilinear, which is right for pixel art and wrong for a photo (a rendered
+  view is drawn through `DrawList::texture`, which is bilinear); and quads are
+  not rounded onto the pixel grid the way the sprite pass rounds
+  `SampleMode::Pixel` quads, so an image at a fractional position crawls. Both
+  are a primitive lane each when a caller needs them.
 - **The UI fragment stage costs more per fragment.** Both atlases are sampled,
   the sharp-bilinear derivative taken and the rounded-rectangle distance
   evaluated for every fragment, and `Vertex2d` is 96 bytes where it was 32.
@@ -11471,17 +11472,40 @@ says what that cleared and what it did not. The allow-list entry in
   sequence plus a full undo compared by `World::hash_state` — is owed with the
   second variant; with one it would assert what the byte-for-byte round trip
   already asserts.
-- **The viewport is a hole, not a view.** The scene is drawn full-window and the
-  panels are composited over it; the pane's rectangle only gates picking. A real
-  viewport pane needs one of two engine changes: an image draw command that can
-  name a rendered target (`DrawCommand::Image` carries no texture identity and
-  `ImageAtlas::register` takes host bytes), or a render area the graph takes
-  from its caller (every pass's scissor comes from the attachment's full
-  extent). **The renderer half of the first exists since 2026-09-15**:
-  `ForwardRenderer::create_view` draws the scene through a second camera into a
-  target of its own (re-checked 2026-09-25). What is missing is the UI half, a
-  `DrawCommand::Image` that can sample that target rather than the host-filled
-  `ImageAtlas` page.
+- **The viewport pane (slice 4, 2026-09-30): what it left.** The pane samples
+  the scene through `DrawList::texture` and
+  `UiRenderer::add_passes_with_textures`; `08-editor.md`'s _Status_ has the
+  design. Left behind, each checked against the tree the day it landed:
+  - **The `ui` shader's MSL and DXIL were not rebuilt here.** The local `slangc`
+    (2026.14) reproduces the pinned SPIR-V only, so `ui.spv` and `ui.wgsl` were
+    rebuilt and `ui.metal`, `ui.vertex.dxil` and `ui.fragment.dxil` still lack
+    set 1 until CI's `regenerated-shaders` artifacts are committed. Until then
+    Metal and D3D12 build a pipeline layout with a set the shader does not read,
+    and a texture rectangle there draws the old shader's fallback for an unknown
+    primitive: its tint, which is opaque white in the editor. Nothing but CI has
+    run the new shader on Metal, D3D12 or in a browser.
+  - **Considered and declined: a `create_view` target for the editor's pane.** A
+    renderer always draws its primary camera, so the pane on a second view would
+    leave the primary drawing a full-window picture nobody sees. The editor
+    draws its primary camera into a pane-sized transient instead; a second pane
+    is where `create_view` comes in.
+  - **A divider drag allocates a target per size it passes through.** The pane
+    is a graph transient keyed by extent, so every size a drag visits is a new
+    set of the forward frame's transients too, each retired by
+    `TransientPool::retire_unused` once idle. Not measured; a window resize has
+    always cost the same.
+  - **Only a UI scale of one is exercised.** `Panels::viewport_pixels` converts
+    the pane at the draw list's scale, but the editor lays its panels out in
+    window pixels and never sets one, so a non-unit scale is unit-tested in
+    `crcbl-ui` and untested in the editor.
+  - **A texture rectangle is bilinear only and not snapped to the pixel grid.**
+    The pane's target is its rounded extent, so a pane with a fractional edge
+    resamples its picture by less than a texel. A sampling-mode lane would
+    answer both, as for image quads (_Image quads have one sampling mode_).
+  - **The editor still has no golden of its window.** The pane is covered by the
+    null-backend tests and by `forward_e2e`'s view-in-a-rectangle readback; the
+    editor itself was run headless on Vulkan (30 frames, validation silent) but
+    its picture is not compared to anything.
 - **`default.css` sets no `min-width: 0` on `split`, `.split-pane` or
   `.dock-pane`.** Flexbox's `min-width: auto` let a 240 px pane's content grow
   to 348 px; `overflow: hidden` hid it, but a rectangle is a hit test, so the
@@ -11530,8 +11554,9 @@ state in ECS systems, **towers ported first** — most samples' state is outside
 the ECS today, so each port is its own slice and is owed here; play/stop
 restores by reloading the scene; and a component's editable fields come from
 `#[derive(Reflect)]`, the workspace's first proc-macro dependency. Still open:
-docking and tabs, the viewport's shape, file dialogs, the scene-format change
-for entities spanning systems, and the `notify` watcher.
+docking and tabs, file dialogs, the scene-format change for entities spanning
+systems, and the `notify` watcher. The viewport's shape was decided and built
+2026-09-30 (a rendered view sampled by a UI rectangle).
 
 **It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
@@ -11567,7 +11592,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   correction); and a server hosting more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
-- **The viewport pane** (the entry above has what exists).
 - **Transform gizmos**: translate, rotate and scale, axis and plane handles,
   snapping, constant screen size. `DebugDraw` is lines only and depth-tested,
   with no on-top mode or filled handles.

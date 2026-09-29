@@ -8,7 +8,8 @@
 //!      └──add_passes──▶ [ui-images] ─▶ [ui-glyphs] ─▶ ui-composite ─▶ ui-overlay
 //!                       a copy when either atlas changed, then two
 //!                       alpha-blended passes onto the same target, after the
-//!                       tonemap
+//!                       tonemap — and after every pass that writes a texture
+//!                       the draw list samples
 //! ```
 //!
 //! The UI pass uses the same target as the tonemap pass, compositing on top
@@ -58,6 +59,35 @@
 //! two halves by this module, because this pass had no textured quad. The two
 //! halves are still two passes, `ui-composite` and `ui-overlay`, drawn back to
 //! back; nothing is between them any more.
+//!
+//! # A texture the renderer drew, sampled by a UI rectangle
+//!
+//! [`DrawList::texture`] names a picture by a caller-chosen
+//! [`TextureId`](crcbl_ui::TextureId) rather than by atlas texels, and
+//! [`add_passes_with_textures`](UiRenderer::add_passes_with_textures) is where
+//! the name meets an image: a [`UiTexture`] pairs it with an [`ImageId`] of the
+//! same graph — a view's target, typically, which is how an editor viewport or
+//! a picture-in-picture is drawn inside the UI rather than under it.
+//!
+//! **The graph puts the barrier; the caller puts the order.** Each half that
+//! samples a texture declares a
+//! [`read_image`](crate::graph::PassBuilder::read_image) of it, so the graph
+//! emits the transition from whatever state the pass that drew it left it in
+//! — its attachment state — to `ShaderRead` between the two. The graph runs
+//! passes in the order they were declared and never reorders them, so the
+//! caller adds the passes that draw the image before these, as it adds the
+//! scene before the UI.
+//!
+//! **Bound per draw, at set 1.** WebGPU has no array of textures to index, so
+//! the portable shape is the sprite pass's per-sheet one: `ui.slang` samples a
+//! lone `boundTexture` at set 1, the draw list's expansion reports the index
+//! runs that use one ([`TextureRun`]), and a half is drawn as one draw per run
+//! plus one per stretch between runs, with a transparent 1×1 bound at set 1
+//! for the stretches. A list with no texture in it is still one draw a half. A
+//! texture the list names and the call was not handed binds the transparent
+//! 1×1 too, so it draws nothing rather than whatever was bound last. Each
+//! image's group is built once and kept while frames keep sampling it — see
+//! `textures::TextureGroups`.
 //!
 //! # Per-pass constants are a uniform buffer, on every tier
 //!
@@ -129,6 +159,12 @@ use crate::texture::{
     upload_texture,
 };
 
+mod textures;
+
+use crcbl_ui::draw_list::TextureRun;
+pub use textures::UiTexture;
+use textures::{TextureGroups, draws, image_of};
+
 /// The constant block matching `ui.slang`'s `UiConstants`.
 ///
 /// `viewport` is the framebuffer size in pixels (width, height). The shader
@@ -152,6 +188,10 @@ pub const IMAGE_SAMPLER_BINDING: u32 = 5;
 /// The binding number the glyph pages occupy — the last one. They are sampled
 /// through the bitmap font's nearest sampler at binding 1.
 pub const GLYPH_PAGES_BINDING: u32 = 6;
+
+/// The set a [`DrawList::texture`] rectangle's texture is bound at, alone at
+/// its binding 0 and sampled through the image atlas's linear sampler.
+pub const TEXTURE_SET: u32 = 1;
 
 /// The image atlas page's format: sRGB-encoded, straight alpha, the sprite
 /// pass's sheet format.
@@ -225,6 +265,18 @@ pub struct UiRenderer {
     glyph_uploads: Vec<GlyphUpload>,
     /// [`Self::image_recorded`]'s counterpart for the page copies.
     glyph_recorded: Arc<AtomicBool>,
+
+    /// Set 1's layout: one sampled texture — see the module docs.
+    texture_layout: BindGroupLayoutHandle,
+    /// A transparent 1×1, and the set-1 group naming it: what every draw that
+    /// samples no renderer-owned texture binds.
+    blank: UploadedTexture,
+    blank_group: BindGroupHandle,
+    /// The set-1 groups naming the textures frames sampled.
+    texture_groups: TextureGroups,
+    /// Per frame in flight, the index runs that sample a renderer-owned
+    /// texture, as [`begin_frame`](Self::begin_frame) tessellated them.
+    last_texture_runs: Vec<Vec<TextureRun>>,
 
     // Per-frame bind groups (each contains atlas+sampler+vertex_buffer+constants)
     frame_groups: Vec<BindGroupHandle>,
@@ -475,6 +527,48 @@ impl UiRenderer {
         let bind_group_layout = device.create_bind_group_layout(&layout_desc)?;
         rollback.bind_group_layouts.push(bind_group_layout);
 
+        // Set 1: the renderer-owned texture a `DrawList::texture` rectangle
+        // samples, and the transparent 1×1 every other draw binds there.
+        let texture_layout = device.create_bind_group_layout(&BindGroupLayoutDesc {
+            label: Some("ui texture"),
+            entries: &[BindGroupLayoutEntry {
+                binding: 0,
+                visibility: ShaderStages::FRAGMENT,
+                kind: BindingKind::SampledImage {
+                    view_type: ImageViewType::D2,
+                    sample_type: SampleType::Float,
+                },
+                count: 1,
+                flags: BindingFlags::empty(),
+            }],
+        })?;
+        rollback.bind_group_layouts.push(texture_layout);
+        let blank = upload_cleared_texture(
+            device,
+            queue,
+            &ClearedTextureDesc {
+                label: "ui blank texture",
+                format: Format::Rgba8Unorm,
+                width: 1,
+                height: 1,
+                layers: 1,
+                view_type: ImageViewType::D2,
+                patches: &[],
+            },
+        )?;
+        rollback.textures.push(blank);
+        let blank_group = device.create_bind_group(&BindGroupDesc {
+            label: Some("ui blank texture"),
+            layout: texture_layout,
+            entries: &[BindGroupEntry {
+                binding: 0,
+                array_index: 0,
+                resource: BindingResource::ImageView(blank.view),
+            }],
+            variable_count: None,
+        })?;
+        rollback.bind_groups.push(blank_group);
+
         // Per-frame bind groups (atlas/sampler are static, the rest rotate)
         let mut frame_groups = Vec::with_capacity(FRAMES_IN_FLIGHT);
         let mut vertex_buffers = Vec::with_capacity(FRAMES_IN_FLIGHT);
@@ -533,7 +627,7 @@ impl UiRenderer {
             index_capacity.push(INITIAL_RING_BYTES);
         }
 
-        let set_layouts = [bind_group_layout];
+        let set_layouts = [bind_group_layout, texture_layout];
         let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDesc {
             label: Some("ui"),
             bind_group_layouts: &set_layouts,
@@ -602,6 +696,11 @@ impl UiRenderer {
             glyph_staging: vec![Vec::new(); FRAMES_IN_FLIGHT],
             glyph_uploads: Vec::new(),
             glyph_recorded: Arc::new(AtomicBool::new(false)),
+            texture_layout,
+            blank,
+            blank_group,
+            texture_groups: TextureGroups::new(FRAMES_IN_FLIGHT),
+            last_texture_runs: vec![Vec::new(); FRAMES_IN_FLIGHT],
             frame_groups,
             vertex_buffers,
             index_buffers,
@@ -680,6 +779,7 @@ impl UiRenderer {
     ) -> Result<(), HalError> {
         self.frame = (self.frame + 1) % FRAMES_IN_FLIGHT;
         let idx = self.frame;
+        self.texture_groups.retire(device, idx);
         self.stage_images(device, idx)?;
 
         self.glyphs.begin_frame();
@@ -687,6 +787,7 @@ impl UiRenderer {
             vertices,
             indices,
             overlay,
+            textures,
         } = draw_list.to_triangles_split(Some(atlas), Some(&mut self.glyphs), scale);
         self.stage_glyphs(device, idx)?;
 
@@ -742,6 +843,7 @@ impl UiRenderer {
         self.last_vertex_count[idx] = vertices.len();
         self.last_index_count[idx] = indices.len();
         self.last_overlay_index[idx] = overlay;
+        self.last_texture_runs[idx] = textures;
 
         // Only a new vertex buffer needs a new bind group; the atlas and the
         // sampler never change, so a steady-state frame writes no descriptors.
@@ -894,10 +996,13 @@ impl UiRenderer {
     /// What the last [`begin_frame`](Self::begin_frame) left this pass to draw.
     ///
     /// **Off `segments`, the same two index ranges
-    /// [`add_passes`](Self::add_passes) branches on**, so a half this reports as
-    /// drawn is a half that gets a pass and the two cannot disagree. One draw of
-    /// one instance per non-empty half: a frame with no overlay on it reports
-    /// one, a paused frame reports two, and an empty draw list reports nothing.
+    /// [`add_passes`](Self::add_passes) branches on**, and off the same split
+    /// of each into draws, so a half this reports as drawn is a half that gets
+    /// a pass and the two cannot disagree. One draw of one instance per
+    /// non-empty half and texture run: a frame with no overlay and no texture
+    /// on it reports one, a paused frame reports two, a frame with a view drawn
+    /// in the middle of its HUD reports three, and an empty draw list reports
+    /// nothing.
     ///
     /// The triangles are the index counts of the halves actually drawn —
     /// `draw_list.to_triangles_split` produced them and the pipeline's
@@ -906,14 +1011,15 @@ impl UiRenderer {
     #[must_use]
     pub fn counters(&self) -> FrameCounters {
         let (below, above) = self.segments();
-        let draws = u64::from(!below.is_empty()) + u64::from(!above.is_empty());
-        if draws == 0 {
+        let runs = &self.last_texture_runs[self.frame];
+        let recorded = (draws(below.clone(), runs).len() + draws(above.clone(), runs).len()) as u64;
+        if recorded == 0 {
             return FrameCounters::default();
         }
         FrameCounters {
-            draws,
-            instances: draws,
-            drawn: Some(draws),
+            draws: recorded,
+            instances: recorded,
+            drawn: Some(recorded),
             triangles: Some((below.len() + above.len()) as u64 / 3),
             // No cluster geometry and no readback: a known zero and no second
             // lag to declare — see [`crate::counters`].
@@ -949,16 +1055,55 @@ impl UiRenderer {
     /// why the uniform buffer is written in the pass body rather than in
     /// [`begin_frame`](Self::begin_frame): a second extent taken a second time
     /// is a second thing that can disagree.
+    ///
+    /// [`add_passes_with_textures`](Self::add_passes_with_textures) with no
+    /// texture handed over: a [`DrawList::texture`] rectangle draws nothing.
     pub fn add_passes<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
         target: ImageId,
         extent: (u32, u32),
     ) {
+        self.add_passes_with_textures(graph, target, extent, &[]);
+    }
+
+    /// [`add_passes`](Self::add_passes) for a frame whose draw list samples
+    /// renderer-owned textures: each [`UiTexture`] says which image of `graph`
+    /// a [`TextureId`](crcbl_ui::TextureId) stands for this frame.
+    ///
+    /// A half that samples one of them declares that it reads the image, so
+    /// the graph puts the barrier between it and the passes that drew it — a
+    /// view's frame, say — which the caller adds first; see the module docs.
+    /// The first pairing
+    /// naming an id wins, and an id the list uses that none names draws
+    /// transparent.
+    ///
+    /// The image must be sampleable as filterable float — a colour target of
+    /// the forward renderer's format is — and must not be `target`, which the
+    /// same pass is drawing into.
+    pub fn add_passes_with_textures<'a>(
+        &'a self,
+        graph: &mut RenderGraph<'a>,
+        target: ImageId,
+        extent: (u32, u32),
+        textures: &[UiTexture],
+    ) {
         let (below, above) = self.segments();
         let pages = [self.add_image_upload(graph), self.add_glyph_upload(graph)];
-        self.add_segment(graph, target, extent, "ui-composite", below, pages);
-        self.add_segment(graph, target, extent, "ui-overlay", above, pages);
+        let halves = [(below, "ui-composite"), (above, "ui-overlay")];
+        for (segment, label) in halves {
+            self.add_segment(
+                graph,
+                Segment {
+                    target,
+                    extent,
+                    label,
+                    indices: segment,
+                },
+                pages,
+                textures,
+            );
+        }
     }
 
     /// Adds the `ui-glyphs` copy of this frame's staged page rectangles, and
@@ -1078,17 +1223,26 @@ impl UiRenderer {
     /// `pages` are the image atlas and the glyph pages, each when this frame's
     /// graph imported it for an upload, and the pass then declares that it
     /// samples it, so the graph returns it from the copy's `TransferDst` before
-    /// the draw reads it.
+    /// the draw reads it. Every image of `textures` a draw of this half samples
+    /// is declared the same way, which is what orders the pass that wrote it
+    /// first.
+    ///
+    /// **One draw per bind of set 1** — see [`textures::draws`]: a half with no
+    /// texture run in it is the one draw it always was.
     fn add_segment<'a>(
         &'a self,
         graph: &mut RenderGraph<'a>,
-        target: ImageId,
-        extent: (u32, u32),
-        label: &'static str,
-        segment: Range<u32>,
+        segment: Segment,
         pages: [Option<ImageId>; 2],
+        textures: &[UiTexture],
     ) {
-        if segment.is_empty() {
+        let Segment {
+            target,
+            extent,
+            label,
+            indices,
+        } = segment;
+        if indices.is_empty() {
             return; // nothing to draw
         }
 
@@ -1097,6 +1251,22 @@ impl UiRenderer {
         let bg = self.frame_groups[self.frame];
         let index_buffer = self.index_buffers[self.frame];
         let constants = self.constant_buffers[self.frame];
+        let slot = self.frame;
+        let texture_layout = self.texture_layout;
+        let blank_group = self.blank_group;
+        let groups = &self.texture_groups;
+
+        // Each draw with the image it samples, resolved now, while the caller's
+        // pairing is in hand; the view behind the image is the graph's to
+        // realise, so that waits for the body.
+        let planned: Vec<(Range<u32>, Option<ImageId>)> =
+            draws(indices, &self.last_texture_runs[self.frame])
+                .into_iter()
+                .map(|draw| {
+                    let image = draw.texture.and_then(|id| image_of(textures, id));
+                    (draw.indices, image)
+                })
+                .collect();
 
         let mut pass = graph
             .add_render_pass(label)
@@ -1104,6 +1274,13 @@ impl UiRenderer {
             .color(target, LoadOp::Load, StoreOp::Store, Default::default());
         for page in pages.into_iter().flatten() {
             pass = pass.read_image(page);
+        }
+        let mut sampled: Vec<ImageId> = Vec::new();
+        for image in planned.iter().filter_map(|(_, image)| *image) {
+            if !sampled.contains(&image) {
+                sampled.push(image);
+                pass = pass.read_image(image);
+            }
         }
         pass.execute(move |ctx| {
             let block = UiConstants {
@@ -1122,11 +1299,33 @@ impl UiRenderer {
                 crcbl_core::log::error!("graph: ui constants write failed: {error}");
                 return;
             }
+            // A group the device refused skips its draw and nothing else, as
+            // `crate::bind_group_cache` skips a pass; the log says why.
+            let bound: Vec<(Range<u32>, BindGroupHandle)> = planned
+                .into_iter()
+                .filter_map(|(range, image)| {
+                    let group = match image {
+                        None => blank_group,
+                        Some(image) => {
+                            let view = ctx.image_view(image);
+                            groups.group(ctx.device(), texture_layout, slot, view)?
+                        }
+                    };
+                    Some((range, group))
+                })
+                .collect();
             let encoder = ctx.encoder();
             encoder.bind_graphics_pipeline(pipeline);
             encoder.bind_group(0, bg, &[], pipeline_layout);
             encoder.bind_index_buffer(index_buffer, 0, IndexFormat::Uint32);
-            encoder.draw_indexed(segment.clone(), 0, 0..1);
+            let mut current = None;
+            for (range, group) in bound {
+                if current != Some(group) {
+                    encoder.bind_group(TEXTURE_SET, group, &[], pipeline_layout);
+                    current = Some(group);
+                }
+                encoder.draw_indexed(range, 0, 0..1);
+            }
         });
     }
 
@@ -1156,6 +1355,9 @@ impl UiRenderer {
         for staging in self.glyph_staging.drain(..).flatten() {
             device.destroy_buffer(staging);
         }
+        self.texture_groups.destroy(device);
+        device.destroy_bind_group(self.blank_group);
+        self.blank.destroy(device);
         self.glyph_pages.destroy(device);
         device.destroy_sampler(self.atlas_sampler);
         self.atlas.destroy(device);
@@ -1164,6 +1366,7 @@ impl UiRenderer {
         device.destroy_graphics_pipeline(self.pipeline);
         device.destroy_pipeline_layout(self.pipeline_layout);
         device.destroy_bind_group_layout(self.bind_group_layout);
+        device.destroy_bind_group_layout(self.texture_layout);
     }
 }
 
@@ -1224,6 +1427,15 @@ impl Rollback {
             device.destroy_bind_group_layout(handle);
         }
     }
+}
+
+/// One half of the draw list, as [`UiRenderer::add_segment`] adds it: the
+/// target and its extent, the pass's label, and the half's indices.
+struct Segment {
+    target: ImageId,
+    extent: (u32, u32),
+    label: &'static str,
+    indices: Range<u32>,
 }
 
 /// One frame's staged image-atlas copy: where the bytes are and where they go.
@@ -1320,3 +1532,6 @@ fn entry(shader: &crcbl_shaders::Shader, stage: Stage) -> Result<&'static str, H
 // `Instance::create_device` is native-only: see the `crcbl_hal::device` module docs.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod texture_tests;

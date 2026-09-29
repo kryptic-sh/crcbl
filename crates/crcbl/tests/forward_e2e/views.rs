@@ -1246,3 +1246,6 @@ fn a_fixed_view_s_environment_gives_a_dark_glossy_icon_a_sheen() {
     );
     headless.finish();
 }
+
+// A view sampled by the UI pass, which reads this module's helpers.
+mod ui;

@@ -183,9 +183,11 @@ fn the_glyph_atlas_is_still_an_r8_upload_at_the_same_pitch() {
             (ResourceState::TransferDst, ResourceState::ShaderRead),
             (ResourceState::Undefined, ResourceState::TransferDst),
             (ResourceState::TransferDst, ResourceState::ShaderRead),
+            (ResourceState::Undefined, ResourceState::TransferDst),
+            (ResourceState::TransferDst, ResourceState::ShaderRead),
         ],
-        "the two atlases and the glyph pages are the only barriers the UI renderer's \
-         construction records"
+        "the two atlases, the transparent 1x1 set 1 binds for untextured draws and \
+         the glyph pages are the only barriers the UI renderer's construction records"
     );
 
     renderer.destroy(device.as_ref());

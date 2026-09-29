@@ -25,6 +25,8 @@ struct UiConstants_std140_0
 
 @binding(5) @group(0) var imageSampler_0 : sampler;
 
+@binding(0) @group(1) var boundTexture_0 : texture_2d<f32>;
+
 @binding(6) @group(0) var glyphPages_0 : texture_2d_array<f32>;
 
 struct UiOutput_0
@@ -124,6 +126,7 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) 
     var imageHeight_0 : u32;
     {var dim = textureDimensions((imageAtlas_0));((imageWidth_0)) = dim.x;((imageHeight_0)) = dim.y;};
     var texel_0 : vec4<f32> = (textureSample((imageAtlas_0), (imageSampler_0), (sharpen_0(_S3.uv_3, vec2<f32>(f32(imageWidth_0), f32(imageHeight_0))))));
+    var bound_0 : vec4<f32> = (textureSample((boundTexture_0), (imageSampler_0), (_S3.uv_3)));
     var primitive_0 : f32 = _S3.shape_2.w;
     var _S4 : bool = primitive_0 == 4.0f;
     var page_0 : f32;
@@ -160,6 +163,15 @@ fn fragmentMain( _S3 : pixelInput_0, @builtin(position) position_2 : vec4<f32>) 
     if(primitive_0 == 2.0f)
     {
         _S6 = texel_0 * _S3.color_2;
+    }
+    else
+    {
+        _S6 = color_3;
+    }
+    color_3 = _S6;
+    if(primitive_0 == 5.0f)
+    {
+        _S6 = bound_0 * _S3.color_2;
     }
     else
     {
