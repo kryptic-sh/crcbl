@@ -197,16 +197,21 @@ fn serial_starts(case: Case, visible: &mut [u32], counts: &mut [u32]) {
 
 /// Bytes of a buffer holding `words` words, and never zero: a table with no
 /// buckets still binds a buffer, and no backend creates an empty one.
-fn bytes_for(words: usize) -> u64 {
+pub(crate) fn bytes_for(words: usize) -> u64 {
     (words.max(1) * 4) as u64
 }
 
-/// `startsMain`'s pipeline over `draw_gen.slang`'s nine bindings, laid out as
-/// `crcbl::render::DrawGen` lays them out.
+/// One `draw_gen.slang` entry point's pipeline over the shader's nine
+/// bindings, laid out as `crcbl::render::DrawGen` lays them out.
+pub(crate) struct EntryPipeline {
+    pub(crate) layout: crcbl::hal::BindGroupLayoutHandle,
+    pub(crate) pipeline_layout: crcbl::hal::PipelineLayoutHandle,
+    pub(crate) pipeline: crcbl::hal::ComputePipelineHandle,
+}
+
+/// `startsMain`'s pipeline.
 struct StartsProbe {
-    layout: crcbl::hal::BindGroupLayoutHandle,
-    pipeline_layout: crcbl::hal::PipelineLayoutHandle,
-    pipeline: crcbl::hal::ComputePipelineHandle,
+    entry: EntryPipeline,
 }
 
 /// The size of every buffer bound only because the layout names it.
@@ -215,10 +220,12 @@ struct StartsProbe {
 /// binding: D3D12 binds storage as a structured view and refuses a buffer
 /// smaller than one element of its structure, so a placeholder must hold
 /// at least one of the largest, the instance record.
-const UNREAD_BINDING_BYTES: u64 = 4096;
+pub(crate) const UNREAD_BINDING_BYTES: u64 = 4096;
 
-impl StartsProbe {
-    fn new(headless: &Headless) -> Self {
+impl EntryPipeline {
+    /// `entry`'s pipeline, dispatched in workgroups of `workgroup_size`
+    /// invocations, with every object labelled `label`.
+    pub(crate) fn new(headless: &Headless, label: &str, entry: &str, workgroup_size: u32) -> Self {
         let device = headless.device.as_ref();
         let storage = |binding, read_only, stride: usize| BindGroupLayoutEntry {
             binding,
@@ -251,13 +258,13 @@ impl StartsProbe {
         ];
         let layout = device
             .create_bind_group_layout(&crcbl::hal::BindGroupLayoutDesc {
-                label: Some("starts probe"),
+                label: Some(label),
                 entries: &entries,
             })
             .expect("the draw-args layout");
         let pipeline_layout = device
             .create_pipeline_layout(&crcbl::hal::PipelineLayoutDesc {
-                label: Some("starts probe"),
+                label: Some(label),
                 bind_group_layouts: &[layout],
                 push_constants: None,
             })
@@ -274,13 +281,13 @@ impl StartsProbe {
             .expect("the committed artifacts are accepted");
         let pipeline = device
             .create_compute_pipeline(&crcbl::hal::ComputePipelineDesc {
-                label: Some("starts probe"),
+                label: Some(label),
                 layout: pipeline_layout,
                 compute: crcbl::hal::ShaderEntry {
                     module,
-                    entry_point: "startsMain",
+                    entry_point: entry,
                 },
-                workgroup_size: [STARTS_WORKGROUP_SIZE, 1, 1],
+                workgroup_size: [workgroup_size, 1, 1],
             })
             .expect("a compute pipeline");
         device.destroy_shader_module(module);
@@ -288,6 +295,26 @@ impl StartsProbe {
             layout,
             pipeline_layout,
             pipeline,
+        }
+    }
+
+    pub(crate) fn destroy(self, headless: &Headless) {
+        let device = headless.device.as_ref();
+        device.destroy_compute_pipeline(self.pipeline);
+        device.destroy_pipeline_layout(self.pipeline_layout);
+        device.destroy_bind_group_layout(self.layout);
+    }
+}
+
+impl StartsProbe {
+    fn new(headless: &Headless) -> Self {
+        Self {
+            entry: EntryPipeline::new(
+                headless,
+                "starts probe",
+                "startsMain",
+                STARTS_WORKGROUP_SIZE,
+            ),
         }
     }
 
@@ -397,7 +424,7 @@ impl StartsProbe {
         let group = device
             .create_bind_group(&crcbl::hal::BindGroupDesc {
                 label: Some("starts probe"),
-                layout: self.layout,
+                layout: self.entry.layout,
                 entries: &[
                     params,
                     instances,
@@ -471,8 +498,8 @@ impl StartsProbe {
             label: Some("starts probe"),
             timestamp_writes: None,
         });
-        encoder.bind_compute_pipeline(self.pipeline);
-        encoder.bind_group(0, group, &[], self.pipeline_layout);
+        encoder.bind_compute_pipeline(self.entry.pipeline);
+        encoder.bind_group(0, group, &[], self.entry.pipeline_layout);
         // One workgroup, as `crcbl::render::DrawGen` dispatches it.
         encoder.dispatch(1, 1, 1);
         encoder.end_compute_pass();
@@ -516,10 +543,7 @@ impl StartsProbe {
     }
 
     fn destroy(self, headless: &Headless) {
-        let device = headless.device.as_ref();
-        device.destroy_compute_pipeline(self.pipeline);
-        device.destroy_pipeline_layout(self.pipeline_layout);
-        device.destroy_bind_group_layout(self.layout);
+        self.entry.destroy(headless);
     }
 }
 

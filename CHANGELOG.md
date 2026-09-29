@@ -16,6 +16,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::draw_gen::Params` and `TableOffsets` have a
+  `bucket_lookup_at` field**, where the new `(mesh, mode) → bucket` lookup
+  starts in the table buffer (see Changed); a struct literal of either needs it.
+  It fills the uniform block's former tail padding, so `PARAMS_SIZE` is
+  unchanged. `draw_gen::MATERIAL_MODES` and `draw_gen::bucket_lookup` are new.
+
 - **`crcbl_shaders::mesh::DrawConstants` has a `mesh_at` field**, the word of
   the runs buffer holding the bucket's mesh, which the SPIR-V vertex stages now
   read; a struct literal needs it. The runs buffer behind it grows by one word
@@ -3439,6 +3445,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **The draw generator routes a survivor with one table read.**
+  `draw_gen.slang`'s `binMain` — the `draw-args` pass — walked the bucket table
+  for each survivor until its level mesh and material mode both matched; it now
+  reads a `(mesh, mode) → bucket` lookup that
+  `crcbl_shaders::draw_gen::bucket_lookup` builds when `pack_tables` packs the
+  bucket table, appended to the table buffer after every existing region.
+  Routing is bit-identical to the walk — the first bucket matching both halves,
+  `NO_BUCKET` where none does — which `draw_gen_e2e`'s
+  `the_looked_up_routes_are_the_linear_walks_word_for_word` checks word for word
+  over tables of 0 to 4,099 buckets, level meshes and every draw mode. Measured
+  on Vulkan, RX 7900 XTX, release, validation off, 17,219 instances at 1920x1080
+  over 240 frames (`mesh_e2e`'s `the_price_of_one_call_per_bucket`): GPU
+  `draw-args` p50 0.143 → 0.011 ms a frame at 938 buckets (0.159 → 0.011 ms on
+  the ranged `IndirectCount` tail), and 0.009 ms at two buckets before and
+  after.
 
 - **The draw generator's run starts are a parallel prefix sum.**
   `draw_gen.slang`'s `startsMain` — the `draw-starts` pass — was one invocation

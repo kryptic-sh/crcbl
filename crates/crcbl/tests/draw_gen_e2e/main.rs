@@ -65,6 +65,7 @@ pub(crate) const SUITE: &str = "crcbl draw gen e2e";
 mod cull;
 mod cull_stats;
 mod draw_gen;
+mod routes;
 mod starts;
 
 // The fixture, out of `tests/gpu_scene/` rather than beside the root, because

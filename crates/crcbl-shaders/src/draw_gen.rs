@@ -222,6 +222,13 @@ pub struct Params {
     /// Where the face regions' runs start, in words — [`face_runs_at`]. Read
     /// only under [`DrawMode::Faces`].
     pub face_runs_at: u32,
+    /// Where the `(mesh, mode) → bucket` lookup starts, in words, in the table
+    /// buffer — [`TableOffsets::bucket_lookup_at`], and [`bucket_lookup`] is
+    /// what it holds.
+    ///
+    /// The word the block's `std140` tail padding used to be, so the block is
+    /// no wider for it.
+    pub bucket_lookup_at: u32,
 }
 
 impl Params {
@@ -258,9 +265,14 @@ impl Params {
         for (slot, value) in self.lod_params.into_iter().enumerate() {
             put(48 + slot * 4, value.to_le_bytes());
         }
-        for (slot, value) in [self.mode.word(), self.draw_regions, self.face_runs_at]
-            .into_iter()
-            .enumerate()
+        for (slot, value) in [
+            self.mode.word(),
+            self.draw_regions,
+            self.face_runs_at,
+            self.bucket_lookup_at,
+        ]
+        .into_iter()
+        .enumerate()
         {
             put(64 + slot * 4, value.to_le_bytes());
         }
@@ -308,9 +320,13 @@ pub struct TableOffsets {
     /// out of when one multi-draw call stands for a range of buckets —
     /// [`ClusterDrawConstants::cluster_base_at`](crate::meshlet::ClusterDrawConstants::cluster_base_at)
     /// names bucket `b`'s word, and the range's later buckets are the words
-    /// after it. Packed last, so every region that pass reads starts where it
-    /// did before this one existed.
+    /// after it. Packed after every region `draw_gen.slang` read before it,
+    /// so each of those starts where it did before this one existed.
     pub bucket_cluster_bases_at: u32,
+    /// [`Params::bucket_lookup_at`]: where [`bucket_lookup`]'s words start.
+    /// Packed last, behind the cluster bases, so no region in front of it
+    /// moved when it arrived.
+    pub bucket_lookup_at: u32,
 }
 
 /// Packs every host-written table `draw_gen.slang` reads into one buffer.
@@ -321,7 +337,9 @@ pub struct TableOffsets {
 /// [`MeshLevels`](crate::level_select::MeshLevels) records, then the
 /// [`LevelGroup`](crate::level_select::LevelGroup) records, then the level →
 /// mesh id table. Then one region that shader does not read: the per-bucket
-/// cluster bases, for [`TableOffsets::bucket_cluster_bases_at`]'s reader. **One buffer because a WebGPU device guarantees only eight
+/// cluster bases, for [`TableOffsets::bucket_cluster_bases_at`]'s reader. Then
+/// the `(mesh, mode) → bucket` lookup [`bucket_lookup`] builds from the bucket
+/// table and its modes, which is how that shader routes a survivor. **One buffer because a WebGPU device guarantees only eight
 /// storage buffers per shader stage** and the pass bound fourteen; the tables
 /// were chosen for the merge because they are written together, when a mesh
 /// becomes resident, and never per frame.
@@ -336,7 +354,7 @@ pub struct TableOffsets {
 ///
 /// `None` if the packed buffer is longer than a `u32` of words can address,
 /// which is a table built far past anything a device would allocate rather than
-/// a runtime condition.
+/// a runtime condition — and so is a bucket lookup [`bucket_lookup`] refuses.
 #[must_use]
 pub fn pack_tables(
     bucket_meshes: &[u32],
@@ -383,6 +401,8 @@ pub fn pack_tables(
     bytes.extend_from_slice(&padded(words(level_meshes), 4));
     let bucket_cluster_bases_at = offset(&bytes)?;
     bytes.extend_from_slice(&words(bucket_cluster_bases));
+    let bucket_lookup_at = offset(&bytes)?;
+    bytes.extend_from_slice(&words(&bucket_lookup(bucket_meshes, bucket_modes)?));
     // The whole buffer is bound as a descriptor, and a zero-length one is not a
     // descriptor any backend takes. The padding above guarantees it, and this is
     // what says so where a reader meets it.
@@ -397,8 +417,73 @@ pub fn pack_tables(
             level_groups_at,
             level_meshes_at,
             bucket_cluster_bases_at,
+            bucket_lookup_at,
         },
     })
+}
+
+/// How many material modes a bucket key can hold: every value
+/// [`GpuInstance::MATERIAL_MODE_MASK`](crate::mesh::GpuInstance::MATERIAL_MODE_MASK)
+/// can carry, matching `MATERIAL_MODES` in `draw_gen.slang`. The row width of
+/// [`bucket_lookup`].
+pub const MATERIAL_MODES: u32 = (crate::mesh::GpuInstance::MATERIAL_MODE_MASK
+    >> crate::mesh::GpuInstance::MATERIAL_MODE_SHIFT)
+    + 1;
+
+/// The `(mesh, mode) → bucket` lookup `draw_gen.slang`'s `binMain` routes a
+/// survivor through, as the words [`pack_tables`] lays down at
+/// [`TableOffsets::bucket_lookup_at`].
+///
+/// Word 0 is the number of mesh rows, one past the largest mesh id any bucket
+/// draws; row `m` is the [`MATERIAL_MODES`] words after `1 + m *
+/// MATERIAL_MODES`, and word `mode` of it is the bucket drawing mesh `m` in
+/// that mode, or [`NO_BUCKET`] where none does. A survivor's level mesh at or
+/// past the row count has no bucket, and the shader answers [`NO_BUCKET`]
+/// without reading a row.
+///
+/// **The same answer the linear walk of the bucket table gave, for every
+/// key**, which is what makes this a pure speed change: that walk took the
+/// *first* bucket matching both halves, so a key two buckets share keeps the
+/// earlier, and a bucket whose mode no instance can carry — one at or past
+/// [`MATERIAL_MODES`] — was never matched and is left out. The renderer builds
+/// no such table; the rule is kept anyway so no input can tell the two apart.
+///
+/// Sized by the largest mesh id, not by the bucket count, so a caller naming
+/// ids far past its mesh table pays for the rows in between — a bucket's mesh
+/// id indexes the mesh table, so no table the renderer builds does.
+///
+/// # Errors
+///
+/// `None` if the lookup would be longer than a `u32` of words can address, or
+/// if the two tables differ in length.
+#[must_use]
+pub fn bucket_lookup(bucket_meshes: &[u32], bucket_modes: &[u32]) -> Option<Vec<u32>> {
+    if bucket_meshes.len() != bucket_modes.len() {
+        return None;
+    }
+    let largest = bucket_meshes
+        .iter()
+        .zip(bucket_modes)
+        .filter(|(_, mode)| **mode < MATERIAL_MODES)
+        .map(|(mesh, _)| *mesh)
+        .max();
+    let rows = match largest {
+        Some(largest) => largest.checked_add(1)?,
+        None => 0,
+    };
+    let entries = rows.checked_mul(MATERIAL_MODES)?.checked_add(1)?;
+    let mut lookup = vec![NO_BUCKET; usize::try_from(entries).ok()?];
+    lookup[0] = rows;
+    for (bucket, (mesh, mode)) in bucket_meshes.iter().zip(bucket_modes).enumerate() {
+        if *mode >= MATERIAL_MODES {
+            continue;
+        }
+        let slot = &mut lookup[1 + (*mesh * MATERIAL_MODES + *mode) as usize];
+        if *slot == NO_BUCKET {
+            *slot = u32::try_from(bucket).ok()?;
+        }
+    }
+    Some(lookup)
 }
 
 /// What `draw_gen.slang` writes as a survivor's route when no bucket matches its
@@ -716,6 +801,7 @@ mod tests {
             mode: DrawMode::Faces,
             draw_regions: DRAW_REGIONS,
             face_runs_at: 29,
+            bucket_lookup_at: 31,
         }
         .to_bytes();
         let uint_at =
@@ -740,11 +826,8 @@ mod tests {
         assert_eq!(uint_at(64), 2, "mode at offset 64");
         assert_eq!(uint_at(68), DRAW_REGIONS, "draw_regions at offset 68");
         assert_eq!(uint_at(72), 29, "face_runs_at at offset 72");
-        assert!(
-            bytes[76..].iter().all(|byte| *byte == 0),
-            "the std140 tail padding is written, and it is zero: {:?}",
-            &bytes[76..]
-        );
+        assert_eq!(uint_at(76), 31, "bucket_lookup_at at offset 76");
+        assert_eq!(bytes.len(), 80, "and the block ends behind it");
     }
 
     /// The regions [`pack_tables`] lays out are the ones the offsets it returns
@@ -854,9 +937,173 @@ mod tests {
             assert_eq!(word_at(at), *mesh, "level table at level_meshes_at");
         }
         assert_eq!(
+            packed.offsets.bucket_lookup_at,
+            packed.offsets.bucket_cluster_bases_at + 3,
+            "the lookup directly behind the cluster bases"
+        );
+        let lookup = bucket_lookup(&bucket_meshes, &bucket_modes).expect("a small lookup");
+        for (index, expected) in lookup.iter().enumerate() {
+            let at = packed.offsets.bucket_lookup_at + u32::try_from(index).expect("small");
+            assert_eq!(
+                word_at(at),
+                *expected,
+                "lookup word {index} at bucket_lookup_at"
+            );
+        }
+        assert_eq!(
             packed.bytes.len(),
-            (packed.offsets.bucket_cluster_bases_at as usize + bucket_meshes.len()) * 4,
-            "the cluster bases last, and the buffer's last words"
+            (packed.offsets.bucket_lookup_at as usize + lookup.len()) * 4,
+            "the lookup last, and the buffer's last words"
+        );
+    }
+
+    /// The walk `binMain` did before the lookup, transcribed: the first bucket
+    /// whose mesh and mode both match, or [`NO_BUCKET`].
+    fn linear_route(bucket_meshes: &[u32], bucket_modes: &[u32], mesh: u32, mode: u32) -> u32 {
+        bucket_meshes
+            .iter()
+            .zip(bucket_modes)
+            .position(|(bucket_mesh, bucket_mode)| *bucket_mesh == mesh && *bucket_mode == mode)
+            .map_or(NO_BUCKET, |bucket| u32::try_from(bucket).expect("small"))
+    }
+
+    /// `draw_gen.slang`'s `bucket_for`, transcribed: the row count, then a row.
+    fn looked_up(lookup: &[u32], mesh: u32, mode: u32) -> u32 {
+        if mesh >= lookup[0] {
+            return NO_BUCKET;
+        }
+        lookup[1 + (mesh * MATERIAL_MODES + mode) as usize]
+    }
+
+    /// **The lookup answers every key as the linear walk did**, over tables
+    /// shaped like the renderer's and tables it never builds.
+    ///
+    /// Every mode an instance can carry and every mesh id up to past the
+    /// largest, on: no buckets; one; the renderer's shape, a mesh's levels once
+    /// per mode with a mesh id the table skips; a key two buckets share, where
+    /// the walk kept the earlier; a mode no instance can carry; and the
+    /// measured scene's 938 buckets over scattered ids.
+    #[test]
+    fn the_bucket_lookup_routes_every_key_as_the_linear_walk_did() {
+        let mut scattered_meshes = Vec::new();
+        let mut scattered_modes = Vec::new();
+        for bucket in 0..938u32 {
+            // Mesh ids that repeat and skip, and a mode cycling through all
+            // four, so keys are shared and ids are missing.
+            scattered_meshes.push((bucket * 7 / 3) % 1_500);
+            scattered_modes.push((bucket / 5) % MATERIAL_MODES);
+        }
+        let tables: [(&str, Vec<u32>, Vec<u32>); 6] = [
+            ("no buckets", vec![], vec![]),
+            ("one bucket", vec![4], vec![0]),
+            (
+                "levels once per mode",
+                vec![0, 5, 6, 2, 0, 5, 6, 2],
+                vec![0, 0, 0, 0, 1, 1, 1, 1],
+            ),
+            ("a shared key", vec![3, 1, 3, 3], vec![2, 2, 2, 0]),
+            (
+                "a mode past the mask",
+                vec![9, 2, 9],
+                vec![MATERIAL_MODES, 1, 3],
+            ),
+            ("the measured scene", scattered_meshes, scattered_modes),
+        ];
+        for (name, meshes, modes) in &tables {
+            let lookup = bucket_lookup(meshes, modes).expect("a small lookup");
+            let largest = meshes.iter().copied().max().unwrap_or(0);
+            let mut routed = 0;
+            for mesh in 0..largest + 3 {
+                for mode in 0..MATERIAL_MODES {
+                    let expected = linear_route(meshes, modes, mesh, mode);
+                    assert_eq!(
+                        looked_up(&lookup, mesh, mode),
+                        expected,
+                        "{name}: mesh {mesh} in mode {mode}"
+                    );
+                    routed += usize::from(expected != NO_BUCKET);
+                }
+            }
+            let keys: std::collections::BTreeSet<(u32, u32)> = meshes
+                .iter()
+                .zip(modes)
+                .filter(|(_, mode)| **mode < MATERIAL_MODES)
+                .map(|(mesh, mode)| (*mesh, *mode))
+                .collect();
+            assert_eq!(
+                routed,
+                keys.len(),
+                "{name}: every key the table holds was asked"
+            );
+        }
+    }
+
+    /// A shared key keeps the **earlier** bucket, and a mesh with no bucket —
+    /// between two that have one, or past every one — is [`NO_BUCKET`].
+    ///
+    /// Spelled out beside the comparison above, because an oracle and a lookup
+    /// that both took the later bucket would agree with each other.
+    #[test]
+    fn the_bucket_lookup_keeps_the_first_bucket_and_routes_no_mesh_nowhere() {
+        let lookup = bucket_lookup(&[3, 1, 3, 3], &[2, 2, 2, 0]).expect("a small lookup");
+        assert_eq!(lookup[0], 4, "rows for meshes 0 through 3");
+        assert_eq!(looked_up(&lookup, 3, 2), 0, "the first of buckets 0 and 2");
+        assert_eq!(looked_up(&lookup, 3, 0), 3);
+        assert_eq!(looked_up(&lookup, 1, 2), 1);
+        for (mesh, mode) in [(0, 0), (2, 2), (1, 0), (3, 1), (4, 2), (u32::MAX, 0)] {
+            assert_eq!(
+                looked_up(&lookup, mesh, mode),
+                NO_BUCKET,
+                "mesh {mesh} mode {mode}"
+            );
+        }
+        assert_eq!(
+            bucket_lookup(&[], &[]),
+            Some(vec![0]),
+            "no buckets is a row count of zero and no rows"
+        );
+        assert_eq!(
+            bucket_lookup(&[1, 2], &[0]),
+            None,
+            "a mode table of another length keys nothing"
+        );
+        assert_eq!(
+            bucket_lookup(&[u32::MAX], &[0]),
+            None,
+            "a lookup a u32 cannot address is refused"
+        );
+    }
+
+    /// **A survivor's level mesh routes as the walk routed it**: the instance
+    /// names level 0, the level table names the mesh that draws, and the lookup
+    /// is keyed on that mesh — so a mesh whose levels are separate mesh table
+    /// entries reaches each level's bucket, per mode, and a level with no bucket
+    /// of its own goes nowhere.
+    #[test]
+    fn a_level_mesh_reaches_its_levels_bucket_in_every_mode() {
+        // Mesh 0's levels are meshes 0, 5 and 6; mesh 2 has none. Once per
+        // mode, as the renderer lays a DAG out on a uniform-cut path.
+        let bucket_meshes = [0u32, 5, 6, 2, 0, 5, 6, 2];
+        let bucket_modes = [0u32, 0, 0, 0, 1, 1, 1, 1];
+        let level_meshes = [0u32, 5, 6, 2, 7];
+        let lookup = bucket_lookup(&bucket_meshes, &bucket_modes).expect("a small lookup");
+        for (first_level, levels) in [(0usize, 3usize), (3, 1), (4, 1)] {
+            for level in 0..levels {
+                let mesh = level_meshes[first_level + level];
+                for mode in 0..MATERIAL_MODES {
+                    assert_eq!(
+                        looked_up(&lookup, mesh, mode),
+                        linear_route(&bucket_meshes, &bucket_modes, mesh, mode),
+                        "level {level} of the run at {first_level}, mesh {mesh}, mode {mode}"
+                    );
+                }
+            }
+        }
+        assert_eq!(looked_up(&lookup, 6, 1), 6, "mesh 0's top level, masked");
+        assert_eq!(
+            looked_up(&lookup, 7, 0),
+            NO_BUCKET,
+            "a level mesh with no bucket goes nowhere"
         );
     }
 
@@ -1036,11 +1283,10 @@ mod tests {
     /// the shader reads the mode out of the wrong bits of
     /// [`GpuInstance::flags`](crate::mesh::GpuInstance::flags) and every
     /// instance answers mode zero — which routes a cutout into the opaque bucket
-    /// and looks exactly like a scene with no cutout in it. And the scatter's
-    /// skip has to compare **both** halves: a shader that grew the region, the
-    /// offset and the accessor while going on comparing the mesh alone passes
-    /// every layout check in this module and sends both twins to whichever
-    /// bucket comes first.
+    /// and looks exactly like a scene with no cutout in it. And the lookup has
+    /// to be indexed by **both** halves, at the row width [`bucket_lookup`]
+    /// packs: a shader indexing by the mesh alone passes every layout check in
+    /// this module and sends both twins to one bucket.
     #[test]
     fn the_scatter_routes_by_the_mesh_and_the_material_mode() {
         use crate::mesh::GpuInstance;
@@ -1063,11 +1309,24 @@ mod tests {
                  material mode out of bits the host does not write it into"
             );
         }
+        let declaration = format!("static const uint MATERIAL_MODES = {MATERIAL_MODES};");
         assert!(
-            source.contains("if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)"),
-            "draw_gen.slang's scatter no longer skips a bucket whose mode differs, so a mesh's \
-             opaque and masked twins collapse into whichever bucket the table lists first"
+            source.contains(&declaration),
+            "draw_gen.slang does not declare `{declaration}`, so its lookup rows are not the \
+             width `bucket_lookup` packs them at"
         );
+        for line in [
+            "uint routed = bucket_for(mesh_id, mode);",
+            "if (mesh >= tables[gen.bucket_lookup_at])",
+            "return tables[gen.bucket_lookup_at + 1 + mesh * MATERIAL_MODES + mode];",
+        ] {
+            assert!(
+                source.contains(line),
+                "draw_gen.slang no longer reads `{line}`, so its routing is not keyed on the \
+                 mesh and the mode the way `bucket_lookup` lays the lookup out, and a mesh's \
+                 opaque and masked twins can collapse into one bucket"
+            );
+        }
     }
 
     /// The mesh-dispatch words are in the order every API's own structure puts

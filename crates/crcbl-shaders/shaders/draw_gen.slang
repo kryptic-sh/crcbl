@@ -544,10 +544,14 @@ struct DrawGenParams
     /// Where the per-bucket **material modes** start in `tables`, in words.
     ///
     /// The other half of a bucket's key: bucket `b` draws mesh `bucket_mesh(b)`
-    /// shaded in mode `bucket_mode(b)`, and `binMain` below routes an instance
-    /// to the bucket that matches both. A scene whose materials are all one mode
-    /// has one bucket per mesh exactly as it always did — the region is there,
-    /// every word of it equal, and no draw is added.
+    /// shaded in the mode this region holds for it, and `binMain` below routes
+    /// an instance to the bucket that matches both. A scene whose materials are
+    /// all one mode has one bucket per mesh exactly as it always did — the
+    /// region is there, every word of it equal, and no draw is added.
+    ///
+    /// **Nothing here reads it any more**: `binMain` asks `bucket_for`, whose
+    /// lookup the host keys on this region. It stays where it was so that no
+    /// region behind it moved.
     ///
     /// Host-computed on `bucket_clusters_at`'s terms below.
     uint bucket_modes_at;
@@ -612,7 +616,9 @@ struct DrawGenParams
     /// Where the face regions' runs start in `visible_instances`, in words —
     /// past every region's starts. Read only under `DRAW_MODE_FACES`.
     uint face_runs_at;
-    uint mode_pad;
+    /// Where the `(mesh, mode) → bucket` lookup starts in `tables`, in words —
+    /// see `bucket_for`. The word that was this block's tail padding.
+    uint bucket_lookup_at;
 };
 
 [[vk::binding(0, 0)]]
@@ -655,6 +661,8 @@ StructuredBuffer<uint> visible_count D3D12_REGISTER(t3, space0);
 /// | `MeshLevels` per mesh | `gen.mesh_levels_at` | `MESH_LEVELS_WORDS` | `GpuInstance::mesh` |
 /// | `LevelGroup` per DAG group | `gen.level_groups_at` | `LEVEL_GROUP_WORDS` | `MeshLevels::first_group + i` |
 /// | level → mesh id | `gen.level_meshes_at` | 1 | `MeshLevels::first_level + d` |
+/// | per-bucket cluster bases, which this pass never reads | host-only | 1 | bucket |
+/// | `(mesh, mode) → bucket`, behind its row count | `gen.bucket_lookup_at` | `MATERIAL_MODES` | level mesh id |
 ///
 /// Every one of them is written when a mesh becomes resident and not rewritten
 /// per frame, which is what lets them share one upload: they change together or
@@ -788,17 +796,6 @@ uint bucket_mesh(uint bucket)
     return tables[bucket];
 }
 
-/// Which material mode bucket `bucket` draws — the half of its key that is not
-/// the mesh id.
-///
-/// Compared against `instance_material_mode` below, so a mesh drawn by an opaque
-/// material and by a cutout one occupies two buckets and the depth passes bind a
-/// pipeline per bucket rather than one per frame.
-uint bucket_mode(uint bucket)
-{
-    return tables[gen.bucket_modes_at + bucket];
-}
-
 /// This instance's material mode, unpacked from `GpuInstance::flags` — the host
 /// twin is `crcbl_shaders::mesh::GpuInstance::material_mode`.
 ///
@@ -869,6 +866,34 @@ uint level_mesh_at(uint level)
 /// mode — and what `scatterMain` then sends nowhere. No table reaches this many
 /// buckets: `crcbl_render::DrawGen` counts them in a `u32`.
 static const uint NO_BUCKET = 0xffffffff;
+
+/// Material modes a bucket key can hold — every value
+/// `INSTANCE_MATERIAL_MODE_MASK` can carry, matching
+/// `crcbl_shaders::draw_gen::MATERIAL_MODES` — and so the width of one mesh's
+/// row of the bucket lookup.
+static const uint MATERIAL_MODES = 4;
+
+/// The bucket drawing mesh `mesh` in material mode `mode`, or `NO_BUCKET`.
+///
+/// **One read where there was a walk of the bucket table**: survivors times the
+/// buckets searched, which at the measured scene's 938 buckets cost more GPU
+/// time than the rest of the pass. The host builds the lookup when it packs the
+/// bucket table — `crcbl_shaders::draw_gen::bucket_lookup` — and it gives the
+/// walk's answer for every key: the *first* bucket matching both halves, and
+/// `NO_BUCKET` where none does. Word 0 is how many mesh rows follow, one past
+/// the largest mesh id any bucket draws, so a mesh past them has no bucket and
+/// no row is read for it.
+///
+/// `mode` is `instance_material_mode`'s, which its mask keeps below
+/// `MATERIAL_MODES`, so it cannot reach the next row.
+uint bucket_for(uint mesh, uint mode)
+{
+    if (mesh >= tables[gen.bucket_lookup_at])
+    {
+        return NO_BUCKET;
+    }
+    return tables[gen.bucket_lookup_at + 1 + mesh * MATERIAL_MODES + mode];
+}
 
 /// Which word of `visible_instances` holds survivor `survivor`'s route, past the
 /// survivor list.
@@ -1184,18 +1209,10 @@ void binMain(uint3 thread: SV_DispatchThreadID)
     // different buckets, so the depth prepass and the shadow atlas record the
     // first under a vertex-only pipeline and the second under the cutout twin.
     uint mode = instance_material_mode(instance);
-    // A linear walk of the bucket table. The table is small and fixed — one
-    // entry per (resident mesh, mode present in the scene) today — so this is a
-    // couple of comparisons; a (mesh, mode) → bucket map is what a table large
-    // enough to notice would want.
-    uint routed = NO_BUCKET;
-    for (uint bucket = 0; bucket < gen.bucket_count; ++bucket)
+    uint routed = bucket_for(mesh_id, mode);
+    if (routed != NO_BUCKET)
     {
-        if (bucket_mesh(bucket) != mesh_id || bucket_mode(bucket) != mode)
-        {
-            continue;
-        }
-        routed = bucket;
+        uint bucket = routed;
         // Counted into the mesh dispatch's y extent, which is what `startsMain`
         // sums. `scatterMain` counts the same survivors again into
         // `ARG_INSTANCE_COUNT`, so the two words reach the same total — held
@@ -1226,7 +1243,6 @@ void binMain(uint3 thread: SV_DispatchThreadID)
                     .add(1);
             }
         }
-        break;
     }
     // Invocation `index` owns word `index` of the routes, so this is a plain
     // store rather than an atomic. An instance matching no bucket is routed

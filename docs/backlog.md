@@ -210,9 +210,9 @@ next is the mesh tail's task-stage cost (P21's first open item), the
 best-measured frame-path cost left: on this card's default path at 938 buckets
 the ranged mesh tail records for 2.98 ms and spends 2.45 ms on the GPU, against
 0.37 ms of GPU for the same ranged calls without a task stage (whose 1.68 ms
-record was measured before the scan). P20 is priced now, at 0.142 ms of GPU a
-frame at 938 buckets, below it; P11, P12 and P13 are frame-path too but
-unpriced, so they rank behind it until measured. Keep startup-only and
+record was measured before the scan). P20's bucket lookup shipped (`draw-args`
+0.143 → 0.011 ms of GPU a frame at 938 buckets); P11, P12 and P13 are frame-path
+too but unpriced, so they rank behind it until measured. Keep startup-only and
 unexercised candidates behind measured frame-path work.
 
 Retained UI geometry was considered and declined in its current form. The
@@ -3940,9 +3940,9 @@ run to completion at a 363 MiB peak where they aborted before, and that is with
 One item at a time: an implementation agent takes an item with the verification
 below, the change is reviewed and the whole verification re-run by hand, then
 committed on its own and pushed to `main`, and its bullet is deleted here. The
-remaining order, by expected win against risk: P3, P20, P2 (log the real stride
-first — it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the
-rest top to bottom. The verification every item gets:
+remaining order, by expected win against risk: P3, P2 (log the real stride first
+— it may be moot), P11, P31 and P32, P12, P13, P22, P23, P21, then the rest top
+to bottom. The verification every item gets:
 
 - `cargo clippy --workspace --all-targets --all-features --locked -- -D warnings`
   (it compiles the feature-gated GPU suites too, which a plain workspace check
@@ -4188,16 +4188,13 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
 
 ### GPU time
 
-- **P20 — draw generation routes survivors with a linear bucket search.**
-  `draw_gen.slang::binMain` walks the bucket table until `(mesh_id, mode)`
-  matches, then writes a route that scatter consumes. The old description of a
-  repeated scatter search is stale; the routing cost remains proportional to
-  survivors times the bucket-table prefix searched. Priced 2026-09-29 with
-  `mesh_e2e`'s `the_price_of_one_call_per_bucket` (the pass is labelled
-  `draw-args`): GPU p50 0.142 ms a frame at 938 buckets against 0.009 ms at two,
-  17,219 instances, RX 7900 XTX. Consider a build-time
-  `(level mesh, mode) → bucket` table. Preserve material-mode and LOD routing,
-  empty buckets and `NO_BUCKET`.
+- **`draw_gen::Params::bucket_modes_at` is read by no shader.** Since `binMain`
+  routes through `bucket_lookup` (the `(mesh, mode) → bucket` table
+  `pack_tables` appends), nothing on the GPU reads the per-bucket mode region;
+  the host keys the lookup on the slice, and the region and the `Params` word
+  stay only so no offset behind them moved. Dropping both shifts every later
+  region and the uniform block — a layout change with its own artifact
+  regeneration, worth it only alongside another change to that block.
 - **P21 — what is left of one call per bucket per pass per view.** Every tail
   now records one bind and one multi-draw per run of consecutive buckets on a
   device granting `Features::DRAW_INDEX` (Vulkan only): the SPIR-V vertex stages
@@ -4273,10 +4270,10 @@ lavapipe, plus CI's full matrix at `04dd4070`. Not done:
     `IndirectCount` and 0.87 ms on `IndirectPerBatch`, level with their
     two-bucket rows (0.90 and 0.95 ms). The mesh tail's ranged row still records
     2.98 against 1.48 ms, which is its own GPU time — the task-stage item above.
-    `draw-args` at 0.142 ms is P20's. Not built: timing `PassTimers`' readback
-    apart from recording, so the record column would be CPU alone, and printing
-    `draw-args` and `draw-starts` among the test's `PRICED` passes (added only
-    temporarily to measure this).
+    `draw-args`, 0.142 ms then, is now a lookup (0.011 ms). Not built: timing
+    `PassTimers`' readback apart from recording, so the record column would be
+    CPU alone, and printing `draw-args` and `draw-starts` among the test's
+    `PRICED` passes (added only temporarily to measure this).
   - **Not measured** on lavapipe, radv or any Vulkan device without mesh shaders
     — the devices that take the ranged tail by default.
   - **`forward_e2e::shadow::the_cascade_view_tints_a_pixel_by_the_cascade_its_shadow_came_from`

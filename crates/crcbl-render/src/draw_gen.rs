@@ -161,8 +161,9 @@
 //!   are at offset zero and bucket `b`'s dispatch extents at
 //!   [`DrawGen::mesh_args_offset`]`(b)`.
 //! * Every host-written table — the bucket table, its per-bucket material
-//!   modes, the per-bucket cluster counts and topic 25's three
-//!   selection tables — is one buffer, packed by
+//!   modes, the per-bucket cluster counts, topic 25's three
+//!   selection tables and the `(mesh, mode) → bucket` lookup built from the
+//!   first two — is one buffer, packed by
 //!   [`crcbl_shaders::draw_gen::pack_tables`].
 //!
 //! So a reader that copies a region back must take its offset from the accessor
@@ -777,6 +778,7 @@ impl DrawGen {
                     mesh_levels_at: table_offsets.mesh_levels_at,
                     level_groups_at: table_offsets.level_groups_at,
                     level_meshes_at: table_offsets.level_meshes_at,
+                    bucket_lookup_at: table_offsets.bucket_lookup_at,
                     ..draw_gen::Params::default()
                 }
                 .to_bytes(),
@@ -1671,6 +1673,7 @@ impl DrawGen {
                 mode,
                 draw_regions: self.mode.regions(),
                 face_runs_at: draw_gen::face_runs_at(self.capacity, self.bucket_count),
+                bucket_lookup_at: self.table_offsets.bucket_lookup_at,
             }
             .to_bytes(),
         )?;
