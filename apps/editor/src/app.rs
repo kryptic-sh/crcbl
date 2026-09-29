@@ -96,7 +96,7 @@ use crate::panel::{PanelInput, Panels, VIEWPORT_TEXTURE};
 
 mod instances;
 
-use instances::{PlacedInstance, place};
+use instances::Placed;
 
 /// How far one arrow key moves the selection, in metres.
 ///
@@ -161,7 +161,7 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     pool: TransientPool,
     /// One instance per entity, retaining its last published description so
     /// unchanged draws let the renderer settle motion history and reuse shadows.
-    instances: Vec<PlacedInstance>,
+    instances: Placed,
     document: Document,
     /// The docked outliner and inspector, and the join between what they show
     /// and what the document holds.
@@ -339,7 +339,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             renderer.destroy(gpu.device());
             return Err(GpuError::Hal(error).into());
         }
-        let instances = match place(&mut renderer, &mut document) {
+        let instances = match Placed::place(&mut renderer, &mut document) {
             Ok(instances) => instances,
             Err(error) => {
                 renderer.destroy(gpu.device());
@@ -755,7 +755,9 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         let extent = acquired.extent;
 
-        instances::update(&mut self.instances, &mut self.renderer, &mut self.document);
+        self.instances
+            .update(&mut self.renderer, &mut self.document)
+            .map_err(|error| GpuError::pools("the editor's entities", &error))?;
         if let Some(id) = self.document.selected()
             && let Some((min, max)) = self.document.bounds(id)
         {

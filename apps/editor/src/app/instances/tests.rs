@@ -26,6 +26,7 @@ fn pose(
 ) {
     let placed = editor
         .instances
+        .instances
         .iter()
         .find(|placed| placed.id == id)
         .expect("placed");
@@ -112,6 +113,68 @@ fn unchanged_draws_settle_motion_and_edits_follow_undo_redo() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
+/// The ids with an instance and how many of the renderer's records are live.
+fn drawn(editor: &Editor<HeadlessShell>) -> (Vec<SceneEntityId>, usize) {
+    let mut ids: Vec<_> = editor
+        .instances
+        .instances
+        .iter()
+        .map(|each| each.id)
+        .collect();
+    ids.sort();
+    let live = editor
+        .renderer
+        .cull_records()
+        .0
+        .iter()
+        .filter(|record| record.flags & crcbl::shaders::mesh::GpuInstance::LIVE != 0)
+        .count();
+    (ids, live)
+}
+
+/// **An entity that leaves stops being drawn and one that arrives starts** —
+/// read off the renderer's own live records, not the editor's list alone.
+#[test]
+fn deleted_and_spawned_entities_leave_and_join_the_drawn_instances() {
+    let mut editor = headless(16);
+    step_any(&mut editor);
+    let ids = |range: &[u32]| range.iter().copied().map(SceneEntityId).collect::<Vec<_>>();
+    assert_eq!(drawn(&editor), (ids(&[0, 1, 2, 3]), 4));
+
+    editor
+        .document
+        .delete(SceneEntityId(2))
+        .expect("in the scene");
+    step_any(&mut editor);
+    assert_eq!(
+        drawn(&editor),
+        (ids(&[0, 1, 3]), 3),
+        "the deleted block is still drawn"
+    );
+
+    editor
+        .document
+        .duplicate(SceneEntityId(1))
+        .expect("in the scene");
+    step_any(&mut editor);
+    assert_eq!(
+        drawn(&editor),
+        (ids(&[0, 1, 3, 4]), 4),
+        "the copy is not drawn"
+    );
+
+    editor.act(&Action::Undo);
+    editor.act(&Action::Undo);
+    step_any(&mut editor);
+    assert_eq!(drawn(&editor), (ids(&[0, 1, 2, 3]), 4));
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// A frame, whatever the shadow cache did.
+fn step_any(editor: &mut Editor<HeadlessShell>) {
+    assert_eq!(editor.frame().expect("a presented frame"), Flow::Continue);
+}
+
 #[test]
 fn missing_bounds_leave_the_published_instance_unchanged() {
     let mut editor = headless(16);
@@ -121,14 +184,14 @@ fn missing_bounds_leave_the_published_instance_unchanged() {
     step(&mut editor, false);
     step(&mut editor, true);
     let (before, _) = editor.renderer.cull_records();
-    let id = editor.instances[0].id;
-    let desc = editor.instances[0].desc;
-    editor.instances[0].id = SceneEntityId(u32::MAX);
-    assert!(instance_of(&mut editor.document, editor.instances[0].id).is_none());
+    let id = editor.instances.instances[0].id;
+    let desc = editor.instances.instances[0].desc;
+    editor.instances.instances[0].id = SceneEntityId(u32::MAX);
+    assert!(instance_of(&mut editor.document, editor.instances.instances[0].id).is_none());
     step(&mut editor, true);
-    assert_eq!(editor.instances[0].desc, desc);
+    assert_eq!(editor.instances.instances[0].desc, desc);
     assert_eq!(editor.renderer.cull_records().0, before);
-    editor.instances[0].id = id;
+    editor.instances.instances[0].id = id;
     step(&mut editor, true);
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
@@ -188,7 +251,7 @@ fn filtered_editor_images_match_eager_writes_through_history() {
                 _ => {}
             }
             if eager {
-                for placed in &editor.instances {
+                for placed in &editor.instances.instances {
                     if let Some(desc) = instance_of(&mut editor.document, placed.id) {
                         editor.renderer.set_instance(placed.handle, &desc);
                     }
@@ -263,7 +326,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         crate::scene::vocabulary(),
     )
     .expect("greybox document");
-    let mut placed = place(&mut renderer, &mut document).expect("placed entities");
+    let mut placed = Placed::place(&mut renderer, &mut document).expect("placed entities");
     let buffers: HashSet<_> = recorder
         .events()
         .windows(2)
@@ -281,11 +344,11 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     assert!(buffers.len() > 1, "observe the actual instance-buffer ring");
     let camera = Camera::default();
     let light = DirectionalLight::default();
-    let tick = |renderer: &mut ForwardRenderer,
-                placed: &mut [PlacedInstance],
-                document: &mut Document| {
+    let tick = |renderer: &mut ForwardRenderer, placed: &mut Placed, document: &mut Document| {
         let seen = recorder.events().len();
-        update(placed, renderer, document);
+        placed
+            .update(renderer, document)
+            .expect("no entity arrives");
         renderer
             .begin_frame(device.as_ref(), &camera, &light, (64, 64))
             .expect("frame uploads");
@@ -303,8 +366,8 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
     for _ in 0..buffers.len() {
         assert_eq!(tick(&mut renderer, &mut placed, &mut document), 0);
     }
-    let id = placed[0].id;
-    let original = placed[0].desc;
+    let id = placed.instances[0].id;
+    let original = placed.instances[0].desc;
     let Value::Float(x) = document.read(id, "position.0").expect("position") else {
         panic!("number");
     };
@@ -320,7 +383,7 @@ fn filtered_instances_drain_uploads_and_settle_each_ring_slot() {
         tick(&mut renderer, &mut placed, &mut document),
         INSTANCE_STRIDE
     );
-    let index = usize::try_from(placed[0].handle.index()).expect("host index");
+    let index = usize::try_from(placed.instances[0].handle.index()).expect("host index");
     let moving = &renderer.cull_records().0[index];
     assert_eq!(moving.transform, moved.transform.to_cols_array());
     assert_eq!(

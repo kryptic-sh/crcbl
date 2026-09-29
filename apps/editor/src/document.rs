@@ -63,6 +63,9 @@ pub struct Document {
     /// been loaded and not saved, which is also where a fresh log stands — so a
     /// document nobody has edited opens clean.
     saved_at: usize,
+    /// How many times an entity has entered or left this document — see
+    /// [`Document::membership`].
+    membership: u64,
     /// Where [`Document::save_to`] writes when it is not told otherwise: the
     /// directory this document was opened from, or [`None`] for one opened out
     /// of a compiled-in source.
@@ -203,6 +206,7 @@ impl Document {
             selected: None,
             log: UndoLog::new(),
             saved_at: 0,
+            membership: 0,
             origin: None,
         })
     }
@@ -296,6 +300,17 @@ impl Document {
     #[must_use]
     pub fn entity_count(&self) -> usize {
         self.ids.len()
+    }
+
+    /// A number that moves every time an entity enters or leaves the document —
+    /// a spawn, a delete, and either one undone or redone.
+    ///
+    /// What a view of the entity list re-reads on. Not
+    /// [`entity_count`](Self::entity_count): a delete followed by a duplicate
+    /// leaves the count where it was and the list different.
+    #[must_use]
+    pub const fn membership(&self) -> u64 {
+        self.membership
     }
 
     /// What is selected.
@@ -719,6 +734,7 @@ impl Document {
             "a fresh entity under a free id is always filed",
         );
         sync_colliders(&self.registry, &mut self.world, [entity]);
+        self.membership += 1;
         Ok(EditCommand::Delete { entity: id })
     }
 
@@ -734,6 +750,7 @@ impl Document {
         // picked and saved.
         self.world.sweep();
         self.ids.remove(id);
+        self.membership += 1;
         if self.selected == Some(id) {
             self.selected = None;
         }

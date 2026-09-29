@@ -58,8 +58,8 @@
 //! The rows are virtualized: a frame builds the rows its window shows and no
 //! more, whatever the scene holds. What is *not* free is the flatten, and the
 //! outline it is flattened from — so the outline is read once and re-read only
-//! when [`Document::entity_count`] moves, which in this slice is never, and the
-//! flatten runs only when the widget says its model is stale.
+//! when [`Document::membership`] moves, which is an entity entering or leaving,
+//! and the flatten runs only when the widget says its model is stale.
 
 use crcbl::math::Vec2;
 use crcbl::scene::scn::SceneEntityId;
@@ -191,11 +191,11 @@ pub struct Panels {
     layout: DockLayout,
     outliner: OutlinerState,
     overrides: Overrides,
-    /// [`Document::outline`], read again only when the entity count moves —
-    /// see the module docs.
+    /// [`Document::outline`], read again only when the document's membership
+    /// moves — see the module docs.
     outline: Vec<(String, Vec<SceneEntityId>)>,
-    /// The entity count the outline was read at.
-    counted: usize,
+    /// The [`Document::membership`] the outline was read at.
+    counted: u64,
     /// The selection the outliner was last told about: the witness that says
     /// which side changed it. See the module docs.
     shown: Option<SceneEntityId>,
@@ -228,7 +228,7 @@ impl Panels {
             layout,
             outliner,
             overrides: Overrides::vectors(),
-            counted: document.entity_count(),
+            counted: document.membership(),
             outline,
             // Deliberately not the document's selection: leaving the witness
             // empty makes the idle frame below *push* whatever is selected into
@@ -491,15 +491,13 @@ impl Panels {
     /// Reads [`Document::outline`] again when the document has gained or lost
     /// an entity.
     ///
-    /// The count rather than a revision, because the count is what changes:
-    /// every command this slice issues is a property set, which moves no row in
-    /// or out — so this is the trigger for the day one does, and costs an
-    /// integer comparison until then.
+    /// On [`Document::membership`], not the entity count: a delete and a
+    /// duplicate leave the count where it was and the rows different.
     fn refresh(&mut self, document: &mut Document) {
-        if document.entity_count() == self.counted {
+        if document.membership() == self.counted {
             return;
         }
-        self.counted = document.entity_count();
+        self.counted = document.membership();
         self.outline = document.outline();
         self.outliner.invalidate();
     }
@@ -916,6 +914,38 @@ mod tests {
         let header = page.centre(page.panels.row_keys()[0]);
         page.click(header);
         assert_eq!(page.document.selected(), None);
+    }
+
+    /// **The rows follow an entity leaving and another arriving**, even when the
+    /// two leave the entity count where it was — a delete and then a duplicate.
+    /// Each row is clicked and read back, as above.
+    #[test]
+    fn the_outliner_follows_a_delete_and_a_duplicate_that_keep_the_count() {
+        let mut page = Page::built_in();
+        page.idle();
+        let count = page.document.entity_count();
+        page.document
+            .delete(SceneEntityId(2))
+            .expect("in the scene");
+        let copy = page
+            .document
+            .duplicate(SceneEntityId(1))
+            .expect("in the scene");
+        assert_eq!(page.document.entity_count(), count);
+        page.idle();
+
+        let entities: Vec<SceneEntityId> = page
+            .document
+            .outline()
+            .into_iter()
+            .flat_map(|(_, ids)| ids)
+            .collect();
+        assert!(entities.contains(&copy) && !entities.contains(&SceneEntityId(2)));
+        for (index, id) in entities.iter().enumerate() {
+            let at = page.centre(page.panels.row_keys()[index + 1]);
+            page.click(at);
+            assert_eq!(page.document.selected(), Some(*id), "row {}", index + 1);
+        }
     }
 
     /// **A document handed over with something already selected keeps it**, and
