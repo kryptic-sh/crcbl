@@ -1,33 +1,23 @@
 //! LAN play in the sandbox: `--host`, `--join` and `--browse`, over the
-//! engine's own UDP transport.
+//! engine's own UDP transport, through `crcbl::lan`.
 //!
-//! - **`--host [PORT]`** binds a `crcbl::net::udp::UdpListener` and opens a
-//!   `discovery::Announcer` beside it, advertising the listener's port. Every frame the listener's newly
-//!   confirmed peers go to a [`crcbl::server::Host`] as `Box<dyn Transport>`,
-//!   the way the Steam path takes its listener's peers, and the announced
-//!   player count follows the host's.
-//! - **`--join <IP:PORT>`** connects a `UdpTransport` to that address and
-//!   runs a [`crcbl::client::Client`] over it: direct connect, first-class.
-//! - **`--browse`** polls a `discovery::Browser`, prints every host it heard, and joins the first one this build can play
-//!   with. There is no list on screen to choose from yet — the backlog says
-//!   what one would take.
+//! The session machinery is the engine's — the listener, the announcer, the
+//! accept loop feeding a [`crcbl::server::Host`], the client connecting by
+//! address or browsing, the "lan" section of the F3 panel — and what is left
+//! here is what is the sandbox's: which of the three the command line asked
+//! for, and what the host's world holds.
 //!
 //! The host's world is the smallest one that replicates something: a
 //! "players" system with an entity per admitted peer. The sandbox has no
 //! game, so there is nothing to play beyond joining, receiving the host's
-//! snapshots, and seeing the player count change as others come and go. The
-//! F3 panel's "lan" section shows where each side stands.
+//! snapshots, and seeing the player count change as others come and go.
 //!
 //! # One datagram per snapshot
 //!
-//! A UDP snapshot travels on the unreliable channel, which takes one
-//! datagram — [`MAX_UNRELIABLE_PAYLOAD`](crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD)
-//! bytes. This world's snapshot sits far under it (a test holds that); a
-//! world that grew past it would have each snapshot fitted to the datagram,
-//! the least urgent updates held back for later ones (`crcbl::net::budget`),
-//! which the F3 panel counts. Only an update that cannot fit a datagram on
-//! its own is refused, which the host records by name
-//! ([`crcbl::server::SnapshotTooLarge`]) and this module logs.
+//! This world's snapshot sits far under
+//! [`MAX_UNRELIABLE_PAYLOAD`](crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD)
+//! (a test holds that); `crcbl::lan` says what happens to one that grows
+//! past it.
 //!
 //! # Native only
 //!
@@ -43,18 +33,17 @@ pub use imp::{Lan, LanError};
 #[cfg(not(target_arch = "wasm32"))]
 mod imp {
     use std::collections::HashMap;
-    use std::io;
-    use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
-    use std::num::NonZeroU16;
+    #[cfg(test)]
+    use std::net::SocketAddr;
     use std::time::Duration;
 
-    use crcbl::client::{Client, Ended};
     use crcbl::ecs::{Entity, System, World};
+    use crcbl::lan::{LanBind, LanGame};
+    pub use crcbl::lan::{LanClient, LanError, LanMode};
     use crcbl::net::ProtocolCompatibility;
-    use crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD;
-    use crcbl::net::udp::discovery::{Announcement, Announcer, Browser, DISCOVERY_PORT};
-    use crcbl::net::udp::{ConnectError, UdpListener, UdpTransport};
-    use crcbl::server::{Host, HostConfig, PeerEvent, PeerId};
+    #[cfg(test)]
+    use crcbl::net::udp::discovery::Announcement;
+    use crcbl::server::{PeerEvent, PeerId};
     use crcbl::ui::{DebugModule, DebugPanel, DebugSection};
 
     /// The endpoint protocol id the sandbox's links speak — `SBOX`. A
@@ -72,55 +61,17 @@ mod imp {
     /// The most players a sandbox host admits, and what it announces.
     pub const MAX_PLAYERS: u16 = 8;
 
+    /// The sandbox's LAN session, as [`crcbl::lan`] knows it.
+    pub const SANDBOX: LanGame = LanGame {
+        app: "sandbox",
+        host_name: "crcbl sandbox",
+        protocol_id: PROTOCOL_ID,
+        compatibility: COMPATIBILITY,
+        max_players: MAX_PLAYERS,
+    };
+
     /// The replicated system holding one entity per admitted peer.
     const PLAYERS: &str = "players";
-
-    /// The name a host announces.
-    const HOST_NAME: &str = "crcbl sandbox";
-
-    /// The least time between two logged snapshot refusals: one a second
-    /// says the world is too big without a line every tick.
-    const REFUSAL_LOG_INTERVAL: Duration = Duration::from_secs(1);
-
-    /// What the command line asked of the network.
-    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-    pub enum LanMode {
-        /// No networking: the sandbox as it always ran.
-        #[default]
-        Off,
-        /// Host a session on this UDP port — 0 for any free one.
-        Host {
-            /// The port to listen on.
-            port: u16,
-        },
-        /// Join the host at this address.
-        Join(SocketAddr),
-        /// Find a host on the LAN and join it.
-        Browse,
-    }
-
-    /// Why LAN play could not start.
-    #[derive(Debug)]
-    pub enum LanError {
-        /// The host's listener could not be bound.
-        Listen(io::Error),
-        /// The browser's socket could not be bound.
-        Browse(io::Error),
-        /// The connect to a host could not start.
-        Connect(ConnectError),
-    }
-
-    impl std::fmt::Display for LanError {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            match self {
-                Self::Listen(error) => write!(f, "cannot host: {error}"),
-                Self::Browse(error) => write!(f, "cannot look for hosts: {error}"),
-                Self::Connect(error) => write!(f, "cannot connect: {error}"),
-            }
-        }
-    }
-
-    impl std::error::Error for LanError {}
 
     /// The sandbox's side of a LAN session, or none.
     #[derive(Debug)]
@@ -148,8 +99,8 @@ mod imp {
         }
 
         /// Starts what `mode` asks for, ticking at `tick_hz` — a host and
-        /// its clients must agree on it. Prints where a host listens, since
-        /// `--join` needs the port.
+        /// its clients must agree on it. A host prints where it listens,
+        /// since `--join` needs the port.
         ///
         /// # Errors
         ///
@@ -158,31 +109,15 @@ mod imp {
         pub fn start(mode: LanMode, tick_hz: u32) -> Result<Self, LanError> {
             let role = match mode {
                 LanMode::Off => Role::Off,
-                LanMode::Host { port } => {
-                    let host = LanHost::open(
-                        (Ipv4Addr::UNSPECIFIED, port).into(),
-                        (Ipv4Addr::UNSPECIFIED, DISCOVERY_PORT).into(),
-                        Some(SocketAddr::V4(SocketAddrV4::new(
-                            Ipv4Addr::BROADCAST,
-                            DISCOVERY_PORT,
-                        ))),
-                        tick_hz,
-                    )?;
-                    println!(
-                        "sandbox: hosting on UDP port {}{}",
-                        host.game_port(),
-                        if host.announcer.is_some() {
-                            ", announced on the LAN"
-                        } else {
-                            " (not announced; --join by address)"
-                        },
-                    );
-                    Role::Host(Box::new(host))
+                LanMode::Host { port } => Role::Host(Box::new(LanHost::open_with(
+                    LanBind::on_the_lan(port),
+                    tick_hz,
+                )?)),
+                LanMode::Join(addr) => {
+                    Role::Client(Box::new(LanClient::join(SANDBOX, addr, tick_hz)?))
                 }
-                LanMode::Join(addr) => Role::Client(Box::new(LanClient::join(addr, tick_hz)?)),
                 LanMode::Browse => {
-                    let browser = Browser::open(PROTOCOL_ID).map_err(LanError::Browse)?;
-                    Role::Client(Box::new(LanClient::browse(browser, tick_hz)))
+                    Role::Client(Box::new(LanClient::browse_the_lan(SANDBOX, tick_hz)?))
                 }
             };
             Ok(Self {
@@ -212,20 +147,12 @@ mod imp {
         }
     }
 
-    /// A host: the listener, the announcer beside it, and the session host
-    /// its peers are handed to.
+    /// The engine's LAN host, and the "players" system its peers fill.
+    #[derive(Debug)]
     pub struct LanHost {
-        listener: UdpListener,
-        /// `None` when the discovery port could not be bound — another host
-        /// on this machine holds it. The session is still joinable by
-        /// address.
-        announcer: Option<Announcer>,
-        host: Host,
+        lan: crcbl::lan::LanHost,
         /// Each admitted peer's entity in the "players" system.
         players: HashMap<PeerId, Entity>,
-        /// Refusals already logged, and when the last line went out.
-        refusals_logged: u64,
-        last_refusal_log: Option<Duration>,
     }
 
     impl LanHost {
@@ -235,112 +162,67 @@ mod imp {
         ///
         /// # Errors
         ///
-        /// [`LanError::Listen`] when the listener cannot be bound. An
-        /// announcer that cannot be bound is logged and left out instead:
-        /// discovery is a convenience over connecting by address.
+        /// As [`crcbl::lan::LanHost::open`].
+        #[cfg(test)]
         pub fn open(
             listen: SocketAddr,
             announce_at: SocketAddr,
             broadcast_to: Option<SocketAddr>,
             tick_hz: u32,
         ) -> Result<Self, LanError> {
-            let listener = UdpListener::bind(listen, PROTOCOL_ID).map_err(LanError::Listen)?;
-            let port = listener.local_addr().map_err(LanError::Listen)?.port();
-            let game_port = NonZeroU16::new(port)
-                .ok_or_else(|| LanError::Listen(io::Error::other("the listener reports port 0")))?;
-            let mut announcement =
-                Announcement::new(PROTOCOL_ID, game_port, COMPATIBILITY, HOST_NAME);
-            announcement.max_players = MAX_PLAYERS;
-            let announcer = match Announcer::bind_with(
-                announce_at,
-                announcement,
-                broadcast_to,
-                crcbl::net::SystemClock::new(),
-            ) {
-                Ok(announcer) => Some(announcer),
-                Err(error) => {
-                    crcbl::log::warn!(
-                        "lan: not announcing on {announce_at}: {error}; join by address instead"
-                    );
-                    None
-                }
-            };
-            let mut host = Host::new(
-                world(),
-                HostConfig {
-                    max_peers: usize::from(MAX_PLAYERS),
-                    tick_hz,
-                    compatibility: COMPATIBILITY,
+            Self::open_with(
+                LanBind {
+                    listen,
+                    announce_at,
+                    broadcast_to,
                 },
-            );
-            // The host's clock takes its baseline here, as `Loopback` spends
-            // its first update at zero.
-            host.update(Duration::ZERO);
+                tick_hz,
+            )
+        }
+
+        fn open_with(bind: LanBind, tick_hz: u32) -> Result<Self, LanError> {
             Ok(Self {
-                listener,
-                announcer,
-                host,
+                lan: crcbl::lan::LanHost::open(SANDBOX, bind, world(), tick_hz)?,
                 players: HashMap::new(),
-                refusals_logged: 0,
-                last_refusal_log: None,
             })
         }
 
         /// The port the listener is bound to.
+        #[cfg(test)]
         pub fn game_port(&self) -> u16 {
-            self.listener.local_addr().map_or(0, |addr| addr.port())
+            self.lan.game_port()
         }
 
         /// The session host.
         #[cfg(test)]
-        pub fn host(&self) -> &Host {
-            &self.host
+        pub fn host(&self) -> &crcbl::server::Host {
+            self.lan.host()
         }
 
         /// What the host announces, while it announces.
         #[cfg(test)]
         pub fn announcement(&self) -> Option<&Announcement> {
-            self.announcer.as_ref().map(Announcer::announcement)
+            self.lan.announcement()
         }
 
         /// Where the announcer answers queries, while it announces.
         #[cfg(test)]
         pub fn announcer_addr(&self) -> Option<SocketAddr> {
-            self.announcer
-                .as_ref()
-                .and_then(|announcer| announcer.local_addr().ok())
+            self.lan.announcer_addr()
         }
 
-        /// Takes in newly confirmed peers, runs the host to `now`, keeps the
-        /// players system and the announcement in step with who is in, and
-        /// answers discovery queries.
+        /// Serves the session to `now`, and keeps the players system in step
+        /// with who is in.
         pub fn frame(&mut self, now: Duration) {
-            while let Some(peer) = self.listener.accept() {
-                crcbl::log::info!("lan: {} connected", peer.peer_addr());
-                self.host.add(Box::new(peer));
-            }
-            self.host.update(now);
-            let events: Vec<PeerEvent> = self.host.events().collect();
-            for event in events {
-                crcbl::log::info!("lan: {event:?}");
+            for event in self.lan.frame(now) {
                 self.apply(event);
-            }
-            self.report_refusals(now);
-            if let Some(announcer) = &mut self.announcer {
-                let players = u16::try_from(self.host.peer_count()).unwrap_or(u16::MAX);
-                if announcer.announcement().players != players {
-                    let mut announcement = announcer.announcement().clone();
-                    announcement.players = players;
-                    announcer.set_announcement(announcement);
-                }
-                announcer.poll();
             }
         }
 
         /// One session change, reflected in the players system: an entity
         /// per admitted peer, marked connected or not.
         fn apply(&mut self, event: PeerEvent) {
-            let world = self.host.world_mut();
+            let world = self.lan.host_mut().world_mut();
             match event {
                 PeerEvent::Joined(peer) => {
                     let entity = world.spawn();
@@ -363,76 +245,11 @@ mod imp {
                 }
             }
         }
-
-        /// Logs a snapshot the transport refused as too long, naming the
-        /// limit — at most once per [`REFUSAL_LOG_INTERVAL`].
-        fn report_refusals(&mut self, now: Duration) {
-            let refused = self.host.oversized_snapshot_count();
-            if refused == self.refusals_logged {
-                return;
-            }
-            if self
-                .last_refusal_log
-                .is_some_and(|last| now.saturating_sub(last) < REFUSAL_LOG_INTERVAL)
-            {
-                return;
-            }
-            if let Some(snapshot) = self.host.last_oversized_snapshot() {
-                crcbl::log::warn!(
-                    "lan: {snapshot} ({refused} refused so far); one entity's update must fit \
-                     a UDP datagram on its own"
-                );
-            }
-            self.refusals_logged = refused;
-            self.last_refusal_log = Some(now);
-        }
-    }
-
-    impl std::fmt::Debug for LanHost {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.debug_struct("LanHost")
-                .field("listener", &self.listener)
-                .field("announcer", &self.announcer)
-                .field("host", &self.host)
-                .finish_non_exhaustive()
-        }
     }
 
     impl DebugModule for LanHost {
         fn debug_section(&self, out: &mut DebugSection) {
-            out.set_title("lan");
-            out.row_str("role", "host");
-            out.row("port", format_args!("{}", self.game_port()));
-            out.row(
-                "announced",
-                format_args!(
-                    "{}",
-                    if self.announcer.is_some() {
-                        "yes"
-                    } else {
-                        "no"
-                    }
-                ),
-            );
-            out.row(
-                "players",
-                format_args!("{}/{MAX_PLAYERS}", self.host.peer_count()),
-            );
-            out.row(
-                "snapshot",
-                format_args!(
-                    "{} of {MAX_UNRELIABLE_PAYLOAD} bytes",
-                    self.host.largest_snapshot_bytes()
-                ),
-            );
-            out.row(
-                "held back",
-                format_args!("{}", self.host.held_back_update_count()),
-            );
-            out.row(
-                "refused",
-                format_args!("{}", self.host.oversized_snapshot_count()),
-            );
+            self.lan.debug_section(out);
         }
     }
 
@@ -448,179 +265,6 @@ mod imp {
         world
             .system_mut::<System<bool>>()
             .expect("the host's world registers the players system")
-    }
-
-    /// A client: looking for a host, or in a session with one.
-    #[derive(Debug)]
-    pub struct LanClient {
-        phase: Phase,
-        tick_hz: u32,
-        /// Whether the session's start and end have been logged.
-        reported_session: bool,
-        reported_end: bool,
-    }
-
-    #[derive(Debug)]
-    enum Phase {
-        Browsing(Browser),
-        Joined {
-            host: SocketAddr,
-            client: Box<Client<UdpTransport>>,
-        },
-        /// A connect to the chosen host could not start; logged, and nothing
-        /// more happens.
-        Failed,
-    }
-
-    impl LanClient {
-        /// Starts a connect to the host at `addr`.
-        ///
-        /// # Errors
-        ///
-        /// [`LanError::Connect`] when no socket could be bound or no secret
-        /// drawn.
-        pub fn join(addr: SocketAddr, tick_hz: u32) -> Result<Self, LanError> {
-            Ok(Self::in_phase(connect(addr, tick_hz)?, tick_hz))
-        }
-
-        /// Looks for hosts with `browser`, and joins the first this build can
-        /// play with.
-        pub fn browse(browser: Browser, tick_hz: u32) -> Self {
-            Self::in_phase(Phase::Browsing(browser), tick_hz)
-        }
-
-        fn in_phase(phase: Phase, tick_hz: u32) -> Self {
-            Self {
-                phase,
-                tick_hz,
-                reported_session: false,
-                reported_end: false,
-            }
-        }
-
-        /// The session client, once a host is chosen.
-        pub fn client(&self) -> Option<&Client<UdpTransport>> {
-            match &self.phase {
-                Phase::Joined { client, .. } => Some(client),
-                Phase::Browsing(_) | Phase::Failed => None,
-            }
-        }
-
-        /// The host joined, once one is chosen.
-        pub fn host(&self) -> Option<SocketAddr> {
-            match &self.phase {
-                Phase::Joined { host, .. } => Some(*host),
-                Phase::Browsing(_) | Phase::Failed => None,
-            }
-        }
-
-        /// Browses or plays for one frame, at `now`.
-        pub fn frame(&mut self, now: Duration) {
-            match &mut self.phase {
-                Phase::Browsing(browser) => {
-                    browser.poll();
-                    let hosts = browser.hosts();
-                    let Some(chosen) = hosts
-                        .iter()
-                        .find(|host| host.compatibility == COMPATIBILITY)
-                    else {
-                        return;
-                    };
-                    for host in &hosts {
-                        println!(
-                            "sandbox: LAN host {:?} at {}, {}/{} players{}",
-                            host.name,
-                            host.addr,
-                            host.players,
-                            host.max_players,
-                            if host.compatibility == COMPATIBILITY {
-                                ""
-                            } else {
-                                ", another build"
-                            },
-                        );
-                    }
-                    println!("sandbox: joining {}", chosen.addr);
-                    self.phase = match connect(chosen.addr, self.tick_hz) {
-                        Ok(phase) => phase,
-                        Err(error) => {
-                            crcbl::log::error!("lan: {error}");
-                            Phase::Failed
-                        }
-                    };
-                }
-                Phase::Joined { host, client } => {
-                    client.update(now);
-                    if !self.reported_session
-                        && let Some(session) = client.session_id()
-                    {
-                        crcbl::log::info!("lan: in session {session:?} with {host}");
-                        self.reported_session = true;
-                    }
-                    if !self.reported_end {
-                        if client.handshake_blocked() {
-                            crcbl::log::warn!("lan: {host} runs another build and refused us");
-                            self.reported_end = true;
-                        } else if let Some(ended) = client.ended() {
-                            log_end(*host, ended, client);
-                            self.reported_end = true;
-                        }
-                    }
-                }
-                Phase::Failed => {}
-            }
-        }
-    }
-
-    /// Starts a connect to `addr` and the session client over it. The
-    /// client says hello once the transport is up; until then its sends
-    /// are backpressure, which it retries.
-    fn connect(addr: SocketAddr, tick_hz: u32) -> Result<Phase, LanError> {
-        let transport = UdpTransport::connect(addr, PROTOCOL_ID).map_err(LanError::Connect)?;
-        let client =
-            Client::new_with_compatibility(World::new(), transport, tick_hz, COMPATIBILITY);
-        Ok(Phase::Joined {
-            host: addr,
-            client: Box::new(client),
-        })
-    }
-
-    fn log_end(host: SocketAddr, ended: Ended, client: &Client<UdpTransport>) {
-        match ended {
-            Ended::ByServer(reason) => {
-                crcbl::log::warn!("lan: {host} ended the session: {reason:?}");
-            }
-            Ended::Lost => crcbl::log::warn!(
-                "lan: the link to {host} ended: {:?}",
-                client.transport().end_reason()
-            ),
-        }
-    }
-
-    impl DebugModule for LanClient {
-        fn debug_section(&self, out: &mut DebugSection) {
-            out.set_title("lan");
-            out.row_str("role", "client");
-            let (Some(host), Some(client)) = (self.host(), self.client()) else {
-                out.row_str(
-                    "host",
-                    match self.phase {
-                        Phase::Failed => "connect failed",
-                        Phase::Browsing(_) | Phase::Joined { .. } => "looking",
-                    },
-                );
-                return;
-            };
-            out.row("host", format_args!("{host}"));
-            match client.session_id() {
-                Some(session) => out.row("session", format_args!("{}", session.0)),
-                None => out.row_str("session", "handshaking"),
-            }
-            out.row(
-                "applied",
-                format_args!("tick {}", client.last_applied_tick().get()),
-            );
-        }
     }
 }
 

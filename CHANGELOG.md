@@ -468,6 +468,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   first of this build. Native builds only; the F3 panel gains a "lan" section
   during a session, and a LAN session that cannot start exits with code 1.
 
+- **`crcbl::lan`**, the LAN session those flags run, for any sample (native
+  builds only). `LanHost::open` binds a listener and an announcer where a
+  `LanBind` says (`LanBind::on_the_lan(port)` for every interface and the real
+  discovery port), runs a `crcbl_server::Host` on the sample's world and returns
+  each frame's `PeerEvent`s; `LanClient::join`, `browse` and `browse_the_lan`
+  run a `crcbl_client::Client` over `UdpTransport`; `LanMode::consume` parses
+  `--host [PORT]`, `--join <IP:PORT>` and `--browse` into a `LanMode`; a
+  `LanGame` names the protocol id, compatibility, player cap and announced name.
+  Both sides implement `DebugModule` as the "lan" section.
+
 - **`crcbl_server::Host` names a snapshot refused as too long**:
   `oversized_snapshot_count()` and `last_oversized_snapshot()`, a
   `SnapshotTooLarge { tick, size, limit }` whose message names the transport's

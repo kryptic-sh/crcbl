@@ -18,7 +18,7 @@ use crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crcbl::net::udp::discovery::{Browser, BrowserConfig};
 use crcbl::net::{SectorId, SystemClock};
 
-use super::imp::{COMPATIBILITY, LanClient, LanHost, MAX_PLAYERS, PROTOCOL_ID};
+use super::imp::{COMPATIBILITY, LanClient, LanHost, MAX_PLAYERS, PROTOCOL_ID, SANDBOX};
 
 const TICK_HZ: u32 = 60;
 
@@ -65,7 +65,7 @@ impl Rig {
     }
 
     fn join(&mut self) {
-        let client = LanClient::join(address(&self.host), TICK_HZ).expect("connect");
+        let client = LanClient::join(SANDBOX, address(&self.host), TICK_HZ).expect("connect");
         self.clients.push(client);
     }
 
@@ -174,7 +174,8 @@ fn a_browser_finds_the_host_and_joins_the_address_it_announced() {
         SystemClock::new(),
     )
     .expect("loopback UDP must be available to these tests");
-    rig.clients.push(LanClient::browse(browser, TICK_HZ));
+    rig.clients
+        .push(LanClient::browse(SANDBOX, browser, TICK_HZ));
 
     rig.until("the browsed session", |rig| playing(&rig.clients[0]));
     assert_eq!(rig.clients[0].host(), Some(address(&rig.host)));
@@ -227,7 +228,7 @@ fn a_browser_passes_over_a_host_of_another_build() {
     }
     assert!(heard, "the announce reaches a browser");
 
-    let mut client = LanClient::browse(browser, TICK_HZ);
+    let mut client = LanClient::browse(SANDBOX, browser, TICK_HZ);
     let mut now = Duration::ZERO;
     for _ in 0..10 {
         now += FRAME;

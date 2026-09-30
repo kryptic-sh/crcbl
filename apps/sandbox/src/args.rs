@@ -4,13 +4,13 @@
 //! which makes the same argument at the length it deserves and is the one that
 //! had a real choice to make.
 
+#[cfg(not(target_arch = "wasm32"))]
+use crcbl::args::Consumed;
 use crcbl::args::{MAX_TICK_RATE, size};
 use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameLimit, Pacing};
 
 use crate::app::{CameraMode, Options};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::lan::LanMode;
 
 /// `--help` text, and the definition of the flag set.
 pub const USAGE: &str = "\
@@ -93,10 +93,16 @@ pub enum Invocation {
 pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     let mut options = Options::default();
     // Peekable for `--host`, whose port is optional: the next argument is
-    // taken only when it is one.
+    // taken only when it is one — see `crcbl::lan::LanMode::consume`.
     let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
+        #[cfg(not(target_arch = "wasm32"))]
+        match options.lan.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::Help | Consumed::No => {}
+        }
         match arg.as_str() {
             "--headless" => options.headless = true,
             "--fullscreen" => options.fullscreen = true,
@@ -178,59 +184,12 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 Ok(size) => options.size = size,
                 Err(message) => return Invocation::BadUsage(message),
             },
-            #[cfg(not(target_arch = "wasm32"))]
-            "--host" => {
-                let port = match args.peek().map(|value| value.parse::<u16>()) {
-                    Some(Ok(port)) => {
-                        args.next();
-                        port
-                    }
-                    Some(Err(_)) | None => 0,
-                };
-                if let Err(message) = set_lan(&mut options, LanMode::Host { port }) {
-                    return Invocation::BadUsage(message);
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            "--join" => {
-                let addr = match args.next() {
-                    Some(value) => match value.parse() {
-                        Ok(addr) => addr,
-                        Err(_) => {
-                            return Invocation::BadUsage(format!(
-                                "--join needs an IP:PORT address, not `{value}`"
-                            ));
-                        }
-                    },
-                    None => return Invocation::BadUsage("--join needs a value".to_string()),
-                };
-                if let Err(message) = set_lan(&mut options, LanMode::Join(addr)) {
-                    return Invocation::BadUsage(message);
-                }
-            }
-            #[cfg(not(target_arch = "wasm32"))]
-            "--browse" => {
-                if let Err(message) = set_lan(&mut options, LanMode::Browse) {
-                    return Invocation::BadUsage(message);
-                }
-            }
             other => {
                 return Invocation::BadUsage(format!("unrecognized argument `{other}`"));
             }
         }
     }
     Invocation::Run(Box::new(options))
-}
-
-/// Sets the LAN mode, refusing a second one: which of two sessions to start
-/// is not a thing to guess.
-#[cfg(not(target_arch = "wasm32"))]
-fn set_lan(options: &mut Options, mode: LanMode) -> Result<(), String> {
-    if options.lan != LanMode::Off {
-        return Err("--host, --join and --browse exclude each other".to_string());
-    }
-    options.lan = mode;
-    Ok(())
 }
 
 fn take_number(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u64, String> {
@@ -245,6 +204,8 @@ fn take_number(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u6
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use crate::lan::LanMode;
 
     fn parse_args(args: &[&str]) -> Invocation {
         parse(args.iter().map(|arg| (*arg).to_string()))
