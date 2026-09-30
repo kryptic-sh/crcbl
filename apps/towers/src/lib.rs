@@ -62,7 +62,8 @@
 //! replicates the field as [`replica`]'s entities, which is all a joiner draws
 //! from. The `lan` module has the wiring, and it is native only: the browser
 //! build is single player. A native run whose command line chose nothing opens
-//! on [`lobby`], which picks among those — solo, host, a LAN host or an address.
+//! on the `lobby` module, which picks among those — solo, host, a LAN host or
+//! an address.
 //!
 //! # The path is a polyline, and the engine owes a spline
 //!
