@@ -38,6 +38,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   earlier member keeps its offset. `GpuMaterial::default()` now carries that
   neutral specular rather than zeroes in those words.
 
+- **`crcbl_towers::Options` has a `lan` field and `GameError` a `Lan` variant**
+  on native builds (see Added: towers plays co-op over a LAN), so a struct
+  literal must name the field (`crcbl::lan::LanMode::Off` is solo) and an
+  exhaustive `match` the variant. Towers' protocol version is 3: the snapshot
+  now carries the field, which an older client cannot read.
+
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
   the lane (`PAD_MESH` … `MESHES`) and the crate-root `PLOTS` re-export are
@@ -477,6 +483,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `--host [PORT]`, `--join <IP:PORT>` and `--browse` into a `LanMode`; a
   `LanGame` names the protocol id, compatibility, player cap and announced name.
   Both sides implement `DebugModule` as the "lan" section.
+
+- **Towers plays co-op over a LAN** (native builds; the browser build stays
+  single player). `--host [PORT]` runs the stage on a `crcbl_server::Host`
+  behind `crcbl::lan` and plays in it — the host's own player is one of its
+  clients, over an in-memory pair — announcing up to four players;
+  `--join <IP:PORT>` and `--browse` join one. Every player's `PlaceTower`,
+  `UpgradeTower`, `StartWave` and `Restart` are validated by the host in
+  admission order against one purse and one pool of lives. A joiner has no
+  stage: the server's world, solo's too, replicates the frame's view of the
+  stage (`RenderState` and `Stats`) as `crcbl_towers::replica`'s quantized
+  entities, and a joiner draws what they carry. A LAN session is served every
+  frame on wall time (`Game::frame`), so a host's pause menu does not stop the
+  others; `Game::host`, `Game::join`, `Game::replicated`, `Game::lan_host`,
+  `Game::lan_client` and `Game::lan_section` are new, and the F3 panel gains the
+  "lan" section during a session. Four players winning the whole table fit every
+  snapshot in one datagram with nothing held back.
+
+- **`crcbl_client::Client::replicated(system)`**: the entity bits and component
+  bytes a server system of that name replicated, from the default sector's
+  reconstructed baseline — how a game reads back state it replicates itself.
 
 - **`crcbl_server::Host` names a snapshot refused as too long**:
   `oversized_snapshot_count()` and `last_oversized_snapshot()`, a

@@ -2,14 +2,18 @@
 //!
 //! ```text
 //! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] [--scene DIR] …
+//!        [--host [PORT] | --join IP:PORT | --browse]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
 //!
 //! [`crcbl::args::Common`] owns `--headless`, `--frames`, `--tick-hz`,
 //! `--backend`, `--size`, `--screenshot` and the debug-overlay pair, and
-//! `--scene` is the one flag that is this sample's: it names a `.scn/` directory
-//! to read the map out of instead of the committed `assets/scenes/field.scn/`.
+//! `--scene` is the one flag that is this sample's alone: it names a `.scn/`
+//! directory to read the map out of instead of the committed
+//! `assets/scenes/field.scn/`. The three LAN flags are
+//! `crcbl::lan::LanMode::consume`'s, native builds only, as `apps/sandbox`
+//! reads them too.
 //! The shape is `apps/breakout/src/args.rs`'s and `apps/puppet/src/args.rs`'s —
 //! the directory is read *here*, while there is still an exit code to refuse the
 //! run with, and [`Options`] carries the parsed map rather than the path.
@@ -30,7 +34,7 @@ use crate::map::Map;
 /// `the_shared_half_of_the_usage_text_is_the_engines_verbatim` asserts this
 /// string *contains* both blocks byte for byte.
 pub const USAGE: &str = "\
-towers — co-op tower defense; this slice is the solo loop on one map
+towers — co-op tower defense on one map, solo or over a LAN
 
 USAGE:
     towers [OPTIONS]
@@ -79,6 +83,16 @@ OPTIONS:
                          scene.ron. A directory that is not a scene is refused
                          by key, line and column, and a layout the field cannot
                          hold is refused by the waypoint, leg or plot at fault.
+    --host [PORT]        Host a co-op session and play in it: listen for players
+                         on UDP PORT and announce the session to --browse on
+                         the local network. Default: any free port, printed at
+                         start.
+    --join <IP:PORT>     Join the co-op session at IP:PORT directly.
+    --browse             Look for co-op sessions on the local network, print
+                         what answers, and join the first one this build can
+                         play with. --host, --join and --browse exclude each
+                         other, and are native builds only: the browser build
+                         is single player.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -94,8 +108,12 @@ pub struct Options {
     /// The flags every sample has.
     pub common: Common,
     /// The field the run is played on: the committed one unless `--scene`
-    /// named another directory.
+    /// named another directory. A joiner draws its own — see `crate::lan`.
     pub map: Map,
+    /// Host, join or look for a co-op session — see `crate::lan`. Native
+    /// builds only: web builds have no networking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lan: crcbl::lan::LanMode,
 }
 
 impl Default for Options {
@@ -110,6 +128,8 @@ impl Default for Options {
             #[cfg(target_arch = "wasm32")]
             common: Common::new(crate::game::DEFAULT_TICK_HZ),
             map: Map::built_in(),
+            #[cfg(not(target_arch = "wasm32"))]
+            lan: crcbl::lan::LanMode::Off,
         }
     }
 }
@@ -131,6 +151,12 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
             Consumed::Help => return Invocation::Help,
             Consumed::Bad(message) => return Invocation::BadUsage(message),
             Consumed::No => {}
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        match options.lan.consume(&arg, &mut args) {
+            Consumed::Yes => continue,
+            Consumed::Bad(message) => return Invocation::BadUsage(message),
+            Consumed::Help | Consumed::No => {}
         }
         match arg.as_str() {
             "--scene" => match args.next() {
@@ -289,6 +315,51 @@ mod tests {
             ),
             "--scene at the end of an argv is a run that silently kept the built-in map"
         );
+    }
+
+    /// **The three LAN flags reach this sample's options through its own
+    /// parser**, beside the shared flags and `--scene` rather than instead of
+    /// them — the join `crcbl::lan`'s own tests cannot make — and solo is the
+    /// default.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_lan_flags_reach_the_options_beside_the_rest() {
+        use crcbl::lan::LanMode;
+
+        assert_eq!(parsed(&[]).lan, LanMode::Off);
+        let hosting = parsed(&["--host", "--headless"]);
+        assert_eq!(hosting.lan, LanMode::Host { port: 0 });
+        assert!(
+            hosting.common.headless,
+            "the flag after --host is still read"
+        );
+        assert_eq!(
+            parsed(&["--tick-hz", "30", "--host", "27015"]).lan,
+            LanMode::Host { port: 27_015 }
+        );
+        let joining = parsed(&["--join", "192.168.1.20:27015", "--tick-hz", "30"]);
+        assert_eq!(
+            joining.lan,
+            LanMode::Join("192.168.1.20:27015".parse().unwrap())
+        );
+        assert_eq!(joining.common.tick_hz, 30);
+        assert_eq!(parsed(&["--browse"]).lan, LanMode::Browse);
+        for flag in ["--host [PORT]", "--join <IP:PORT>", "--browse"] {
+            assert!(USAGE.contains(flag), "USAGE lists {flag}");
+        }
+    }
+
+    /// **Two sessions, or an address that is not one, are bad usage** — exit
+    /// code 2, never a guess at which was meant.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn two_lan_modes_or_a_bad_address_are_refused() {
+        assert!(rejected(&["--host", "--browse"]).contains("exclude each other"));
+        assert!(rejected(&["--join", "127.0.0.1:1", "--host"]).contains("exclude each other"));
+        assert!(rejected(&["--join"]).contains("--join needs a value"));
+        assert!(rejected(&["--join", "localhost"]).contains("IP:PORT"));
+        // Not a port, so not `--host`'s: read as an argument of its own.
+        assert!(rejected(&["--host", "99999"]).contains("unknown argument: 99999"));
     }
 
     /// With no `--scene`, the map is the committed one — the browser's only path,

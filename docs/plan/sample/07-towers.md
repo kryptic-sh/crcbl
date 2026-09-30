@@ -82,7 +82,9 @@ above is a requirement rather than an aspiration.
    plots are `apps/towers/assets/scenes/field.scn/`, which the game reads and
    the editor opens; authoring the real map in the editor is what is left.
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
-   into native dedicated server).
+   into native dedicated server). **Its LAN half is built (2026-10-01)**:
+   `--host`, `--join` and `--browse` over `crcbl::lan` — see "Where this stands"
+   for what that holds and what is unverified.
 4. Polish pass: world-space health bars, minimap, game-feel cheap wins.
 
 ## Where this stands
@@ -204,8 +206,10 @@ row of buttons **outside** the canvas — plot, kind, build and upgrade, in
 `web/demos/towers/main.js` — which synthesise the very `keydown`/`keyup` pair
 the canvas already listens for, so a finger and a keyboard reach the game down
 one path and the row is thrown away with the hint text rather than with engine
-code. And the debug panel's network module has nothing to report on, which is
-milestone 3's problem rather than these slices'.
+code. The debug panel has a "lan" section during a LAN session — the port, the
+players and the largest snapshot on a host, the session on a joiner — but the
+netgraph the network module was specified for (RTT, jitter, loss, tick-lead) is
+not built anywhere yet.
 
 **What it is waiting on, and it is not one thing.**
 
@@ -229,13 +233,25 @@ milestone 3's problem rather than these slices'.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
-- **Milestone 3 waits on a wire.** `crcbl-net`'s UDP transport
-  (`crcbl_net::udp`, 2026-09-30) is wired to no server or client yet, and there
-  is no LAN host discovery and no lobby browser. So "co-op over real transport"
-  and the 4-player LAN exit criterion have no implementation to sit on, and the
-  netgraph's network module has no connection to report on in this sample any
-  more than it does in breakout's. The commands are already shaped for it, which
-  is the one thing slice 1 could do about it.
+- **Milestone 3's co-op over real transport is built; its exit criterion is not
+  met.** Since 2026-10-01 `towers --host [PORT]` runs the stage on a
+  `crcbl_server::Host` behind `crcbl::lan`'s UDP listener and announcer, and the
+  host plays in it as one of its own clients, over an in-memory pair.
+  `--join <IP:PORT>` and `--browse` join one: a joiner has no stage and draws
+  what the host's snapshots carry — the server's world replicates the frame's
+  view of the stage as `crate::replica`'s quantized entities, solo's included.
+  Every player's commands are validated in admission order against one purse and
+  one pool of lives, up to four players. `--browse` joins the first host of this
+  build it hears and prints the rest; there is no lobby screen, because there is
+  no start menu to put it in. Four players winning the whole table fit every
+  snapshot in one datagram with nothing held back (the largest is 767 of 1158
+  bytes). **Unverified:** two machines on a real LAN, the broadcast query
+  reaching a host at all, and whether a Windows firewall prompt blocks the first
+  run — every test is one process on loopback. **Not built:** the lobby browser,
+  a dedicated headless server (a host is always a player), the map in the
+  handshake (a joiner draws its own), and the wasm client, which the LAN rule
+  rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has
+  each with what it would take.
 
 ## Exit criteria
 

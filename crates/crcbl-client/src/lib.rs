@@ -406,6 +406,26 @@ impl<T: Transport> Client<T> {
         self.baselines.get(&sector).map(Baseline::state_hash)
     }
 
+    /// Every entity the server's system named `system` replicated, as its
+    /// entity bits and the component bytes that system's
+    /// [`replicate`](crcbl_ecs::SystemTrait::replicate) wrote, read from the
+    /// default sector's reconstructed baseline in no particular order.
+    ///
+    /// How a game reads back state it replicates itself. Found by
+    /// [`replicated_system_id`], as [`Client::interpolate`] finds the physics
+    /// system's transforms, so another system's bytes never appear here.
+    /// Empty before the first snapshot applies, and for a name the server
+    /// does not replicate.
+    pub fn replicated(&self, system: &str) -> impl Iterator<Item = (u64, &[u8])> {
+        let wanted = replicated_system_id(system);
+        self.baselines
+            .get(&SectorId::ZERO)
+            .into_iter()
+            .flat_map(Baseline::iter_entities)
+            .filter(move |&(system_id, _, _)| system_id == wanted)
+            .map(|(_, entity_bits, data)| (entity_bits, data))
+    }
+
     /// The accepted server session id, if the handshake has completed.
     #[must_use]
     pub fn session_id(&self) -> Option<SessionId> {
@@ -2007,6 +2027,44 @@ mod tests {
         assert_eq!(state.transforms.len(), 1, "{:?}", state.transforms);
         assert_eq!(state.transforms[0].0, entity);
         assert_eq!(state.transforms[0].1.position.x, 2.0);
+    }
+
+    /// **A game reads back the entities of the system it named, and no
+    /// other's.** Two systems arrive with an entity of the same bits; only
+    /// the named one's bytes come back, and a name nothing replicates reads
+    /// as nothing rather than as some other system.
+    #[test]
+    fn replicated_entities_are_read_from_the_named_system_alone() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        assert_eq!(client.replicated("field").count(), 0, "nothing applied");
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        let mut field = Vec::new();
+        crcbl_net::encode_entity_entry(&mut field, 7, &[1, 2, 3]);
+        crcbl_net::encode_entity_entry(&mut field, 9, &[4]);
+        let mut other = Vec::new();
+        crcbl_net::encode_entity_entry(&mut other, 7, &[0xEE; 5]);
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &keyframe_snapshot(
+                1,
+                &[
+                    (replicated_system_id("field"), field),
+                    (replicated_system_id("other"), other),
+                ],
+            ),
+        );
+        client.update(Duration::ZERO);
+
+        let mut read: Vec<(u64, Vec<u8>)> = client
+            .replicated("field")
+            .map(|(bits, data)| (bits, data.to_vec()))
+            .collect();
+        read.sort_unstable();
+        assert_eq!(read, vec![(7, vec![1, 2, 3]), (9, vec![4])]);
+        assert_eq!(client.replicated("nothing").count(), 0);
     }
 
     // ── A link still coming up ─────────────────────────────────────────────

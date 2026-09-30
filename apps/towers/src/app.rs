@@ -397,7 +397,7 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, TowersError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let paths = booted.gpu.paths();
-    let game = Game::new(options.common.tick_hz, &options.map).map_err(TowersError::Game)?;
+    let game = open_game(options).map_err(TowersError::Game)?;
     Ok(Loop::new(
         booted,
         Towers {
@@ -414,6 +414,39 @@ fn assemble<S: Shell + ?Sized>(
         },
         options.common.loop_config(),
     ))
+}
+
+/// The simulation the command line asked for: solo, or — natively — hosting,
+/// joining or looking for a co-op session. See `crate::lan`.
+///
+/// # Errors
+///
+/// [`crate::game::GameError`] if the server could not be built or the LAN
+/// session could not start.
+fn open_game(options: &Options) -> Result<Game, crate::game::GameError> {
+    let tick_hz = options.common.tick_hz;
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use crate::game::GameError;
+        use crate::lan::LAN;
+        use crcbl::lan::{LanBind, LanClient, LanMode};
+
+        match options.lan {
+            LanMode::Off => {}
+            LanMode::Host { port } => {
+                return Game::host(tick_hz, &options.map, LanBind::on_the_lan(port));
+            }
+            LanMode::Join(addr) => {
+                let client = LanClient::join(LAN, addr, tick_hz).map_err(GameError::Lan)?;
+                return Ok(Game::join(tick_hz, &options.map, client));
+            }
+            LanMode::Browse => {
+                let client = LanClient::browse_the_lan(LAN, tick_hz).map_err(GameError::Lan)?;
+                return Ok(Game::join(tick_hz, &options.map, client));
+            }
+        }
+    }
+    Game::new(tick_hz, &options.map)
 }
 
 /// Creates the one window this sample has: its title, its app id, its size.
@@ -534,8 +567,12 @@ impl HostedGame for Towers {
         &mut self,
         gpu: &mut Gpu,
         draw_list: &mut crcbl::ui::draw_list::DrawList,
-        _frame: FrameInfo,
+        frame: FrameInfo,
     ) {
+        // Here because `draw` is the one hook that runs on every frame, paused
+        // or not: a LAN session is served on wall time, so a paused host goes
+        // on serving the others. See [`Game::frame`].
+        self.game.frame(frame.render_dt);
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
         self.page = crate::page::draw(
@@ -549,17 +586,22 @@ impl HostedGame for Towers {
         );
     }
 
-    /// **Towers' two modules, and no third.**
+    /// **Towers' two modules, and a third during a LAN session.**
     ///
-    /// No network section: this sample runs over `InMemoryTransport` and has no
-    /// connection to report on — which is the one thing
-    /// `docs/plan/sample/07-towers.md` most wants from this sample and the one
-    /// thing `crcbl-net` cannot yet give it. No audio section either: slice 1
-    /// plays nothing, and a section that said so would be a module with no
-    /// system behind it.
+    /// The "lan" section is `crcbl::lan`'s: the port, the players and the
+    /// snapshot's size against a datagram on a host, the session and the last
+    /// applied tick on a joiner. Solo has no connection to report on, so it
+    /// has no section. The netgraph `docs/plan/sample/07-towers.md` wants —
+    /// RTT, jitter, loss — is not built anywhere yet. No audio section either:
+    /// slice 1 plays nothing, and a section that said so would be a module with
+    /// no system behind it.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         panel.add(&self.stats);
         panel.add(&self.paths);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lan) = self.game.lan_section() {
+            panel.add(lan);
+        }
     }
 
     fn summary(&self, run: RunSummary) -> Summary {

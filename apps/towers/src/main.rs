@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] …
+//!        [--host [PORT] | --join IP:PORT | --browse]
 //! ```
 //!
 //! Argv in, exit code out, and nothing else: the sample itself is the

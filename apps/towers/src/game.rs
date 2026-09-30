@@ -21,6 +21,12 @@
 //! [`crate::wave::Waves::start_now`]. A refused command is **counted**, so "the
 //! server said no" is a number a run reports rather than something it swallows.
 //!
+//! **Co-op is the same stage on another server.** A LAN host ticks the same
+//! `TowersModule` from a `crcbl::server::Host`, with every player's commands
+//! at once — `run_team_tick` — and the server's world replicates the stage as
+//! [`crate::replica`]'s entities, which is all a joiner draws. The `lan` module
+//! has the wiring; [`Game`] hides which of the three a frame is reading.
+//!
 //! # What one tick does, and why it is in that order
 //!
 //! ```text
@@ -55,13 +61,15 @@
 //! [`sweep_sphere`](crcbl::phys::PhysicsWorld::sweep_sphere) for a bolt. This
 //! file decides which query to ask and what an answer means.
 
+use std::cell::Cell;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use crcbl::ecs::{ClientInputs, GameModule, World};
+use crcbl::ecs::{ClientInputs, DebugCtx, Entity, GameModule, SystemTrait, World};
 use crcbl::math::DVec3;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::phys::{ColliderId, PhysicsWorld};
+use crcbl::server::{HostModule, PeerInputs};
 use crcbl::session::Loopback;
 
 use crate::creep::{self, Creep, CreepView};
@@ -81,8 +89,14 @@ use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Wave
 /// command read as a frame of the wrong length and silently dropped; the bump is
 /// what turns that into a refused handshake. The schema hash is this sample's
 /// identity and does not move with it.
-const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
-    protocol_version: 2,
+///
+/// **And 3 because the snapshot started carrying the field.** The server's
+/// world replicates the stage as [`crate::replica::SYSTEM`] since co-op over a
+/// LAN, which is what a remote player draws; a client from before would read
+/// none of it, and one from after would draw an empty field against an older
+/// server.
+pub(crate) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+    protocol_version: 3,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0000_0054_5752,
 };
@@ -543,22 +557,36 @@ impl Stage {
 /// One tick of the simulation: a command in, and the seven systems in the order
 /// the module docs give.
 fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
-    if intent.restart {
+    run_team_tick(stage, core::slice::from_ref(&intent), dt);
+}
+
+/// One tick with every player's command in — one per player, in the order the
+/// host admitted them — and then the seven systems.
+///
+/// **One team, one run.** A restart from anyone throws the run away for
+/// everyone, before any other command is read. The rest are validated one
+/// player at a time against the one purse, so two players building on the same
+/// plot in the same tick get one tower and one refusal, and the first admitted
+/// is the one who built it.
+fn run_team_tick(stage: &mut Stage, intents: &[Intent], dt: f64) {
+    if intents.iter().any(|intent| intent.restart) {
         stage.reset();
         return;
     }
-    if let Some(plot) = intent.place
-        && !stage.place_tower(plot, intent.kind)
-    {
-        stage.refused += 1;
-    }
-    if let Some(plot) = intent.upgrade
-        && !stage.upgrade_tower(plot)
-    {
-        stage.refused += 1;
-    }
-    if intent.start_wave && (stage.outcome.is_over() || !stage.waves.start_now(stage.elapsed)) {
-        stage.refused += 1;
+    for intent in intents {
+        if let Some(plot) = intent.place
+            && !stage.place_tower(plot, intent.kind)
+        {
+            stage.refused += 1;
+        }
+        if let Some(plot) = intent.upgrade
+            && !stage.upgrade_tower(plot)
+        {
+            stage.refused += 1;
+        }
+        if intent.start_wave && (stage.outcome.is_over() || !stage.waves.start_now(stage.elapsed)) {
+            stage.refused += 1;
+        }
     }
 
     if stage.outcome.is_over() {
@@ -692,9 +720,15 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 /// The stage, as the server hosts it.
 ///
 /// `register` is empty for the same reason `apps/breach`'s is: the whole
-/// simulation is the [`Stage`] behind the shared cell, and there is no ECS
-/// system to register.
-struct TowersModule {
+/// simulation is the [`Stage`] behind the shared cell. The one system the
+/// server's world holds is [`FieldReplica`], which [`server_world`] registers
+/// rather than the module, because it only reads the stage.
+///
+/// **Two hosts, one tick.** Solo's `Server` hands it one client's frames as a
+/// [`GameModule`]; a LAN host's [`Host`](crcbl::server::Host) hands it every
+/// player's as a [`HostModule`], and [`run_team_tick`] reads them one player
+/// at a time.
+pub(crate) struct TowersModule {
     shared: Arc<Mutex<Stage>>,
 }
 
@@ -716,6 +750,85 @@ impl GameModule for TowersModule {
         let mut stage = lock(&self.shared);
         run_tick(&mut stage, Intent::from_inputs(inputs), dt);
     }
+}
+
+impl HostModule for TowersModule {
+    fn tick(&mut self, world: &mut World, inputs: PeerInputs<'_>) {
+        let dt = world.tick_dt();
+        let intents: Vec<Intent> = inputs
+            .iter()
+            .map(|(_, frames)| Intent::from_inputs(frames))
+            .collect();
+        let mut stage = lock(&self.shared);
+        run_team_tick(&mut stage, &intents, dt);
+    }
+}
+
+/// The stage as the server's world replicates it: every snapshot, the frame's
+/// own view of the stage, written as [`crate::replica`]'s entities.
+///
+/// What a remote player draws — see that module's docs. Registered on every
+/// server, solo's too, so the one wire format is exercised by every run and
+/// solo's client reconstructs the same field a LAN client does.
+struct FieldReplica {
+    shared: Arc<Mutex<Stage>>,
+    /// Whether a snapshot that left something out has been logged: once is
+    /// enough to say the field outgrew the wire, and every snapshot after it
+    /// would be the same line.
+    reported_refusal: Cell<bool>,
+}
+
+impl SystemTrait for FieldReplica {
+    fn name(&self) -> &str {
+        crate::replica::SYSTEM
+    }
+
+    fn tick(&mut self, _dt: f64) {}
+
+    fn entity_count(&self) -> usize {
+        let render = render_state_of(&lock(&self.shared));
+        let towers = render.towers.iter().flatten().count();
+        1 + towers + render.creeps_alive + render.bolts_flying + render.bursts_live
+    }
+
+    fn sweep(&mut self, _dead: &[Entity]) {}
+
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+
+    fn replicate(&self, out: &mut Vec<u8>) -> bool {
+        let (render, stats) = {
+            let stage = lock(&self.shared);
+            (render_state_of(&stage), stats_of(&stage))
+        };
+        let encoded = crate::replica::encode(&render, &stats, out);
+        if encoded.refused > 0 && !self.reported_refusal.replace(true) {
+            crcbl::log::warn!(
+                "replica: {} of the field's entities would not fit the wire and were left out \
+                 of the snapshot; a remote player does not see them",
+                encoded.refused
+            );
+        }
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// A new stage on `map`, the world a server hosts it in, and the module that
+/// ticks it.
+fn server_world(map: &Arc<Map>) -> (Arc<Mutex<Stage>>, World, TowersModule) {
+    let shared = Arc::new(Mutex::new(Stage::new(Arc::clone(map))));
+    let mut world = World::new();
+    world.register_system(Box::new(FieldReplica {
+        shared: Arc::clone(&shared),
+        reported_refusal: Cell::new(false),
+    }));
+    let module = TowersModule {
+        shared: Arc::clone(&shared),
+    };
+    (shared, world, module)
 }
 
 /// The shared stage, with a poisoned lock treated as the stage it was left in.
@@ -879,28 +992,52 @@ impl crcbl::ui::DebugModule for Stats {
 pub enum GameError {
     /// The operating system would not seed the server's resume credential.
     Server(String),
+    /// A LAN session could not start: a socket would not bind, or a connect
+    /// would not begin. Native builds only — see [`crate::lan`].
+    #[cfg(not(target_arch = "wasm32"))]
+    Lan(crcbl::lan::LanError),
 }
 
 impl std::fmt::Display for GameError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Server(message) => write!(f, "server creation failed: {message}"),
+            #[cfg(not(target_arch = "wasm32"))]
+            Self::Lan(error) => write!(f, "LAN session failed: {error}"),
         }
     }
 }
 
 impl std::error::Error for GameError {}
 
-/// The stage, its server, its client, and the clock that drives all three.
+/// Which side of which wire this game's client is on.
+enum Link {
+    /// Solo: the server and its client over an `InMemoryTransport`.
+    Solo(Box<Loopback>),
+    /// Hosting a LAN session: the server is a [`Host`](crcbl::server::Host)
+    /// behind a UDP listener, and this player is one of its clients.
+    #[cfg(not(target_arch = "wasm32"))]
+    Host(Box<crate::lan::HostLink>),
+    /// In someone else's LAN session: a client and nothing else, and the field
+    /// is what its snapshots carry.
+    #[cfg(not(target_arch = "wasm32"))]
+    Remote(Box<crate::lan::RemoteLink>),
+}
+
+/// The stage, its server, its client, and the clock that drives all three —
+/// or, joined to a remote host, the client alone.
 pub struct Game {
-    session: Loopback,
-    shared: Arc<Mutex<Stage>>,
+    link: Link,
+    /// The stage, wherever this process runs the server: solo, or hosting.
+    /// `None` on a remote client, which has no stage — see [`crate::replica`].
+    shared: Option<Arc<Mutex<Stage>>>,
     /// The stage's map, held here as well so the client can read the plots it
     /// lists without taking the tick's lock. The same allocation the stage
-    /// holds, so the two cannot be different maps.
+    /// holds, so the two cannot be different maps. On a remote client it is
+    /// this process's own, which has to be the host's — see `crate::lan`.
     map: Arc<Map>,
-    /// Exactly one tick period per [`Game::tick`], so the server's accumulator
-    /// yields exactly one tick per call.
+    /// Exactly one tick period per [`Game::tick`], so the client's clock — and
+    /// solo's server's — yields exactly one tick per call.
     tick_period: Duration,
     sim_time: Duration,
     ticks_run: u64,
@@ -931,58 +1068,98 @@ impl Game {
     pub fn new(tick_hz: u32, map: &Map) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
         let map = Arc::new(map.clone());
-        let shared = Arc::new(Mutex::new(Stage::new(Arc::clone(&map))));
+        let (shared, world, module) = server_world(&map);
 
-        // An empty world, and that is the honest shape: this sample has no
-        // entity and no ECS system. What the server hosts is the module, and
-        // what the module owns is the stage.
-        let session = Loopback::new(
-            World::new(),
-            Box::new(TowersModule {
-                shared: Arc::clone(&shared),
-            }),
-            tick_hz,
-            COMPATIBILITY,
-        )
-        .map_err(|error| GameError::Server(error.to_string()))?;
-
+        // The world's one system is the field's replica. What the server
+        // ticks is the module, and what the module owns is the stage.
+        let mut session = Loopback::new(world, Box::new(module), tick_hz, COMPATIBILITY)
+            .map_err(|error| GameError::Server(error.to_string()))?;
         let tick_period = session.tick_period();
-        let mut game = Self {
-            session,
-            shared,
-            map,
-            tick_period,
-            sim_time: Duration::ZERO,
-            ticks_run: 0,
-            pending: Intent::default(),
-        };
 
         // **One tick spent on the handshake, before the first command.**
         // `Server::update` drains the transport inside `tick`, so the client's
         // hello is not read until a tick runs, and until the session is up the
         // client drops every input frame it is asked to send. Spending it here
         // is what makes the player's first key the first the simulation sees.
-        game.sim_time = tick_period;
-        game.session.client_mut().update(game.sim_time);
-        game.session.server_mut().update(game.sim_time);
-        game.session.client_mut().update(game.sim_time);
-        if game.session.server().session_state() != crcbl::net::SessionState::Connected {
+        session.client_mut().update(tick_period);
+        session.server_mut().update(tick_period);
+        session.client_mut().update(tick_period);
+        if session.server().session_state() != crcbl::net::SessionState::Connected {
             return Err(GameError::Server(
                 "the loopback session did not come up in its first tick".into(),
             ));
         }
 
-        crcbl::log::info!(
-            "sim: {tick_hz} Hz, {:.3} ms per tick, {} waves of up to {MAX_CREEPS} creeps over a \
-             {:.1} m path, {} tower kinds, {} lives and {} gold",
-            tick_period.as_secs_f64() * 1e3,
-            wave::WAVES.len(),
-            game.map.path().length(),
-            tower::KINDS,
-            STARTING_LIVES,
-            STARTING_GOLD,
-        );
-        Ok(game)
+        log_the_rules(tick_hz, tick_period, &map);
+        Ok(Self {
+            link: Link::Solo(Box::new(session)),
+            shared: Some(shared),
+            map,
+            tick_period,
+            sim_time: tick_period,
+            ticks_run: 0,
+            pending: Intent::default(),
+        })
+    }
+
+    /// Hosts a LAN session of `map` bound where `bind` says, with this player
+    /// one of its clients — see [`crate::lan`].
+    ///
+    /// The server runs on the frame's wall time from here on, through
+    /// [`Game::frame`], so a host with its pause menu open goes on serving the
+    /// others; this player's commands still go out a tick at a time from
+    /// [`Game::tick`].
+    ///
+    /// # Errors
+    ///
+    /// [`GameError::Lan`] if the listener would not bind, and
+    /// [`GameError::Server`] if this player's own session did not come up in
+    /// the first tick.
+    ///
+    /// # Panics
+    ///
+    /// If `tick_hz` is zero.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn host(tick_hz: u32, map: &Map, bind: crcbl::lan::LanBind) -> Result<Self, GameError> {
+        assert!(tick_hz > 0, "tick rate must be positive");
+        let map = Arc::new(map.clone());
+        let (shared, world, module) = server_world(&map);
+        let (link, tick_period) = crate::lan::HostLink::open(bind, world, module, tick_hz)?;
+        log_the_rules(tick_hz, tick_period, &map);
+        Ok(Self {
+            link: Link::Host(Box::new(link)),
+            shared: Some(shared),
+            map,
+            tick_period,
+            // `HostLink::open` spent the first tick on this player's handshake,
+            // as `Game::new` does on solo's.
+            sim_time: tick_period,
+            ticks_run: 0,
+            pending: Intent::default(),
+        })
+    }
+
+    /// Plays in the LAN session `client` joins or finds, drawing `map` — see
+    /// [`crate::lan`].
+    ///
+    /// # Panics
+    ///
+    /// If `tick_hz` is zero.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn join(tick_hz: u32, map: &Map, client: crcbl::lan::LanClient) -> Self {
+        assert!(tick_hz > 0, "tick rate must be positive");
+        Self {
+            link: Link::Remote(Box::new(crate::lan::RemoteLink::new(client))),
+            shared: None,
+            map: Arc::new(map.clone()),
+            // The client clock's own step, so one period is exactly one tick
+            // of it, as `Loopback::tick_period` is solo's.
+            tick_period: crcbl::core::FrameClock::new(tick_hz).tick_dt(),
+            sim_time: Duration::ZERO,
+            ticks_run: 0,
+            pending: Intent::default(),
+        }
     }
 
     /// Records what the player asked for, to be sent on the next tick.
@@ -996,31 +1173,92 @@ impl Game {
         };
     }
 
-    /// Advances the server, and with it the stage, by exactly one tick.
+    /// Sends this tick's command and advances this player's client by exactly
+    /// one tick — and, solo, the server and the stage with it.
+    ///
+    /// A LAN host's server is not advanced here but by [`Game::frame`], on the
+    /// frame's wall time; see `Game::host`.
     pub fn tick(&mut self) {
         self.sim_time += self.tick_period;
-        let (server, client) = self.session.both_mut();
-
         // The bytes are the whole command path: the client seals them, the
         // transport carries them and the module decodes them, exactly as a
         // remote client's would be.
-        client.set_input(core::mem::take(&mut self.pending).to_wire());
+        let input = core::mem::take(&mut self.pending).to_wire();
+        match &mut self.link {
+            Link::Solo(session) => {
+                let (server, client) = session.both_mut();
+                client.set_input(input);
 
-        // Send, simulate, then receive — and the send has to come first.
-        // `Client::update` is the only thing that puts input on the wire and
-        // the server drains the wire at the top of its tick, so a client
-        // updated only after the server posts this tick's commands to the next
-        // one.
-        client.update(self.sim_time);
-        let server_ticks = server.update(self.sim_time);
-        debug_assert_eq!(
-            server_ticks, 1,
-            "one tick period in must be exactly one server tick out",
-        );
-        // Consumes no tick — the clock has not moved between the two — and is
-        // there to take the snapshot this tick produced.
-        client.update(self.sim_time);
+                // Send, simulate, then receive — and the send has to come
+                // first. `Client::update` is the only thing that puts input on
+                // the wire and the server drains the wire at the top of its
+                // tick, so a client updated only after the server posts this
+                // tick's commands to the next one.
+                client.update(self.sim_time);
+                let server_ticks = server.update(self.sim_time);
+                debug_assert_eq!(
+                    server_ticks, 1,
+                    "one tick period in must be exactly one server tick out",
+                );
+                // Consumes no tick — the clock has not moved between the two —
+                // and is there to take the snapshot this tick produced.
+                client.update(self.sim_time);
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Host(host) => host.tick(input, self.sim_time),
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Remote(remote) => remote.tick(input, self.sim_time),
+        }
         self.ticks_run += 1;
+    }
+
+    /// Serves a LAN session for one frame covering `render_dt`, paused or
+    /// not: a host runs its server to the frame's wall time, and either side
+    /// reads what arrived. Solo has nothing to serve between ticks.
+    ///
+    /// Every frame rather than every tick for the reason `apps/sandbox`'s LAN
+    /// session is: a side that stopped reading while its pause menu was open
+    /// would time every link out.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    pub fn frame(&mut self, render_dt: Duration) {
+        match &mut self.link {
+            Link::Solo(_) => {}
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Host(host) => host.frame(render_dt, self.sim_time),
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Remote(remote) => remote.frame(self.sim_time),
+        }
+    }
+
+    /// The F3 panel's "lan" section, during a LAN session.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn lan_section(&self) -> Option<&dyn crcbl::ui::DebugModule> {
+        match &self.link {
+            Link::Solo(_) => None,
+            Link::Host(host) => Some(host.lan()),
+            Link::Remote(remote) => Some(remote.lan()),
+        }
+    }
+
+    /// The LAN host, while this game hosts one.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn lan_host(&self) -> Option<&crcbl::lan::LanHost> {
+        match &self.link {
+            Link::Host(host) => Some(host.lan()),
+            Link::Solo(_) | Link::Remote(_) => None,
+        }
+    }
+
+    /// The LAN client, while this game plays in someone else's session.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn lan_client(&self) -> Option<&crcbl::lan::LanClient> {
+        match &self.link {
+            Link::Remote(remote) => Some(remote.lan()),
+            Link::Solo(_) | Link::Host(_) => None,
+        }
     }
 
     /// The field the run is played on.
@@ -1035,78 +1273,126 @@ impl Game {
         self.ticks_run
     }
 
-    /// What the frame should draw.
+    /// What the frame should draw: read off the stage where this process runs
+    /// the server, and off the host's snapshots where it does not.
     #[must_use]
     pub fn render_state(&self) -> RenderState {
-        let stage = lock(&self.shared);
-        let mut creeps = [CreepView::default(); MAX_CREEPS];
-        for (slot, creep) in creeps.iter_mut().zip(stage.creeps.iter()) {
-            *slot = creep.view();
-        }
-        let mut bolts = [DVec3::ZERO; MAX_PLOTS];
-        for (slot, bolt) in bolts.iter_mut().zip(stage.bolts.iter()) {
-            *slot = bolt.at();
-        }
-        let mut bursts = [BurstView::default(); MAX_PLOTS];
-        for (slot, burst) in bursts.iter_mut().zip(stage.bursts.iter()) {
-            *slot = BurstView {
-                centre: burst.at,
-                radius_m: burst.radius_m,
-            };
-        }
-        let now = stage.elapsed;
-        RenderState {
-            creeps,
-            creeps_alive: stage.creeps.len().min(MAX_CREEPS),
-            towers: core::array::from_fn(|plot| {
-                stage
-                    .towers
-                    .iter()
-                    .find(|tower| tower.plot() == plot)
-                    .map(|tower| TowerView {
-                        kind: tower.kind(),
-                        tier: tower.tier(),
-                        working: tower.is_firing(now),
-                    })
-            }),
-            bolts,
-            bolts_flying: stage.bolts.len().min(stage.map.max_bolts()),
-            bursts,
-            bursts_live: stage.bursts.len().min(stage.map.max_bursts()),
-            gold: stage.gold,
-            lives: stage.lives,
-            wave: stage.waves.started(),
-            kills: stage.kills,
-            leaks: stage.leaks,
-            outcome: stage.outcome,
-            next_wave_in: stage.waves.next_in(now),
+        match &self.shared {
+            Some(shared) => render_state_of(&lock(shared)),
+            None => self.replicated().render,
         }
     }
 
-    /// The stage's numbers for the debug panel and the `[HUD]` line.
+    /// The stage's numbers for the debug panel and the `[HUD]` line, read as
+    /// [`Game::render_state`] is.
     #[must_use]
     pub fn stats(&self) -> Stats {
-        let stage = lock(&self.shared);
-        Stats {
-            ticks: stage.ticks,
-            gold: stage.gold,
-            lives: stage.lives,
-            wave: stage.waves.started(),
-            creeps: stage.creeps.len(),
-            towers: stage.towers.len(),
-            plots: stage.map.plots().len(),
-            bolts: stage.bolts.len(),
-            kills: stage.kills,
-            leaks: stage.leaks,
-            shots: stage.shots,
-            built: stage.built,
-            built_by_kind: stage.built_by_kind,
-            upgrades: stage.upgrades,
-            refused: stage.refused,
-            outcome: stage.outcome,
-            runs: stage.runs,
-            next_wave_in: stage.waves.next_in(stage.elapsed),
+        match &self.shared {
+            Some(shared) => stats_of(&lock(shared)),
+            None => self.replicated().stats,
         }
+    }
+
+    /// What this game's client has reconstructed of the server's field.
+    ///
+    /// Solo's client and a host's own player reconstruct it too, from the
+    /// same snapshots a remote player's does — which is what makes every mode
+    /// the same game over the wire, and what their tests compare.
+    #[must_use]
+    pub fn replicated(&self) -> crate::replica::Decoded {
+        match &self.link {
+            Link::Solo(session) => {
+                crate::replica::decode(session.client().replicated(crate::replica::SYSTEM))
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Host(host) => host.replicated(),
+            #[cfg(not(target_arch = "wasm32"))]
+            Link::Remote(remote) => remote.replicated(),
+        }
+    }
+}
+
+/// The start-up line: the rate, the table and the purse.
+fn log_the_rules(tick_hz: u32, tick_period: Duration, map: &Map) {
+    crcbl::log::info!(
+        "sim: {tick_hz} Hz, {:.3} ms per tick, {} waves of up to {MAX_CREEPS} creeps over a \
+         {:.1} m path, {} tower kinds, {} lives and {} gold",
+        tick_period.as_secs_f64() * 1e3,
+        wave::WAVES.len(),
+        map.path().length(),
+        tower::KINDS,
+        STARTING_LIVES,
+        STARTING_GOLD,
+    );
+}
+
+/// What the frame should draw of `stage`.
+fn render_state_of(stage: &Stage) -> RenderState {
+    let mut creeps = [CreepView::default(); MAX_CREEPS];
+    for (slot, creep) in creeps.iter_mut().zip(stage.creeps.iter()) {
+        *slot = creep.view();
+    }
+    let mut bolts = [DVec3::ZERO; MAX_PLOTS];
+    for (slot, bolt) in bolts.iter_mut().zip(stage.bolts.iter()) {
+        *slot = bolt.at();
+    }
+    let mut bursts = [BurstView::default(); MAX_PLOTS];
+    for (slot, burst) in bursts.iter_mut().zip(stage.bursts.iter()) {
+        *slot = BurstView {
+            centre: burst.at,
+            radius_m: burst.radius_m,
+        };
+    }
+    let now = stage.elapsed;
+    RenderState {
+        creeps,
+        creeps_alive: stage.creeps.len().min(MAX_CREEPS),
+        towers: core::array::from_fn(|plot| {
+            stage
+                .towers
+                .iter()
+                .find(|tower| tower.plot() == plot)
+                .map(|tower| TowerView {
+                    kind: tower.kind(),
+                    tier: tower.tier(),
+                    working: tower.is_firing(now),
+                })
+        }),
+        bolts,
+        bolts_flying: stage.bolts.len().min(stage.map.max_bolts()),
+        bursts,
+        bursts_live: stage.bursts.len().min(stage.map.max_bursts()),
+        gold: stage.gold,
+        lives: stage.lives,
+        wave: stage.waves.started(),
+        kills: stage.kills,
+        leaks: stage.leaks,
+        outcome: stage.outcome,
+        next_wave_in: stage.waves.next_in(now),
+    }
+}
+
+/// `stage`'s numbers for the debug panel and the `[HUD]` line.
+fn stats_of(stage: &Stage) -> Stats {
+    Stats {
+        ticks: stage.ticks,
+        gold: stage.gold,
+        lives: stage.lives,
+        wave: stage.waves.started(),
+        creeps: stage.creeps.len(),
+        towers: stage.towers.len(),
+        plots: stage.map.plots().len(),
+        bolts: stage.bolts.len(),
+        kills: stage.kills,
+        leaks: stage.leaks,
+        shots: stage.shots,
+        built: stage.built,
+        built_by_kind: stage.built_by_kind,
+        upgrades: stage.upgrades,
+        refused: stage.refused,
+        outcome: stage.outcome,
+        runs: stage.runs,
+        next_wave_in: stage.waves.next_in(stage.elapsed),
     }
 }
 

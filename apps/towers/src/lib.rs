@@ -51,8 +51,15 @@
 //! co-op are one build: `PlaceTower` and `StartWave` are **commands** the
 //! client seals into bytes and the server validates over an
 //! `InMemoryTransport`. A refused command is counted, which is how "the server
-//! decides" is a number rather than a claim. What is not here is a second
-//! player, because `crcbl-net` ships no transport but the loopback.
+//! decides" is a number rather than a claim.
+//!
+//! **And co-op is the same game over UDP.** `--host [PORT]` runs that server on
+//! a LAN host whose own player is one of its clients, `--join <IP:PORT>` and
+//! `--browse` join one from another machine, and every player's commands are
+//! validated against one purse and one pool of lives. The server's world
+//! replicates the field as [`replica`]'s entities, which is all a joiner draws
+//! from. The `lan` module has the wiring, and it is native only: the browser
+//! build is single player.
 //!
 //! # The path is a polyline, and the engine owes a spline
 //!
@@ -95,10 +102,13 @@ pub mod camera;
 pub mod creep;
 pub mod game;
 mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod lan;
 pub mod map;
 pub mod menu;
 pub mod page;
 pub mod path;
+pub mod replica;
 pub mod scene;
 pub mod tower;
 pub mod wave;

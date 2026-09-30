@@ -12495,13 +12495,13 @@ samples planned on 2026-09-15 added `meadow`, `mane` and `relief`, which also
 have a `docs/plan/sample/` document and no `apps/` directory.
 
 **Why it belongs here too:** the exit criteria that name towers are the co-op
-ones, and those are milestone 3's. The audio plan's "towers plays creep/tower
-audio spatially in co-op" is unmet on both halves — the sample ships silent and
-there is no co-op — and the persistence plan's "towers: save mid-wave, quit,
-resume — solo and dedicated-server co-op" is unmet on both too, since slice 1
-has no save. Those documents' MVP bars are still unreachable rather than merely
-unmet, and a reader checking "are we done" against a built `apps/towers` needs
-that stated.
+ones, and those are milestone 3's. Co-op over a LAN exists since 2026-10-01
+(`towers --host`, `--join`, `--browse`), but the audio plan's "towers plays
+creep/tower audio spatially in co-op" is still unmet — the sample ships silent —
+and the persistence plan's "towers: save mid-wave, quit, resume — solo and
+dedicated-server co-op" is unmet on both halves: there is no save and no
+dedicated server (a towers host is always a player too). A reader checking "are
+we done" against a built `apps/towers` needs that stated.
 
 ## Audio (from the deleted 13-audio plan, 2026-09-24)
 
@@ -13040,44 +13040,50 @@ so CI's `decoder-fuzz` job is its first run.
 
 **What is left, by slice:**
 
-- **The sandbox is wired (2026-10-01); nothing else is.** `apps/sandbox`'s `lan`
-  module is the pattern: `LanHost` accepts `UdpListener` peers into a
-  `crcbl_server::Host` every frame and keeps an `Announcer` (the listener's port
-  as `game_port`, players from `Host::peer_count`) beside it; `LanClient` runs a
-  `crcbl_client::Client` over `UdpTransport::connect`, the client retrying its
-  hello while the transport answers `Backpressure`. Its world is one
-  non-replicating "players" system, so its snapshot is 102 bytes sealed of
-  `MAX_UNRELIABLE_PAYLOAD`'s 1158 (measured 2026-10-01 by
+- **The sandbox and towers are wired (2026-10-01), both through `crcbl::lan`.**
+  `LanHost` accepts `UdpListener` peers into a `crcbl_server::Host` every frame
+  and keeps an `Announcer` (the listener's port as `game_port`, players from
+  `Host::peer_count`) beside it; `LanClient` runs a `crcbl_client::Client` over
+  `UdpTransport::connect`, the client retrying its hello while the transport
+  answers `Backpressure`. The sandbox's world is one non-replicating "players"
+  system, so its snapshot is 102 bytes sealed of `MAX_UNRELIABLE_PAYLOAD`'s 1158
+  (measured 2026-10-01 by
   `lan::tests::the_sandboxes_snapshot_fits_one_datagram_with_every_player_in`,
-  which holds it under a quarter of the limit). **Towers is next**, and needs
-  its lobby to take a direct-connect address beside discovery.
+  which holds it under a quarter of the limit). Towers replicates its field
+  (`crcbl_towers::replica`); what it left is under _What towers' LAN co-op
+  shipped without_.
 - **The one-datagram ceiling is per entity now, not per snapshot** (2026-10-01).
   Snapshots are fitted to `UdpTransport::max_unreliable_message_bytes`
   (`crcbl_net::budget`, see _Quantization, the priority/budget encoder, and the
   one-datagram rule_), so a long snapshot rotates its updates instead of being
   refused. What is still refused by name (`Host::oversized_snapshot_count`,
-  `crcbl_server::SnapshotTooLarge`, logged by the sandbox at most once a second)
-  is one entity's update too long for a datagram on its own. Towers, or any
-  sample over UDP, must keep every single entity's replicated blob under
-  `MAX_UNRELIABLE_PAYLOAD` less the framing.
+  `crcbl_server::SnapshotTooLarge`, logged by `crcbl::lan` at most once a
+  second) is one entity's update too long for a datagram on its own. Any sample
+  over UDP must keep every single entity's replicated blob under
+  `MAX_UNRELIABLE_PAYLOAD` less the framing; towers' largest is its numbers
+  entity (`replica`'s `HUD_SCHEMA`), a few dozen bytes.
 - **D2 — connection tokens** (below). Needs nothing from the packet layer. LAN
   discovery, D1, is built; what it left is under _Netgraph HUD, LAN discovery_.
-- **Not run: two processes, or two machines.** Every wiring test runs host and
-  clients in one process over loopback, and the discovery test queries the
-  announcer's port directly; `Lan::start`'s own binds (every interface, the real
-  `DISCOVERY_PORT`, a broadcast query) run in no test and were not run by hand
-  either, since binding every interface can raise a firewall prompt on a
-  developer's desktop. Whether `--browse`'s broadcast query reaches a `--host`
-  on the same machine, or across a real LAN, and whether a Windows firewall
-  prompt blocks the first run, is unverified. The manual check: `sandbox --host`
-  on one machine, `sandbox --browse` on another (and on the same one), each
-  joining within a few seconds, with the F3 "lan" section showing the session.
-- **The client cannot read the host's player count.** The "players" system is a
-  `System<bool>`, which replicates only its entity count, and
-  `crcbl_client::Client` exposes its baseline as counts and a hash — so the
-  sandbox's client panel shows the session and the applied tick, and the tests
-  observe a join as the client's baseline hash changing. Replicating real state
-  means a system with a `replicate` implementation.
+- **Not run: two processes, or two machines.** Every wiring test, the sandbox's
+  and towers', runs host and clients in one process over loopback, and the
+  discovery tests query the announcer's port directly; `LanBind::on_the_lan`'s
+  binds (every interface, the real `DISCOVERY_PORT`, a broadcast query from
+  `LanClient::browse_the_lan`) run in no test and were not run by hand either,
+  since binding every interface can raise a firewall prompt on a developer's
+  desktop. Whether `--browse`'s broadcast query reaches a `--host` on the same
+  machine, or across a real LAN, and whether a Windows firewall prompt blocks
+  the first run, is unverified. The manual check: `towers --host` (or
+  `sandbox --host`) on one machine, `towers --browse` on another (and on the
+  same one), each joining within a few seconds, with the F3 "lan" section
+  showing the session — and for towers, a tower one player builds appearing on
+  the other's field.
+- **The sandbox's client cannot read the host's player count.** Its "players"
+  system is a `System<bool>`, which replicates only its entity count, so the
+  sandbox's client panel shows the session and the applied tick, and its tests
+  observe a join as the client's baseline hash changing.
+  `crcbl_client::Client::replicated` (2026-10-01) reads a system's replicated
+  entities back — towers draws its whole field from it — so what the sandbox
+  lacks is a "players" system with a `replicate` implementation, not an API.
 
 **Not built in the packet layer, deliberately:** congestion control and pacing —
 a reliable message's fragments all go out in one poll, capped only by
@@ -13284,6 +13290,13 @@ read, and `client_server_session`'s convergence to the quantized value.
   order suffers.
 - **Delta granularity** is whole-component-on-change, now over the quantized
   form, and moves to per-field masks only when towers' numbers justify it.
+  **They do not yet** (2026-10-01): four players winning the whole table with
+  every wave brought forward peak at 30 creeps, and the largest snapshot the
+  host sends is 767 of `MAX_UNRELIABLE_PAYLOAD`'s 1158 bytes, with no update
+  held back
+  (`crcbl_towers::lan::tests::the_towers_snapshot_fits_one_datagram_through_the_table_with_nothing_held_back`,
+  which prints both). A creep is a whole-component change every tick anyway — it
+  moves — so masks would save little there.
 
 **Hard contract, now enforced:** a steady-state snapshot fits a single
 ~1200-byte datagram, because only the reliable channel fragments. Exceeding it
@@ -13330,14 +13343,19 @@ Either is the owner's call.
 
 **Left, and what each would take:**
 
-- **A lobby browser on screen.** Nothing draws the list. The sandbox's
-  `--browse` (2026-10-01) polls a `Browser`, prints every host to stdout, and
-  joins the first whose `compatibility` matches its own, passing over the rest —
-  no choosing. A lobby screen would show `hosts()` (greying out a host of
-  another build), join the chosen `addr`, and keep a direct-connect address
-  field beside it; the sandbox has no menu of its own to put it in beyond the
-  pause panel, so towers' lobby is the likelier first home. The host side is
-  `apps/sandbox/src/lan.rs`'s `LanHost`.
+- **A lobby browser on screen.** Nothing draws the list. `--browse` in the
+  sandbox and in towers (2026-10-01, `crcbl::lan::LanClient::browse`) polls a
+  `Browser`, prints every host to stdout, and joins the first whose
+  `compatibility` matches its own, passing over the rest — no choosing. A lobby
+  screen would show `hosts()` (greying out a host of another build, and treating
+  the name as untrusted text), join the chosen `addr`, and keep a direct-connect
+  address field beside it (`crcbl::text_input` is the field). **Towers has no
+  start menu to put it in** — its one menu is the pause panel
+  (`crcbl_towers::menu`), and its `Game` is built before the first frame from
+  the command line — so the lobby is a new `MenuKind` shown before play, rows
+  built from `hosts()` every frame, and a `Game` that can be swapped from solo
+  to joined at run time; that is its own slice, not a menu row. The sandbox is
+  in the same position.
 - **Link-local multicast is not sent.** The design wanted it beside broadcast,
   because networks disagree about which they forward. Receiving multicast needs
   the discovery port bound too (`join_multicast_v4` on a bound socket), so it
@@ -13416,9 +13434,13 @@ recorded.
 reconnect-with-hash-continuity test and the bandwidth measurement actually exist
 as tests. I read the modules, not the test list.
 
-**Certain:** the bandwidth row cannot exist — it is measured from a towers
-4-player session, and `apps/towers` (built 2026-09-07) is solo over
-`InMemoryTransport` with no wire under it.
+**Certain:** the bandwidth row does not exist yet, though it now can. Towers
+plays co-op over UDP (2026-10-01), and a 4-player loopback session through the
+whole table is a test that measures its largest snapshot (767 of 1158 bytes; see
+_Quantization, the priority/budget encoder, and the one-datagram rule_) — a
+size, not a rate. The row wants bytes a second per client, a window over
+`UdpTransport::stats`' byte counters on the host's peers, recorded from that
+session.
 
 ## Auth (`docs/plan/27-auth.md`)
 
@@ -14088,12 +14110,15 @@ it would be sample code.
    `Scene::save`, not a map authored in the editor — so the exit criterion "map
    authored 100% in the editor, zero hand-edited scene text" is not met until
    someone authors it there. `docs/plan/08-editor.md` owns that pass.
-2. **Milestone 3 waits on a wire.** `crates/crcbl-net`'s UDP transport and LAN
-   discovery (`crcbl_net::udp`, 2026-09-30) are wired into the sandbox
-   (2026-10-01, `apps/sandbox/src/lan.rs`) but not into towers, and nothing
-   draws a lobby browser — so "co-op over real transport" and the 4-player LAN
-   exit criterion have nothing to run on yet. The commands are already shaped
-   for it, which is the one thing slice 1 could do about it.
+2. **Milestone 3's LAN half is built; its exit criterion is not met.** Towers
+   plays co-op over UDP since 2026-10-01 — see _What towers' LAN co-op shipped
+   without_ below — but the criterion is a 4-player session through all ten
+   waves on a **dedicated headless server** found through a **lobby browser**,
+   recorded, and neither of those two exists. The milestone's "browser client"
+   half is the wasm client into a native server, which the LAN rule in
+   `docs/notes/simulation.md` rules out (a browser cannot reach a LAN server
+   from an HTTPS page); the plan's exit criteria already say all clients are
+   native, and the milestone line has not been reconciled with them.
 
 **Rules owed rather than exempted, stated so the next slice does not read them
 as decisions:** rule 11 (no `.crpix` art anywhere — the tower and creep icons,
@@ -14110,6 +14135,67 @@ visitor has instead is a row of buttons **outside** the canvas —
 `web/demos/towers/main.js` — which synthesise the `keydown`/`keyup` pair
 `web/engine/shell.js` already listens for and are thrown away with the hint text
 rather than with engine code.
+
+### What towers' LAN co-op shipped without (2026-10-01)
+
+**Built:** `towers --host [PORT]` runs the stage on a `crcbl_server::Host`
+behind `crcbl::lan::LanHost`, with the host's own player a client over an
+in-memory pair (`crcbl_towers::lan::HostLink`); `--join <IP:PORT>` and
+`--browse` run a `crcbl::lan::LanClient`, and a joiner draws only what the
+host's snapshots carry. The server's world — solo's too — replicates the frame's
+view of the stage (`RenderState` and `Stats`) as `crcbl_towers::replica`'s
+entities, which `crcbl_client::Client::replicated` reads back. Every player's
+commands go through `game::run_team_tick` in admission order against one purse
+and one pool of lives; a restart from anyone restarts the run. Tests:
+`crcbl_towers::lan::tests` (a build one joiner asks for validated by the host
+and seen by another within `SEEN_WITHIN` ticks, a wave one joiner brings forward
+running for all, a joiner leaving while the other plays on, discovery to a
+joined session, the snapshot through the whole table) and `replica::tests`
+(round trip, order, refusal, undecodable entries, the facing wrap, the extents,
+solo's client reconstructing the stage every tick), each shown red by a
+mutation. `--browse` auto-joins the first compatible host, as the sandbox's
+does; there is no lobby screen.
+
+**Left, and what each would take:**
+
+- **A lobby browser.** See _Netgraph HUD, LAN discovery_: towers has no start
+  menu to put it in, so it is its own slice.
+- **A dedicated headless server.** A towers host is always a player —
+  `HostLink::open` adds its in-memory client — and the exit criterion wants a
+  host with none. It would be a serve-only mode building the `LanHost` without
+  the local client, and running it without a window or a GPU, which towers'
+  `Loop`-based start-up cannot do: it opens a shell and a GPU before the game. A
+  windowless entry point, like the determinism harness's, is the shape.
+- **The map is not in the handshake.** A joiner draws its own `--scene` or the
+  committed field, so a host on another map puts its towers on the joiner's
+  plots. Folding a stable fingerprint of the map (its waypoints and plots) into
+  the LAN `ProtocolCompatibility::schema_hash` would make a browser pass over
+  such a host and the handshake refuse it; sending the map on the reliable
+  channel at join is the other option. Not decided.
+- **Not run on two machines, or through a firewall.** See the UDP entry's _Not
+  run_ item, which has the manual check.
+- **D2 connection tokens.** The UDP entry's; nothing towers-specific.
+- **Pause is per player.** A LAN host serves on wall time through `Game::frame`,
+  so its pause menu stops only its own commands and the run goes on for
+  everyone, as a joiner's does. Whether a co-op pause should stop the session
+  (host only, or by vote) is a design call not made.
+- **Late join is not refused.** The plan's "lobby-lite (join before wave 1)" is
+  not enforced: a joiner admitted mid-run plays from there. Refusing needs the
+  host to stop accepting, or to `Host::kick` a newcomer, once the first wave has
+  started.
+- **A refused command is counted, not told to whoever sent it.**
+  `Stats::refused` is the team's. Telling the player who asked needs the refusal
+  attributed to its `PeerId` in `run_team_tick` and a way back to that peer — a
+  replicated per-player entity, or an event once the unreliable-event channel
+  exists.
+- **No presence.** A player's cursor and picked kind are presentation and never
+  cross the wire, so nobody sees where a teammate is about to build.
+- **An entity the wire cannot carry is dropped from the snapshot, logged once.**
+  `replica`'s extents hold the committed field and every tower's reach with room
+  (`the_extents_hold_the_field_and_every_reach`), so nothing on it trips this,
+  but a position outside them is left out with a warning rather than shipped
+  exactly. `crcbl_phys::Transform::encode_wire`'s exact fallback is the model if
+  it ever matters.
 
 ### towers' map is scene data, and what `Map::new` does not check (2026-09-30)
 
