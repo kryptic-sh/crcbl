@@ -3553,6 +3553,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **Dragging an editor inspector field is one undo**, back to the value from
+  before the drag; it was one undo per frame the field moved. Edits to one field
+  while the mouse button is held are folded into a single history entry, as a
+  gizmo drag is.
+
 - **The screen-space reflection march reads its Hi-Z levels without a
   `switch`.** `ssr.slang`'s `hiz_at` now loads every pyramid level, each clamped
   into its own extent, and keeps the one the ray is on; the `switch` it replaces

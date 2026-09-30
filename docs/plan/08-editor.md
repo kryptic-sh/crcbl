@@ -152,7 +152,10 @@ full-window draw under a hole in the panels is gone.
 - **A drag is one undo.** Each write is a `position.N` property set through
   `Document::apply_in` with the drag's `Gesture`, and `UndoLog::record_in` folds
   a gesture's writes to one leaf into one entry that keeps the first write's
-  inverse. A save seals the entry, so a drag carried past it is dirty again.
+  inverse. A save seals the entry, so a drag carried past it is dirty again. The
+  inspector's field drags ride the same mechanism: edits to one leaf while the
+  primary button is held share a gesture (`Panels::apply_edits`), so a field
+  dragged over many frames is one undo too — it was one per frame.
 - **Evidence**: the gizmo's tests hold handle direction, constant size at two
   distances and two scales, hidden axes and the closest-point formula against
   hand-worked rays; the editor's loop test drags the X handle through the

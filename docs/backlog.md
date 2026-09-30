@@ -11613,12 +11613,6 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   `08-editor.md` _Status_ says why not debug draw). A rotate handle needs the
   scene format to carry a rotation, which `Block` and `Brick` do not; scale maps
   onto `half_extents` where a component has them.
-- **Inspector drags are one undo entry per frame.** `Panels::apply_edits` hands
-  each frame's `FieldEdit` to `Document::record_edit`, which records plainly, so
-  dragging a field for a second takes dozens of undos to walk back. The gizmo's
-  `Gesture` folding (`UndoLog::record_in`) is the mechanism; the missing piece
-  is knowing when an inspector drag begins and ends, which `FieldEdit` does not
-  say.
 - **The asset browser and drag-spawn.** `AssetSource::list` landed 2026-09-30
   (`DirSource`, `MemorySource`; `Unsupported` by default). What is still
   missing: a mesh component the editor's vocabulary can spawn and draw — it

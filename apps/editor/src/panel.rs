@@ -71,6 +71,7 @@ use crcbl::ui::tree::{
 };
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
+use crate::command::Gesture;
 use crate::document::Document;
 use crate::layout::{self, PANE_MIN};
 
@@ -207,6 +208,9 @@ pub struct Panels {
     outliner_key: Option<NodeKey>,
     /// The inspector block, as the last frame laid it out.
     props_key: Option<NodeKey>,
+    /// The field a held pointer is dragging and the gesture its edits share —
+    /// see [`Panels::apply_edits`].
+    field_gesture: Option<(SceneEntityId, String, Gesture)>,
 }
 
 impl Panels {
@@ -239,6 +243,7 @@ impl Panels {
             viewport: (Vec2::ZERO, Vec2::ZERO),
             outliner_key: None,
             props_key: None,
+            field_gesture: None,
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -501,7 +506,7 @@ impl Panels {
             self.reveal_row(key, id);
         }
 
-        let commands = self.apply_edits(document, selected, &edits);
+        let commands = self.apply_edits(document, selected, &edits, input.pointer);
         self.follow_outliner(document);
         PanelFrame {
             viewport: self.viewport,
@@ -563,21 +568,45 @@ impl Panels {
     /// one the paths are relative to — reading the document's selection again
     /// here would attach an edit to whatever a click in the outliner selected
     /// in the same frame.
+    ///
+    /// # One drag, one entry
+    ///
+    /// A dragged field reports an edit every frame it moves. Edits to one leaf
+    /// while `pointer` holds the primary button — and on the frame it comes up
+    /// — share a [`Gesture`], which the log folds into
+    /// one entry; a frame with the button up ends it, so the next drag is an
+    /// entry of its own. The tree has no pointer capture to ask instead, and a
+    /// held button over one leaf is what a drag is. A typed edit, made with the
+    /// button up, is an entry each.
     fn apply_edits(
-        &self,
+        &mut self,
         document: &mut Document,
         selected: Option<SceneEntityId>,
         edits: &[FieldEdit],
+        pointer: PointerInput,
     ) -> usize {
-        let Some(id) = selected else {
-            return 0;
-        };
+        let held = pointer.down || pointer.released;
         let mut applied = 0;
-        for edit in edits {
-            match document.record_edit(id, &edit.path, &edit.before, &edit.after) {
-                Ok(()) => applied += 1,
-                Err(error) => crcbl::log::warn!("editor: {error}"),
+        if let Some(id) = selected {
+            for edit in edits {
+                let gesture = held.then(|| match &self.field_gesture {
+                    Some((entity, path, gesture)) if *entity == id && *path == edit.path => {
+                        *gesture
+                    }
+                    _ => {
+                        let gesture = document.begin_gesture();
+                        self.field_gesture = Some((id, edit.path.clone(), gesture));
+                        gesture
+                    }
+                });
+                match document.record_edit(id, &edit.path, &edit.before, &edit.after, gesture) {
+                    Ok(()) => applied += 1,
+                    Err(error) => crcbl::log::warn!("editor: {error}"),
+                }
             }
+        }
+        if !pointer.down {
+            self.field_gesture = None;
         }
         applied
     }
@@ -837,6 +866,28 @@ mod tests {
             );
         }
 
+        /// [`drag`](Self::drag), moving in `steps` frames rather than one — a
+        /// drag as a hand makes it.
+        fn drag_in_steps(&mut self, at: Vec2, by: Vec2, steps: u32) {
+            let held = |pos| PointerInput {
+                pos,
+                down: true,
+                released: false,
+            };
+            self.frame(held(at), 0.0);
+            for step in 1..=steps {
+                self.frame(held(at + by * (step as f32 / steps as f32)), 0.0);
+            }
+            self.frame(
+                PointerInput {
+                    pos: at + by,
+                    down: false,
+                    released: true,
+                },
+                0.0,
+            );
+        }
+
         /// The middle of a node the last frame laid out.
         fn centre(&self, key: NodeKey) -> Vec2 {
             let (min, max) = self.panels.ui().rect(key).expect("laid out last frame");
@@ -1027,6 +1078,42 @@ mod tests {
         // And the document keeps the selection the panels were handed: a frame
         // that pushed the outliner's own answer back would clear it.
         assert_eq!(page.document.selected(), Some(id));
+    }
+
+    /// **A field dragged over many frames is one undo**, back to the value
+    /// from before the drag — and a second drag of the same field is an entry
+    /// of its own.
+    #[test]
+    fn an_inspector_drag_over_many_frames_is_one_undo() {
+        let mut page = Page::built_in();
+        let id = SceneEntityId(3);
+        page.document.select(Some(id));
+        page.idle();
+        let before = page.document.files().expect("ids");
+
+        let field = page.axis_field(0, 0);
+        let at = page.centre(field);
+        page.drag_in_steps(at, Vec2::new(30.0, 0.0), 6);
+        assert_ne!(
+            page.document.files().expect("ids"),
+            before,
+            "the drag moved nothing"
+        );
+        assert_eq!(
+            page.document.log().len(),
+            1,
+            "a drag of six frames took more than one undo",
+        );
+
+        assert!(page.document.undo().expect("one entry"));
+        assert_eq!(page.document.files().expect("ids"), before);
+
+        // A second drag of the same field is a second entry, not folded into
+        // the first.
+        page.idle();
+        page.drag_in_steps(at, Vec2::new(10.0, 0.0), 3);
+        page.drag_in_steps(at, Vec2::new(10.0, 0.0), 3);
+        assert_eq!(page.document.log().len(), 2, "two drags, two entries");
     }
 
     /// **An inspector edit becomes a command that undo reverses, and the thing

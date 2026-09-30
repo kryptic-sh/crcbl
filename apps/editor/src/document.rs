@@ -425,12 +425,20 @@ impl Document {
     /// leaf refuses either value. A refusal on the way back in leaves the
     /// rewind standing, which is the panel's own `before` and so still a value
     /// the document held.
+    ///
+    /// # A drag
+    ///
+    /// With `gesture`, the command is recorded through
+    /// [`apply_in`](Self::apply_in), so a field dragged over many frames — one
+    /// report a frame — is one entry whose undo goes back to where the drag
+    /// began.
     pub fn record_edit(
         &mut self,
         id: SceneEntityId,
         path: &str,
         before: &Value,
         after: &Value,
+        gesture: Option<Gesture>,
     ) -> Result<(), EditError> {
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
         let component = self
@@ -438,11 +446,15 @@ impl Document {
             .component(&mut self.world, entity)
             .ok_or(EditError::NoEntity(id))?;
         set_path(component, path, before)?;
-        self.apply(EditCommand::SetProperty {
+        let command = EditCommand::SetProperty {
             entity: id,
             path: path.to_owned(),
             value: after.clone(),
-        })
+        };
+        match gesture {
+            Some(gesture) => self.apply_in(command, gesture),
+            None => self.apply(command),
+        }
     }
 
     /// Applies `command` and records it with the inverse it produced.
