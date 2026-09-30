@@ -2,9 +2,9 @@
 //! piggybacked acks, resend, ordering and fragmentation, over any datagram
 //! pipe.
 //!
-//! This is the packet layer of the design in `docs/backlog.md` under _There is
-//! no UDP transport, and therefore no crypto of our own_ — the Gaffer On Games
-//! and netcode.io lineage. It is pure logic: an [`Endpoint`] takes datagram
+//! This is the packet layer of the design in `docs/backlog.md` under _The UDP
+//! transport and its crypto_ — the Gaffer On Games and netcode.io lineage. It
+//! is pure logic: an [`Endpoint`] takes datagram
 //! bytes in through [`Endpoint::receive_datagram`] and hands datagram bytes
 //! out through [`Endpoint::poll_outgoing`], and never touches a socket. What
 //! carries those bytes is the caller's business, which is what lets the tests

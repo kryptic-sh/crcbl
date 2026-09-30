@@ -425,8 +425,30 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   paste that is not a clipping) or what a save found, as a warning when the game
   would refuse the saved scene. The same lines still go to the log.
 
-- **`crcbl_net::seal`: the AEAD every datagram on a network transport will
-  travel under**, as pure logic between `reliable::Endpoint` and a socket.
+- **`crcbl_net::udp`: the engine's own network transport**, native only (web
+  builds have no networking). `UdpTransport` implements `Transport` over a
+  `std::net::UdpSocket`, running `reliable::Endpoint` inside `seal`:
+  `send_reliable` rides the reliable channel (fragmented up to
+  `MAX_RELIABLE_MESSAGE_BYTES`), `send_unreliable` the unreliable-sequenced one
+  (one datagram, latest wins). `UdpTransport::connect(addr, protocol_id)` starts
+  a client and returns at once; `UdpListener::bind(addr, protocol_id)` and
+  `accept()` give a host one transport per peer over one shared socket, capped
+  by `ListenerConfig::{max_peers, max_pending}`. A fixed-size plaintext hello
+  (`HELLO_TAG`, `TRANSPORT_VERSION`, protocol id, a random nonce the reply must
+  echo, the X25519 public key; the reply is no larger) keys each connection from
+  fresh OS entropy, and every datagram after it is sealed. Hostile datagrams —
+  from another address, forged, tampered or replayed — are counted in `UdpStats`
+  / `ListenerStats` and dropped, never a disconnect. A link ends with an
+  `EndReason`: `ConnectTimedOut` (`CONNECT_TIMEOUT`, hello resent every
+  `HELLO_RESEND_INTERVAL`), `TimedOut`, `PeerDisconnected` or `Closed`; dropping
+  a transport sends the disconnect. Every connection is honest about its trust:
+  unauthenticated X25519 defeats a passive observer, not someone in the middle.
+  `crcbl-net` now depends on `getrandom` on native targets. The conformance
+  suite's `Link` gained `max_unreliable_message_bytes` (defaulting to
+  `max_message_bytes`) for a transport whose channels have different limits.
+
+- **`crcbl_net::seal`: the AEAD every datagram on a network transport travels
+  under**, as pure logic between `reliable::Endpoint` and a socket.
   `Sealer::seal` puts a packet under XChaCha20-Poly1305 behind a clear
   `SEALED_TAG` byte and a 64-bit per-direction counter, both authenticated as
   associated data; the nonce derives from direction and counter, never drawn,
@@ -448,13 +470,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `hmac` and `sha2` with identical output, and `crcbl-net` no longer depends on
   `crcbl-shaders`.
 
-- **`crcbl_net::reliable`: the reliability layer a UDP transport will run
-  inside**, as pure logic over any datagram pipe — no socket and no crypto yet.
-  An `Endpoint` (driven by an injected `Clock`: `send`, `receive_datagram`,
-  `poll_outgoing`, `recv` / `recv_reliable`, `update`, `disconnect`) speaks a
-  packet format with a protocol id, a wrapping 16-bit sequence, and an ack plus
-  64-bit ack bitfield piggybacked on every packet. `Channel::Reliable` resends
-  on an RFC 6298 timeout (floor `MIN_RTO`, cap `MAX_RTO`, doubling per resend),
+- **`crcbl_net::reliable`: the reliability layer `crcbl_net::udp` runs inside**,
+  as pure logic over any datagram pipe. An `Endpoint` (driven by an injected
+  `Clock`: `send`, `receive_datagram`, `poll_outgoing`, `recv` /
+  `recv_reliable`, `update`, `request_keepalive`, `disconnect`) speaks a packet
+  format with a protocol id, a wrapping 16-bit sequence, and an ack plus 64-bit
+  ack bitfield piggybacked on every packet. `Channel::Reliable` resends on an
+  RFC 6298 timeout (floor `MIN_RTO`, cap `MAX_RTO`, doubling per resend),
   delivers once and in order, and fragments messages past one datagram up to
   `MAX_RELIABLE_MESSAGE_BYTES`; `Channel::UnreliableSequenced` never resends,
   drops anything older than what it last delivered, and refuses a payload past

@@ -229,12 +229,13 @@ milestone 3's problem rather than these slices'.
   with no ECS system, which is fine for a map — the scene is read into a `Map`
   and the stage plays on that — and would not be for anything the editor should
   place that moves.
-- **Milestone 3 waits on a wire.** `crcbl-net` ships `InMemoryTransport` and
-  nothing else: no UDP transport, no LAN host discovery, no lobby browser. So
-  "co-op over real transport" and the 4-player LAN exit criterion have no
-  implementation to sit on, and the netgraph's network module has no connection
-  to report on in this sample any more than it does in breakout's. The commands
-  are already shaped for it, which is the one thing slice 1 could do about it.
+- **Milestone 3 waits on a wire.** `crcbl-net`'s UDP transport
+  (`crcbl_net::udp`, 2026-09-30) is wired to no server or client yet, and there
+  is no LAN host discovery and no lobby browser. So "co-op over real transport"
+  and the 4-player LAN exit criterion have no implementation to sit on, and the
+  netgraph's network module has no connection to report on in this sample any
+  more than it does in breakout's. The commands are already shaped for it, which
+  is the one thing slice 1 could do about it.
 
 ## Exit criteria
 

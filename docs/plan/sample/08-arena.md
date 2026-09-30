@@ -77,9 +77,9 @@ standing decision, so this is the plan holding rather than a slip.
 
 **The dependency chain, from the outside in.** Milestone 1 — the
 interpolation-only version that is the recorded "before" — needs a real wire
-between two machines, and `crcbl-net` ships `InMemoryTransport` and nothing
-else: no UDP transport, no LAN host discovery. Milestones 2 and 3 need
-prediction, reconciliation and server-side rewind, which
+between two machines, and `crcbl-net`'s UDP transport (`crcbl_net::udp`,
+2026-09-30) is wired to no server or client yet, with no LAN host discovery.
+Milestones 2 and 3 need prediction, reconciliation and server-side rewind, which
 `docs/plan/26-prediction.md` designs and nothing implements. Milestone 4's
 eight-client soak needs both, plus a `Server` that holds more than one transport
 and one session manager, which it does not.

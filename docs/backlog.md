@@ -12899,14 +12899,14 @@ rule, backpressure, sectors as the wire architecture — are in
 `docs/notes/simulation.md` under _What the deleted 23-netcode plan left behind_.
 What it left unbuilt is below.
 
-### There is no UDP transport, and therefore no crypto of our own (2026-08-27)
+### The UDP transport and its crypto: built, bar tokens and discovery (2026-08-27)
 
-**Partly built: the packet layer and the seal exist, the socket does not.** No
-`UdpSocket` exists anywhere in `crates/` or `apps/` (grep, 2026-09-30).
-`Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
-`FileTransport` and, since 2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P
-over Valve's relay, run through `crcbl_net::conformance`; `crcbl_server::Host`
-serves several sessions over `Box<dyn Transport>` peers).
+**Built through slice C (2026-09-30); connection tokens, discovery and the
+wiring are left.** `Transport` is implemented by `InMemoryTransport`,
+`crcbl_store`'s `FileTransport`, since 2026-09-23 `crcbl-steam`'s
+`SteamTransport` (P2P over Valve's relay; `crcbl_server::Host` serves several
+sessions over `Box<dyn Transport>` peers), and now `crcbl_net::udp`'s
+`UdpTransport`, which nothing in `apps/` or `crcbl-server` uses yet.
 
 **Built 2026-09-30 (slice A): `crcbl_net::reliable`**, pure logic over any
 datagram pipe. Packet header with protocol id, wrapping 16-bit sequence
@@ -12958,6 +12958,63 @@ on `crcbl-shaders`, since `auth.rs`'s hand-written HMAC moved onto the same
 crates (checked equal to the old implementation over every key length to 200 and
 twelve data lengths before the old one was deleted).
 
+**Built 2026-09-30 (slice C): `crcbl_net::udp`**, native only — the module is
+`#[cfg(not(target_arch = "wasm32"))]` by the LOCKED no-web-networking rule, and
+`crcbl-net` still builds for `wasm32-unknown-unknown`. `UdpTransport::connect`
+binds an ephemeral socket and returns at once (connecting counts as
+`is_connected`; a send then is `Backpressure`, as `SteamTransport` answers);
+`UdpListener::bind` plus `accept()` demultiplex one socket by source address
+into per-peer `UdpTransport`s that share it, and any peer's receive or `accept`
+reads the socket for all of them. The hello is `HELLO_BYTES` both ways (tag,
+`TRANSPORT_VERSION`, protocol id, a `HELLO_NONCE_BYTES` client nonce the reply
+must echo, the X25519 public key), so the reply never amplifies; it is resent
+every `HELLO_RESEND_INTERVAL` until `CONNECT_TIMEOUT`. The server answers into a
+pending handshake (`ListenerConfig::max_pending`, expiring after
+`HANDSHAKE_TIMEOUT`) and admits a peer (`max_peers`) only when a sealed datagram
+opens under the new key; the client sends one at once through the new
+`Endpoint::request_keepalive`. Secret bytes and the nonce come from `getrandom`
+(native-only dependency) per connection. Hostile datagrams are counted in
+`UdpStats` / `ListenerStats` and dropped, never a disconnect. `EndReason` says
+`ConnectTimedOut`, `TimedOut`, `PeerDisconnected`, `Closed` or `KeysExhausted`;
+a dropped transport sends the disconnect. Tests over loopback, every socket on
+port 0 and a failed bind failing the test: the conformance suite against a
+client and a listener's peer (its `Link` gained `max_unreliable_message_bytes`,
+since the two channels' limits differ here), ordered reliable delivery with a
+multi-datagram message, latest-wins under reordering, the handshake keying both
+ways with nothing in clear after it, a stranger's datagrams, replay, tampering,
+a forged reply without the echo, the connect timeout, the pending and peer caps
+under a flood with expiry and a freed slot, and a graceful close against a
+`ManualClock` timeout — each shown red by a mutation of the code it guards.
+**Run only on Windows locally**; the Linux and macOS test jobs are their first
+run there (both cross-clippy clean).
+
+**Found while building C, not fixed:**
+
+- **A peer cap that fills between a hello and its confirmation strands the
+  client.** The listener drops the confirmation (`ListenerStats::peers_full`),
+  but the client has already keyed and believes it is connected until
+  `PEER_TIMEOUT`. It takes several handshakes racing for the last slot. Options:
+  reserve a slot per pending handshake (then a spoofed flood can hold the peer
+  slots for `HANDSHAKE_TIMEOUT`), or send a sealed refusal to the confirmation.
+- **A full server, or one on another protocol id or `TRANSPORT_VERSION`, answers
+  nothing**, so the client reads `ConnectTimedOut` rather than why. A same-size
+  plaintext refusal echoing the nonce would be safe (no amplification,
+  unforgeable off-path); not built.
+- **A spoofed-hello flood is bounded in memory, not in availability.** Each
+  answered hello costs an X25519 agreement and a `getrandom` draw, and a full
+  pending table turns honest clients away for up to `HANDSHAKE_TIMEOUT`.
+  Connection tokens (slice D) or a stateless cookie round are the fix.
+- **A client reconnecting from the same port** is sorted into its old peer's
+  inbox until that session ends; clients bind port 0, so it needs port reuse.
+- **No socket buffer sizing.** `std::net::UdpSocket` has no `SO_RCVBUF` setter
+  and no dependency (`socket2`) was taken for it; a largest reliable message's
+  burst can overflow a small default buffer and costs resends, not correctness.
+- **One mutex serialises every peer's read of the shared socket**: fine for a
+  LAN session, contended if peers are driven from many threads.
+- `crcbl-rand`'s `entropy` is the project's own entropy seam; `udp` calls
+  `getrandom` directly, as the slice's brief said, because the module is native
+  only and `crcbl-rand` would bring its PRNG dependencies into `crcbl-net`.
+
 **DECIDED 2026-09-30: option (a), with the removal condition.** `x25519-dalek`
 3.0 names `rand_core` 0.10 unconditionally (as 2.x names 0.6), beside the 0.9
 `proptest` 1.11 holds; `deny.toml` skips `rand_core@0.10.1` by exact version,
@@ -12972,29 +13029,19 @@ so CI's `decoder-fuzz` job is its first run.
 
 **What is left, by slice:**
 
-- **C — `UdpTransport`.** A socket, one `Endpoint` per peer behind `Transport`
-  (`send_reliable` → `Channel::Reliable`, `send_unreliable` →
-  `Channel::UnreliableSequenced`, `recv_reliable` → `Endpoint::recv_reliable`,
-  `is_connected` → `EndpointState::is_connected`), the hello and handshake
-  carried over it, and `crcbl_net::conformance` run against it. Only after B:
-  **an unsealed endpoint on a network is exploitable, not just readable** — a
-  forged disconnect ends the link, and a forged first fragment with the wrong
-  count for the next message id stalls the reliable channel for good. The
-  endpoint cannot tell a forgery from the peer; only the tag can. **What it
-  wires from B:** each side draws 32 fresh secret bytes per connection from the
-  OS (natively — `crcbl-net` draws nothing, and web builds have no networking),
-  never reused across connections, and builds a `KeyPair` from them; the public
-  keys travel in the hello and its reply; each side calls `agree_channel` with
-  its role, its key pair, the peer's public key and the endpoint protocol id,
-  and from then on every datagram goes through `Sealer::seal` / `Opener::open`,
-  with the `SEALED_TAG` byte telling sealed traffic from the hello. **Rekey on
-  reconnect** is a new key pair and a new `agree_channel`, dropping the old
-  sealer and opener; `SealError::CounterExhausted` is handled the same way. An
-  `OpenError` is a dropped datagram, never a disconnect — a spoofer must not be
-  able to end the link by sending garbage. The opener's replay window is
-  `ReplayWindow::WIDTH` counters, so a datagram delayed behind more than that
-  many newer ones is refused and the reliable channel resends it; a fragment
-  burst reordered past the width costs resends, not correctness.
+- **Wiring — the next step.** Nothing connects a server or client over UDP. A
+  host would call `UdpListener::accept()` every frame and hand each
+  `UdpTransport` to `crcbl_server::Host::add` as a `Box<dyn Transport>`, the way
+  `apps/sandbox/src/steam.rs` feeds its `SteamListener`'s peers to its own
+  links; a client would drive `UdpTransport::connect` until connected and then
+  run the session handshake over it. **The trap is the snapshot size:**
+  `crcbl_net::delta`'s `MAX_DELTA_BYTES` is sized against
+  `MAX_IN_MEMORY_MESSAGE_BYTES`, while `UdpTransport::send_unreliable` refuses
+  anything past `MAX_UNRELIABLE_PAYLOAD`, one datagram — so a server sending
+  today's deltas over UDP gets `MessageTooLarge` as soon as a snapshot passes a
+  datagram. The quantization and budget entry below is what makes a snapshot
+  fit; until then, towers or any sample over UDP needs its snapshots held under
+  the limit. Direct connect by address needs a UI field in each sample's lobby.
 - **D — tokens and discovery.** Connection tokens (below) and LAN discovery (its
   own entry). Neither needs anything from the packet layer.
 
@@ -13060,26 +13107,25 @@ plan's table:
   implementation overwrites it, so a mismatched field cannot silently reroute
   anything.
 - **unreliable-sequenced** (snapshots; latest wins, drops fine, no resend) —
-  **built in the packet layer, not behind the seam.**
+  **built in the packet layer, and behind the seam only on UDP.**
   `crcbl_net::reliable::Channel::UnreliableSequenced` (2026-09-30) drops a
-  packet older than the newest it delivered and never resends, but no
-  `Transport` routes to it until slice C's `UdpTransport` (see the entry above).
-  Through the seam, `Unreliable` still promises only "may be dropped or
-  reordered". What actually stops a stale snapshot beating a fresh one is a
-  layer up: `crcbl_net::delta` refuses a delta whose tick is not newer than the
-  baseline's. Lateness is rejected at apply time rather than prevented at the
-  channel.
+  packet older than the newest it delivered and never resends, and
+  `crcbl_net::udp::UdpTransport` routes `send_unreliable` to it (see the entry
+  above); no other `Transport` sequences. Through the seam, `Unreliable` still
+  promises only "may be dropped or reordered". What actually stops a stale
+  snapshot beating a fresh one is a layer up: `crcbl_net::delta` refuses a delta
+  whose tick is not newer than the baseline's. Lateness is rejected at apply
+  time rather than prevented at the channel.
 - **reliable-fragmented** (bulk: a join-in-progress snapshot, replays) —
   **folded into reliable-ordered in the packet layer**: `crcbl_net::reliable`'s
   reliable channel fragments and reassembles up to `MAX_RELIABLE_MESSAGE_BYTES`,
-  which clears the in-memory limit, but nothing reaches it through a `Transport`
-  yet. Over the seam as it stands, `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB)
-  _refuses_ an oversized message; nothing reassembles. A separate bulk channel,
-  so a large transfer does not head-of-line block commands, is not built: a
-  command queued behind a large message goes out alongside its fragments but is
-  delivered after it. (`SteamTransport` accepts up to its own
-  `MAX_MESSAGE_BYTES`, Steam's send limit, and leaves the splitting to Valve's
-  layer.)
+  which clears the in-memory limit, and `UdpTransport::send_reliable` reaches
+  it. Over `InMemoryTransport`, `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB) _refuses_
+  an oversized message; nothing reassembles. A separate bulk channel, so a large
+  transfer does not head-of-line block commands, is not built: a command queued
+  behind a large message goes out alongside its fragments but is delivered after
+  it. (`SteamTransport` accepts up to its own `MAX_MESSAGE_BYTES`, Steam's send
+  limit, and leaves the splitting to Valve's layer.)
 - **unreliable-event** (added 2026-07-27: footstep and gunfire cues, impact VFX;
   tick-stamped, fire-and-forget, late = dropped) — no representation at all.
 
@@ -13170,8 +13216,11 @@ condition simulator (`condition.rs`) and inbound rate limiting (`rate_limit.rs`)
 are built, so the machinery the soak needs is there. **The reliability soak
 exists for the packet layer** (2026-09-30): `crcbl_net::reliable`'s tests run
 two endpoints through the condition simulator and check both channel properties
-below across many seeds. What it cannot cover yet is the same soak through a
-real `Transport` and socket, which waits on `UdpTransport`.
+below across many seeds. What it does not cover is the same soak through a real
+socket: `crcbl_net::udp`'s tests run loopback, which neither loses nor reorders
+on its own, and bend the traffic only through a hand-driven proxy (replay,
+tamper, one reordering). A lossy socket soak would need a proxy that drops and
+delays by seed, or the condition simulator under the socket.
 
 The plan's matrix: a reliability soak under the condition simulator (loss up to
 30%, reorder, duplication) where every reliable message arrives in order and the
@@ -13857,11 +13906,12 @@ it would be sample code.
    `Scene::save`, not a map authored in the editor — so the exit criterion "map
    authored 100% in the editor, zero hand-edited scene text" is not met until
    someone authors it there. `docs/plan/08-editor.md` owns that pass.
-2. **Milestone 3 waits on a wire.** `crates/crcbl-net` ships `InMemoryTransport`
-   and nothing else — no UDP transport, no LAN host discovery, no lobby browser
-   — so "co-op over real transport" and the 4-player LAN exit criterion have
-   nothing to run on. The commands are already shaped for it, which is the one
-   thing slice 1 could do about it.
+2. **Milestone 3 waits on a wire.** `crates/crcbl-net`'s UDP transport
+   (`crcbl_net::udp`, 2026-09-30) is wired to no server or client yet, and there
+   is no LAN host discovery and no lobby browser — so "co-op over real
+   transport" and the 4-player LAN exit criterion have nothing to run on. The
+   commands are already shaped for it, which is the one thing slice 1 could do
+   about it.
 
 **Rules owed rather than exempted, stated so the next slice does not read them
 as decisions:** rule 11 (no `.crpix` art anywhere — the tower and creep icons,
@@ -14424,17 +14474,18 @@ web demo ship: the widening-tolerance queue, Glicko-2 ratings, the match stub, a
 UI-only client, and `bracket sim [--seed N] [--players N] [--ticks N]` for the
 headless soak. `web/demos/bracket/` is the page.
 
-**The blocker is narrower than "there is no UDP".** There is no UDP transport
-and no LAN discovery, but the demo runs its `Sim` **directly** rather than over
-any transport, and routing it through a loopback as things stand would be worse
-than not doing it — it would put the matchmaker behind a tick-shaped input
-channel and look like the claim while not being it. Queueing, leaving the queue
-and reporting a result are **commands**: `crcbl-server`'s receive loop has an
-arm for `ClientToServer::Command` whose body is empty, with a comment saying
-that a caller must not read it as a command being acted on. So the missing piece
-is a way for a `GameModule` to receive a command and reply to it, and it is
-engine work. `docs/backlog.md` already carries this under "bracket does not yet
-drive the transport (2026-08-24)"; it is re-verified and still accurate.
+**The blocker is narrower than "there is no UDP".** `crcbl_net::udp` exists
+(2026-09-30) and there is no LAN discovery, but the demo runs its `Sim`
+**directly** rather than over any transport, and routing it through a loopback
+as things stand would be worse than not doing it — it would put the matchmaker
+behind a tick-shaped input channel and look like the claim while not being it.
+Queueing, leaving the queue and reporting a result are **commands**:
+`crcbl-server`'s receive loop has an arm for `ClientToServer::Command` whose
+body is empty, with a comment saying that a caller must not read it as a command
+being acted on. So the missing piece is a way for a `GameModule` to receive a
+command and reply to it, and it is engine work. `docs/backlog.md` already
+carries this under "bracket does not yet drive the transport (2026-08-24)"; it
+is re-verified and still accurate.
 
 **The multi-client half is absent for a second, independent reason:** `Server`
 holds one transport and one session manager, so "many connections, low

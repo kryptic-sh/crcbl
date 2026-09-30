@@ -285,6 +285,9 @@ pub struct Endpoint<C: Clock> {
     /// When an ack-eliciting packet last went out: the round-trip estimate
     /// is only fed by those.
     last_probe_sent: Duration,
+    /// Whether [`Self::request_keepalive`] asked for a keepalive that has not
+    /// gone out yet.
+    probe_requested: bool,
     last_received: Duration,
     disconnects_left: u8,
     stats: EndpointStats,
@@ -323,6 +326,7 @@ impl<C: Clock> Endpoint<C> {
             ack_snapshots: VecDeque::new(),
             unacked_eliciting: 0,
             last_probe_sent: now,
+            probe_requested: false,
             last_received: now,
             disconnects_left: 0,
             stats: EndpointStats::default(),
@@ -401,6 +405,16 @@ impl<C: Clock> Endpoint<C> {
         let delivery = self.delivered.remove(position)?;
         self.delivered_bytes -= delivery.payload.len();
         Some(delivery)
+    }
+
+    /// Have the next [`Self::poll_outgoing`] with nothing else ack-eliciting
+    /// to send emit a keepalive, without waiting for [`KEEPALIVE_INTERVAL`].
+    ///
+    /// For a transport that has just keyed a link and wants the peer to see a
+    /// packet under the new key at once: the first keepalive is what tells a
+    /// server the client really holds the key its hello offered.
+    pub fn request_keepalive(&mut self) {
+        self.probe_requested = true;
     }
 
     /// Close the link from this side: queued traffic is dropped and the next
@@ -545,7 +559,7 @@ impl<C: Clock> Endpoint<C> {
         if self.unacked_eliciting > 0 {
             return Some(self.emit(PacketBody::Ack, now));
         }
-        if now.saturating_sub(self.last_probe_sent) >= KEEPALIVE_INTERVAL {
+        if self.probe_requested || now.saturating_sub(self.last_probe_sent) >= KEEPALIVE_INTERVAL {
             return Some(self.emit(PacketBody::Keepalive, now));
         }
         None
@@ -597,6 +611,7 @@ impl<C: Clock> Endpoint<C> {
         self.next_sequence = sequence.wrapping_add(1);
         if ack_eliciting {
             self.last_probe_sent = now;
+            self.probe_requested = false;
         }
         self.stats.packets_sent += 1;
         self.stats.bytes_sent += datagram.len() as u64;

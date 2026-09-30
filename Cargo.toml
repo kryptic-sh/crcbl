@@ -47,15 +47,15 @@ gltf = { version = "1.4.1", default-features = false, features = [
   "names",
   "utils",
 ] }
-# Entropy for `crcbl-server`'s resume tokens. Deliberately featureless here:
-# the browser backend (`wasm_js`, i.e. `crypto.getRandomValues` via `js-sys`)
-# is enabled from `crates/crcbl-server/Cargo.toml`'s `cfg(target_arch =
-# "wasm32")` section instead, because enabling it in this table would enable it
-# for native too and put `wasm-bindgen` in every binary that links a server.
+# Native OS entropy: `crcbl-rand`'s seam, and `crcbl-net`'s UDP key pairs.
+# Deliberately featureless, and named only from native-only sections: the
+# browser backend (`wasm_js`, `crypto.getRandomValues` via `js-sys`) would put
+# `wasm-bindgen` in every binary that linked it, and `crcbl-rand` seeds `wasm32`
+# from the host instead.
 getrandom = "0.4.3"
 # The crypto primitives `crcbl_net::seal` is built on, approved 2026-09-06 as
-# RustCrypto (`docs/backlog.md`, _There is no UDP transport_). Every one is
-# featured so that nothing in it can draw randomness: `chacha20poly1305`'s
+# RustCrypto (`docs/backlog.md`, _The UDP transport and its crypto_). Every one
+# is featured so that nothing in it can draw randomness: `chacha20poly1305`'s
 # defaults are `alloc` and `getrandom`, and the seal derives its nonces and
 # takes key material from its caller, so neither is wanted — and `getrandom`
 # on `wasm32-unknown-unknown` fails to build at all. `zeroize` on both keyed

@@ -483,6 +483,25 @@ fn idle_peers_keep_each_other_alive_with_keepalives() {
     assert!(link.a_got.is_empty() && link.b_got.is_empty());
 }
 
+/// A requested keepalive goes out on the next poll, with no time passed, and
+/// once only: the interval then governs again.
+#[test]
+fn a_requested_keepalive_goes_out_at_once_and_once() {
+    let clock = ManualClock::new();
+    let mut endpoint = Endpoint::new(PROTOCOL, clock.clone());
+    assert!(endpoint.poll_outgoing().is_none(), "nothing is due yet");
+    endpoint.request_keepalive();
+    let datagram = endpoint.poll_outgoing().expect("the requested keepalive");
+    assert!(matches!(
+        decode_packet(&datagram, PROTOCOL),
+        Ok((_, PacketBody::Keepalive))
+    ));
+    assert!(
+        endpoint.poll_outgoing().is_none(),
+        "one keepalive per request"
+    );
+}
+
 /// A peer that stops answering is declared timed out after exactly
 /// [`PEER_TIMEOUT`] of silence, and not a step before.
 #[test]

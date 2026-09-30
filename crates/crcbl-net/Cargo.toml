@@ -23,3 +23,11 @@ workspace = true
 # that implement a transport — `crcbl-steam` names it as a dev-dependency
 # feature — and never needed by a game.
 conformance = []
+
+# The secret bytes behind each UDP connection's X25519 key pair, and the hello
+# nonce, from the operating system. Native only, like `udp` itself: web builds
+# have no networking (`docs/notes/simulation.md`), and `getrandom` does not
+# build for `wasm32-unknown-unknown` without a backend nothing here wants. The
+# seal, the packet layer and everything else in the crate still draw nothing.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+getrandom = { workspace = true }

@@ -16,7 +16,7 @@
 //! - reliable messages arrive in the order sent, each end receives the
 //!   other's traffic and not its own ([`reliable_messages_arrive_in_order`]);
 //! - an oversized payload is [`TransportError::MessageTooLarge`] carrying the
-//!   size and the limit, and one at the limit is accepted
+//!   size and that channel's limit, and one at the limit is accepted
 //!   ([`an_oversized_message_names_its_size_and_the_limit`]);
 //! - an end whose peer is gone reports [`TransportError::Disconnected`] and
 //!   stops claiming to be connected
@@ -44,8 +44,18 @@ pub trait Link {
     /// one driven by an event pump runs it.
     fn settle(&mut self);
 
-    /// The largest payload the transport accepts.
+    /// The largest payload the transport accepts, on the reliable channel
+    /// and — unless [`Self::max_unreliable_message_bytes`] says otherwise —
+    /// the unreliable one too.
     fn max_message_bytes(&self) -> usize;
+
+    /// The largest payload the unreliable channel accepts, for a transport
+    /// whose channels differ: one that fragments reliable messages but holds
+    /// unreliable ones to a single datagram. The default is
+    /// [`Self::max_message_bytes`].
+    fn max_unreliable_message_bytes(&self) -> usize {
+        self.max_message_bytes()
+    }
 }
 
 /// How many `recv` calls a check makes before deciding a queue will not
@@ -193,12 +203,16 @@ pub fn reliable_messages_arrive_in_order<L: Link>(link: &mut L) {
     assert_eq!(at_a, expected(b'b'), "a must receive b's messages in order");
 }
 
-/// One byte over the limit is refused, naming both numbers; the limit
+/// One byte over a channel's limit is refused, naming both numbers; the limit
 /// itself is accepted, on both channels.
 pub fn an_oversized_message_names_its_size_and_the_limit<L: Link>(link: &mut L) {
-    let limit = link.max_message_bytes();
     let (mut a, _b) = link.pair();
     for reliable in [true, false] {
+        let limit = if reliable {
+            link.max_message_bytes()
+        } else {
+            link.max_unreliable_message_bytes()
+        };
         let send = |a: &mut L::Transport, size: usize| {
             let payload = vec![0; size];
             if reliable {

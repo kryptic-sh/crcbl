@@ -15,11 +15,13 @@
 //!   for the server → client snapshot path.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
-//! * [`reliable`] — the packet layer a UDP transport will run inside: acks,
-//!   resend, ordering and fragmentation over any datagram pipe. No socket yet;
-//!   see its module docs for where it and the seal go.
+//! * [`reliable`] — the packet layer the UDP transport runs inside: acks,
+//!   resend, ordering and fragmentation over any datagram pipe.
 //! * [`seal`] — the AEAD every datagram on a network transport travels under,
 //!   with derived nonces, a replay window, and the key schedule behind it.
+//! * `udp` (native only) — the engine's own network transport: the packet
+//!   layer inside the seal over a UDP socket, a client's connect and a host's
+//!   listener. Web builds have no networking, so it does not exist there.
 //! * `conformance` (feature `conformance`) — the checks every [`Transport`]
 //!   must pass, for crates that implement one.
 
@@ -37,6 +39,8 @@ pub mod seal;
 pub mod session;
 pub mod transport;
 pub mod types;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod udp;
 
 pub use auth::{AuthError, ReplayWindow, SessionCrypto, SessionKey};
 pub use codec::{
