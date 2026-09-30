@@ -1,5 +1,6 @@
 #![no_main]
 
+use crcbl_ecs::quantize::{self, Codec, Field, Fixed, SmallestThree};
 use crcbl_net::ResumeToken;
 use crcbl_net::auth::{SessionKey, open};
 use crcbl_net::reliable::{Endpoint, decode_packet};
@@ -10,6 +11,27 @@ use crcbl_net::{
 };
 use libfuzzer_sys::fuzz_target;
 
+/// Every codec at once, at widths that leave padding bits, so the schema
+/// decoder's length, padding and unwritten-code checks all see hostile bytes.
+const EVERY_CODEC: &[Field] = &[
+    Field {
+        name: "fixed",
+        codec: Codec::Fixed(Fixed::new(-1.0, 1.0, 13)),
+    },
+    Field {
+        name: "half",
+        codec: Codec::Half,
+    },
+    Field {
+        name: "rotation",
+        codec: Codec::Rotation(SmallestThree::new(9)),
+    },
+    Field {
+        name: "exact",
+        codec: Codec::Exact,
+    },
+];
+
 fuzz_target!(|data: &[u8]| {
     let _ = decode_hello(data);
     let _ = decode_handshake_result(data);
@@ -18,6 +40,11 @@ fuzz_target!(|data: &[u8]| {
     let _ = decode_server_to_client(data);
     let _ = decode_delta(data, Trust::Untrusted);
     let _ = decode_delta(data, Trust::Authenticated);
+    // A snapshot's entity blobs, once it has opened and applied: the client
+    // reads each physics entry as a transform in either wire form.
+    let _ = crcbl_phys::Transform::decode_wire(data);
+    let mut values = [0.0; quantize::value_count(EVERY_CODEC)];
+    let _ = quantize::decode_values(EVERY_CODEC, data, &mut values);
     // The authenticated envelope is the outermost parser on the wire now, so
     // it sees hostile bytes before anything else does.
     let _ = open(

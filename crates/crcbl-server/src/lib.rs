@@ -15,7 +15,10 @@ pub use host::{Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
 pub use peer::SnapshotTooLarge;
 
 pub use crcbl_net::rate_limit;
+// Moved to `crcbl-net`, where the client can reach it too; kept here so
+// existing callers do not churn.
 pub use crcbl_net::rate_limit::InboundRateLimitConfig;
+pub use crcbl_net::replicated_system_id;
 
 use std::fmt;
 use std::time::Duration;
@@ -492,25 +495,6 @@ impl<T: Transport> Server<T> {
     pub fn tick_id(&self) -> TickId {
         self.clock.tick()
     }
-}
-
-/// The replicated id for a system, derived from its name.
-///
-/// Derived from the name rather than the schedule position, because the
-/// position changes whenever a system is registered or removed and the client
-/// would then apply one system's blobs into another's baseline without any
-/// error. FNV-1a: short, stable across builds and platforms, and adequate for
-/// an identifier space the server also checks for collisions.
-#[must_use]
-pub fn replicated_system_id(name: &str) -> u32 {
-    const OFFSET_BASIS: u32 = 0x811c_9dc5;
-    const PRIME: u32 = 0x0100_0193;
-    let mut hash = OFFSET_BASIS;
-    for byte in name.as_bytes() {
-        hash ^= u32::from(*byte);
-        hash = hash.wrapping_mul(PRIME);
-    }
-    hash
 }
 
 impl<T: Transport> fmt::Debug for Server<T> {
@@ -1229,6 +1213,154 @@ mod tests {
         assert_eq!(server.auth_failure_count(), 0);
     }
 
+    /// Move `entity`'s transform in the server's physics system.
+    fn place<T: Transport>(
+        server: &mut Server<T>,
+        entity: crcbl_ecs::Entity,
+        transform: crcbl_phys::Transform,
+    ) {
+        server
+            .world_mut()
+            .schedule_mut()
+            .iter_mut()
+            .find_map(|s| s.as_any_mut().downcast_mut::<crcbl_phys::PhysicsSystem>())
+            .expect("physics system registered")
+            .set_transform(entity, transform);
+    }
+
+    /// **A sub-quantum move ships nothing; a supra-quantum one ships.** The
+    /// server compares encoded bytes against the acked baseline, and physics
+    /// quantizes before that comparison, so a wobble under the quantum is no
+    /// change on the wire — the whole reason to quantize before the diff.
+    #[test]
+    fn a_move_under_the_quantum_ships_nothing_and_one_over_it_ships() {
+        let q = crcbl_phys::Transform::WIRE_POSITION.quantum();
+        let (world, entities) = world_with_replicated_entities(2);
+        let moved = entities[0];
+        let (transport, mut peer) = InMemoryTransport::pair();
+        let mut server = server(world, transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        let mut described_after = |server: &mut Server<InMemoryTransport>, tick: u32| {
+            server.update(tick * TICK);
+            let payloads = drain_payloads(&mut peer);
+            assert_eq!(payloads.len(), 1);
+            let delta = open_delta(&mut crypto, &payloads[0]);
+            send_sealed(
+                &mut peer,
+                &mut crypto,
+                &crcbl_net::encode_ack(SectorId::ZERO, delta.tick),
+            );
+            (delta.is_keyframe, entities_described(&delta))
+        };
+
+        let (keyframe, _) = described_after(&mut server, 2);
+        assert!(keyframe);
+
+        let at = |x: f64| crcbl_phys::Transform::from_position(glam::DVec3::new(x, 0.0, 0.0));
+        place(&mut server, moved, at(q / 4.0));
+        let (keyframe, described) = described_after(&mut server, 3);
+        assert!(!keyframe, "on the delta path");
+        assert!(
+            described.is_empty(),
+            "a quarter quantum shipped {described:?}"
+        );
+
+        place(&mut server, moved, at(q));
+        let (_, described) = described_after(&mut server, 4);
+        assert_eq!(described, vec![moved.to_bits()], "a whole quantum ships");
+        assert_eq!(server.processing_error_count(), 0);
+    }
+
+    /// `count` transforms off the quantization grid, each turned a little, as
+    /// `(entity bits, transform)`.
+    fn scattered_transforms(count: u64) -> Vec<(u64, crcbl_phys::Transform)> {
+        (1..=count)
+            .map(|i| {
+                let f = i as f64;
+                let transform = crcbl_phys::Transform::new(
+                    glam::DVec3::new(f * 1.37, 0.51 - f * 0.13, f * 0.29),
+                    crcbl_phys::rotation_from_scaled_axis(glam::DVec3::new(0.1, f * 0.01, 0.3)),
+                );
+                ((1 << 32) | i, transform)
+            })
+            .collect()
+    }
+
+    /// The keyframe a physics system replicating `transforms`, each encoded
+    /// by `encode`, would produce.
+    fn physics_keyframe(
+        transforms: &[(u64, crcbl_phys::Transform)],
+        encode: impl Fn(&crcbl_phys::Transform, &mut Vec<u8>),
+    ) -> crcbl_net::Delta {
+        let mut data = Vec::new();
+        for (bits, transform) in transforms {
+            let mut component = Vec::new();
+            encode(transform, &mut component);
+            crcbl_net::encode_entity_entry(&mut data, *bits, &component);
+        }
+        let systems = [crcbl_net::SystemSnapshot {
+            system_id: replicated_system_id(crcbl_phys::PhysicsSystem::NAME),
+            data,
+        }];
+        let baseline = Baseline::from_snapshot(TickId::from_raw(1), &systems, Trust::Authenticated)
+            .expect("a valid snapshot");
+        DeltaCodec::encode_from_baseline(SectorId::ZERO, &baseline, None)
+    }
+
+    /// **Quantized transforms make a smaller snapshot, and more of them fit a
+    /// datagram.** The same scene encoded both ways: exactly (the form every
+    /// transform took before quantization) and as `PhysicsSystem::replicate`
+    /// now writes it. The factor and the per-datagram counts are printed,
+    /// since they are what the backlog records.
+    #[test]
+    fn quantized_transforms_shrink_a_snapshot_and_fit_more_entities_a_datagram() {
+        const ENTITIES: u64 = 200;
+        let scene = scattered_transforms(ENTITIES);
+
+        let exact = physics_keyframe(&scene, crcbl_phys::Transform::encode);
+        let quantized = physics_keyframe(&scene, crcbl_phys::Transform::encode_wire);
+        let exact_len = crcbl_net::encode_delta(&exact).unwrap().len();
+        let quantized_len = crcbl_net::encode_delta(&quantized).unwrap().len();
+
+        // And the helper builds what the server really writes.
+        let mut world = World::new();
+        let mut phys = crcbl_phys::PhysicsSystem::new();
+        let entities: Vec<_> = (0..ENTITIES).map(|_| world.spawn()).collect();
+        for (entity, (_, transform)) in entities.iter().zip(&scene) {
+            phys.set_transform(*entity, *transform);
+        }
+        world.register_system(Box::new(phys));
+        assert_eq!(keyframe_payload_len(&world), quantized_len);
+
+        let factor = exact_len as f64 / quantized_len as f64;
+        println!(
+            "{ENTITIES} transforms: {exact_len} bytes exact, {quantized_len} quantized, \
+             {factor:.2}x smaller"
+        );
+        assert!(
+            factor > 2.0,
+            "quantization must more than halve a transform snapshot, got {factor:.2}x"
+        );
+
+        let budget = crcbl_net::snapshot_budget(crcbl_net::reliable::MAX_UNRELIABLE_PAYLOAD);
+        let packed = |delta: crcbl_net::Delta| {
+            let fitted = crcbl_net::PriorityAccumulator::new()
+                .fit(delta, budget, |_, _| crcbl_net::DEFAULT_RELEVANCE)
+                .expect("one transform fits a datagram");
+            ENTITIES as usize - fitted.shed
+        };
+        let (exact_packed, quantized_packed) = (packed(exact), packed(quantized));
+        println!(
+            "a {budget}-byte datagram budget holds {exact_packed} exact transforms, \
+             {quantized_packed} quantized"
+        );
+        assert!(
+            quantized_packed > 2 * exact_packed,
+            "{quantized_packed} quantized against {exact_packed} exact"
+        );
+    }
+
     #[test]
     fn replicated_system_ids_follow_the_name_not_the_schedule_position() {
         let build = |names: &[&str]| {
@@ -1718,22 +1850,6 @@ mod tests {
         );
         assert_eq!(server_a.rate_limited_message_count(), 0);
         assert_eq!(server_b.rate_limited_message_count(), 0);
-    }
-
-    // ── System ids ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn replicated_system_id_is_stable_and_name_specific() {
-        assert_eq!(
-            replicated_system_id("physics"),
-            replicated_system_id("physics")
-        );
-        assert_ne!(
-            replicated_system_id("physics"),
-            replicated_system_id("render")
-        );
-        // FNV-1a of the empty string is the offset basis.
-        assert_eq!(replicated_system_id(""), 0x811c_9dc5);
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────

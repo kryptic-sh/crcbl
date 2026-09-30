@@ -60,7 +60,10 @@ impl std::fmt::Debug for ResumeToken {
 /// Immutable identifiers which must agree before two peers exchange state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProtocolCompatibility {
-    /// Protocol version, incremented for breaking wire changes.
+    /// Protocol version, incremented for breaking wire changes — including the
+    /// engine's own replicated components, such as 6's quantized physics
+    /// transforms, which a build from before could not read and would simply
+    /// not show.
     pub protocol_version: u32,
     /// Engine and game build identifier supplied by the embedding application.
     pub engine_build_id: u64,
@@ -75,7 +78,7 @@ impl ProtocolCompatibility {
     /// embeddings must pass explicit, non-zero engine and schema identifiers to
     /// client and server constructors.
     pub const DEFAULT: Self = Self {
-        protocol_version: 5,
+        protocol_version: 6,
         engine_build_id: 0,
         schema_hash: 0,
     };
@@ -171,7 +174,7 @@ mod tests {
 
     #[test]
     fn protocol_compatibility_default_is_explicit() {
-        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 5);
+        assert_eq!(ProtocolCompatibility::DEFAULT.protocol_version, 6);
     }
 
     #[test]

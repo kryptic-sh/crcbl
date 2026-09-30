@@ -947,9 +947,11 @@ multi-sector subscription and entity migration, and the test matrix.
   is not newer than its baseline's; that is what stops a stale snapshot beating
   a fresh one today. Whoever adds sequencing to the channel keeps the check
   rather than replacing it.
-- **Compare "changed" in encoded space**, from P2 onward — the identity codec
-  until quantisation lands. Otherwise the encoder is rewritten when quantisation
-  arrives, and prediction's comparison breaks (topic 26).
+- **Compare "changed" in encoded space**, from P2 onward — the quantized form
+  where a component declares one (`crcbl_ecs::quantize`, physics transforms
+  since 2026-10-01), the identity codec for anything undeclared. Otherwise the
+  encoder is rewritten when quantisation arrives, and prediction's comparison
+  breaks (topic 26).
 - **Quantisation is a wire concern, not a sim concern.** The determinism hash
   uses unquantised server state.
 - **A steady-state snapshot fits one ~1200-byte datagram.** Only the reliable

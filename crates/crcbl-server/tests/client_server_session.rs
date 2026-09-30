@@ -667,6 +667,62 @@ fn physics_transforms_replicate_and_interpolate_end_to_end() {
     );
 }
 
+/// **The client converges to the server's quantized values** — exactly what
+/// the wire form decodes to, not the server's own state and not something in
+/// between. The positions are off the quantization grid and the rotation is
+/// arbitrary, so the rounding is real; the server's state is within the
+/// declared bounds of what the client holds.
+#[test]
+fn a_client_converges_to_the_servers_quantized_transforms() {
+    use crcbl_phys::{PhysicsSystem, Transform};
+
+    let mut world = World::new();
+    let mut phys = PhysicsSystem::new();
+    let entity = world.spawn();
+    phys.set_transform(entity, Transform::IDENTITY);
+    world.register_system(Box::new(phys));
+
+    let (server_transport, client_transport) = InMemoryTransport::pair();
+    let mut server = server(world, server_transport);
+    let mut client = client(World::new(), client_transport);
+    let tick_dt = std::time::Duration::from_nanos(16_666_667);
+
+    let mut last = Transform::IDENTITY;
+    for i in 1..=6u32 {
+        let f = f64::from(i);
+        last = Transform::new(
+            glam::DVec3::new(f * 1.234_567_89, -f * 0.987_654_3, 100.0 / 3.0),
+            crcbl_phys::rotation_from_scaled_axis(glam::DVec3::new(0.3, f * 0.2, -0.7)),
+        );
+        server
+            .world_mut()
+            .schedule_mut()
+            .iter_mut()
+            .find_map(|s| s.as_any_mut().downcast_mut::<PhysicsSystem>())
+            .expect("physics system registered")
+            .set_transform(entity, last);
+        server.update(tick_dt * i);
+        client.update(tick_dt * i);
+    }
+    // One more round so the last snapshot is the newest the client holds.
+    server.update(tick_dt * 7);
+    client.update(tick_dt * 7);
+    assert_eq!(client.processing_error_count(), 0);
+
+    let mut wire = Vec::new();
+    last.encode_wire(&mut wire);
+    assert_eq!(wire.len(), Transform::QUANTIZED_LEN);
+    let quantized = Transform::decode_wire(&wire).expect("the wire form decodes");
+
+    let held = client.interpolate(1.0).transforms;
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0].0, entity.to_bits());
+    assert_eq!(held[0].1, quantized, "the client holds the quantized value");
+    assert_ne!(held[0].1, last, "and the rounding was real");
+    let half = Transform::WIRE_POSITION.quantum() / 2.0;
+    assert!((held[0].1.position - last.position).abs().max_element() <= half);
+}
+
 #[test]
 fn server_answers_a_token_less_hello_on_the_connected_link_with_the_session() {
     let (server_transport, mut peer) = InMemoryTransport::pair();

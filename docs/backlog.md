@@ -13173,8 +13173,8 @@ reliable-ordered, where one loss head-of-line blocks them into a stale burst.
 
 ### Quantization, the priority/budget encoder, and the one-datagram rule (2026-08-27)
 
-**The budget and priority accumulator are built (2026-10-01); quantization, the
-rate drop, relevance and the predicted-component exemption are not.**
+**The budget, the priority accumulator and quantization are built (2026-10-01);
+the rate drop, relevance and the predicted-component exemption are not.**
 
 **Built:** `crcbl_net::budget`. `crcbl_server`'s `PeerSession::send_snapshot`
 diffs against the acked baseline, then `PriorityAccumulator::fit` (one per
@@ -13191,18 +13191,53 @@ byte-identical output, ties, relevance, fitted join keyframe, the refusal) and
 `host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`,
 each shown red by a mutation.
 
+**Built: quantization,** `crcbl_ecs::quantize` — in the ECS beside
+`SystemTrait::replicate` and `ComponentHash`, because physics declares a schema
+and must not depend on `crcbl-net` and its cryptography. A component implements
+`Quantized` (a constant schema of `Field`s, each an `Exact`, `Fixed`, `Half` or
+`Rotation` codec); fields bit-pack with no alignment and the decoder refuses a
+wrong length, a set padding bit or a code never written. Out of range is refused
+(`QuantizeError::Unrepresentable`), never clamped. `PhysicsSystem::replicate`
+writes `Transform::encode_wire`: 16 bytes (24-bit fixed point per axis over
+`±Transform::WIRE_POSITION_EXTENT`, smallest-three at
+`Transform::WIRE_ROTATION_BITS`), or the 56-byte exact form for a body outside
+the range, told apart by length. Because it quantizes inside `replicate`, the
+server's byte comparison sees a sub-quantum move as no change; `hash_state`
+still reads unquantized transforms, so the determinism hashes did not move. The
+client reads transforms only from the physics system's entries (by
+`replicated_system_id(PhysicsSystem::NAME)`, now in `crcbl-net`), since any 16
+bytes decode. `ProtocolCompatibility::DEFAULT` went to version 6 for the wire
+change. Measured by
+`crcbl_server::tests::quantized_transforms_shrink_a_snapshot_and_fit_more_entities_a_datagram`
+on 200 transforms: 13661 bytes exact against 5661 quantized (2.41×), and a
+1133-byte UDP budget holds 38 quantized transforms against 15 exact. Tests, each
+shown red by a mutation: `crcbl_ecs::quantize::tests` (binary16 against known
+patterns and all 65 536 round trips, fixed-point edges and half-quantum round
+trips, smallest-three's largest-component choice, `q ≡ -q`, bound and ties, the
+exact schema's identity bytes, refusals), `crcbl_phys` (`components::tests` wire
+round trip and fallback, `system::tests` sub-quantum bytes and the hash over
+unquantized state), the server's sub-quantum delta, the client's physics-only
+read, and `client_server_session`'s convergence to the quantized value.
+
 **Left, and what each would take:**
 
-- **Quantization** (the next slice). Per component type, schema-declared and
-  applied at snapshot encode — positions as sector-local fixed point (sectors
-  bound the range, so 16–24 bits per axis), quaternions smallest-three,
-  velocities half-float. It composes with the budget without changing it: `fit`
-  measures encoded bytes (`encoded_delta_len`), so a quantized component is
-  simply a shorter entry and more fit a datagram. It has to quantize before the
-  diff, since "changed" is compared in encoded space (the notes' rule), or a
-  sub-quantum wobble ships as a change every tick and holds real updates back.
-  `System::replicate` writes the bytes today, so the schema hook goes there or
-  between it and `current_baseline`.
+- **Sector-local positions are world positions today.** Every snapshot is
+  `SectorId::ZERO` and physics never rebases, so the quantized range is centred
+  on the world origin and bounded by the scenes that replicate, not by
+  `crcbl_core::SECTOR_SIZE`. Once sectors are populated and positions rebased to
+  `WorldPos`'s `[0, SECTOR_SIZE)`, 24 bits over a whole sector is a sixteenth of
+  a metre per step: either the range stays a sub-region around what a client
+  watches (needing an origin on the wire), or the bit count grows. The exact
+  fallback keeps any position correct meanwhile, at 56 bytes. Not decided.
+- **Nothing uses `Codec::Half` yet.** Velocities are not replicated (replication
+  carries transforms only), so the half-float codec is tested and unused until a
+  component declares one.
+- **Prediction must compare in the same encoded space.** When a predicted
+  component lands, reconciliation compares the server's quantized value, not its
+  own unquantized one, or every correction looks like a misprediction of up to
+  half a quantum. Nothing predicts yet.
+- **The fuzz target decodes the new surface** (`Transform::decode_wire` and a
+  schema of every codec), but the corpus has no named seed for either.
 - **The rate drop (30, then 20 Hz under sustained over-budget)** is not built
   because nothing has a per-session cadence to hook: `Host::emit_snapshots` and
   `Server::emit_snapshot` send every peer a snapshot every tick. It needs a
@@ -13247,8 +13282,8 @@ each shown red by a mutation.
   the send, so a snapshot the transport then refuses costs its packed updates
   their accumulated priority. They are pending still and ship later; only the
   order suffers.
-- **Delta granularity** starts whole-component-on-change and moves to per-field
-  masks only when towers' numbers justify it.
+- **Delta granularity** is whole-component-on-change, now over the quantized
+  form, and moves to per-field masks only when towers' numbers justify it.
 
 **Hard contract, now enforced:** a steady-state snapshot fits a single
 ~1200-byte datagram, because only the reliable channel fragments. Exceeding it

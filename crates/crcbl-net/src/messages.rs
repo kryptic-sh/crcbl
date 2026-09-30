@@ -51,6 +51,25 @@ pub struct SystemSnapshot {
     pub data: Vec<u8>,
 }
 
+/// The replicated id for a system, derived from its name.
+///
+/// Derived from the name rather than the schedule position, because the
+/// position changes whenever a system is registered or removed and the client
+/// would then apply one system's blobs into another's baseline without any
+/// error. FNV-1a: short, stable across builds and platforms, and adequate for
+/// an identifier space the server also checks for collisions.
+#[must_use]
+pub fn replicated_system_id(name: &str) -> u32 {
+    const OFFSET_BASIS: u32 = 0x811c_9dc5;
+    const PRIME: u32 = 0x0100_0193;
+    let mut hash = OFFSET_BASIS;
+    for byte in name.as_bytes() {
+        hash ^= u32::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
+}
+
 // ── Session end ───────────────────────────────────────────────────────────────
 
 /// Why a server ended a session.
@@ -198,6 +217,20 @@ impl<'a> std::fmt::Debug for SnapshotReader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replicated_system_id_is_stable_and_name_specific() {
+        assert_eq!(
+            replicated_system_id("physics"),
+            replicated_system_id("physics")
+        );
+        assert_ne!(
+            replicated_system_id("physics"),
+            replicated_system_id("render")
+        );
+        // FNV-1a of the empty string is the offset basis.
+        assert_eq!(replicated_system_id(""), 0x811c_9dc5);
+    }
 
     #[test]
     fn snapshot_writer_reader_roundtrip() {

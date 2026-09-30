@@ -417,6 +417,10 @@ fn entity_for_in(collider_to_entity: &[Option<Entity>], id: ColliderId) -> Optio
 }
 
 impl PhysicsSystem {
+    /// The system's name, and so the key its replicated transforms travel
+    /// under: a client finds them by this name's replicated id.
+    pub const NAME: &'static str = "physics";
+
     /// Create an empty physics system.
     ///
     /// Integration is [`SemiImplicitEuler`]; see [`PhysicsSystem::step`].
@@ -1679,7 +1683,7 @@ impl std::fmt::Debug for PhysicsSystem {
 
 impl SystemTrait for PhysicsSystem {
     fn name(&self) -> &str {
-        "physics"
+        Self::NAME
     }
 
     fn tick(&mut self, dt: f64) {
@@ -1810,9 +1814,11 @@ impl SystemTrait for PhysicsSystem {
     }
 
     fn replicate(&self, out: &mut Vec<u8>) -> bool {
-        // Per-entity Transform: position (3 × f64 LE) then rotation
-        // quaternion (4 × f64 LE, x/y/z/w). Entities are sorted by bits so
-        // the wire encoding is deterministic across runs and platforms.
+        // Per-entity Transform in its wire form (`Transform::encode_wire`):
+        // quantized, so the server's byte comparison sees a sub-quantum
+        // change as no change at all. `hash_state` reads the unquantized
+        // transforms, never these bytes. Entities are sorted by bits so the
+        // wire encoding is deterministic across runs and platforms.
         let mut entries: Vec<(u64, &Transform)> = self
             .records
             .iter()
@@ -1826,10 +1832,13 @@ impl SystemTrait for PhysicsSystem {
             })
             .collect();
         entries.sort_unstable_by_key(|(bits, _)| *bits);
+        let mut component = Vec::with_capacity(Transform::ENCODED_LEN);
         for (bits, transform) in &entries {
+            component.clear();
+            transform.encode_wire(&mut component);
             out.extend_from_slice(&bits.to_le_bytes());
-            out.extend_from_slice(&(transform.encoded_len() as u32).to_le_bytes());
-            transform.encode(out);
+            out.extend_from_slice(&(component.len() as u32).to_le_bytes());
+            out.extend_from_slice(&component);
         }
         !entries.is_empty()
     }
@@ -2168,6 +2177,28 @@ mod tests {
         });
     }
 
+    /// Split a replicated blob into `(entity bits, component bytes)`.
+    fn replicated_entries(out: &[u8]) -> Vec<(u64, Vec<u8>)> {
+        let mut cursor = 0usize;
+        let mut entries = Vec::new();
+        while cursor < out.len() {
+            let bits = u64::from_le_bytes(out[cursor..cursor + 8].try_into().unwrap());
+            cursor += 8;
+            let len = u32::from_le_bytes(out[cursor..cursor + 4].try_into().unwrap()) as usize;
+            cursor += 4;
+            entries.push((bits, out[cursor..cursor + len].to_vec()));
+            cursor += len;
+        }
+        entries
+    }
+
+    /// What `phys` replicates.
+    fn replicated(phys: &PhysicsSystem) -> Vec<u8> {
+        let mut out = Vec::new();
+        SystemTrait::replicate(phys, &mut out);
+        out
+    }
+
     #[test]
     fn replicate_encodes_sorted_transform_blobs() {
         let mut phys = PhysicsSystem::new();
@@ -2186,21 +2217,20 @@ mod tests {
         let mut out = Vec::new();
         assert!(SystemTrait::replicate(&phys, &mut out));
 
-        let entity_len = 8 + 4 + Transform::IDENTITY.encoded_len();
-        assert_eq!(out.len(), 2 * entity_len);
+        let entity_len = 8 + 4 + Transform::QUANTIZED_LEN;
+        assert_eq!(
+            out.len(),
+            2 * entity_len,
+            "both inside the range: quantized"
+        );
 
-        let mut cursor = 0usize;
-        let mut decoded = Vec::new();
-        while cursor < out.len() {
-            let bits = u64::from_le_bytes(out[cursor..cursor + 8].try_into().unwrap());
-            cursor += 8;
-            let len = u32::from_le_bytes(out[cursor..cursor + 4].try_into().unwrap()) as usize;
-            cursor += 4;
-            decoded.push((bits, Transform::decode(&out[cursor..cursor + len]).unwrap()));
-            cursor += len;
-        }
+        let decoded: Vec<_> = replicated_entries(&out)
+            .into_iter()
+            .map(|(bits, data)| (bits, Transform::decode_wire(&data).unwrap()))
+            .collect();
         assert_eq!(decoded[0].0, e2.to_bits(), "sorted by entity bits");
         assert_eq!(decoded[1].0, e1.to_bits());
+        // Both positions are on the quantization grid, so they are exact.
         assert_eq!(decoded[0].1.position, DVec3::new(-4.0, 0.5, 8.0));
         assert_eq!(decoded[1].1.position, DVec3::new(1.0, 2.0, 3.0));
 
@@ -2209,6 +2239,60 @@ mod tests {
         let mut out = Vec::new();
         assert!(!SystemTrait::replicate(&empty, &mut out));
         assert!(out.is_empty());
+    }
+
+    /// **A change smaller than the quantum replicates nothing; a larger one
+    /// does.** The server compares these bytes against the client's baseline,
+    /// so identical bytes are what "no update" means on the wire.
+    #[test]
+    fn a_sub_quantum_move_replicates_the_same_bytes_and_a_larger_one_does_not() {
+        let q = Transform::WIRE_POSITION.quantum();
+        let entity = test_entity(1);
+        let at = |x: f64| {
+            let mut phys = PhysicsSystem::new();
+            phys.set_transform(
+                entity,
+                Transform::new(
+                    DVec3::new(x, 1.0, -2.0),
+                    crate::rotation_from_scaled_axis(DVec3::Y * 0.3),
+                ),
+            );
+            phys
+        };
+        let still = replicated(&at(10.0));
+        assert_eq!(replicated(&at(10.0 + q / 4.0)), still, "a quarter quantum");
+        assert_eq!(replicated(&at(10.0 - q / 4.0)), still);
+        assert_ne!(replicated(&at(10.0 + q)), still, "a whole quantum");
+    }
+
+    /// **The determinism hash is over the unquantized state.** Two systems
+    /// whose replicated bytes are identical, because they differ by less than a
+    /// quantum, must still hash differently: the hash is how a desync is
+    /// caught, and the wire's rounding must not hide one.
+    #[test]
+    fn the_determinism_hash_sees_what_quantization_rounds_away() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::Hasher;
+
+        let q = Transform::WIRE_POSITION.quantum();
+        let entity = test_entity(1);
+        let at = |x: f64| {
+            let mut phys = PhysicsSystem::new();
+            phys.set_transform(entity, Transform::from_position(DVec3::new(x, 0.0, 0.0)));
+            phys
+        };
+        let (a, b) = (at(3.0), at(3.0 + q / 8.0));
+        assert_eq!(
+            replicated(&a),
+            replicated(&b),
+            "the wire cannot tell them apart"
+        );
+        let hash = |phys: &PhysicsSystem| {
+            let mut hasher = DefaultHasher::new();
+            SystemTrait::hash_state(phys, &mut hasher);
+            hasher.finish()
+        };
+        assert_ne!(hash(&a), hash(&b), "the hash can");
     }
 
     #[test]

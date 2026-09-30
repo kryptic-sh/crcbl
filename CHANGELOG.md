@@ -16,6 +16,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **Physics transforms replicate quantized, and the protocol version is 6**
+  (`ProtocolCompatibility::DEFAULT`). `PhysicsSystem::replicate` writes each
+  transform as `Transform::encode_wire`: 16 bytes — each position axis as 24-bit
+  fixed point over ±4096 m (a 2⁻¹¹ m step), the rotation as smallest-three at 18
+  bits a component — where it used to write the 56-byte exact form, which it
+  still writes for a body outside that range. A build from before cannot read
+  the new form and would show no entities, hence the version bump.
+  `crcbl_client::Client` now reads transforms only from the entries of the
+  system named `PhysicsSystem::NAME` (by its `replicated_system_id`), since any
+  16 bytes decode as a quantized transform; a test or tool that fed it
+  transforms under another system id must use that one.
+
 - **`crcbl_shaders::mesh::GpuMaterial` has two more fields and a wider row**:
   `specular_f0: [f32; 3]` and `specular_f90: f32`, glTF's dielectric reflectance
   (see Added). A struct literal that does not spread `..GpuMaterial::UNTINTED`
@@ -419,6 +431,28 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **`crcbl_ecs::quantize`: schema-declared quantization for replicated
+  components.** A component implements `Quantized` — a constant `SCHEMA` of
+  named `Field`s, each with a `Codec`: `Exact` (the identity, eight bytes
+  little-endian), `Fixed` (fixed point over a declared half-open range and bit
+  count, within half a quantum), `Half` (IEEE 754-2008 binary16 via
+  `to_binary16`/`from_binary16`, rounded to nearest-even) or `Rotation` (a
+  `SmallestThree` quaternion). `encode`/`decode` and the slice-level
+  `encode_values`/`decode_values` bit-pack fields with no alignment; a value no
+  code can carry within its bound is refused with
+  `QuantizeError::Unrepresentable`, never clamped, and a payload of the wrong
+  length, with a padding bit set or with a code never written is refused on
+  decode. Quantizing in `SystemTrait::replicate` happens before the server's
+  byte comparison, so a change under a field's quantum ships nothing; the
+  determinism hash still reads unquantized state. Measured on 200 transforms, a
+  keyframe is 2.41× smaller and a UDP datagram's budget holds 38 transforms
+  instead of 15.
+
+- **`crcbl_phys::Transform::encode_wire`/`decode_wire`** and the schema behind
+  them (`WIRE_SCHEMA`, `WIRE_POSITION`, `WIRE_ROTATION`, `QUANTIZED_LEN`), plus
+  `PhysicsSystem::NAME`. **`crcbl_net::replicated_system_id`**, moved from
+  `crcbl-server` (which re-exports it) so a client can find a system's entries.
 
 - **The editor has a status line** under its panes. It reads "Ready" until
   something happens, then shows the last refusal (a save with nowhere to go, a

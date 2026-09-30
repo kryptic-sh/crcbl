@@ -118,6 +118,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "crcbl-ecs"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+]
+
+[[package]]
 name = "crcbl-net"
 version = "0.1.0"
 dependencies = [
@@ -134,8 +141,19 @@ dependencies = [
 name = "crcbl-net-fuzz"
 version = "0.0.0"
 dependencies = [
+ "crcbl-ecs",
  "crcbl-net",
+ "crcbl-phys",
  "libfuzzer-sys",
+]
+
+[[package]]
+name = "crcbl-phys"
+version = "0.1.0"
+dependencies = [
+ "crcbl-core",
+ "crcbl-ecs",
+ "glam",
 ]
 
 [[package]]

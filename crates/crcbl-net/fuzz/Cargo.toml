@@ -15,6 +15,15 @@ libfuzzer-sys = "0.4"
 [dependencies.crcbl-net]
 path = ".."
 
+# The replicated components a client decodes out of a snapshot's entity blobs:
+# `crcbl_phys::Transform::decode_wire` and the quantization schema under it,
+# which read bytes a peer chose once the snapshot's MAC has verified.
+[dependencies.crcbl-ecs]
+path = "../../crcbl-ecs"
+
+[dependencies.crcbl-phys]
+path = "../../crcbl-phys"
+
 [[bin]]
 name = "decoder"
 path = "fuzz_targets/decoder.rs"

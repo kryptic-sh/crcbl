@@ -20,9 +20,9 @@ use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Hello, Message, MessageKind, ProtocolCompatibility,
     RejectReason, ResumeToken, SectorId, SessionEndReason, SessionId, Transport, TransportError,
-    Trust,
+    Trust, replicated_system_id,
 };
-use crcbl_phys::Transform;
+use crcbl_phys::{PhysicsSystem, Transform};
 
 /// How long the client waits for a handshake reply before assuming the hello
 /// (or its answer) was lost and trying again.
@@ -61,13 +61,19 @@ struct Frame {
 
 /// Read the transforms out of a reconstructed baseline.
 ///
-/// Entries whose payload is not a valid [`Transform`] encoding (e.g. the
-/// 4-byte synthetic count emitted for non-replicated systems) are skipped.
+/// Only the physics system's entries are transforms — found by
+/// [`PhysicsSystem::NAME`]'s replicated id — and each is read in either form
+/// [`Transform::encode_wire`] writes. Any 16 bytes decode as a quantized
+/// transform, so without the system filter another system's component of that
+/// length would appear as an entity somewhere in the world. An entry that
+/// does not decode is skipped.
 fn frame_from_baseline(baseline: &Baseline) -> Frame {
+    let physics = replicated_system_id(PhysicsSystem::NAME);
     let transforms = baseline
         .iter_entities()
+        .filter(|&(system_id, _, _)| system_id == physics)
         .filter_map(|(_, entity_bits, data)| {
-            Transform::decode(data).map(|transform| (entity_bits, transform))
+            Transform::decode_wire(data).map(|transform| (entity_bits, transform))
         })
         .collect();
     Frame {
@@ -1042,11 +1048,17 @@ mod tests {
         crcbl_net::encode_delta(&delta).expect("valid delta")
     }
 
+    /// The replicated id transforms travel under.
+    fn physics() -> u32 {
+        replicated_system_id(PhysicsSystem::NAME)
+    }
+
+    /// Transforms at `x` along the X axis, in the quantized wire form.
     fn transform_blob(entities: &[(u64, f64)]) -> Vec<u8> {
         let mut blob = Vec::new();
         for &(bits, x) in entities {
             let mut data = Vec::new();
-            Transform::from_position(glam::DVec3::new(x, 0.0, 0.0)).encode(&mut data);
+            Transform::from_position(glam::DVec3::new(x, 0.0, 0.0)).encode_wire(&mut data);
             crcbl_net::encode_entity_entry(&mut blob, bits, &data);
         }
         blob
@@ -1914,7 +1926,7 @@ mod tests {
             send_sealed(
                 &mut peer,
                 &mut crypto,
-                &keyframe_snapshot(tick, &[(0, blob)]),
+                &keyframe_snapshot(tick, &[(physics(), blob)]),
             );
             client.update(Duration::from_nanos(tick));
         }
@@ -1945,13 +1957,13 @@ mod tests {
         send_sealed(
             &mut peer,
             &mut crypto,
-            &keyframe_snapshot(1, &[(0, transform_blob(&[(gone, 5.0)]))]),
+            &keyframe_snapshot(1, &[(physics(), transform_blob(&[(gone, 5.0)]))]),
         );
         client.update(Duration::ZERO);
         send_sealed(
             &mut peer,
             &mut crypto,
-            &keyframe_snapshot(2, &[(0, transform_blob(&[(appeared, 7.0)]))]),
+            &keyframe_snapshot(2, &[(physics(), transform_blob(&[(appeared, 7.0)]))]),
         );
         client.update(Duration::from_nanos(1));
 
@@ -1961,6 +1973,40 @@ mod tests {
         assert!((state.transforms[0].1.position.x - 5.0).abs() < 1e-9);
         assert_eq!(state.transforms[1].0, appeared);
         assert!((state.transforms[1].1.position.x - 7.0).abs() < 1e-9);
+    }
+
+    /// **Only the physics system's entries are transforms.** Any sixteen
+    /// bytes decode as a quantized transform, so a component of that length in
+    /// another system — or a real transform filed under another id — must not
+    /// become an entity on screen.
+    #[test]
+    fn transforms_are_read_from_the_physics_system_alone() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        let entity = (1u64 << 32) | 3;
+        let mut lookalike = Vec::new();
+        crcbl_net::encode_entity_entry(&mut lookalike, (1u64 << 32) | 4, &[0x5A; 16]);
+        send_sealed(
+            &mut peer,
+            &mut crypto,
+            &keyframe_snapshot(
+                1,
+                &[
+                    (physics(), transform_blob(&[(entity, 2.0)])),
+                    (physics() ^ 1, transform_blob(&[((1u64 << 32) | 5, 9.0)])),
+                    (physics() ^ 2, lookalike),
+                ],
+            ),
+        );
+        client.update(Duration::ZERO);
+
+        let state = client.interpolate(1.0);
+        assert_eq!(client.baseline_entity_count(), 3, "all three arrived");
+        assert_eq!(state.transforms.len(), 1, "{:?}", state.transforms);
+        assert_eq!(state.transforms[0].0, entity);
+        assert_eq!(state.transforms[0].1.position.x, 2.0);
     }
 
     // ── A link still coming up ─────────────────────────────────────────────

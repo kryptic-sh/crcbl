@@ -10,6 +10,9 @@
 //! * **Schedule** — an ordered sequence of systems run each tick.
 //! * **World** — the container: entity pool, schedule, deferred-destruction
 //!   queue. `World::tick()` runs the schedule then sweeps dead entities.
+//! * **[`quantize`]** — how a replicated component declares its wire form:
+//!   fixed point, half float and smallest-three rotations, applied in
+//!   [`SystemTrait::replicate`] before the server compares anything.
 //!
 //! # Example
 //!
@@ -46,6 +49,7 @@ mod component_hash;
 mod entity;
 mod game_module;
 mod inspector;
+pub mod quantize;
 mod schedule;
 mod system;
 mod world;

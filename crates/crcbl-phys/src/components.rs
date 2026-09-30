@@ -4,6 +4,7 @@
 //! [`crcbl_ecs::System<T>`] arrays. They carry no storage or scheduling logic —
 //! that belongs to the physics system (see [`crate::system`]).
 
+use crcbl_ecs::quantize::{self, Codec, Field, Fixed, Quantized, SmallestThree};
 use glam::{DMat3, DQuat, DVec3};
 
 use crate::compound_shape::CompoundShape;
@@ -288,6 +289,65 @@ impl Transform {
     /// from Euler angles; far too tight to admit a degenerate or zero one.
     const ROTATION_TOLERANCE: f64 = 1e-6;
 
+    /// Half the width of the range a replicated position axis is quantized
+    /// over, in metres, centred on the sector's origin.
+    ///
+    /// Wire positions are sector-local, and today every snapshot is
+    /// `crcbl_net::SectorId::ZERO` with physics never rebasing, so sector-local
+    /// is world space. The range is bounded by the scenes that replicate, not
+    /// by `crcbl_core::SECTOR_SIZE`: a whole sector at
+    /// [`Self::WIRE_POSITION_BITS`] would be a sixteenth of a metre per step,
+    /// too coarse to watch a crate settle. A body outside it replicates
+    /// exactly (see [`Self::encode_wire`]).
+    pub const WIRE_POSITION_EXTENT: f64 = 4096.0;
+
+    /// Bits per replicated position axis.
+    pub const WIRE_POSITION_BITS: u32 = 24;
+
+    /// A replicated position axis: [`Self::WIRE_POSITION_BITS`] of fixed point
+    /// over `±`[`Self::WIRE_POSITION_EXTENT`]. The width is a power of two, so
+    /// the quantum is too (asserted in the tests) and a position on that grid
+    /// replicates exactly.
+    pub const WIRE_POSITION: Fixed = Fixed::new(
+        -Self::WIRE_POSITION_EXTENT,
+        Self::WIRE_POSITION_EXTENT,
+        Self::WIRE_POSITION_BITS,
+    );
+
+    /// Bits per sent component of a replicated rotation. With the index bits
+    /// and the three position axes it fills [`Self::QUANTIZED_LEN`] with no
+    /// padding (asserted below the impl), so the precision costs nothing the
+    /// payload's last byte was not already spending.
+    pub const WIRE_ROTATION_BITS: u32 = 18;
+
+    /// A replicated rotation: smallest-three at [`Self::WIRE_ROTATION_BITS`].
+    pub const WIRE_ROTATION: SmallestThree = SmallestThree::new(Self::WIRE_ROTATION_BITS);
+
+    /// The quantized replication schema: each position axis as
+    /// [`Self::WIRE_POSITION`] fixed point, the rotation as
+    /// [`Self::WIRE_ROTATION`].
+    pub const WIRE_SCHEMA: &'static [Field] = &[
+        Field {
+            name: "position.x",
+            codec: Codec::Fixed(Self::WIRE_POSITION),
+        },
+        Field {
+            name: "position.y",
+            codec: Codec::Fixed(Self::WIRE_POSITION),
+        },
+        Field {
+            name: "position.z",
+            codec: Codec::Fixed(Self::WIRE_POSITION),
+        },
+        Field {
+            name: "rotation",
+            codec: Codec::Rotation(Self::WIRE_ROTATION),
+        },
+    ];
+
+    /// Byte length of the quantized form [`Self::encode_wire`] writes.
+    pub const QUANTIZED_LEN: usize = quantize::encoded_len(Self::WIRE_SCHEMA);
+
     /// Byte length of the replication encoding written by [`Self::encode`].
     ///
     /// Always [`Self::ENCODED_LEN`] — the encoding is fixed-width, so this
@@ -335,20 +395,55 @@ impl Transform {
         for (i, value) in values.iter_mut().enumerate() {
             let bytes: [u8; 8] = data[i * 8..(i + 1) * 8].try_into().ok()?;
             *value = f64::from_le_bytes(bytes);
-            if !value.is_finite() {
-                return None;
-            }
         }
+        Self::from_parts(&values)
+    }
 
+    /// A transform from position then rotation `x, y, z, w`, or `None` if any
+    /// is not finite or the rotation is not (near enough) a unit quaternion.
+    fn from_parts(values: &[f64; 7]) -> Option<Self> {
+        if values.iter().any(|value| !value.is_finite()) {
+            return None;
+        }
         let rotation = DQuat::from_xyzw(values[3], values[4], values[5], values[6]);
         if (rotation.length_squared() - 1.0).abs() > Self::ROTATION_TOLERANCE {
             return None;
         }
-
         Some(Self {
             position: DVec3::new(values[0], values[1], values[2]),
             rotation,
         })
+    }
+
+    /// Append the replicated form to `out`: [`Self::WIRE_SCHEMA`]'s
+    /// [`Self::QUANTIZED_LEN`] bytes when the position is inside
+    /// [`Self::WIRE_POSITION`], otherwise the exact [`Self::encode`] form.
+    ///
+    /// The fallback is what keeps an entity outside the declared range where
+    /// it is: clamping it to the range's edge would move it on every client
+    /// and say nothing. The two lengths differ, which is how
+    /// [`Self::decode_wire`] tells them apart.
+    pub fn encode_wire(&self, out: &mut Vec<u8>) {
+        // A refusal writes nothing, so the exact form lands in its place.
+        if quantize::encode(self, out).is_err() {
+            self.encode(out);
+        }
+    }
+
+    /// Decode either form [`Self::encode_wire`] writes, telling them apart by
+    /// length.
+    ///
+    /// Returns `None` for any other length, and for what [`Self::decode`]
+    /// refuses. A quantized payload always holds a unit quaternion and a
+    /// finite position; one with a padding bit or a code the encoder never
+    /// writes is refused.
+    #[must_use]
+    pub fn decode_wire(data: &[u8]) -> Option<Self> {
+        match data.len() {
+            Self::QUANTIZED_LEN => quantize::decode(data).ok(),
+            Self::ENCODED_LEN => Self::decode(data),
+            _ => None,
+        }
     }
 
     /// Linearly interpolate between `self` and `other` at `alpha ∈ [0, 1]`.
@@ -364,6 +459,37 @@ impl Transform {
         }
     }
 }
+
+/// The quantized wire form [`Transform::encode_wire`] prefers.
+impl Quantized for Transform {
+    const SCHEMA: &'static [Field] = Self::WIRE_SCHEMA;
+    type Values = [f64; 7];
+
+    fn to_values(&self) -> [f64; 7] {
+        [
+            self.position.x,
+            self.position.y,
+            self.position.z,
+            self.rotation.x,
+            self.rotation.y,
+            self.rotation.z,
+            self.rotation.w,
+        ]
+    }
+
+    fn from_values(values: &[f64; 7]) -> Option<Self> {
+        Self::from_parts(values)
+    }
+}
+
+// The quantized form must not be mistaken for the exact one, and the schema
+// must consume exactly the seven values `to_values` supplies.
+const _: () = assert!(Transform::QUANTIZED_LEN != Transform::ENCODED_LEN);
+const _: () = assert!(quantize::value_count(Transform::WIRE_SCHEMA) == 7);
+const _: () = assert!(
+    3 * Transform::WIRE_POSITION_BITS + Transform::WIRE_ROTATION.encoded_bits()
+        == 8 * Transform::QUANTIZED_LEN as u32
+);
 
 impl Default for Transform {
     fn default() -> Self {
@@ -617,6 +743,113 @@ mod tests {
         assert_eq!(t.forward(), DVec3::NEG_Z);
         assert_eq!(t.right(), DVec3::X);
         assert_eq!(t.up(), DVec3::Y);
+    }
+
+    /// **The exact form is unchanged**: seven `f64`s, little-endian, position
+    /// then rotation `x, y, z, w` — what every replicated transform was before
+    /// quantization, and what one outside the quantized range still is.
+    #[test]
+    fn the_exact_encoding_is_the_seven_values_little_endian() {
+        let t = Transform::new(
+            DVec3::new(1.25, -2.5, 1e6),
+            crate::rotation_from_scaled_axis(DVec3::X * 0.5),
+        );
+        let mut buf = Vec::new();
+        t.encode(&mut buf);
+        let raw: Vec<u8> = [
+            t.position.x,
+            t.position.y,
+            t.position.z,
+            t.rotation.x,
+            t.rotation.y,
+            t.rotation.z,
+            t.rotation.w,
+        ]
+        .iter()
+        .flat_map(|v| v.to_le_bytes())
+        .collect();
+        assert_eq!(buf, raw);
+    }
+
+    #[test]
+    fn the_wire_position_quantum_is_a_power_of_two() {
+        assert_eq!(Transform::WIRE_POSITION.quantum(), 1.0 / 2048.0);
+        assert_eq!(Transform::QUANTIZED_LEN, 16);
+    }
+
+    /// A transform drawn from `i`: a position anywhere inside the quantized
+    /// range and an arbitrary rotation.
+    fn drawn(i: u64) -> Transform {
+        use crcbl_core::rand::hash_unit;
+        let extent = Transform::WIRE_POSITION_EXTENT;
+        let unit = |k: u64| hash_unit(0x7157, 8 * i + k) * 2.0 - 1.0;
+        let axis = DVec3::new(unit(3), unit(4), unit(5));
+        Transform::new(
+            DVec3::new(unit(0), unit(1), unit(2)) * extent * (1.0 - 1e-9),
+            crate::rotation_from_scaled_axis(axis * std::f64::consts::PI),
+        )
+    }
+
+    /// **A quantized transform decodes within its bounds**: half a quantum per
+    /// position axis, and the rotation within smallest-three's four half-quanta
+    /// per component (derived beside `crcbl_ecs::quantize`'s own test), after
+    /// lining `q` and `-q` up.
+    #[test]
+    fn a_quantized_transform_round_trips_within_its_bounds() {
+        let half = Transform::WIRE_POSITION.quantum() / 2.0;
+        let rotation_bound = 2.0 * Transform::WIRE_ROTATION.quantum();
+        for i in 0..5_000 {
+            let t = drawn(i);
+            let mut buf = Vec::new();
+            t.encode_wire(&mut buf);
+            assert_eq!(buf.len(), Transform::QUANTIZED_LEN, "{t:?} is in range");
+            let back = Transform::decode_wire(&buf).expect("a quantized payload decodes");
+            assert!((back.position - t.position).abs().max_element() <= half);
+            let aligned = if back.rotation.dot(t.rotation) < 0.0 {
+                -back.rotation
+            } else {
+                back.rotation
+            };
+            let error = (aligned - t.rotation).to_array();
+            assert!(
+                error.iter().all(|e| e.abs() <= rotation_bound),
+                "{error:?} past {rotation_bound:e}"
+            );
+        }
+        // The range's own edges: its bottom corner and its last code.
+        let top = Transform::WIRE_POSITION_EXTENT - Transform::WIRE_POSITION.quantum();
+        for corner in [
+            DVec3::splat(-Transform::WIRE_POSITION_EXTENT),
+            DVec3::splat(top),
+        ] {
+            let mut buf = Vec::new();
+            Transform::from_position(corner).encode_wire(&mut buf);
+            assert_eq!(buf.len(), Transform::QUANTIZED_LEN);
+            assert_eq!(Transform::decode_wire(&buf).unwrap().position, corner);
+        }
+    }
+
+    /// **Outside the quantized range a transform replicates exactly**, rather
+    /// than being clamped to the edge, and the decoder reads that form too.
+    #[test]
+    fn a_transform_outside_the_range_falls_back_to_the_exact_form() {
+        let far = Transform::new(
+            DVec3::new(Transform::WIRE_POSITION_EXTENT, -3.0, 0.125),
+            crate::rotation_from_scaled_axis(DVec3::Z * 1.1),
+        );
+        let mut buf = Vec::new();
+        far.encode_wire(&mut buf);
+        assert_eq!(buf.len(), Transform::ENCODED_LEN);
+        assert_eq!(Transform::decode_wire(&buf), Some(far), "bit for bit");
+
+        for len in [
+            0,
+            4,
+            Transform::QUANTIZED_LEN - 1,
+            Transform::QUANTIZED_LEN + 1,
+        ] {
+            assert_eq!(Transform::decode_wire(&vec![0; len]), None, "{len} bytes");
+        }
     }
 
     #[test]
