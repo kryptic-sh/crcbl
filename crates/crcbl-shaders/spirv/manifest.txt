@@ -318,12 +318,12 @@ entry-points = computeMain:glcompute
 
 [mesh]
 source = shaders/mesh.slang
-source-sha256 = 23a253f43a64c64e4d32b1fcadc48e85a2c2251566cc1a30c8de09055577462a
+source-sha256 = 738baf5d40aefb321643e7d514f62d7543755f89430a603db7d724562a475d82
 targets = spirv, wgsl, msl, dxil
 spirv = spirv/mesh.spv
-spirv-sha256 = 870423a4a923c9353357354642d8f24eb3fa60ef0006e16ebc3bbad35c0111aa
+spirv-sha256 = b3e910675f454f18638745f4ad33ddd2e87edcb163c0c8bb663988d045c91cb6
 wgsl = wgsl/mesh.wgsl
-wgsl-sha256 = 466ce664ba1b9a8c27efe535b41f68406927d92ccfe2f0ecbe228edad3df483f
+wgsl-sha256 = 65aca5ba46f3cf38acd494908f01063541097acdd9cd00a88f8433f43d75b041
 msl = msl/mesh.metal
 msl-sha256 = 1e66f7437e2cf992ac5d177769ca1f34784e6f2be4dfaca1891c8afbc870fe13
 dxil = vertexMain:dxil/mesh.vertex.dxil:e416e9385394b85a2cce3da00a8a1363ea5e157b87b112badb52c736683301b6
@@ -336,7 +336,7 @@ entry-points = vertexMain:vertex, depthVertexMain:vertex, depthClearVertexMain:v
 
 [mesh_cluster]
 source = shaders/mesh_cluster.slang
-source-sha256 = 63704ba0980a5d37af7c1726ae10b22376ea5d502942b0262bc0988cc6c35ba9
+source-sha256 = 1347d9f17902b3f3e05970f0748b11328c501e40782df788ff5311091b92fe95
 targets = spirv, msl, dxil
 spirv = spirv/mesh_cluster.spv
 spirv-sha256 = 6ddbecfc5c22188b0fec1ce9dbcaa1ecbf6c5e51bbfa14d34138a1683c5f1d17

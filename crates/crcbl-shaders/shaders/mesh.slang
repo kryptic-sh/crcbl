@@ -991,7 +991,8 @@ struct GpuMaterial
     /// `crcbl_shaders::mesh::GpuMaterial`'s `base_color_texture` and
     /// `normal_texture`.
     ///
-    /// **Two layers to a word, and that is what makes the row 64 bytes.**
+    /// **Two layers to a word, and that is what fit the page columns in 64
+    /// bytes** — the row's size until the dielectric specular was appended.
     /// Topic 43 §2 sizes it for four page rows, the
     /// alpha cutoff and flags; written as four separate `uint`s the row needs
     /// eighteen words and `std430` rounds it to eighty. A page layer index is
@@ -1007,8 +1008,9 @@ struct GpuMaterial
     /// How metallic the surface is: 0 a dielectric, 1 a conductor. glTF's
     /// `metallicFactor`.
     ///
-    /// Read twice by `fragmentMain`: `F0` interpolates between the dielectric
-    /// 0.04 and the base colour on it, and the diffuse albedo is scaled *down*
+    /// Read twice by `fragmentMain`: `F0` interpolates between the row's
+    /// dielectric `specular_f0` and the base colour on it (and `F90` between
+    /// `specular_f90` and one), and the diffuse albedo is scaled *down*
     /// by it — so a conductor reflects and does not scatter, and has no ambient
     /// term either. See the accumulation loop.
     float metallic;
@@ -1082,6 +1084,26 @@ struct GpuMaterial
     /// `OPAQUE` and single-sided both, so a row written before either bit
     /// existed already means what the specification means.
     uint flags;
+    /// The dielectric reflectance at normal incidence, linear RGB — glTF's
+    /// `dielectric_f0`, which `KHR_materials_specular` and `KHR_materials_ior`
+    /// define and the host multiplies out once per material. Matching
+    /// `crcbl_shaders::mesh::GpuMaterial::specular_f0`.
+    ///
+    /// **Appended after `flags`**, because the row's first sixty-four bytes
+    /// were spent: every member above keeps its offset and the stride grew to
+    /// `crcbl_shaders::mesh::MATERIAL_STRIDE`. Three scalars for `emissive_r`'s
+    /// reason, and `specular_f0_of` reads them back as a vector.
+    ///
+    /// A row carrying the neutral `DIELECTRIC_F0` on all three shades exactly as
+    /// every dielectric did when that constant was the lobe's `F0`.
+    float specular_f0_r;
+    float specular_f0_g;
+    float specular_f0_b;
+    /// The dielectric reflectance at grazing incidence, glTF's
+    /// `dielectric_f90`: the extension's `specularFactor`, so one — Schlick's
+    /// own limit — unless a document turns the specular layer down. Matching
+    /// `crcbl_shaders::mesh::GpuMaterial::specular_f90`.
+    float specular_f90;
 };
 
 /// The base-colour page layer a material row names — the low half of
@@ -1149,6 +1171,14 @@ uint emissive_layer(GpuMaterial material)
 float3 emissive_of(GpuMaterial material)
 {
     return float3(material.emissive_r, material.emissive_g, material.emissive_b);
+}
+
+/// The dielectric reflectance at normal incidence of a material row, as a
+/// vector — `emissive_of`'s reassembly, for `GpuMaterial::specular_f0_r`'s
+/// three scalars.
+float3 specular_f0_of(GpuMaterial material)
+{
+    return float3(material.specular_f0_r, material.specular_f0_g, material.specular_f0_b);
 }
 
 /// `GpuMaterial::tiling`: sample the base-colour texture at the vertex's own UV.
@@ -2434,12 +2464,59 @@ static const float REFLECTIVITY_LEVELS = 255.0;
 /// the debug views below write it.
 static const float4 NO_REFLECTION = float4(0.0, 0.0, 0.0, 1.0);
 
-/// The dielectric normal-incidence reflectance every non-metal is given.
+/// The dielectric normal-incidence reflectance glTF's defaults reduce to — an
+/// IOR of 1.5 with `KHR_materials_specular`'s factors at one — matching
+/// `crcbl_shaders::mesh::GpuMaterial::DIELECTRIC_F0`.
 ///
-/// Four per cent covers the range real insulators sit in closely enough that a
-/// material column for it would be a knob with no picture behind it. A metal
-/// interpolates away from it towards its own base colour — see `f0_of` below.
+/// **No longer the lobe's `F0`**: that is the row's own `specular_f0`, which
+/// carries this value unless a document says otherwise. What reads it here is
+/// `dielectric_diffuse_weight`, which measures a row's specular layer against
+/// the one this engine's diffuse term was always drawn beside.
 static const float DIELECTRIC_F0 = 0.04;
+
+/// How much of a dielectric's diffuse lobe survives its specular layer,
+/// relative to the default material's — `KHR_materials_specular`'s diffuse
+/// weight, at normal incidence.
+///
+/// The extension's Implementation section weights the diffuse BRDF by
+/// `1 - max_value(dielectric_fresnel)`, so a surface whose specular layer
+/// reflects less passes more on to the diffuse one. **This engine's diffuse
+/// term has never carried that weight** — `fragmentMain` sums
+/// `diffuse_albedo * light + gloss` — which is the same as saying the default
+/// layer's `1 - DIELECTRIC_F0` was folded into every albedo. So what a row
+/// needs is the ratio of its weight to that one, and this is it: `(1 -
+/// max(F0)) / (1 - DIELECTRIC_F0)`, with the Fresnel term taken at normal
+/// incidence, where it is `specular_f0` exactly.
+///
+/// **Selected, not computed, where the row is the default**, and that is what
+/// keeps every picture drawn before this weight existed bit for bit. The
+/// arithmetic form is one on paper for a neutral row — the difference it
+/// divides is zero — and was measured under one on an RX 7900 XTX's proprietary
+/// Vulkan driver: a white surface under an ambient of a half read one
+/// half-float step below `0.5`. A compiler is free to rearrange the constants around a division, and
+/// a comparison against the literal the row carries is exact whatever it does.
+/// `a_layer_that_reflects_less_leaves_more_to_the_diffuse` in
+/// `crcbl/tests/mesh_e2e/specular.rs` holds the neutral row to exactly that
+/// half.
+///
+/// **Above one where the layer reflects less than the default**, which is the
+/// point — a surface with its specular layer turned off scatters the share the
+/// default layer took. The `max` keeps a hand-written row whose `F0` exceeds one
+/// from subtracting light.
+///
+/// The view-dependent part of the extension's weight — Schlick's rise towards
+/// grazing — is not applied, as it never was for the default material either;
+/// `docs/backlog.md` carries it.
+float dielectric_diffuse_weight(GpuMaterial material)
+{
+    float3 f0 = specular_f0_of(material);
+    float reflected = max(f0.r, max(f0.g, f0.b));
+    if (reflected == DIELECTRIC_F0)
+    {
+        return 1.0;
+    }
+    return max(1.0 - (reflected - DIELECTRIC_F0) / (1.0 - DIELECTRIC_F0), 0.0);
+}
 
 /// The Cook-Torrance specular lobe, `pi * D * V * F`, without the `N·L` the
 /// accumulation multiplies in.
@@ -2469,8 +2546,12 @@ static const float DIELECTRIC_F0 = 0.04;
 ///
 /// `alpha2` rather than the roughness, because the caller has clamped and
 /// squared it once for the whole fragment rather than once per light.
-float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_dot_h,
-                float v_dot_h)
+///
+/// **`f90` is where Schlick's curve ends**, which is one for every surface
+/// but a dielectric whose `KHR_materials_specular` factor turned its layer
+/// down — `fragmentMain` resolves it once for the fragment beside `f0`.
+float3 ggx_lobe(float alpha2, float3 f0, float f90, float n_dot_l, float n_dot_v,
+                float n_dot_h, float v_dot_h)
 {
     // Trowbridge-Reitz. The denominator is `alpha2` at `n_dot_h == 1` and grows
     // from there, so it is only zero when `alpha2` is — which `MIN_ROUGHNESS`
@@ -2487,10 +2568,11 @@ float3 ggx_lobe(float alpha2, float3 f0, float n_dot_l, float n_dot_v, float n_d
     float lambda_l = n_dot_v * sqrt(n_dot_l * n_dot_l * (1.0 - alpha2) + alpha2);
     float visibility = 0.5 / max(lambda_v + lambda_l, 1e-6);
 
-    // Schlick, as repeated multiplication.
+    // Schlick, as repeated multiplication, towards `f90` rather than a
+    // literal one — the same arithmetic where `f90` is one.
     float grazing = 1.0 - v_dot_h;
     float grazing2 = grazing * grazing;
-    float3 fresnel = f0 + (float3(1.0, 1.0, 1.0) - f0) * (grazing2 * grazing2 * grazing);
+    float3 fresnel = f0 + (float3(f90, f90, f90) - f0) * (grazing2 * grazing2 * grazing);
 
     return d * visibility * fresnel;
 }
@@ -5711,10 +5793,25 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
 
     // **A conductor has no diffuse lobe**: what a metal does with light is
     // reflect it, and its reflectance is coloured where a dielectric's is the
-    // flat `DIELECTRIC_F0`. Both halves are one interpolation each, and the
+    // row's own `specular_f0`. Both halves are one interpolation each, and the
     // pair is the whole of what `metallic` means.
-    float3 f0 = lerp(float3(DIELECTRIC_F0, DIELECTRIC_F0, DIELECTRIC_F0), albedo.rgb, metallic);
-    float3 diffuse_albedo = albedo.rgb * (1.0 - metallic);
+    //
+    // **The dielectric end is glTF's, not a constant.** `KHR_materials_specular`
+    // (its Implementation section, with `KHR_materials_ior`'s `dielectric_f0`
+    // under Interaction with other extensions) gives the dielectric BRDF an `F0`
+    // of `min(f0_from_ior * specularColor, 1) * specular` and an `F90` of
+    // `specular`, and the material is `mix(dielectric_brdf, metal_brdf,
+    // metallic)` — so `F0` runs from the row's value to the base colour and
+    // `F90` from the row's value to one. The `F90` blend is spelled out rather
+    // than a `lerp` so that a row at `specular_f90 == 1` gets `1 + 0 * metallic`,
+    // which IEEE arithmetic makes exactly one, where a `lerp` may be lowered to
+    // `(1 - t) * a + t * b` and round.
+    //
+    // **And the diffuse lobe keeps what the specular layer does not take** —
+    // `dielectric_diffuse_weight`, which is exactly one on a neutral row.
+    float3 f0 = lerp(specular_f0_of(material), albedo.rgb, metallic);
+    float f90 = material.specular_f90 + (1.0 - material.specular_f90) * metallic;
+    float3 diffuse_albedo = albedo.rgb * (1.0 - metallic) * dielectric_diffuse_weight(material);
 
     // Constant across the fragment's lights, so it is taken once. Clamped off
     // zero because it is a factor of the visibility term's denominator: a
@@ -5744,7 +5841,9 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // before this rung: four `Load`s and a blend.
     TableTap table = table_tap(n_dot_v, roughness);
     float2 dfg = dfg_at(table);
-    float3 lobe_energy = f0 * dfg.x + dfg.y;
+    // The split sum's bias is what the lobe returns at `F0 = 0`, which is the
+    // share Schlick's rise towards `F90` contributes — so it scales by `f90`.
+    float3 lobe_energy = f0 * dfg.x + f90 * dfg.y;
 
     // Accumulated rather than branched on, which is the whole of what making the
     // sun a row bought: one loop shades a directional, a point, a spot and a
@@ -5833,7 +5932,7 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
             // the microfacet model is written in, rather than an approximation
             // of it.
             float3 half_vector = normalize(to_light + to_eye);
-            specular = ggx_lobe(alpha2, f0, diffuse, n_dot_v,
+            specular = ggx_lobe(alpha2, f0, f90, diffuse, n_dot_v,
                                 max(dot(normal, half_vector), 0.0),
                                 max(dot(to_eye, half_vector), 0.0));
             // No light on the back of a surface, whatever the half-vector says.
@@ -5924,6 +6023,11 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     // omission: what the lobe dropped is light that went on bouncing *within the
     // microsurface* and left it as specular, so putting it back anywhere else
     // would be inventing energy in a term that never lost any.
+    //
+    // **`f90` is not in it**: the fit is derived for Schlick rising to one, and
+    // a `KHR_materials_specular` row with a lower `F90` gets the factor its
+    // `f0` implies. That factor is one wherever `f0` is zero, so a row with its
+    // specular layer turned off still reflects nothing.
     gloss *= specular_compensation(f0, dfg.x + dfg.y);
 
     // **Screen-space occlusion scales the ambient term and nothing else**, and
@@ -6089,6 +6193,11 @@ FragmentOutput fragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFa
     output.lit = float4(lit, 1.0);
     // `roughness` is the clamped lobe input, stored as the level it will
     // reload as — `REFLECTIVITY_LEVELS` says why the rounding happens here.
+    //
+    // **`f90` has no channel here**, so `ssr.slang` weights a reflection as
+    // though Schlick rose to one. That is every row but a dielectric whose
+    // `KHR_materials_specular` factor is below one, and `docs/backlog.md`
+    // carries what widening the attachment would take.
     output.reflectivity =
         float4(f0, floor(roughness * REFLECTIVITY_LEVELS + 0.5) / REFLECTIVITY_LEVELS);
     output.motion = motion;
@@ -6274,9 +6383,12 @@ RsmOutput rsmFragmentMain(VertexOutput input, bool front_facing : SV_IsFrontFace
     // Through `metallic_of` and therefore through §2's packed page, so this map
     // and the shaded frame agree about which surfaces are conductors — a
     // per-texel metalness honoured in one and not the other would bounce light
-    // off a mirror into every probe near it.
+    // off a mirror into every probe near it. `dielectric_diffuse_weight` is the
+    // same agreement about the specular layer's share, and one on a neutral row.
     written.albedo =
-        float4(albedo.rgb * (1.0 - metallic_of(material, mro_texel(material, uv))), 1.0);
+        float4(albedo.rgb * (1.0 - metallic_of(material, mro_texel(material, uv)))
+                   * dielectric_diffuse_weight(material),
+               1.0);
     // glTF's back-face reversal, on `fragmentMain`'s terms and for a reason of
     // this pass's own: the gather measures a patch's solid angle at a probe and
     // its cosine against the sun off this vector, so a double-sided patch

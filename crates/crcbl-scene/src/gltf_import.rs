@@ -73,6 +73,14 @@
 //! a document that writes a strength loses it silently — `docs/backlog.md`
 //! holds what filling it would take.
 //!
+//! **`KHR_materials_ior` and `KHR_materials_specular` arrive as factors.** Every
+//! term of the dielectric reflectance they define is a per-material constant,
+//! so `dielectric_specular` multiplies them out into the row's
+//! [`GpuMaterial::specular_f0`] and [`GpuMaterial::specular_f90`], and a
+//! document naming neither gets glTF's default dielectric. The extension's two
+//! textures are not read — they would be two more pages — and a document that
+//! names one is told so, once.
+//!
 //! # An image that will not resolve is skipped, where a buffer that will not is
 //! refused
 //!
@@ -137,7 +145,7 @@
 //! because a curve is a curve whether or not this importer extracted the shapes
 //! it drives.
 //!
-//! `MSFT_lod` is the one extension read, and only where it sits on a **node**.
+//! `MSFT_lod` is read only where it sits on a **node**.
 //! The extension is also defined on materials — a material chain for a mesh
 //! that keeps its geometry — and nothing here shades at two levels of detail,
 //! so a material's copy is left alone rather than parsed into a field no
@@ -149,8 +157,12 @@
 //! [`GpuMaterial::metallic`]: crcbl_shaders::mesh::GpuMaterial::metallic
 //! [`GpuMaterial::roughness`]: crcbl_shaders::mesh::GpuMaterial::roughness
 //! [`GpuMaterial::UNTINTED`]: crcbl_shaders::mesh::GpuMaterial::UNTINTED
+//! [`GpuMaterial::specular_f0`]: crcbl_shaders::mesh::GpuMaterial::specular_f0
+//! [`GpuMaterial::specular_f90`]: crcbl_shaders::mesh::GpuMaterial::specular_f90
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use crcbl_assets::{AssetSource, StorageError};
 use crcbl_shaders::mesh::GpuMaterial;
@@ -162,6 +174,10 @@ use gltf::material::AlphaMode;
 use gltf::mesh::Mode;
 
 use crate::gltf_check::{check_document, check_glb_header, malformed};
+
+mod specular;
+
+use specular::{dielectric_specular, warn_specular_textures};
 
 /// One glTF document, parsed.
 ///
@@ -1308,6 +1324,7 @@ fn build(
                 } else {
                     0
                 };
+            let (specular_f0, specular_f90) = dielectric_specular(&material);
             GpuMaterial {
                 base_color: pbr.base_color_factor(),
                 metallic: pbr.metallic_factor(),
@@ -1345,6 +1362,10 @@ fn build(
                 // flattened onto `OPAQUE`, and its `doubleSided`.
                 alpha_cutoff,
                 flags,
+                // `KHR_materials_ior` and `KHR_materials_specular`, reduced to
+                // the two numbers the lobe reads — see `dielectric_specular`.
+                specular_f0,
+                specular_f90,
             }
         })
         .collect();
@@ -1422,6 +1443,7 @@ fn warn_dropped_features(document: &gltf::Document, key: &Path) -> Vec<String> {
         );
     }
     let unsupported_required = warn_unsupported_extensions(root, key);
+    warn_specular_textures(document, key);
 
     // Counted off the JSON for `texture_has_an_image`'s reason. Reported
     // separately from the extension lines because a texture can lose its image
@@ -1479,6 +1501,28 @@ fn emissive_radiance(material: &gltf::Material<'_>) -> [f32; 3] {
     material.emissive_factor().map(|channel| channel * strength)
 }
 
+/// Every `(asset key, feature)` pair a warning has already named in this
+/// process.
+///
+/// A scene or view that imports the same asset again would otherwise repeat
+/// the same line each time — EW imports its range rifle on every range load —
+/// and a log full of one line is a log nobody reads. The first import says it;
+/// the rest are the same document and the same answer.
+static REPORTED: Mutex<BTreeSet<(PathBuf, String)>> = Mutex::new(BTreeSet::new());
+
+/// Whether this is the first time the process reports `feature` for `key`, and
+/// record that it now has.
+///
+/// The poison is stepped over rather than propagated: nothing but this one
+/// insert ever holds the lock, so a poisoned set is still a set of names
+/// already said, and the worst it can cost is a line said twice or not at all.
+fn first_report(key: &Path, feature: &str) -> bool {
+    REPORTED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((key.to_path_buf(), feature.to_owned()))
+}
+
 /// One material slot's reference to an image, as [`GltfScene`] carries it.
 ///
 /// `texture` is the slot's own `(texture, texCoord)` pair, or [`None`] where
@@ -1513,13 +1557,13 @@ fn texture_has_an_image(document: &gltf::Document, index: usize) -> bool {
         .is_some_and(|texture| texture.source.value() < root.images.len())
 }
 
-/// The one glTF extension this importer implements.
+/// The glTF extensions this importer implements.
 ///
-/// `lod_resolve` reads it. Everything else a document declares is ignored, so
-/// this list is what [`warn_unsupported_extensions`] measures against — and it
-/// is a list rather than a constant so that adding the second one is a line
-/// here instead of a rewrite.
-const IMPLEMENTED_EXTENSIONS: &[&str] = &["MSFT_lod"];
+/// `lod_resolve` reads `MSFT_lod`, and `dielectric_specular` reads the IOR and
+/// the specular factors. Everything else a document declares is ignored, so
+/// this list is what [`warn_unsupported_extensions`] measures against.
+const IMPLEMENTED_EXTENSIONS: &[&str] =
+    &["MSFT_lod", "KHR_materials_ior", "KHR_materials_specular"];
 
 /// Name every extension the document declares and this importer does not
 /// implement, `extensionsRequired` louder than `extensionsUsed`, and hand the
@@ -1552,13 +1596,25 @@ fn warn_unsupported_extensions(root: &gltf::json::Root, key: &Path) -> Vec<Strin
             .collect()
     };
 
+    // **Each name is said once per asset per process** — see `REPORTED`. The
+    // returned list is not deduplicated: it is this document's answer, and a
+    // second import of the file is owed the same one.
+    let unreported = |names: &[String]| -> Vec<String> {
+        names
+            .iter()
+            .filter(|name| first_report(key, name))
+            .cloned()
+            .collect()
+    };
+
     let required = unsupported(&root.extensions_required);
-    if !required.is_empty() {
+    let required_unreported = unreported(&required);
+    if !required_unreported.is_empty() {
         crcbl_core::log::warn!(
             "{}: this document REQUIRES {}, which this importer does not implement — it is \
              drawn without them, so what is on screen is not what the file describes",
             key.display(),
-            required.join(", "),
+            required_unreported.join(", "),
         );
     }
 
@@ -1568,12 +1624,13 @@ fn warn_unsupported_extensions(root: &gltf::json::Root, key: &Path) -> Vec<Strin
         .into_iter()
         .filter(|name| !required.contains(name))
         .collect();
-    if !optional.is_empty() {
+    let optional_unreported = unreported(&optional);
+    if !optional_unreported.is_empty() {
         crcbl_core::log::warn!(
             "{}: ignoring {}, which this importer does not implement — the document lists them \
              as optional, so the rest of it is unaffected",
             key.display(),
-            optional.join(", "),
+            optional_unreported.join(", "),
         );
     }
 
@@ -2006,12 +2063,15 @@ fn flatten(document: &gltf::Document, key: &Path) -> Result<Vec<GltfInstance>, S
 
 #[cfg(test)]
 pub(crate) mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use crate::gltf_fixture::{
         Assets, BASE_COLOR, BIN_CHUNK_BUFFER, CLIP_ROTATIONS, CLIP_TIMES, EXTERNAL_BUFFER,
         IMAGE_TEXELS, INDICES, INVERSE_BIND, JOINTS, NORMALS, POSITIONS, TEX_COORDS, WEIGHTS, glb,
-        import_glb, import_glb_bytes, import_gltf_text, import_rigged_glb, png_bytes, replacing,
-        rigged_json, textured_glb, textured_parts, triangle_bin, triangle_json,
+        import_glb, import_glb_bytes, import_glb_bytes_as, import_gltf_text, import_rigged_glb,
+        png_bytes, replacing, rigged_json, textured_glb, textured_parts, triangle_bin,
+        triangle_json,
     };
 
     /// The row a glTF material with no `pbrMetallicRoughness` block imports as:
@@ -2043,6 +2103,10 @@ pub(crate) mod tests {
         // glTF's own default `alphaCutoff`, and no alpha mode set.
         alpha_cutoff: 0.5,
         flags: 0,
+        // The dielectric `KHR_materials_ior`'s and `KHR_materials_specular`'s
+        // defaults reduce to — an IOR of 1.5 and both factors at one.
+        specular_f0: [GpuMaterial::DIELECTRIC_F0; 3],
+        specular_f90: 1.0,
     };
 
     /// The `animations` array a `KHR_animation_pointer` document carries: a
@@ -2121,15 +2185,101 @@ pub(crate) mod tests {
         );
     }
 
-    /// Every warning `warn_dropped_features` emitted while importing `json`.
+    /// Every warning `warn_dropped_features` emitted while importing `json`,
+    /// under a key no other call has used.
+    ///
+    /// A fresh key because the extension lines are said once per key per
+    /// process — see `import_glb_bytes_as`.
     fn import_warnings(json: &str) -> Vec<String> {
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let key = format!(
+            "meshes/warnings-{}.glb",
+            CALLS.fetch_add(1, Ordering::Relaxed)
+        );
+        import_warnings_as(json, &key)
+    }
+
+    /// [`import_warnings`] under a key the caller chose, so a test can import
+    /// the same asset twice.
+    fn import_warnings_as(json: &str, key: &str) -> Vec<String> {
         let logs = crcbl_core::log::capture();
-        import_glb(json).expect("the fixture imports");
+        import_glb_bytes_as(&glb(json, Some(&triangle_bin())), key).expect("the fixture imports");
         logs.records()
             .into_iter()
             .filter(|record| record.target.contains("gltf_import"))
             .map(|record| record.message)
             .collect()
+    }
+
+    /// **An asset imported again is not reported again**, and a different asset
+    /// naming the same extension still is.
+    ///
+    /// EW imports the same rifle on every range load, and each import used to
+    /// repeat the same line. The scene's own answer is not deduplicated — a
+    /// second import of a document is owed the same
+    /// `unsupported_required_extensions` as the first — only the log line is.
+    ///
+    /// # Sabotage
+    ///
+    /// `first_report` returning `true` unconditionally: red with "the second
+    /// import of the same asset repeated its extension lines".
+    #[test]
+    fn an_extension_is_reported_once_per_asset_and_not_once_per_import() {
+        let json = with_extensions(r#""KHR_animation_pointer""#, r#""KHR_materials_sheen""#);
+        let first = import_warnings_as(&json, "meshes/reported-once.glb");
+        let names = |warnings: &[String]| {
+            warnings
+                .iter()
+                .filter(|line| {
+                    line.contains("KHR_animation_pointer") || line.contains("KHR_materials_sheen")
+                })
+                .count()
+        };
+        assert_eq!(
+            names(&first),
+            2,
+            "the first import names both extensions once each: {first:#?}"
+        );
+
+        let second = import_warnings_as(&json, "meshes/reported-once.glb");
+        assert_eq!(
+            names(&second),
+            0,
+            "the second import of the same asset repeated its extension lines: {second:#?}"
+        );
+
+        let other = import_warnings_as(&json, "meshes/reported-elsewhere.glb");
+        assert_eq!(
+            names(&other),
+            2,
+            "a different asset naming the same extensions is its own report: {other:#?}"
+        );
+
+        let again = import_glb_bytes_as(
+            &glb(&json, Some(&triangle_bin())),
+            "meshes/reported-once.glb",
+        )
+        .expect("the fixture imports");
+        assert_eq!(
+            again.unsupported_required_extensions(),
+            ["KHR_materials_sheen"],
+            "the scene's own answer must not be deduplicated with the log line"
+        );
+    }
+
+    /// **The IOR and specular extensions are implemented, so neither is
+    /// reported** — the line EW's Mossberg asset drew on every import.
+    #[test]
+    fn the_ior_and_specular_extensions_are_not_reported() {
+        let names = r#""KHR_materials_ior", "KHR_materials_specular""#;
+        let warnings = import_warnings(&with_extensions(names, names));
+        assert!(
+            !warnings
+                .iter()
+                .any(|line| line.contains("KHR_materials_ior")
+                    || line.contains("KHR_materials_specular")),
+            "an implemented extension was reported as unsupported: {warnings:#?}",
+        );
     }
 
     /// The fixture with `extensionsUsed`/`extensionsRequired` spliced in.

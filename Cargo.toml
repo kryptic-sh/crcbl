@@ -29,15 +29,21 @@ glam = "0.33"
 # crate rather than the JSON; `names` is what lets a skipped primitive be
 # reported by the name its author gave it.
 #
-# **One `KHR_*` extension feature is on, and the rule is unchanged**: an
-# extension nothing reads is a field nothing reads, and
-# `KHR_materials_emissive_strength` is now read.
+# **`KHR_*` extension features are on only where something reads them**: an
+# extension nothing reads is a field nothing reads.
+# `KHR_materials_emissive_strength` is read because
 # `crcbl_shaders::mesh::GpuMaterial::emissive` is a linear radiance rather than
 # glTF's factor-and-strength pair, so the importer needs the multiplier to
 # produce it — without the feature, `Material::emissive_strength` does not
 # compile and every emissive above one is silently clamped to the factor.
+# `KHR_materials_ior` and `KHR_materials_specular` are read for the same kind of
+# reason: `GpuMaterial::specular_f0` is the product of the IOR's reflectance and
+# the specular factors, and without them `Material::ior` and
+# `Material::specular` do not exist.
 gltf = { version = "1.4.1", default-features = false, features = [
   "KHR_materials_emissive_strength",
+  "KHR_materials_ior",
+  "KHR_materials_specular",
   "names",
   "utils",
 ] }

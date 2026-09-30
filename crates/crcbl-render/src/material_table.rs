@@ -500,6 +500,14 @@ mod tests {
             emissive_texture: n + 17,
             alpha_cutoff: base + 0.9375 + 1.0 / 64.0,
             flags: n + 19,
+            // And the dielectric specular appended past the flags, which a
+            // writer that stopped at sixty-four bytes leaves zero.
+            specular_f0: [
+                base + 0.9375 + 3.0 / 128.0,
+                base + 0.9375 + 5.0 / 128.0,
+                base + 0.9375 + 7.0 / 128.0,
+            ],
+            specular_f90: base + 0.9375 + 1.0 / 128.0,
         }
     }
 

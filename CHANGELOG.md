@@ -16,6 +16,16 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_shaders::mesh::GpuMaterial` has two more fields and a wider row**:
+  `specular_f0: [f32; 3]` and `specular_f90: f32`, glTF's dielectric reflectance
+  (see Added). A struct literal that does not spread `..GpuMaterial::UNTINTED`
+  or `..GpuMaterial::default()` must name them —
+  `[GpuMaterial::DIELECTRIC_F0; 3]` and `1.0` shade exactly as before.
+  `MATERIAL_STRIDE` is 80 rather than 64, so `to_bytes`/`from_bytes` take and
+  return 80-byte arrays and a material table's buffer is a quarter larger; every
+  earlier member keeps its offset. `GpuMaterial::default()` now carries that
+  neutral specular rather than zeroes in those words.
+
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
   the lane (`PAD_MESH` … `MESHES`) and the crate-root `PLOTS` re-export are
@@ -409,6 +419,18 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **glTF `KHR_materials_ior` and `KHR_materials_specular` reach the renderer**:
+  `crcbl_scene::gltf_import` reads the IOR, `specularFactor` and
+  `specularColorFactor` into the row's new `specular_f0` and `specular_f90`, and
+  `mesh.slang` starts its dielectric lobe from them — `F0` and Schlick's `F90` —
+  and scales the diffuse term by the share the specular layer leaves it, in the
+  colour pass and the reflective shadow map alike. A material naming neither
+  extension shades exactly as before, and neither extension is reported as
+  unsupported any more. `specularTexture` and `specularColorTexture` are not
+  read yet; a document that names one is told so once and its factors apply. The
+  workspace's `gltf` dependency enables its `KHR_materials_ior` and
+  `KHR_materials_specular` features.
 
 - **Towers reads its map from a `.scn/` directory**, and the editor opens it —
   `docs/plan/sample/07-towers.md`'s milestone 2 has a scene to author.
@@ -3588,6 +3610,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **A glTF asset's unsupported-extension warning is said once per asset**, not
+  once per import: importing the same key again in the same process logs nothing
+  new, while `GltfScene::unsupported_required_extensions` still reports the full
+  list every time.
 
 - **Dragging an editor inspector field is one undo**, back to the value from
   before the drag; it was one undo per frame the field moved. Edits to one field

@@ -3575,23 +3575,58 @@ produced EW's log was not reproduced (this machine has no Wayland session), and
 no windowed check closes EW and reads its exit status. EW rechecking a quit on
 Wayland after pinning the fix closes the entry.
 
-## Import glTF specular and IOR materials (2026-09-15)
+## glTF specular and IOR: what the factor slice left (2026-09-30)
 
-EW's `models/range/mossberg-590-placeholder.gltf` declares the optional
-`KHR_materials_specular` and `KHR_materials_ior` extensions. `crcbl-scene` loads
-the remaining document but ignores both extensions and emits the same warning
-each time EW imports the asset, so the authored dielectric response does not
-reach the renderer.
+EW's `models/range/mossberg-590-placeholder.gltf` declares
+`KHR_materials_specular` and `KHR_materials_ior`. The factors shipped:
+`crcbl_scene::gltf_import`'s `specular` module reduces the IOR, `specularFactor`
+and `specularColorFactor` into `GpuMaterial::specular_f0` and `specular_f90`,
+`mesh.slang` reads them, and the unsupported-extension warning is said once per
+asset key per process. Still owed:
 
-Implement both extensions through the existing glTF material path: parse the
-specular factor, specular colour factor and their textures, parse the index of
-refraction, carry those values through the renderer's material records, and
-apply them consistently in every lit backend shader. Preserve the glTF defaults
-when an extension or property is absent. Add a synthesized importer fixture and
-a rendered material comparison that fail when each value is ignored. Unsupported
-optional-extension diagnostics should be deduplicated per asset and extension so
-multiple scene/view imports do not flood the log. Recheck the Mossberg asset in
-EW after the engine implementation lands, then update EW's pinned revision.
+- **Recheck the Mossberg asset in EW and bump EW's pin.** Not done here: the
+  engine side lands first, and the pin should move only to a green commit.
+- **`specularTexture` and `specularColorTexture`.** A document naming either is
+  warned once (`warn_specular_textures`) and shades with its factors. What it
+  would take: two page kinds in `crcbl_render::scene::PageKind` (the colour one
+  sRGB like the emissive page, the strength one reading `a`), two more layer
+  columns — the row is full at `MATERIAL_STRIDE`, so either another widening or
+  packing both into one word the way `color_normal_pages` does, which needs one
+  spare word — `gltf_import` slots for them beside `emissive_textures`,
+  `gltf_render::pack_page` placing them, and the texel folded into `F0`/`F90`
+  and the diffuse weight per fragment rather than on the CPU.
+- **The diffuse weight is at normal incidence and relative to the default.** The
+  extension weights the diffuse lobe by `1 - max(F)` with `F` the full
+  view-dependent Fresnel; this engine never weighted its diffuse by the default
+  layer's Fresnel at all, so `dielectric_diffuse_weight` applies the ratio of a
+  row's weight to the default's with `F = F0`. Applying the view-dependent
+  weight properly would darken every dielectric toward grazing — a picture
+  change for every golden, and the user's call.
+- **`F90` does not reach `ssr.slang`.** The reflectivity attachment is
+  `Rgba8Unorm` with `rgb` = `F0` and `a` = roughness, so a reflection is
+  weighted as though Schlick rose to one. Only a dielectric with
+  `specularFactor < 1` is affected. Carrying it means a fifth channel: a wider
+  attachment format or packing roughness and `F90` into `a`.
+- **`specular_compensation` ignores `F90`**: the multi-scatter fit assumes
+  Schlick rises to one. It is exactly one where `F0` is zero, so a disabled
+  layer still reflects nothing; a partly disabled one gets the factor its `F0`
+  implies.
+- **The area-light split-sum term `f90 * dfg.y` is untested on a device.** The
+  mesh-e2e `specular` tests use a directional sun and ambient light; no test
+  draws a rectangle light over a row with `specular_f90 < 1`.
+- **`KHR_materials_emissive_strength` is read but not in
+  `IMPLEMENTED_EXTENSIONS`**, so a document declaring it is warned that it is
+  ignored while its strength is applied. Found while adding the two names above;
+  not changed because it was outside this slice. Adding it to the list (and a
+  test like `the_ior_and_specular_extensions_are_not_reported`) is the whole
+  fix.
+- **Not verified here:** MSL and DXIL were not regenerated (the local `slangc`
+  is 2026.14 against the pinned 2026.18.2; SPIR-V and WGSL reproduce, the other
+  two do not), so Metal and D3D12 run stale 64-byte-row shaders until CI's
+  `regenerated-shaders` artifact is committed. The bit-for-bit claim for a
+  default row was measured on Vulkan on an RX 7900 XTX (AMD proprietary
+  25.10.36) only, by hashing 36 full HDR frames drawn by the old and the new
+  arithmetic.
 
 ## A lying capsule for prone characters: what the move left (2026-09-25)
 

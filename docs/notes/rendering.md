@@ -714,6 +714,21 @@ speaks GGX. Two consequences:
   is folded out of `D` too and the ratio between the lobes stays physical. The
   textbook `D` against this diffuse would put every highlight a factor of `pi`
   under its surface.
+- **The dielectric's reflectance is the row's, not a constant (2026-09-30).**
+  glTF's `KHR_materials_specular` and `KHR_materials_ior` define it, and the
+  importer multiplies them out into `GpuMaterial::specular_f0` (the extension's
+  `min(f0_from_ior * specularColor, 1) * specularFactor`) and `specular_f90`
+  (`specularFactor`); `metallic` interpolates `F0` towards the base colour and
+  `F90` towards one. Every default reduces to `GpuMaterial::DIELECTRIC_F0` and
+  one, the lobe's old constants, so a row naming neither shades as before —
+  measured bit for bit on 36 full frames on an RX 7900 XTX. The extension's
+  diffuse weight, `1 - max(F)`, was never applied to this engine's diffuse, so
+  the shader applies it **relative to the default layer's and at normal
+  incidence**: `mesh.slang`'s `dielectric_diffuse_weight`, which selects one for
+  a neutral row rather than computing it, because the computed form drifted a
+  half-float step on that driver. What is left out — the view-dependent part of
+  the weight, `F90` in the reflectivity attachment `ssr.slang` reads, the
+  extension's textures — is in `docs/backlog.md`.
 
 **The shading rule: no platform transcendental reaches a colour.** A platform's
 `pow`, `exp`, `sin`, `cos` and the rest are specified to no accuracy and differ
@@ -833,8 +848,9 @@ integrate as silhouette quads); only the rectangle is built.
 
 - **A second BRDF lobe** — anisotropic GGX, clearcoat, sheen, subsurface. Each
   is a second material model, refused until an asset in the tree needs one; the
-  row has no room at `MATERIAL_STRIDE`, so the first arrives with a stride
-  widening and can bring the rest.
+  row is full at `MATERIAL_STRIDE` — the dielectric specular widened it and
+  spent the widening — so the first arrives with another widening and can bring
+  the rest.
 - **Parallax occlusion mapping** — a per-pixel march with a dependent read for
   what normal mapping already approximates; a rung above normal maps, not beside
   them.

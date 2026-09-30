@@ -482,9 +482,20 @@ pub(crate) fn import_rigged_glb(json: &str) -> Result<GltfScene, StorageError> {
 /// Import raw bytes as `meshes/model.glb`.
 #[cfg(test)]
 pub(crate) fn import_glb_bytes(bytes: &[u8]) -> Result<GltfScene, StorageError> {
+    import_glb_bytes_as(bytes, "meshes/model.glb")
+}
+
+/// Import raw bytes under `key`, which must sit in `meshes/`.
+///
+/// For a test that reads the import's warnings: those are said once per key
+/// for the life of the process, and every test in a `cargo test` binary shares
+/// one — so a test asserting a line was said imports under a key no other test
+/// uses, or it passes or fails by which test ran first.
+#[cfg(test)]
+pub(crate) fn import_glb_bytes_as(bytes: &[u8], key: &str) -> Result<GltfScene, StorageError> {
     let assets = Assets::new();
-    assets.write("meshes/model.glb", bytes);
-    assets.import("meshes/model.glb")
+    assets.write(key, bytes);
+    assets.import(key)
 }
 
 /// Import `json` as `meshes/model.gltf`, with `bin` written beside it as the

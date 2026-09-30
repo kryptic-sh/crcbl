@@ -349,12 +349,12 @@ pub const MESH_ENTRY_STRIDE: usize = 56;
 /// Bytes per [`GpuMaterial`], and the stride of the material-table storage
 /// buffer.
 ///
-/// One `float4` and then twelve scalar words, no padding at all: sixty-four is
+/// One `float4` and then sixteen scalar words, no padding at all: eighty is
 /// already a multiple of the `float4`'s sixteen. Checked against the
 /// `ArrayStride` and the `Offset` decorations `slangc` emits by this module's
 /// `the_material_layout_matches_the_offsets_slangc_emits`.
 ///
-/// # Sixty-four, which is topic 43 §2's own number
+/// # Sixty-four was topic 43 §2's number, and the specular words are the rest
 ///
 /// That section's table sizes the row at 64 bytes for "four page rows … plus
 /// the alpha cutoff and flags", and the four page rows are what make the
@@ -367,7 +367,14 @@ pub const MESH_ENTRY_STRIDE: usize = 56;
 /// sixteen bits is not a limit anybody reaches — and it is the same trick the
 /// vertex stream is built out of, with the same kind of unpack beside it in the
 /// shader.
-pub const MATERIAL_STRIDE: usize = 64;
+///
+/// **The last sixteen bytes are glTF's dielectric specular**:
+/// [`GpuMaterial::specular_f0`] and [`GpuMaterial::specular_f90`], which
+/// `KHR_materials_specular` and `KHR_materials_ior` feed. The sixty-four were
+/// spent, so they are **appended**, and every earlier member's offset is where
+/// it was — a reader of the row that predates them reads the same bytes it
+/// always did, one stride further apart.
+pub const MATERIAL_STRIDE: usize = 80;
 
 /// The largest page layer index [`GpuMaterial`] can carry, since the four
 /// indices ride sixteen bits each — see [`MATERIAL_STRIDE`].
@@ -1743,9 +1750,11 @@ impl GpuMesh {
 /// # `default` is not the zeroed row any more
 ///
 /// [`Default`] is written out rather than derived, because
-/// [`NO_PAGE`](Self::NO_PAGE) is `0xFFFF` and every other field's neutral is
-/// zero. So [`to_bytes`](Self::to_bytes) of a default row is `0xFFFF_FFFF` in
-/// each of its two page words and zero everywhere else, and the device's own
+/// [`NO_PAGE`](Self::NO_PAGE) is `0xFFFF` and the dielectric specular's neutral
+/// is glTF's default reflectance rather than zero; every other field's neutral
+/// is zero. So [`to_bytes`](Self::to_bytes) of a default row is `0xFFFF_FFFF`
+/// in each of its two page words, the neutral specular in its last four, and
+/// zero everywhere else, and the device's own
 /// zero-filled *unwritten* row is no longer the same value: it decodes to layer
 /// 0 on all four columns. That row is still black — its `base_color` is
 /// `[0.0; 4]` — and nothing can name it, because a material id comes from a
@@ -1753,12 +1762,14 @@ impl GpuMesh {
 /// writing this `default`, which under this constant means "no page" rather
 /// than "layer 0".
 ///
-/// The two shading factors do not change it either, and one of them is worth
-/// being precise about: a zeroed row is `metallic 0.0`, so its diffuse albedo
-/// is zero and its `F0` is the dielectric `0.04` — the row is black apart from
-/// a mirror-sharp four-per-cent highlight where a light happens to reflect off
-/// it. That is a smaller signal than the flat black the row had before this
-/// column existed, and it is still nothing anyone would mistake for a material
+/// The shading factors do not change it either, and they are worth being
+/// precise about. A [`default`](Self::default) row is `metallic 0.0` with the
+/// neutral dielectric specular, so its diffuse albedo is zero and its `F0` is
+/// [`DIELECTRIC_F0`](Self::DIELECTRIC_F0) — black apart from a mirror-sharp
+/// highlight where a light happens to reflect off it. The device's zero-filled
+/// *unwritten* row goes further: its [`specular_f0`](Self::specular_f0) and
+/// [`specular_f90`](Self::specular_f90) are zero too, so it reflects nothing and
+/// is black outright. Neither is anything anyone would mistake for a material
 /// they authored.
 ///
 /// `PartialEq` but not `Eq`, for [`GpuMesh`]'s reason: several fields are floats.
@@ -1788,9 +1799,10 @@ pub struct GpuMaterial {
     /// glTF's `pbrMetallicRoughness.metallicFactor` exactly, which is what lets
     /// [`crcbl_scene::gltf_import`](https://docs.rs/crcbl-scene) assign it with
     /// no conversion. `mesh.slang` reads it twice: it is what the specular
-    /// lobe's `F0` interpolates between `0.04` and the base colour on, and it is
-    /// what scales the diffuse albedo *down* — a conductor has no diffuse
-    /// lobe at all.
+    /// lobe's `F0` interpolates between [`specular_f0`](Self::specular_f0) and
+    /// the base colour on (and its `F90` between
+    /// [`specular_f90`](Self::specular_f90) and one), and it is what scales the
+    /// diffuse albedo *down* — a conductor has no diffuse lobe at all.
     ///
     /// **A factor over the page, not instead of it**: where
     /// [`metallic_roughness_occlusion_texture`](Self::metallic_roughness_occlusion_texture)
@@ -1955,6 +1967,37 @@ pub struct GpuMaterial {
     /// material nobody marked is opaque, which is what every row written before
     /// this bit existed meant.
     pub flags: u32,
+    /// The dielectric reflectance at normal incidence, linear RGB: the `F0` a
+    /// non-metal's specular lobe starts from, and the end of the interpolation
+    /// [`metallic`](Self::metallic) runs towards the base colour.
+    ///
+    /// **glTF's `dielectric_f0`, already reduced**: `KHR_materials_specular`
+    /// defines it as `min(((ior - 1) / (ior + 1))^2 * specularColor, 1) *
+    /// specular`, with the IOR from `KHR_materials_ior`, and every term of that
+    /// is a per-material constant, so the importer multiplies it out once
+    /// rather than the fragment stage doing it per pixel.
+    /// [`DIELECTRIC_F0`](Self::DIELECTRIC_F0) on all three channels is what
+    /// every extension's defaults reduce to, and it is the literal the lobe
+    /// used before this column existed — so a row carrying it shades bit for
+    /// bit as every row did before.
+    ///
+    /// **Also the diffuse lobe's weight**: the extension takes the diffuse
+    /// term's share from what the specular layer reflects, and `mesh.slang`'s
+    /// `dielectric_diffuse_weight` reads that share off this column.
+    ///
+    /// Three scalars on the shader side, for
+    /// [`emissive`](Self::emissive)'s reason: a `float3` would be 16-aligned.
+    pub specular_f0: [f32; 3],
+    /// The dielectric reflectance at grazing incidence: the `F90` Schlick's
+    /// Fresnel rises to, glTF's `dielectric_f90`.
+    ///
+    /// `KHR_materials_specular` sets it to `specularFactor`, so it is `1.0` —
+    /// Schlick's own grazing limit, and what the lobe used before this column
+    /// existed — unless a document turns the specular layer down, and `0.0`
+    /// together with a zero [`specular_f0`](Self::specular_f0) is a surface with
+    /// no specular reflection at all. A conductor's `F90` is one whatever this
+    /// says: [`metallic`](Self::metallic) interpolates it there.
+    pub specular_f90: f32,
 }
 
 impl Default for GpuMaterial {
@@ -1962,7 +2005,10 @@ impl Default for GpuMaterial {
     /// [`NO_PAGE`](Self::NO_PAGE) on all four page columns.
     ///
     /// **Written out rather than derived**, and the four columns are why: every
-    /// other field's neutral is zero, and `NO_PAGE` is not zero any more. A
+    /// other field's neutral is zero, and `NO_PAGE` is not zero any more. The
+    /// dielectric specular is not zero either — it is glTF's default
+    /// reflectance, the one [`UNTINTED`](Self::UNTINTED) carries — so a black
+    /// row still has the highlight a black row always had. A
     /// derived `Default` would name layer 0 on all four — a real layer of
     /// whatever the page happens to hold — where this row means "no texture",
     /// which is what a row nobody wrote has always meant. See the type's own
@@ -1983,6 +2029,8 @@ impl Default for GpuMaterial {
             emissive_texture: Self::NO_PAGE,
             alpha_cutoff: 0.0,
             flags: 0,
+            specular_f0: Self::UNTINTED.specular_f0,
+            specular_f90: Self::UNTINTED.specular_f90,
         }
     }
 }
@@ -2046,7 +2094,26 @@ impl GpuMaterial {
         alpha_cutoff: 0.5,
         // No bits, which is `OPAQUE`.
         flags: 0,
+        // glTF's dielectric with every specular and IOR default, which is the
+        // lobe this engine drew before the row carried one — see
+        // `specular_f0`.
+        specular_f0: [Self::DIELECTRIC_F0; 3],
+        specular_f90: 1.0,
     };
+
+    /// The dielectric reflectance at normal incidence that glTF's defaults
+    /// reduce to — an IOR of `1.5`, `specularFactor` one and a white
+    /// `specularColorFactor` — and the [`specular_f0`](Self::specular_f0)
+    /// [`UNTINTED`](Self::UNTINTED) and [`default`](Self::default) carry.
+    ///
+    /// **Spelled as the literal, not computed from the IOR**, because the two
+    /// are not the same `f32`: `((1.5 - 1) / (1.5 + 1))^2` evaluated in single
+    /// precision rounds one step above it. This is the value `mesh.slang`
+    /// shaded every dielectric with before the row carried one, and a default
+    /// row reproduces those pictures bit for bit only if it carries exactly
+    /// that value. `shaders/mesh.slang` declares the same constant for the
+    /// diffuse weight it normalises by.
+    pub const DIELECTRIC_F0: f32 = 0.04;
 
     /// [`tiling`](Self::tiling): sample the base-colour texture at the vertex's
     /// own UV, the way every material did before physical tiling existed.
@@ -2159,7 +2226,7 @@ impl GpuMaterial {
 
     /// The bytes one material-table element holds, in `std430` order.
     ///
-    /// The row has no padding: sixty-four is a multiple of the `float4`'s
+    /// The row has no padding: eighty is a multiple of the `float4`'s
     /// alignment already, and every word after it is spent. Two of them are the
     /// four page indices packed in pairs — see [`MATERIAL_STRIDE`], which is
     /// where that arithmetic is argued, and `page_words`, which does it.
@@ -2194,6 +2261,10 @@ impl GpuMaterial {
         }
         bytes[at..at + 4].copy_from_slice(&self.flags.to_le_bytes());
         at += 4;
+        for value in self.specular_f0.iter().chain([&self.specular_f90]) {
+            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            at += 4;
+        }
         debug_assert_eq!(at, MATERIAL_STRIDE);
         bytes
     }
@@ -2235,6 +2306,8 @@ impl GpuMaterial {
             emissive_texture: high(uint_at(48)),
             alpha_cutoff: float_at(56),
             flags: uint_at(60),
+            specular_f0: [float_at(64), float_at(68), float_at(72)],
+            specular_f90: float_at(76),
         }
     }
 }
@@ -5080,18 +5153,18 @@ mod tests {
     /// the only reason the table exists at all.
     #[test]
     fn the_material_layout_matches_the_offsets_slangc_emits() {
-        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 64`, and
+        // `OpDecorate %_runtimearr_GpuMaterial_std430 ArrayStride 80`, and
         // `OpMemberDecorate %GpuMaterial_std430 0 Offset 0` / `1 Offset 16` /
         // `2 Offset 20` / `3 Offset 24` / `4 Offset 28` / `5 Offset 32` /
         // `6 Offset 36` / `7 Offset 40` / `8 Offset 44` / `9 Offset 48` /
-        // `10 Offset 52` / `11 Offset 56` / `12 Offset 60`.
-        // Sixty-four with **no** padding, where the row before the material
-        // pages was forty-eight with none either: the alignment is the
-        // `float4`'s sixteen and thirteen members of four bytes each land on
-        // exactly four of them. What the four page rows cost is two words, not
-        // four — see `MATERIAL_STRIDE`, and `the_page_words_pack_two_layers_each`
-        // for the pairing itself.
-        assert_eq!(MATERIAL_STRIDE, 64);
+        // `10 Offset 52` / `11 Offset 56` / `12 Offset 60` / `13 Offset 64` /
+        // `14 Offset 68` / `15 Offset 72` / `16 Offset 76`.
+        // Eighty with **no** padding: the alignment is the `float4`'s sixteen
+        // and the scalar members after it land on exactly four more of them.
+        // What the four page rows cost is two words, not four — see
+        // `MATERIAL_STRIDE`, and `the_page_words_pack_two_layers_each` for the
+        // pairing itself — and the dielectric specular is the last sixteen.
+        assert_eq!(MATERIAL_STRIDE, 80);
 
         let material = GpuMaterial {
             base_color: [0.25, 0.5, 0.75, 1.0],
@@ -5107,6 +5180,8 @@ mod tests {
             emissive_texture: 7,
             alpha_cutoff: 0.25,
             flags: 0x8000_0001,
+            specular_f0: [0.0625, 0.125, 0.1875],
+            specular_f90: 0.625,
         };
         let bytes = material.to_bytes();
         assert_eq!(bytes.len(), MATERIAL_STRIDE);
@@ -5170,6 +5245,12 @@ mod tests {
         assert_eq!(float_at(52), 0.75, "normal_scale at offset 52");
         assert_eq!(float_at(56), 0.25, "alpha_cutoff at offset 56");
         assert_eq!(uint_at(60), 0x8000_0001, "flags at offset 60");
+        // **The dielectric specular is appended after the flags**, so nothing
+        // above it moved when it arrived.
+        assert_eq!(float_at(64), 0.0625, "specular_f0[0] at offset 64");
+        assert_eq!(float_at(68), 0.125, "specular_f0[1] at offset 68");
+        assert_eq!(float_at(72), 0.1875, "specular_f0[2] at offset 72");
+        assert_eq!(float_at(76), 0.625, "specular_f90 at offset 76");
         assert_eq!(GpuMaterial::from_bytes(&bytes), material);
 
         // A row nothing has written is black, not untinted — the contract the
@@ -5178,16 +5259,22 @@ mod tests {
         // times the `1.0` an unnamed page multiplies by is still zero.
         //
         // **And it is no longer all zeros**, which is the fact `NO_PAGE` going
-        // out of band costs: the two page words are every bit set and every
-        // other byte of the row is zero. Pinned rather than relaxed, so a
-        // column that drifted back in band shows up here.
+        // out of band costs: the two page words are every bit set, the
+        // dielectric specular is glTF's default and every other byte of the
+        // row is zero. Pinned rather than relaxed, so a column that drifted
+        // back in band shows up here.
         let cleared = GpuMaterial::default().to_bytes();
         let mut want = [0u8; MATERIAL_STRIDE];
         want[16..20].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         want[48..52].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        for at in [64, 68, 72] {
+            want[at..at + 4].copy_from_slice(&GpuMaterial::DIELECTRIC_F0.to_le_bytes());
+        }
+        want[76..80].copy_from_slice(&1.0f32.to_le_bytes());
         assert_eq!(
             cleared, want,
-            "a cleared row names no page in both page words and is zero everywhere else"
+            "a cleared row names no page in both page words, carries the neutral dielectric \
+             specular and is zero everywhere else"
         );
         assert_eq!(GpuMaterial::default().base_color, [0.0; 4]);
         assert_eq!(
@@ -5437,6 +5524,53 @@ mod tests {
             "mesh.slang does not declare `{declaration}`; the host's `NO_PAGE` and the \
              shader's have drifted, and every material naming no texture reads the wrong \
              page"
+        );
+    }
+
+    /// **The neutral dielectric specular is exactly the constant the lobe used
+    /// before the row carried one**, so no golden in the tree moves for it.
+    ///
+    /// `mesh.slang` shaded every dielectric with the literal
+    /// [`GpuMaterial::DIELECTRIC_F0`] holds and Schlick's `F90` of one; the
+    /// rows every scene spreads from now hand the
+    /// lobe those numbers instead, and they have to be the same `f32`s for the
+    /// arithmetic to be the same. The shader still declares the literal, for
+    /// the diffuse weight it normalises by, and the two must agree.
+    ///
+    /// **And the literal is not what single precision computes from the
+    /// IOR**, which is why [`GpuMaterial::DIELECTRIC_F0`] is spelled rather
+    /// than derived: the last assertion is that rounding, pinned so a later
+    /// "simplification" to the formula is caught here rather than by a golden.
+    #[test]
+    fn the_neutral_dielectric_specular_is_the_constant_the_lobe_used() {
+        let declaration = format!(
+            "static const float DIELECTRIC_F0 = {:?};",
+            GpuMaterial::DIELECTRIC_F0
+        );
+        let source = include_str!("../shaders/mesh.slang");
+        assert!(
+            source.contains(&declaration),
+            "mesh.slang does not declare `{declaration}`; the host's neutral reflectance and \
+             the shader's have drifted, and a default row's diffuse weight is no longer one"
+        );
+        for row in [GpuMaterial::UNTINTED, GpuMaterial::default()] {
+            assert_eq!(
+                row.specular_f0.map(f32::to_bits),
+                [0.04f32.to_bits(); 3],
+                "a neutral row's F0 must be the literal the lobe used"
+            );
+            assert_eq!(
+                row.specular_f90.to_bits(),
+                1.0f32.to_bits(),
+                "a neutral row's F90 must be Schlick's own one"
+            );
+        }
+        let ior = 1.5f32;
+        let ratio = (ior - 1.0) / (ior + 1.0);
+        assert_ne!(
+            (ratio * ratio).to_bits(),
+            GpuMaterial::DIELECTRIC_F0.to_bits(),
+            "the IOR formula in single precision is expected to round away from the literal"
         );
     }
 
@@ -6236,7 +6370,7 @@ mod tests {
         }
     }
 
-    /// Both shaders that declare `GpuMaterial` declare **all thirteen** of its
+    /// Both shaders that declare `GpuMaterial` declare **every one** of its
     /// members, and the two page words in the halves the host packs them into.
     ///
     /// `mesh_cluster.slang` reads no material at all — its copy exists because
@@ -6265,8 +6399,8 @@ mod tests {
                 .map(str::trim)
                 .filter(|line| line.ends_with(';'))
                 .collect();
-            // A `float4` and twelve scalars: thirteen members over
-            // `MATERIAL_STRIDE` bytes, of which the vector is four words.
+            // A `float4` and then scalars over `MATERIAL_STRIDE` bytes, of
+            // which the vector is four words and so one member.
             assert_eq!(
                 members.len(),
                 MATERIAL_STRIDE / 4 - 3,
@@ -6280,6 +6414,10 @@ mod tests {
                 "float normal_scale;",
                 "float alpha_cutoff;",
                 "uint flags;",
+                "float specular_f0_r;",
+                "float specular_f0_g;",
+                "float specular_f0_b;",
+                "float specular_f90;",
             ] {
                 assert!(
                     members.contains(&expected),

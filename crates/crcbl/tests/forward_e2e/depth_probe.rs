@@ -246,6 +246,12 @@ const PROBE_MATERIALS: [crcbl::shaders::mesh::GpuMaterial; 2] = [
         emissive_texture: crcbl::shaders::mesh::GpuMaterial::NO_PAGE,
         alpha_cutoff: crcbl::shaders::mesh::GpuMaterial::UNTINTED.alpha_cutoff,
         flags: crcbl::shaders::mesh::GpuMaterial::UNTINTED.flags,
+        // The row above's dielectric specular. A conductor's `F0` is its
+        // albedo whatever the dielectric end says, so these do not reach the
+        // attachment — they are the row above's so the two differ only where
+        // the assertion looks.
+        specular_f0: crcbl::shaders::mesh::GpuMaterial::UNTINTED.specular_f0,
+        specular_f90: crcbl::shaders::mesh::GpuMaterial::UNTINTED.specular_f90,
     },
 ];
 

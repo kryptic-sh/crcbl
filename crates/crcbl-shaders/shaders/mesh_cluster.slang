@@ -505,6 +505,10 @@ struct GpuMaterial
     float normal_scale;
     float alpha_cutoff;
     uint flags;
+    float specular_f0_r;
+    float specular_f0_g;
+    float specular_f0_b;
+    float specular_f90;
 };
 
 /// One cluster, matching `crcbl_shaders::meshlet::Meshlet`.

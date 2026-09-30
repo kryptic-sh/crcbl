@@ -781,6 +781,10 @@ const GLTF_DEFAULT_ROW: mesh::GpuMaterial = mesh::GpuMaterial {
     // the absence of every flag.
     alpha_cutoff: 0.5,
     flags: 0,
+    // The dielectric every `KHR_materials_ior` and `KHR_materials_specular`
+    // default reduces to, which is what a material naming neither means.
+    specular_f0: [mesh::GpuMaterial::DIELECTRIC_F0; 3],
+    specular_f90: 1.0,
 };
 
 /// The material table: the glTF default first, then the document's own rows with
