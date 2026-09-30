@@ -313,12 +313,12 @@ pub use crcbl_store as store;
 /// the dependency line above *does* take the symbols out of the artifact,
 /// which is the state the gate found and this change fixes.
 ///
-/// Nothing encodes into the stream yet — no HAL implementation writes through
-/// [`StreamChannel::encode`](crcbl_webgpu::web::StreamChannel::encode) and
-/// nothing calls [`install`](crcbl_webgpu::web::install) — so the exports answer
-/// `0` on every frame today. That is the documented "a shim that started before
-/// the engine did" case, not a failure, and it stays that way until the WebGPU
-/// backend arrives to encode through it.
+/// **The WebGPU backend is what encodes into it**: `crcbl_webgpu::hal`'s device
+/// writes each call through
+/// [`StreamChannel::encode`](crcbl_webgpu::web::StreamChannel::encode), and
+/// opening an instance [`install`](crcbl_webgpu::web::install)s the channel the
+/// exports drain. Before that — a shim that started before the engine did —
+/// the exports answer `0`, which is the documented case and not a failure.
 #[cfg(target_arch = "wasm32")]
 pub use crcbl_webgpu as webgpu;
 /// [`glam`]: the linear algebra `crcbl::render`'s cameras and transforms are

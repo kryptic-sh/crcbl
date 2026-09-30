@@ -581,9 +581,11 @@ fn common_sample_count(limits: &vk::PhysicalDeviceLimits) -> u32 {
 
 /// Enumerates every physical device the instance can see.
 ///
-/// Discrete devices are listed first (stage 2 §2.1:
-/// "prefer discrete"), so a caller taking `adapters()[0]` gets the right answer
-/// without knowing the rule — which is what `apps/sandbox` does.
+/// Openable devices first and discrete ahead of integrated among them (stage 2
+/// §2.1: "prefer discrete"), so the order is already the preference: the
+/// engine's `GpuContext::start_device` walks it and takes the first adapter
+/// that can present, and a caller with no surface to ask about gets the
+/// preferred adapter first.
 pub(crate) fn enumerate(
     instance: &ash::Instance,
     debug_utils: bool,
@@ -603,11 +605,12 @@ pub(crate) fn enumerate(
         .map(|physical| describe(instance, physical, debug_utils, surface_caps2))
         .collect();
 
-    // **Openability first, speed second.** The crate docs say `apps/sandbox`
-    // takes `adapters()[0]` blind, so an adapter this backend cannot open must
-    // never be first — and sorting on device type alone put an unopenable
-    // discrete GPU ahead of a perfectly good integrated one, which surfaces as
-    // "crcbl refuses to start on this laptop".
+    // **Openability first, speed second.** Selection walks this order and
+    // stops at the first adapter that serves the surface, so an adapter this
+    // backend cannot open must never be ahead of one it can — sorting on device
+    // type alone put an unopenable discrete GPU ahead of a perfectly good
+    // integrated one, which surfaced as "crcbl refuses to start on this
+    // laptop".
     records.sort_by_key(|record| {
         let openable = u8::from(!record.core_1_3.is_complete());
         let speed = match record.info.device_type {

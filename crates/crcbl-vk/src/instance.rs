@@ -949,7 +949,7 @@ impl Instance for VkInstance {
         // the honest answer, and it obliges a caller doing adapter selection to
         // treat an `Err` from this call as "try the next one" rather than as
         // fatal — which `crcbl::engine`'s `GpuContext::start_device` does, and
-        // which the seam should probably say out loud. See the crate docs.
+        // which `Instance::surface_caps`'s contract in `crcbl-hal` states.
         let mut presentable = false;
         // SAFETY: `record.physical` came from this instance.
         let families = unsafe {

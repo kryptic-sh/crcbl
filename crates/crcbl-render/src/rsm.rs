@@ -184,10 +184,11 @@ pub fn normal_target(extent: (u32, u32)) -> TransientImageDesc {
 /// `w`.
 ///
 /// **`Rgba32Float`, and it is a position rather than a reconstruction.** The
-/// seam has no plain-float read of a depth image —
-/// [`SampleType::Depth`](crcbl_hal::SampleType::Depth) is a comparison-sampler
-/// slot — so the gather cannot recover a position from this pass's depth
-/// attachment. `probe_capture.slang` set the precedent and its header argues it.
+/// gather could fetch this pass's depth instead —
+/// [`SampleType::Depth`](crcbl_hal::SampleType::Depth) is read with `Load` and
+/// no sampler, as the SSAO pass reads the scene's — and unproject it, but it
+/// stores the position, on the precedent `probe_capture.slang` set, whose
+/// header argues it.
 #[must_use]
 pub fn world_target(extent: (u32, u32)) -> TransientImageDesc {
     TransientImageDesc::new(

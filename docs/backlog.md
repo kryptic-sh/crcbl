@@ -3936,30 +3936,6 @@ mane have nothing built. What the plans leave open:
   internals; Far Cry 5's wind runtime; primary sources for Breath of the Wild,
   Genshin, Sable and Ghibli-style grass.
 
-## Doc drift found 2026-09-23
-
-Seen while correcting other stale docs, and not fixed because each was outside
-that pass's list. Each claim below was read in the tree on that date; what is
-marked unverified was not checked further.
-
-- **`crates/crcbl/src/lib.rs`'s `pub use crcbl_webgpu` doc still says nothing
-  encodes into the stream** and the exports answer `0` on every frame.
-  `StreamChannel::encode_awaited` exists and `WebGpuInstanceOpen` installs a
-  channel, so this reads stale; what the exports answer today is unverified.
-- **`crcbl-vk` still names `apps/sandbox` as taking `adapters()[0]` blind**:
-  `crates/crcbl-vk/src/adapter.rs`'s `enumerate` doc and its "Openability first"
-  comment, and two places in `crates/crcbl-vk/src/lib.rs`'s crate docs. Adapter
-  selection is `GpuContext::start_device`'s surface-aware loop now; whether
-  anything still takes the first adapter blind is unverified.
-- **`crates/crcbl-vk/src/instance.rs`'s surface-caps comment says the seam
-  "should probably say out loud"** the try-the-next-adapter rule. The
-  `Instance::surface_caps` doc in `crcbl-hal` already does.
-- **`crates/crcbl-render/src/rsm.rs`'s `world_target` doc calls
-  `SampleType::Depth` "a comparison-sampler slot"**, the narrow reading that
-  type's doc no longer makes (it is also fetched with no sampler, as SSAO does).
-  Its conclusion — no plain-float read of a depth image — may still hold; the
-  reason it gives does not.
-
 ## Performance: VRAM, CPU and GPU cost (2026-09-15)
 
 The standing goal is the least VRAM, CPU and GPU time the engine can spend for
