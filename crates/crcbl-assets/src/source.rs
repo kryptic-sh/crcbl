@@ -54,7 +54,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crcbl_store::web::canonical_key;
+use crcbl_store::web::{canonical_dir, canonical_key};
 use crcbl_store::{NativeStorage, StorageError, StorageSource};
 
 /// A read-only source of asset bytes that never blocks.
@@ -82,6 +82,38 @@ pub trait AssetSource: fmt::Debug {
     /// - [`StorageError::InvalidPath`] — `key` is not a legal asset key.
     /// - anything else the backing store produces, unchanged.
     fn read(&self, key: &Path) -> Result<Vec<u8>, StorageError>;
+
+    /// The entries directly inside the directory `dir` names, in key order —
+    /// what an asset browser or an in-app file picker walks.
+    ///
+    /// `dir` is a key as [`read`](Self::read) takes one, and the empty path (or
+    /// `.`) is the source's root. Each entry's key is the full key from the
+    /// root, so it can be handed straight back to `read` or to `list`. Only
+    /// entries whose names are legal keys are listed: a file called
+    /// `my asset.png` could never be read, and listing it would offer a thing
+    /// that fails when chosen.
+    ///
+    /// # Errors
+    ///
+    /// - [`StorageError::Unsupported`] — **the default**, for a source that
+    ///   cannot enumerate what it holds: a browser fetching by URL has no
+    ///   directory to ask. Said rather than answered with an empty list, which
+    ///   would read as a directory with nothing in it.
+    /// - [`StorageError::NotFound`] — no directory by that key.
+    /// - [`StorageError::InvalidPath`] — `dir` is not a legal key.
+    fn list(&self, _dir: &Path) -> Result<Vec<AssetEntry>, StorageError> {
+        Err(StorageError::Unsupported("listing assets"))
+    }
+}
+
+/// One entry [`AssetSource::list`] found.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AssetEntry {
+    /// The full key from the source's root, `/`-separated.
+    pub key: String,
+    /// Whether the key names a directory, which lists, rather than an asset,
+    /// which reads.
+    pub is_dir: bool,
 }
 
 /// The native [`AssetSource`]: a directory on disk.
@@ -138,6 +170,30 @@ impl AssetSource for DirSource {
         let key = canonical_key(key)?;
         self.inner.read(Path::new(&key))
     }
+
+    /// Lists the directory `dir` names under [`root`](DirSource::root),
+    /// through [`NativeStorage`]'s own listing and containment.
+    fn list(&self, dir: &Path) -> Result<Vec<AssetEntry>, StorageError> {
+        let dir = canonical_dir(dir)?;
+        let mut entries: Vec<AssetEntry> = self
+            .inner
+            .list(Path::new(&dir))?
+            .into_iter()
+            .filter_map(|path| {
+                // Joined with `/` here: the store's listing joins with the
+                // host's separator, and a key is a URL path on every host.
+                let spelled: Vec<&str> = path
+                    .components()
+                    .map(|part| part.as_os_str().to_str())
+                    .collect::<Option<_>>()?;
+                let key = canonical_key(Path::new(&spelled.join("/"))).ok()?;
+                let is_dir = self.inner.root().join(&path).is_dir();
+                Some(AssetEntry { key, is_dir })
+            })
+            .collect();
+        entries.sort();
+        Ok(entries)
+    }
 }
 
 /// A source over bytes that are already in memory.
@@ -192,6 +248,41 @@ impl AssetSource for MemorySource {
             .get(&key)
             .cloned()
             .ok_or(StorageError::NotFound(PathBuf::from(key)))
+    }
+
+    /// Lists what is filed under `dir`: a key with nothing further is an asset,
+    /// and the first segment of a longer one is a directory — a memory source
+    /// has no directories of its own, only the keys that imply them.
+    fn list(&self, dir: &Path) -> Result<Vec<AssetEntry>, StorageError> {
+        let dir = canonical_dir(dir)?;
+        let prefix = if dir.is_empty() {
+            String::new()
+        } else {
+            format!("{dir}/")
+        };
+        let mut entries: Vec<AssetEntry> = Vec::new();
+        for key in self.entries.keys().filter(|key| key.starts_with(&prefix)) {
+            let rest = &key[prefix.len()..];
+            let entry = match rest.split_once('/') {
+                Some((child, _)) => AssetEntry {
+                    key: format!("{prefix}{child}"),
+                    is_dir: true,
+                },
+                None => AssetEntry {
+                    key: key.clone(),
+                    is_dir: false,
+                },
+            };
+            if entries.last() != Some(&entry) {
+                entries.push(entry);
+            }
+        }
+        if entries.is_empty() && !dir.is_empty() {
+            return Err(StorageError::NotFound(PathBuf::from(dir)));
+        }
+        entries.sort();
+        entries.dedup();
+        Ok(entries)
     }
 }
 
@@ -378,5 +469,108 @@ mod tests {
         }
         // The legal spelling of the third one does read.
         assert_eq!(source.read(Path::new("q.png")).unwrap(), b"query-ish");
+    }
+
+    /// An entry as a test spells one.
+    fn entry(key: &str, is_dir: bool) -> AssetEntry {
+        AssetEntry {
+            key: key.to_owned(),
+            is_dir,
+        }
+    }
+
+    /// **A memory source lists the keys directly under a directory, and the
+    /// directories its deeper keys imply** — each once, in key order.
+    #[test]
+    fn a_memory_source_lists_assets_and_the_directories_keys_imply() {
+        let mut source = resident();
+        for key in ["meshes/barrel.glb", "meshes/props/lamp.glb", "readme.txt"] {
+            source
+                .insert(Path::new(key), Vec::new())
+                .expect("a legal key");
+        }
+        assert_eq!(
+            source.list(Path::new("")).expect("the root lists"),
+            [entry("meshes", true), entry("readme.txt", false)],
+        );
+        assert_eq!(
+            source.list(Path::new(".")).expect("the root"),
+            source.list(Path::new("")).unwrap()
+        );
+        assert_eq!(
+            source.list(Path::new("meshes/")).expect("a directory"),
+            [
+                entry("meshes/barrel.glb", false),
+                entry("meshes/crate.glb", false),
+                entry("meshes/props", true),
+            ],
+        );
+        assert!(matches!(
+            source.list(Path::new("textures")),
+            Err(StorageError::NotFound(_))
+        ));
+        assert!(matches!(
+            source.list(Path::new("../x")),
+            Err(StorageError::InvalidPath(_))
+        ));
+        assert_eq!(
+            MemorySource::new().list(Path::new("")).expect("empty root"),
+            []
+        );
+    }
+
+    /// **A directory source lists what is on disk**, directories told apart
+    /// from files, and leaves out a name no key could spell.
+    #[test]
+    fn a_dir_source_lists_a_directory_and_skips_illegal_names() {
+        let (_dir, source) = fixture();
+        let root = source.root().to_path_buf();
+        std::fs::write(root.join("meshes/my asset.png"), b"unreadable").unwrap();
+        std::fs::create_dir_all(root.join("meshes/props")).unwrap();
+        std::fs::write(root.join("index.txt"), b"").unwrap();
+
+        assert_eq!(
+            source.list(Path::new("")).expect("the root lists"),
+            [entry("index.txt", false), entry("meshes", true)],
+        );
+        assert_eq!(
+            source.list(Path::new("meshes")).expect("a directory"),
+            [
+                entry("meshes/crate.glb", false),
+                entry("meshes/props", true)
+            ],
+        );
+        for entry in source.list(Path::new("meshes")).unwrap() {
+            if !entry.is_dir {
+                source
+                    .read(Path::new(&entry.key))
+                    .expect("every listed asset reads");
+            }
+        }
+        assert!(matches!(
+            source.list(Path::new("absent")),
+            Err(StorageError::NotFound(_))
+        ));
+        assert!(matches!(
+            source.list(Path::new("..")),
+            Err(StorageError::InvalidPath(_))
+        ));
+    }
+
+    /// A source that cannot enumerate says so, rather than answering with an
+    /// empty directory.
+    #[test]
+    fn a_source_that_cannot_list_says_so() {
+        #[derive(Debug)]
+        struct ReadOnly;
+        impl AssetSource for ReadOnly {
+            fn read(&self, key: &Path) -> Result<Vec<u8>, StorageError> {
+                Err(StorageError::NotFound(key.to_path_buf()))
+            }
+        }
+        assert!(matches!(
+            ReadOnly.list(Path::new("")),
+            Err(StorageError::Unsupported(_))
+        ));
     }
 }

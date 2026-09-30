@@ -266,7 +266,7 @@ pub fn canonical_key(path: &Path) -> Result<String, StorageError> {
 /// # Errors
 ///
 /// [`StorageError::InvalidPath`], as [`canonical_key`].
-fn canonical_dir(path: &Path) -> Result<String, StorageError> {
+pub fn canonical_dir(path: &Path) -> Result<String, StorageError> {
     // String-first, for the reason `canonical_key` gives at length.
     let raw = path.to_str().unwrap_or("\0");
     let trimmed = raw.strip_suffix('/').unwrap_or(raw);

@@ -397,6 +397,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **An asset source can list a directory.** `AssetSource::list(dir)` returns the
+  `AssetEntry`s directly inside it — full key and whether it is a directory — in
+  key order, leaving out names no key could spell. `DirSource` lists the disk
+  and `MemorySource` the keys it holds (and the directories they imply); any
+  other source answers `StorageError::Unsupported` unless it overrides it, which
+  is what a browser fetching by URL should say.
+  `crcbl_store::web::canonical_dir`, the directory-key rule `list` uses, is
+  public.
+
 - **The editor has a translate gizmo.** An arrow per axis over the selection,
   drawn in the viewport's screen space at a constant size; dragging one moves
   the selection along that axis (in quarter-metre steps with Ctrl held), and a

@@ -11619,7 +11619,12 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   `Gesture` folding (`UndoLog::record_in`) is the mechanism; the missing piece
   is knowing when an inspector drag begins and ends, which `FieldEdit` does not
   say.
-- **The asset browser and drag-spawn**; `AssetSource` has `read` and no `list`.
+- **The asset browser and drag-spawn.** `AssetSource::list` landed 2026-09-30
+  (`DirSource`, `MemorySource`; `Unsupported` by default). What is still
+  missing: a mesh component the editor's vocabulary can spawn and draw — it
+  draws every entity as a greybox cube today — and a pane for the browser, which
+  under the splitters-only docking decision is a fourth pane and a layout the
+  saved `settings.toml` of an older build refuses (`crate::layout::load`).
 - **Play/stop** by reloading the scene (decided 2026-09-16).
 - **The remaining command variants**: rename, attach/detach system data and
   scene-load and save markers (_Task 4's commands_ above says what each waits

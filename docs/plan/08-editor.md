@@ -173,9 +173,10 @@ Run-time discovery needs a link-time distributed slice (`linkme` or
 
 Everything else below stands unchanged: the server still drops commands, there
 is one schedule per `World`, there is no snapshot, the samples' state is outside
-the ECS, the format cannot hold one entity in two systems, debug draw is not a
-gizmo layer, `AssetSource` cannot list, and there are no `serve`/`scene`/`edit`
-subcommands.
+the ECS, the format cannot hold one entity in two systems, and there are no
+`serve`/`scene`/`edit` subcommands. (Debug draw is still not a gizmo layer; the
+gizmo does not need it to be — slice 6, above. `AssetSource` lists since
+2026-09-30.)
 
 Two things sit behind it, in both directions:
 
@@ -265,7 +266,9 @@ than the rest of this document suggests; each line was checked in the source.
 9. **No undo or command log** anywhere, and the inventory kit's
    optimistic-then-reconcile shape exists only as prose in
    [34-inventory.md](34-inventory.md).
-10. **`AssetSource` cannot list** (it has `read` alone), `crcbl import` writes
+10. **`AssetSource` could not list** (it had `read` alone) — `list` landed
+    2026-09-30, for `DirSource` and `MemorySource`, with an `Unsupported`
+    default for a source that cannot enumerate — and `crcbl import` writes
     nothing, and there is no watcher but the viewer's polled file.
 11. **The UI cannot host an editor yet**: no textured quad or clip rect in the
     draw list, no layout, no keyboard focus, text input without selection, an
@@ -334,8 +337,12 @@ long term and recorded):
 - **Docking is splitters only for now.** Tabs are added when a second panel
   competes for one slot; nothing does yet.
 - **File dialogs are an in-UI browser over storage listing**, the same on every
-  backend including the browser, with no native dialog dependency. It needs
-  `AssetSource` to list, which it cannot yet.
+  backend including the browser, with no native dialog dependency.
+  `AssetSource::list` exists since 2026-09-30. In a browser, served assets
+  cannot be listed — a URL fetch has no directory to ask, and the default says
+  `Unsupported` rather than empty — so a browser build browses its OPFS storage
+  (`StorageSource::list`) and would need a baked manifest to browse served
+  assets.
 - **The scene format change for entities spanning systems** is decided when the
   towers port first needs one entity in two systems. The format is v0, so the
   break is allowed then.
