@@ -1559,11 +1559,15 @@ fn texture_has_an_image(document: &gltf::Document, index: usize) -> bool {
 
 /// The glTF extensions this importer implements.
 ///
-/// `lod_resolve` reads `MSFT_lod`, and `dielectric_specular` reads the IOR and
-/// the specular factors. Everything else a document declares is ignored, so
+/// `lod_resolve` reads `MSFT_lod`, [`emissive_radiance`] the emissive strength,
+/// and `dielectric_specular` the IOR and the specular factors. Everything else a document declares is ignored, so
 /// this list is what [`warn_unsupported_extensions`] measures against.
-const IMPLEMENTED_EXTENSIONS: &[&str] =
-    &["MSFT_lod", "KHR_materials_ior", "KHR_materials_specular"];
+const IMPLEMENTED_EXTENSIONS: &[&str] = &[
+    "MSFT_lod",
+    "KHR_materials_emissive_strength",
+    "KHR_materials_ior",
+    "KHR_materials_specular",
+];
 
 /// Name every extension the document declares and this importer does not
 /// implement, `extensionsRequired` louder than `extensionsUsed`, and hand the
@@ -2278,6 +2282,21 @@ pub(crate) mod tests {
                 .iter()
                 .any(|line| line.contains("KHR_materials_ior")
                     || line.contains("KHR_materials_specular")),
+            "an implemented extension was reported as unsupported: {warnings:#?}",
+        );
+    }
+
+    /// **Emissive strength is implemented too, so it is not reported** — it
+    /// was read into the row's radiance while the list still called it
+    /// ignored.
+    #[test]
+    fn the_emissive_strength_extension_is_not_reported() {
+        let name = r#""KHR_materials_emissive_strength""#;
+        let warnings = import_warnings(&with_extensions(name, name));
+        assert!(
+            !warnings
+                .iter()
+                .any(|line| line.contains("KHR_materials_emissive_strength")),
             "an implemented extension was reported as unsupported: {warnings:#?}",
         );
     }

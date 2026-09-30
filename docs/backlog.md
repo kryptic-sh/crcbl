@@ -3595,13 +3595,16 @@ asset key per process. Still owed:
   spare word — `gltf_import` slots for them beside `emissive_textures`,
   `gltf_render::pack_page` placing them, and the texel folded into `F0`/`F90`
   and the diffuse weight per fragment rather than on the CPU.
-- **The diffuse weight is at normal incidence and relative to the default.** The
-  extension weights the diffuse lobe by `1 - max(F)` with `F` the full
-  view-dependent Fresnel; this engine never weighted its diffuse by the default
-  layer's Fresnel at all, so `dielectric_diffuse_weight` applies the ratio of a
-  row's weight to the default's with `F = F0`. Applying the view-dependent
-  weight properly would darken every dielectric toward grazing — a picture
-  change for every golden, and the user's call.
+- **Decided 2026-09-30: the diffuse weight stays at normal incidence, relative
+  to the default.** The extension weights the diffuse lobe by `1 - max(F)` with
+  `F` the full view-dependent Fresnel; this engine never weighted its diffuse by
+  the default layer's Fresnel at all, so `dielectric_diffuse_weight` applies the
+  ratio of a row's weight to the default's with `F = F0`. The view-dependent
+  weight was declined for now: it would darken every dielectric toward grazing,
+  moving every golden in the tree for a term no asset has been seen to need,
+  while the ratio already gives what the extension is used for — a layer that
+  reflects less leaves more to the diffuse. Revisit when a reference comparison
+  against another renderer shows the grazing difference on a real asset.
 - **`F90` does not reach `ssr.slang`.** The reflectivity attachment is
   `Rgba8Unorm` with `rgb` = `F0` and `a` = roughness, so a reflection is
   weighted as though Schlick rose to one. Only a dielectric with
@@ -3614,19 +3617,12 @@ asset key per process. Still owed:
 - **The area-light split-sum term `f90 * dfg.y` is untested on a device.** The
   mesh-e2e `specular` tests use a directional sun and ambient light; no test
   draws a rectangle light over a row with `specular_f90 < 1`.
-- **`KHR_materials_emissive_strength` is read but not in
-  `IMPLEMENTED_EXTENSIONS`**, so a document declaring it is warned that it is
-  ignored while its strength is applied. Found while adding the two names above;
-  not changed because it was outside this slice. Adding it to the list (and a
-  test like `the_ior_and_specular_extensions_are_not_reported`) is the whole
-  fix.
-- **Not verified here:** MSL and DXIL were not regenerated (the local `slangc`
-  is 2026.14 against the pinned 2026.18.2; SPIR-V and WGSL reproduce, the other
-  two do not), so Metal and D3D12 run stale 64-byte-row shaders until CI's
-  `regenerated-shaders` artifact is committed. The bit-for-bit claim for a
-  default row was measured on Vulkan on an RX 7900 XTX (AMD proprietary
-  25.10.36) only, by hashing 36 full HDR frames drawn by the old and the new
-  arithmetic.
+- **What was verified where.** The bit-for-bit claim for a default row was
+  measured on Vulkan on an RX 7900 XTX (AMD proprietary 25.10.36) by hashing
+  full HDR frames drawn by the old and the new arithmetic. The MSL and DXIL are
+  CI's regenerated artifacts; on the same card under D3D12 the render suite and
+  the three `specular` mesh tests pass. Metal and the browser were not run
+  locally: CI's `mtl e2e` and `pages.yml` are what cover them.
 
 ## A lying capsule for prone characters: what the move left (2026-09-25)
 

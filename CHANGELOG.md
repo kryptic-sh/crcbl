@@ -3158,6 +3158,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **A glTF document using `KHR_materials_emissive_strength` is no longer warned
+  that the extension is ignored.** Its strength was always applied to the
+  emissive radiance; the importer's list of implemented extensions left it out.
+
 - **Quitting no longer fails on a close that was already answered.**
   `crcbl::engine::accept_close` replies to an outstanding close request and
   otherwise just destroys the window, so a compositor that sends the close
