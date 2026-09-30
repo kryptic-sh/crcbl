@@ -741,7 +741,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             Action::Nudge { axis, sign } => self.nudge(*axis, sign * NUDGE_M),
             Action::Undo => self.document.undo().map(|_| ()),
             Action::Redo => self.document.redo().map(|_| ()),
-            Action::Save => self.document.save(),
+            Action::Save => self.save(),
             Action::Frame => {
                 self.frame_scene();
                 Ok(())
@@ -763,6 +763,16 @@ impl<S: Shell + ?Sized> Editor<S> {
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
         }
+    }
+
+    /// Saves the document, then says what the games it is made for would
+    /// refuse in it — reported, not refused: see [`Document::problems`].
+    fn save(&mut self) -> Result<(), EditError> {
+        self.document.save()?;
+        for problem in self.document.problems()? {
+            crcbl::log::warn!("editor: saved, but its game will refuse it: {problem}");
+        }
+        Ok(())
     }
 
     /// Offers the selection to the clipboard, as the engine's RON and as text.

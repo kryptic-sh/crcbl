@@ -80,11 +80,13 @@
 use std::any::type_name;
 use std::collections::BTreeMap;
 use std::fmt;
+use std::path::Path;
 
 use glam::DVec3;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
+use crcbl_assets::AssetSource;
 use crcbl_ecs::{ComponentHash, Entity, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_scene::scn::{IdMap, SystemChunk, chunk_of};
@@ -184,7 +186,20 @@ pub struct Registry {
     /// [`Registry::systems`] has an order that is a function of the names rather
     /// than of the order a game happened to register them in.
     entries: BTreeMap<String, Entry>,
+    /// The games' rules over whole scenes, each with the system whose presence
+    /// in a manifest says the rule applies — see [`Registry::check`].
+    checks: Vec<(String, SceneCheck)>,
 }
+
+/// A game's rule over a whole scene: the scene's files, read through `source`
+/// under the directory `dir`, and the reason the game would refuse them — or
+/// `Ok` for a scene it would play.
+///
+/// What the format cannot say and a game can: a path whose legs must be
+/// axis-aligned, a plot that must stand clear of the lane. A tool that saves a
+/// scene runs these so that a layout the game will refuse is reported where it
+/// was made rather than where it is next loaded.
+pub type SceneCheck = fn(&dyn AssetSource, &Path) -> Result<(), String>;
 
 /// One registered component, reduced to the calls a tool makes.
 ///
@@ -243,6 +258,33 @@ impl Registry {
             );
         }
         self.entries.insert(system, entry);
+    }
+
+    /// Adds `check`, run on every scene whose manifest lists `system` — the
+    /// game that owns that system holding the scene to its own rules.
+    ///
+    /// Keyed by a system rather than run on every scene, because a registry
+    /// holds several games' vocabularies at once and one game's rules are
+    /// nothing to another's scene.
+    pub fn check(&mut self, system: impl Into<String>, check: SceneCheck) {
+        self.checks.push((system.into(), check));
+    }
+
+    /// What every check whose system `systems` lists refuses in the scene
+    /// `source` holds under `dir`, in the order the checks were added — empty
+    /// for a scene every applicable game would play.
+    #[must_use]
+    pub fn problems(
+        &self,
+        systems: &[String],
+        source: &dyn AssetSource,
+        dir: &Path,
+    ) -> Vec<String> {
+        self.checks
+            .iter()
+            .filter(|(system, _)| systems.contains(system))
+            .filter_map(|(_, check)| check(source, dir).err())
+            .collect()
     }
 
     /// The system names this registry knows, in name order.
@@ -682,6 +724,38 @@ mod tests {
             .expect("it holds the beacon");
         assert_eq!(row, "(intensity:3.0)");
         assert!(registry.codec("bricks").is_none());
+    }
+
+    /// **A game's check runs on a scene that lists its system and on no other**,
+    /// and says what it refuses.
+    #[test]
+    fn a_check_runs_only_on_scenes_listing_its_system() {
+        fn refuse_beacons(_: &dyn AssetSource, _: &Path) -> Result<(), String> {
+            Err("a beacon needs a block to stand on".to_owned())
+        }
+        fn refuse_bricks(_: &dyn AssetSource, _: &Path) -> Result<(), String> {
+            Err("bricks were checked".to_owned())
+        }
+        fn pass(_: &dyn AssetSource, _: &Path) -> Result<(), String> {
+            Ok(())
+        }
+        let mut registry = registry();
+        registry.check("beacons", refuse_beacons);
+        registry.check("bricks", refuse_bricks);
+        registry.check("blocks", pass);
+
+        let source = scene_source();
+        let systems = ["blocks".to_owned(), "beacons".to_owned()];
+        assert_eq!(
+            registry.problems(&systems, &source, std::path::Path::new("")),
+            ["a beacon needs a block to stand on"],
+        );
+        assert!(
+            registry
+                .problems(&["blocks".to_owned()], &source, std::path::Path::new(""))
+                .is_empty(),
+            "a check ran on a scene that does not list its system",
+        );
     }
 
     /// **An unregistered system fails loudly, naming itself.** The failure this

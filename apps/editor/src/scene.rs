@@ -284,6 +284,47 @@ mod tests {
         );
     }
 
+    /// **A plot moved onto the lane is a problem towers reports**, named by the
+    /// plot, and undoing the move clears it — the check an author sees on
+    /// saving, run over the document's own saved text.
+    #[test]
+    fn a_plot_moved_onto_the_lane_is_a_problem_towers_reports() {
+        let mut document = crate::Document::open(
+            &crcbl_towers::built_in_source(),
+            std::path::Path::new(crcbl_towers::FIELD),
+            vocabulary(),
+        )
+        .expect("the shipped vocabulary opens towers' field");
+        assert_eq!(
+            document.problems().expect("the field saves"),
+            Vec::<String>::new(),
+            "the committed field is one towers plays",
+        );
+
+        // Plot 4 is "entry", and the first leg runs along z = 8.
+        document
+            .apply(crate::command::EditCommand::SetProperty {
+                entity: crcbl::scene::scn::SceneEntityId(4),
+                path: "position.2".to_owned(),
+                value: crcbl::reflect::Value::Float(8.0),
+            })
+            .expect("a plot has a z");
+        let problems = document.problems().expect("the field saves");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains("entry"), "{problems:?}");
+
+        document.undo().expect("the move undoes");
+        assert!(document.problems().expect("the field saves").is_empty());
+    }
+
+    /// **Towers' check is towers' alone**: a scene with none of its systems —
+    /// the editor's own greybox — is held to no rule of its.
+    #[test]
+    fn a_scene_without_towers_systems_is_not_held_to_towers_rules() {
+        let mut document = crate::Document::built_in().expect("the compiled-in scene");
+        assert!(document.problems().expect("it saves").is_empty());
+    }
+
     /// **Towers' committed field opens through the shipped vocabulary**, with
     /// every corner of the path and every plot the game itself reads out of it.
     /// The dogfood claim `docs/plan/sample/07-towers.md`'s milestone 2 makes: a

@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crcbl::assets::AssetSource;
+use crcbl::assets::{AssetSource, MemorySource};
 use crcbl::ecs::{Entity, World};
 use crcbl::math::{DVec3, Vec3};
 use crcbl::phys::{ColliderComponent, PhysicsSystem, Ray, RigidBody, Transform};
@@ -682,6 +682,30 @@ impl Document {
         // entry the save stands on.
         self.log.seal();
         Ok(())
+    }
+
+    /// What the games whose systems this scene holds would refuse in it as it
+    /// stands — each registered [`crcbl::registry::SceneCheck`] run over the
+    /// scene's own saved text — or nothing for a scene they would all play.
+    ///
+    /// Not a gate on [`save`](Self::save): authoring passes through layouts
+    /// no game would load, a corner added before the leg it breaks is
+    /// straightened, and a save that refused them would lose the work in
+    /// between. A caller reports these instead.
+    ///
+    /// # Errors
+    ///
+    /// As [`files`](Self::files).
+    pub fn problems(&mut self) -> Result<Vec<String>, EditError> {
+        let mut source = MemorySource::new();
+        for (key, text) in self.files()? {
+            source
+                .insert(Path::new(&key), text.into_bytes())
+                .map_err(|source| EditError::Write { key, source })?;
+        }
+        Ok(self
+            .registry
+            .problems(self.scene.systems(), &source, Path::new("")))
     }
 
     /// [`save_to`](Self::save_to) the directory this document was opened from.

@@ -181,7 +181,7 @@ impl Placement for Plot {
 }
 
 /// This game's scene vocabulary: two components, under the names their chunk
-/// files are spelled with.
+/// files are spelled with, and the rule a scene holding them is held to.
 ///
 /// **The one place `waypoints` and `plots` are joined to their types.**
 /// [`Map::load`] uses it and so does any tool that opens this game's field, so
@@ -191,6 +191,17 @@ impl Placement for Plot {
 pub fn register_components(registry: &mut Registry) {
     registry.register::<Waypoint>(WAYPOINTS);
     registry.register::<Plot>(PLOTS);
+    registry.check(WAYPOINTS, check_field);
+}
+
+/// This game's rule over a scene that holds its waypoints: that
+/// [`Map::load`] would take it — the check an editor saving this game's field
+/// runs, so a diagonal leg or a plot on the lane is reported where it was made
+/// rather than at the next `--scene`.
+fn check_field(source: &dyn AssetSource, dir: &Path) -> Result<(), String> {
+    Map::load(source, dir)
+        .map(drop)
+        .map_err(|error| error.to_string())
 }
 
 impl Map {

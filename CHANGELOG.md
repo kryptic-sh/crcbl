@@ -420,6 +420,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A game can hold its scenes to its own rules, and the editor says when a save
+  breaks them.** `crcbl::registry::Registry::check(system, SceneCheck)`
+  registers a rule run on any scene whose manifest lists `system`, and
+  `Registry::problems` collects what they refuse. Towers registers its map's
+  loader, so the editor's Ctrl+S logs a plot moved onto the lane or a diagonal
+  leg, naming it, while still saving (`Document::problems`).
+
 - **glTF `KHR_materials_ior` and `KHR_materials_specular` reach the renderer**:
   `crcbl_scene::gltf_import` reads the IOR, `specularFactor` and
   `specularColorFactor` into the row's new `specular_f0` and `specular_f90`, and

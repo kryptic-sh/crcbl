@@ -13819,10 +13819,18 @@ committed field):
 
 **Surprises, not bugs:** `env.ron`'s camera and ambient are written from
 `crate::camera` and `map::sun` and read by nothing — the frame is drawn from the
-code, as breakout's is; the scene tests keep the file from drifting. The editor
-edits the field with no knowledge of `Map::new`'s rules, so a layout broken in
-the editor saves and is refused when `--scene` loads it, with the rule it broke
-in the message; the editor has no validation hook to call.
+code, as breakout's is; the scene tests keep the file from drifting.
+
+**The editor reports a broken field on save (2026-09-30).**
+`crcbl::registry::Registry::check` lets a game register a `SceneCheck` run on
+any scene listing one of its systems; towers registers `Map::load` against
+`waypoints`, and the editor's save runs `Document::problems` and logs each
+refusal. **Decided: reported, not refused.** Authoring passes through layouts no
+game would load — a corner added before the leg it breaks is straightened — and
+a save that refused them would lose the work in between; the game still refuses
+the file at `--scene` with the rule it broke. The report is a log line; the
+editor has no status line to show it in, which is the gap to close when one
+exists.
 
 **Coverage gap:** no windowed or screenshot run of a non-default map was made;
 `app::tests::a_map_other_than_the_committed_one_is_the_one_the_run_plays` runs
