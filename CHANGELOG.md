@@ -420,6 +420,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **`crcbl_net::reliable`: the reliability layer a UDP transport will run
+  inside**, as pure logic over any datagram pipe — no socket and no crypto yet.
+  An `Endpoint` (driven by an injected `Clock`: `send`, `receive_datagram`,
+  `poll_outgoing`, `recv` / `recv_reliable`, `update`, `disconnect`) speaks a
+  packet format with a protocol id, a wrapping 16-bit sequence, and an ack plus
+  64-bit ack bitfield piggybacked on every packet. `Channel::Reliable` resends
+  on an RFC 6298 timeout (floor `MIN_RTO`, cap `MAX_RTO`, doubling per resend),
+  delivers once and in order, and fragments messages past one datagram up to
+  `MAX_RELIABLE_MESSAGE_BYTES`; `Channel::UnreliableSequenced` never resends,
+  drops anything older than what it last delivered, and refuses a payload past
+  `MAX_UNRELIABLE_PAYLOAD` (the one-datagram rule, against a 1200-byte
+  `MAX_DATAGRAM_BYTES` that already reserves room for the AEAD tag). Keepalives,
+  a `PEER_TIMEOUT`, and a graceful disconnect reported as
+  `EndpointState::PeerDisconnected` rather than `TimedOut`; `EndpointStats`
+  carries round trip, jitter, loss and resend counts for the netgraph. Every
+  queue is capped and a full one is `TransportError::Backpressure`;
+  `decode_packet` is total on hostile bytes, and the decoder fuzz target now
+  runs it and a live endpoint too.
+
 - **A game can hold its scenes to its own rules, and the editor says when a save
   breaks them.** `crcbl::registry::Registry::check(system, SceneCheck)`
   registers a rule run on any scene whose manifest lists `system`, and

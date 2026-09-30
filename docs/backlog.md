@@ -12897,24 +12897,63 @@ What it left unbuilt is below.
 
 ### There is no UDP transport, and therefore no crypto of our own (2026-08-27)
 
-**DEFERRED 2026-08-30 — the transport and the first crypto crate are decided
-when netcode is the active topic**, not before. **Not built:** no `UdpSocket`
-exists anywhere in `crates/` or `apps/` (grep, 2026-09-24). `Transport` is
-implemented by `InMemoryTransport`, `crcbl_store`'s `FileTransport` and, since
-2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P over Valve's relay, run
-through `crcbl_net::conformance`; `crcbl_server::Host` serves several sessions
-over `Box<dyn Transport>` peers). The Steam path is a real network transport,
-but none of the plan's own layer exists.
+**Partly built: the packet layer exists, the socket and the seal do not.** No
+`UdpSocket` exists anywhere in `crates/` or `apps/` (grep, 2026-09-30).
+`Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
+`FileTransport` and, since 2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P
+over Valve's relay, run through `crcbl_net::conformance`; `crcbl_server::Host`
+serves several sessions over `Box<dyn Transport>` peers).
 
-**The design, for whoever builds it** (Gaffer / netcode.io lineage):
+**Built 2026-09-30 (slice A): `crcbl_net::reliable`**, pure logic over any
+datagram pipe. Packet header with protocol id, wrapping 16-bit sequence
+(Gaffer's `sequence_greater_than`), and an ack plus 64-bit ack bitfield on every
+packet; `Endpoint`, one per peer, driven by an injected `Clock`. The reliable
+channel resends on an RFC 6298 RTO (`MIN_RTO`, `MAX_RTO`, doubling per resend),
+delivers in order through a bounded reorder window (`RELIABLE_WINDOW`), and
+fragments up to `MAX_RELIABLE_MESSAGE_BYTES` from the 1200-byte
+`MAX_DATAGRAM_BYTES`, which reserves `AEAD_TAG_RESERVE` for the seal. The
+unreliable-sequenced channel never resends, never fragments, and drops anything
+older than it last delivered. Keepalives (`KEEPALIVE_INTERVAL`), `PEER_TIMEOUT`,
+and a disconnect packet sent `DISCONNECT_REDUNDANCY` times and reported as
+`PeerDisconnected`, distinct from `TimedOut`. `EndpointStats` holds RTT, jitter,
+smoothed loss and resend counts. Every queue is capped. Its tests run two
+endpoints over `ConditionSimulator` (one per direction, datagrams on the
+unreliable channel) with a `ManualClock`: the soak (heavy loss, duplication,
+reorder and jitter, sequences crossing the wrap, many seeds), fragment
+reassembly under loss, RTT convergence, loss estimate, timeout, disconnect,
+hostile datagrams, floods and end-to-end backpressure. The decoder fuzz target
+feeds it too.
 
-- **One socket, channel-multiplexed packets.** Per-packet header: protocol id,
-  sequence, ack and a 64-bit ack bitfield piggybacked on every packet, so
-  reliable resend needs no separate ack traffic and RTT falls out free, feeding
-  topic 21's tick-lead estimate.
-- **Resend** of unacked reliable payloads on an RTT-derived RTO; the sequenced
-  channel never resends. **Fragmentation** on the reliable channel only, from a
-  conservative 1200-byte MTU, discovery optional later.
+**What is left, by slice:**
+
+- **B — the seal.** RustCrypto's `chacha20poly1305` and `x25519-dalek` (the
+  decision below). Seal between `Endpoint::poll_outgoing` and the socket, open
+  between the socket and `Endpoint::receive_datagram`; the endpoint's header
+  under the tag. **The nonce cannot be the packet sequence**: it is 16 bits and
+  wraps, so the seal carries its own 64-bit per-direction counter (netcode.io's
+  layering: a 64-bit sequence outside, reliable.io's 16-bit one inside) and
+  needs its own replay window over it. X25519 in the handshake, rekey on
+  reconnect, nonce uniqueness property-tested.
+- **C — `UdpTransport`.** A socket, one `Endpoint` per peer behind `Transport`
+  (`send_reliable` → `Channel::Reliable`, `send_unreliable` →
+  `Channel::UnreliableSequenced`, `recv_reliable` → `Endpoint::recv_reliable`,
+  `is_connected` → `EndpointState::is_connected`), the hello and handshake
+  carried over it, and `crcbl_net::conformance` run against it. Only after B:
+  **an unsealed endpoint on a network is exploitable, not just readable** — a
+  forged disconnect ends the link, and a forged first fragment with the wrong
+  count for the next message id stalls the reliable channel for good. The
+  endpoint cannot tell a forgery from the peer; only the tag can.
+- **D — tokens and discovery.** Connection tokens (below) and LAN discovery (its
+  own entry). Neither needs anything from the packet layer.
+
+**Not built in the packet layer, deliberately:** congestion control and pacing —
+a reliable message's fragments all go out in one poll, capped only by
+`MAX_RELIABLE_BYTES_IN_FLIGHT`; fine on a LAN, a question if the link ever
+crosses anything slower. Path-MTU discovery. Bandwidth rates for the netgraph
+(the stats carry byte counters; a rate is a window over them).
+
+**The design, for whoever builds the rest** (Gaffer / netcode.io lineage):
+
 - **Connection tokens** (netcode.io pattern): a short-lived token minted by a
   trusted source — the server itself for direct connect, a backend later — as an
   anti-spoof filter and the carrier of key material when a backend mints it.
@@ -12923,8 +12962,6 @@ but none of the plan's own layer exists.
   skips the exchange), then XChaCha20-Poly1305 with the nonce derived from
   direction plus sequence and the header under the tag. Rekey on reconnect.
   Nonce uniqueness is property-tested.
-- **Keepalive and timeout**: heartbeats when idle, drop-detection windows, and a
-  graceful disconnect message distinct from a timeout.
 - The risks the plan named: ack wraparound, RTO tuning and fragment loss, gated
   by the condition-simulator soak below.
 
@@ -12971,14 +13008,24 @@ plan's table:
   implementation overwrites it, so a mismatched field cannot silently reroute
   anything.
 - **unreliable-sequenced** (snapshots; latest wins, drops fine, no resend) —
-  **not sequenced.** `Unreliable` promises only "may be dropped or reordered".
-  What actually stops a stale snapshot beating a fresh one is a layer up:
-  `crcbl_net::delta` refuses a delta whose tick is not newer than the
+  **built in the packet layer, not behind the seam.**
+  `crcbl_net::reliable::Channel::UnreliableSequenced` (2026-09-30) drops a
+  packet older than the newest it delivered and never resends, but no
+  `Transport` routes to it until slice C's `UdpTransport` (see the entry above).
+  Through the seam, `Unreliable` still promises only "may be dropped or
+  reordered". What actually stops a stale snapshot beating a fresh one is a
+  layer up: `crcbl_net::delta` refuses a delta whose tick is not newer than the
   baseline's. Lateness is rejected at apply time rather than prevented at the
   channel.
-- **reliable-fragmented** (bulk: a join-in-progress snapshot, replays) — does
-  not exist. `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB) _refuses_ an oversized
-  message; nothing reassembles. (`SteamTransport` accepts up to its own
+- **reliable-fragmented** (bulk: a join-in-progress snapshot, replays) —
+  **folded into reliable-ordered in the packet layer**: `crcbl_net::reliable`'s
+  reliable channel fragments and reassembles up to `MAX_RELIABLE_MESSAGE_BYTES`,
+  which clears the in-memory limit, but nothing reaches it through a `Transport`
+  yet. Over the seam as it stands, `MAX_IN_MEMORY_MESSAGE_BYTES` (64 KiB)
+  _refuses_ an oversized message; nothing reassembles. A separate bulk channel,
+  so a large transfer does not head-of-line block commands, is not built: a
+  command queued behind a large message goes out alongside its fragments but is
+  delivered after it. (`SteamTransport` accepts up to its own
   `MAX_MESSAGE_BYTES`, Steam's send limit, and leaves the splitting to Valve's
   layer.)
 - **unreliable-event** (added 2026-07-27: footstep and gunfire cues, impact VFX;
@@ -13068,7 +13115,11 @@ subscription, ownership or migration symbol in `crcbl-net` or `crcbl-server`
 **Partly verified.** A fuzz target tree exists at `crates/crcbl-net/fuzz`, and
 `crates/crcbl-net/tests/replication.rs` is the crate's integration suite. The
 condition simulator (`condition.rs`) and inbound rate limiting (`rate_limit.rs`)
-are built, so the machinery the soak needs is there.
+are built, so the machinery the soak needs is there. **The reliability soak
+exists for the packet layer** (2026-09-30): `crcbl_net::reliable`'s tests run
+two endpoints through the condition simulator and check both channel properties
+below across many seeds. What it cannot cover yet is the same soak through a
+real `Transport` and socket, which waits on `UdpTransport`.
 
 The plan's matrix: a reliability soak under the condition simulator (loss up to
 30%, reorder, duplication) where every reliable message arrives in order and the

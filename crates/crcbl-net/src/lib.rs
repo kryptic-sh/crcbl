@@ -15,6 +15,9 @@
 //!   for the server → client snapshot path.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
+//! * [`reliable`] — the packet layer a UDP transport will run inside: acks,
+//!   resend, ordering and fragmentation over any datagram pipe. No socket and
+//!   no crypto yet; see its module docs for where both go.
 //! * `conformance` (feature `conformance`) — the checks every [`Transport`]
 //!   must pass, for crates that implement one.
 
@@ -27,6 +30,7 @@ pub mod delta;
 pub mod handshake;
 pub mod messages;
 pub mod rate_limit;
+pub mod reliable;
 pub mod session;
 pub mod transport;
 pub mod types;
