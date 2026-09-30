@@ -105,18 +105,23 @@ its frames here), and then a long tail of 60–90 s per-path equivalence tests
 was near the per-test limit except `shadow_block_reads`. The job's length is the
 tail's sum, not one outlier.
 
-**One grass test stalls software and paravirtual devices (2026-09-30), twice.**
+**Grass frames stall software and paravirtual devices (2026-09-30), three
+times.**
 `grass_shells::shells_draw_strands_at_the_roots_a_card_field_leaves_open` failed
 in run 36652393660 (`aef492d5`) on Metal with a `DeviceLost` whose error was
 `kIOGPUCommandBufferCallbackErrorHang` on the "Apple Paravirtual device", every
 encoder of the frame reported completed; and in run 36724475615 (`04db3b6c`) on
-`dx12 e2e (software adapter)` with `ReadbackTimeout(10s)` on WARP. Neither
-change touched renderer code, and both passed on rerun. Two backends in one day
-point at the test's frame rather than one driver: it is the heaviest single
-frame in the render suite on these adapters. **Next, if it recurs:** give this
-test a smaller field on software adapters (the `bucket_price` gate-scene
-pattern), or split its frame's submission so no one command buffer runs long
-enough for a watchdog or the readback budget.
+`dx12 e2e (software adapter)` with `ReadbackTimeout(10s)` on WARP. The same day,
+run 36732234129 (`2adaaf4b`) failed
+`grass_blades::a_look_switch_leaves_the_blade_placement_bit_identical` on
+`vk e2e (lavapipe)` with the same `ReadbackTimeout(10s)` from the same
+`render_e2e::grass::frame_of`. None of the three changes touched renderer code,
+and each passed on rerun. Three backends in one day point at the grass frames
+rather than one driver: they are the heaviest single frames in the render suite
+on these adapters. **Next, if it recurs:** give the grass tests a smaller field
+on software adapters (the `bucket_price` gate-scene pattern), or split its
+frame's submission so no one command buffer runs long enough for a watchdog or
+the readback budget.
 
 ## EW's engine port requests (2026-09-27)
 
