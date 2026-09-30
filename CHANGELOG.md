@@ -425,6 +425,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   paste that is not a clipping) or what a save found, as a warning when the game
   would refuse the saved scene. The same lines still go to the log.
 
+- **The sandbox plays over the LAN**: `--host [PORT]` binds a
+  `crcbl_net::udp::UdpListener` (any free port unless given, printed at start),
+  hands each peer it accepts to a `crcbl_server::Host`, and announces the
+  session with an `Announcer` whose player count follows the host's;
+  `--join <IP:PORT>` connects a `UdpTransport` and runs a `crcbl_client::Client`
+  over it; `--browse` polls a `Browser`, prints the hosts it hears and joins the
+  first of this build. Native builds only; the F3 panel gains a "lan" section
+  during a session, and a LAN session that cannot start exits with code 1.
+
+- **`crcbl_server::Host` names a snapshot its transport refused as too long**:
+  `oversized_snapshot_count()` and `last_oversized_snapshot()`, a
+  `SnapshotTooLarge { tick, size, limit }` whose message names the transport's
+  limit — over UDP one datagram's payload, far below the in-memory limit the
+  delta encoder is sized against. `largest_snapshot_bytes()` is the longest one
+  sent. Each refusal still counts as a processing error.
+
+- **`crcbl_client::Client::transport()`**, to ask a link why it ended
+  (`UdpTransport::end_reason`) or read its counters.
+
 - **`crcbl_net::udp::discovery`: LAN host discovery**, native only like the rest
   of `udp`. A host's `Announcer` (`Announcer::open(Announcement)`, bound to
   `DISCOVERY_PORT`) answers queries with a fixed-size announce — protocol id,
@@ -3251,6 +3270,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   migration — everything here is v0.
 
 ### Fixed
+
+- **`crcbl_client::Client` no longer counts a hello sent while its link is still
+  coming up as a processing error.** A `UdpTransport` before its hello reply,
+  like a `SteamTransport` before Steam connects, answers a send with
+  `TransportError::Backpressure`; the client now sends the hello on a later
+  update instead, and `processing_error_count` stays zero.
 
 - **A glTF document using `KHR_materials_emissive_strength` is no longer warned
   that the extension is ignored.** Its strength was always applied to the

@@ -480,6 +480,13 @@ impl<T: Transport> Client<T> {
         self.transport.is_connected()
     }
 
+    /// The transport, for what only it can say: why a link ended, and its
+    /// own counters.
+    #[must_use]
+    pub fn transport(&self) -> &T {
+        &self.transport
+    }
+
     /// Borrow the local world.
     #[must_use]
     pub fn world(&self) -> &World {
@@ -597,11 +604,17 @@ impl<T: Transport> Client<T> {
                 generation,
                 session_token: self.resume_token,
             })));
-        if result.is_ok() {
-            self.outstanding_handshake_generation = Some(generation);
-            self.handshake_deadline = Some(self.now.saturating_add(HANDSHAKE_TIMEOUT));
-        } else {
-            self.processing_error_count += 1;
+        match result {
+            Ok(()) => {
+                self.outstanding_handshake_generation = Some(generation);
+                self.handshake_deadline = Some(self.now.saturating_add(HANDSHAKE_TIMEOUT));
+            }
+            // A link still coming up — a `UdpTransport` before its hello
+            // reply, a `SteamTransport` before Steam connects — answers a send
+            // with backpressure. Nothing went wrong: the hello goes on the
+            // next update, when the link may take it.
+            Err(TransportError::Backpressure) => {}
+            Err(_) => self.processing_error_count += 1,
         }
     }
 
@@ -1948,6 +1961,75 @@ mod tests {
         assert!((state.transforms[0].1.position.x - 5.0).abs() < 1e-9);
         assert_eq!(state.transforms[1].0, appeared);
         assert!((state.transforms[1].1.position.x - 7.0).abs() < 1e-9);
+    }
+
+    // ── A link still coming up ─────────────────────────────────────────────
+
+    /// A transport that answers its first `refusals` sends with backpressure,
+    /// as a `UdpTransport` does before its hello reply arrives.
+    struct ComingUp {
+        inner: InMemoryTransport,
+        refusals: u32,
+    }
+
+    impl ComingUp {
+        fn refuse(&mut self) -> Result<(), TransportError> {
+            if self.refusals == 0 {
+                return Ok(());
+            }
+            self.refusals -= 1;
+            Err(TransportError::Backpressure)
+        }
+    }
+
+    impl Transport for ComingUp {
+        fn send_reliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.refuse()?;
+            self.inner.send_reliable(msg)
+        }
+
+        fn send_unreliable(&mut self, msg: Message) -> Result<(), TransportError> {
+            self.refuse()?;
+            self.inner.send_unreliable(msg)
+        }
+
+        fn recv(&mut self) -> Result<Option<Message>, TransportError> {
+            self.inner.recv()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+    }
+
+    /// **A link still coming up is not an error.** The hello waits for the
+    /// update on which the transport takes it, and nothing is counted.
+    #[test]
+    fn a_hello_refused_with_backpressure_goes_on_a_later_update_uncounted() {
+        const REFUSALS: u32 = 3;
+        let (inner, mut peer) = InMemoryTransport::pair();
+        let mut client = Client::new_with_compatibility(
+            World::new(),
+            ComingUp {
+                inner,
+                refusals: REFUSALS,
+            },
+            60,
+            COMPATIBILITY,
+        );
+        let mut now = Duration::ZERO;
+        for _ in 0..REFUSALS {
+            client.update(now);
+            assert!(peer.recv().unwrap().is_none(), "nothing left yet");
+            now += TICK;
+        }
+        client.update(now);
+        let hello = peer
+            .recv()
+            .unwrap()
+            .expect("the hello, once the link takes it");
+        assert!(crcbl_net::decode_hello(&hello.payload).is_ok());
+        assert_eq!(client.processing_error_count(), 0);
     }
 
     // ── Debug ──────────────────────────────────────────────────────────────

@@ -69,6 +69,7 @@ use crcbl::engine::{
 };
 use crcbl::prelude::*;
 
+use crate::lan::{Lan, LanError};
 use crate::steam::SteamLink;
 use crcbl::render::RenderEffects;
 use crcbl::shell::{DisplayMode, PhysicalSize, ShellBackend as Backend, open, open_backend};
@@ -182,6 +183,10 @@ pub struct Options {
     /// `wait_until_presented` with a real swapchain. Off by default so an
     /// ordinary run never blocks.
     pub wait_unpresented: bool,
+    /// Host, join or look for a LAN session — see [`crate::lan`]. Native
+    /// builds only: web builds have no networking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lan: crate::lan::LanMode,
 }
 
 impl Default for Options {
@@ -199,6 +204,8 @@ impl Default for Options {
             pacing: Pacing::default(),
             limit: FrameLimit::default(),
             wait_unpresented: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan: crate::lan::LanMode::Off,
         }
     }
 }
@@ -266,9 +273,9 @@ pub struct Summary {
 ///
 /// An alias rather than an enum: [`crcbl::engine::LoopError`] owns these
 /// variants for every sample. The sandbox has no simulation of its own to
-/// fail, so it takes the default type parameter and its `Game` variant is
-/// [`Infallible`](core::convert::Infallible) — uninhabited, and free.
-pub type SandboxError = crcbl::engine::LoopError;
+/// fail; its `Game` variant is a LAN session that could not start
+/// ([`LanError`]), which in a web build is uninhabited, and free.
+pub type SandboxError = crcbl::engine::LoopError<LanError>;
 
 /// The sandbox, as the engine's loop hosts it.
 ///
@@ -310,6 +317,9 @@ pub struct Sandbox {
     /// Steam, when the `steam` feature is on and a windowed run started it;
     /// inert otherwise. See [`crate::steam`].
     steam: SteamLink,
+    /// The LAN session `--host`, `--join` or `--browse` started; inert
+    /// otherwise. See [`crate::lan`].
+    lan: Lan,
 }
 
 impl Sandbox {
@@ -336,6 +346,7 @@ impl Sandbox {
             unpresented: None,
             effects,
             steam: SteamLink::off(),
+            lan: Lan::off(),
         }
     }
 }
@@ -444,6 +455,11 @@ pub fn with_shell<S: Shell + ?Sized>(
     if !options.headless {
         sandbox.steam = SteamLink::start();
     }
+    // Headless too: a `--headless --host` run is a host with no window.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        sandbox.lan = Lan::start(options.lan, options.tick_hz).map_err(SandboxError::Game)?;
+    }
     let steam_pads = sandbox.steam.pad_source();
 
     let mut engine = Loop::new(
@@ -478,10 +494,9 @@ pub fn with_shell<S: Shell + ?Sized>(
 /// spin is on the fixed timestep so a `--headless --frames N` run is a
 /// bit-reproducible picture on every machine.
 impl HostedGame for Sandbox {
-    /// The sandbox has no simulation, so it has nothing of its own to fail at.
-    /// [`LoopError`](crcbl::engine::LoopError)'s `Game` variant is uninhabited
-    /// as a result, which is the type system agreeing.
-    type Error = core::convert::Infallible;
+    /// The sandbox has no simulation, so all it can fail at is starting a LAN
+    /// session; in a web build, which has none, the type is uninhabited.
+    type Error = LanError;
     type Gpu = Gpu;
     /// Paused or not, which is the sandbox's whole state machine.
     type MenuKind = bool;
@@ -583,9 +598,11 @@ impl HostedGame for Sandbox {
         paused
     }
 
-    /// The "steam" section, when the `steam` feature is live.
+    /// The "steam" section, when the `steam` feature is live, and the "lan"
+    /// one during a LAN session.
     fn debug_sections(&self, panel: &mut crcbl::ui::DebugPanel) {
         self.steam.debug_sections(panel);
+        self.lan.debug_sections(panel);
     }
 
     fn take_pending_frame_limit(&mut self) -> Option<FrameLimit> {
@@ -621,6 +638,10 @@ impl HostedGame for Sandbox {
         // or not, after the loop's Steam pump: a call answered while paused is
         // still taken.
         self.steam.frame();
+        // And the LAN session, on wall time for the same reason: a paused
+        // host that stopped reading its peers would time every one of them
+        // out.
+        self.lan.frame(frame.render_dt);
         // Re-read rather than kept: the device clamps last, so what the summary
         // reports comes back off the renderer.
         self.effects = gpu.effects();
@@ -734,6 +755,8 @@ mod tests {
             pacing: Pacing::default(),
             limit: FrameLimit::default(),
             wait_unpresented: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            lan: crate::lan::LanMode::Off,
         }
     }
 

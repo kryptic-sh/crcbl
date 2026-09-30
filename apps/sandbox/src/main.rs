@@ -2,6 +2,7 @@
 //!
 //! ```text
 //! sandbox [--headless] [--frames N] [--tick-hz N] [--title T] [--camera MODE]
+//!         [--host [PORT] | --join IP:PORT | --browse]
 //! ```
 //!
 //! Opens a window through `crcbl-shell`, joins it to `crcbl-hal` through
@@ -18,6 +19,7 @@
 mod app;
 mod args;
 mod gpu;
+mod lan;
 mod menu;
 mod steam;
 

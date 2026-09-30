@@ -15,7 +15,7 @@ use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
     Baseline, DeltaCodec, HandshakeResult, Message, RejectReason, ResumeToken, SectorId,
     SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState, SnapshotWriter,
-    Transport, Trust,
+    Transport, TransportError, Trust,
 };
 
 use crate::{KEYFRAME_RECOVERY_TICKS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
@@ -29,6 +29,43 @@ pub(crate) struct Counters {
     pub(crate) rate_limited_bytes: u64,
     /// Frames the per-tick input cap has refused since the server was built.
     pub(crate) dropped_inputs: u64,
+    /// Snapshots a transport refused for their size; each is a processing
+    /// error too.
+    pub(crate) oversized_snapshots: u64,
+    /// The latest of those, with the sizes the transport reported.
+    pub(crate) last_oversized_snapshot: Option<SnapshotTooLarge>,
+    /// The longest sealed snapshot any transport accepted.
+    pub(crate) largest_snapshot_bytes: usize,
+}
+
+/// A snapshot the transport would not carry because it was too long.
+///
+/// A transport's limit on its unreliable channel is its own:
+/// [`crcbl_net::MAX_IN_MEMORY_MESSAGE_BYTES`] in memory, a single datagram's
+/// payload over UDP, which is far smaller. A snapshot past it is not sent at
+/// all — the client stops applying state — so the host records the refusal by
+/// name rather than folding it into the processing-error count alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SnapshotTooLarge {
+    /// The tick the snapshot was taken at.
+    pub tick: TickId,
+    /// Its sealed length, in bytes.
+    pub size: usize,
+    /// The most the transport's unreliable channel takes, in bytes.
+    pub limit: usize,
+}
+
+impl std::fmt::Display for SnapshotTooLarge {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the snapshot for tick {} seals to {} bytes, past the transport's \
+             {}-byte unreliable limit, and was not sent",
+            self.tick.get(),
+            self.size,
+            self.limit
+        )
+    }
 }
 
 /// One peer's session state.
@@ -245,12 +282,25 @@ impl PeerSession {
             }
         };
 
-        if transport
-            .send_unreliable(Message::unreliable(payload))
-            .is_err()
-        {
-            counters.processing_errors += 1;
-            return;
+        let size = payload.len();
+        match transport.send_unreliable(Message::unreliable(payload)) {
+            Ok(()) => {
+                counters.largest_snapshot_bytes = counters.largest_snapshot_bytes.max(size);
+            }
+            Err(TransportError::MessageTooLarge { size, limit }) => {
+                counters.processing_errors += 1;
+                counters.oversized_snapshots += 1;
+                counters.last_oversized_snapshot = Some(SnapshotTooLarge {
+                    tick: current.tick,
+                    size,
+                    limit,
+                });
+                return;
+            }
+            Err(_) => {
+                counters.processing_errors += 1;
+                return;
+            }
         }
 
         // Store this full snapshot as a new baseline for future deltas — only

@@ -23,7 +23,7 @@ use crcbl_net::{
     SectorId, SessionConfig, SessionEndReason, SessionId, SessionState, Transport, TransportError,
 };
 
-use crate::peer::{self, Counters, PeerSession};
+use crate::peer::{self, Counters, PeerSession, SnapshotTooLarge};
 
 /// How long a pending transport may go without a hello before it is dropped.
 ///
@@ -736,6 +736,29 @@ impl Host {
         self.counters.processing_errors
     }
 
+    /// Snapshots a peer's transport refused as too long for its unreliable
+    /// channel. Each is counted in
+    /// [`processing_error_count`](Self::processing_error_count) too.
+    #[must_use]
+    pub fn oversized_snapshot_count(&self) -> u64 {
+        self.counters.oversized_snapshots
+    }
+
+    /// The latest snapshot a peer's transport refused as too long, with the
+    /// limit it named: what a game logs when
+    /// [`oversized_snapshot_count`](Self::oversized_snapshot_count) moves.
+    #[must_use]
+    pub fn last_oversized_snapshot(&self) -> Option<SnapshotTooLarge> {
+        self.counters.last_oversized_snapshot
+    }
+
+    /// The longest sealed snapshot any peer's transport has accepted, in
+    /// bytes — the figure to hold against a transport's unreliable limit.
+    #[must_use]
+    pub fn largest_snapshot_bytes(&self) -> usize {
+        self.counters.largest_snapshot_bytes
+    }
+
     /// Borrow the world.
     #[must_use]
     pub fn world(&self) -> &World {
@@ -795,3 +818,7 @@ impl fmt::Debug for Host {
 
 #[cfg(test)]
 mod tests;
+
+// The UDP transport is native only, by the no-web-networking rule.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod udp_tests;

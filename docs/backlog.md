@@ -12910,12 +12910,14 @@ What it left unbuilt is below.
 
 ### The UDP transport and its crypto: built, bar tokens (2026-08-27)
 
-**Built through slice C and LAN discovery (D1), 2026-09-30; connection tokens
-and the wiring are left.** `Transport` is implemented by `InMemoryTransport`,
-`crcbl_store`'s `FileTransport`, since 2026-09-23 `crcbl-steam`'s
-`SteamTransport` (P2P over Valve's relay; `crcbl_server::Host` serves several
-sessions over `Box<dyn Transport>` peers), and now `crcbl_net::udp`'s
-`UdpTransport`, which nothing in `apps/` or `crcbl-server` uses yet.
+**Built through slice C and LAN discovery (D1), 2026-09-30, and wired into the
+sandbox 2026-10-01; connection tokens and every other sample's wiring are
+left.** `Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
+`FileTransport`, since 2026-09-23 `crcbl-steam`'s `SteamTransport` (P2P over
+Valve's relay; `crcbl_server::Host` serves several sessions over
+`Box<dyn Transport>` peers), and now `crcbl_net::udp`'s `UdpTransport`, which
+`apps/sandbox`'s `--host`, `--join` and `--browse` run
+(`apps/sandbox/src/lan.rs`).
 
 **Built 2026-09-30 (slice A): `crcbl_net::reliable`**, pure logic over any
 datagram pipe. Packet header with protocol id, wrapping 16-bit sequence
@@ -13038,27 +13040,44 @@ so CI's `decoder-fuzz` job is its first run.
 
 **What is left, by slice:**
 
-- **Wiring — the next step.** Nothing connects a server or client over UDP. A
-  host would call `UdpListener::accept()` every frame and hand each
-  `UdpTransport` to `crcbl_server::Host::add` as a `Box<dyn Transport>`, the way
-  `apps/sandbox/src/steam.rs` feeds its `SteamListener`'s peers to its own
-  links; a client would drive `UdpTransport::connect` until connected and then
-  run the session handshake over it. **The trap is the snapshot size:**
-  `crcbl_net::delta`'s `MAX_DELTA_BYTES` is sized against
-  `MAX_IN_MEMORY_MESSAGE_BYTES`, while `UdpTransport::send_unreliable` refuses
-  anything past `MAX_UNRELIABLE_PAYLOAD`, one datagram — so a server sending
-  today's deltas over UDP gets `MessageTooLarge` as soon as a snapshot passes a
-  datagram. The quantization and budget entry below is what makes a snapshot
-  fit; until then, towers or any sample over UDP needs its snapshots held under
-  the limit. Direct connect by address needs a UI field in each sample's lobby.
+- **The sandbox is wired (2026-10-01); nothing else is.** `apps/sandbox`'s `lan`
+  module is the pattern: `LanHost` accepts `UdpListener` peers into a
+  `crcbl_server::Host` every frame and keeps an `Announcer` (the listener's port
+  as `game_port`, players from `Host::peer_count`) beside it; `LanClient` runs a
+  `crcbl_client::Client` over `UdpTransport::connect`, the client retrying its
+  hello while the transport answers `Backpressure`. Its world is one
+  non-replicating "players" system, so its snapshot is 102 bytes sealed of
+  `MAX_UNRELIABLE_PAYLOAD`'s 1158 (measured 2026-10-01 by
+  `lan::tests::the_sandboxes_snapshot_fits_one_datagram_with_every_player_in`,
+  which holds it under a quarter of the limit). **Towers is next**, and needs
+  its lobby to take a direct-connect address beside discovery.
+- **The one-datagram ceiling stands.** `crcbl_net::delta`'s `MAX_DELTA_BYTES` is
+  sized against `MAX_IN_MEMORY_MESSAGE_BYTES`, while
+  `UdpTransport::send_unreliable` refuses anything past
+  `MAX_UNRELIABLE_PAYLOAD`. A snapshot past it is not sent; `Host` now records
+  the refusal by name (`oversized_snapshot_count`, `last_oversized_snapshot` →
+  `crcbl_server::SnapshotTooLarge { tick, size, limit }`) and the sandbox logs
+  it at most once a second. The quantization and budget entry below is what
+  lifts the ceiling; until then towers, or any sample over UDP, must hold its
+  snapshots under one datagram — measure its world's keyframe before wiring it.
 - **D2 — connection tokens** (below). Needs nothing from the packet layer. LAN
   discovery, D1, is built; what it left is under _Netgraph HUD, LAN discovery_.
-- **Wiring discovery.** Nothing runs an `Announcer` or a `Browser` either. A
-  host would open an `Announcer` beside its `UdpListener`, with the listener's
-  port as the announcement's `game_port`, poll it every frame and update the
-  player counts from `crcbl_server::Host`; towers and the sandbox would each
-  need that, and a client's lobby would poll a `Browser` and hand the chosen
-  `HostEntry::addr` to `UdpTransport::connect`.
+- **Not run: two processes, or two machines.** Every wiring test runs host and
+  clients in one process over loopback, and the discovery test queries the
+  announcer's port directly; `Lan::start`'s own binds (every interface, the real
+  `DISCOVERY_PORT`, a broadcast query) run in no test and were not run by hand
+  either, since binding every interface can raise a firewall prompt on a
+  developer's desktop. Whether `--browse`'s broadcast query reaches a `--host`
+  on the same machine, or across a real LAN, and whether a Windows firewall
+  prompt blocks the first run, is unverified. The manual check: `sandbox --host`
+  on one machine, `sandbox --browse` on another (and on the same one), each
+  joining within a few seconds, with the F3 "lan" section showing the session.
+- **The client cannot read the host's player count.** The "players" system is a
+  `System<bool>`, which replicates only its entity count, and
+  `crcbl_client::Client` exposes its baseline as counts and a hash — so the
+  sandbox's client panel shows the session and the applied tick, and the tests
+  observe a join as the client's baseline hash changing. Replicating real state
+  means a system with a `replicate` implementation.
 
 **Not built in the packet layer, deliberately:** congestion control and pacing —
 a reliable message's fragments all go out in one poll, capped only by
@@ -13222,12 +13241,14 @@ Either is the owner's call.
 
 **Left, and what each would take:**
 
-- **A lobby browser in a sample.** Nothing draws the list. A lobby screen would
-  poll a `Browser` every frame, show `hosts()` (greying out a host whose
-  `compatibility` differs from its own), and pass the chosen `addr` to
-  `UdpTransport::connect`, beside the direct-connect address field every
-  sample's lobby keeps. The wiring bullet under _The UDP transport and its
-  crypto_ says what the host side needs.
+- **A lobby browser on screen.** Nothing draws the list. The sandbox's
+  `--browse` (2026-10-01) polls a `Browser`, prints every host to stdout, and
+  joins the first whose `compatibility` matches its own, passing over the rest —
+  no choosing. A lobby screen would show `hosts()` (greying out a host of
+  another build), join the chosen `addr`, and keep a direct-connect address
+  field beside it; the sandbox has no menu of its own to put it in beyond the
+  pause panel, so towers' lobby is the likelier first home. The host side is
+  `apps/sandbox/src/lan.rs`'s `LanHost`.
 - **Link-local multicast is not sent.** The design wanted it beside broadcast,
   because networks disagree about which they forward. Receiving multicast needs
   the discovery port bound too (`join_multicast_v4` on a bound socket), so it
@@ -13978,12 +13999,12 @@ it would be sample code.
    `Scene::save`, not a map authored in the editor — so the exit criterion "map
    authored 100% in the editor, zero hand-edited scene text" is not met until
    someone authors it there. `docs/plan/08-editor.md` owns that pass.
-2. **Milestone 3 waits on a wire.** `crates/crcbl-net`'s UDP transport
-   (`crcbl_net::udp`, 2026-09-30) is wired to no server or client yet, and there
-   is no LAN host discovery and no lobby browser — so "co-op over real
-   transport" and the 4-player LAN exit criterion have nothing to run on. The
-   commands are already shaped for it, which is the one thing slice 1 could do
-   about it.
+2. **Milestone 3 waits on a wire.** `crates/crcbl-net`'s UDP transport and LAN
+   discovery (`crcbl_net::udp`, 2026-09-30) are wired into the sandbox
+   (2026-10-01, `apps/sandbox/src/lan.rs`) but not into towers, and nothing
+   draws a lobby browser — so "co-op over real transport" and the 4-player LAN
+   exit criterion have nothing to run on yet. The commands are already shaped
+   for it, which is the one thing slice 1 could do about it.
 
 **Rules owed rather than exempted, stated so the next slice does not read them
 as decisions:** rule 11 (no `.crpix` art anywhere — the tower and creep icons,

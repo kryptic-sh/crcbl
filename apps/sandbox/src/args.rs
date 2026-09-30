@@ -9,6 +9,8 @@ use crcbl::backend::GpuBackend;
 use crcbl::engine::{FrameLimit, Pacing};
 
 use crate::app::{CameraMode, Options};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::lan::LanMode;
 
 /// `--help` text, and the definition of the flag set.
 pub const USAGE: &str = "\
@@ -53,6 +55,15 @@ OPTIONS:
                           swapchain was never given and log the outcome. The
                           wayland e2e harness's probe of the id guard; off by
                           default.
+        --host [PORT]     Host a LAN session: listen for players on UDP PORT
+                          and announce it to `--browse` on the local
+                          network. Default: any free port, printed at start.
+        --join <IP:PORT>  Join the LAN session at IP:PORT directly.
+        --browse          Look for LAN sessions, print what answers, and join
+                          the first one this build can play with.
+                          `--host`, `--join` and `--browse` exclude each
+                          other, and are native builds only: web builds have
+                          no networking.
         --debug-overlay   Start with the debug panel visible. F3 toggles it.
         --no-debug-overlay
                           Start with it hidden. The default is `visible in a
@@ -81,7 +92,9 @@ pub enum Invocation {
 /// Parses arguments, which must **not** include the program name.
 pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
     let mut options = Options::default();
-    let mut args = args.into_iter();
+    // Peekable for `--host`, whose port is optional: the next argument is
+    // taken only when it is one.
+    let mut args = args.into_iter().peekable();
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -165,12 +178,59 @@ pub fn parse(args: impl IntoIterator<Item = String>) -> Invocation {
                 Ok(size) => options.size = size,
                 Err(message) => return Invocation::BadUsage(message),
             },
+            #[cfg(not(target_arch = "wasm32"))]
+            "--host" => {
+                let port = match args.peek().map(|value| value.parse::<u16>()) {
+                    Some(Ok(port)) => {
+                        args.next();
+                        port
+                    }
+                    Some(Err(_)) | None => 0,
+                };
+                if let Err(message) = set_lan(&mut options, LanMode::Host { port }) {
+                    return Invocation::BadUsage(message);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "--join" => {
+                let addr = match args.next() {
+                    Some(value) => match value.parse() {
+                        Ok(addr) => addr,
+                        Err(_) => {
+                            return Invocation::BadUsage(format!(
+                                "--join needs an IP:PORT address, not `{value}`"
+                            ));
+                        }
+                    },
+                    None => return Invocation::BadUsage("--join needs a value".to_string()),
+                };
+                if let Err(message) = set_lan(&mut options, LanMode::Join(addr)) {
+                    return Invocation::BadUsage(message);
+                }
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            "--browse" => {
+                if let Err(message) = set_lan(&mut options, LanMode::Browse) {
+                    return Invocation::BadUsage(message);
+                }
+            }
             other => {
                 return Invocation::BadUsage(format!("unrecognized argument `{other}`"));
             }
         }
     }
     Invocation::Run(Box::new(options))
+}
+
+/// Sets the LAN mode, refusing a second one: which of two sessions to start
+/// is not a thing to guess.
+#[cfg(not(target_arch = "wasm32"))]
+fn set_lan(options: &mut Options, mode: LanMode) -> Result<(), String> {
+    if options.lan != LanMode::Off {
+        return Err("--host, --join and --browse exclude each other".to_string());
+    }
+    options.lan = mode;
+    Ok(())
 }
 
 fn take_number(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<u64, String> {
@@ -353,6 +413,59 @@ mod tests {
         );
         assert!(USAGE.contains("--pacing"));
         assert!(USAGE.contains("--fps"));
+    }
+
+    /// The three LAN flags reach [`LanMode`], `--host`'s port is optional
+    /// and the next flag is not mistaken for one, and none is the default.
+    #[test]
+    fn the_lan_flags_reach_their_mode_and_the_host_port_is_optional() {
+        assert_eq!(options(&[]).lan, LanMode::Off);
+        assert_eq!(options(&["--host"]).lan, LanMode::Host { port: 0 });
+        assert_eq!(
+            options(&["--host", "27015"]).lan,
+            LanMode::Host { port: 27_015 }
+        );
+        let options_after = options(&["--host", "--headless"]);
+        assert_eq!(options_after.lan, LanMode::Host { port: 0 });
+        assert!(
+            options_after.headless,
+            "the flag after --host is still read"
+        );
+        assert_eq!(
+            options(&["--join", "192.168.1.20:27015"]).lan,
+            LanMode::Join("192.168.1.20:27015".parse().unwrap())
+        );
+        assert_eq!(
+            options(&["--join", "[::1]:27015"]).lan,
+            LanMode::Join("[::1]:27015".parse().unwrap())
+        );
+        assert_eq!(options(&["--browse"]).lan, LanMode::Browse);
+        for flag in ["--host [PORT]", "--join <IP:PORT>", "--browse"] {
+            assert!(USAGE.contains(flag), "USAGE lists {flag}");
+        }
+    }
+
+    /// Two sessions at once, or an address that is not one, is bad usage —
+    /// never a guess at which was meant.
+    #[test]
+    fn two_lan_modes_or_a_bad_address_are_refused() {
+        for args in [
+            vec!["--host", "--browse"],
+            vec!["--browse", "--join", "127.0.0.1:1"],
+            vec!["--join", "127.0.0.1:1", "--host", "2"],
+            vec!["--browse", "--browse"],
+            vec!["--join"],
+            vec!["--join", "localhost"],
+            vec!["--join", "127.0.0.1"],
+            vec!["--join", "127.0.0.1:99999"],
+            // Not a port, so not `--host`'s: read as an argument of its own.
+            vec!["--host", "99999"],
+        ] {
+            assert!(
+                matches!(parse_args(&args), Invocation::BadUsage(_)),
+                "{args:?} should be rejected"
+            );
+        }
     }
 
     #[test]
