@@ -1324,7 +1324,8 @@ mod tests {
         let (status_min, status_max) = page.panels.status_rect().expect("laid out");
         assert!(
             min.x > 0.0 && max.x == EXTENT.0 as f32 && max.y == status_min.y,
-            "the viewport is not the right-hand pane down to the status line:              {min:?}..{max:?} over {status_min:?}",
+            "the viewport is not the right-hand pane down to the status line: \
+             {min:?}..{max:?} over {status_min:?}",
         );
         assert!(
             status_min.x == 0.0
