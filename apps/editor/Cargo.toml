@@ -46,9 +46,10 @@ crcbl = { workspace = true, features = ["greybox", "scn"] }
 # **The vocabularies this build ships with.** A `.scn/` chunk cannot be read
 # without the type its rows are of, so every tool that opens a scene carries a
 # vocabulary; `crcbl::registry` is what one is, and `src/scene.rs` builds this
-# build's out of three — the editor's own greybox block, and the two games whose
-# committed scenes the workspace wants edited
-# (`docs/plan/sample/07-towers.md`'s milestone 2 is the dogfood pass).
+# build's out of four — the editor's own greybox block, and the three games
+# whose committed scenes the workspace wants edited
+# (`docs/plan/sample/07-towers.md`'s milestone 2 is the dogfood pass, and
+# towers' field is the scene it edits).
 #
 # Slice 1's arrow was different in kind: `src/board.rs` was a hand-written list
 # that could drift from the game's own, and `src/document.rs` was wired to it.
@@ -56,16 +57,18 @@ crcbl = { workspace = true, features = ["greybox", "scn"] }
 # other scenes edits one function.
 breakout = { workspace = true }
 puppet = { workspace = true }
+towers = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 
-# **`breakout` and `puppet` are named through their `[lib]` names**
-# (`crcbl_breakout`, `crcbl_puppet`) and `cargo machete` matches a dependency by
-# its *package* name against the source text, so it cannot see either use.
-# Measured 2026-09-16: machete reads `[dependencies]` only.
+# **`breakout`, `puppet` and `towers` are named through their `[lib]` names**
+# (`crcbl_breakout`, `crcbl_puppet`, `crcbl_towers`) and `cargo machete` matches
+# a dependency by its *package* name against the source text, so it cannot see
+# any of the three uses. Measured 2026-09-16: machete reads `[dependencies]`
+# only.
 [package.metadata.cargo-machete]
-ignored = ["breakout", "puppet"]
+ignored = ["breakout", "puppet", "towers"]
 
 [lints]
 workspace = true

@@ -33,12 +33,13 @@ use crcbl::hal::{BindingModel, CommandEncoderDesc, DeviceCaps, GeometryPath, Lig
 use crcbl::render::{
     Camera, ForwardRenderer, MAX_TIMED_PASSES, PassTimers, RenderGraph, TransientPool, UiRenderer,
 };
+use crcbl::shell::WindowId;
 use crcbl::ui::draw_list::DrawList;
 use crcbl::ui::menu::MenuSkin;
 use crcbl::ui::text::FontAtlas;
 
 use crate::game::RenderState;
-use crate::map::{self, Field};
+use crate::map::{self, Field, Map};
 
 const FRAMES_IN_FLIGHT: usize = crcbl::engine::FRAMES_IN_FLIGHT;
 
@@ -127,22 +128,95 @@ fn desc(gpu: GpuOptions) -> GpuContextDesc<'static> {
     }
 }
 
+/// The device request this bundle is waiting on, and the map it will make
+/// resident when it arrives.
+///
+/// **The map is carried through the wait**, which is what
+/// [`crcbl::engine::PolledGpu::Context`] exists for: a browser's device request
+/// is a promise the page's own event loop resolves, and which map to open was
+/// decided by `--scene` before `boot` was ever called. `apps/puppet` carries its
+/// map through the same seam. Written out rather than taken from
+/// `crcbl::impl_polled_bundle!`, because that macro is for a bundle with nothing
+/// of its own to open with — and the lane is one mesh per leg, so what is
+/// resident depends on the map.
+#[derive(Debug)]
+pub struct PendingGpu {
+    pending: crcbl::engine::PendingGpuContext,
+    map: Map,
+}
+
+impl PendingGpu {
+    /// Advances the open. `Ok(None)` means "not yet, poll again next frame".
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if the device request failed or a renderer refused the
+    /// device it produced.
+    pub fn poll(&mut self) -> Result<Option<Gpu>, GpuError> {
+        match self.pending.poll()? {
+            Some(ctx) => Gpu::from_context(ctx, &self.map).map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 impl Gpu {
-    /// Builds this sample's renderers on an already-open context.
+    /// Opens a backend, a surface, a device and a swapchain, and makes `map`
+    /// resident.
+    ///
+    /// **Blocks**, so this is the native path only; a browser calls
+    /// [`request_open`](Self::request_open).
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend opened or any HAL call failed.
+    pub fn open<S: crcbl::shell::Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        map: &Map,
+    ) -> Result<Self, GpuError> {
+        Self::from_context(GpuContext::open(shell, window, extent, &desc(gpu))?, map)
+    }
+
+    /// Asks for a device and returns at once, keeping `map` for the build.
+    ///
+    /// The non-blocking half of [`Gpu::open`], routed through the same `desc` so
+    /// the two paths cannot ask for different devices.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if no backend could be opened at `extent`.
+    pub fn request_open<S: crcbl::shell::Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        map: Map,
+    ) -> Result<PendingGpu, GpuError> {
+        Ok(PendingGpu {
+            pending: GpuContext::request_open(shell, window, extent, &desc(gpu))?,
+            map,
+        })
+    }
+
+    /// Builds this sample's renderers on an already-open context, and makes
+    /// `map` resident.
     ///
     /// # Errors
     ///
     /// [`GpuError`] if the map's description is one the pools it asks for
     /// cannot hold, if the UI compositor refused the device,
     /// or if any HAL call failed.
-    fn from_context(ctx: GpuContext) -> Result<Self, GpuError> {
+    fn from_context(ctx: GpuContext, map: &Map) -> Result<Self, GpuError> {
         let format = ctx.format();
         let paths = Paths::of(&ctx.device().caps());
         let mut renderer =
-            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), format, &map::scene())?;
+            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), format, &map.scene())?;
         // Rolled back by hand from here on: `Gpu` has no `Drop`, so a `?` would
         // leak the forward renderer's pipelines rather than release them.
-        let field = match map::place(&mut renderer) {
+        let field = match map.place(&mut renderer) {
             Ok(field) => field,
             Err(error) => {
                 renderer.destroy(ctx.device());
@@ -220,14 +294,14 @@ impl Gpu {
             let view = (index < state.creeps_alive).then(|| state.creeps[index]);
             self.field.set_creep(&mut self.renderer, index, view);
         }
-        for (plot, tower) in state.towers.iter().enumerate() {
+        for (plot, tower) in state.towers.iter().take(self.field.plots()).enumerate() {
             self.field.set_tower(&mut self.renderer, plot, *tower);
         }
-        for index in 0..map::MAX_BOLTS {
+        for index in 0..self.field.bolt_slots() {
             let at = (index < state.bolts_flying).then(|| state.bolts[index]);
             self.field.set_bolt(&mut self.renderer, index, at);
         }
-        for index in 0..map::MAX_BURSTS {
+        for index in 0..self.field.burst_slots() {
             let burst = (index < state.bursts_live).then(|| state.bursts[index]);
             self.field.set_burst(&mut self.renderer, index, burst);
         }
@@ -277,6 +351,13 @@ impl Gpu {
     #[must_use]
     pub const fn atlas(&self) -> &FontAtlas {
         &self.atlas
+    }
+
+    /// The pools the field was placed with, for the loop's own tests: how many
+    /// of each there are is what says which map was made resident.
+    #[cfg(test)]
+    pub const fn field(&self) -> &Field {
+        &self.field
     }
 
     /// The UI geometry this frame handed over, for the loop's own tests.
@@ -431,12 +512,31 @@ impl Gpu {
 
 crcbl::impl_game_gpu!(Gpu, with_renderer);
 
-// The `Pending` type, `open`, `request_open` and the `PolledGpu` forwards, all
-// routed through the one `desc` above so the blocking and non-blocking bring-up
-// paths cannot ask for different devices. Written out only by the samples whose
-// pending state carries something of their own; this one's does not.
-crcbl::impl_polled_bundle!(gpu: Gpu, pending: PendingGpu, desc: desc);
-crcbl::impl_polled_gpu!(gpu: Gpu, pending: PendingGpu);
+/// Lets [`crcbl::engine::PolledBoot`] drive this bundle's arrival.
+///
+/// Written out rather than taken from `crcbl::impl_polled_gpu!` because that
+/// macro is for a bundle with no context: it declares `type Context = ()` and
+/// calls a four-argument `request_open`. This one opens with a map.
+impl crcbl::engine::PolledGpu for Gpu {
+    type Pending = PendingGpu;
+
+    /// Which map to make resident, carried through the wait by `PendingGpu`.
+    type Context = Map;
+
+    fn request<S: crcbl::shell::Shell + ?Sized>(
+        shell: &S,
+        window: WindowId,
+        extent: (u32, u32),
+        gpu: GpuOptions,
+        map: Self::Context,
+    ) -> Result<Self::Pending, GpuError> {
+        Self::request_open(shell, window, extent, gpu, map)
+    }
+
+    fn poll_pending(pending: &mut Self::Pending) -> Result<Option<Self>, GpuError> {
+        pending.poll()
+    }
+}
 
 #[cfg(test)]
 mod tests {

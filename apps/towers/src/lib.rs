@@ -1,8 +1,9 @@
 //! Towers — co-op tower defense, and the ladder's flagship.
 //!
 //! `docs/plan/sample/07-towers.md`, **milestone 1, slices 1, 2 and 3a**: the
-//! solo loop on a hardcoded map, natively and in a browser, with the combat
-//! content milestone 1 asks for. Three kinds of tower and an upgrade tier each,
+//! solo loop on one map, natively and in a browser, with the combat content
+//! milestone 1 asks for. The map is scene data — [`scene`] reads it out of a
+//! `.scn/` directory the editor opens, which is milestone 2's first step. Three kinds of tower and an upgrade tier each,
 //! three kinds of creep, ten scripted waves; creeps walk a path, towers shoot,
 //! burst and hold them, kills pay gold, and the run is won or lost. That
 //! document's status section is the list of what each remaining slice owes.
@@ -57,7 +58,7 @@
 //!
 //! That document asks for creeps that walk a spline. Nothing in `crcbl-phys` or
 //! `crcbl-scene` offers a spline type, so [`path`] measures straight legs
-//! between [`map::PATH`]'s waypoints and a creep turns a corner in one tick.
+//! between the map's waypoints and a creep turns a corner in one tick.
 //! It is the one engine gap this slice found, and it is recorded rather than
 //! worked around.
 //!
@@ -98,6 +99,7 @@ pub mod map;
 pub mod menu;
 pub mod page;
 pub mod path;
+pub mod scene;
 pub mod tower;
 pub mod wave;
 
@@ -109,9 +111,10 @@ pub use args::{Invocation, Options, USAGE, parse};
 pub use creep::{CREEPS, Creep, CreepSpec, CreepView};
 pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
 pub use gpu::{Gpu, Paths};
-pub use map::{PLOTS, Plot};
+pub use map::{Map, MapError};
 pub use menu::{MenuAction, MenuKind, Menus};
 pub use page::PageStats;
+pub use scene::{FIELD, Plot, Waypoint, built_in_source, register_components};
 pub use tower::{Bolt, BoltOutcome, BurstView, TOWERS, Tier, Tower, TowerSpec, TowerView};
 pub use wave::{Outcome, Release, WAVES, Wave, Waves};
 
@@ -174,17 +177,19 @@ mod tests {
         );
 
         // The labels, quoted as the JavaScript spells them. Each is a plot the
-        // gate walks its cursor to by **name**, so a renamed or reordered
-        // `map::PLOTS` leaves it pressing keys at a plot it is not on.
+        // gate walks its cursor to by **name**, so a renamed or reordered plot
+        // in the committed field leaves it pressing keys at a plot it is not on.
         let quoted = |label: &str| format!("'{label}'");
+        let map = map::Map::built_in();
+        let plots = map.plots();
         assert_eq!(
             gate("loop", "lastPlot"),
-            quoted(map::PLOTS[map::PLOTS.len() - 1].label),
-            "the gate's far plot is not the last of PLOTS",
+            quoted(&plots[plots.len() - 1].label),
+            "the gate's far plot is not the committed field's last",
         );
         assert_eq!(
             gate("loop", "emptyPlot"),
-            quoted(map::PLOTS[map::PLOTS.len() - 2].label),
+            quoted(&plots[plots.len() - 2].label),
             "the gate's empty plot is not the one a second `prev` reaches",
         );
         assert_eq!(

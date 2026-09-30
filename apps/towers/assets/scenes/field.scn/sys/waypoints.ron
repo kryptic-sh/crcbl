@@ -1,0 +1,21 @@
+Chunk(
+    system: "waypoints",
+    entities: [
+        (0, Waypoint(
+            order: 0,
+            position: (-14.0, 0.0, 8.0),
+        )),
+        (1, Waypoint(
+            order: 1,
+            position: (8.0, 0.0, 8.0),
+        )),
+        (2, Waypoint(
+            order: 2,
+            position: (8.0, 0.0, -6.0),
+        )),
+        (3, Waypoint(
+            order: 3,
+            position: (-10.0, 0.0, -6.0),
+        )),
+    ],
+)

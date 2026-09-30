@@ -1,8 +1,8 @@
-//! `CreepSystem`: three archetypes of creep, walking [`crate::map::PATH`] as
-//! kinematic bodies in the broadphase.
+//! `CreepSystem`: three archetypes of creep, walking the map's
+//! [`Path`] as kinematic bodies in the broadphase.
 //!
 //! ```text
-//!   along += speed × slow × dt ──▶ path::point_at ──▶ PhysicsWorld::set_sphere
+//!   along += speed × slow × dt ──▶ Path::point_at ──▶ PhysicsWorld::set_sphere
 //!                                                            │
 //!                                    exit trigger ◀── overlap_sphere ──▶ a life
 //! ```
@@ -20,8 +20,8 @@
 //! # Reaching the exit is an overlap and not a distance
 //!
 //! [`has_reached_the_exit`] asks the world whether the creep's sphere touches
-//! [`crate::map::exit_collider`], rather than comparing `along` against
-//! [`crate::path::length`]. The two answers are genuinely different — the
+//! [`crate::map::Map::exit_collider`], rather than comparing `along` against
+//! [`Path::length`]. The two answers are genuinely different — the
 //! volume is two metres across, so it catches a creep about a metre and a half
 //! before the last waypoint — and the overlap is the one the sample is for:
 //! a **trigger volume** is the L0 feature (`docs/notes/simulation.md`) this map
@@ -66,7 +66,7 @@ use crcbl::math::DVec3;
 use crcbl::phys::{ColliderId, PhysicsWorld, Sphere};
 
 use crate::map::CREEP_RADIUS;
-use crate::path;
+use crate::path::Path;
 
 // ---------------------------------------------------------------------------
 // The table
@@ -173,9 +173,18 @@ pub struct Creep {
     /// Its sphere in the world — what a tower's overlap finds and what a bolt's
     /// sweep hits.
     body: ColliderId,
-    /// How far it has walked, in metres along [`crate::map::PATH`]. **The whole
+    /// How far it has walked, in metres along the map's [`Path`]. **The whole
     /// of its position**: see [`crate::path`].
     along: f64,
+    /// Where `along` puts its centre, and which way it is walking there.
+    ///
+    /// Read off the path by [`Creep::spawn`] and [`Creep::advance`] — the two
+    /// places `along` changes — and never written anywhere else, so they are
+    /// `along` read once rather than a second state that could disagree with
+    /// it. Held so that a tower's aim and the frame can ask a creep where it
+    /// is without being handed the path.
+    centre: DVec3,
+    facing: f64,
     /// Which archetype it is, and therefore every number it walks and dies on.
     kind: Kind,
     /// What it has left, and what it started with.
@@ -189,23 +198,24 @@ pub struct Creep {
     slow: f64,
 }
 
-/// Where a creep with `along` metres behind it has its centre.
-///
-/// A free function because the frame wants it for a creep it does not hold and
-/// [`Creep::centre`] wants it for one it does.
+/// Where a creep with `along` metres of `path` behind it has its centre.
 #[must_use]
-pub fn centre_at(along: f64) -> DVec3 {
-    path::point_at(along) + DVec3::Y * CREEP_RADIUS
+pub fn centre_at(path: &Path, along: f64) -> DVec3 {
+    path.point_at(along) + DVec3::Y * CREEP_RADIUS
 }
 
 impl Creep {
-    /// Puts a creep of `kind` on the first waypoint, with its sphere in `world`.
+    /// Puts a creep of `kind` on the first waypoint of `path`, with its sphere
+    /// in `world`.
     #[must_use]
-    pub fn spawn(world: &mut PhysicsWorld, kind: Kind) -> Self {
-        let body = world.add_sphere(Sphere::new(centre_at(0.0), CREEP_RADIUS));
+    pub fn spawn(world: &mut PhysicsWorld, path: &Path, kind: Kind) -> Self {
+        let centre = centre_at(path, 0.0);
+        let body = world.add_sphere(Sphere::new(centre, CREEP_RADIUS));
         Self {
             body,
             along: 0.0,
+            centre,
+            facing: path.heading_at(0.0),
             kind,
             health: kind.spec().health,
             max_health: kind.spec().health,
@@ -279,19 +289,25 @@ impl Creep {
 
     /// Where its centre is, in metres.
     #[must_use]
-    pub fn centre(&self) -> DVec3 {
-        centre_at(self.along)
+    pub const fn centre(&self) -> DVec3 {
+        self.centre
     }
 
-    /// Walks one tick and writes the sphere where the walk left it.
+    /// Walks one tick along `path` and writes the sphere where the walk left
+    /// it.
     ///
     /// The write is not optional and not deferred: the towers' queries and the
     /// bolts' sweeps run later in the same tick against this world, and a body
     /// left at last tick's place is a target that cannot be hit where it is
     /// drawn.
-    pub fn advance(&mut self, world: &mut PhysicsWorld, dt: f64) {
+    ///
+    /// Every caller hands in the stage's one path, which is the one
+    /// [`Creep::spawn`] was given — a map is fixed for the life of a stage.
+    pub fn advance(&mut self, world: &mut PhysicsWorld, path: &Path, dt: f64) {
         self.along += self.kind.spec().speed * self.slow * dt;
-        world.set_sphere(self.body, Sphere::new(self.centre(), CREEP_RADIUS));
+        self.centre = centre_at(path, self.along);
+        self.facing = path.heading_at(self.along);
+        world.set_sphere(self.body, Sphere::new(self.centre, CREEP_RADIUS));
     }
 
     /// Takes `damage` off it. Answers whether that killed it.
@@ -308,7 +324,7 @@ impl Creep {
             centre: self.centre(),
             facing: {
                 #[allow(clippy::cast_possible_truncation)]
-                let facing = path::heading_at(self.along) as f32;
+                let facing = self.facing as f32;
                 facing
             },
             hurt: 2 * self.health <= self.max_health,
@@ -337,7 +353,7 @@ pub struct CreepView {
     pub kind: Kind,
     /// Where its centre is, in metres.
     pub centre: DVec3,
-    /// Which way it is walking, in [`crate::path::heading_at`]'s measure.
+    /// Which way it is walking, in [`Path::heading_at`]'s measure.
     pub facing: f32,
     /// Whether it is down to half its health or less.
     pub hurt: bool,
@@ -381,7 +397,7 @@ pub fn has_reached_the_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map;
+    use crate::map::{self, Map};
 
     /// One tick at sixty a second.
     const DT: f64 = 1.0 / 60.0;
@@ -454,13 +470,14 @@ mod tests {
     /// one row for all of them would pass on the first.
     #[test]
     fn a_creep_walks_its_speed_and_its_body_follows() {
+        let map = Map::built_in();
         for kind in ALL {
-            let (mut world, _) = map::world();
-            let mut creep = Creep::spawn(&mut world, kind);
+            let (mut world, _) = map.world();
+            let mut creep = Creep::spawn(&mut world, map.path(), kind);
             let start = creep.centre();
 
             for _ in 0..60 {
-                creep.advance(&mut world, DT);
+                creep.advance(&mut world, map.path(), DT);
             }
             let walked = (creep.centre() - start).length();
             assert!(
@@ -492,8 +509,9 @@ mod tests {
     #[test]
     fn a_creep_that_walks_out_of_a_slow_field_gets_its_speed_back() {
         const FACTOR: f64 = 0.5;
-        let (mut world, _) = map::world();
-        let mut creep = Creep::spawn(&mut world, Kind::Fast);
+        let map = Map::built_in();
+        let (mut world, _) = map.world();
+        let mut creep = Creep::spawn(&mut world, map.path(), Kind::Fast);
 
         // A second held, then a second free, measured over the same stretch of
         // the first leg so the path itself cannot be what differs.
@@ -501,7 +519,7 @@ mod tests {
         assert!(creep.is_slowed(), "a creep told to slow is not slowed");
         let start = creep.along();
         for _ in 0..60 {
-            creep.advance(&mut world, DT);
+            creep.advance(&mut world, map.path(), DT);
         }
         let held = creep.along() - start;
 
@@ -509,7 +527,7 @@ mod tests {
         assert!(!creep.is_slowed(), "a released creep is still held");
         let from = creep.along();
         for _ in 0..60 {
-            creep.advance(&mut world, DT);
+            creep.advance(&mut world, map.path(), DT);
         }
         let free = creep.along() - from;
 
@@ -534,8 +552,9 @@ mod tests {
     /// the factors would do.
     #[test]
     fn two_holds_on_one_creep_do_not_multiply() {
-        let (mut world, _) = map::world();
-        let mut creep = Creep::spawn(&mut world, Kind::Fast);
+        let map = Map::built_in();
+        let (mut world, _) = map.world();
+        let mut creep = Creep::spawn(&mut world, map.path(), Kind::Fast);
         creep.slow_to(0.6);
         creep.slow_to(0.4);
         creep.slow_to(0.8);
@@ -553,8 +572,9 @@ mod tests {
     /// of the last leg.
     #[test]
     fn a_creep_is_taken_by_the_volume_before_the_path_runs_out() {
-        let (mut world, exit) = map::world();
-        let mut creep = Creep::spawn(&mut world, Kind::Fast);
+        let map = Map::built_in();
+        let (mut world, exit) = map.world();
+        let mut creep = Creep::spawn(&mut world, map.path(), Kind::Fast);
         let mut scratch = Vec::new();
 
         assert!(
@@ -564,14 +584,14 @@ mod tests {
 
         let mut caught = None;
         for _ in 0..(60 * 60) {
-            creep.advance(&mut world, DT);
+            creep.advance(&mut world, map.path(), DT);
             if has_reached_the_exit(&mut world, &creep, exit, &mut scratch) {
                 caught = Some(creep.along());
                 break;
             }
         }
         let caught = caught.expect("a creep walking the whole path never reached the exit");
-        let left = path::length() - caught;
+        let left = map.path().length() - caught;
         assert!(
             left > 0.5,
             "the volume caught it {left:.2} m from the end, which is the end rather than the \
@@ -587,9 +607,10 @@ mod tests {
     /// once it is down to half. Per kind, because the pool is the kind's.
     #[test]
     fn a_creep_dies_when_its_health_runs_out() {
+        let map = Map::built_in();
         for kind in ALL {
-            let (mut world, _) = map::world();
-            let mut creep = Creep::spawn(&mut world, kind);
+            let (mut world, _) = map.world();
+            let mut creep = Creep::spawn(&mut world, map.path(), kind);
             let half = kind.spec().health / 2;
 
             assert!(!creep.view().hurt, "a {} spawns hurt", kind.label());
@@ -617,8 +638,9 @@ mod tests {
     /// is a state a reviewer cannot check the readout against.
     #[test]
     fn the_view_carries_the_kind_and_the_hold() {
-        let (mut world, _) = map::world();
-        let mut creep = Creep::spawn(&mut world, Kind::Tanky);
+        let map = Map::built_in();
+        let (mut world, _) = map.world();
+        let mut creep = Creep::spawn(&mut world, map.path(), Kind::Tanky);
         let free = creep.view();
         assert_eq!(free.kind, Kind::Tanky, "the view forgot the archetype");
         assert!(!free.slowed, "a free creep is drawn held");
@@ -632,8 +654,9 @@ mod tests {
     /// dead creep going on being a thing towers acquire and bolts stop at.
     #[test]
     fn a_despawned_creep_is_no_longer_in_the_world() {
-        let (mut world, _) = map::world();
-        let creep = Creep::spawn(&mut world, Kind::Fast);
+        let map = Map::built_in();
+        let (mut world, _) = map.world();
+        let creep = Creep::spawn(&mut world, map.path(), Kind::Fast);
         let (body, centre) = (creep.body(), creep.centre());
         assert!(world.overlap_sphere(centre, 0.01).contains(&body));
 

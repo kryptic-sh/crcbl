@@ -11309,8 +11309,9 @@ commands it will have to parse input, which is the moment
 `crcbl scene spawn …` → `crcbl screenshot` → `crcbl sim` session that builds and
 verifies a small scene with zero GUI launches, and the towers map modified from
 the CLI (a tower plot spawned, a spawner moved) opening correctly in the GUI
-editor with its undo history intact. The towers half also needs towers' state in
-ECS systems (_The editor: slices 1 to 3 landed, and what they leave_).
+editor with its undo history intact. Towers' plots and path corners are scene
+rows since 2026-09-30 (`apps/towers/assets/scenes/field.scn/`, in the editor's
+shipped vocabulary), so the towers half waits on the CLI protocol alone.
 
 ## Tooling and infrastructure — what the plans still owe
 
@@ -11603,7 +11604,14 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   half — any inspector value copied as plain text and pasted through the scene's
   serde path — is still owed, and needs the inspector to expose a field's value
   as text.
-- **Towers' ECS port, then the dogfood pass**, which is towers' milestone 2.
+- **The dogfood pass**, which is towers' milestone 2. Towers' map is a `.scn/`
+  directory the editor opens since 2026-09-30
+  (`crcbl_towers::register_components` in
+  `apps/editor/src/scene.rs::vocabulary`), so what is left is authoring the
+  field in the editor and committing what it saves. Towers' _simulation_ still
+  lives in `Stage` rather than ECS systems; the 2026-09-16 decision that games
+  keep editable state in ECS systems applies to what an editor should place that
+  moves, and nothing in towers' map does.
 - **The exit criteria**: empty scene to play and stop without a text editor
   (owed), and the editor never linking `crcbl-vk` directly (kept so far:
   `apps/editor/Cargo.toml`'s dependencies name the `crcbl` umbrella and no
@@ -13674,18 +13682,19 @@ it.
 
 ### towers milestone 1 is built; milestones 2 and 3 are each blocked on a phase (2026-09-07)
 
-**Slice 1 shipped 2026-09-07.** `apps/towers` is the solo loop on a hardcoded
-map: `map::PATH`'s polyline, one creep archetype, one single-target tower, three
-scripted waves, shared gold and lives, and `PlaceTower`/`StartWave`/ `Restart`
-validated server-side over `InMemoryTransport`. The slice table in
-`docs/plan/sample/07-towers.md` is the record of what the rest of milestone 1
-costs. **Slice 2 shipped the same day:** `/demos/towers/` is on the site, gated
-by `web/tools/browser-e2e.mjs`'s `towers` row. **Slice 3a shipped 2026-09-10:**
-three tower kinds with one upgrade tier each and an `UpgradeTower` command
-beside `PlaceTower`, three creep kinds, all ten waves, a material per kind and a
-burst instance at a splash impact. What is left of slice 3 is **3b**, which is
-the presentation half: `.crpix` art and the build menu it makes possible,
-spatial audio, and world-space health bars.
+**Slice 1 shipped 2026-09-07.** `apps/towers` is the solo loop on one map — a
+hardcoded table then, scene data since 2026-09-30 (_towers' map is scene data,
+and what `Map::new` does not check_ below) — with a polyline path, one creep
+archetype, one single-target tower, three scripted waves, shared gold and lives,
+and `PlaceTower`/`StartWave`/ `Restart` validated server-side over
+`InMemoryTransport`. The slice table in `docs/plan/sample/07-towers.md` is the
+record of what the rest of milestone 1 costs. **Slice 2 shipped the same day:**
+`/demos/towers/` is on the site, gated by `web/tools/browser-e2e.mjs`'s `towers`
+row. **Slice 3a shipped 2026-09-10:** three tower kinds with one upgrade tier
+each and an `UpgradeTower` command beside `PlaceTower`, three creep kinds, all
+ten waves, a material per kind and a burst instance at a splash impact. What is
+left of slice 3 is **3b**, which is the presentation half: `.crpix` art and the
+build menu it makes possible, spatial audio, and world-space health bars.
 
 **The one engine gap the slice found is a spline type.** Nothing in `crcbl-phys`
 or `crcbl-scene` offers a curve a body can be put on — the only splines in the
@@ -13699,14 +13708,12 @@ it would be sample code.
 
 **Two links are unchanged and neither is this sample's to clear.**
 
-1. **Milestone 2 waits on the editor.** There is no `apps/editor`; the workspace
-   `Cargo.toml` records the absence as deliberate until the editor phase. The
-   scene half is no longer part of this link — `crcbl_scene::scn` landed
-   2026-09-07 and `apps/breakout` reads its board out of one — but every
-   "editor-built" and "authored in the editor" line still inherits P12,
-   including the exit criterion "map authored 100% in the editor, zero
-   hand-edited scene text". Slice 1's map is a table in `apps/towers/src/map.rs`
-   for exactly that reason.
+1. **Milestone 2 waits on the dogfood pass.** The map is
+   `apps/towers/assets/scenes/field.scn/` and `apps/editor` opens it
+   (2026-09-30), but the committed field is the milestone 1 table written out by
+   `Scene::save`, not a map authored in the editor — so the exit criterion "map
+   authored 100% in the editor, zero hand-edited scene text" is not met until
+   someone authors it there. `docs/plan/08-editor.md` owns that pass.
 2. **Milestone 3 waits on a wire.** `crates/crcbl-net` ships `InMemoryTransport`
    and nothing else — no UDP transport, no LAN host discovery, no lobby browser
    — so "co-op over real transport" and the 4-player LAN exit criterion have
@@ -13728,6 +13735,59 @@ visitor has instead is a row of buttons **outside** the canvas —
 `web/demos/towers/main.js` — which synthesise the `keydown`/`keyup` pair
 `web/engine/shell.js` already listens for and are thrown away with the hint text
 rather than with engine code.
+
+### towers' map is scene data, and what `Map::new` does not check (2026-09-30)
+
+**Shipped:** the path's corners and the build plots are
+`apps/towers/assets/scenes/field.scn/` (`sys/waypoints.ron`, `sys/plots.ron`),
+read by `crcbl_towers::scene` into a `map::Map`, with `--scene <DIR>` for
+another directory; the editor's shipped vocabulary registers `Waypoint` and
+`Plot`. `Map::new` refuses, by name (`map::MapError`): fewer than two corners or
+more than `MAX_WAYPOINTS`, a corner or plot off the ground or off the field, a
+leg that is diagonal or no longer than the lane is wide, no plots or more than
+`MAX_PLOTS`, a plot within `PLOT_CLEARANCE` of the lane, a plot out of
+`SHORTEST_RANGE_M` of it; the loader also refuses two corners with one `order`.
+
+**Not checked, deliberately left for when a map that needs it exists** (each
+would be a new `MapError` variant and a test; none is reachable from the
+committed field):
+
+- **Plots overlapping each other**, or a pad overlapping the exit volume. Two
+  pads in one place draw as one and are two build sites.
+- **Duplicate plot labels.** The overlay, the `[HUD]` line and
+  `web/tools/browser-e2e.mjs` name plots by label, so two with one label are
+  ambiguous there; the simulation numbers plots by position and is unaffected.
+- **Legs that cross or run over each other.** The lane draws both; a creep walks
+  the polyline regardless. Only the plot-to-lane clearance is checked, against
+  every leg.
+
+**Decisions taken in the slice, recorded so they are not re-argued:**
+
+- **`MAX_WAYPOINTS` and `MAX_PLOTS` are both 16**, chosen so the largest map
+  they admit fits `map::CAPACITIES`' instance count unchanged
+  (`the_largest_map_the_caps_admit_fits_the_pools_it_reserves` builds that map
+  and measures it). `CAPACITIES.meshes` was raised from 12 to 24 for the lane
+  meshes of 15 legs; nothing measured a memory or frame-time difference, and a
+  larger cap needs both numbers raised together.
+- **`game::RenderState`'s per-plot arrays are `MAX_PLOTS` wide** rather than the
+  map's width, because it is a `Copy` snapshot taken each draw; the GPU pools
+  and `Stats::plots` are the map's own width.
+- **A creep caches its centre and heading** (`Creep::spawn` and `Creep::advance`
+  take the path), so towers and the frame ask a creep where it is without the
+  path. The values are identical to the old per-call reading: both are the same
+  function of `along`, read at the same moments.
+
+**Surprises, not bugs:** `env.ron`'s camera and ambient are written from
+`crate::camera` and `map::sun` and read by nothing — the frame is drawn from the
+code, as breakout's is; the scene tests keep the file from drifting. The editor
+edits the field with no knowledge of `Map::new`'s rules, so a layout broken in
+the editor saves and is refused when `--scene` loads it, with the rule it broke
+in the message; the editor has no validation hook to call.
+
+**Coverage gap:** no windowed or screenshot run of a non-default map was made;
+`app::tests::a_map_other_than_the_committed_one_is_the_one_the_run_plays` runs
+one headless on the null backend, which exercises `Gpu::from_context` and the
+pools but not the picture.
 
 ### towers' bolt tower is priced against a table the other two kinds were then tuned to beat (2026-09-10)
 

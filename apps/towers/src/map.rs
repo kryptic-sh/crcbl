@@ -1,5 +1,5 @@
-//! The one map: the field the creeps cross, the lane they walk, the pads a
-//! tower can be built on, and the volume that takes a life off the team.
+//! The map: the field the creeps cross, the lane they walk, the pads a tower
+//! can be built on, and the volume that takes a life off the team.
 //!
 //! ```text
 //!            +X
@@ -14,26 +14,36 @@
 //!            −X       x = -14                            x = +13
 //! ```
 //!
+//! The picture above is the committed `assets/scenes/field.scn/`; a `--scene`
+//! directory draws whatever path and plots it holds instead.
+//!
 //! # One set of numbers, three consumers
 //!
-//! Every constant here is read by the meshes in [`scene`], by the instances in
-//! [`place`], and by the colliders in [`world`]. There is no second set of
-//! numbers for the physics, which is what makes a lane that looks walkable
-//! walkable and an exit volume that looks like a gate the gate. `apps/breach`
-//! and `apps/shard` build their rooms the same way, and for the same reason.
+//! Every constant here, and every waypoint and plot a [`Map`] holds, is read by
+//! the meshes in [`Map::scene`], by the instances in [`Map::place`], and by the
+//! colliders in [`Map::world`]. There is no second set of numbers for the
+//! physics, which is what makes a lane that looks walkable walkable and an exit
+//! volume that looks like a gate the gate. `apps/breach` and `apps/shard` build
+//! their rooms the same way, and for the same reason.
 //!
-//! # The map is a table in this file, and milestone 2 is where it stops being
+//! # The layout is scene data, and the rules are this file's
 //!
-//! `docs/plan/sample/07-towers.md` asks for a map authored in the stage 8
-//! editor and shipped as a `.scn/` directory. There is no `apps/editor`, so
-//! this slice hardcodes the map the way that document's milestone 1 says to.
-//! Nothing here reads a file.
+//! Where the path runs and where the plots stand is a `.scn/` directory, read by
+//! [`crate::scene`] — `docs/plan/sample/07-towers.md`'s milestone 2 is a map
+//! authored in the editor, and a map that is data is one the editor can open.
+//! What stays here is everything a layout is **measured against**: how big the
+//! field is, how wide the lane is drawn, what a tower needs around it, and the
+//! two caps the reserved pools and a frame's snapshot are sized for.
+//! [`Map::new`] holds every layout to them and refuses one that breaks any, by
+//! name — see [`MapError`] — because each is an assumption something below
+//! makes without checking: one straight `platform` per leg, a pad on the
+//! ground, a tower beside the lane rather than on it.
 //!
-//! # The creeps are not in [`world`]
+//! # The creeps are not in [`Map::world`]
 //!
 //! Each adds its own sphere when it spawns and writes it back every tick — see
-//! [`crate::creep`]. What this module puts in the world is what does not move:
-//! the ground and the exit trigger.
+//! [`crate::creep`]. What [`Map::world`] puts in the world is what does not
+//! move: the ground and the exit trigger.
 //!
 //! # The exit is a trigger, and that is the whole of how a life is lost
 //!
@@ -66,8 +76,8 @@
 //! # There is a sun in here, because this map has no roof
 //!
 //! [`sun`] is a real [`DirectionalLight`] rather than the token
-//! `apps/breach::map::house_light` hands its ceilinged room, and [`place`] sets
-//! no point lights at all. A field under the sky is the one thing on the ladder
+//! `apps/breach::map::house_light` hands its ceilinged room, and [`Map::place`]
+//! sets no point lights at all. A field under the sky is the one thing on the ladder
 //! that wants exactly what `begin_frame` already takes.
 
 use std::borrow::Cow;
@@ -77,8 +87,12 @@ use crcbl::math::{DVec3, Mat4, Quat, Vec3};
 use crcbl::phys::{BoxCollider, ColliderId, PhysicsWorld};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError};
+use crcbl::scene::scn::ScnError;
 use crcbl::shaders::mesh::GpuMaterial;
 
+use crate::path::Path;
+use crate::scene::Plot;
+use crate::tower::SHORTEST_RANGE_M;
 use crate::wave::MAX_CREEPS;
 
 // ---------------------------------------------------------------------------
@@ -96,30 +110,250 @@ pub const HALF_DEPTH: f64 = 12.0;
 pub const SLAB_THICKNESS: f64 = 0.6;
 
 // ---------------------------------------------------------------------------
+// The map
+// ---------------------------------------------------------------------------
+
+/// One field's layout: the path the creeps walk and the plots a tower can be
+/// built on, checked against the rules everything below depends on.
+///
+/// Read out of a `.scn/` directory by [`crate::scene`] — the committed
+/// `assets/scenes/field.scn/` unless `--scene` names another — and built by
+/// [`Map::new`] and nothing else, so a map that reached the game is one whose
+/// legs the lane meshes can draw and whose plots a tower can stand on.
+///
+/// Not `Eq`: every number in it is a float. [`PartialEq`] is what
+/// [`crate::Options`] needs and all a test comparing two parses of one
+/// directory wants.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Map {
+    path: Path,
+    plots: Vec<Plot>,
+}
+
+impl Map {
+    /// The map `waypoints` and `plots` describe: the waypoints spawn first, the
+    /// plots in the order the overlay lists them and `PlaceTower` numbers them.
+    ///
+    /// # Errors
+    ///
+    /// [`MapError`], naming the waypoint, the leg or the plot it is about —
+    /// [`Path::new`] says what the path is refused for. A plot is refused when
+    /// there are none or more than [`MAX_PLOTS`], when it is off the ground or
+    /// off the field, when it stands within [`PLOT_CLEARANCE`] of the lane, and
+    /// when the lane is out of [`SHORTEST_RANGE_M`] of it: the build list offers
+    /// every kind on every plot, so a plot the shortest-reaching kind cannot
+    /// cover from is one that kind may not be built on.
+    pub fn new(waypoints: Vec<DVec3>, plots: Vec<Plot>) -> Result<Self, MapError> {
+        let path = Path::new(waypoints)?;
+        if plots.is_empty() {
+            return Err(MapError::NoPlots);
+        }
+        if plots.len() > MAX_PLOTS {
+            return Err(MapError::TooManyPlots { found: plots.len() });
+        }
+        for plot in &plots {
+            let feet = DVec3::from_array(plot.position);
+            let what = || format!("plot {:?}", plot.label);
+            // The pad is drawn on the ground and a tower stands on the pad, so a
+            // plot above or below it is a tower whose feet are not where its
+            // pad is.
+            if feet.y != 0.0 {
+                return Err(MapError::OffTheGround {
+                    what: what(),
+                    y: feet.y,
+                });
+            }
+            if feet.x.abs() + 0.5 * PAD_EDGE > HALF_WIDTH
+                || feet.z.abs() + 0.5 * PAD_EDGE > HALF_DEPTH
+            {
+                return Err(MapError::OffTheField { what: what() });
+            }
+            let distance = path.distance_to(feet);
+            if distance <= PLOT_CLEARANCE {
+                return Err(MapError::OnTheLane {
+                    plot: plot.label.clone(),
+                    distance,
+                });
+            }
+            if distance >= SHORTEST_RANGE_M {
+                return Err(MapError::OutOfReach {
+                    plot: plot.label.clone(),
+                    distance,
+                });
+            }
+        }
+        Ok(Self { path, plots })
+    }
+
+    /// The path the creeps walk.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Every plot, in the order the overlay lists them and `PlaceTower`
+    /// numbers them.
+    #[must_use]
+    pub fn plots(&self) -> &[Plot] {
+        &self.plots
+    }
+}
+
+/// Why a directory, or a list of waypoints and plots, is not a towers map.
+///
+/// [`ScnError`] is the format's half and says which *key* it is about;
+/// [`MapError::Missing`] says which *chunk* the manifest left out; every other
+/// variant is a rule of the field this module's arithmetic stands on, and names
+/// the waypoint, the leg or the plot that broke it. A map is refused whole
+/// rather than drawn with the offending row dropped, because a field missing a
+/// plot its file names is a field nobody can tell from the one they authored.
+#[derive(Debug)]
+pub enum MapError {
+    /// The directory is not a scene, or a chunk in it would not read.
+    Scene(ScnError),
+    /// The manifest does not name one of the systems a towers map is made of.
+    Missing(&'static str),
+    /// Fewer than two waypoints, which is a path with no leg.
+    TooFewWaypoints {
+        /// How many there are.
+        found: usize,
+    },
+    /// More than [`MAX_WAYPOINTS`].
+    TooManyWaypoints {
+        /// How many there are.
+        found: usize,
+    },
+    /// Two waypoints claim the same place in the walk.
+    RepeatedOrder {
+        /// The order both carry.
+        order: u32,
+    },
+    /// A waypoint or a plot is not on the ground's top, `y = 0`.
+    OffTheGround {
+        /// Which one: `waypoint 2`, `plot "gate"`.
+        what: String,
+        /// Where it stands instead.
+        y: f64,
+    },
+    /// A waypoint's lane, or a plot's pad, reaches past the field's edge.
+    OffTheField {
+        /// Which one, spelled as [`MapError::OffTheGround`] spells it.
+        what: String,
+    },
+    /// A leg no longer than the lane is wide, which draws as a square and
+    /// reads as no leg at all.
+    ShortLeg {
+        /// Which leg, counted from the spawn.
+        leg: usize,
+        /// How long it is, in metres.
+        length: f64,
+    },
+    /// A leg that runs along neither `X` nor `Z`, which one `platform` cannot
+    /// draw.
+    Diagonal {
+        /// Which leg, counted from the spawn.
+        leg: usize,
+    },
+    /// No build plots at all, which is a field a player cannot play on.
+    NoPlots,
+    /// More than [`MAX_PLOTS`].
+    TooManyPlots {
+        /// How many there are.
+        found: usize,
+    },
+    /// A plot within [`PLOT_CLEARANCE`] of the lane's centre line.
+    OnTheLane {
+        /// Its label.
+        plot: String,
+        /// How far it is from the centre line, in metres.
+        distance: f64,
+    },
+    /// A plot the shortest-reaching kind cannot cover the lane from.
+    OutOfReach {
+        /// Its label.
+        plot: String,
+        /// How far it is from the centre line, in metres.
+        distance: f64,
+    },
+}
+
+impl std::fmt::Display for MapError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Scene(error) => write!(f, "{error}"),
+            Self::Missing(system) => write!(
+                f,
+                "the manifest names no `{system}` chunk, which every towers map has"
+            ),
+            Self::TooFewWaypoints { found } => write!(
+                f,
+                "the path has {found} waypoint(s), and it takes two to make a leg"
+            ),
+            Self::TooManyWaypoints { found } => write!(
+                f,
+                "the path has {found} waypoints, past the {MAX_WAYPOINTS} this sample reserves \
+                 room to draw"
+            ),
+            Self::RepeatedOrder { order } => write!(
+                f,
+                "two waypoints share order {order}, so the path has no one order to walk them in"
+            ),
+            Self::OffTheGround { what, y } => write!(
+                f,
+                "{what} stands at y = {y}, and everything on the field stands on the ground at \
+                 y = 0"
+            ),
+            Self::OffTheField { what } => write!(f, "{what} reaches past the edge of the field"),
+            Self::ShortLeg { leg, length } => write!(
+                f,
+                "leg {leg} is {length:.2} m long, no longer than the lane is wide"
+            ),
+            Self::Diagonal { leg } => write!(
+                f,
+                "leg {leg} runs along neither X nor Z, and the lane is one straight platform per \
+                 leg"
+            ),
+            Self::NoPlots => write!(f, "the map has no build plots"),
+            Self::TooManyPlots { found } => write!(
+                f,
+                "the map has {found} plots, past the {MAX_PLOTS} a frame draws"
+            ),
+            Self::OnTheLane { plot, distance } => write!(
+                f,
+                "plot {plot:?} is {distance:.2} m from the lane's centre line, inside the \
+                 {PLOT_CLEARANCE:.2} m an upgraded tower needs"
+            ),
+            Self::OutOfReach { plot, distance } => write!(
+                f,
+                "plot {plot:?} is {distance:.2} m from the lane, past the {SHORTEST_RANGE_M} m the \
+                 shortest-reaching tower covers"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MapError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Scene(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The path
 // ---------------------------------------------------------------------------
 
-/// The waypoints the creeps walk, spawn first and exit last.
+/// The most waypoints a map may have, and so one more than the most legs.
 ///
-/// **A polyline, and deliberately not a spline.**
-/// `docs/plan/sample/07-towers.md` asks for a spline follower and nothing in
-/// `crcbl-phys` or `crcbl-scene` offers a spline type — the only splines in the
-/// workspace are `crcbl-anim`'s clip interpolation and the glTF importer's — so
-/// what [`crate::path`] walks is straight legs between these points. The
-/// difference a spline would make is the corners, and the engine gap is
-/// recorded in `docs/backlog.md` rather than worked around here.
-///
-/// Every leg is axis-aligned, which is what lets one `platform` per leg be both
-/// the lane a reader sees and the length [`crate::path`] measures.
-pub const PATH: [DVec3; 4] = [
-    DVec3::new(-14.0, 0.0, 8.0),
-    DVec3::new(8.0, 0.0, 8.0),
-    DVec3::new(8.0, 0.0, -6.0),
-    DVec3::new(-10.0, 0.0, -6.0),
-];
-
-/// How many straight legs [`PATH`] has.
-pub const LEGS: usize = PATH.len() - 1;
+/// **What the reserved pools are sized against**, not a limit the path's own
+/// arithmetic has: every leg is a lane mesh of its own and a lane instance, so
+/// `CAPACITIES`' mesh and instance counts have to cover a map this long —
+/// `the_largest_map_the_caps_admit_fits_the_pools_it_reserves` builds one and
+/// asserts it does. A longer map is refused by [`MapError::TooManyWaypoints`]
+/// when it is read, rather than at start-up by a pool error that names no file.
+pub const MAX_WAYPOINTS: usize = 16;
 
 /// How wide the lane is drawn, in metres. Decoration: nothing collides with it.
 pub const LANE_WIDTH: f64 = 1.8;
@@ -138,76 +372,51 @@ pub const LANE_HEIGHT: f64 = 0.06;
 /// for why it is a trigger and what that buys.
 pub const EXIT_HALF: DVec3 = DVec3::new(1.0, 1.0, 1.0);
 
-/// Where the exit volume's centre is, in metres.
-#[must_use]
-pub fn exit_centre() -> DVec3 {
-    let at = PATH[PATH.len() - 1];
-    DVec3::new(at.x, EXIT_HALF.y, at.z)
-}
+impl Map {
+    /// Where the exit volume's centre is, in metres: standing on the last
+    /// waypoint.
+    ///
+    /// Derived rather than authored, so a map cannot put its exit anywhere but
+    /// the end of the walk — a file has no way to spell an exit the creeps never
+    /// reach.
+    #[must_use]
+    pub fn exit_centre(&self) -> DVec3 {
+        let at = self.path.end();
+        DVec3::new(at.x, EXIT_HALF.y, at.z)
+    }
 
-/// The exit volume, as the physics world holds it.
-#[must_use]
-pub fn exit_collider() -> BoxCollider {
-    BoxCollider::new(exit_centre(), EXIT_HALF)
+    /// The exit volume, as the physics world holds it.
+    #[must_use]
+    pub fn exit_collider(&self) -> BoxCollider {
+        BoxCollider::new(self.exit_centre(), EXIT_HALF)
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The build plots
 // ---------------------------------------------------------------------------
 
-/// One place a tower can be built.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Plot {
-    /// What the overlay, the debug panel and a failing test call it.
-    pub label: &'static str,
-    /// Where it stands across the field, in metres.
-    pub x: f64,
-    /// …and down it, in metres along `Z`.
-    pub z: f64,
-}
-
-impl Plot {
-    /// Where a tower on this plot has its feet, in metres.
-    #[must_use]
-    pub const fn at(&self) -> DVec3 {
-        DVec3::new(self.x, 0.0, self.z)
-    }
-}
-
-/// Every plot, in the order the overlay lists them and `PlaceTower` numbers
-/// them.
+/// The most build plots a map may have.
 ///
-/// Five, each beside a different stretch of [`PATH`] and none of them **on**
-/// it: `every_plot_stands_clear_of_the_lane_and_still_covers_it` asserts both
-/// the clearance and that each is close enough to reach the path, which is the
-/// pair that says a plot is a build site rather than a decoration.
-pub const PLOTS: [Plot; 5] = [
-    Plot {
-        label: "entry",
-        x: -6.0,
-        z: 3.0,
-    },
-    Plot {
-        label: "bend",
-        x: 3.0,
-        z: 3.0,
-    },
-    Plot {
-        label: "east",
-        x: 13.0,
-        z: 1.0,
-    },
-    Plot {
-        label: "middle",
-        x: 2.0,
-        z: -1.0,
-    },
-    Plot {
-        label: "gate",
-        x: -7.0,
-        z: -1.0,
-    },
-];
+/// **What a frame's snapshot is sized against.** [`crate::game::RenderState`] is
+/// a `Copy` struct of fixed arrays — its docs say why — and its towers, bolts
+/// and bursts each hold one entry per plot, so this is the width of those arrays
+/// and a map with more plots could not be drawn. The instance reservation covers
+/// it too; see [`MAX_WAYPOINTS`]. A map past it is refused by
+/// [`MapError::TooManyPlots`] rather than drawn with its last plots missing.
+///
+/// Well inside what the `PlaceTower` frame can carry: its plot byte keeps its
+/// top value as the "no plot" sentinel, and `crate::game`'s
+/// `the_no_plot_sentinel_is_not_a_plot` is what holds the two apart.
+pub const MAX_PLOTS: usize = 16;
+
+/// How far a plot's centre must stand from the lane's centre line, in metres:
+/// half the lane, and an **upgraded** tower's radius beside it.
+///
+/// The upgraded radius rather than the base one, because every plot can be
+/// stepped up and a tower standing over the lane is a tower a creep walks
+/// through. [`Map::new`] refuses a plot inside it, as [`MapError::OnTheLane`].
+pub const PLOT_CLEARANCE: f64 = 0.5 * LANE_WIDTH + TOWER_RADIUS * UPGRADED_SCALE as f64;
 
 /// How wide a build pad is drawn, in metres.
 pub const PAD_EDGE: f64 = 2.0;
@@ -244,35 +453,43 @@ pub const BOLT_RADIUS: f64 = 0.16;
 /// which is where this sample is read from — see [`crate::camera`].
 pub const UPGRADED_SCALE: f32 = 1.35;
 
-/// How many bolts a frame draws: one slot per plot.
-///
-/// A pool rather than a count of what is in flight: instances are added once at
-/// start-up and the unused ones are parked at [`PARK`], because adding and
-/// removing an instance every frame would churn the pool for a thing that lives
-/// a fraction of a second.
-///
-/// **One slot per plot is the real bound and not a guess.** A bolt is in the
-/// air for less time than a tower takes to reload, so a tower never has two of
-/// them out at once and a full field has one each: `crate::tower`'s
-/// `a_bolt_lands_long_before_its_tower_reloads` asserts that timing on the
-/// longest flight there is, and `crate::game`'s
-/// `a_splash_and_a_slow_tower_hold_the_whole_table` measures the peak over a
-/// whole run against this pool. Bolts past it would be simulated and not drawn,
-/// which would be a presentation limit and never a simulation one — those two
-/// tests are what say the case does not arise.
-pub const MAX_BOLTS: usize = PLOTS.len();
+impl Map {
+    /// How many bolts a frame draws: one slot per plot.
+    ///
+    /// A pool rather than a count of what is in flight: instances are added once
+    /// at start-up and the unused ones are parked at [`PARK`], because adding and
+    /// removing an instance every frame would churn the pool for a thing that
+    /// lives a fraction of a second.
+    ///
+    /// **One slot per plot is the real bound and not a guess.** A bolt is in the
+    /// air for less time than a tower takes to reload, so a tower never has two
+    /// of them out at once and a full field has one each: `crate::tower`'s
+    /// `a_bolt_lands_long_before_its_tower_reloads` asserts that timing on the
+    /// longest flight there is, and `crate::game`'s
+    /// `a_splash_and_a_slow_tower_hold_the_whole_table` measures the peak over a
+    /// whole run against this pool. Bolts past it would be simulated and not
+    /// drawn, which would be a presentation limit and never a simulation one —
+    /// those two tests are what say the case does not arise.
+    #[must_use]
+    pub fn max_bolts(&self) -> usize {
+        self.plots.len()
+    }
 
-/// How many splash bursts a frame draws: one slot per plot.
-///
-/// The same argument [`MAX_BOLTS`] makes, one step further along. A burst is
-/// drawn for [`crate::tower::BURST_S`] and every bursting row's reload is longer
-/// than that, so a plot never has two bursts on screen at once and a full field
-/// of splash towers has one each —
-/// `crate::tower`'s `a_burst_is_gone_before_its_tower_can_raise_another` asserts
-/// the inequality, and `crate::game`'s
-/// `a_splash_and_a_slow_tower_hold_the_whole_table` measures the peak over a
-/// whole run against this pool.
-pub const MAX_BURSTS: usize = PLOTS.len();
+    /// How many splash bursts a frame draws: one slot per plot.
+    ///
+    /// The same argument [`Map::max_bolts`] makes, one step further along. A
+    /// burst is drawn for [`crate::tower::BURST_S`] and every bursting row's
+    /// reload is longer than that, so a plot never has two bursts on screen at
+    /// once and a full field of splash towers has one each — `crate::tower`'s
+    /// `a_burst_is_gone_before_its_tower_can_raise_another` asserts the
+    /// inequality, and `crate::game`'s
+    /// `a_splash_and_a_slow_tower_hold_the_whole_table` measures the peak over a
+    /// whole run against this pool.
+    #[must_use]
+    pub fn max_bursts(&self) -> usize {
+        self.plots.len()
+    }
+}
 
 /// Where an unused instance is parked: under the ground slab, inside its
 /// footprint, so the opaque floor hides it.
@@ -289,25 +506,59 @@ pub const GROUND_MESH: usize = 0;
 /// The first leg of the lane; leg `i` is `LANE_MESH + i`. One mesh per leg
 /// because each is its own length, which is what keeps the lane the same
 /// numbers [`crate::path`] measures.
-pub const LANE_MESH: usize = 1;
-/// A build pad.
-pub const PAD_MESH: usize = LANE_MESH + LEGS;
-/// The exit volume, drawn as the cube it is.
-pub const EXIT_MESH: usize = PAD_MESH + 1;
-/// A creep.
-pub const CREEP_MESH: usize = EXIT_MESH + 1;
-/// A tower.
-pub const TOWER_MESH: usize = CREEP_MESH + 1;
-/// A bolt in flight.
-pub const BOLT_MESH: usize = TOWER_MESH + 1;
-/// A splash burst.
 ///
-/// A **unit** sphere, scaled by the burst's own radius when it is drawn — the
-/// two bursting rows of [`crate::tower::TOWERS`] reach different distances and
-/// one mesh per radius would be a mesh per row for ever.
-pub const BURST_MESH: usize = BOLT_MESH + 1;
-/// How many meshes this map makes resident.
-pub const MESHES: usize = BURST_MESH + 1;
+/// Every slot after the lane moves with the map's leg count, so those are
+/// methods on [`Map`] rather than constants: [`Map::pad_mesh`] and the ones
+/// after it.
+pub const LANE_MESH: usize = 1;
+
+impl Map {
+    /// A build pad.
+    #[must_use]
+    pub fn pad_mesh(&self) -> usize {
+        LANE_MESH + self.path.legs()
+    }
+
+    /// The exit volume, drawn as the cube it is.
+    #[must_use]
+    pub fn exit_mesh(&self) -> usize {
+        self.pad_mesh() + 1
+    }
+
+    /// A creep.
+    #[must_use]
+    pub fn creep_mesh(&self) -> usize {
+        self.exit_mesh() + 1
+    }
+
+    /// A tower.
+    #[must_use]
+    pub fn tower_mesh(&self) -> usize {
+        self.creep_mesh() + 1
+    }
+
+    /// A bolt in flight.
+    #[must_use]
+    pub fn bolt_mesh(&self) -> usize {
+        self.tower_mesh() + 1
+    }
+
+    /// A splash burst.
+    ///
+    /// A **unit** sphere, scaled by the burst's own radius when it is drawn —
+    /// the two bursting rows of [`crate::tower::TOWERS`] reach different
+    /// distances and one mesh per radius would be a mesh per row for ever.
+    #[must_use]
+    pub fn burst_mesh(&self) -> usize {
+        self.bolt_mesh() + 1
+    }
+
+    /// How many meshes this map makes resident.
+    #[must_use]
+    pub fn meshes(&self) -> usize {
+        self.burst_mesh() + 1
+    }
+}
 
 /// The ground. [`SceneDesc::materials`] slot 0, and therefore what an instance
 /// placed without a named material would shade through.
@@ -375,18 +626,21 @@ const BOLT_SEGMENTS: u32 = 8;
 const BURST_RINGS: u32 = 6;
 const BURST_SEGMENTS: u32 = 10;
 
-/// What this map reserves, which is a little over what it places.
+/// What this map reserves, which is a little over what the largest map
+/// [`MAX_WAYPOINTS`] and [`MAX_PLOTS`] admit places.
 ///
 /// Sized against the description rather than left at [`Capacities::default`],
 /// for `apps/breach/src/map.rs`'s reason: that default reserves far more
 /// instances than this field needs, and the level-of-detail state behind that
 /// number is a word per instance per draw generator. Filling any of these is a
-/// mistake in this file rather than a condition a run can be in, and
-/// `the_map_fits_the_pools_it_reserves` asserts it.
+/// mistake in this file rather than a condition a run can be in:
+/// `the_map_fits_the_pools_it_reserves` asserts the committed field fits, and
+/// `the_largest_map_the_caps_admit_fits_the_pools_it_reserves` that every map
+/// [`Map::new`] accepts does.
 const CAPACITIES: Capacities = Capacities {
     vertices: 8 * 1024,
     indices: 16 * 1024,
-    meshes: 12,
+    meshes: 24,
     instances: 320,
     materials: 16,
     lights: 4,
@@ -411,104 +665,108 @@ fn painted(tint: [f32; 3]) -> GpuMaterial {
     }
 }
 
-/// How wide and deep leg `leg` of the lane is drawn, in metres.
-///
-/// The leg's own length across whichever axis it runs, widened by
-/// [`LANE_WIDTH`] on both — so the square end of one leg fills the corner the
-/// next one turns out of and the lane reads as continuous.
-fn lane_extent(leg: usize) -> (f64, f64) {
-    let step = PATH[leg + 1] - PATH[leg];
-    (step.x.abs() + LANE_WIDTH, step.z.abs() + LANE_WIDTH)
-}
-
-/// Everything this map makes resident: [`MESHES`] meshes, [`MATERIALS`] painted
-/// rows and the grid page they sample.
-///
-/// The mesh and material order is the constants above, in value order; keep
-/// them and this assembly in step, which `the_constants_name_their_own_meshes`
-/// asserts.
-#[must_use]
-pub fn scene() -> SceneDesc<'static> {
-    let mesh = |label: &'static str, geometry: Geometry<'static>| MeshDesc {
-        label: Cow::Borrowed(label),
-        geometry,
-    };
-    let mut meshes = Vec::with_capacity(MESHES);
-    meshes.push(mesh(
-        "ground",
-        platform(
-            2.0 * HALF_WIDTH as f32,
-            2.0 * HALF_DEPTH as f32,
-            SLAB_THICKNESS as f32,
-        ),
-    ));
-    for leg in 0..LEGS {
-        let (width, depth) = lane_extent(leg);
-        meshes.push(mesh(
-            "lane",
-            platform(width as f32, depth as f32, LANE_HEIGHT as f32),
-        ));
+impl Map {
+    /// How wide and deep leg `leg` of the lane is drawn, in metres.
+    ///
+    /// The leg's own length across whichever axis it runs, widened by
+    /// [`LANE_WIDTH`] on both — so the square end of one leg fills the corner
+    /// the next one turns out of and the lane reads as continuous.
+    fn lane_extent(&self, leg: usize) -> (f64, f64) {
+        let waypoints = self.path.waypoints();
+        let step = waypoints[leg + 1] - waypoints[leg];
+        (step.x.abs() + LANE_WIDTH, step.z.abs() + LANE_WIDTH)
     }
-    meshes.push(mesh(
-        "pad",
-        platform(PAD_EDGE as f32, PAD_EDGE as f32, PAD_HEIGHT as f32),
-    ));
-    meshes.push(mesh(
-        "exit",
-        platform(
-            2.0 * EXIT_HALF.x as f32,
-            2.0 * EXIT_HALF.z as f32,
-            2.0 * EXIT_HALF.y as f32,
-        ),
-    ));
-    meshes.push(mesh(
-        "creep",
-        sphere(CREEP_RADIUS as f32, CREEP_RINGS, CREEP_SEGMENTS),
-    ));
-    meshes.push(mesh(
-        "tower",
-        cylinder(TOWER_RADIUS as f32, TOWER_HEIGHT as f32, TOWER_SEGMENTS),
-    ));
-    meshes.push(mesh(
-        "bolt",
-        sphere(BOLT_RADIUS as f32, BOLT_RINGS, BOLT_SEGMENTS),
-    ));
-    meshes.push(mesh("burst", sphere(1.0, BURST_RINGS, BURST_SEGMENTS)));
 
-    SceneDesc {
-        meshes,
-        // In the constants' own order — `the_palette_is_the_one_the_constants_index`
-        // asserts it, because a row out of place is a creep kind drawn as a tower
-        // and a picture nobody would think to disbelieve.
-        materials: vec![
-            // The field.
-            painted([0.26, 0.31, 0.24]),
-            painted([0.46, 0.42, 0.32]),
-            painted([0.30, 0.38, 0.46]),
-            painted([0.72, 0.30, 0.28]),
-            // One per creep kind: fast is the green the single archetype always
-            // was, tanky a heavier slate, swarm a pale wash — light things read
-            // as light ones from overhead.
-            painted([0.55, 0.72, 0.40]),
-            painted([0.36, 0.40, 0.52]),
-            painted([0.82, 0.86, 0.62]),
-            // …and the two states over them: hurt, then held.
-            painted([0.86, 0.52, 0.24]),
-            painted([0.40, 0.72, 0.88]),
-            // One per tower kind: the bolt's grey post, the splash's rust, the
-            // slow tower's cold blue — the same hue its hold tints a creep.
-            painted([0.58, 0.62, 0.70]),
-            painted([0.74, 0.44, 0.34]),
-            painted([0.34, 0.52, 0.66]),
-            // …and a tower of any kind that worked this tick.
-            painted([0.95, 0.88, 0.45]),
-            // The bolt, and the burst it leaves.
-            painted([0.98, 0.94, 0.60]),
-            painted([1.0, 0.72, 0.36]),
-        ],
-        page: grid_page(),
-        probes: ProbeGrid::default(),
-        capacities: CAPACITIES,
+    /// Everything this map makes resident: [`Map::meshes`] meshes,
+    /// [`MATERIALS`] painted rows and the grid page they sample.
+    ///
+    /// The mesh order is [`GROUND_MESH`], [`LANE_MESH`] and the methods after
+    /// it, and the material order is the constants above, in value order; keep
+    /// them and this assembly in step, which
+    /// `the_constants_name_their_own_meshes` asserts.
+    #[must_use]
+    pub fn scene(&self) -> SceneDesc<'static> {
+        let mesh = |label: &'static str, geometry: Geometry<'static>| MeshDesc {
+            label: Cow::Borrowed(label),
+            geometry,
+        };
+        let mut meshes = Vec::with_capacity(self.meshes());
+        meshes.push(mesh(
+            "ground",
+            platform(
+                2.0 * HALF_WIDTH as f32,
+                2.0 * HALF_DEPTH as f32,
+                SLAB_THICKNESS as f32,
+            ),
+        ));
+        for leg in 0..self.path.legs() {
+            let (width, depth) = self.lane_extent(leg);
+            meshes.push(mesh(
+                "lane",
+                platform(width as f32, depth as f32, LANE_HEIGHT as f32),
+            ));
+        }
+        meshes.push(mesh(
+            "pad",
+            platform(PAD_EDGE as f32, PAD_EDGE as f32, PAD_HEIGHT as f32),
+        ));
+        meshes.push(mesh(
+            "exit",
+            platform(
+                2.0 * EXIT_HALF.x as f32,
+                2.0 * EXIT_HALF.z as f32,
+                2.0 * EXIT_HALF.y as f32,
+            ),
+        ));
+        meshes.push(mesh(
+            "creep",
+            sphere(CREEP_RADIUS as f32, CREEP_RINGS, CREEP_SEGMENTS),
+        ));
+        meshes.push(mesh(
+            "tower",
+            cylinder(TOWER_RADIUS as f32, TOWER_HEIGHT as f32, TOWER_SEGMENTS),
+        ));
+        meshes.push(mesh(
+            "bolt",
+            sphere(BOLT_RADIUS as f32, BOLT_RINGS, BOLT_SEGMENTS),
+        ));
+        meshes.push(mesh("burst", sphere(1.0, BURST_RINGS, BURST_SEGMENTS)));
+
+        SceneDesc {
+            meshes,
+            // In the constants' own order — `the_palette_is_the_one_the_constants_index`
+            // asserts it, because a row out of place is a creep kind drawn as a tower
+            // and a picture nobody would think to disbelieve.
+            materials: vec![
+                // The field.
+                painted([0.26, 0.31, 0.24]),
+                painted([0.46, 0.42, 0.32]),
+                painted([0.30, 0.38, 0.46]),
+                painted([0.72, 0.30, 0.28]),
+                // One per creep kind: fast is the green the single archetype always
+                // was, tanky a heavier slate, swarm a pale wash — light things read
+                // as light ones from overhead.
+                painted([0.55, 0.72, 0.40]),
+                painted([0.36, 0.40, 0.52]),
+                painted([0.82, 0.86, 0.62]),
+                // …and the two states over them: hurt, then held.
+                painted([0.86, 0.52, 0.24]),
+                painted([0.40, 0.72, 0.88]),
+                // One per tower kind: the bolt's grey post, the splash's rust, the
+                // slow tower's cold blue — the same hue its hold tints a creep.
+                painted([0.58, 0.62, 0.70]),
+                painted([0.74, 0.44, 0.34]),
+                painted([0.34, 0.52, 0.66]),
+                // …and a tower of any kind that worked this tick.
+                painted([0.95, 0.88, 0.45]),
+                // The bolt, and the burst it leaves.
+                painted([0.98, 0.94, 0.60]),
+                painted([1.0, 0.72, 0.36]),
+            ],
+            page: grid_page(),
+            probes: ProbeGrid::default(),
+            capacities: CAPACITIES,
+        }
     }
 }
 
@@ -519,9 +777,21 @@ pub fn scene() -> SceneDesc<'static> {
 #[derive(Debug)]
 pub struct Field {
     creeps: [InstanceHandle; MAX_CREEPS],
-    towers: [InstanceHandle; PLOTS.len()],
-    bolts: [InstanceHandle; MAX_BOLTS],
-    bursts: [InstanceHandle; MAX_BURSTS],
+    /// One per plot, in the map's plot order.
+    towers: Vec<InstanceHandle>,
+    /// [`Map::max_bolts`] of them.
+    bolts: Vec<InstanceHandle>,
+    /// [`Map::max_bursts`] of them.
+    bursts: Vec<InstanceHandle>,
+    /// Where each plot's tower stands, in the same order as `towers`.
+    plots: Vec<DVec3>,
+    /// The mesh slots the pools draw. Held rather than asked of the map each
+    /// frame, because they sit after however many legs the lane has — see
+    /// [`Map::pad_mesh`].
+    creep_mesh: usize,
+    tower_mesh: usize,
+    bolt_mesh: usize,
+    burst_mesh: usize,
 }
 
 /// Where a creep's mesh sits, given where its centre is.
@@ -530,6 +800,24 @@ fn creep_transform(centre: DVec3) -> Mat4 {
 }
 
 impl Field {
+    /// How many plots there are, and so how many tower slots.
+    #[must_use]
+    pub fn plots(&self) -> usize {
+        self.towers.len()
+    }
+
+    /// How many bolt slots there are — [`Map::max_bolts`].
+    #[must_use]
+    pub fn bolt_slots(&self) -> usize {
+        self.bolts.len()
+    }
+
+    /// How many burst slots there are — [`Map::max_bursts`].
+    #[must_use]
+    pub fn burst_slots(&self) -> usize {
+        self.bursts.len()
+    }
+
     /// Draws one creep, or parks it under the ground when the pool is longer
     /// than the field is populated.
     ///
@@ -550,7 +838,7 @@ impl Field {
         renderer.set_instance(
             self.creeps[index],
             &InstanceDesc {
-                mesh: CREEP_MESH,
+                mesh: self.creep_mesh,
                 material,
                 transform: creep_transform(centre),
             },
@@ -565,7 +853,7 @@ impl Field {
     /// # Panics
     ///
     /// If `plot` is not a plot. Called only from `crate::gpu`'s own
-    /// enumeration of [`PLOTS`].
+    /// enumeration of [`Field::plots`].
     pub fn set_tower(
         &self,
         renderer: &mut ForwardRenderer,
@@ -579,7 +867,7 @@ impl Field {
                 } else {
                     tower_material(view.kind)
                 },
-                PLOTS[plot].at(),
+                self.plots[plot],
                 match view.tier {
                     crate::tower::Tier::Base => 1.0,
                     crate::tower::Tier::Upgraded => UPGRADED_SCALE,
@@ -590,7 +878,7 @@ impl Field {
         renderer.set_instance(
             self.towers[plot],
             &InstanceDesc {
-                mesh: TOWER_MESH,
+                mesh: self.tower_mesh,
                 material,
                 transform: Mat4::from_scale_rotation_translation(
                     Vec3::splat(scale),
@@ -611,7 +899,7 @@ impl Field {
         renderer.set_instance(
             self.bolts[index],
             &InstanceDesc {
-                mesh: BOLT_MESH,
+                mesh: self.bolt_mesh,
                 material: BOLT_MATERIAL,
                 transform: creep_transform(at.unwrap_or(PARK)),
             },
@@ -642,7 +930,7 @@ impl Field {
         renderer.set_instance(
             self.bursts[index],
             &InstanceDesc {
-                mesh: BURST_MESH,
+                mesh: self.burst_mesh,
                 material: BURST_MATERIAL,
                 transform: Mat4::from_scale_rotation_translation(
                     Vec3::splat(radius),
@@ -654,127 +942,134 @@ impl Field {
     }
 }
 
-/// Places the field and hands back the pools that move.
-///
-/// The lights are set here too, and they are sticky: nothing in this sample
-/// moves the sun.
-///
-/// # Errors
-///
-/// [`InstancePoolError`] if `CAPACITIES`'s instance count does not cover the
-/// map, which is this file's numbers being wrong rather than a condition a run
-/// can be in.
-pub fn place(renderer: &mut ForwardRenderer) -> Result<Field, InstancePoolError> {
-    let at =
-        |x: f64, y: f64, z: f64| Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32));
+impl Map {
+    /// Places the field and hands back the pools that move.
+    ///
+    /// The lights are set here too, and they are sticky: nothing in this sample
+    /// moves the sun.
+    ///
+    /// # Errors
+    ///
+    /// [`InstancePoolError`] if `CAPACITIES`' instance count does not cover the
+    /// map, which is this file's numbers being wrong rather than a condition a
+    /// run can be in — [`Map::new`] refuses every map past the caps that count
+    /// is sized for.
+    pub fn place(&self, renderer: &mut ForwardRenderer) -> Result<Field, InstancePoolError> {
+        let at = |x: f64, y: f64, z: f64| {
+            Mat4::from_translation(Vec3::new(x as f32, y as f32, z as f32))
+        };
 
-    // A `platform` rises from `y = 0`, so the ground is dropped by its own
-    // thickness to put its top there.
-    renderer.add_instance(&InstanceDesc {
-        mesh: GROUND_MESH,
-        material: GROUND_MATERIAL,
-        transform: at(0.0, -SLAB_THICKNESS, 0.0),
-    })?;
-
-    for leg in 0..LEGS {
-        let middle = 0.5 * (PATH[leg] + PATH[leg + 1]);
+        // A `platform` rises from `y = 0`, so the ground is dropped by its own
+        // thickness to put its top there.
         renderer.add_instance(&InstanceDesc {
-            mesh: LANE_MESH + leg,
-            material: LANE_MATERIAL,
-            transform: at(middle.x, 0.0, middle.z),
+            mesh: GROUND_MESH,
+            material: GROUND_MATERIAL,
+            transform: at(0.0, -SLAB_THICKNESS, 0.0),
         })?;
-    }
 
-    for plot in PLOTS {
+        for (leg, pair) in self.path.waypoints().windows(2).enumerate() {
+            let middle = 0.5 * (pair[0] + pair[1]);
+            renderer.add_instance(&InstanceDesc {
+                mesh: LANE_MESH + leg,
+                material: LANE_MATERIAL,
+                transform: at(middle.x, 0.0, middle.z),
+            })?;
+        }
+
+        for plot in &self.plots {
+            let feet = plot.at();
+            renderer.add_instance(&InstanceDesc {
+                mesh: self.pad_mesh(),
+                material: PAD_MATERIAL,
+                transform: at(feet.x, 0.0, feet.z),
+            })?;
+        }
+
+        let exit = self.path.end();
         renderer.add_instance(&InstanceDesc {
-            mesh: PAD_MESH,
-            material: PAD_MATERIAL,
-            transform: at(plot.x, 0.0, plot.z),
+            mesh: self.exit_mesh(),
+            material: EXIT_MATERIAL,
+            transform: at(exit.x, 0.0, exit.z),
         })?;
-    }
 
-    let exit = PATH[PATH.len() - 1];
-    renderer.add_instance(&InstanceDesc {
-        mesh: EXIT_MESH,
-        material: EXIT_MATERIAL,
-        transform: at(exit.x, 0.0, exit.z),
-    })?;
+        // The pools last, every one of them parked: the first frame draws the
+        // field before the first tick has spawned anything, and a pool left at
+        // the origin would put a creep on the ground before the wave began.
+        let mut creeps = Vec::with_capacity(MAX_CREEPS);
+        for _ in 0..MAX_CREEPS {
+            creeps.push(renderer.add_instance(&InstanceDesc {
+                mesh: self.creep_mesh(),
+                material: CREEP_MATERIAL,
+                transform: creep_transform(PARK),
+            })?);
+        }
+        let mut towers = Vec::with_capacity(self.plots.len());
+        for _ in 0..self.plots.len() {
+            towers.push(renderer.add_instance(&InstanceDesc {
+                mesh: self.tower_mesh(),
+                material: TOWER_MATERIAL,
+                transform: creep_transform(PARK),
+            })?);
+        }
+        let mut bolts = Vec::with_capacity(self.max_bolts());
+        for _ in 0..self.max_bolts() {
+            bolts.push(renderer.add_instance(&InstanceDesc {
+                mesh: self.bolt_mesh(),
+                material: BOLT_MATERIAL,
+                transform: creep_transform(PARK),
+            })?);
+        }
+        let mut bursts = Vec::with_capacity(self.max_bursts());
+        for _ in 0..self.max_bursts() {
+            bursts.push(renderer.add_instance(&InstanceDesc {
+                mesh: self.burst_mesh(),
+                material: BURST_MATERIAL,
+                transform: creep_transform(PARK),
+            })?);
+        }
 
-    // The pools last, every one of them parked: the first frame draws the field
-    // before the first tick has spawned anything, and a pool left at the
-    // origin would put a creep on the ground before the wave began.
-    let mut creeps = Vec::with_capacity(MAX_CREEPS);
-    for _ in 0..MAX_CREEPS {
-        creeps.push(renderer.add_instance(&InstanceDesc {
-            mesh: CREEP_MESH,
-            material: CREEP_MATERIAL,
-            transform: creep_transform(PARK),
-        })?);
-    }
-    let mut towers = Vec::with_capacity(PLOTS.len());
-    for _ in 0..PLOTS.len() {
-        towers.push(renderer.add_instance(&InstanceDesc {
-            mesh: TOWER_MESH,
-            material: TOWER_MATERIAL,
-            transform: creep_transform(PARK),
-        })?);
-    }
-    let mut bolts = Vec::with_capacity(MAX_BOLTS);
-    for _ in 0..MAX_BOLTS {
-        bolts.push(renderer.add_instance(&InstanceDesc {
-            mesh: BOLT_MESH,
-            material: BOLT_MATERIAL,
-            transform: creep_transform(PARK),
-        })?);
-    }
-    let mut bursts = Vec::with_capacity(MAX_BURSTS);
-    for _ in 0..MAX_BURSTS {
-        bursts.push(renderer.add_instance(&InstanceDesc {
-            mesh: BURST_MESH,
-            material: BURST_MATERIAL,
-            transform: creep_transform(PARK),
-        })?);
-    }
+        // No point lights: this field is outdoors and [`sun`] is what lights it.
+        renderer.set_lights(&[]);
 
-    // No point lights: this field is outdoors and [`sun`] is what lights it.
-    renderer.set_lights(&[]);
-
-    Ok(Field {
-        creeps: creeps
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("one instance per pooled creep was pushed")),
-        towers: towers
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("one instance per plot was pushed")),
-        bolts: bolts
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("one instance per pooled bolt was pushed")),
-        bursts: bursts
-            .try_into()
-            .unwrap_or_else(|_| unreachable!("one instance per pooled burst was pushed")),
-    })
+        Ok(Field {
+            creeps: creeps
+                .try_into()
+                .unwrap_or_else(|_| unreachable!("one instance per pooled creep was pushed")),
+            towers,
+            bolts,
+            bursts,
+            plots: self.plots.iter().map(Plot::at).collect(),
+            creep_mesh: self.creep_mesh(),
+            tower_mesh: self.tower_mesh(),
+            bolt_mesh: self.bolt_mesh(),
+            burst_mesh: self.burst_mesh(),
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
 // The collision side
 // ---------------------------------------------------------------------------
 
-/// The field as the colliders a bolt sweeps against, with the exit trigger's
-/// id — which is what [`crate::creep`] compares an overlap's answer to.
-///
-/// Two colliders and no more: the ground, so a bolt whose target died stops in
-/// it rather than flying under the map for ever, and the exit volume. The
-/// creeps add their own — see the module docs.
-#[must_use]
-pub fn world() -> (PhysicsWorld, ColliderId) {
-    let mut world = PhysicsWorld::new();
-    world.add_box(BoxCollider::new(
-        DVec3::new(0.0, -0.5 * SLAB_THICKNESS, 0.0),
-        DVec3::new(HALF_WIDTH, 0.5 * SLAB_THICKNESS, HALF_DEPTH),
-    ));
-    let exit = world.add_box(exit_collider());
-    world.set_trigger(exit, true);
-    (world, exit)
+impl Map {
+    /// The field as the colliders a bolt sweeps against, with the exit
+    /// trigger's id — which is what [`crate::creep`] compares an overlap's
+    /// answer to.
+    ///
+    /// Two colliders and no more: the ground, so a bolt whose target died stops
+    /// in it rather than flying under the map for ever, and the exit volume.
+    /// The creeps add their own — see the module docs.
+    #[must_use]
+    pub fn world(&self) -> (PhysicsWorld, ColliderId) {
+        let mut world = PhysicsWorld::new();
+        world.add_box(BoxCollider::new(
+            DVec3::new(0.0, -0.5 * SLAB_THICKNESS, 0.0),
+            DVec3::new(HALF_WIDTH, 0.5 * SLAB_THICKNESS, HALF_DEPTH),
+        ));
+        let exit = world.add_box(self.exit_collider());
+        world.set_trigger(exit, true);
+        (world, exit)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -807,6 +1102,12 @@ pub fn sun() -> DirectionalLight {
 mod tests {
     use super::*;
 
+    /// The committed field, which is what every test here reads the path and
+    /// the plots off.
+    fn map() -> Map {
+        Map::built_in()
+    }
+
     /// **Every mesh the description makes resident is placed, and every row it
     /// declares is named**, in the order the constants say.
     ///
@@ -816,11 +1117,12 @@ mod tests {
     /// `apps/puppet/src/map.rs` assert the same pair.
     #[test]
     fn the_constants_name_their_own_meshes() {
-        let scene = scene();
+        let map = map();
+        let scene = map.scene();
         assert_eq!(
             scene.meshes.len(),
-            MESHES,
-            "the mesh list is not MESHES long"
+            map.meshes(),
+            "the mesh list is not Map::meshes long"
         );
         assert_eq!(
             scene.materials.len(),
@@ -830,12 +1132,12 @@ mod tests {
         for (slot, label) in [
             (GROUND_MESH, "ground"),
             (LANE_MESH, "lane"),
-            (PAD_MESH, "pad"),
-            (EXIT_MESH, "exit"),
-            (CREEP_MESH, "creep"),
-            (TOWER_MESH, "tower"),
-            (BOLT_MESH, "bolt"),
-            (BURST_MESH, "burst"),
+            (map.pad_mesh(), "pad"),
+            (map.exit_mesh(), "exit"),
+            (map.creep_mesh(), "creep"),
+            (map.tower_mesh(), "tower"),
+            (map.bolt_mesh(), "bolt"),
+            (map.burst_mesh(), "burst"),
         ] {
             assert_eq!(
                 scene.meshes[slot].label, label,
@@ -907,13 +1209,22 @@ mod tests {
     /// fail on the first wave rather than at start-up.
     #[test]
     fn the_map_fits_the_pools_it_reserves() {
-        let placed = 1 + LEGS + PLOTS.len() + 1 + MAX_CREEPS + PLOTS.len() + MAX_BOLTS + MAX_BURSTS;
+        let map = map();
+        let plots = map.plots().len();
+        let placed = 1
+            + map.path().legs()
+            + plots
+            + 1
+            + MAX_CREEPS
+            + plots
+            + map.max_bolts()
+            + map.max_bursts();
         assert!(
             placed <= CAPACITIES.instances as usize,
             "the map places {placed} instances into {}",
             CAPACITIES.instances,
         );
-        assert!(MESHES <= CAPACITIES.meshes as usize);
+        assert!(map.meshes() <= CAPACITIES.meshes as usize);
         assert!(MATERIALS <= CAPACITIES.materials as usize);
     }
 
@@ -945,8 +1256,10 @@ mod tests {
     /// lane be one `platform` per leg and what [`crate::path`] measures.
     #[test]
     fn every_leg_of_the_path_is_axis_aligned() {
-        for leg in 0..LEGS {
-            let step = PATH[leg + 1] - PATH[leg];
+        let map = map();
+        let path = map.path().waypoints();
+        for leg in 0..map.path().legs() {
+            let step = path[leg + 1] - path[leg];
             assert_eq!(step.y, 0.0, "leg {leg} climbs");
             assert!(
                 (step.x == 0.0) != (step.z == 0.0),
@@ -963,7 +1276,7 @@ mod tests {
     /// slab would be creeps walking on nothing.
     #[test]
     fn the_path_stays_on_the_ground() {
-        for point in PATH {
+        for &point in map().path().waypoints() {
             assert!(
                 point.x.abs() + 0.5 * LANE_WIDTH <= HALF_WIDTH,
                 "{point:?} is off the field across X",
@@ -986,10 +1299,11 @@ mod tests {
     fn the_exit_is_a_volume_a_bolt_flies_through_and_an_overlap_reports() {
         use crcbl::phys::Segment;
 
-        let (mut world, exit) = world();
+        let map = map();
+        let (mut world, exit) = map.world();
         assert!(world.is_trigger(exit), "the exit was registered solid");
 
-        let centre = exit_centre();
+        let centre = map.exit_centre();
         assert!(
             world.overlap_sphere(centre, CREEP_RADIUS).contains(&exit),
             "a creep standing in the exit is not reported by the overlap",
@@ -1015,10 +1329,12 @@ mod tests {
     #[test]
     fn every_plot_stands_clear_of_the_lane_and_still_covers_it() {
         let clearance = 0.5 * LANE_WIDTH + TOWER_RADIUS;
-        for plot in PLOTS {
+        let map = map();
+        let path = map.path().waypoints();
+        for plot in map.plots() {
             let mut nearest = f64::INFINITY;
-            for leg in 0..LEGS {
-                let (from, to) = (PATH[leg], PATH[leg + 1]);
+            for leg in 0..map.path().legs() {
+                let (from, to) = (path[leg], path[leg + 1]);
                 let step = to - from;
                 let t = ((plot.at() - from).dot(step) / step.length_squared()).clamp(0.0, 1.0);
                 nearest = nearest.min((from + step * t - plot.at()).length());
@@ -1051,10 +1367,12 @@ mod tests {
             "an upgraded tower is {radius:.2} m across the radius on a {PAD_EDGE} m pad",
         );
         let clearance = 0.5 * LANE_WIDTH + radius;
-        for plot in PLOTS {
+        let map = map();
+        let path = map.path().waypoints();
+        for plot in map.plots() {
             let mut nearest = f64::INFINITY;
-            for leg in 0..LEGS {
-                let (from, to) = (PATH[leg], PATH[leg + 1]);
+            for leg in 0..map.path().legs() {
+                let (from, to) = (path[leg], path[leg + 1]);
                 let step = to - from;
                 let t = ((plot.at() - from).dot(step) / step.length_squared()).clamp(0.0, 1.0);
                 nearest = nearest.min((from + step * t - plot.at()).length());
@@ -1066,5 +1384,263 @@ mod tests {
                 plot.label,
             );
         }
+    }
+
+    // -- the rules a layout is held to ----------------------------------------
+
+    /// The committed layout, as the two lists [`Map::new`] takes — what every
+    /// refusal below starts from and breaks one thing in.
+    fn layout() -> (Vec<DVec3>, Vec<Plot>) {
+        let map = map();
+        (map.path().waypoints().to_vec(), map.plots().to_vec())
+    }
+
+    /// What [`Map::new`] refuses `waypoints` and `plots` for.
+    fn refused(waypoints: Vec<DVec3>, plots: Vec<Plot>) -> MapError {
+        match Map::new(waypoints, plots) {
+            Ok(_) => panic!("the layout was accepted"),
+            Err(error) => error,
+        }
+    }
+
+    /// A plot called `label` standing at `x`, `z`.
+    fn plot_at(label: &str, x: f64, z: f64) -> Plot {
+        Plot {
+            label: label.to_string(),
+            position: [x, 0.0, z],
+        }
+    }
+
+    /// **The committed layout passes every rule**, which is the control for
+    /// each refusal below: a rule that refused everything would pass all of
+    /// them.
+    #[test]
+    fn the_committed_layout_passes_every_rule() {
+        let (waypoints, plots) = layout();
+        assert_eq!(
+            Map::new(waypoints, plots).expect("the committed layout is a map"),
+            map()
+        );
+    }
+
+    /// **A path is refused for too few waypoints, too many, and one that is
+    /// off the ground or off the field** — each by the waypoint at fault.
+    #[test]
+    fn a_path_is_refused_by_the_waypoint_that_breaks_a_rule() {
+        let (waypoints, plots) = layout();
+
+        assert!(matches!(
+            refused(waypoints[..1].to_vec(), plots.clone()),
+            MapError::TooFewWaypoints { found: 1 }
+        ));
+
+        let long: Vec<DVec3> = (0..=MAX_WAYPOINTS)
+            .map(|at| waypoints[at % waypoints.len()])
+            .collect();
+        assert!(matches!(
+            refused(long, plots.clone()),
+            MapError::TooManyWaypoints { found } if found == MAX_WAYPOINTS + 1
+        ));
+
+        let mut raised = waypoints.clone();
+        raised[2].y = 0.5;
+        assert!(matches!(
+            refused(raised, plots.clone()),
+            MapError::OffTheGround { what, .. } if what == "waypoint 2"
+        ));
+
+        let mut outside = waypoints.clone();
+        outside[1].x = HALF_WIDTH;
+        outside[2].x = HALF_WIDTH;
+        assert!(matches!(
+            refused(outside, plots),
+            MapError::OffTheField { what } if what == "waypoint 1"
+        ));
+    }
+
+    /// **A leg is refused for being diagonal or no longer than the lane is
+    /// wide** — the two things one `platform` per leg cannot draw.
+    #[test]
+    fn a_leg_one_platform_cannot_draw_is_refused_by_the_leg() {
+        let (waypoints, plots) = layout();
+
+        let mut diagonal = waypoints.clone();
+        diagonal[2].x -= 3.0;
+        assert!(matches!(
+            refused(diagonal, plots.clone()),
+            MapError::Diagonal { leg: 1 }
+        ));
+
+        let mut short = waypoints.clone();
+        short.insert(1, waypoints[0] + DVec3::new(0.5 * LANE_WIDTH, 0.0, 0.0));
+        assert!(matches!(
+            refused(short, plots.clone()),
+            MapError::ShortLeg { leg: 0, .. }
+        ));
+
+        // A leg of no length at all is a short leg, not a diagonal one.
+        let mut repeated = waypoints;
+        repeated.insert(1, repeated[0]);
+        assert!(matches!(
+            refused(repeated, plots),
+            MapError::ShortLeg { leg: 0, length } if length == 0.0
+        ));
+    }
+
+    /// **The plots are refused when there are none or too many, and a plot is
+    /// refused when it is off the ground, off the field, on the lane or out of
+    /// the shortest-reaching kind's range of it** — each by its label.
+    #[test]
+    fn a_plot_is_refused_by_the_rule_it_breaks() {
+        let (waypoints, plots) = layout();
+
+        assert!(matches!(
+            refused(waypoints.clone(), Vec::new()),
+            MapError::NoPlots
+        ));
+
+        let crowd: Vec<Plot> = (0..=MAX_PLOTS)
+            .map(|at| plots[at % plots.len()].clone())
+            .collect();
+        assert!(matches!(
+            refused(waypoints.clone(), crowd),
+            MapError::TooManyPlots { found } if found == MAX_PLOTS + 1
+        ));
+
+        let mut raised = plots.clone();
+        raised[0].position[1] = 0.25;
+        assert!(matches!(
+            refused(waypoints.clone(), raised),
+            MapError::OffTheGround { what, .. } if what == "plot \"entry\""
+        ));
+
+        // Half a pad past the edge, and still beside the lane.
+        let mut outside = plots.clone();
+        outside[2] = plot_at("east", HALF_WIDTH - 0.5 * PAD_EDGE + 0.1, 1.0);
+        assert!(matches!(
+            refused(waypoints.clone(), outside),
+            MapError::OffTheField { what } if what == "plot \"east\""
+        ));
+
+        // On the first leg's centre line.
+        let mut on_lane = plots.clone();
+        on_lane[1] = plot_at("bend", 0.0, waypoints[0].z);
+        assert!(matches!(
+            refused(waypoints.clone(), on_lane),
+            MapError::OnTheLane { plot, distance } if plot == "bend" && distance == 0.0
+        ));
+
+        // In the far corner, where nothing on the lane is in reach.
+        let mut far = plots;
+        far[4] = plot_at(
+            "gate",
+            -HALF_WIDTH + 0.5 * PAD_EDGE,
+            -HALF_DEPTH + 0.5 * PAD_EDGE,
+        );
+        assert!(matches!(
+            refused(waypoints, far),
+            MapError::OutOfReach { plot, distance } if plot == "gate" && distance >= SHORTEST_RANGE_M
+        ));
+    }
+
+    /// **The clearance a plot is held to is an upgraded tower's**, so every
+    /// plot [`Map::new`] accepts is one
+    /// `an_upgraded_tower_still_fits_its_pad_and_clears_the_lane` would pass.
+    /// A plot just outside the base tower's clearance and inside the upgraded
+    /// one's is the case that tells the two apart.
+    #[test]
+    fn a_plot_is_held_to_an_upgraded_towers_clearance() {
+        let (waypoints, mut plots) = layout();
+        let base = 0.5 * LANE_WIDTH + TOWER_RADIUS;
+        let between = 0.5 * (base + PLOT_CLEARANCE);
+        assert!(base < between && between < PLOT_CLEARANCE);
+        plots[1] = plot_at("bend", 0.0, waypoints[0].z - between);
+        assert!(matches!(
+            refused(waypoints, plots),
+            MapError::OnTheLane { plot, .. } if plot == "bend"
+        ));
+    }
+
+    /// **The largest map the caps admit fits the pools this file reserves**,
+    /// so no map [`Map::new`] accepts can fail at start-up for want of room.
+    ///
+    /// A real layout rather than a count: a serpentine of [`MAX_WAYPOINTS`]
+    /// corners filling the field, with [`MAX_PLOTS`] plots down its two sides,
+    /// built through [`Map::new`] — so the caps are shown to be reachable by a
+    /// layout the rules accept, and its description is measured the way the
+    /// renderer will measure it.
+    #[test]
+    fn the_largest_map_the_caps_admit_fits_the_pools_it_reserves() {
+        use crcbl::shaders::mesh;
+
+        let lanes = MAX_WAYPOINTS / 2;
+        let spacing = 3.0;
+        let lane_z = |lane: usize| (lane as f64 - 0.5 * (lanes - 1) as f64) * spacing;
+        let reach = HALF_WIDTH - 4.0;
+        let mut waypoints = Vec::with_capacity(MAX_WAYPOINTS);
+        for lane in 0..lanes {
+            let (from, to) = if lane % 2 == 0 {
+                (-reach, reach)
+            } else {
+                (reach, -reach)
+            };
+            waypoints.push(DVec3::new(from, 0.0, lane_z(lane)));
+            waypoints.push(DVec3::new(to, 0.0, lane_z(lane)));
+        }
+        let plots: Vec<Plot> = (0..MAX_PLOTS)
+            .map(|at| {
+                let side = if at % 2 == 0 { 1.0 } else { -1.0 };
+                plot_at(&format!("p{at}"), side * (reach + 2.0), lane_z(at / 2))
+            })
+            .collect();
+        let map = Map::new(waypoints, plots).expect("the serpentine is a map");
+        assert_eq!(map.path().waypoints().len(), MAX_WAYPOINTS);
+        assert_eq!(map.plots().len(), MAX_PLOTS);
+
+        let plots = map.plots().len();
+        let placed = 1
+            + map.path().legs()
+            + plots
+            + 1
+            + MAX_CREEPS
+            + plots
+            + map.max_bolts()
+            + map.max_bursts();
+        assert!(
+            placed <= CAPACITIES.instances as usize,
+            "the largest map places {placed} instances into {}",
+            CAPACITIES.instances,
+        );
+
+        let scene = map.scene();
+        let (mut vertices, mut indices) = (0usize, 0usize);
+        for desc in &scene.meshes {
+            let Geometry::Flat {
+                vertices: bytes,
+                indices: list,
+                ..
+            } = &desc.geometry
+            else {
+                panic!("{}: the field has no cluster DAG in it", desc.label);
+            };
+            vertices += bytes.len() / mesh::VERTEX_STRIDE;
+            indices += list.len();
+        }
+        assert!(
+            scene.meshes.len() <= CAPACITIES.meshes as usize,
+            "the largest map has {} meshes and reserves {}",
+            scene.meshes.len(),
+            CAPACITIES.meshes,
+        );
+        assert!(
+            vertices <= CAPACITIES.vertices as usize,
+            "the largest map has {vertices} vertices and reserves {}",
+            CAPACITIES.vertices,
+        );
+        assert!(
+            indices <= CAPACITIES.indices as usize,
+            "the largest map has {indices} indices and reserves {}",
+            CAPACITIES.indices,
+        );
     }
 }

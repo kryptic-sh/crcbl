@@ -69,7 +69,7 @@
 //!
 //! One speed for every kind, and that is deliberate: what makes a
 //! [`Kind::Splash`] tower slower is its reload, not a bolt that loiters. The
-//! single speed is also what keeps [`crate::map::MAX_BOLTS`]' argument one
+//! single speed is also what keeps [`crate::map::Map::max_bolts`]' argument one
 //! sentence long — see [`SHORTEST_RELOAD_S`].
 //!
 //! # A bolt homes, and that is a design decision rather than a shortcut
@@ -94,7 +94,7 @@ use crcbl::math::DVec3;
 use crcbl::phys::{ColliderId, PhysicsWorld, Segment};
 
 use crate::creep::Creep;
-use crate::map::{BOLT_RADIUS, MUZZLE_Y, PLOTS};
+use crate::map::{BOLT_RADIUS, MUZZLE_Y};
 
 // ---------------------------------------------------------------------------
 // The table
@@ -278,8 +278,8 @@ impl Kind {
     /// no kind has.
     ///
     /// **A format question rather than a rules one**, which is why it is here
-    /// and not in `crate::game`'s validation: a plot number outside [`PLOTS`]
-    /// is a thing the rules turn down, and a kind byte outside this table is a
+    /// and not in `crate::game`'s validation: a plot number the map has no plot
+    /// for is a thing the rules turn down, and a kind byte outside this table is a
     /// frame no build of this game wrote.
     #[must_use]
     pub const fn from_index(index: u8) -> Option<Self> {
@@ -319,7 +319,7 @@ pub const FLASH_S: f64 = 0.12;
 ///
 /// Shorter than [`FLASH_S`], because the burst is the loudest thing on the field
 /// and a lingering one would read as a permanent feature of the map. Under every
-/// bursting row's reload, which is what makes [`crate::map::MAX_BURSTS`] one
+/// bursting row's reload, which is what makes [`crate::map::Map::max_bursts`] one
 /// slot per plot — `a_burst_is_gone_before_its_tower_can_raise_another` asserts
 /// it.
 pub const BURST_S: f64 = 0.09;
@@ -356,7 +356,7 @@ pub const SHORTEST_RANGE_M: f64 = {
 
 /// The shortest reload any shooting row in [`TOWERS`] has, in seconds.
 ///
-/// **What [`crate::map::MAX_BOLTS`] rests on.** A bolt lands inside the reload
+/// **What [`crate::map::Map::max_bolts`] rests on.** A bolt lands inside the reload
 /// of the quickest tower that could have fired it, so no tower ever has two out
 /// at once and a full field has one each —
 /// `a_bolt_lands_long_before_its_tower_reloads` measures the longest flight
@@ -385,8 +385,10 @@ pub const SHORTEST_RELOAD_S: f64 = {
 /// One built tower.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Tower {
-    /// Which of [`PLOTS`] it stands on.
+    /// Which of the map's plots it stands on.
     plot: usize,
+    /// Where that plot is, in metres: where the tower has its feet.
+    feet: DVec3,
     /// Which kind it is — and therefore which row of [`TOWERS`] it reads.
     kind: Kind,
     /// Which column of that row: what it was built as, or the one upgrade.
@@ -400,11 +402,13 @@ pub struct Tower {
 }
 
 impl Tower {
-    /// Builds a `kind` tower on `plot`, able to fire at once.
+    /// Builds a `kind` tower on `plot`, whose feet are at `feet`, able to fire
+    /// at once.
     #[must_use]
-    pub const fn new(plot: usize, kind: Kind) -> Self {
+    pub const fn new(plot: usize, feet: DVec3, kind: Kind) -> Self {
         Self {
             plot,
+            feet,
             kind,
             tier: Tier::Base,
             ready_at: 0.0,
@@ -463,16 +467,9 @@ impl Tower {
 
     /// Where its bolts start, in metres — and where a [`Kind::Slow`] tower's
     /// reach is measured from.
-    ///
-    /// # Panics
-    ///
-    /// If its plot is not a plot, which `crate::game`'s validation makes
-    /// unreachable: a `PlaceTower` naming a plot outside [`PLOTS`] is refused
-    /// before a tower is built.
     #[must_use]
-    pub fn muzzle(&self) -> DVec3 {
-        let at = PLOTS[self.plot];
-        DVec3::new(at.x, MUZZLE_Y, at.z)
+    pub const fn muzzle(&self) -> DVec3 {
+        DVec3::new(self.feet.x, MUZZLE_Y, self.feet.z)
     }
 
     /// Whether its reload has finished. Meaningless for a kind that does not
@@ -516,7 +513,7 @@ pub struct TowerView {
 /// What the frame draws of one splash burst.
 ///
 /// A sphere the size of the burst that raised it, drawn for [`BURST_S`] and then
-/// parked — see [`crate::map::MAX_BURSTS`].
+/// parked — see [`crate::map::Map::max_bursts`].
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct BurstView {
     /// Where the bolt stopped, in metres.
@@ -717,30 +714,38 @@ impl Bolt {
 mod tests {
     use super::*;
     use crate::creep::{self, Creep};
-    use crate::map;
+    use crate::map::{self, Map};
 
     /// One tick at the sample's own rate.
     const DT: f64 = 1.0 / crate::game::DEFAULT_TICK_HZ as f64;
 
     /// A fast creep `along` metres into the path, in a world with the map in it.
     fn creep_at(world: &mut PhysicsWorld, along: f64) -> Creep {
-        let mut creep = Creep::spawn(world, creep::Kind::Fast);
+        let map = Map::built_in();
+        let mut creep = Creep::spawn(world, map.path(), creep::Kind::Fast);
         // Walked rather than placed, because `advance` is what writes the
         // sphere: a creep whose number moved and whose body did not is exactly
         // the failure these queries would then fail to see.
         let ticks = (along / (creep::Kind::Fast.spec().speed * DT)).round() as u64;
         for _ in 0..ticks {
-            creep.advance(world, DT);
+            creep.advance(world, map.path(), DT);
         }
         creep
     }
 
     /// Which plot is labelled `label`.
     fn plot(label: &str) -> usize {
-        PLOTS
+        Map::built_in()
+            .plots()
             .iter()
             .position(|plot| plot.label == label)
             .unwrap_or_else(|| panic!("the map has no {label} plot"))
+    }
+
+    /// A `kind` tower on the plot labelled `label`, able to fire at once.
+    fn built(label: &str, kind: Kind) -> Tower {
+        let at = plot(label);
+        Tower::new(at, Map::built_in().plots()[at].at(), kind)
     }
 
     /// **The enum and the table are in the same order**, which is what makes
@@ -882,7 +887,7 @@ mod tests {
     /// tier to buy.
     #[test]
     fn an_upgrade_is_taken_once_and_then_turned_down() {
-        let mut tower = Tower::new(0, Kind::Bolt);
+        let mut tower = built("entry", Kind::Bolt);
         assert_eq!(tower.tier(), Tier::Base);
         assert_eq!(
             tower.upgrade_cost(),
@@ -903,7 +908,7 @@ mod tests {
 
     /// **The shortest reach and the shortest reload are the table's own.** Both
     /// are derived in a `const` block, and both are what something else rests
-    /// on — the plots in `crate::map` and [`crate::map::MAX_BOLTS`] — so a
+    /// on — the plots in `crate::map` and [`crate::map::Map::max_bolts`] — so a
     /// derivation that silently stopped covering a row would take those two
     /// claims with it.
     #[test]
@@ -929,7 +934,7 @@ mod tests {
     }
 
     /// **A burst is gone before its tower can raise another**, which is the
-    /// claim [`crate::map::MAX_BURSTS`] rests on: one slot per plot, because a
+    /// claim [`crate::map::Map::max_bursts`] rests on: one slot per plot, because a
     /// plot never has two bursts drawn at once.
     #[test]
     fn a_burst_is_gone_before_its_tower_can_raise_another() {
@@ -980,7 +985,7 @@ mod tests {
     /// is [`PhysicsWorld::sweep_sphere`] over the segment between them.
     #[test]
     fn a_bolt_hits_a_creep_that_a_test_at_either_end_of_the_tick_would_miss() {
-        let (mut world, _) = map::world();
+        let (mut world, _) = Map::built_in().world();
         let mut creep = creep_at(&mut world, 6.0);
 
         // Half a tick's travel short of the creep, aimed straight at it: one
@@ -998,7 +1003,7 @@ mod tests {
         );
 
         // The creep walks first, exactly as the tick order has it.
-        creep.advance(&mut world, DT);
+        creep.advance(&mut world, Map::built_in().path(), DT);
         let creeps = [creep];
         // Where the tick's segment ends, worked out the way `Bolt::step` works
         // it out — this is the *other* place a static test would look, and it
@@ -1028,10 +1033,10 @@ mod tests {
     /// overlap returned creeps alone, a build with no filter at all would pass.
     #[test]
     fn a_tower_ignores_everything_in_range_that_is_not_a_creep() {
-        let (mut world, exit) = map::world();
+        let (mut world, exit) = Map::built_in().world();
         let mut scratch = Vec::new();
         // The gate plot, which is the one the exit volume stands beside.
-        let tower = Tower::new(plot("gate"), Kind::Bolt);
+        let tower = built("gate", Kind::Bolt);
         let muzzle = tower.muzzle();
 
         let in_range = world.overlap_sphere(muzzle, tower.spec().range_m);
@@ -1054,9 +1059,9 @@ mod tests {
     /// once its target walks out of range.
     #[test]
     fn a_tower_shoots_the_creep_nearest_the_exit_and_nothing_out_of_range() {
-        let (mut world, _) = map::world();
+        let (mut world, _) = Map::built_in().world();
         let mut scratch = Vec::new();
-        let tower = Tower::new(plot("entry"), Kind::Bolt);
+        let tower = built("entry", Kind::Bolt);
         let (muzzle, range) = (tower.muzzle(), tower.spec().range_m);
 
         // Two creeps on the first leg, one further along than the other, both
@@ -1078,8 +1083,8 @@ mod tests {
         );
 
         // And one that has walked away down the far leg is out of reach.
-        let (mut world, _) = map::world();
-        let gone = creep_at(&mut world, crate::path::length() - 2.0);
+        let (mut world, _) = Map::built_in().world();
+        let gone = creep_at(&mut world, Map::built_in().path().length() - 2.0);
         let creeps = [gone];
         assert!(
             (creeps[0].centre() - muzzle).length() > range,
@@ -1101,13 +1106,13 @@ mod tests {
     /// this one.
     #[test]
     fn a_slow_tower_holds_what_is_in_reach_and_nothing_outside_it() {
-        let (mut world, _) = map::world();
+        let (mut world, _) = Map::built_in().world();
         let mut scratch = Vec::new();
-        let tower = Tower::new(plot("entry"), Kind::Slow);
+        let tower = built("entry", Kind::Slow);
         let spec = tower.spec();
 
         let near = creep_at(&mut world, 8.0);
-        let far = creep_at(&mut world, crate::path::length() - 2.0);
+        let far = creep_at(&mut world, Map::built_in().path().length() - 2.0);
         assert!(
             (near.centre() - tower.muzzle()).length() < spec.range_m,
             "the near creep is not in reach, so this proves nothing",
@@ -1156,9 +1161,9 @@ mod tests {
                 "a bolt fired at a creep would not be descending",
             );
         }
-        let (mut world, _) = map::world();
+        let (mut world, _) = Map::built_in().world();
         let creep = creep_at(&mut world, 6.0);
-        let tower = Tower::new(plot("entry"), Kind::Bolt);
+        let tower = built("entry", Kind::Bolt);
         let mut bolt = Bolt::fire(tower.muzzle(), &creep, tower.spec());
         creep.despawn(&mut world);
 
@@ -1187,7 +1192,7 @@ mod tests {
     }
 
     /// **A bolt is gone before its tower can fire again.** The claim
-    /// [`crate::map::MAX_BOLTS`] rests on: a tower with a bolt still in the
+    /// [`crate::map::Map::max_bolts`] rests on: a tower with a bolt still in the
     /// air has not reloaded, so a full field has one bolt per plot and never
     /// more. Measured on the longest flight there is — a bolt fired at the
     /// edge of the *longest* reach in the table whose target then vanished,
@@ -1196,18 +1201,19 @@ mod tests {
     /// which is the quickest any tower could ask for a second one.
     #[test]
     fn a_bolt_lands_long_before_its_tower_reloads() {
-        let (mut world, _) = map::world();
-        let tower = Tower::new(plot("entry"), Kind::Bolt);
+        let (mut world, _) = Map::built_in().world();
+        let tower = built("entry", Kind::Bolt);
         let muzzle = tower.muzzle();
         let longest = ALL
             .iter()
             .flat_map(|kind| [Tier::Base, Tier::Upgraded].map(|tier| kind.spec(tier).range_m))
             .fold(0.0_f64, f64::max);
 
-        let mut creep = Creep::spawn(&mut world, creep::Kind::Fast);
+        let map = Map::built_in();
+        let mut creep = Creep::spawn(&mut world, map.path(), creep::Kind::Fast);
         let mut walked = 0_u64;
         while (creep.centre() - muzzle).length() > longest {
-            creep.advance(&mut world, DT);
+            creep.advance(&mut world, map.path(), DT);
             walked += 1;
             assert!(walked < 10_000, "the entry plot never had a creep in range");
         }
@@ -1241,7 +1247,7 @@ mod tests {
                 if !kind.spec(tier).fires() {
                     continue;
                 }
-                let mut tower = Tower::new(0, kind);
+                let mut tower = built("entry", kind);
                 if tier == Tier::Upgraded {
                     assert!(tower.upgrade());
                 }

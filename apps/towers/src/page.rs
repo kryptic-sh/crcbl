@@ -74,7 +74,7 @@ use crcbl::ui::text::FontAtlas;
 use crcbl::ui::widget::NATURAL_FONT_SIZE;
 
 use crate::game::RenderState;
-use crate::map::PLOTS;
+use crate::scene::Plot;
 use crate::tower::{self, Tier};
 use crate::wave::{Outcome, STARTING_LIVES, WAVES};
 
@@ -215,12 +215,17 @@ fn kind_list(state: &RenderState, kind: tower::Kind) -> Vec<ReadoutRow> {
 /// An empty plot is priced at the **picked kind's** cost, because that is what
 /// `B` would spend. A built one names what stands on it and what `U` would cost,
 /// or [`MAXED`] once there is nothing left to buy.
-fn build_list(state: &RenderState, selected: u8, kind: tower::Kind) -> Vec<ReadoutRow> {
-    PLOTS
+fn build_list(
+    state: &RenderState,
+    plots: &[Plot],
+    selected: u8,
+    kind: tower::Kind,
+) -> Vec<ReadoutRow> {
+    plots
         .iter()
         .enumerate()
         .map(|(plot, at)| {
-            let label = marked(at.label, plot == usize::from(selected));
+            let label = marked(&at.label, plot == usize::from(selected));
             let (reading, colour) = match state.towers[plot] {
                 Some(tower) => match tower.tier {
                     Tier::Base => {
@@ -245,7 +250,8 @@ fn build_list(state: &RenderState, selected: u8, kind: tower::Kind) -> Vec<Reado
         .collect()
 }
 
-/// Draws the overlay into `list`, laid out against a surface of `extent`.
+/// Draws the overlay into `list`, laid out against a surface of `extent`, with
+/// one build row per entry of `plots`.
 ///
 /// `atlas` is only measured against — the glyphs themselves are the UI pass's
 /// business — and it is what right-aligns the readings against a proportional
@@ -255,6 +261,7 @@ pub fn draw(
     atlas: &FontAtlas,
     extent: (u32, u32),
     state: &RenderState,
+    plots: &[Plot],
     selected: u8,
     kind: tower::Kind,
 ) -> PageStats {
@@ -263,7 +270,7 @@ pub fn draw(
 
     let readout = readout(state);
     let kinds = kind_list(state, kind);
-    let build = build_list(state, selected, kind);
+    let build = build_list(state, plots, selected, kind);
     READOUT.draw(list, atlas, &readout);
     // Stacked, each panel under the one before it with an inset between — so a
     // row added to any of them moves the ones below rather than drawing over
@@ -303,10 +310,16 @@ mod tests {
     use super::*;
     use crcbl::ui::draw_list::DrawCommand;
 
+    use crate::map::{MAX_PLOTS, Map};
     use crate::tower::{Kind, TowerView};
 
     /// A window the page is laid out against.
     const EXTENT: (u32, u32) = (960, 720);
+
+    /// The committed field's plots, which is what every build list here lists.
+    fn plots() -> Vec<Plot> {
+        Map::built_in().plots().to_vec()
+    }
 
     /// Every `Text` command the page produced.
     fn text(list: &DrawList) -> Vec<String> {
@@ -339,13 +352,15 @@ mod tests {
             leaks: 3,
             creeps_alive: 3,
             next_wave_in: None,
-            towers: [
-                built(Kind::Bolt, Tier::Base),
-                built(Kind::Bolt, Tier::Upgraded),
-                built(Kind::Slow, Tier::Base),
-                None,
-                None,
-            ],
+            towers: {
+                let mut towers = [None; MAX_PLOTS];
+                towers[..3].copy_from_slice(&[
+                    built(Kind::Bolt, Tier::Base),
+                    built(Kind::Bolt, Tier::Upgraded),
+                    built(Kind::Slow, Tier::Base),
+                ]);
+                towers
+            },
             ..RenderState::default()
         }
     }
@@ -362,6 +377,7 @@ mod tests {
             &FontAtlas::built_in(),
             EXTENT,
             &state,
+            &plots(),
             2,
             Kind::Bolt,
         );
@@ -379,7 +395,7 @@ mod tests {
         ] {
             assert!(text.contains(&expected), "{expected} is not on the page");
         }
-        for plot in PLOTS {
+        for plot in plots() {
             assert!(
                 text.iter()
                     .any(|drawn| drawn.contains(&plot.label.to_uppercase())),
@@ -406,6 +422,7 @@ mod tests {
             &FontAtlas::built_in(),
             EXTENT,
             &playing(),
+            &plots(),
             0,
             Kind::Splash,
         );
@@ -439,7 +456,7 @@ mod tests {
     #[test]
     fn a_built_plot_is_priced_for_its_upgrade_and_a_maxed_one_is_not() {
         let state = playing();
-        let rows = build_list(&state, 0, Kind::Splash);
+        let rows = build_list(&state, &plots(), 0, Kind::Splash);
 
         let base = &rows[0];
         assert!(
@@ -467,7 +484,7 @@ mod tests {
         );
 
         // …and with a different kind picked, the empty rows move with it.
-        let other = build_list(&state, 0, Kind::Bolt);
+        let other = build_list(&state, &plots(), 0, Kind::Bolt);
         assert_eq!(
             other[3].value,
             format!("{}g", Kind::Bolt.spec(Tier::Base).cost),
@@ -507,7 +524,8 @@ mod tests {
     /// what it builds there.
     #[test]
     fn exactly_the_selected_plot_and_kind_are_marked() {
-        for selected in 0..PLOTS.len() as u8 {
+        let plots = plots();
+        for selected in 0..plots.len() as u8 {
             for kind in tower::ALL {
                 let mut list = DrawList::new();
                 draw(
@@ -515,6 +533,7 @@ mod tests {
                     &FontAtlas::built_in(),
                     EXTENT,
                     &RenderState::default(),
+                    &plots,
                     selected,
                     kind,
                 );
@@ -530,11 +549,11 @@ mod tests {
                 assert!(
                     marked
                         .iter()
-                        .any(|row| row.contains(&PLOTS[usize::from(selected)]
+                        .any(|row| row.contains(&plots[usize::from(selected)]
                             .label
                             .to_uppercase())),
                     "no marker on {}: {marked:?}",
-                    PLOTS[usize::from(selected)].label,
+                    plots[usize::from(selected)].label,
                 );
                 assert!(
                     marked
@@ -564,6 +583,7 @@ mod tests {
             &FontAtlas::built_in(),
             EXTENT,
             &playing(),
+            &plots(),
             2,
             Kind::Bolt,
         );
@@ -644,6 +664,7 @@ mod tests {
                     outcome,
                     ..playing()
                 },
+                &plots(),
                 0,
                 Kind::Bolt,
             );

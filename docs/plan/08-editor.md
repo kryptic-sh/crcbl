@@ -198,7 +198,12 @@ Two things sit behind it, in both directions:
   [../notes/tooling.md](../notes/tooling.md)).
 - **Two sample plans wait on it.** [sample/07-towers.md](sample/07-towers.md)'s
   milestone 2 _is_ this document's dogfood pass — its exit criterion is "map
-  authored 100% in the editor, zero hand-edited scene text" — and
+  authored 100% in the editor, zero hand-edited scene text". **Towers' map is
+  scene data since 2026-09-30**: its path and build plots are
+  `apps/towers/assets/scenes/field.scn/`, the shipped vocabulary registers
+  towers' `Waypoint` and `Plot` beside breakout's and puppet's components, and
+  the editor opens the committed field, so the dogfood pass has a scene to edit
+  and is what is left of that milestone. And
   [sample/08-arena.md](sample/08-arena.md) wants an editor-built map too. Towers
   has an app directory; arena is one of five sample plans without one, beside
   mirrors, meadow, mane and relief.
@@ -251,8 +256,9 @@ than the rest of this document suggests; each line was checked in the source.
    from. Replication is one-way and carries transforms only.
 4. **Most samples keep their state outside the ECS**, in a `Stage` behind a
    mutex the renderer locks. Towers — whose milestone 2 is this document's
-   dogfood pass — says in its own source that it has no entity and no ECS
-   system. An editor has no world to edit in it until it is ported.
+   dogfood pass — still simulates in one, but its map is a `.scn/` directory
+   since 2026-09-30, read into a `Map` the stage plays on, so what the editor
+   edits there is the scene the game loads rather than live entities.
 5. **No inspector _in the editor_**: `crcbl_ecs::Inspector::collect` returns a
    system's name and entity count, and the per-system debug-UI callback is an
    empty stub. The per-component half is built — `crcbl-reflect`,
@@ -348,7 +354,8 @@ long term and recorded):
   assets.
 - **The scene format change for entities spanning systems** is decided when the
   towers port first needs one entity in two systems. The format is v0, so the
-  break is allowed then.
+  break is allowed then. The map's port (2026-09-30) did not: a corner of the
+  path and a build plot are one component each, in one system each.
 
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's

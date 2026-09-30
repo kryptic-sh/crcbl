@@ -31,10 +31,10 @@
 //! document's milestone 3 is where a wire arrives.
 //!
 //! **What this sample does not add to the macro.** There is no `asset_source`
-//! accessor here, because towers has nothing to read out of one: the map is a
-//! table in [`crate::map`], the field is `crcbl::greybox` primitives, and every
-//! byte it draws with — the geometry, the materials, the shaders, the font atlas
-//! — is compiled into the module. There is no save either, so nothing reaches
+//! accessor here, because towers has nothing to read out of one: the map is the
+//! committed `.scn/` directory compiled in by [`crate::scene`], the field is
+//! `crcbl::greybox` primitives, and every byte it draws with — the geometry, the
+//! materials, the shaders, the font atlas — is compiled into the module. There is no save either, so nothing reaches
 //! for the OPFS store beyond the `prepare` that installs it: both backends are
 //! installed there because the shared shim's boot sequence drives both ABIs
 //! before it boots the demo and both must answer.
@@ -65,8 +65,9 @@ use crate::args::Options;
 // and `HostedGame::log_summary` in `app.rs`. What is left is start-up, and the
 // macro below writes it.
 //
-// Towers' `Options` is the shared set and nothing else, so the browser wants it
-// exactly as the binary's default builds it.
+// Towers' `Options` is the shared set and the committed map, so the browser
+// wants it exactly as the binary's default builds it: a page has no directory
+// for `--scene` to name.
 //
 // **`WebPending` is deliberately not imported.** The macro's guard against a
 // missing inherent method resolves `PendingLoop::poll` by path, and an import

@@ -16,6 +16,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_towers`' map is a value rather than constants** (see Added):
+  `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
+  the lane (`PAD_MESH` … `MESHES`) and the crate-root `PLOTS` re-export are
+  gone, and `map::{scene, place, world, exit_centre, exit_collider}` are methods
+  on `map::Map`, beside `max_bolts`, `max_bursts` and `pad_mesh` … `meshes`.
+  `Plot` is `scene::Plot { label: String, position: [f64; 3] }` (no longer
+  `Copy`). `path`'s free functions are methods on `path::Path`. `Game::new`,
+  `Creep::spawn`, `Creep::advance`, `creep::centre_at`, `Tower::new` and
+  `page::draw` take the map, path, plot position or plots they used to read from
+  the constants. `RenderState`'s per-plot arrays are `map::MAX_PLOTS` wide,
+  `Stats` has a `plots` field, and `Options` has a `map` field and is no longer
+  `Eq`.
+
 - **`crcbl::scene::scn::SystemChunk` has two more required methods**, `row` and
   `attach_row`, which read one entity's component as a row's RON text and attach
   one back (see Added). `chunk_of` implements both, so only a hand-written
@@ -396,6 +409,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Towers reads its map from a `.scn/` directory**, and the editor opens it —
+  `docs/plan/sample/07-towers.md`'s milestone 2 has a scene to author.
+  `apps/towers/assets/scenes/field.scn/` is `scene.ron`, `env.ron`,
+  `sys/waypoints.ron` (one `Waypoint { order, position }` per corner of the
+  path, walked in `order`) and `sys/plots.ron` (one `Plot { label, position }`
+  per build plot), compiled in and read through `crcbl_scene::scn`, or read from
+  the directory the new **`--scene <DIR>`** names. The committed files are the
+  milestone 1 map exactly, as `Scene::save` writes it, and a round-trip test
+  holds them to that. `map::Map::new` refuses a layout the field cannot hold, by
+  name (`map::MapError`): too few or more than `MAX_WAYPOINTS` corners, a corner
+  or plot off the ground or the field, a diagonal or too-short leg, no plots or
+  more than `MAX_PLOTS`, a plot on the lane or out of every tower's reach, and
+  two corners with one `order`. The exit still stands on the last corner.
+  `crcbl_towers::{register_components, built_in_source, FIELD}` are public and
+  `apps/editor`'s shipped vocabulary registers both components.
 
 - **An asset source can list a directory.** `AssetSource::list(dir)` returns the
   `AssetEntry`s directly inside it — full key and whether it is a directory — in

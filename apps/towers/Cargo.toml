@@ -1,6 +1,6 @@
 [package]
 name = "towers"
-description = "Towers — a co-op tower defense; the solo loop on a hardcoded map, three tower kinds and ten waves"
+description = "Towers — a co-op tower defense; the solo loop on a scene-file map, three tower kinds and ten waves"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -18,18 +18,19 @@ crate-type = ["cdylib", "rlib"]
 name = "towers"
 path = "src/main.rs"
 
-# One engine dependency, like every other sample — with the `greybox` feature
-# on, which is what the field is built out of. The ground slab, the lane the
-# creeps walk, the build pads, the creeps and the towers are every one of them a
-# `crcbl::greybox` primitive over a constant in `src/map.rs` that the colliders
-# are written from too.
+# One engine dependency, like every other sample — with two features on.
 #
-# The `scene` feature stays off: nothing here imports a glTF document, and
-# milestone 1's map is a hardcoded table rather than a `.scn/` directory — see
-# `docs/plan/sample/07-towers.md`, whose milestone 2 is where the map comes out
-# of the editor.
+# `greybox` is what the field is built out of. The ground slab, the lane the
+# creeps walk, the build pads, the creeps and the towers are every one of them a
+# `crcbl::greybox` primitive over the map in `src/map.rs` that the colliders are
+# written from too.
+#
+# `scn` is the scene *format* half of `crcbl::scene` — the `.scn/` directory the
+# path and the plots are read out of, `assets/scenes/field.scn/` — without the
+# glTF importer, which nothing here reads. The same feature `apps/breakout` and
+# `apps/puppet` ask for, and for the same reason.
 [dependencies]
-crcbl = { workspace = true, features = ["greybox"] }
+crcbl = { workspace = true, features = ["greybox", "scn"] }
 
 # The helpers this sample's own unit tests read a frame back with — `ui_text`,
 # `row_value` and `headless_common`, each a fact about an engine surface that

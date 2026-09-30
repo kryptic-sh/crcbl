@@ -78,7 +78,9 @@ above is a requirement rather than an aspiration.
    slices are built — the first two 2026-09-07 and the combat content
    2026-09-10** — see "Where this stands" for what they hold and what they owe.
 2. Map from editor: author the real map in stage 8 editor — this milestone _is_
-   stage 8 dogfood.
+   stage 8 dogfood. **The map is scene data since 2026-09-30**: the path and the
+   plots are `apps/towers/assets/scenes/field.scn/`, which the game reads and
+   the editor opens; authoring the real map in the editor is what is left.
 3. Co-op over real transport + browser client (stage 10 exit demo: wasm client
    into native dedicated server).
 4. Polish pass: world-space health bars, minimap, game-feel cheap wins.
@@ -86,15 +88,30 @@ above is a requirement rather than an aspiration.
 ## Where this stands
 
 **Milestone 1's first three slices are built.** `apps/towers` is the solo loop
-on a hardcoded map, with the combat content this milestone's scope line asks
-for: creeps of three kinds walk a path as kinematic bodies, **three** kinds of
-tower answer them — a single-target bolt, a splash tower whose shot bursts where
-it lands, and a slow tower that holds what is inside its reach — each with one
-upgrade tier, a kill pays gold, a scripted table of **ten** waves runs out, and
-the run is won at the end of the table or lost at zero lives and then plays
-itself again. `PlaceTower`, `UpgradeTower` and `StartWave` are commands the
-client seals into four bytes and the server validates over `InMemoryTransport`,
-so solo is already the same game the co-op build will be.
+on one map, with the combat content this milestone's scope line asks for: creeps
+of three kinds walk a path as kinematic bodies, **three** kinds of tower answer
+them — a single-target bolt, a splash tower whose shot bursts where it lands,
+and a slow tower that holds what is inside its reach — each with one upgrade
+tier, a kill pays gold, a scripted table of **ten** waves runs out, and the run
+is won at the end of the table or lost at zero lives and then plays itself
+again. `PlaceTower`, `UpgradeTower` and `StartWave` are commands the client
+seals into four bytes and the server validates over `InMemoryTransport`, so solo
+is already the same game the co-op build will be.
+
+**The map is scene data.** The path's corners and the build plots are two chunk
+files in `apps/towers/assets/scenes/field.scn/` — `sys/waypoints.ron`, one
+`Waypoint(order, position)` per corner, and `sys/plots.ron`, one
+`Plot(label, position)` per plot — read through `crcbl_scene::scn`, compiled in
+by default and replaced at run time by `--scene <DIR>`. `crate::map`'s
+`Map::new` holds a layout to the rules the rest of the sample assumes and
+refuses one that breaks any by name: at least two corners and at most
+`MAX_WAYPOINTS`, every leg along `X` or `Z` and longer than the lane is wide, at
+least one plot and at most `MAX_PLOTS`, and every plot on the field, clear of
+the lane by an upgraded tower's radius and within the shortest-reaching kind's
+range of it. The exit is still derived from the last corner. The committed files
+are what the milestone 1 table was, byte for byte as `Scene::save` writes it,
+and `apps/editor`'s shipped vocabulary registers both components and opens the
+field.
 
 **The three kinds are three kinds, and that is asserted rather than claimed.**
 The tenth row needs a splash tower **and** a slow tower to hold: five bolt
@@ -199,18 +216,19 @@ milestone 3's problem rather than these slices'.
   `overlap_sphere` are what the sample runs on, and `CharacterController` is the
   one still untouched here — it is slice 4's, and `apps/puppet`, `apps/breach`
   and `apps/shard` drive it from three different cameras in the meantime.
-- **Milestone 2 waits on towers reaching the editor. Neither the scene directory
-  nor the editor's existence holds it up any more.** `crcbl_scene::scn` (stage
-  6's task 4; its rules are in [../../notes/tooling.md](../../notes/tooling.md))
-  landed 2026-09-07 and `apps/breakout` reads its board out of a `.scn/`
-  directory, so a wave that saves and reloads has a format to save into; and
-  `apps/editor` exists (`docs/plan/08-editor.md`, slices 1 to 3). What is
-  missing is towers on the editor's side of the line: towers keeps its
-  simulation in a `Stage` with no ECS system, registers no components, and so is
-  not in the editor's vocabulary (`apps/editor/src/scene.rs::vocabulary` names
-  its own block, breakout's and puppet's). Every "editor-built" and "authored in
-  the editor" line in this doc still waits on that port, and slice 1's map is a
-  table in `apps/towers/src/map.rs` for exactly that reason.
+- **Milestone 2's map is in the editor's vocabulary; authoring it there is what
+  is left.** Since 2026-09-30 the path and the plots are
+  `apps/towers/assets/scenes/field.scn/`, `crcbl_towers::register_components`
+  names their two components, and `apps/editor/src/scene.rs::vocabulary`
+  registers them beside its own block, breakout's and puppet's — so the editor
+  opens the field, and a directory it saves is one `--scene` plays. The
+  committed field is still the milestone 1 table written out by the writer
+  rather than a map authored in the editor, so the exit criterion "map authored
+  100% in the editor" is not met yet: that is the dogfood pass
+  (`docs/plan/08-editor.md`). The simulation itself still lives in a `Stage`
+  with no ECS system, which is fine for a map — the scene is read into a `Map`
+  and the stage plays on that — and would not be for anything the editor should
+  place that moves.
 - **Milestone 3 waits on a wire.** `crcbl-net` ships `InMemoryTransport` and
   nothing else: no UDP transport, no LAN host discovery, no lobby browser. So
   "co-op over real transport" and the 4-player LAN exit criterion have no

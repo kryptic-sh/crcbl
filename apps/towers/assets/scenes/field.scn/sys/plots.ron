@@ -1,0 +1,25 @@
+Chunk(
+    system: "plots",
+    entities: [
+        (4, Plot(
+            label: "entry",
+            position: (-6.0, 0.0, 3.0),
+        )),
+        (5, Plot(
+            label: "bend",
+            position: (3.0, 0.0, 3.0),
+        )),
+        (6, Plot(
+            label: "east",
+            position: (13.0, 0.0, 1.0),
+        )),
+        (7, Plot(
+            label: "middle",
+            position: (2.0, 0.0, -1.0),
+        )),
+        (8, Plot(
+            label: "gate",
+            position: (-7.0, 0.0, -1.0),
+        )),
+    ],
+)

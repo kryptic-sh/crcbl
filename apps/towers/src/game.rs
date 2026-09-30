@@ -65,7 +65,7 @@ use crcbl::phys::{ColliderId, PhysicsWorld};
 use crcbl::session::Loopback;
 
 use crate::creep::{self, Creep, CreepView};
-use crate::map::{self, MAX_BOLTS, MAX_BURSTS, PLOTS};
+use crate::map::{MAX_PLOTS, Map};
 use crate::tower::{self, Bolt, BoltOutcome, BurstView, Tier, Tower, TowerView};
 use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Waves};
 
@@ -157,8 +157,8 @@ const INTENT_FLAGS: u8 = INTENT_START | INTENT_RESTART;
 /// The plot byte on a frame that is not building — or not upgrading — anything.
 ///
 /// A sentinel rather than two more flag bits, and it is safe to be one because
-/// [`PLOTS`] is five rows long — `the_no_plot_sentinel_is_not_a_plot` asserts
-/// that it never becomes a plot index.
+/// a map has at most [`MAX_PLOTS`] plots — `the_no_plot_sentinel_is_not_a_plot`
+/// asserts that it never becomes a plot index.
 const PLOT_NONE: u8 = u8::MAX;
 
 /// How many bytes one sealed command is: a flag byte, the plot to build on, the
@@ -275,6 +275,10 @@ struct Burst {
 /// `apps/orbit` gives: the module is what the server ticks and the frame is
 /// what reads the result, and the two are not the same call stack.
 struct Stage {
+    /// The field this stage is played on. Shared with [`Game`], which answers
+    /// the client's questions about it without taking the tick's lock, and
+    /// kept across a restart — a restart replays the run, not the map.
+    map: Arc<Map>,
     world: PhysicsWorld,
     /// The exit volume's id, which is what an overlap's answer is compared
     /// against — see [`crate::creep::has_reached_the_exit`].
@@ -326,10 +330,11 @@ struct Stage {
 }
 
 impl Stage {
-    /// An empty field with the first build phase running.
-    fn new() -> Self {
-        let (world, exit) = map::world();
+    /// An empty field on `map`, with the first build phase running.
+    fn new(map: Arc<Map>) -> Self {
+        let (world, exit) = map.world();
         Self {
+            map,
             world,
             exit,
             creeps: Vec::new(),
@@ -361,10 +366,10 @@ impl Stage {
     /// Everything goes, the physics world included — a restart that kept the
     /// old world would keep every dead creep's collider in it. What survives is
     /// [`Stage::runs`], because a demo that has played itself four times should
-    /// say so.
+    /// say so, and the map the run is played on.
     fn reset(&mut self) {
         let runs = self.runs + 1;
-        *self = Self::new();
+        *self = Self::new(Arc::clone(&self.map));
         self.runs = runs;
     }
 
@@ -389,12 +394,14 @@ impl Stage {
     fn place_tower(&mut self, plot: u8, kind: tower::Kind) -> bool {
         let plot = plot as usize;
         let cost = kind.spec(Tier::Base).cost;
-        if self.outcome.is_over() || plot >= PLOTS.len() || self.is_taken(plot) || self.gold < cost
-        {
+        let Some(feet) = self.map.plots().get(plot).map(crate::scene::Plot::at) else {
+            return false;
+        };
+        if self.outcome.is_over() || self.is_taken(plot) || self.gold < cost {
             return false;
         }
         self.gold -= cost;
-        self.towers.push(Tower::new(plot, kind));
+        self.towers.push(Tower::new(plot, feet, kind));
         self.built += 1;
         self.built_by_kind[kind.index()] += 1;
         true
@@ -570,7 +577,7 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
     // 1. The table releases, at most one creep a tick — see
     //    `crate::wave::Waves::step`.
     if let Some(release) = stage.waves.step(stage.elapsed) {
-        let creep = Creep::spawn(&mut stage.world, release.kind);
+        let creep = Creep::spawn(&mut stage.world, stage.map.path(), release.kind);
         stage.creeps.push(creep);
     }
 
@@ -580,7 +587,7 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
     // 3. Every creep walks — at its kind's speed times whatever is holding it —
     //    and writes its sphere where the walk left it.
     for creep in &mut stage.creeps {
-        creep.advance(&mut stage.world, dt);
+        creep.advance(&mut stage.world, stage.map.path(), dt);
     }
 
     // 4. The exit volume takes what reached it. One overlap per creep, against
@@ -731,7 +738,8 @@ fn lock(shared: &Arc<Mutex<Stage>>) -> MutexGuard<'_, Stage> {
 /// the frame's thread and the stage is behind a mutex the tick holds, and a
 /// frame that read through the lock would be holding it for the length of a
 /// draw. The pools are fixed-size for the same reason — a heap allocation here
-/// would be one per draw.
+/// would be one per draw — which is why the per-plot pools are [`MAX_PLOTS`]
+/// wide rather than as wide as the map the run is on.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RenderState {
     /// Every creep on the field, the first [`RenderState::creeps_alive`] of
@@ -739,16 +747,17 @@ pub struct RenderState {
     pub creeps: [CreepView; MAX_CREEPS],
     pub creeps_alive: usize,
     /// One entry per plot: `None` for an empty plot, the tower for a built one.
-    pub towers: [Option<TowerView>; PLOTS.len()],
+    /// Every entry past the map's last plot is `None`.
+    pub towers: [Option<TowerView>; MAX_PLOTS],
     /// Every bolt in the air, the first [`RenderState::bolts_flying`] of them
     /// live. Bolts past the pool are simulated and not drawn — see
-    /// [`crate::map::MAX_BOLTS`].
-    pub bolts: [DVec3; MAX_BOLTS],
+    /// [`crate::map::Map::max_bolts`].
+    pub bolts: [DVec3; MAX_PLOTS],
     pub bolts_flying: usize,
     /// Every splash burst still being drawn, the first
     /// [`RenderState::bursts_live`] of them live — see
-    /// [`crate::map::MAX_BURSTS`].
-    pub bursts: [BurstView; MAX_BURSTS],
+    /// [`crate::map::Map::max_bursts`].
+    pub bursts: [BurstView; MAX_PLOTS],
     pub bursts_live: usize,
     pub gold: u32,
     pub lives: u32,
@@ -772,10 +781,10 @@ impl Default for RenderState {
         Self {
             creeps: [CreepView::default(); MAX_CREEPS],
             creeps_alive: 0,
-            towers: [None; PLOTS.len()],
-            bolts: [DVec3::ZERO; MAX_BOLTS],
+            towers: [None; MAX_PLOTS],
+            bolts: [DVec3::ZERO; MAX_PLOTS],
             bolts_flying: 0,
-            bursts: [BurstView::default(); MAX_BURSTS],
+            bursts: [BurstView::default(); MAX_PLOTS],
             bursts_live: 0,
             gold: 0,
             lives: 0,
@@ -797,6 +806,8 @@ pub struct Stats {
     pub wave: usize,
     pub creeps: usize,
     pub towers: usize,
+    /// How many plots the map has, which is how many towers it can hold.
+    pub plots: usize,
     pub bolts: usize,
     pub kills: u64,
     pub leaks: u64,
@@ -840,7 +851,7 @@ impl crcbl::ui::DebugModule for Stats {
             None => section.row_str("next", "--"),
         }
         section.row("creeps", format_args!("{}", self.creeps));
-        section.row("towers", format_args!("{}/{}", self.towers, PLOTS.len()));
+        section.row("towers", format_args!("{}/{}", self.towers, self.plots));
         // One row per kind, because "three towers" says nothing about whether
         // the kind keys reached the server.
         for kind in tower::ALL {
@@ -884,6 +895,10 @@ impl std::error::Error for GameError {}
 pub struct Game {
     session: Loopback,
     shared: Arc<Mutex<Stage>>,
+    /// The stage's map, held here as well so the client can read the plots it
+    /// lists without taking the tick's lock. The same allocation the stage
+    /// holds, so the two cannot be different maps.
+    map: Arc<Map>,
     /// Exactly one tick period per [`Game::tick`], so the server's accumulator
     /// yields exactly one tick per call.
     tick_period: Duration,
@@ -902,7 +917,7 @@ impl std::fmt::Debug for Game {
 }
 
 impl Game {
-    /// Builds the server, its client and the stage between them.
+    /// Builds the server, its client and the stage between them, on `map`.
     ///
     /// # Errors
     ///
@@ -913,9 +928,10 @@ impl Game {
     /// # Panics
     ///
     /// If `tick_hz` is zero.
-    pub fn new(tick_hz: u32) -> Result<Self, GameError> {
+    pub fn new(tick_hz: u32, map: &Map) -> Result<Self, GameError> {
         assert!(tick_hz > 0, "tick rate must be positive");
-        let shared = Arc::new(Mutex::new(Stage::new()));
+        let map = Arc::new(map.clone());
+        let shared = Arc::new(Mutex::new(Stage::new(Arc::clone(&map))));
 
         // An empty world, and that is the honest shape: this sample has no
         // entity and no ECS system. What the server hosts is the module, and
@@ -934,6 +950,7 @@ impl Game {
         let mut game = Self {
             session,
             shared,
+            map,
             tick_period,
             sim_time: Duration::ZERO,
             ticks_run: 0,
@@ -960,7 +977,7 @@ impl Game {
              {:.1} m path, {} tower kinds, {} lives and {} gold",
             tick_period.as_secs_f64() * 1e3,
             wave::WAVES.len(),
-            crate::path::length(),
+            game.map.path().length(),
             tower::KINDS,
             STARTING_LIVES,
             STARTING_GOLD,
@@ -1006,6 +1023,12 @@ impl Game {
         self.ticks_run += 1;
     }
 
+    /// The field the run is played on.
+    #[must_use]
+    pub fn map(&self) -> &Map {
+        &self.map
+    }
+
     /// How many times [`Game::tick`] has been called.
     #[must_use]
     pub const fn ticks_run(&self) -> u64 {
@@ -1020,11 +1043,11 @@ impl Game {
         for (slot, creep) in creeps.iter_mut().zip(stage.creeps.iter()) {
             *slot = creep.view();
         }
-        let mut bolts = [DVec3::ZERO; MAX_BOLTS];
+        let mut bolts = [DVec3::ZERO; MAX_PLOTS];
         for (slot, bolt) in bolts.iter_mut().zip(stage.bolts.iter()) {
             *slot = bolt.at();
         }
-        let mut bursts = [BurstView::default(); MAX_BURSTS];
+        let mut bursts = [BurstView::default(); MAX_PLOTS];
         for (slot, burst) in bursts.iter_mut().zip(stage.bursts.iter()) {
             *slot = BurstView {
                 centre: burst.at,
@@ -1047,9 +1070,9 @@ impl Game {
                     })
             }),
             bolts,
-            bolts_flying: stage.bolts.len().min(MAX_BOLTS),
+            bolts_flying: stage.bolts.len().min(stage.map.max_bolts()),
             bursts,
-            bursts_live: stage.bursts.len().min(MAX_BURSTS),
+            bursts_live: stage.bursts.len().min(stage.map.max_bursts()),
             gold: stage.gold,
             lives: stage.lives,
             wave: stage.waves.started(),
@@ -1071,6 +1094,7 @@ impl Game {
             wave: stage.waves.started(),
             creeps: stage.creeps.len(),
             towers: stage.towers.len(),
+            plots: stage.map.plots().len(),
             bolts: stage.bolts.len(),
             kills: stage.kills,
             leaks: stage.leaks,
@@ -1089,9 +1113,14 @@ impl Game {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::map::CREEP_RADIUS;
+    use crate::map::{self, CREEP_RADIUS};
     use crate::tower::Kind::{Bolt as BoltKind, Slow, Splash};
     use crate::wave::WAVES;
+
+    /// An empty field on the committed map, with the first build phase running.
+    fn new_stage() -> Stage {
+        Stage::new(Arc::new(Map::built_in()))
+    }
 
     /// One tick at the default rate.
     const DT: f64 = 1.0 / DEFAULT_TICK_HZ as f64;
@@ -1108,7 +1137,7 @@ mod tests {
                     .sum::<f64>()
             })
             .sum();
-        let walk = crate::path::length() / creep::Kind::Tanky.spec().speed;
+        let walk = Map::built_in().path().length() / creep::Kind::Tanky.spec().speed;
         releases + (WAVES.len() + 2) as f64 * wave::GAP_S + 3.0 * walk
     }
 
@@ -1175,7 +1204,8 @@ mod tests {
 
     /// Which plot is labelled `label`.
     fn plot(label: &str) -> u8 {
-        let at = PLOTS
+        let at = Map::built_in()
+            .plots()
             .iter()
             .position(|plot| plot.label == label)
             .unwrap_or_else(|| panic!("the map has no {label} plot"));
@@ -1184,15 +1214,22 @@ mod tests {
         at
     }
 
+    /// A `kind` tower on the plot labelled `label` of `stage`'s map, not yet on
+    /// the field.
+    fn tower_on(stage: &Stage, label: &str, kind: tower::Kind) -> Tower {
+        let at = usize::from(plot(label));
+        Tower::new(at, stage.map.plots()[at].at(), kind)
+    }
+
     /// Puts a creep of `kind` on the field, walked `along` metres in.
     ///
     /// Walked rather than placed, because `Creep::advance` is what writes the
     /// sphere every query here reads.
     fn creep_at(stage: &mut Stage, kind: creep::Kind, along: f64) -> ColliderId {
-        let mut creep = Creep::spawn(&mut stage.world, kind);
+        let mut creep = Creep::spawn(&mut stage.world, stage.map.path(), kind);
         let ticks = (along / (kind.spec().speed * DT)).round() as u64;
         for _ in 0..ticks {
-            creep.advance(&mut stage.world, DT);
+            creep.advance(&mut stage.world, stage.map.path(), DT);
         }
         let body = creep.body();
         stage.creeps.push(creep);
@@ -1259,7 +1296,7 @@ mod tests {
     /// Plays the whole table with `plan` on the plots, buying as the purse
     /// allows, and stops the moment the run is decided.
     fn play(plan: &[tower::Kind]) -> Played {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         let (mut peak_creeps, mut peak_bolts, mut peak_bursts) = (0, 0, 0);
         for _ in 0..(long_enough_for_the_table() / DT).round() as u64 {
             if stage.outcome.is_over() {
@@ -1338,7 +1375,7 @@ mod tests {
     #[test]
     fn the_no_plot_sentinel_is_not_a_plot() {
         assert!(
-            (PLOT_NONE as usize) >= PLOTS.len(),
+            (PLOT_NONE as usize) >= MAX_PLOTS,
             "the sentinel names plot {PLOT_NONE}",
         );
     }
@@ -1353,7 +1390,7 @@ mod tests {
     /// tower would have gone up.
     #[test]
     fn a_tower_is_built_only_when_the_rules_allow_it() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         command(&mut stage, build(0, BoltKind));
         assert_eq!(stage.towers.len(), 1, "the first build was refused");
         assert_eq!(stage.gold, STARTING_GOLD - BoltKind.spec(Tier::Base).cost);
@@ -1392,7 +1429,7 @@ mod tests {
 
         // Spend down to nothing, then ask again.
         let mut at = 2;
-        while stage.gold >= BoltKind.spec(Tier::Base).cost && at < PLOTS.len() {
+        while stage.gold >= BoltKind.spec(Tier::Base).cost && at < stage.map.plots().len() {
             command(&mut stage, build(at as u8, BoltKind));
             at += 1;
         }
@@ -1401,7 +1438,8 @@ mod tests {
             "the purse is not empty",
         );
         let (built, refused) = (stage.towers.len(), stage.refused);
-        command(&mut stage, build((PLOTS.len() - 1) as u8, BoltKind));
+        let last = (stage.map.plots().len() - 1) as u8;
+        command(&mut stage, build(last, BoltKind));
         assert_eq!(stage.towers.len(), built, "it built with no gold");
         assert_eq!(stage.refused, refused + 1);
     }
@@ -1415,7 +1453,7 @@ mod tests {
     /// and nothing on the client could tell.
     #[test]
     fn an_upgrade_is_built_only_when_the_rules_allow_it() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
 
         // An empty plot — which is also every plot that is not a plot at all.
         command(&mut stage, step_up(0));
@@ -1456,7 +1494,7 @@ mod tests {
 
         // And one nobody can pay for: a splash tower is dear enough that the
         // purse cannot reach its upgrade after building it.
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         command(&mut stage, build(1, Splash));
         assert_eq!(stage.towers.len(), 1, "the splash tower was refused");
         assert!(
@@ -1487,7 +1525,7 @@ mod tests {
     #[test]
     fn a_splash_burst_wounds_more_than_the_creep_the_bolt_struck() {
         let spec = Splash.spec(Tier::Base);
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
 
         // Spaced along the opening leg, far from a corner. The neighbour is
         // inside the burst and out of reach of the impact; the bystander is
@@ -1519,7 +1557,7 @@ mod tests {
         // One splash bolt, fired by hand at the target: no tower on the field,
         // so nothing else can be what wounded anybody.
         let whole = kind.spec().health;
-        let tower = Tower::new(plot("entry") as usize, Splash);
+        let tower = tower_on(&stage, "entry", Splash);
         let aimed = stage
             .creeps
             .iter()
@@ -1577,14 +1615,14 @@ mod tests {
     ///
     /// The second half is the control: a burst pool that never retired would
     /// fill with every impact of the run and draw the whole history of the
-    /// field — and `crate::map::MAX_BURSTS`' one-slot-per-plot argument would be
+    /// field — and `crate::map::Map::max_bursts`' one-slot-per-plot argument would be
     /// wrong with it.
     #[test]
     fn a_burst_is_drawn_and_then_retired() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         let target = creep_at(&mut stage, creep::Kind::Tanky, 10.0);
         let spec = Splash.spec(Tier::Base);
-        let tower = Tower::new(plot("entry") as usize, Splash);
+        let tower = tower_on(&stage, "entry", Splash);
         let aimed = stage
             .creeps
             .iter()
@@ -1602,10 +1640,10 @@ mod tests {
         }
         assert_eq!(seen, 1, "the impact raised {seen} bursts rather than one");
         assert!(
-            stage.bursts.len() <= map::MAX_BURSTS,
+            stage.bursts.len() <= stage.map.max_bursts(),
             "{} bursts are being drawn into a pool of {}",
             stage.bursts.len(),
-            map::MAX_BURSTS,
+            stage.map.max_bursts(),
         );
 
         idle(&mut stage, tower::BURST_S + 4.0 * DT);
@@ -1623,8 +1661,8 @@ mod tests {
     #[test]
     fn a_slow_tower_holds_the_creeps_it_covers_and_lets_them_go() {
         let seconds = 5.0;
-        let mut stage = Stage::new();
-        let tower = Tower::new(plot("entry") as usize, Slow);
+        let mut stage = new_stage();
+        let tower = tower_on(&stage, "entry", Slow);
         let factor = tower.spec().slow_factor;
         stage.towers.push(tower);
         let kind = creep::Kind::Fast;
@@ -1705,7 +1743,7 @@ mod tests {
     /// without it.
     #[test]
     fn a_creep_that_reaches_the_exit_costs_a_life() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         command(&mut stage, send_wave());
         assert_eq!(stage.refused, 0, "the first wave refused to start");
 
@@ -1719,7 +1757,8 @@ mod tests {
         let span: f64 = (0..first.creeps())
             .filter_map(|index| first.gap_after(index))
             .sum();
-        idle(&mut stage, crate::path::length() / slowest + span + 1.0);
+        let walk = stage.map.path().length() / slowest;
+        idle(&mut stage, walk + span + 1.0);
         assert_eq!(
             stage.leaks,
             u64::from(first.creeps()),
@@ -1737,7 +1776,7 @@ mod tests {
     /// it produces.
     #[test]
     fn a_field_with_no_towers_on_it_loses_the_run() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         assert_eq!(
             until_over(&mut stage, long_enough_for_the_table()),
             Outcome::Lost,
@@ -1799,15 +1838,15 @@ mod tests {
             // rather than the purchase.
             assert_eq!(
                 stage.towers.len(),
-                PLOTS.len(),
+                stage.map.plots().len(),
                 "{names:?} did not fill the field",
             );
             assert_eq!(
                 stage.upgrades,
-                PLOTS.len() as u64,
+                stage.map.plots().len() as u64,
                 "{names:?} bought {} of {} upgrades",
                 stage.upgrades,
-                PLOTS.len(),
+                stage.map.plots().len(),
             );
             assert_eq!(
                 stage.refused, 0,
@@ -1837,7 +1876,7 @@ mod tests {
     /// other tower again.
     ///
     /// It also measures the **three instance pools** over a whole run, which is
-    /// what `crate::map`'s `MAX_CREEPS`, `MAX_BOLTS` and `MAX_BURSTS` arguments
+    /// what `MAX_CREEPS`, `Map::max_bolts` and `Map::max_bursts`' arguments
     /// rest on: each is a bound argued from the rules, and this is the reading
     /// beside it.
     #[test]
@@ -1853,16 +1892,20 @@ mod tests {
             stage.lives,
             stage.waves.started(),
         );
-        assert_eq!(stage.towers.len(), PLOTS.len(), "not every plot was built");
+        assert_eq!(
+            stage.towers.len(),
+            stage.map.plots().len(),
+            "not every plot was built"
+        );
         assert_eq!(stage.built_by_kind[Splash.index()], 1);
         assert_eq!(stage.built_by_kind[Slow.index()], 1);
         assert_eq!(
             stage.built_by_kind[BoltKind.index()],
-            (PLOTS.len() - 2) as u64,
+            (stage.map.plots().len() - 2) as u64,
         );
         assert_eq!(
             stage.upgrades,
-            PLOTS.len() as u64,
+            stage.map.plots().len() as u64,
             "the plan was not upgraded"
         );
         assert_eq!(
@@ -1890,14 +1933,16 @@ mod tests {
             played.peak_creeps,
         );
         assert!(
-            played.peak_bolts > 0 && played.peak_bolts <= MAX_BOLTS,
-            "{} bolts were in the air at once, against a pool of {MAX_BOLTS}",
+            played.peak_bolts > 0 && played.peak_bolts <= stage.map.max_bolts(),
+            "{} bolts were in the air at once, against a pool of {}",
             played.peak_bolts,
+            stage.map.max_bolts(),
         );
         assert!(
-            played.peak_bursts > 0 && played.peak_bursts <= MAX_BURSTS,
-            "{} bursts were drawn at once, against a pool of {MAX_BURSTS}",
+            played.peak_bursts > 0 && played.peak_bursts <= stage.map.max_bursts(),
+            "{} bursts were drawn at once, against a pool of {}",
             played.peak_bursts,
+            stage.map.max_bursts(),
         );
     }
 
@@ -1905,7 +1950,7 @@ mod tests {
     /// never a still picture — see [`RESTART_S`].
     #[test]
     fn a_finished_run_starts_itself_again() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         assert_eq!(
             until_over(&mut stage, long_enough_for_the_table()),
             Outcome::Lost,
@@ -1924,7 +1969,7 @@ mod tests {
     /// it takes the upgrades with it.
     #[test]
     fn the_restart_command_starts_the_run_over() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         command(&mut stage, build(0, BoltKind));
         command(&mut stage, step_up(0));
         idle(&mut stage, 5.0);
@@ -1954,7 +1999,7 @@ mod tests {
     /// multiple of one number.
     #[test]
     fn a_kill_pays_its_bounty() {
-        let mut stage = Stage::new();
+        let mut stage = new_stage();
         command(&mut stage, build(0, BoltKind));
         let purse = stage.gold;
         command(&mut stage, send_wave());

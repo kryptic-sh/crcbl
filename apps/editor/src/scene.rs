@@ -3,7 +3,7 @@
 //! **A tool that opens a scene ships with a vocabulary.** A `.scn/` chunk
 //! cannot be read without the type its rows are of, so
 //! `crcbl::registry::Registry` is what a vocabulary is and this module builds
-//! this build's: the editor's own [`Block`], and the components of the two
+//! this build's: the editor's own [`Block`], and the components of the three
 //! games whose committed scenes the workspace wants edited. It also holds the
 //! scene the editor opens when the command line names none.
 //!
@@ -150,6 +150,7 @@ pub fn vocabulary() -> Registry {
     // scene could not be dogfooded at all.
     crcbl_breakout::register_components(&mut registry);
     crcbl_puppet::map::register_components(&mut registry);
+    crcbl_towers::register_components(&mut registry);
     registry
 }
 
@@ -218,22 +219,32 @@ mod tests {
         }
     }
 
-    /// **The shipped vocabulary is this build's own component and both games'**,
+    /// **The shipped vocabulary is this build's own component and every game's**,
     /// so the editor opens the scenes the workspace wants edited — the dogfood
     /// pass `docs/plan/sample/07-towers.md`'s milestone 2 asks for — and the
     /// registry resolves each name to the type whose chunk it is.
     #[test]
-    fn the_vocabulary_is_this_builds_block_and_both_games_components() {
+    fn the_vocabulary_is_this_builds_block_and_every_games_components() {
         let registry = vocabulary();
         assert_eq!(
             registry.systems().collect::<Vec<_>>(),
-            [BLOCKS, "bricks", "spawn", "sun", "surfaces"],
-            "the shipped build opens its own scene and both samples'",
+            [
+                BLOCKS,
+                "bricks",
+                "plots",
+                "spawn",
+                "sun",
+                "surfaces",
+                "waypoints"
+            ],
+            "the shipped build opens its own scene and every sample's",
         );
         for (system, type_name) in [
             (BLOCKS, "Block"),
             ("bricks", "Brick"),
             ("surfaces", "Surface"),
+            ("waypoints", "Waypoint"),
+            ("plots", "Plot"),
         ] {
             assert!(
                 registry
@@ -270,6 +281,40 @@ mod tests {
                 .iter()
                 .map(|(s, ids)| (s, ids.len()))
                 .collect::<Vec<_>>(),
+        );
+    }
+
+    /// **Towers' committed field opens through the shipped vocabulary**, with
+    /// every corner of the path and every plot the game itself reads out of it.
+    /// The dogfood claim `docs/plan/sample/07-towers.md`'s milestone 2 makes: a
+    /// registry that did not carry towers' components would refuse the field by
+    /// name rather than open it, and the map could not be edited at all.
+    #[test]
+    fn the_shipped_vocabulary_opens_towers_committed_field() {
+        let mut document = crate::Document::open(
+            &crcbl_towers::built_in_source(),
+            std::path::Path::new(crcbl_towers::FIELD),
+            vocabulary(),
+        )
+        .expect("the shipped vocabulary knows what the waypoints and plots chunks hold");
+        let outline = document.outline();
+        let count = |name: &str| {
+            outline
+                .iter()
+                .find(|(system, _)| system == name)
+                .map(|(_, ids)| ids.len())
+                .unwrap_or_default()
+        };
+        let map = crcbl_towers::Map::built_in();
+        assert_eq!(
+            count("waypoints"),
+            map.path().waypoints().len(),
+            "the editor and the game read a different path out of one directory",
+        );
+        assert_eq!(
+            count("plots"),
+            map.plots().len(),
+            "the editor and the game read different plots out of one directory",
         );
     }
 

@@ -776,6 +776,7 @@ dependencies = [
  "crcbl",
  "puppet",
  "tempfile",
+ "towers",
 ]
 
 [[package]]

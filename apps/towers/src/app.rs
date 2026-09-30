@@ -68,7 +68,6 @@ use crcbl::shell::DisplayMode;
 
 use crate::game::{Controls, Game, RenderState, Stats};
 use crate::gpu::{Gpu, Paths};
-use crate::map::PLOTS;
 use crate::menu::{MenuAction, MenuKind, Menus};
 use crate::page::PageStats;
 use crate::tower;
@@ -286,7 +285,7 @@ impl Towers {
             stats.refused,
             stats.outcome.label(),
             stats.runs,
-            PLOTS[usize::from(self.selected)].label,
+            self.game.map().plots()[usize::from(self.selected)].label,
             self.kind.label(),
             self.paths.geometry,
             self.paths.binding,
@@ -368,7 +367,13 @@ pub fn with_shell<S: Shell + ?Sized>(
     let mut events = 0;
     let extent = wait_for_configure(shell.as_mut(), window, &mut events)?;
 
-    let gpu = Gpu::open(shell.as_ref(), window, extent, options.common.gpu())?;
+    let gpu = Gpu::open(
+        shell.as_ref(),
+        window,
+        extent,
+        options.common.gpu(),
+        &options.map,
+    )?;
     assemble(
         Booted {
             shell,
@@ -392,7 +397,7 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, TowersError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let paths = booted.gpu.paths();
-    let game = Game::new(options.common.tick_hz).map_err(TowersError::Game)?;
+    let game = Game::new(options.common.tick_hz, &options.map).map_err(TowersError::Game)?;
     Ok(Loop::new(
         booted,
         Towers {
@@ -456,7 +461,7 @@ impl HostedGame for Towers {
 
         // The cursor moves here rather than on the frame's clock, because it
         // is what a command names and a command belongs to a tick.
-        let plots = PLOTS.len() as u8;
+        let plots = self.game.map().plots().len() as u8;
         if self.actions.just_pressed(ACTION_PREV) {
             self.selected = (self.selected + plots - 1) % plots;
         }
@@ -538,6 +543,7 @@ impl HostedGame for Towers {
             gpu.atlas(),
             gpu.extent(),
             &self.render_state,
+            self.game.map().plots(),
             self.selected,
             self.kind,
         );
@@ -618,7 +624,7 @@ crcbl::impl_pending_loop!(
         options.common.display_mode(),
         options.common.size,
     ),
-    context: |_options| (),
+    context: |options| options.map.clone(),
     assemble: |booted, options| assemble(booted, options),
 );
 
@@ -645,7 +651,10 @@ mod tests {
     fn headless_with(frames: u64, tweak: impl FnOnce(&mut Common)) -> Options {
         let mut common = headless_common(crate::game::DEFAULT_TICK_HZ, frames);
         tweak(&mut common);
-        Options { common }
+        Options {
+            common,
+            ..Options::default()
+        }
     }
 
     /// Runs `count` frames.
@@ -695,6 +704,72 @@ mod tests {
         assert_eq!(summary.built, 0, "a run that pressed nothing built a tower");
         assert_eq!(summary.gold, crate::wave::STARTING_GOLD);
         assert_eq!(summary.runs, 1);
+    }
+
+    /// **A map other than the committed one reaches the stage, the cursor and
+    /// the renderer.**
+    ///
+    /// The end of the `--scene` path, and the only place it is a *run* rather
+    /// than a parse: `crate::args` proves a directory reaches [`Options::map`],
+    /// and this proves that field is what the server counts plots against, what
+    /// the cursor wraps at, and what `Gpu::from_context` makes resident. The
+    /// renderer's half is read off the pools it placed: a two-plot field has
+    /// two tower, bolt and burst slots where the committed one has five, so a
+    /// renderer still built from the committed field is red here — as is a
+    /// stage still on it, which would count five plots.
+    ///
+    /// **The picture is not what this reads.** Nothing here would change if the
+    /// right pools were placed through the wrong mesh slots; the mesh slots are
+    /// `crate::map`'s own tests.
+    #[test]
+    fn a_map_other_than_the_committed_one_is_the_one_the_run_plays() {
+        use crate::map::Map;
+        use crate::scene::Plot;
+
+        let plot = |label: &str, z: f64| Plot {
+            label: label.to_string(),
+            position: [0.0, 0.0, z],
+        };
+        let map = Map::new(
+            vec![
+                crcbl::math::DVec3::new(-10.0, 0.0, 0.0),
+                crcbl::math::DVec3::new(10.0, 0.0, 0.0),
+            ],
+            vec![plot("north", -3.0), plot("south", 3.0)],
+        )
+        .expect("a straight lane with a plot either side is a map");
+        let mut engine = scripted(&Options {
+            map,
+            ..headless(400)
+        });
+        frames(&mut engine, 4);
+
+        // Build on the second plot, which is also the last: the cursor wraps
+        // at the map's own length, so one step left from the first lands there.
+        tap(&mut engine, KeyCode::ArrowLeft);
+        assert_eq!(
+            engine.game().selected(),
+            1,
+            "the cursor did not wrap at two"
+        );
+        tap(&mut engine, KeyCode::KeyB);
+        frames(&mut engine, 2);
+
+        let stats = engine.game().game().stats();
+        assert_eq!(stats.plots, 2, "the stage is not on the two-plot field");
+        assert_eq!(stats.towers, 1, "the build on the second plot was refused");
+        assert_eq!(stats.refused, 0);
+        assert!(
+            engine.game().page().commands > 0,
+            "the run presented frames with nothing on them",
+        );
+
+        let field = engine.gpu().field();
+        assert_eq!(
+            (field.plots(), field.bolt_slots(), field.burst_slots()),
+            (2, 2, 2),
+            "the renderer did not make the two-plot field resident",
+        );
     }
 
     /// **Two identical runs agree exactly**, which is what a fixed timestep
@@ -796,7 +871,7 @@ mod tests {
         tap(&mut engine, KeyCode::ArrowLeft);
         assert_eq!(
             engine.game().selected(),
-            (PLOTS.len() - 1) as u8,
+            (engine.game().game().map().plots().len() - 1) as u8,
             "the cursor did not wrap round the end of the list",
         );
     }

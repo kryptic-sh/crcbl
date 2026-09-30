@@ -748,7 +748,7 @@ mod tests {
         let plan = [Bolt, Bolt, Bolt, Splash, Slow];
         assert_eq!(
             plan.len(),
-            crate::map::PLOTS.len(),
+            crate::map::Map::built_in().plots().len(),
             "the plan does not fill the field",
         );
         let cost: u32 = plan
