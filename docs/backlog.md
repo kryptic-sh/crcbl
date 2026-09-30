@@ -18586,6 +18586,13 @@ ordinary sweep's runner is where every instance landed. Check the
 `win32 e2e (real desktop)` job's history since `aef2872` for failures in these
 three first; any there answer the question already.
 
+**The group is nextest's, and `cargo test` does not read it.** A plain
+`cargo test --workspace` on a Windows desktop runs the `win32::shell` suite in
+parallel, so its tests race each other for the foreground again: EW saw
+`hiding_the_cursor_is_balanced_however_many_times_it_is_asked_for` fail once
+that way on 2026-09-30 (293 passed, 1 failed) and pass on its own. Run the suite
+through nextest, or `cargo test` with `--test-threads 1`.
+
 ### `GpuInstance::flags` is a bare `u32`, not `bitflags`
 
 **DECIDED 2026-09-06 —** the bare `u32` stays, with associated consts on the
