@@ -454,6 +454,11 @@ mod tests {
     }
 
     #[test]
+    fn conformance_the_unreliable_limit_it_reports_is_one_it_accepts() {
+        conformance::the_unreliable_limit_it_reports_is_one_it_accepts(&mut Loop::new());
+    }
+
+    #[test]
     fn conformance_a_dropped_peer_is_disconnected() {
         conformance::a_dropped_peer_is_disconnected(&mut Loop::new());
     }

@@ -22,11 +22,12 @@
 //!
 //! A UDP snapshot travels on the unreliable channel, which takes one
 //! datagram — [`MAX_UNRELIABLE_PAYLOAD`](crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD)
-//! bytes — while the delta encoder is sized against the in-memory limit. This
-//! world's snapshot sits far under it (a test holds that); a world that grew
-//! past it would have every snapshot refused, which the host records by name
-//! ([`crcbl::server::SnapshotTooLarge`]) and this module logs. The
-//! quantization and budget encoder is what lifts that ceiling.
+//! bytes. This world's snapshot sits far under it (a test holds that); a
+//! world that grew past it would have each snapshot fitted to the datagram,
+//! the least urgent updates held back for later ones (`crcbl::net::budget`),
+//! which the F3 panel counts. Only an update that cannot fit a datagram on
+//! its own is refused, which the host records by name
+//! ([`crcbl::server::SnapshotTooLarge`]) and this module logs.
 //!
 //! # Native only
 //!
@@ -378,8 +379,8 @@ mod imp {
             }
             if let Some(snapshot) = self.host.last_oversized_snapshot() {
                 crcbl::log::warn!(
-                    "lan: {snapshot} ({refused} refused so far); a UDP snapshot must fit one \
-                     datagram until the quantization and budget encoder lands"
+                    "lan: {snapshot} ({refused} refused so far); one entity's update must fit \
+                     a UDP datagram on its own"
                 );
             }
             self.refusals_logged = refused;
@@ -423,6 +424,10 @@ mod imp {
                     "{} of {MAX_UNRELIABLE_PAYLOAD} bytes",
                     self.host.largest_snapshot_bytes()
                 ),
+            );
+            out.row(
+                "held back",
+                format_args!("{}", self.host.held_back_update_count()),
             );
             out.row(
                 "refused",

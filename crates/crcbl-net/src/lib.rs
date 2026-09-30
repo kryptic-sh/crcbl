@@ -13,6 +13,9 @@
 //!   single-threaded local play.
 //! * [`SnapshotWriter`] / [`SnapshotReader`] — encode and decode per-system state
 //!   for the server → client snapshot path.
+//! * [`budget`] — fits each snapshot to one message of its transport's
+//!   unreliable channel, holding the least urgent updates back by priority
+//!   rather than sending a snapshot the transport would refuse.
 //! * [`auth`] — the per-session MAC every post-handshake message carries.
 //!   Nothing else in the protocol proves who sent a packet.
 //! * [`reliable`] — the packet layer the UDP transport runs inside: acks,
@@ -27,6 +30,7 @@
 //!   must pass, for crates that implement one.
 
 pub mod auth;
+pub mod budget;
 pub mod codec;
 pub mod condition;
 #[cfg(any(test, feature = "conformance"))]
@@ -44,6 +48,7 @@ pub mod types;
 pub mod udp;
 
 pub use auth::{AuthError, ReplayWindow, SessionCrypto, SessionKey};
+pub use budget::{BudgetTooSmall, DEFAULT_RELEVANCE, Fitted, PriorityAccumulator, snapshot_budget};
 pub use codec::{
     Ack, DecodeError, decode_ack, decode_client_to_server, decode_handshake_result, decode_hello,
     decode_server_to_client, decode_session_ended, encode_ack, encode_client_to_server,

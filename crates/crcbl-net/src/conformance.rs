@@ -18,6 +18,9 @@
 //! - an oversized payload is [`TransportError::MessageTooLarge`] carrying the
 //!   size and that channel's limit, and one at the limit is accepted
 //!   ([`an_oversized_message_names_its_size_and_the_limit`]);
+//! - [`Transport::max_unreliable_message_bytes`] is a limit the unreliable
+//!   channel honours — a server sizes every snapshot to it
+//!   ([`the_unreliable_limit_it_reports_is_one_it_accepts`]);
 //! - an end whose peer is gone reports [`TransportError::Disconnected`] and
 //!   stops claiming to be connected
 //!   ([`a_dropped_peer_is_disconnected`]), but only after the reliable
@@ -83,6 +86,7 @@ pub fn check_all<L: Link>(link: &mut L) {
     the_send_method_sets_the_kind(link);
     reliable_messages_arrive_in_order(link);
     an_oversized_message_names_its_size_and_the_limit(link);
+    the_unreliable_limit_it_reports_is_one_it_accepts(link);
     a_dropped_peer_is_disconnected(link);
     reliable_messages_sent_before_a_drop_arrive_first(link);
 }
@@ -231,6 +235,23 @@ pub fn an_oversized_message_names_its_size_and_the_limit<L: Link>(link: &mut L) 
     }
 }
 
+/// The unreliable limit the transport reports is no more than its channel
+/// accepts, and a payload that long is sent. A server fits each snapshot to
+/// the reported figure, so one past what the channel takes is a snapshot
+/// refused every tick.
+pub fn the_unreliable_limit_it_reports_is_one_it_accepts<L: Link>(link: &mut L) {
+    let (mut a, _b) = link.pair();
+    let reported = a.max_unreliable_message_bytes();
+    let accepted = link.max_unreliable_message_bytes();
+    assert!(
+        reported <= accepted,
+        "the transport reports an unreliable limit of {reported} bytes, past the \
+         {accepted} its channel accepts"
+    );
+    a.send_unreliable(Message::unreliable(vec![0; reported]))
+        .expect("a payload at the reported unreliable limit must be accepted");
+}
+
 /// Once the peer is dropped and that has settled, `recv` reports
 /// [`TransportError::Disconnected`] and `is_connected` is false.
 pub fn a_dropped_peer_is_disconnected<L: Link>(link: &mut L) {
@@ -345,6 +366,11 @@ mod tests {
     }
 
     #[test]
+    fn in_memory_the_unreliable_limit_it_reports_is_one_it_accepts() {
+        the_unreliable_limit_it_reports_is_one_it_accepts(&mut InMemory);
+    }
+
+    #[test]
     fn in_memory_a_dropped_peer_is_disconnected() {
         a_dropped_peer_is_disconnected(&mut InMemory);
     }
@@ -367,6 +393,9 @@ mod tests {
         deaf_reliable: bool,
         /// `recv` reports the disconnect before draining what is queued.
         disconnect_first: bool,
+        /// `max_unreliable_message_bytes` claims one byte more than the
+        /// channel takes.
+        overstates_limit: bool,
     }
 
     impl Transport for Broken {
@@ -400,12 +429,22 @@ mod tests {
         fn is_connected(&self) -> bool {
             self.inner.is_connected()
         }
+
+        fn max_unreliable_message_bytes(&self) -> usize {
+            let limit = self.inner.max_unreliable_message_bytes();
+            if self.overstates_limit {
+                limit + 1
+            } else {
+                limit
+            }
+        }
     }
 
     /// Pairs of [`Broken`], each end breaking what the flags say.
     struct BrokenLink {
         deaf_reliable: bool,
         disconnect_first: bool,
+        overstates_limit: bool,
     }
 
     impl Link for BrokenLink {
@@ -417,6 +456,7 @@ mod tests {
                 inner,
                 deaf_reliable: self.deaf_reliable,
                 disconnect_first: self.disconnect_first,
+                overstates_limit: self.overstates_limit,
             };
             (wrap(a), wrap(b))
         }
@@ -434,6 +474,7 @@ mod tests {
         recv_reliable_returns_reliable_traffic_in_order(&mut BrokenLink {
             deaf_reliable: true,
             disconnect_first: false,
+            overstates_limit: false,
         });
     }
 
@@ -443,6 +484,17 @@ mod tests {
         reliable_messages_sent_before_a_drop_arrive_first(&mut BrokenLink {
             deaf_reliable: false,
             disconnect_first: true,
+            overstates_limit: false,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "past the 65536 its channel accepts")]
+    fn a_transport_that_overstates_its_unreliable_limit_fails() {
+        the_unreliable_limit_it_reports_is_one_it_accepts(&mut BrokenLink {
+            deaf_reliable: false,
+            disconnect_first: false,
+            overstates_limit: true,
         });
     }
 }

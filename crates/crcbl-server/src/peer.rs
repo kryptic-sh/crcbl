@@ -10,12 +10,12 @@ use std::time::Duration;
 
 use crcbl_core::TickId;
 use crcbl_ecs::{Inspector, World};
-use crcbl_net::auth::SessionCrypto;
+use crcbl_net::auth::{AUTH_OVERHEAD, SessionCrypto};
 use crcbl_net::rate_limit::{InboundRateLimitConfig, InboundRateLimiter};
 use crcbl_net::{
-    Baseline, DeltaCodec, HandshakeResult, Message, RejectReason, ResumeToken, SectorId,
-    SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState, SnapshotWriter,
-    Transport, TransportError, Trust,
+    Baseline, DEFAULT_RELEVANCE, DeltaCodec, HandshakeResult, Message, RejectReason, ResumeToken,
+    SectorId, SessionConfig, SessionEndReason, SessionId, SessionManager, SessionState,
+    SnapshotWriter, Transport, TransportError, Trust, snapshot_budget,
 };
 
 use crate::{KEYFRAME_RECOVERY_TICKS, MAX_CLIENT_INPUTS_PER_TICK, replicated_system_id};
@@ -29,27 +29,38 @@ pub(crate) struct Counters {
     pub(crate) rate_limited_bytes: u64,
     /// Frames the per-tick input cap has refused since the server was built.
     pub(crate) dropped_inputs: u64,
-    /// Snapshots a transport refused for their size; each is a processing
-    /// error too.
+    /// Snapshots refused for their size — by the budget, for what it cannot
+    /// hold back, or by a transport that took less than it reported; each is
+    /// a processing error too.
     pub(crate) oversized_snapshots: u64,
-    /// The latest of those, with the sizes the transport reported.
+    /// The latest of those, with its size and the transport's limit.
     pub(crate) last_oversized_snapshot: Option<SnapshotTooLarge>,
     /// The longest sealed snapshot any transport accepted.
     pub(crate) largest_snapshot_bytes: usize,
+    /// Entity updates held back to fit a snapshot's budget, removals
+    /// included, summed over every snapshot sent.
+    pub(crate) held_back_updates: u64,
 }
 
 /// A snapshot the transport would not carry because it was too long.
 ///
 /// A transport's limit on its unreliable channel is its own:
 /// [`crcbl_net::MAX_IN_MEMORY_MESSAGE_BYTES`] in memory, a single datagram's
-/// payload over UDP, which is far smaller. A snapshot past it is not sent at
-/// all — the client stops applying state — so the host records the refusal by
-/// name rather than folding it into the processing-error count alone.
+/// payload over UDP, which is far smaller. Every snapshot is fitted to it
+/// ([`crcbl_net::budget`]), holding the least urgent updates back, so what is
+/// refused is only what cannot be held back: the delta's framing, and a
+/// single entity's update too long to fit beside it in any snapshot. That is
+/// refused before it is sent. A transport that accepts less than
+/// [`Transport::max_unreliable_message_bytes`] reports can refuse one too.
+/// Either way nothing is sent — the client stops applying state — so the host
+/// records the refusal by name rather than folding it into the
+/// processing-error count alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SnapshotTooLarge {
     /// The tick the snapshot was taken at.
     pub tick: TickId,
-    /// Its sealed length, in bytes.
+    /// Its sealed length, in bytes: for a budget refusal, that of the
+    /// smallest snapshot carrying what could not be held back.
     pub size: usize,
     /// The most the transport's unreliable channel takes, in bytes.
     pub limit: usize,
@@ -242,8 +253,8 @@ impl PeerSession {
         self.authenticated = false;
     }
 
-    /// Delta-encode `current` against this client's baseline, seal it, and
-    /// send it on `transport`.
+    /// Delta-encode `current` against this client's baseline, fit it to the
+    /// transport's unreliable limit, seal it, and send it on `transport`.
     pub(crate) fn send_snapshot<T: Transport + ?Sized>(
         &mut self,
         transport: &mut T,
@@ -251,19 +262,63 @@ impl PeerSession {
         current: Baseline,
         counters: &mut Counters,
     ) {
+        let tick = current.tick;
         // Borrow the retained baseline rather than cloning it: the delta is
-        // finished with it before anything needs the store mutably again.
+        // finished with it before anything needs the session mutably again.
         let previous_tick = self.delta_baseline_tick(sector);
-        let delta = {
-            let previous = previous_tick.and_then(|tick| {
-                self.session
+        fn previous(
+            session: &SessionManager,
+            sector: SectorId,
+            tick: Option<TickId>,
+        ) -> Option<&Baseline> {
+            tick.and_then(|tick| {
+                session
                     .baseline_store(sector)
                     .and_then(|store| store.get(tick))
-            });
-            DeltaCodec::encode_from_baseline(sector, &current, previous)
+            })
+        }
+        let delta = DeltaCodec::encode_from_baseline(
+            sector,
+            &current,
+            previous(&self.session, sector, previous_tick),
+        );
+
+        // Every update is relevant alike until a game supplies relevance.
+        let limit = transport.max_unreliable_message_bytes();
+        let fitted = match self.session.priority_accumulator_mut(sector).fit(
+            delta,
+            snapshot_budget(limit),
+            |_, _| DEFAULT_RELEVANCE,
+        ) {
+            Ok(fitted) => fitted,
+            Err(too_small) => {
+                counters.processing_errors += 1;
+                counters.oversized_snapshots += 1;
+                counters.last_oversized_snapshot = Some(SnapshotTooLarge {
+                    tick,
+                    size: too_small.size + AUTH_OVERHEAD,
+                    limit,
+                });
+                return;
+            }
+        };
+        // What the client holds once it applies this snapshot is what the next
+        // delta is encoded against. With updates held back that is not
+        // `current`: retaining `current` would record them as delivered, and
+        // the next diff would call them unchanged and never send them.
+        let retained = if fitted.is_whole() {
+            current
+        } else {
+            match fitted.baseline_after(previous(&self.session, sector, previous_tick)) {
+                Ok(retained) => retained,
+                Err(_) => {
+                    counters.processing_errors += 1;
+                    return;
+                }
+            }
         };
 
-        let payload = match crcbl_net::encode_delta(&delta) {
+        let payload = match crcbl_net::encode_delta(&fitted.delta) {
             Ok(payload) => payload,
             Err(_) => {
                 counters.processing_errors += 1;
@@ -286,15 +341,14 @@ impl PeerSession {
         match transport.send_unreliable(Message::unreliable(payload)) {
             Ok(()) => {
                 counters.largest_snapshot_bytes = counters.largest_snapshot_bytes.max(size);
+                counters.held_back_updates = counters
+                    .held_back_updates
+                    .saturating_add((fitted.shed + fitted.deferred_removals) as u64);
             }
             Err(TransportError::MessageTooLarge { size, limit }) => {
                 counters.processing_errors += 1;
                 counters.oversized_snapshots += 1;
-                counters.last_oversized_snapshot = Some(SnapshotTooLarge {
-                    tick: current.tick,
-                    size,
-                    limit,
-                });
+                counters.last_oversized_snapshot = Some(SnapshotTooLarge { tick, size, limit });
                 return;
             }
             Err(_) => {
@@ -303,12 +357,12 @@ impl PeerSession {
             }
         }
 
-        // Store this full snapshot as a new baseline for future deltas — only
-        // once the transport accepted it. A baseline whose snapshot never left
-        // the server must not be the reference future deltas encode against:
-        // that is what evicts the client's real baseline and makes the desync
-        // permanent.
-        self.session.baseline_store_mut(sector).insert(current);
+        // Store what this snapshot leaves the client holding as a new baseline
+        // for future deltas — only once the transport accepted it. A baseline
+        // whose snapshot never left the server must not be the reference
+        // future deltas encode against: that is what evicts the client's real
+        // baseline and makes the desync permanent.
+        self.session.baseline_store_mut(sector).insert(retained);
     }
 
     /// Tell the client, sealed and on the reliable channel, why its session is

@@ -759,6 +759,15 @@ impl Host {
         self.counters.largest_snapshot_bytes
     }
 
+    /// Entity updates held back to fit snapshots to their peers' unreliable
+    /// limits, summed over every snapshot sent (see [`crcbl_net::budget`]).
+    /// Each is sent in a later snapshot; a figure that climbs every tick is a
+    /// sector with more changing than one datagram carries, rotating.
+    #[must_use]
+    pub fn held_back_update_count(&self) -> u64 {
+        self.counters.held_back_updates
+    }
+
     /// Borrow the world.
     #[must_use]
     pub fn world(&self) -> &World {

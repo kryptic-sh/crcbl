@@ -553,7 +553,7 @@ mod tests {
 
     const TICK: Duration = Duration::from_nanos(16_666_667);
 
-    fn server(world: World, transport: InMemoryTransport) -> Server<InMemoryTransport> {
+    fn server<T: Transport>(world: World, transport: T) -> Server<T> {
         Server::try_new_with_compatibility(world, transport, 60, COMPATIBILITY)
             .expect("OS CSPRNG available")
     }
@@ -589,8 +589,8 @@ mod tests {
 
     /// Complete a handshake and return the peer's end of the authenticated
     /// channel, which is what lets a test send an ack the server will accept.
-    fn connect(
-        server: &mut Server<InMemoryTransport>,
+    fn connect<T: Transport>(
+        server: &mut Server<T>,
         peer: &mut InMemoryTransport,
     ) -> SessionCrypto {
         peer.send_reliable(Message::reliable(hello(1, None)))
@@ -619,8 +619,8 @@ mod tests {
         crcbl_net::encode_ack(SectorId::ZERO, TickId::from_raw(tick))
     }
 
-    fn retain_ack_baselines(
-        server: &mut Server<InMemoryTransport>,
+    fn retain_ack_baselines<T: Transport>(
+        server: &mut Server<T>,
         ticks: impl IntoIterator<Item = u64>,
     ) {
         for tick in ticks {
@@ -1285,12 +1285,100 @@ mod tests {
         assert_eq!(server.processing_error_count(), 1);
     }
 
+    /// An in-memory transport whose unreliable channel takes less than it
+    /// reports — the transport bug the conformance suite's
+    /// `the_unreliable_limit_it_reports_is_one_it_accepts` catches, kept here
+    /// because it is the one way a fitted snapshot still meets a refusal.
+    struct Understated {
+        inner: InMemoryTransport,
+        accepts: usize,
+    }
+
+    impl Transport for Understated {
+        fn send_reliable(&mut self, msg: Message) -> Result<(), crcbl_net::TransportError> {
+            self.inner.send_reliable(msg)
+        }
+
+        fn send_unreliable(&mut self, msg: Message) -> Result<(), crcbl_net::TransportError> {
+            if msg.payload.len() > self.accepts {
+                return Err(crcbl_net::TransportError::MessageTooLarge {
+                    size: msg.payload.len(),
+                    limit: self.accepts,
+                });
+            }
+            self.inner.send_unreliable(msg)
+        }
+
+        fn recv_reliable(&mut self) -> Result<Option<Message>, crcbl_net::TransportError> {
+            self.inner.recv_reliable()
+        }
+
+        fn recv(&mut self) -> Result<Option<Message>, crcbl_net::TransportError> {
+            self.inner.recv()
+        }
+
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+    }
+
     #[test]
-    fn oversized_delta_is_not_retained_as_a_baseline() {
+    fn a_snapshot_the_transport_refuses_is_not_retained_as_a_baseline() {
+        // `System<T>` does not replicate, so every system costs a fixed 32
+        // wire bytes (16-byte system header + one synthetic 16-byte entity):
+        // far past what this transport takes, and far under what it reports,
+        // so the snapshot is fitted to the reported limit and then refused.
+        const ACCEPTS: usize = 256;
+        let mut world = World::new();
+        for i in 0..64 {
+            world.register_system(Box::new(System::<f32>::new(format!("position_{i}"))));
+        }
+        assert!(keyframe_payload_len(&world) + AUTH_OVERHEAD > ACCEPTS);
+        let (inner, mut peer) = InMemoryTransport::pair();
+        let transport = Understated {
+            inner,
+            accepts: ACCEPTS,
+        };
+        let mut server = server(world, transport);
+        let mut crypto = connect(&mut server, &mut peer);
+
+        // The client acks tick 1, whose retained baseline is empty; the next
+        // delta is the whole world, which the transport refuses.
+        retain_ack_baselines(&mut server, [1]);
+        send_sealed(&mut peer, &mut crypto, &ack(1));
+        server.update(2 * TICK);
+
+        assert_eq!(server.processing_error_count(), 1);
+        assert_eq!(server.counters.oversized_snapshots, 1);
+        assert_eq!(
+            server
+                .counters
+                .last_oversized_snapshot
+                .map(|refused| refused.limit),
+            Some(ACCEPTS),
+            "the refusal names the limit the transport gave"
+        );
+        let emitted_tick = server.tick_id();
+        let store = server.peer.session.baseline_store(SectorId::ZERO).unwrap();
+        assert!(
+            store.get(emitted_tick).is_none(),
+            "a snapshot the transport dropped must not become the next delta's \
+             baseline (tick {emitted_tick} was retained)"
+        );
+        assert!(
+            store.get(TickId::from_raw(1)).is_some(),
+            "the client's acked baseline must survive"
+        );
+    }
+
+    #[test]
+    fn a_snapshot_past_the_transport_limit_is_fitted_and_retains_what_it_sent() {
         // A delta in (MAX_IN_MEMORY_MESSAGE_BYTES - AUTH_OVERHEAD,
-        // MAX_IN_MEMORY_MESSAGE_BYTES] encodes under the old cap but seals to
-        // more than the transport accepts. The server must refuse it at encode
-        // time — and must not retain it as the next delta's baseline.
+        // MAX_IN_MEMORY_MESSAGE_BYTES] seals to more than the transport
+        // accepts. It used to be refused outright; now the budget holds back
+        // what does not fit, sends the rest, and retains the baseline the
+        // client will hold — not the full state, or the next delta would call
+        // the held-back entities unchanged.
         //
         // `System<T>` does not replicate, so every system costs a fixed 32
         // wire bytes (16-byte system header + one synthetic 16-byte entity);
@@ -1331,24 +1419,30 @@ mod tests {
         let mut server = server(world, server_transport);
         let mut crypto = connect(&mut server, &mut peer);
 
-        // The client acks tick 1, whose retained baseline is empty; the next
-        // delta is the whole world, sized to be dropped by the transport.
         retain_ack_baselines(&mut server, [1]);
         send_sealed(&mut peer, &mut crypto, &ack(1));
+        drain_payloads(&mut peer);
         server.update(2 * TICK);
 
-        assert_eq!(server.processing_error_count(), 1);
+        assert_eq!(server.processing_error_count(), 0);
+        assert_eq!(server.counters.oversized_snapshots, 0);
+        assert!(server.counters.held_back_updates > 0);
+        let payloads = drain_payloads(&mut peer);
+        assert_eq!(payloads.len(), 1, "the fitted snapshot was sent");
+        assert!(payloads[0].len() <= MAX_IN_MEMORY_MESSAGE_BYTES);
+
         let emitted_tick = server.tick_id();
         let store = server.peer.session.baseline_store(SectorId::ZERO).unwrap();
-        assert!(
-            store.get(emitted_tick).is_none(),
-            "a snapshot the transport dropped must not become the next delta's \
-             baseline (tick {emitted_tick} was retained)"
+        let retained = store
+            .get(emitted_tick)
+            .expect("the snapshot sent is retained as a baseline");
+        let sent = open_delta(&mut crypto, &payloads[0]);
+        assert_eq!(
+            retained.entity_count(),
+            entities_described(&sent).len(),
+            "the retained baseline holds what was sent and nothing held back"
         );
-        assert!(
-            store.get(TickId::from_raw(1)).is_some(),
-            "the client's acked baseline must survive"
-        );
+        assert!(retained.entity_count() < FIXTURE_SYSTEMS);
     }
 
     // ── Authentication ─────────────────────────────────────────────────────

@@ -116,6 +116,22 @@ pub trait Transport: Send {
 
     /// Whether the transport is still connected.
     fn is_connected(&self) -> bool;
+
+    /// The longest payload [`Transport::send_unreliable`] accepts.
+    ///
+    /// A server fits every snapshot to this ([`crate::budget`]), holding
+    /// updates back rather than sending one the transport would refuse, so a
+    /// transport whose unreliable channel takes less than the default must
+    /// say so here. Reporting more than it accepts is a transport bug the
+    /// conformance suite catches; reporting less wastes room and is safe.
+    ///
+    /// The default is [`MAX_IN_MEMORY_MESSAGE_BYTES`], the seam's own ceiling
+    /// and the one the delta encoder was sized against before transports
+    /// reported a limit, so a transport that does not override this is
+    /// budgeted exactly as it was encoded for before.
+    fn max_unreliable_message_bytes(&self) -> usize {
+        MAX_IN_MEMORY_MESSAGE_BYTES
+    }
 }
 
 // ── In-memory transport ───────────────────────────────────────────────────────

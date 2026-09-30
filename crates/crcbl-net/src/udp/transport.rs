@@ -483,6 +483,11 @@ impl<C: Clock + Clone> Transport for UdpTransport<C> {
     fn is_connected(&self) -> bool {
         matches!(self.state(), UdpState::Connecting | UdpState::Connected)
     }
+
+    /// One datagram's payload: the unreliable channel never fragments.
+    fn max_unreliable_message_bytes(&self) -> usize {
+        MAX_UNRELIABLE_PAYLOAD
+    }
 }
 
 impl<C: Clock + Clone> Drop for UdpTransport<C> {

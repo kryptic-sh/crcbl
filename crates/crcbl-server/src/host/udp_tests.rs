@@ -250,12 +250,14 @@ fn a_udp_peer_that_falls_silent_times_out_and_is_lost() {
     assert_eq!(rig.host.peer_count(), 1, "a lost peer keeps its place");
 }
 
-/// **A snapshot longer than one datagram is refused by name, not dropped in
-/// silence.** `UdpTransport::send_unreliable` takes at most
-/// [`MAX_UNRELIABLE_PAYLOAD`], far below the in-memory limit the delta
-/// encoder is sized against; the host records the refusal with the limit the
-/// transport named, and the client applies nothing. The same world with a
-/// snapshot under the limit plays, so it is the size that is refused.
+/// **A snapshot that cannot fit one datagram is refused by name, not dropped
+/// in silence.** `UdpTransport::send_unreliable` takes at most
+/// [`MAX_UNRELIABLE_PAYLOAD`], and here one entity's update alone is that
+/// long, so no fitting of the snapshot can hold it back into a datagram (a
+/// snapshot that is merely long is fitted — see the test below). The host
+/// records the refusal with the limit the transport reports, and the client
+/// applies nothing. The same world with the entity under the limit plays, so
+/// it is the size that is refused.
 #[test]
 fn a_snapshot_past_one_datagram_is_refused_by_name_and_one_under_it_plays() {
     for (bytes, fits) in [
@@ -305,4 +307,123 @@ fn a_snapshot_past_one_datagram_is_refused_by_name_and_one_under_it_plays() {
             "no snapshot reached the client"
         );
     }
+}
+
+/// A system replicating [`Churn::ENTITIES`] entities whose components all
+/// change every tick for the first [`Churn::TICKS`] ticks and then hold: far
+/// more change per tick than one datagram carries, and then none.
+struct Churn {
+    ticks: u64,
+}
+
+impl Churn {
+    /// Entities in the system: several datagrams' worth of updates a tick.
+    const ENTITIES: u64 = 200;
+    /// Ticks the components change for.
+    const TICKS: u64 = 60;
+    /// Bytes of each component: the tick it was written at, then padding.
+    const COMPONENT_BYTES: usize = 24;
+}
+
+impl SystemTrait for Churn {
+    fn name(&self) -> &str {
+        "churn"
+    }
+
+    fn tick(&mut self, _dt: f64) {
+        self.ticks = (self.ticks + 1).min(Self::TICKS);
+    }
+
+    fn entity_count(&self) -> usize {
+        Self::ENTITIES as usize
+    }
+
+    fn sweep(&mut self, _dead: &[Entity]) {}
+
+    fn debug_draw(&mut self, _ctx: &DebugCtx) {}
+
+    fn replicate(&self, out: &mut Vec<u8>) -> bool {
+        let mut component = self.ticks.to_le_bytes().to_vec();
+        component.resize(Self::COMPONENT_BYTES, 0x5A);
+        for entity in 1..=Self::ENTITIES {
+            crcbl_net::encode_entity_entry(out, entity, &component);
+        }
+        true
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// **A session changing more than one datagram a tick plays, and converges.**
+/// Every one of [`Churn::ENTITIES`] components changes every tick, several
+/// datagrams' worth, so each snapshot is fitted to one datagram and the rest
+/// held back by priority rather than the snapshot being refused. Once the
+/// changes stop, the held-back updates rotate through and the client's state
+/// matches the server's exactly.
+#[test]
+fn a_session_changing_more_than_a_datagram_holds_updates_back_and_converges() {
+    let mut world = world();
+    world.register_system(Box::new(Churn { ticks: 0 }));
+    let full = peer::current_baseline(
+        &world,
+        SectorId::ZERO,
+        TickId::from_raw(1),
+        &mut Counters::default(),
+    )
+    .expect("the world serialises");
+    let full_len = crcbl_net::encode_delta(&crcbl_net::DeltaCodec::encode_from_baseline(
+        SectorId::ZERO,
+        &full,
+        None,
+    ))
+    .expect("a whole snapshot encodes in memory")
+    .len();
+    assert!(
+        full_len > 4 * MAX_UNRELIABLE_PAYLOAD,
+        "a {full_len}-byte snapshot must be several datagrams"
+    );
+
+    let mut rig = Rig::new(world, SystemClock::new());
+    rig.connect();
+    rig.until_joined();
+    rig.until("the first snapshot", |rig| {
+        rig.clients[0].last_applied_tick() > TickId::ZERO
+    });
+    let server_state = |rig: &Rig<SystemClock>| {
+        peer::current_baseline(
+            rig.host.world(),
+            SectorId::ZERO,
+            rig.host.tick_id(),
+            &mut Counters::default(),
+        )
+        .expect("the world serialises")
+        .state_hash()
+    };
+    rig.until("the client to converge once the changes stop", |rig| {
+        rig.host.tick_id().get() > Churn::TICKS
+            && rig.clients[0].baseline_state_hash_in(SectorId::ZERO) == Some(server_state(rig))
+    });
+
+    assert!(
+        rig.host.held_back_update_count() > 0,
+        "the snapshots were fitted by holding updates back"
+    );
+    assert_eq!(
+        rig.host.oversized_snapshot_count(),
+        0,
+        "nothing was refused"
+    );
+    let largest = rig.host.largest_snapshot_bytes();
+    assert!(
+        largest <= MAX_UNRELIABLE_PAYLOAD,
+        "the longest snapshot sent was {largest} bytes"
+    );
+    assert_eq!(
+        rig.clients[0].baseline_entity_count(),
+        full.entity_count(),
+        "the client holds every entity"
+    );
+    assert_eq!(rig.host.processing_error_count(), 0);
 }

@@ -289,6 +289,11 @@ fn conformance_an_oversized_message_names_its_size_and_the_limit() {
 }
 
 #[test]
+fn conformance_the_unreliable_limit_it_reports_is_one_it_accepts() {
+    conformance::the_unreliable_limit_it_reports_is_one_it_accepts(&mut Loopback::new());
+}
+
+#[test]
 fn conformance_a_dropped_peer_is_disconnected() {
     conformance::a_dropped_peer_is_disconnected(&mut Loopback::new());
 }

@@ -2,13 +2,15 @@
 //!
 //! Each connected client has a [`SessionManager`] that tracks connection
 //! state, maintains a ring of [`crate::delta::Baseline`] snapshots for
-//! delta encoding, and handles the reconnect grace window.
+//! delta encoding and the [`PriorityAccumulator`] that fits each snapshot to
+//! its budget, and handles the reconnect grace window.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
 use crcbl_core::TickId;
 
+use crate::budget::PriorityAccumulator;
 use crate::delta::BaselineStore;
 use crate::types::{SectorId, SessionId};
 
@@ -60,6 +62,9 @@ pub struct SessionManager {
     reconnect_deadline: Option<Duration>,
     last_acked_ticks: HashMap<SectorId, TickId>,
     baseline_stores: HashMap<SectorId, BaselineStore>,
+    /// Per sector, like the baselines it decides the contents of: what one
+    /// sector's snapshot held back says nothing about another's.
+    priority_accumulators: HashMap<SectorId, PriorityAccumulator>,
     baseline_ring_capacity: usize,
     /// Set once on first successful handshake; validated on reconnect.
     engine_build_id: Option<u64>,
@@ -75,6 +80,7 @@ impl SessionManager {
             reconnect_deadline: None,
             last_acked_ticks: HashMap::new(),
             baseline_stores: HashMap::new(),
+            priority_accumulators: HashMap::new(),
             baseline_ring_capacity: config.baseline_ring_capacity,
             engine_build_id: None,
             schema_hash: None,
@@ -108,6 +114,12 @@ impl SessionManager {
         self.baseline_stores
             .entry(sector)
             .or_insert_with(|| BaselineStore::new(self.baseline_ring_capacity))
+    }
+
+    /// The priority accumulator that fits `sector`'s snapshots to their
+    /// budget, creating it on demand.
+    pub fn priority_accumulator_mut(&mut self, sector: SectorId) -> &mut PriorityAccumulator {
+        self.priority_accumulators.entry(sector).or_default()
     }
 
     // ── Lifecycle transitions ────────────────────────────────────────────

@@ -434,12 +434,32 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   first of this build. Native builds only; the F3 panel gains a "lan" section
   during a session, and a LAN session that cannot start exits with code 1.
 
-- **`crcbl_server::Host` names a snapshot its transport refused as too long**:
+- **`crcbl_server::Host` names a snapshot refused as too long**:
   `oversized_snapshot_count()` and `last_oversized_snapshot()`, a
   `SnapshotTooLarge { tick, size, limit }` whose message names the transport's
-  limit — over UDP one datagram's payload, far below the in-memory limit the
-  delta encoder is sized against. `largest_snapshot_bytes()` is the longest one
-  sent. Each refusal still counts as a processing error.
+  unreliable limit — over UDP one datagram's payload. Since snapshots are fitted
+  to that limit (next entry), only what cannot be held back is refused: one
+  entity's update too long for any snapshot, or a transport that accepts less
+  than it reports. `largest_snapshot_bytes()` is the longest one sent. Each
+  refusal still counts as a processing error.
+
+- **Snapshots are fitted to one message of the transport's unreliable channel
+  instead of being refused** (`crcbl_net::budget`). Each (client, sector) has a
+  `PriorityAccumulator` in `SessionManager` (`priority_accumulator_mut`): every
+  tick each pending update's priority grows by its relevance
+  (`DEFAULT_RELEVANCE` until a game supplies one), removals are packed first,
+  then updates in descending priority until `snapshot_budget(limit)` — the
+  transport's limit less the seal — is full, and the rest are held back for
+  later snapshots. What is retained as the tick's baseline is what the client
+  will hold (`Fitted::baseline_after`), so a held-back update keeps differing
+  and ships next; over UDP a sector changing several datagrams a tick rotates
+  and converges. `Transport::max_unreliable_message_bytes()` (default
+  `MAX_IN_MEMORY_MESSAGE_BYTES`; `UdpTransport` reports
+  `MAX_UNRELIABLE_PAYLOAD`, `ConditionSimulator` its inner transport's) is what
+  the server fits to, and the conformance suite's
+  `the_unreliable_limit_it_reports_is_one_it_accepts` holds a transport to it.
+  `Host::held_back_update_count()` counts the updates held back, and the
+  sandbox's F3 "lan" section shows it.
 
 - **`crcbl_client::Client::transport()`**, to ask a link why it ended
   (`UdpTransport::end_reason`) or read its counters.

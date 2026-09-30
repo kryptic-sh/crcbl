@@ -51,7 +51,15 @@ pub const MAX_BASELINE_ENTITIES: usize = 4_096;
 /// Maximum encoded entity bytes retained in one baseline.
 pub const MAX_BASELINE_ENCODED_BYTES: usize = 256 * 1024;
 /// Bytes of framing each entity entry costs on the wire and in a baseline.
-const ENTITY_ENTRY_HEADER_BYTES: usize = 12;
+pub(crate) const ENTITY_ENTRY_HEADER_BYTES: usize = 12;
+/// Bytes of an encoded delta before its first system: sector, tick, baseline
+/// tick, keyframe flag and system count (see [`encode_delta`]).
+pub(crate) const DELTA_HEADER_BYTES: usize = 3 * 8 + 8 + 8 + 1 + 4;
+/// Bytes each system costs in an encoded delta before its entities: id and
+/// the three counts.
+pub(crate) const SYSTEM_HEADER_BYTES: usize = 4 * 4;
+/// Bytes each removal costs in an encoded delta: a bare entity id.
+pub(crate) const REMOVED_ENTRY_BYTES: usize = 8;
 
 // ── Trust ─────────────────────────────────────────────────────────────────────
 
@@ -797,27 +805,7 @@ fn validate_delta_against_baseline(
 /// ```
 pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     validate_delta_operations(delta)?;
-    let mut capacity = 45usize;
-    for system in &delta.systems {
-        capacity = capacity
-            .checked_add(16)
-            .ok_or(BaselineDecodeError::BaselineTooLarge)?;
-        for entity in system.added.iter().chain(&system.modified) {
-            capacity = capacity
-                .checked_add(ENTITY_ENTRY_HEADER_BYTES)
-                .and_then(|bytes| bytes.checked_add(entity.data.len()))
-                .ok_or(BaselineDecodeError::BaselineTooLarge)?;
-        }
-        capacity = capacity
-            .checked_add(
-                system
-                    .removed
-                    .len()
-                    .checked_mul(8)
-                    .ok_or(BaselineDecodeError::BaselineTooLarge)?,
-            )
-            .ok_or(BaselineDecodeError::BaselineTooLarge)?;
-    }
+    let capacity = encoded_delta_len(delta).ok_or(BaselineDecodeError::BaselineTooLarge)?;
     if capacity > MAX_DELTA_BYTES {
         return Err(BaselineDecodeError::BlobTooLarge(capacity));
     }
@@ -853,6 +841,25 @@ pub fn encode_delta(delta: &Delta) -> Result<Vec<u8>, BaselineDecodeError> {
     }
 
     Ok(buf)
+}
+
+/// The length [`encode_delta`] writes for `delta`, or `None` past `usize`.
+///
+/// The one place the wire layout's sizes are summed: the encoder sizes its
+/// buffer with it, and [`crate::budget`] measures what a snapshot costs
+/// before choosing what it carries.
+pub(crate) fn encoded_delta_len(delta: &Delta) -> Option<usize> {
+    let mut len = DELTA_HEADER_BYTES;
+    for system in &delta.systems {
+        len = len.checked_add(SYSTEM_HEADER_BYTES)?;
+        for entity in system.added.iter().chain(&system.modified) {
+            len = len
+                .checked_add(ENTITY_ENTRY_HEADER_BYTES)?
+                .checked_add(entity.data.len())?;
+        }
+        len = len.checked_add(system.removed.len().checked_mul(REMOVED_ENTRY_BYTES)?)?;
+    }
+    Some(len)
 }
 
 /// Decode a [`Delta`] from a wire packet (see [`encode_delta`]) at `trust`.

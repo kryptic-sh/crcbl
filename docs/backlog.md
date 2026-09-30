@@ -13051,15 +13051,15 @@ so CI's `decoder-fuzz` job is its first run.
   `lan::tests::the_sandboxes_snapshot_fits_one_datagram_with_every_player_in`,
   which holds it under a quarter of the limit). **Towers is next**, and needs
   its lobby to take a direct-connect address beside discovery.
-- **The one-datagram ceiling stands.** `crcbl_net::delta`'s `MAX_DELTA_BYTES` is
-  sized against `MAX_IN_MEMORY_MESSAGE_BYTES`, while
-  `UdpTransport::send_unreliable` refuses anything past
-  `MAX_UNRELIABLE_PAYLOAD`. A snapshot past it is not sent; `Host` now records
-  the refusal by name (`oversized_snapshot_count`, `last_oversized_snapshot` →
-  `crcbl_server::SnapshotTooLarge { tick, size, limit }`) and the sandbox logs
-  it at most once a second. The quantization and budget entry below is what
-  lifts the ceiling; until then towers, or any sample over UDP, must hold its
-  snapshots under one datagram — measure its world's keyframe before wiring it.
+- **The one-datagram ceiling is per entity now, not per snapshot** (2026-10-01).
+  Snapshots are fitted to `UdpTransport::max_unreliable_message_bytes`
+  (`crcbl_net::budget`, see _Quantization, the priority/budget encoder, and the
+  one-datagram rule_), so a long snapshot rotates its updates instead of being
+  refused. What is still refused by name (`Host::oversized_snapshot_count`,
+  `crcbl_server::SnapshotTooLarge`, logged by the sandbox at most once a second)
+  is one entity's update too long for a datagram on its own. Towers, or any
+  sample over UDP, must keep every single entity's replicated blob under
+  `MAX_UNRELIABLE_PAYLOAD` less the framing.
 - **D2 — connection tokens** (below). Needs nothing from the packet layer. LAN
   discovery, D1, is built; what it left is under _Netgraph HUD, LAN discovery_.
 - **Not run: two processes, or two machines.** Every wiring test runs host and
@@ -13173,32 +13173,86 @@ reliable-ordered, where one loss head-of-line blocks them into a stale burst.
 
 ### Quantization, the priority/budget encoder, and the one-datagram rule (2026-08-27)
 
-**Not built.** No quantization anywhere in `crcbl-net`; no per-client budget, no
-relevance×staleness rotation, no adaptive snapshot rate.
+**The budget and priority accumulator are built (2026-10-01); quantization, the
+rate drop, relevance and the predicted-component exemption are not.**
 
-**The design:** quantisation is per component type, schema-declared and applied
-at snapshot encode — positions as sector-local fixed point (sectors bound the
-range, so 16–24 bits per axis), quaternions smallest-three, velocities
-half-float. The budget is bytes per tick with a **Tribes 2 priority
-accumulator** over relevance × staleness: what matters updates every tick, the
-long tail rotates. Delta granularity starts whole-component-on-change and moves
-to per-field masks only when towers' numbers justify it. Sustained over-budget
-drops the snapshot rate (30, then 20 Hz) rather than queueing.
+**Built:** `crcbl_net::budget`. `crcbl_server`'s `PeerSession::send_snapshot`
+diffs against the acked baseline, then `PriorityAccumulator::fit` (one per
+(client, sector), in `SessionManager` beside `last_acked_ticks` and
+`baseline_stores`) trims the delta to `snapshot_budget` of the transport's
+`Transport::max_unreliable_message_bytes`, and the server retains
+`Fitted::baseline_after` — what the client will hold — rather than the full
+state. Removals pack first; a keyframe is fitted like a delta; framing plus the
+single largest entry past the budget is `BudgetTooSmall`, which the host records
+as `SnapshotTooLarge`. The module docs state how each ack-baseline invariant
+survives. Tests: `crcbl_net::budget::tests` (rotation bound, convergence under
+loss, no removal or revert, removals first and deferred, budget never exceeded,
+byte-identical output, ties, relevance, fitted join keyframe, the refusal) and
+`host::udp_tests::a_session_changing_more_than_a_datagram_holds_updates_back_and_converges`,
+each shown red by a mutation.
 
-**Where the budget lives:** `SnapshotWriter::new_with_sector` takes a `SectorId`
-and a `TickId` and nothing else — no client id, which the plan wrongly claimed.
-The per-client state is `SessionManager`'s (`last_acked_ticks` and
-`baseline_stores`, both keyed by sector), so a budget belongs there and is per
-(client, sector) rather than per client.
+**Left, and what each would take:**
 
-**Hard contract to honour when it is built:** a steady-state snapshot must fit a
-single ~1200-byte datagram, because only the reliable channel fragments (and it
-does not fragment yet either). Exceeding it means shedding by priority, never
-silently fragmenting. Predicted components are exempt from rotation — skipping
-their tick stalls reconciliation.
+- **Quantization** (the next slice). Per component type, schema-declared and
+  applied at snapshot encode — positions as sector-local fixed point (sectors
+  bound the range, so 16–24 bits per axis), quaternions smallest-three,
+  velocities half-float. It composes with the budget without changing it: `fit`
+  measures encoded bytes (`encoded_delta_len`), so a quantized component is
+  simply a shorter entry and more fit a datagram. It has to quantize before the
+  diff, since "changed" is compared in encoded space (the notes' rule), or a
+  sub-quantum wobble ships as a change every tick and holds real updates back.
+  `System::replicate` writes the bytes today, so the schema hook goes there or
+  between it and `current_baseline`.
+- **The rate drop (30, then 20 Hz under sustained over-budget)** is not built
+  because nothing has a per-session cadence to hook: `Host::emit_snapshots` and
+  `Server::emit_snapshot` send every peer a snapshot every tick. It needs a
+  per-`PeerSession` send interval (every Nth tick), an over-budget signal
+  (`Fitted::shed > 0` for some number of consecutive snapshots, with hysteresis
+  to come back up), `KEYFRAME_RECOVERY_TICKS` counted in snapshots rather than
+  ticks (at a lower rate it would fire early), and the client's interpolation
+  delay checked against the longer interval. The server ticks at whatever
+  `tick_hz` the game gives it, so "30 then 20 Hz" wants restating as fractions
+  of the tick rate.
+- **Relevance** is `DEFAULT_RELEVANCE` for every update: `fit` takes a
+  `Fn(system_id, entity_bits) -> NonZeroU32`, and `send_snapshot` passes the
+  constant. A game's interest model (distance, view, ownership) is what would
+  supply it, through `HostConfig` or a `HostModule` method; none exists yet.
+- **The predicted-component exemption** is not built because nothing predicts:
+  `crcbl-client` has interpolation and no prediction (the notes: _Prediction is
+  hooks, not an implementation_). When prediction lands, a predicted entity's
+  updates must never be held back — a relevance of its own is not enough, since
+  a big enough backlog can still outrank it; it needs packing first, like
+  removals.
+- **A recovery keyframe withdraws what it holds back.** A keyframe after acks
+  stall or the client's baseline is evicted replaces the client's state, so an
+  entity it cannot fit disappears on the client until a later delta adds it
+  (within the rotation bound). A join loses nothing — the client held nothing.
+  Closing it needs either a keyframe that keeps unlisted entities, which the
+  server cannot then track exactly, or state on the reliable channel, which the
+  notes refuse. Not tested beyond the join case.
+- **An entity whose one update exceeds a datagram stalls the whole session**:
+  `fit` refuses the snapshot rather than leave that entity stale in silence, so
+  nothing else ships either. Splitting a component across snapshots, or giving
+  such an entity its own reliable path, is the alternative; neither is designed.
+- **Systems stay in a fitted delta with nothing in them**, 16 bytes each. With a
+  few systems this is noise; with hundreds it is most of a datagram, and
+  dropping empty systems from a delta would buy it back (the fixed framing would
+  then depend on what was packed).
+- **Steam reports the default limit.** `SteamTransport` does not override
+  `max_unreliable_message_bytes`, so it is budgeted at
+  `MAX_IN_MEMORY_MESSAGE_BYTES`, under its own `MAX_MESSAGE_BYTES`, and Steam
+  fragments an unreliable message past its MTU itself. Whether to budget Steam
+  snapshots to one of its packets instead is untested and the owner's call.
+- **A failed send still resets what it packed.** `fit` runs before the seal and
+  the send, so a snapshot the transport then refuses costs its packed updates
+  their accumulated priority. They are pending still and ship later; only the
+  order suffers.
+- **Delta granularity** starts whole-component-on-change and moves to per-field
+  masks only when towers' numbers justify it.
 
-**What it blocks:** any session with more entities than fit a datagram, which is
-every session the galaxy model is for.
+**Hard contract, now enforced:** a steady-state snapshot fits a single
+~1200-byte datagram, because only the reliable channel fragments. Exceeding it
+sheds by priority, never silently fragments.
 
 ### Netgraph HUD, LAN discovery (2026-08-27)
 

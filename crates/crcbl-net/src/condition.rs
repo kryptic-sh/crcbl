@@ -580,6 +580,12 @@ impl<T: Transport, C: Clock> Transport for ConditionSimulator<T, C> {
     fn is_connected(&self) -> bool {
         self.inner.is_connected()
     }
+
+    /// The wrapped transport's: the simulator delays and drops, but whatever
+    /// it forwards the inner transport still has to accept.
+    fn max_unreliable_message_bytes(&self) -> usize {
+        self.inner.max_unreliable_message_bytes()
+    }
 }
 
 impl<T: Transport, C: Clock> std::fmt::Debug for ConditionSimulator<T, C> {
