@@ -249,21 +249,23 @@ not built anywhere yet.
   session the run holds still** — `run_team_tick` sees a tick with no command
   frame and steps nothing, so no build phase runs out and no wave is sent at an
   empty field until the first player joins; a player whose link dropped keeps
-  the run going through their grace period. `lan::tests` has four joiners of a
-  dedicated server on loopback splitting the plots between them and winning all
-  ten waves, a browser finding an empty server that has sent no wave, and a
-  player leaving mid-run while the other plays on. `--browse` joins the first
-  host of this build it hears and prints the rest; there is no lobby screen,
-  because there is no start menu to put it in. Four players winning the whole
-  table fit every snapshot in one datagram with nothing held back (the largest
-  is 767 of 1158 bytes). **Unverified:** two machines on a real LAN, the
-  broadcast query reaching a host at all, whether a Windows firewall prompt
-  blocks the first run, and `--serve`'s own wall-clock loop — every test is one
-  process on loopback, driving the server a frame at a time. **Not built:** the
-  lobby browser, the map in the handshake (a joiner draws its own), a clean
-  shutdown for `--serve` (it runs until killed), and the wasm client, which the
-  LAN rule rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped
-  without_ has each with what it would take.
+  the run going through their grace period. A run whose last player left for
+  good (every grace period over) is reset once, so the next group starts on a
+  fresh field (decided 2026-10-01). `lan::tests` has four joiners of a dedicated
+  server on loopback splitting the plots between them and winning all ten waves,
+  a browser finding an empty server that has sent no wave, and a player leaving
+  mid-run while the other plays on. `--browse` joins the first host of this
+  build it hears and prints the rest; there is no lobby screen, because there is
+  no start menu to put it in. Four players winning the whole table fit every
+  snapshot in one datagram with nothing held back (the largest is 767 of 1158
+  bytes). **Unverified:** two machines on a real LAN, the broadcast query
+  reaching a host at all, whether a Windows firewall prompt blocks the first
+  run, and `--serve`'s own wall-clock loop — every test is one process on
+  loopback, driving the server a frame at a time. **Not built:** the lobby
+  browser, the map in the handshake (a joiner draws its own), a clean shutdown
+  for `--serve` (it runs until killed), and the wasm client, which the LAN rule
+  rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has
+  each with what it would take.
 
 ## Exit criteria
 

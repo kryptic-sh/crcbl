@@ -507,9 +507,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   line — players, wave, lives, gold, run and outcome — when any of those change
   and every 10 seconds otherwise. With nobody in the session the run holds
   still: no build phase runs out and no wave is sent at an empty field until the
-  first player joins. `--serve` takes `--tick-hz` and `--scene` and refuses
-  every window, GPU or frame flag, and `--host`, `--join` and `--browse`, with
-  exit code 2. Native builds only.
+  first player joins, and a run whose last player left for good is reset, so the
+  next group starts on a fresh field. `--serve` takes `--tick-hz` and `--scene`
+  and refuses every window, GPU or frame flag, and `--host`, `--join` and
+  `--browse`, with exit code 2. Native builds only.
 
 - **`crcbl_client::Client::replicated(system)`**: the entity bits and component
   bytes a server system of that name replicated, from the default sector's

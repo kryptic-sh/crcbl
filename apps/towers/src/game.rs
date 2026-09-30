@@ -573,11 +573,20 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 /// nobody holds a place in — only a dedicated server's, since solo and a
 /// listen host always have their own player — and the stage holds still
 /// through it: no clock, so no build phase running out and no wave released
-/// at an empty field. The first joiner's tick starts it where it stopped. A
-/// player whose link dropped still holds a place through its grace period,
-/// so a run goes on while they reconnect, as it would with them in it.
+/// at an empty field. A player whose link dropped still holds a place through
+/// its grace period, so a run goes on while they reconnect, as it would with
+/// them in it.
+///
+/// **An emptied run is thrown away, once.** A run that had started and then
+/// lost its last player — every grace period over, so nobody can come back to
+/// it — is reset rather than kept half-played: the next group to join finds a
+/// fresh field, not the lives and gold the last one left behind. A reset stage
+/// has ticked nothing, so the empty ticks after it hold still like any other.
 fn run_team_tick(stage: &mut Stage, intents: &[Intent], dt: f64) {
     if intents.is_empty() {
+        if stage.ticks > 0 {
+            stage.reset();
+        }
         return;
     }
     if intents.iter().any(|intent| intent.restart) {
@@ -2348,6 +2357,38 @@ mod tests {
         assert!(
             stage.waves.started() > 0,
             "the first player's run never went on"
+        );
+    }
+
+    /// **A run its last player left is reset once**, so the next group starts
+    /// on a fresh field; the empty ticks after that hold still.
+    #[test]
+    fn a_run_its_last_player_left_is_reset_once() {
+        let mut stage = new_stage();
+        command(&mut stage, build(0, BoltKind));
+        command(&mut stage, send_wave());
+        idle(&mut stage, 6.0);
+        assert!(
+            !stage.towers.is_empty() && stage.ticks > 0,
+            "the run never started"
+        );
+        let runs = stage.runs;
+
+        run_team_tick(&mut stage, &[], DT);
+        assert_eq!(stage.runs, runs + 1, "an emptied run was kept");
+        assert!(
+            stage.towers.is_empty(),
+            "the reset kept the last group's towers"
+        );
+        assert_eq!(stage.waves.started(), 0);
+
+        for _ in 0..10 {
+            run_team_tick(&mut stage, &[], DT);
+        }
+        assert_eq!(
+            stage.runs,
+            runs + 1,
+            "an empty session reset more than once"
         );
     }
 

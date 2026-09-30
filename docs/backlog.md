@@ -14184,16 +14184,16 @@ wave, and a player leaving mid-run.
   four UDP clients on loopback, in about half a minute of wall time; the exit
   criterion's recorded demo — four machines, a real LAN, the server found by
   browsing — is the two-machine item below.
-- **An empty server keeps the run it was left with.** The last player leaving
-  holds the run where it stood rather than restarting it, so the next group
-  picks it up mid-wave; `R` restarts it for them. Whether an emptied server
-  should reset instead is a design call, not made.
 - **The map is not in the handshake.** A joiner draws its own `--scene` or the
   committed field, so a host on another map puts its towers on the joiner's
   plots. Folding a stable fingerprint of the map (its waypoints and plots) into
   the LAN `ProtocolCompatibility::schema_hash` would make a browser pass over
   such a host and the handshake refuse it; sending the map on the reliable
-  channel at join is the other option. Not decided.
+  channel at join is the other option. **Decided 2026-10-01: both, in that
+  order.** The long-term design is that the host's map is authoritative and is
+  sent to each joiner on the reliable channel at join, so any client can join
+  any host; until that lands, the map fingerprint in `schema_hash` is the cheap
+  guard that turns a silent wrong-plots game into a refusal naming the reason.
 - **Not run on two machines, or through a firewall.** See the UDP entry's _Not
   run_ item, which has the manual check.
 - **D2 connection tokens.** The UDP entry's; nothing towers-specific.
