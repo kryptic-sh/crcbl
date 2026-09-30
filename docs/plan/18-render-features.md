@@ -55,14 +55,19 @@ are in the [rendering notes](../notes/rendering.md) (_What the deleted
   binds whoever composites at native resolution.
 - UI renders after upscale at native res (crisp text regardless of 3D scale) —
   this ordering is the reason the UI pass was kept separate in stage 7.
-- Debug overlays (debug draw, gizmos) render pre-tonemap in HDR (they're in the
-  world) except UI-space panels. **`crcbl_render::debug_draw` was built to this
-  rule on 2026-08-31**: its pass writes the HDR scene target immediately before
-  the tonemap — after the reflection composite, the bloom chain and the
-  auto-exposure histogram, so an overlay does not reflect, bloom or move the
-  exposure the scene is metered at. `crcbl_render::grid` is the deliberate
-  exception and its header says why: reference chrome is drawn in display space
-  after the tonemap so its colour does not move with the scene's brightness.
+- Debug overlays (debug draw) render pre-tonemap in HDR (they're in the world)
+  except UI-space panels. **Editor gizmos are the exception, decided
+  2026-09-30**: `apps/editor/src/gizmo.rs` draws its handles in the viewport
+  pane's screen space through the UI draw list, on top and at a constant pixel
+  size, which is what a handle a person has to find and grab wants — a handle
+  exposed with the scene goes dim in a dark one and hides behind geometry.
+  **`crcbl_render::debug_draw` was built to this rule on 2026-08-31**: its pass
+  writes the HDR scene target immediately before the tonemap — after the
+  reflection composite, the bloom chain and the auto-exposure histogram, so an
+  overlay does not reflect, bloom or move the exposure the scene is metered at.
+  `crcbl_render::grid` is the deliberate exception and its header says why:
+  reference chrome is drawn in display space after the tonemap so its colour
+  does not move with the scene's brightness.
 - Golden-image tests (topic 12): shadows and each post pass get dedicated golden
   frames; tonemap changes are the classic "everything shifted" diff — the
   `--bless` flow exists for exactly this.

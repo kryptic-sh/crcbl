@@ -330,6 +330,27 @@ impl Panels {
         &self.list
     }
 
+    /// Physical pixels per logical one: what the list's pushes are scaled by.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        self.list.scale()
+    }
+
+    /// Lets `draw` push onto this frame's list over the viewport pane, clipped
+    /// to it — what the gizmo is drawn with, after the frame that laid the pane
+    /// out.
+    ///
+    /// The list's coordinates are logical pixels, which
+    /// [`DrawList::to_logical`] turns a window pixel into.
+    pub fn overlay_viewport(&mut self, draw: impl FnOnce(&mut DrawList)) {
+        let (min, max) = self.viewport;
+        self.list.push_clip(min, max);
+        draw(&mut self.list);
+        self.list
+            .pop_clip()
+            .expect("the clip pushed just above is on the stack");
+    }
+
     /// The font the panels were measured against.
     ///
     /// **The same one the compositor must draw with**: a page measured with one

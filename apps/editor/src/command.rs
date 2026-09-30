@@ -181,6 +181,17 @@ pub fn set_property(
 /// It is also the whole of the dirty marker: [`crate::Document`] remembers the
 /// position it last saved at, so undoing back to it is clean again. A flag
 /// would say "dirty" forever.
+///
+/// # A gesture is one entry
+///
+/// A drag writes its leaf every frame it moves, and a log that kept each write
+/// would take as many undos to walk back as the drag had frames.
+/// [`record_in`](Self::record_in) folds a property set into the entry on top
+/// when both came from the same [`Gesture`] and name the same leaf: the entry
+/// keeps the inverse of the gesture's **first** write, which holds the value
+/// from before the drag began, and takes the newest write as what a redo
+/// applies. [`seal`](Self::seal) closes the entry on top to further folding,
+/// which a save does so that a drag carried on past it is dirty again.
 #[derive(Debug, Default)]
 pub struct UndoLog {
     entries: Vec<Entry>,
@@ -192,7 +203,18 @@ pub struct UndoLog {
 struct Entry {
     done: EditCommand,
     undo: EditCommand,
+    /// The gesture this entry is still open to, or [`None`] once nothing more
+    /// may fold into it.
+    gesture: Option<Gesture>,
 }
+
+/// One continuous gesture — a drag, from press to release — whose writes the
+/// log keeps as a single entry. See [`UndoLog`].
+///
+/// Handed out by [`crate::Document::begin_gesture`], each one distinct, so two
+/// drags never fold into each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Gesture(pub u64);
 
 impl UndoLog {
     /// An empty log, standing at position 0.
@@ -207,8 +229,46 @@ impl UndoLog {
     /// Anything above the current position is dropped: it described a future
     /// that this command has replaced.
     pub fn record(&mut self, done: EditCommand, undo: EditCommand) {
+        self.push(done, undo, None);
+    }
+
+    /// [`record`](Self::record), for a command that is part of `gesture` —
+    /// folded into the entry on top when that entry is the same gesture's,
+    /// open, at the top of the log, and a property set of the same leaf.
+    ///
+    /// Only then: a gesture that wrote a second leaf would leave the first
+    /// leaf's inverse out of the entry, so a write to another leaf starts an
+    /// entry of its own.
+    pub fn record_in(&mut self, done: EditCommand, undo: EditCommand, gesture: Gesture) {
+        if self.position == self.entries.len()
+            && let Some(last) = self.entries.last_mut()
+            && last.gesture == Some(gesture)
+            && same_leaf(&last.done, &done)
+        {
+            last.done = done;
+            return;
+        }
+        self.push(done, undo, Some(gesture));
+    }
+
+    /// Closes the entry the log stands on to further folding.
+    pub fn seal(&mut self) {
+        if let Some(last) = self
+            .position
+            .checked_sub(1)
+            .and_then(|top| self.entries.get_mut(top))
+        {
+            last.gesture = None;
+        }
+    }
+
+    fn push(&mut self, done: EditCommand, undo: EditCommand, gesture: Option<Gesture>) {
         self.entries.truncate(self.position);
-        self.entries.push(Entry { done, undo });
+        self.entries.push(Entry {
+            done,
+            undo,
+            gesture,
+        });
         self.position = self.entries.len();
     }
 
@@ -258,6 +318,17 @@ impl UndoLog {
             .iter()
             .map(|entry| &entry.done)
     }
+}
+
+/// Whether `a` and `b` are property sets of the same leaf of the same entity.
+fn same_leaf(a: &EditCommand, b: &EditCommand) -> bool {
+    matches!(
+        (a, b),
+        (
+            EditCommand::SetProperty { entity: first, path: here, .. },
+            EditCommand::SetProperty { entity: second, path: there, .. },
+        ) if first == second && here == there
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -468,6 +539,56 @@ mod tests {
         assert_eq!(log.len(), 2, "the 2.0 entry is gone");
         assert_eq!(log.position(), 2);
         assert!(log.redo().is_none());
+    }
+
+    /// **A gesture's writes to one leaf are one entry**, whose undo restores the
+    /// value from before the first write and whose redo applies the last.
+    #[test]
+    fn a_gestures_writes_to_one_leaf_are_one_entry() {
+        let mut value = brick();
+        let mut log = UndoLog::new();
+        let drag = Gesture(1);
+        for to in [1.0, 2.0, 3.0] {
+            let command = set("position.0", Value::Float(to));
+            let undo = command.apply(&mut value).expect("a brick has an x");
+            log.record_in(command, undo, drag);
+        }
+        assert_eq!(log.len(), 1);
+        log.undo()
+            .expect("one entry")
+            .apply(&mut value)
+            .expect("a brick has an x");
+        assert_eq!(
+            value,
+            brick(),
+            "the undo did not reach the value before the drag"
+        );
+        log.redo()
+            .expect("one entry above")
+            .apply(&mut value)
+            .expect("a brick has an x");
+        assert_eq!(value.position[0], 3.0);
+    }
+
+    /// Another gesture, another leaf, or a sealed entry each start an entry of
+    /// their own.
+    #[test]
+    fn a_new_gesture_leaf_or_seal_starts_a_new_entry() {
+        let mut value = brick();
+        let mut log = UndoLog::new();
+        let mut write = |log: &mut UndoLog, path: &str, gesture: u64| {
+            let command = set(path, Value::Float(5.0));
+            let undo = command.apply(&mut value).expect("a brick has that leaf");
+            log.record_in(command, undo, Gesture(gesture));
+        };
+        write(&mut log, "position.0", 1);
+        write(&mut log, "position.0", 2);
+        assert_eq!(log.len(), 2, "a second gesture folded into the first");
+        write(&mut log, "position.1", 2);
+        assert_eq!(log.len(), 3, "a second leaf folded into the first");
+        log.seal();
+        write(&mut log, "position.1", 2);
+        assert_eq!(log.len(), 4, "a sealed entry was folded into");
     }
 
     /// An empty log has nothing to walk in either direction.

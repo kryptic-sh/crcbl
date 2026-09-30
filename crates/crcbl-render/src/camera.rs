@@ -391,6 +391,50 @@ impl Camera {
             direction: (unproject(RAY_DEPTH) - origin).normalize(),
         }
     }
+
+    /// The pixel a point in render space lands on, in a viewport of `extent`
+    /// pixels — [`ray_through`](Self::ray_through) run the other way.
+    ///
+    /// In the same pixels `ray_through` takes: `(0, 0)` is the top-left corner
+    /// and `y` grows downward, and the answer is a position rather than a whole
+    /// pixel, so the ray through it passes through `point`. What a marker drawn
+    /// over the scene — a health bar, a label, an editor's handles — is placed
+    /// with.
+    ///
+    /// Not clamped to the viewport: a point off to the side answers with a pixel
+    /// outside it. [`None`] for a point on or behind the eye plane, on
+    /// [`depth_of`](Self::depth_of)'s terms, where it lands on no pixel at all.
+    ///
+    /// ```
+    /// use crcbl_render::Camera;
+    /// use glam::Vec2;
+    ///
+    /// let camera = Camera::default();
+    /// let at = camera.pixel_of(camera.target, (800, 600)).expect("in front");
+    /// assert!((at - Vec2::new(400.0, 300.0)).length() < 1e-3);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// As [`ray_through`](Self::ray_through).
+    #[must_use]
+    pub fn pixel_of(&self, point: Vec3, extent: (u32, u32)) -> Option<Vec2> {
+        let (width, height) = extent;
+        assert!(
+            width > 0 && height > 0,
+            "a viewport with a zero side has no pixel to land on, got {width}x{height}"
+        );
+        let size = Vec2::new(width as f32, height as f32);
+        let clip = self.view_projection(size.x / size.y) * point.extend(1.0);
+        if clip.w <= f32::MIN_POSITIVE {
+            return None;
+        }
+        let ndc = Vec2::new(clip.x, clip.y) / clip.w;
+        Some(Vec2::new(
+            (ndc.x + 1.0) * 0.5 * size.x,
+            (1.0 - ndc.y) * 0.5 * size.y,
+        ))
+    }
 }
 
 /// Where a pixel's ray starts and where it goes — what
@@ -1367,15 +1411,15 @@ mod tests {
         }
     }
 
-    /// **The ray through a pixel projects back to that pixel.**
+    /// **The ray through a pixel projects back to that pixel**, through
+    /// [`Camera::pixel_of`].
     ///
     /// The round trip against [`Camera::view_projection`], which is the only
     /// check here that could catch a sign, an axis or an aspect applied twice —
-    /// every one of those still yields a plausible-looking unit direction.
+    /// every one of those still yields a plausible-looking unit direction. The
+    /// Y convention both share is held on its own below.
     #[test]
     fn a_pixels_ray_projects_back_to_that_pixel() {
-        let size = Vec2::new(VIEWPORT.0 as f32, VIEWPORT.1 as f32);
-        let view_proj = perspective().view_projection(size.x / size.y);
         for at in [
             Vec2::new(0.5, 0.5),
             centre(),
@@ -1385,9 +1429,9 @@ mod tests {
         ] {
             let ray = perspective().ray_through(at, VIEWPORT);
             for distance in [0.5_f32, 7.0, 250.0] {
-                let clip = view_proj * (ray.origin + ray.direction * distance).extend(1.0);
-                let ndc = clip.truncate() / clip.w;
-                let pixel = Vec2::new((ndc.x + 1.0) * 0.5 * size.x, (1.0 - ndc.y) * 0.5 * size.y);
+                let pixel = perspective()
+                    .pixel_of(ray.origin + ray.direction * distance, VIEWPORT)
+                    .expect("a point along the ray is in front of the eye");
                 assert!(
                     (pixel - at).length() < 1e-2,
                     "the ray through {at:?} reached {pixel:?} {distance} m along itself",
@@ -1426,6 +1470,16 @@ mod tests {
         );
         let bottom_right = camera.ray_through(Vec2::new(799.5, 599.5), VIEWPORT);
         assert!(bottom_right.direction.y < 0.0 && bottom_right.direction.x > 0.0);
+    }
+
+    /// A point behind the eye lands on no pixel, rather than on the mirrored
+    /// one the divide by a negative `w` would give.
+    #[test]
+    fn a_point_behind_the_eye_lands_on_no_pixel() {
+        let camera = perspective();
+        let behind = camera.eye + (camera.eye - camera.target);
+        assert_eq!(camera.pixel_of(behind, VIEWPORT), None);
+        assert!(camera.pixel_of(camera.target, VIEWPORT).is_some());
     }
 
     /// **The ray starts on the near plane**, which is what

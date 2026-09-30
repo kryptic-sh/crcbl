@@ -70,7 +70,7 @@ use crcbl::engine::{
 use crcbl::greybox::scene3d;
 use crcbl::hal::{CommandEncoderDesc, ImageUsage};
 use crcbl::input::ActionMap;
-use crcbl::math::{Vec2, Vec3};
+use crcbl::math::{DVec3, Vec2, Vec3};
 use crcbl::reflect::Value;
 use crcbl::render::grid::GridStyle;
 use crcbl::render::{
@@ -90,6 +90,7 @@ use crate::args::Options;
 use crate::clipboard::Paste;
 use crate::command::EditCommand;
 use crate::document::{Document, EditError};
+use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
 use crate::panel::{PanelInput, Panels, VIEWPORT_TEXTURE};
@@ -211,13 +212,15 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     mode: ModeRequest,
 }
 
-/// What a held pointer button is doing to the camera.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a held pointer button is doing: to the camera, or to a gizmo handle.
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
     /// Right button: turn the camera around the pivot.
     Orbit,
     /// Middle button: slide the pivot across the view plane.
     Pan,
+    /// Left button on a gizmo handle: move the selection along its axis.
+    Gizmo(gizmo::Drag),
 }
 
 impl Editor<dyn Shell> {
@@ -496,7 +499,19 @@ impl<S: Shell + ?Sized> Editor<S> {
         self.drive_camera(&pending, in_viewport);
         if pending.pointer_pressed && in_viewport {
             self.panels.release_keyboard();
-            self.pick(&pending);
+            if !self.grab_handle(&pending) {
+                self.pick(&pending);
+            }
+        }
+        if let Some(Drag::Gizmo(drag)) = self.drag {
+            if pending.motion.is_some()
+                && let Some(at) = pending.pointer
+            {
+                self.move_handle(&drag, at);
+            }
+            if pending.pointer_released {
+                self.drag = None;
+            }
         }
 
         let asked = crate::keys::actions(&self.actions, self.modifiers, editing);
@@ -514,6 +529,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             },
         };
         self.panels.frame(&mut self.document, input);
+        self.draw_gizmo(pointer.pos);
 
         let requests = self.panels.take_clipboard_requests();
         self.text_pump
@@ -583,6 +599,9 @@ impl<S: Shell + ?Sized> Editor<S> {
                     let height = self.panels.viewport_extent().1 as f32;
                     self.camera.pan(-motion.x / height, motion.y / height);
                 }
+                // Moved by `move_handle`, which reads where the pointer is
+                // rather than how far it went.
+                Drag::Gizmo(_) => {}
             }
         }
 
@@ -596,6 +615,92 @@ impl<S: Shell + ?Sized> Editor<S> {
                 ScrollDelta::Pixels { y, .. } => y as f32 * ZOOM_PER_PIXEL,
             });
         }
+    }
+
+    /// The selection's gizmo handles, in the pane's pixels — none for nothing
+    /// selected, and none for an entity with no `position` to move.
+    fn handles(&mut self) -> Vec<gizmo::Handle> {
+        let Some(id) = self.document.selected() else {
+            return Vec::new();
+        };
+        if !matches!(self.document.read(id, "position.0"), Ok(Value::Float(_))) {
+            return Vec::new();
+        }
+        let Some((min, max)) = self.document.bounds(id) else {
+            return Vec::new();
+        };
+        gizmo::handles(
+            &self.camera.camera(),
+            self.panels.viewport_extent(),
+            (min + max) * 0.5,
+            self.panels.scale(),
+        )
+    }
+
+    /// Starts a gizmo drag if the press landed on a handle, and says whether it
+    /// did — a press that missed every handle is a pick.
+    fn grab_handle(&mut self, pending: &Pending) -> bool {
+        let (Some(at), Some(id)) = (pending.pointer, self.document.selected()) else {
+            return false;
+        };
+        let handles = self.handles();
+        let (corner, _) = self.panels.viewport_pixels();
+        let Some(axis) = gizmo::hit(&handles, at - corner, self.panels.scale()) else {
+            return false;
+        };
+        let path = format!("position.{}", axis.index());
+        let (Ok(Value::Float(start)), Some((min, max))) =
+            (self.document.read(id, &path), self.document.bounds(id))
+        else {
+            return false;
+        };
+        let origin = (min + max) * 0.5;
+        let origin = DVec3::new(
+            f64::from(origin.x),
+            f64::from(origin.y),
+            f64::from(origin.z),
+        );
+        let gesture = self.document.begin_gesture();
+        let ray = self.ray_at(at);
+        let Some(drag) = gizmo::Drag::begin(id, axis, gesture, start, origin, &ray) else {
+            return false;
+        };
+        self.drag = Some(Drag::Gizmo(drag));
+        true
+    }
+
+    /// Moves the dragged entity to where the pointer at `at` puts it on the
+    /// handle's axis, snapping while Ctrl is held — one write of the drag's
+    /// gesture, so the whole drag undoes at once.
+    fn move_handle(&mut self, drag: &gizmo::Drag, at: Vec2) {
+        let snap = self.modifiers.contains(Modifiers::CTRL);
+        let Some(value) = drag.value(&self.ray_at(at), snap) else {
+            return;
+        };
+        let command = EditCommand::SetProperty {
+            entity: drag.entity,
+            path: format!("position.{}", drag.axis.index()),
+            value: Value::Float(value),
+        };
+        if let Err(error) = self.document.apply_in(command, drag.gesture) {
+            crcbl::log::warn!("editor: {error}");
+        }
+    }
+
+    /// Draws the selection's handles over the pane, the one being dragged or
+    /// under `pointer` brightened.
+    fn draw_gizmo(&mut self, pointer: Vec2) {
+        let handles = self.handles();
+        if handles.is_empty() {
+            return;
+        }
+        let (corner, _) = self.panels.viewport_pixels();
+        let hot = match self.drag {
+            Some(Drag::Gizmo(drag)) => Some(drag.axis),
+            _ => gizmo::hit(&handles, pointer - corner, self.panels.scale()),
+        };
+        self.panels
+            .overlay_viewport(|list| gizmo::draw(list, &handles, corner, hot));
     }
 
     /// Selects whatever the left button landed on.
@@ -1237,6 +1342,109 @@ mod tests {
         assert_eq!(editor.document().entity_count(), count);
         assert!(!editor.document().is_dirty());
         assert_eq!(editor.frame().expect("a frame"), Flow::Continue);
+        editor.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A window pixel as the shell takes one.
+    fn physical(at: Vec2) -> PhysicalPoint {
+        PhysicalPoint {
+            x: f64::from(at.x),
+            y: f64::from(at.y),
+        }
+    }
+
+    /// **Dragging a gizmo handle moves the selection along that axis alone, as
+    /// one undo**, and a press on the handle does not re-pick whatever is
+    /// behind it.
+    #[test]
+    fn dragging_a_handle_moves_the_selection_along_its_axis_as_one_undo() {
+        let mut editor = headless(16);
+        let id = SceneEntityId(2);
+        editor.document_mut().select(Some(id));
+        editor.frame().expect("a frame");
+        let before = editor.document_mut().files().expect("ids");
+        let read = |editor: &mut Editor<HeadlessShell>, axis: usize| {
+            let Value::Float(value) = editor
+                .document_mut()
+                .read(id, &format!("position.{axis}"))
+                .expect("a block")
+            else {
+                panic!("a position is a number");
+            };
+            value
+        };
+        let was = [
+            read(&mut editor, 0),
+            read(&mut editor, 1),
+            read(&mut editor, 2),
+        ];
+
+        let handles = editor.handles();
+        let x = handles
+            .iter()
+            .find(|handle| handle.axis == gizmo::Axis::X)
+            .expect("the default view shows the X handle");
+        let (corner, _) = editor.panels.viewport_pixels();
+        let grab = corner + (x.from + x.to) * 0.5;
+        let release = corner + x.to + (x.to - x.from) * 0.5;
+
+        let window = editor.window;
+        let shell = editor.shell_mut();
+        shell
+            .move_pointer(window, physical(grab), (0.0, 0.0))
+            .expect("live");
+        shell
+            .button(
+                window,
+                PointerButton::Left,
+                ButtonState::Pressed,
+                Some(physical(grab)),
+            )
+            .expect("live");
+        editor.frame().expect("a frame");
+        for step in 1..=4 {
+            let at = grab + (release - grab) * (step as f32 / 4.0);
+            let delta = (release - grab) / 4.0;
+            editor
+                .shell_mut()
+                .move_pointer(
+                    window,
+                    physical(at),
+                    (f64::from(delta.x), f64::from(delta.y)),
+                )
+                .expect("live");
+            editor.frame().expect("a frame");
+        }
+        editor
+            .shell_mut()
+            .button(
+                window,
+                PointerButton::Left,
+                ButtonState::Released,
+                Some(physical(release)),
+            )
+            .expect("live");
+        editor.frame().expect("a frame");
+
+        assert_eq!(
+            editor.document().selected(),
+            Some(id),
+            "the press re-picked"
+        );
+        let now = [
+            read(&mut editor, 0),
+            read(&mut editor, 1),
+            read(&mut editor, 2),
+        ];
+        assert!(
+            now[0] > was[0] + 0.1,
+            "the X handle did not move it along +X: {now:?}"
+        );
+        assert_eq!([now[1], now[2]], [was[1], was[2]], "it moved off its axis");
+        assert_eq!(editor.document().log().len(), 1, "a drag is one entry");
+
+        editor.act(&Action::Undo);
+        assert_eq!(editor.document_mut().files().expect("ids"), before);
         editor.finish(ExitReason::FrameBudget).expect("teardown");
     }
 

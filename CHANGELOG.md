@@ -397,6 +397,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor has a translate gizmo.** An arrow per axis over the selection,
+  drawn in the viewport's screen space at a constant size; dragging one moves
+  the selection along that axis (in quarter-metre steps with Ctrl held), and a
+  whole drag is one undo. `crcbl_render::Camera::pixel_of` is new: the pixel a
+  point lands on, `ray_through` run the other way, for anything drawn over the
+  scene.
+
 - **The editor deletes, duplicates, copies and pastes entities, undoably.**
   Delete removes the selection and Ctrl+D copies it in place and selects the
   copy; undo brings a deleted entity back under the id it had, so later history

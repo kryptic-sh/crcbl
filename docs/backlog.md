@@ -11607,9 +11607,18 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   correction); and a server hosting more than one session.
 - **An edit-mode schedule** for the selection, gizmo and editor-camera systems;
   a `World` has one `Schedule` and no per-system gating.
-- **Transform gizmos**: translate, rotate and scale, axis and plane handles,
-  snapping, constant screen size. `DebugDraw` is lines only and depth-tested,
-  with no on-top mode or filled handles.
+- **The rest of the transform gizmos**: rotate and scale handles, plane handles,
+  and snapping to an absolute grid. The translate axis handles landed 2026-09-30
+  in `apps/editor/src/gizmo.rs`, drawn in the pane's screen space (decided then;
+  `08-editor.md` _Status_ says why not debug draw). A rotate handle needs the
+  scene format to carry a rotation, which `Block` and `Brick` do not; scale maps
+  onto `half_extents` where a component has them.
+- **Inspector drags are one undo entry per frame.** `Panels::apply_edits` hands
+  each frame's `FieldEdit` to `Document::record_edit`, which records plainly, so
+  dragging a field for a second takes dozens of undos to walk back. The gizmo's
+  `Gesture` folding (`UndoLog::record_in`) is the mechanism; the missing piece
+  is knowing when an inspector drag begins and ends, which `FieldEdit` does not
+  say.
 - **The asset browser and drag-spawn**; `AssetSource` has `read` and no `list`.
 - **Play/stop** by reloading the scene (decided 2026-09-16).
 - **The remaining command variants**: rename, attach/detach system data and

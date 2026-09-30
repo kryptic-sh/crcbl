@@ -132,6 +132,37 @@ full-window draw under a hole in the panels is gone.
   while a load replaces the log). The backlog's editor entry says what each
   waits on.
 
+**Slice 6, the translate gizmo (task 5's first half), landed 2026-09-30.**
+
+- **Decided 2026-09-30: handles are drawn in the pane's screen space**, through
+  the UI draw list over the scene's picture, rather than through the world-space
+  debug-draw layer the feature list named. On top of everything in the pane and
+  a constant number of pixels long by construction — the plan's "constant
+  screen-size scaling" — and hit tested in the pixels they are drawn in. Debug
+  draw is lines only, depth tested and exposed with the scene, so it would have
+  needed an on-top mode and a constant-size transform, and a handle exposed with
+  a dark scene goes dim. `docs/plan/18-render-features.md`'s overlay rule
+  records the exception.
+- **A handle per axis** from the selection's projected centre
+  (`crcbl_render::Camera::pixel_of`, `ray_through` run the other way); an axis
+  pointing along the view has none. A press on a handle drags instead of
+  picking; the entity moves along the axis line through where the drag began, to
+  the point closest to the cursor's ray, by as far as that point has moved since
+  the press — in `gizmo::SNAP_M` steps while Ctrl is held.
+- **A drag is one undo.** Each write is a `position.N` property set through
+  `Document::apply_in` with the drag's `Gesture`, and `UndoLog::record_in` folds
+  a gesture's writes to one leaf into one entry that keeps the first write's
+  inverse. A save seals the entry, so a drag carried past it is dirty again.
+- **Evidence**: the gizmo's tests hold handle direction, constant size at two
+  distances and two scales, hidden axes and the closest-point formula against
+  hand-worked rays; the editor's loop test drags the X handle through the
+  headless shell and reads back an X-only move and one log entry. Writing the
+  drag through plain `apply`, flipping the sign of the formula's `b` term (which
+  first survived, until an oblique ray was added) and dropping the seal each
+  turned a test red.
+- **Owed from task 5**: rotate and scale handles, plane handles, and snapping to
+  an absolute grid rather than in steps from where the drag began.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -344,7 +375,8 @@ rules. It stays open in the backlog.
 3. **Property panel** — reuses the stage 7 inspector: systems render editable UI
    for their data; edits become update commands.
 4. **Transform gizmos** — translate/rotate/scale, axis/plane constrained,
-   snapping. Drawn via debug-draw layer, interact via viewport input.
+   snapping. Drawn in the viewport pane's screen space over the scene's picture
+   (decided 2026-09-30; see _Status_), interact via viewport input.
 5. **Scene IO** — open/save `.scn/` scene dirs (stage 6 loader in both
    directions), dirty-state tracking, revert (= stage 6 scene-reload path).
 6. **Asset browser** — list `AssetSource` contents, drag mesh into viewport →

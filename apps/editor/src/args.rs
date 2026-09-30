@@ -95,6 +95,8 @@ EDITING:
     Ctrl / Shift click   Add a row to the selection, or take a run of them
     Drag a field         Edit it, one step a pixel — an undoable command like
                          every other edit
+    Drag an arrow        Move the selection along that axis, one undo a drag;
+                         hold Ctrl to move in quarter-metre steps
     Arrow keys           Nudge the selection along X (left/right) and Y
                          (up/down), or walk the rows once a panel has the
                          keyboard

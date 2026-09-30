@@ -40,7 +40,7 @@ use crcbl::render::ViewRay;
 use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
-use crate::command::{EditCommand, UndoLog, set_property};
+use crate::command::{EditCommand, Gesture, UndoLog, set_property};
 
 /// A loaded scene and everything the editor knows about it.
 #[derive(Debug)]
@@ -66,6 +66,8 @@ pub struct Document {
     /// How many times an entity has entered or left this document — see
     /// [`Document::membership`].
     membership: u64,
+    /// The last [`Gesture`] [`Document::begin_gesture`] handed out.
+    gestures: u64,
     /// Where [`Document::save_to`] writes when it is not told otherwise: the
     /// directory this document was opened from, or [`None`] for one opened out
     /// of a compiled-in source.
@@ -207,6 +209,7 @@ impl Document {
             log: UndoLog::new(),
             saved_at: 0,
             membership: 0,
+            gestures: 0,
             origin: None,
         })
     }
@@ -459,6 +462,26 @@ impl Document {
         Ok(())
     }
 
+    /// A new [`Gesture`], distinct from every one before it: what a drag passes
+    /// to [`apply_in`](Self::apply_in) for each write it makes.
+    pub fn begin_gesture(&mut self) -> Gesture {
+        self.gestures += 1;
+        Gesture(self.gestures)
+    }
+
+    /// [`apply`](Self::apply), as one write of `gesture`: a property set of the
+    /// leaf the gesture's last write set folds into that write's entry, so the
+    /// whole drag is one undo. See [`UndoLog`].
+    ///
+    /// # Errors
+    ///
+    /// As [`apply`](Self::apply).
+    pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
+        let undo = self.perform(&command)?;
+        self.log.record_in(command, undo, gesture);
+        Ok(())
+    }
+
     /// Removes `id` from the scene, as an [`EditCommand::Delete`] — so an undo
     /// brings it back under the same id, component and all.
     ///
@@ -642,6 +665,10 @@ impl Document {
                 })?;
         }
         self.saved_at = self.log.position();
+        // A drag carried on past the save writes an entry of its own, so the
+        // document is dirty again rather than folding the change into the
+        // entry the save stands on.
+        self.log.seal();
         Ok(())
     }
 
@@ -1134,6 +1161,33 @@ mod tests {
 
         assert_eq!(document.files().expect("ids"), edited);
         assert_eq!(document.log().position(), 2);
+    }
+
+    /// **A drag carried on past a save is dirty again**: the save seals the
+    /// entry it stands on, so the drag's next write starts an entry of its own
+    /// rather than folding into one the file already holds.
+    #[test]
+    fn a_drag_carried_past_a_save_is_dirty_again() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let mut document = document();
+        let drag = document.begin_gesture();
+        for x in [0.5, 1.0] {
+            let command = nudge(&mut document, SceneEntityId(1), 0, x);
+            document.apply_in(command, drag).expect("a block has an x");
+        }
+        assert_eq!(document.log().len(), 1, "one drag, one entry");
+        document
+            .save_to(dir.path())
+            .expect("the directory is writable");
+        assert!(!document.is_dirty());
+
+        let command = nudge(&mut document, SceneEntityId(1), 0, 0.5);
+        document.apply_in(command, drag).expect("a block has an x");
+        assert!(
+            document.is_dirty(),
+            "the write after the save was folded into it"
+        );
+        assert_eq!(document.log().len(), 2);
     }
 
     /// **The dirty marker follows the log's position**, in both directions.
