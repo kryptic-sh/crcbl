@@ -3,6 +3,7 @@
 //! ```text
 //! towers [--headless] [--frames N] [--size WxH] [--tick-hz N] [--scene DIR] …
 //!        [--host [PORT] | --join IP:PORT | --browse]
+//! towers --serve [PORT] [--tick-hz N] [--scene DIR]
 //! ```
 //!
 //! # What is left here after the engine took the shared half
@@ -13,7 +14,11 @@
 //! directory to read the map out of instead of the committed
 //! `assets/scenes/field.scn/`. The three LAN flags are
 //! `crcbl::lan::LanMode::consume`'s, native builds only, as `apps/sandbox`
-//! reads them too.
+//! reads them too. `--serve [PORT]` is this sample's own, native only too: a
+//! dedicated server with no window, renderer or player, which takes the tick
+//! rate and the map and refuses every flag that only means something to a
+//! window or a frame — see `crate::lan::serve` for why it is not
+//! `--headless --host`.
 //! The shape is `apps/breakout/src/args.rs`'s and `apps/puppet/src/args.rs`'s —
 //! the directory is read *here*, while there is still an exit code to refuse the
 //! run with, and [`Options`] carries the parsed map rather than the path.
@@ -87,12 +92,18 @@ OPTIONS:
                          on UDP PORT and announce the session to --browse on
                          the local network. Default: any free port, printed at
                          start.
+    --serve [PORT]       Run a dedicated server on UDP PORT: the --host session
+                         with no window, no renderer and no player of its own,
+                         announced to --browse, on the wall clock until killed.
+                         With nobody in it the run holds still. Prints a status
+                         line as players come and go and every 10 seconds.
+                         Takes --tick-hz and --scene and no other option.
     --join <IP:PORT>     Join the co-op session at IP:PORT directly.
     --browse             Look for co-op sessions on the local network, print
                          what answers, and join the first one this build can
-                         play with. --host, --join and --browse exclude each
-                         other, and are native builds only: the browser build
-                         is single player.
+                         play with. --host, --serve, --join and --browse
+                         exclude each other, and are native builds only: the
+                         browser build is single player.
     --debug-overlay      Start with the debug panel visible (F3 toggles it)
     --no-debug-overlay   Start with it hidden. The default is 'visible in a
                          debug build, hidden in a release build'
@@ -114,6 +125,10 @@ pub struct Options {
     /// builds only: web builds have no networking.
     #[cfg(not(target_arch = "wasm32"))]
     pub lan: crcbl::lan::LanMode,
+    /// Serve a dedicated session on this UDP port — 0 for any free one —
+    /// instead of playing: see `crate::lan::serve`. Native builds only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub serve: Option<u16>,
 }
 
 impl Default for Options {
@@ -130,6 +145,8 @@ impl Default for Options {
             map: Map::built_in(),
             #[cfg(not(target_arch = "wasm32"))]
             lan: crcbl::lan::LanMode::Off,
+            #[cfg(not(target_arch = "wasm32"))]
+            serve: None,
         }
     }
 }
@@ -159,6 +176,21 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
             Consumed::Help | Consumed::No => {}
         }
         match arg.as_str() {
+            #[cfg(not(target_arch = "wasm32"))]
+            "--serve" => {
+                if options.serve.is_some() {
+                    return Invocation::BadUsage(SERVE_EXCLUDES.into());
+                }
+                // Optional, as `--host`'s is: taken only when it is a port.
+                let port = match args.peek().map(|value| value.parse::<u16>()) {
+                    Some(Ok(port)) => {
+                        args.next();
+                        port
+                    }
+                    Some(Err(_)) | None => 0,
+                };
+                options.serve = Some(port);
+            }
             "--scene" => match args.next() {
                 // Refused here rather than fallen back on: a run that quietly
                 // kept the committed field when the directory it was pointed at
@@ -174,8 +206,32 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
         }
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    if options.serve.is_some() {
+        if options.lan != crcbl::lan::LanMode::Off {
+            return Invocation::BadUsage(SERVE_EXCLUDES.into());
+        }
+        // Everything but the tick rate as it was before parsing: a flag a
+        // server has no use for is refused rather than silently dropped.
+        let untouched = Common {
+            tick_hz: options.common.tick_hz,
+            ..Options::default().common
+        };
+        if options.common != untouched {
+            return Invocation::BadUsage(
+                "--serve takes --tick-hz and --scene and no other option: a dedicated server \
+                 has no window, no renderer and no frames"
+                    .into(),
+            );
+        }
+    }
+
     Invocation::Run(options)
 }
+
+/// Why `--serve` beside another session is refused.
+#[cfg(not(target_arch = "wasm32"))]
+const SERVE_EXCLUDES: &str = "--host, --serve, --join and --browse exclude each other";
 
 #[cfg(test)]
 mod tests {
@@ -360,6 +416,70 @@ mod tests {
         assert!(rejected(&["--join", "localhost"]).contains("IP:PORT"));
         // Not a port, so not `--host`'s: read as an argument of its own.
         assert!(rejected(&["--host", "99999"]).contains("unknown argument: 99999"));
+    }
+
+    /// **`--serve` reaches the options with its port or without one**, beside
+    /// the tick rate and the map it takes — and nothing else runs a server.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_serve_flag_reaches_the_options_with_or_without_a_port() {
+        assert_eq!(parsed(&[]).serve, None);
+        assert_eq!(parsed(&["--serve"]).serve, Some(0));
+        let serving = parsed(&["--serve", "27015", "--tick-hz", "30"]);
+        assert_eq!(serving.serve, Some(27_015));
+        assert_eq!(
+            serving.common.tick_hz, 30,
+            "the flag after the port is read"
+        );
+        assert_eq!(serving.lan, crcbl::lan::LanMode::Off);
+        // Not a port, so not `--serve`'s: read as a flag of its own.
+        assert_eq!(parsed(&["--serve", "--tick-hz", "20"]).serve, Some(0));
+        assert!(rejected(&["--serve", "99999"]).contains("unknown argument: 99999"));
+        assert!(USAGE.contains("--serve [PORT]"), "USAGE lists --serve");
+        let every = format!(
+            "every {} seconds",
+            crate::lan::serve::STATUS_INTERVAL.as_secs()
+        );
+        assert!(
+            USAGE.contains(&every),
+            "USAGE says the status line comes {every}"
+        );
+    }
+
+    /// **`--serve` beside another session, or beside a flag only a window or
+    /// a frame has a use for, is bad usage** — never a server that quietly
+    /// dropped the flag.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_serve_flag_refuses_another_session_and_every_window_flag() {
+        for argv in [
+            &["--serve", "--host"][..],
+            &["--host", "--serve"],
+            &["--serve", "--join", "127.0.0.1:1"],
+            &["--browse", "--serve"],
+            &["--serve", "--serve"],
+        ] {
+            assert!(
+                rejected(argv).contains("exclude each other"),
+                "{argv:?}: {}",
+                rejected(argv)
+            );
+        }
+        for argv in [
+            &["--serve", "--headless"][..],
+            &["--serve", "--frames", "10"],
+            &["--serve", "--backend", "null"],
+            &["--serve", "--size", "640x480"],
+            &["--serve", "--screenshot", "frame.png"],
+            &["--serve", "--exec", "echo hi"],
+            &["--debug-overlay", "--serve"],
+        ] {
+            assert!(
+                rejected(argv).contains("--serve takes --tick-hz and --scene"),
+                "{argv:?}: {}",
+                rejected(argv)
+            );
+        }
     }
 
     /// With no `--scene`, the map is the committed one — the browser's only path,

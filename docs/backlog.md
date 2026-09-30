@@ -14154,18 +14154,40 @@ joined session, the snapshot through the whole table) and `replica::tests`
 (round trip, order, refusal, undecodable entries, the facing wrap, the extents,
 solo's client reconstructing the stage every tick), each shown red by a
 mutation. `--browse` auto-joins the first compatible host, as the sandbox's
-does; there is no lobby screen.
+does; there is no lobby screen. `towers --serve [PORT]` is the dedicated server
+(`crcbl_towers::lan::serve`): the `LanHost` with no local client, no window and
+no GPU, ticked on `Instant` by its own entry point rather than the `Loop`, with
+a status line on change and every `serve::STATUS_INTERVAL`; an empty session
+holds the run still (`run_team_tick` returns on a tick with no command frame).
+Tested by four joiners winning the whole table on it, an empty one sending no
+wave, and a player leaving mid-run.
 
 **Left, and what each would take:**
 
 - **A lobby browser.** See _Netgraph HUD, LAN discovery_: towers has no start
   menu to put it in, so it is its own slice.
-- **A dedicated headless server.** A towers host is always a player —
-  `HostLink::open` adds its in-memory client — and the exit criterion wants a
-  host with none. It would be a serve-only mode building the `LanHost` without
-  the local client, and running it without a window or a GPU, which towers'
-  `Loop`-based start-up cannot do: it opens a shell and a GPU before the game. A
-  windowless entry point, like the determinism harness's, is the shape.
+- **`--serve` has no clean shutdown.** It runs until the process is killed: the
+  workspace has no signal handling (no Ctrl+C hook, and no crate for one), so
+  the players are never sent `SessionEndReason::SHUTTING_DOWN` and see their
+  links time out instead. Closing it needs a console-control / `SIGINT` hook — a
+  new dependency or a platform-gated handler per OS — that sets a flag
+  `lan::serve::serve` checks between frames before calling `Host::shutdown`. Not
+  decided: which, since neither exists anywhere in the tree yet.
+- **`--serve`'s wall-clock loop and `app::run`'s dispatch to it are not run by
+  any test.** `serve` binds every interface (`LanBind::on_the_lan`), which can
+  raise a Windows firewall prompt, so the tests drive `serve::Server` a frame at
+  a time on loopback instead; only `until_next_tick`'s arithmetic is tested of
+  the loop. A manual check: `towers --serve`, then four `towers --browse` on the
+  LAN, and play the table.
+- **The ten-wave soak is one process.**
+  `four_players_win_the_whole_table_on_a_dedicated_server` wins every wave with
+  four UDP clients on loopback, in about half a minute of wall time; the exit
+  criterion's recorded demo — four machines, a real LAN, the server found by
+  browsing — is the two-machine item below.
+- **An empty server keeps the run it was left with.** The last player leaving
+  holds the run where it stood rather than restarting it, so the next group
+  picks it up mid-wave; `R` restarts it for them. Whether an emptied server
+  should reset instead is a design call, not made.
 - **The map is not in the handshake.** A joiner draws its own `--scene` or the
   committed field, so a host on another map puts its towers on the joiner's
   plots. Folding a stable fingerprint of the map (its waypoints and plots) into

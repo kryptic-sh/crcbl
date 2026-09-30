@@ -321,13 +321,22 @@ impl Towers {
 /// `Loop<HeadlessShell>` so they can inject the events a compositor would send.
 pub type Loop<S = dyn Shell> = crcbl::engine::Loop<S, Towers>;
 
-/// Runs the full loop.
+/// Runs the full loop — or, natively with `--serve`, a dedicated server
+/// with no loop at all, which answers only if it could not start (see
+/// `crate::lan::serve`).
 ///
 /// # Errors
 ///
 /// [`TowersError`] if the shell, the GPU or the simulation's server failed.
 /// Teardown runs on every path.
 pub fn run(options: &Options) -> Result<Summary, TowersError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(port) = options.serve {
+        return match crate::lan::serve::serve(port, &options.map, options.common.tick_hz) {
+            Ok(never) => match never {},
+            Err(error) => Err(TowersError::Game(error)),
+        };
+    }
     crcbl::engine::drive(start(options)?)
 }
 

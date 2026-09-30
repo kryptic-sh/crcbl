@@ -568,7 +568,18 @@ fn run_tick(stage: &mut Stage, intent: Intent, dt: f64) {
 /// player at a time against the one purse, so two players building on the same
 /// plot in the same tick get one tower and one refusal, and the first admitted
 /// is the one who built it.
+///
+/// **No players, no run.** A tick with no command frame at all is a session
+/// nobody holds a place in — only a dedicated server's, since solo and a
+/// listen host always have their own player — and the stage holds still
+/// through it: no clock, so no build phase running out and no wave released
+/// at an empty field. The first joiner's tick starts it where it stopped. A
+/// player whose link dropped still holds a place through its grace period,
+/// so a run goes on while they reconnect, as it would with them in it.
 fn run_team_tick(stage: &mut Stage, intents: &[Intent], dt: f64) {
+    if intents.is_empty() {
+        return;
+    }
     if intents.iter().any(|intent| intent.restart) {
         stage.reset();
         return;
@@ -829,6 +840,33 @@ fn server_world(map: &Arc<Map>) -> (Arc<Mutex<Stage>>, World, TowersModule) {
         shared: Arc::clone(&shared),
     };
     (shared, world, module)
+}
+
+/// A stage a server outside this file ticks, read only for its numbers: a
+/// dedicated server's, which has no [`Game`] around it — see
+/// `crate::lan::serve`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct Field(Arc<Mutex<Stage>>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Field {
+    /// A new stage on `map`, the world a host serves it from and the module
+    /// that ticks it, with the start-up line logged as every other mode logs
+    /// it.
+    pub(crate) fn open(map: &Map, tick_hz: u32) -> (Self, World, TowersModule) {
+        let (shared, world, module) = server_world(&Arc::new(map.clone()));
+        log_the_rules(
+            tick_hz,
+            crcbl::core::FrameClock::new(tick_hz).tick_dt(),
+            map,
+        );
+        (Self(shared), world, module)
+    }
+
+    /// The stage's numbers, read as [`Game::stats`] reads them.
+    pub(crate) fn stats(&self) -> Stats {
+        stats_of(&lock(&self.0))
+    }
 }
 
 /// The shared stage, with a poisoned lock treated as the stage it was left in.
@@ -2278,6 +2316,39 @@ mod tests {
         assert_eq!(stage.upgrades, 0, "the upgrades survived the restart");
         assert_eq!(stage.built_by_kind, [0; tower::KINDS]);
         assert_eq!(stage.runs, 2);
+    }
+
+    /// **A team with nobody in it holds the run still** — a dedicated server
+    /// with no player sends no wave at an empty field — and the first player's
+    /// tick picks it up where it stopped. See `run_team_tick`.
+    #[test]
+    fn a_team_with_nobody_in_it_holds_the_run_still() {
+        let mut stage = new_stage();
+        let due = stage
+            .waves
+            .next_in(stage.elapsed)
+            .expect("the build phase is running");
+        // Twice the build phase: a player in the session would have seen the
+        // first wave arrive half-way through.
+        let ticks = (2.0 * due / DT).ceil() as u64;
+        for _ in 0..ticks {
+            run_team_tick(&mut stage, &[], DT);
+        }
+        assert_eq!(stage.waves.started(), 0, "a wave was sent at nobody");
+        assert_eq!(stage.ticks, 0, "the stage ticked with nobody in it");
+        assert_eq!(
+            stage.waves.next_in(stage.elapsed),
+            Some(due),
+            "the build phase ran down with nobody in it"
+        );
+
+        for _ in 0..ticks {
+            run_team_tick(&mut stage, &[Intent::default()], DT);
+        }
+        assert!(
+            stage.waves.started() > 0,
+            "the first player's run never went on"
+        );
     }
 
     /// **A kill pays its kind's bounty**, which is the whole of the economy.

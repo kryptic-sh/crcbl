@@ -1,5 +1,5 @@
-//! Co-op over a LAN: `--host [PORT]`, `--join <IP:PORT>` and `--browse`,
-//! through the engine's [`crcbl::lan`].
+//! Co-op over a LAN: `--host [PORT]`, `--serve [PORT]`, `--join <IP:PORT>`
+//! and `--browse`, through the engine's [`crcbl::lan`].
 //!
 //! ```text
 //!  host:   Stage ◀─ TowersModule ◀─ Host ◀─┬─ in-memory ─ this player
@@ -19,6 +19,13 @@
 //! order the host admitted them, against **one** purse and **one** pool of
 //! lives — the co-op the sample's plan asks for. A restart from any player
 //! restarts the run for all of them.
+//!
+//! # Or nobody plays on the server
+//!
+//! `--serve` is the same host with no player of its own, no window and no
+//! renderer: a dedicated server every player joins, ticking on the wall
+//! clock. The `serve` module has it, and the rule for a session nobody is
+//! in.
 //!
 //! # A joiner has no stage
 //!
@@ -44,7 +51,7 @@
 //! # Native only
 //!
 //! Web builds have no networking, by the LOCKED rule in
-//! `docs/notes/simulation.md`: the browser build offers none of the three
+//! `docs/notes/simulation.md`: the browser build offers none of the four
 //! flags and has no LAN link.
 
 use std::time::Duration;
@@ -196,6 +203,8 @@ impl RemoteLink {
         })
     }
 }
+
+pub(crate) mod serve;
 
 #[cfg(test)]
 mod tests;

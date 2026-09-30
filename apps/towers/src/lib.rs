@@ -56,7 +56,9 @@
 //! **And co-op is the same game over UDP.** `--host [PORT]` runs that server on
 //! a LAN host whose own player is one of its clients, `--join <IP:PORT>` and
 //! `--browse` join one from another machine, and every player's commands are
-//! validated against one purse and one pool of lives. The server's world
+//! validated against one purse and one pool of lives; `--serve [PORT]` runs
+//! the same server with no window and no player of its own, for four
+//! joiners. The server's world
 //! replicates the field as [`replica`]'s entities, which is all a joiner draws
 //! from. The `lan` module has the wiring, and it is native only: the browser
 //! build is single player.

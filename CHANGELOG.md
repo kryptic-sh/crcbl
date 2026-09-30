@@ -500,6 +500,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   "lan" section during a session. Four players winning the whole table fit every
   snapshot in one datagram with nothing held back.
 
+- **Towers has a dedicated server**: `towers --serve [PORT]` runs the same
+  authoritative stage on `crcbl::lan`'s host with no window, no renderer and no
+  player of its own, announced to `--browse` and ticking on the wall clock until
+  the process is killed, so all four places are joiners'. It prints a status
+  line — players, wave, lives, gold, run and outcome — when any of those change
+  and every 10 seconds otherwise. With nobody in the session the run holds
+  still: no build phase runs out and no wave is sent at an empty field until the
+  first player joins. `--serve` takes `--tick-hz` and `--scene` and refuses
+  every window, GPU or frame flag, and `--host`, `--join` and `--browse`, with
+  exit code 2. Native builds only.
+
 - **`crcbl_client::Client::replicated(system)`**: the entity bits and component
   bytes a server system of that name replicated, from the default sector's
   reconstructed baseline — how a game reads back state it replicates itself.
