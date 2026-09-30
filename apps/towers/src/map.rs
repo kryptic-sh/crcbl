@@ -95,7 +95,9 @@ use crate::scene::Plot;
 use crate::tower::SHORTEST_RANGE_M;
 use crate::wave::MAX_CREEPS;
 
-mod fingerprint;
+mod wire;
+
+pub use wire::MapWireError;
 
 // ---------------------------------------------------------------------------
 // The field
@@ -144,7 +146,8 @@ impl Map {
     /// off the field, when it stands within [`PLOT_CLEARANCE`] of the lane, and
     /// when the lane is out of [`SHORTEST_RANGE_M`] of it: the build list offers
     /// every kind on every plot, so a plot the shortest-reaching kind cannot
-    /// cover from is one that kind may not be built on.
+    /// cover from is one that kind may not be built on — and when its label
+    /// is longer than [`MAX_LABEL_BYTES`].
     pub fn new(waypoints: Vec<DVec3>, plots: Vec<Plot>) -> Result<Self, MapError> {
         let path = Path::new(waypoints)?;
         if plots.is_empty() {
@@ -153,7 +156,13 @@ impl Map {
         if plots.len() > MAX_PLOTS {
             return Err(MapError::TooManyPlots { found: plots.len() });
         }
-        for plot in &plots {
+        for (index, plot) in plots.iter().enumerate() {
+            if plot.label.len() > MAX_LABEL_BYTES {
+                return Err(MapError::LabelTooLong {
+                    plot: index,
+                    length: plot.label.len(),
+                });
+            }
             let feet = DVec3::from_array(plot.position);
             let what = || format!("plot {:?}", plot.label);
             // The pad is drawn on the ground and a tower stands on the pad, so a
@@ -277,6 +286,14 @@ pub enum MapError {
         /// How far it is from the centre line, in metres.
         distance: f64,
     },
+    /// A plot's label is longer than [`MAX_LABEL_BYTES`]. Named by its place
+    /// in the list, since the label is the thing too long to print.
+    LabelTooLong {
+        /// Which plot, counted from the first.
+        plot: usize,
+        /// How long its label is, in bytes.
+        length: usize,
+    },
 }
 
 impl std::fmt::Display for MapError {
@@ -329,6 +346,10 @@ impl std::fmt::Display for MapError {
                 f,
                 "plot {plot:?} is {distance:.2} m from the lane, past the {SHORTEST_RANGE_M} m the \
                  shortest-reaching tower covers"
+            ),
+            Self::LabelTooLong { plot, length } => write!(
+                f,
+                "plot {plot}'s label is {length} bytes, past the {MAX_LABEL_BYTES} a label may hold"
             ),
         }
     }
@@ -411,6 +432,15 @@ impl Map {
 /// top value as the "no plot" sentinel, and `crate::game`'s
 /// `the_no_plot_sentinel_is_not_a_plot` is what holds the two apart.
 pub const MAX_PLOTS: usize = 16;
+
+/// The most bytes a plot's label may hold.
+///
+/// **What the map's wire form is bounded by.** A host sends its map to every
+/// joiner (`map::wire`), and a joiner refuses a label past this before it
+/// allocates for it; holding every map to it here is what makes every map a
+/// host can load one its joiners accept. Far more than the overlay's plot
+/// column shows, and than any committed label needs.
+pub const MAX_LABEL_BYTES: usize = 32;
 
 /// How far a plot's centre must stand from the lane's centre line, in metres:
 /// half the lane, and an **upgraded** tower's radius beside it.
@@ -1491,7 +1521,8 @@ mod tests {
 
     /// **The plots are refused when there are none or too many, and a plot is
     /// refused when it is off the ground, off the field, on the lane or out of
-    /// the shortest-reaching kind's range of it** — each by its label.
+    /// the shortest-reaching kind's range of it** — each by its label — **or
+    /// when its label is too long**, by its place in the list.
     #[test]
     fn a_plot_is_refused_by_the_rule_it_breaks() {
         let (waypoints, plots) = layout();
@@ -1531,6 +1562,18 @@ mod tests {
             refused(waypoints.clone(), on_lane),
             MapError::OnTheLane { plot, distance } if plot == "bend" && distance == 0.0
         ));
+
+        let mut long = plots.clone();
+        long[3].label = "m".repeat(MAX_LABEL_BYTES + 1);
+        assert!(matches!(
+            refused(waypoints.clone(), long.clone()),
+            MapError::LabelTooLong { plot: 3, length } if length == MAX_LABEL_BYTES + 1
+        ));
+        long[3].label.pop();
+        assert!(
+            Map::new(waypoints.clone(), long).is_ok(),
+            "the cap itself is a label"
+        );
 
         // In the far corner, where nothing on the lane is in reach.
         let mut far = plots;

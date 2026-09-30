@@ -14,15 +14,17 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::thread;
 use std::time::Duration;
 
-use crcbl::lan::{LanBind, LanClient, LanHost};
+use crcbl::ecs::World;
+use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
 use crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crcbl::net::udp::discovery::{Browser, BrowserConfig};
-use crcbl::net::{RejectReason, SessionState, SystemClock};
+use crcbl::net::{ProtocolCompatibility, SessionState, SystemClock};
+use crcbl::server::PeerEvent;
 
 use super::serve::{STATUS_INTERVAL, Server};
-use super::{MAX_PLAYERS, PROTOCOL_ID, session};
+use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
 use crate::game::{Controls, Game, Stats};
-use crate::map::Map;
+use crate::map::{Map, MapError, MapWireError};
 use crate::tower::{self, Tier};
 
 pub(crate) const TICK_HZ: u32 = crate::game::DEFAULT_TICK_HZ;
@@ -60,8 +62,82 @@ pub(crate) fn on_loopback() -> LanBind {
 
 /// A host on loopback, with a player of its own.
 fn host() -> Game {
-    Game::host(TICK_HZ, &Map::built_in(), on_loopback())
-        .expect("loopback UDP must be available to these tests")
+    host_on(&Map::built_in())
+}
+
+/// …playing `map`.
+fn host_on(map: &Map) -> Game {
+    Game::host(TICK_HZ, map, on_loopback()).expect("loopback UDP must be available to these tests")
+}
+
+/// A joiner: waiting for the host's map, then playing on it — or not, and
+/// why.
+#[derive(Debug)]
+enum Joiner {
+    Joining(Joining),
+    Playing(Game),
+    Failed(JoinFailure),
+}
+
+impl Joiner {
+    /// A joiner through `lan`, given the whole [`JOIN_TIMEOUT`].
+    fn through(lan: LanClient) -> Self {
+        Self::Joining(Joining::new(lan, TICK_HZ, JOIN_TIMEOUT))
+    }
+
+    /// The game it plays, which it must have by now.
+    fn game(&self) -> &Game {
+        match self {
+            Self::Playing(game) => game,
+            other => panic!("the joiner is not playing: {other:?}"),
+        }
+    }
+
+    fn game_mut(&mut self) -> &mut Game {
+        match self {
+            Self::Playing(game) => game,
+            other => panic!("the joiner is not playing: {other:?}"),
+        }
+    }
+
+    /// The engine's client, joining or playing.
+    fn lan(&self) -> Option<&LanClient> {
+        match self {
+            Self::Joining(joining) => Some(joining.lan()),
+            Self::Playing(game) => game.lan_client(),
+            Self::Failed(_) => None,
+        }
+    }
+
+    fn tick(&mut self) {
+        if let Self::Playing(game) = self {
+            game.tick();
+        }
+    }
+
+    /// One frame of `render_dt`: the join runs, or the game reads the host.
+    fn frame(self, render_dt: Duration) -> Self {
+        match self {
+            Self::Joining(joining) => match joining.step(render_dt) {
+                Progress::Waiting(joining) => Self::Joining(joining),
+                Progress::Joined(game) => Self::Playing(game),
+                Progress::Failed(failure) => Self::Failed(failure),
+            },
+            Self::Playing(mut game) => {
+                game.frame(render_dt);
+                Self::Playing(game)
+            }
+            failed @ Self::Failed(_) => failed,
+        }
+    }
+
+    /// Why the join failed, once it has.
+    fn failure(&self) -> Option<&JoinFailure> {
+        match self {
+            Self::Failed(failure) => Some(failure),
+            Self::Joining(_) | Self::Playing(_) => None,
+        }
+    }
 }
 
 /// A dedicated server on loopback, the time it has been served to, and every
@@ -134,7 +210,7 @@ impl Authority for Dedicated {
 /// A host and its joiners, stepped together.
 struct Rig<A> {
     host: A,
-    joiners: Vec<Game>,
+    joiners: Vec<Joiner>,
 }
 
 impl Rig<Game> {
@@ -178,23 +254,23 @@ impl<A: Authority> Rig<A> {
     }
 
     fn join(&mut self) {
-        let client =
-            LanClient::join(session(&Map::built_in()), self.address(), TICK_HZ).expect("connect");
-        self.joiners
-            .push(Game::join(TICK_HZ, &Map::built_in(), client));
+        let client = LanClient::join(SESSION, self.address(), TICK_HZ).expect("connect");
+        self.joiners.push(Joiner::through(client));
     }
 
     /// Every player's tick, then the host's frame and every joiner's, then
     /// the pause.
     fn step(&mut self) {
         self.host.tick();
-        for game in &mut self.joiners {
-            game.tick();
+        for joiner in &mut self.joiners {
+            joiner.tick();
         }
         self.host.frame(FRAME);
-        for game in &mut self.joiners {
-            game.frame(FRAME);
-        }
+        self.joiners = self
+            .joiners
+            .drain(..)
+            .map(|joiner| joiner.frame(FRAME))
+            .collect();
         thread::sleep(PAUSE);
     }
 
@@ -220,8 +296,12 @@ impl<A: Authority> Rig<A> {
     }
 }
 
-/// Whether a joiner is in a session and has the host's numbers.
-fn playing(game: &Game) -> bool {
+/// Whether a joiner has the host's map, is in its session and has its
+/// numbers.
+fn playing(joiner: &Joiner) -> bool {
+    let Joiner::Playing(game) = joiner else {
+        return false;
+    };
     game.lan_client()
         .and_then(LanClient::client)
         .is_some_and(|client| client.session_id().is_some())
@@ -256,13 +336,15 @@ fn a_tower_one_joiner_builds_is_validated_by_the_host_and_seen_by_the_other() {
     let purse = rig.host.stats().gold;
     let cost = tower::Kind::Splash.spec(Tier::Base).cost;
 
-    rig.joiners[0].set_controls(build(0, tower::Kind::Splash));
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Splash));
     rig.until("the host building joiner A's tower", |rig| {
         rig.host.stats().built == 1
     });
     assert_eq!(rig.host.stats().gold, purse - cost, "out of the one purse");
     let seen = rig.until("joiner B drawing it", |rig| {
-        rig.joiners[1].render_state().towers[0]
+        rig.joiners[1].game().render_state().towers[0]
             .is_some_and(|tower| tower.kind == tower::Kind::Splash && tower.tier == Tier::Base)
     });
     assert!(
@@ -270,17 +352,19 @@ fn a_tower_one_joiner_builds_is_validated_by_the_host_and_seen_by_the_other() {
         "B saw A's tower {seen} ticks after it was built"
     );
     rig.until("joiner B reading the same purse", |rig| {
-        rig.joiners[1].stats().gold == purse - cost
+        rig.joiners[1].game().stats().gold == purse - cost
     });
 
     let refused = rig.host.stats().refused;
-    rig.joiners[1].set_controls(build(0, tower::Kind::Bolt));
+    rig.joiners[1]
+        .game_mut()
+        .set_controls(build(0, tower::Kind::Bolt));
     rig.until("the host refusing joiner B's build", |rig| {
         rig.host.stats().refused == refused + 1
     });
     assert_eq!(rig.host.stats().built, 1, "the plot was taken");
     rig.until("joiner A reading the refusal", |rig| {
-        rig.joiners[0].stats().refused == refused + 1
+        rig.joiners[0].game().stats().refused == refused + 1
     });
 }
 
@@ -298,7 +382,7 @@ fn a_wave_one_joiner_starts_runs_for_every_player() {
         .stats()
         .next_wave_in
         .expect("the build phase is running");
-    rig.joiners[1].set_controls(send_wave());
+    rig.joiners[1].game_mut().set_controls(send_wave());
     let frames = rig.until("the host starting the wave", |rig| {
         rig.host.stats().wave == 1
     });
@@ -309,10 +393,9 @@ fn a_wave_one_joiner_starts_runs_for_every_player() {
     assert_eq!(rig.host.stats().refused, 0);
     rig.until("creeps on every player's field", |rig| {
         rig.host.replicated().render.creeps_alive > 0
-            && rig
-                .joiners
-                .iter()
-                .all(|game| game.stats().wave == 1 && game.render_state().creeps_alive > 0)
+            && rig.joiners.iter().all(|joiner| {
+                joiner.game().stats().wave == 1 && joiner.game().render_state().creeps_alive > 0
+            })
     });
 }
 
@@ -327,13 +410,16 @@ fn a_joiner_who_leaves_does_not_stop_the_others() {
     drop(rig.joiners.remove(0));
     rig.until("the host seeing joiner A go", |rig| rig.connected() == 2);
 
-    let ticks = rig.joiners[0].stats().ticks;
-    rig.joiners[0].set_controls(build(1, tower::Kind::Bolt));
+    let ticks = rig.joiners[0].game().stats().ticks;
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(1, tower::Kind::Bolt));
     rig.until("the host building B's tower", |rig| {
         rig.host.stats().built == 1
     });
     rig.until("B drawing it, on a field still moving", |rig| {
-        rig.joiners[0].render_state().towers[1].is_some() && rig.joiners[0].stats().ticks > ticks
+        rig.joiners[0].game().render_state().towers[1].is_some()
+            && rig.joiners[0].game().stats().ticks > ticks
     });
 }
 
@@ -351,33 +437,30 @@ pub(crate) fn loopback_browser(announcer: SocketAddr) -> Browser {
 }
 
 /// A player browsing for a host, its query sent straight to `announcer`.
-fn browsing(announcer: SocketAddr) -> Game {
-    browsing_on(announcer, &Map::built_in())
-}
-
-/// …drawing `map`.
-fn browsing_on(announcer: SocketAddr, map: &Map) -> Game {
-    Game::join(
+fn browsing(announcer: SocketAddr) -> Joiner {
+    Joiner::through(LanClient::browse(
+        SESSION,
+        loopback_browser(announcer),
         TICK_HZ,
-        map,
-        LanClient::browse(session(map), loopback_browser(announcer), TICK_HZ),
-    )
+    ))
 }
 
-/// The committed field with one plot a quarter metre along: a map a player
-/// could have loaded with `--scene`, and not the host's.
+/// A map nothing like the committed field: one straight lane and two plots,
+/// one either side — what a host could have loaded with `--scene`, and what
+/// no joiner here has.
 pub(crate) fn another_map() -> Map {
-    let map = Map::built_in();
-    let mut plots = map.plots().to_vec();
-    plots[2].position[0] += 0.25;
-    Map::new(map.path().waypoints().to_vec(), plots).expect("still a legal map")
-}
-
-/// Why `game`'s host refused it for good, once it has.
-fn refusal(game: &Game) -> Option<RejectReason> {
-    game.lan_client()
-        .and_then(LanClient::client)
-        .and_then(|client| client.handshake_refusal().cloned())
+    let plot = |label: &str, z: f64| crate::scene::Plot {
+        label: label.to_string(),
+        position: [0.0, 0.0, z],
+    };
+    Map::new(
+        vec![
+            crcbl::math::DVec3::new(-10.0, 0.0, 0.0),
+            crcbl::math::DVec3::new(10.0, 0.0, 0.0),
+        ],
+        vec![plot("north", -3.0), plot("south", 3.0)],
+    )
+    .expect("a straight lane with a plot either side is a map")
 }
 
 /// **A browser finds the towers host and plays in it.** The query goes
@@ -397,7 +480,7 @@ fn a_browser_finds_the_towers_host_and_plays_in_it() {
     rig.joiners.push(browsing(announcer));
 
     rig.until("the browsed session", |rig| playing(&rig.joiners[0]));
-    let joined = rig.joiners[0].lan_client().and_then(LanClient::host);
+    let joined = rig.joiners[0].lan().and_then(LanClient::host);
     assert_eq!(joined, Some(rig.address()));
     rig.until("the announcement counting both players", |rig| {
         rig.host
@@ -407,78 +490,314 @@ fn a_browser_finds_the_towers_host_and_plays_in_it() {
     });
 }
 
-/// **A browser on another map passes over the host.** The host is heard —
-/// a plain browser lists it, announcing the host's map's compatibility and
-/// not the joiner's — and a player browsing on the host's map joins it; a
-/// player browsing on another map, polling the same host over the same
-/// frames and well past them, chooses nothing.
+/// **A joiner plays on the host's map, which is none it has.** The host is on
+/// [`another_map`] — two plots where the committed field has five — and two
+/// joiners, one by address and one by browsing, each build their game on the
+/// map the host sent: its plots, its path. A tower one of them asks for on
+/// the host's **second** plot is built by the host and drawn by both, and
+/// the host's own player sees it too.
 #[test]
-fn a_browser_on_another_map_passes_over_the_host() {
-    let mut rig = Rig::new();
+fn a_joiner_plays_on_the_hosts_map_which_is_none_it_has() {
+    let map = another_map();
+    assert_ne!(map, Map::built_in());
+    let mut rig = Rig {
+        host: host_on(&map),
+        joiners: Vec::new(),
+    };
     let announcer = rig
         .host
         .lan_host()
         .and_then(LanHost::announcer_addr)
         .expect("the host announces");
-    let other = another_map();
-    rig.joiners.push(browsing_on(announcer, &other));
+    rig.join();
     rig.joiners.push(browsing(announcer));
-    rig.until("the joiner on the host's map playing", |rig| {
-        playing(&rig.joiners[1])
+    rig.until("both joiners playing", |rig| {
+        rig.joiners.iter().all(playing)
     });
-    for _ in 0..SEEN_WITHIN {
-        rig.step();
+    for joiner in &rig.joiners {
+        assert_eq!(
+            joiner.game().map(),
+            &map,
+            "a joiner is not on the host's map"
+        );
+        assert_eq!(joiner.game().stats().plots, 2);
     }
-    assert_eq!(
-        rig.joiners[0].lan_client().and_then(LanClient::host),
-        None,
-        "a joiner on another map chose the host"
-    );
 
-    let mut heard = loopback_browser(announcer);
-    let mut hosts = Vec::new();
-    for _ in 0..MAX_FRAMES {
-        heard.poll();
-        hosts = heard.hosts();
-        if !hosts.is_empty() {
-            break;
-        }
-        // The host answers the query in its own frame.
-        rig.step();
-    }
-    let [host] = hosts.as_slice() else {
-        panic!("the browser should hear exactly the one host: {hosts:?}");
-    };
-    assert_eq!(host.compatibility, session(&Map::built_in()).compatibility);
-    assert_ne!(
-        host.compatibility,
-        session(&other).compatibility,
-        "the announce does not tell the two maps apart"
+    let south = 1;
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(south, tower::Kind::Slow));
+    rig.until("every player drawing the tower on the host's plot", |rig| {
+        rig.host.render_state().towers[usize::from(south)].is_some()
+            && rig
+                .joiners
+                .iter()
+                .all(|joiner| joiner.game().render_state().towers[usize::from(south)].is_some())
+    });
+    assert_eq!(rig.host.stats().built_of(tower::Kind::Slow), 1);
+    assert_eq!(
+        rig.host.stats().refused,
+        0,
+        "the host's plot was the one asked for"
     );
 }
 
-/// **A direct join on another map is refused, by name.** A player who
-/// `--join`s a host with the wrong map is turned away by the handshake as a
-/// schema mismatch — permanent, so the client stops asking — and the
-/// refusal it keeps names both sides' schema hashes; the host holds only its
-/// own player.
+/// **A host on another map is a host like any other to a browser**: it is
+/// heard announcing towers' own compatibility — the map is no part of it —
+/// and a browsing player joins it.
 #[test]
-fn a_direct_join_on_another_map_is_refused_by_name() {
-    let mut rig = Rig::new();
-    let other = another_map();
-    let client = LanClient::join(session(&other), rig.address(), TICK_HZ).expect("connect");
-    rig.joiners.push(Game::join(TICK_HZ, &other, client));
-    rig.until("the host refusing the joiner", |rig| {
-        refusal(&rig.joiners[0]).is_some()
-    });
+fn a_browser_joins_a_host_on_another_map() {
+    let mut rig = Rig {
+        host: host_on(&another_map()),
+        joiners: Vec::new(),
+    };
+    let announcer = rig
+        .host
+        .lan_host()
+        .and_then(LanHost::announcer_addr)
+        .expect("the host announces");
+    assert_eq!(
+        rig.host
+            .lan_host()
+            .and_then(LanHost::announcement)
+            .map(|announcement| announcement.compatibility),
+        Some(SESSION.compatibility)
+    );
+    rig.joiners.push(browsing(announcer));
+    rig.until("the browsed session", |rig| playing(&rig.joiners[0]));
+    assert_eq!(rig.joiners[0].game().map(), &another_map());
+}
 
-    let refused = refusal(&rig.joiners[0]).expect("refused");
-    assert_eq!(refused.code, RejectReason::SCHEMA_MISMATCH, "{refused:?}");
-    for (side, map) in [("client", &other), ("server", &Map::built_in())] {
-        let named = format!("{side} 0x{:016x}", session(map).compatibility.schema_hash);
-        assert!(refused.msg.contains(&named), "{named} in {:?}", refused.msg);
+/// What the committed field's session hand-shook on before the map crossed
+/// the wire: protocol version 3, and the field's fingerprint folded into the
+/// schema.
+const BEFORE_THE_MAP_WAS_SENT: ProtocolCompatibility = ProtocolCompatibility {
+    protocol_version: 3,
+    engine_build_id: SESSION.compatibility.engine_build_id,
+    schema_hash: 0x9d7f_d7e0_2e75_7e3d,
+};
+
+/// A host that is nothing but the engine's: a session on an empty world,
+/// announcing `game`, whose peers are sent whatever a test sends them.
+struct Bare {
+    lan: LanHost,
+    now: Duration,
+}
+
+impl Bare {
+    fn open(game: LanGame) -> Self {
+        Self {
+            lan: LanHost::open(game, on_loopback(), World::new(), TICK_HZ)
+                .expect("loopback UDP must be available to these tests"),
+            now: Duration::ZERO,
+        }
     }
+
+    fn address(&self) -> SocketAddr {
+        (Ipv4Addr::LOCALHOST, self.lan.game_port()).into()
+    }
+
+    /// One frame, answering the peers who joined in it.
+    fn frame(&mut self) -> Vec<PeerEvent> {
+        self.now += FRAME;
+        self.lan.frame(self.now)
+    }
+}
+
+/// Steps `bare` and `joiner` until `done` holds, failing past
+/// [`MAX_FRAMES`]. Returns the joiner, and the peer the host admitted if it
+/// admitted one.
+fn step_bare(
+    bare: &mut Bare,
+    mut joiner: Joiner,
+    what: &str,
+    mut on_join: impl FnMut(&mut LanHost, crcbl::server::PeerId),
+    done: impl Fn(&Joiner) -> bool,
+) -> Joiner {
+    for _ in 0..MAX_FRAMES {
+        if done(&joiner) {
+            return joiner;
+        }
+        for event in bare.frame() {
+            if let PeerEvent::Joined(peer) = event {
+                on_join(&mut bare.lan, peer);
+            }
+        }
+        joiner = joiner.frame(FRAME);
+        thread::sleep(PAUSE);
+    }
+    panic!("no {what} within {MAX_FRAMES} frames");
+}
+
+/// **A build from before the map crossed the wire and one from after refuse
+/// each other, by version** — both ways round, each side naming both
+/// versions — so a joiner of the old protocol can never wait on a map, or a
+/// new one play on its own.
+#[test]
+fn a_build_from_before_the_map_was_sent_is_refused_both_ways() {
+    let old = LanGame {
+        compatibility: BEFORE_THE_MAP_WAS_SENT,
+        ..SESSION
+    };
+    let expected = format!(
+        "client {}, server {}",
+        BEFORE_THE_MAP_WAS_SENT.protocol_version, SESSION.compatibility.protocol_version
+    );
+    let mut rig = Rig::new();
+    let client = LanClient::join(old, rig.address(), TICK_HZ).expect("connect");
+    rig.joiners.push(Joiner::through(client));
+    rig.until("the new host refusing the old joiner", |rig| {
+        rig.joiners[0].failure().is_some()
+    });
+    let Some(JoinFailure::Refused { reason, .. }) = rig.joiners[0].failure() else {
+        panic!("not a refusal: {:?}", rig.joiners[0]);
+    };
+    assert!(reason.contains(&expected), "{reason}");
     assert_eq!(rig.connected(), 1, "only the host's own player is in");
+
+    let mut bare = Bare::open(old);
+    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let joiner = step_bare(
+        &mut bare,
+        Joiner::through(client),
+        "the old host refusing the new joiner",
+        |_, _| {},
+        |joiner| joiner.failure().is_some(),
+    );
+    let Some(JoinFailure::Refused { reason, .. }) = joiner.failure() else {
+        panic!("not a refusal: {joiner:?}");
+    };
+    let expected = format!(
+        "client {}, server {}",
+        SESSION.compatibility.protocol_version, BEFORE_THE_MAP_WAS_SENT.protocol_version
+    );
+    assert!(reason.contains(&expected), "{reason}");
+}
+
+/// **A map the host sends that this build refuses ends the join, by name** —
+/// bytes that are not a map, and a well-formed map with a plot on the lane —
+/// and no game is built on either.
+#[test]
+fn a_malformed_map_ends_the_join_by_name() {
+    let mut on_the_lane = another_map().to_wire();
+    // The last plot's z, the final coordinate: onto the lane's centre line.
+    let z = on_the_lane.len() - size_of::<u64>();
+    on_the_lane[z..].copy_from_slice(&0.0_f64.to_bits().to_le_bytes());
+
+    for (bytes, check) in [
+        (
+            b"not a towers map, nor anything like one".to_vec(),
+            (|error: &MapWireError| matches!(error, MapWireError::NotAMap))
+                as fn(&MapWireError) -> bool,
+        ),
+        (
+            on_the_lane,
+            |error| matches!(error, MapWireError::Map(MapError::OnTheLane { plot, .. }) if plot == "south"),
+        ),
+    ] {
+        let mut bare = Bare::open(SESSION);
+        let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+        let joiner = step_bare(
+            &mut bare,
+            Joiner::through(client),
+            "the join ending on the map",
+            |lan, peer| {
+                lan.host_mut()
+                    .send_event(peer, bytes.clone())
+                    .expect("the joiner is connected");
+            },
+            |joiner| !matches!(joiner, Joiner::Joining(_)),
+        );
+        let Joiner::Failed(JoinFailure::BadMap { error, host }) = &joiner else {
+            panic!("the join did not end on the map: {joiner:?}");
+        };
+        assert!(check(error), "{error:?}");
+        assert_eq!(*host, bare.address());
+        let named = joiner.failure().expect("failed").to_string();
+        assert!(named.contains(&error.to_string()), "{named}");
+    }
+}
+
+/// **A joiner builds nothing until the map comes, and then builds on it.**
+/// A host that holds the map back: the joiner's session comes up and runs
+/// for many frames with no game; the host sends the map, and the first game
+/// the joiner has is on it. Held back past the timeout instead, the join ends
+/// as no map — by name, and without a game.
+#[test]
+fn a_joiner_builds_nothing_until_the_map_comes() {
+    let map = another_map();
+    let mut bare = Bare::open(SESSION);
+    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let mut admitted = None;
+    let in_session = |joiner: &Joiner| {
+        joiner
+            .lan()
+            .and_then(LanClient::client)
+            .is_some_and(|client| client.session_id().is_some())
+    };
+    let mut joiner = step_bare(
+        &mut bare,
+        Joiner::through(client),
+        "the joiner's session",
+        |_, peer| admitted = Some(peer),
+        in_session,
+    );
+    for _ in 0..SEEN_WITHIN {
+        bare.frame();
+        joiner = joiner.frame(FRAME);
+        thread::sleep(PAUSE);
+        assert!(
+            matches!(joiner, Joiner::Joining(_)),
+            "a game with no map: {joiner:?}"
+        );
+    }
+    bare.lan
+        .host_mut()
+        .send_event(admitted.expect("admitted"), map.to_wire())
+        .expect("the joiner is connected");
+    let joiner = step_bare(
+        &mut bare,
+        joiner,
+        "the game",
+        |_, _| {},
+        |joiner| matches!(joiner, Joiner::Playing(_)),
+    );
+    assert_eq!(joiner.game().map(), &map);
+
+    let client = LanClient::join(SESSION, bare.address(), TICK_HZ).expect("connect");
+    let joiner = step_bare(
+        &mut bare,
+        Joiner::through(client),
+        "the second joiner's session",
+        |_, _| {},
+        in_session,
+    );
+    let Joiner::Failed(failure) = joiner.frame(JOIN_TIMEOUT) else {
+        panic!("the join outlived its timeout with no map");
+    };
+    assert!(
+        matches!(failure, JoinFailure::NoMap { waited, .. } if waited == JOIN_TIMEOUT),
+        "{failure:?}"
+    );
+}
+
+/// **A host nobody answers ends the join as no answer**, once the join's
+/// timeout has passed on its own clock — a socket that takes the hello and
+/// says nothing, so no link reports anything first.
+#[test]
+fn a_host_nobody_answers_ends_the_join_as_no_answer() {
+    let silent = std::net::UdpSocket::bind(loopback()).expect("loopback UDP");
+    let address = silent.local_addr().expect("bound");
+    let client = LanClient::join(SESSION, address, TICK_HZ).expect("connect");
+    let joiner = Joiner::through(client).frame(FRAME);
+    assert!(matches!(joiner, Joiner::Joining(_)), "{joiner:?}");
+    let Joiner::Failed(failure) = joiner.frame(JOIN_TIMEOUT) else {
+        panic!("the join outlived its timeout");
+    };
+    assert!(
+        matches!(failure, JoinFailure::NoAnswer { host, .. } if host == address),
+        "{failure:?}"
+    );
 }
 
 /// The plan `a_splash_and_a_slow_tower_hold_the_whole_table` wins with.
@@ -555,7 +874,7 @@ fn the_towers_snapshot_fits_one_datagram_through_the_table_with_nothing_held_bac
         let controls = next_move(&rig.host, &PLAN, |_| true);
         match frame % usize::from(MAX_PLAYERS) {
             0 => rig.host.set_controls(controls),
-            joiner => rig.joiners[joiner - 1].set_controls(controls),
+            joiner => rig.joiners[joiner - 1].game_mut().set_controls(controls),
         }
         rig.step();
         peak_creeps = peak_creeps.max(stats.creeps);
@@ -585,6 +904,7 @@ fn the_towers_snapshot_fits_one_datagram_through_the_table_with_nothing_held_bac
     assert_eq!(host.oversized_snapshot_count(), 0, "no snapshot refused");
     assert_eq!(host.processing_error_count(), 0);
     for joiner in &rig.joiners {
+        let joiner = joiner.game();
         let client = joiner
             .lan_client()
             .and_then(LanClient::client)
@@ -648,7 +968,7 @@ fn a_dedicated_server_holds_its_run_until_a_player_who_found_it_joins() {
 
     rig.joiners.push(browsing(announcer));
     rig.until("the browsed session", |rig| playing(&rig.joiners[0]));
-    let joined = rig.joiners[0].lan_client().and_then(LanClient::host);
+    let joined = rig.joiners[0].lan().and_then(LanClient::host);
     assert_eq!(joined, Some(rig.address()));
     let (_, line) = rig.host.printed.last().expect("a line on the join");
     assert!(line.starts_with("towers: 1/4 players"), "{line}");
@@ -686,8 +1006,10 @@ fn four_players_win_the_whole_table_on_a_dedicated_server() {
         }
         let players = rig.joiners.len();
         let player = frame % players;
-        let controls = next_move(&rig.joiners[player], &PLAN, |plot| plot % players == player);
-        rig.joiners[player].set_controls(controls);
+        let controls = next_move(rig.joiners[player].game(), &PLAN, |plot| {
+            plot % players == player
+        });
+        rig.joiners[player].game_mut().set_controls(controls);
         rig.step();
     }
 
@@ -709,7 +1031,7 @@ fn four_players_win_the_whole_table_on_a_dedicated_server() {
     rig.until("every player reading the win", |rig| {
         rig.joiners
             .iter()
-            .all(|game| game.stats().outcome == crate::wave::Outcome::Won)
+            .all(|joiner| joiner.game().stats().outcome == crate::wave::Outcome::Won)
     });
     assert!(
         rig.host.printed.iter().any(|(_, line)| {
@@ -727,7 +1049,7 @@ fn four_players_win_the_whole_table_on_a_dedicated_server() {
 #[test]
 fn a_player_leaving_mid_run_does_not_stop_a_dedicated_server() {
     let mut rig = Rig::serving().with_playing(2);
-    rig.joiners[0].set_controls(send_wave());
+    rig.joiners[0].game_mut().set_controls(send_wave());
     rig.until("the wave the first player sent", |rig| {
         rig.host.stats().wave == 1
     });
@@ -737,12 +1059,15 @@ fn a_player_leaving_mid_run_does_not_stop_a_dedicated_server() {
         rig.connected() == 1
     });
 
-    let ticks = rig.joiners[0].stats().ticks;
-    rig.joiners[0].set_controls(build(1, tower::Kind::Bolt));
+    let ticks = rig.joiners[0].game().stats().ticks;
+    rig.joiners[0]
+        .game_mut()
+        .set_controls(build(1, tower::Kind::Bolt));
     rig.until("the server building the other's tower", |rig| {
         rig.host.stats().built == 1
     });
     rig.until("the other drawing it, on a field still moving", |rig| {
-        rig.joiners[0].render_state().towers[1].is_some() && rig.joiners[0].stats().ticks > ticks
+        rig.joiners[0].game().render_state().towers[1].is_some()
+            && rig.joiners[0].game().stats().ticks > ticks
     });
 }

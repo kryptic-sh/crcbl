@@ -103,7 +103,8 @@ OPTIONS:
                          With nobody in it the run holds still. Prints a status
                          line as players come and go and every 10 seconds.
                          Takes --tick-hz and --scene and no other option.
-    --join <IP:PORT>     Join the co-op session at IP:PORT directly.
+    --join <IP:PORT>     Join the co-op session at IP:PORT directly. A joiner
+                         plays on the host's map, whatever --scene says.
     --browse             Look for co-op sessions on the local network, print
                          what answers, and join the first one this build can
                          play with. --host, --serve, --join and --browse
@@ -124,7 +125,8 @@ pub struct Options {
     /// The flags every sample has.
     pub common: Common,
     /// The field the run is played on: the committed one unless `--scene`
-    /// named another directory. A joiner draws its own — see `crate::lan`.
+    /// named another directory. A joiner plays on the host's instead, which
+    /// the host sends at join — see `crate::lan`.
     pub map: Map,
     /// Host, join or look for a co-op session — see `crate::lan`. Native
     /// builds only: web builds have no networking.

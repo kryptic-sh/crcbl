@@ -58,9 +58,9 @@
 //! `--browse` join one from another machine, and every player's commands are
 //! validated against one purse and one pool of lives; `--serve [PORT]` runs
 //! the same server with no window and no player of its own, for four
-//! joiners. The server's world
-//! replicates the field as [`replica`]'s entities, which is all a joiner draws
-//! from. The `lan` module has the wiring, and it is native only: the browser
+//! joiners. The host sends each joiner its map at join, and the joiner plays
+//! on that; the server's world replicates the field as [`replica`]'s
+//! entities, which is all a joiner draws from. The `lan` module has the wiring, and it is native only: the browser
 //! build is single player. A native run whose command line chose nothing opens
 //! on the `lobby` module, which picks among those — solo, host, a LAN host or
 //! an address.
@@ -127,7 +127,7 @@ pub use args::{Invocation, Options, USAGE, parse};
 pub use creep::{CREEPS, Creep, CreepSpec, CreepView};
 pub use game::{Controls, DEFAULT_TICK_HZ, Game, GameError, RenderState, Stats};
 pub use gpu::{Gpu, Paths};
-pub use map::{Map, MapError};
+pub use map::{Map, MapError, MapWireError};
 pub use menu::{MenuAction, MenuKind, Menus};
 pub use page::PageStats;
 pub use scene::{FIELD, Plot, Waypoint, built_in_source, register_components};

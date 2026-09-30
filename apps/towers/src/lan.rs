@@ -5,7 +5,8 @@
 //!  host:   Stage ◀─ TowersModule ◀─ Host ◀─┬─ in-memory ─ this player
 //!            └─▶ FieldReplica ─▶ snapshots ├─ UDP ─────── a joiner
 //!                                          └─ UDP ─────── another
-//!  joiner: snapshots ─▶ Client::replicated ─▶ replica::decode ─▶ the frame
+//!  joiner: the host's map ─▶ Joining ─▶ Game on that map
+//!          snapshots ─▶ Client::replicated ─▶ replica::decode ─▶ the frame
 //! ```
 //!
 //! # The host is a player too
@@ -35,14 +36,21 @@
 //! [`crate::game::Stats`] are the host's, a round trip late. Its commands go
 //! out a tick at a time, exactly as solo's.
 //!
-//! **It draws its own map.** The plots and the path are this process's
-//! `--scene` (or the committed field), and the host's map never crosses the
-//! wire. What does is its fingerprint, folded into the handshake's
-//! compatibility by [`crate::game`]'s `compatibility`: a browser passes over a
-//! host on another map, and the handshake refuses a direct join to one as a
-//! schema mismatch, so a joiner never draws the host's towers on its own
-//! plots. Sending the host's map at join, so any joiner can play any host, is
-//! recorded in `docs/backlog.md`.
+//! **It plays on the host's map, whatever its own `--scene` says.** The
+//! moment a joiner is admitted the host sends it the map — [`Map::to_wire`],
+//! sealed on the reliable channel with `crcbl_server::Host::send_event`, so
+//! it arrives behind the handshake's accept and ahead of anything else sent
+//! reliably — and the joiner builds no game until it has it: a [`Joining`]
+//! holds the client, reads the map back with [`Map::from_wire`], which
+//! trusts none of it, and only then builds the [`Game`] on it. So a joiner's
+//! game is never on its own map, and never draws the host's towers on its own
+//! plots. Any build of this protocol joins any host, on any map.
+//!
+//! **A join that goes wrong says so.** A host that refuses the handshake, a
+//! link that ends, a map that does not decode, or no map within
+//! [`JOIN_TIMEOUT`] of choosing the host ends the [`Joining`] with a
+//! [`JoinFailure`] naming which — what the lobby shows, and what a joiner
+//! started from the command line logs.
 //!
 //! # Wall time, every frame
 //!
@@ -57,16 +65,19 @@
 //! `docs/notes/simulation.md`: the browser build offers none of the four
 //! flags and has no LAN link.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
-use crcbl::client::Client;
+use crcbl::client::{Client, Ended};
 use crcbl::core::FrameClock;
 use crcbl::ecs::World;
 use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
 use crcbl::net::InMemoryTransport;
+use crcbl::net::udp::CONNECT_TIMEOUT;
+use crcbl::server::{PeerEvent, PeerId};
 
-use crate::game::{GameError, TowersModule, compatibility};
-use crate::map::Map;
+use crate::game::{COMPATIBILITY, Game, GameError, TowersModule};
+use crate::map::{Map, MapWireError};
 use crate::replica::{self, Decoded};
 
 /// The most players a towers session holds, the host's own among them: the
@@ -80,20 +91,42 @@ pub const APP: &str = "towers";
 /// or a listener on another lists and answers nothing.
 pub const PROTOCOL_ID: u32 = u32::from_be_bytes(*b"TWRS");
 
-/// Towers' LAN session on `map`, as [`crcbl::lan`] knows it.
+/// Towers' LAN session, as [`crcbl::lan`] knows it.
 ///
-/// The compatibility is the one solo's handshake gates on too, with the map
-/// folded in — see [`crate::game`]'s `compatibility` — so a joiner of another
-/// build or on another map is refused by the handshake and passed over by a
-/// browser before it.
-#[must_use]
-pub fn session(map: &Map) -> LanGame {
-    LanGame {
-        app: APP,
-        host_name: "crcbl towers",
-        protocol_id: PROTOCOL_ID,
-        compatibility: compatibility(map),
-        max_players: MAX_PLAYERS,
+/// The compatibility is the one solo's handshake gates on too, so a joiner of
+/// another build is refused by the handshake and passed over by a browser
+/// before it. The map is not in it: the host sends its own at join.
+pub const SESSION: LanGame = LanGame {
+    app: APP,
+    host_name: "crcbl towers",
+    protocol_id: PROTOCOL_ID,
+    compatibility: COMPATIBILITY,
+    max_players: MAX_PLAYERS,
+};
+
+/// The longest a join may take from choosing a host to holding its map, on
+/// the join's own clock.
+///
+/// Past the transport's own [`CONNECT_TIMEOUT`], so an address nobody answers
+/// is reported as the link says it ended wherever the link says so first,
+/// with the rest left for the handshake and the map — which on a LAN take a
+/// few milliseconds. What it catches is everything no link reports: a host
+/// that accepted the join and whose map never came.
+pub const JOIN_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_mul(2);
+
+/// Sends `map` — a [`Map::to_wire`] — to every peer `events` says joined,
+/// but `local`: the host's own player, whose game is on the map already.
+///
+/// A send that fails is logged: that joiner waits out [`JOIN_TIMEOUT`] and
+/// says so on its side, which is where a player can act on it.
+fn welcome(lan: &mut LanHost, events: &[PeerEvent], map: &[u8], local: Option<PeerId>) {
+    for event in events {
+        if let PeerEvent::Joined(peer) = *event
+            && Some(peer) != local
+            && let Err(error) = lan.host_mut().send_event(peer, map.to_vec())
+        {
+            crcbl::log::warn!("lan: the map did not go to {peer:?}: {error}");
+        }
     }
 }
 
@@ -102,16 +135,20 @@ pub fn session(map: &Map) -> LanGame {
 pub(crate) struct HostLink {
     lan: LanHost,
     local: Client<InMemoryTransport>,
+    /// This player's own session, which is sent no map.
+    local_peer: Option<PeerId>,
+    /// The map every joiner is sent, encoded once.
+    map: Vec<u8>,
     /// Wall time since the session started, summed from each frame's
     /// `render_dt`: the host's clock.
     wall: Duration,
 }
 
 impl HostLink {
-    /// Hosts `world` — the stage's replica — ticked by `module` as `game`,
-    /// bound where `bind` says, and joins it as this player. Answers the link
-    /// and the tick period, with the first tick spent on this player's
-    /// handshake.
+    /// Hosts `world` — the stage's replica on `map` — ticked by `module` as
+    /// `game`, bound where `bind` says, and joins it as this player. Every
+    /// other player is sent `map` as they join. Answers the link and the tick
+    /// period, with the first tick spent on this player's handshake.
     ///
     /// # Errors
     ///
@@ -124,6 +161,7 @@ impl HostLink {
         world: World,
         module: TowersModule,
         tick_hz: u32,
+        map: &Map,
     ) -> Result<(Self, Duration), GameError> {
         let mut lan = LanHost::open(game, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
@@ -137,17 +175,27 @@ impl HostLink {
         // One tick on the handshake, as `Game::new` spends solo's: the hello
         // goes out, the host's tick admits it, and the accept comes back.
         local.update(tick_period);
-        lan.frame(tick_period);
+        let events = lan.frame(tick_period);
         local.update(tick_period);
         if local.session_id().is_none() {
             return Err(GameError::Server(
                 "the host's own session did not come up in its first tick".into(),
             ));
         }
+        // The only transport the host had was this player's, so the first
+        // session it admitted is theirs.
+        let local_peer = events.iter().find_map(|event| match *event {
+            PeerEvent::Joined(peer) => Some(peer),
+            _ => None,
+        });
+        let map = map.to_wire();
+        welcome(&mut lan, &events, &map, local_peer);
         Ok((
             Self {
                 lan,
                 local,
+                local_peer,
+                map,
                 wall: tick_period,
             },
             tick_period,
@@ -166,7 +214,8 @@ impl HostLink {
     /// `sim_time`, so no command goes out twice.
     pub fn frame(&mut self, render_dt: Duration, sim_time: Duration) {
         self.wall += render_dt;
-        self.lan.frame(self.wall);
+        let events = self.lan.frame(self.wall);
+        welcome(&mut self.lan, &events, &self.map, self.local_peer);
         self.local.update(sim_time);
     }
 
@@ -202,10 +251,22 @@ impl RemoteLink {
         self.lan.frame(sim_time);
     }
 
-    /// Browses, or reads what the host sent, without moving the client's
-    /// clock from `sim_time`.
+    /// Reads what the host sent, without moving the client's clock from
+    /// `sim_time`.
+    ///
+    /// The host sends one event, the map, and [`Joining`] took it before
+    /// this game was built; anything after it means nothing to towers and is
+    /// taken off the queue and logged rather than left to fill it.
     pub fn frame(&mut self, sim_time: Duration) {
         self.lan.frame(sim_time);
+        if let Some(client) = self.lan.client_mut() {
+            for event in client.events() {
+                crcbl::log::warn!(
+                    "lan: an event of {} bytes from the host after its map, ignored",
+                    event.len()
+                );
+            }
+        }
     }
 
     /// The engine's LAN client: the F3 section and the session.
@@ -219,6 +280,171 @@ impl RemoteLink {
         self.lan.client().map_or_else(Decoded::default, |client| {
             replica::decode(client.replicated(replica::SYSTEM))
         })
+    }
+}
+
+/// Why a join ended without a game.
+#[derive(Debug)]
+pub enum JoinFailure {
+    /// The host refused the handshake, for good — another build.
+    Refused {
+        /// The host.
+        host: SocketAddr,
+        /// What its refusal said.
+        reason: String,
+    },
+    /// The host ended the session, or the link did, before the map came.
+    Ended {
+        /// The host.
+        host: SocketAddr,
+        /// How.
+        how: String,
+    },
+    /// The host sent a map this build refuses.
+    BadMap {
+        /// The host.
+        host: SocketAddr,
+        /// What is wrong with it.
+        error: MapWireError,
+    },
+    /// Nothing answered within the join's timeout: no session came up.
+    NoAnswer {
+        /// The host.
+        host: SocketAddr,
+        /// How long it was given.
+        waited: Duration,
+    },
+    /// The session came up and the map did not come within the join's
+    /// timeout.
+    NoMap {
+        /// The host.
+        host: SocketAddr,
+        /// How long it was given.
+        waited: Duration,
+    },
+}
+
+impl std::fmt::Display for JoinFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused { host, reason } => write!(f, "{host} refused the join: {reason}"),
+            Self::Ended { host, how } => write!(f, "{host}: {how}"),
+            Self::BadMap { host, error } => {
+                write!(f, "{host} sent a map this build refuses: {error}")
+            }
+            Self::NoAnswer { host, waited } => {
+                write!(f, "no answer from {host} in {:.1} s", waited.as_secs_f64())
+            }
+            Self::NoMap { host, waited } => {
+                write!(f, "no map from {host} in {:.1} s", waited.as_secs_f64())
+            }
+        }
+    }
+}
+
+impl std::error::Error for JoinFailure {}
+
+/// A joiner waiting for the host's map: the client in the session, or on its
+/// way into one, and no game yet — see the module docs.
+#[derive(Debug)]
+pub struct Joining {
+    /// Boxed, as the game's link boxes it, so a join is small to move
+    /// between the states it passes through.
+    lan: Box<LanClient>,
+    tick_hz: u32,
+    /// Wall time since the join started, summed from each frame's
+    /// `render_dt`: the client's clock, and what the timeout is measured on.
+    now: Duration,
+    /// When a host was chosen — at once for an address, when the browser
+    /// finds one for a browse.
+    chosen_at: Option<Duration>,
+    /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
+    /// test asked for less.
+    timeout: Duration,
+}
+
+/// Where a [`Joining`] stands after a frame.
+#[derive(Debug)]
+pub enum Progress {
+    /// Still waiting: browsing, handshaking, or in the session with no map.
+    Waiting(Joining),
+    /// The map came, and this is the game on it.
+    Joined(Game),
+    /// The join is over, and why.
+    Failed(JoinFailure),
+}
+
+impl Joining {
+    /// Waits, through `lan`, for a host's map, at `tick_hz`, giving a chosen
+    /// host `timeout` to send it — [`JOIN_TIMEOUT`] outside the tests.
+    #[must_use]
+    pub fn new(lan: LanClient, tick_hz: u32, timeout: Duration) -> Self {
+        Self {
+            lan: Box::new(lan),
+            tick_hz,
+            now: Duration::ZERO,
+            chosen_at: None,
+            timeout,
+        }
+    }
+
+    /// The engine's LAN client: where it is joining, and the F3 section.
+    #[must_use]
+    pub const fn lan(&self) -> &LanClient {
+        &self.lan
+    }
+
+    /// Runs the join for a frame covering `render_dt`, paused or not, and
+    /// says where it stands. The first event the host sends is its map: a
+    /// map that decodes is the game, and one that does not ends the join.
+    pub fn step(mut self, render_dt: Duration) -> Progress {
+        self.now += render_dt;
+        self.lan.frame(self.now);
+        let (Some(host), Some(client)) = (self.lan.host(), self.lan.client_mut()) else {
+            // Still browsing: no host is chosen, so none is late.
+            return Progress::Waiting(self);
+        };
+        let chosen_at = *self.chosen_at.get_or_insert(self.now);
+        if let Some(refusal) = client.handshake_refusal() {
+            return Progress::Failed(JoinFailure::Refused {
+                host,
+                reason: refusal.msg.clone(),
+            });
+        }
+        // The host sends one event, its map; anything behind it in the same
+        // read goes with the drain, as `RemoteLink::frame` drops what comes
+        // after.
+        let map = client.events().next();
+        if let Some(bytes) = map {
+            return match Map::from_wire(&bytes) {
+                Ok(map) => Progress::Joined(Game::joined(self.tick_hz, map, *self.lan, self.now)),
+                Err(error) => {
+                    crcbl::log::warn!("lan: {host} sent a map this build refuses: {error}");
+                    Progress::Failed(JoinFailure::BadMap { host, error })
+                }
+            };
+        }
+        if let Some(ended) = client.ended() {
+            let how = match ended {
+                Ended::ByServer(reason) => format!("the host ended the session: {reason:?}"),
+                Ended::Lost => match client.transport().end_reason() {
+                    Some(reason) => format!("the link ended: {reason:?}"),
+                    None => "the link ended".to_string(),
+                },
+            };
+            return Progress::Failed(JoinFailure::Ended { host, how });
+        }
+        if self.now.saturating_sub(chosen_at) >= self.timeout {
+            let waited = self.timeout;
+            let failure = if client.session_id().is_some() {
+                JoinFailure::NoMap { host, waited }
+            } else {
+                JoinFailure::NoAnswer { host, waited }
+            };
+            crcbl::log::warn!("lan: {failure}");
+            return Progress::Failed(failure);
+        }
+        Progress::Waiting(self)
     }
 }
 

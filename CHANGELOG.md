@@ -41,16 +41,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 - **`crcbl_towers::Options` has a `lan` field and `GameError` a `Lan` variant**
   on native builds (see Added: towers plays co-op over a LAN), so a struct
   literal must name the field (`crcbl::lan::LanMode::Off` is solo) and an
-  exhaustive `match` the variant. Towers' protocol version is 3: the snapshot
-  now carries the field, which an older client cannot read. **Its schema hash
-  now folds in the map's fingerprint** (`crcbl_towers::Map::fingerprint`), so
-  two towers builds on different maps refuse each other, and so do a build from
-  before this change and one from after it, whatever their maps: the committed
-  field's session hand-shakes on schema `0x9d7fd7e02e757e3d`. There is no
-  `lan::LAN` constant: `crcbl_towers::lan::session(&map)` is the session on a
-  map, beside `lan::PROTOCOL_ID` and `lan::APP`. On native builds `Options` has
-  a `lobby` field and `MenuKind` a `Lobby` variant (see Added: towers opens on a
-  lobby), and `MenuAction` a `Lobby(lobby::Pick)` variant.
+  exhaustive `match` the variant. **Towers' protocol version is 4**: the
+  snapshot carries the field, and a LAN host sends its map to each joiner at
+  join (see Added), so a towers build from before either change and one from
+  after refuse each other by version, both ways round. The map is not part of
+  the schema — an earlier unreleased build folded a `Map::fingerprint` into it;
+  that method is gone. `crcbl_towers::lan::SESSION` is the session, beside
+  `lan::PROTOCOL_ID` and `lan::APP`. There is no `Game::join`: a joiner is a
+  `lan::Joining` until the host's map arrives, and only then a `Game`.
+  `MapError` has a `LabelTooLong` variant — a plot label past
+  `map::MAX_LABEL_BYTES` is refused, so every map a host loads is one its
+  joiners accept. On native builds `Options` has a `lobby` field and `MenuKind`
+  `Lobby` and `Joining` variants (see Added: towers opens on a lobby), and
+  `MenuAction` a `Lobby(lobby::Pick)` variant.
 
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
@@ -506,23 +509,34 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   others; `Game::host`, `Game::join`, `Game::replicated`, `Game::lan_host`,
   `Game::lan_client` and `Game::lan_section` are new, and the F3 panel gains the
   "lan" section during a session. Four players winning the whole table fit every
-  snapshot in one datagram with nothing held back. A joiner draws its own map,
-  so the map is in the handshake as a fingerprint: `Map::fingerprint` digests
-  the waypoints in order and the plots (label and position) through a defined
-  little-endian encoding with SHA-256, and every session's schema hash folds it
-  in, so a browser passes over a host on another map and a direct join to one is
-  refused as a schema mismatch naming both hashes.
+  snapshot in one datagram with nothing held back. **The host's map is the
+  session's**: the moment a joiner is admitted the host sends it `Map::to_wire`
+  (the waypoints in order and the plots, label and position, through a defined
+  little-endian layout) with `crcbl_server::Host::send_event`, and the joiner —
+  a `lan::Joining` until then — reads it back with `Map::from_wire`, which holds
+  every count and label to its cap before allocating, refuses a coordinate that
+  is not finite and then every rule `Map::new` has, naming what was wrong
+  (`MapWireError`). Only then is the joiner's `Game` built, on that map, and the
+  GPU's field rebuilt for it (`Gpu::set_map`), so any joiner plays any host
+  whatever its own `--scene`, and never draws on a map that is not the host's. A
+  join that ends without a map — refused, the link ended, a map this build
+  refuses, or nothing within `lan::JOIN_TIMEOUT` — ends as a `lan::JoinFailure`
+  naming which; `--join` and `--browse` wait under a `JOINING` panel and show
+  and log the failure there.
 
 - **Towers opens on a lobby** (native builds): solo, host (as `--host`, on any
   free port), a row per LAN host a `Browser` hears that this build can join —
   its name and players — with the ones it cannot join shown dimmed under the
-  title with the reason (another version, build or map, or full), and a connect
+  title with the reason (another version, build or game, or full), and a connect
   row that joins an `IP:PORT` typed into the lobby, refusing anything else by
-  name. Arrows and Enter, or a pad, drive it like every menu. A command line
-  that chose anything skips it — `--host`, `--join`, `--browse`, `--serve`,
-  `--scene`, `--headless`, `--frames` or `--screenshot` — so scripts and CI are
-  unaffected, and `Options` gains `lobby: bool` (false unless `parse` set it).
-  The browser build has no lobby and boots straight into solo.
+  name. A join keeps the lobby up, saying `JOINING` and where, until the host's
+  map is in; one that fails leaves the player in the lobby with a warning naming
+  why (`JOIN FAILED: …`) rather than on an empty field. Arrows and Enter, or a
+  pad, drive it like every menu. A command line that chose anything skips it —
+  `--host`, `--join`, `--browse`, `--serve`, `--scene`, `--headless`, `--frames`
+  or `--screenshot` — so scripts and CI are unaffected, and `Options` gains
+  `lobby: bool` (false unless `parse` set it). The browser build has no lobby
+  and boots straight into solo.
 
 - **`HostedGame::text_event(&str)`**: the text a keyboard layout or input method
   committed (`ShellEvent::TextCommit`), once per commit, so a game can take

@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 use crcbl::core::FrameClock;
 use crcbl::lan::{LanBind, LanHost};
 
-use super::{APP, MAX_PLAYERS, session};
+use super::{APP, MAX_PLAYERS, SESSION, welcome};
 use crate::game::{Field, GameError, Stats};
 use crate::map::Map;
 use crate::wave::{Outcome, WAVES};
@@ -69,6 +69,8 @@ struct Headline {
 pub(crate) struct Server {
     lan: LanHost,
     field: Field,
+    /// The map every player is sent as they join, encoded once.
+    map: Vec<u8>,
     /// What the last status line said, and when the next is due regardless.
     printed: Option<Headline>,
     next_status: Duration,
@@ -84,18 +86,19 @@ impl std::fmt::Debug for Server {
 
 impl Server {
     /// Serves a new run on `map`, bound where `bind` says, ticking at
-    /// `tick_hz`.
+    /// `tick_hz`. Every player is sent `map` as they join.
     ///
     /// # Errors
     ///
     /// [`GameError::Lan`] if the listener would not bind.
     pub fn open(bind: LanBind, map: &Map, tick_hz: u32) -> Result<Self, GameError> {
         let (field, world, module) = Field::open(map, tick_hz);
-        let mut lan = LanHost::open(session(map), bind, world, tick_hz).map_err(GameError::Lan)?;
+        let mut lan = LanHost::open(SESSION, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
         Ok(Self {
             lan,
             field,
+            map: map.to_wire(),
             printed: None,
             next_status: Duration::ZERO,
         })
@@ -105,7 +108,8 @@ impl Server {
     /// status line when it is due to be printed: when it has news, or has
     /// been quiet for [`STATUS_INTERVAL`].
     pub fn frame(&mut self, now: Duration) -> Option<String> {
-        self.lan.frame(now);
+        let events = self.lan.frame(now);
+        welcome(&mut self.lan, &events, &self.map, None);
         let headline = self.headline();
         if self.printed == Some(headline) && now < self.next_status {
             return None;

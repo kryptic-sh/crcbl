@@ -3,6 +3,7 @@
 //! ```text
 //!   paused ─────────────────▶ Paused
 //!   the lobby is open ──────▶ Lobby     (native only)
+//!   --join / --browse wait ─▶ Joining   (native only)
 //!   running ────────────────▶ none
 //! ```
 //!
@@ -106,6 +107,10 @@ pub enum MenuKind {
     /// The lobby: solo, host, the LAN's hosts and a direct connect.
     #[cfg(not(target_arch = "wasm32"))]
     Lobby,
+    /// A join the command line asked for, waiting for the host's map — or
+    /// saying why it never came. No rows: there is nothing to pick.
+    #[cfg(not(target_arch = "wasm32"))]
+    Joining,
 }
 
 impl MenuKind {
@@ -120,6 +125,14 @@ impl MenuKind {
     #[must_use]
     pub const fn in_the_lobby(paused: bool) -> Self {
         if paused { Self::Paused } else { Self::Lobby }
+    }
+
+    /// The menu this frame shows while a command-line join waits: pause
+    /// still wins.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub const fn joining(paused: bool) -> Self {
+        if paused { Self::Paused } else { Self::Joining }
     }
 }
 

@@ -14155,7 +14155,11 @@ no GPU, ticked on `Instant` by its own entry point rather than the `Loop`, with
 a status line on change and every `serve::STATUS_INTERVAL`; an empty session
 holds the run still (`run_team_tick` returns on a tick with no command frame).
 Tested by four joiners winning the whole table on it, an empty one sending no
-wave, and a player leaving mid-run.
+wave, and a player leaving mid-run. Since 2026-10-01 the host sends its map to
+each joiner at join (`Map::to_wire` through `crcbl_server::Host::send_event`), a
+joiner is a `crcbl_towers::lan::Joining` until `Map::from_wire` has read it, and
+the map left the schema (protocol version 4); a lobby join that fails leaves the
+player in the lobby with the reason.
 
 **Left, and what each would take:**
 
@@ -14167,13 +14171,47 @@ wave, and a player leaving mid-run.
   real lobby's `Browser::open` binds every interface and queries the broadcast
   address, which no test does. The manual check is the two-machine one below,
   started from the lobby rather than `--browse`.
-- **A refused or dead join from the lobby does not come back to it.** Once a
-  pick starts a session the lobby is dropped, so a host that refuses the join
-  (another map typed by address — a listed host on another map is never a row),
-  or an address nobody answers, leaves the player on an empty field with the
-  refusal in the log. Returning to the lobby needs `Towers` to watch the joined
-  client's `handshake_refusal` and `ended`, and to build a new `Lobby` (and
-  `Browser`) and a fresh solo `Game` under it.
+- **A session from the lobby that ends after the map came does not return to
+  it.** The lobby stays up until the host's map is in, so a join that fails
+  before that — refused, link ended, bad map, `lan::JOIN_TIMEOUT` — comes back
+  to it with the reason (`a_refused_join_returns_to_the_lobby_saying_why` and
+  `a_join_nobody_answers_returns_to_the_lobby_saying_why` in `crate::app`). Once
+  the joined game has started the lobby is dropped, so a host that leaves or a
+  link that dies mid-run leaves the player on a field that stops moving, with
+  the end in the log. Returning needs `Towers` to watch the joined game's
+  `lan_client().client().ended()` and build a new `Lobby` (`Lobby::on_the_lan`,
+  which opens a broadcast `Browser`) and a fresh solo `Game` under it — or keep
+  the old lobby parked while the session runs.
+- **The map is sent once, on `PeerEvent::Joined`.** Reasoned from the code, not
+  observed: a joiner whose first `Accept` it drops as a stale generation (it
+  said hello again after `crcbl_client`'s `HANDSHAKE_TIMEOUT`) is re-accepted on
+  the same link with a restarted key, so the map sealed before that no longer
+  opens and the join ends as `JoinFailure::NoMap` after `lan::JOIN_TIMEOUT`
+  rather than recovering. Recovering needs the host to know it re-accepted a
+  peer (no `PeerEvent` says so today) and send again, or the joiner to ask for
+  the map — client commands are decoded and dropped by `crcbl_server` today.
+- **A join waits over the local field.** While a join waits for the map the
+  frame still draws the idle solo run on this process's own map, under the lobby
+  or, for `--join`/`--browse`, under the `JOINING` panel; the joined game is
+  only ever drawn on the host's map (`Gpu::set_map` runs before its first
+  frame). Hiding the field instead needs a frame with no forward pass, which
+  `crcbl::render::UiRenderer` cannot draw alone (it only loads its target). A
+  `--join`/`--browse` that fails stays on that panel, with the reason, until the
+  window closes; the exit code is still 0, as before the map was sent.
+- **`Map::new` does not refuse a coordinate that is not finite**; the wire
+  decoder does (`MapWireError::NotFinite`), because a NaN compares false against
+  every limit `Map::new` measures and would pass it. Whether a `.scn/` file can
+  carry a NaN through `crcbl::scene`'s RON is not checked; if it can, the check
+  belongs in `Map::new` as a `MapError` variant.
+- **`Map::from_wire` has no fuzz target.** It reads untrusted bytes, but towers
+  has no fuzz crate; `crates/crcbl-net/fuzz` covers the event's envelope
+  (`decode_server_to_client`) and not towers' payload. Unit tests cover each
+  refusal. Adding it means a fuzz crate for towers, or a shared one that depends
+  on it.
+- **`Gpu::set_map` is run only on the null backend.** The app tests rebuild the
+  field for the host's map headless and read the pools placed; no windowed run
+  on a real device, and the carried-over video settings and debug view are not
+  observed by any test.
 - **The lobby's host binds every interface**, as `--host` does
   (`LanBind::on_the_lan(0)`), on any free port printed to stdout; there is no
   field for the port. `--host PORT` is still the way to pick one.
@@ -14195,19 +14233,6 @@ wave, and a player leaving mid-run.
   four UDP clients on loopback, in about half a minute of wall time; the exit
   criterion's recorded demo — four machines, a real LAN, the server found by
   browsing — is the two-machine item below.
-- **The host's map is not sent at join.** A joiner still draws its own `--scene`
-  or the committed field. Since 2026-10-01 the map's fingerprint
-  (`Map::fingerprint`, folded into the schema hash by
-  `crate::game::compatibility`) makes a browser pass over a host on another map
-  and the handshake refuse a direct join to one, so the wrong-plots game cannot
-  happen — but a joiner on another map cannot play at all. **Decided
-  2026-10-01:** the host's map is authoritative and is to be sent to each joiner
-  on the reliable channel at join, so any client can join any host. What it
-  takes: a map encoding on the wire (the fingerprint's layout in
-  `map::fingerprint` is most of one, minus the digest), a joiner that waits for
-  it before building its `Game` and GPU field (today both are built from the
-  local map before the session exists), and dropping the fingerprint from the
-  schema hash once every build sends it — which is a protocol version bump.
 - **Not run on two machines, or through a firewall.** See the UDP entry's _Not
   run_ item, which has the manual check.
 - **D2 connection tokens.** The UDP entry's; nothing towers-specific.

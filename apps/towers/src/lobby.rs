@@ -4,7 +4,7 @@
 //! ```text
 //!   ┌────────────────────────────────────────┐
 //!   │                 TOWERS                 │
-//!   │  crcbl towers 10.0.0.7:5000 1/4 ANOTHER MAP  ← heard, not joinable
+//!   │  crcbl towers 10.0.0.7:5000 1/4 ANOTHER VERSION  ← heard, not joinable
 //!   │  SOLO                                  │
 //!   │  HOST                              LAN │
 //!   │  JOIN crcbl towers                 1/4 │  ← one row per host
@@ -17,19 +17,32 @@
 //! `--browse` would have joined, chosen instead of taken first. A host it
 //! cannot play with is not a row: it is a line under the title in the hint
 //! colour, dimmer than the rows, with the reason — another version, another
-//! build, another map, or full — because a row is something Enter can fire
-//! and there is nothing to fire. **Connect** joins the address typed into the
-//! lobby, which is what `--join` does; the text arrives through
-//! [`crcbl::engine::HostedGame::text_event`], with the layout applied, and
-//! Backspace takes a character off it.
+//! build, another game, or full — because a row is something Enter can fire
+//! and there is nothing to fire. A host on another map is a row like any
+//! other: it sends its map to whoever joins (`crate::lan`). **Connect** joins
+//! the address typed into the lobby, which is what `--join` does; the text
+//! arrives through [`crcbl::engine::HostedGame::text_event`], with the layout
+//! applied, and Backspace takes a character off it.
 //!
 //! # The lobby picks, and `crate::app` starts
 //!
-//! A pick is `Lobby::pick`: it opens the [`Game`] the row asks for — or
-//! answers `Picked::Solo`, because the solo game under the lobby has not
-//! ticked and is already the run a player choosing solo gets — or records why
-//! it could not, which the next menu shows as a warning. `crate::app::Towers`
-//! swaps the game in and drops the lobby, and the browser with it.
+//! A pick is `Lobby::pick`: it opens the [`Game`] a host row asks for, or the
+//! [`Joining`] a join asks for — or answers `Picked::Solo`, because the solo
+//! game under the lobby has not ticked and is already the run a player
+//! choosing solo gets — or records why it could not, which the next menu
+//! shows as a warning. `crate::app::Towers` swaps a game in and drops the
+//! lobby, and the browser with it.
+//!
+//! # A join keeps the lobby up until the host's map is in
+//!
+//! A join has no game until the host has sent its map, so the lobby stays on
+//! screen while it waits, saying `JOINING` and where; the field under it is
+//! still the solo run that has not started. When the map comes the joined
+//! game replaces both. When the join fails instead — the host refused it, the
+//! link ended, the map did not decode, or nothing came within
+//! [`JOIN_TIMEOUT`] — the lobby is still there, and says why
+//! (`Lobby::join_failed`), so the player picks again rather than being left
+//! on an empty field.
 //!
 //! # Native only, and only when asked for nothing
 //!
@@ -39,6 +52,7 @@
 //! headless test starts where it always did.
 
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
 use crcbl::lan::{LanBind, LanClient, LanGame};
@@ -48,11 +62,16 @@ use crcbl::ui::edit::LineEdit;
 use crcbl::ui::menu::{Caption, Menu, MenuItem};
 
 use crate::game::Game;
+use crate::lan::{JOIN_TIMEOUT, Joining};
 use crate::map::Map;
 use crate::menu::{CONNECT_ID, FIRST_LISTED_ID, HOST_ID, SOLO_ID};
 
 /// The lobby's heading.
 pub const TITLE: &str = "TOWERS";
+
+/// The heading of the panel a join the command line asked for waits under —
+/// the lobby's own joins wait in the lobby.
+pub const JOINING_TITLE: &str = "JOINING";
 
 /// What a lobby row asks for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,8 +91,10 @@ pub enum Pick {
 pub(crate) enum Picked {
     /// The solo run already under the lobby.
     Solo,
-    /// A LAN session, hosted or joined.
+    /// A LAN session this player hosts.
     Session(Game),
+    /// A join, waiting for the host's map.
+    Joining(Joining),
 }
 
 /// Why a host the browser heard cannot be joined.
@@ -83,11 +104,9 @@ pub enum Unjoinable {
     Version,
     /// Its engine build is not this one.
     Build,
-    /// Its schema hash is not this session's. Towers' schema is its fixed
-    /// identity with the map folded in (`crate::game::compatibility`), and
-    /// the identity has not moved, so on two towers builds that agree on the
-    /// two above this is another map.
-    Map,
+    /// Its schema hash is not towers': another game on towers' protocol id.
+    /// The map is not in it — a host sends its own at join.
+    Game,
     /// It has every player it takes.
     Full,
 }
@@ -104,7 +123,7 @@ impl Unjoinable {
         } else if theirs.engine_build_id != ours.engine_build_id {
             Some(Self::Build)
         } else if theirs.schema_hash != ours.schema_hash {
-            Some(Self::Map)
+            Some(Self::Game)
         } else if host.players >= host.max_players {
             Some(Self::Full)
         } else {
@@ -118,7 +137,7 @@ impl Unjoinable {
         match self {
             Self::Version => "ANOTHER VERSION",
             Self::Build => "ANOTHER BUILD",
-            Self::Map => "ANOTHER MAP",
+            Self::Game => "ANOTHER GAME",
             Self::Full => "FULL",
         }
     }
@@ -157,8 +176,13 @@ pub struct Lobby {
     passed_over: Vec<(HostEntry, Unjoinable)>,
     /// The address [`Pick::Connect`] joins.
     address: LineEdit,
-    /// Why the last pick did not start anything.
+    /// Why the last pick did not start anything, or the last join failed.
     notice: Option<String>,
+    /// Where the join under way is going, while one is.
+    joining: Option<String>,
+    /// How long a chosen host has to send its map: [`JOIN_TIMEOUT`], unless a
+    /// test asked for less.
+    join_timeout: Duration,
     /// Whether the rows or the lines changed since [`Lobby::take_changed`].
     changed: bool,
     /// Whether text arrived since [`Lobby::take_typed`].
@@ -194,9 +218,21 @@ impl Lobby {
             passed_over: Vec::new(),
             address: LineEdit::new(),
             notice: None,
+            joining: None,
+            join_timeout: JOIN_TIMEOUT,
             changed: true,
             typed: false,
         }
+    }
+
+    /// This lobby, giving a chosen host `timeout` rather than
+    /// [`JOIN_TIMEOUT`] to send its map, so a test sees a join time out in a
+    /// few frames.
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn with_join_timeout(mut self, timeout: Duration) -> Self {
+        self.join_timeout = timeout;
+        self
     }
 
     /// Reads what the browser heard, and sorts it into rows and lines. Every
@@ -310,41 +346,67 @@ impl Lobby {
                 .into(),
             );
         }
+        if let Some(host) = &self.joining {
+            menu.subtitle.push(format!("JOINING {host}").into());
+        }
         if let Some(notice) = &self.notice {
             menu.subtitle.push(Caption::warning(notice.clone()));
         }
         menu
     }
 
-    /// Starts what `pick` asks for on `map`, or records why it could not.
+    /// The join a pick started ended without a game: the lobby says why, and
+    /// is what the player picks from again.
+    pub(crate) fn join_failed(&mut self, why: &str) {
+        self.joining = None;
+        self.notice = Some(format!("JOIN FAILED: {why}"));
+        self.changed = true;
+    }
+
+    /// Starts what `pick` asks for — a host on `map`, the local one — or
+    /// records why it could not. A join does not use `map`: it plays on the
+    /// host's.
     pub(crate) fn pick(&mut self, pick: Pick, map: &Map) -> Option<Picked> {
         let started = match pick {
-            Pick::Solo => return Some(Picked::Solo),
+            Pick::Solo => {
+                self.joining = None;
+                return Some(Picked::Solo);
+            }
             Pick::Host => Game::host(self.tick_hz, map, self.host_bind)
+                .map(Picked::Session)
                 .map_err(|error| format!("CANNOT HOST: {error}")),
             Pick::Listed(row) => match self.joinable.get(row) {
-                Some(host) => self.join(host.addr, map),
+                Some(host) => self.join(host.addr),
                 None => Err("THAT HOST IS GONE".to_string()),
             },
             Pick::Connect => match self.address.text().trim().parse::<SocketAddr>() {
-                Ok(addr) => self.join(addr, map),
+                Ok(addr) => self.join(addr),
                 Err(_) => Err(format!("NOT AN IP:PORT: {:?}", self.address.text())),
             },
         };
+        // Whatever this pick started — or failed to — replaces the join that
+        // was under way, which the caller drops.
+        self.joining = None;
+        self.changed = true;
         match started {
-            Ok(game) => Some(Picked::Session(game)),
+            Ok(picked) => {
+                if let Picked::Joining(joining) = &picked {
+                    self.joining = joining.lan().host().map(|host| host.to_string());
+                    self.notice = None;
+                }
+                Some(picked)
+            }
             Err(why) => {
                 self.notice = Some(why);
-                self.changed = true;
                 None
             }
         }
     }
 
-    /// A game joining the host at `addr`.
-    fn join(&self, addr: SocketAddr, map: &Map) -> Result<Game, String> {
+    /// A join to the host at `addr`, which waits for the host's map.
+    fn join(&self, addr: SocketAddr) -> Result<Picked, String> {
         LanClient::join(self.session, addr, self.tick_hz)
-            .map(|client| Game::join(self.tick_hz, map, client))
+            .map(|client| Picked::Joining(Joining::new(client, self.tick_hz, self.join_timeout)))
             .map_err(|error| format!("CANNOT JOIN {addr}: {error}"))
     }
 }

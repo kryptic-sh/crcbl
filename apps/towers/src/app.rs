@@ -225,6 +225,18 @@ pub struct Towers {
     /// open. Native only.
     #[cfg(not(target_arch = "wasm32"))]
     lobby: Option<crate::lobby::Lobby>,
+    /// A join waiting for the host's map — picked in the lobby, or asked for
+    /// by `--join` or `--browse`. Until the map comes there is no joined game
+    /// at all (`crate::lan`), so the game drawn is still the one under the
+    /// lobby, or, from the command line, an idle solo run under the joining
+    /// panel; neither ticks. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    joining: Option<crate::lan::Joining>,
+    /// Why a join the command line asked for ended without a game, shown on
+    /// the joining panel for as long as the window stays open. A join picked
+    /// in the lobby says it in the lobby instead. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    join_failed: Option<String>,
 }
 
 impl Towers {
@@ -333,12 +345,96 @@ impl Towers {
         }
     }
 
+    /// Whether nothing is being played yet: the lobby is open, a join is
+    /// waiting for the host's map, or a command-line join failed. The game
+    /// underneath does not tick.
+    #[must_use]
+    pub const fn in_front(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.lobby.is_some() || self.joining.is_some() || self.join_failed.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    /// Whether a join is waiting for the host's map.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub const fn is_joining(&self) -> bool {
+        self.joining.is_some()
+    }
+
+    /// Runs the join under way for a frame covering `render_dt`: the host's
+    /// map makes the GPU's field and then the game, and a join that ends
+    /// without one says why — in the lobby when it was picked there, on the
+    /// joining panel and in the log when the command line asked for it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drive_join(&mut self, gpu: &mut Gpu, render_dt: std::time::Duration) {
+        use crate::lan::Progress;
+
+        let Some(joining) = self.joining.take() else {
+            return;
+        };
+        match joining.step(render_dt) {
+            Progress::Waiting(joining) => self.joining = Some(joining),
+            // The field first: a game on the host's map is never drawn over
+            // the field of another.
+            Progress::Joined(game) => match gpu.set_map(game.map()) {
+                Ok(()) => self.start(game),
+                Err(error) => self.join_failed(&format!("cannot draw the host's map: {error}")),
+            },
+            Progress::Failed(failure) => self.join_failed(&failure.to_string()),
+        }
+    }
+
+    /// A join ended without a game: the lobby says why when there is one, and
+    /// the joining panel and the log do when the command line asked for the
+    /// join.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn join_failed(&mut self, why: &str) {
+        match &mut self.lobby {
+            Some(lobby) => lobby.join_failed(why),
+            None => {
+                crcbl::log::error!("lan: the join failed: {why}");
+                self.join_failed = Some(why.to_string());
+            }
+        }
+    }
+
+    /// The joining panel: where the command line's join is going, or why it
+    /// failed.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn joining_panel(&self) -> crcbl::ui::menu::Menu {
+        use crcbl::ui::menu::{Caption, Menu};
+
+        let mut menu = Menu::new(crate::lobby::JOINING_TITLE, Vec::new());
+        if let Some(why) = &self.join_failed {
+            menu.subtitle
+                .push(Caption::warning(format!("JOIN FAILED: {why}")));
+        } else if let Some(joining) = &self.joining {
+            menu.subtitle.push(
+                match joining.lan().host() {
+                    Some(host) => format!("JOINING {host}"),
+                    None => "LOOKING FOR HOSTS ON THE LAN".to_string(),
+                }
+                .into(),
+            );
+        }
+        menu
+    }
+
     /// Starts `game` in place of the one under the lobby, from a clean
-    /// cursor — the lobby's pick, and the only way a game is replaced.
+    /// cursor — the lobby's pick or the host's map arriving, and the only way
+    /// a game is replaced.
     #[cfg(not(target_arch = "wasm32"))]
     fn start(&mut self, game: Game) {
         self.game = game;
         self.lobby = None;
+        self.joining = None;
+        self.join_failed = None;
         self.selected = 0;
         self.kind = tower::Kind::default();
         self.pending_keys.clear();
@@ -439,7 +535,8 @@ fn assemble<S: Shell + ?Sized>(
 ) -> Result<Loop<S>, TowersError> {
     let booted = crcbl::engine::arm_screenshot(booted, &options.common);
     let paths = booted.gpu.paths();
-    let game = open_game(options).map_err(TowersError::Game)?;
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    let (game, joining) = open_game(options).map_err(TowersError::Game)?;
     Ok(Loop::new(
         booted,
         Towers {
@@ -455,48 +552,59 @@ fn assemble<S: Shell + ?Sized>(
             paths,
             #[cfg(not(target_arch = "wasm32"))]
             lobby: options.lobby.then(|| {
-                crate::lobby::Lobby::on_the_lan(
-                    crate::lan::session(&options.map),
-                    options.common.tick_hz,
-                )
+                crate::lobby::Lobby::on_the_lan(crate::lan::SESSION, options.common.tick_hz)
             }),
+            #[cfg(not(target_arch = "wasm32"))]
+            joining,
+            #[cfg(not(target_arch = "wasm32"))]
+            join_failed: None,
         },
         options.common.loop_config(),
     ))
 }
 
+/// What a join the command line asked for waits in, natively; nothing, in a
+/// browser, which has no networking.
+#[cfg(not(target_arch = "wasm32"))]
+type CommandLineJoin = Option<crate::lan::Joining>;
+#[cfg(target_arch = "wasm32")]
+type CommandLineJoin = ();
+
 /// The simulation the command line asked for: solo, or — natively — hosting,
-/// joining or looking for a co-op session. See `crate::lan`.
+/// or joining or looking for a co-op session. See `crate::lan`.
+///
+/// A join has no game until the host's map arrives, so for `--join` and
+/// `--browse` this answers the join, and an idle solo run on this process's
+/// own map for the frame to hold until then — never ticked, and replaced by
+/// the joined game the moment it exists.
 ///
 /// # Errors
 ///
 /// [`crate::game::GameError`] if the server could not be built or the LAN
 /// session could not start.
-fn open_game(options: &Options) -> Result<Game, crate::game::GameError> {
+fn open_game(options: &Options) -> Result<(Game, CommandLineJoin), crate::game::GameError> {
     let tick_hz = options.common.tick_hz;
     #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::game::GameError;
+        use crate::lan::{JOIN_TIMEOUT, Joining, SESSION};
         use crcbl::lan::{LanBind, LanClient, LanMode};
 
-        match options.lan {
-            LanMode::Off => {}
+        let client = match options.lan {
+            LanMode::Off => return Ok((Game::new(tick_hz, &options.map)?, None)),
             LanMode::Host { port } => {
-                return Game::host(tick_hz, &options.map, LanBind::on_the_lan(port));
+                let game = Game::host(tick_hz, &options.map, LanBind::on_the_lan(port))?;
+                return Ok((game, None));
             }
-            LanMode::Join(addr) => {
-                let client = LanClient::join(crate::lan::session(&options.map), addr, tick_hz)
-                    .map_err(GameError::Lan)?;
-                return Ok(Game::join(tick_hz, &options.map, client));
-            }
-            LanMode::Browse => {
-                let client = LanClient::browse_the_lan(crate::lan::session(&options.map), tick_hz)
-                    .map_err(GameError::Lan)?;
-                return Ok(Game::join(tick_hz, &options.map, client));
-            }
+            LanMode::Join(addr) => LanClient::join(SESSION, addr, tick_hz),
+            LanMode::Browse => LanClient::browse_the_lan(SESSION, tick_hz),
         }
+        .map_err(GameError::Lan)?;
+        let joining = Joining::new(client, tick_hz, JOIN_TIMEOUT);
+        Ok((Game::new(tick_hz, &options.map)?, Some(joining)))
     }
-    Game::new(tick_hz, &options.map)
+    #[cfg(target_arch = "wasm32")]
+    Ok((Game::new(tick_hz, &options.map)?, ()))
 }
 
 /// Creates the one window this sample has: its title, its app id, its size.
@@ -534,8 +642,9 @@ impl HostedGame for Towers {
     }
 
     fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
-        // Nothing runs under the lobby: the run starts when one is picked.
-        if self.in_the_lobby() {
+        // Nothing runs under the lobby or a join: the run starts when one is
+        // picked, or when the host's map is in.
+        if self.in_front() {
             return;
         }
         // `ActionMap` holds its timers in `f32`, which is the precision an
@@ -628,9 +737,14 @@ impl HostedGame for Towers {
                 let Some(lobby) = &mut self.lobby else {
                     return;
                 };
+                // Any pick replaces a join under way, whether or not it starts
+                // anything, as the lobby forgets it too.
+                self.joining = None;
                 match lobby.pick(pick, self.game.map()) {
                     Some(crate::lobby::Picked::Solo) => self.lobby = None,
                     Some(crate::lobby::Picked::Session(game)) => self.start(game),
+                    // The lobby stays up, saying where, until the map is in.
+                    Some(crate::lobby::Picked::Joining(joining)) => self.joining = Some(joining),
                     // The lobby shows why on the next frame.
                     None => {}
                 }
@@ -669,6 +783,17 @@ impl HostedGame for Towers {
             }
             return MenuKind::in_the_lobby(paused);
         }
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.joining.is_some() || self.join_failed.is_some() {
+            let panel = self.joining_panel();
+            let stale = menus
+                .get_mut(MenuKind::Joining)
+                .is_none_or(|menu| menu.subtitle != panel.subtitle);
+            if stale {
+                menus.replace(MenuKind::Joining, panel);
+            }
+            return MenuKind::joining(paused);
+        }
         MenuKind::of(paused)
     }
 
@@ -680,7 +805,10 @@ impl HostedGame for Towers {
     ) {
         // Here because `draw` is the one hook that runs on every frame, paused
         // or not: a LAN session is served on wall time, so a paused host goes
-        // on serving the others. See [`Game::frame`].
+        // on serving the others, and a join goes on waiting for its map. See
+        // [`Game::frame`].
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drive_join(gpu, frame.render_dt);
         self.game.frame(frame.render_dt);
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
@@ -708,7 +836,9 @@ impl HostedGame for Towers {
         panel.add(&self.stats);
         panel.add(&self.paths);
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(lan) = self.game.lan_section() {
+        if let Some(joining) = &self.joining {
+            panel.add(joining.lan());
+        } else if let Some(lan) = self.game.lan_section() {
             panel.add(lan);
         }
     }
@@ -1115,18 +1245,41 @@ mod tests {
     /// lobby a parsed command line opens queries the broadcast address.
     #[cfg(not(target_arch = "wasm32"))]
     fn in_a_lobby(announcer: Option<std::net::SocketAddr>) -> Loop<HeadlessShell> {
+        in_a_lobby_timing_out(announcer, crate::lan::JOIN_TIMEOUT)
+    }
+
+    /// …whose joins give a host `timeout` to send its map.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_lobby_timing_out(
+        announcer: Option<std::net::SocketAddr>,
+        timeout: std::time::Duration,
+    ) -> Loop<HeadlessShell> {
         use crate::lan::tests::{loopback_browser, on_loopback};
 
         let mut engine = scripted(&headless(4000));
-        engine.game_mut().lobby = Some(crate::lobby::Lobby::new(
-            crate::lan::session(&crate::map::Map::built_in()),
-            announcer
-                .map(loopback_browser)
-                .ok_or_else(|| "NOT LOOKING".to_string()),
-            on_loopback(),
-            crate::game::DEFAULT_TICK_HZ,
-        ));
+        engine.game_mut().lobby = Some(
+            crate::lobby::Lobby::new(
+                crate::lan::SESSION,
+                announcer
+                    .map(loopback_browser)
+                    .ok_or_else(|| "NOT LOOKING".to_string()),
+                on_loopback(),
+                crate::game::DEFAULT_TICK_HZ,
+            )
+            .with_join_timeout(timeout),
+        );
         engine
+    }
+
+    /// The lobby's lines under its title, while it is the panel up.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lobby_lines(engine: &Loop<HeadlessShell>) -> Vec<crcbl::ui::menu::Caption> {
+        engine
+            .menus()
+            .current()
+            .filter(|menu| menu.title == crate::lobby::TITLE)
+            .map(|menu| menu.subtitle.clone())
+            .unwrap_or_default()
     }
 
     /// The id of the lobby row the keyboard is on.
@@ -1143,9 +1296,15 @@ mod tests {
     /// reaches it.
     #[cfg(not(target_arch = "wasm32"))]
     fn loopback_host() -> (Game, std::net::SocketAddr) {
+        loopback_host_on(&crate::map::Map::built_in())
+    }
+
+    /// …playing `map`.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loopback_host_on(map: &crate::map::Map) -> (Game, std::net::SocketAddr) {
         let host = Game::host(
             crate::game::DEFAULT_TICK_HZ,
-            &crate::map::Map::built_in(),
+            map,
             crate::lan::tests::on_loopback(),
         )
         .expect("loopback UDP must be available to these tests");
@@ -1163,18 +1322,47 @@ mod tests {
             .and_then(crcbl::lan::LanClient::host)
     }
 
-    /// **The lobby's keys pick a host it heard, and the game joins it.** A
-    /// host on loopback announces; its row appears under solo and host; Down
-    /// twice and Enter start a client of that host, which gets into the
-    /// session. Until then the solo game under the lobby never ticked, while
-    /// the loop did.
+    /// Where `engine`'s join under way is going, while one is.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn joining(engine: &Loop<HeadlessShell>) -> Option<std::net::SocketAddr> {
+        engine
+            .game()
+            .joining
+            .as_ref()
+            .and_then(|joining| joining.lan().host())
+    }
+
+    /// Types `address` into the lobby's connect row and presses Enter.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn connect_to(engine: &mut Loop<HeadlessShell>, address: std::net::SocketAddr) {
+        let window = engine.window();
+        engine
+            .shell_mut()
+            .commit_text(window, &address.to_string())
+            .expect("the window is live");
+        frames(engine, 2);
+        tap(engine, KeyCode::Enter);
+    }
+
+    /// **The lobby's keys pick a host it heard, and the game joins it — on
+    /// the host's map, never on its own.** A host on loopback, on
+    /// [`another_map`](crate::lan::tests::another_map)'s two plots where
+    /// this process's own field has five, announces; its row appears under
+    /// solo and host; Down twice and Enter start a join to it, and the lobby
+    /// stays up saying so until the host's map is in. From the first frame
+    /// the joined game is up the GPU's field is the host's — two plots — and
+    /// the game's map is the host's; `LEFT` wraps the cursor at the host's
+    /// plot count and `B` builds on the host's second plot, which the host
+    /// builds and the joiner draws. Until the join, the solo game under the
+    /// lobby never ticked, while the loop did.
     #[cfg(not(target_arch = "wasm32"))]
     #[test]
     fn the_lobbys_keys_pick_a_host_it_heard_and_the_game_joins_it() {
-        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE};
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE, another_map};
         use crate::menu::FIRST_LISTED_ID;
 
-        let (mut host, address) = loopback_host();
+        let map = another_map();
+        let (mut host, address) = loopback_host_on(&map);
         let announcer = host
             .lan_host()
             .and_then(crcbl::lan::LanHost::announcer_addr)
@@ -1208,17 +1396,64 @@ mod tests {
         tap(&mut engine, KeyCode::ArrowDown);
         assert_eq!(lobby_row(&engine), Some(FIRST_LISTED_ID));
         tap(&mut engine, KeyCode::Enter);
+        assert_eq!(
+            joining(&engine),
+            Some(address),
+            "no join to the host picked"
+        );
+        assert!(
+            engine.game().in_the_lobby(),
+            "the lobby went before the map came"
+        );
+        let waiting = format!("JOINING {address}");
+        assert!(
+            lobby_lines(&engine).iter().any(|line| line.text == waiting),
+            "{:?}",
+            lobby_lines(&engine)
+        );
+
+        let plots = map.plots().len();
+        let mut frames_on_the_hosts_map = 0;
+        for _ in 0..MAX_FRAMES {
+            if joined(&engine).is_some() && engine.game().game().stats().ticks > 0 {
+                break;
+            }
+            host.tick();
+            host.frame(FRAME);
+            frames(&mut engine, 1);
+            if joined(&engine).is_some() {
+                // Every frame drawn of the joined game is on the host's map.
+                assert_eq!(engine.game().game().map(), &map);
+                assert_eq!(
+                    engine.gpu().field().plots(),
+                    plots,
+                    "a frame on a stale map"
+                );
+                frames_on_the_hosts_map += 1;
+            }
+            std::thread::sleep(PAUSE);
+        }
+        assert!(
+            engine.game().game().stats().ticks > 0,
+            "the joiner never had the host's field"
+        );
+        assert!(frames_on_the_hosts_map > 0);
+        assert_eq!(joined(&engine), Some(address));
         assert!(
             !engine.game().in_the_lobby(),
-            "the pick left the lobby open"
+            "the map came and the lobby stayed"
         );
+        assert!(!engine.menus().is_showing(), "a panel is still up");
+
+        tap(&mut engine, KeyCode::ArrowLeft);
         assert_eq!(
-            joined(&engine),
-            Some(address),
-            "the game is not a client of the host picked"
+            usize::from(engine.game().selected()),
+            plots - 1,
+            "the cursor did not wrap at the host's plot count"
         );
+        tap(&mut engine, KeyCode::KeyB);
         for _ in 0..MAX_FRAMES {
-            if engine.game().game().stats().ticks > 0 {
+            if engine.game().game().render_state().towers[plots - 1].is_some() {
                 break;
             }
             host.tick();
@@ -1227,10 +1462,148 @@ mod tests {
             std::thread::sleep(PAUSE);
         }
         assert!(
-            engine.game().game().stats().ticks > 0,
-            "the joiner never had the host's field"
+            host.render_state().towers[plots - 1].is_some(),
+            "the host did not build on its own last plot"
         );
-        assert!(!engine.menus().is_showing(), "a panel is still up");
+        assert!(
+            engine.game().game().render_state().towers[plots - 1].is_some(),
+            "the joiner did not draw the tower it asked for"
+        );
+        assert_eq!(host.stats().refused, 0);
+    }
+
+    /// **A join the host refuses returns the player to the lobby, saying
+    /// why** — here a host of the protocol before the map crossed the wire,
+    /// reached by address. The lobby never went: it says the join failed and
+    /// names the refusal, nothing is joining any more, and the solo game under
+    /// it has still not ticked.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_refused_join_returns_to_the_lobby_saying_why() {
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE, on_loopback};
+
+        let mut old = crcbl::lan::LanHost::open(
+            crcbl::lan::LanGame {
+                compatibility: crcbl::net::ProtocolCompatibility {
+                    protocol_version: crate::lan::SESSION.compatibility.protocol_version - 1,
+                    ..crate::lan::SESSION.compatibility
+                },
+                ..crate::lan::SESSION
+            },
+            on_loopback(),
+            crcbl::ecs::World::new(),
+            crate::game::DEFAULT_TICK_HZ,
+        )
+        .expect("loopback UDP must be available to these tests");
+        let address = (std::net::Ipv4Addr::LOCALHOST, old.game_port()).into();
+        let mut engine = in_a_lobby(None);
+        frames(&mut engine, 2);
+        connect_to(&mut engine, address);
+        assert_eq!(joining(&engine), Some(address));
+
+        let failed = |engine: &Loop<HeadlessShell>| {
+            lobby_lines(engine).into_iter().find(|line| {
+                line.tone == crcbl::ui::menu::CaptionTone::Warning
+                    && line.text.starts_with("JOIN FAILED:")
+            })
+        };
+        let mut now = std::time::Duration::ZERO;
+        for _ in 0..MAX_FRAMES {
+            if failed(&engine).is_some() {
+                break;
+            }
+            now += FRAME;
+            old.frame(now);
+            frames(&mut engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        let line = failed(&engine).expect("the lobby never said the join failed");
+        assert!(line.text.contains("refused the join"), "{}", line.text);
+        assert!(
+            line.text.contains("protocol version mismatch"),
+            "{}",
+            line.text
+        );
+        assert!(engine.game().in_the_lobby());
+        assert!(!engine.game().is_joining());
+        assert_eq!(engine.game().game().ticks_run(), 0);
+        assert!(engine.game().game().lan_client().is_none());
+    }
+
+    /// **A join nobody answers returns the player to the lobby, saying why**,
+    /// once the join's timeout has passed — shortened here to a handful of
+    /// frames, on the loop's own clock. The address is a socket that takes
+    /// the hello and never answers.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_join_nobody_answers_returns_to_the_lobby_saying_why() {
+        const TIMEOUT_FRAMES: u32 = 6;
+
+        let silent =
+            std::net::UdpSocket::bind(crate::lan::tests::loopback()).expect("loopback UDP");
+        let address = silent.local_addr().expect("bound");
+        let mut engine =
+            in_a_lobby_timing_out(None, crcbl::engine::HEADLESS_FRAME_STEP * TIMEOUT_FRAMES);
+        frames(&mut engine, 2);
+        connect_to(&mut engine, address);
+        assert_eq!(joining(&engine), Some(address));
+        frames(&mut engine, 4 * TIMEOUT_FRAMES as usize);
+
+        let expected = format!("JOIN FAILED: no answer from {address}");
+        assert!(
+            lobby_lines(&engine)
+                .iter()
+                .any(|line| line.text.starts_with(&expected)),
+            "{:?}",
+            lobby_lines(&engine)
+        );
+        assert!(engine.game().in_the_lobby());
+        assert!(!engine.game().is_joining());
+        assert_eq!(engine.game().game().ticks_run(), 0);
+    }
+
+    /// **A join the command line asked for waits under the joining panel and
+    /// then plays the host's map.** `--join` to a host on another map: the
+    /// panel says where, the idle game under it does not tick, and once the
+    /// map is in the panel is gone and the game and the GPU's field are the
+    /// host's.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_command_line_join_waits_under_its_panel_and_plays_the_hosts_map() {
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE, another_map};
+
+        let map = another_map();
+        let (mut host, address) = loopback_host_on(&map);
+        let mut engine = scripted(&Options {
+            lan: crcbl::lan::LanMode::Join(address),
+            ..headless(4000)
+        });
+        frames(&mut engine, 1);
+        let panel = engine.menus().current().expect("the joining panel");
+        assert_eq!(panel.title, crate::lobby::JOINING_TITLE);
+        assert_eq!(panel.subtitle[0].text, format!("JOINING {address}"));
+        assert_eq!(engine.game().game().ticks_run(), 0);
+
+        for _ in 0..MAX_FRAMES {
+            if joined(&engine).is_some() {
+                break;
+            }
+            host.tick();
+            host.frame(FRAME);
+            frames(&mut engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        assert_eq!(
+            joined(&engine),
+            Some(address),
+            "the command line's join never played"
+        );
+        assert_eq!(engine.game().game().map(), &map);
+        assert_eq!(engine.gpu().field().plots(), map.plots().len());
+        assert!(
+            !engine.menus().is_showing(),
+            "the joining panel is still up"
+        );
     }
 
     /// **Typing in the lobby fills the connect row and Enter joins it** — or,
@@ -1283,7 +1656,7 @@ mod tests {
             "the row shows exactly what was typed"
         );
         tap(&mut engine, KeyCode::Enter);
-        assert_eq!(joined(&engine), Some(address));
+        assert_eq!(joining(&engine), Some(address));
     }
 
     /// **Solo from the lobby starts the run that was under it**, and a run

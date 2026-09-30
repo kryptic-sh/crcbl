@@ -96,34 +96,22 @@ use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Wave
 /// none of it, and one from after would draw an empty field against an older
 /// server.
 ///
-/// **This is the base, and no session gates on it as it stands**: every
-/// handshake uses [`compatibility`], which folds the map into the schema.
-const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
-    protocol_version: 3,
+/// **And 4 because the host's map crosses the wire.** A LAN host sends its map
+/// to every joiner at join (`crate::map`'s `wire`), and the joiner plays on
+/// it whatever its own `--scene` says — so the map is no longer part of what
+/// two builds must agree on, and it left the schema, where a fingerprint of it
+/// had been folded in to make a joiner on another map refuse the host. A
+/// client from before would wait for no map and be refused on a schema it
+/// computed from its own; the bump makes the two refuse each other by version
+/// instead, which the lobby names.
+///
+/// Every session hand-shakes on this, solo's included, so there is one rule
+/// for every session rather than one for the LAN.
+pub(crate) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+    protocol_version: 4,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0000_0054_5752,
 };
-
-/// What a session on `map` hand-shakes on: [`COMPATIBILITY`] with the map's
-/// [`Map::fingerprint`] folded into its schema hash.
-///
-/// **A joiner draws its own map** — `crate::lan` says why — so two processes
-/// on different maps would play one's towers on the other's plots. With the
-/// map in the schema, a browser passes over a host on another map and the
-/// handshake refuses a direct join to one as a schema mismatch, which is
-/// permanent: the client stops asking. Solo hand-shakes on it too, so there
-/// is one rule for every session rather than one for the LAN.
-///
-/// The low bit is set so the hash is never zero, the placeholder
-/// [`ProtocolCompatibility::assert_explicit`] refuses — a fingerprint equal to
-/// the base's schema would otherwise fold to it. The other 63 bits are the
-/// map's.
-pub(crate) fn compatibility(map: &Map) -> ProtocolCompatibility {
-    ProtocolCompatibility {
-        schema_hash: (COMPATIBILITY.schema_hash ^ map.fingerprint()) | 1,
-        ..COMPATIBILITY
-    }
-}
 
 /// The default simulation rate. Reaches the server, the client and the stage,
 /// so there is exactly one rate in the process.
@@ -1105,7 +1093,7 @@ pub struct Game {
     /// The stage's map, held here as well so the client can read the plots it
     /// lists without taking the tick's lock. The same allocation the stage
     /// holds, so the two cannot be different maps. On a remote client it is
-    /// this process's own, which has to be the host's — see `crate::lan`.
+    /// the one the host sent at join — see `crate::lan`.
     map: Arc<Map>,
     /// Exactly one tick period per [`Game::tick`], so the client's clock — and
     /// solo's server's — yields exactly one tick per call.
@@ -1143,7 +1131,7 @@ impl Game {
 
         // The world's one system is the field's replica. What the server
         // ticks is the module, and what the module owns is the stage.
-        let mut session = Loopback::new(world, Box::new(module), tick_hz, compatibility(&map))
+        let mut session = Loopback::new(world, Box::new(module), tick_hz, COMPATIBILITY)
             .map_err(|error| GameError::Server(error.to_string()))?;
         let tick_period = session.tick_period();
 
@@ -1196,7 +1184,7 @@ impl Game {
         let map = Arc::new(map.clone());
         let (shared, world, module) = server_world(&map);
         let (link, tick_period) =
-            crate::lan::HostLink::open(crate::lan::session(&map), bind, world, module, tick_hz)?;
+            crate::lan::HostLink::open(crate::lan::SESSION, bind, world, module, tick_hz, &map)?;
         log_the_rules(tick_hz, tick_period, &map);
         Ok(Self {
             link: Link::Host(Box::new(link)),
@@ -1211,24 +1199,31 @@ impl Game {
         })
     }
 
-    /// Plays in the LAN session `client` joins or finds, drawing `map` — see
-    /// [`crate::lan`].
+    /// Plays in the LAN session `client` is in, on `map` — the one its host
+    /// sent at join. Built by `crate::lan::Joining` once that map has
+    /// arrived, and by nothing else, so a joiner's game is never on any other
+    /// map. `now` is the client's clock so far, which this game's carries on
+    /// from.
     ///
     /// # Panics
     ///
     /// If `tick_hz` is zero.
     #[cfg(not(target_arch = "wasm32"))]
-    #[must_use]
-    pub fn join(tick_hz: u32, map: &Map, client: crcbl::lan::LanClient) -> Self {
+    pub(crate) fn joined(
+        tick_hz: u32,
+        map: Map,
+        client: crcbl::lan::LanClient,
+        now: Duration,
+    ) -> Self {
         assert!(tick_hz > 0, "tick rate must be positive");
         Self {
             link: Link::Remote(Box::new(crate::lan::RemoteLink::new(client))),
             shared: None,
-            map: Arc::new(map.clone()),
+            map: Arc::new(map),
             // The client clock's own step, so one period is exactly one tick
             // of it, as `Loopback::tick_period` is solo's.
             tick_period: crcbl::core::FrameClock::new(tick_hz).tick_dt(),
-            sim_time: Duration::ZERO,
+            sim_time: now,
             ticks_run: 0,
             pending: Intent::default(),
         }

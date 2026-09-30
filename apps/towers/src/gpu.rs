@@ -87,11 +87,19 @@ impl crcbl::ui::DebugModule for Paths {
 #[derive(Debug)]
 pub struct Gpu {
     ctx: GpuContext,
-    /// The field, made resident once and drawn every frame.
+    /// The field, made resident once and drawn every frame — built again
+    /// only by [`Gpu::set_map`].
     renderer: ForwardRenderer,
     /// The instances in it that are rewritten — the creeps, the towers and the
     /// bolts.
     field: Field,
+    /// The map the renderer holds, which [`Gpu::set_map`] compares against.
+    map: Map,
+    /// The last `[engine.video]` section and debug view put into force, put
+    /// into force again on a renderer [`Gpu::set_map`] builds — `None` and
+    /// the default until the loop applies one, as a new renderer starts.
+    video: Option<crcbl::settings::VideoSettings>,
+    debug_view: crcbl::render::DebugView,
     /// Which selectors this device drew through — see [`Paths`].
     paths: Paths,
     pool: TransientPool,
@@ -212,17 +220,9 @@ impl Gpu {
     fn from_context(ctx: GpuContext, map: &Map) -> Result<Self, GpuError> {
         let format = ctx.format();
         let paths = Paths::of(&ctx.device().caps());
-        let mut renderer =
-            ForwardRenderer::with_scene(ctx.device(), ctx.queue(), format, &map.scene())?;
+        let (renderer, field) = field_renderer(&ctx, map)?;
         // Rolled back by hand from here on: `Gpu` has no `Drop`, so a `?` would
         // leak the forward renderer's pipelines rather than release them.
-        let field = match map.place(&mut renderer) {
-            Ok(field) => field,
-            Err(error) => {
-                renderer.destroy(ctx.device());
-                return Err(GpuError::pools("towers' field", &error));
-            }
-        };
         let timers = PassTimers::new(ctx.device(), FRAMES_IN_FLIGHT, MAX_TIMED_PASSES);
         if timers.is_none() {
             crcbl::log::info!("hal: no timestamp queries on this device; per-pass timing is off");
@@ -246,6 +246,9 @@ impl Gpu {
             ctx,
             renderer,
             field,
+            map: map.clone(),
+            video: None,
+            debug_view: crcbl::render::DebugView::default(),
             paths,
             pool: TransientPool::new(),
             timers,
@@ -278,6 +281,44 @@ impl Gpu {
     /// [`arm_screenshot`](crcbl::engine::arm_screenshot) is what reaches it.
     pub const fn context_mut(&mut self) -> &mut GpuContext {
         &mut self.ctx
+    }
+
+    /// Makes `map` the field drawn, if it is not already: the renderer and
+    /// its pools are built for it and replace the ones built for the last,
+    /// with the video settings and the debug view in force carried over.
+    ///
+    /// What a LAN joiner does once the host's map has arrived, before the
+    /// first frame of the game on it — the renderer holds the meshes of one
+    /// map and has no way to swap them, so a map of another shape is another
+    /// renderer.
+    ///
+    /// # Errors
+    ///
+    /// [`GpuError`] if waiting for the frames in flight failed, or the new
+    /// renderer could not be built. Either way the old one is left in place,
+    /// whole, still drawing the old map.
+    pub fn set_map(&mut self, map: &Map) -> Result<(), GpuError> {
+        if self.map == *map {
+            return Ok(());
+        }
+        let (mut renderer, field) = field_renderer(&self.ctx, map)?;
+        if let Err(error) = self.ctx.drain() {
+            renderer.destroy(self.ctx.device());
+            return Err(error);
+        }
+        // Refused only for the anisotropy, which `apply_video_to` has logged
+        // with the value still in force; the rest of the section is in force
+        // regardless, as it is when the loop applies it.
+        if let Some(video) = self.video
+            && crcbl::settings::apply_video_to(&mut renderer, self.ctx.device(), &video).is_err()
+        {
+            crcbl::log::debug!("render: the new field kept its sampler's anisotropy");
+        }
+        crcbl::settings::set_debug_view_on(&mut renderer, self.debug_view);
+        std::mem::replace(&mut self.renderer, renderer).destroy(self.ctx.device());
+        self.field = field;
+        self.map = map.clone();
+        Ok(())
     }
 
     /// Draws the creeps, the towers, the bolts and the splash bursts where the
@@ -493,6 +534,7 @@ impl Gpu {
         &mut self,
         video: &crcbl::settings::VideoSettings,
     ) -> Result<(), crcbl::settings::Unsupported> {
+        self.video = Some(*video);
         crcbl::settings::apply_video_to(&mut self.renderer, self.ctx.device(), video)
     }
 
@@ -505,8 +547,28 @@ impl Gpu {
         &mut self,
         view: crcbl::render::DebugView,
     ) -> Result<(), crcbl::settings::Unsupported> {
+        self.debug_view = view;
         crcbl::settings::set_debug_view_on(&mut self.renderer, view);
         Ok(())
+    }
+}
+
+/// A forward renderer holding `map`'s field, and the pools placed in it.
+///
+/// # Errors
+///
+/// [`GpuError`] if the renderer could not be built, or the map's description
+/// asks for more than the pools hold — in which case the renderer is released
+/// rather than leaked: nothing here has a `Drop`.
+fn field_renderer(ctx: &GpuContext, map: &Map) -> Result<(ForwardRenderer, Field), GpuError> {
+    let mut renderer =
+        ForwardRenderer::with_scene(ctx.device(), ctx.queue(), ctx.format(), &map.scene())?;
+    match map.place(&mut renderer) {
+        Ok(field) => Ok((renderer, field)),
+        Err(error) => {
+            renderer.destroy(ctx.device());
+            Err(GpuError::pools("towers' field", &error))
+        }
     }
 }
 

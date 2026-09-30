@@ -7,16 +7,17 @@ use std::thread;
 use std::time::Duration;
 
 use crcbl::core::input::KeyCode;
+use crcbl::ecs::World;
 use crcbl::lan::LanHost;
 use crcbl::net::ProtocolCompatibility;
 use crcbl::net::udp::discovery::HostEntry;
 use crcbl::ui::menu::CaptionTone;
 
 use super::*;
-use crate::lan::session;
 use crate::lan::tests::{
     FRAME, MAX_FRAMES, PAUSE, TICK_HZ, another_map, loopback_browser, on_loopback,
 };
+use crate::lan::{Progress, SESSION};
 
 /// A host on loopback playing `map`, with a player of its own.
 fn host_on(map: &Map) -> Game {
@@ -39,7 +40,7 @@ fn address(host: &Game) -> SocketAddr {
 /// A lobby on the committed field, browsing `host`'s announcer.
 fn lobby_browsing(host: &Game) -> Lobby {
     Lobby::new(
-        session(&Map::built_in()),
+        SESSION,
         Ok(loopback_browser(announcer(host))),
         on_loopback(),
         TICK_HZ,
@@ -49,26 +50,48 @@ fn lobby_browsing(host: &Game) -> Lobby {
 /// A lobby that is not browsing at all, for what needs no host.
 fn lobby_alone() -> Lobby {
     Lobby::new(
-        session(&Map::built_in()),
+        SESSION,
         Err("NOT LOOKING".to_string()),
         on_loopback(),
         TICK_HZ,
     )
 }
 
-/// Steps `host` and polls `lobby` until `done` holds, failing past
-/// [`MAX_FRAMES`].
-fn until(host: &mut Game, lobby: &mut Lobby, what: &str, done: impl Fn(&Lobby) -> bool) {
+/// Runs `step` — the host's frame — and polls `lobby` until `done` holds,
+/// failing past [`MAX_FRAMES`].
+fn until(mut step: impl FnMut(), lobby: &mut Lobby, what: &str, done: impl Fn(&Lobby) -> bool) {
     for _ in 0..MAX_FRAMES {
         if done(lobby) {
             return;
         }
-        host.tick();
-        host.frame(FRAME);
+        step();
         lobby.poll();
         thread::sleep(PAUSE);
     }
     panic!("no {what} within {MAX_FRAMES} frames");
+}
+
+/// The step that runs `host` — its own player's tick and its frame.
+fn serving(host: &mut Game) -> impl FnMut() + '_ {
+    move || {
+        host.tick();
+        host.frame(FRAME);
+    }
+}
+
+/// A host speaking `compatibility` on loopback with nobody of its own — the
+/// engine's alone, for a host of another version.
+fn bare_host(compatibility: ProtocolCompatibility) -> LanHost {
+    LanHost::open(
+        crcbl::lan::LanGame {
+            compatibility,
+            ..SESSION
+        },
+        on_loopback(),
+        World::new(),
+        TICK_HZ,
+    )
+    .expect("loopback UDP must be available to these tests")
 }
 
 /// The labels of `menu`'s rows, with the hint each carries.
@@ -91,7 +114,7 @@ fn the_lobby_lists_a_host_announced_on_loopback() {
         vec![Caption::hint("LOOKING FOR HOSTS ON THE LAN")],
         "a browsing lobby that has heard nothing says it is looking"
     );
-    until(&mut host, &mut lobby, "listed host", |lobby| {
+    until(serving(&mut host), &mut lobby, "listed host", |lobby| {
         lobby.menu().items().len() > 3
     });
     assert_eq!(
@@ -106,22 +129,33 @@ fn the_lobby_lists_a_host_announced_on_loopback() {
     assert!(lobby.take_changed(), "a new row is a menu to rebuild");
 }
 
-/// **Choosing the listed host joins it**: the game the pick starts is a
-/// client of that host's address, and it gets into the session.
+/// **Choosing the listed host joins it**: the pick starts a join to that
+/// host's address, which the lobby names while it waits, and the game it
+/// ends in is on the host's map and gets into the session — the host on
+/// [`another_map`], which the lobby's own is not.
 #[test]
 fn choosing_a_listed_host_joins_it() {
-    let mut host = host_on(&Map::built_in());
+    let mut host = host_on(&another_map());
     let mut lobby = lobby_browsing(&host);
-    until(&mut host, &mut lobby, "listed host", |lobby| {
+    until(serving(&mut host), &mut lobby, "listed host", |lobby| {
         lobby.menu().items().len() > 3
     });
-    let Some(Picked::Session(mut joiner)) = lobby.pick(Pick::Listed(0), &Map::built_in()) else {
-        panic!("the listed host did not start a session");
+    let Some(Picked::Joining(joining)) = lobby.pick(Pick::Listed(0), &Map::built_in()) else {
+        panic!("the listed host did not start a join");
     };
-    assert_eq!(
-        joiner.lan_client().and_then(LanClient::host),
-        Some(address(&host))
+    assert_eq!(joining.lan().host(), Some(address(&host)));
+    let waiting = format!("JOINING {}", address(&host));
+    assert!(
+        lobby
+            .menu()
+            .subtitle
+            .iter()
+            .any(|line| line.text == waiting),
+        "{:?}",
+        lobby.menu().subtitle
     );
+    let mut joiner = loop_until_joined(&mut host, joining);
+    assert_eq!(joiner.map(), &another_map(), "not on the host's map");
     for _ in 0..MAX_FRAMES {
         if joiner.stats().ticks > 0 {
             return;
@@ -135,37 +169,69 @@ fn choosing_a_listed_host_joins_it() {
     panic!("the joiner never got into the host's session");
 }
 
-/// **A host on another map is a dimmed line with its reason, and not a row**:
-/// nothing Enter can fire, and a pick of a row that is not there starts
-/// nothing and says so.
+/// Steps `host` and `joining` until the host's map makes the game, failing
+/// past [`MAX_FRAMES`] or on a failed join.
+fn loop_until_joined(host: &mut Game, joining: Joining) -> Game {
+    let mut waiting = Some(joining);
+    for _ in 0..MAX_FRAMES {
+        host.tick();
+        host.frame(FRAME);
+        match waiting.take().expect("still joining").step(FRAME) {
+            Progress::Waiting(next) => waiting = Some(next),
+            Progress::Joined(game) => return game,
+            Progress::Failed(failure) => panic!("the join failed: {failure}"),
+        }
+        thread::sleep(PAUSE);
+    }
+    panic!("no map from the host within {MAX_FRAMES} frames");
+}
+
+/// **A host of another version is a dimmed line with its reason, and not a
+/// row**: nothing Enter can fire, and a pick of a row that is not there
+/// starts nothing and says so.
 #[test]
 fn an_incompatible_host_is_listed_dimmed_and_not_joinable() {
-    let mut host = host_on(&another_map());
-    let mut lobby = lobby_browsing(&host);
-    until(&mut host, &mut lobby, "passed-over host", |lobby| {
-        lobby
-            .menu()
-            .subtitle
-            .iter()
-            .any(|line| line.text.contains("ANOTHER MAP"))
+    let mut old = bare_host(ProtocolCompatibility {
+        protocol_version: SESSION.compatibility.protocol_version - 1,
+        ..SESSION.compatibility
     });
+    let announcer = old.announcer_addr().expect("the host announces");
+    let port = old.game_port();
+    let mut lobby = Lobby::new(
+        SESSION,
+        Ok(loopback_browser(announcer)),
+        on_loopback(),
+        TICK_HZ,
+    );
+    let mut now = Duration::ZERO;
+    until(
+        || {
+            now += FRAME;
+            old.frame(now);
+        },
+        &mut lobby,
+        "passed-over host",
+        |lobby| {
+            lobby
+                .menu()
+                .subtitle
+                .iter()
+                .any(|line| line.text.contains("ANOTHER VERSION"))
+        },
+    );
     let menu = lobby.menu();
     let line = menu
         .subtitle
         .iter()
-        .find(|line| line.text.contains("ANOTHER MAP"))
+        .find(|line| line.text.contains("ANOTHER VERSION"))
         .expect("the line");
     assert_eq!(line.tone, CaptionTone::Hint, "dimmed: the hint colour");
-    assert!(
-        line.text.contains(&address(&host).to_string()),
-        "{}",
-        line.text
-    );
+    assert!(line.text.contains(&format!(":{port}")), "{}", line.text);
     assert!(
         menu.items()
             .iter()
             .all(|item| !item.label.starts_with("JOIN")),
-        "a host on another map is a row: {:?}",
+        "a host of another version is a row: {:?}",
         rows(&menu)
     );
 
@@ -194,10 +260,11 @@ fn entry(compatibility: ProtocolCompatibility, players: u16) -> HostEntry {
 }
 
 /// **Each reason a host is passed over is named**, in the handshake's order,
-/// and a host with room on this session is joinable.
+/// and a host with room on this session is joinable — whatever its map,
+/// which is no part of what it announces.
 #[test]
-fn a_host_is_passed_over_for_its_version_its_build_its_map_or_its_room() {
-    let ours = session(&Map::built_in()).compatibility;
+fn a_host_is_passed_over_for_its_version_its_build_its_game_or_its_room() {
+    let ours = SESSION.compatibility;
     assert_eq!(Unjoinable::of(ours, &entry(ours, 1)), None);
     let cases = [
         (
@@ -214,7 +281,13 @@ fn a_host_is_passed_over_for_its_version_its_build_its_map_or_its_room() {
             },
             Unjoinable::Build,
         ),
-        (session(&another_map()).compatibility, Unjoinable::Map),
+        (
+            ProtocolCompatibility {
+                schema_hash: ours.schema_hash ^ 0b10,
+                ..ours
+            },
+            Unjoinable::Game,
+        ),
     ];
     for (theirs, why) in cases {
         assert_eq!(Unjoinable::of(ours, &entry(theirs, 1)), Some(why));
@@ -223,7 +296,7 @@ fn a_host_is_passed_over_for_its_version_its_build_its_map_or_its_room() {
         Unjoinable::of(ours, &entry(ours, crate::lan::MAX_PLAYERS)),
         Some(Unjoinable::Full)
     );
-    assert_eq!(Unjoinable::Map.label(), "ANOTHER MAP");
+    assert_eq!(Unjoinable::Game.label(), "ANOTHER GAME");
 }
 
 /// **The connect field parses what was typed, and refuses what is not an
@@ -257,13 +330,10 @@ fn the_connect_field_parses_and_refuses_a_bad_address() {
     assert_eq!(lobby.address(), "127.0.0.1:", "one press, one character");
     lobby.text(&address(&host).port().to_string());
     assert_eq!(lobby.connect_hint(), address(&host).to_string());
-    let Some(Picked::Session(joiner)) = lobby.pick(Pick::Connect, &Map::built_in()) else {
+    let Some(Picked::Joining(joining)) = lobby.pick(Pick::Connect, &Map::built_in()) else {
         panic!("a good address started nothing");
     };
-    assert_eq!(
-        joiner.lan_client().and_then(LanClient::host),
-        Some(address(&host))
-    );
+    assert_eq!(joining.lan().host(), Some(address(&host)));
     host.frame(FRAME);
 }
 
