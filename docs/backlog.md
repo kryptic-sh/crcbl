@@ -14218,10 +14218,13 @@ player in the lobby with the reason.
 - **`--serve` has no clean shutdown.** It runs until the process is killed: the
   workspace has no signal handling (no Ctrl+C hook, and no crate for one), so
   the players are never sent `SessionEndReason::SHUTTING_DOWN` and see their
-  links time out instead. Closing it needs a console-control / `SIGINT` hook — a
-  new dependency or a platform-gated handler per OS — that sets a flag
-  `lan::serve::serve` checks between frames before calling `Host::shutdown`. Not
-  decided: which, since neither exists anywhere in the tree yet.
+  links time out instead. **Decided 2026-10-01: a console on stdin.** A reader
+  thread takes lines from the server's stdin — `quit` ends the session with
+  `Host::shutdown` between frames, `status` prints the status line now — which
+  is the dedicated-server norm, is `std` only, and behaves the same on every OS,
+  where a signal hook is a new dependency or a handler per platform. Ctrl+C
+  still kills it without the goodbye; stdin closing is not a quit, so a server
+  started with no console keeps running.
 - **`--serve`'s wall-clock loop and `app::run`'s dispatch to it are not run by
   any test.** `serve` binds every interface (`LanBind::on_the_lan`), which can
   raise a Windows firewall prompt, so the tests drive `serve::Server` a frame at
@@ -14236,14 +14239,18 @@ player in the lobby with the reason.
 - **Not run on two machines, or through a firewall.** See the UDP entry's _Not
   run_ item, which has the manual check.
 - **D2 connection tokens.** The UDP entry's; nothing towers-specific.
-- **Pause is per player.** A LAN host serves on wall time through `Game::frame`,
-  so its pause menu stops only its own commands and the run goes on for
-  everyone, as a joiner's does. Whether a co-op pause should stop the session
-  (host only, or by vote) is a design call not made.
-- **Late join is not refused.** The plan's "lobby-lite (join before wave 1)" is
-  not enforced: a joiner admitted mid-run plays from there. Refusing needs the
-  host to stop accepting, or to `Host::kick` a newcomer, once the first wave has
-  started.
+- **Pause is per player — decided 2026-10-01, and it stays that way.** A LAN
+  host serves on wall time through `Game::frame`, so a pause menu stops only its
+  own player's commands and the run goes on for everyone. That is the online
+  co-op norm, and the alternatives are worse long-term: a host-only pause makes
+  one player the others' referee, and a vote adds a UI and a protocol message
+  for a game whose between-wave build phase already gives the team its breather.
+  Solo still pauses the run.
+- **Late join is allowed — decided 2026-10-01.** The plan's MVP asked for "join
+  before wave 1" with late join after it; a joiner admitted mid-run already
+  plays from there, and refusing it now would be work to undo when late join
+  lands. Drop-in costs a co-op tower defense nothing — the purse and lives are
+  the team's — so the MVP rule is dropped rather than enforced.
 - **A refused command is counted, not told to whoever sent it.**
   `Stats::refused` is the team's. Telling the player who asked needs the refusal
   attributed to its `PeerId` in `run_team_tick` and a way back to that peer — a

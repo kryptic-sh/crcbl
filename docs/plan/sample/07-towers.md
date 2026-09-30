@@ -45,7 +45,8 @@ without needing prediction.
 - 3 creep types (fast, tanky, swarm), 10 scripted waves, shared team lives +
   shared gold.
 - 1–4 players co-op; solo = same game over in-memory transport.
-- Win/lose, restart, lobby-lite (join before wave 1; late join post-MVP).
+- Win/lose, restart, lobby-lite. Late join is allowed: a player admitted mid-run
+  plays from there (decided 2026-10-01 — see the backlog).
 - Save/resume (topic 14): manual + between-wave autosave; solo and
   dedicated-server co-op (world save server-side, clients rejoin into it — save
   = same snapshot machinery as join-in-progress).
