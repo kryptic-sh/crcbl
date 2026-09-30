@@ -425,6 +425,26 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   paste that is not a clipping) or what a save found, as a warning when the game
   would refuse the saved scene. The same lines still go to the log.
 
+- **`crcbl_net::seal`: the AEAD every datagram on a network transport will
+  travel under**, as pure logic between `reliable::Endpoint` and a socket.
+  `Sealer::seal` puts a packet under XChaCha20-Poly1305 behind a clear
+  `SEALED_TAG` byte and a 64-bit per-direction counter, both authenticated as
+  associated data; the nonce derives from direction and counter, never drawn,
+  and the sealer refuses with `SealError::CounterExhausted` rather than wrap.
+  `Opener::open` authenticates first and only then checks the counter against a
+  replay window, so duplicates and stale datagrams are refused and a forged
+  counter cannot move the window (`OpenError` names each refusal).
+  `derive_channel(role, shared_secret, client_public, server_public, protocol_id)`
+  keys both halves with HKDF-SHA256 in Noise's two-output form over a transcript
+  of both public keys, the protocol id and `PROTOCOL_NAME`, one key per
+  direction, refusing an all-zero shared secret. The X25519 call that produces
+  the shared secret is **not** included yet: `x25519-dalek` would add a second
+  `rand_core` to the tree, and that decision is open. New dependencies:
+  `chacha20poly1305` 0.11, `hmac` 0.13 and `sha2` 0.11, with every RNG feature
+  off, so nothing in `crcbl-net` draws randomness and the wasm build is
+  unaffected. `crcbl_net::auth`'s MAC now runs on `hmac` and `sha2` with
+  identical output, and `crcbl-net` no longer depends on `crcbl-shaders`.
+
 - **`crcbl_net::reliable`: the reliability layer a UDP transport will run
   inside**, as pure logic over any datagram pipe — no socket and no crypto yet.
   An `Endpoint` (driven by an injected `Clock`: `send`, `receive_datagram`,
@@ -436,8 +456,8 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `MAX_RELIABLE_MESSAGE_BYTES`; `Channel::UnreliableSequenced` never resends,
   drops anything older than what it last delivered, and refuses a payload past
   `MAX_UNRELIABLE_PAYLOAD` (the one-datagram rule, against a 1200-byte
-  `MAX_DATAGRAM_BYTES` that already reserves room for the AEAD tag). Keepalives,
-  a `PEER_TIMEOUT`, and a graceful disconnect reported as
+  `MAX_DATAGRAM_BYTES` that already reserves `SEAL_RESERVE` for the seal).
+  Keepalives, a `PEER_TIMEOUT`, and a graceful disconnect reported as
   `EndpointState::PeerDisconnected` rather than `TimedOut`; `EndpointStats`
   carries round trip, jitter, loss and resend counts for the netgraph. Every
   queue is capped and a full one is `TransportError::Backpressure`;

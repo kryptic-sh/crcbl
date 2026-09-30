@@ -3,6 +3,7 @@
 use crcbl_net::ResumeToken;
 use crcbl_net::auth::{SessionKey, open};
 use crcbl_net::reliable::{Endpoint, decode_packet};
+use crcbl_net::seal::{Role, derive_channel};
 use crcbl_net::{
     ManualClock, Trust, decode_ack, decode_client_to_server, decode_delta, decode_handshake_result,
     decode_hello, decode_server_to_client,
@@ -23,6 +24,16 @@ fuzz_target!(|data: &[u8]| {
         &SessionKey::derive(&ResumeToken::from_bytes([0xA5; 32])),
         data,
     );
+    // The seal's opener is the outermost parser a UDP transport will have: it
+    // reads the clear prefix of every datagram before anything authenticates
+    // it. Without the key the fuzzer reaches the framing checks and the tag
+    // verification, not a successful open, which is the surface a spoofer has.
+    if let Ok((_, mut opener)) =
+        derive_channel(Role::Server, &[0x42; 32], &[0xC1; 32], &[0x5E; 32], 0)
+    {
+        let _ = opener.open(data);
+        let _ = opener.open(data);
+    }
     // The reliability layer's packet decoder, and the endpoint state machine
     // behind it: under the seal a datagram only reaches them once it has
     // opened, but they must hold on bytes they were never meant to see. The

@@ -14,21 +14,22 @@ use crate::{
     TransportError,
 };
 
-const PROTOCOL: u32 = 0x4352_4342;
+pub(crate) const PROTOCOL: u32 = 0x4352_4342;
 
 /// Simulated time per step of the driving loop: every endpoint polls and
 /// receives once per step, like a game loop's frame.
-const STEP: Duration = Duration::from_millis(5);
+pub(crate) const STEP: Duration = Duration::from_millis(5);
 
-/// One direction of the wire.
-struct Wire {
+/// One direction of the wire. `crate::seal`'s tests run sealed traffic
+/// through it too.
+pub(crate) struct Wire {
     sim: ConditionSimulator<InMemoryTransport, ManualClock>,
     far: InMemoryTransport,
     arrived: VecDeque<Vec<u8>>,
 }
 
 impl Wire {
-    fn new(conditions: SimConditions, clock: ManualClock) -> Self {
+    pub(crate) fn new(conditions: SimConditions, clock: ManualClock) -> Self {
         let (near, far) = InMemoryTransport::pair();
         Self {
             sim: ConditionSimulator::with_clock(near, conditions, clock),
@@ -37,7 +38,7 @@ impl Wire {
         }
     }
 
-    fn put(&mut self, datagram: Vec<u8>) {
+    pub(crate) fn put(&mut self, datagram: Vec<u8>) {
         loop {
             match self
                 .sim
@@ -72,7 +73,7 @@ impl Wire {
         }
     }
 
-    fn take(&mut self) -> Vec<Vec<u8>> {
+    pub(crate) fn take(&mut self) -> Vec<Vec<u8>> {
         self.collect();
         self.arrived.drain(..).collect()
     }
@@ -171,14 +172,14 @@ impl Link {
 /// Honest traffic is never refused as malformed. A closed endpoint refusing
 /// the peer's last packets, and a receiver whose application is not reading
 /// refusing fragments until it does, are the expected errors.
-fn accept(endpoint: &mut Endpoint<ManualClock>, datagram: &[u8]) {
+pub(crate) fn accept(endpoint: &mut Endpoint<ManualClock>, datagram: &[u8]) {
     match endpoint.receive_datagram(datagram) {
         Ok(()) | Err(ReceiveError::Closed | ReceiveError::DeliveriesFull { .. }) => {}
         Err(e) => panic!("an honest datagram was refused: {e}"),
     }
 }
 
-fn payloads(deliveries: &[Delivery], channel: Channel) -> Vec<Vec<u8>> {
+pub(crate) fn payloads(deliveries: &[Delivery], channel: Channel) -> Vec<Vec<u8>> {
     deliveries
         .iter()
         .filter(|delivery| delivery.channel == channel)
@@ -188,7 +189,7 @@ fn payloads(deliveries: &[Delivery], channel: Channel) -> Vec<Vec<u8>> {
 
 /// A reliable message whose bytes say which one it is, and every so often
 /// one large enough to be split.
-fn numbered_message(n: usize) -> Vec<u8> {
+pub(crate) fn numbered_message(n: usize) -> Vec<u8> {
     let len = if n % 37 == 5 {
         MAX_FRAGMENT_BYTES * 2 + 17
     } else {
@@ -199,7 +200,7 @@ fn numbered_message(n: usize) -> Vec<u8> {
     bytes
 }
 
-fn hostile_conditions(seed: u64) -> SimConditions {
+pub(crate) fn hostile_conditions(seed: u64) -> SimConditions {
     SimConditions {
         loss_rate: 0.25,
         latency: Duration::from_millis(20),

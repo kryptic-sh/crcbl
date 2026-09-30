@@ -30,14 +30,15 @@ use crate::codec::{ByteReader, DecodeError};
 /// raise it; nothing does yet.
 pub const MAX_DATAGRAM_BYTES: usize = 1200;
 
-/// Bytes kept free in every datagram for the seal the AEAD layer adds: a
-/// Poly1305 tag, which is what XChaCha20-Poly1305 appends. The nonce is not
-/// sent, since it derives from direction and a packet counter.
-pub const AEAD_TAG_RESERVE: usize = 16;
+/// Bytes kept free in every datagram for what [`crate::seal`] adds around a
+/// packet: its clear prefix and the Poly1305 tag. The nonce is not sent, since
+/// it derives from direction and the prefix's counter. The seal owns the
+/// number; this is where the packet budget reads it.
+pub const SEAL_RESERVE: usize = crate::seal::SEAL_OVERHEAD;
 
 /// The largest packet this layer emits or accepts: the datagram budget less the
 /// seal's reserve.
-pub const MAX_PACKET_BYTES: usize = MAX_DATAGRAM_BYTES - AEAD_TAG_RESERVE;
+pub const MAX_PACKET_BYTES: usize = MAX_DATAGRAM_BYTES - SEAL_RESERVE;
 
 /// Bytes of the header every packet starts with: protocol id, kind, sequence,
 /// ack and ack bitfield.

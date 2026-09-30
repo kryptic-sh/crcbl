@@ -7,7 +7,7 @@ fn key() -> SessionKey {
 #[test]
 fn hmac_matches_rfc4231_test_case_1() {
     // RFC 4231 §4.2: key = 0x0b × 20, data = "Hi There".
-    let mac = hmac_sha256(&[0x0b; 20], b"Hi There");
+    let mac = hmac_sha256(&[0x0b; 20], &[b"Hi There"]);
     let expected: [u8; 32] = [
         0xb0, 0x34, 0x4c, 0x61, 0xd8, 0xdb, 0x38, 0x53, 0x5c, 0xa8, 0xaf, 0xce, 0xaf, 0x0b, 0xf1,
         0x2b, 0x88, 0x1d, 0xc2, 0x00, 0xc9, 0x83, 0x3d, 0xa7, 0x26, 0xe9, 0x37, 0x6c, 0x2e, 0x32,
@@ -19,7 +19,7 @@ fn hmac_matches_rfc4231_test_case_1() {
 #[test]
 fn hmac_matches_rfc4231_test_case_2() {
     // RFC 4231 §4.3: key = "Jefe", data = "what do ya want for nothing?".
-    let mac = hmac_sha256(b"Jefe", b"what do ya want for nothing?");
+    let mac = hmac_sha256(b"Jefe", &[b"what do ya want for nothing?"]);
     let expected: [u8; 32] = [
         0x5b, 0xdc, 0xc1, 0x46, 0xbf, 0x60, 0x75, 0x4e, 0x6a, 0x04, 0x24, 0x26, 0x08, 0x95, 0x75,
         0xc7, 0x5a, 0x00, 0x3f, 0x08, 0x9d, 0x27, 0x39, 0x83, 0x9d, 0xec, 0x58, 0xb9, 0x64, 0xec,
@@ -34,7 +34,7 @@ fn hmac_hashes_oversized_keys() {
     // is hashed first.
     let mac = hmac_sha256(
         &[0xaa; 131],
-        b"Test Using Larger Than Block-Size Key - Hash Key First",
+        &[b"Test Using Larger Than Block-Size Key - Hash Key First"],
     );
     let expected: [u8; 32] = [
         0x60, 0xe4, 0x31, 0x59, 0x1e, 0xe0, 0xb6, 0x7f, 0x0d, 0x8a, 0x26, 0xaa, 0xcb, 0xf5, 0xb7,
@@ -191,13 +191,6 @@ fn debug_redacts_the_key() {
     let debug = format!("{:?}", key());
     assert!(debug.contains("REDACTED"));
     assert!(!debug.contains("165"));
-}
-
-#[test]
-fn constant_time_eq_compares_contents_and_length() {
-    assert!(constant_time_eq(b"abc", b"abc"));
-    assert!(!constant_time_eq(b"abc", b"abd"));
-    assert!(!constant_time_eq(b"abc", b"ab"));
 }
 
 #[test]

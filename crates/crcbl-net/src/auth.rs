@@ -29,12 +29,14 @@
 //! spoofer who can send packets but did not see the handshake — a shared-secret
 //! MAC is the right primitive.
 //!
-//! The MAC is HMAC-SHA256 truncated to 128 bits, built on the workspace's own
-//! [`crcbl_shaders::sha256`] so no third-party crypto dependency enters the
-//! build graph.
+//! The MAC is HMAC-SHA256 truncated to 128 bits, on RustCrypto's `hmac` and
+//! `sha2` — the crates [`crate::seal`] is built on — and the truncated MAC is
+//! compared in constant time by `hmac`'s own `verify_truncated_left`.
 
+use hmac::Mac;
+
+use crate::seal::kdf::{hmac_sha256, keyed};
 use crate::types::ResumeToken;
-use crcbl_shaders::sha256::sha256;
 
 /// First byte of an authenticated envelope. Distinct from every message tag.
 pub const AUTH_TAG: u8 = 0x40;
@@ -43,7 +45,6 @@ pub const MAC_BYTES: usize = 16;
 /// Bytes an envelope adds to the payload it wraps.
 pub const AUTH_OVERHEAD: usize = 1 + 8 + MAC_BYTES;
 
-const HMAC_BLOCK_BYTES: usize = 64;
 /// Domain separator so the session key is not the resume token itself: a
 /// server that leaked a MAC key would not thereby leak the reconnect
 /// credential.
@@ -86,7 +87,7 @@ impl SessionKey {
     /// reconnect start a fresh counter space.
     #[must_use]
     pub fn derive(token: &ResumeToken) -> Self {
-        Self(hmac_sha256(token.as_bytes(), SESSION_KEY_INFO))
+        Self(hmac_sha256(token.as_bytes(), &[SESSION_KEY_INFO]))
     }
 }
 
@@ -105,7 +106,7 @@ pub fn seal(key: &SessionKey, counter: u64, payload: &[u8]) -> Vec<u8> {
     out.push(AUTH_TAG);
     out.extend_from_slice(&counter.to_le_bytes());
     out.extend_from_slice(payload);
-    let mac = hmac_sha256(&key.0, &out);
+    let mac = hmac_sha256(&key.0, &[&out]);
     out.extend_from_slice(&mac[..MAC_BYTES]);
     out
 }
@@ -122,10 +123,10 @@ pub fn open<'a>(key: &SessionKey, envelope: &'a [u8]) -> Result<(u64, &'a [u8]),
         return Err(AuthError::TooShort);
     }
     let (signed, mac) = envelope.split_at(envelope.len() - MAC_BYTES);
-    let expected = hmac_sha256(&key.0, signed);
-    if !constant_time_eq(&expected[..MAC_BYTES], mac) {
-        return Err(AuthError::BadMac);
-    }
+    keyed(&key.0)
+        .chain_update(signed)
+        .verify_truncated_left(mac)
+        .map_err(|_| AuthError::BadMac)?;
     let counter = u64::from_le_bytes(signed[1..9].try_into().expect("9 bytes of framing"));
     Ok((counter, &signed[9..]))
 }
@@ -233,45 +234,6 @@ impl SessionCrypto {
         }
         Ok(payload)
     }
-}
-
-// ── HMAC-SHA256 ───────────────────────────────────────────────────────────────
-
-/// HMAC-SHA256 (RFC 2104) over the workspace's own SHA-256.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut block = [0u8; HMAC_BLOCK_BYTES];
-    if key.len() > HMAC_BLOCK_BYTES {
-        block[..32].copy_from_slice(&sha256(key));
-    } else {
-        block[..key.len()].copy_from_slice(key);
-    }
-
-    let mut inner = Vec::with_capacity(HMAC_BLOCK_BYTES + data.len());
-    for byte in block {
-        inner.push(byte ^ 0x36);
-    }
-    inner.extend_from_slice(data);
-    let inner_digest = sha256(&inner);
-
-    let mut outer = [0u8; HMAC_BLOCK_BYTES + 32];
-    for (out, byte) in outer[..HMAC_BLOCK_BYTES].iter_mut().zip(block) {
-        *out = byte ^ 0x5c;
-    }
-    outer[HMAC_BLOCK_BYTES..].copy_from_slice(&inner_digest);
-    sha256(&outer)
-}
-
-/// Compare two equal-length byte slices without an early return, so a
-/// mismatch does not reveal how many leading bytes matched.
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut difference = 0u8;
-    for (l, r) in left.iter().zip(right) {
-        difference |= l ^ r;
-    }
-    difference == 0
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────

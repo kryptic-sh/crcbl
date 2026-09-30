@@ -53,6 +53,21 @@ gltf = { version = "1.4.1", default-features = false, features = [
 # "wasm32")` section instead, because enabling it in this table would enable it
 # for native too and put `wasm-bindgen` in every binary that links a server.
 getrandom = "0.4.3"
+# The crypto primitives `crcbl_net::seal` is built on, approved 2026-09-06 as
+# RustCrypto (`docs/backlog.md`, _There is no UDP transport_). Every one is
+# featured so that nothing in it can draw randomness: `chacha20poly1305`'s
+# defaults are `alloc` and `getrandom`, and the seal derives its nonces and
+# takes key material from its caller, so neither is wanted — and `getrandom`
+# on `wasm32-unknown-unknown` fails to build at all. `zeroize` on both keyed
+# crates wipes the AEAD key and HMAC state on drop, and makes `digest::zeroize`
+# available for the key schedule's own intermediate secrets; `zeroize` is
+# already in the tree under `chacha20`. `sha2` drops `alloc` and `oid`, which
+# nothing reads. `hmac` has no default features. `x25519-dalek` is NOT here:
+# both its 2.x and 3.x lines name `rand_core` unconditionally (0.6 and 0.10),
+# a second copy beside the 0.9 this table pins — see the backlog entry.
+chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
+hmac = { version = "0.13.0", features = ["zeroize"] }
+sha2 = { version = "0.11.0", default-features = false }
 log = "0.4"
 # Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is
 # a dependency rather than a hand-rolled encoder.

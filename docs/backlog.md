@@ -12897,9 +12897,9 @@ What it left unbuilt is below.
 
 ### There is no UDP transport, and therefore no crypto of our own (2026-08-27)
 
-**Partly built: the packet layer exists, the socket and the seal do not.** No
-`UdpSocket` exists anywhere in `crates/` or `apps/` (grep, 2026-09-30).
-`Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
+**Partly built: the packet layer and the seal exist, the socket and the X25519
+call do not.** No `UdpSocket` exists anywhere in `crates/` or `apps/` (grep,
+2026-09-30). `Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
 `FileTransport` and, since 2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P
 over Valve's relay, run through `crcbl_net::conformance`; `crcbl_server::Host`
 serves several sessions over `Box<dyn Transport>` peers).
@@ -12911,7 +12911,7 @@ packet; `Endpoint`, one per peer, driven by an injected `Clock`. The reliable
 channel resends on an RFC 6298 RTO (`MIN_RTO`, `MAX_RTO`, doubling per resend),
 delivers in order through a bounded reorder window (`RELIABLE_WINDOW`), and
 fragments up to `MAX_RELIABLE_MESSAGE_BYTES` from the 1200-byte
-`MAX_DATAGRAM_BYTES`, which reserves `AEAD_TAG_RESERVE` for the seal. The
+`MAX_DATAGRAM_BYTES`, which reserves `SEAL_RESERVE` for the seal. The
 unreliable-sequenced channel never resends, never fragments, and drops anything
 older than it last delivered. Keepalives (`KEEPALIVE_INTERVAL`), `PEER_TIMEOUT`,
 and a disconnect packet sent `DISCONNECT_REDUNDANCY` times and reported as
@@ -12924,25 +12924,75 @@ reassembly under loss, RTT convergence, loss estimate, timeout, disconnect,
 hostile datagrams, floods and end-to-end backpressure. The decoder fuzz target
 feeds it too.
 
+**Built 2026-09-30 (slice B): `crcbl_net::seal`**, pure logic like the packet
+layer. A `Sealer` puts a packet from `Endpoint::poll_outgoing` under
+XChaCha20-Poly1305; an `Opener` reverses it for `Endpoint::receive_datagram`.
+Datagram: `SEALED_TAG`, a 64-bit per-direction counter in clear, then the whole
+packet (header included) as ciphertext, then the Poly1305 tag; the clear bytes
+are the associated data. `SEAL_OVERHEAD` is what that adds, and
+`reliable::SEAL_RESERVE` now reads it, so `MAX_PACKET_BYTES` and the payload
+limits shrank by the prefix. The nonce is the direction byte, the counter and
+zeros; the sealer refuses at counter exhaustion (`SealError::CounterExhausted`)
+rather than wrap; the opener checks `auth::ReplayWindow` only after the tag
+verifies. `derive_channel` is the key schedule: SHA-256 over `PROTOCOL_NAME`,
+the endpoint protocol id and both public keys as Noise's chaining key, then
+Noise §4.3 `HKDF` (RFC 5869, `seal::kdf`) to one key per direction, refusing an
+all-zero shared secret (RFC 7748 §6.1). Tests: RFC 5869 A.1–A.3, the
+draft-irtf-cfrg-xchacha-03 A.3.1 vector, the datagram layout rebuilt by hand
+from the raw cipher, every single-bit flip, wrong key and direction, replay and
+reordering, a forged counter not moving the window, exhaustion, the largest
+endpoint packet sealing to exactly `MAX_DATAGRAM_BYTES`, and two endpoints over
+`ConditionSimulator` through the seal with and without an adversary forging four
+datagrams per honest one. The decoder fuzz target runs the opener. The
+dependencies are `chacha20poly1305` 0.11, `hmac` 0.13 and `sha2` 0.11, with no
+RNG feature anywhere; `crcbl-net` no longer depends on `crcbl-shaders`, since
+`auth.rs`'s hand-written HMAC moved onto the same crates (checked equal to the
+old implementation over every key length to 200 and twelve data lengths before
+the old one was deleted). **Not run locally:** the fuzz target with the opener
+in it — `cargo check --bins` passes, but its `no_main` binary does not link
+under MSVC, so CI's `decoder-fuzz` job is its first run.
+
 **What is left, by slice:**
 
-- **B — the seal.** RustCrypto's `chacha20poly1305` and `x25519-dalek` (the
-  decision below). Seal between `Endpoint::poll_outgoing` and the socket, open
-  between the socket and `Endpoint::receive_datagram`; the endpoint's header
-  under the tag. **The nonce cannot be the packet sequence**: it is 16 bits and
-  wraps, so the seal carries its own 64-bit per-direction counter (netcode.io's
-  layering: a 64-bit sequence outside, reliable.io's 16-bit one inside) and
-  needs its own replay window over it. X25519 in the handshake, rekey on
-  reconnect, nonce uniqueness property-tested.
-- **C — `UdpTransport`.** A socket, one `Endpoint` per peer behind `Transport`
-  (`send_reliable` → `Channel::Reliable`, `send_unreliable` →
-  `Channel::UnreliableSequenced`, `recv_reliable` → `Endpoint::recv_reliable`,
-  `is_connected` → `EndpointState::is_connected`), the hello and handshake
-  carried over it, and `crcbl_net::conformance` run against it. Only after B:
-  **an unsealed endpoint on a network is exploitable, not just readable** — a
-  forged disconnect ends the link, and a forged first fragment with the wrong
-  count for the next message id stalls the reliable channel for good. The
-  endpoint cannot tell a forgery from the peer; only the tag can.
+- **B′ — the X25519 call. Blocked on a decision.** `x25519-dalek` cannot enter
+  the tree without breaking `deny.toml`'s duplicate ban: 3.0.0 names `rand_core`
+  0.10 and 2.0.1 names 0.6, both **unconditionally** (not behind a feature —
+  read in each release's `Cargo.toml`, 2026-09-30), beside the 0.9 the workspace
+  holds for `proptest` (the entry above on the rand 0.10 migration). No feature
+  set avoids it. The options: **(a)** a `deny.toml` skip for `rand_core@0.10.1`
+  — a traits-only crate with no features on, so no second ChaCha and no
+  `getrandom`, which is the difference from the duplicate that entry declined to
+  skip; drop the skip when `proptest` moves. **(b)** wait for `proptest` on rand
+  0.10, then take `x25519-dalek` 3 with no skip. **(c)** name `curve25519-dalek`
+  directly (`MontgomeryPoint::mul_clamped`, whose `rand_core` is optional) — a
+  crate outside the approved four. Until then `derive_channel` takes the X25519
+  output as bytes. When it lands:
+  `default-features = false, features = ["static_secrets", "zeroize"]`,
+  `StaticSecret::from([u8; 32])` from caller bytes (no `getrandom` feature, so
+  wasm stays clean), and RFC 7748 §6.1's vector through the crate.
+- **C — `UdpTransport`.** Needs B′ for a real key exchange. A socket, one
+  `Endpoint` per peer behind `Transport` (`send_reliable` → `Channel::Reliable`,
+  `send_unreliable` → `Channel::UnreliableSequenced`, `recv_reliable` →
+  `Endpoint::recv_reliable`, `is_connected` → `EndpointState::is_connected`),
+  the hello and handshake carried over it, and `crcbl_net::conformance` run
+  against it. Only after B: **an unsealed endpoint on a network is exploitable,
+  not just readable** — a forged disconnect ends the link, and a forged first
+  fragment with the wrong count for the next message id stalls the reliable
+  channel for good. The endpoint cannot tell a forgery from the peer; only the
+  tag can. **What it wires from B:** each side draws 32 fresh secret bytes per
+  connection from the OS (natively — `crcbl-net` draws nothing, and web builds
+  have no networking), never reused across connections; the public keys travel
+  in the hello and its reply; both sides call `derive_channel` with the same
+  client/server public keys and the endpoint protocol id, and from then on every
+  datagram goes through `Sealer::seal` / `Opener::open`, with the `SEALED_TAG`
+  byte telling sealed traffic from the hello. **Rekey on reconnect** is a new
+  key pair and a new `derive_channel`, dropping the old sealer and opener;
+  `SealError::CounterExhausted` is handled the same way. An `OpenError` is a
+  dropped datagram, never a disconnect — a spoofer must not be able to end the
+  link by sending garbage. The opener's replay window is `ReplayWindow::WIDTH`
+  counters, so a datagram delayed behind more than that many newer ones is
+  refused and the reliable channel resends it; a fragment burst reordered past
+  the width costs resends, not correctness.
 - **D — tokens and discovery.** Connection tokens (below) and LAN discovery (its
   own entry). Neither needs anything from the packet layer.
 

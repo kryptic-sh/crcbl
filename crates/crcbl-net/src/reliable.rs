@@ -19,18 +19,18 @@
 //!
 //! **Nothing here goes on a network as it is.** The encryption rule in
 //! `docs/notes/simulation.md` puts every packet on a network transport under
-//! AEAD from the first packet after the hello, with no plaintext mode, so the
-//! seal belongs between [`Endpoint::poll_outgoing`] and the socket and the open
-//! between the socket and [`Endpoint::receive_datagram`]. The endpoint's bytes
-//! are the AEAD plaintext; its packet header goes under the tag as associated
-//! data, so an ack, a sequence or a channel id cannot be forged by anyone
-//! without the key. [`MAX_DATAGRAM_BYTES`] already reserves
-//! [`AEAD_TAG_RESERVE`] for that tag, so sealing a packet the endpoint emitted
-//! never pushes it past the datagram budget.
+//! AEAD from the first packet after the hello, with no plaintext mode, so
+//! [`crate::seal`]'s `Sealer` belongs between [`Endpoint::poll_outgoing`] and
+//! the socket and its `Opener` between the socket and
+//! [`Endpoint::receive_datagram`]. The endpoint's whole packet, header
+//! included, is the AEAD plaintext, so an ack, a sequence or a channel id can
+//! be neither read nor forged by anyone without the key. [`MAX_DATAGRAM_BYTES`]
+//! already reserves [`SEAL_RESERVE`] for what the seal adds, so sealing a
+//! packet the endpoint emitted never pushes it past the datagram budget.
 //!
 //! **The nonce cannot be this header's sequence.** It is 16 bits and wraps —
 //! at a steady sixty packets a second, in about eighteen minutes — and an AEAD
-//! nonce repeated under one key is fatal. The seal layer carries its own 64-bit
+//! nonce repeated under one key is fatal. The seal carries its own 64-bit
 //! counter for the nonce, as netcode.io's packet prefix does beneath
 //! reliable.io's 16-bit sequence.
 //!
@@ -76,7 +76,7 @@ pub mod rtt;
 pub mod sequence;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use endpoint::{
     Channel, DISCONNECT_REDUNDANCY, Delivery, Endpoint, EndpointState, EndpointStats,
@@ -84,10 +84,9 @@ pub use endpoint::{
     MAX_RELIABLE_BYTES_IN_FLIGHT, PEER_TIMEOUT, RELIABLE_WINDOW, ReceiveError,
 };
 pub use packet::{
-    AEAD_TAG_RESERVE, Fragment, HEADER_BYTES, MAX_DATAGRAM_BYTES, MAX_FRAGMENT_BYTES,
-    MAX_FRAGMENTS_PER_MESSAGE, MAX_PACKET_BYTES, MAX_RELIABLE_MESSAGE_BYTES,
-    MAX_UNRELIABLE_PAYLOAD, PacketAcks, PacketBody, PacketDecodeError, PacketHeader, decode_packet,
-    encode_packet,
+    Fragment, HEADER_BYTES, MAX_DATAGRAM_BYTES, MAX_FRAGMENT_BYTES, MAX_FRAGMENTS_PER_MESSAGE,
+    MAX_PACKET_BYTES, MAX_RELIABLE_MESSAGE_BYTES, MAX_UNRELIABLE_PAYLOAD, PacketAcks, PacketBody,
+    PacketDecodeError, PacketHeader, SEAL_RESERVE, decode_packet, encode_packet,
 };
 pub use rtt::RttEstimator;
 pub use sequence::{sequence_greater_than, sequence_less_than};
