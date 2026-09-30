@@ -42,7 +42,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   on native builds (see Added: towers plays co-op over a LAN), so a struct
   literal must name the field (`crcbl::lan::LanMode::Off` is solo) and an
   exhaustive `match` the variant. Towers' protocol version is 3: the snapshot
-  now carries the field, which an older client cannot read.
+  now carries the field, which an older client cannot read. **Its schema hash
+  now folds in the map's fingerprint** (`crcbl_towers::Map::fingerprint`), so
+  two towers builds on different maps refuse each other, and so do a build from
+  before this change and one from after it, whatever their maps: the committed
+  field's session hand-shakes on schema `0x9d7fd7e02e757e3d`. There is no
+  `lan::LAN` constant: `crcbl_towers::lan::session(&map)` is the session on a
+  map, beside `lan::PROTOCOL_ID` and `lan::APP`.
 
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
@@ -498,7 +504,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   others; `Game::host`, `Game::join`, `Game::replicated`, `Game::lan_host`,
   `Game::lan_client` and `Game::lan_section` are new, and the F3 panel gains the
   "lan" section during a session. Four players winning the whole table fit every
-  snapshot in one datagram with nothing held back.
+  snapshot in one datagram with nothing held back. A joiner draws its own map,
+  so the map is in the handshake as a fingerprint: `Map::fingerprint` digests
+  the waypoints in order and the plots (label and position) through a defined
+  little-endian encoding with SHA-256, and every session's schema hash folds it
+  in, so a browser passes over a host on another map and a direct join to one is
+  refused as a schema mismatch naming both hashes.
 
 - **Towers has a dedicated server**: `towers --serve [PORT]` runs the same
   authoritative stage on `crcbl::lan`'s host with no window, no renderer and no
@@ -511,6 +522,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   next group starts on a fresh field. `--serve` takes `--tick-hz` and `--scene`
   and refuses every window, GPU or frame flag, and `--host`, `--join` and
   `--browse`, with exit code 2. Native builds only.
+
+- **`crcbl_client::Client::handshake_refusal()`**: the `RejectReason` that made
+  the client give up handshaking — a protocol, engine-build or schema mismatch —
+  with its code and the message naming both sides' values, where
+  `handshake_blocked()` only said that it had. `crcbl::lan::LanClient` logs that
+  message when a host refuses it, rather than "runs another build".
 
 - **`crcbl_client::Client::replicated(system)`**: the entity bits and component
   bytes a server system of that name replicated, from the default sector's

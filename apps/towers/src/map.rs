@@ -95,6 +95,8 @@ use crate::scene::Plot;
 use crate::tower::SHORTEST_RANGE_M;
 use crate::wave::MAX_CREEPS;
 
+mod fingerprint;
+
 // ---------------------------------------------------------------------------
 // The field
 // ---------------------------------------------------------------------------

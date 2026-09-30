@@ -17,10 +17,10 @@ use std::time::Duration;
 use crcbl::lan::{LanBind, LanClient, LanHost};
 use crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crcbl::net::udp::discovery::{Browser, BrowserConfig};
-use crcbl::net::{SessionState, SystemClock};
+use crcbl::net::{RejectReason, SessionState, SystemClock};
 
 use super::serve::{STATUS_INTERVAL, Server};
-use super::{LAN, MAX_PLAYERS};
+use super::{MAX_PLAYERS, PROTOCOL_ID, session};
 use crate::game::{Controls, Game, Stats};
 use crate::map::Map;
 use crate::tower::{self, Tier};
@@ -178,7 +178,8 @@ impl<A: Authority> Rig<A> {
     }
 
     fn join(&mut self) {
-        let client = LanClient::join(LAN, self.address(), TICK_HZ).expect("connect");
+        let client =
+            LanClient::join(session(&Map::built_in()), self.address(), TICK_HZ).expect("connect");
         self.joiners
             .push(Game::join(TICK_HZ, &Map::built_in(), client));
     }
@@ -336,22 +337,47 @@ fn a_joiner_who_leaves_does_not_stop_the_others() {
     });
 }
 
-/// A player browsing for a host, its query sent straight to `announcer`.
-fn browsing(announcer: SocketAddr) -> Game {
-    let browser = Browser::bind_with(
+/// A browser whose query goes straight to `announcer`.
+fn loopback_browser(announcer: SocketAddr) -> Browser {
+    Browser::bind_with(
         loopback(),
         BrowserConfig {
             query_to: Some(announcer),
-            ..BrowserConfig::new(LAN.protocol_id)
+            ..BrowserConfig::new(PROTOCOL_ID)
         },
         SystemClock::new(),
     )
-    .expect("loopback UDP must be available to these tests");
+    .expect("loopback UDP must be available to these tests")
+}
+
+/// A player browsing for a host, its query sent straight to `announcer`.
+fn browsing(announcer: SocketAddr) -> Game {
+    browsing_on(announcer, &Map::built_in())
+}
+
+/// …drawing `map`.
+fn browsing_on(announcer: SocketAddr, map: &Map) -> Game {
     Game::join(
         TICK_HZ,
-        &Map::built_in(),
-        LanClient::browse(LAN, browser, TICK_HZ),
+        map,
+        LanClient::browse(session(map), loopback_browser(announcer), TICK_HZ),
     )
+}
+
+/// The committed field with one plot a quarter metre along: a map a player
+/// could have loaded with `--scene`, and not the host's.
+fn another_map() -> Map {
+    let map = Map::built_in();
+    let mut plots = map.plots().to_vec();
+    plots[2].position[0] += 0.25;
+    Map::new(map.path().waypoints().to_vec(), plots).expect("still a legal map")
+}
+
+/// Why `game`'s host refused it for good, once it has.
+fn refusal(game: &Game) -> Option<RejectReason> {
+    game.lan_client()
+        .and_then(LanClient::client)
+        .and_then(|client| client.handshake_refusal().cloned())
 }
 
 /// **A browser finds the towers host and plays in it.** The query goes
@@ -379,6 +405,80 @@ fn a_browser_finds_the_towers_host_and_plays_in_it() {
             .and_then(crcbl::lan::LanHost::announcement)
             .is_some_and(|announcement| announcement.players == 2)
     });
+}
+
+/// **A browser on another map passes over the host.** The host is heard —
+/// a plain browser lists it, announcing the host's map's compatibility and
+/// not the joiner's — and a player browsing on the host's map joins it; a
+/// player browsing on another map, polling the same host over the same
+/// frames and well past them, chooses nothing.
+#[test]
+fn a_browser_on_another_map_passes_over_the_host() {
+    let mut rig = Rig::new();
+    let announcer = rig
+        .host
+        .lan_host()
+        .and_then(LanHost::announcer_addr)
+        .expect("the host announces");
+    let other = another_map();
+    rig.joiners.push(browsing_on(announcer, &other));
+    rig.joiners.push(browsing(announcer));
+    rig.until("the joiner on the host's map playing", |rig| {
+        playing(&rig.joiners[1])
+    });
+    for _ in 0..SEEN_WITHIN {
+        rig.step();
+    }
+    assert_eq!(
+        rig.joiners[0].lan_client().and_then(LanClient::host),
+        None,
+        "a joiner on another map chose the host"
+    );
+
+    let mut heard = loopback_browser(announcer);
+    let mut hosts = Vec::new();
+    for _ in 0..MAX_FRAMES {
+        heard.poll();
+        hosts = heard.hosts();
+        if !hosts.is_empty() {
+            break;
+        }
+        // The host answers the query in its own frame.
+        rig.step();
+    }
+    let [host] = hosts.as_slice() else {
+        panic!("the browser should hear exactly the one host: {hosts:?}");
+    };
+    assert_eq!(host.compatibility, session(&Map::built_in()).compatibility);
+    assert_ne!(
+        host.compatibility,
+        session(&other).compatibility,
+        "the announce does not tell the two maps apart"
+    );
+}
+
+/// **A direct join on another map is refused, by name.** A player who
+/// `--join`s a host with the wrong map is turned away by the handshake as a
+/// schema mismatch — permanent, so the client stops asking — and the
+/// refusal it keeps names both sides' schema hashes; the host holds only its
+/// own player.
+#[test]
+fn a_direct_join_on_another_map_is_refused_by_name() {
+    let mut rig = Rig::new();
+    let other = another_map();
+    let client = LanClient::join(session(&other), rig.address(), TICK_HZ).expect("connect");
+    rig.joiners.push(Game::join(TICK_HZ, &other, client));
+    rig.until("the host refusing the joiner", |rig| {
+        refusal(&rig.joiners[0]).is_some()
+    });
+
+    let refused = refusal(&rig.joiners[0]).expect("refused");
+    assert_eq!(refused.code, RejectReason::SCHEMA_MISMATCH, "{refused:?}");
+    for (side, map) in [("client", &other), ("server", &Map::built_in())] {
+        let named = format!("{side} 0x{:016x}", session(map).compatibility.schema_hash);
+        assert!(refused.msg.contains(&named), "{named} in {:?}", refused.msg);
+    }
+    assert_eq!(rig.connected(), 1, "only the host's own player is in");
 }
 
 /// The plan `a_splash_and_a_slow_tower_hold_the_whole_table` wins with.

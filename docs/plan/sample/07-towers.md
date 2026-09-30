@@ -261,9 +261,14 @@ not built anywhere yet.
   bytes). **Unverified:** two machines on a real LAN, the broadcast query
   reaching a host at all, whether a Windows firewall prompt blocks the first
   run, and `--serve`'s own wall-clock loop — every test is one process on
-  loopback, driving the server a frame at a time. **Not built:** the lobby
-  browser, the map in the handshake (a joiner draws its own), a clean shutdown
-  for `--serve` (it runs until killed), and the wasm client, which the LAN rule
+  loopback, driving the server a frame at a time. **The map is in the handshake
+  as a fingerprint:** a joiner still draws its own map, so the map's SHA-256
+  fingerprint (`Map::fingerprint`, its waypoints and plots through a defined
+  encoding) is folded into the session's schema hash, and a browser passes over
+  a host on another map while a direct join to one is refused as a schema
+  mismatch naming both hashes. **Not built:** the lobby browser, sending the
+  host's map at join so any joiner can play any host, a clean shutdown for
+  `--serve` (it runs until killed), and the wasm client, which the LAN rule
   rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has
   each with what it would take.
 

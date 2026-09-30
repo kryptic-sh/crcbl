@@ -545,8 +545,8 @@ impl LanClient {
                     self.reported_session = true;
                 }
                 if !self.reported_end {
-                    if client.handshake_blocked() {
-                        crate::log::warn!("lan: {host} runs another build and refused us");
+                    if let Some(refusal) = client.handshake_refusal() {
+                        crate::log::warn!("lan: {host} refused us: {}", refusal.msg);
                         self.reported_end = true;
                     } else if let Some(ended) = client.ended() {
                         log_end(*host, ended, client);

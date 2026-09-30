@@ -36,10 +36,13 @@
 //! out a tick at a time, exactly as solo's.
 //!
 //! **It draws its own map.** The plots and the path are this process's
-//! `--scene` (or the committed field), and nothing on the wire says the host
-//! is playing the same one: a joiner on another map would draw the host's
-//! towers on its own plots. The handshake's compatibility does not cover the
-//! map; `docs/backlog.md` records what closing that would take.
+//! `--scene` (or the committed field), and the host's map never crosses the
+//! wire. What does is its fingerprint, folded into the handshake's
+//! compatibility by [`crate::game`]'s `compatibility`: a browser passes over a
+//! host on another map, and the handshake refuses a direct join to one as a
+//! schema mismatch, so a joiner never draws the host's towers on its own
+//! plots. Sending the host's map at join, so any joiner can play any host, is
+//! recorded in `docs/backlog.md`.
 //!
 //! # Wall time, every frame
 //!
@@ -62,24 +65,37 @@ use crcbl::ecs::World;
 use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
 use crcbl::net::InMemoryTransport;
 
-use crate::game::{COMPATIBILITY, GameError, TowersModule};
+use crate::game::{GameError, TowersModule, compatibility};
+use crate::map::Map;
 use crate::replica::{self, Decoded};
 
 /// The most players a towers session holds, the host's own among them: the
 /// "1–4 players co-op" of `docs/plan/sample/07-towers.md`.
 pub const MAX_PLAYERS: u16 = 4;
 
-/// Towers' LAN session, as [`crcbl::lan`] knows it. The protocol id spells
-/// `TWRS`; the compatibility is the one solo's handshake gates on, so a
-/// joiner of another build is refused by the handshake and passed over by a
+/// What towers' printed lines start with.
+pub const APP: &str = "towers";
+
+/// The endpoint protocol id towers' links speak: it spells `TWRS`. A browser
+/// or a listener on another lists and answers nothing.
+pub const PROTOCOL_ID: u32 = u32::from_be_bytes(*b"TWRS");
+
+/// Towers' LAN session on `map`, as [`crcbl::lan`] knows it.
+///
+/// The compatibility is the one solo's handshake gates on too, with the map
+/// folded in — see [`crate::game`]'s `compatibility` — so a joiner of another
+/// build or on another map is refused by the handshake and passed over by a
 /// browser before it.
-pub const LAN: LanGame = LanGame {
-    app: "towers",
-    host_name: "crcbl towers",
-    protocol_id: u32::from_be_bytes(*b"TWRS"),
-    compatibility: COMPATIBILITY,
-    max_players: MAX_PLAYERS,
-};
+#[must_use]
+pub fn session(map: &Map) -> LanGame {
+    LanGame {
+        app: APP,
+        host_name: "crcbl towers",
+        protocol_id: PROTOCOL_ID,
+        compatibility: compatibility(map),
+        max_players: MAX_PLAYERS,
+    }
+}
 
 /// A host's side: the engine's LAN host, and this player's own client of it.
 #[derive(Debug)]
@@ -92,9 +108,10 @@ pub(crate) struct HostLink {
 }
 
 impl HostLink {
-    /// Hosts `world` — the stage's replica — ticked by `module`, bound where
-    /// `bind` says, and joins it as this player. Answers the link and the
-    /// tick period, with the first tick spent on this player's handshake.
+    /// Hosts `world` — the stage's replica — ticked by `module` as `game`,
+    /// bound where `bind` says, and joins it as this player. Answers the link
+    /// and the tick period, with the first tick spent on this player's
+    /// handshake.
     ///
     /// # Errors
     ///
@@ -102,17 +119,18 @@ impl HostLink {
     /// [`GameError::Server`] if this player's session did not come up in the
     /// first tick.
     pub fn open(
+        game: LanGame,
         bind: LanBind,
         world: World,
         module: TowersModule,
         tick_hz: u32,
     ) -> Result<(Self, Duration), GameError> {
-        let mut lan = LanHost::open(LAN, bind, world, tick_hz).map_err(GameError::Lan)?;
+        let mut lan = LanHost::open(game, bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
         let (server_end, client_end) = InMemoryTransport::pair();
         lan.host_mut().add(Box::new(server_end));
         let mut local =
-            Client::new_with_compatibility(World::new(), client_end, tick_hz, COMPATIBILITY);
+            Client::new_with_compatibility(World::new(), client_end, tick_hz, game.compatibility);
         // The client clock's own step, so one period is exactly one tick of it.
         let tick_period = FrameClock::new(tick_hz).tick_dt();
 

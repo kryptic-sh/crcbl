@@ -95,11 +95,35 @@ use crate::wave::{self, MAX_CREEPS, Outcome, STARTING_GOLD, STARTING_LIVES, Wave
 /// LAN, which is what a remote player draws; a client from before would read
 /// none of it, and one from after would draw an empty field against an older
 /// server.
-pub(crate) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+///
+/// **This is the base, and no session gates on it as it stands**: every
+/// handshake uses [`compatibility`], which folds the map into the schema.
+const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
     protocol_version: 3,
     engine_build_id: 0x0043_5243_424C,
     schema_hash: 0x0000_0054_5752,
 };
+
+/// What a session on `map` hand-shakes on: [`COMPATIBILITY`] with the map's
+/// [`Map::fingerprint`] folded into its schema hash.
+///
+/// **A joiner draws its own map** — `crate::lan` says why — so two processes
+/// on different maps would play one's towers on the other's plots. With the
+/// map in the schema, a browser passes over a host on another map and the
+/// handshake refuses a direct join to one as a schema mismatch, which is
+/// permanent: the client stops asking. Solo hand-shakes on it too, so there
+/// is one rule for every session rather than one for the LAN.
+///
+/// The low bit is set so the hash is never zero, the placeholder
+/// [`ProtocolCompatibility::assert_explicit`] refuses — a fingerprint equal to
+/// the base's schema would otherwise fold to it. The other 63 bits are the
+/// map's.
+pub(crate) fn compatibility(map: &Map) -> ProtocolCompatibility {
+    ProtocolCompatibility {
+        schema_hash: (COMPATIBILITY.schema_hash ^ map.fingerprint()) | 1,
+        ..COMPATIBILITY
+    }
+}
 
 /// The default simulation rate. Reaches the server, the client and the stage,
 /// so there is exactly one rate in the process.
@@ -1119,7 +1143,7 @@ impl Game {
 
         // The world's one system is the field's replica. What the server
         // ticks is the module, and what the module owns is the stage.
-        let mut session = Loopback::new(world, Box::new(module), tick_hz, COMPATIBILITY)
+        let mut session = Loopback::new(world, Box::new(module), tick_hz, compatibility(&map))
             .map_err(|error| GameError::Server(error.to_string()))?;
         let tick_period = session.tick_period();
 
@@ -1171,7 +1195,8 @@ impl Game {
         assert!(tick_hz > 0, "tick rate must be positive");
         let map = Arc::new(map.clone());
         let (shared, world, module) = server_world(&map);
-        let (link, tick_period) = crate::lan::HostLink::open(bind, world, module, tick_hz)?;
+        let (link, tick_period) =
+            crate::lan::HostLink::open(crate::lan::session(&map), bind, world, module, tick_hz)?;
         log_the_rules(tick_hz, tick_period, &map);
         Ok(Self {
             link: Link::Host(Box::new(link)),

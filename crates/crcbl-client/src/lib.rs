@@ -149,8 +149,8 @@ pub struct Client<T: Transport> {
     /// drops the resume token, on the same reasoning as
     /// `handshake_token_rejections`.
     unproven_sessions: u32,
-    /// Set only by a rejection this build can never satisfy.
-    handshake_blocked: bool,
+    /// Set only by a rejection this build can never satisfy, and holding it.
+    handshake_refusal: Option<RejectReason>,
     /// Why the server ended this session, once it has said so; cleared by
     /// [`Client::reconnect`].
     session_ended: Option<SessionEndReason>,
@@ -210,7 +210,7 @@ impl<T: Transport> Client<T> {
             handshake_complete: false,
             session_proof_deadline: None,
             unproven_sessions: 0,
-            handshake_blocked: false,
+            handshake_refusal: None,
             session_ended: None,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
@@ -440,7 +440,16 @@ impl<T: Transport> Client<T> {
     /// wedged by a single forged packet.
     #[must_use]
     pub fn handshake_blocked(&self) -> bool {
-        self.handshake_blocked
+        self.handshake_refusal.is_some()
+    }
+
+    /// The rejection that made the client give up handshaking, while it has
+    /// — see [`Client::handshake_blocked`]. Its code says which identifier
+    /// disagreed and its message names both sides' values, which is what a
+    /// player refused by a host needs to be told.
+    #[must_use]
+    pub fn handshake_refusal(&self) -> Option<&RejectReason> {
+        self.handshake_refusal.as_ref()
     }
 
     /// How the session ended, or `None` while it has not.
@@ -469,7 +478,7 @@ impl<T: Transport> Client<T> {
         self.handshake_attempts = 0;
         self.handshake_token_rejections = 0;
         self.handshake_complete = false;
-        self.handshake_blocked = false;
+        self.handshake_refusal = None;
         self.session_crypto = None;
         self.session_proof_deadline = None;
         self.unproven_sessions = 0;
@@ -536,7 +545,7 @@ impl<T: Transport> Client<T> {
     /// rather than latching.
     fn drive_handshake(&mut self) {
         self.expire_unproven_session();
-        if self.handshake_complete || self.handshake_blocked || self.session_ended.is_some() {
+        if self.handshake_complete || self.handshake_blocked() || self.session_ended.is_some() {
             return;
         }
         if let Some(deadline) = self.handshake_deadline
@@ -778,7 +787,7 @@ impl<T: Transport> Client<T> {
             HandshakeResult::Reject { reason, .. } => {
                 self.processing_error_count += 1;
                 if reason.is_permanent() {
-                    self.handshake_blocked = true;
+                    self.handshake_refusal = Some(reason);
                 } else if reason.code == RejectReason::INVALID_SESSION_TOKEN
                     && self.resume_token.is_some()
                 {
@@ -1276,6 +1285,11 @@ mod tests {
         .unwrap();
         client.update(TICK);
         assert!(!client.handshake_blocked());
+        assert_eq!(
+            client.handshake_refusal(),
+            None,
+            "a transient one is no refusal"
+        );
         // Backoff holds the retry briefly...
         client.update(2 * TICK);
         assert!(peer.recv().unwrap().is_none());
@@ -1376,6 +1390,14 @@ mod tests {
         client.update(TICK);
 
         assert!(client.handshake_blocked());
+        assert_eq!(
+            client.handshake_refusal(),
+            Some(&RejectReason {
+                code: RejectReason::SCHEMA_MISMATCH,
+                msg: "incompatible".into(),
+            }),
+            "the client forgot why it was refused"
+        );
         client.update(Duration::from_secs(60));
         assert!(
             peer.recv().unwrap().is_none(),

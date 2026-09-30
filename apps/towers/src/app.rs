@@ -437,7 +437,6 @@ fn open_game(options: &Options) -> Result<Game, crate::game::GameError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use crate::game::GameError;
-        use crate::lan::LAN;
         use crcbl::lan::{LanBind, LanClient, LanMode};
 
         match options.lan {
@@ -446,11 +445,13 @@ fn open_game(options: &Options) -> Result<Game, crate::game::GameError> {
                 return Game::host(tick_hz, &options.map, LanBind::on_the_lan(port));
             }
             LanMode::Join(addr) => {
-                let client = LanClient::join(LAN, addr, tick_hz).map_err(GameError::Lan)?;
+                let client = LanClient::join(crate::lan::session(&options.map), addr, tick_hz)
+                    .map_err(GameError::Lan)?;
                 return Ok(Game::join(tick_hz, &options.map, client));
             }
             LanMode::Browse => {
-                let client = LanClient::browse_the_lan(LAN, tick_hz).map_err(GameError::Lan)?;
+                let client = LanClient::browse_the_lan(crate::lan::session(&options.map), tick_hz)
+                    .map_err(GameError::Lan)?;
                 return Ok(Game::join(tick_hz, &options.map, client));
             }
         }

@@ -46,7 +46,7 @@ use std::time::{Duration, Instant};
 use crcbl::core::FrameClock;
 use crcbl::lan::{LanBind, LanHost};
 
-use super::LAN;
+use super::{APP, MAX_PLAYERS, session};
 use crate::game::{Field, GameError, Stats};
 use crate::map::Map;
 use crate::wave::{Outcome, WAVES};
@@ -91,7 +91,7 @@ impl Server {
     /// [`GameError::Lan`] if the listener would not bind.
     pub fn open(bind: LanBind, map: &Map, tick_hz: u32) -> Result<Self, GameError> {
         let (field, world, module) = Field::open(map, tick_hz);
-        let mut lan = LanHost::open(LAN, bind, world, tick_hz).map_err(GameError::Lan)?;
+        let mut lan = LanHost::open(session(map), bind, world, tick_hz).map_err(GameError::Lan)?;
         lan.host_mut().set_module(Box::new(module));
         Ok(Self {
             lan,
@@ -158,8 +158,8 @@ fn status_line(players: usize, stats: &Stats) -> String {
     };
     format!(
         "{}: {players}/{} players, wave {}/{}, {} lives, {} gold, run {}, {state}",
-        LAN.app,
-        LAN.max_players,
+        APP,
+        MAX_PLAYERS,
         stats.wave,
         WAVES.len(),
         stats.lives,
