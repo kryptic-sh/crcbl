@@ -109,7 +109,7 @@ impl Server {
     /// been quiet for [`STATUS_INTERVAL`].
     pub fn frame(&mut self, now: Duration) -> Option<String> {
         let events = self.lan.frame(now);
-        welcome(&mut self.lan, &events, &self.map, None);
+        welcome(self.lan.host_mut(), &events, &self.map, None);
         let headline = self.headline();
         if self.printed == Some(headline) && now < self.next_status {
             return None;

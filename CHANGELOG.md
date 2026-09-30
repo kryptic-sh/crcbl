@@ -38,6 +38,10 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   earlier member keeps its offset. `GpuMaterial::default()` now carries that
   neutral specular rather than zeroes in those words.
 
+- **`crcbl_server::PeerEvent` has a `Reaccepted(PeerId)` variant** (see Added),
+  so an exhaustive `match` on it must name the new arm; `apps/sandbox`'s ignores
+  it, and towers sends its map again on it.
+
 - **`crcbl_towers::Options` has a `lan` field and `GameError` a `Lan` variant**
   on native builds (see Added: towers plays co-op over a LAN), so a struct
   literal must name the field (`crcbl::lan::LanMode::Off` is solo) and an
@@ -517,7 +521,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   every count and label to its cap before allocating, refuses a coordinate that
   is not finite and then every rule `Map::new` has, naming what was wrong
   (`MapWireError`). Only then is the joiner's `Game` built, on that map, and the
-  GPU's field rebuilt for it (`Gpu::set_map`), so any joiner plays any host
+  GPU's field rebuilt for it (`Gpu::set_map`) — and sent again when the host
+  accepts a joiner again on its link (`PeerEvent::Reaccepted`), whose restarted
+  key the first copy no longer opens under — so any joiner plays any host
   whatever its own `--scene`, and never draws on a map that is not the host's. A
   join that ends without a map — refused, the link ended, a map this build
   refuses, or nothing within `lan::JOIN_TIMEOUT` — ends as a `lan::JoinFailure`
@@ -570,6 +576,14 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and past `MAX_QUEUED_EVENTS` waiting the newest is dropped and counted
   (`dropped_event_count()`). Before, a client counted any sealed reliable
   message that was not a session end as a processing error.
+
+- **`crcbl_server::PeerEvent::Reaccepted(PeerId)`**: a connected peer's client
+  said hello again on its own link and was accepted again, to the same session —
+  what a client does when no answer to its hello came within its handshake
+  timeout, after which it drops the late first `Accept` as an old one. The
+  session's key starts over with the second `Accept`, so an event the game sent
+  on `PeerEvent::Joined` never opens on the client's side; this is when to send
+  it again. Raised only when the `Accept` went out.
 
 - **`crcbl_client::Client::handshake_refusal()`**: the `RejectReason` that made
   the client give up handshaking — a protocol, engine-build or schema mismatch —

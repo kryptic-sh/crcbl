@@ -274,11 +274,12 @@ not built anywhere yet.
   `crcbl_server::Host::send_event`), and the joiner builds its game — and its
   GPU field — only once `Map::from_wire` has read it back and held it to every
   rule a scene file is; so any joiner plays any host whatever its own `--scene`,
-  the map is out of the handshake's schema (protocol version 4), and a map the
-  joiner refuses ends the join by name. **A join from the lobby that fails comes
-  back to it:** the lobby stays up saying `JOINING` until the map is in, and a
-  refusal, a dead link, a bad map or no map within `lan::JOIN_TIMEOUT` leaves
-  the player there with the reason; `--join` and `--browse` wait under a
+  the map is out of the handshake's schema (protocol version 4), a joiner the
+  host accepts again on its link (`PeerEvent::Reaccepted`) is sent it again, and
+  a map the joiner refuses ends the join by name. **A join from the lobby that
+  fails comes back to it:** the lobby stays up saying `JOINING` until the map is
+  in, and a refusal, a dead link, a bad map or no map within `lan::JOIN_TIMEOUT`
+  leaves the player there with the reason; `--join` and `--browse` wait under a
   `JOINING` panel that shows and logs it. **So does a session from the lobby
   that ends after the map came** — the host left or shut down, a kick, or a dead
   link: the player is back in the lobby, over the idle solo run that was under

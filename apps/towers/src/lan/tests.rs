@@ -14,12 +14,16 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::thread;
 use std::time::Duration;
 
+use crcbl::client::Client;
 use crcbl::ecs::World;
 use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
 use crcbl::net::reliable::MAX_UNRELIABLE_PAYLOAD;
 use crcbl::net::udp::discovery::{Browser, BrowserConfig};
-use crcbl::net::{ProtocolCompatibility, SessionState, SystemClock};
-use crcbl::server::PeerEvent;
+use crcbl::net::{
+    InMemoryTransport, Message, MessageKind, ProtocolCompatibility, SessionState, SystemClock,
+    Transport,
+};
+use crcbl::server::{Host, HostConfig, PeerEvent};
 
 use super::serve::{STATUS_INTERVAL, Server};
 use super::{JOIN_TIMEOUT, JoinFailure, Joining, MAX_PLAYERS, PROTOCOL_ID, Progress, SESSION};
@@ -779,6 +783,99 @@ fn a_joiner_builds_nothing_until_the_map_comes() {
         matches!(failure, JoinFailure::NoMap { waited, .. } if waited == JOIN_TIMEOUT),
         "{failure:?}"
     );
+}
+
+/// Messages between a client and a host over in-memory pairs, carried by
+/// hand so a handshake reply can be lost on the way — as a datagram carrying
+/// it could be, or could come after the client stopped waiting.
+struct Relay {
+    client_side: InMemoryTransport,
+    host_side: InMemoryTransport,
+    /// How many of the host's handshake replies to lose.
+    lose_replies: usize,
+}
+
+impl Relay {
+    fn carry(&mut self) {
+        while let Some(msg) = self.client_side.recv().expect("in-memory") {
+            forward(&mut self.host_side, msg);
+        }
+        while let Some(msg) = self.host_side.recv().expect("in-memory") {
+            if self.lose_replies > 0 && crcbl::net::decode_handshake_result(&msg.payload).is_ok() {
+                self.lose_replies -= 1;
+                continue;
+            }
+            forward(&mut self.client_side, msg);
+        }
+    }
+}
+
+fn forward(to: &mut InMemoryTransport, msg: Message) {
+    match msg.kind {
+        MessageKind::Reliable => to.send_reliable(msg),
+        MessageKind::Unreliable => to.send_unreliable(msg),
+    }
+    .expect("in-memory");
+}
+
+/// **A joiner whose first `Accept` was lost is sent the map again, and reads
+/// it.** Its client hears nothing within its handshake timeout, says hello
+/// again and drops the late first `Accept` as an old one — so the map the
+/// host sealed at join no longer opens. The host accepts it again on the
+/// same link, `welcome` sends the map again, and that copy is the one the
+/// client reads.
+#[test]
+fn a_joiner_accepted_again_is_sent_the_map_again() {
+    let map = another_map();
+    let (_field, world, module) = crate::game::Field::open(&map, TICK_HZ);
+    let mut host = Host::new(
+        world,
+        HostConfig {
+            max_peers: usize::from(MAX_PLAYERS),
+            tick_hz: TICK_HZ,
+            compatibility: SESSION.compatibility,
+        },
+    );
+    host.set_module(Box::new(module));
+    let (near, client_side) = InMemoryTransport::pair();
+    let (host_side, far) = InMemoryTransport::pair();
+    host.add(Box::new(far));
+    let mut client =
+        Client::new_with_compatibility(World::new(), near, TICK_HZ, SESSION.compatibility);
+    let mut relay = Relay {
+        client_side,
+        host_side,
+        lose_replies: 1,
+    };
+    let wire = map.to_wire();
+    let mut raised = Vec::new();
+    let mut now = Duration::ZERO;
+    let mut received = Vec::new();
+    for _ in 0..MAX_FRAMES {
+        now += FRAME;
+        client.update(now);
+        relay.carry();
+        host.update(now);
+        let events: Vec<PeerEvent> = host.events().collect();
+        super::welcome(&mut host, &events, &wire, None);
+        raised.extend(events);
+        relay.carry();
+        received.extend(client.events());
+        if !received.is_empty() {
+            break;
+        }
+    }
+    assert_eq!(relay.lose_replies, 0, "the first Accept was not lost");
+    assert!(
+        raised
+            .iter()
+            .any(|event| matches!(event, PeerEvent::Reaccepted(_))),
+        "the host never accepted the joiner again: {raised:?}"
+    );
+    let [bytes] = &received[..] else {
+        panic!("not one map: {} events", received.len());
+    };
+    assert_eq!(Map::from_wire(bytes).expect("a map"), map);
 }
 
 /// **A host nobody answers ends the join as no answer**, once the join's

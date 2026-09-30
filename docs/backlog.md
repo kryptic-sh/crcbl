@@ -14162,7 +14162,12 @@ the map left the schema (protocol version 4); a lobby join that fails leaves the
 player in the lobby with the reason, and a joined session that ends brings them
 back to it saying how (`Towers::drive_session_end`, tested by
 `a_joined_session_that_ends_returns_to_the_lobby_saying_how` and
-`a_command_line_session_that_ends_says_so_on_its_panel` in `crate::app`).
+`a_command_line_session_that_ends_says_so_on_its_panel` in `crate::app`). A
+joiner the host accepts again on its link (its first `Accept` came after its
+handshake timeout) is sent the map again on `PeerEvent::Reaccepted`
+(`a_joiner_accepted_again_is_sent_the_map_again`, over in-memory pairs with the
+first `Accept` lost); a `Resumed` peer is not, since `crcbl::lan::LanClient`
+never reconnects on a new link — its link ends, and so does its game.
 
 **Left, and what each would take:**
 
@@ -14174,14 +14179,6 @@ back to it saying how (`Towers::drive_session_end`, tested by
   real lobby's `Browser::open` binds every interface and queries the broadcast
   address, which no test does. The manual check is the two-machine one below,
   started from the lobby rather than `--browse`.
-- **The map is sent once, on `PeerEvent::Joined`.** Reasoned from the code, not
-  observed: a joiner whose first `Accept` it drops as a stale generation (it
-  said hello again after `crcbl_client`'s `HANDSHAKE_TIMEOUT`) is re-accepted on
-  the same link with a restarted key, so the map sealed before that no longer
-  opens and the join ends as `JoinFailure::NoMap` after `lan::JOIN_TIMEOUT`
-  rather than recovering. Recovering needs the host to know it re-accepted a
-  peer (no `PeerEvent` says so today) and send again, or the joiner to ask for
-  the map — client commands are decoded and dropped by `crcbl_server` today.
 - **A join waits over the local field.** While a join waits for the map the
   frame still draws the idle solo run on this process's own map, under the lobby
   or, for `--join`/`--browse`, under the `JOINING` panel; the joined game is

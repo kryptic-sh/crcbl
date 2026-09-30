@@ -74,6 +74,15 @@ pub enum PeerEvent {
     Lost(PeerId),
     /// A lost peer came back within its grace period, to the same session.
     Resumed(PeerId),
+    /// A connected peer's client said hello again on its own link and was
+    /// accepted again, to the same session. A client does that when no
+    /// answer to its hello came within its handshake timeout, and then drops
+    /// the `Accept` that does come as an old one — so the session's key
+    /// started over with this `Accept`, and nothing sealed to the peer
+    /// before it opens on the client's side. What the game sent the peer on
+    /// [`Joined`](Self::Joined) is lost, and this is when to send it again;
+    /// a client that did read it the first time may be sent it twice.
+    Reaccepted(PeerId),
     /// The peer's session is gone: a lost peer's grace period ran out, or a
     /// connected peer sent nothing under its session key for a while after
     /// it was admitted or resumed (its client never took the session up). If
@@ -315,15 +324,20 @@ impl Host {
                                             // The session's key starts over
                                             // with the client's, which adopts
                                             // it afresh on every Accept.
-                                            if matches!(result, HandshakeResult::Accept { .. }) {
+                                            let accepted =
+                                                matches!(result, HandshakeResult::Accept { .. });
+                                            if accepted {
                                                 peer.link.adopt_session_key();
                                                 peer.keyed_at = self.now;
                                             }
-                                            peer::send_handshake_result(
+                                            let sent = peer::send_handshake_result(
                                                 transport.as_mut(),
                                                 &result,
                                                 &mut self.counters,
                                             );
+                                            if accepted && sent {
+                                                self.events.push(PeerEvent::Reaccepted(peer.id));
+                                            }
                                         }
                                         Err(_) => self.counters.processing_errors += 1,
                                     }
@@ -694,7 +708,8 @@ impl Host {
     /// session's key and on the reliable channel, so it arrives once, whole
     /// and in order with the handshake and everything else sent reliably —
     /// which is what a game sends a newly [`Joined`](PeerEvent::Joined) peer
-    /// the state it needs before its first snapshot means anything. The
+    /// the state it needs before its first snapshot means anything, and
+    /// sends again when it is [`Reaccepted`](PeerEvent::Reaccepted). The
     /// client reads it with `crcbl_client::Client::events`.
     ///
     /// # Errors

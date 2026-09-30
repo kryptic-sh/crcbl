@@ -243,6 +243,10 @@ mod imp {
                         world.despawn(entity);
                     }
                 }
+                // The same session on the same link, connected all along: its
+                // entity is already there, and the sandbox sends its players
+                // no event that a restarted key could have lost.
+                PeerEvent::Reaccepted(_) => {}
             }
         }
     }

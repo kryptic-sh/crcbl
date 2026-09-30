@@ -650,6 +650,59 @@ fn a_client_whose_first_accept_was_lost_takes_the_session_up_on_its_retry() {
     assert_eq!(left, [], "the session was taken up, so it stays");
 }
 
+/// **A client whose first `Accept` was lost is raised as re-accepted, and
+/// what the game sends it then reaches it** — where what it was sent on
+/// `Joined`, sealed before the key started over, never opens on its side.
+#[test]
+fn a_reaccepted_peer_is_raised_and_an_event_sent_then_reaches_it() {
+    let mut host = Host::new(
+        world(),
+        HostConfig {
+            max_peers: 1,
+            tick_hz: TICK_HZ,
+            compatibility: COMPATIBILITY,
+        },
+    );
+    let (near, client_side) = InMemoryTransport::pair();
+    let (host_side, far) = InMemoryTransport::pair();
+    host.add(Box::new(far));
+    let mut client = client(near);
+    let mut relay = Relay {
+        client_side,
+        host_side,
+        lose_replies: 1,
+    };
+    let mut raised = Vec::new();
+    let mut now = Duration::ZERO;
+    // Past the client's handshake timeout and its retry, with room.
+    let ticks = Duration::from_secs(5).as_nanos() / TICK.as_nanos();
+    for _ in 0..ticks {
+        now += TICK;
+        client.update(now);
+        relay.carry();
+        host.update(now);
+        for event in host.events().collect::<Vec<_>>() {
+            let (id, sent): (PeerId, &[u8]) = match event {
+                PeerEvent::Joined(id) => (id, b"sent on join"),
+                PeerEvent::Reaccepted(id) => (id, b"sent again"),
+                other => panic!("unexpected {other:?}"),
+            };
+            host.send_event(id, sent.to_vec())
+                .expect("a connected peer takes an event");
+            raised.push(event);
+        }
+        relay.carry();
+    }
+    assert_eq!(relay.lose_replies, 0, "the first Accept was lost");
+    let id = host.peers().next().expect("one peer");
+    assert_eq!(raised, [PeerEvent::Joined(id), PeerEvent::Reaccepted(id)]);
+    assert_eq!(
+        client.events().collect::<Vec<_>>(),
+        vec![b"sent again".to_vec()],
+        "what the game sent on the re-accept did not reach the client"
+    );
+}
+
 #[test]
 fn a_session_its_client_never_takes_up_ends_at_the_deadline() {
     let mut rig = Rig::new(1);

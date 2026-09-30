@@ -42,7 +42,9 @@
 //! it arrives behind the handshake's accept and ahead of anything else sent
 //! reliably — and the joiner builds no game until it has it: a [`Joining`]
 //! holds the client, reads the map back with [`Map::from_wire`], which
-//! trusts none of it, and only then builds the [`Game`] on it. So a joiner's
+//! trusts none of it, and only then builds the [`Game`] on it. A joiner the
+//! host accepts again on its link is sent the map again (`welcome` has why).
+//! So a joiner's
 //! game is never on its own map, and never draws the host's towers on its own
 //! plots. Any build of this protocol joins any host, on any map.
 //!
@@ -78,7 +80,7 @@ use crcbl::ecs::World;
 use crcbl::lan::{LanBind, LanClient, LanGame, LanHost};
 use crcbl::net::udp::{CONNECT_TIMEOUT, UdpTransport};
 use crcbl::net::{InMemoryTransport, SessionEndReason};
-use crcbl::server::{PeerEvent, PeerId};
+use crcbl::server::{Host, PeerEvent, PeerId};
 
 use crate::game::{COMPATIBILITY, Game, GameError, TowersModule};
 use crate::map::{Map, MapWireError};
@@ -118,16 +120,28 @@ pub const SESSION: LanGame = LanGame {
 /// that accepted the join and whose map never came.
 pub const JOIN_TIMEOUT: Duration = CONNECT_TIMEOUT.saturating_mul(2);
 
-/// Sends `map` — a [`Map::to_wire`] — to every peer `events` says joined,
-/// but `local`: the host's own player, whose game is on the map already.
+/// Sends `map` — a [`Map::to_wire`] — to every peer `events` says joined or
+/// was accepted again, but `local`: the host's own player, whose game is on
+/// the map already.
+///
+/// **Again on a re-accept**, because the map sent at join is lost then: a
+/// joiner that heard no `Accept` within its handshake timeout says hello
+/// again and drops the first `Accept` as an old one, and the key the map was
+/// sealed under starts over with the second
+/// ([`PeerEvent::Reaccepted`]). A joiner that read the first copy is past
+/// [`Joining`] and ignores the second. **Not on a resume**: a
+/// [`PeerEvent::Resumed`] peer is a client that reconnected on a new link
+/// within its grace period, which [`LanClient`] never does — its link ends
+/// and so does the join or the game — and a client that did would keep the
+/// game it had, and the map in it.
 ///
 /// A send that fails is logged: that joiner waits out [`JOIN_TIMEOUT`] and
 /// says so on its side, which is where a player can act on it.
-fn welcome(lan: &mut LanHost, events: &[PeerEvent], map: &[u8], local: Option<PeerId>) {
+fn welcome(host: &mut Host, events: &[PeerEvent], map: &[u8], local: Option<PeerId>) {
     for event in events {
-        if let PeerEvent::Joined(peer) = *event
+        if let PeerEvent::Joined(peer) | PeerEvent::Reaccepted(peer) = *event
             && Some(peer) != local
-            && let Err(error) = lan.host_mut().send_event(peer, map.to_vec())
+            && let Err(error) = host.send_event(peer, map.to_vec())
         {
             crcbl::log::warn!("lan: the map did not go to {peer:?}: {error}");
         }
@@ -193,7 +207,7 @@ impl HostLink {
             _ => None,
         });
         let map = map.to_wire();
-        welcome(&mut lan, &events, &map, local_peer);
+        welcome(lan.host_mut(), &events, &map, local_peer);
         Ok((
             Self {
                 lan,
@@ -219,7 +233,7 @@ impl HostLink {
     pub fn frame(&mut self, render_dt: Duration, sim_time: Duration) {
         self.wall += render_dt;
         let events = self.lan.frame(self.wall);
-        welcome(&mut self.lan, &events, &self.map, self.local_peer);
+        welcome(self.lan.host_mut(), &events, &self.map, self.local_peer);
         self.local.update(sim_time);
     }
 
