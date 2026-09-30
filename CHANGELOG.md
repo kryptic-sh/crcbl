@@ -3107,6 +3107,13 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **Quitting no longer fails on a close that was already answered.**
+  `crcbl::engine::accept_close` replies to an outstanding close request and
+  otherwise just destroys the window, so a compositor that sends the close
+  twice, or a request replied to before the loop read it, ends the run cleanly
+  instead of with `NoPendingCloseRequest` and a nonzero exit (seen quitting EW
+  on Wayland).
+
 - A browser build types characters reached through `AltGr` — `@`, `\` and `{` on
   a German or French layout — instead of dropping them. The shim reads
   `KeyboardEvent.getModifierState("AltGraph")` into a new state bit, and a

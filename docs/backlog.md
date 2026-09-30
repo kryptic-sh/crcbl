@@ -3553,19 +3553,18 @@ and `push_clip`, and the menu drawn through the UI pass — left these:
 
 Quitting EW on Wayland returned a nonzero status after the engine logged
 `window Handle<crcbl_shell::window::Window>(0, gen 1) has no outstanding close request`.
-The preceding Vulkan display-timing messages reported `Unknown` and the present
-loop closing normally; they are context, not evidence of the failure.
 
-`Loop::frame` currently calls `accept_close` whenever the coalesced
-`PendingEvents::close_requested` flag is set, and `accept_close` requires an
-outstanding backend request. Reproduce the path where a close is consumed or the
-window changes state before that reply, identify which Wayland event sequence
-leaves the coalesced flag stale, and make normal application quit idempotent at
-the engine boundary without weakening `Shell::reply_close_request` for callers
-answering a real question. Add a synthesized loop/backend test that fails with
-the duplicate or stale close sequence, plus a Wayland windowed check that closes
-EW and asserts exit status zero. Verify that real close requests can still be
-refused and later accepted.
+**Fixed at the engine boundary 2026-09-30**: `crcbl::engine::accept_close` now
+replies to an outstanding request, destroys a window with none (the quit stands)
+and treats a window already gone as closed, so a close answered twice, one
+refused and then accepted, or one never asked all quit without an error.
+`Shell::reply_close_request` is unchanged and still refuses a reply to nothing.
+`engine::tests::accepting_a_close_twice_or_unasked_still_closes_the_window`
+holds all three sequences on the headless shell, and went red against the old
+one-line `accept_close`. **Not verified**: the Wayland event sequence that
+produced EW's log was not reproduced (this machine has no Wayland session), and
+no windowed check closes EW and reads its exit status. EW rechecking a quit on
+Wayland after pinning the fix closes the entry.
 
 ## Import glTF specular and IOR materials (2026-09-15)
 

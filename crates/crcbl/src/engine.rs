@@ -4771,16 +4771,32 @@ pub fn wait_for_configure<S: Shell + ?Sized>(
     }
 }
 
-/// Answers a close request with "yes".
+/// Answers a close request with "yes", and closes the window whether or not a
+/// request is still outstanding.
 ///
 /// A close request is a question. A game asks the player about unsaved progress
 /// here; a sample has none.
 ///
+/// **Quitting is idempotent.** A loop that coalesces a batch's events can see a
+/// close after the request it came from has been answered — a compositor that
+/// sent it twice, or a window whose request was replied to before the flag was
+/// read — and [`Shell::reply_close_request`] refuses a reply to a question
+/// nobody is asking, which is right for a caller answering a real one. So an
+/// outstanding request is replied to, a window with none is destroyed outright
+/// (the decision to quit stands either way), and a window already gone is
+/// already closed.
+///
 /// # Errors
 ///
-/// [`ShellError`] if the shell refused the reply.
+/// [`ShellError`] if the shell refused the reply or the destroy for any other
+/// reason.
 pub fn accept_close<S: Shell + ?Sized>(shell: &mut S, window: WindowId) -> Result<(), ShellError> {
-    shell.reply_close_request(window, CloseReply::Close)
+    match shell.window_state(window) {
+        Ok(state) if state.close_pending => shell.reply_close_request(window, CloseReply::Close),
+        Ok(_) => shell.destroy_window(window),
+        Err(ShellError::InvalidWindow { .. }) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12051,6 +12067,57 @@ mod tests {
             said[1].message, "hal: display timing Unknown; asked for Off, pacing Off",
             "a concrete request comes back unchanged, and the line still says so",
         );
+    }
+
+    /// **Quitting is idempotent at the engine boundary**: a close answered
+    /// twice, one already refused, and one nobody asked for all close the
+    /// window without an error — while the seam itself still refuses a reply to
+    /// a question nobody is asking.
+    #[test]
+    fn accepting_a_close_twice_or_unasked_still_closes_the_window() {
+        use crcbl_shell::{HeadlessShell, WindowDesc};
+
+        let open = |shell: &mut HeadlessShell| {
+            shell
+                .create_window(&WindowDesc::default())
+                .expect("headless always creates a window")
+        };
+        let closed = |shell: &HeadlessShell, window| {
+            matches!(
+                shell.window_state(window),
+                Err(ShellError::InvalidWindow { .. })
+            )
+        };
+        let mut shell = HeadlessShell::new();
+
+        // Asked twice, answered twice: the second answer finds it gone.
+        let window = open(&mut shell);
+        shell.request_close(window).expect("live");
+        shell.request_close(window).expect("live");
+        accept_close(&mut shell, window).expect("the first answer closes it");
+        accept_close(&mut shell, window).expect("the second finds it closed");
+        assert!(closed(&shell, window));
+
+        // Refused, then the game decides to quit after all.
+        let window = open(&mut shell);
+        shell.request_close(window).expect("live");
+        shell
+            .reply_close_request(window, CloseReply::Keep)
+            .expect("an outstanding request takes a reply");
+        assert!(
+            matches!(
+                shell.reply_close_request(window, CloseReply::Close),
+                Err(ShellError::NoPendingCloseRequest { .. })
+            ),
+            "the seam no longer refuses a reply to nothing",
+        );
+        accept_close(&mut shell, window).expect("the quit stands");
+        assert!(closed(&shell, window));
+
+        // Never asked at all.
+        let window = open(&mut shell);
+        accept_close(&mut shell, window).expect("an unasked quit closes it");
+        assert!(closed(&shell, window));
     }
 
     #[test]
