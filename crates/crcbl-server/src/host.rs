@@ -81,6 +81,46 @@ pub enum PeerEvent {
     Left(PeerId),
 }
 
+/// Why [`Host::send_event`] sent nothing.
+#[derive(Debug)]
+pub enum EventNotSent {
+    /// No session of this host has that id: it never had one, or it ended.
+    NoSuchPeer(PeerId),
+    /// The peer's link is down — it is waiting out its grace period — so
+    /// there is nothing to send on.
+    NotConnected(PeerId),
+    /// The event is longer than a client reads one:
+    /// [`MAX_FIELD_BYTES`](crcbl_net::codec::MAX_FIELD_BYTES), the wire's
+    /// limit on one opaque field.
+    TooLarge {
+        /// The event's length, in bytes.
+        size: usize,
+        /// The most a client accepts, in bytes.
+        limit: usize,
+    },
+    /// The session's key has sealed all it may.
+    Seal(crcbl_net::AuthError),
+    /// The transport refused the message.
+    Transport(TransportError),
+}
+
+impl fmt::Display for EventNotSent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoSuchPeer(peer) => write!(f, "{peer:?} is no session of this host"),
+            Self::NotConnected(peer) => write!(f, "{peer:?}'s link is down"),
+            Self::TooLarge { size, limit } => write!(
+                f,
+                "the event is {size} bytes, past the {limit} a client reads"
+            ),
+            Self::Seal(error) => write!(f, "the event could not be sealed: {error}"),
+            Self::Transport(error) => write!(f, "the transport refused the event: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for EventNotSent {}
+
 /// Per-tick game logic for a [`Host`].
 pub trait HostModule: Send {
     /// Called every host tick after the ECS schedule has run, with the input
@@ -648,6 +688,50 @@ impl Host {
             peer.link
                 .send_session_end(transport.as_mut(), reason, counters);
         }
+    }
+
+    /// Send `data` to `peer` as a [`ServerToClient::Event`], sealed with its
+    /// session's key and on the reliable channel, so it arrives once, whole
+    /// and in order with the handshake and everything else sent reliably —
+    /// which is what a game sends a newly [`Joined`](PeerEvent::Joined) peer
+    /// the state it needs before its first snapshot means anything. The
+    /// client reads it with `crcbl_client::Client::events`.
+    ///
+    /// # Errors
+    ///
+    /// [`EventNotSent`], naming why: `peer` is not a session of this host,
+    /// its link is down, `data` is past what a client reads, or the key or
+    /// the transport refused it. Nothing was sent.
+    ///
+    /// [`ServerToClient::Event`]: crcbl_net::ServerToClient::Event
+    pub fn send_event(&mut self, peer: PeerId, data: Vec<u8>) -> Result<(), EventNotSent> {
+        let limit = crcbl_net::codec::MAX_FIELD_BYTES;
+        if data.len() > limit {
+            return Err(EventNotSent::TooLarge {
+                size: data.len(),
+                limit,
+            });
+        }
+        let Some(target) = self.peers.iter_mut().find(|p| p.id == peer) else {
+            return Err(EventNotSent::NoSuchPeer(peer));
+        };
+        if !target.is_connected() {
+            return Err(EventNotSent::NotConnected(peer));
+        }
+        // A connected session was keyed when it was admitted or resumed, so
+        // both of these are there whenever `is_connected` holds.
+        let (Some(transport), Some(crypto)) = (
+            target.transport.as_mut(),
+            target.link.session_crypto.as_mut(),
+        ) else {
+            return Err(EventNotSent::NotConnected(peer));
+        };
+        let payload =
+            crcbl_net::encode_server_to_client(&crcbl_net::ServerToClient::Event { data });
+        let sealed = crypto.seal(&payload).map_err(EventNotSent::Seal)?;
+        transport
+            .send_reliable(crcbl_net::Message::reliable(sealed))
+            .map_err(EventNotSent::Transport)
     }
 
     /// Take the session changes since the last call, oldest first.

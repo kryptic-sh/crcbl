@@ -542,6 +542,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   and refuses every window, GPU or frame flag, and `--host`, `--join` and
   `--browse`, with exit code 2. Native builds only.
 
+- **Server events reach the game**: `crcbl_server::Host::send_event(peer, data)`
+  seals `data` as a `ServerToClient::Event` under that peer's session key and
+  sends it on the reliable channel — so it arrives once, whole, and behind the
+  handshake's accept when sent on `PeerEvent::Joined` — refusing by name
+  (`EventNotSent`) a peer that is gone or whose link is down, and data past
+  `codec::MAX_FIELD_BYTES`. `crcbl_client::Client::events()` takes what arrived,
+  oldest first; a forged or malformed event is counted and never handed over,
+  and past `MAX_QUEUED_EVENTS` waiting the newest is dropped and counted
+  (`dropped_event_count()`). Before, a client counted any sealed reliable
+  message that was not a session end as a processing error.
+
 - **`crcbl_client::Client::handshake_refusal()`**: the `RejectReason` that made
   the client give up handshaking — a protocol, engine-build or schema mismatch —
   with its code and the message naming both sides' values, where

@@ -11,7 +11,7 @@ pub mod host;
 mod peer;
 pub mod sim_hash;
 
-pub use host::{Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
+pub use host::{EventNotSent, Host, HostConfig, HostModule, PeerEvent, PeerId, PeerInputs};
 pub use peer::SnapshotTooLarge;
 
 pub use crcbl_net::rate_limit;

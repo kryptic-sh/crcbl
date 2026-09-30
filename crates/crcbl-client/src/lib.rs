@@ -34,6 +34,11 @@ const HANDSHAKE_RETRY_MAX: Duration = Duration::from_secs(8);
 /// How long an accepted session has to open one message before the client
 /// concludes the key it derived is not the one the server holds.
 const SESSION_PROOF_TIMEOUT: Duration = Duration::from_secs(5);
+/// The most server events held for the game to read. A game reads them every
+/// frame, so the bound is only reached by one that never does — or by a
+/// server sending far more than any game asks of it — and what arrives past it
+/// is dropped and counted rather than held without limit.
+pub const MAX_QUEUED_EVENTS: usize = 64;
 
 // ---------------------------------------------------------------------------
 // InterpolatedState
@@ -154,6 +159,10 @@ pub struct Client<T: Transport> {
     /// Why the server ended this session, once it has said so; cleared by
     /// [`Client::reconnect`].
     session_ended: Option<SessionEndReason>,
+    /// The server's events not yet taken by [`Client::events`], oldest first,
+    /// at most [`MAX_QUEUED_EVENTS`].
+    events: Vec<Vec<u8>>,
+    dropped_event_count: u64,
     reliable_rate_limiter: InboundRateLimiter,
     unreliable_rate_limiter: InboundRateLimiter,
     processing_error_count: u64,
@@ -212,6 +221,8 @@ impl<T: Transport> Client<T> {
             unproven_sessions: 0,
             handshake_refusal: None,
             session_ended: None,
+            events: Vec::new(),
+            dropped_event_count: 0,
             reliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             unreliable_rate_limiter: InboundRateLimiter::new(rate_limit_config, Duration::ZERO),
             processing_error_count: 0,
@@ -465,6 +476,26 @@ impl<T: Transport> Client<T> {
             None if !self.transport.is_connected() => Some(Ended::Lost),
             None => None,
         }
+    }
+
+    /// Take the events the server sent since the last call, oldest first —
+    /// each the `data` of a `ServerToClient::Event`, which a server sends
+    /// sealed on the reliable channel (`crcbl_server::Host::send_event`), so
+    /// every one arrives once and in the order it was sent. What the bytes
+    /// mean is the game's: this client only carries them, and a game must
+    /// validate them as it would anything else off the wire.
+    ///
+    /// Held until taken, up to [`MAX_QUEUED_EVENTS`]; see
+    /// [`Client::dropped_event_count`] for what arrived past that.
+    pub fn events(&mut self) -> impl Iterator<Item = Vec<u8>> + '_ {
+        self.events.drain(..)
+    }
+
+    /// Events dropped because [`MAX_QUEUED_EVENTS`] were already waiting to
+    /// be taken.
+    #[must_use]
+    pub fn dropped_event_count(&self) -> u64 {
+        self.dropped_event_count
     }
 
     /// Request a fresh handshake or resume the accepted session on a replacement
@@ -814,8 +845,8 @@ impl<T: Transport> Client<T> {
         }
     }
 
-    /// Open a sealed control message: today, only the server ending the
-    /// session.
+    /// Open a sealed control message: the server ending the session, or an
+    /// event for the game.
     fn handle_sealed_control(&mut self, envelope: &[u8]) {
         let Some(crypto) = self.session_crypto.as_mut() else {
             self.auth_failure_count += 1;
@@ -825,6 +856,20 @@ impl<T: Transport> Client<T> {
             self.auth_failure_count += 1;
             return;
         };
+        if payload.first() == Some(&crcbl_net::codec::EVENT_TAG) {
+            let event = crcbl_net::decode_server_to_client(payload);
+            // As an opened snapshot does: the MAC verified, so the session
+            // is the real server's.
+            self.session_proof_deadline = None;
+            self.unproven_sessions = 0;
+            match event {
+                Ok(crcbl_net::ServerToClient::Event { data }) => self.queue_event(data),
+                Ok(crcbl_net::ServerToClient::Snapshot { .. }) | Err(_) => {
+                    self.processing_error_count += 1;
+                }
+            }
+            return;
+        }
         let Ok(reason) = crcbl_net::decode_session_ended(payload) else {
             self.processing_error_count += 1;
             return;
@@ -837,6 +882,18 @@ impl<T: Transport> Client<T> {
         self.resume_token = None;
         self.session_id = None;
         self.handshake_complete = false;
+    }
+
+    /// Hold one event for [`Client::events`], or drop it once
+    /// [`MAX_QUEUED_EVENTS`] are waiting. The newest is the one dropped, for
+    /// the reason the server refuses the newest input frame past its cap: the
+    /// ones held are what the game is about to read, in the order sent.
+    fn queue_event(&mut self, data: Vec<u8>) {
+        if self.events.len() >= MAX_QUEUED_EVENTS {
+            self.dropped_event_count = self.dropped_event_count.saturating_add(1);
+            return;
+        }
+        self.events.push(data);
     }
 
     fn handle_sealed_snapshot(&mut self, envelope: &[u8], repairs: &mut HashMap<SectorId, TickId>) {
@@ -1258,6 +1315,77 @@ mod tests {
             hello.session_token, None,
             "the ended session is not resumed"
         );
+    }
+
+    // ── Events ─────────────────────────────────────────────────────────────
+
+    fn send_event(peer: &mut InMemoryTransport, crypto: &mut SessionCrypto, data: &[u8]) {
+        let event = crcbl_net::encode_server_to_client(&crcbl_net::ServerToClient::Event {
+            data: data.to_vec(),
+        });
+        let sealed = crypto.seal(&event).expect("counter space available");
+        peer.send_reliable(Message::reliable(sealed)).unwrap();
+    }
+
+    #[test]
+    fn a_sealed_event_is_taken_once_and_in_the_order_sent() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        send_event(&mut peer, &mut crypto, b"first");
+        send_event(&mut peer, &mut crypto, b"second");
+        client.update(TICK);
+        assert_eq!(
+            client.events().collect::<Vec<_>>(),
+            vec![b"first".to_vec(), b"second".to_vec()]
+        );
+        assert_eq!(client.events().count(), 0, "taken once");
+        assert_eq!(client.ended(), None, "an event is not a session end");
+        assert_eq!(client.processing_error_count(), 0);
+    }
+
+    #[test]
+    fn a_forged_or_malformed_event_is_not_handed_to_the_game() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        let mut forged = SessionCrypto::from_token(&ResumeToken::from_bytes([0x11; 32]));
+        send_event(&mut peer, &mut forged, b"forged");
+        client.update(TICK);
+        assert_eq!(client.auth_failure_count(), 1);
+
+        // Sealed under the right key, but a length past the bytes it carries.
+        let mut truncated = crcbl_net::encode_server_to_client(&crcbl_net::ServerToClient::Event {
+            data: b"whole".to_vec(),
+        });
+        truncated.pop();
+        let sealed = crypto.seal(&truncated).expect("counter space available");
+        peer.send_reliable(Message::reliable(sealed)).unwrap();
+        client.update(2 * TICK);
+        assert_eq!(client.processing_error_count(), 1);
+        assert_eq!(client.events().count(), 0);
+    }
+
+    #[test]
+    fn events_past_the_cap_are_dropped_and_counted() {
+        let (client_transport, mut peer) = InMemoryTransport::pair();
+        let mut client = client(client_transport);
+        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
+
+        for index in 0..=MAX_QUEUED_EVENTS {
+            send_event(&mut peer, &mut crypto, &index.to_le_bytes());
+        }
+        client.update(TICK);
+        let taken: Vec<_> = client.events().collect();
+        assert_eq!(taken.len(), MAX_QUEUED_EVENTS);
+        assert_eq!(
+            taken.last(),
+            Some(&(MAX_QUEUED_EVENTS - 1).to_le_bytes().to_vec()),
+            "the newest is the one dropped"
+        );
+        assert_eq!(client.dropped_event_count(), 1);
     }
 
     // ── Handshake recovery ─────────────────────────────────────────────────

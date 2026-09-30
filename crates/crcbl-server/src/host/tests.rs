@@ -388,6 +388,68 @@ fn a_host_that_vanishes_without_a_word_reads_as_lost() {
     }
 }
 
+/// **An event sent the moment a peer joins reaches that peer and no other** —
+/// sent before its client has read the `Accept`, which is when a game sends
+/// a newcomer what it needs first: the reliable channel keeps it behind the
+/// `Accept`, so the client holds the key by the time it opens it.
+#[test]
+fn an_event_sent_on_join_reaches_that_peer_and_no_other() {
+    let mut rig = Rig::with_peers(3, 1);
+    let (near, far) = InMemoryTransport::pair();
+    rig.host.add(Box::new(far));
+    let mut newcomer = client(near);
+    newcomer.update(rig.now);
+    rig.now += TICK;
+    rig.host.update(rig.now);
+    let [PeerEvent::Joined(id)] = rig.host.events().collect::<Vec<_>>()[..] else {
+        panic!("the newcomer did not join in one tick");
+    };
+    rig.host
+        .send_event(id, b"what a newcomer needs".to_vec())
+        .expect("a connected peer takes an event");
+
+    newcomer.update(rig.now);
+    assert!(newcomer.session_id().is_some(), "the accept came first");
+    assert_eq!(
+        newcomer.events().collect::<Vec<_>>(),
+        vec![b"what a newcomer needs".to_vec()]
+    );
+    rig.step();
+    assert_eq!(rig.clients[0].events().count(), 0, "only the peer named");
+    assert_eq!(newcomer.processing_error_count(), 0);
+    assert_eq!(newcomer.auth_failure_count(), 0);
+}
+
+/// **An event that cannot go says why**: to a peer that is gone, to one whose
+/// link is down, and one longer than a client reads.
+#[test]
+fn an_event_that_cannot_be_sent_is_refused_by_name() {
+    let mut rig = Rig::with_peers(3, 2);
+    let limit = crcbl_net::codec::MAX_FIELD_BYTES;
+    assert!(matches!(
+        rig.host.send_event(rig.ids[0], vec![0; limit + 1]),
+        Err(EventNotSent::TooLarge { size, limit: named }) if size == limit + 1 && named == limit
+    ));
+    assert!(rig.host.send_event(rig.ids[0], vec![0; limit]).is_ok());
+
+    assert!(rig.host.kick(rig.ids[0]));
+    assert!(matches!(
+        rig.host.send_event(rig.ids[0], vec![1]),
+        Err(EventNotSent::NoSuchPeer(peer)) if peer == rig.ids[0]
+    ));
+
+    drop(rig.clients.remove(1));
+    rig.step();
+    assert_eq!(
+        rig.host.peer_state(rig.ids[1]),
+        Some(SessionState::Reconnecting)
+    );
+    assert!(matches!(
+        rig.host.send_event(rig.ids[1], vec![1]),
+        Err(EventNotSent::NotConnected(peer)) if peer == rig.ids[1]
+    ));
+}
+
 #[test]
 fn a_kick_ends_one_session_and_tells_that_peer_why() {
     let mut rig = Rig::with_peers(3, 3);
