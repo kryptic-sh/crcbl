@@ -118,10 +118,14 @@ run 36732234129 (`2adaaf4b`) failed
 `render_e2e::grass::frame_of`. None of the three changes touched renderer code,
 and each passed on rerun. Three backends in one day point at the grass frames
 rather than one driver: they are the heaviest single frames in the render suite
-on these adapters. **Next, if it recurs:** give the grass tests a smaller field
-on software adapters (the `bucket_price` gate-scene pattern), or split its
-frame's submission so no one command buffer runs long enough for a watchdog or
-the readback budget.
+on these adapters. **Done for the two timeouts:**
+`crcbl::screenshot::READBACK_DEADLINE` went from ten seconds to thirty the same
+day — it is a hang detector, and a frame that lands in eleven seconds on a
+contended software rasteriser is slow, not hung. **Still open: the Metal hang,**
+which was a `DeviceLost` from the paravirtual driver's watchdog rather than a
+deadline, and which no deadline changes. If it recurs, give the grass tests a
+smaller field on that runner (the `bucket_price` gate-scene pattern) or split
+the frame's submission so no one command buffer runs long.
 
 ## EW's engine port requests (2026-09-27)
 

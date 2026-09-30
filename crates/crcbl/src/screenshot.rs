@@ -7015,11 +7015,14 @@ pub const READBACK_ROW_ALIGNMENT: u32 = 256;
 
 /// How long `OffscreenSetup::draw_and_readback` waits for the copy to land.
 ///
-/// Generous because an offscreen ring on a software rasteriser can take
-/// hundreds of milliseconds for a single frame. Public because the two error
-/// paths that mention it are public, and a deadline a caller can be hit by is
-/// one it should be able to read.
-pub const READBACK_DEADLINE: Duration = Duration::from_secs(10);
+/// A hang detector, not a performance claim: it separates a copy that will
+/// never land from one that is merely slow. Generous because an offscreen ring
+/// on a software rasteriser can take hundreds of milliseconds for a single
+/// frame, and several seconds for a grass frame on a CI runner that is running
+/// other GPU tests beside it — WARP and lavapipe each overran a ten-second
+/// budget on a grass frame on 2026-09-30 and passed on rerun. Public because the two error paths that mention it are public, and a deadline a
+/// caller can be hit by is one it should be able to read.
+pub const READBACK_DEADLINE: Duration = Duration::from_secs(30);
 
 /// How many images the offscreen ring holds.
 ///

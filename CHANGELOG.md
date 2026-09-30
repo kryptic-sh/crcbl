@@ -3709,6 +3709,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Changed
 
+- **`crcbl::screenshot::READBACK_DEADLINE` is thirty seconds, up from ten.** It
+  decides when an offscreen readback or a screenshot is given up as hung, and
+  grass frames on software rasterisers in busy CI runners overran ten seconds
+  while still landing. A copy that never lands now takes thirty seconds to be
+  reported.
+
 - **A glTF asset's unsupported-extension warning is said once per asset**, not
   once per import: importing the same key again in the same process logs nothing
   new, while `GltfScene::unsupported_required_extensions` still reports the full
