@@ -12899,10 +12899,10 @@ rule, backpressure, sectors as the wire architecture — are in
 `docs/notes/simulation.md` under _What the deleted 23-netcode plan left behind_.
 What it left unbuilt is below.
 
-### The UDP transport and its crypto: built, bar tokens and discovery (2026-08-27)
+### The UDP transport and its crypto: built, bar tokens (2026-08-27)
 
-**Built through slice C (2026-09-30); connection tokens, discovery and the
-wiring are left.** `Transport` is implemented by `InMemoryTransport`,
+**Built through slice C and LAN discovery (D1), 2026-09-30; connection tokens
+and the wiring are left.** `Transport` is implemented by `InMemoryTransport`,
 `crcbl_store`'s `FileTransport`, since 2026-09-23 `crcbl-steam`'s
 `SteamTransport` (P2P over Valve's relay; `crcbl_server::Host` serves several
 sessions over `Box<dyn Transport>` peers), and now `crcbl_net::udp`'s
@@ -13042,8 +13042,14 @@ so CI's `decoder-fuzz` job is its first run.
   datagram. The quantization and budget entry below is what makes a snapshot
   fit; until then, towers or any sample over UDP needs its snapshots held under
   the limit. Direct connect by address needs a UI field in each sample's lobby.
-- **D — tokens and discovery.** Connection tokens (below) and LAN discovery (its
-  own entry). Neither needs anything from the packet layer.
+- **D2 — connection tokens** (below). Needs nothing from the packet layer. LAN
+  discovery, D1, is built; what it left is under _Netgraph HUD, LAN discovery_.
+- **Wiring discovery.** Nothing runs an `Announcer` or a `Browser` either. A
+  host would open an `Announcer` beside its `UdpListener`, with the listener's
+  port as the announcement's `game_port`, poll it every frame and update the
+  player counts from `crcbl_server::Host`; towers and the sandbox would each
+  need that, and a client's lobby would poll a `Browser` and hand the chosen
+  `HostEntry::addr` to `UdpTransport::connect`.
 
 **Not built in the packet layer, deliberately:** congestion control and pacing —
 a reliable message's fragments all go out in one poll, capped only by
@@ -13168,27 +13174,84 @@ every session the galaxy model is for.
 
 ### Netgraph HUD, LAN discovery (2026-08-27)
 
-**Not built.** No netgraph (RTT, jitter, loss, send/recv bandwidth, snapshot
-size, resend counts, tick-lead — per client on the server panel, self on the
-client) in `crcbl-ui`'s debug overlay; no LAN announce/enumerate. Both are
-scheduled (P10 and post-MVP respectively), so this is scope, not slip. Why the
-netgraph cannot be written yet is under _The debug overlay, and what is left of
-it_ below.
+**The netgraph is not built; LAN discovery's socket layer is (2026-09-30).** No
+netgraph (RTT, jitter, loss, send/recv bandwidth, snapshot size, resend counts,
+tick-lead — per client on the server panel, self on the client) in `crcbl-ui`'s
+debug overlay. It is scheduled for P10, so this is scope, not slip. Why it
+cannot be written yet is under _The debug overlay, and what is left of it_
+below.
 
-**LAN discovery, as designed:** hosts announce at a modest interval over both
-broadcast and link-local multicast (networks disagree about which they forward);
-the datagram carries the protocol and schema hash the handshake gates on, the
-game and mode, current and maximum players, and whether a password is set.
-Clients listen for a short window, list what replied and age entries out when a
-host stops announcing — no registry, no client state between runs. Announcements
-authenticate nothing, and direct connect by address stays in every sample's
-lobby beside discovery. On the Steam path, lobbies (`crcbl_steam::matchmaking`)
-cover finding a session, through Valve's backend rather than the LAN.
+**Built (slice D1): `crcbl_net::udp::discovery`**, native only like `udp`. A
+host's `Announcer` binds `DISCOVERY_PORT`, answers each padded query with a
+fixed-size announce (protocol id, the listener's port, players and maximum, the
+`ProtocolCompatibility` fields, a name capped at `MAX_NAME_BYTES`) and
+broadcasts it every `ANNOUNCE_INTERVAL`. A client's `Browser` binds an ephemeral
+port, queries the IPv4 broadcast address every `QUERY_INTERVAL`, and lists a
+`HostEntry` per host heard within `HOST_EXPIRY`. The connect address is the
+announce's source IP with the announced port. A query shorter than `QUERY_BYTES`
+(at least `ANNOUNCE_BYTES`) goes unanswered, so nothing amplifies. Tests (all
+loopback, all on port 0, each shown red by a mutation): the layouts, round
+trips, a refusal table and seeded arbitrary bytes, the connect address, dedupe,
+the host cap, sorting, expiry on a `ManualClock`, a directed query listing the
+host, the padding rule on the wire, the broadcast send path aimed at a loopback
+socket, a silent network, and an oversized datagram.
 
-**Tests it owes, and the trap:** two processes on one host find each other
-through the real code path, and the discovery window must be shown to time out
-cleanly when nothing answers. A lobby that hangs on a silent network is the
-obvious failure and the one nobody writes a test for.
+Announcements authenticate nothing, and direct connect by address stays in every
+sample's lobby beside discovery. On the Steam path, lobbies
+(`crcbl_steam::matchmaking`) cover finding a session, through Valve's backend
+rather than the LAN.
+
+**Why the browser queries instead of listening:** only a socket bound to the
+discovery port hears a broadcast, and `std::net::UdpSocket` cannot set
+`SO_REUSEADDR`/`SO_REUSEPORT`, so only one process per machine can bind it. The
+browser asks from an ephemeral port instead; any number run on one machine. The
+price is **one announcer per machine on `DISCOVERY_PORT`**: a second host on the
+same machine fails its bind. It can bind another port, but then only a browser
+that queries that port directly finds it. Taking `socket2` for address reuse
+would lift that, and so would one announcer answering for several local hosts.
+Either is the owner's call.
+
+**Left, and what each would take:**
+
+- **A lobby browser in a sample.** Nothing draws the list. A lobby screen would
+  poll a `Browser` every frame, show `hosts()` (greying out a host whose
+  `compatibility` differs from its own), and pass the chosen `addr` to
+  `UdpTransport::connect`, beside the direct-connect address field every
+  sample's lobby keeps. The wiring bullet under _The UDP transport and its
+  crypto_ says what the host side needs.
+- **Link-local multicast is not sent.** The design wanted it beside broadcast,
+  because networks disagree about which they forward. Receiving multicast needs
+  the discovery port bound too (`join_multicast_v4` on a bound socket), so it
+  has the same one-listener limit.
+- **One interface only.** `Ipv4Addr::BROADCAST` goes out the interface the OS
+  picks. A subnet-directed broadcast per interface needs the interface list,
+  which `std` does not give.
+- **No IPv6.** Broadcast is IPv4. IPv6 discovery would be multicast (`ff02::1`
+  or a group of its own), with the same bind problem.
+- **The announce carries no game or mode, and no password flag.** The design
+  listed both. Nothing has a password to flag, and a game or mode string would
+  be a second capped field like the name. Add them with the lobby that shows
+  them, as a `DISCOVERY_VERSION` bump.
+- **The name is shown as sent.** Control characters are refused, but bidi
+  overrides and look-alike characters pass. The UI has to treat it as untrusted
+  text.
+- **The periodic broadcast has no test receiving it.** No test sends to a
+  broadcast address, since whether a CI runner delivers broadcast is the
+  runner's business. The send path is checked through `SO_BROADCAST` on both
+  sockets and the periodic send aimed at a loopback socket; the receive path
+  through directed queries.
+- **Two processes on one host have not been shown to find each other.** The
+  tests run both ends in one process over loopback. A test starting a second
+  process (a small binary, or the test binary re-executed with an argument)
+  would close that. It is the remaining half of the design's "tests it owes".
+- **Run only on Windows locally.** Linux and macOS clippy is clean. The Linux
+  and macOS test jobs are the first run there. The oversized-datagram test
+  accepts either count on purpose: Windows refuses the read (`receive_errors`),
+  and other platforms cut the datagram to the buffer (`malformed`).
+
+**The trap still stands:** a lobby that hangs on a silent network. The browser
+never blocks (`a_silent_network_is_an_empty_list`), so a lobby that hangs will
+have added the wait itself.
 
 ### Netcode: multi-sector subscription and entity migration are design only (2026-09-24)
 

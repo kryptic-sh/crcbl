@@ -21,7 +21,8 @@
 //!   with derived nonces, a replay window, and the key schedule behind it.
 //! * `udp` (native only) — the engine's own network transport: the packet
 //!   layer inside the seal over a UDP socket, a client's connect and a host's
-//!   listener. Web builds have no networking, so it does not exist there.
+//!   listener, and `udp::discovery` for finding hosts on the LAN. Web builds
+//!   have no networking, so it does not exist there.
 //! * `conformance` (feature `conformance`) — the checks every [`Transport`]
 //!   must pass, for crates that implement one.
 

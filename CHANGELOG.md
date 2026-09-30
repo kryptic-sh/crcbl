@@ -425,6 +425,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   paste that is not a clipping) or what a save found, as a warning when the game
   would refuse the saved scene. The same lines still go to the log.
 
+- **`crcbl_net::udp::discovery`: LAN host discovery**, native only like the rest
+  of `udp`. A host's `Announcer` (`Announcer::open(Announcement)`, bound to
+  `DISCOVERY_PORT`) answers queries with a fixed-size announce — protocol id,
+  the game listener's port, players and maximum, the `ProtocolCompatibility` the
+  session handshake gates on, and a name capped at `MAX_NAME_BYTES` of UTF-8 —
+  and broadcasts it every `ANNOUNCE_INTERVAL`; `set_announcement` keeps the
+  counts current. A client's `Browser` (`Browser::open(protocol_id)`, on an
+  ephemeral port so several run on one machine) queries the IPv4 broadcast
+  address every `QUERY_INTERVAL`, or one host with `query(addr)`, and `hosts()`
+  returns a `HostEntry` per host heard within `HOST_EXPIRY`, sorted by name then
+  address, capped by `BrowserConfig::max_hosts`. An entry is a hint: its address
+  is the announce's source IP with the announced port, never anything in the
+  payload, and connecting still runs the hello, the handshake gate and the seal.
+  A query is padded to `QUERY_BYTES`, at least `ANNOUNCE_BYTES`, and a shorter
+  one goes unanswered, so a spoofed query cannot amplify. Malformed,
+  foreign-version and foreign-protocol datagrams are counted in `BrowserStats` /
+  `AnnouncerStats` and dropped.
+
 - **`crcbl_net::udp`: the engine's own network transport**, native only (web
   builds have no networking). `UdpTransport` implements `Transport` over a
   `std::net::UdpSocket`, running `reliable::Endpoint` inside `seal`:

@@ -8,6 +8,8 @@
 //!   `UdpTransport` per admitted peer, every one sharing that socket.
 //! - [`EndReason`] says why a link ended: a connect nobody answered, a peer
 //!   that went silent, one that said goodbye, or this side closing it.
+//! - [`discovery`] finds hosts on the LAN: a host's announcer and a client's
+//!   browser, a convenience over connecting by address.
 //!
 //! ```text
 //! Transport ── Endpoint ── Sealer / Opener ── UdpSocket
@@ -88,7 +90,9 @@
 //! * `session` — a keyed link: sealer, opener and endpoint together.
 //! * `transport` — [`UdpTransport`].
 //! * `listener` — [`UdpListener`] and the demultiplexer behind it.
+//! * [`discovery`] — LAN host discovery, on its own socket.
 
+pub mod discovery;
 mod hello;
 mod listener;
 mod session;
