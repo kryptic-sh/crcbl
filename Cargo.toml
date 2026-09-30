@@ -62,12 +62,16 @@ getrandom = "0.4.3"
 # crates wipes the AEAD key and HMAC state on drop, and makes `digest::zeroize`
 # available for the key schedule's own intermediate secrets; `zeroize` is
 # already in the tree under `chacha20`. `sha2` drops `alloc` and `oid`, which
-# nothing reads. `hmac` has no default features. `x25519-dalek` is NOT here:
-# both its 2.x and 3.x lines name `rand_core` unconditionally (0.6 and 0.10),
-# a second copy beside the 0.9 this table pins — see the backlog entry.
+# nothing reads. `hmac` has no default features. `x25519-dalek` drops
+# `precomputed-tables` (a speed-for-size trade one agreement per connection
+# does not need) and keeps its `getrandom` feature off; `static_secrets` is
+# what gates `StaticSecret::from([u8; 32])`, the constructor that takes the
+# caller's bytes, and `zeroize` wipes that secret on drop. It names
+# `rand_core` 0.10 unconditionally, which `deny.toml` skips by exact version.
 chacha20poly1305 = { version = "0.11.0", default-features = false, features = ["zeroize"] }
 hmac = { version = "0.13.0", features = ["zeroize"] }
 sha2 = { version = "0.11.0", default-features = false }
+x25519-dalek = { version = "3.0.0", default-features = false, features = ["static_secrets", "zeroize"] }
 log = "0.4"
 # Golden-image I/O for `crcbl-golden`; see that crate's manifest for why it is
 # a dependency rather than a hand-rolled encoder.

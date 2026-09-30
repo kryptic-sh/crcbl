@@ -1,4 +1,4 @@
-//! The key schedule: one X25519 output in, a sealer and an opener out.
+//! The key schedule: one X25519 output in, two directional keys out.
 //!
 //! ```text
 //! transcript = SHA-256(PROTOCOL_NAME || protocol_id (u32 LE)
@@ -16,11 +16,9 @@
 //! schedule, not a Noise handshake pattern**: there is one DH, no static keys
 //! are authenticated, and nothing here decides what goes on the wire when.
 //!
-//! **The X25519 itself is not here.** The approved crate for it,
-//! `x25519-dalek`, cannot enter the tree yet — see `docs/backlog.md`, _There is
-//! no UDP transport_. So [`derive_channel`] takes the X25519 output (RFC 7748
-//! §6.1's `K`) as bytes, and refuses the all-zero one that section says to
-//! check for; the agreement that produces it is the missing call in front.
+//! The X25519 output comes from [`super::agreement`], which has already
+//! refused the all-zero one RFC 7748 §6.1 says to check for; this module only
+//! ever sees a contributory secret.
 
 use std::fmt;
 
@@ -72,16 +70,6 @@ impl Role {
     }
 }
 
-/// Why no channel could be keyed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub enum KeyAgreementError {
-    /// The X25519 output is all zeros, which it is exactly when the peer sent
-    /// a small-order point: the "shared" secret is then one an observer knows
-    /// too. RFC 7748 §6.1 says to check for it and abort.
-    #[error("the key agreement output is all zeros: the peer's public key is a small-order point")]
-    NonContributory,
-}
-
 /// The two directional keys. Wiped on drop, and never printed.
 pub(crate) struct SessionKeys {
     client_to_server: Zeroizing<[u8; SESSION_KEY_BYTES]>,
@@ -101,12 +89,7 @@ impl SessionKeys {
         client_public: &[u8; X25519_BYTES],
         server_public: &[u8; X25519_BYTES],
         protocol_id: u32,
-    ) -> Result<Self, KeyAgreementError> {
-        // Folded rather than compared with an early return, so the time taken
-        // says nothing about where a nonzero byte is.
-        if shared_secret.iter().fold(0u8, |any, byte| any | byte) == 0 {
-            return Err(KeyAgreementError::NonContributory);
-        }
+    ) -> Self {
         let transcript: [u8; HASH_BYTES] = Sha256::new()
             .chain_update(PROTOCOL_NAME)
             .chain_update(protocol_id.to_le_bytes())
@@ -124,7 +107,7 @@ impl SessionKeys {
         };
         keys.client_to_server.copy_from_slice(first);
         keys.server_to_client.copy_from_slice(second);
-        Ok(keys)
+        keys
     }
 
     fn key(&self, direction: Direction) -> &[u8; SESSION_KEY_BYTES] {
@@ -148,32 +131,6 @@ impl SessionKeys {
     }
 }
 
-/// Key one side of a sealed link: this side's [`Sealer`] and [`Opener`] from
-/// the X25519 output both sides computed.
-///
-/// `client_public` and `server_public` are the two public keys as they were
-/// exchanged, and `protocol_id` the build's [`crate::reliable::Endpoint`]
-/// protocol id; both sides must pass the same values, `role` aside. Call it
-/// once per connection, with a fresh X25519 key pair for each one: that is the
-/// rekey on reconnect, and a new sealer is also the only way past
-/// [`super::SealError::CounterExhausted`].
-///
-/// # Errors
-///
-/// [`KeyAgreementError::NonContributory`] for an all-zero `shared_secret`.
-pub fn derive_channel(
-    role: Role,
-    shared_secret: &[u8; X25519_BYTES],
-    client_public: &[u8; X25519_BYTES],
-    server_public: &[u8; X25519_BYTES],
-    protocol_id: u32,
-) -> Result<(Sealer, Opener), KeyAgreementError> {
-    Ok(
-        SessionKeys::derive(shared_secret, client_public, server_public, protocol_id)?
-            .into_channel(role),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,7 +142,7 @@ mod tests {
     const PROTOCOL: u32 = 0x4352_4342;
 
     fn keys(client: &[u8; 32], server: &[u8; 32], protocol_id: u32) -> SessionKeys {
-        SessionKeys::derive(&SHARED, client, server, protocol_id).unwrap()
+        SessionKeys::derive(&SHARED, client, server, protocol_id)
     }
 
     /// The schedule written out as Noise §4.3 states `HKDF`, without the RFC
@@ -258,20 +215,6 @@ mod tests {
                 *other.server_to_client, *reference.server_to_client,
                 "{what}"
             );
-        }
-    }
-
-    #[test]
-    fn an_all_zero_shared_secret_is_refused() {
-        assert_eq!(
-            SessionKeys::derive(&[0; 32], &CLIENT, &SERVER, PROTOCOL).map(|_| ()),
-            Err(KeyAgreementError::NonContributory)
-        );
-        // One nonzero byte anywhere is contributory.
-        for at in 0..X25519_BYTES {
-            let mut secret = [0; X25519_BYTES];
-            secret[at] = 1;
-            assert!(SessionKeys::derive(&secret, &CLIENT, &SERVER, PROTOCOL).is_ok());
         }
     }
 

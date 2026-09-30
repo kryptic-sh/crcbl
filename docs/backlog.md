@@ -12897,9 +12897,9 @@ What it left unbuilt is below.
 
 ### There is no UDP transport, and therefore no crypto of our own (2026-08-27)
 
-**Partly built: the packet layer and the seal exist, the socket and the X25519
-call do not.** No `UdpSocket` exists anywhere in `crates/` or `apps/` (grep,
-2026-09-30). `Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
+**Partly built: the packet layer and the seal exist, the socket does not.** No
+`UdpSocket` exists anywhere in `crates/` or `apps/` (grep, 2026-09-30).
+`Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
 `FileTransport` and, since 2026-09-23, `crcbl-steam`'s `SteamTransport` (P2P
 over Valve's relay, run through `crcbl_net::conformance`; `crcbl_server::Host`
 serves several sessions over `Box<dyn Transport>` peers).
@@ -12934,65 +12934,63 @@ are the associated data. `SEAL_OVERHEAD` is what that adds, and
 limits shrank by the prefix. The nonce is the direction byte, the counter and
 zeros; the sealer refuses at counter exhaustion (`SealError::CounterExhausted`)
 rather than wrap; the opener checks `auth::ReplayWindow` only after the tag
-verifies. `derive_channel` is the key schedule: SHA-256 over `PROTOCOL_NAME`,
-the endpoint protocol id and both public keys as Noise's chaining key, then
-Noise §4.3 `HKDF` (RFC 5869, `seal::kdf`) to one key per direction, refusing an
-all-zero shared secret (RFC 7748 §6.1). Tests: RFC 5869 A.1–A.3, the
-draft-irtf-cfrg-xchacha-03 A.3.1 vector, the datagram layout rebuilt by hand
+verifies. `agree_channel` runs X25519 (`x25519-dalek`) between a `KeyPair` built
+from caller-supplied secret bytes and the peer's public key, refuses a
+non-contributory result (RFC 7748 §6.1, the crate's `was_contributory`), and
+feeds the key schedule: SHA-256 over `PROTOCOL_NAME`, the endpoint protocol id
+and both public keys as Noise's chaining key, then Noise §4.3 `HKDF` (RFC 5869,
+`seal::kdf`) to one key per direction. Tests: RFC 7748 §6.1, RFC 5869 A.1–A.3,
+the draft-irtf-cfrg-xchacha-03 A.3.1 vector, the datagram layout rebuilt by hand
 from the raw cipher, every single-bit flip, wrong key and direction, replay and
 reordering, a forged counter not moving the window, exhaustion, the largest
 endpoint packet sealing to exactly `MAX_DATAGRAM_BYTES`, and two endpoints over
 `ConditionSimulator` through the seal with and without an adversary forging four
-datagrams per honest one. The decoder fuzz target runs the opener. The
-dependencies are `chacha20poly1305` 0.11, `hmac` 0.13 and `sha2` 0.11, with no
-RNG feature anywhere; `crcbl-net` no longer depends on `crcbl-shaders`, since
-`auth.rs`'s hand-written HMAC moved onto the same crates (checked equal to the
-old implementation over every key length to 200 and twelve data lengths before
-the old one was deleted). **Not run locally:** the fuzz target with the opener
-in it — `cargo check --bins` passes, but its `no_main` binary does not link
-under MSVC, so CI's `decoder-fuzz` job is its first run.
+datagrams per honest one, two parties agreeing matching channels from their own
+secrets, and mismatched agreements (a substituted key, both sides the client,
+another protocol id) failing to open. The decoder fuzz target runs the opener.
+The dependencies are `chacha20poly1305` 0.11, `hmac` 0.13, `sha2` 0.11 and
+`x25519-dalek` 3.0, with no RNG feature anywhere; `crcbl-net` no longer depends
+on `crcbl-shaders`, since `auth.rs`'s hand-written HMAC moved onto the same
+crates (checked equal to the old implementation over every key length to 200 and
+twelve data lengths before the old one was deleted).
+
+**DECIDED 2026-09-30: option (a), with the removal condition.** `x25519-dalek`
+3.0 names `rand_core` 0.10 unconditionally (as 2.x names 0.6), beside the 0.9
+`proptest` 1.11 holds; `deny.toml` skips `rand_core@0.10.1` by exact version,
+since it comes in traits only, with no features and no RNG. **When `proptest`
+moves to rand 0.10, drop the skip and move the workspace's
+`rand_core`/`rand_chacha` pins to 0.10 in the same change** — the entry on the
+rand 0.10 migration has the rest of that job.
+
+**Not run locally:** the fuzz target with the opener in it —
+`cargo check --bins` passes, but its `no_main` binary does not link under MSVC,
+so CI's `decoder-fuzz` job is its first run.
 
 **What is left, by slice:**
 
-- **B′ — the X25519 call. Blocked on a decision.** `x25519-dalek` cannot enter
-  the tree without breaking `deny.toml`'s duplicate ban: 3.0.0 names `rand_core`
-  0.10 and 2.0.1 names 0.6, both **unconditionally** (not behind a feature —
-  read in each release's `Cargo.toml`, 2026-09-30), beside the 0.9 the workspace
-  holds for `proptest` (the entry above on the rand 0.10 migration). No feature
-  set avoids it. The options: **(a)** a `deny.toml` skip for `rand_core@0.10.1`
-  — a traits-only crate with no features on, so no second ChaCha and no
-  `getrandom`, which is the difference from the duplicate that entry declined to
-  skip; drop the skip when `proptest` moves. **(b)** wait for `proptest` on rand
-  0.10, then take `x25519-dalek` 3 with no skip. **(c)** name `curve25519-dalek`
-  directly (`MontgomeryPoint::mul_clamped`, whose `rand_core` is optional) — a
-  crate outside the approved four. Until then `derive_channel` takes the X25519
-  output as bytes. When it lands:
-  `default-features = false, features = ["static_secrets", "zeroize"]`,
-  `StaticSecret::from([u8; 32])` from caller bytes (no `getrandom` feature, so
-  wasm stays clean), and RFC 7748 §6.1's vector through the crate.
-- **C — `UdpTransport`.** Needs B′ for a real key exchange. A socket, one
-  `Endpoint` per peer behind `Transport` (`send_reliable` → `Channel::Reliable`,
-  `send_unreliable` → `Channel::UnreliableSequenced`, `recv_reliable` →
-  `Endpoint::recv_reliable`, `is_connected` → `EndpointState::is_connected`),
-  the hello and handshake carried over it, and `crcbl_net::conformance` run
-  against it. Only after B: **an unsealed endpoint on a network is exploitable,
-  not just readable** — a forged disconnect ends the link, and a forged first
-  fragment with the wrong count for the next message id stalls the reliable
-  channel for good. The endpoint cannot tell a forgery from the peer; only the
-  tag can. **What it wires from B:** each side draws 32 fresh secret bytes per
-  connection from the OS (natively — `crcbl-net` draws nothing, and web builds
-  have no networking), never reused across connections; the public keys travel
-  in the hello and its reply; both sides call `derive_channel` with the same
-  client/server public keys and the endpoint protocol id, and from then on every
-  datagram goes through `Sealer::seal` / `Opener::open`, with the `SEALED_TAG`
-  byte telling sealed traffic from the hello. **Rekey on reconnect** is a new
-  key pair and a new `derive_channel`, dropping the old sealer and opener;
-  `SealError::CounterExhausted` is handled the same way. An `OpenError` is a
-  dropped datagram, never a disconnect — a spoofer must not be able to end the
-  link by sending garbage. The opener's replay window is `ReplayWindow::WIDTH`
-  counters, so a datagram delayed behind more than that many newer ones is
-  refused and the reliable channel resends it; a fragment burst reordered past
-  the width costs resends, not correctness.
+- **C — `UdpTransport`.** A socket, one `Endpoint` per peer behind `Transport`
+  (`send_reliable` → `Channel::Reliable`, `send_unreliable` →
+  `Channel::UnreliableSequenced`, `recv_reliable` → `Endpoint::recv_reliable`,
+  `is_connected` → `EndpointState::is_connected`), the hello and handshake
+  carried over it, and `crcbl_net::conformance` run against it. Only after B:
+  **an unsealed endpoint on a network is exploitable, not just readable** — a
+  forged disconnect ends the link, and a forged first fragment with the wrong
+  count for the next message id stalls the reliable channel for good. The
+  endpoint cannot tell a forgery from the peer; only the tag can. **What it
+  wires from B:** each side draws 32 fresh secret bytes per connection from the
+  OS (natively — `crcbl-net` draws nothing, and web builds have no networking),
+  never reused across connections, and builds a `KeyPair` from them; the public
+  keys travel in the hello and its reply; each side calls `agree_channel` with
+  its role, its key pair, the peer's public key and the endpoint protocol id,
+  and from then on every datagram goes through `Sealer::seal` / `Opener::open`,
+  with the `SEALED_TAG` byte telling sealed traffic from the hello. **Rekey on
+  reconnect** is a new key pair and a new `agree_channel`, dropping the old
+  sealer and opener; `SealError::CounterExhausted` is handled the same way. An
+  `OpenError` is a dropped datagram, never a disconnect — a spoofer must not be
+  able to end the link by sending garbage. The opener's replay window is
+  `ReplayWindow::WIDTH` counters, so a datagram delayed behind more than that
+  many newer ones is refused and the reliable channel resends it; a fragment
+  burst reordered past the width costs resends, not correctness.
 - **D — tokens and discovery.** Connection tokens (below) and LAN discovery (its
   own entry). Neither needs anything from the packet layer.
 

@@ -32,18 +32,24 @@ pub(crate) fn hex(text: &str) -> Vec<u8> {
         .collect()
 }
 
-const SHARED: [u8; X25519_BYTES] = [0x42; X25519_BYTES];
-const CLIENT_PUBLIC: [u8; X25519_BYTES] = [0xC1; X25519_BYTES];
-const SERVER_PUBLIC: [u8; X25519_BYTES] = [0x5E; X25519_BYTES];
+const CLIENT_SECRET: [u8; X25519_BYTES] = [0xC1; X25519_BYTES];
+const SERVER_SECRET: [u8; X25519_BYTES] = [0x5E; X25519_BYTES];
 
-fn channel(role: Role, shared: &[u8; X25519_BYTES]) -> (Sealer, Opener) {
-    derive_channel(role, shared, &CLIENT_PUBLIC, &SERVER_PUBLIC, PROTOCOL).unwrap()
+/// `role`'s half of the link between the client and server key pairs above.
+fn channel(role: Role) -> (Sealer, Opener) {
+    let client = KeyPair::from_secret_bytes(CLIENT_SECRET);
+    let server = KeyPair::from_secret_bytes(SERVER_SECRET);
+    match role {
+        Role::Client => agree_channel(role, &client, &server.public_key(), PROTOCOL),
+        Role::Server => agree_channel(role, &server, &client.public_key(), PROTOCOL),
+    }
+    .unwrap()
 }
 
 /// The client's sealer and the server's opener: one direction of a link.
 fn client_to_server() -> (Sealer, Opener) {
-    let (sealer, _) = channel(Role::Client, &SHARED);
-    let (_, opener) = channel(Role::Server, &SHARED);
+    let (sealer, _) = channel(Role::Client);
+    let (_, opener) = channel(Role::Server);
     (sealer, opener)
 }
 
@@ -180,14 +186,15 @@ fn another_key_or_the_other_direction_fails_to_open() {
     let (mut sealer, _) = client_to_server();
     let sealed = sealer.seal(&packet(1)).unwrap();
 
-    // Another session's key.
-    let mut other_shared = SHARED;
-    other_shared[0] ^= 1;
-    let (_, mut stranger) = channel(Role::Server, &other_shared);
+    // Another session's key: a server with a different key pair.
+    let stranger_pair = KeyPair::from_secret_bytes([0x99; X25519_BYTES]);
+    let client_public = KeyPair::from_secret_bytes(CLIENT_SECRET).public_key();
+    let (_, mut stranger) =
+        agree_channel(Role::Server, &stranger_pair, &client_public, PROTOCOL).unwrap();
     assert_eq!(stranger.open(&sealed), Err(OpenError::Forged));
 
     // Reflected back at its sender: the client opens server-to-client.
-    let (_, mut own_opener) = channel(Role::Client, &SHARED);
+    let (_, mut own_opener) = channel(Role::Client);
     assert_eq!(own_opener.open(&sealed), Err(OpenError::Forged));
 
     // The direction byte stands on its own: under one key, a datagram sealed
@@ -350,7 +357,7 @@ struct Side {
 
 impl Side {
     fn new(role: Role, clock: ManualClock) -> Self {
-        let (sealer, opener) = channel(role, &SHARED);
+        let (sealer, opener) = channel(role);
         Self {
             endpoint: Endpoint::new(PROTOCOL, clock),
             sealer,

@@ -6,7 +6,7 @@
 //! network transport under AEAD from the first packet after the hello, with no
 //! plaintext mode and no switch to turn it off. This module is that AEAD, as
 //! pure logic like [`crate::reliable`] beneath it: bytes in, bytes out, no
-//! socket, and no randomness — key material comes from the caller.
+//! socket, and no randomness — secret key bytes come from the caller.
 //!
 //! ```text
 //! Endpoint::poll_outgoing ── Sealer::seal ── socket ── Opener::open ── Endpoint::receive_datagram
@@ -43,7 +43,8 @@
 //!
 //! # Keys
 //!
-//! [`derive_channel`] turns an X25519 output into this side's [`Sealer`] and
+//! [`agree_channel`] runs X25519 between this side's [`KeyPair`] and the
+//! peer's public key and turns the result into this side's [`Sealer`] and
 //! [`Opener`], one key per direction (see `keys` for the schedule). **Its
 //! trust is honest, not strong**: an unauthenticated X25519 exchange defeats a
 //! passive observer and is open to anyone who can sit in the middle of the
@@ -51,18 +52,15 @@
 //! public key; a token minted by a trusted source, or an operator-configured
 //! pre-shared key, is what would. No competitive-integrity claim rests on it.
 //!
-//! **The X25519 call itself is not built.** `x25519-dalek` names a `rand_core`
-//! the workspace's duplicate-version ban refuses; `docs/backlog.md`, _There is
-//! no UDP transport_, has the options. [`derive_channel`] takes its output as
-//! bytes until then.
-//!
 //! # Submodules
 //!
 //! * `nonce` — the direction-and-counter nonce, unique by construction.
 //! * `kdf` — HKDF-SHA256 per RFC 5869, the form Noise §4.3 names.
-//! * `keys` — the key schedule and [`derive_channel`].
+//! * `agreement` — X25519 and [`agree_channel`].
+//! * `keys` — the key schedule from the X25519 output to directional keys.
 //! * `channel` — [`Sealer`] and [`Opener`].
 
+mod agreement;
 mod channel;
 pub(crate) mod kdf;
 mod keys;
@@ -74,8 +72,9 @@ pub(crate) mod tests;
 use chacha20poly1305::aead::array::typenum::Unsigned;
 use chacha20poly1305::{AeadCore, XChaCha20Poly1305};
 
+pub use agreement::{KeyAgreementError, KeyPair, agree_channel};
 pub use channel::{OpenError, Opener, SealError, Sealer};
-pub use keys::{KeyAgreementError, PROTOCOL_NAME, Role, X25519_BYTES, derive_channel};
+pub use keys::{PROTOCOL_NAME, Role, X25519_BYTES};
 
 /// First byte of a sealed datagram. Distinct from every message tag and from
 /// [`crate::auth::AUTH_TAG`], so one socket can carry the plaintext hello and

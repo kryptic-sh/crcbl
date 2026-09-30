@@ -434,16 +434,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   `Opener::open` authenticates first and only then checks the counter against a
   replay window, so duplicates and stale datagrams are refused and a forged
   counter cannot move the window (`OpenError` names each refusal).
-  `derive_channel(role, shared_secret, client_public, server_public, protocol_id)`
-  keys both halves with HKDF-SHA256 in Noise's two-output form over a transcript
-  of both public keys, the protocol id and `PROTOCOL_NAME`, one key per
-  direction, refusing an all-zero shared secret. The X25519 call that produces
-  the shared secret is **not** included yet: `x25519-dalek` would add a second
-  `rand_core` to the tree, and that decision is open. New dependencies:
-  `chacha20poly1305` 0.11, `hmac` 0.13 and `sha2` 0.11, with every RNG feature
-  off, so nothing in `crcbl-net` draws randomness and the wasm build is
-  unaffected. `crcbl_net::auth`'s MAC now runs on `hmac` and `sha2` with
-  identical output, and `crcbl-net` no longer depends on `crcbl-shaders`.
+  `agree_channel(role, &KeyPair, peer_public, protocol_id)` runs X25519 between
+  a `KeyPair` built from caller-supplied secret bytes
+  (`KeyPair::from_secret_bytes`, `KeyPair::public_key`) and the peer's public
+  key, refuses a small-order peer key (`KeyAgreementError::NonContributory`),
+  and keys both halves with HKDF-SHA256 in Noise's two-output form over a
+  transcript of both public keys, the protocol id and `PROTOCOL_NAME`, one key
+  per direction. New dependencies: `chacha20poly1305` 0.11, `hmac` 0.13, `sha2`
+  0.11 and `x25519-dalek` 3.0, with every RNG feature off, so nothing in
+  `crcbl-net` draws randomness and the wasm build is unaffected;
+  `x25519-dalek`'s `rand_core` 0.10 is skipped in `deny.toml` by exact version
+  until `proptest` moves to rand 0.10. `crcbl_net::auth`'s MAC now runs on
+  `hmac` and `sha2` with identical output, and `crcbl-net` no longer depends on
+  `crcbl-shaders`.
 
 - **`crcbl_net::reliable`: the reliability layer a UDP transport will run
   inside**, as pure logic over any datagram pipe — no socket and no crypto yet.

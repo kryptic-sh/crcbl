@@ -76,6 +76,14 @@ skip = [
   # `png` 0.18.1 names `miniz_oxide` 0.8 itself and also reaches it through
   # `flate2`, which moved to 0.9 in 1.1.10; the older copy is png's to drop.
   { crate = "miniz_oxide@0.8.9", reason = "png 0.18.1's own pin; its flate2 is on 0.9" },
+  # `rand_core` 0.10 is `x25519-dalek` 3.0's, named unconditionally rather than
+  # behind a feature, and pulled in with no features of its own: the traits and
+  # nothing else — no RNG, no `getrandom`, no second ChaCha. The workspace's
+  # 0.9 is held by `proptest` 1.11 (`docs/backlog.md`, _The rand 0.10
+  # migration is written and blocked upstream_). Decided 2026-09-30. **Remove
+  # it when proptest moves to rand 0.10**, and move the workspace's
+  # `rand_core`/`rand_chacha` pins to 0.10 in the same change.
+  { crate = "rand_core@0.10.1", reason = "x25519-dalek 3.0's, traits only; the workspace's 0.9 is held by proptest 1.11" },
 ]
 
 [sources]
