@@ -225,4 +225,4 @@ impl RemoteLink {
 pub(crate) mod serve;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

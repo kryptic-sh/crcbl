@@ -218,6 +218,13 @@ pub struct Towers {
     /// [`HostedGame::debug_sections`] and [`HostedGame::summary`] are handed
     /// `&self` and no GPU at all.
     paths: Paths,
+    /// The lobby, while it is open — see [`crate::lobby`]. The solo game
+    /// under it is built and does not tick, so the field it draws under the
+    /// panel is a run that has not started, and the one a player picking
+    /// solo gets. Every key and every character is the lobby's while it is
+    /// open. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    lobby: Option<crate::lobby::Lobby>,
 }
 
 impl Towers {
@@ -311,6 +318,32 @@ impl Towers {
     /// What the last frame's overlay drew.
     pub const fn page(&self) -> &PageStats {
         &self.page
+    }
+
+    /// Whether the lobby is open.
+    #[must_use]
+    pub const fn in_the_lobby(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.lobby.is_some()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
+        }
+    }
+
+    /// Starts `game` in place of the one under the lobby, from a clean
+    /// cursor — the lobby's pick, and the only way a game is replaced.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn start(&mut self, game: Game) {
+        self.game = game;
+        self.lobby = None;
+        self.selected = 0;
+        self.kind = tower::Kind::default();
+        self.pending_keys.clear();
+        self.pending_restart = false;
+        self.stats = Stats::default();
     }
 }
 
@@ -420,6 +453,13 @@ fn assemble<S: Shell + ?Sized>(
             stats: Stats::default(),
             page: PageStats::default(),
             paths,
+            #[cfg(not(target_arch = "wasm32"))]
+            lobby: options.lobby.then(|| {
+                crate::lobby::Lobby::on_the_lan(
+                    crate::lan::session(&options.map),
+                    options.common.tick_hz,
+                )
+            }),
         },
         options.common.loop_config(),
     ))
@@ -494,6 +534,10 @@ impl HostedGame for Towers {
     }
 
     fn tick(&mut self, gpu: &mut Gpu, tick_dt: f64) {
+        // Nothing runs under the lobby: the run starts when one is picked.
+        if self.in_the_lobby() {
+            return;
+        }
         // `ActionMap` holds its timers in `f32`, which is the precision an
         // input edge is worth.
         #[allow(clippy::cast_possible_truncation)]
@@ -543,9 +587,22 @@ impl HostedGame for Towers {
     }
 
     fn key_event(&mut self, key: KeyCode, pressed: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lobby) = &mut self.lobby {
+            lobby.key(key, pressed);
+            return;
+        }
         // Queued rather than fed straight in: the map's edges belong to the
         // tick, not to the frame. See [`Towers::pending_keys`].
         self.pending_keys.push((key, pressed));
+    }
+
+    /// The lobby's connect address, typed. Nothing else here takes text.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn text_event(&mut self, text: &str) {
+        if let Some(lobby) = &mut self.lobby {
+            lobby.text(text);
+        }
     }
 
     /// The map the console's `bind` and `unbind` rebind.
@@ -558,7 +615,7 @@ impl HostedGame for Towers {
     }
 
     fn menu_action(id: crcbl::ui::WidgetId) -> Option<MenuAction> {
-        (id == crate::menu::RESTART_ID).then_some(MenuAction::Restart)
+        MenuAction::from_id(id)
     }
 
     fn apply(&mut self, action: MenuAction) {
@@ -566,10 +623,52 @@ impl HostedGame for Towers {
             // Latched rather than applied: the restart is a command the server
             // owns, and the next tick is what seals it. See [`crate::menu`].
             MenuAction::Restart => self.pending_restart = true,
+            #[cfg(not(target_arch = "wasm32"))]
+            MenuAction::Lobby(pick) => {
+                let Some(lobby) = &mut self.lobby else {
+                    return;
+                };
+                match lobby.pick(pick, self.game.map()) {
+                    Some(crate::lobby::Picked::Solo) => self.lobby = None,
+                    Some(crate::lobby::Picked::Session(game)) => self.start(game),
+                    // The lobby shows why on the next frame.
+                    None => {}
+                }
+            }
         }
     }
 
-    fn menu_kind(&mut self, _menus: &mut Menus, paused: bool) -> MenuKind {
+    /// Pause, or none — or, while the lobby is open, the lobby, rebuilt
+    /// first when what it lists changed.
+    #[cfg_attr(target_arch = "wasm32", allow(unused_variables))]
+    fn menu_kind(&mut self, menus: &mut Menus, paused: bool) -> MenuKind {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(lobby) = &mut self.lobby {
+            use crate::menu::CONNECT_ID;
+
+            lobby.poll();
+            if lobby.take_changed() {
+                // A rebuild resets the selection, so it is carried across by
+                // id — onto the first row if what it was on is gone.
+                let selected = menus
+                    .get_mut(MenuKind::Lobby)
+                    .and_then(|menu| menu.selected_item().map(|item| item.id));
+                let mut menu = lobby.menu();
+                if let Some(id) = selected {
+                    menu.select_id(id);
+                }
+                menus.replace(MenuKind::Lobby, menu);
+            }
+            if let Some(menu) = menus.get_mut(MenuKind::Lobby) {
+                menu.set_item_hint(CONNECT_ID, lobby.connect_hint());
+                // Typing is for the connect row, so the selection goes there
+                // and Enter joins what was typed.
+                if lobby.take_typed() {
+                    menu.select_id(CONNECT_ID);
+                }
+            }
+            return MenuKind::in_the_lobby(paused);
+        }
         MenuKind::of(paused)
     }
 
@@ -1009,6 +1108,206 @@ mod tests {
             "the kills paid nothing",
         );
         engine.finish(ExitReason::FrameBudget).expect("teardown");
+    }
+
+    /// A loop opened on a lobby that browses `announcer` — or nothing — and
+    /// hosts on loopback: `Options` built in code never opens one, and the
+    /// lobby a parsed command line opens queries the broadcast address.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn in_a_lobby(announcer: Option<std::net::SocketAddr>) -> Loop<HeadlessShell> {
+        use crate::lan::tests::{loopback_browser, on_loopback};
+
+        let mut engine = scripted(&headless(4000));
+        engine.game_mut().lobby = Some(crate::lobby::Lobby::new(
+            crate::lan::session(&crate::map::Map::built_in()),
+            announcer
+                .map(loopback_browser)
+                .ok_or_else(|| "NOT LOOKING".to_string()),
+            on_loopback(),
+            crate::game::DEFAULT_TICK_HZ,
+        ));
+        engine
+    }
+
+    /// The id of the lobby row the keyboard is on.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn lobby_row(engine: &Loop<HeadlessShell>) -> Option<crcbl::ui::WidgetId> {
+        let menu = engine.menus().current()?;
+        if menu.title != crate::lobby::TITLE {
+            return None;
+        }
+        menu.selected_item().map(|item| item.id)
+    }
+
+    /// A LAN host on loopback with a player of its own, and where a joiner
+    /// reaches it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loopback_host() -> (Game, std::net::SocketAddr) {
+        let host = Game::host(
+            crate::game::DEFAULT_TICK_HZ,
+            &crate::map::Map::built_in(),
+            crate::lan::tests::on_loopback(),
+        )
+        .expect("loopback UDP must be available to these tests");
+        let port = host.lan_host().expect("a host").game_port();
+        (host, (std::net::Ipv4Addr::LOCALHOST, port).into())
+    }
+
+    /// Where `engine`'s game is a client of, if it is one.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn joined(engine: &Loop<HeadlessShell>) -> Option<std::net::SocketAddr> {
+        engine
+            .game()
+            .game()
+            .lan_client()
+            .and_then(crcbl::lan::LanClient::host)
+    }
+
+    /// **The lobby's keys pick a host it heard, and the game joins it.** A
+    /// host on loopback announces; its row appears under solo and host; Down
+    /// twice and Enter start a client of that host, which gets into the
+    /// session. Until then the solo game under the lobby never ticked, while
+    /// the loop did.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_lobbys_keys_pick_a_host_it_heard_and_the_game_joins_it() {
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE};
+        use crate::menu::FIRST_LISTED_ID;
+
+        let (mut host, address) = loopback_host();
+        let announcer = host
+            .lan_host()
+            .and_then(crcbl::lan::LanHost::announcer_addr)
+            .expect("the host announces");
+        let mut engine = in_a_lobby(Some(announcer));
+
+        let listed = |engine: &Loop<HeadlessShell>| {
+            engine
+                .menus()
+                .current()
+                .is_some_and(|menu| menu.items().iter().any(|item| item.id == FIRST_LISTED_ID))
+        };
+        for _ in 0..MAX_FRAMES {
+            if listed(&engine) {
+                break;
+            }
+            host.tick();
+            host.frame(FRAME);
+            frames(&mut engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        assert!(listed(&engine), "the lobby never listed the host");
+        assert!(engine.ticks() > 0, "the loop ran no tick");
+        assert_eq!(
+            engine.game().game().ticks_run(),
+            0,
+            "the game under the lobby ticked"
+        );
+
+        tap(&mut engine, KeyCode::ArrowDown);
+        tap(&mut engine, KeyCode::ArrowDown);
+        assert_eq!(lobby_row(&engine), Some(FIRST_LISTED_ID));
+        tap(&mut engine, KeyCode::Enter);
+        assert!(
+            !engine.game().in_the_lobby(),
+            "the pick left the lobby open"
+        );
+        assert_eq!(
+            joined(&engine),
+            Some(address),
+            "the game is not a client of the host picked"
+        );
+        for _ in 0..MAX_FRAMES {
+            if engine.game().game().stats().ticks > 0 {
+                break;
+            }
+            host.tick();
+            host.frame(FRAME);
+            frames(&mut engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        assert!(
+            engine.game().game().stats().ticks > 0,
+            "the joiner never had the host's field"
+        );
+        assert!(!engine.menus().is_showing(), "a panel is still up");
+    }
+
+    /// **Typing in the lobby fills the connect row and Enter joins it** — or,
+    /// for text that is not an `IP:PORT`, says so under the title and starts
+    /// nothing. The text arrives as the window system's commits, through the
+    /// loop, and Backspace takes it off a character a press.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn typing_in_the_lobby_fills_the_connect_row_and_enter_joins_it() {
+        use crate::menu::CONNECT_ID;
+
+        let mut engine = in_a_lobby(None);
+        frames(&mut engine, 2);
+        let window = engine.window();
+        let bad = "nowhere";
+        engine
+            .shell_mut()
+            .commit_text(window, bad)
+            .expect("the window is live");
+        frames(&mut engine, 2);
+        assert_eq!(lobby_row(&engine), Some(CONNECT_ID), "typing moved nothing");
+        tap(&mut engine, KeyCode::Enter);
+        assert!(engine.game().in_the_lobby(), "a bad address left the lobby");
+        let warned = engine
+            .menus()
+            .current()
+            .expect("the lobby")
+            .subtitle
+            .clone();
+        let refusal = format!("NOT AN IP:PORT: {bad:?}");
+        assert!(warned.iter().any(|line| line.text == refusal), "{warned:?}");
+
+        for _ in 0..bad.len() {
+            tap(&mut engine, KeyCode::Backspace);
+        }
+        let (_host, address) = loopback_host();
+        engine
+            .shell_mut()
+            .commit_text(window, &address.to_string())
+            .expect("the window is live");
+        frames(&mut engine, 2);
+        let row = engine
+            .menus()
+            .current()
+            .and_then(|menu| menu.items().iter().find(|item| item.id == CONNECT_ID))
+            .map(|item| item.hint.clone());
+        assert_eq!(
+            row,
+            Some(address.to_string()),
+            "the row shows exactly what was typed"
+        );
+        tap(&mut engine, KeyCode::Enter);
+        assert_eq!(joined(&engine), Some(address));
+    }
+
+    /// **Solo from the lobby starts the run that was under it**, and a run
+    /// the command line chose has no lobby at all — the control, on the same
+    /// field.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn solo_from_the_lobby_starts_the_run_under_it_and_a_chosen_run_has_no_lobby() {
+        let mut engine = in_a_lobby(None);
+        frames(&mut engine, 4);
+        assert_eq!(lobby_row(&engine), Some(crate::menu::SOLO_ID));
+        assert_eq!(engine.game().game().ticks_run(), 0);
+        tap(&mut engine, KeyCode::Enter);
+        assert!(!engine.game().in_the_lobby());
+        frames(&mut engine, 4);
+        assert!(engine.game().game().ticks_run() > 0, "solo did not start");
+        assert!(engine.game().game().lan_client().is_none());
+        assert!(engine.game().game().lan_host().is_none());
+
+        let mut chosen = scripted(&headless(400));
+        frames(&mut chosen, 4);
+        assert!(!chosen.game().in_the_lobby());
+        assert!(!chosen.menus().is_showing());
+        assert!(chosen.game().game().ticks_run() > 0);
     }
 
     /// **The overlay is composed of exactly the modules towers has**, and the

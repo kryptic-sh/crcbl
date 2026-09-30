@@ -1,9 +1,17 @@
-//! Towers' one menu: the pause panel.
+//! Towers' menus: the pause panel, and — natively — the lobby.
 //!
 //! ```text
-//!   paused ──▶ Paused
-//!   running ─▶ none
+//!   paused ─────────────────▶ Paused
+//!   the lobby is open ──────▶ Lobby     (native only)
+//!   running ────────────────▶ none
 //! ```
+//!
+//! Pause wins over the lobby, as it wins over everything in every sample: a
+//! player who pressed Escape in the lobby is shown the panel Escape opens,
+//! and resuming goes back to the lobby. The lobby's rows are built at run
+//! time from what the LAN answers — `crate::lobby` has them — so [`menus`]
+//! holds only the pause panel, and `crate::app` puts the lobby in the set the
+//! first frame it is open.
 //!
 //! # One row on it is this game's, and the rest belong to the loop
 //!
@@ -24,18 +32,67 @@ use crcbl::engine::{FIRST_GAME_ID, PAUSE_TITLE, pause_items};
 use crcbl::ui::WidgetId;
 use crcbl::ui::menu::{Menu, MenuItem, MenuSet};
 
-/// The one widget id this game answers for.
+/// The pause panel's own row.
 pub const RESTART_ID: WidgetId = FIRST_GAME_ID;
+
+/// The lobby's solo row.
+#[cfg(not(target_arch = "wasm32"))]
+pub const SOLO_ID: WidgetId = FIRST_GAME_ID + 1;
+
+/// The lobby's host row.
+#[cfg(not(target_arch = "wasm32"))]
+pub const HOST_ID: WidgetId = FIRST_GAME_ID + 2;
+
+/// The lobby's connect row, which joins the address typed into it.
+#[cfg(not(target_arch = "wasm32"))]
+pub const CONNECT_ID: WidgetId = FIRST_GAME_ID + 3;
+
+/// The lobby's first listed host; the rest follow it, one id a row, up to the
+/// most hosts a browser lists
+/// ([`DEFAULT_MAX_HOSTS`](crcbl::net::udp::discovery::DEFAULT_MAX_HOSTS)).
+#[cfg(not(target_arch = "wasm32"))]
+pub const FIRST_LISTED_ID: WidgetId = FIRST_GAME_ID + 4;
 
 /// Where `RESTART` sits among [`crcbl::engine::pause_items`]' three rows:
 /// directly under `RESUME`.
 const RESTART_ROW: usize = 1;
 
-/// What only towers' menu does.
+/// What only towers' menus do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuAction {
     /// Throw the run away and start again.
     Restart,
+    /// Start what a lobby row asks for.
+    #[cfg(not(target_arch = "wasm32"))]
+    Lobby(crate::lobby::Pick),
+}
+
+impl MenuAction {
+    /// The action a widget id of this game's names, or `None` for one it does
+    /// not use.
+    #[must_use]
+    pub fn from_id(id: WidgetId) -> Option<Self> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use crate::lobby::Pick;
+            use crcbl::net::udp::discovery::DEFAULT_MAX_HOSTS;
+
+            let pick = match id {
+                SOLO_ID => Some(Pick::Solo),
+                HOST_ID => Some(Pick::Host),
+                CONNECT_ID => Some(Pick::Connect),
+                _ => id
+                    .checked_sub(FIRST_LISTED_ID)
+                    .and_then(|row| usize::try_from(row).ok())
+                    .filter(|&row| row < DEFAULT_MAX_HOSTS)
+                    .map(Pick::Listed),
+            };
+            if let Some(pick) = pick {
+                return Some(Self::Lobby(pick));
+            }
+        }
+        (id == RESTART_ID).then_some(Self::Restart)
+    }
 }
 
 /// Which menu a frame shows.
@@ -46,13 +103,23 @@ pub enum MenuKind {
     None,
     /// The loop has stopped ticking.
     Paused,
+    /// The lobby: solo, host, the LAN's hosts and a direct connect.
+    #[cfg(not(target_arch = "wasm32"))]
+    Lobby,
 }
 
 impl MenuKind {
-    /// The menu this frame shows.
+    /// The menu this frame shows, with no lobby open.
     #[must_use]
     pub const fn of(paused: bool) -> Self {
         if paused { Self::Paused } else { Self::None }
+    }
+
+    /// The menu this frame shows with the lobby open: pause still wins.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub const fn in_the_lobby(paused: bool) -> Self {
+        if paused { Self::Paused } else { Self::Lobby }
     }
 }
 

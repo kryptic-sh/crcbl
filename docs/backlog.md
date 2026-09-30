@@ -13343,19 +13343,14 @@ Either is the owner's call.
 
 **Left, and what each would take:**
 
-- **A lobby browser on screen.** Nothing draws the list. `--browse` in the
-  sandbox and in towers (2026-10-01, `crcbl::lan::LanClient::browse`) polls a
-  `Browser`, prints every host to stdout, and joins the first whose
-  `compatibility` matches its own, passing over the rest — no choosing. A lobby
-  screen would show `hosts()` (greying out a host of another build, and treating
-  the name as untrusted text), join the chosen `addr`, and keep a direct-connect
-  address field beside it (`crcbl::text_input` is the field). **Towers has no
-  start menu to put it in** — its one menu is the pause panel
-  (`crcbl_towers::menu`), and its `Game` is built before the first frame from
-  the command line — so the lobby is a new `MenuKind` shown before play, rows
-  built from `hosts()` every frame, and a `Game` that can be swapped from solo
-  to joined at run time; that is its own slice, not a menu row. The sandbox is
-  in the same position.
+- **The sandbox has no lobby screen.** `--browse` there
+  (`crcbl::lan::LanClient::browse`) prints every host and joins the first whose
+  `compatibility` matches, with no choosing. Towers has one since 2026-10-01
+  (`crcbl_towers::lobby`, over its own `Browser`, with rows built from `hosts()`
+  and a connect field fed by `HostedGame::text_event`); the sandbox would need
+  the same: a start `MenuKind`, and a session that can be swapped in at run time
+  rather than built from the command line. Host names are drawn as announced;
+  nothing in the menu font path treats them as more than text.
 - **Link-local multicast is not sent.** The design wanted it beside broadcast,
   because networks disagree about which they forward. Receiving multicast needs
   the discovery port bound too (`join_multicast_v4` on a bound socket), so it
@@ -14164,8 +14159,24 @@ wave, and a player leaving mid-run.
 
 **Left, and what each would take:**
 
-- **A lobby browser.** See _Netgraph HUD, LAN discovery_: towers has no start
-  menu to put it in, so it is its own slice.
+- **The lobby is not run against a real LAN.** A native `towers` with no
+  session, map or script flag opens on `crcbl_towers::lobby` (2026-10-01): solo,
+  host, a row per compatible host a `Browser` hears, the incompatible ones as
+  dimmed lines with the reason, and a connect field. Every test drives it on
+  loopback with the browser's query sent straight to the host's announcer; the
+  real lobby's `Browser::open` binds every interface and queries the broadcast
+  address, which no test does. The manual check is the two-machine one below,
+  started from the lobby rather than `--browse`.
+- **A refused or dead join from the lobby does not come back to it.** Once a
+  pick starts a session the lobby is dropped, so a host that refuses the join
+  (another map typed by address — a listed host on another map is never a row),
+  or an address nobody answers, leaves the player on an empty field with the
+  refusal in the log. Returning to the lobby needs `Towers` to watch the joined
+  client's `handshake_refusal` and `ended`, and to build a new `Lobby` (and
+  `Browser`) and a fresh solo `Game` under it.
+- **The lobby's host binds every interface**, as `--host` does
+  (`LanBind::on_the_lan(0)`), on any free port printed to stdout; there is no
+  field for the port. `--host PORT` is still the way to pick one.
 - **`--serve` has no clean shutdown.** It runs until the process is killed: the
   workspace has no signal handling (no Ctrl+C hook, and no crate for one), so
   the players are never sent `SessionEndReason::SHUTTING_DOWN` and see their

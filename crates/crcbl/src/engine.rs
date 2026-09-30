@@ -6065,6 +6065,30 @@ pub trait HostedGame: Sized {
         let _ = path;
     }
 
+    /// Text the keyboard layout or an input method committed, once per
+    /// [`ShellEvent::TextCommit`], in the order the shell reported them.
+    ///
+    /// **The only way a game can take typed text.** [`key_event`](Self::key_event)
+    /// carries key codes, and a field rebuilt from them could type neither a
+    /// character the layout puts behind a modifier (a `:` on most of them) nor
+    /// a language whose letters are not on the keys — which is why the
+    /// console's own field reads commits too. The key a character came from
+    /// still arrives through `key_event`, so a game that edits text with keys
+    /// (Backspace) reads those there.
+    ///
+    /// **Not while the console is open**: its field is what the player is
+    /// typing into, and a commit handed to both would type every character
+    /// twice. The character the console key itself commits is never delivered
+    /// either — it is swallowed before anything sees it. A menu on screen does
+    /// not claim text, since no menu row takes any.
+    ///
+    /// The empty default carries [`touch_event`](Self::touch_event)'s
+    /// argument: nothing is verified by this method, and a game that never
+    /// overrides it is a game with no text field.
+    fn text_event(&mut self, text: &str) {
+        let _ = text;
+    }
+
     /// One pad event, once per event the loop's [`PadSource`] reported, in
     /// its order — see [`crate::input::GamepadEvent`] for what each means.
     ///
@@ -6895,6 +6919,9 @@ impl<S: Shell + ?Sized, G: HostedGame> Loop<S, G> {
             // this matches by request id may arrive frames after the panel that
             // asked for it was shut.
             text_pump.observe(&event, console_editing);
+            if !console_showing && let ShellEvent::TextCommit { text, .. } = &event {
+                game.text_event(text);
+            }
             // **Every key, open console or not**, so the map hears the release
             // of a key held into the panel — which is what lets the console
             // open without the loop letting go of the menu's keys by hand.
@@ -13734,6 +13761,8 @@ mod tests {
         scrolls: Vec<crcbl_core::input::ScrollDelta>,
         /// Every dropped file the loop forwarded, in order.
         dropped: Vec<PathBuf>,
+        /// Every committed text the loop forwarded, in order.
+        texts: Vec<String>,
         /// Every pad event the loop forwarded, in order.
         pads: Vec<crate::input::GamepadEvent>,
         /// What each `draw` was told about its frame.
@@ -13910,6 +13939,10 @@ mod tests {
 
         fn dropped_file(&mut self, path: &Path) {
             self.dropped.push(path.to_path_buf());
+        }
+
+        fn text_event(&mut self, text: &str) {
+            self.texts.push(text.to_string());
         }
 
         /// Fed straight into the map, as `key_event` feeds keys.
@@ -17419,6 +17452,44 @@ mod tests {
             "a letter does not reach the game once the console is shut either, so \
              the claim above proves nothing: {:?}",
             engine.game.keys,
+        );
+    }
+
+    /// **Committed text reaches the game, in order — and not while the console
+    /// is open**, whose field is what is being typed into.
+    ///
+    /// The console half is the control: a loop that handed every commit to the
+    /// game would pass the first assertion and type each character twice. The
+    /// console key's own backtick is asserted absent as well, on the way in.
+    #[test]
+    fn committed_text_reaches_the_game_unless_the_console_has_it() {
+        let mut engine = hosted(None);
+        typed(&mut engine, "12");
+        typed(&mut engine, "7.0.0.1:");
+        step(&mut engine);
+        assert_eq!(engine.game().texts, vec!["12", "7.0.0.1:"]);
+
+        let window = engine.window;
+        engine
+            .shell_mut()
+            .key_press(window, CONSOLE_KEY)
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .commit_text(window, "`")
+            .expect("the window is live");
+        engine
+            .shell_mut()
+            .key_release(window, CONSOLE_KEY)
+            .expect("the window is live");
+        step(&mut engine);
+        assert!(engine.console().is_open());
+        typed(&mut engine, "help");
+        step(&mut engine);
+        assert_eq!(
+            engine.game().texts,
+            vec!["12", "7.0.0.1:"],
+            "the console's text, or the key that opened it, reached the game"
         );
     }
 

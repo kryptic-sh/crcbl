@@ -254,23 +254,29 @@ not built anywhere yet.
   fresh field (decided 2026-10-01). `lan::tests` has four joiners of a dedicated
   server on loopback splitting the plots between them and winning all ten waves,
   a browser finding an empty server that has sent no wave, and a player leaving
-  mid-run while the other plays on. `--browse` joins the first host of this
-  build it hears and prints the rest; there is no lobby screen, because there is
-  no start menu to put it in. Four players winning the whole table fit every
-  snapshot in one datagram with nothing held back (the largest is 767 of 1158
-  bytes). **Unverified:** two machines on a real LAN, the broadcast query
-  reaching a host at all, whether a Windows firewall prompt blocks the first
-  run, and `--serve`'s own wall-clock loop — every test is one process on
-  loopback, driving the server a frame at a time. **The map is in the handshake
-  as a fingerprint:** a joiner still draws its own map, so the map's SHA-256
+  mid-run while the other plays on. **A native `towers` opens on a lobby**
+  (`crcbl_towers::lobby`) when its command line chose nothing — no session flag,
+  no `--scene`, no `--headless`, `--frames` or `--screenshot`: solo, host, a row
+  per LAN host this build can join (name and players), the others dimmed under
+  the title with the reason (another version, build or map, or full), and a
+  connect row that joins an `IP:PORT` typed into it; the arrows, Enter and a
+  pad's d-pad and South drive it, as every menu. The web build has none and
+  boots straight into solo. `--browse` still joins the first host of this build
+  it hears. Four players winning the whole table fit every snapshot in one
+  datagram with nothing held back (the largest is 767 of 1158 bytes).
+  **Unverified:** two machines on a real LAN, the broadcast query reaching a
+  host at all, whether a Windows firewall prompt blocks the first run, and
+  `--serve`'s own wall-clock loop — every test is one process on loopback,
+  driving the server a frame at a time. **The map is in the handshake as a
+  fingerprint:** a joiner still draws its own map, so the map's SHA-256
   fingerprint (`Map::fingerprint`, its waypoints and plots through a defined
   encoding) is folded into the session's schema hash, and a browser passes over
   a host on another map while a direct join to one is refused as a schema
-  mismatch naming both hashes. **Not built:** the lobby browser, sending the
-  host's map at join so any joiner can play any host, a clean shutdown for
-  `--serve` (it runs until killed), and the wasm client, which the LAN rule
-  rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has
-  each with what it would take.
+  mismatch naming both hashes. **Not built:** sending the host's map at join so
+  any joiner can play any host, a way back to the lobby from a join the host
+  refused, a clean shutdown for `--serve` (it runs until killed), and the wasm
+  client, which the LAN rule rules out. `docs/backlog.md`'s _What towers' LAN
+  co-op shipped without_ has each with what it would take.
 
 ## Exit criteria
 

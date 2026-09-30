@@ -44,6 +44,11 @@ towers — co-op tower defense on one map, solo or over a LAN
 USAGE:
     towers [OPTIONS]
 
+    With none of --host, --serve, --join, --browse, --scene, --headless,
+    --frames or --screenshot, towers opens on a lobby: play solo, host, join
+    a host on the local network, or type an IP:PORT to connect to. Any of
+    them skips it. The browser build has no lobby and is single player.
+
 CONTROLS:
     LEFT/RIGHT           Pick a build plot
     B                    Build a tower on it. The server refuses a plot that is
@@ -129,6 +134,16 @@ pub struct Options {
     /// instead of playing: see `crate::lan::serve`. Native builds only.
     #[cfg(not(target_arch = "wasm32"))]
     pub serve: Option<u16>,
+    /// Open on the lobby rather than on the field — see `crate::lobby`.
+    ///
+    /// [`parse`] sets it for a command line that chose nothing: no session
+    /// flag, no `--scene`, and no flag that makes the run a script
+    /// (`--headless`, `--frames`, `--screenshot`), so every script, CI run
+    /// and test starts where it always did. **`false` by default**, so an
+    /// `Options` built in code rather than parsed opens on the field as it
+    /// always has. Native builds only: the browser has no networking.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub lobby: bool,
 }
 
 impl Default for Options {
@@ -147,6 +162,8 @@ impl Default for Options {
             lan: crcbl::lan::LanMode::Off,
             #[cfg(not(target_arch = "wasm32"))]
             serve: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            lobby: false,
         }
     }
 }
@@ -161,6 +178,11 @@ pub type Invocation = crcbl::args::Invocation<Options>;
 pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
     let mut options = Options::default();
     let mut args = args.peekable();
+    // Whether the map was chosen, which a lobby would otherwise ask about:
+    // the parsed map equal to the committed one cannot tell `--scene` of the
+    // committed directory from no flag.
+    #[cfg(not(target_arch = "wasm32"))]
+    let mut scene_given = false;
 
     while let Some(arg) = args.next() {
         match options.common.consume(&arg, &mut args) {
@@ -197,7 +219,13 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                 // would not parse is one that played the map it always played
                 // and reported nothing.
                 Some(path) => match Map::read_dir(&path) {
-                    Ok(map) => options.map = map,
+                    Ok(map) => {
+                        options.map = map;
+                        #[cfg(not(target_arch = "wasm32"))]
+                        {
+                            scene_given = true;
+                        }
+                    }
                     Err(message) => return Invocation::BadUsage(message),
                 },
                 None => return Invocation::BadUsage("--scene needs a value".into()),
@@ -224,6 +252,15 @@ pub fn parse(args: impl Iterator<Item = String>) -> Invocation {
                     .into(),
             );
         }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        options.lobby = options.lan == crcbl::lan::LanMode::Off
+            && options.serve.is_none()
+            && !scene_given
+            && !options.common.headless
+            && options.common.frames.is_none();
     }
 
     Invocation::Run(options)
@@ -480,6 +517,38 @@ mod tests {
                 rejected(argv)
             );
         }
+    }
+
+    /// **A command line that chose nothing opens on the lobby, and every
+    /// flag that chose something skips it** — a session, a map, or a run
+    /// that is a script. A display flag chooses nothing, so it keeps the
+    /// lobby.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_command_line_that_chose_nothing_opens_the_lobby_and_every_choice_skips_it() {
+        assert!(parsed(&[]).lobby, "a bare towers opens on the lobby");
+        assert!(parsed(&["--fullscreen", "--size", "640x480"]).lobby);
+        let field = format!(
+            "{}/assets/scenes/{}",
+            env!("CARGO_MANIFEST_DIR"),
+            crate::scene::FIELD
+        );
+        for argv in [
+            &["--host"][..],
+            &["--join", "127.0.0.1:27015"],
+            &["--browse"],
+            &["--serve"],
+            &["--scene", &field],
+            &["--headless"],
+            &["--frames", "10"],
+            &["--screenshot", "frame.png"],
+        ] {
+            assert!(!parsed(argv).lobby, "{argv:?} opened the lobby");
+        }
+        assert!(
+            !Options::default().lobby,
+            "options built in code open on the lobby"
+        );
     }
 
     /// With no `--scene`, the map is the committed one — the browser's only path,

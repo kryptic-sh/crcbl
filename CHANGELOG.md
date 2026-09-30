@@ -48,7 +48,9 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   before this change and one from after it, whatever their maps: the committed
   field's session hand-shakes on schema `0x9d7fd7e02e757e3d`. There is no
   `lan::LAN` constant: `crcbl_towers::lan::session(&map)` is the session on a
-  map, beside `lan::PROTOCOL_ID` and `lan::APP`.
+  map, beside `lan::PROTOCOL_ID` and `lan::APP`. On native builds `Options` has
+  a `lobby` field and `MenuKind` a `Lobby` variant (see Added: towers opens on a
+  lobby), and `MenuAction` a `Lobby(lobby::Pick)` variant.
 
 - **`crcbl_towers`' map is a value rather than constants** (see Added):
   `map::PATH`, `LEGS`, `PLOTS`, `MAX_BOLTS`, `MAX_BURSTS`, the mesh slots after
@@ -510,6 +512,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   little-endian encoding with SHA-256, and every session's schema hash folds it
   in, so a browser passes over a host on another map and a direct join to one is
   refused as a schema mismatch naming both hashes.
+
+- **Towers opens on a lobby** (native builds): solo, host (as `--host`, on any
+  free port), a row per LAN host a `Browser` hears that this build can join —
+  its name and players — with the ones it cannot join shown dimmed under the
+  title with the reason (another version, build or map, or full), and a connect
+  row that joins an `IP:PORT` typed into the lobby, refusing anything else by
+  name. Arrows and Enter, or a pad, drive it like every menu. A command line
+  that chose anything skips it — `--host`, `--join`, `--browse`, `--serve`,
+  `--scene`, `--headless`, `--frames` or `--screenshot` — so scripts and CI are
+  unaffected, and `Options` gains `lobby: bool` (false unless `parse` set it).
+  The browser build has no lobby and boots straight into solo.
+
+- **`HostedGame::text_event(&str)`**: the text a keyboard layout or input method
+  committed (`ShellEvent::TextCommit`), once per commit, so a game can take
+  typed text — `key_event` carries key codes, which cannot type a `:` or a
+  letter off the keys. Not delivered while the console is open, and the console
+  key's own character never is. The default does nothing.
 
 - **Towers has a dedicated server**: `towers --serve [PORT]` runs the same
   authoritative stage on `crcbl::lan`'s host with no window, no renderer and no

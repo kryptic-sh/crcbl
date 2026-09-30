@@ -25,18 +25,18 @@ use crate::game::{Controls, Game, Stats};
 use crate::map::Map;
 use crate::tower::{self, Tier};
 
-const TICK_HZ: u32 = crate::game::DEFAULT_TICK_HZ;
+pub(crate) const TICK_HZ: u32 = crate::game::DEFAULT_TICK_HZ;
 
 /// One frame at [`TICK_HZ`]: every step runs one tick of each game and about
 /// one of the host's server.
-const FRAME: Duration = Duration::from_nanos(1_000_000_000 / TICK_HZ as u64);
+pub(crate) const FRAME: Duration = Duration::from_nanos(1_000_000_000 / TICK_HZ as u64);
 
 /// The most frames any wait here runs: ten seconds of game time, and a few
 /// seconds of wall time at [`PAUSE`] a step.
-const MAX_FRAMES: usize = 600;
+pub(crate) const MAX_FRAMES: usize = 600;
 
 /// The pause after each step, for loopback to deliver.
-const PAUSE: Duration = Duration::from_millis(1);
+pub(crate) const PAUSE: Duration = Duration::from_millis(1);
 
 /// How many ticks a command one joiner sends may take to reach another's
 /// screen: its way to the host, the host's tick, and the snapshot's way back
@@ -44,13 +44,13 @@ const PAUSE: Duration = Duration::from_millis(1);
 const SEEN_WITHIN: usize = 30;
 
 /// Loopback, any free port.
-fn loopback() -> SocketAddr {
+pub(crate) fn loopback() -> SocketAddr {
     (Ipv4Addr::LOCALHOST, 0).into()
 }
 
 /// Where a host binds on loopback: announcing on loopback, broadcasting
 /// nowhere.
-fn on_loopback() -> LanBind {
+pub(crate) fn on_loopback() -> LanBind {
     LanBind {
         listen: loopback(),
         announce_at: loopback(),
@@ -338,7 +338,7 @@ fn a_joiner_who_leaves_does_not_stop_the_others() {
 }
 
 /// A browser whose query goes straight to `announcer`.
-fn loopback_browser(announcer: SocketAddr) -> Browser {
+pub(crate) fn loopback_browser(announcer: SocketAddr) -> Browser {
     Browser::bind_with(
         loopback(),
         BrowserConfig {
@@ -366,7 +366,7 @@ fn browsing_on(announcer: SocketAddr, map: &Map) -> Game {
 
 /// The committed field with one plot a quarter metre along: a map a player
 /// could have loaded with `--scene`, and not the host's.
-fn another_map() -> Map {
+pub(crate) fn another_map() -> Map {
     let map = Map::built_in();
     let mut plots = map.plots().to_vec();
     plots[2].position[0] += 0.25;

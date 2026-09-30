@@ -19,8 +19,9 @@
 //! - **[`LanClient`]** connects a [`UdpTransport`] to an address and runs a
 //!   [`Client`] over it — direct connect, first-class — or polls a
 //!   [`Browser`], prints every host it heard, and joins the first one this
-//!   build can play with. There is no list on screen to choose from yet; the
-//!   backlog says what one would take.
+//!   build can play with. A sample that lets the player choose runs its own
+//!   [`Browser`] and joins the chosen address — `apps/towers/src/lobby.rs`
+//!   does.
 //! - **[`LanMode`]** is what `--host [PORT]`, `--join <IP:PORT>` and
 //!   `--browse` ask for, parsed by [`LanMode::consume`] so every sample reads
 //!   the three flags alike.
