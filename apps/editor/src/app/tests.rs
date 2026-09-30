@@ -333,6 +333,40 @@ fn a_copied_entity_pastes_back_through_the_clipboard() {
     editor.finish(ExitReason::FrameBudget).expect("teardown");
 }
 
+/// **A refusal reaches the status line, not only the log**: saving the
+/// compiled-in scene, which has nowhere to save to, says so under the panes
+/// as a warning, and the line reads "Ready" until something happens.
+#[test]
+fn a_refused_save_is_on_the_status_line() {
+    let mut editor = Editor::start(&options(2)).expect("headless starts");
+    assert_eq!(editor.panels.status(), ("Ready", Tone::Info));
+    editor.act(&Action::Save);
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(text.contains("nowhere to save"), "{text}");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// A paste of text that is not a clipping is on the status line too: its
+/// refusal arrives with the clipboard's answer, outside the keyboard's path.
+#[test]
+fn a_refused_paste_is_on_the_status_line() {
+    let mut editor = headless(8);
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .clipboard_offer(window, &[crcbl::shell::ClipboardOffer::text("hello")])
+        .expect("the headless clipboard takes an offer");
+    editor.act(&Action::Paste);
+    for _ in 0..3 {
+        editor.frame().expect("a frame");
+    }
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{text}");
+    assert!(text.contains("no entities"), "{text}");
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
 /// Nudging with nothing selected changes nothing and records nothing — it
 /// is a thing a person does, not a failure of the run.
 #[test]

@@ -93,7 +93,7 @@ use crate::document::{Document, EditError};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
-use crate::panel::{PanelInput, Panels, VIEWPORT_TEXTURE};
+use crate::panel::{PanelInput, Panels, Tone, VIEWPORT_TEXTURE};
 
 mod instances;
 
@@ -762,6 +762,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
+            self.panels.set_status(error.to_string(), Tone::Warning);
         }
     }
 
@@ -769,8 +770,23 @@ impl<S: Shell + ?Sized> Editor<S> {
     /// refuse in it — reported, not refused: see [`Document::problems`].
     fn save(&mut self) -> Result<(), EditError> {
         self.document.save()?;
-        for problem in self.document.problems()? {
+        let problems = self.document.problems()?;
+        for problem in &problems {
             crcbl::log::warn!("editor: saved, but its game will refuse it: {problem}");
+        }
+        match problems.as_slice() {
+            [] => self.panels.set_status("Saved", Tone::Info),
+            [only] => self.panels.set_status(
+                format!("Saved, but its game will refuse it: {only}"),
+                Tone::Warning,
+            ),
+            [first, rest @ ..] => self.panels.set_status(
+                format!(
+                    "Saved, but its game will refuse it: {first} (and {} more in the log)",
+                    rest.len()
+                ),
+                Tone::Warning,
+            ),
         }
         Ok(())
     }
@@ -804,7 +820,10 @@ impl<S: Shell + ?Sized> Editor<S> {
                     self.document.select(Some(first));
                 }
             }
-            Err(error) => crcbl::log::warn!("editor: {error}"),
+            Err(error) => {
+                crcbl::log::warn!("editor: {error}");
+                self.panels.set_status(error.to_string(), Tone::Warning);
+            }
         }
     }
 

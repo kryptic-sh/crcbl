@@ -102,7 +102,18 @@ const UNTINTED: [f32; 4] = [1.0; 4];
 /// of these, which is worth an upstream look — a dock whose panes grow past
 /// their dividers is a dock whose dividers lie.
 const EDITOR_CSS: &str = "
-#editor { flex-direction: row; }
+#editor { flex-direction: column; }
+
+#panes { flex-grow: 1; min-width: 0; min-height: 0; }
+
+#status {
+  flex-shrink: 0;
+  padding: 2px 6px;
+  background: #1b1f27;
+  color: #9aa3b2;
+}
+
+#status.warning { color: #e0b050; }
 
 #panes split,
 #panes .split-pane,
@@ -211,7 +222,25 @@ pub struct Panels {
     /// The field a held pointer is dragging and the gesture its edits share —
     /// see [`Panels::apply_edits`].
     field_gesture: Option<(SceneEntityId, String, Gesture)>,
+    /// The line under the panes: what the editor last had to say, and whether
+    /// it is a warning — see [`Panels::set_status`].
+    status: (String, Tone),
+    /// The status line, as the last frame laid it out.
+    status_key: Option<NodeKey>,
 }
+
+/// How the status line reads a message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tone {
+    /// What happened, as it was asked for.
+    Info,
+    /// Something a person should look at: a refusal, or a save its game would
+    /// not load.
+    Warning,
+}
+
+/// What the status line says before anything has happened.
+const READY: &str = "Ready";
 
 impl Panels {
     /// The panels for `document`, arranged by `layout`, with every system
@@ -244,6 +273,8 @@ impl Panels {
             outliner_key: None,
             props_key: None,
             field_gesture: None,
+            status: (READY.to_owned(), Tone::Info),
+            status_key: None,
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -327,6 +358,24 @@ impl Panels {
     /// edited — what a click in the viewport means.
     pub fn release_keyboard(&mut self) {
         self.ui.clear_focus();
+    }
+
+    /// Puts `text` on the status line under the panes, read as `tone`, until
+    /// the next message replaces it.
+    pub fn set_status(&mut self, text: impl Into<String>, tone: Tone) {
+        self.status = (text.into(), tone);
+    }
+
+    /// The status line's rectangle as the last frame laid it out.
+    #[cfg(test)]
+    fn status_rect(&self) -> Option<(Vec2, Vec2)> {
+        self.ui.rect(self.status_key?)
+    }
+
+    /// What the status line says, and how.
+    #[must_use]
+    pub fn status(&self) -> (&str, Tone) {
+        (&self.status.0, self.status.1)
     }
 
     /// What the last frame drew.
@@ -425,6 +474,7 @@ impl Panels {
         let selected = document.selected();
         let mut edits: Vec<FieldEdit> = Vec::new();
         let mut viewport = None;
+        let mut status_key = None;
         let mut outliner_key = None;
         let mut props = None;
 
@@ -443,6 +493,7 @@ impl Panels {
             outliner,
             overrides,
             outline,
+            status,
             ..
         } = self;
         let options = OutlinerOptions {
@@ -481,6 +532,14 @@ impl Panels {
                         ui.span(".editor-note", note.as_str(), &[]);
                     }
                 });
+                // Always drawn, "Ready" before anything happens, so a message
+                // arriving never changes the viewport's size.
+                let (text, tone) = &*status;
+                let class = match tone {
+                    Tone::Info => "#status",
+                    Tone::Warning => "#status.warning",
+                };
+                status_key = Some(ui.span(class, text.as_str(), &[]).key);
             },
         );
         ui.layout(Vec2::ZERO, AvailableSpace::definite(extent), atlas);
@@ -501,6 +560,7 @@ impl Panels {
             self.viewport = rect;
         }
         self.outliner_key = outliner_key;
+        self.status_key = status_key;
         self.props_key = props.flatten();
         if let (Some(key), Some(id)) = (outliner_key, self.reveal.take()) {
             self.reveal_row(key, id);
@@ -1261,9 +1321,16 @@ mod tests {
         let frame = page.idle();
         let (min, max) = frame.viewport;
         assert_eq!(page.panels.viewport(), (min, max));
+        let (status_min, status_max) = page.panels.status_rect().expect("laid out");
         assert!(
-            min.x > 0.0 && max.x == EXTENT.0 as f32 && max.y == EXTENT.1 as f32,
-            "the viewport is not the right-hand pane: {min:?}..{max:?}",
+            min.x > 0.0 && max.x == EXTENT.0 as f32 && max.y == status_min.y,
+            "the viewport is not the right-hand pane down to the status line:              {min:?}..{max:?} over {status_min:?}",
+        );
+        assert!(
+            status_min.x == 0.0
+                && status_max.x == EXTENT.0 as f32
+                && status_max.y == EXTENT.1 as f32,
+            "the status line is not the window's bottom edge: {status_min:?}..{status_max:?}",
         );
 
         for key in [

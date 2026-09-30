@@ -420,6 +420,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **The editor has a status line** under its panes. It reads "Ready" until
+  something happens, then shows the last refusal (a save with nowhere to go, a
+  paste that is not a clipping) or what a save found, as a warning when the game
+  would refuse the saved scene. The same lines still go to the log.
+
 - **`crcbl_net::reliable`: the reliability layer a UDP transport will run
   inside**, as pure logic over any datagram pipe — no socket and no crypto yet.
   An `Endpoint` (driven by an injected `Clock`: `send`, `receive_datagram`,

@@ -13879,9 +13879,8 @@ any scene listing one of its systems; towers registers `Map::load` against
 refusal. **Decided: reported, not refused.** Authoring passes through layouts no
 game would load — a corner added before the leg it breaks is straightened — and
 a save that refused them would lose the work in between; the game still refuses
-the file at `--scene` with the rule it broke. The report is a log line; the
-editor has no status line to show it in, which is the gap to close when one
-exists.
+the file at `--scene` with the rule it broke. The report goes to the log and to
+the editor's status line under the panes (`Panels::set_status`), as a warning.
 
 **Coverage gap:** no windowed or screenshot run of a non-default map was made;
 `app::tests::a_map_other_than_the_committed_one_is_the_one_the_run_plays` runs
