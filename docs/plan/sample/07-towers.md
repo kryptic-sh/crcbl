@@ -279,10 +279,15 @@ not built anywhere yet.
   back to it:** the lobby stays up saying `JOINING` until the map is in, and a
   refusal, a dead link, a bad map or no map within `lan::JOIN_TIMEOUT` leaves
   the player there with the reason; `--join` and `--browse` wait under a
-  `JOINING` panel that shows and logs it. **Not built:** a clean shutdown for
-  `--serve` (it runs until killed), and the wasm client, which the LAN rule
-  rules out. `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has
-  each with what it would take.
+  `JOINING` panel that shows and logs it. **So does a session from the lobby
+  that ends after the map came** — the host left or shut down, a kick, or a dead
+  link: the player is back in the lobby, over the idle solo run that was under
+  it and its own field, with a `SESSION ENDED` warning naming how, and the
+  lobby's browser listening again; `--join` and `--browse` show the end on their
+  panel instead. **Not built:** a clean shutdown for `--serve` (it runs until
+  killed), and the wasm client, which the LAN rule rules out.
+  `docs/backlog.md`'s _What towers' LAN co-op shipped without_ has each with
+  what it would take.
 
 ## Exit criteria
 

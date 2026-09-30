@@ -232,11 +232,18 @@ pub struct Towers {
     /// panel; neither ticks. Native only.
     #[cfg(not(target_arch = "wasm32"))]
     joining: Option<crate::lan::Joining>,
-    /// Why a join the command line asked for ended without a game, shown on
-    /// the joining panel for as long as the window stays open. A join picked
-    /// in the lobby says it in the lobby instead. Native only.
+    /// The lobby a join was picked from and the idle solo game that was
+    /// under it, set aside while the joined game runs: when its session ends
+    /// the player goes back to both — see `Towers::drive_session_end`. Native
+    /// only.
     #[cfg(not(target_arch = "wasm32"))]
-    join_failed: Option<String>,
+    parked: Option<(crate::lobby::Lobby, Game)>,
+    /// Why a join the command line asked for ended without a game, or how
+    /// its session ended — the warning the joining panel shows for as long
+    /// as the window stays open. A join picked in the lobby says either in
+    /// the lobby instead. Native only.
+    #[cfg(not(target_arch = "wasm32"))]
+    panel_warning: Option<String>,
 }
 
 impl Towers {
@@ -345,14 +352,14 @@ impl Towers {
         }
     }
 
-    /// Whether nothing is being played yet: the lobby is open, a join is
-    /// waiting for the host's map, or a command-line join failed. The game
-    /// underneath does not tick.
+    /// Whether nothing is being played: the lobby is open, a join is waiting
+    /// for the host's map, or a command-line join failed or its session
+    /// ended. The game underneath does not tick.
     #[must_use]
     pub const fn in_front(&self) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            self.lobby.is_some() || self.joining.is_some() || self.join_failed.is_some()
+            self.lobby.is_some() || self.joining.is_some() || self.panel_warning.is_some()
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -383,7 +390,13 @@ impl Towers {
             // The field first: a game on the host's map is never drawn over
             // the field of another.
             Progress::Joined(game) => match gpu.set_map(game.map()) {
-                Ok(()) => self.start(game),
+                Ok(()) => {
+                    // The lobby the join was picked from waits, with the solo
+                    // game that was under it, for the session to end.
+                    let lobby = self.lobby.take();
+                    let solo = self.start(game);
+                    self.parked = lobby.map(|lobby| (lobby, solo));
+                }
                 Err(error) => self.join_failed(&format!("cannot draw the host's map: {error}")),
             },
             Progress::Failed(failure) => self.join_failed(&failure.to_string()),
@@ -399,21 +412,54 @@ impl Towers {
             Some(lobby) => lobby.join_failed(why),
             None => {
                 crcbl::log::error!("lan: the join failed: {why}");
-                self.join_failed = Some(why.to_string());
+                self.panel_warning = Some(format!("JOIN FAILED: {why}"));
             }
         }
     }
 
+    /// Notices that the joined game's session ended — the host left or shut
+    /// down, removed this player, or the link died — and takes the player
+    /// back to where the join started: the lobby it was picked from, saying
+    /// how the session ended, over the idle solo game that was under it and
+    /// the GPU's field for this process's own map again. A join the command
+    /// line asked for has no lobby to go back to, so its panel says it, as a
+    /// failed join's does, and the stopped field stays under it.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn drive_session_end(&mut self, gpu: &mut Gpu) {
+        if self.panel_warning.is_some() {
+            return;
+        }
+        let Some(how) = self.game.session_end() else {
+            return;
+        };
+        crcbl::log::warn!("lan: the session ended: {how}");
+        let Some((mut lobby, solo)) = self.parked.take() else {
+            self.panel_warning = Some(format!("SESSION ENDED: {how}"));
+            return;
+        };
+        // The field first, as a join's is: the solo game is never drawn over
+        // the host's field.
+        if let Err(error) = gpu.set_map(solo.map()) {
+            crcbl::log::error!("lan: cannot draw this machine's map again: {error}");
+            self.panel_warning = Some(format!(
+                "SESSION ENDED: {how}; cannot draw this machine's map: {error}"
+            ));
+            return;
+        }
+        lobby.session_ended(&how);
+        drop(self.start(solo));
+        self.lobby = Some(lobby);
+    }
+
     /// The joining panel: where the command line's join is going, or why it
-    /// failed.
+    /// failed, or how its session ended.
     #[cfg(not(target_arch = "wasm32"))]
     fn joining_panel(&self) -> crcbl::ui::menu::Menu {
         use crcbl::ui::menu::{Caption, Menu};
 
         let mut menu = Menu::new(crate::lobby::JOINING_TITLE, Vec::new());
-        if let Some(why) = &self.join_failed {
-            menu.subtitle
-                .push(Caption::warning(format!("JOIN FAILED: {why}")));
+        if let Some(warning) = &self.panel_warning {
+            menu.subtitle.push(Caption::warning(warning.clone()));
         } else if let Some(joining) = &self.joining {
             menu.subtitle.push(
                 match joining.lan().host() {
@@ -426,20 +472,21 @@ impl Towers {
         menu
     }
 
-    /// Starts `game` in place of the one under the lobby, from a clean
-    /// cursor — the lobby's pick or the host's map arriving, and the only way
-    /// a game is replaced.
+    /// Starts `game` in place of the one being drawn, from a clean cursor —
+    /// the lobby's pick, the host's map arriving, or the way back from an
+    /// ended session, and the only way a game is replaced. Answers the game
+    /// it replaced.
     #[cfg(not(target_arch = "wasm32"))]
-    fn start(&mut self, game: Game) {
-        self.game = game;
+    fn start(&mut self, game: Game) -> Game {
         self.lobby = None;
         self.joining = None;
-        self.join_failed = None;
+        self.panel_warning = None;
         self.selected = 0;
         self.kind = tower::Kind::default();
         self.pending_keys.clear();
         self.pending_restart = false;
         self.stats = Stats::default();
+        std::mem::replace(&mut self.game, game)
     }
 }
 
@@ -557,7 +604,9 @@ fn assemble<S: Shell + ?Sized>(
             #[cfg(not(target_arch = "wasm32"))]
             joining,
             #[cfg(not(target_arch = "wasm32"))]
-            join_failed: None,
+            parked: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            panel_warning: None,
         },
         options.common.loop_config(),
     ))
@@ -742,7 +791,7 @@ impl HostedGame for Towers {
                 self.joining = None;
                 match lobby.pick(pick, self.game.map()) {
                     Some(crate::lobby::Picked::Solo) => self.lobby = None,
-                    Some(crate::lobby::Picked::Session(game)) => self.start(game),
+                    Some(crate::lobby::Picked::Session(game)) => drop(self.start(game)),
                     // The lobby stays up, saying where, until the map is in.
                     Some(crate::lobby::Picked::Joining(joining)) => self.joining = Some(joining),
                     // The lobby shows why on the next frame.
@@ -784,7 +833,7 @@ impl HostedGame for Towers {
             return MenuKind::in_the_lobby(paused);
         }
         #[cfg(not(target_arch = "wasm32"))]
-        if self.joining.is_some() || self.join_failed.is_some() {
+        if self.joining.is_some() || self.panel_warning.is_some() {
             let panel = self.joining_panel();
             let stale = menus
                 .get_mut(MenuKind::Joining)
@@ -810,6 +859,8 @@ impl HostedGame for Towers {
         #[cfg(not(target_arch = "wasm32"))]
         self.drive_join(gpu, frame.render_dt);
         self.game.frame(frame.render_dt);
+        #[cfg(not(target_arch = "wasm32"))]
+        self.drive_session_end(gpu);
         self.render_state = self.game.render_state();
         gpu.set_field(&self.render_state);
         self.page = crate::page::draw(
@@ -1603,6 +1654,164 @@ mod tests {
         assert!(
             !engine.menus().is_showing(),
             "the joining panel is still up"
+        );
+    }
+
+    /// A dedicated server on loopback playing `map`, and where a joiner
+    /// reaches it: a host whose sessions a test can end.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn loopback_server(map: &crate::map::Map) -> (crate::lan::serve::Server, std::net::SocketAddr) {
+        let server = crate::lan::serve::Server::open(
+            crate::lan::tests::on_loopback(),
+            map,
+            crate::game::DEFAULT_TICK_HZ,
+        )
+        .expect("loopback UDP must be available to these tests");
+        let port = server.lan().game_port();
+        (server, (std::net::Ipv4Addr::LOCALHOST, port).into())
+    }
+
+    /// Serves `server` and runs `engine` a frame at a time, on `now`, until
+    /// `done` holds — failing, naming `what`, if it never does.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn serve_until(
+        server: &mut crate::lan::serve::Server,
+        engine: &mut Loop<HeadlessShell>,
+        now: &mut std::time::Duration,
+        what: &str,
+        done: impl Fn(&Loop<HeadlessShell>) -> bool,
+    ) {
+        use crate::lan::tests::{FRAME, MAX_FRAMES, PAUSE};
+
+        for _ in 0..MAX_FRAMES {
+            if done(engine) {
+                return;
+            }
+            *now += FRAME;
+            server.frame(*now);
+            frames(engine, 1);
+            std::thread::sleep(PAUSE);
+        }
+        panic!("no {what} within {MAX_FRAMES} frames");
+    }
+
+    /// **A joined session that ends returns the player to the lobby, saying
+    /// how.** A join picked in the lobby plays the server's two-plot map;
+    /// then the host leaves. The player is back in the lobby, which names
+    /// the end as a warning, over the idle solo game that was under it —
+    /// this process's own five-plot field, in the game and on the GPU, never
+    /// ticked — and the lobby's browser still hears the server.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_joined_session_that_ends_returns_to_the_lobby_saying_how() {
+        use crate::lan::tests::another_map;
+        use crate::menu::FIRST_LISTED_ID;
+
+        let (mut server, address) = loopback_server(&another_map());
+        let announcer = server.lan().announcer_addr().expect("the server announces");
+        let mut engine = in_a_lobby(Some(announcer));
+        let mut now = std::time::Duration::ZERO;
+        frames(&mut engine, 2);
+        connect_to(&mut engine, address);
+        serve_until(
+            &mut server,
+            &mut engine,
+            &mut now,
+            "the joined game",
+            |engine| joined(engine).is_some() && engine.game().game().stats().ticks > 0,
+        );
+        assert_eq!(engine.gpu().field().plots(), another_map().plots().len());
+
+        server
+            .lan_mut()
+            .host_mut()
+            .shutdown(crcbl::net::SessionEndReason::HOST_LEFT);
+        serve_until(
+            &mut server,
+            &mut engine,
+            &mut now,
+            "the way back",
+            |engine| engine.game().in_the_lobby(),
+        );
+        frames(&mut engine, 1);
+        let ended = lobby_lines(&engine)
+            .into_iter()
+            .find(|line| line.text.starts_with("SESSION ENDED:"))
+            .expect("the lobby does not say the session ended");
+        assert_eq!(ended.text, "SESSION ENDED: the host left");
+        assert_eq!(ended.tone, crcbl::ui::menu::CaptionTone::Warning);
+        let game = engine.game().game();
+        assert!(game.lan_client().is_none(), "still the joined game");
+        assert_eq!(game.map(), &crate::map::Map::built_in());
+        assert_eq!(
+            game.ticks_run(),
+            0,
+            "not the idle solo game from under the lobby"
+        );
+        assert_eq!(
+            engine.gpu().field().plots(),
+            crate::map::Map::built_in().plots().len(),
+            "the GPU still draws the host's field"
+        );
+        assert!(!engine.game().is_joining());
+        serve_until(
+            &mut server,
+            &mut engine,
+            &mut now,
+            "the server's row",
+            |engine| {
+                engine
+                    .menus()
+                    .current()
+                    .is_some_and(|menu| menu.items().iter().any(|item| item.id == FIRST_LISTED_ID))
+            },
+        );
+    }
+
+    /// **A command-line join whose session ends says so on its panel**, as a
+    /// failed join does: `--join`, then the server shuts down, and the
+    /// joining panel names the end while the stopped game under it ticks no
+    /// more.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_command_line_session_that_ends_says_so_on_its_panel() {
+        let (mut server, address) = loopback_server(&crate::map::Map::built_in());
+        let mut engine = scripted(&Options {
+            lan: crcbl::lan::LanMode::Join(address),
+            ..headless(4000)
+        });
+        let mut now = std::time::Duration::ZERO;
+        serve_until(
+            &mut server,
+            &mut engine,
+            &mut now,
+            "the joined game",
+            |engine| joined(engine).is_some() && engine.game().game().stats().ticks > 0,
+        );
+
+        server
+            .lan_mut()
+            .host_mut()
+            .shutdown(crcbl::net::SessionEndReason::SHUTTING_DOWN);
+        serve_until(&mut server, &mut engine, &mut now, "the panel", |engine| {
+            engine.menus().is_showing()
+        });
+        let panel = engine.menus().current().expect("the joining panel");
+        assert_eq!(panel.title, crate::lobby::JOINING_TITLE);
+        assert_eq!(
+            panel.subtitle[0].text,
+            "SESSION ENDED: the server shut down"
+        );
+        assert_eq!(
+            panel.subtitle[0].tone,
+            crcbl::ui::menu::CaptionTone::Warning
+        );
+        let ticks = engine.game().game().ticks_run();
+        frames(&mut engine, 4);
+        assert_eq!(
+            engine.game().game().ticks_run(),
+            ticks,
+            "the ended game ticked"
         );
     }
 

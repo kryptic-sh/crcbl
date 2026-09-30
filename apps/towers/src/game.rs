@@ -1328,6 +1328,18 @@ impl Game {
         }
     }
 
+    /// How the LAN session this game joined ended, in words, once it has —
+    /// the host left or shut down, removed this player, or the link died.
+    /// `None` solo, hosting, and while the session runs.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn session_end(&self) -> Option<String> {
+        match &self.link {
+            Link::Remote(remote) => remote.ended(),
+            Link::Solo(_) | Link::Host(_) => None,
+        }
+    }
+
     /// The field the run is played on.
     #[must_use]
     pub fn map(&self) -> &Map {

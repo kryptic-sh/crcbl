@@ -30,8 +30,9 @@
 //! [`Joining`] a join asks for — or answers `Picked::Solo`, because the solo
 //! game under the lobby has not ticked and is already the run a player
 //! choosing solo gets — or records why it could not, which the next menu
-//! shows as a warning. `crate::app::Towers` swaps a game in and drops the
-//! lobby, and the browser with it.
+//! shows as a warning. `crate::app::Towers` swaps a game in: a host drops the
+//! lobby, and the browser with it; a join sets the lobby aside, with the solo
+//! game that was under it, for as long as its session runs.
 //!
 //! # A join keeps the lobby up until the host's map is in
 //!
@@ -43,6 +44,15 @@
 //! [`JOIN_TIMEOUT`] — the lobby is still there, and says why
 //! (`Lobby::join_failed`), so the player picks again rather than being left
 //! on an empty field.
+//!
+//! # A session that ends comes back here
+//!
+//! Once the joined game is up, the lobby waits, set aside and not polled,
+//! until its session ends — the host left or shut down, removed this player,
+//! or the link died. Then the player is back in it, over the idle solo game
+//! that was under it on this process's own map, and the lobby says how the
+//! session ended (`Lobby::session_ended`). Its browser is the one it had, so
+//! the hosts it lists are heard again from the next frame.
 //!
 //! # Native only, and only when asked for nothing
 //!
@@ -360,6 +370,14 @@ impl Lobby {
     pub(crate) fn join_failed(&mut self, why: &str) {
         self.joining = None;
         self.notice = Some(format!("JOIN FAILED: {why}"));
+        self.changed = true;
+    }
+
+    /// The session a join from here started has ended, and the player is
+    /// back: the lobby says how, and is what the player picks from again.
+    pub(crate) fn session_ended(&mut self, how: &str) {
+        self.joining = None;
+        self.notice = Some(format!("SESSION ENDED: {how}"));
         self.changed = true;
     }
 

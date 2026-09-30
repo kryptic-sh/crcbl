@@ -531,8 +531,12 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   row that joins an `IP:PORT` typed into the lobby, refusing anything else by
   name. A join keeps the lobby up, saying `JOINING` and where, until the host's
   map is in; one that fails leaves the player in the lobby with a warning naming
-  why (`JOIN FAILED: …`) rather than on an empty field. Arrows and Enter, or a
-  pad, drive it like every menu. A command line that chose anything skips it —
+  why (`JOIN FAILED: …`) rather than on an empty field, and a joined session
+  that ends after the map came — the host left or shut down, a kick, or a dead
+  link — brings the player back to the lobby, over the idle solo run that was
+  under it, with a warning naming how (`SESSION ENDED: …`); `--join` and
+  `--browse` show that end on their panel instead. Arrows and Enter, or a pad,
+  drive it like every menu. A command line that chose anything skips it —
   `--host`, `--join`, `--browse`, `--serve`, `--scene`, `--headless`, `--frames`
   or `--screenshot` — so scripts and CI are unaffected, and `Options` gains
   `lobby: bool` (false unless `parse` set it). The browser build has no lobby

@@ -125,6 +125,12 @@ impl Server {
         &self.lan
     }
 
+    /// The engine's LAN host, for the tests that end its sessions.
+    #[cfg(test)]
+    pub const fn lan_mut(&mut self) -> &mut LanHost {
+        &mut self.lan
+    }
+
     /// How many players hold a place in the session, one whose link dropped
     /// among them until its grace period runs out — the count the run goes
     /// on for, and the one the announcement carries.

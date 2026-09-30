@@ -14159,7 +14159,10 @@ wave, and a player leaving mid-run. Since 2026-10-01 the host sends its map to
 each joiner at join (`Map::to_wire` through `crcbl_server::Host::send_event`), a
 joiner is a `crcbl_towers::lan::Joining` until `Map::from_wire` has read it, and
 the map left the schema (protocol version 4); a lobby join that fails leaves the
-player in the lobby with the reason.
+player in the lobby with the reason, and a joined session that ends brings them
+back to it saying how (`Towers::drive_session_end`, tested by
+`a_joined_session_that_ends_returns_to_the_lobby_saying_how` and
+`a_command_line_session_that_ends_says_so_on_its_panel` in `crate::app`).
 
 **Left, and what each would take:**
 
@@ -14171,17 +14174,6 @@ player in the lobby with the reason.
   real lobby's `Browser::open` binds every interface and queries the broadcast
   address, which no test does. The manual check is the two-machine one below,
   started from the lobby rather than `--browse`.
-- **A session from the lobby that ends after the map came does not return to
-  it.** The lobby stays up until the host's map is in, so a join that fails
-  before that — refused, link ended, bad map, `lan::JOIN_TIMEOUT` — comes back
-  to it with the reason (`a_refused_join_returns_to_the_lobby_saying_why` and
-  `a_join_nobody_answers_returns_to_the_lobby_saying_why` in `crate::app`). Once
-  the joined game has started the lobby is dropped, so a host that leaves or a
-  link that dies mid-run leaves the player on a field that stops moving, with
-  the end in the log. Returning needs `Towers` to watch the joined game's
-  `lan_client().client().ended()` and build a new `Lobby` (`Lobby::on_the_lan`,
-  which opens a broadcast `Browser`) and a fresh solo `Game` under it — or keep
-  the old lobby parked while the session runs.
 - **The map is sent once, on `PeerEvent::Joined`.** Reasoned from the code, not
   observed: a joiner whose first `Accept` it drops as a stale generation (it
   said hello again after `crcbl_client`'s `HANDSHAKE_TIMEOUT`) is re-accepted on
