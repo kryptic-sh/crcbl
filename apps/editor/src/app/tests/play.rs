@@ -1,0 +1,277 @@
+//! Play mode through the loop: F5, F6 and the toolbar, the frames that tick
+//! in between, and every edit path refused on the status line.
+//!
+//! The editor here plays the compiled-in scene through
+//! `crate::document::play_tests::drifting`, a test vocabulary whose module
+//! moves every block along X each tick; the shipped vocabulary registers no
+//! module.
+
+use super::*;
+
+use crate::document::play_tests::{DRIFT_M, TICK, drifting, drifting_document};
+
+/// An editor on the compiled-in scene and the drifting vocabulary, whose
+/// frames are each one of the module's ticks long — so a frame of play is a
+/// tick, and a test counts them.
+fn drifting_editor(frames: u64) -> Editor<HeadlessShell> {
+    let mut editor = headless(frames);
+    // The same scene the editor opened, so the instances, the panels and the
+    // camera built from that one describe this one too.
+    editor.document = drifting_document();
+    editor.clock_source = Clock::manual(TICK);
+    editor
+}
+
+/// The X of `id`'s position.
+fn x_of(editor: &mut Editor<HeadlessShell>, id: SceneEntityId) -> f64 {
+    leaves(editor, id, gizmo::POSITION)[0]
+}
+
+/// Asserts the status line is a warning that names play mode.
+fn assert_refused_for_play(editor: &Editor<HeadlessShell>, what: &str) {
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Warning, "{what}: {text}");
+    assert!(text.contains("play mode"), "{what}: {text}");
+}
+
+/// An editor that is playing and then paused, so nothing moves under a test
+/// comparing the scene before and after a refused edit — edits are refused
+/// paused as much as playing.
+fn paused_editor(frames: u64) -> Editor<HeadlessShell> {
+    let mut editor = drifting_editor(frames);
+    editor.act(&Action::PlayStop);
+    editor.act(&Action::Pause);
+    assert_eq!(editor.document().play_state(), PlayState::Paused);
+    editor
+}
+
+/// **F5 plays and the frames tick, F6 pauses and resumes, and F5 again puts
+/// the scene back** — each on the status line and on the toolbar's state.
+#[test]
+fn f5_plays_f6_pauses_and_f5_stops_and_restores() {
+    const STEP: SceneEntityId = SceneEntityId(1);
+    let mut editor = drifting_editor(40);
+    let before = editor.document_mut().files().expect("ids");
+    let was = x_of(&mut editor, STEP);
+
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document().play_state(), PlayState::Playing);
+    let (text, _) = editor.panels.status();
+    assert!(text.starts_with("Playing drift"), "{text}");
+    let moved = x_of(&mut editor, STEP);
+    assert!(
+        moved > was,
+        "the frames after F5 did not tick: {was} to {moved}"
+    );
+
+    tap(&mut editor, KeyCode::F6);
+    assert_eq!(editor.document().play_state(), PlayState::Paused);
+    assert!(editor.panels.status().0.starts_with("Paused"));
+    let held = x_of(&mut editor, STEP);
+    editor.frame().expect("a frame");
+    assert_eq!(x_of(&mut editor, STEP), held, "a paused frame ticked");
+
+    tap(&mut editor, KeyCode::F6);
+    assert_eq!(editor.document().play_state(), PlayState::Playing);
+    editor.frame().expect("a frame");
+    assert!(
+        (x_of(&mut editor, STEP) - held) >= DRIFT_M,
+        "a resumed frame did not tick"
+    );
+
+    tap(&mut editor, KeyCode::F5);
+    assert_eq!(editor.document().play_state(), PlayState::Editing);
+    assert!(editor.panels.status().0.starts_with("Stopped"));
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+
+    let summary = editor.finish(ExitReason::FrameBudget).expect("teardown");
+    assert!(summary.run.ticks > 0, "the summary counted no ticks");
+    assert!(
+        summary.run.paused,
+        "a run that ended editing was not paused"
+    );
+}
+
+/// **The toolbar's buttons are F5's and F6's**: a click on each changes the
+/// play state the way its key does, and the button that started play is the
+/// one that stops it.
+#[test]
+fn the_toolbar_plays_pauses_and_stops() {
+    let mut editor = drifting_editor(40);
+    editor.frame().expect("a frame");
+    let before = editor.document_mut().files().expect("ids");
+    let [play, pause] = editor.panels.toolbar_buttons();
+
+    for (button, state) in [
+        (play, PlayState::Playing),
+        (pause, PlayState::Paused),
+        (pause, PlayState::Playing),
+        (play, PlayState::Editing),
+    ] {
+        let at = centre(&editor, button);
+        click(&mut editor, at);
+        assert_eq!(editor.document().play_state(), state);
+    }
+    assert_eq!(editor.document_mut().files().expect("ids"), before);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// F6 while editing starts nothing and says how to.
+#[test]
+fn pause_while_editing_says_play_is_not_running() {
+    let mut editor = drifting_editor(4);
+    editor.act(&Action::Pause);
+    assert_eq!(editor.document().play_state(), PlayState::Editing);
+    assert!(editor.panels.status().0.starts_with("Not playing"));
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A scene no registered game plays still plays**, and the status line says
+/// only the world ticks — the shipped vocabulary, which registers no module.
+#[test]
+fn a_scene_with_no_module_plays_and_says_only_the_world_ticks() {
+    let mut editor = headless(8);
+    editor.act(&Action::PlayStop);
+    assert_eq!(editor.document().play_state(), PlayState::Playing);
+    let (text, tone) = editor.panels.status();
+    assert_eq!(tone, Tone::Info, "{text}");
+    assert!(text.contains("only the"), "{text}");
+    editor.frame().expect("a frame");
+    editor.act(&Action::PlayStop);
+    assert_eq!(editor.document().play_state(), PlayState::Editing);
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Keyboard edits are refused in play mode**: a nudge, a delete and a
+/// duplicate each leave the scene and the log as they were and say why.
+#[test]
+fn keyboard_edits_are_refused_in_play_mode() {
+    let mut editor = paused_editor(8);
+    editor.document_mut().select(Some(SceneEntityId(2)));
+    let before = editor.document_mut().files().expect("ids");
+    for action in [
+        Action::Nudge { axis: 0, sign: 1.0 },
+        Action::Delete,
+        Action::Duplicate,
+    ] {
+        editor.panels.set_status("Ready", Tone::Info);
+        editor.act(&action);
+        assert_refused_for_play(&editor, &format!("{action:?}"));
+        assert_eq!(editor.document_mut().files().expect("ids"), before);
+        assert!(
+            editor.document().log().is_empty(),
+            "{action:?} was recorded"
+        );
+    }
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **Undo and redo are refused in play mode**, leaving the log where it was —
+/// one entry done and one undone, so both directions have something to walk.
+#[test]
+fn undo_and_redo_are_refused_in_play_mode() {
+    let mut editor = drifting_editor(8);
+    editor.document_mut().select(Some(SceneEntityId(2)));
+    editor.act(&Action::Nudge { axis: 0, sign: 1.0 });
+    editor.act(&Action::Nudge { axis: 1, sign: 1.0 });
+    editor.act(&Action::Undo);
+    editor.act(&Action::PlayStop);
+    for action in [Action::Undo, Action::Redo] {
+        editor.panels.set_status("Ready", Tone::Info);
+        editor.act(&action);
+        assert_refused_for_play(&editor, &format!("{action:?}"));
+        assert_eq!(
+            editor.document().log().position(),
+            1,
+            "{action:?} walked the log"
+        );
+    }
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A save in play mode is refused and writes nothing**, from a document
+/// opened from a directory — so it is play mode that refused it, not the
+/// lack of anywhere to write — and the compiled-in scene says play mode too,
+/// rather than that it has nowhere to go.
+#[test]
+fn a_save_in_play_mode_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("a temporary directory");
+    drifting_document()
+        .save_to(dir.path())
+        .expect("a writable directory");
+    let chunk = dir.path().join("sys").join("blocks.ron");
+    let on_disk = std::fs::read(&chunk).expect("the save wrote the chunk");
+
+    let mut editor = drifting_editor(16);
+    editor.document = Document::open_dir(dir.path(), drifting()).expect("what we wrote");
+    editor.act(&Action::PlayStop);
+    for _ in 0..4 {
+        editor.frame().expect("a frame");
+    }
+    editor.act(&Action::Save);
+    assert_refused_for_play(&editor, "save");
+    assert_eq!(
+        std::fs::read(&chunk).expect("still there"),
+        on_disk,
+        "a save in play mode wrote the played scene",
+    );
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+
+    let mut built_in = paused_editor(4);
+    built_in.act(&Action::Save);
+    assert_refused_for_play(&built_in, "save of the compiled-in scene");
+    built_in.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A paste in play mode is refused** when the clipboard answers, on the
+/// status line, and spawns nothing — a clipping the scene could otherwise
+/// hold, so it is play mode that refused it.
+#[test]
+fn a_paste_in_play_mode_is_refused() {
+    let mut editor = drifting_editor(8);
+    let clipping = editor
+        .document_mut()
+        .copy(SceneEntityId(2))
+        .expect("in the scene");
+    let window = editor.window;
+    editor
+        .shell_mut()
+        .clipboard_offer(window, &[crcbl::shell::ClipboardOffer::text(&clipping)])
+        .expect("the headless clipboard takes an offer");
+    editor.act(&Action::PlayStop);
+    editor.act(&Action::Pause);
+    let count = editor.document().entity_count();
+
+    editor.act(&Action::Paste);
+    for _ in 0..3 {
+        editor.frame().expect("a frame");
+    }
+    assert_refused_for_play(&editor, "paste");
+    assert_eq!(editor.document().entity_count(), count, "the paste spawned");
+    assert!(editor.document().log().is_empty());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}
+
+/// **A gizmo drag in play mode is refused**: the handle is grabbed, every
+/// write is refused on the status line, and the selection stays where play
+/// left it.
+#[test]
+fn a_gizmo_drag_in_play_mode_is_refused() {
+    let id = SceneEntityId(2);
+    let mut editor = paused_editor(16);
+    editor.document_mut().select(Some(id));
+    editor.frame().expect("a frame");
+    let was = leaves(&mut editor, id, gizmo::POSITION);
+
+    let (from, to) = handle_at(&mut editor, gizmo::Grip::Move(gizmo::Axis::X));
+    drag(&mut editor, (from + to) * 0.5, to + (to - from) * 0.5);
+
+    assert_refused_for_play(&editor, "gizmo drag");
+    assert_eq!(
+        leaves(&mut editor, id, gizmo::POSITION),
+        was,
+        "the drag moved it"
+    );
+    assert!(editor.document().log().is_empty());
+    editor.finish(ExitReason::FrameBudget).expect("teardown");
+}

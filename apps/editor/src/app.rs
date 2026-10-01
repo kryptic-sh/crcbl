@@ -2,12 +2,13 @@
 //! [`Document`].
 //!
 //! **A hand-written loop, like `apps/bare`'s**, rather than the engine's
-//! [`GameLoop`](crcbl::engine::GameLoop): the editor has no simulation to tick,
-//! no menu, no pause and no HUD, so what the hosted loop would bring is a
-//! schedule for things this slice does not have. `docs/plan/08-editor.md`'s
-//! edit-mode schedule is the missing piece that makes that a switch instead of
-//! an omission, and until it lands the honest shape is the one that says in as
-//! many words that nothing ticks.
+//! [`GameLoop`](crcbl::engine::GameLoop): while editing nothing ticks, and the
+//! editor has no menu and no HUD, so what the hosted loop would bring is a
+//! schedule for things this tool does not have. Play mode is the one thing
+//! that ticks, and it is the document's: each frame hands
+//! [`Document::advance`] the frame's time, which runs the scene's modules on a
+//! fixed step at the world's own rate and does nothing while editing or
+//! paused. See [`crate::document`]'s `play` module.
 //!
 //! # Everything here is a call into [`Document`]
 //!
@@ -89,7 +90,7 @@ use crcbl::ui::tree::{DockLayout, SelectMode};
 use crate::args::Options;
 use crate::clipboard::Paste;
 use crate::command::EditCommand;
-use crate::document::{Document, EditError};
+use crate::document::{Document, EditError, PlayState};
 use crate::gizmo;
 use crate::keys::Action;
 use crate::layout;
@@ -195,6 +196,8 @@ pub struct Editor<S: Shell + ?Sized = dyn Shell> {
     opened_layout: DockLayout,
     /// The clock's total elapsed at the last frame, for this frame's `dt`.
     elapsed: Duration,
+    /// How many ticks play mode has run this run, across every play.
+    ticks: u64,
     camera: OrbitCamera,
     /// Which drag, if any, the pointer is in the middle of.
     drag: Option<Drag>,
@@ -385,6 +388,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             settings_source,
             opened_layout: dock,
             elapsed: Duration::ZERO,
+            ticks: 0,
             camera: OrbitCamera::new(bounds.center(), 1.0, Projection::default()),
             drag: None,
             gizmo_mode: gizmo::Mode::default(),
@@ -522,7 +526,7 @@ impl<S: Shell + ?Sized> Editor<S> {
             }
         }
 
-        let asked = crate::keys::actions(&self.actions, self.modifiers, editing);
+        let mut asked = crate::keys::actions(&self.actions, self.modifiers, editing);
         let pointer = self.pointer_state.resolve(&pending);
         let input = PanelInput {
             pointer,
@@ -536,7 +540,8 @@ impl<S: Shell + ?Sized> Editor<S> {
                 wheel_pixels(&pending)
             },
         };
-        self.panels.frame(&mut self.document, input);
+        let panels = self.panels.frame(&mut self.document, input);
+        asked.extend(panels.toolbar);
         self.draw_gizmo(pointer.pos);
 
         let requests = self.panels.take_clipboard_requests();
@@ -544,6 +549,10 @@ impl<S: Shell + ?Sized> Editor<S> {
             .serve(requests, self.shell.as_mut(), self.window);
         self.sync_contexts();
 
+        // Before this frame's actions: the time the frame covers passed before
+        // any key in it was read, so the frame that starts play does not tick
+        // for time spent editing, and the one that pauses ticks what it played.
+        self.ticks += u64::from(self.document.advance(dt));
         for action in asked {
             self.act(&action);
         }
@@ -734,6 +743,7 @@ impl<S: Shell + ?Sized> Editor<S> {
         };
         if let Err(error) = self.document.apply_in(command, drag.gesture) {
             crcbl::log::warn!("editor: {error}");
+            self.panels.set_status(error.to_string(), Tone::Warning);
         }
     }
 
@@ -887,10 +897,68 @@ impl<S: Shell + ?Sized> Editor<S> {
                 self.panels.set_status(ROTATE_REFUSED, Tone::Warning);
                 Ok(())
             }
+            Action::PlayStop => self.play_or_stop(),
+            Action::Pause => {
+                self.pause_or_resume();
+                Ok(())
+            }
         };
         if let Err(error) = outcome {
             crcbl::log::warn!("editor: {error}");
             self.panels.set_status(error.to_string(), Tone::Warning);
+        }
+    }
+
+    /// Starts play mode from editing, or stops it and puts the scene back, and
+    /// says on the status line which it did.
+    fn play_or_stop(&mut self) -> Result<(), EditError> {
+        if self.document.play_state() == PlayState::Editing {
+            self.document.play()?;
+            let status = self.playing_status();
+            self.panels.set_status(status, Tone::Info);
+        } else {
+            self.document.stop()?;
+            self.panels.set_status(STOPPED, Tone::Info);
+        }
+        Ok(())
+    }
+
+    /// Pauses a playing scene or resumes a paused one, and says so — or says
+    /// there is nothing to pause while editing.
+    fn pause_or_resume(&mut self) {
+        match self.document.play_state() {
+            PlayState::Editing => self.panels.set_status(NOT_PLAYING, Tone::Info),
+            PlayState::Playing => {
+                self.document.pause();
+                self.panels.set_status(PAUSED, Tone::Info);
+            }
+            PlayState::Paused => {
+                // Resuming takes no snapshot and builds no module, so there is
+                // nothing for it to refuse.
+                if let Err(error) = self.document.play() {
+                    crcbl::log::warn!("editor: {error}");
+                    self.panels.set_status(error.to_string(), Tone::Warning);
+                    return;
+                }
+                let status = self.playing_status();
+                self.panels.set_status(status, Tone::Info);
+            }
+        }
+    }
+
+    /// What the status line says while the scene plays: which modules run it,
+    /// or that none does and only the world's own schedule ticks.
+    fn playing_status(&self) -> String {
+        let modules = self.document.playing_modules();
+        if modules.is_empty() {
+            "Playing: no game registers a module for this scene's systems, so only the world \
+             ticks. Edits are refused until F5 stops play mode"
+                .to_owned()
+        } else {
+            format!(
+                "Playing {}: edits are refused until F5 stops play mode (F6 pauses)",
+                modules.join(", ")
+            )
         }
     }
 
@@ -1140,13 +1208,12 @@ impl<S: Shell + ?Sized> Editor<S> {
             run: RunSummary {
                 backend: self.shell.backend(),
                 frames: self.budget.presented(),
-                ticks: 0,
+                ticks: self.ticks,
                 events: self.events,
                 extent: self.gpu.extent(),
                 exit,
-                // Nothing here ticks, so the simulation is never running; see
-                // the module docs.
-                paused: true,
+                // Running only while play mode plays; see the module docs.
+                paused: self.document.play_state() != PlayState::Playing,
                 mode: self.mode.mode_at_exit(&*self.shell, self.window),
             },
             entities: self.document.entity_count(),
@@ -1169,6 +1236,15 @@ impl<S: Shell + ?Sized> Editor<S> {
         Ok(summary)
     }
 }
+
+/// What the status line says once play mode has stopped.
+const STOPPED: &str = "Stopped: the scene is back as it was when play began";
+
+/// What the status line says once play mode is paused.
+const PAUSED: &str = "Paused: F6 resumes, F5 stops and puts the scene back";
+
+/// What the status line says when pause is asked for while editing.
+const NOT_PLAYING: &str = "Not playing: F5 starts play mode";
 
 /// What the status line says when rotate is asked for. See [`gizmo::Mode`].
 const ROTATE_REFUSED: &str = "Rotate is not built: the scene format carries no rotation to turn \

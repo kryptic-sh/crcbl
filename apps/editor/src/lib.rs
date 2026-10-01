@@ -47,9 +47,10 @@
 //!
 //! # What this slice is not
 //!
-//! No server protocol or transport routing, no rotate gizmo, no play mode, no
-//! asset listing, no file watcher, no multi-session editing, and no port of a
-//! sample's state into ECS. Each is named in the plan with what it waits on.
+//! No server protocol or transport routing, no rotate gizmo, no game that
+//! plays yet (play mode runs whatever modules a vocabulary registers, and none
+//! does), no asset listing, no file watcher, no multi-session editing, and no
+//! port of a sample's state into ECS. Each is named in the plan with what it waits on.
 
 pub mod app;
 pub mod args;

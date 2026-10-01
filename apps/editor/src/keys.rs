@@ -96,6 +96,13 @@ pub const SCALE: &str = "editor_scale";
 /// [`crate::gizmo::Mode`].
 pub const ROTATE: &str = "editor_rotate";
 
+/// Start play mode, or stop it and put the scene back: F5, the key every IDE
+/// starts a run with. See [`crate::document::Document::play`].
+pub const PLAY: &str = "editor_play";
+
+/// Pause play mode, or resume it: F6, beside it.
+pub const PAUSE: &str = "editor_pause";
+
 /// One thing the keyboard asked for this frame.
 ///
 /// Collected out of the map and applied afterwards, because reading the map
@@ -131,6 +138,10 @@ pub enum Action {
     Scale,
     /// Ask for rotate handles, which the scene format gives nothing to turn.
     Rotate,
+    /// Start play mode from editing, or stop it from playing or paused.
+    PlayStop,
+    /// Pause a playing scene, or resume a paused one.
+    Pause,
 }
 
 /// The editor's map: its own actions in the default context, with the reserved
@@ -220,6 +231,11 @@ pub fn map() -> ActionMap {
     map.declare(button(TRANSLATE, vec![Binding::Key(KeyCode::KeyW)]));
     map.declare(button(SCALE, vec![Binding::Key(KeyCode::KeyR)]));
     map.declare(button(ROTATE, vec![Binding::Key(KeyCode::KeyE)]));
+    // Function keys, which neither reserved context binds: play and pause
+    // reach the editor while a panel holds the keyboard, as a run key does in
+    // every IDE, and only the editing rule in `actions` stops them.
+    map.declare(button(PLAY, vec![Binding::Key(KeyCode::F5)]));
+    map.declare(button(PAUSE, vec![Binding::Key(KeyCode::F6)]));
 
     // Holding a nudge key repeats it, which is how a coarse move is made — the
     // schedule the reserved navigation actions carry, so a held arrow moves an
@@ -295,7 +311,7 @@ pub fn release_keys(map: &mut ActionMap) {
     let mut keys = Vec::new();
     for name in [
         MOVE, LIFT, UNDO, REDO, SAVE, FRAME, DELETE, DUPLICATE, COPY, PASTE, TRANSLATE, SCALE,
-        ROTATE,
+        ROTATE, PLAY, PAUSE,
     ] {
         for binding in map.bindings(name).unwrap_or_default() {
             binding.visit_keys(|key| keys.push(key));
@@ -383,6 +399,12 @@ pub fn actions(map: &ActionMap, modifiers: Modifiers, editing: bool) -> Vec<Acti
     }
     if map.just_pressed(ROTATE) {
         actions.push(Action::Rotate);
+    }
+    if map.just_pressed(PLAY) {
+        actions.push(Action::PlayStop);
+    }
+    if map.just_pressed(PAUSE) {
+        actions.push(Action::Pause);
     }
     actions
 }
@@ -572,6 +594,12 @@ mod tests {
             [Action::Rotate]
         );
         assert_eq!(keys.tap(KeyCode::KeyR, Modifiers::CTRL), []);
+        assert_eq!(
+            keys.tap(KeyCode::F5, Modifiers::empty()),
+            [Action::PlayStop]
+        );
+        assert_eq!(keys.tap(KeyCode::F6, Modifiers::empty()), [Action::Pause]);
+        assert_eq!(keys.tap(KeyCode::F5, Modifiers::CTRL), []);
     }
 
     /// A key this editor has no meaning for asks for nothing.

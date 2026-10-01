@@ -7,6 +7,8 @@ use crcbl::engine::FrameLimit;
 use crcbl::shell::{HeadlessShell, PhysicalPoint, PhysicalSize};
 use crcbl::ui::tree::NodeKey;
 
+mod play;
+
 fn options(frames: u64) -> Options {
     let mut common = crcbl::args::Common::new(crate::args::DEFAULT_TICK_HZ);
     common.headless = true;

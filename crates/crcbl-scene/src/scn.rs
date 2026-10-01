@@ -170,6 +170,18 @@ impl IdMap {
         SceneEntityId(self.next)
     }
 
+    /// Raises the high-water mark so that nothing below `next` is handed out
+    /// again; a mark already past it stays where it is.
+    ///
+    /// What carries a history across a reload. The files spell the ids a scene
+    /// holds, not every id it has handed out, so a map read back from them sets
+    /// its mark one past the highest **held** id — and an id
+    /// [`remove`](Self::remove)d before the save would be handed out again, to
+    /// a different entity than the history still naming it means.
+    pub fn reserve(&mut self, next: SceneEntityId) {
+        self.next = self.next.max(next.0);
+    }
+
     /// Forgets `id`, handing back the entity it named.
     ///
     /// The id is **not** handed out again by [`assign`](Self::assign): the map's
@@ -1268,6 +1280,26 @@ mod tests {
         let spawned = world.spawn();
         assert!(ids.restore(next, spawned));
         assert_ne!(ids.assign(world.spawn()), next);
+    }
+
+    /// **A reserved mark survives a reload's lower one**: a map read back from
+    /// files that no longer spell a removed id hands out neither it nor
+    /// anything below the mark — and reserving below the mark moves nothing.
+    #[test]
+    fn a_reserved_mark_is_not_handed_out_again() {
+        let (_, mut ids, mut world) = load(HEADER, ENV, MARKS).expect("the canonical scene loads");
+        assert_eq!(ids.next_id(), SceneEntityId(1), "the file holds id 0");
+
+        ids.reserve(SceneEntityId(4));
+        assert_eq!(ids.next_id(), SceneEntityId(4));
+        assert_eq!(ids.assign(world.spawn()), SceneEntityId(4));
+
+        ids.reserve(SceneEntityId(2));
+        assert_eq!(
+            ids.next_id(),
+            SceneEntityId(5),
+            "a lower reservation moved the mark"
+        );
     }
 
     /// **A row round-trips one component exactly**, which is what a deleted

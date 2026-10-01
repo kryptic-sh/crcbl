@@ -19,6 +19,10 @@
 //! * [`Document::files`] — the scene as text, byte-stably, and
 //!   [`Document::save_to`] the same text written to a directory.
 //!
+//! And a sixth that is not an edit: [`Document::play`] runs the scene with its
+//! games' modules until [`Document::stop`] puts it back exactly as it was —
+//! see `play`'s own module docs, and why every edit is refused in between.
+//!
 //! # What "dirty" means here
 //!
 //! The position the log stands at, against the position it stood at when the
@@ -41,6 +45,10 @@ use crcbl::scene::scn::{IdMap, Scene, SceneEntityId, ScnError};
 use crcbl::store::{NativeStorage, StorageError, StorageSource};
 
 use crate::command::{EditCommand, Gesture, UndoLog, set_property};
+
+mod play;
+
+pub use play::PlayState;
 
 /// A loaded scene and everything the editor knows about it.
 #[derive(Debug)]
@@ -72,6 +80,9 @@ pub struct Document {
     /// directory this document was opened from, or [`None`] for one opened out
     /// of a compiled-in source.
     origin: Option<PathBuf>,
+    /// The scene as it stood when play began, and what is running it — or
+    /// [`None`] while editing. See [`Document::play`].
+    play: Option<play::Session>,
 }
 
 /// Why a document would not open, edit or save.
@@ -124,6 +135,19 @@ pub enum EditError {
     /// [`Document::save`] was asked to write a document that was never opened
     /// from a directory.
     NoOrigin,
+
+    /// An edit, an undo or a save was asked for while the scene is in play
+    /// mode.
+    ///
+    /// Refused rather than applied: what play changes is thrown away when it
+    /// stops, so an edit made into it would be lost with it, and a save would
+    /// write a played state over the authored one. See [`Document::play`].
+    Playing,
+
+    /// Play was asked to step a world whose tick period, in seconds, is not
+    /// one a fixed step can be taken at — zero, negative or not a number,
+    /// which a module's [`register`](crcbl::ecs::GameModule::register) set.
+    TickRate(f64),
 }
 
 impl fmt::Display for EditError {
@@ -141,6 +165,15 @@ impl fmt::Display for EditError {
             Self::NoOrigin => f.write_str(
                 "this document was not opened from a directory, so there is nowhere to save \
                  it back to; name a directory",
+            ),
+            Self::Playing => f.write_str(
+                "the scene is in play mode, which refuses edits and saves; stop play mode \
+                 first",
+            ),
+            Self::TickRate(dt) => write!(
+                f,
+                "the scene's world ticks every {dt} s, which is not a period play mode can \
+                 step at"
             ),
         }
     }
@@ -166,9 +199,9 @@ impl Document {
     ///
     /// The world is this document's: the systems are registered here, the
     /// entities are spawned here, and nothing else holds a handle into it. That
-    /// is what makes [`Document::open`] the whole of "revert" and the whole of
-    /// `docs/plan/08-editor.md`'s decided play/stop — reloading is opening
-    /// again, not restoring a snapshot.
+    /// is what makes opening again the whole of "revert" and the whole of
+    /// [`Document::stop`] — play's restore is this load, run over the text the
+    /// scene was saved as when play began, rather than a snapshot of the world.
     ///
     /// **The registry is the vocabulary and there is no other.** The systems a
     /// scene loads into, the codecs its chunks are read with, the component an
@@ -188,18 +221,7 @@ impl Document {
         dir: &Path,
         registry: Registry,
     ) -> Result<Self, EditError> {
-        let mut world = World::new();
-        registry.register_systems(&mut world);
-        // Every pick goes through it, and an entity with no collider does not
-        // pick. Registered here rather than by the registry: a scene's chunks are
-        // the registry's business and the way this tool selects things is not.
-        world.register_system(Box::new(PhysicsSystem::new()));
-
-        let (scene, ids) = Scene::load(source, dir, &registry.codecs(), &mut world)?;
-        for system in scene.systems() {
-            let entities = registry.entities(&mut world, &ids, system);
-            sync_colliders(&registry, &mut world, entities);
-        }
+        let (world, scene, ids) = load(source, dir, &registry)?;
         Ok(Self {
             world,
             scene,
@@ -211,6 +233,7 @@ impl Document {
             membership: 0,
             gestures: 0,
             origin: None,
+            play: None,
         })
     }
 
@@ -424,7 +447,8 @@ impl Document {
     /// [`EditError::Path`] if the path names nothing in that component or the
     /// leaf refuses either value. A refusal on the way back in leaves the
     /// rewind standing, which is the panel's own `before` and so still a value
-    /// the document held.
+    /// the document held. [`EditError::Playing`] in play mode, after the rewind
+    /// — so the panel's write does not stand either.
     ///
     /// # A drag
     ///
@@ -446,6 +470,9 @@ impl Document {
             .component(&mut self.world, entity)
             .ok_or(EditError::NoEntity(id))?;
         set_path(component, path, before)?;
+        // After the rewind, so a panel's write into a playing scene is taken
+        // back rather than left standing beside the refusal.
+        self.refuse_in_play()?;
         let command = EditCommand::SetProperty {
             entity: id,
             path: path.to_owned(),
@@ -467,8 +494,10 @@ impl Document {
     ///
     /// [`EditError::NoEntity`] for an id this document does not hold, or
     /// [`EditError::Path`] carrying the component's own refusal — in which case
-    /// nothing was written and nothing was recorded.
+    /// nothing was written and nothing was recorded — or [`EditError::Playing`]
+    /// in play mode, which writes and records nothing either.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
+        self.refuse_in_play()?;
         let undo = self.perform(&command)?;
         self.log.record(command, undo);
         Ok(())
@@ -489,6 +518,7 @@ impl Document {
     ///
     /// As [`apply`](Self::apply).
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
+        self.refuse_in_play()?;
         let undo = self.perform(&command)?;
         self.log.record_in(command, undo, gesture);
         Ok(())
@@ -499,8 +529,8 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::NoEntity`] for an id this document does not hold, in which
-    /// case nothing is recorded.
+    /// [`EditError::NoEntity`] for an id this document does not hold, or
+    /// [`EditError::Playing`] in play mode, in which case nothing is recorded.
     pub fn delete(&mut self, id: SceneEntityId) -> Result<(), EditError> {
         self.apply(EditCommand::Delete { entity: id })
     }
@@ -517,7 +547,8 @@ impl Document {
     /// # Errors
     ///
     /// [`EditError::NoEntity`] for an id this document does not hold, or
-    /// [`EditError::Scene`] if the component would not serialise.
+    /// [`EditError::Scene`] if the component would not serialise, or
+    /// [`EditError::Playing`] in play mode.
     pub fn duplicate(&mut self, id: SceneEntityId) -> Result<SceneEntityId, EditError> {
         let (system, row) = self.row(id)?;
         let copy = self.ids.next_id();
@@ -550,7 +581,11 @@ impl Document {
     /// [`EditError::Paste`] if the text is not a clipping, and otherwise as a
     /// spawn: [`EditError::NoSystem`] for a system this scene does not list, or
     /// [`EditError::Scene`] for a row that is not that system's component.
+    /// [`EditError::Playing`] in play mode, before the text is read.
     pub fn paste(&mut self, text: &str) -> Result<Vec<SceneEntityId>, EditError> {
+        // Before the text is read, so a paste into a playing scene says why it
+        // was refused rather than what was wrong with the clipboard.
+        self.refuse_in_play()?;
         let entities = crate::clipboard::decode(text).map_err(EditError::Paste)?;
         let first = self.ids.next_id().0;
         let (ids, spawns): (Vec<_>, Vec<_>) = (first..)
@@ -584,8 +619,9 @@ impl Document {
     /// [`EditError`] if the entity the entry names is not where the log left
     /// it. Every edit goes through the log, so that is a document whose history
     /// was walked out of order — a condition a caller can report rather than a
-    /// panic.
+    /// panic. [`EditError::Playing`] in play mode, leaving the log where it was.
     pub fn undo(&mut self) -> Result<bool, EditError> {
+        self.refuse_in_play()?;
         let Some(command) = self.log.undo() else {
             return Ok(false);
         };
@@ -600,6 +636,7 @@ impl Document {
     ///
     /// As [`Document::undo`].
     pub fn redo(&mut self) -> Result<bool, EditError> {
+        self.refuse_in_play()?;
         let Some(command) = self.log.redo() else {
             return Ok(false);
         };
@@ -665,7 +702,10 @@ impl Document {
     /// [`EditError::Scene`] as [`files`](Self::files), or [`EditError::Write`]
     /// naming the key that would not write. **The document is marked saved only
     /// when every file landed**, so a partial write leaves the dirty marker up.
+    /// [`EditError::Playing`] in play mode, writing nothing: a played state is
+    /// not the scene that was authored.
     pub fn save_to(&mut self, dir: impl AsRef<Path>) -> Result<(), EditError> {
+        self.refuse_in_play()?;
         let files = self.files()?;
         let storage = NativeStorage::at(dir.as_ref().to_path_buf());
         for (key, text) in &files {
@@ -697,12 +737,7 @@ impl Document {
     ///
     /// As [`files`](Self::files).
     pub fn problems(&mut self) -> Result<Vec<String>, EditError> {
-        let mut source = MemorySource::new();
-        for (key, text) in self.files()? {
-            source
-                .insert(Path::new(&key), text.into_bytes())
-                .map_err(|source| EditError::Write { key, source })?;
-        }
+        let source = memory_source(self.files()?)?;
         Ok(self
             .registry
             .problems(self.scene.systems(), &source, Path::new("")))
@@ -712,10 +747,14 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// [`EditError::NoOrigin`] for a document that was not opened from one —
-    /// the compiled-in scene is the case — and otherwise as
+    /// [`EditError::Playing`] in play mode, whatever the document was opened
+    /// from; [`EditError::NoOrigin`] for a document that was not opened from a
+    /// directory — the compiled-in scene is the case — and otherwise as
     /// [`save_to`](Self::save_to).
     pub fn save(&mut self) -> Result<(), EditError> {
+        // Before the origin, so a save in play mode says why whatever the
+        // document was opened from.
+        self.refuse_in_play()?;
         let dir = self.origin.clone().ok_or(EditError::NoOrigin)?;
         self.save_to(dir)
     }
@@ -808,9 +847,9 @@ impl Document {
         let (system, row) = self.row(id)?;
         let entity = self.ids.entity(id).ok_or(EditError::NoEntity(id))?;
         self.world.despawn(entity);
-        // Swept now rather than at the end of a tick, because nothing here
-        // ticks: a despawned entity stays in every system until a sweep, drawn,
-        // picked and saved.
+        // Swept now rather than at the end of a tick, because nothing ticks
+        // while the scene is edited: a despawned entity stays in every system
+        // until a sweep, drawn, picked and saved.
         self.world.sweep();
         self.ids.remove(id);
         self.membership += 1;
@@ -850,6 +889,47 @@ impl Document {
     }
 }
 
+/// A world of `registry`'s systems and this tool's picking physics, with the
+/// scene at `dir`, read through `source`, loaded into it and every entity given
+/// its collider — what [`Document::open`] and play's restore both build.
+fn load(
+    source: &dyn AssetSource,
+    dir: &Path,
+    registry: &Registry,
+) -> Result<(World, Scene, IdMap), EditError> {
+    let mut world = World::new();
+    registry.register_systems(&mut world);
+    // Every pick goes through it, and an entity with no collider does not
+    // pick. Registered here rather than by the registry: a scene's chunks are
+    // the registry's business and the way this tool selects things is not.
+    world.register_system(Box::new(PhysicsSystem::new()));
+
+    let (scene, ids) = Scene::load(source, dir, &registry.codecs(), &mut world)?;
+    sync_scene_colliders(registry, &mut world, &scene, &ids);
+    Ok((world, scene, ids))
+}
+
+/// [`sync_colliders`] over every entity the scene's systems hold: after a load,
+/// and after a tick of play has moved whatever its modules moved.
+fn sync_scene_colliders(registry: &Registry, world: &mut World, scene: &Scene, ids: &IdMap) {
+    for system in scene.systems() {
+        let entities = registry.entities(world, ids, system);
+        sync_colliders(registry, world, entities);
+    }
+}
+
+/// `files`, keyed the way a source rooted at the scene directory reads them —
+/// a scene in memory, for a load or a check that wants no directory.
+fn memory_source(files: BTreeMap<String, String>) -> Result<MemorySource, EditError> {
+    let mut source = MemorySource::new();
+    for (key, text) in files {
+        source
+            .insert(Path::new(&key), text.into_bytes())
+            .map_err(|source| EditError::Write { key, source })?;
+    }
+    Ok(source)
+}
+
 /// Gives every entity in `entities` the collider a ray picks it by, replacing any
 /// it already had, from whatever [`crcbl::registry::Placement`] its component
 /// answers.
@@ -863,8 +943,9 @@ impl Document {
 /// the case — gets no collider and so cannot be picked, which is the honest
 /// answer rather than a box at the origin.
 ///
-/// Kinematic bodies: the body is what the broadphase tracks, and nothing
-/// integrates it because nothing here ticks.
+/// Kinematic bodies: the body is what the broadphase tracks, and nothing moves
+/// it but this — no velocity is ever given to one, so a tick of play leaves it
+/// where the last sync put it.
 fn sync_colliders(
     registry: &Registry,
     world: &mut World,
@@ -918,6 +999,9 @@ fn narrow(value: DVec3) -> Vec3 {
 
 #[cfg(test)]
 mod entity_tests;
+
+#[cfg(test)]
+pub(crate) mod play_tests;
 
 #[cfg(test)]
 mod tests {

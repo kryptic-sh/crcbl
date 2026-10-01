@@ -9,9 +9,10 @@ use crcbl::args::{Common, Consumed};
 
 /// The simulation rate the shared clock is set to.
 ///
-/// The editor ticks nothing — a scene being edited is not a scene being
-/// simulated — but the flag is shared and the clock still paces the loop, so
-/// the number has to be something. 60, like every other binary here.
+/// Nothing ticks while a scene is edited, and play mode ticks at the scene
+/// world's own rate (`crate::document::Document::advance`), not at this one —
+/// but the flag is shared and the clock still paces the loop, so the number has
+/// to be something. 60, like every other binary here.
 pub const DEFAULT_TICK_HZ: u32 = 60;
 
 /// What the command line asked for.

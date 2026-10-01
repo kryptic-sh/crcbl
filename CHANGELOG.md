@@ -480,6 +480,35 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   paste that is not a clipping) or what a save found, as a warning when the game
   would refuse the saved scene. The same lines still go to the log.
 
+- **The editor has play mode.** F5 or the new toolbar's Play button runs the
+  open scene: every module its vocabulary registers for the scene's systems is
+  built fresh, registered on the scene's world and ticked with empty client
+  inputs at the world's own tick rate on a fixed step (`FrameClock`, so a
+  stalled frame drops ticks past its catch-up cap rather than bursting). F6
+  pauses and resumes; F5 again stops and puts the scene back exactly as it stood
+  when play began, from the scene's text held in memory — so unsaved edits
+  survive a play, and so do the undo log, the dirty marker and the selection.
+  Every edit is refused while playing or paused — the inspector, gizmo drags,
+  nudges, delete, duplicate, paste, undo, redo and save — with a status-line
+  warning naming play mode, and an inspector write is taken back rather than
+  left in the played scene. A scene no module plays still plays: its world's
+  schedule ticks. `Document::play`, `pause`, `stop`, `advance`, `play_state` and
+  `playing_modules` are the headless half; `EditError::Playing` and `TickRate`
+  are new. No shipped vocabulary registers a module yet.
+
+- **A game can register its behaviour beside its components.**
+  `crcbl::registry::Registry::module(system, ModuleFactory)` records how to
+  build a `GameModule` for any scene whose manifest lists `system`, and
+  `Registry::modules(systems)` builds a fresh instance of each, in registration
+  order — what the editor's play mode ticks. Keyed by a system, as `check` is,
+  so one game's rules never run on another game's scene in a registry holding
+  several vocabularies.
+
+- **`crcbl_scene::scn::IdMap::reserve(next)`** raises the map's high-water mark,
+  so a map read back from saved files — which spell the ids a scene holds, not
+  the ids it has removed — still never hands a removed id out again to a history
+  that names it.
+
 - **The sandbox plays over the LAN**: `--host [PORT]` binds a
   `crcbl_net::udp::UdpListener` (any free port unless given, printed at start),
   hands each peer it accepts to a `crcbl_server::Host`, and announces the

@@ -28,6 +28,15 @@
 //! camera from the click's position inside it, because that is the picture
 //! under the cursor.
 //!
+//! # The toolbar
+//!
+//! A strip over the panes, outside the dock, with play mode's two buttons and
+//! where play stands — so it costs the saved layout nothing: the dock's panes
+//! are the ones [`crate::layout::load`] checks a settings file against, and a
+//! fourth pane would have every saved layout discarded. A click is not acted
+//! on here: [`PanelFrame::toolbar`] hands the [`Action`] its key would have
+//! asked for back to [`crate::app`], which carries both out the same way.
+//!
 //! # Selection, in both directions
 //!
 //! One witness carries it: the selection the outliner was last told about. At
@@ -72,7 +81,8 @@ use crcbl::ui::tree::{
 use crcbl::ui::{DrawList, FontAtlas, PointerInput, TextureId};
 
 use crate::command::Gesture;
-use crate::document::Document;
+use crate::document::{Document, PlayState};
+use crate::keys::Action;
 use crate::layout::{self, PANE_MIN};
 
 /// The name the viewport pane's picture goes by in the panels' draw list —
@@ -114,6 +124,17 @@ const EDITOR_CSS: &str = "
 }
 
 #status.warning { color: #e0b050; }
+
+#toolbar {
+  flex-shrink: 0;
+  align-items: center;
+  padding: 2px 4px;
+  background: #1b1f27;
+}
+
+#toolbar button { margin-right: 4px; }
+
+#play-state { padding: 0 6px; color: #9aa3b2; }
 
 #panes split,
 #panes .split-pane,
@@ -192,6 +213,9 @@ pub struct PanelFrame {
     pub viewport: (Vec2, Vec2),
     /// How many commands this frame's inspector edits became.
     pub commands: usize,
+    /// What a click on the toolbar asked for this frame — the action the
+    /// button's key asks for — for the caller to carry out.
+    pub toolbar: Option<Action>,
 }
 
 /// The editor's panels, and everything they keep between frames.
@@ -227,6 +251,8 @@ pub struct Panels {
     status: (String, Tone),
     /// The status line, as the last frame laid it out.
     status_key: Option<NodeKey>,
+    /// The toolbar, as the last frame laid it out.
+    toolbar_key: Option<NodeKey>,
 }
 
 /// How the status line reads a message.
@@ -275,6 +301,7 @@ impl Panels {
             field_gesture: None,
             status: (READY.to_owned(), Tone::Info),
             status_key: None,
+            toolbar_key: None,
         };
         // One idle frame, so the first real one has rectangles to hit-test
         // against: the tree resolves a click against the *previous* layout, and
@@ -423,6 +450,15 @@ impl Panels {
         &self.ui
     }
 
+    /// The toolbar's play and pause buttons, as the last frame laid them out.
+    #[cfg(test)]
+    pub(crate) fn toolbar_buttons(&self) -> [NodeKey; 2] {
+        let keys = self
+            .ui
+            .child_keys(self.toolbar_key.expect("the toolbar is laid out"));
+        [keys[0], keys[1]]
+    }
+
     /// The outliner block, as the last frame laid it out.
     #[cfg(test)]
     pub(crate) const fn outliner_key(&self) -> Option<NodeKey> {
@@ -472,6 +508,9 @@ impl Panels {
 
         let extent = Vec2::new(input.extent.0 as f32, input.extent.1 as f32);
         let selected = document.selected();
+        let play = document.play_state();
+        let mut toolbar = None;
+        let mut toolbar_key = None;
         let mut edits: Vec<FieldEdit> = Vec::new();
         let mut viewport = None;
         let mut status_key = None;
@@ -511,6 +550,7 @@ impl Panels {
                 Declaration::Height(LengthAuto::Px(extent.y)),
             ],
             |ui| {
+                (toolbar_key, toolbar) = build_toolbar(ui, play);
                 ui.dock("#panes", layout, PANE_MIN, |ui, pane| match pane {
                     // Built empty: the scene's picture is pushed over its
                     // rectangle once it is laid out. See the module docs.
@@ -561,6 +601,7 @@ impl Panels {
         }
         self.outliner_key = outliner_key;
         self.status_key = status_key;
+        self.toolbar_key = toolbar_key;
         self.props_key = props.flatten();
         if let (Some(key), Some(id)) = (outliner_key, self.reveal.take()) {
             self.reveal_row(key, id);
@@ -571,6 +612,7 @@ impl Panels {
         PanelFrame {
             viewport: self.viewport,
             commands,
+            toolbar,
         }
     }
 
@@ -661,7 +703,10 @@ impl Panels {
                 });
                 match document.record_edit(id, &edit.path, &edit.before, &edit.after, gesture) {
                     Ok(()) => applied += 1,
-                    Err(error) => crcbl::log::warn!("editor: {error}"),
+                    Err(error) => {
+                        crcbl::log::warn!("editor: {error}");
+                        self.set_status(error.to_string(), Tone::Warning);
+                    }
                 }
             }
         }
@@ -717,6 +762,30 @@ fn scroll(ui: &mut Ui, scrollers: &[NodeKey], at: Vec2, delta: f32) {
     };
     let offset = ui.scroll_offset_of(key);
     ui.set_scroll_offset_of(key, Vec2::new(offset.x, (offset.y + delta).max(0.0)));
+}
+
+/// The toolbar over the panes: play or stop, pause or resume, and where play
+/// stands. Returns its key, and what a click on it asked for.
+///
+/// Each button is labelled with what it does **now** and the key that does the
+/// same, so the strip is also where a person learns F5 and F6.
+fn build_toolbar(ui: &mut Ui, play: PlayState) -> (Option<NodeKey>, Option<Action>) {
+    let (start, hold, state) = match play {
+        PlayState::Editing => ("Play (F5)", "Pause (F6)", "Editing"),
+        PlayState::Playing => ("Stop (F5)", "Pause (F6)", "Playing"),
+        PlayState::Paused => ("Stop (F5)", "Resume (F6)", "Paused"),
+    };
+    let mut asked = None;
+    let toolbar = ui.block("#toolbar", &[], |ui| {
+        if ui.button("#play", start).clicked {
+            asked = Some(Action::PlayStop);
+        }
+        if ui.button("#pause", hold).clicked {
+            asked = Some(Action::Pause);
+        }
+        ui.span("#play-state", state, &[]);
+    });
+    (Some(toolbar.key), asked)
 }
 
 /// The outliner pane: a title and the scene's rows. Returns the outliner
@@ -1255,6 +1324,37 @@ mod tests {
             Some(id),
             "the collider did not follow the undo",
         );
+    }
+
+    /// **An inspector edit in play mode is refused, on the status line**, and
+    /// the panel's own write is taken back: the scene as play left it, and
+    /// nothing in the log. Paused, so no tick moves the scene under the
+    /// comparison.
+    #[test]
+    fn an_inspector_edit_in_play_mode_is_refused_on_the_status_line() {
+        let mut page = Page::over(crate::document::play_tests::drifting_document());
+        page.document.select(Some(SceneEntityId(3)));
+        page.document.play().expect("the scene plays");
+        assert!(page.document.pause());
+        page.idle();
+        let before = page.document.files().expect("ids");
+
+        let field = page.axis_field(0, 0);
+        let at = page.centre(field);
+        page.drag(at, Vec2::new(30.0, 0.0));
+
+        assert_eq!(
+            page.document.files().expect("ids"),
+            before,
+            "the panel's write into the playing scene stood",
+        );
+        assert!(
+            page.document.log().is_empty(),
+            "a refused edit was recorded"
+        );
+        let (text, tone) = page.panels.status();
+        assert_eq!(tone, Tone::Warning, "{text}");
+        assert!(text.contains("play mode"), "{text}");
     }
 
     /// **The wheel scrolls the panel the pointer is over**, and only that one —

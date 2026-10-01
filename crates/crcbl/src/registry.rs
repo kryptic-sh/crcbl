@@ -17,6 +17,11 @@
 //!                     ├── component()       &mut dyn Reflect, for an edit
 //!                     └── placement()       a centre and half extents, for a
 //!                                           collider and a bounds box
+//!
+//!     a game ──▶ Registry::module("bricks", || Box::new(Rules))
+//!                     │
+//!                     └── modules()         a fresh GameModule per play, for a
+//!                                           tool that runs the scene
 //! ```
 //!
 //! # One call registers all four, which is why they cannot drift
@@ -76,6 +81,10 @@
 //! * **Not a schedule.** [`Registry::register_systems`] adds the systems a
 //!   scene's chunks load into and nothing else; a tool that also wants physics,
 //!   or a game that wants its own, registers it beside them.
+//! * **Not a loop.** [`Registry::module`] records how to build a game's
+//!   [`GameModule`] and [`Registry::modules`] builds them; registering their
+//!   systems and ticking them is the caller's — the editor's play mode is one,
+//!   and it decides the rate and the inputs.
 
 use std::any::type_name;
 use std::collections::BTreeMap;
@@ -87,7 +96,7 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use crcbl_assets::AssetSource;
-use crcbl_ecs::{ComponentHash, Entity, System, World};
+use crcbl_ecs::{ComponentHash, Entity, GameModule, System, World};
 use crcbl_reflect::Reflect;
 use crcbl_scene::scn::{IdMap, SystemChunk, chunk_of};
 
@@ -189,6 +198,9 @@ pub struct Registry {
     /// The games' rules over whole scenes, each with the system whose presence
     /// in a manifest says the rule applies — see [`Registry::check`].
     checks: Vec<(String, SceneCheck)>,
+    /// The games' behaviour, each with the system whose presence in a manifest
+    /// says the scene is that game's — see [`Registry::module`].
+    modules: Vec<(String, ModuleFactory)>,
 }
 
 /// A game's rule over a whole scene: the scene's files, read through `source`
@@ -200,6 +212,15 @@ pub struct Registry {
 /// scene runs these so that a layout the game will refuse is reported where it
 /// was made rather than where it is next loaded.
 pub type SceneCheck = fn(&dyn AssetSource, &Path) -> Result<(), String>;
+
+/// Builds a fresh instance of a game's [`GameModule`]: what a tool that plays a
+/// scene calls each time it starts playing.
+///
+/// A constructor rather than an instance, because a module carries state from
+/// tick to tick — a score, a wave counter — and a second play has to start from
+/// none of it. A function pointer for [`SceneCheck`]'s reason: a capture-free
+/// closure coerces to one, and the registry stays a table of plain pointers.
+pub type ModuleFactory = fn() -> Box<dyn GameModule>;
 
 /// One registered component, reduced to the calls a tool makes.
 ///
@@ -284,6 +305,59 @@ impl Registry {
             .iter()
             .filter(|(system, _)| systems.contains(system))
             .filter_map(|(_, check)| check(source, dir).err())
+            .collect()
+    }
+
+    /// Adds `factory`, whose module plays any scene whose manifest lists
+    /// `system` — the game that owns that system bringing its behaviour beside
+    /// its components.
+    ///
+    /// Keyed by a system for [`check`](Self::check)'s reason: a registry holds
+    /// several games' vocabularies at once, and one game's rules ticking on
+    /// another's scene would move things that game never meant to move. So a
+    /// game registers its module **once**, under the system whose presence says
+    /// the scene is that game's; registered under two of its systems, it would
+    /// be built and ticked twice.
+    ///
+    /// ```
+    /// use crcbl::ecs::{ClientInputs, GameModule, World};
+    /// use crcbl::registry::Registry;
+    ///
+    /// struct Rules;
+    ///
+    /// impl GameModule for Rules {
+    ///     fn name(&self) -> &str {
+    ///         "rules"
+    ///     }
+    ///     fn register(&self, _world: &mut World) {}
+    ///     fn tick(&mut self, _world: &mut World, _inputs: ClientInputs<'_>) {}
+    /// }
+    ///
+    /// let mut registry = Registry::new();
+    /// registry.module("bricks", || Box::new(Rules));
+    ///
+    /// let built = registry.modules(&["bricks".to_owned()]);
+    /// assert_eq!(built.len(), 1);
+    /// assert_eq!(built[0].name(), "rules");
+    /// assert!(registry.modules(&["props".to_owned()]).is_empty());
+    /// ```
+    pub fn module(&mut self, system: impl Into<String>, factory: ModuleFactory) {
+        self.modules.push((system.into(), factory));
+    }
+
+    /// A fresh instance of every module whose system `systems` lists, in the
+    /// order the modules were added — empty for a scene no registered game
+    /// plays.
+    ///
+    /// Registration order rather than name order, because it is the order the
+    /// modules tick in, and a game that registers two wants them to run in the
+    /// order it wrote.
+    #[must_use]
+    pub fn modules(&self, systems: &[String]) -> Vec<Box<dyn GameModule>> {
+        self.modules
+            .iter()
+            .filter(|(system, _)| systems.contains(system))
+            .map(|(_, factory)| factory())
             .collect()
     }
 
@@ -756,6 +830,62 @@ mod tests {
                 .is_empty(),
             "a check ran on a scene that does not list its system",
         );
+    }
+
+    /// **A module is built for a scene that lists its system and for no
+    /// other**, in the order the modules were added — and every call builds
+    /// new instances, so what one play left in a module is not where the next
+    /// starts.
+    #[test]
+    fn modules_are_built_fresh_for_scenes_listing_their_system() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// How many modules the factories below have built.
+        static BUILT: AtomicUsize = AtomicUsize::new(0);
+
+        struct Named(&'static str);
+
+        impl GameModule for Named {
+            fn name(&self) -> &str {
+                self.0
+            }
+            fn register(&self, _world: &mut World) {}
+        }
+
+        fn names(modules: &[Box<dyn GameModule>]) -> Vec<&str> {
+            modules.iter().map(|module| module.name()).collect()
+        }
+
+        let mut registry = registry();
+        registry.module("beacons", || {
+            BUILT.fetch_add(1, Ordering::Relaxed);
+            Box::new(Named("first"))
+        });
+        registry.module("bricks", || {
+            BUILT.fetch_add(1, Ordering::Relaxed);
+            Box::new(Named("elsewhere"))
+        });
+        registry.module("blocks", || {
+            BUILT.fetch_add(1, Ordering::Relaxed);
+            Box::new(Named("second"))
+        });
+
+        let systems = ["blocks".to_owned(), "beacons".to_owned()];
+        let first = registry.modules(&systems);
+        assert_eq!(names(&first), ["first", "second"]);
+        assert_eq!(
+            BUILT.load(Ordering::Relaxed),
+            2,
+            "a module nothing listed was built"
+        );
+        let again = registry.modules(&systems);
+        assert_eq!(names(&again), ["first", "second"]);
+        assert_eq!(
+            BUILT.load(Ordering::Relaxed),
+            4,
+            "a second call handed back the modules it built before",
+        );
+        assert!(registry.modules(&[]).is_empty());
     }
 
     /// **An unregistered system fails loudly, naming itself.** The failure this
