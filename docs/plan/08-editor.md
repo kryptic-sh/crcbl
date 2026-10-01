@@ -4,7 +4,7 @@
 the same renderer, ECS, server loop, transport, and GUI as a game. MVP editor:
 open scene, move things, edit properties, save, play.
 
-## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slice 7 2026-10-01, and what still waits
+## Status: slices 1, 2 and 3 landed 2026-09-16, slices 4 to 6 2026-09-30, slices 7 and 8 2026-10-01, and what still waits
 
 **Performance follow-up:** `apps/editor/src/app/instances` retains each placed
 entity's last description and publishes changes before `begin_frame`. Unchanged
@@ -214,6 +214,67 @@ full-window draw under a hole in the panels is gone.
   scale, Ctrl ignored, no settings validation, edge-on planes kept, a plane
   square off its corner, and R unbound — turned a test red.
 
+**Slice 8, play mode's mechanism (task 7), landed 2026-10-01**, on the decisions
+of the same day (below).
+
+- **A vocabulary registers behaviour beside components.**
+  `crcbl::registry::Registry::module(system, factory)` records a
+  `fn() -> Box<dyn GameModule>` under the system whose presence says a scene is
+  that game's, and `Registry::modules(systems)` builds a fresh instance of each
+  in registration order. Keyed by a system as `Registry::check` is, rather than
+  "every registered module": the shipped vocabulary holds four games, and one
+  game's rules ticking on another's scene would move things it never meant to.
+- **Play** (`Document::play`, F5 or the toolbar) saves the scene's files to
+  memory as the snapshot, builds the scene's modules and calls each one's
+  `register` on the document's world. Each frame hands `Document::advance` the
+  frame's time; a `FrameClock` at the world's own tick period (read after the
+  modules registered, so a module may set it) runs whole ticks, each in the
+  server's order — `World::tick`, every module with `ClientInputs::empty()`, a
+  sweep — and drops ticks past its catch-up cap rather than owing them. The
+  colliders are rebuilt after a frame that ticked, so a click picks what a
+  module moved where it is drawn. A world left with no usable period is refused
+  (`EditError::TickRate`) and restored first.
+- **Pause** (F6) stops the ticks and banks no time; resume picks up from there.
+  **Stop** (F5 again) loads the snapshot back through `Document::open`'s own
+  load into a fresh world. The undo log, the saved position and the gesture
+  counter are untouched, the selection is kept when its entity is there, and
+  `IdMap::reserve` carries the id map's high-water mark across — the files spell
+  the ids a scene holds, not the id of a copy the log deleted, which a reloaded
+  map would otherwise hand out again.
+- **Every edit is refused in play mode**, paused or not, by one check at the top
+  of every `Document` method that writes the scene, the log or the disk
+  (`EditError::Playing`); an inspector edit's panel write is rewound before the
+  refusal. Every refusal reaches the status line as a warning naming play mode:
+  the keyboard's through `act`, the inspector's through `Panels::apply_edits`, a
+  gizmo drag's through `move_handle`, and a paste's when the clipboard answers.
+- **The toolbar** is a strip over the panes, outside the dock, with Play/Stop
+  and Pause/Resume buttons and the play state, so the saved layout's panes are
+  unchanged and `layout::load` keeps every saved file. F5 and F6 are bound in
+  the default context; neither reserved context binds a function key, so they
+  reach the editor while a panel holds the keyboard, and only the editing rule
+  stops them.
+- **No sample registers a module yet**, and the shipped vocabulary has no demo
+  one: the tests play a test-only module that moves every greybox block.
+- **Evidence**: the document's play tests hold a tick through the bounds and a
+  pick, pause banking nothing, a byte-for-byte restore after play changed the
+  scene, an edit, a duplicate and its delete surviving play with the log walked
+  back to the opened scene afterwards and no reused id, every edit refused
+  playing and paused, the accumulator's tick counts and cap, a module-less play
+  ticking the world, and the refused tick period. The loop tests drive F5, F6
+  and both toolbar buttons through the headless shell and refuse a keyboard
+  edit, undo and redo, a save (from a directory and from the compiled-in scene),
+  a paste and a gizmo drag on the status line; the panel test refuses an
+  inspector drag. Each of these mutations turned a test red: modules never
+  ticked, the world's schedule never run, one tick a frame whatever the time, no
+  collider rebuild after a tick, pause ignored or its time banked, stop not
+  restoring, the restore dropping the id mark or the selection, a bad tick
+  period not restored, nothing refused (and, separately, save, save-to, undo and
+  paste unguarded or checked in the wrong order), the inspector's refusal before
+  its rewind or off the status line, the gizmo's off the status line, F5
+  unbound, the toolbar's buttons swapped or its clicks dropped, the loop never
+  advancing play, and the module-less status reversed; the registry's system
+  filter and `IdMap::reserve`'s body each turned their own test red.
+
 **What slice 2 did not settle.** `chunk_of::<T>` is typed, so a statically
 linked binary cannot learn a component type at run time: a build of the editor
 opens the vocabularies it was compiled with. The shipped build registers its own
@@ -223,8 +284,9 @@ Run-time discovery needs a link-time distributed slice (`linkme` or
 `inventory`), which is a new dependency and the user's call.
 
 Everything else below stands unchanged: the server still drops commands, there
-is one schedule per `World`, there is no snapshot, the samples' state is outside
-the ECS, the format cannot hold one entity in two systems, and there are no
+is one schedule per `World`, there is no snapshot of a `World` (play restores
+from the scene's text, slice 8), the samples' state is outside the ECS, the
+format cannot hold one entity in two systems, and there are no
 `serve`/`scene`/`edit` subcommands. (Debug draw is still not a gizmo layer; the
 gizmo does not need it to be — slice 6, above. `AssetSource` lists since
 2026-09-30.)
@@ -376,7 +438,9 @@ exists.
 - **Play/stop restores by reloading the scene.** Restore is the load path the
   engine already tests, at the cost of losing unsaved edits when play starts and
   of a load's worth of time on stop. Per-system snapshots stay declined: a
-  system that forgets one loses state silently.
+  system that forgets one loses state silently. _Amended 2026-10-01, below_: the
+  text reloaded is held in memory from the moment play began, so unsaved edits
+  are no longer lost.
 - **A component's editable fields come from `#[derive(Reflect)]`** in a new
   proc-macro crate, one annotation per component, checked at compile time. This
   is the workspace's first proc-macro dependency (`syn`, `quote`,
@@ -405,6 +469,26 @@ long term and recorded):
   break is allowed then. The map's port (2026-09-30) did not: a corner of the
   path and a build plot are one component each, in one system each.
 
+**Decided 2026-10-01** (taken for the long term and recorded, as above):
+
+- **A vocabulary registers behaviour beside components.** The registry gains a
+  module factory; play builds every module registered for the scene's systems,
+  registers it on the play world and ticks it with empty client inputs at the
+  world's tick rate on a fixed step from the frame's time.
+- **Play snapshots the scene to memory and stop restores from it** (the scene's
+  files, read back through the load `Document::open` runs). This amends the
+  2026-09-16 decision's accepted cost: unsaved edits survive play. The undo log
+  survives play and stop, because the restored scene is the pre-play scene under
+  the same ids; the selection survives when its entity does.
+- **Edits are refused during play**, every path, with a status line naming play
+  mode; a save is refused too, since saving a played state is a footgun. Pause
+  stops ticking and stays in play, still refusing edits; stop restores.
+- **Play, pause and stop are a toolbar outside the dock and F5 and F6**, so the
+  saved layout stays compatible.
+- **The first slice builds the mechanism only.** No sample registers a module in
+  it, and no demo component joins the shipped vocabulary; towers' play module is
+  the next slice.
+
 **Still the owner's:** a file watcher dependency for hot reload (`notify`),
 because adding a crates.io dependency is the owner's call by the workspace's
 rules. It stays open in the backlog.
@@ -419,9 +503,14 @@ rules. It stays open in the backlog.
     serializes them).
   - Collaborative/remote editing is structurally possible later (not MVP),
     because editing is already message-based.
-  - Play-in-editor = tell the server to switch from edit-mode schedule to the
-    game schedule (edit-mode systems freeze, game systems run). Stop = restore
-    the pre-play snapshot (the stage 4 snapshot machinery, reused).
+  - Play-in-editor, as built (slice 8, in process): the scene's files are held
+    in memory, the games' modules the vocabulary registers for the scene's
+    systems are registered on the same world and ticked beside its schedule on a
+    fixed step, and every edit is refused. Stop loads the held files back into a
+    fresh world through the scene load. There is no edit-mode schedule to switch
+    from and no `World` snapshot: nothing ticks while editing, and the restore
+    is the load path. Over a transport, play and stop become commands to the
+    editor server; the mechanism is the same.
   - **Headless/CLI is a peer client** (topic 11): `crcbl edit --serve` runs the
     editor server windowless; `crcbl scene …` sends the same commands the GUI
     sends. Nothing editor-side may be implemented GUI-only — the command
@@ -482,7 +571,8 @@ rules. It stays open in the backlog.
    system data, scene-load/save markers).
 5. Gizmos.
 6. Asset browser + drag-spawn.
-7. Play/stop with snapshot restore.
+7. Play/stop with snapshot restore. The mechanism landed in slice 8, restoring
+   from the scene's text; no game registers a module yet.
 8. Dogfood pass: build a small playable scene start-to-finish in the editor; fix
    what hurts.
 

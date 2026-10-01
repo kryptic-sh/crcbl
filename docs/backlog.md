@@ -11596,11 +11596,12 @@ _Asset hot reload: two polled watches, and no engine reload path_ above.
 applied in-process, with the transport carrying them later; games keep editable
 state in ECS systems, **towers ported first** — most samples' state is outside
 the ECS today, so each port is its own slice and is owed here; play/stop
-restores by reloading the scene; and a component's editable fields come from
-`#[derive(Reflect)]`, the workspace's first proc-macro dependency. Still open:
-docking and tabs, file dialogs, the scene-format change for entities spanning
-systems, and the `notify` watcher. The viewport's shape was decided and built
-2026-09-30 (a rendered view sampled by a UI rectangle).
+restores by reloading the scene (amended 2026-10-01: from the scene's text held
+in memory since play began, so unsaved edits survive); and a component's
+editable fields come from `#[derive(Reflect)]`, the workspace's first proc-macro
+dependency. Still open: docking and tabs, file dialogs, the scene-format change
+for entities spanning systems, and the `notify` watcher. The viewport's shape
+was decided and built 2026-09-30 (a rendered view sampled by a UI rectangle).
 
 **It blocks two sample plans:** `docs/plan/sample/07-towers.md`, whose milestone
 2 _is_ the editor dogfood pass and whose exit criterion is "map authored 100% in
@@ -11670,7 +11671,42 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   draws every entity as a greybox cube today — and a pane for the browser, which
   under the splitters-only docking decision is a fourth pane and a layout the
   saved `settings.toml` of an older build refuses (`crate::layout::load`).
-- **Play/stop** by reloading the scene (decided 2026-09-16).
+- **Play mode's mechanism landed 2026-10-01; what plays is owed.**
+  `Registry::module(system, factory)` registers a game's `GameModule` beside its
+  components, and `Document::play`/`pause`/`stop`/`advance` (F5, F6 and a
+  toolbar outside the dock) tick the scene's modules on a fixed step and restore
+  the scene's text on stop, refusing every edit in between;
+  `docs/plan/08-editor.md`'s slice 8 has the design. Owed, in order:
+  - **Towers' play module**, the next slice: a `GameModule` registered under
+    towers' `waypoints` system that builds its `Stage` from the scene's map on
+    `register` and steps it each tick, with creeps as `replica` entities the
+    editor can draw. **The editor draws and lists only entities with a
+    `SceneEntityId`** (`app::instances::Placed` and `Document::outline` both go
+    through the id map), so an entity a module spawns is ticked and invisible
+    until the editor draws id-less entities too — from a registered placement,
+    as `Document::bounds` does for scene entities.
+  - **An edit-mode schedule, only if something needs one.** Nothing ticks while
+    editing, so play needs no schedule to switch from; the selection, gizmo and
+    camera systems the plan put in one are plain editor code today (the
+    edit-mode schedule bullet above).
+  - **Physics on scene components.** The world's `PhysicsSystem` holds one
+    kinematic box per entity for picking, rebuilt from `Placement` after each
+    tick that ran; nothing gives a scene component a simulated body, so a module
+    that wants collision or gravity has to bring its own.
+  - **A module despawning a scene entity** is swept and leaves the outline and
+    the picture (both re-read when the world's entity count moves), but its id
+    stays in the document's id map until stop, so selecting it shows "no
+    editable component". Not tested: no test module despawns.
+  - **Considered and declined: ticking every registered module on every scene.**
+    The decision's wording was "every registered module"; the shipped vocabulary
+    holds four games, so a module is keyed by the system that says a scene is
+    its game's, as `Registry::check` is.
+  - **Coverage gaps**: the toolbar has never been looked at on a device
+    (headless tests click its laid-out rectangles); clicking a toolbar button
+    takes the keyboard, as an outliner row does, so the arrows walk the panels
+    until a viewport click; the `membership` bump on stop that makes the
+    outliner and the instances re-read after a play that spawned or despawned
+    has no test of its own, because no test module changes the entity set.
 - **The remaining command variants**: rename, attach/detach system data and
   scene-load and save markers (_Task 4's commands_ above says what each waits
   on). Spawn, delete, duplicate, batch and the undo property test landed
