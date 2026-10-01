@@ -263,44 +263,45 @@ fn a_congested_peer_steps_down_and_up_alone() {
 }
 
 /// **A client at the slowest interval interpolates without starving.**
-/// Between two snapshots [`SLOWEST`] ticks apart its playback moves on every
-/// frame — the alpha rises each update until the next snapshot arrives — and
-/// never sits at the newest snapshot waiting, which is what a playback delay
-/// shorter than the snapshot spacing would do. The client's delay is not a
-/// constant: playback is held between the two snapshots it has, so it lags by
-/// whatever the spacing is.
+/// Between snapshots [`SLOWEST`] ticks apart its playback moves on every
+/// frame and never reaches the newest snapshot it holds — which is what a
+/// playback delay shorter than the snapshot spacing would do — so it never
+/// runs dry. The client's playout delay measures the spacing and covers it.
 #[test]
 fn a_client_interpolates_smoothly_at_the_slowest_interval() {
     let mut rig = Rig::new();
     rig.join(true);
     rig.run(ticks_to_slowest() + 4 * SLOWEST);
     assert_eq!(rig.interval(0), SLOWEST);
-
-    let mut previous = (
-        rig.clients[0].last_applied_tick(),
-        rig.clients[0].interpolation_alpha(),
+    assert!(
+        rig.clients[0].playout_stats().delay >= TICK * SLOWEST,
+        "a delay of {:?} does not cover the spacing",
+        rig.clients[0].playout_stats().delay
     );
+
+    let underruns = rig.clients[0].playout_stats().underruns;
+    let mut previous = rig.clients[0].playback_tick().expect("playing");
     for _ in 0..12 * SLOWEST {
         rig.step();
-        let now = (
-            rig.clients[0].last_applied_tick(),
-            rig.clients[0].interpolation_alpha(),
+        let client = &rig.clients[0];
+        let alpha = client.interpolation_alpha();
+        let playback = client.playback_tick().expect("playing");
+        assert!((0.0..=1.0).contains(&alpha), "alpha {alpha} extrapolates");
+        assert!(
+            playback > previous,
+            "playback stood still at tick {playback}"
         );
-        assert!((0.0..=1.0).contains(&now.1), "alpha {} extrapolates", now.1);
-        if now.0 == previous.0 {
-            assert!(
-                now.1 > previous.1,
-                "playback stood still at alpha {} with no new snapshot",
-                now.1
-            );
-        } else {
-            assert!(
-                now.1 < 1.0,
-                "a new snapshot was shown at once, not interpolated"
-            );
-        }
-        previous = now;
+        assert!(
+            playback < client.last_applied_tick().get() as f64,
+            "playback reached the newest snapshot, tick {playback}"
+        );
+        previous = playback;
     }
+    assert_eq!(
+        rig.clients[0].playout_stats().underruns,
+        underruns,
+        "playback ran dry"
+    );
 }
 
 /// A bare far end of a narrow link: the test reads, opens and acknowledges

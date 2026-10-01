@@ -2,14 +2,16 @@
 //!
 //! The client sends its input to the server each tick and buffers incoming
 //! delta-encoded snapshots. Each delta is applied to a local [`Baseline`]
-//! to reconstruct the full server state. Between ticks the two most recent
-//! snapshots are used to interpolate entity state for smooth rendering.
+//! to reconstruct the full server state, and the state it reconstructs is
+//! buffered by server tick. Playback runs an adaptive playout delay behind
+//! the newest snapshot (see [`playout`]) and interpolates between the two
+//! buffered snapshots either side of it for smooth rendering.
 //!
 //! Every message except the handshake itself carries a per-session MAC (see
 //! [`crcbl_net::auth`]); a snapshot that does not verify never reaches the
 //! baseline.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::time::Duration;
 
@@ -23,6 +25,11 @@ use crcbl_net::{
     Trust, replicated_system_id,
 };
 use crcbl_phys::{PhysicsSystem, Transform};
+
+pub mod playout;
+
+pub use playout::PlayoutStats;
+use playout::{JITTER_BUFFER_CAPACITY, Playout};
 
 /// How long the client waits for a handshake reply before assuming the hello
 /// (or its answer) was lost and trying again.
@@ -49,7 +56,8 @@ pub const MAX_QUEUED_EVENTS: usize = 64;
 pub struct InterpolatedState {
     /// Interpolated world-space transform for each entity, keyed by entity
     /// bits ([`crcbl_ecs::Entity::to_bits`]). Entities present in only one of
-    /// the two buffered snapshots appear at their most recent transform.
+    /// the two snapshots either side of playback appear at their most recent
+    /// transform.
     pub transforms: Vec<(u64 /* entity bits */, Transform)>,
 }
 
@@ -87,6 +95,17 @@ fn frame_from_baseline(baseline: &Baseline) -> Frame {
     }
 }
 
+/// Index of the older frame of the pair either side of `playback` in a
+/// sector's buffer: the newest at or behind it, but never the newest frame
+/// itself, so a playback held at the newest snapshot shows the end of the last
+/// pair rather than a pair of one.
+fn playback_index(frames: &VecDeque<Frame>, playback: Option<f64>) -> usize {
+    let behind = playback.map_or(0, |playback| {
+        frames.partition_point(|frame| frame.tick.get() as f64 <= playback)
+    });
+    behind.saturating_sub(1).min(frames.len().saturating_sub(2))
+}
+
 /// How a client's session ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ended {
@@ -114,19 +133,16 @@ pub struct Client<T: Transport> {
     clock: FrameClock,
     /// Sectors this client currently accepts replication for.
     subscribed_sectors: HashSet<SectorId>,
-    /// Older buffered frames after delta apply, keyed by sector.
-    prev_frames: HashMap<SectorId, Frame>,
-    /// Newer buffered frames after delta apply, keyed by sector.
-    current_frames: HashMap<SectorId, Frame>,
+    /// Buffered frames after delta apply, oldest first, keyed by sector: from
+    /// the one at or just behind playback to the newest, at most
+    /// [`JITTER_BUFFER_CAPACITY`].
+    frames: HashMap<SectorId, VecDeque<Frame>>,
     /// Input data to send on the next tick.
     pending_input: Vec<u8>,
     /// Accumulated baselines for delta application, keyed by sector.
     baselines: HashMap<SectorId, Baseline>,
-    /// Playback position in server ticks, advanced by wall time.
-    playback_tick: f64,
-    /// Server ticks per second, used to advance `playback_tick`.
-    tick_rate_hz: f64,
-    last_update: Option<Duration>,
+    /// The playout delay and the playback position it steers.
+    playout: Playout,
     now: Duration,
     session_id: Option<SessionId>,
     resume_token: Option<ResumeToken>,
@@ -198,13 +214,10 @@ impl<T: Transport> Client<T> {
             transport,
             clock,
             subscribed_sectors: HashSet::from([SectorId::ZERO]),
-            prev_frames: HashMap::new(),
-            current_frames: HashMap::new(),
+            frames: HashMap::new(),
             pending_input: Vec::new(),
             baselines: HashMap::new(),
-            playback_tick: 0.0,
-            tick_rate_hz,
-            last_update: None,
+            playout: Playout::new(tick_rate_hz),
             now: Duration::ZERO,
             session_id: None,
             resume_token: None,
@@ -235,12 +248,15 @@ impl<T: Transport> Client<T> {
     /// Feed the current time.
     ///
     /// Drains received snapshots into the buffer, sends pending input for
-    /// each consumed tick, and returns the interpolation alpha in `[0, 1]`.
+    /// each consumed tick, moves playback on, and returns the interpolation
+    /// alpha in `[0, 1]`.
     ///
-    /// The alpha spans the two buffered snapshots' *server* ticks, so it stays
-    /// correct when a snapshot is lost or when the server ticks at a different
-    /// rate than this client. With fewer than two snapshots buffered it falls
-    /// back to the local frame clock's fraction.
+    /// Playback trails the estimated latest server time by the playout delay
+    /// ([`playout`]), so the alpha spans the two buffered snapshots either
+    /// side of the playback position — not the newest two — measured in
+    /// their *server* ticks, so it stays correct when a snapshot is lost or
+    /// when the server sends one only every few ticks. With fewer than two
+    /// snapshots buffered it falls back to the local frame clock's fraction.
     pub fn update(&mut self, now: std::time::Duration) -> f32 {
         self.now = now;
         self.clock.update(now);
@@ -254,43 +270,55 @@ impl<T: Transport> Client<T> {
         if self.recv_snapshots().is_err() {
             self.processing_error_count += 1;
         }
-        self.advance_playback(now);
+        self.playout.advance(now);
+        self.drop_frames_behind_playback();
         self.interpolation_alpha()
     }
 
-    /// The interpolation alpha for the currently buffered snapshot pair.
+    /// The interpolation alpha for the buffered snapshot pair either side of
+    /// the playback position.
     #[must_use]
     pub fn interpolation_alpha(&self) -> f32 {
         self.snapshot_alpha().unwrap_or_else(|| self.clock.alpha())
     }
 
     fn snapshot_alpha(&self) -> Option<f32> {
-        let current = self.current_frames.get(&SectorId::ZERO)?;
-        let prev = self.prev_frames.get(&SectorId::ZERO)?;
-        let span = current.tick.get().checked_sub(prev.tick.get())?;
-        if span == 0 {
-            return Some(1.0);
-        }
-        let position = self.playback_tick - prev.tick.get() as f64;
-        Some((position / span as f64).clamp(0.0, 1.0) as f32)
+        let (prev, current) = self.playback_pair(SectorId::ZERO)?;
+        let span = (current.tick.get() - prev.tick.get()) as f64;
+        let position = self.playout.playback_tick()? - prev.tick.get() as f64;
+        Some((position / span).clamp(0.0, 1.0) as f32)
     }
 
-    /// Advance the playback position by wall time, bounded by the snapshots
-    /// actually held. Without the clamp a stalled stream would extrapolate.
-    fn advance_playback(&mut self, now: Duration) {
-        let elapsed = self
-            .last_update
-            .map_or(Duration::ZERO, |previous| now.saturating_sub(previous));
-        self.last_update = Some(now);
-        self.playback_tick += elapsed.as_secs_f64() * self.tick_rate_hz;
+    /// Where playback is, in server ticks: the estimated latest server time
+    /// less the playout delay, and never past the newest snapshot held.
+    /// `None` before the first snapshot arrives.
+    #[must_use]
+    pub fn playback_tick(&self) -> Option<f64> {
+        self.playout.playback_tick()
+    }
 
-        if let (Some(prev), Some(current)) = (
-            self.prev_frames.get(&SectorId::ZERO),
-            self.current_frames.get(&SectorId::ZERO),
-        ) {
-            let low = prev.tick.get() as f64;
-            let high = current.tick.get() as f64;
-            self.playback_tick = self.playback_tick.clamp(low.min(high), low.max(high));
+    /// The playout delay, the jitter it was sized from, and how often
+    /// playback ran dry or had to step. See [`playout`].
+    #[must_use]
+    pub fn playout_stats(&self) -> PlayoutStats {
+        self.playout.stats()
+    }
+
+    /// The buffered pair either side of playback in `sector`, oldest first;
+    /// `None` with fewer than two frames.
+    fn playback_pair(&self, sector: SectorId) -> Option<(&Frame, &Frame)> {
+        let frames = self.frames.get(&sector)?;
+        let index = playback_index(frames, self.playout.playback_tick());
+        Some((frames.get(index)?, frames.get(index + 1)?))
+    }
+
+    /// Drop every frame older than the pair playback is between. Playback
+    /// only moves forwards, so none of them is shown again.
+    fn drop_frames_behind_playback(&mut self) {
+        let playback = self.playout.playback_tick();
+        for buffered in self.frames.values_mut() {
+            let index = playback_index(buffered, playback);
+            buffered.drain(..index);
         }
     }
 
@@ -302,9 +330,7 @@ impl<T: Transport> Client<T> {
         self.subscribed_sectors = sectors.into_iter().collect();
         self.baselines
             .retain(|sector, _| self.subscribed_sectors.contains(sector));
-        self.prev_frames
-            .retain(|sector, _| self.subscribed_sectors.contains(sector));
-        self.current_frames
+        self.frames
             .retain(|sector, _| self.subscribed_sectors.contains(sector));
     }
 
@@ -329,21 +355,24 @@ impl<T: Transport> Client<T> {
 
     /// Interpolated per-entity transforms for rendering.
     ///
-    /// Lerps between the two most recent buffered snapshots in the default
-    /// sector at the given `alpha` — the value returned by [`Self::update`].
-    /// Entities present in only one snapshot appear at that snapshot's
-    /// transform; with fewer than two snapshots the newest is used as-is.
+    /// Lerps between the two buffered snapshots either side of the playback
+    /// position in the default sector at the given `alpha` — the value
+    /// returned by [`Self::update`]. Entities present in only one snapshot
+    /// appear at that snapshot's transform; with fewer than two snapshots the
+    /// one held is used as-is.
     #[must_use]
     pub fn interpolate(&self, alpha: f32) -> InterpolatedState {
         let empty = HashMap::new();
-        let current = self
-            .current_frames
-            .get(&SectorId::ZERO)
-            .map_or(&empty, |frame| &frame.transforms);
-        let prev = self
-            .prev_frames
-            .get(&SectorId::ZERO)
-            .map_or(&empty, |frame| &frame.transforms);
+        let (prev, current) = match self.playback_pair(SectorId::ZERO) {
+            Some((prev, current)) => (&prev.transforms, &current.transforms),
+            None => (
+                &empty,
+                self.frames
+                    .get(&SectorId::ZERO)
+                    .and_then(VecDeque::back)
+                    .map_or(&empty, |frame| &frame.transforms),
+            ),
+        };
 
         let alpha = f64::from(alpha.clamp(0.0, 1.0));
         let mut transforms: Vec<(u64, Transform)> = current
@@ -736,7 +765,7 @@ impl<T: Transport> Client<T> {
     }
 
     /// Drain available messages from the transport, apply snapshots to the
-    /// local baseline, and slide the two-slot interpolation buffer.
+    /// local baseline, and buffer the state each one reconstructs.
     fn recv_snapshots(&mut self) -> Result<(), TransportError> {
         // Sectors whose baseline needs re-announcing because the server is
         // delta-encoding against a tick this client does not hold. At most one
@@ -796,7 +825,6 @@ impl<T: Transport> Client<T> {
             HandshakeResult::Accept {
                 session_id,
                 resume_token,
-                server_tick,
                 ..
             } => {
                 self.session_id = Some(session_id);
@@ -811,9 +839,6 @@ impl<T: Transport> Client<T> {
                 // The `Accept` proves nothing on its own — it is unauthenticated
                 // — so the session is on the clock until a message opens.
                 self.session_proof_deadline = Some(self.now.saturating_add(SESSION_PROOF_TIMEOUT));
-                // Start playback at the server's clock rather than zero, so
-                // the first snapshot pair does not have to drag it forwards.
-                self.playback_tick = server_tick.get() as f64;
             }
             HandshakeResult::Reject { reason, .. } => {
                 self.processing_error_count += 1;
@@ -965,13 +990,16 @@ impl<T: Transport> Client<T> {
         let frame = frame_from_baseline(baseline);
         self.send_ack(sector, delta.tick);
 
-        let is_newer = self
-            .current_frames
-            .get(&sector)
-            .is_none_or(|current| delta.tick > current.tick);
-        if is_newer && let Some(current) = self.current_frames.insert(sector, frame) {
-            self.prev_frames.insert(sector, current);
+        // Only a delta newer than the baseline gets this far, and the
+        // baseline's tick is the newest frame's, so the buffer stays in tick
+        // order: a duplicate, or a snapshot another overtook, was dropped
+        // above.
+        let buffered = self.frames.entry(sector).or_default();
+        buffered.push_back(frame);
+        if buffered.len() > JITTER_BUFFER_CAPACITY {
+            buffered.pop_front();
         }
+        self.playout.observe(delta.tick, self.now);
     }
 
     fn send_ack(&mut self, sector: SectorId, tick: TickId) {
@@ -993,17 +1021,26 @@ impl<T: Transport> fmt::Debug for Client<T> {
             .field(
                 "prev_snapshot_tick",
                 &self
-                    .prev_frames
-                    .get(&SectorId::ZERO)
-                    .map(|frame| frame.tick),
+                    .playback_pair(SectorId::ZERO)
+                    .map(|(prev, _)| prev.tick),
             )
             .field(
                 "current_snapshot_tick",
-                &self
-                    .current_frames
-                    .get(&SectorId::ZERO)
-                    .map(|frame| frame.tick),
+                &self.playback_pair(SectorId::ZERO).map_or_else(
+                    || {
+                        self.frames
+                            .get(&SectorId::ZERO)
+                            .and_then(VecDeque::back)
+                            .map(|frame| frame.tick)
+                    },
+                    |(_, current)| Some(current.tick),
+                ),
             )
+            .field(
+                "buffered_snapshots",
+                &self.frames.get(&SectorId::ZERO).map_or(0, VecDeque::len),
+            )
+            .field("playback_tick", &self.playout.playback_tick())
             .field("pending_input_len", &self.pending_input.len())
             .finish()
     }
@@ -1014,6 +1051,9 @@ impl<T: Transport> fmt::Debug for Client<T> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+mod playout_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crcbl_net::auth::AUTH_TAG;
@@ -1021,21 +1061,21 @@ mod tests {
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
-    const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
+    pub(crate) const COMPATIBILITY: ProtocolCompatibility = ProtocolCompatibility {
         protocol_version: ProtocolCompatibility::DEFAULT.protocol_version,
         engine_build_id: 0x0043_5243_424C,
         schema_hash: 0x0053_5256,
     };
 
-    const TICK: Duration = Duration::from_nanos(16_666_667);
+    pub(crate) const TICK: Duration = Duration::from_nanos(16_666_667);
 
-    fn client(transport: InMemoryTransport) -> Client<InMemoryTransport> {
+    pub(crate) fn client(transport: InMemoryTransport) -> Client<InMemoryTransport> {
         Client::new_with_compatibility(World::new(), transport, 60, COMPATIBILITY)
     }
 
     /// Play the server side of a handshake and return the channel the peer
     /// must seal its snapshots with.
-    fn connect(
+    pub(crate) fn connect(
         client: &mut Client<InMemoryTransport>,
         peer: &mut InMemoryTransport,
         now: Duration,
@@ -1067,7 +1107,11 @@ mod tests {
         SessionCrypto::from_token(&token)
     }
 
-    fn send_sealed(peer: &mut InMemoryTransport, crypto: &mut SessionCrypto, payload: &[u8]) {
+    pub(crate) fn send_sealed(
+        peer: &mut InMemoryTransport,
+        crypto: &mut SessionCrypto,
+        payload: &[u8],
+    ) {
         let sealed = crypto.seal(payload).expect("counter space available");
         peer.send_unreliable(Message::unreliable(sealed)).unwrap();
     }
@@ -1081,7 +1125,7 @@ mod tests {
     }
 
     /// Build a keyframe delta payload for `sector` at `tick`.
-    fn keyframe_snapshot_for_sector(
+    pub(crate) fn keyframe_snapshot_for_sector(
         sector: SectorId,
         tick: u64,
         system_data: &[(u32, Vec<u8>)],
@@ -1126,7 +1170,7 @@ mod tests {
         blob
     }
 
-    fn keyframe_snapshot(tick: u64, system_data: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    pub(crate) fn keyframe_snapshot(tick: u64, system_data: &[(u32, Vec<u8>)]) -> Vec<u8> {
         keyframe_snapshot_for_sector(SectorId::ZERO, tick, system_data)
     }
 
@@ -1135,12 +1179,12 @@ mod tests {
     }
 
     /// The replicated id transforms travel under.
-    fn physics() -> u32 {
+    pub(crate) fn physics() -> u32 {
         replicated_system_id(PhysicsSystem::NAME)
     }
 
     /// Transforms at `x` along the X axis, in the quantized wire form.
-    fn transform_blob(entities: &[(u64, f64)]) -> Vec<u8> {
+    pub(crate) fn transform_blob(entities: &[(u64, f64)]) -> Vec<u8> {
         let mut blob = Vec::new();
         for &(bits, x) in entities {
             let mut data = Vec::new();
@@ -1902,8 +1946,7 @@ mod tests {
         client.update(TICK);
 
         assert!(client.baselines.is_empty());
-        assert!(client.current_frames.is_empty());
-        assert!(client.prev_frames.is_empty());
+        assert!(client.frames.is_empty());
         assert_eq!(client.processing_error_count(), 100);
         assert!(peer.recv().unwrap().is_none());
     }
@@ -1925,8 +1968,7 @@ mod tests {
 
         client.set_subscribed_sectors([]);
         assert!(client.baselines.is_empty());
-        assert!(client.current_frames.is_empty());
-        assert!(client.prev_frames.is_empty());
+        assert!(client.frames.is_empty());
     }
 
     #[test]
@@ -2018,42 +2060,6 @@ mod tests {
         client.update(Duration::ZERO);
         let alpha = client.update(Duration::from_nanos(8_333_333));
         assert!((alpha - 0.5).abs() < 0.01, "expected ~0.5, got {alpha}");
-    }
-
-    #[test]
-    fn alpha_spans_the_buffered_snapshot_ticks_not_the_local_tick() {
-        let (client_transport, mut peer) = InMemoryTransport::pair();
-        let mut client = client(client_transport);
-        let mut crypto = connect(&mut client, &mut peer, Duration::ZERO);
-
-        // Two snapshots four server ticks apart — what packet loss, or a
-        // server ticking slower than this client, produces.
-        send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(10, &[]));
-        client.update(Duration::ZERO);
-        send_sealed(&mut peer, &mut crypto, &keyframe_snapshot(14, &[]));
-        let alpha = client.update(Duration::ZERO);
-        assert!(
-            alpha.abs() < 1e-6,
-            "playback starts at the older snapshot, got {alpha}"
-        );
-
-        // One local tick of wall time covers one server tick, so a quarter of
-        // the four-tick span — not a whole one, which is what re-lerping the
-        // same pair against the local frame clock produced.
-        let alpha = client.update(TICK);
-        assert!(
-            (alpha - 0.25).abs() < 0.02,
-            "expected ~0.25 across a four-tick span, got {alpha}"
-        );
-        let alpha = client.update(3 * TICK);
-        assert!((alpha - 0.75).abs() < 0.02, "expected ~0.75, got {alpha}");
-
-        // Playback never runs past the newest snapshot it holds.
-        let alpha = client.update(Duration::from_secs(10));
-        assert!(
-            (alpha - 1.0).abs() < 1e-6,
-            "expected clamp to 1.0, got {alpha}"
-        );
     }
 
     #[test]

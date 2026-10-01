@@ -679,9 +679,9 @@ the netcode section below records; `crcbl-client`'s interpolation and
 "smooth at mismatched tick and render rates" exit criterion at any `--tick-hz`.
 
 What it left unbuilt is in `docs/backlog.md` under _ECS, server and client (from
-the deleted 04-ecs-server-client plan, 2026-09-24)_: the jitter-adaptive buffer,
-a client id for `replicate`, the headless binary and its `cargo tree` guard, the
-input script for the determinism test, and per-system tick time.
+the deleted 04-ecs-server-client plan, 2026-09-24)_: a client id for
+`replicate`, the headless binary and its `cargo tree` guard, the input script
+for the determinism test, and per-system tick time.
 
 - **Systems own arrays; an entity is only an id.** `Entity` is a generational id
   from `crcbl-core`'s `Pool` with no storage of its own. A system owns
@@ -720,14 +720,22 @@ input script for the determinism test, and per-system tick time.
   sector. The plan said finer per-client visibility would cost nothing later
   because the writer takes a client id; `replicate` takes a byte sink and
   nothing else, so narrowing below the sector changes every replicating system.
-- **The interpolation buffer is about 100 ms and jitter-adaptive** (design
-  review, 2026-07-27). One tick of delay survives no jitter and no dropped
-  snapshot; the industry norm, documented in Valve's Source networking, is two
-  snapshot intervals plus a jitter margin, growing under measured jitter and
-  shrinking when calm. `26-prediction.md` assumes this number. The tree holds
-  two frames per sector.
+- **The interpolation buffer is jitter-adaptive** (design review, 2026-07-27;
+  built 2026-10-01 as `crcbl_client::playout`). One tick of delay survives no
+  jitter and no dropped snapshot; the industry norm, documented in Valve's
+  Source networking, is two snapshot intervals plus a jitter margin, growing
+  under measured jitter and shrinking when calm. What was built is one measured
+  interval plus `JITTER_MULTIPLE` RFC 3550 jitters plus `PLAYOUT_MARGIN`,
+  clamped by `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY`: a lost snapshot is
+  covered by the interval estimate taking over the longer spacing, not by a
+  second interval held in reserve. Playback eases towards a changed delay within
+  `MAX_PLAYOUT_RATE_DEVIATION` of the tick rate. `26-prediction.md` assumed
+  about 100 ms, which the delay reaches only under jitter; at a steady snapshot
+  every 60 Hz tick it is about 21 ms.
 - **Prediction is hooks, not an implementation**, until the arena era; the
-  buffer is shaped so client-side prediction can slot in.
+  buffer is shaped so client-side prediction can slot in. A dry buffer holds the
+  last state rather than extrapolating, because guessing past the newest
+  snapshot is prediction's job.
 - **Stage 4's determinism was same-binary, same-machine**, only as far as the
   1000-tick smoke test needed. The physics plan's cross-target rule, next
   section, supersedes it.

@@ -520,6 +520,24 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Added
 
+- **A jitter buffer with an adaptive playout delay in `crcbl_client`**
+  (`crcbl_client::playout`). The client buffers snapshots by server tick, up to
+  `JITTER_BUFFER_CAPACITY` per sector, and plays them back at the latest server
+  time it estimates from their arrivals less a playout delay: the measured
+  snapshot interval plus `JITTER_MULTIPLE` times the measured interarrival
+  jitter (RFC 3550 §6.4.1's estimator, gain `ESTIMATOR_GAIN`) plus
+  `PLAYOUT_MARGIN`, held between `MIN_PLAYOUT_DELAY` and `MAX_PLAYOUT_DELAY` and
+  never under the interval itself. A longer snapshot spacing takes over the
+  interval at once, so the rate drop's slower cadences are covered from their
+  first snapshot. The delay changes gradually: playback runs at most
+  `MAX_PLAYOUT_RATE_DEVIATION` faster or slower than the tick rate while it
+  drifts to its target, and steps only after falling further behind than
+  `MAX_PLAYOUT_DELAY`. When the buffer runs dry playback holds the last state —
+  nothing extrapolates — and counts an underrun. New on `Client`:
+  `playback_tick()` (where playback is, in server ticks) and `playout_stats()`,
+  a `PlayoutStats` with the delay, the jitter, the interval, `underruns` and
+  `steps`.
+
 - **Every hit along a straight sweep from `crcbl_phys::PhysicsWorld`.**
   `sweep_sphere_all(segment, radius, filter, &mut hits)` and
   `sweep_capsule_all(segment, radius, half_height, filter, &mut hits)` (and the
@@ -1032,10 +1050,11 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   which `crcbl::lan`'s F3 "lan" section lists per peer as "snapshot every".
   Keyframe recovery counts snapshots (`KEYFRAME_RECOVERY_SNAPSHOTS`), not ticks,
   so a slowed session is given as many snapshots to acknowledge before it is
-  reset. The client needed no change: its playback is held between the two
-  snapshots it has, so its interpolation lags by whatever their spacing is, and
+  reset. The client's playout delay measures the slower spacing and covers it
+  (see the jitter buffer entry):
   `host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`
-  shows it advancing every frame at the slowest interval.
+  shows its playback advancing every frame at the slowest interval without
+  running dry.
 
 - **`crcbl_client::Client::transport()`**, to ask a link why it ended
   (`UdpTransport::end_reason`) or read its counters.
@@ -4376,6 +4395,19 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   was the one job holding the demo site's deploy.
 
 ### Changed
+
+- **`crcbl_client::Client` interpolates between the snapshots either side of its
+  playback position, not the newest two.** Playback trails the newest snapshot
+  by the playout delay (see Added), so the alpha `Client::update` and
+  `Client::interpolation_alpha` return, and the pair `Client::interpolate`
+  lerps, are the buffered pair around that position — a frame or more behind the
+  newest at a steady snapshot every tick, more under jitter. A caller that feeds
+  `update`'s alpha to `interpolate`, as every one in the workspace does, needs
+  no change; one that passed `interpolate(1.0)` to read the newest snapshot's
+  transforms now reads the snapshot at the playback position, and should read
+  `Client::replicated` or `Client::last_applied_tick` for the newest. Playback
+  no longer starts at the `Accept`'s server tick but one delay behind the first
+  snapshot.
 
 - **`crcbl_phys::PhysicsWorld`'s closest-hit sphere and capsule sweeps break
   ties by collider slot.** Two colliders met at exactly the same fraction — two

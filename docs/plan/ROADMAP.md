@@ -170,8 +170,9 @@ browser's own gate and the demo site's deploy.
 - **`crcbl-server`** — the authoritative fixed-tick server: drains client
   inputs, advances the ECS schedule, emits per-tick snapshots.
   Headless-runnable, with no render dependency.
-- **`crcbl-client`** — the rendering client: sends input each tick, buffers the
-  two most recent snapshots for interpolation, handles snapshot reordering.
+- **`crcbl-client`** — the rendering client: sends input each tick, buffers
+  snapshots by server tick and plays them back at an adaptive playout delay
+  sized from measured jitter, handles snapshot reordering.
 - **`crcbl-input`** — the device-agnostic action system: `ActionMap`
   (bindings→actions, WASD composite, mouse motion/scroll), `ButtonAction` with
   just-pressed/just-released edges, `InputTickState` for client→server tick

@@ -10678,19 +10678,79 @@ in `docs/notes/simulation.md` under _What the deleted 04-ecs-server-client plan
 left behind_. What it left unbuilt is below; the ECS access declarations and the
 parallel schedule are under _Jobs and threading_.
 
-### Jitter-adaptive interpolation buffer (2026-08-27)
+### Client jitter buffer: what the adaptive playout delay leaves (2026-10-01)
 
-**Not built.** The stage 4 plan's 2026-07-27 correction requires a buffer of
-roughly two snapshot intervals plus a jitter margin, growing under measured
-jitter and shrinking when calm. `crcbl-client` holds exactly two frames per
-sector — `prev_frames` and `current_frames`, both `HashMap<SectorId, Frame>` —
-and `grep -n "jitter|adaptive|buffer_depth"` over
-`crates/crcbl-client/src/lib.rs` returns nothing. The alpha spans the two
-buffered snapshots' server ticks, which is correct arithmetic over a buffer that
-is one tick deep.
+**Built (2026-10-01): `crcbl_client::playout`.** Decided 2026-10-01 for the long
+term: the client buffers snapshots by server tick (at most
+`JITTER_BUFFER_CAPACITY` per sector) and plays them back at the latest server
+time it estimates from their arrivals less an adaptive playout delay — the
+measured snapshot interval plus `JITTER_MULTIPLE` times RFC 3550 §6.4.1's
+interarrival jitter plus `PLAYOUT_MARGIN`, between `MIN_PLAYOUT_DELAY` and
+`MAX_PLAYOUT_DELAY` and never under the interval. The delay changes gradually:
+playback runs within `MAX_PLAYOUT_RATE_DEVIATION` of the tick rate towards its
+target and steps only after falling behind by more than `MAX_PLAYOUT_DELAY`. A
+dry buffer holds the last state and counts an underrun; nothing extrapolates.
+`Client::playout_stats` reports the delay, jitter, interval, underruns and
+steps. The module docs give the estimator in full. Tests, each shown red by a
+mutation: `playout::tests` (the RFC arithmetic by hand, the delay's floor and
+ceiling, a longer spacing taking over the interval and an outage not, a long
+frame not overshooting) and `playout_tests` (steady streams at intervals 1 to 3,
+the alpha across a four-tick span, reordering and queued jitter, a gap past the
+longest delay, overtaken and duplicate snapshots, one arrival per tick across
+sectors, the capacity), plus
+`host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`.
 
-**What it blocks:** anything played over a real network. `26-prediction.md`
-already assumes the ~100 ms figure.
+**Left, and what each would take:**
+
+- **Extrapolation belongs to prediction, which is hooks only** (the notes:
+  _Prediction is hooks, not an implementation_). A dry buffer freezes the entity
+  rather than guessing. Extrapolating past the newest snapshot needs a velocity
+  on the wire (replication carries transforms only) and a rule for pulling a
+  wrong guess back, which is `26-prediction.md`'s reconciliation. Not designed.
+- **One delay for every entity.** Every entity and sector plays at the same
+  playback tick. A per-entity delay — the player's own entity predicted at zero,
+  others interpolated — needs per-entity buffers and a policy for who is
+  predicted; nothing needs it until prediction lands.
+- **The constants were chosen, not tuned.** `MIN_PLAYOUT_DELAY`,
+  `MAX_PLAYOUT_DELAY`, `PLAYOUT_MARGIN`, `PLAYOUT_CORRECTION_TIME`,
+  `MAX_PLAYOUT_RATE_DEVIATION`, `LOSS_SPACING_CAP` and `JITTER_BUFFER_CAPACITY`
+  are unmeasured on a real link; every test drives in-memory links, some through
+  `crcbl_net::ConditionSimulator` on a `ManualClock`.
+- **Bursty delivery reads as little jitter.** RFC 3550's estimator averages
+  consecutive transit changes, so a stream that arrives in bursts — a link
+  holding many snapshots and releasing them together — measures far less jitter
+  than its spread. A discarded probe at 240 Hz with bursts of 40 every 40 ticks
+  measured a delay of 28 ms against bursts 167 ms apart — far too short to
+  bridge them (its underruns were not counted). Jitter that queues without
+  bursting is covered: `queued_jitter_never_runs_dry_once_converged` holds up to
+  100 ms at 60 Hz. A quantile of the transit-time spread (WebRTC NetEq keeps a
+  delay histogram for this) would cover bursts. Not built.
+- **The estimator sees only the snapshots it keeps.** Under reordering jitter
+  the client drops what was overtaken, and the spacing between survivors
+  inflates the interval estimate: ±40 ms at 60 Hz in
+  `jitter_grows_the_delay_without_underruns_and_calm_shrinks_it_gradually`
+  measured an interval near three ticks. The delay then covers the jitter partly
+  through the interval term. Behaviour, not a bug.
+- **A step lerps across the outage.** After a gap the pair either side of
+  playback is the last snapshot before it and the first after, so an entity
+  glides across the outage's motion over a delay's worth of frames. Behaviour,
+  not a bug.
+- **Startup assumes a snapshot every tick.** Playback starts one delay behind
+  the first snapshot; a session already slowed by the rate drop runs dry once or
+  twice until the interval takes over (one arrival) and playback slows within
+  its rate bound. Counted in `underruns`.
+- **Playback steps past `MAX_PLAYOUT_DELAY`, not `21-jobs.md`'s ~50 ms.** That
+  policy is for the simulation clock's input lead (the next entry); a 50 ms
+  playback step is a visible jump that slewing at the rate bound closes in about
+  half a second. Considered and declined for playback.
+- **Not on F3.** `crcbl::lan`'s client section lists no playout stats;
+  `Client::playout_stats` is there for it. Left out because the `LanClient` path
+  needs a socket, which the headless tests here must not open.
+- **Not verified:** clock drift between server and client (the offset estimate
+  should track it; no test skews a clock), and breakout's replication drift
+  warning (`apps/breakout/src/game.rs`, a 1-unit threshold) against the slightly
+  longer delay — breakout's own tests pass, but nobody watched the warning in a
+  running game.
 
 ### `SystemTrait::replicate` takes no client id (2026-08-27)
 
@@ -10968,11 +11028,14 @@ ring.
 
 ### Client tick alignment and the jitter buffer (2026-08-27)
 
-**Not built.** No lead, no EWMA server-time estimate and no rate correction in
-`crcbl-client`, `crcbl-server` or `crcbl-net`; the client advances playback at a
-constant rate. `21-jobs.md`'s 2026-07-27 correction already settled the policy
-(slew below ~50 ms, step above it, with a defined sim-side policy for the
-stepped interval) — the policy is decided and unimplemented.
+**Not built for input.** The client's _playback_ now estimates the server's
+clock from snapshot arrivals and rate-corrects towards it
+(`crcbl_client::playout`, the entry _Client jitter buffer: what the adaptive
+playout delay leaves_), but nothing runs the client's input ahead of the server:
+no lead, and the input tick still advances at a constant rate. `21-jobs.md`'s
+2026-07-27 correction already settled the policy for that lead (slew below ~50
+ms, step above it, with a defined sim-side policy for the stepped interval) —
+the policy is decided and unimplemented.
 
 **Half of this row is now closed and should not be re-derived:** the server no
 longer discards client input. It queues the frames that arrived since the tick
@@ -13763,14 +13826,6 @@ read, and `client_server_session`'s convergence to the quantized value.
   Decided 2026-10-01 for the long term: steps are tick-rate fractions
   (`SNAPSHOT_INTERVAL_STEPS`), per session, with distinct down and up
   thresholds; a withheld oversized update does not count against the rate.
-- **The client has no jitter buffer.** Its playback is held between the two
-  snapshots it has (`Client::advance_playback`), so at any interval it reaches
-  the newest snapshot as the next is due and a late one stands it still until it
-  lands; nothing extrapolates. That is why the rate drop needed no client change
-  (`host::rate_tests::a_client_interpolates_smoothly_at_the_slowest_interval`
-  holds it at the slowest interval with on-time snapshots), and it is the same
-  at every interval: a fixed or adaptive playback delay longer than the spacing
-  is what would absorb jitter, at the cost of latency. Not designed.
 - **Relevance** is `DEFAULT_RELEVANCE` for every update: `fit` takes a
   `Fn(system_id, entity_bits) -> NonZeroU32`, and `send_snapshot` passes the
   constant. A game's interest model (distance, view, ownership) is what would
