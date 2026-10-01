@@ -54,27 +54,35 @@ What it left:
 - **`move_lying` records nothing.** The slide records through the same loop for
   a lying body (`slide` takes the sink for both), but only the upright move
   exposes it. A `move_lying_into` is a few lines once a caller asks for it.
-- **A capsule hovering within the turned-box sweep's tolerance can hang on a
-  face it slides along** — found while fixing the corner hang (the slide now
-  keeps its plane set across an advance no longer than `MIN_MOVE`), not fixed.
-  The turned-box capsule sweep (`query::boxes::swept_capsule_vs_box`,
-  conservative advancement) reports a hit once the gap is within its tolerance
-  (a quarter of `LINEAR_SLOP`), and the slide only backs a capsule off to the
-  skin width when the sweep reports `started_inside`. A capsule that has crept
-  to within that tolerance of a 30°-turned box's face meets it at a fraction of
-  about 1e-15 every tick, with zero applied; the tangential remainder's sweep,
-  starting that close, meets the same face again at a fraction of 2/9, again
-  with zero applied, until `max_slides` runs out, and the character hangs in
-  mid-air. Seen in 20 of 4800 starts of a corner scan (axis wall filling
-  `x >= 5`, slab at (4.6, 0, -2) with half extents (0.25, 5, 1) turned 30°,
-  falling moves of (0.05, -0.01, -0.05) from a grid of starts at y = 2); before
-  the plane-set fix the same move hung 208 times. The likely cause of the second
-  hit is rounding in the advancement's closing speed for motion tangent to the
-  face; that is inferred from the contacts, not traced. The fix is either a
-  sweep that reports no closing hit for motion tangent within rounding, or a
-  slide that backs off any hit nearer than the skin width rather than only a
-  started-inside one; both change movement or query results, so it is its own
-  slice with the corner, crease and turned-box tests rerun.
+- **The slide owns the skin, not the sweep (decided 2026-10-01, long term).** It
+  backs off any hit nearer than `CharacterConfig::skin_width`, so every sweep
+  with a tolerance (conservative advancement, meshes, future shapes) is covered
+  rather than one patched. Why, from the turned-box hover hang it fixed, traced
+  rather than inferred: a move whose advancement step lands at `t >= 1` is no
+  hit, so a capsule closing on the slab by exactly its remaining gap ended a
+  tick about 1e-15 off the face, nearer than the skin, and stayed there because
+  only a `started_inside` hit was backed off. Sliding down the face it crept to
+  5.55e-17 by rounding. The remainder clipped against that face moves away from
+  it by 1.2e-17, but the world sweep rebuilds the motion as
+  `segment.end - segment.start`, which rounds its x by 3e-16 and makes a closing
+  speed of 2.5e-16; `advance` divides the gap by that and lands at exactly 2/9,
+  where the gap is still within tolerance. The sweep is therefore right within
+  rounding, not wrong, and was left alone. Backing off to a normal gap needed
+  the advance to keep the skin across the normal too
+  (`CharacterController::skin_short`, also used by `clear_travel`): with the old
+  skin along the move, a capsule in the crease bounced between the walls, and
+  the step-up's advance offered a cornered character the difference as a step.
+- **Starts inside the corner's slab lose their fall while they dig out.** Seen
+  in the same scan's wider grids, not a hang: a capsule started overlapping the
+  slab where it meets the wall depenetrates over about five ticks, the slide is
+  blocked on each, and `MoveOutcome::motion.y` is zero until it is clear, after
+  which it falls as asked.
+  `no_start_falling_into_the_corner_hangs_on_the_turned_face` keeps its grid
+  clear of geometry for that reason. Not investigated further.
+- **No scan covers a lying body or a mesh against the slide change.** Only the
+  upright corner scan, the existing character, corner, crease, slide-contact,
+  lying and turned-box tests were run against the slide change; a scan of a
+  lying body along a turned box or a mesh is not written.
 
 **The candidate sweep shipped (2026-10-01)** as
 `PhysicsWorld::sweep_sphere_all(segment, radius, filter, &mut hits)` and

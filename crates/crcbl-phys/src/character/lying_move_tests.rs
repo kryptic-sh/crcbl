@@ -194,8 +194,11 @@ fn crawling_into_a_wall_at_an_angle_slides_along_it() {
     let asked = DVec3::new(0.1, 0.0, -0.1);
     let outcome = character.move_lying(&mut world, &body, asked);
     assert!(outcome.hit_wall, "the wall is 0.05 away");
+    // A skin short of the wall across its normal, less up to the sweep's
+    // tolerance short of touching.
+    let skin = prone_config().skin_width;
     assert!(
-        outcome.motion.x < 0.05 && outcome.motion.x > 0.05 - 2.0 * SWEEP_TOLERANCE,
+        outcome.motion.x <= 0.05 - skin + 1e-12 && outcome.motion.x > 0.05 - skin - SWEEP_TOLERANCE,
         "x moved {}",
         outcome.motion.x
     );

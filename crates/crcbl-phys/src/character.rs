@@ -195,9 +195,12 @@ pub struct CharacterConfig {
     pub step_offset: f64,
     /// The gap kept between the capsule and every surface it touches.
     ///
-    /// Every sweep stops this far short of its contact, so the next sweep
-    /// starts outside the surface instead of exactly on it, where a touching
-    /// start would be reported as an overlap. Unity's `CharacterController`
+    /// Every sweep of a move stops this far short of its contact, measured
+    /// along the surface's normal, and one that met a surface already nearer
+    /// than this backs off to it. The next sweep then starts outside the
+    /// surface instead of on it, where a touching start would be reported as
+    /// an overlap and a sweep with a tolerance can meet the surface again for
+    /// motion along it. Unity's `CharacterController`
     /// calls the same quantity `skinWidth`; Unreal spends it as
     /// `MAX_FLOOR_DIST`.
     pub skin_width: f64,
@@ -773,8 +776,26 @@ impl CharacterController {
                 stepped_up: false,
             };
 
-            let travel = (hit.t * distance - self.config.skin_width).clamp(0.0, distance);
-            if travel > 0.0 {
+            let wall = !self.is_ceiling(hit.normal) && !self.is_walkable(hit.normal);
+            let mut plane = hit.normal;
+            if wall && was_grounded && matches!(body, Body::Lying(_)) {
+                // Unreal's `SlideAlongSurface`: a grounded body is not pushed
+                // up a wall. A lying body meets the edge of a riser with its
+                // round end, whose normal leans up, and clipping against that,
+                // or backing off along it, lifts it a little every tick until
+                // it is on top; against the wall made upright, it stops. The
+                // upright capsule is not given the rule here: it steps up, and
+                // its sweep meets a box's edge square
+                // (`query::swept_capsule_vs_aabb`), not leaning.
+                let flat = (plane - UP * plane.dot(UP)).normalize_or_zero();
+                if flat != DVec3::ZERO {
+                    plane = flat;
+                }
+            }
+
+            let along = hit.t * distance;
+            if let Some(travel) = self.skin_short(along, direction, plane) {
+                let travel = travel.min(distance);
                 let step = direction * travel;
                 self.position += step;
                 remaining -= step;
@@ -789,22 +810,26 @@ impl CharacterController {
                     clip_from = remaining;
                     plane_count = 0;
                 }
-            } else if hit.started_inside {
-                // The sweep began *on* the surface rather than short of it, so
-                // clipping alone would leave the next sweep starting on it too
-                // and reporting the same contact for ever. A capsule set down
-                // exactly on the floor is the ordinary way to arrive here, and
-                // it must still be able to walk. Back off by the gap every
-                // other sweep already keeps.
-                let back_off = hit.normal * self.config.skin_width;
+            } else {
+                // The contact is no further than the skin width, so clipping
+                // alone would leave the next sweep starting that near too,
+                // and a sweep with a tolerance can meet the same surface
+                // again for motion along it: conservative advancement divides
+                // a gap of rounding size by a closing speed of rounding size,
+                // and a capsule hovering 1e-16 off a turned box hung in
+                // mid-air on it. A capsule set down exactly on the floor
+                // arrives here too, started inside, and must still be able to
+                // walk. Back off along the normal to the gap every other
+                // sweep keeps.
+                let approach = (along * -direction.dot(plane)).max(0.0);
+                let back_off = plane * (self.config.skin_width - approach);
                 self.position += back_off;
                 contact.applied = back_off;
             }
 
-            let mut plane = hit.normal;
             if self.is_ceiling(hit.normal) {
                 report.hit_ceiling = true;
-            } else if !self.is_walkable(hit.normal) {
+            } else if wall {
                 report.hit_wall = true;
                 if was_grounded
                     && !report.stepped_up
@@ -823,20 +848,6 @@ impl CharacterController {
                         ..contact
                     });
                     continue;
-                }
-                if was_grounded && matches!(body, Body::Lying(_)) {
-                    // Unreal's `SlideAlongSurface`: a grounded body is not
-                    // pushed up a wall. A lying body meets the edge of a riser
-                    // with its round end, whose normal leans up, and clipping
-                    // against that lifts it a little every tick until it is
-                    // on top; against the wall made upright, it stops. The
-                    // upright capsule is not given the rule here: it steps
-                    // up, and its sweep meets a box's edge square
-                    // (`query::swept_capsule_vs_aabb`), not leaning.
-                    let flat = (plane - UP * plane.dot(UP)).normalize_or_zero();
-                    if flat != DVec3::ZERO {
-                        plane = flat;
-                    }
                 }
             }
 
@@ -1000,8 +1011,9 @@ impl CharacterController {
 
     // ── Sweeping ───────────────────────────────────────────────────────
 
-    /// How far the capsule gets along `delta` before something stops it, less
-    /// a skin width, and never past `delta` itself.
+    /// How far the capsule gets along `delta` before something stops it, a
+    /// skin width short of it across its normal, and never past `delta`
+    /// itself: see [`skin_short`](Self::skin_short).
     fn clear_travel(&self, world: &mut PhysicsWorld, from: DVec3, delta: DVec3) -> f64 {
         let distance = delta.length();
         if distance <= MIN_MOVE {
@@ -1009,8 +1021,27 @@ impl CharacterController {
         }
         match self.sweep(world, from, from + delta) {
             None => distance,
-            Some((_, hit)) => (hit.t * distance - self.config.skin_width).clamp(0.0, distance),
+            Some((_, hit)) => self
+                .skin_short(hit.t * distance, delta / distance, hit.normal)
+                .map_or(0.0, |travel| travel.min(distance)),
         }
+    }
+
+    /// How far along `direction` the capsule can go toward a contact `along`
+    /// ahead of it, with surface normal `normal`, and stay a
+    /// [`skin_width`](CharacterConfig::skin_width) off the surface's plane:
+    /// `None` when it is already no further than that.
+    ///
+    /// The gap is measured along the normal, as a gap is. Measured along the
+    /// move instead, an oblique approach is left nearer than a skin; the
+    /// slide backs that off along the normal on its next sweep, and the two
+    /// then fight — a capsule in a crease bounced between its walls rather
+    /// than falling down it. The step-up's advance measures it the same way,
+    /// or a character the slide left a skin off both walls of a corner is
+    /// offered the diagonal between the two measures as a step.
+    fn skin_short(&self, along: f64, direction: DVec3, normal: DVec3) -> Option<f64> {
+        let closing = -direction.dot(normal);
+        (along * closing > self.config.skin_width).then(|| along - self.config.skin_width / closing)
     }
 
     /// Sweep `body` from the controller's position by `delta`: the slide's one

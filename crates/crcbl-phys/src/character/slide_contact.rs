@@ -47,11 +47,18 @@ use crate::world::ColliderId;
 ///
 /// # How the fields fit together
 ///
-/// For a sweep that approached its collider
-/// ([`started_inside`](Self::started_inside) false) and did not step up, the
-/// capsule stops a [`skin_width`] short of the contact:
-/// `applied = requested.normalize() * max(fraction * |requested| - skin_width, 0)`.
-/// The next contact's `requested` is this one's `remaining`, exactly.
+/// The capsule keeps a [`skin_width`] off the surface it met, measured along
+/// [`normal`](Self::normal). With `direction = requested.normalize()`,
+/// `along = fraction * |requested|` and `closing = -direction · normal`, a
+/// sweep that did not step up and touched from further than that
+/// (`along * closing > skin_width`) stops a skin width short across the
+/// normal: `applied = direction * (along - skin_width / closing)`. One that
+/// touched from no further — [`started_inside`](Self::started_inside), or
+/// already that near — backs off along the normal instead:
+/// `applied = normal * (skin_width - max(along * closing, 0))`. A grounded
+/// lying body measures both against a wall's normal made level, the plane its
+/// slide clips against, rather than the leaning one recorded here. The next
+/// contact's `requested` is this one's `remaining`, exactly.
 ///
 /// [`move_and_slide_into`]: super::CharacterController::move_and_slide_into
 /// [`MoveOutcome::slides`]: super::MoveOutcome::slides
@@ -85,14 +92,15 @@ pub struct SlideContact {
     /// instead of advancing it.
     pub started_inside: bool,
     /// How far this sweep moved the capsule: the advance to a skin width short
-    /// of the contact, or the skin-width back-off of one that started inside,
-    /// and the whole step when [`stepped_up`](Self::stepped_up) is set.
+    /// of the contact, or the back-off to a skin width of one that touched
+    /// nearer than that, and the whole step when
+    /// [`stepped_up`](Self::stepped_up) is set.
     pub applied: DVec3,
     /// What the slide carried past this contact: the part of
     /// [`requested`](Self::requested) the advance did not cover, clipped
     /// against every plane the move has collected — or less the step's
-    /// horizontal advance instead, when it stepped up. A skin-width back-off
-    /// off a surface it started on is not taken out of it.
+    /// horizontal advance instead, when it stepped up. A back-off off a
+    /// surface it touched nearer than a skin width is not taken out of it.
     ///
     /// Zero when this contact stopped the move dead: a corner with no crease
     /// to run along, a clip that turned the motion against the direction the

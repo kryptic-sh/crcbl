@@ -56,13 +56,20 @@ fn recorded(
 }
 
 /// The relations [`SlideContact`] documents, for a contact the capsule
-/// approached: it stops a skin width short of where the sweep touched.
+/// approached from further than a skin width: it stops a skin width short of
+/// the surface it touched, measured along the surface's normal.
 fn assert_stops_a_skin_short(contact: &SlideContact, config: &CharacterConfig) {
     assert!(!contact.started_inside && !contact.stepped_up);
     assert!((0.0..=1.0).contains(&contact.fraction));
     let distance = contact.requested.length();
-    let travel = (contact.fraction * distance - config.skin_width).max(0.0);
-    let expected = contact.requested / distance * travel;
+    let direction = contact.requested / distance;
+    let along = contact.fraction * distance;
+    let closing = -direction.dot(contact.normal);
+    assert!(
+        along * closing > config.skin_width,
+        "approached from no further than a skin: {contact:?}"
+    );
+    let expected = direction * (along - config.skin_width / closing);
     assert!(
         (contact.applied - expected).length() < EXACT,
         "applied {:?}, expected {expected:?} from fraction {}",

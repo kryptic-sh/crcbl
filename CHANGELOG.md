@@ -3884,6 +3884,22 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   so the crease between the two walls survives; reproduced with an axis wall and
   a 30°-turned box. Moves that cover real ground are unchanged.
 
+- **A character sliding down a turned box's face no longer hangs in mid-air.** A
+  move ending just short of a turned box (whose capsule sweep is conservative
+  advancement, with a tolerance) left the capsule nearer than the skin width,
+  and the slide backed a capsule off only when its sweep started inside. Sliding
+  down the face it crept to about 5e-17 off it, and then the remainder clipped
+  to run along the face met it again — the rounding in the sweep segment's
+  `end - start` is a closing speed against a gap that small — so every sweep of
+  every tick applied nothing. `CharacterController::move_and_slide` and
+  `move_lying` now back off every hit nearer than `CharacterConfig::skin_width`,
+  and measure the skin across the surface's normal rather than along the move,
+  for the slide's advance and the step-up's rise and advance alike. **Movement
+  changes:** an oblique approach now stops a skin off the surface it meets
+  instead of a skin back along the move, so `SlideContact::applied` for one is
+  `direction * (along - skin_width / closing)` as its docs now give; a head-on
+  approach is unchanged.
+
 - Sphere and capsule sweeps against boxes retain contact times for tiny nonzero
   motion instead of treating it as stationary. Stationary sphere/box overlap
   checks avoid squared-distance underflow and overflow at extreme scales.
