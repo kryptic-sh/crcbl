@@ -27,7 +27,7 @@
 
 use crcbl::math::DVec3;
 
-use crate::map::{HALF_DEPTH, HALF_WIDTH, LANE_WIDTH, MAX_WAYPOINTS, MapError};
+use crate::map::{HALF_DEPTH, HALF_WIDTH, LANE_WIDTH, MAX_WAYPOINTS, MapError, footing};
 
 /// The waypoints a creep walks, spawn first and exit last, checked.
 ///
@@ -47,9 +47,9 @@ impl Path {
     /// # Errors
     ///
     /// [`MapError`], naming the waypoint or the leg it is about: fewer than two
-    /// waypoints or more than [`MAX_WAYPOINTS`], a waypoint off the ground or
-    /// off the field, and a leg that is diagonal or shorter than the lane is
-    /// wide.
+    /// waypoints or more than [`MAX_WAYPOINTS`], a waypoint [`footing`] refuses
+    /// (not a finite number, or off the ground) or off the field, and a leg
+    /// that is diagonal or shorter than the lane is wide.
     pub fn new(waypoints: Vec<DVec3>) -> Result<Self, MapError> {
         if waypoints.len() < 2 {
             return Err(MapError::TooFewWaypoints {
@@ -63,15 +63,7 @@ impl Path {
         }
         for (index, point) in waypoints.iter().enumerate() {
             let what = || format!("waypoint {index}");
-            // The ground's top is `y = 0` and the lane is drawn there, so a
-            // waypoint above or below it is a creep walking on air or in the
-            // slab beside a lane that says otherwise.
-            if point.y != 0.0 {
-                return Err(MapError::OffTheGround {
-                    what: what(),
-                    y: point.y,
-                });
-            }
+            footing(*point).map_err(|fault| fault.refusal(what()))?;
             if point.x.abs() + 0.5 * LANE_WIDTH > HALF_WIDTH
                 || point.z.abs() + 0.5 * LANE_WIDTH > HALF_DEPTH
             {

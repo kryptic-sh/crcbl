@@ -380,6 +380,64 @@ mod tests {
         assert!(document.problems().expect("the field saves").is_empty());
     }
 
+    /// **A towers row that breaks a rule of its own is refused at the edit**,
+    /// naming the field, and put back — a plot or a corner lifted off the
+    /// ground, a label past `MAX_LABEL_BYTES` — rather than taken and reported at the save, as
+    /// they were while towers ran them only as its scene check. And the save
+    /// reports nothing for a field a refused edit left alone.
+    #[test]
+    fn a_towers_row_that_breaks_its_own_rule_is_refused_at_the_edit() {
+        use crcbl::scene::scn::SceneEntityId;
+
+        use crate::command::EditCommand;
+        use crate::document::EditError;
+
+        let mut document = crate::Document::open(
+            &crcbl_towers::built_in_source(),
+            std::path::Path::new(crcbl_towers::FIELD),
+            vocabulary(),
+        )
+        .expect("the shipped vocabulary opens towers' field");
+        let saved = document.files().expect("the field saves");
+        // Waypoint 1 is the first corner, plot 4 is "entry".
+        let (corner, entry) = (SceneEntityId(1), SceneEntityId(4));
+        let long = "m".repeat(crcbl_towers::map::MAX_LABEL_BYTES + 1);
+        for (entity, system, path, value) in [
+            (entry, "plots", "position.1", Value::Float(0.5)),
+            (entry, "plots", "label", Value::Text(long)),
+            (corner, "waypoints", "position.1", Value::Float(-0.5)),
+        ] {
+            let error = document
+                .apply(EditCommand::SetProperty {
+                    entity,
+                    system: system.to_owned(),
+                    path: path.to_owned(),
+                    value,
+                })
+                .expect_err("towers refuses that row");
+            assert!(
+                matches!(&error, EditError::Invalid { entity: whose, system: which, error }
+                    if *whose == entity && which == system && error.field == path),
+                "{path}: {error}",
+            );
+            assert_eq!(document.files().expect("the field saves"), saved);
+        }
+        assert!(document.problems().expect("the field saves").is_empty());
+
+        // Written past the edit check, the same lifted plot is reported once,
+        // by its chunk's line — not a second time by towers' scene check,
+        // which reads the same chunk through the same rule.
+        let plot = document.component(entry, "plots").expect("a plot");
+        crcbl::reflect::set_path(plot, "position.1", &Value::Float(0.5)).expect("a plot's y");
+        let problems = document.problems().expect("the field saves");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(
+            problems[0].starts_with("`sys/plots.ron` line ")
+                && problems[0].contains("`position.1`"),
+            "{problems:?}"
+        );
+    }
+
     /// **Towers' check is towers' alone**: a scene with none of its systems —
     /// the editor's own greybox — is held to no rule of its.
     #[test]

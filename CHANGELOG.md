@@ -3950,6 +3950,25 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Fixed
 
+- **The samples' scene components refuse the values their games cannot build**,
+  through `crcbl::registry::Validate`: on load by file, line and field, and at
+  the editor's edit, put back with the field named. Breakout's `Brick` and
+  puppet's `Surface` refuse a negative or non-finite size (a brick's
+  `half_extents`, a platform's `width`, `depth` and `height`, a dome's `radius`)
+  and a non-finite position or tint; before, a negative one panicked
+  `BoxCollider::new` (or `Sphere::new`) in the game's colliders and in the
+  editor's picking collider after the edit. Puppet's `Spawn` refuses a
+  non-finite position or facing, and its `Sun` an `elevation` outside `-1..=1`,
+  a `period` of zero or less and any non-finite number, each of which turned
+  `Map::sun`'s light to `NaN`. Towers' `Waypoint` and `Plot` refuse a position
+  off the ground or not finite, and `Plot` a label past `MAX_LABEL_BYTES`, as
+  their row rule — the same `towers::map::footing` and `check_label` functions
+  `Map::new` and `Path::new` now call — rather than only at the save; a
+  non-finite coordinate, which `Map::new` let past its ground and field-edge
+  rules, is the new `MapError::NotFinite`. `MapError::OffTheGround`'s message
+  now names the field, `position.1`. Every committed scene still loads and
+  round-trips unchanged.
+
 - **A character falling into a corner no longer hangs in mid-air.**
   `CharacterController::move_and_slide` (and `move_lying`, which shares the
   slide) dropped the planes it had collected after any advance at all, so a

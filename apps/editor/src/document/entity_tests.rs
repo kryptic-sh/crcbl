@@ -530,11 +530,14 @@ impl Ran {
 }
 
 /// The leaf a nudge of `target` moves, from the draw `value`: its placing
-/// component's position, or for an entity nothing places a float of a
-/// component it holds — a sun's period, else a body's friction.
+/// component's position across the ground — `X` or `Z`, never the height,
+/// which towers' row rules hold its plots and corners to — or for an entity
+/// nothing places a float of a component it holds: a sun's period, else a
+/// body's friction.
 fn nudged_leaf(document: &mut Document, target: SceneEntityId, value: u64) -> (String, String) {
     if let Some(system) = document.placing_system(target) {
-        return (system, format!("position.{}", value % 3));
+        let axis = if value.is_multiple_of(2) { 0 } else { 2 };
+        return (system, format!("position.{axis}"));
     }
     if document
         .systems_of(target)

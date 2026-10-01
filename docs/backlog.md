@@ -11974,22 +11974,29 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
   (`Registry::problems` reading the chunks back); `08-editor.md`'s _Editor
   follow-ups, 2026-10-02_ has the design. Each item below was checked against
   the tree the day it landed:
-  - **Towers' and puppet's per-row rules are still their loaders'.** Towers'
-    `Map::load` refuses a waypoint or plot off the ground (`OffTheGround`) and a
-    plot label too long (`LabelTooLong`) — rules about one row — but runs them
-    as the scene check, at the save, with the whole-scene ones; their `Validate`
-    impls are empty. Moving them onto `Waypoint`'s and `Plot`'s `Validate` would
-    refuse them at the edit and on load with the line; it changes towers'
-    `MapError` reporting, so it is the game's slice. Puppet's `Map::load`
-    refuses nothing per row (read, not run).
-  - **A negative half extent on breakout's `Brick` or puppet's `Surface` would
-    trip `BoxCollider::new`'s debug assertion in the editor's picking
-    collider**, as it did for the editor's `Block` until `Block`'s rule refused
-    it. Observed for `Block` (a test panicked in
-    `crates/crcbl-phys/src/collider.rs`); for `Brick` and `Surface` it is read
-    from their placements, not run. The widgets clamp at their `min`, so a field
-    paste is the path. Either a rule on each, or `sync_colliders` refusing a
-    degenerate box generically, would close it.
+  - **Towers' `OffTheField` is a rule about one row and stays the scene
+    check's.** It needs no other row (the field's half extents and the lane's or
+    pad's width are constants), so it could join `footing` in `Waypoint`'s and
+    `Plot`'s `Validate`; it was left out because a per-edit refusal would refuse
+    every frame of a gizmo drag that passes the field's edge on its way
+    somewhere legal, which is a UX call rather than a correctness one. Moving it
+    is a line in `towers::map::footing`'s callers and one more case in
+    `the_row_rules_and_map_new_give_the_same_verdict`.
+  - **No generic guard in the editor's `sync_colliders`.** Every shipped placing
+    component now refuses a negative extent by its own rule, but a component
+    registered later with no rule and a `Placement` that can go negative would
+    still panic `BoxCollider::new`'s debug assertion in the picking collider
+    after an edit. Refusing a degenerate box there (no collider, so not
+    pickable) would close it for every component; not built.
+  - **A non-finite value never reaches a rule from an edit**:
+    `crcbl::reflect::set_path` refuses `NaN` and infinities itself (observed:
+    `EditError::Path(Set(NotFinite))` for a brick's `position.0`, a spawn's
+    `facing` and a surface's `position.1`), so the samples' finite-number rules
+    are reached only by a file — the load tests are what hold them.
+  - **Puppet's `Sun` takes a negative `intensity`**, and no rule refuses it: the
+    colour is multiplied by it and nothing in `Map::sun` breaks, so it is not a
+    value the sample cannot use. A label of any length or charset is likewise
+    taken by puppet's `Surface` (the renderer names a mesh by it).
   - **A component already failing its rule refuses every write that leaves it
     failing**, a write to another field included, until a write puts the failing
     field right — the check is the component's, not the write's. Only a value

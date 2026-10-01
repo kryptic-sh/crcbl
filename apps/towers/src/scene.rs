@@ -56,11 +56,14 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
-use crcbl::scene::scn::{IdMap, Scene};
+use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Validate};
+use crcbl::scene::scn::{IdMap, Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 
-use crate::map::{LANE_HEIGHT, LANE_WIDTH, Map, MapError, PAD_EDGE, PAD_HEIGHT};
+use crate::map::{
+    LANE_HEIGHT, LANE_WIDTH, MAX_LABEL_BYTES, Map, MapError, PAD_EDGE, PAD_HEIGHT, check_label,
+    footing,
+};
 
 /// The system every corner of the path is a row of: the manifest entry, the
 /// chunk file's stem, and the name [`Waypoint`]'s codec is registered under.
@@ -139,9 +142,16 @@ impl Placement for Waypoint {
     }
 }
 
-/// No rule of its own yet: every rule of the field, the per-row ones
-/// included, is [`Map::load`]'s, run as this game's scene check.
-impl Validate for Waypoint {}
+/// **Where it stands, alone**: [`footing`] — every coordinate finite, and on
+/// the ground — the rule [`Map::new`] holds every corner to as well. The
+/// rules about the path, its legs and its order need the other corners, and
+/// stay [`Map::load`]'s, run as this game's scene check.
+impl Validate for Waypoint {
+    fn validate(&self) -> Result<(), FieldError> {
+        footing(DVec3::from_array(self.position))
+            .map_err(|fault| FieldError::new(fault.field(), fault.refusal("a waypoint".to_owned())))
+    }
+}
 
 /// One place a tower can be built.
 ///
@@ -192,9 +202,29 @@ impl Placement for Plot {
     }
 }
 
-/// No rule of its own yet: every rule of the field, the per-row ones
-/// included, is [`Map::load`]'s, run as this game's scene check.
-impl Validate for Plot {}
+/// **Its label and where it stands, alone**: [`check_label`], then
+/// [`footing`] — the rules [`Map::new`] holds every plot to as well, in that
+/// order. The field's edge, the lane's clearance and the towers' reach stay
+/// [`Map::load`]'s, run as this game's scene check, with the rules that need
+/// the other rows.
+impl Validate for Plot {
+    fn validate(&self) -> Result<(), FieldError> {
+        check_label(&self.label).map_err(|length| {
+            FieldError::new(
+                "label",
+                format_args!(
+                    "a plot's `label` is {length} bytes, past the {MAX_LABEL_BYTES} a label may hold"
+                ),
+            )
+        })?;
+        footing(self.at()).map_err(|fault| {
+            FieldError::new(
+                fault.field(),
+                fault.refusal(format!("plot {:?}", self.label)),
+            )
+        })
+    }
+}
 
 /// This game's scene vocabulary: two components, under the names their chunk
 /// files are spelled with, the rule a scene holding them is held to, and the
@@ -230,10 +260,24 @@ const GROUP: &str = "towers";
 /// [`Map::load`] would take it — the check an editor saving this game's field
 /// runs, so a diagonal leg or a plot on the lane is reported where it was made
 /// rather than at the next `--scene`.
+///
+/// A chunk that would not read is not this check's to report: the registry
+/// reads every listed chunk back through the same codec, and the same row
+/// rules, before it runs a check, and says so by the line — repeating it here
+/// would list one fault twice.
 fn check_field(source: &dyn AssetSource, dir: &Path) -> Result<(), String> {
-    Map::load(source, dir)
-        .map(drop)
-        .map_err(|error| error.to_string())
+    match Map::load(source, dir) {
+        Ok(_) => Ok(()),
+        Err(MapError::Scene(ScnError::Parse { key, .. })) if is_chunk(&key) => Ok(()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+/// Whether `key` is one of this game's chunk files under any scene directory.
+fn is_chunk(key: &str) -> bool {
+    [WAYPOINTS, PLOTS]
+        .iter()
+        .any(|system| Path::new(key).ends_with(format!("sys/{system}.ron")))
 }
 
 impl Map {
@@ -651,6 +695,80 @@ mod tests {
         assert!(message.starts_with(path), "{message}");
         assert!(message.contains("leg 0"), "{message}");
         assert!(message.contains("neither X nor Z"), "{message}");
+    }
+
+    /// **A waypoint or a plot that breaks a rule of its own row is refused on
+    /// load by the chunk's file, the row's line and the field** — as the chunk
+    /// is read, by the row's [`Validate`], rather than by [`Map::new`] after
+    /// the whole field is in. A coordinate that is not a number is one of
+    /// them: every comparison `Map::new` makes is false for a `NaN`, so before
+    /// the row rule one passed the ground and field-edge rules and was refused,
+    /// if at all, as a plot out of reach of the lane.
+    #[test]
+    fn a_row_that_breaks_its_own_rule_is_refused_on_load_by_line_and_field() {
+        let long = "m".repeat(crate::map::MAX_LABEL_BYTES + 1);
+        let plot = |label: &str, position: &str| {
+            format!(
+                "Chunk(system: \"plots\", entities: [
+                 (4, Plot(label: \"{label}\", position: {position})),
+                 ])"
+            )
+        };
+        let waypoints = |spawn: &str| {
+            format!(
+                "Chunk(system: \"waypoints\", entities: [
+                 (0, Waypoint(order: 0, position: {spawn})),
+                 (1, Waypoint(order: 1, position: (8.0, 0.0, 8.0))),
+                 ])"
+            )
+        };
+        let committed = FIELD_WAYPOINTS_RON.to_owned();
+        for (name, waypoints, plots, key, field) in [
+            (
+                "raised-plot",
+                committed.clone(),
+                plot("entry", "(-6.0, 1.0, 3.0)"),
+                "sys/plots.ron",
+                "position.1",
+            ),
+            (
+                "nan-plot",
+                committed.clone(),
+                plot("entry", "(NaN, 0.0, 3.0)"),
+                "sys/plots.ron",
+                "position.0",
+            ),
+            (
+                "long-label",
+                committed,
+                plot(&long, "(-6.0, 0.0, 3.0)"),
+                "sys/plots.ron",
+                "label",
+            ),
+            (
+                "sunk-waypoint",
+                waypoints("(-14.0, -0.5, 8.0)"),
+                FIELD_PLOTS_RON.to_owned(),
+                "sys/waypoints.ron",
+                "position.1",
+            ),
+            (
+                "nan-waypoint",
+                waypoints("(NaN, 0.0, 8.0)"),
+                FIELD_PLOTS_RON.to_owned(),
+                "sys/waypoints.ron",
+                "position.0",
+            ),
+        ] {
+            let dir = scene_dir(name, &waypoints, &plots);
+            let error = Map::load(&DirSource::at(dir), Path::new(""))
+                .expect_err("a row that breaks its own rule is not a map");
+            assert!(
+                matches!(&error, MapError::Scene(ScnError::Parse { key: which, line: 2, message, .. })
+                    if which == key && message.contains(&format!("`{field}`"))),
+                "{name}: {error}",
+            );
+        }
     }
 
     /// **A manifest that leaves out a chunk is refused by the chunk**, rather

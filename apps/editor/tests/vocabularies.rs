@@ -387,3 +387,102 @@ fn a_spawn_points_bounds_are_the_character_it_will_hold() {
         "{half:?}",
     );
 }
+
+/// `value` written into `entity`'s `system` row at `path`, as the inspector's
+/// write and a field paste both reach it.
+fn set(entity: SceneEntityId, system: &str, path: &str, value: f64) -> EditCommand {
+    EditCommand::SetProperty {
+        entity,
+        system: system.to_owned(),
+        path: path.to_owned(),
+        value: Value::Float(value),
+    }
+}
+
+/// Asserts each of `refused` written at `path` is refused naming that field,
+/// and put back: the files are what they were and nothing is recorded.
+fn assert_refused(
+    document: &mut Document,
+    (entity, system, path): (SceneEntityId, &str, &str),
+    refused: &[f64],
+) {
+    let saved = document.files().expect("the scene saves");
+    let logged = document.log().len();
+    for &value in refused {
+        let error = document
+            .apply(set(entity, system, path, value))
+            .expect_err("the game refuses that value");
+        assert!(
+            matches!(&error, EditError::Invalid { entity: whose, system: which, error }
+                if *whose == entity && which == system && error.field == path),
+            "{path} = {value}: {error}",
+        );
+        assert_eq!(
+            document.files().expect("the scene saves"),
+            saved,
+            "{path} = {value} was not put back",
+        );
+        assert_eq!(
+            document.log().len(),
+            logged,
+            "{path} = {value} was recorded"
+        );
+    }
+}
+
+/// **A brick's half extent below zero is refused at the edit**, naming the
+/// axis, and put back — a box collider refuses a negative one, and both the
+/// game and the editor's picking collider are built from it; before the rule
+/// the write panicked in `BoxCollider::new`. Zero is taken: a flat brick is
+/// still a box. (A value that is not a number never reaches the rule from an
+/// edit — the reflected write refuses it first — so the file is its door,
+/// which `crcbl_breakout`'s own tests hold.)
+#[test]
+fn a_bricks_half_extent_below_zero_is_refused_at_the_edit() {
+    let mut document = breakout_document();
+    let brick = SceneEntityId(0);
+    for axis in 0..3 {
+        let path = format!("half_extents.{axis}");
+        assert_refused(&mut document, (brick, "bricks", &path), &[-1.0, -0.001]);
+    }
+    document
+        .apply(set(brick, "bricks", "half_extents.1", 0.0))
+        .expect("a flat brick is a box");
+}
+
+/// **A surface's size below zero is refused at the edit**, naming the field
+/// inside the shape: a platform's width, depth and height are its box
+/// collider's half extents doubled, and a dome's radius is both its sphere
+/// collider's and the half extent of the box the editor picks it by — each
+/// of which panicked in the collider before the rule. Zero is taken.
+#[test]
+fn a_surfaces_size_below_zero_is_refused_at_the_edit() {
+    let mut document = puppet_document();
+    // Row 1 is the low step, a platform; row 3 the gentle mound, a dome.
+    let (step, mound) = (SceneEntityId(1), SceneEntityId(3));
+    for field in ["shape.width", "shape.depth", "shape.height"] {
+        assert_refused(&mut document, (step, "surfaces", field), &[-1.0]);
+    }
+    assert_refused(&mut document, (mound, "surfaces", "shape.radius"), &[-1.0]);
+    document
+        .apply(set(step, "surfaces", "shape.height", 0.0))
+        .expect("a platform of no height is a box");
+    document
+        .apply(set(mound, "surfaces", "shape.radius", 0.0))
+        .expect("a sphere of no radius is a sphere");
+}
+
+/// **A sun that lights nothing is refused at the edit**: its elevation is the
+/// `+Y` of a unit vector, whose horizontal part is `sqrt(1 - elevation²)`,
+/// and its period divides the clock, so an elevation past one or a period of
+/// zero or less turns the light's direction to `NaN`.
+#[test]
+fn a_sun_the_sample_cannot_light_with_is_refused_at_the_edit() {
+    let mut document = puppet_document();
+    let sun = SceneEntityId(6);
+    assert_refused(&mut document, (sun, "sun", "elevation"), &[1.5, -1.5]);
+    assert_refused(&mut document, (sun, "sun", "period"), &[0.0, -45.0]);
+    document
+        .apply(set(sun, "sun", "elevation", 1.0))
+        .expect("a sun straight overhead is a sun");
+}

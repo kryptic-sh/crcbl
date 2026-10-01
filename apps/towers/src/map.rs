@@ -142,12 +142,17 @@ impl Map {
     ///
     /// [`MapError`], naming the waypoint, the leg or the plot it is about —
     /// [`Path::new`] says what the path is refused for. A plot is refused when
-    /// there are none or more than [`MAX_PLOTS`], when it is off the ground or
-    /// off the field, when it stands within [`PLOT_CLEARANCE`] of the lane, and
+    /// there are none or more than [`MAX_PLOTS`], when [`footing`] refuses it
+    /// (not a finite number, or off the ground) or it is off the field, when it stands within [`PLOT_CLEARANCE`] of the lane, and
     /// when the lane is out of [`SHORTEST_RANGE_M`] of it: the build list offers
     /// every kind on every plot, so a plot the shortest-reaching kind cannot
-    /// cover from is one that kind may not be built on — and when its label
-    /// is longer than [`MAX_LABEL_BYTES`].
+    /// cover from is one that kind may not be built on — and when
+    /// [`check_label`] refuses its label.
+    ///
+    /// [`footing`] and [`check_label`] are also the plots' and waypoints' own
+    /// row rules (their `Validate`), so a map built here without a scene —
+    /// from the wire, or by a test — is held to the same per-row rules a load
+    /// and an editor's edit are.
     pub fn new(waypoints: Vec<DVec3>, plots: Vec<Plot>) -> Result<Self, MapError> {
         let path = Path::new(waypoints)?;
         if plots.is_empty() {
@@ -157,23 +162,13 @@ impl Map {
             return Err(MapError::TooManyPlots { found: plots.len() });
         }
         for (index, plot) in plots.iter().enumerate() {
-            if plot.label.len() > MAX_LABEL_BYTES {
-                return Err(MapError::LabelTooLong {
-                    plot: index,
-                    length: plot.label.len(),
-                });
-            }
-            let feet = DVec3::from_array(plot.position);
+            check_label(&plot.label).map_err(|length| MapError::LabelTooLong {
+                plot: index,
+                length,
+            })?;
+            let feet = plot.at();
             let what = || format!("plot {:?}", plot.label);
-            // The pad is drawn on the ground and a tower stands on the pad, so a
-            // plot above or below it is a tower whose feet are not where its
-            // pad is.
-            if feet.y != 0.0 {
-                return Err(MapError::OffTheGround {
-                    what: what(),
-                    y: feet.y,
-                });
-            }
+            footing(feet).map_err(|fault| fault.refusal(what()))?;
             if feet.x.abs() + 0.5 * PAD_EDGE > HALF_WIDTH
                 || feet.z.abs() + 0.5 * PAD_EDGE > HALF_DEPTH
             {
@@ -246,6 +241,15 @@ pub enum MapError {
         /// Where it stands instead.
         y: f64,
     },
+    /// A waypoint's or a plot's coordinate is not a finite number.
+    NotFinite {
+        /// Which one, spelled as [`MapError::OffTheGround`] spells it.
+        what: String,
+        /// Which coordinate, `0` for `X`.
+        axis: usize,
+        /// What it is instead.
+        value: f64,
+    },
     /// A waypoint's lane, or a plot's pad, reaches past the field's edge.
     OffTheField {
         /// Which one, spelled as [`MapError::OffTheGround`] spells it.
@@ -296,6 +300,84 @@ pub enum MapError {
     },
 }
 
+/// What a waypoint or a plot breaks by where it stands alone, needing no
+/// other row: the half of the field's rules a tool runs on every edit, as
+/// `crate::scene`'s `Validate` impls, and [`Path::new`] and [`Map::new`] run
+/// on every map — one rule, [`footing`], at both.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Footing {
+    /// A coordinate that is not a finite number: every comparison the field's
+    /// other rules make is false for a `NaN`, so it is refused before them.
+    NotFinite {
+        /// Which coordinate, `0` for `X`.
+        axis: usize,
+        /// What it is instead.
+        value: f64,
+    },
+    /// Not on the ground's top, `y = 0`.
+    OffTheGround {
+        /// Where it stands instead.
+        y: f64,
+    },
+}
+
+impl Footing {
+    /// The field of the row it is about, as a property write names it.
+    #[must_use]
+    pub fn field(&self) -> String {
+        match self {
+            Self::NotFinite { axis, .. } => format!("position.{axis}"),
+            Self::OffTheGround { .. } => "position.1".to_owned(),
+        }
+    }
+
+    /// This fault as [`Map::new`] refuses it, `what` naming the row: `waypoint
+    /// 2`, `plot "gate"`.
+    #[must_use]
+    pub fn refusal(self, what: String) -> MapError {
+        match self {
+            Self::NotFinite { axis, value } => MapError::NotFinite { what, axis, value },
+            Self::OffTheGround { y } => MapError::OffTheGround { what, y },
+        }
+    }
+}
+
+/// The rule over where one waypoint or plot stands, alone: every coordinate
+/// finite, and on the ground.
+///
+/// # Errors
+///
+/// The first [`Footing`] fault, coordinates checked before the ground.
+pub fn footing(position: DVec3) -> Result<(), Footing> {
+    for (axis, value) in position.to_array().into_iter().enumerate() {
+        if !value.is_finite() {
+            return Err(Footing::NotFinite { axis, value });
+        }
+    }
+    // The ground's top is `y = 0` and everything is drawn there: a pad above
+    // or below it is a tower whose feet are not where its pad is, and a
+    // waypoint off it a creep walking on air beside a lane that says
+    // otherwise.
+    if position.y != 0.0 {
+        return Err(Footing::OffTheGround { y: position.y });
+    }
+    Ok(())
+}
+
+/// The rule over one plot's label, alone: no longer than
+/// [`MAX_LABEL_BYTES`].
+///
+/// # Errors
+///
+/// The label's length in bytes, when it is past the cap.
+pub fn check_label(label: &str) -> Result<(), usize> {
+    if label.len() > MAX_LABEL_BYTES {
+        Err(label.len())
+    } else {
+        Ok(())
+    }
+}
+
 impl std::fmt::Display for MapError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -319,8 +401,12 @@ impl std::fmt::Display for MapError {
             ),
             Self::OffTheGround { what, y } => write!(
                 f,
-                "{what} stands at y = {y}, and everything on the field stands on the ground at \
-                 y = 0"
+                "{what}'s `position.1` is {y}, and everything on the field stands on the ground \
+                 at y = 0"
+            ),
+            Self::NotFinite { what, axis, value } => write!(
+                f,
+                "{what}'s `position.{axis}` is {value}, not a finite number"
             ),
             Self::OffTheField { what } => write!(f, "{what} reaches past the edge of the field"),
             Self::ShortLeg { leg, length } => write!(
@@ -1586,6 +1672,96 @@ mod tests {
             refused(waypoints, far),
             MapError::OutOfReach { plot, distance } if plot == "gate" && distance >= SHORTEST_RANGE_M
         ));
+    }
+
+    /// The field a per-row refusal of [`Map::new`]'s is about, as the row's
+    /// own rule names it — or [`None`] for a map it builds, and for one it
+    /// refuses by a rule that needs another row.
+    fn row_fault(map: Result<Map, MapError>) -> Option<String> {
+        match map {
+            Err(MapError::OffTheGround { .. }) => Some("position.1".to_owned()),
+            Err(MapError::NotFinite { axis, .. }) => Some(format!("position.{axis}")),
+            Err(MapError::LabelTooLong { .. }) => Some("label".to_owned()),
+            _ => None,
+        }
+    }
+
+    /// **The row rules and [`Map::new`] give the same verdict**: each plot and
+    /// each corner below, put into the committed layout, is refused by
+    /// `Map::new` for a rule of its own row exactly when its own
+    /// [`Validate`](crcbl::registry::Validate) refuses it, and for the same
+    /// field — so a map built without a scene, from the wire or a test, is
+    /// held to what a load and an edit are. Rules that need another row (the
+    /// lane's clearance here) are `Map::new`'s alone.
+    #[test]
+    fn the_row_rules_and_map_new_give_the_same_verdict() {
+        use crcbl::registry::Validate;
+
+        use crate::scene::Waypoint;
+
+        let (waypoints, plots) = layout();
+        let entry = plots[0].clone();
+        let moved = |at: [f64; 3]| Plot {
+            position: at,
+            ..entry.clone()
+        };
+        let named = |label: String| Plot {
+            label,
+            ..entry.clone()
+        };
+        let [x, _, z] = entry.position;
+        let mut tall_and_raised = named("m".repeat(MAX_LABEL_BYTES + 1));
+        tall_and_raised.position[1] = 0.25;
+        let candidates = [
+            entry.clone(),
+            moved([x, 0.25, z]),
+            moved([x, -0.0, z]),
+            moved([x, f64::NAN, z]),
+            moved([f64::NAN, 0.0, z]),
+            moved([x, 0.0, f64::INFINITY]),
+            moved([0.0, 0.0, waypoints[0].z]),
+            named("m".repeat(MAX_LABEL_BYTES)),
+            named("m".repeat(MAX_LABEL_BYTES + 1)),
+            tall_and_raised,
+        ];
+        let mut refusals = 0;
+        for plot in candidates {
+            let mut layout = plots.clone();
+            layout[0] = plot.clone();
+            let whole = row_fault(Map::new(waypoints.clone(), layout));
+            refusals += usize::from(whole.is_some());
+            assert_eq!(
+                plot.validate().err().map(|error| error.field),
+                whole,
+                "{plot:?}"
+            );
+        }
+
+        let spawn = waypoints[0];
+        for at in [
+            spawn,
+            DVec3::new(spawn.x, 0.5, spawn.z),
+            DVec3::new(spawn.x, -0.0, spawn.z),
+            DVec3::new(f64::NAN, 0.0, spawn.z),
+            DVec3::new(spawn.x, 0.0, f64::NEG_INFINITY),
+        ] {
+            let mut path = waypoints.clone();
+            path[0] = at;
+            let whole = row_fault(Map::new(path, plots.clone()));
+            refusals += usize::from(whole.is_some());
+            let waypoint = Waypoint {
+                order: 0,
+                position: at.to_array(),
+            };
+            assert_eq!(
+                waypoint.validate().err().map(|error| error.field),
+                whole,
+                "{at:?}"
+            );
+        }
+        // The cases above that a row rule refuses, so a rule that refused
+        // nothing on either side could not agree its way through.
+        assert_eq!(refusals, 9);
     }
 
     /// **The clearance a plot is held to is an upgraded tower's**, so every

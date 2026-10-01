@@ -50,7 +50,7 @@ use crcbl::assets::{AssetSource, DirSource, MemorySource};
 use crcbl::ecs::{ComponentHash, System, World};
 use crcbl::math::DVec3;
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
+use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Validate};
 use crcbl::scene::scn::{Scene, ScnError};
 use crcbl::serde::{Deserialize, Serialize};
 
@@ -140,8 +140,37 @@ impl Placement for Brick {
     }
 }
 
-/// No rule of its own: [`Board::load`] refuses no brick its type can hold.
-impl Validate for Brick {}
+/// **Every number finite, and every half extent zero or more**: the game
+/// gives each brick a box collider of exactly these half extents, which
+/// refuses a negative one (a `NaN` fails the same assertion), and a tool
+/// rebuilds its picking collider from them after every edit. A centre that is
+/// not a number is no place on the board.
+impl Validate for Brick {
+    fn validate(&self) -> Result<(), FieldError> {
+        for (axis, value) in self.position.into_iter().enumerate() {
+            if !value.is_finite() {
+                return Err(FieldError::new(
+                    format!("position.{axis}"),
+                    format_args!(
+                        "a brick's `position.{axis}` must be a finite number, not {value}"
+                    ),
+                ));
+            }
+        }
+        for (axis, half) in self.half_extents.into_iter().enumerate() {
+            if !(half.is_finite() && half >= 0.0) {
+                return Err(FieldError::new(
+                    format!("half_extents.{axis}"),
+                    format_args!(
+                        "a brick's `half_extents.{axis}` must be a finite number of zero or more, \
+                         not {half}"
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+}
 
 /// How far a brick reaches either side of its centre along `Z`: the depth every
 /// row of the committed board is written with.
@@ -490,6 +519,57 @@ mod tests {
         assert!(message.contains("scene.ron"), "{message}");
         assert!(message.contains("line"), "{message}");
         assert!(message.contains("column"), "{message}");
+    }
+
+    /// The committed board with the first `from` in its bricks chunk written
+    /// as `to`, keyed as [`built_in_source`] keys it.
+    fn board_with(from: &str, to: &str) -> MemorySource {
+        assert!(BOARD_BRICKS_RON.contains(from), "no `{from}` to replace");
+        let bricks = BOARD_BRICKS_RON.replacen(from, to, 1);
+        let mut source = MemorySource::new();
+        for (key, text) in [
+            ("scene.ron", BOARD_SCENE_RON),
+            ("env.ron", BOARD_ENV_RON),
+            ("sys/bricks.ron", &bricks),
+        ] {
+            source
+                .insert(
+                    Path::new(&format!("{BOARD}/{key}")),
+                    text.as_bytes().to_vec(),
+                )
+                .expect("a nested scene key is a legal asset key");
+        }
+        source
+    }
+
+    /// **A brick that is no box is refused on load**, by the chunk's file, a
+    /// line inside the brick's own row, and the field — rather than read into
+    /// a board whose box collider `crate::game` then builds, which a negative
+    /// half extent trips and a `NaN` one fails the same way.
+    #[test]
+    fn a_brick_that_is_no_box_is_refused_on_load_by_line_and_field() {
+        // Brick 0's row is lines 4 to 7 of the committed chunk.
+        let row = 4..=7;
+        for (from, to, field) in [
+            (
+                "half_extents: (1.2,",
+                "half_extents: (-1.2,",
+                "half_extents.0",
+            ),
+            ("0.4, 0.5)", "0.4, NaN)", "half_extents.2"),
+            ("0.4, 0.5)", "0.4, inf)", "half_extents.2"),
+            ("(-11.8,", "(NaN,", "position.0"),
+        ] {
+            let error = Board::load(&board_with(from, to), Path::new(BOARD))
+                .expect_err("a brick that is no box is not a board");
+            assert!(
+                matches!(&error, ScnError::Parse { key, line, message, .. }
+                    if key == "board.scn/sys/bricks.ron"
+                        && row.contains(line)
+                        && message.contains(&format!("`{field}`"))),
+                "{to}: {error}",
+            );
+        }
     }
 
     // -- reflection ----------------------------------------------------------

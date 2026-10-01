@@ -1,6 +1,6 @@
 //! A component's rule held at every door: a body's mass refused at the edit,
 //! on load and reported at the save; a block's half extents refused; a
-//! component with no rule taking any write; and a batch judged whole.
+//! write no rule covers taken; and a batch judged whole.
 
 use super::*;
 
@@ -116,10 +116,12 @@ fn a_mass_written_outside_commands_is_reported_by_problems() {
     );
 }
 
-/// **A component with no rule of its own takes any write its type holds**:
-/// puppet's sun, given an intensity below zero, is applied and recorded.
+/// **A write no rule covers is taken**: puppet's sun has a rule over its
+/// elevation, its period and every number being finite, and none over the
+/// sign of its intensity — so an intensity below zero is applied and
+/// recorded.
 #[test]
-fn a_component_without_a_rule_takes_any_write() {
+fn a_write_no_rule_covers_is_taken() {
     use super::systems_tests::{SUN, two_systems};
 
     /// The sun alone in [`two_systems`].

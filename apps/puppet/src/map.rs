@@ -112,7 +112,7 @@ use crcbl::greybox::{GREYBOX_TILE_M, cube, grid_material, grid_page, platform, s
 use crcbl::math::{DVec3, Mat4, Vec3};
 use crcbl::phys::{BoxCollider, PhysicsWorld, Sphere};
 use crcbl::reflect::Reflect;
-use crcbl::registry::{OrientedBox, Placement, Registry, Validate};
+use crcbl::registry::{FieldError, OrientedBox, Placement, Registry, Validate};
 use crcbl::render::scene::{Capacities, Geometry, InstanceDesc, MeshDesc, ProbeGrid, SceneDesc};
 use crcbl::render::{
     DirectionalLight, ForwardRenderer, InstanceHandle, InstancePoolError, MeshPoolError, SkinRange,
@@ -427,8 +427,31 @@ impl Placement for Surface {
     }
 }
 
-/// No rule of its own: [`Map::load`] refuses no surface its type can hold.
-impl Validate for Surface {}
+/// **Every number finite, and every size zero or more**: a platform's width,
+/// depth and height are its box collider's extents and a dome's radius is its
+/// sphere collider's, each of which refuses a negative size when
+/// [`Map::world`] builds it, and a tool picks either by the box [`Placement`]
+/// answers, rebuilt after every edit. A position or a tint that is not a
+/// number is no place and no colour. Any label is a mesh's name.
+impl Validate for Surface {
+    fn validate(&self) -> Result<(), FieldError> {
+        const WHAT: &str = "surface";
+        finite_axes(WHAT, "position", self.position)?;
+        match self.shape {
+            Shape::Platform {
+                width,
+                depth,
+                height,
+            } => {
+                size(WHAT, "shape.width", width)?;
+                size(WHAT, "shape.depth", depth)?;
+                size(WHAT, "shape.height", height)?;
+            }
+            Shape::Dome { radius } => size(WHAT, "shape.radius", radius)?,
+        }
+        finite_axes(WHAT, "tint", self.tint.map(f64::from))
+    }
+}
 
 /// The side of the platform a new surface is: a step a person can see and
 /// then resize.
@@ -498,8 +521,16 @@ impl Placement for Spawn {
     }
 }
 
-/// No rule of its own: [`Map::load`] refuses no spawn its type can hold.
-impl Validate for Spawn {}
+/// **Every number finite**: the feet are where the character's capsule is
+/// put down and the facing is the yaw it is turned to, and a value that is
+/// not a number is neither.
+impl Validate for Spawn {
+    fn validate(&self) -> Result<(), FieldError> {
+        const WHAT: &str = "spawn";
+        finite_axes(WHAT, "position", self.position)?;
+        finite(WHAT, "facing", self.facing)
+    }
+}
 
 /// The committed map's own spawn, facing the zero yaw — what a tool attaching a
 /// spawn to an entity starts it as, which is why `Registry::register` asks for
@@ -567,8 +598,73 @@ impl Placement for Sun {
     }
 }
 
-/// No rule of its own: [`Map::load`] refuses no sun its type can hold.
-impl Validate for Sun {}
+/// **A direction [`Map::sun`] can build, and a light it can shine**: the
+/// elevation is the `+Y` of a unit vector, whose horizontal part is
+/// `sqrt(1 - elevation²)`, so it lies in `-1..=1`; the period divides the
+/// clock, so it is above zero; and every number is finite. Outside any of
+/// these the light's direction or colour is `NaN`.
+impl Validate for Sun {
+    fn validate(&self) -> Result<(), FieldError> {
+        const WHAT: &str = "sun";
+        let elevation = self.elevation;
+        if !(-1.0..=1.0).contains(&elevation) {
+            return Err(FieldError::new(
+                "elevation",
+                format_args!("a sun's `elevation` must be a number from -1 to 1, not {elevation}"),
+            ));
+        }
+        finite_axes(WHAT, "color", self.color.map(f64::from))?;
+        finite(WHAT, "intensity", f64::from(self.intensity))?;
+        let period = self.period;
+        if !(period.is_finite() && period > 0.0) {
+            return Err(FieldError::new(
+                "period",
+                format_args!("a sun's `period` must be a finite number above zero, not {period}"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// `Ok` for a finite `value`, or the refusal naming a `what`'s `field`.
+fn finite(what: &str, field: &str, value: f64) -> Result<(), FieldError> {
+    if value.is_finite() {
+        Ok(())
+    } else {
+        Err(FieldError::new(
+            field,
+            format_args!("a {what}'s `{field}` must be a finite number, not {value}"),
+        ))
+    }
+}
+
+/// [`finite`] over each of `values`, named `field.0` onwards as a property
+/// write names an array's leaves.
+fn finite_axes<const N: usize>(
+    what: &str,
+    field: &str,
+    values: [f64; N],
+) -> Result<(), FieldError> {
+    values
+        .into_iter()
+        .enumerate()
+        .try_for_each(|(axis, value)| finite(what, &format!("{field}.{axis}"), value))
+}
+
+/// `Ok` for a finite `value` of zero or more — a size a collider takes — or
+/// the refusal naming a `what`'s `field`.
+fn size(what: &str, field: &str, value: f64) -> Result<(), FieldError> {
+    if value.is_finite() && value >= 0.0 {
+        Ok(())
+    } else {
+        Err(FieldError::new(
+            field,
+            format_args!(
+                "a {what}'s `{field}` must be a finite number of zero or more, not {value}"
+            ),
+        ))
+    }
+}
 
 /// The sun the committed map is lit by, from the constants its row was written
 /// from — what a tool attaching a sun to an entity starts it as, which is why
@@ -1984,6 +2080,124 @@ mod tests {
             .expect_err("a map with two spawns is not a puppet map");
         assert!(message.contains("sys/spawn.ron"), "{message}");
         assert!(message.contains('2'), "{message}");
+    }
+
+    /// The committed blockout with the first `from` in its `chunk` file written
+    /// as `to`, keyed as [`built_in_source`] keys it.
+    fn blockout_with(chunk: &str, from: &str, to: &str) -> MemorySource {
+        let mut source = MemorySource::new();
+        for (key, text) in [
+            ("scene.ron", BLOCKOUT_SCENE_RON),
+            ("env.ron", BLOCKOUT_ENV_RON),
+            ("sys/surfaces.ron", BLOCKOUT_SURFACES_RON),
+            ("sys/spawn.ron", BLOCKOUT_SPAWN_RON),
+            ("sys/sun.ron", BLOCKOUT_SUN_RON),
+        ] {
+            let text = if key == chunk {
+                assert!(text.contains(from), "no `{from}` in {key} to replace");
+                text.replacen(from, to, 1)
+            } else {
+                text.to_owned()
+            };
+            source
+                .insert(Path::new(&format!("{BLOCKOUT}/{key}")), text.into_bytes())
+                .expect("a nested scene key is a legal asset key");
+        }
+        source
+    }
+
+    /// **A row the sample cannot build is refused on load**, by its chunk's
+    /// file, a line inside the row and the field — rather than read into a map
+    /// whose [`Map::world`] trips a collider's assertion on a negative size, or
+    /// whose [`Map::sun`] divides by a period of zero.
+    #[test]
+    fn a_row_the_sample_cannot_build_is_refused_on_load_by_line_and_field() {
+        // The low step is lines 14 to 23 of the surfaces chunk, the gentle
+        // mound lines 34 to 41; the spawn and the sun are lines 4 to 7 and 4
+        // to 9 of theirs.
+        for (chunk, from, to, rows, field) in [
+            (
+                "sys/surfaces.ron",
+                "width: 10.0,",
+                "width: -10.0,",
+                14..=23,
+                "shape.width",
+            ),
+            (
+                "sys/surfaces.ron",
+                "height: 0.3,",
+                "height: NaN,",
+                14..=23,
+                "shape.height",
+            ),
+            (
+                "sys/surfaces.ron",
+                "radius: 6.0,",
+                "radius: -6.0,",
+                34..=41,
+                "shape.radius",
+            ),
+            (
+                "sys/surfaces.ron",
+                "(8.0, -4.5,",
+                "(inf, -4.5,",
+                34..=41,
+                "position.0",
+            ),
+            (
+                "sys/surfaces.ron",
+                "(0.16, 0.38,",
+                "(0.16, NaN,",
+                14..=23,
+                "tint.1",
+            ),
+            (
+                "sys/spawn.ron",
+                "facing: 0.0,",
+                "facing: NaN,",
+                4..=7,
+                "facing",
+            ),
+            (
+                "sys/spawn.ron",
+                "0.0, 16.0)",
+                "0.0, -inf)",
+                4..=7,
+                "position.2",
+            ),
+            (
+                "sys/sun.ron",
+                "period: 45.0,",
+                "period: 0.0,",
+                4..=9,
+                "period",
+            ),
+            (
+                "sys/sun.ron",
+                "elevation: 0.78,",
+                "elevation: 1.5,",
+                4..=9,
+                "elevation",
+            ),
+            ("sys/sun.ron", "(1.0, 0.97,", "(1.0, NaN,", 4..=9, "color.1"),
+            (
+                "sys/sun.ron",
+                "intensity: 2.2,",
+                "intensity: inf,",
+                4..=9,
+                "intensity",
+            ),
+        ] {
+            let error = Map::load(&blockout_with(chunk, from, to), Path::new(BLOCKOUT))
+                .expect_err("a row the sample cannot build is not a map");
+            assert!(
+                matches!(&error, MapError::Scene(ScnError::Parse { key, line, message, .. })
+                    if *key == format!("{BLOCKOUT}/{chunk}")
+                        && rows.contains(line)
+                        && message.contains(&format!("`{field}`"))),
+                "{to}: {error}",
+            );
+        }
     }
 
     // -- reflection ----------------------------------------------------------

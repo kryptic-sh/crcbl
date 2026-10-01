@@ -31,7 +31,7 @@ use super::rotation;
 ///
 /// A bound on [`Registry::register`](super::Registry::register), as
 /// [`Placement`](super::Placement) is, so a component registered for a tool
-/// says whether it has a rule — `impl Validate for Brick {}` is the statement
+/// says whether it has a rule — `impl Validate for Prop {}` is the statement
 /// that it has none. The method is provided, unlike `placement`, because "no
 /// rule" is the common answer and is spelled by the empty impl rather than by
 /// a body every such type would repeat.
