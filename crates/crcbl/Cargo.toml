@@ -222,6 +222,10 @@ tempfile = "3"
 # `crcbl-scene`'s `gltf_fixture` argument: a checked-in binary is a fixture
 # nobody reviewing a change can read.
 png = { workspace = true }
+# `src/scene_mesh/tests.rs` measures a real `.glb`, built by `crcbl-scene`'s
+# fixture builder rather than vendored, on that module's argument: a checked-in
+# binary is a fixture nobody reviewing a change can read.
+crcbl-scene = { workspace = true, features = ["gltf-fixture"] }
 
 [lints]
 workspace = true

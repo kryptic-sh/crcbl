@@ -620,6 +620,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   entity. `crcbl::registry::POSITION` is the one spelling of the `position`
   field a tool and the module write.
 
+- **Meshes on scene components: `crcbl::scene_mesh`** (features `scn` or
+  `scene`). A `Mesh` — `asset`, a glTF key in the asset source, and `position`,
+  where the asset's own origin stands — is a scene component under the `meshes`
+  system, registered with its check by `scene_mesh::register(&mut registry)`; it
+  derives `Reflect`, and its `Default` has no asset chosen. A key is admitted by
+  `check_asset`: relative, no `..`, a `.glb` or `.gltf` extension, a legal asset
+  key in its canonical spelling, or empty for a mesh with no asset yet; any
+  other is refused on load with the file, line and field, and the check reports
+  one a panel typed. Its placement is the asset's box offset by `position`,
+  measured by `MeshLibrary` (feature `scene`), which imports each asset once
+  through any `AssetSource` and writes the box into the rows with `resolve`. The
+  box is never written to the file. A missing, malformed or unchosen asset is a
+  `PLACEHOLDER_HALF_EXTENT` cube about the origin and a `MeshProblem` naming the
+  asset, never a panic; a flat model is given `MIN_HALF_EXTENT` across its
+  plane. `Mesh::standing_on` puts a mesh's foot on a point, and `is_mesh_asset`
+  says which listed keys a mesh can be made of.
+
 - **The editor plays physics.** Its vocabulary registers `scene_physics`, so a
   greybox block with a body beside it falls, collides and comes to rest when the
   scene plays, the picture and the pick following it; stop puts the scene back
