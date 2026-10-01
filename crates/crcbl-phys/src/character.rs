@@ -605,8 +605,8 @@ impl CharacterController {
         let start = self.position;
         let was_grounded = self.ground.is_some();
 
-        let motion = self.ground_adjusted(motion, was_grounded);
-        let report = self.slide(world, motion, was_grounded, Body::Upright);
+        let adjusted = self.ground_adjusted(motion, was_grounded);
+        let report = self.slide(world, adjusted, was_grounded, Body::Upright);
         self.settle_on_ground(world, was_grounded, motion);
 
         if let Some(collider) = self.self_collider {
@@ -849,6 +849,12 @@ impl CharacterController {
     /// up, so a jump is not swallowed by the floor it just left.
     fn settle_on_ground(&mut self, world: &mut PhysicsWorld, was_grounded: bool, motion: DVec3) {
         self.ground = None;
+        // An explicit ascent leaves support even inside the ground probe's
+        // reach. Use requested motion here: walking uphill also rises, but
+        // that rise belongs to the ground adjustment and must stay supported.
+        if motion.dot(UP) > 0.0 {
+            return;
+        }
         let probe = self.settle_reach(was_grounded, motion);
 
         let Some(found) = self.probe_below(world, self.position, probe) else {
@@ -1551,15 +1557,20 @@ mod tests {
     /// character that was walking and stayed down, not for one that jumped.
     #[test]
     fn an_upward_move_is_not_pulled_back_by_the_ground_snap() {
-        let mut world = flat_world();
-        let mut character = standing(&mut world, CharacterConfig::default());
-
-        let outcome = character.move_and_slide(&mut world, DVec3::new(0.0, 0.2, 0.0));
-
-        assert!(
-            !outcome.grounded,
-            "the floor reached up and took the jump back"
-        );
+        let config = CharacterConfig::default();
+        for rise in [config.skin_width * 0.1, 0.2] {
+            let mut world = flat_world();
+            let mut character = standing(&mut world, config);
+            for _ in 0..2 {
+                let motion = DVec3::new(0.005, rise, 0.0);
+                let outcome = character.move_and_slide(&mut world, motion);
+                assert!(
+                    !outcome.grounded,
+                    "the floor reached up and took the jump back: rise={rise}"
+                );
+                assert!((outcome.motion - motion).length() < 1e-12);
+            }
+        }
     }
 
     /// **A grounded character asked for nothing but gravity does not move.**
