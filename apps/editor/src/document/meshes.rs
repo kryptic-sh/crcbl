@@ -102,10 +102,7 @@ impl Document {
             .iter()
             .filter_map(|problem| {
                 let id = self.ids.id(problem.entity)?;
-                Some(match self.scene.entity_name(id) {
-                    Some(name) => format!("entity `{}` #{id}: {problem}", name.as_str()),
-                    None => format!("entity #{id}: {problem}"),
-                })
+                Some(self.about(id, &problem.to_string()))
             })
             .collect()
     }

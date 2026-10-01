@@ -11947,13 +11947,22 @@ so nothing is lost between them. Verified 2026-09-25 by reading `apps/editor`
     read, and the editor would show a turn the game does not play. Adding one to
     a game is the field, its `Placement` turning, and the game's own loader
     honouring it — in that order, or not at all.
-  - **A rotation set off unit by a path write is caught at load, not at save,
-    for blocks.** No editor edit writes one leaf alone (the handle and the
-    inspector row write all four in one command), but `SetProperty` on one leaf
-    can; `Rotation::quat` reads it normalised meanwhile. Meshes are covered at
-    save by the meshes check, which reads through `Rotation`'s `try_from`; the
-    editor's `Block` registers no check. Same root as `Body`'s mass: a
-    validation hook on `Registry::register` that `SetProperty` runs.
+  - **Decided 2026-10-02: a property write that leaves a rotation off unit is
+    refused, not renormalised** (`document::rotations`): `Document::apply` puts
+    the write back and returns `EditError::Rotation` naming the entity, system
+    and field, which the status line shows. The one path that writes a single
+    quaternion leaf is a field paste (`Document::paste_field`, reachable only
+    through the API — the inspector's rotation row names no leaf for the
+    clipboard keys); renormalising it would save numbers nobody wrote, which is
+    `Rotation`'s own reason for refusing a file's value. Declined: renormalising
+    in `paste_field`. `Document::problems` also reports, by entity and field,
+    any rotation off unit in a component the scene would save — found by type
+    through every component's reflected fields, so a game's component carrying
+    one is covered — for a value written through `Document::component` without a
+    command. A mesh's such rotation is reported twice: there and by the meshes
+    chunk check (file line and column). The general answer — a validation hook
+    on `Registry::register` that `SetProperty` runs — is still open for `Body`'s
+    mass, below; the rotation check is the editor's, not the registry's.
 - **Multi-select transforms**: not MVP by the plan, and not reachable yet — the
   document holds one selection (`Document::selected`), the outliner's Ctrl and
   Shift clicks select rows of which the document takes the first, and every

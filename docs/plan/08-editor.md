@@ -1003,6 +1003,16 @@ term and recorded, as above):
   manifest's end, saving a reordered `scene.ron`: `ListSystem` now carries its
   place (`at`) and `Scene::list_system_at` inserts there. Putting the undo back
   at the end, and an unlisting whose inverse did nothing, each turned it red.
+- **Rotations stay rotations.** `Document::apply` refuses, and puts back, a
+  property write that leaves any component's `Rotation` off unit
+  (`EditError::Rotation`, by entity, system and field) — decided over
+  renormalising, which would save numbers nobody wrote; the only single-leaf
+  path is a field paste. `Document::problems` reports a rotation off unit that
+  reached the world without a command, in every component carrying one, found by
+  type through the reflected fields (`document::rotations`). Skipping the check
+  at the edit, matching only an exact path, leaving the report out of
+  `problems`, and a walk that stopped at the top struct or the first list
+  element each turned a test red.
 
 **Decided 2026-10-01, for rotation** (taken for the long term and recorded, as
 above):

@@ -809,6 +809,15 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   where it stood rather than at the end, and the `scene.ron` saved is the one
   before it.
 
+- **The editor keeps every rotation a rotation.** A property write that leaves a
+  `Rotation` further than `ROTATION_TOLERANCE` from unit — one of a quaternion's
+  four numbers pasted alone — is put back and refused with
+  `EditError::Rotation`, naming the entity, system and field on the status line,
+  rather than saved for the next load to refuse. `Document::problems` (the
+  save's report) also names, by entity and field, any rotation off unit in a
+  component the scene would save (`Document::rotation_problems`), in every
+  component that carries one, not only meshes.
+
 - **`crcbl::scene::scn::Scene::list_system` and `unlist_system`** add a system
   to the end of a scene's manifest, so the next save writes its chunk, and take
   one out; listing one already listed, or unlisting one that is not, changes

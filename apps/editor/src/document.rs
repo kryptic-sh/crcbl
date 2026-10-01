@@ -52,6 +52,7 @@ mod field;
 mod meshes;
 mod naming;
 mod play;
+mod rotations;
 mod systems;
 
 pub use play::PlayState;
@@ -161,6 +162,22 @@ pub enum EditError {
     /// A mesh was asked for of a key no mesh may name.
     Asset(crcbl::scene_mesh::MeshPathError),
 
+    /// A property write would leave a rotation of `entity`'s component in
+    /// `system` off unit — one of a quaternion's four leaves written alone.
+    ///
+    /// Refused, and the write put back, rather than renormalised: see the
+    /// module docs of `document::rotations`.
+    Rotation {
+        /// Whose.
+        entity: SceneEntityId,
+        /// The system holding the component.
+        system: String,
+        /// The rotation's dotted path in the component.
+        field: String,
+        /// What a load would refuse it for.
+        error: crcbl::registry::RotationError,
+    },
+
     /// A drop's ray met neither the scene nor the ground plane in front of
     /// the camera, so there is nowhere to put what was dropped.
     NoGround,
@@ -257,6 +274,16 @@ impl fmt::Display for EditError {
                 "`{system}` still holds entities, which a save without it would drop"
             ),
             Self::Asset(error) => write!(f, "{error}"),
+            Self::Rotation {
+                entity,
+                system,
+                field,
+                error,
+            } => write!(
+                f,
+                "entity {entity}'s `{field}` in `{system}` would be left off unit ({error}); \
+                 a rotation's four numbers are written together"
+            ),
             Self::NoGround => f.write_str(
                 "the drop meets nothing in the scene and the ground is not in front of the \
                  camera, so there is nowhere to put it",
@@ -722,9 +749,11 @@ impl Document {
     /// [`EditError::Path`] carrying the component's own refusal — in which case
     /// nothing was written and nothing was recorded — or [`EditError::Playing`]
     /// in play mode, which writes and records nothing either.
+    /// [`EditError::Rotation`] for a property write that would leave a
+    /// rotation off unit, which is put back and not recorded.
     pub fn apply(&mut self, command: EditCommand) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let undo = self.perform(&command)?;
+        let undo = self.perform_true(&command)?;
         self.resolve_meshes();
         self.log.record(command, undo);
         Ok(())
@@ -746,7 +775,7 @@ impl Document {
     /// As [`apply`](Self::apply).
     pub fn apply_in(&mut self, command: EditCommand, gesture: Gesture) -> Result<(), EditError> {
         self.refuse_in_play()?;
-        let undo = self.perform(&command)?;
+        let undo = self.perform_true(&command)?;
         self.resolve_meshes();
         self.log.record_in(command, undo, gesture);
         Ok(())
@@ -980,7 +1009,8 @@ impl Document {
     /// stands — each registered [`crcbl::registry::SceneCheck`] run over the
     /// scene's own saved text — or nothing for a scene they would all play;
     /// and after them, every mesh whose asset could not be measured
-    /// ([`mesh_problems`](Self::mesh_problems)).
+    /// ([`mesh_problems`](Self::mesh_problems)), and every rotation a
+    /// component holds off unit ([`rotation_problems`](Self::rotation_problems)).
     ///
     /// Not a gate on [`save`](Self::save): authoring passes through layouts
     /// no game would load, a corner added before the leg it breaks is
@@ -996,6 +1026,7 @@ impl Document {
             .registry
             .problems(self.scene.systems(), &source, Path::new(""));
         problems.extend(self.mesh_problems());
+        problems.extend(self.rotation_problems());
         Ok(problems)
     }
 
@@ -1013,6 +1044,29 @@ impl Document {
         self.refuse_in_play()?;
         let dir = self.origin.clone().ok_or(EditError::NoOrigin)?;
         self.save_to(dir)
+    }
+
+    /// [`perform`](Self::perform), then puts it back and refuses it if a
+    /// property write left a rotation off unit — the body
+    /// [`apply`](Self::apply) and [`apply_in`](Self::apply_in) share. See the
+    /// module docs of `document::rotations`.
+    fn perform_true(&mut self, command: &EditCommand) -> Result<EditCommand, EditError> {
+        let undo = self.perform(command)?;
+        if let Err(error) = self.turned_true(command) {
+            self.perform(&undo)
+                .expect("an inverse produced a moment ago applies");
+            return Err(error);
+        }
+        Ok(undo)
+    }
+
+    /// `text` about the entity `id`, as a problem names it: its name and id,
+    /// or its id alone for an unnamed one.
+    fn about(&self, id: SceneEntityId, text: &str) -> String {
+        match self.scene.entity_name(id) {
+            Some(name) => format!("entity `{}` #{id}: {text}", name.as_str()),
+            None => format!("entity #{id}: {text}"),
+        }
     }
 
     /// Performs `command` without touching the log, and hands back the command
