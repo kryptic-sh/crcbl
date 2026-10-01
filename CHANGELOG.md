@@ -16,6 +16,17 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
 
 ### Breaking
 
+- **`crcbl_net::udp`'s handshake is `TRANSPORT_VERSION` 2, and a listener
+  answers a tokenless hello with a challenge** (see Added), so a v1 client and a
+  v2 listener, either way round, do not answer each other: the connect times out
+  as `ConnectTimedOut`. The hello carries a token field and is longer
+  (`HELLO_BYTES`); the reply is its own, shorter layout (`REPLY_BYTES`) rather
+  than one length both ways. `UdpListener::bind` and `bind_with` now also fail,
+  with an `io::ErrorKind::Other`, when the OS entropy source cannot supply the
+  listener's token key. `ListenerStats` gained `challenges`, `tokens_forged`,
+  `tokens_expired`, `tokens_spent` and `spent_full`, and `UdpStats` gained
+  `challenges`, so a struct literal naming every field must add them.
+
 - **`crcbl::registry::Registry` answers per system.** `component(world, entity)`
   is `component(world, system, entity)`: one entity may now hold a component in
   several systems (see Added), so a caller names the one it means — the system
@@ -480,6 +491,23 @@ effect, test-only and docs-only changes, CI repairs — is deliberately left out
   stops asking for it.
 
 ### Added
+
+- **Connection tokens on `crcbl_net::udp`**, netcode.io's connect-token pattern
+  minted by the listener itself. A hello without a valid token is answered with
+  a `Challenge` (`CHALLENGE_TAG`, `CHALLENGE_BYTES`, never longer than the
+  hello) carrying a token: HMAC-SHA256 under a per-listener-run `TokenKey` drawn
+  from the OS at bind, over the token's kind, expiry and serial, the protocol id
+  and the client's address. Only a hello presenting it back from that address
+  within `TOKEN_LIFETIME`, to the same listener run, gets the X25519 agreement,
+  a pending entry and the `Reply`; each token buys that once (spent serials are
+  remembered until they expire, up to `MAX_SPENT_TOKENS`), and anything else
+  gets a fresh challenge and no state. `UdpTransport` answers a challenge by
+  sending its hello again at once with the token. A spoofed-hello flood now
+  costs the listener one HMAC and one challenge per hello, not a key agreement
+  and a pending slot. The wire types are public — `Hello`, `Challenge`, `Reply`,
+  `udp::token`'s `TokenKey`, `TokenError`, `VerifiedToken`, `TOKEN_BYTES`,
+  `NO_TOKEN` — and the decoder fuzz target runs every decoder and
+  `TokenKey::verify`.
 
 - **`crcbl_ecs::quantize`: schema-declared quantization for replicated
   components.** A component implements `Quantized` — a constant `SCHEMA` of

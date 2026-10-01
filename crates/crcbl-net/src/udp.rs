@@ -27,40 +27,59 @@
 //! # The hello
 //!
 //! Before any key exists the socket carries one plaintext exchange, laid out
-//! in `hello`: the client sends [`HELLO_TAG`], the [`TRANSPORT_VERSION`], the
-//! protocol id, a fresh random nonce and its X25519 public key; the server
-//! answers [`HELLO_REPLY_TAG`] with the same fields, echoing the client's
-//! nonce and carrying its own public key. Each side then calls
+//! in `hello`. The client sends a [`Hello`]: [`HELLO_TAG`], the
+//! [`TRANSPORT_VERSION`], the protocol id, a fresh random nonce, its X25519
+//! public key and a token field, empty at first. The server answers a hello
+//! without a valid token with a [`Challenge`] carrying one (see [`token`]);
+//! the client puts it in its hello and sends again at once. A hello whose
+//! token verifies is answered with a [`Reply`] echoing the client's nonce and
+//! carrying the server's public key. Each side then calls
 //! [`crate::seal::agree_channel`] with its [`crate::seal::Role`], and from
 //! there on **every datagram is sealed** — the encryption rule in
 //! `docs/notes/simulation.md`, with no plaintext mode and no switch. The tag
 //! bytes are distinct from [`crate::seal::SEALED_TAG`], so one socket carries
 //! both and tells them apart by the first byte.
 //!
+//! ```text
+//! client                                  listener
+//!   Hello { nonce, key, NO_TOKEN }   ──►    mints a token: one HMAC, no state
+//!                                    ◄──  Challenge { nonce, token }
+//!   Hello { nonce, key, token }      ──►    verifies it, X25519, pending entry
+//!                                    ◄──  Reply { nonce, key }
+//!   sealed datagrams                 ◄─►  sealed datagrams
+//! ```
+//!
 //! Each side draws its secret bytes from the operating system (`getrandom`)
 //! for every connection and never reuses them: a reconnect is a new hello and
 //! new keys, which is the rekey the seal's docs ask for.
 //!
-//! - **The echo** is what an off-path attacker cannot forge. A reply whose
-//!   nonce is not the one this hello carried is ignored, so someone who did
-//!   not see the hello cannot hand the client a key of their choosing.
-//! - **No amplification.** A reply is exactly as long as the hello that asked
-//!   for it ([`HELLO_BYTES`] both ways), so a spoofed hello cannot turn the
-//!   server into a multiplier aimed at someone else's address.
-//! - **Bounded state.** A hello costs the server one pending entry, capped at
-//!   [`ListenerConfig::max_pending`]; the entry becomes a peer only when a
-//!   sealed datagram opens under its key — proof the client both holds the
-//!   private key and received the reply at the address it claims — and
-//!   expires after [`HANDSHAKE_TIMEOUT`] otherwise. A flood of hellos from
-//!   spoofed addresses fills the pending table and then goes unanswered; it
-//!   never grows memory. It does still cost an X25519 agreement per answered
-//!   hello: connection tokens (slice D in `docs/backlog.md`) are what move
-//!   that cost onto the client.
+//! - **The echo** is what an off-path attacker cannot forge. A challenge or
+//!   reply whose nonce is not the one this hello carried is ignored, so
+//!   someone who did not see the hello can neither hand the client a key of
+//!   their choosing nor a token.
+//! - **No amplification.** The hello is the longest handshake datagram
+//!   ([`HELLO_BYTES`]; a [`CHALLENGE_BYTES`] challenge and a [`REPLY_BYTES`]
+//!   reply are shorter), so a spoofed hello cannot turn the server into a
+//!   multiplier aimed at someone else's address.
+//! - **Work only for a returning address.** A hello without a token valid for
+//!   its source address costs the server one HMAC and a challenge, and holds
+//!   nothing. Only a token presented back from the address it was minted for,
+//!   within [`TOKEN_LIFETIME`] and on the run of the listener that minted it,
+//!   buys the X25519 agreement and a pending entry — so a spoofer, who never
+//!   sees the challenges, never gets that far. Each token buys it once: the
+//!   listener remembers the tokens it has spent until they expire.
+//! - **Bounded state.** A valid hello costs the server one pending entry,
+//!   capped at [`ListenerConfig::max_pending`]; the entry becomes a peer only
+//!   when a sealed datagram opens under its key — proof the client holds the
+//!   private key — and expires after [`HANDSHAKE_TIMEOUT`] otherwise. Spent
+//!   tokens are capped at [`MAX_SPENT_TOKENS`]. Neither table grows past its
+//!   cap, however many hellos arrive.
 //! - **Honest trust.** Nothing authenticates either public key. The exchange
 //!   defeats a passive observer and is open to anyone who can sit in the
 //!   middle of the hello and substitute keys both ways — the seal's docs say
-//!   the same. A token minted by a trusted source, or an operator-configured
-//!   pre-shared key, is what would close that; nothing here claims to.
+//!   the same. A token minted by a trusted backend carrying key material, or
+//!   an operator-configured pre-shared key, is what would close that; the
+//!   listener's own tokens prove an address, not an identity.
 //!
 //! This is the transport's own key exchange. The session handshake in
 //! [`crate::handshake`] — protocol, build and schema gate — rides on the
@@ -86,7 +105,8 @@
 //!
 //! # Submodules
 //!
-//! * `hello` — the plaintext hello and its reply.
+//! * `hello` — the plaintext hello, challenge and reply.
+//! * [`token`] — the connection tokens a challenge carries.
 //! * `session` — a keyed link: sealer, opener and endpoint together.
 //! * `transport` — [`UdpTransport`].
 //! * `listener` — [`UdpListener`] and the demultiplexer behind it.
@@ -96,6 +116,7 @@ pub mod discovery;
 mod hello;
 mod listener;
 mod session;
+pub mod token;
 mod transport;
 
 #[cfg(test)]
@@ -103,8 +124,12 @@ mod tests;
 
 use std::time::Duration;
 
-pub use hello::{HELLO_BYTES, HELLO_NONCE_BYTES, HELLO_REPLY_TAG, HELLO_TAG, TRANSPORT_VERSION};
+pub use hello::{
+    CHALLENGE_BYTES, CHALLENGE_TAG, Challenge, HELLO_BYTES, HELLO_NONCE_BYTES, HELLO_REPLY_TAG,
+    HELLO_TAG, Hello, REPLY_BYTES, Reply, TRANSPORT_VERSION,
+};
 pub use listener::{ListenerConfig, ListenerStats, MAX_PEER_INBOX, UdpListener};
+pub use token::{NO_TOKEN, TOKEN_BYTES, TokenError, TokenKey, VerifiedToken};
 pub use transport::{ConnectError, EndReason, UdpState, UdpStats, UdpTransport};
 
 use crate::reliable::{KEEPALIVE_INTERVAL, MAX_DATAGRAM_BYTES, PEER_TIMEOUT};
@@ -122,8 +147,24 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long a server holds a pending handshake — a hello answered, no sealed
 /// datagram yet — before dropping it. The client's first sealed datagram
 /// leaves the moment it reads the reply, so an honest one arrives within a
-/// round trip; this is what clears the entries a spoofed hello leaves behind.
+/// round trip; this is what clears the entries of clients that went away
+/// mid-handshake, or presented a token they had seen and hold no key for.
 pub const HANDSHAKE_TIMEOUT: Duration = CONNECT_TIMEOUT;
+
+/// How long a token a [`Challenge`] carries stays valid. A client presents
+/// it the moment the challenge arrives, so it needs a round trip; it is as
+/// long as a connect may take, so no token outlives the connect it was
+/// minted for. One that expires anyway costs the client one more challenge.
+pub const TOKEN_LIFETIME: Duration = CONNECT_TIMEOUT;
+
+/// Spent tokens a [`UdpListener`] remembers at once. Each is kept only until
+/// it expires — after [`TOKEN_LIFETIME`] its expiry refuses it anyway — and a
+/// token is spent only when a hello presenting it takes a pending entry, so
+/// filling this takes that many valid handshakes, each a round trip from a
+/// real address, within one lifetime. When it is full, valid tokens are
+/// turned away rather than accepted unremembered: a replayed token must never
+/// buy a second agreement.
+pub const MAX_SPENT_TOKENS: usize = 4096;
 
 /// Peers a [`UdpListener`] admits at once unless its [`ListenerConfig`] says
 /// otherwise. A LAN session's worth, with room.
@@ -131,7 +172,8 @@ pub const DEFAULT_MAX_PEERS: usize = 64;
 
 /// Pending handshakes a [`UdpListener`] holds at once unless its
 /// [`ListenerConfig`] says otherwise. Each is one entry of fixed size, so this
-/// is the memory a flood of spoofed hellos can take.
+/// is the memory a flood of hellos can take — and each takes a token valid
+/// for its source address, so a spoofer cannot fill it.
 pub const DEFAULT_MAX_PENDING: usize = 256;
 
 /// Datagrams one read of a socket takes before handing back to the caller,

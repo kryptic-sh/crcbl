@@ -16,12 +16,13 @@ use std::net::{SocketAddr, UdpSocket};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::hello::Hello;
 use super::*;
 use crate::conformance::{self, Link};
 use crate::reliable::{MAX_RELIABLE_MESSAGE_BYTES, MAX_UNRELIABLE_PAYLOAD, PEER_TIMEOUT};
 use crate::seal::{KeyPair, SEALED_TAG};
 use crate::{Clock, ManualClock, Message, MessageKind, SystemClock, Transport, TransportError};
+
+mod tokens;
 
 const PROTOCOL: u32 = 0x4352_4342;
 
@@ -370,8 +371,9 @@ fn an_unreliable_message_older_than_one_delivered_is_dropped() {
 
 // ── Handshake ────────────────────────────────────────────────────────────────
 
-/// The handshake is one hello and one reply of the documented size, the
-/// reply no longer than the hello; everything after is sealed, carries no
+/// The handshake is a tokenless hello, its challenge, the hello again with
+/// the challenge's token, and the reply — each of the documented size, no
+/// answer longer than the hello; everything after is sealed, carries no
 /// plaintext, and opens on the far side both ways — so both derived the same
 /// keys.
 #[test]
@@ -381,19 +383,43 @@ fn the_handshake_keys_both_sides_and_everything_after_it_is_sealed() {
     let mut proxy = Proxy::new(listener.local_addr().expect("address"));
     let (mut client, mut peer, handshake) = connect_via(&mut listener, &mut proxy, clock);
 
-    let (hello, reply) = (&handshake[0], &handshake[1]);
+    let shape: Vec<(Way, u8, usize)> = handshake[..4]
+        .iter()
+        .map(|(way, datagram)| (*way, datagram[0], datagram.len()))
+        .collect();
     assert_eq!(
-        (hello.0, hello.1[0], hello.1.len()),
-        (Way::Up, HELLO_TAG, HELLO_BYTES)
+        shape,
+        [
+            (Way::Up, HELLO_TAG, HELLO_BYTES),
+            (Way::Down, CHALLENGE_TAG, CHALLENGE_BYTES),
+            (Way::Up, HELLO_TAG, HELLO_BYTES),
+            (Way::Down, HELLO_REPLY_TAG, REPLY_BYTES),
+        ]
     );
+    let first = Hello::decode(&handshake[0].1, PROTOCOL).expect("a hello");
+    let challenge = Challenge::decode(&handshake[1].1, PROTOCOL).expect("a challenge");
+    let second = Hello::decode(&handshake[2].1, PROTOCOL).expect("a hello");
+    assert_eq!(first.token, NO_TOKEN);
+    assert_eq!(challenge.nonce, first.nonce);
     assert_eq!(
-        (reply.0, reply.1[0], reply.1.len()),
-        (Way::Down, HELLO_REPLY_TAG, HELLO_BYTES)
+        second,
+        Hello {
+            token: challenge.token,
+            ..first
+        },
+        "the second hello is the first presenting the challenge's token"
     );
-    assert!(reply.1.len() <= hello.1.len(), "the reply must not amplify");
     assert!(
-        handshake[2..].iter().all(|(_, d)| d[0] == SEALED_TAG),
+        handshake[4..].iter().all(|(_, d)| d[0] == SEALED_TAG),
         "{handshake:?}"
+    );
+    assert_eq!(client.stats().challenges, 1);
+    assert_eq!(
+        (
+            listener.stats().challenges,
+            listener.stats().hellos_answered
+        ),
+        (1, 1)
     );
 
     const MARKER: &[u8] = b"plaintext marker";
@@ -487,12 +513,12 @@ fn an_observer_of_the_whole_handshake_cannot_open_the_session() {
     assert!(!upstream.is_empty() && !downstream.is_empty(), "{wire:?}");
     let client_public = clear
         .iter()
-        .find_map(|datagram| Hello::decode(datagram, HELLO_TAG, PROTOCOL))
+        .find_map(|datagram| Hello::decode(datagram, PROTOCOL))
         .expect("the hello was seen")
         .public_key;
     let server_public = clear
         .iter()
-        .find_map(|datagram| Hello::decode(datagram, HELLO_REPLY_TAG, PROTOCOL))
+        .find_map(|datagram| Reply::decode(datagram, PROTOCOL))
         .expect("the reply was seen")
         .public_key;
 
@@ -548,11 +574,11 @@ fn a_reply_without_the_hellos_nonce_is_ignored() {
     let held = proxy.hold_until("the hello", |held| !held.is_empty());
 
     let forger = KeyPair::from_secret_bytes([0x33; 32]);
-    let forged = Hello {
+    let forged = Reply {
         nonce: [0; HELLO_NONCE_BYTES],
         public_key: forger.public_key(),
     }
-    .encode(HELLO_REPLY_TAG, PROTOCOL);
+    .encode(PROTOCOL);
     proxy.deliver(Way::Down, &forged);
     wait_until("the forged reply", || {
         pump(&mut client);
@@ -646,7 +672,7 @@ fn datagrams_from_a_stranger_are_dropped_without_disturbing_the_link() {
     let listener_addr = listener.local_addr().expect("listener address");
     let mut garbage = vec![0xEE; 64];
     garbage[0] = SEALED_TAG;
-    for datagram in [garbage.as_slice(), &[HELLO_REPLY_TAG; HELLO_BYTES]] {
+    for datagram in [garbage.as_slice(), &[HELLO_REPLY_TAG; REPLY_BYTES]] {
         stranger.send_to(datagram, client_addr).expect("send");
         stranger.send_to(datagram, listener_addr).expect("send");
     }
@@ -760,31 +786,80 @@ fn a_tampered_datagram_is_dropped() {
     assert_eq!(got, [b"intact".to_vec()]);
 }
 
-/// A valid hello from `socket` with the key `seed` makes.
-fn send_hello(socket: &UdpSocket, to: SocketAddr, seed: u8) -> [u8; HELLO_BYTES] {
-    let hello = Hello {
+/// A tokenless hello with the nonce and key `seed` makes.
+fn hello_from(seed: u8) -> Hello {
+    Hello {
         nonce: [seed; HELLO_NONCE_BYTES],
         public_key: KeyPair::from_secret_bytes([seed; 32]).public_key(),
+        token: NO_TOKEN,
     }
-    .encode(HELLO_TAG, PROTOCOL);
-    socket.send_to(&hello, to).expect("send hello");
-    hello
 }
 
-/// Replies waiting on `socket`, each checked to be no longer than a hello.
+/// The next datagram to reach `socket`, reading `listener` while waiting,
+/// which must confirm nobody meanwhile.
+fn next_datagram<C: Clock + Clone>(listener: &mut UdpListener<C>, socket: &UdpSocket) -> Vec<u8> {
+    let mut buffer = [0u8; 2048];
+    let mut got = None;
+    wait_until("a datagram", || {
+        assert!(listener.accept().is_none(), "nothing confirmed");
+        if let Ok((len, _)) = socket.recv_from(&mut buffer) {
+            got = Some(buffer[..len].to_vec());
+        }
+        got.is_some()
+    });
+    got.expect("a datagram")
+}
+
+/// The challenge `listener` sends `socket` for `hello`.
+fn challenge_for<C: Clock + Clone>(
+    listener: &mut UdpListener<C>,
+    socket: &UdpSocket,
+    hello: &Hello,
+) -> Challenge {
+    let server = listener.local_addr().expect("address");
+    socket
+        .send_to(&hello.encode(PROTOCOL), server)
+        .expect("send hello");
+    let datagram = next_datagram(listener, socket);
+    let challenge = Challenge::decode(&datagram, PROTOCOL).expect("a challenge");
+    assert_eq!(challenge.nonce, hello.nonce);
+    challenge
+}
+
+/// `hello` sent from `socket`, its challenge read, and the hello sent again
+/// presenting the challenge's token — what a client does. Returns the hello
+/// that presented it.
+fn present_token<C: Clock + Clone>(
+    listener: &mut UdpListener<C>,
+    socket: &UdpSocket,
+    hello: Hello,
+) -> [u8; HELLO_BYTES] {
+    let challenge = challenge_for(listener, socket, &hello);
+    let presented = Hello {
+        token: challenge.token,
+        ..hello
+    }
+    .encode(PROTOCOL);
+    let server = listener.local_addr().expect("address");
+    socket.send_to(&presented, server).expect("send hello");
+    presented
+}
+
+/// Replies waiting on `socket`, each checked to be a reply of its length.
 fn replies(socket: &UdpSocket) -> usize {
     let mut buffer = [0u8; 2048];
     let mut count = 0;
     while let Ok((len, _)) = socket.recv_from(&mut buffer) {
-        assert_eq!((buffer[0], len), (HELLO_REPLY_TAG, HELLO_BYTES));
+        assert_eq!((buffer[0], len), (HELLO_REPLY_TAG, REPLY_BYTES));
         count += 1;
     }
     count
 }
 
-/// Hellos from more addresses than the pending cap: the cap holds, the rest
-/// go unanswered, one address cannot swap its pending key, and the pending
-/// entries expire. Then the peer cap holds, and a freed slot is taken.
+/// Hellos with valid tokens from more addresses than the pending cap: the
+/// cap holds, the rest go unanswered, one address cannot swap its pending
+/// key, and the pending entries expire. Then the peer cap holds, and a freed
+/// slot is taken.
 #[test]
 fn the_pending_and_peer_caps_hold_under_a_flood() {
     let clock = ManualClock::new();
@@ -797,9 +872,10 @@ fn the_pending_and_peer_caps_hold_under_a_flood() {
     let server = listener.local_addr().expect("address");
 
     let flooders: Vec<UdpSocket> = (0..4).map(|_| bind_loopback()).collect();
-    for (seed, socket) in (1..).zip(&flooders) {
-        send_hello(socket, server, seed);
-    }
+    let presented: Vec<[u8; HELLO_BYTES]> = (1..)
+        .zip(&flooders)
+        .map(|(seed, socket)| present_token(&mut listener, socket, hello_from(seed)))
+        .collect();
     wait_until("the flood", || {
         assert!(listener.accept().is_none(), "nothing confirmed");
         let stats = listener.stats();
@@ -807,8 +883,13 @@ fn the_pending_and_peer_caps_hold_under_a_flood() {
     });
     let stats = listener.stats();
     assert_eq!(
-        (stats.pending, stats.hellos_answered, stats.pending_full),
-        (2, 2, 2)
+        (
+            stats.challenges,
+            stats.pending,
+            stats.hellos_answered,
+            stats.pending_full
+        ),
+        (4, 2, 2, 2)
     );
     let mut answered = vec![0; flooders.len()];
     wait_until("the replies", || {
@@ -826,10 +907,13 @@ fn the_pending_and_peer_caps_hold_under_a_flood() {
     // One address, many keys: the first handshake stands. Its own hello
     // repeated is answered again, no larger.
     for seed in 100..150 {
-        send_hello(&flooders[pending], server, seed);
+        flooders[pending]
+            .send_to(&hello_from(seed).encode(PROTOCOL), server)
+            .expect("send hello");
     }
-    let seed = u8::try_from(pending + 1).expect("small");
-    send_hello(&flooders[pending], server, seed);
+    flooders[pending]
+        .send_to(&presented[pending], server)
+        .expect("send hello");
     wait_until("the conflicting hellos", || {
         assert!(listener.accept().is_none(), "nothing confirmed");
         listener.stats().conflicting >= 50

@@ -13119,15 +13119,15 @@ rule, backpressure, sectors as the wire architecture — are in
 `docs/notes/simulation.md` under _What the deleted 23-netcode plan left behind_.
 What it left unbuilt is below.
 
-### The UDP transport and its crypto: built, bar tokens (2026-08-27)
+### The UDP transport and its crypto: built (2026-08-27)
 
-**Built through slice C and LAN discovery (D1), 2026-09-30, and wired into the
-sandbox 2026-10-01; connection tokens and every other sample's wiring are
-left.** `Transport` is implemented by `InMemoryTransport`, `crcbl_store`'s
-`FileTransport`, since 2026-09-23 `crcbl-steam`'s `SteamTransport` (P2P over
-Valve's relay; `crcbl_server::Host` serves several sessions over
-`Box<dyn Transport>` peers), and now `crcbl_net::udp`'s `UdpTransport`, which
-`apps/sandbox`'s `--host`, `--join` and `--browse` run
+**Built through slice C and LAN discovery (D1), 2026-09-30, wired into the
+sandbox 2026-10-01, and connection tokens (D2) built 2026-10-01; backend-minted
+tokens are left (below).** `Transport` is implemented by `InMemoryTransport`,
+`crcbl_store`'s `FileTransport`, since 2026-09-23 `crcbl-steam`'s
+`SteamTransport` (P2P over Valve's relay; `crcbl_server::Host` serves several
+sessions over `Box<dyn Transport>` peers), and now `crcbl_net::udp`'s
+`UdpTransport`, which `apps/sandbox`'s `--host`, `--join` and `--browse` run
 (`apps/sandbox/src/lan.rs`).
 
 **Built 2026-09-30 (slice A): `crcbl_net::reliable`**, pure logic over any
@@ -13222,10 +13222,6 @@ run there (both cross-clippy clean).
   nothing**, so the client reads `ConnectTimedOut` rather than why. A same-size
   plaintext refusal echoing the nonce would be safe (no amplification,
   unforgeable off-path); not built.
-- **A spoofed-hello flood is bounded in memory, not in availability.** Each
-  answered hello costs an X25519 agreement and a `getrandom` draw, and a full
-  pending table turns honest clients away for up to `HANDSHAKE_TIMEOUT`.
-  Connection tokens (slice D) or a stateless cookie round are the fix.
 - **A client reconnecting from the same port** is sorted into its old peer's
   inbox until that session ends; clients bind port 0, so it needs port reuse.
 - **No socket buffer sizing.** `std::net::UdpSocket` has no `SO_RCVBUF` setter
@@ -13245,9 +13241,71 @@ moves to rand 0.10, drop the skip and move the workspace's
 `rand_core`/`rand_chacha` pins to 0.10 in the same change** — the entry on the
 rand 0.10 migration has the rest of that job.
 
-**Not run locally:** the fuzz target with the opener in it —
-`cargo check --bins` passes, but its `no_main` binary does not link under MSVC,
-so CI's `decoder-fuzz` job is its first run.
+**Not run locally:** the fuzz target with the opener in it, and since D2 with
+the handshake decoders and `TokenKey::verify` — `cargo check --bins` passes, but
+its `no_main` binary does not link under MSVC, so CI's `decoder-fuzz` job is its
+first run.
+
+**Built 2026-10-01 (D2): connection tokens**, netcode.io's connect-token pattern
+with the listener as the minter. `TRANSPORT_VERSION` is 2. The hello carries a
+`TOKEN_BYTES` token field (`NO_TOKEN` at first), so it is the longest handshake
+datagram (a `const` assert in `udp::hello` holds `CHALLENGE_BYTES` and
+`REPLY_BYTES` at or under `HELLO_BYTES`). A hello without a valid token gets a
+`Challenge` echoing its nonce and carrying a token minted statelessly —
+`udp::token::TokenKey::mint`, HMAC-SHA256 truncated to 128 bits over
+`TOKEN_DOMAIN`, kind, expiry (nanoseconds on the listener's clock), serial (the
+listener's counter), protocol id and the client address in a defined encoding —
+and nothing is held. The key is drawn from `getrandom` at
+`UdpListener::bind_with`, so a restart invalidates every token. A hello whose
+token verifies (`TokenKey::verify`: MAC in constant time first, then
+`TOKEN_LIFETIME`) and whose serial is not spent gets the agreement, the pending
+entry and the `Reply`, and spends the serial; repeats of that hello while it
+pends — same nonce and key, whatever token, since a client that resent before
+its first challenge returned holds a later one — get the stored reply, not a
+second use. **Single use, decided:** a token's only power is to make the
+listener run X25519 and hold a slot, and an honest client never needs a second —
+a lost or expired handshake gets a fresh challenge — so a captured hello cannot
+buy the work twice. Spent serials are kept until they expire, so the cache is
+bounded by `TOKEN_LIFETIME` and capped at `MAX_SPENT_TOKENS`; when full it turns
+valid tokens away (`spent_full`) rather than accept one unremembered.
+`UdpTransport` takes a challenge whose nonce matches, adopts the newest token
+and sends again at once. Refusals are counted (`ListenerStats::challenges`,
+`tokens_forged`, `tokens_expired`, `tokens_spent`, `spent_full`;
+`UdpStats::challenges`). Tests over loopback, each shown red by a mutation: a
+tokenless hello gets one challenge no longer than the hello and no state; a
+valid token gets a session; an expired one (at exactly `TOKEN_LIFETIME`, not a
+nanosecond before) and one from another address get a fresh challenge; a replay
+after the session gets one; a listener rebound at the same address refuses the
+old run's token; an old-version hello is not answered and an old-version reply
+is not taken. A spoofed-hello flood now costs the listener one HMAC and one
+challenge per hello; what can still fill the pending table is a flood from
+addresses the flooder really holds, each completing the challenge round trip,
+which `max_pending` and single use bound. `udp::token`'s unit tests rebuild the
+layout and MAC by hand and flip every byte and bound input. The discovery
+`Browser` / `Announcer` path is unchanged.
+
+**Left from D2:**
+
+- **Backend-minted tokens.** Verification needs only the key and the encoding in
+  `udp::token`'s docs, so a backend holding the key mints tokens the listener
+  verifies unchanged — but two fields assume the listener mints: the expiry is
+  on the listener's own `Clock` (a backend needs UNIX time, so a second `kind`
+  byte value with a wall-clock expiry), and the serial is the listener's counter
+  (a backend needs serials unique across every minter of the key, or a random
+  nonce, which the spent cache would key on instead). A backend token is also
+  where netcode.io carries the session's key material, which is what would make
+  the hello's X25519 authenticated rather than honest; that needs the backend to
+  exist and a decision on how a listener learns the key.
+- **Token key rotation.** A listener keeps one key for its whole run. A long run
+  would rotate by accepting the previous key for one `TOKEN_LIFETIME` after
+  minting under a new one; not built, since a LAN session's run is the key's
+  natural life.
+- **`spent_full` has no test.** Reaching `MAX_SPENT_TOKENS` takes that many
+  valid handshakes within one lifetime; the branch is unexercised.
+- **A dual-stack listener** would see one client as either an IPv4 or an
+  IPv4-mapped IPv6 address, and the token binds the form it was minted for. The
+  listener binds one family today, so it cannot arise; a dual-stack bind would
+  need to normalise the address before minting and verifying.
 
 **What is left, by slice:**
 
@@ -13273,8 +13331,9 @@ so CI's `decoder-fuzz` job is its first run.
   over UDP must keep every single entity's replicated blob under
   `MAX_UNRELIABLE_PAYLOAD` less the framing; towers' largest is its numbers
   entity (`replica`'s `HUD_SCHEMA`), a few dozen bytes.
-- **D2 — connection tokens** (below). Needs nothing from the packet layer. LAN
-  discovery, D1, is built; what it left is under _Netgraph HUD, LAN discovery_.
+- LAN discovery, D1, is built; what it left is under _Netgraph HUD, LAN
+  discovery_. Connection tokens, D2, are built; what they left is under _Left
+  from D2_ above.
 - **Not run: two processes, or two machines.** Every wiring test, the sandbox's
   and towers', runs host and clients in one process over loopback, and the
   discovery tests query the announcer's port directly; `LanBind::on_the_lan`'s
@@ -13305,13 +13364,14 @@ crosses anything slower. Path-MTU discovery. Bandwidth rates for the netgraph
 **The design, for whoever builds the rest** (Gaffer / netcode.io lineage):
 
 - **Connection tokens** (netcode.io pattern): a short-lived token minted by a
-  trusted source — the server itself for direct connect, a backend later — as an
-  anti-spoof filter and the carrier of key material when a backend mints it.
-- **Per-packet AEAD from the first packet after the hello**: X25519 in the
-  handshake (hello → key exchange → version gate → session accept; only InMemory
-  skips the exchange), then XChaCha20-Poly1305 with the nonce derived from
-  direction plus sequence and the header under the tag. Rekey on reconnect.
-  Nonce uniqueness is property-tested.
+  trusted source — the server itself for direct connect (built, D2), a backend
+  later — as an anti-spoof filter and the carrier of key material when a backend
+  mints it (not built; see _Left from D2_).
+- **Per-packet AEAD from the first packet after the hello** (built, slices B and
+  C): X25519 in the handshake, then XChaCha20-Poly1305 with the nonce derived
+  from direction plus the seal's 64-bit counter and the clear prefix as
+  associated data; rekey on reconnect. Nonce uniqueness is tested by
+  `seal::nonce`'s `every_direction_and_counter_pair_has_its_own_nonce`.
 - The risks the plan named: ack wraparound, RTO tuning and fragment loss, gated
   by the condition-simulator soak below.
 
@@ -13319,21 +13379,22 @@ crosses anything slower. Path-MTU discovery. Bandwidth rates for the netgraph
 version of this paragraph said the session key travels in clear, which stopped
 being true when slice C landed).** Two layers, keyed independently. On UDP the
 outer one is `crcbl_net::seal`: each `UdpTransport::connect` and each hello
-`UdpListener` answers draws a fresh X25519 secret from `getrandom`, the hello
-and reply carry the two public keys, and `seal::agree_channel` runs
-`seal::keys::SessionKeys::derive` (SHA-256 transcript over `PROTOCOL_NAME`, the
-protocol id and both public keys, then Noise §4.3 HKDF) to one
-XChaCha20-Poly1305 key per direction; every datagram after the hello is sealed,
-nonce from direction plus the 64-bit seal counter, the clear prefix as
-associated data. The session handshake (`crcbl_net::handshake`'s `Hello` /
-`Accept`, resume token included) rides inside that seal. The inner layer is
-`crcbl_net::auth::SessionCrypto`, HMAC-SHA256 keyed by `SessionKey::derive` over
-the `ResumeToken`, which `crcbl_server`'s `PeerSession::adopt_session_key` and
-`crcbl_client` re-adopt on every `Accept`: a `Reaccepted` re-hello restarts that
-key (same token, fresh counters) on the same transport, whose seal keys and
-replay window carry on, so the datagrams sent before it still do not replay; a
-reconnect is a new `UdpTransport` and new X25519 keys. So an on-path observer of
-a UDP handshake learns neither key —
+`UdpListener` answers with a reply (one whose token verified) draws a fresh
+X25519 secret from `getrandom`, the hello and reply carry the two public keys,
+and `seal::agree_channel` runs `seal::keys::SessionKeys::derive` (SHA-256
+transcript over `PROTOCOL_NAME`, the protocol id and both public keys, then
+Noise §4.3 HKDF) to one XChaCha20-Poly1305 key per direction; every datagram
+after the hello is sealed, nonce from direction plus the 64-bit seal counter,
+the clear prefix as associated data. The session handshake
+(`crcbl_net::handshake`'s `Hello` / `Accept`, resume token included) rides
+inside that seal. The inner layer is `crcbl_net::auth::SessionCrypto`,
+HMAC-SHA256 keyed by `SessionKey::derive` over the `ResumeToken`, which
+`crcbl_server`'s `PeerSession::adopt_session_key` and `crcbl_client` re-adopt on
+every `Accept`: a `Reaccepted` re-hello restarts that key (same token, fresh
+counters) on the same transport, whose seal keys and replay window carry on, so
+the datagrams sent before it still do not replay; a reconnect is a new
+`UdpTransport` and new X25519 keys. So an on-path observer of a UDP handshake
+learns neither key —
 `udp::tests::an_observer_of_the_whole_handshake_cannot_open_the_session` tries
 every 32-byte run of the clear handshake as a shared secret and as an X25519
 secret against either public key, and opens nothing. The resume token is in
@@ -14461,7 +14522,6 @@ frame, and the page shows it for `NOTICE_FOR` (in `crate::app`); tested by
   browsing — is the two-machine item below.
 - **Not run on two machines, or through a firewall.** See the UDP entry's _Not
   run_ item, which has the manual check.
-- **D2 connection tokens.** The UDP entry's; nothing towers-specific.
 - **Pause is per player — decided 2026-10-01, and it stays that way.** A LAN
   host serves on wall time through `Game::frame`, so a pause menu stops only its
   own player's commands and the run goes on for everyone. That is the online

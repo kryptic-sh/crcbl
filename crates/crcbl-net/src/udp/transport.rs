@@ -7,9 +7,10 @@ use std::time::Duration;
 
 use hmac::digest::zeroize::Zeroizing;
 
-use super::hello::{HELLO_NONCE_BYTES, HELLO_REPLY_TAG, HELLO_TAG, Hello};
+use super::hello::{Challenge, HELLO_NONCE_BYTES, Hello, Reply};
 use super::listener::Shared;
 use super::session::{Session, send};
+use super::token::NO_TOKEN;
 use super::{CONNECT_TIMEOUT, HELLO_RESEND_INTERVAL, RECEIVE_BUDGET, RECEIVE_BUFFER_BYTES};
 use crate::reliable::{
     Channel, Delivery, Endpoint, EndpointState, EndpointStats, MAX_RELIABLE_MESSAGE_BYTES,
@@ -23,7 +24,8 @@ use crate::{Clock, Message, SystemClock, Transport, TransportError};
 pub enum EndReason {
     /// No hello reply came within [`CONNECT_TIMEOUT`]: nothing is listening
     /// at the address, it speaks another protocol id or
-    /// [`super::TRANSPORT_VERSION`], or it is full.
+    /// [`super::TRANSPORT_VERSION`], it is full, or every token it challenged
+    /// with was refused.
     ConnectTimedOut,
     /// The peer went silent for [`crate::reliable::PEER_TIMEOUT`] — gone
     /// without saying so.
@@ -58,10 +60,13 @@ pub struct UdpStats {
     /// Datagrams from any address but the peer's. Always zero on a
     /// listener's peer, whose listener sorts datagrams by address first.
     pub foreign: u64,
-    /// Datagrams from the peer's address while connecting that were not a
-    /// reply to this hello: malformed, another nonce, or a key that cannot
-    /// agree one.
+    /// Datagrams from the peer's address while connecting that were neither
+    /// a challenge nor a reply to this hello: malformed, another nonce, or a
+    /// key that cannot agree one.
     pub stray: u64,
+    /// Challenges to this hello taken while connecting: each carried a
+    /// token, and the hello went out again at once presenting it.
+    pub challenges: u64,
     /// Datagrams that did not open: forged, tampered, replayed, or not sealed
     /// at all.
     pub unopened: u64,
@@ -193,6 +198,7 @@ impl<C: Clock + Clone> UdpTransport<C> {
         let hello = Hello {
             nonce,
             public_key: key_pair.public_key(),
+            token: NO_TOKEN,
         };
         let now = clock.now();
         let mut transport = Self {
@@ -329,8 +335,20 @@ impl<C: Clock + Clone> UdpTransport<C> {
     fn take(&mut self, datagram: &[u8]) {
         match &mut self.phase {
             Phase::Connecting(connecting) => {
-                let reply = Hello::decode(datagram, HELLO_REPLY_TAG, self.protocol_id)
-                    .filter(|reply| reply.nonce == connecting.hello.nonce);
+                let nonce = connecting.hello.nonce;
+                if let Some(challenge) = Challenge::decode(datagram, self.protocol_id)
+                    .filter(|challenge| challenge.nonce == nonce)
+                {
+                    // The newest token wins: a listener that restarted, or
+                    // whose last token expired, challenges again.
+                    connecting.hello.token = challenge.token;
+                    self.stats.challenges += 1;
+                    let now = self.clock.now();
+                    self.send_hello(now);
+                    return;
+                }
+                let reply =
+                    Reply::decode(datagram, self.protocol_id).filter(|reply| reply.nonce == nonce);
                 let agreed = reply.and_then(|reply| {
                     agree_channel(
                         Role::Client,
@@ -383,7 +401,7 @@ impl<C: Clock + Clone> UdpTransport<C> {
 
     fn send_hello(&mut self, now: Duration) {
         if let Phase::Connecting(connecting) = &mut self.phase {
-            let datagram = connecting.hello.encode(HELLO_TAG, self.protocol_id);
+            let datagram = connecting.hello.encode(self.protocol_id);
             send(
                 self.route.socket(),
                 &datagram,

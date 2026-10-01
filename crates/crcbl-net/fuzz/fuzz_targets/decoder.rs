@@ -1,10 +1,14 @@
 #![no_main]
 
+use std::net::SocketAddr;
+use std::time::Duration;
+
 use crcbl_ecs::quantize::{self, Codec, Field, Fixed, SmallestThree};
 use crcbl_net::ResumeToken;
 use crcbl_net::auth::{SessionKey, open};
 use crcbl_net::reliable::{Endpoint, decode_packet};
 use crcbl_net::seal::{KeyPair, Role, agree_channel};
+use crcbl_net::udp::{Challenge, Hello, Reply, TokenKey};
 use crcbl_net::{
     ManualClock, Trust, decode_ack, decode_client_to_server, decode_delta, decode_handshake_result,
     decode_hello, decode_server_to_client,
@@ -60,6 +64,23 @@ fuzz_target!(|data: &[u8]| {
     if let Ok((_, mut opener)) = agree_channel(Role::Server, &server, &client.public_key(), 0) {
         let _ = opener.open(data);
         let _ = opener.open(data);
+    }
+    // The UDP handshake's plaintext datagrams, and the connection token a
+    // hello carries: a listener reads them from any address before anything
+    // is keyed. The protocol id sits after the tag and version byte, read
+    // from the input so the fuzzer can get past that filter into the bodies.
+    // Without the key the token reaches its framing and the MAC check, the
+    // surface a spoofer has.
+    let handshake_protocol = data
+        .get(2..6)
+        .map_or(0, |id| u32::from_le_bytes([id[0], id[1], id[2], id[3]]));
+    let _ = Challenge::decode(data, handshake_protocol);
+    let _ = Reply::decode(data, handshake_protocol);
+    let tokens = TokenKey::from_secret_bytes([0x7E; 32]);
+    let client = SocketAddr::from(([127, 0, 0, 1], 4100));
+    let _ = tokens.verify(data, client, handshake_protocol, Duration::ZERO);
+    if let Some(hello) = Hello::decode(data, handshake_protocol) {
+        let _ = tokens.verify(&hello.token, client, handshake_protocol, Duration::ZERO);
     }
     // The reliability layer's packet decoder, and the endpoint state machine
     // behind it: under the seal a datagram only reaches them once it has

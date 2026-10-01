@@ -9,11 +9,12 @@ use std::time::Duration;
 
 use hmac::digest::zeroize::Zeroizing;
 
-use super::hello::{HELLO_BYTES, HELLO_REPLY_TAG, HELLO_TAG, Hello};
+use super::hello::{Challenge, HELLO_TAG, Hello, REPLY_BYTES, Reply};
 use super::session::{Session, send};
+use super::token::{TOKEN_KEY_BYTES, TokenError, TokenKey};
 use super::{
-    DEFAULT_MAX_PEERS, DEFAULT_MAX_PENDING, HANDSHAKE_TIMEOUT, RECEIVE_BUDGET,
-    RECEIVE_BUFFER_BYTES, UdpTransport,
+    DEFAULT_MAX_PEERS, DEFAULT_MAX_PENDING, HANDSHAKE_TIMEOUT, MAX_SPENT_TOKENS, RECEIVE_BUDGET,
+    RECEIVE_BUFFER_BYTES, TOKEN_LIFETIME, UdpTransport,
 };
 use crate::reliable::{Endpoint, MAX_FRAGMENT_BYTES, MAX_RELIABLE_BYTES_IN_FLIGHT};
 use crate::seal::{KeyPair, Opener, Role, SEALED_TAG, Sealer, X25519_BYTES, agree_channel};
@@ -63,6 +64,23 @@ pub struct ListenerStats {
     pub pending: usize,
     /// Hellos answered with a reply and a pending handshake.
     pub hellos_answered: u64,
+    /// Hellos answered with a [`Challenge`](super::Challenge) instead: no
+    /// token, or one counted below as refused. Each held nothing and cost no
+    /// key agreement.
+    pub challenges: u64,
+    /// Hellos whose token was not one this listener minted for that address
+    /// and protocol id — forged, altered, from another address, or minted
+    /// before a restart — or not a token at all.
+    pub tokens_forged: u64,
+    /// Hellos whose token was authentic and past
+    /// [`TOKEN_LIFETIME`](super::TOKEN_LIFETIME).
+    pub tokens_expired: u64,
+    /// Hellos whose token had already bought a handshake.
+    pub tokens_spent: u64,
+    /// Hellos with a valid token turned away because
+    /// [`MAX_SPENT_TOKENS`](super::MAX_SPENT_TOKENS) spent tokens were
+    /// already remembered.
+    pub spent_full: u64,
     /// Hellos turned away because [`ListenerConfig::max_pending`] handshakes
     /// were already pending.
     pub pending_full: u64,
@@ -88,8 +106,8 @@ pub struct ListenerStats {
     /// Datagrams dropped because their peer's inbox held
     /// [`MAX_PEER_INBOX`] already.
     pub inbox_overflow: u64,
-    /// Hellos left unanswered because the operating system's entropy source
-    /// failed.
+    /// Hellos with a valid token left unanswered because the operating
+    /// system's entropy source failed.
     pub entropy_failures: u64,
     /// Datagrams the socket would not send.
     pub send_failures: u64,
@@ -104,12 +122,14 @@ pub struct ListenerStats {
 /// peers only when this socket is read, which `accept` and every accepted
 /// peer's receive do.
 ///
-/// A hello is answered only while fewer than [`ListenerConfig::max_peers`]
-/// peers and [`ListenerConfig::max_pending`] handshakes are held; its sender
-/// becomes a peer only when a sealed datagram opens under the new key — see
-/// [`super`]'s docs for why that is the proof — and `accept` hands it out
-/// then. A peer's slot is freed when its transport reports the link's end
-/// from a receive, closes, or is dropped.
+/// A hello without a token valid for its address is answered with a
+/// challenge carrying one, and nothing is held for it. A hello presenting a
+/// valid token is answered with the reply only while fewer than
+/// [`ListenerConfig::max_peers`] peers and [`ListenerConfig::max_pending`]
+/// handshakes are held; its sender becomes a peer only when a sealed datagram
+/// opens under the new key — see [`super`]'s docs for why that is the proof —
+/// and `accept` hands it out then. A peer's slot is freed when its transport
+/// reports the link's end from a receive, closes, or is dropped.
 ///
 /// Every accepted [`UdpTransport`] shares this socket, and keeps it open
 /// while it lives. Dropping the listener stops admitting — later hellos go
@@ -126,7 +146,9 @@ impl UdpListener<SystemClock> {
     ///
     /// # Errors
     ///
-    /// The socket's error when it cannot be bound or made non-blocking.
+    /// The socket's error when it cannot be bound or made non-blocking, and
+    /// an [`io::ErrorKind::Other`] carrying the entropy source's error when
+    /// no token key could be drawn.
     pub fn bind(addr: impl ToSocketAddrs, protocol_id: u32) -> io::Result<Self> {
         Self::bind_with(addr, ListenerConfig::new(protocol_id), SystemClock::new())
     }
@@ -135,14 +157,20 @@ impl UdpListener<SystemClock> {
 impl<C: Clock + Clone> UdpListener<C> {
     /// [`bind`](UdpListener::bind) with `config`'s caps, timed by `clock`.
     ///
+    /// Every bind draws a new token key, so tokens minted by an earlier
+    /// listener — this process's or one before a restart — do not verify.
+    ///
     /// # Errors
     ///
-    /// The socket's error when it cannot be bound or made non-blocking.
+    /// As [`bind`](UdpListener::bind).
     pub fn bind_with(
         addr: impl ToSocketAddrs,
         config: ListenerConfig,
         clock: C,
     ) -> io::Result<Self> {
+        let mut secret = Zeroizing::new([0u8; TOKEN_KEY_BYTES]);
+        getrandom::fill(&mut secret[..]).map_err(io::Error::other)?;
+        let tokens = TokenKey::from_secret_bytes(*secret);
         let socket = UdpSocket::bind(addr)?;
         socket.set_nonblocking(true)?;
         Ok(Self {
@@ -152,6 +180,9 @@ impl<C: Clock + Clone> UdpListener<C> {
                     config,
                     clock,
                     listening: true,
+                    tokens,
+                    next_serial: 0,
+                    spent: HashMap::new(),
                     pending: HashMap::new(),
                     inboxes: HashMap::new(),
                     ready: VecDeque::new(),
@@ -274,11 +305,12 @@ impl<C: Clock + Clone> Shared<C> {
 struct Pending {
     sealer: Sealer,
     opener: Opener,
-    /// The hello it answered: a repeat of it is answered again.
+    /// The hello it answered: a repeat of it — the same nonce and key,
+    /// whatever token — is answered again.
     hello: Hello,
     /// The reply, kept to resend when the client repeats its hello because
     /// the first reply was lost.
-    reply: [u8; HELLO_BYTES],
+    reply: [u8; REPLY_BYTES],
     since: Duration,
 }
 
@@ -288,6 +320,13 @@ struct Demux<C: Clock + Clone> {
     clock: C,
     /// `false` once the listener is dropped: nobody will accept a new peer.
     listening: bool,
+    /// What this run's tokens are minted and verified under.
+    tokens: TokenKey,
+    /// The serial the next token is minted with.
+    next_serial: u64,
+    /// The serials of tokens that have bought a handshake, each with its
+    /// expiry: kept until then, after which the expiry refuses it anyway.
+    spent: HashMap<u64, Duration>,
     pending: HashMap<SocketAddr, Pending>,
     /// Every peer, accepted or ready, and the datagrams waiting for it.
     inboxes: HashMap<SocketAddr, VecDeque<Vec<u8>>>,
@@ -316,6 +355,7 @@ impl<C: Clock + Clone> Demux<C> {
         self.pending
             .retain(|_, pending| now.saturating_sub(pending.since) < HANDSHAKE_TIMEOUT);
         self.stats.expired += (before - self.pending.len()) as u64;
+        self.spent.retain(|_, expires| now < *expires);
     }
 
     fn sort(&mut self, socket: &UdpSocket, datagram: &[u8], from: SocketAddr, now: Duration) {
@@ -335,27 +375,53 @@ impl<C: Clock + Clone> Demux<C> {
         }
     }
 
-    /// Answer a hello, holding a pending handshake for it.
+    /// Answer a hello: with a challenge unless it presents a token valid for
+    /// its address, and otherwise with a reply and a pending handshake.
     fn hello(&mut self, socket: &UdpSocket, datagram: &[u8], from: SocketAddr, now: Duration) {
         let protocol_id = self.config.protocol_id;
-        let Some(hello) = Hello::decode(datagram, HELLO_TAG, protocol_id) else {
+        let Some(hello) = Hello::decode(datagram, protocol_id) else {
             self.stats.malformed += 1;
             return;
         };
+        // A repeat of the hello a pending handshake answered — its reply was
+        // lost — is answered again before its token is looked at: it is the
+        // same handshake, not a second use of a token. The token is left out
+        // of the match because a client whose hello was resent before the
+        // first challenge came back holds a second challenge's token by the
+        // time it repeats itself, and must still get its reply.
         if let Some(pending) = self.pending.get(&from) {
-            if pending.hello == hello {
+            if (pending.hello.nonce, pending.hello.public_key) == (hello.nonce, hello.public_key) {
                 send(socket, &pending.reply, from, &mut self.stats.send_failures);
             } else {
                 self.stats.conflicting += 1;
             }
             return;
         }
+        let token = match self.tokens.verify(&hello.token, from, protocol_id, now) {
+            Ok(token) if !self.spent.contains_key(&token.serial) => token,
+            refused => {
+                match refused {
+                    Ok(_) => self.stats.tokens_spent += 1,
+                    Err(TokenError::Absent) => {}
+                    Err(TokenError::Malformed | TokenError::Forged) => {
+                        self.stats.tokens_forged += 1;
+                    }
+                    Err(TokenError::Expired) => self.stats.tokens_expired += 1,
+                }
+                self.challenge(socket, &hello, from, now);
+                return;
+            }
+        };
         if self.inboxes.len() >= self.config.max_peers {
             self.stats.peers_full += 1;
             return;
         }
         if self.pending.len() >= self.config.max_pending {
             self.stats.pending_full += 1;
+            return;
+        }
+        if self.spent.len() >= MAX_SPENT_TOKENS {
+            self.stats.spent_full += 1;
             return;
         }
         // Fresh for every connection and never reused: this is the rekey.
@@ -371,12 +437,13 @@ impl<C: Clock + Clone> Demux<C> {
             self.stats.malformed += 1;
             return;
         };
-        let reply = Hello {
+        let reply = Reply {
             nonce: hello.nonce,
             public_key: key_pair.public_key(),
         }
-        .encode(HELLO_REPLY_TAG, protocol_id);
+        .encode(protocol_id);
         send(socket, &reply, from, &mut self.stats.send_failures);
+        self.spent.insert(token.serial, token.expires);
         self.pending.insert(
             from,
             Pending {
@@ -388,6 +455,30 @@ impl<C: Clock + Clone> Demux<C> {
             },
         );
         self.stats.hellos_answered += 1;
+    }
+
+    /// Answer `hello` with a fresh token for `from`. Stateless: nothing is
+    /// held for it, so a flood of these costs one HMAC and one datagram no
+    /// longer than the hello, each.
+    fn challenge(&mut self, socket: &UdpSocket, hello: &Hello, from: SocketAddr, now: Duration) {
+        let serial = self.next_serial;
+        // Unreachable in practice (2^64 challenges). If it ever wrapped, a
+        // repeated serial could only be refused as spent, never accepted.
+        self.next_serial = serial.wrapping_add(1);
+        let protocol_id = self.config.protocol_id;
+        let token = self.tokens.mint(
+            from,
+            protocol_id,
+            now.saturating_add(TOKEN_LIFETIME),
+            serial,
+        );
+        let challenge = Challenge {
+            nonce: hello.nonce,
+            token,
+        }
+        .encode(protocol_id);
+        send(socket, &challenge, from, &mut self.stats.send_failures);
+        self.stats.challenges += 1;
     }
 
     /// A sealed datagram for a pending handshake: if it opens, the client

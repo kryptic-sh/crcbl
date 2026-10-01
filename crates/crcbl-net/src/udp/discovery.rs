@@ -45,7 +45,7 @@
 //! taken here at a factor of one: **a query is padded to [`QUERY_BYTES`], at
 //! least [`ANNOUNCE_BYTES`]**, and a query of any other length is dropped
 //! unanswered. A spoofer gets out exactly what it puts in, no gain — the same
-//! reason [`super::HELLO_BYTES`] is one length both ways.
+//! reason no answer to a hello is longer than [`super::HELLO_BYTES`].
 //!
 //! # Why the browser does not listen on the discovery port
 //!
