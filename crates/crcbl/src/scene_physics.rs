@@ -90,9 +90,9 @@ use crcbl_phys::{
     Transform,
 };
 use crcbl_reflect::{Reflect, Value, get_path, set_path};
-use crcbl_scene::scn::{IdMap, Scene, SceneEntityId, chunk_of};
+use crcbl_scene::scn::{Scene, SceneEntityId};
 
-use crate::registry::{POSITION, Placement, Registry};
+use crate::registry::{POSITION, Placement, Registry, check_chunk};
 
 /// The scene system every [`Body`] is a row of: the manifest entry, the chunk
 /// file's stem, and the system the module is registered under.
@@ -297,28 +297,7 @@ pub fn register(registry: &mut Registry) {
 /// The chunk alone, read through its own codec: a check is handed no
 /// vocabulary, and the rest of the scene is other games' business.
 fn check_bodies(source: &dyn AssetSource, dir: &Path) -> Result<(), String> {
-    let prefix = dir.to_str().ok_or_else(|| {
-        format!(
-            "the scene directory `{}` is not a valid asset key",
-            dir.display()
-        )
-    })?;
-    let prefix = prefix.trim_end_matches('/');
-    let name = format!("sys/{BODIES}.ron");
-    let key = if prefix.is_empty() {
-        name
-    } else {
-        format!("{prefix}/{name}")
-    };
-    let bytes = source
-        .read(Path::new(&key))
-        .map_err(|error| format!("reading `{key}`: {error}"))?;
-    let text = String::from_utf8(bytes).map_err(|error| format!("`{key}`: {error}"))?;
-    let mut world = World::new();
-    world.register_system(Box::new(System::<Body>::new(BODIES)));
-    chunk_of::<Body>(BODIES)
-        .read(&mut world, &mut IdMap::new(), &key, &text)
-        .map_err(|error| error.to_string())
+    check_chunk::<Body>(source, dir, BODIES)
 }
 
 /// The module that simulates the bodies of the scene whose files `source`

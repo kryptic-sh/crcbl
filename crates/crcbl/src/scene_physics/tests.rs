@@ -4,7 +4,7 @@
 use std::hash::Hasher;
 
 use crcbl_assets::MemorySource;
-use crcbl_scene::scn::ScnError;
+use crcbl_scene::scn::{IdMap, ScnError};
 
 use super::*;
 

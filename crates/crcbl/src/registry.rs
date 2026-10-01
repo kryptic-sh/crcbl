@@ -757,6 +757,46 @@ impl fmt::Debug for Registry {
     }
 }
 
+/// Whether the chunk file of `system` under `dir` would load as rows of `T`:
+/// the file alone, read through its own codec into a world of its own — the
+/// [`SceneCheck`] a component whose values are refused on load runs, so a
+/// value a panel set is reported where it was made rather than as a scene that
+/// will not open next time.
+///
+/// A check is handed no vocabulary, and the rest of the scene is other games'
+/// business, so nothing but this one chunk is read.
+pub(crate) fn check_chunk<T>(
+    source: &dyn AssetSource,
+    dir: &Path,
+    system: &str,
+) -> Result<(), String>
+where
+    T: Serialize + DeserializeOwned + ComponentHash + 'static,
+{
+    let prefix = dir.to_str().ok_or_else(|| {
+        format!(
+            "the scene directory `{}` is not a valid asset key",
+            dir.display()
+        )
+    })?;
+    let prefix = prefix.trim_end_matches('/');
+    let name = format!("sys/{system}.ron");
+    let key = if prefix.is_empty() {
+        name
+    } else {
+        format!("{prefix}/{name}")
+    };
+    let bytes = source
+        .read(Path::new(&key))
+        .map_err(|error| format!("reading `{key}`: {error}"))?;
+    let text = String::from_utf8(bytes).map_err(|error| format!("`{key}`: {error}"))?;
+    let mut world = World::new();
+    world.register_system(Box::new(System::<T>::new(system)));
+    chunk_of::<T>(system)
+        .read(&mut world, &mut IdMap::new(), &key, &text)
+        .map_err(|error| error.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // The monomorphised halves
 // ---------------------------------------------------------------------------
